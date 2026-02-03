@@ -245,6 +245,6 @@ def create_section_from_semantic_unit(
         knowledge_type=unit.knowledge_type,
         start_sec=unit.start_sec,
         end_sec=unit.end_sec,
-        end_sec=unit.end_sec,
+
         materials=materials
     )

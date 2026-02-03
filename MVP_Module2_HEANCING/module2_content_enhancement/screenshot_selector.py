@@ -433,6 +433,219 @@ class ScreenshotSelector:
         
         return best_idx, best_score
 
+    def select_screenshots_for_range_sync(
+        self,
+        video_path: str,
+        start_sec: float,
+        end_sec: float,
+        coarse_fps: float = 2.0,
+        fine_fps: float = 10.0
+    ) -> List[Dict]:
+        """
+        🚀 先粗后细截图选择 (同步版本，用于 ProcessPool - 仍需自行读取帧)
+        
+        ⚠️ 注意: 此方法仍然在 Worker 中读取帧，用于简单场景。
+        对于高性能场景，应使用 detect_stable_islands_from_frames + select_best_frame_from_frames
+        """
+        import time
+        t0 = time.time()
+        
+        self._ensure_detector()
+        
+        # 边界保护
+        if end_sec <= start_sec:
+            end_sec = start_sec + 1.0
+        
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            logger.error(f"Cannot open video: {video_path}")
+            return []
+        
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        video_duration = total_frames / video_fps
+        end_sec = min(end_sec, video_duration)
+        
+        # Stage 1: 粗采样
+        coarse_interval = 1.0 / coarse_fps
+        coarse_timestamps = []
+        coarse_frames = []
+        
+        t = start_sec
+        while t < end_sec:
+            frame_idx = int(t * video_fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                coarse_timestamps.append(t)
+                coarse_frames.append(frame)
+            t += coarse_interval
+        
+        if len(coarse_frames) < 2:
+            cap.release()
+            return [{"timestamp_sec": (start_sec + end_sec) / 2, "island_index": 0, "score": 0.5, 
+                     "island_start": start_sec, "island_end": end_sec}]
+        
+        # Stage 1: 识别稳定岛
+        islands = self.detect_stable_islands_from_frames(coarse_frames, coarse_timestamps, coarse_interval)
+        
+        if not islands:
+            islands = [{"start_sec": start_sec, "end_sec": end_sec}]
+        
+        # Stage 2: 细采样选最佳帧
+        results = []
+        fine_interval = 1.0 / fine_fps
+        
+        for island_idx, island in enumerate(islands):
+            island_start = island["start_sec"]
+            island_end = island["end_sec"]
+            
+            fine_timestamps = []
+            fine_frames = []
+            
+            t = island_start
+            while t < island_end:
+                frame_idx = int(t * video_fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    fine_timestamps.append(t)
+                    fine_frames.append(frame)
+                t += fine_interval
+            
+            if not fine_frames:
+                continue
+            
+            best_ts, best_score = self.select_best_frame_from_frames(fine_frames, fine_timestamps)
+            
+            results.append({
+                "timestamp_sec": best_ts,
+                "island_index": island_idx,
+                "score": float(best_score),
+                "island_start": island_start,
+                "island_end": island_end
+            })
+        
+        cap.release()
+        
+        elapsed = time.time() - t0
+        logger.info(f"Coarse-Fine selection [{start_sec:.1f}s-{end_sec:.1f}s]: {len(results)} screenshots in {elapsed:.2f}s")
+        
+        return results
+
+    def detect_stable_islands_from_frames(
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float],
+        interval: float,
+        stable_thresh: float = 0.005,
+        min_island_len: int = 2
+    ) -> List[Dict]:
+        """
+        🚀 Stage 1: 从预读取的帧中识别稳定岛 (纯计算，无 IO)
+        
+        用于 ProcessPool Worker，接收主进程通过 SharedMemory 传递的帧
+        
+        Args:
+            frames: 预读取的帧列表
+            timestamps: 对应的时间戳列表
+            interval: 采样间隔
+            stable_thresh: MSE 稳定阈值
+            min_island_len: 最小岛长度
+            
+        Returns:
+            稳定岛列表 [{"start_sec": float, "end_sec": float}, ...]
+        """
+        if len(frames) < 2:
+            return []
+        
+        # 计算相邻帧 MSE
+        mse_values = []
+        for i in range(len(frames) - 1):
+            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            f2 = cv2.cvtColor(frames[i+1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            mse = np.mean((f1 - f2) ** 2) / (255 * 255)
+            mse_values.append(mse)
+        mse_values.append(0.0)
+        
+        # 识别稳定岛
+        islands = []
+        current_island_indices = []
+        
+        for i, mse in enumerate(mse_values[:-1]):
+            if mse < stable_thresh:
+                current_island_indices.append(i)
+            else:
+                if len(current_island_indices) >= min_island_len:
+                    islands.append({
+                        "start_sec": timestamps[current_island_indices[0]],
+                        "end_sec": timestamps[current_island_indices[-1]] + interval
+                    })
+                current_island_indices = []
+        
+        # 处理末尾
+        if len(current_island_indices) >= min_island_len:
+            islands.append({
+                "start_sec": timestamps[current_island_indices[0]],
+                "end_sec": timestamps[current_island_indices[-1]] + interval
+            })
+        
+        logger.debug(f"Detected {len(islands)} stable islands from {len(frames)} coarse frames")
+        return islands
+
+    def select_best_frame_from_frames(
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float]
+    ) -> Tuple[float, float]:
+        """
+        🚀 Stage 2: 从预读取的帧中选择最佳帧 (纯计算，无 IO)
+        
+        用于 ProcessPool Worker，接收主进程通过 SharedMemory 传递的帧
+        
+        Args:
+            frames: 预读取的帧列表
+            timestamps: 对应的时间戳列表
+            
+        Returns:
+            (best_timestamp, best_score)
+        """
+        if not frames:
+            return (0.0, 0.0)
+        
+        if len(frames) == 1:
+            return (timestamps[0], 0.5)
+        
+        # 质量评估
+        quality_results = [_analyze_frame_quality_worker(f) for f in frames]
+        
+        # 计算 MSE
+        mse_values = []
+        for i in range(len(frames) - 1):
+            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            f2 = cv2.cvtColor(frames[i+1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            mse = np.mean((f1 - f2) ** 2) / (255 * 255)
+            mse_values.append(mse)
+        mse_values.append(0.0)
+        
+        # 选择最佳帧
+        best_score = -1
+        best_idx = 0
+        
+        for idx in range(len(frames)):
+            lap, ent, sharp, contrast = quality_results[idx]
+            s4 = self._calculate_S4_no_occlusion_v6(frames[idx])
+            stability_bonus = max(0, 1.0 - mse_values[idx] * 100)
+            
+            score = (ent * 0.35) + (lap * 0.25) + (contrast * 0.1) + (s4 / 100.0 * 0.15) + (stability_bonus * 0.15)
+            
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        
+        return (timestamps[best_idx], best_score)
+
+
 
     async def select_screenshot(
         self,

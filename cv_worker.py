@@ -353,3 +353,167 @@ def run_screenshot_selection_task(
             "analyzed_frames": 0,
             "error": str(e)
         }
+
+
+def run_coarse_fine_screenshot_task(
+    unit_id: str,
+    start_sec: float,
+    end_sec: float,
+    coarse_shm_frames: Dict[float, dict],
+    coarse_interval: float,
+    fine_shm_frames_by_island: List[Dict[float, dict]] = None
+) -> dict:
+    """
+    🚀 先粗后细截图选择任务 - 使用 SharedMemory 帧 (主进程 IO，Worker 计算)
+    
+    架构: 主进程预读帧到 SharedMemory → Worker 接收并执行纯计算
+    
+    Args:
+        unit_id: 语义单元ID
+        start_sec: 时间范围起点
+        end_sec: 时间范围终点
+        coarse_shm_frames: {timestamp: shm_ref} 粗采样帧
+        coarse_interval: 粗采样间隔
+        fine_shm_frames_by_island: 可选，每个岛的细采样帧 [{timestamp: shm_ref}, ...]
+        
+    Returns:
+        {
+            "unit_id": str,
+            "stable_islands": [{"start_sec", "end_sec"}, ...],  # Stage 1 结果
+            "screenshots": [{"timestamp_sec", "score"}, ...],    # Stage 2 结果
+            "error": str (optional)
+        }
+    """
+    _check_memory_usage()
+    
+    try:
+        # 1. 从 SharedMemory 读取粗采样帧
+        coarse_frames = []
+        coarse_timestamps = []
+        
+        for ts, shm_ref in sorted(coarse_shm_frames.items()):
+            frame = get_frame_from_shm(shm_ref)
+            if frame is not None:
+                coarse_frames.append(frame.copy())
+                coarse_timestamps.append(ts)
+        
+        if len(coarse_frames) < 2:
+            logger.warning(f"Insufficient coarse frames for {unit_id}: {len(coarse_frames)}")
+            return {
+                "unit_id": unit_id,
+                "stable_islands": [{"start_sec": start_sec, "end_sec": end_sec}],
+                "screenshots": [{"timestamp_sec": (start_sec + end_sec) / 2, "score": 0.0, 
+                                 "island_start": start_sec, "island_end": end_sec}],
+                "start_sec": start_sec,
+                "end_sec": end_sec
+            }
+        
+        # 2. 获取 ScreenshotSelector
+        from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector import ScreenshotSelector
+        
+        global _validator_cache
+        if '_validator_cache' not in globals():
+            globals()['_validator_cache'] = {}
+        
+        _validator_cache = globals()['_validator_cache']
+        selector_key = "screenshot_selector_lightweight"
+        
+        if selector_key not in _validator_cache:
+            logger.info(f"🆕 [PID={os.getpid()}] Initializing ScreenshotSelector (lightweight)")
+            _validator_cache[selector_key] = ScreenshotSelector.create_lightweight()
+        
+        selector = _validator_cache[selector_key]
+        
+        # 3. Stage 1: 识别稳定岛 (纯计算)
+        stable_islands = selector.detect_stable_islands_from_frames(
+            frames=coarse_frames,
+            timestamps=coarse_timestamps,
+            interval=coarse_interval
+        )
+        
+        if not stable_islands:
+            stable_islands = [{"start_sec": start_sec, "end_sec": end_sec}]
+        
+        logger.info(f"Stage 1 complete for {unit_id}: {len(stable_islands)} stable islands")
+        
+        # 4. Stage 2: 如果提供了细采样帧，选择最佳帧
+        screenshots = []
+        
+        if fine_shm_frames_by_island and len(fine_shm_frames_by_island) == len(stable_islands):
+            for island_idx, (island, fine_shm_frames) in enumerate(zip(stable_islands, fine_shm_frames_by_island)):
+                fine_frames = []
+                fine_timestamps = []
+                
+                for ts, shm_ref in sorted(fine_shm_frames.items()):
+                    frame = get_frame_from_shm(shm_ref)
+                    if frame is not None:
+                        fine_frames.append(frame.copy())
+                        fine_timestamps.append(ts)
+                
+                if not fine_frames:
+                    # Fallback: 使用岛中点
+                    screenshots.append({
+                        "timestamp_sec": (island["start_sec"] + island["end_sec"]) / 2,
+                        "island_index": island_idx,
+                        "score": 0.0,
+                        "island_start": island["start_sec"],
+                        "island_end": island["end_sec"]
+                    })
+                    continue
+                
+                best_ts, best_score = selector.select_best_frame_from_frames(
+                    frames=fine_frames,
+                    timestamps=fine_timestamps
+                )
+                
+                screenshots.append({
+                    "timestamp_sec": best_ts,
+                    "island_index": island_idx,
+                    "score": float(best_score),
+                    "island_start": island["start_sec"],
+                    "island_end": island["end_sec"]
+                })
+        else:
+            # 未提供细采样帧，返回岛中点
+            for island_idx, island in enumerate(stable_islands):
+                screenshots.append({
+                    "timestamp_sec": (island["start_sec"] + island["end_sec"]) / 2,
+                    "island_index": island_idx,
+                    "score": 0.5,
+                    "island_start": island["start_sec"],
+                    "island_end": island["end_sec"]
+                })
+        
+        logger.info(
+            f"✅ Coarse-Fine complete for {unit_id}: "
+            f"{len(stable_islands)} islands, {len(screenshots)} screenshots"
+        )
+        
+        return {
+            "unit_id": unit_id,
+            "stable_islands": stable_islands,
+            "screenshots": screenshots,
+            "start_sec": start_sec,
+            "end_sec": end_sec
+        }
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"❌ Coarse-Fine screenshot failed for {unit_id}: {e}")
+        logger.error(traceback.format_exc())
+        
+        fallback_timestamp = (start_sec + end_sec) / 2
+        return {
+            "unit_id": unit_id,
+            "stable_islands": [{"start_sec": start_sec, "end_sec": end_sec}],
+            "screenshots": [{
+                "timestamp_sec": fallback_timestamp,
+                "island_index": 0,
+                "score": 0.0,
+                "island_start": start_sec,
+                "island_end": end_sec
+            }],
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "error": str(e)
+        }
