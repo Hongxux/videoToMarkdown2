@@ -416,16 +416,24 @@ class RichTextPipeline:
         return markdown_path, json_path
     
     def _save_semantic_units(self, units: List[SemanticUnit], output_path: str):
-        """保存语义单元到JSON (供Phase2B加载)"""
+        """
+        保存语义单元到JSON (供Phase2B加载)
+        
+        V9.0: 新增字段
+        - action_units: 带有 knowledge_type 和 confidence 的动作单元列表
+        - crossed_stable_islands: 被合并跨越的稳定岛
+        - cv_validated: CV 验证完成标记
+        """
         data = []
         for unit in units:
+            # 基础字段
             unit_data = {
                 "unit_id": unit.unit_id,
                 "start_sec": unit.start_sec,
                 "end_sec": unit.end_sec,
                 "full_text": getattr(unit, 'full_text', ''),
                 "text": getattr(unit, 'full_text', ''),  # 兼容性字段
-                "modality": unit.modality,
+                "modality": getattr(unit, 'modality', 'screenshot'),  # V9.0: 可能废弃
                 "stable_islands": getattr(unit, 'stable_islands', []),
                 "action_segments": getattr(unit, 'action_segments', []),
                 # 保存素材需求 (用于Phase2B匹配外部素材)
@@ -440,7 +448,17 @@ class RichTextPipeline:
                          "knowledge_type": r.knowledge_type, "semantic_unit_id": r.semantic_unit_id}
                         for r in getattr(unit, '_material_requests', MaterialRequests([], [], [])).clip_requests
                     ] if hasattr(unit, '_material_requests') else [],
-                }
+                },
+                # V9.0 新增字段
+                "knowledge_type": getattr(unit, 'knowledge_type', ''),
+                "cv_validated": getattr(unit, 'cv_validated', False),
+                # V9.0: 带有 LLM 分类结果的动作单元列表
+                "action_units": getattr(unit, 'action_units', []),
+                # V9.0: 两阶段合并过程中被跨越的稳定岛
+                "crossed_stable_islands": getattr(unit, 'crossed_stable_islands', {
+                    "stage1": [],
+                    "stage2": []
+                }),
             }
             data.append(unit_data)
         
@@ -453,7 +471,14 @@ class RichTextPipeline:
         self, 
         json_path: str
     ) -> Tuple[List[SemanticUnit], Dict[str, MaterialRequests]]:
-        """加载语义单元和素材需求"""
+        """
+        加载语义单元和素材需求
+        
+        V9.0: 新增字段恢复
+        - action_units: 带有 knowledge_type 和 confidence 的动作单元列表
+        - crossed_stable_islands: 被合并跨越的稳定岛
+        - cv_validated: CV 验证完成标记
+        """
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -474,6 +499,14 @@ class RichTextPipeline:
             unit.modality = item.get("modality", "video")
             unit.stable_islands = item.get("stable_islands", [])
             unit.action_segments = item.get("action_segments", [])
+            
+            # V9.0: 恢复新字段
+            unit.cv_validated = item.get("cv_validated", False)
+            unit.action_units = item.get("action_units", [])
+            unit.crossed_stable_islands = item.get("crossed_stable_islands", {
+                "stage1": [],
+                "stage2": []
+            })
             
             # 恢复素材需求
             mr_data = item.get("material_requests", {})
@@ -552,6 +585,246 @@ class RichTextPipeline:
             logger.error(f"  → Failed to merge CV results: {e}")
             import traceback
             logger.error(traceback.format_exc())
+    
+    async def _classify_and_filter_actions(
+        self, 
+        units: List[SemanticUnit],
+        classifier: 'KnowledgeClassifier'
+    ) -> Dict[str, Dict]:
+        """
+        🚀 V9.0: 两阶段合并 + LLM分类过滤
+        
+        架构约束：保留现有 Java KnowledgeClassificationOrchestrator → Python 架构
+        
+        此方法用于本地处理，如需通过 Java 调用，应使用 ClassifyKnowledgeBatch gRPC。
+        
+        流程：
+        1. 第一阶段合并（所有 ActionUnit，间隔 < 1s）
+        2. LLM 分类（过程性知识/讲解型/结构性/概念性）
+        3. 过滤：只保留过程性知识、实操、推演（不为视频生成讲解型）
+        4. 第二阶段合并（筛选后的 ActionUnit，相同 knowledge_type，间隔 < 5s）
+        5. 收集所有稳定岛用于截图提取
+        
+        Args:
+            units: 语义单元列表（已合并 CV 结果）
+            classifier: KnowledgeClassifier 实例
+            
+        Returns:
+            Dict[unit_id, {
+                'clip_actions': [...],      # 需要生成视频的 ActionUnit
+                'all_stable_islands': [...], # 所有稳定岛用于截图
+                'crossed_islands_stage1': [...],
+                'crossed_islands_stage2': [...]
+            }]
+        """
+        from .screenshot_range_calculator import ScreenshotRangeCalculator
+        
+        results = {}
+        STAGE1_GAP_THRESHOLD = 1.0  # 第一阶段：1秒
+        STAGE2_GAP_THRESHOLD = 5.0  # 第二阶段：5秒
+        
+        for unit in units:
+            unit_id = unit.unit_id
+            action_segments = unit.action_segments or []
+            stable_islands = unit.stable_islands or []
+            
+            if not action_segments:
+                # 无动作单元，只用稳定岛生成截图
+                results[unit_id] = {
+                    'clip_actions': [],
+                    'all_stable_islands': stable_islands,
+                    'crossed_islands_stage1': [],
+                    'crossed_islands_stage2': []
+                }
+                continue
+            
+            # ==== 第一阶段合并（所有 ActionUnit，间隔 < 1s）====
+            sorted_actions = sorted(action_segments, key=lambda x: x.get('start_sec', 0))
+            merged_stage1, crossed_stage1 = self._merge_actions_local(
+                sorted_actions, stable_islands, STAGE1_GAP_THRESHOLD
+            )
+            
+            logger.debug(f"[{unit_id}] Stage1 merge: {len(action_segments)} → {len(merged_stage1)} actions")
+            
+            # ==== LLM 分类 ====
+            try:
+                # 为每个动作单元准备字幕
+                subtitles = self.subtitles  # 已加载的字幕
+                classification_results = await classifier.classify_batch(
+                    semantic_unit_title=unit.title,
+                    semantic_unit_text=unit.core_text,
+                    action_segments=[
+                        {"start": a.get('start_sec', 0), "end": a.get('end_sec', 0), "id": f"action_{i}"}
+                        for i, a in enumerate(merged_stage1)
+                    ],
+                    subtitles=[
+                        {"start_sec": s.start_sec, "end_sec": s.end_sec, "corrected_text": s.corrected_text}
+                        for s in subtitles
+                    ] if hasattr(subtitles[0], 'start_sec') else subtitles
+                )
+                
+                # 将分类结果附加到动作单元
+                for i, a in enumerate(merged_stage1):
+                    if i < len(classification_results):
+                        res = classification_results[i]
+                        a['knowledge_type'] = res.get('knowledge_type', '过程性知识')
+                        a['confidence'] = res.get('confidence', 0.5)
+                    else:
+                        a['knowledge_type'] = '过程性知识'
+                        a['confidence'] = 0.5
+                        
+            except Exception as e:
+                logger.warning(f"[{unit_id}] LLM classification failed: {e}, using default type")
+                for a in merged_stage1:
+                    a['knowledge_type'] = '过程性知识'
+                    a['confidence'] = 0.5
+            
+            # ==== 过滤：只保留需要视频的类型 ====
+            # 讲解型 / Noise / Transition → 不生成视频（但保留截图）
+            EXPLAINABLE_TYPES = ['讲解', '概念', '原理', '定义', '背景', '解释', 'Concept', 'Principle', 'explanation']
+            NOISE_TYPES = ['noise', 'transition', '噪点', '转场']
+            
+            video_worthy_actions = []
+            for a in merged_stage1:
+                k_type = a.get('knowledge_type', '')
+                is_explainable = any(t in k_type for t in EXPLAINABLE_TYPES)
+                is_noise = any(t in k_type.lower() for t in NOISE_TYPES)
+                
+                if not is_explainable and not is_noise:
+                    video_worthy_actions.append(a)
+                else:
+                    logger.debug(f"[{unit_id}] Filtered action [{a.get('start_sec', 0):.1f}s-{a.get('end_sec', 0):.1f}s]: type={k_type}")
+            
+            logger.debug(f"[{unit_id}] After LLM filter: {len(merged_stage1)} → {len(video_worthy_actions)} actions")
+            
+            # ==== 第二阶段合并（筛选后的 ActionUnit，相同 knowledge_type，间隔 < 5s）====
+            merged_stage2, crossed_stage2 = self._merge_actions_local_stage2(
+                video_worthy_actions, stable_islands, STAGE2_GAP_THRESHOLD
+            )
+            
+            logger.debug(f"[{unit_id}] Stage2 merge: {len(video_worthy_actions)} → {len(merged_stage2)} actions")
+            
+            # ==== 收集所有稳定岛 ====
+            all_stable = self._collect_all_stable_islands_local(
+                merged_stage2, stable_islands, crossed_stage1, crossed_stage2
+            )
+            
+            results[unit_id] = {
+                'clip_actions': merged_stage2,
+                'all_stable_islands': all_stable,
+                'crossed_islands_stage1': crossed_stage1,
+                'crossed_islands_stage2': crossed_stage2
+            }
+            
+            logger.info(f"[{unit_id}] Final: {len(merged_stage2)} clip actions, {len(all_stable)} stable islands for screenshots")
+        
+        return results
+    
+    def _merge_actions_local(
+        self, 
+        actions: List[Dict], 
+        stable_islands: List[Dict],
+        gap_threshold: float
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """第一阶段本地合并"""
+        if len(actions) <= 1:
+            return actions, []
+        
+        merged = []
+        crossed = []
+        current = actions[0].copy()
+        
+        for next_action in actions[1:]:
+            gap = next_action.get('start_sec', 0) - current.get('end_sec', 0)
+            
+            if gap < gap_threshold:
+                # 记录被跨越的稳定岛
+                for island in stable_islands:
+                    i_start = island.get('start_sec', 0)
+                    i_end = island.get('end_sec', 0)
+                    if i_start >= current.get('end_sec', 0) and i_end <= next_action.get('start_sec', 0):
+                        crossed.append(island)
+                
+                # 合并
+                current['end_sec'] = next_action.get('end_sec', 0)
+            else:
+                merged.append(current)
+                current = next_action.copy()
+        
+        merged.append(current)
+        return merged, crossed
+    
+    def _merge_actions_local_stage2(
+        self, 
+        actions: List[Dict], 
+        stable_islands: List[Dict],
+        gap_threshold: float
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """第二阶段本地合并（需要相同 knowledge_type）"""
+        if len(actions) <= 1:
+            return actions, []
+        
+        merged = []
+        crossed = []
+        current = actions[0].copy()
+        
+        for next_action in actions[1:]:
+            gap = next_action.get('start_sec', 0) - current.get('end_sec', 0)
+            same_type = current.get('knowledge_type', '') == next_action.get('knowledge_type', '')
+            
+            if gap < gap_threshold and same_type:
+                # 记录被跨越的稳定岛
+                for island in stable_islands:
+                    i_start = island.get('start_sec', 0)
+                    i_end = island.get('end_sec', 0)
+                    if i_start >= current.get('end_sec', 0) and i_end <= next_action.get('start_sec', 0):
+                        crossed.append(island)
+                
+                # 合并
+                current['end_sec'] = next_action.get('end_sec', 0)
+            else:
+                merged.append(current)
+                current = next_action.copy()
+        
+        merged.append(current)
+        return merged, crossed
+    
+    def _collect_all_stable_islands_local(
+        self,
+        actions: List[Dict],
+        external_islands: List[Dict],
+        crossed_stage1: List[Dict],
+        crossed_stage2: List[Dict]
+    ) -> List[Dict]:
+        """收集所有稳定岛用于截图"""
+        all_islands = []
+        seen = set()
+        
+        def add_island(island: Dict):
+            key = (round(island.get('start_sec', 0), 2), round(island.get('end_sec', 0), 2))
+            if key not in seen:
+                seen.add(key)
+                all_islands.append(island)
+        
+        # 1. 动作单元内部的稳定岛
+        for a in actions:
+            for island in a.get('stable_islands', []):
+                add_island(island)
+        
+        # 2. 外部稳定岛
+        for island in external_islands:
+            add_island(island)
+        
+        # 3. 被跨越的稳定岛
+        for island in crossed_stage1:
+            add_island(island)
+        for island in crossed_stage2:
+            add_island(island)
+        
+        # 按时间排序
+        all_islands.sort(key=lambda x: x.get('start_sec', 0))
+        return all_islands
+
     
     def _build_sentence_timestamps(self) -> Dict[str, Dict[str, float]]:
         """
@@ -1269,26 +1542,51 @@ class RichTextPipeline:
                      f"clip={'Yes' if clip_path else 'No'}")
     
     def _get_subtitles_in_range(self, start_sec: float, end_sec: float) -> str:
-        """获取指定时间范围内的字幕文本"""
+        """
+        获取指定时间范围内的字幕文本（扩展到包含边界的完整字幕）
+        
+        Bug Fix: 如果 start_sec=13.1s 落在 [12s, 14s] 的字幕区间，则从 12s 开始匹配；
+                 如果 end_sec=15.2s 落在 [14s, 16s] 的字幕区间，则到 16s 结束匹配。
+        """
+        # 第一遍：找到包含 start_sec 和 end_sec 的字幕边界
+        effective_start = start_sec
+        effective_end = end_sec
+        
+        for sub in self.subtitles:
+            sub_start, sub_end, _ = self._parse_subtitle(sub)
+            
+            # 如果 start_sec 落在这个字幕区间内，向前扩展
+            if sub_start <= start_sec < sub_end:
+                effective_start = min(effective_start, sub_start)
+            
+            # 如果 end_sec 落在这个字幕区间内，向后扩展
+            if sub_start < end_sec <= sub_end:
+                effective_end = max(effective_end, sub_end)
+        
+        # 第二遍：收集扩展后范围内的所有字幕
         texts = []
         for sub in self.subtitles:
-            # 处理 CorrectedSubtitle dataclass 和 dict 两种格式
-            if hasattr(sub, 'start_sec'):
-                # CorrectedSubtitle dataclass
-                sub_start = sub.start_sec
-                sub_end = sub.end_sec
-                text = sub.corrected_text if hasattr(sub, 'corrected_text') else getattr(sub, 'text', '')
-            else:
-                # dict 格式
-                sub_start = sub.get("start_sec", 0)
-                sub_end = sub.get("end_sec", 0)
-                text = sub.get("corrected_text", sub.get("text", ""))
+            sub_start, sub_end, text = self._parse_subtitle(sub)
             
-            # 字幕与时间范围有重叠
-            if sub_start < end_sec and sub_end > start_sec:
+            # 字幕与扩展后的时间范围有重叠
+            if sub_start < effective_end and sub_end > effective_start:
                 texts.append(f"[{sub_start:.1f}s] {text}")
         
         return "\n".join(texts) if texts else "(无字幕)"
+    
+    def _parse_subtitle(self, sub) -> tuple:
+        """解析字幕对象，返回 (start_sec, end_sec, text)"""
+        if hasattr(sub, 'start_sec'):
+            # CorrectedSubtitle dataclass
+            sub_start = sub.start_sec
+            sub_end = sub.end_sec
+            text = sub.corrected_text if hasattr(sub, 'corrected_text') else getattr(sub, 'text', '')
+        else:
+            # dict 格式
+            sub_start = sub.get("start_sec", 0)
+            sub_end = sub.get("end_sec", 0)
+            text = sub.get("corrected_text", sub.get("text", ""))
+        return sub_start, sub_end, text
     
     async def _select_screenshot(
         self, 

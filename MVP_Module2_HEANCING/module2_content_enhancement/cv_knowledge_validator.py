@@ -174,11 +174,12 @@ class Modality(Enum):
 @dataclass
 class ActionUnit:
     """
-    动作单元 (V7.0 - 支持模态分类)
+    动作单元 (V9.0 - 两阶段合并 + LLM分类)
     
     分类层级:
     1. 有效性分类: knowledge/transition/noise/mixed
-    2. 模态子分类 (仅针对knowledge): K1/K2→截图, K3→视频+截图, K4→视频
+    2. LLM 知识分类: 过程性知识/实操/推演/讲解型
+    3. 模态子分类 (仅针对knowledge): K1/K2→截图, K3→视频+截图, K4→视频
     """
     start_sec: float
     end_sec: float
@@ -190,6 +191,11 @@ class ActionUnit:
     knowledge_subtype: str = "unknown"  # K1/K2/K3/K4 (仅knowledge类型有效)
     modality: str = "discard"           # 最终模态: screenshot/video_screenshot/video_only/discard
     has_internal_stable: bool = False   # 是否有内部稳定岛 (用于K1/K2判定)
+    # V9.0 新增（两阶段合并 + LLM分类）
+    knowledge_type: str = ""            # LLM 分类结果: 过程性知识/实操/推演/讲解型
+    confidence: float = 0.0             # LLM 分类置信度
+    internal_stable_islands: List['StableIsland'] = field(default_factory=list)  # 内部稳定岛列表
+
     
     @property
     def duration_ms(self) -> float:
@@ -1811,6 +1817,200 @@ class CVKnowledgeValidator:
         return stable_islands, effective_actions, redundancy_segments
 
 
+    # =========================================================================
+    # V9.0: 两阶段动作单元合并 (新架构)
+    # =========================================================================
+    
+    def _merge_action_units_stage1(
+        self, 
+        action_units: List[ActionUnit],
+        all_stable_islands: List[StableIsland]
+    ) -> Tuple[List[ActionUnit], List[StableIsland]]:
+        """
+        第一阶段合并：去碎片（适用于所有 ActionUnit）
+        
+        条件：间隔 < 1s
+        目的：修正 CV 采样导致的碎片化
+        
+        Args:
+            action_units: 所有检测到的动作单元
+            all_stable_islands: 所有检测到的稳定岛（用于记录被跨越的）
+            
+        Returns:
+            (merged_units, crossed_stable_islands)
+        """
+        if len(action_units) <= 1:
+            return action_units, []
+        
+        MERGE_GAP_THRESHOLD = 1.0  # 第一阶段：1秒
+        
+        merged = []
+        crossed_islands = []
+        current = action_units[0]
+        
+        for next_unit in action_units[1:]:
+            gap = next_unit.start_sec - current.end_sec
+            
+            if gap < MERGE_GAP_THRESHOLD:
+                # 记录被跨越的稳定岛
+                gap_islands = self._get_stable_islands_in_range(
+                    current.end_sec, next_unit.start_sec, all_stable_islands
+                )
+                crossed_islands.extend(gap_islands)
+                
+                # 合并动作单元
+                current = ActionUnit(
+                    start_sec=current.start_sec,
+                    end_sec=next_unit.end_sec,
+                    avg_diff_ratio=max(current.avg_diff_ratio, next_unit.avg_diff_ratio),
+                    ssim_drop=max(current.ssim_drop, next_unit.ssim_drop),
+                    action_type=current.action_type,
+                    is_effective=current.is_effective or next_unit.is_effective,
+                    has_internal_stable=current.has_internal_stable or next_unit.has_internal_stable,
+                    modality=current.modality,
+                    knowledge_subtype=current.knowledge_subtype
+                )
+                logger.debug(f"Stage1 merge: gap={gap:.2f}s → [{current.start_sec:.1f}s-{current.end_sec:.1f}s]")
+            else:
+                merged.append(current)
+                current = next_unit
+        
+        merged.append(current)
+        
+        if len(merged) < len(action_units):
+            logger.info(f"Stage1 merge: {len(action_units)} → {len(merged)} actions, "
+                       f"crossed {len(crossed_islands)} stable islands")
+        
+        return merged, crossed_islands
+    
+    def _merge_action_units_stage2(
+        self, 
+        action_units: List[ActionUnit],
+        all_stable_islands: List[StableIsland],
+        semantic_unit_id: str = ""
+    ) -> Tuple[List[ActionUnit], List[StableIsland]]:
+        """
+        第二阶段合并：语义聚合（仅适用于通过 LLM 筛选的 ActionUnit）
+        
+        条件：
+        - knowledge_type 相同
+        - 间隔 < 5s
+        
+        Args:
+            action_units: 通过 LLM 筛选的动作单元
+            all_stable_islands: 所有检测到的稳定岛
+            semantic_unit_id: 语义单元 ID（用于日志）
+            
+        Returns:
+            (merged_units, crossed_stable_islands)
+        """
+        if len(action_units) <= 1:
+            return action_units, []
+        
+        MERGE_GAP_THRESHOLD = 5.0  # 第二阶段：5秒
+        
+        merged = []
+        crossed_islands = []
+        current = action_units[0]
+        
+        for next_unit in action_units[1:]:
+            gap = next_unit.start_sec - current.end_sec
+            
+            # 只有 knowledge_type 相同且间隔 < 5s 才合并
+            same_type = getattr(current, 'knowledge_type', '') == getattr(next_unit, 'knowledge_type', '')
+            
+            if gap < MERGE_GAP_THRESHOLD and same_type:
+                # 记录被跨越的稳定岛
+                gap_islands = self._get_stable_islands_in_range(
+                    current.end_sec, next_unit.start_sec, all_stable_islands
+                )
+                crossed_islands.extend(gap_islands)
+                
+                # 合并动作单元
+                current = ActionUnit(
+                    start_sec=current.start_sec,
+                    end_sec=next_unit.end_sec,
+                    avg_diff_ratio=max(current.avg_diff_ratio, next_unit.avg_diff_ratio),
+                    ssim_drop=max(current.ssim_drop, next_unit.ssim_drop),
+                    action_type=current.action_type,
+                    is_effective=True,
+                    has_internal_stable=current.has_internal_stable or next_unit.has_internal_stable,
+                    modality=current.modality,
+                    knowledge_subtype=current.knowledge_subtype
+                )
+                # 保留 knowledge_type
+                if hasattr(current, 'knowledge_type'):
+                    current.knowledge_type = getattr(action_units[0], 'knowledge_type', '')
+                    
+                logger.debug(f"Stage2 merge [{semantic_unit_id}]: gap={gap:.2f}s, type={getattr(current, 'knowledge_type', 'unknown')} → "
+                           f"[{current.start_sec:.1f}s-{current.end_sec:.1f}s]")
+            else:
+                merged.append(current)
+                current = next_unit
+        
+        merged.append(current)
+        
+        if len(merged) < len(action_units):
+            logger.info(f"Stage2 merge [{semantic_unit_id}]: {len(action_units)} → {len(merged)} actions, "
+                       f"crossed {len(crossed_islands)} stable islands")
+        
+        return merged, crossed_islands
+    
+    def _get_stable_islands_in_range(
+        self, 
+        start_sec: float, 
+        end_sec: float,
+        stable_islands: List[StableIsland]
+    ) -> List[StableIsland]:
+        """获取指定时间范围内的稳定岛"""
+        return [
+            island for island in stable_islands
+            if island.end_sec > start_sec and island.start_sec < end_sec
+        ]
+    
+    def _collect_all_stable_islands(
+        self,
+        action_units: List[ActionUnit],
+        external_stable_islands: List[StableIsland],
+        crossed_islands_stage1: List[StableIsland],
+        crossed_islands_stage2: List[StableIsland]
+    ) -> List[StableIsland]:
+        """
+        收集所有稳定岛用于截图提取：
+        1. ActionUnit 内部的稳定岛
+        2. ActionUnit 外部的稳定岛
+        3. 两次合并中被跨越的稳定岛
+        """
+        all_islands = []
+        seen_times = set()  # 去重
+        
+        def add_island(island: StableIsland):
+            key = (round(island.start_sec, 2), round(island.end_sec, 2))
+            if key not in seen_times:
+                seen_times.add(key)
+                all_islands.append(island)
+        
+        # 1. 内部稳定岛（从 ActionUnit 的 internal_stable_islands 属性）
+        for unit in action_units:
+            if hasattr(unit, 'internal_stable_islands') and unit.internal_stable_islands:
+                for island in unit.internal_stable_islands:
+                    add_island(island)
+        
+        # 2. 外部稳定岛
+        for island in external_stable_islands:
+            add_island(island)
+        
+        # 3. 被跨越的稳定岛
+        for island in crossed_islands_stage1:
+            add_island(island)
+        for island in crossed_islands_stage2:
+            add_island(island)
+        
+        # 按时间排序
+        all_islands.sort(key=lambda x: x.start_sec)
+        
+        logger.debug(f"Collected {len(all_islands)} stable islands for screenshot extraction")
+        return all_islands
 
     
     # =========================================================================

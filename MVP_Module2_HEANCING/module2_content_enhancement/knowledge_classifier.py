@@ -438,23 +438,48 @@ ID: {item['id']}
         return final_results
     
     def _get_subtitles_in_range(self, subtitles: list, start_sec: float, end_sec: float) -> str:
-        """获取指定时间范围内的字幕文本"""
+        """
+        获取指定时间范围内的字幕文本（扩展到包含边界的完整字幕）
+        
+        Bug Fix: 如果 start_sec=13.1s 落在 [12s, 14s] 的字幕区间，则从 12s 开始匹配；
+                 如果 end_sec=15.2s 落在 [14s, 16s] 的字幕区间，则到 16s 结束匹配。
+        """
+        # 第一遍：找到包含 start_sec 和 end_sec 的字幕边界
+        effective_start = start_sec
+        effective_end = end_sec
+        
+        for sub in subtitles:
+            sub_start, sub_end, _ = self._parse_subtitle(sub)
+            
+            # 如果 start_sec 落在这个字幕区间内，向前扩展
+            if sub_start <= start_sec < sub_end:
+                effective_start = min(effective_start, sub_start)
+            
+            # 如果 end_sec 落在这个字幕区间内，向后扩展
+            if sub_start < end_sec <= sub_end:
+                effective_end = max(effective_end, sub_end)
+        
+        # 第二遍：收集扩展后范围内的所有字幕
         texts = []
         for sub in subtitles:
-            # 支持 dict 和 dataclass (CorrectedSubtitle) 两种格式
-            if hasattr(sub, 'start_sec'):
-                # CorrectedSubtitle dataclass
-                sub_start = sub.start_sec
-                sub_end = sub.end_sec
-                text = getattr(sub, 'corrected_text', getattr(sub, 'text', ''))
-            else:
-                # dict 格式
-                sub_start = sub.get("start_sec", 0)
-                sub_end = sub.get("end_sec", 0)
-                text = sub.get("corrected_text", sub.get("text", ""))
+            sub_start, sub_end, text = self._parse_subtitle(sub)
             
-            # 字幕与时间范围有重叠
-            if sub_start < end_sec and sub_end > start_sec:
+            # 字幕与扩展后的时间范围有重叠
+            if sub_start < effective_end and sub_end > effective_start:
                 texts.append(f"[{sub_start:.1f}s] {text}")
         
         return "\n".join(texts) if texts else "(无字幕)"
+    
+    def _parse_subtitle(self, sub) -> tuple:
+        """解析字幕对象，返回 (start_sec, end_sec, text)"""
+        if hasattr(sub, 'start_sec'):
+            # CorrectedSubtitle dataclass
+            sub_start = sub.start_sec
+            sub_end = sub.end_sec
+            text = getattr(sub, 'corrected_text', getattr(sub, 'text', ''))
+        else:
+            # dict 格式
+            sub_start = sub.get("start_sec", 0)
+            sub_end = sub.get("end_sec", 0)
+            text = sub.get("corrected_text", sub.get("text", ""))
+        return sub_start, sub_end, text

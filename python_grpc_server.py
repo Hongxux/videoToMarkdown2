@@ -937,6 +937,85 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 final_ss.extend(ss_list)
                 final_clips.extend(clip_list)
                 
+            # 🚀 V9.0: 更新 semantic_units_phase2a.json 包含完整的素材信息
+            try:
+                output_dir = os.path.dirname(video_path)
+                semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
+                
+                if os.path.exists(semantic_units_path):
+                    import json
+                    with open(semantic_units_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    # 构建 unit_id -> 素材请求映射
+                    unit_ss_map = {}
+                    unit_clip_map = {}
+                    unit_action_map = {}
+                    
+                    for ss in final_ss:
+                        unit_id = ss.semantic_unit_id
+                        if unit_id not in unit_ss_map:
+                            unit_ss_map[unit_id] = []
+                        unit_ss_map[unit_id].append({
+                            "screenshot_id": ss.screenshot_id,
+                            "timestamp_sec": ss.timestamp_sec,
+                            "label": ss.label,
+                            "semantic_unit_id": ss.semantic_unit_id
+                        })
+                    
+                    for clip in final_clips:
+                        unit_id = clip.semantic_unit_id
+                        if unit_id not in unit_clip_map:
+                            unit_clip_map[unit_id] = []
+                        unit_clip_map[unit_id].append({
+                            "clip_id": clip.clip_id,
+                            "start_sec": clip.start_sec,
+                            "end_sec": clip.end_sec,
+                            "knowledge_type": clip.knowledge_type,
+                            "semantic_unit_id": clip.semantic_unit_id
+                        })
+                    
+                    # 从请求中提取 action_units 信息
+                    for u in request.units:
+                        if u.action_units:
+                            unit_action_map[u.unit_id] = [
+                                {
+                                    "id": i,
+                                    "start_sec": au.start_sec,
+                                    "end_sec": au.end_sec,
+                                    "action_type": au.action_type,
+                                    "knowledge_type": au.knowledge_type,
+                                    "confidence": au.confidence,
+                                    "reasoning": au.reasoning if hasattr(au, 'reasoning') else ""
+                                }
+                                for i, au in enumerate(u.action_units)
+                            ]
+                    
+                    # 更新 JSON 数据
+                    for item in data:
+                        unit_id = item.get("unit_id", "")
+                        
+                        # 更新素材请求
+                        if "material_requests" not in item:
+                            item["material_requests"] = {}
+                        item["material_requests"]["screenshot_requests"] = unit_ss_map.get(unit_id, [])
+                        item["material_requests"]["clip_requests"] = unit_clip_map.get(unit_id, [])
+                        
+                        # 更新 action_units
+                        if unit_id in unit_action_map:
+                            item["action_units"] = unit_action_map[unit_id]
+                        
+                        # 标记 CV 验证完成
+                        item["cv_validated"] = True
+                    
+                    # 保存更新后的 JSON
+                    with open(semantic_units_path, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    
+                    logger.info(f"[{task_id}] Updated semantic_units_phase2a.json with {len(final_ss)} screenshots, {len(final_clips)} clips")
+            except Exception as e:
+                logger.warning(f"[{task_id}] Failed to update semantic_units_phase2a.json: {e}")
+            
             return video_processing_pb2.GenerateMaterialRequestsResponse(
                 success=True,
                 screenshot_requests=final_ss,
