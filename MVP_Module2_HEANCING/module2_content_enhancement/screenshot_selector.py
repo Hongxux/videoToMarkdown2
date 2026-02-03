@@ -171,6 +171,269 @@ class ScreenshotSelector:
         
         logger.info(f"ScreenshotSelector V6.2 initialized (Fluctuation Tolerance Enabled)")
     
+    @classmethod
+    def create_lightweight(cls) -> 'ScreenshotSelector':
+        """
+        🚀 工厂方法：创建轻量级实例（用于 ProcessPool Worker）
+        
+        不初始化 visual_extractor（在 Worker 中不需要读取视频）
+        """
+        instance = object.__new__(cls)
+        instance.visual_extractor = None
+        instance.detector = None  # 延迟初始化
+        instance.WEIGHT_S1 = 0.2
+        instance.WEIGHT_S2 = 0.3
+        instance.WEIGHT_S3 = 0.4
+        instance.WEIGHT_S4 = 0.1
+        return instance
+    
+    def _ensure_detector(self):
+        """延迟初始化 detector"""
+        if self.detector is None:
+            from .visual_element_detection_helpers import VisualElementDetector
+            self.detector = VisualElementDetector()
+    
+    def select_from_shared_frames(
+        self,
+        frames: List[np.ndarray],
+        timestamps: List[float],
+        fps: float = 30.0,
+        res_factor: float = 1.0
+    ) -> dict:
+        """
+        🚀 ProcessPool 兼容版本：从预读取的帧中选择最佳截图
+        
+        保留完整的岛屿聚类 + 博弈 + 择优逻辑，但：
+        1. 接受预读取的帧（而非从视频读取）
+        2. 同步执行（而非 async）
+        3. 不保存文件（仅返回时间戳）
+        
+        Args:
+            frames: 预读取的帧列表
+            timestamps: 对应的时间戳列表
+            fps: 视频帧率
+            res_factor: 分辨率系数（相对于 1080p）
+            
+        Returns:
+            {
+                "selected_timestamp": float,
+                "quality_score": float,
+                "island_count": int,
+                "analyzed_frames": int
+            }
+        """
+        self._ensure_detector()
+        
+        if not frames or len(frames) == 0:
+            return {
+                "selected_timestamp": timestamps[0] if timestamps else 0.0,
+                "quality_score": 0.0,
+                "island_count": 0,
+                "analyzed_frames": 0
+            }
+        
+        # 1. 识别内容类型以调整阈值
+        content_type = self._identify_action_type_v6(frames[0])
+        threshold_config = self._get_adaptive_threshold(content_type, res_factor, fps)
+        
+        # 2. 计算帧间 MSE 差异（同步版本）
+        mse_diffs = []
+        for i in range(len(frames) - 1):
+            diff = np.mean((frames[i].astype(np.float32) - frames[i+1].astype(np.float32)) ** 2)
+            mse_diffs.append(diff)
+        mse_diffs.append(0.0)  # 补齐最后一帧
+        
+        # 3. 计算结构化 MSE（边缘图）
+        edge_maps = [cv2.Canny(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), 50, 150) for f in frames]
+        struct_mse_diffs = []
+        for i in range(len(frames) - 1):
+            diff = (edge_maps[i].astype(np.int16) - edge_maps[i+1].astype(np.int16)) ** 2
+            struct_mse_diffs.append(np.mean(diff) / (255 * 255))
+        struct_mse_diffs.append(0.0)
+        
+        # 4. 同步计算质量指标
+        quality_results = [_analyze_frame_quality_worker(f) for f in frames]
+        
+        # 5. 波动容忍聚类
+        PIXEL_THRESH = threshold_config["pixel_mse"]
+        STRUCT_THRESH = threshold_config["struct_mse"]
+        MIN_STABLE_LEN = threshold_config["min_stable_frames"]
+        
+        islands = []
+        current_island = []
+        fluctuation_count = 0
+        
+        MAX_FLUCT_MSE = PIXEL_THRESH * 3.0
+        MAX_FLUCT_SMSE = STRUCT_THRESH * 3.0
+        LAP_GATE = 10.0 * res_factor
+        CONT_GATE = 0.15
+        
+        for i in range(len(frames) - 1):
+            mse, smse = mse_diffs[i], struct_mse_diffs[i]
+            lap, ent, sharp, contrast = quality_results[i]
+            
+            is_visually_stable = (mse < PIXEL_THRESH) and (smse < STRUCT_THRESH)
+            is_high_quality = (lap > LAP_GATE) and (contrast > CONT_GATE)
+            is_tolerable_fluctuation = (mse < MAX_FLUCT_MSE) and (smse < MAX_FLUCT_SMSE) and is_high_quality
+            
+            if is_visually_stable and is_high_quality:
+                current_island.append(i)
+                fluctuation_count = 0
+            elif is_tolerable_fluctuation and len(current_island) > 0 and fluctuation_count < 2:
+                current_island.append(i)
+                fluctuation_count += 1
+            else:
+                if len(current_island) >= MIN_STABLE_LEN:
+                    islands.append(self._finalize_island_sync(current_island, quality_results, mse_diffs, frames))
+                current_island = []
+                fluctuation_count = 0
+        
+        # 处理最后一个岛屿
+        if len(current_island) >= MIN_STABLE_LEN:
+            islands.append(self._finalize_island_sync(current_island, quality_results, mse_diffs, frames))
+        
+        # 6. 岛屿博弈
+        if not islands:
+            # 兜底：选择 Entropy * Laplacian * TimeWeight 最高的帧
+            best_score = -1
+            best_idx = 0
+            for i, (lap, ent, sharp, cont) in enumerate(quality_results):
+                time_bias = 1.0 + (i / len(frames)) * 0.5
+                score = ent * lap * time_bias
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+            
+            return {
+                "selected_timestamp": timestamps[best_idx],
+                "quality_score": best_score,
+                "island_count": 0,
+                "analyzed_frames": len(frames)
+            }
+        
+        # 7. 过滤有效岛屿
+        valid_islands = self._filter_valid_islands_sync(islands, frames, quality_results, mse_diffs, PIXEL_THRESH)
+        
+        if not valid_islands:
+            valid_islands = islands  # 回退到所有岛屿
+        
+        # 8. 岛屿去重（简化版本，避免 SSIM 计算开销）
+        unique_islands = self._deduplicate_islands_simple(valid_islands, timestamps)
+        
+        if not unique_islands:
+            unique_islands = valid_islands
+        
+        # 9. 岛内择优
+        best_island = None
+        best_island_score = -1
+        best_frame_idx = 0
+        
+        for island in unique_islands:
+            idx, score = self._select_intra_island_winner_sync(island, frames, quality_results)
+            if score > best_island_score:
+                best_island_score = score
+                best_frame_idx = idx
+                best_island = island
+        
+        return {
+            "selected_timestamp": timestamps[best_frame_idx],
+            "quality_score": best_island_score,
+            "island_count": len(unique_islands),
+            "analyzed_frames": len(frames)
+        }
+    
+    def _finalize_island_sync(self, indices, quality_results, mse_diffs, frames):
+        """同步版本：结算岛屿统计指标"""
+        avg_lap = np.mean([quality_results[i][0] for i in indices])
+        avg_ent = np.mean([quality_results[i][1] for i in indices])
+        
+        # 快速 S4 估算（抽样首尾中）
+        sample_indices = [indices[0], indices[-1], indices[len(indices)//2]]
+        s4_vals = [self._calculate_S4_no_occlusion_v6(frames[i]) for i in sample_indices]
+        avg_s4 = np.mean(s4_vals)
+        
+        return {
+            "indices": indices,
+            "start_idx": indices[0],
+            "end_idx": indices[-1],
+            "duration": len(indices),
+            "avg_laplacian": float(avg_lap),
+            "avg_entropy": float(avg_ent),
+            "avg_s4": float(avg_s4),
+            "variance": float(np.var([mse_diffs[i] for i in indices[:-1]])) if len(indices) > 1 else 0.0
+        }
+    
+    def _filter_valid_islands_sync(self, islands, frames, quality_results, mse_diffs, pixel_thresh):
+        """同步版本：过滤有效岛屿"""
+        if not islands:
+            return []
+        
+        global_ent_mean = np.mean([q[1] for q in quality_results])
+        max_sharp = max([q[0] for q in quality_results]) if quality_results else 1.0
+        
+        valid_islands = []
+        for island in islands:
+            # 检查抖动帧占比
+            if "indices" in island:
+                fluct_frames = [idx for idx in island["indices"] if mse_diffs[idx] > pixel_thresh]
+                if len(fluct_frames) / len(island["indices"]) > 0.2:
+                    continue
+            
+            # 内容密度检查
+            if island["avg_entropy"] < global_ent_mean * 0.5:
+                continue
+            
+            # 清晰度检查
+            sharp_thresh = max(10.0, max_sharp * 0.6)
+            sharp_count = sum(1 for idx in island["indices"] if quality_results[idx][0] > sharp_thresh)
+            if sharp_count / len(island["indices"]) < 0.6:
+                continue
+            
+            # 遮挡检查
+            if island["avg_s4"] < 50:
+                continue
+            
+            valid_islands.append(island)
+        
+        return valid_islands
+    
+    def _deduplicate_islands_simple(self, islands, timestamps):
+        """简化版岛屿去重：基于时间距离"""
+        if len(islands) <= 1:
+            return islands
+        
+        unique = [islands[0]]
+        for island in islands[1:]:
+            # 如果两个岛屿的中心时间差 > 2s，认为是不同内容
+            last_mid = timestamps[unique[-1]["indices"][len(unique[-1]["indices"])//2]]
+            curr_mid = timestamps[island["indices"][len(island["indices"])//2]]
+            
+            if abs(curr_mid - last_mid) > 2.0:
+                unique.append(island)
+            else:
+                # 保留后一个（通常内容更完整）
+                unique[-1] = island
+        
+        return unique
+    
+    def _select_intra_island_winner_sync(self, island, frames, quality_results):
+        """同步版本：岛内择优"""
+        best_score = -1
+        best_idx = island["indices"][0]
+        
+        for idx in island["indices"]:
+            lap, ent, sharp, contrast = quality_results[idx]
+            s4 = self._calculate_S4_no_occlusion_v6(frames[idx])
+            
+            score = (ent * 0.4) + (lap * 0.3) + (contrast * 0.1) + (s4 / 100.0 * 0.2)
+            
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        
+        return best_idx, best_score
+
+
     async def select_screenshot(
         self,
         video_path: str,

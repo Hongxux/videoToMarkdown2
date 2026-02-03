@@ -415,6 +415,77 @@ class RichTextPipeline:
         
         return markdown_path, json_path
     
+    def _apply_external_materials(self, unit, screenshots_dir: str, clips_dir: str, requests):
+        """
+        应用外部素材（Java FFmpeg 生成的截图和切片）
+        
+        Args:
+            unit: SemanticUnit 对象
+            screenshots_dir: 截图目录
+            clips_dir: 切片目录
+            requests: MaterialRequests 对象
+        """
+        materials = MaterialSet()
+        
+        # 1. 加载截图
+        for ss_req in requests.screenshot_requests:
+            # 尝试多种可能的文件名模式
+            patterns = [
+                os.path.join(screenshots_dir, f"{ss_req.screenshot_id}.jpg"),
+                os.path.join(screenshots_dir, f"{ss_req.screenshot_id}.png"),
+                os.path.join(screenshots_dir, f"screenshot_{ss_req.screenshot_id}.jpg"),
+            ]
+            
+            for pattern in patterns:
+                if os.path.exists(pattern):
+                    materials.screenshots.append(pattern)
+                    materials.labels.append(ss_req.label)
+                    break
+        
+        # 2. 加载视频切片
+        for clip_req in requests.clip_requests:
+            patterns = [
+                os.path.join(clips_dir, f"{clip_req.clip_id}.mp4"),
+                os.path.join(clips_dir, f"clip_{clip_req.clip_id}.mp4"),
+            ]
+            
+            for pattern in patterns:
+                if os.path.exists(pattern):
+                    materials.clip = pattern
+                    break
+        
+        # 3. 保存到 unit 的 materials 属性
+        unit.materials = materials
+    
+    def _assemble_document(self, units, title: str):
+        """
+        组装富文本文档
+        
+        Args:
+            units: List[SemanticUnit]
+            title: 文档标题
+            
+        Returns:
+            RichTextDocument
+        """
+        doc = RichTextDocument(
+            title=title,
+            source_video=self.video_path,
+            total_duration_sec=self._get_video_duration()
+        )
+        
+        for unit in units:
+            # 使用 unit.materials 或创建空的 MaterialSet
+            materials = getattr(unit, 'materials', None)
+            if materials is None:
+                materials = MaterialSet()
+            
+            # 创建 section，确保 title 使用 knowledge_topic
+            section = create_section_from_semantic_unit(unit, materials)
+            doc.add_section(section)
+        
+        return doc
+    
     def _save_semantic_units(self, units: List[SemanticUnit], output_path: str):
         """
         保存语义单元到JSON (供Phase2B加载)

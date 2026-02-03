@@ -262,3 +262,117 @@ def cleanup_worker_resources():
             pass
     _attached_shms.clear()
 
+
+def run_screenshot_selection_task(
+    video_path: str,
+    unit_id: str,
+    island_index: int,
+    expanded_start: float,
+    expanded_end: float,
+    shm_frames: Dict[float, dict],
+    fps: float = 30.0
+) -> dict:
+    """
+    🚀 Worker 函数：在独立进程中执行截图选择
+    
+    调用 ScreenshotSelector.select_from_shared_frames()，保留完整的：
+    - 波动容忍聚类
+    - 岛屿博弈（过滤 + 去重）
+    - 岛内择优
+    
+    Args:
+        video_path: 视频路径
+        unit_id: 语义单元 ID
+        island_index: 稳定岛索引
+        expanded_start: 扩展后的起始时间
+        expanded_end: 扩展后的结束时间
+        shm_frames: {timestamp: {shm_name, shape, dtype}}
+        fps: 视频帧率
+        
+    Returns:
+        {
+            "unit_id": str,
+            "island_index": int,
+            "selected_timestamp": float,
+            "quality_score": float,
+            "island_count": int,
+            "analyzed_frames": int
+        }
+    """
+    try:
+        _check_memory_usage()
+        
+        # 1. 从 SharedMemory 读取帧
+        frames = []
+        timestamps = []
+        
+        for ts, shm_ref in sorted(shm_frames.items()):
+            frame = get_frame_from_shm(shm_ref)
+            if frame is not None:
+                frames.append(frame.copy())  # 复制以避免 SharedMemory 生命周期问题
+                timestamps.append(ts)
+        
+        if not frames:
+            logger.warning(f"No frames read from SharedMemory for {unit_id}_island{island_index}")
+            return {
+                "unit_id": unit_id,
+                "island_index": island_index,
+                "selected_timestamp": (expanded_start + expanded_end) / 2,
+                "quality_score": 0.0,
+                "island_count": 0,
+                "analyzed_frames": 0
+            }
+        
+        # 2. 创建轻量级 ScreenshotSelector
+        from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector import ScreenshotSelector
+        
+        global _validator_cache
+        selector_key = "screenshot_selector_lightweight"
+        
+        if selector_key not in _validator_cache:
+            _validator_cache[selector_key] = ScreenshotSelector.create_lightweight()
+        
+        selector = _validator_cache[selector_key]
+        
+        # 3. 调用同步版本的截图选择（保留完整岛屿逻辑）
+        # 计算分辨率系数
+        res_factor = frames[0].shape[1] / 1920.0 if frames else 1.0
+        
+        result = selector.select_from_shared_frames(
+            frames=frames,
+            timestamps=timestamps,
+            fps=fps,
+            res_factor=res_factor
+        )
+        
+        logger.info(
+            f"✅ Screenshot selected for {unit_id}_island{island_index}: "
+            f"t={result['selected_timestamp']:.2f}s, score={result['quality_score']:.3f} "
+            f"(islands={result['island_count']}, frames={result['analyzed_frames']})"
+        )
+        
+        return {
+            "unit_id": unit_id,
+            "island_index": island_index,
+            "selected_timestamp": result["selected_timestamp"],
+            "quality_score": result["quality_score"],
+            "island_count": result["island_count"],
+            "analyzed_frames": result["analyzed_frames"]
+        }
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"❌ Screenshot selection failed for {unit_id}_island{island_index}: {e}")
+        logger.error(traceback.format_exc())
+        
+        # 回退：返回中点时间戳
+        fallback_timestamp = (expanded_start + expanded_end) / 2
+        return {
+            "unit_id": unit_id,
+            "island_index": island_index,
+            "selected_timestamp": fallback_timestamp,
+            "quality_score": 0.0,
+            "island_count": 0,
+            "analyzed_frames": 0,
+            "error": str(e)
+        }

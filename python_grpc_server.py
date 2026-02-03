@@ -16,7 +16,7 @@ import threading
 import psutil
 import traceback
 from concurrent import futures
-from typing import Optional
+from typing import Optional, List, Dict
 
 import grpc
 import gc
@@ -822,120 +822,190 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     async def GenerateMaterialRequests(self, request, context):
         """
-        🚀 V3: Phase2A - Step 3: Material Request Generation (Smart Timestamp)
+        🚀 V9.0: Phase2A - Material Request Generation (Two-Stage Merge + Global Screenshot)
         
-        基于 CV 验证结果 (action_units) 和知识分类结果 (knowledge_type) 策划素材。
+        新架构流程：
+        1. 第一阶段合并：所有 ActionUnit，间隔 < 1s
+        2. LLM 分类过滤：丢弃"讲解型"和"Noise/Transition"
+        3. 第二阶段合并：筛选后的 ActionUnit，同类型，间隔 < 5s
+        4. 全局截图提取：从所有稳定岛（内部+外部+被跨越）生成截图
         """
         task_id = request.task_id
         video_path = request.video_path
         
+        
         try:
             self._increment_tasks()
-            # 获取该视频专用的选择器
+            
+            # 🚀 V9.0: 使用 RichTextPipeline 的两阶段合并逻辑
+            from MVP_Module2_HEANCING.module2_content_enhancement.rich_text_pipeline import RichTextPipeline
+            from MVP_Module2_HEANCING.module2_content_enhancement.knowledge_classifier import KnowledgeClassifier
+            from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_range_calculator import ScreenshotRangeCalculator
+            
+            # 初始化组件
+            output_dir = os.path.dirname(video_path)
+            intermediates_dir = os.path.join(output_dir, "intermediates")
+            
+            # 🔑 构造中间文件路径 (用于加载字幕和上下文)
+            step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
+            step6_path = os.path.join(intermediates_dir, "step6_merge_cross_output.json")
+            sentence_timestamps_path = os.path.join(intermediates_dir, "sentence_timestamps.json")
+            
+            pipeline = RichTextPipeline(
+                video_path=video_path, 
+                output_dir=output_dir,
+                step2_path=step2_path,
+                step6_path=step6_path,
+                sentence_timestamps_path=sentence_timestamps_path
+            )
+            classifier = KnowledgeClassifier()
+            calculator = ScreenshotRangeCalculator(video_path)
             selector = self.resources.get_screenshot_selector(video_path)
             
-            async def process_unit_requests(u):
-                pb_ss_list = []
-                pb_clip_list = []
+            # 转换 gRPC units 为 SemanticUnit 对象
+            from MVP_Module2_HEANCING.module2_content_enhancement.semantic_unit_segmenter import SemanticUnit
+            units = []
+            for u in request.units:
+                # 转换 action_units
+                action_segments = []
+                for au in u.action_units:
+                    action_segments.append({
+                        "start_sec": au.start_sec,
+                        "end_sec": au.end_sec,
+                        "modality": au.action_type,
+                        "stable_islands": []  # 稍后填充
+                    })
                 
-                # 1. 检查是否有动作单元 (CV 探测结果)
-                if u.action_units:
-                    for i, au in enumerate(u.action_units):
-                        # 判断该动作单元是否为讲解型 (基于分类结果)
-                        k_type = au.knowledge_type or u.knowledge_type or "过程性知识"
-                        is_explainable = any(k in k_type for k in ["概念", "原理", "定义", "背景", "讲解", "Concept", "Principle"])
-                        
-                        # 讲解型策略: 仅截图 (首中尾)
-                        if is_explainable:
-                            # 首帧
-                            ss_head = await selector.select_screenshot(
-                                video_path=video_path,
-                                start_sec=float(au.start_sec),
-                                end_sec=min(float(au.end_sec), float(au.start_sec) + 1.5),
-                                output_name=f"{u.unit_id}_au{i}_head"
-                            )
-                            if ss_head:
-                                pb_ss_list.append(video_processing_pb2.ScreenshotRequest(
-                                    screenshot_id=ss_head.screenshot_id if hasattr(ss_head, 'screenshot_id') else f"{u.unit_id}_au{i}_head",
-                                    timestamp_sec=ss_head.selected_timestamp,
-                                    label="动作首帧", semantic_unit_id=u.unit_id
-                                ))
-                            # 中间关键帧 (Use full range to find best frame)
-                            ss_mid = await selector.select_screenshot(
-                                video_path=video_path,
-                                start_sec=float(au.start_sec),
-                                end_sec=float(au.end_sec),
-                                output_name=f"{u.unit_id}_au{i}_mid"
-                            )
-                            if ss_mid:
-                                pb_ss_list.append(video_processing_pb2.ScreenshotRequest(
-                                    screenshot_id=ss_mid.screenshot_id if hasattr(ss_mid, 'screenshot_id') else f"{u.unit_id}_au{i}_mid",
-                                    timestamp_sec=ss_mid.selected_timestamp,
-                                    label="动作关键帧", semantic_unit_id=u.unit_id
-                                ))
-                        # 过程型策略: 提取视频 + 关键帧截图
-                        else:
-                            # 视频切片
-                            pb_clip_list.append(video_processing_pb2.ClipRequest(
-                                clip_id=f"clip_{u.unit_id}_au{i}",
-                                start_sec=float(au.start_sec),
-                                end_sec=float(au.end_sec),
-                                knowledge_type=k_type,
-                                semantic_unit_id=u.unit_id
-                            ))
-                            # 配套关键帧截图 (Use full range)
-                            ss_action = await selector.select_screenshot(
-                                video_path=video_path,
-                                start_sec=float(au.start_sec),
-                                end_sec=float(au.end_sec),
-                                output_name=f"{u.unit_id}_au{i}_action"
-                            )
-                            if ss_action:
-                                pb_ss_list.append(video_processing_pb2.ScreenshotRequest(
-                                    screenshot_id=ss_action.screenshot_id if hasattr(ss_action, 'screenshot_id') else f"{u.unit_id}_au{i}_action",
-                                    timestamp_sec=ss_action.selected_timestamp,
-                                    label="动作演示帧", semantic_unit_id=u.unit_id
-                                ))
-                
-                # 2. 回退策略 (无动作单元)
-                else:
-                    k_type = u.knowledge_type or "过程性知识"
-                    is_explainable = any(k in k_type for k in ["概念", "原理", "定义", "背景", "讲解", "Concept", "Principle"])
-                    
-                    if is_explainable:
-                        # 纯截图
-                        ss_fallback = await selector.select_screenshot(
-                            video_path=video_path,
-                            start_sec=float(u.start_sec),
-                            end_sec=min(float(u.end_sec), float(u.start_sec) + 2.0),
-                            output_name=f"{u.unit_id}_fallback"
-                        )
-                        if ss_fallback:
-                            pb_ss_list.append(video_processing_pb2.ScreenshotRequest(
-                                screenshot_id=ss_fallback.screenshot_id if hasattr(ss_fallback, 'screenshot_id') else f"{u.unit_id}_fallback",
-                                timestamp_sec=ss_fallback.selected_timestamp,
-                                label="背景截图", semantic_unit_id=u.unit_id
-                            ))
-                    else:
-                        # 整个单元作为视频
-                        pb_clip_list.append(video_processing_pb2.ClipRequest(
-                            clip_id=f"clip_{u.unit_id}_full",
-                            start_sec=u.start_sec,
-                            end_sec=u.end_sec,
-                            knowledge_type=k_type,
-                            semantic_unit_id=u.unit_id
-                        ))
-                
-                return pb_ss_list, pb_clip_list
-
-            tasks = [process_unit_requests(u) for u in request.units]
-            all_results = await asyncio.gather(*tasks)
+                unit = SemanticUnit(
+                    unit_id=u.unit_id,
+                    knowledge_type=u.knowledge_type,
+                    knowledge_topic=u.title or "未知主题",
+                    full_text=u.full_text,
+                    source_paragraph_ids=[],
+                    source_sentence_ids=[],
+                    start_sec=u.start_sec,
+                    end_sec=u.end_sec,
+                    action_segments=action_segments
+                )
+                units.append(unit)
             
+            # 🚀 核心：两阶段合并 + LLM 分类过滤
+            logger.info(f"[{task_id}] Running two-stage merge + LLM classification...")
+            filter_results = await pipeline._classify_and_filter_actions(units, classifier)
+            
+            # 生成素材请求
             final_ss = []
             final_clips = []
-            for ss_list, clip_list in all_results:
-                final_ss.extend(ss_list)
-                final_clips.extend(clip_list)
+            
+            for unit in units:
+                unit_id = unit.unit_id
+                result = filter_results.get(unit_id, {})
+                
+                clip_actions = result.get('clip_actions', [])
+                all_stable_islands = result.get('all_stable_islands', [])
+                
+                # 1. 为过滤后的动作单元生成视频切片
+                for i, action in enumerate(clip_actions):
+                    final_clips.append(video_processing_pb2.ClipRequest(
+                        clip_id=f"clip_{unit_id}_action{i}",
+                        start_sec=float(action.get('start_sec', 0)),
+                        end_sec=float(action.get('end_sec', 0)),
+                        knowledge_type=action.get('knowledge_type', '过程性知识'),
+                        semantic_unit_id=unit_id
+                    ))
+                
+            
+            # 🚀 V9.0 优化：批量并行截图选择（ProcessPool）
+            logger.info(f"[{task_id}] Starting parallel screenshot selection...")
+            screenshot_tasks = []
+            
+            for unit in units:
+                unit_id = unit.unit_id
+                result = filter_results.get(unit_id, {})
+                all_stable_islands = result.get('all_stable_islands', [])
+                
+                if all_stable_islands:
+                    for i, island in enumerate(all_stable_islands):
+                        # 扩展范围
+                        expanded_range = calculator.expand_range(
+                            island.get('start_sec', 0),
+                            island.get('end_sec', 0)
+                        )
+                        
+                        screenshot_tasks.append({
+                            "unit_id": unit_id,
+                            "island_index": i,
+                            "expanded_start": expanded_range['start'],
+                            "expanded_end": expanded_range['end']
+                        })
+                else:
+                    # 回退：如果没有稳定岛，使用单元的起始帧
+                    screenshot_tasks.append({
+                        "unit_id": unit_id,
+                        "island_index": 0,
+                        "expanded_start": float(unit.start_sec),
+                        "expanded_end": min(float(unit.end_sec), float(unit.start_sec) + 2.0)
+                    })
+            
+            if screenshot_tasks:
+                # Step 1: 批量读取所有需要的帧到 SharedMemory
+                shm_map = await self._batch_read_frames_for_screenshots(
+                    video_path, 
+                    screenshot_tasks
+                )
+                
+                # Step 2: 提交到 ProcessPool 并行计算
+                from cv_worker import run_screenshot_selection_task
+                loop = asyncio.get_event_loop()
+                futures = []
+                
+                for task in screenshot_tasks:
+                    key = f"{task['unit_id']}_island{task['island_index']}"
+                    task_shm_frames = shm_map.get(key, {})
+                    
+                    if not task_shm_frames:
+                        # 回退：如果没有读取到帧，使用中点时间戳
+                        final_ss.append(video_processing_pb2.ScreenshotRequest(
+                            screenshot_id=f"{task['unit_id']}_island{task['island_index']}",
+                            timestamp_sec=(task['expanded_start'] + task['expanded_end']) / 2,
+                            label=f"稳定岛{task['island_index']}",
+                            semantic_unit_id=task['unit_id']
+                        ))
+                        continue
+                    
+                    future = loop.run_in_executor(
+                        self.cv_pool,  # 复用现有的 ProcessPool
+                        functools.partial(
+                            run_screenshot_selection_task,
+                            video_path=video_path,
+                            unit_id=task['unit_id'],
+                            island_index=task['island_index'],
+                            expanded_start=task['expanded_start'],
+                            expanded_end=task['expanded_end'],
+                            shm_frames=task_shm_frames,
+                            fps=30.0  # 默认帧率，可从视频元信息获取
+                        )
+                    )
+                    futures.append(future)
+                
+                # Step 3: 等待所有任务完成
+                if futures:
+                    results = await asyncio.gather(*futures)
+                    
+                    # Step 4: 构建 ScreenshotRequest
+                    for result in results:
+                        final_ss.append(video_processing_pb2.ScreenshotRequest(
+                            screenshot_id=f"{result['unit_id']}_island{result['island_index']}",
+                            timestamp_sec=result['selected_timestamp'],
+                            label=f"稳定岛{result['island_index']}",
+                            semantic_unit_id=result['unit_id']
+                        ))
+                
+                # Step 5: 清理 SharedMemory
+                # FrameRegistry 会自动管理，无需手动清理
+                logger.info(f"[{task_id}] Parallel screenshot selection completed: {len(final_ss)} screenshots")
+            
+            logger.info(f"[{task_id}] Generated {len(final_clips)} clips, {len(final_ss)} screenshots")
                 
             # 🚀 V9.0: 更新 semantic_units_phase2a.json 包含完整的素材信息
             try:
@@ -1209,6 +1279,89 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         finally:
             cap.release()
     
+    async def _batch_read_frames_for_screenshots(
+        self, 
+        video_path: str, 
+        screenshot_tasks: List[dict]
+    ) -> Dict[str, Dict[float, dict]]:
+        """
+        🚀 批量读取截图选择所需的帧到 SharedMemory
+        
+        Args:
+            screenshot_tasks: [
+                {
+                    "unit_id": str,
+                    "island_index": int,
+                    "expanded_start": float,
+                    "expanded_end": float
+                },
+                ...
+            ]
+        
+        Returns:
+            {
+                "SU001_island0": {
+                    12.5: {shm_name, shape, dtype},
+                    13.0: {shm_name, shape, dtype},
+                    ...
+                },
+                ...
+            }
+        """
+        import cv2
+        
+        shm_map = {}
+        cap = cv2.VideoCapture(video_path)
+        
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            for task in screenshot_tasks:
+                key = f"{task['unit_id']}_island{task['island_index']}"
+                start_sec = task['expanded_start']
+                end_sec = task['expanded_end']
+                
+                # 采样帧（每 0.5s 一帧，确保覆盖扩展范围）
+                timestamps = np.arange(start_sec, end_sec + 0.1, 0.5)
+                frame_map = {}
+                
+                for ts in timestamps:
+                    frame_idx = int(ts * fps)
+                    frame_idx = max(0, min(frame_idx, total_frames - 1))
+                    
+                    # Seek and read
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = cap.read()
+                    
+                    if not ret or frame is None:
+                        continue
+                    
+                    # 写入 SharedMemory（使用 FrameRegistry）
+                    self.frame_registry.register_frame(frame_idx, frame)
+                    shm_ref = self.frame_registry.get_shm_ref(frame_idx)
+                    
+                    if shm_ref:
+                        frame_map[ts] = shm_ref
+                    
+                    # 立即释放本地内存
+                    del frame
+                
+                if frame_map:
+                    shm_map[key] = frame_map
+            
+            logger.info(f"✅ Batch read {len(shm_map)} screenshot tasks, total frames in SharedMemory")
+            return shm_map
+            
+        except Exception as e:
+            logger.error(f"❌ Batch read for screenshots failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {}
+        finally:
+            cap.release()
+    
+
     async def ValidateCVBatch(self, request, context):
         """
         🚀 V6: CV验证 (Java 控制 + ProcessPool + SharedMemory + Chunked Processing)

@@ -427,7 +427,8 @@ public class VideoProcessingOrchestrator {
 
     private void saveUpdatedSemantics(File file, Object root) {
         try {
-            objectMapper.writeValue(file, root);
+            // 🚀 Pretty Print for better readability
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file, root);
         } catch(IOException e) {
             logger.error("Failed to save updated semantics", e);
         }
