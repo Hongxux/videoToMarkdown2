@@ -1532,7 +1532,7 @@ class RichTextPipeline:
             clips_dir: Java FFmpeg 生成的切片目录
             material_requests: Phase2A 收集的需求（用于匹配文件）
         """
-        materials = MaterialSet(modality=unit.modality)
+        materials = MaterialSet()
         
         screenshot_paths = []
         screenshot_labels = []

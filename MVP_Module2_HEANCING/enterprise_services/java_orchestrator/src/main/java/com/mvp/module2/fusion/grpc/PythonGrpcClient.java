@@ -386,8 +386,6 @@ public class PythonGrpcClient {
     
     public static class CVValidationUnitResult {
         public String unitId;
-        public String modality;
-        public String knowledgeSubtype;
         public List<StableIslandResult> stableIslands = new ArrayList<>();
         public List<ActionSegmentResult> actionSegments = new ArrayList<>();
     }
@@ -451,8 +449,6 @@ public class PythonGrpcClient {
                 for (com.mvp.videoprocessing.grpc.CVValidationResult pbResult : response.getResultsList()) {
                     CVValidationUnitResult unitResult = new CVValidationUnitResult();
                     unitResult.unitId = pbResult.getUnitId();
-                    unitResult.modality = pbResult.getModality();
-                    unitResult.knowledgeSubtype = pbResult.getKnowledgeSubtype();
                     
                     // 转换 stable islands
                     for (com.mvp.videoprocessing.grpc.StableIsland si : pbResult.getStableIslandsList()) {

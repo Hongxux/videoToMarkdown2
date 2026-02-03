@@ -28,7 +28,7 @@ class MaterialSet:
     screenshot_paths: List[str] = field(default_factory=list)  # 截图路径列表
     
     # 元信息
-    modality: str = "unknown"                 # screenshot / video_only / video_screenshot
+    # 元信息
     screenshot_labels: List[str] = field(default_factory=list)  # 截图标签 ["首帧", "稳定岛", "末帧"]
     
     # V7.4: LLM 三要素分类结果
@@ -51,7 +51,7 @@ class RichTextSection:
     end_sec: float
     
     # 素材
-    modality: str                             # screenshot / video_only / video_screenshot
+    # 素材
     materials: MaterialSet = field(default_factory=MaterialSet)
     
     # 布局提示
@@ -96,7 +96,6 @@ class RichTextDocument:
                     "body_text": s.body_text,
                     "knowledge_type": s.knowledge_type,
                     "time_range": [s.start_sec, s.end_sec],
-                    "modality": s.modality,
                     "materials": {
                         "clip": s.materials.clip_path,
                         "screenshots": s.materials.screenshot_paths,
@@ -170,9 +169,7 @@ class RichTextDocument:
         
         # 元信息块
         kt_emoji = {"abstract": "📚", "process": "🔄", "concrete": "🎯"}.get(section.knowledge_type, "📝")
-        mod_emoji = {"screenshot": "🖼️", "video_only": "🎬", "video_screenshot": "🎬🖼️"}.get(section.modality, "📦")
-        
-        lines.append(f"> {kt_emoji} **{section.knowledge_type}** | {mod_emoji} **{section.modality}** | ⏱️ {section.duration_str()}")
+        lines.append(f"> {kt_emoji} **{section.knowledge_type}** | ⏱️ {section.duration_str()}")
         lines.append("")
         
         # 正文
@@ -182,56 +179,43 @@ class RichTextDocument:
         # 素材渲染 (根据 modality 灵活布局)
         materials = section.materials
         
-        if section.modality == "screenshot":
-            # 静态: 1张截图
+        if materials.clip_path:
+            # 优先渲染视频
+            clip_path = self._relative_path(materials.clip_path, assets_dir)
+            lines.append(f"**📹 过程演示**")
+            lines.append("")
+            lines.append(f'<video src="{clip_path}" controls width="100%"></video>')
+            lines.append("")
+            
+            # 如果有截图，作为辅助关键帧图集 (video_screenshot 模式)
             if materials.screenshot_paths:
+                if len(materials.screenshot_paths) >= 2 or str(section.knowledge_type) in ["process", "过程性知识", "过程"]:
+                     lines.append("**关键帧图集:**")
+                     lines.append("")
+                     headers = materials.screenshot_labels if materials.screenshot_labels else [f"帧{i+1}" for i in range(len(materials.screenshot_paths))]
+                     lines.append("| " + " | ".join(headers) + " |")
+                     lines.append("|" + "---|" * len(headers))
+                     imgs = [f"![]({self._relative_path(ss, assets_dir)})" for ss in materials.screenshot_paths]
+                     lines.append("| " + " | ".join(imgs) + " |")
+                     lines.append("")
+            
+        elif materials.screenshot_paths:
+            # 仅截图
+            if len(materials.screenshot_paths) == 1:
+                # 单张图 (screenshot 模式)
                 ss_path = self._relative_path(materials.screenshot_paths[0], assets_dir)
                 lines.append(f"![截图]({ss_path})")
                 lines.append("")
-                
-        elif section.modality == "video_only":
-            # 动态无稳定岛: 视频 + 2张截图 (首尾)
-            if materials.clip_path:
-                clip_path = self._relative_path(materials.clip_path, assets_dir)
-                lines.append(f"**📹 操作演示**")
-                lines.append("")
-                lines.append(f'<video src="{clip_path}" controls width="100%"></video>')
-                lines.append("")
-            
-            # 首尾截图缩略图
-            if len(materials.screenshot_paths) >= 2:
-                lines.append("**关键帧:**")
-                lines.append("")
-                for i, ss in enumerate(materials.screenshot_paths):
-                    label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"帧{i+1}"
-                    ss_path = self._relative_path(ss, assets_dir)
-                    lines.append(f"| {label} |")
-                lines.append("|" + "---|" * len(materials.screenshot_paths))
-                for ss in materials.screenshot_paths:
-                    ss_path = self._relative_path(ss, assets_dir)
-                    lines.append(f"| ![]({ss_path}) |")
-                lines.append("")
-                
-        elif section.modality == "video_screenshot":
-            # 动态有稳定岛: 视频 + 3张截图
-            if materials.clip_path:
-                clip_path = self._relative_path(materials.clip_path, assets_dir)
-                lines.append(f"**📹 过程演示**")
-                lines.append("")
-                lines.append(f'<video src="{clip_path}" controls width="100%"></video>')
-                lines.append("")
-            
-            # 3张关键帧图集
-            if materials.screenshot_paths:
-                lines.append("**关键帧图集:**")
-                lines.append("")
-                # 表格布局
-                headers = materials.screenshot_labels if materials.screenshot_labels else [f"帧{i+1}" for i in range(len(materials.screenshot_paths))]
-                lines.append("| " + " | ".join(headers) + " |")
-                lines.append("|" + "---|" * len(headers))
-                imgs = [f"![]({self._relative_path(ss, assets_dir)})" for ss in materials.screenshot_paths]
-                lines.append("| " + " | ".join(imgs) + " |")
-                lines.append("")
+            else:
+                 # 多张图 (图集模式)
+                 lines.append("**截图图集:**")
+                 lines.append("")
+                 headers = materials.screenshot_labels if materials.screenshot_labels else [f"帧{i+1}" for i in range(len(materials.screenshot_paths))]
+                 lines.append("| " + " | ".join(headers) + " |")
+                 lines.append("|" + "---|" * len(headers))
+                 imgs = [f"![]({self._relative_path(ss, assets_dir)})" for ss in materials.screenshot_paths]
+                 lines.append("| " + " | ".join(imgs) + " |")
+                 lines.append("")
         
         return lines
     
@@ -261,6 +245,6 @@ def create_section_from_semantic_unit(
         knowledge_type=unit.knowledge_type,
         start_sec=unit.start_sec,
         end_sec=unit.end_sec,
-        modality=unit.modality,
+        end_sec=unit.end_sec,
         materials=materials
     )

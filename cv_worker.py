@@ -200,29 +200,8 @@ def run_cv_validation_task(video_path: str, unit_data: dict, shm_frames: dict = 
                 "internal_stable_islands": internal_islands
             })
         
-        # 确定模态
-        if not action_units and stable_islands:
-            modality = "screenshot"
-            knowledge_subtype = "static"
-        elif action_units:
-            first_action = action_units[0]
-            if hasattr(first_action, 'classify_modality'):
-                modality_result = first_action.classify_modality()
-                modality = modality_result.value if hasattr(modality_result, 'value') else str(modality_result)
-            else:
-                modality = "video_screenshot"
-            knowledge_subtype = getattr(first_action, 'action_type', 'mixed')
-        else:
-            modality = "unknown"
-            knowledge_subtype = "unknown"
-        
-        logger.info(f"✅ CV validation done for {unit_data['unit_id']} "
-                   f"(stable={len(stable_islands)}, action={len(action_units)})")
-        
         return {
             "unit_id": unit_data["unit_id"],
-            "modality": modality,
-            "knowledge_subtype": knowledge_subtype,
             "stable_islands": stable_islands_data,
             "action_segments": action_segments_data
         }
@@ -233,8 +212,6 @@ def run_cv_validation_task(video_path: str, unit_data: dict, shm_frames: dict = 
         logger.error(traceback.format_exc())
         return {
             "unit_id": unit_data["unit_id"],
-            "modality": "unknown",
-            "knowledge_subtype": "unknown",
             "stable_islands": [],
             "action_segments": [],
             "error": str(e)

@@ -206,10 +206,8 @@ message CVValidationResponse {
 
 message CVValidationResult {
     string unit_id = 1;                             // 语义单元ID
-    string modality = 2;                            // 模态: screenshot/video_only/video_screenshot
-    string knowledge_subtype = 3;                   // 子分类
-    repeated StableIsland stable_islands = 4;       // 稳定岛列表
-    repeated ActionSegment action_segments = 5;     // 动作单元列表
+    repeated StableIsland stable_islands = 2;       // 稳定岛列表
+    repeated ActionSegment action_segments = 3;     // 动作单元列表
 }
 
 message StableIsland {

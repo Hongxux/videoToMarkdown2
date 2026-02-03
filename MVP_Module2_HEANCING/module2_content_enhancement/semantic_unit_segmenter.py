@@ -50,11 +50,8 @@ class SemanticUnit:
     source_sentence_ids: List[str]        # 来源句子ID (S001, S002, ...)
     start_sec: float = 0.0                # 起始时间
     end_sec: float = 0.0                  # 结束时间
-    display_form: str = "unknown"         # [DEPRECATED] 使用 modality 替代
+    display_form: str = "unknown"         # [DEPRECATED] Retained for compatibility
     confidence: float = 0.0               # LLM判定置信度
-    # V7.x 模态分类扩展字段
-    modality: str = "unknown"             # V7.x: screenshot/video_screenshot/video_only/discard
-    knowledge_subtype: str = ""           # V7.x: K1_K2_stepwise/K3_derivation/K4_operation/presentation
     screenshot_times: List[float] = None  # V7.x: 截图时间点 [根据modality: 1/2/3个]
     action_segments: List[Dict] = None    # V7.x: 动作区间详情 [{start, end, type}]
     stable_islands: List[Dict] = None     # V7.x: 稳定岛区间 [{start, end, mid, duration}]

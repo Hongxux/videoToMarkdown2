@@ -389,7 +389,7 @@ public class VideoProcessingOrchestrator {
             if (cvResults.containsKey(uid)) {
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 unit.put("cv_validated", true);
-                unit.put("modality", cvRes.modality);
+
                 
                 List<Map<String, Object>> actionsOut = new ArrayList<>();
                 if (cvRes.actionSegments != null) {

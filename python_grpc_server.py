@@ -1488,8 +1488,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 
                 pb_results.append(video_processing_pb2.CVValidationResult(
                     unit_id=str(res.get("unit_id", "")),
-                    modality=str(res.get("modality", "unknown")),
-                    knowledge_subtype=str(res.get("knowledge_subtype", "unknown")),
                     stable_islands=pb_islands,
                     action_segments=pb_actions
                 ))
