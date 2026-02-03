@@ -1,0 +1,330 @@
+// gRPC协议定义 - Java-Python视频处理服务
+// 版本: v1.0
+// 说明: 定义Java Backend与Python Worker之间的通信接口
+
+syntax = "proto3";
+
+package videoprocessing;
+
+// Java生成选项
+option java_multiple_files = true;
+option java_package = "com.mvp.videoprocessing.grpc";
+option java_outer_classname = "VideoProcessingProto";
+
+// Python生成选项
+option py_generic_services = true;
+
+// ==========================================
+// 主服务定义
+// ==========================================
+
+service VideoProcessingService {
+    // 步骤1: 下载视频 (IO密集 - Python)
+    rpc DownloadVideo(DownloadRequest) returns (DownloadResponse);
+    
+    // 步骤2: Whisper转录 (GPU/CPU密集 - Python)
+    rpc TranscribeVideo(TranscribeRequest) returns (TranscribeResponse);
+    
+    // 步骤3: Stage1处理(步骤1-6) (LLM API调用 - Python)
+    rpc ProcessStage1(Stage1Request) returns (Stage1Response);
+    
+    // 🔑 V2: Module2 拆分为两阶段
+    // 步骤4: Module2 Phase2A - 语义分析 + 时间戳提取 (不执行FFmpeg)
+    rpc AnalyzeSemanticUnits(AnalyzeRequest) returns (AnalyzeResponse);
+    
+    // 步骤5 由 Java 执行 FFmpeg
+    
+    // 步骤6: Module2 Phase2B - Vision AI验证 + 富文本组装 (使用外部截图)
+    rpc AssembleRichText(AssembleRequest) returns (AssembleResponse);
+    
+    // 🚀 V3: CV验证批量并行处理 (Java编排调用)
+    rpc ValidateCVBatch(CVValidationRequest) returns (CVValidationResponse);
+    
+    rpc ClassifyKnowledgeBatch(KnowledgeClassificationRequest) returns (KnowledgeClassificationResponse);
+    rpc GenerateMaterialRequests(GenerateMaterialRequestsRequest) returns (GenerateMaterialRequestsResponse);
+    
+    // 健康检查
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ==========================================
+// 下载视频
+// ==========================================
+
+message DownloadRequest {
+    string task_id = 1;         // 任务唯一ID
+    string video_url = 2;       // 视频URL
+    string output_dir = 3;      // 输出目录（共享存储路径）
+}
+
+message DownloadResponse {
+    bool success = 1;           // 是否成功
+    string video_path = 2;      // 下载后的视频文件路径
+    int64 file_size_bytes = 3;  // 文件大小（字节）
+    double duration_sec = 4;    // 视频时长（秒）- 用于动态超时计算
+    string error_msg = 5;       // 错误信息
+}
+
+// ==========================================
+// Whisper转录
+// ==========================================
+
+message TranscribeRequest {
+    string task_id = 1;         // 任务唯一ID
+    string video_path = 2;      // 视频文件路径
+    string language = 3;        // 语言代码 (zh/en等, 默认zh)
+    bool use_gpu = 4;           // 是否使用GPU
+}
+
+message TranscribeResponse {
+    bool success = 1;                   // 是否成功
+    string subtitle_path = 2;           // 字幕文件路径 (.srt)
+    string subtitle_text = 3;           // 字幕文本内容
+    repeated TranscriptSegment segments = 4;  // 分段详情
+    string error_msg = 5;               // 错误信息
+}
+
+message TranscriptSegment {
+    int32 id = 1;               // 片段ID
+    double start_sec = 2;       // 开始时间（秒）
+    double end_sec = 3;         // 结束时间（秒）
+    string text = 4;            // 文本内容
+}
+
+// ==========================================
+// Stage1处理 (步骤1-6)
+// ==========================================
+
+message Stage1Request {
+    string task_id = 1;         // 任务唯一ID
+    string video_path = 2;      // 视频文件路径
+    string subtitle_path = 3;   // 字幕文件路径
+    string output_dir = 4;      // 输出目录
+    int32 max_step = 5;         // 🔑 最大执行到第几步（6）
+}
+
+message Stage1Response {
+    bool success = 1;                           // 是否成功
+    string step2_json_path = 2;                 // 步骤2输出JSON路径
+    string step6_json_path = 3;                 // 步骤6输出JSON路径
+    string sentence_timestamps_path = 4;        // 句子时间戳JSON路径
+    string error_msg = 5;                       // 错误信息
+}
+
+// ==========================================
+// 🔑 V2: Module2 Phase2A - 语义分析
+// ==========================================
+
+message AnalyzeRequest {
+    string task_id = 1;                     // 任务唯一ID
+    string video_path = 2;                  // 视频文件路径
+    string step2_json_path = 3;             // Stage1步骤2输出
+    string step6_json_path = 4;             // Stage1步骤6输出
+    string sentence_timestamps_path = 5;    // 句子时间戳文件
+    string output_dir = 6;                  // 输出目录
+}
+
+message AnalyzeResponse {
+    bool success = 1;                               // 是否成功
+    
+    // 🔑 返回需要Java执行FFmpeg的时间戳
+    repeated ScreenshotRequest screenshot_requests = 2;  // 截图请求列表
+    repeated ClipRequest clip_requests = 3;              // 切片请求列表
+    
+    // 中间结果 (JSON路径)
+    string semantic_units_json_path = 4;            // 语义单元分析结果
+    string error_msg = 5;                           // 错误信息
+}
+
+message ScreenshotRequest {
+    string screenshot_id = 1;       // 截图ID，如 "SU001_action_1_head"
+    double timestamp_sec = 2;       // 截图时间点（秒）
+    string label = 3;               // 标签 (head/tail/stable/fallback)
+    string semantic_unit_id = 4;    // 所属语义单元ID
+}
+
+message ClipRequest {
+    string clip_id = 1;             // 切片ID，如 "SU001_action_1"
+    double start_sec = 2;           // 起始时间（秒）
+    double end_sec = 3;             // 结束时间（秒）
+    string knowledge_type = 4;      // 知识类型 (过程性/讲解型/结构性/概念性)
+    string semantic_unit_id = 5;    // 所属语义单元ID
+}
+
+// ==========================================
+// 🔑 V2: Module2 Phase2B - 富文本组装
+// ==========================================
+
+message AssembleRequest {
+    string task_id = 1;                     // 任务唯一ID
+    string video_path = 2;                  // 原始视频路径
+    string semantic_units_json_path = 3;    // Phase2A 输出的语义单元分析结果
+    string screenshots_dir = 4;             // Java FFmpeg 生成的截图目录
+    string clips_dir = 5;                   // Java FFmpeg 生成的切片目录
+    string output_dir = 6;                  // 输出目录
+    string title = 7;                       // 文档标题（可选）
+}
+
+message AssembleResponse {
+    bool success = 1;               // 是否成功
+    string markdown_path = 2;       // 输出Markdown路径
+    string json_path = 3;           // 输出JSON路径
+    AssembleStats stats = 4;        // 统计信息
+    string error_msg = 5;           // 错误信息
+}
+
+message AssembleStats {
+    int32 total_sections = 1;           // 总section数
+    int32 video_clips_count = 2;        // 视频切片数量
+    int32 screenshots_count = 3;        // 截图数量
+    int32 text_only_count = 4;          // 纯文本section数量
+    int32 vision_validated_count = 5;   // Vision AI验证通过的截图数量
+}
+
+// ==========================================
+// 🚀 V3: CV验证批量并行处理
+// ==========================================
+
+message CVValidationRequest {
+    string task_id = 1;                             // 任务唯一ID
+    string video_path = 2;                          // 视频文件路径
+    repeated SemanticUnitForCV semantic_units = 3;  // 待验证的语义单元
+}
+
+message SemanticUnitForCV {
+    string unit_id = 1;             // 语义单元ID
+    double start_sec = 2;           // 起始时间
+    double end_sec = 3;             // 结束时间
+    string knowledge_type = 4;      // LLM判定的知识类型
+}
+
+message CVValidationResponse {
+    bool success = 1;                               // 是否成功
+    repeated CVValidationResult results = 2;        // 验证结果列表
+    string error_msg = 3;                           // 错误信息
+}
+
+message CVValidationResult {
+    string unit_id = 1;                             // 语义单元ID
+    string modality = 2;                            // 模态: screenshot/video_only/video_screenshot
+    string knowledge_subtype = 3;                   // 子分类
+    repeated StableIsland stable_islands = 4;       // 稳定岛列表
+    repeated ActionSegment action_segments = 5;     // 动作单元列表
+}
+
+message StableIsland {
+    double start_sec = 1;           // 起始时间
+    double end_sec = 2;             // 结束时间
+    double mid_sec = 3;             // 中点时间
+    double duration_sec = 4;        // 持续时长
+}
+
+message ActionSegment {
+    double start_sec = 1;                           // 起始时间
+    double end_sec = 2;                             // 结束时间
+    string action_type = 3;                         // 动作类型
+    repeated StableIsland internal_stable_islands = 4;  // 内部稳定岛
+}
+
+// ==========================================
+// 健康检查
+// ==========================================
+
+message HealthCheckRequest {
+    // 空请求
+}
+
+message HealthCheckResponse {
+    bool healthy = 1;           // 是否健康
+    string version = 2;         // 服务版本
+    int32 active_tasks = 3;     // 当前活跃任务数
+    ServerStatus status = 4;    // 服务器状态
+}
+
+message ServerStatus {
+    double cpu_percent = 1;     // CPU使用率 (0-100)
+    double memory_percent = 2;  // 内存使用率 (0-100)
+    int64 available_memory_mb = 3;  // 可用内存（MB）
+    bool gpu_available = 4;     // GPU是否可用
+}
+
+// =============================================================================
+// Knowledge Classification (Parallel Phase 2A - Step 2)
+// =============================================================================
+
+message KnowledgeClassificationRequest {
+    string task_id = 1;
+    // Batch of units to classify in parallel
+    repeated SemanticUnitForClassification units = 2;
+}
+
+message SemanticUnitForClassification {
+    string unit_id = 1;
+    string title = 2;
+    string text = 3;
+    repeated ActionUnitForClassification action_units = 4;
+    repeated SubtitleForClassification subtitles = 5;
+}
+
+// ActionUnitForClassification (re-using checking for conflict, seems ok)
+// Actually ActionUnitForClassification was defined inside the previous block in my plan?
+// Let me check if I defined it already. No.
+message ActionUnitForClassification {
+    int32 id = 1;
+    double start_sec = 2;
+    double end_sec = 3;
+}
+
+message SubtitleForClassification {
+    double start_sec = 1;
+    double end_sec = 2;
+    string text = 3;
+}
+
+message KnowledgeClassificationResponse {
+    bool success = 1;
+    repeated KnowledgeClassificationResult results = 2;
+    string error_msg = 3;
+}
+
+message KnowledgeClassificationResult {
+    string unit_id = 1;
+    int32 action_id = 2; // 0 for unit-level, >0 for action-level
+    string knowledge_type = 3;
+    double confidence = 4;
+    string key_evidence = 5;
+    string reasoning = 6;
+}
+
+// =============================================================================
+// Material Request Generation (Parallel Phase 2A - Step 3)
+// =============================================================================
+
+message GenerateMaterialRequestsRequest {
+    string task_id = 1;
+    repeated SemanticUnitForMaterialGeneration units = 2;
+    string video_path = 3;
+}
+
+message SemanticUnitForMaterialGeneration {
+    string unit_id = 1;
+    string knowledge_type = 2; // Unit-level or default
+    double start_sec = 3;
+    double end_sec = 4;
+    repeated ActionUnitForMaterialGeneration action_units = 5;
+    string full_text = 6; // Needed for text-matching or refinement
+}
+
+message ActionUnitForMaterialGeneration {
+    int32 id = 1;
+    double start_sec = 2;
+    double end_sec = 3;
+    string knowledge_type = 4;
+}
+
+message GenerateMaterialRequestsResponse {
+    bool success = 1;
+    repeated ScreenshotRequest screenshot_requests = 2;
+    repeated ClipRequest clip_requests = 3;
+    string error_msg = 4;
+}

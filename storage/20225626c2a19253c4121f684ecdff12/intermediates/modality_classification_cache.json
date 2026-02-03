@@ -1,0 +1,1134 @@
+{
+  "units": [
+    {
+      "unit_id": "SU001",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot项目介绍与热度",
+      "full_text": "最近有一个开源项目实在是太火了，整个硅谷都为之疯狂。它就是Cloudbot，一个可以7天24小时待命，并且可以使用聊天工具去操控的AI Agent。我知道很多人都对它非常感兴趣，刚好Mac mini咱们也有，今天我们就来聊一聊如何玩转Cloudbot，以及它的效果如何。",
+      "source_paragraph_ids": [
+        "P001",
+        "P002"
+      ],
+      "source_sentence_ids": [
+        "S001",
+        "S003",
+        "S004",
+        "S006"
+      ],
+      "start_sec": 0.0,
+      "end_sec": 12.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 1.5,
+          "end": 4.200000000000001,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 8.200000000000003,
+          "end": 11.200000000000003,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU002",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "作者背景与创业故事",
+      "full_text": "在开始技术内容之前，我想先聊一聊作者的故事，因为实在有点传奇。作者Pietro Deberger，对，就是这哥们。你以为他是又一个挤进AI创业圈的投机者吗？我告诉你，人家早就已经实现了财富自由。他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？人家早就已经实现了财富自由，他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？",
+      "source_paragraph_ids": [
+        "P003",
+        "P004",
+        "P005",
+        "P006",
+        "P007",
+        "P008"
+      ],
+      "source_sentence_ids": [
+        "S007",
+        "S010",
+        "S011",
+        "S012",
+        "S013",
+        "S014",
+        "S015",
+        "S016",
+        "S016",
+        "S018",
+        "S019",
+        "S020",
+        "S017",
+        "S018",
+        "S019",
+        "S021",
+        "S022",
+        "S020",
+        "S023"
+      ],
+      "start_sec": 12.0,
+      "end_sec": 46.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 15.199999999999989,
+          "end": 16.199999999999985,
+          "type": "mixed",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 19.99999999999997,
+          "end": 24.199999999999957,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 27.999999999999943,
+          "end": 32.49999999999994,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 33.799999999999955,
+          "end": 38.000000000000014,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 42.80000000000008,
+          "end": 46.0,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU003",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot功能与使用方式",
+      "full_text": "总之不到一年，人家就捣鼓出了Cloudbot，一款运行在你自己设备上的个人AI助手。你可以通过你熟悉的工具来让它工作，比如像WhatsApp、Telegram或者是iMessage。",
+      "source_paragraph_ids": [
+        "P009"
+      ],
+      "source_sentence_ids": [
+        "S024",
+        "S026",
+        "S027"
+      ],
+      "start_sec": 46.0,
+      "end_sec": 54.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 46.400000000000006,
+          "end": 48.400000000000034,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 49.800000000000054,
+          "end": 54.0,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU004",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot项目热度与增长",
+      "full_text": "而且不到一个月就已经超过了40K的Star，现在还在飞速的增长，整个AI圈都在为它疯狂。",
+      "source_paragraph_ids": [
+        "P010"
+      ],
+      "source_sentence_ids": [
+        "S029",
+        "S031"
+      ],
+      "start_sec": 56.0,
+      "end_sec": 62.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 61.60000000000008,
+          "end": 62.0,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU005",
+      "knowledge_type": "process",
+      "knowledge_topic": "项目安装平台说明",
+      "full_text": "那接下来我们就进入技术的部分，来看一下如何安装和使用它。项目的安装还是非常容易的，虽然默认是推荐Mac，但是你肯定想知道是不是必须得买一个Mac mini。当然不是，实际上不仅只有Mac，你也可以在Linux或者是Windows上使用WSL来安装，网上也有人在树莓派的设备上运行。网上也有人在树莓派的设备上成功安装运行了，这很正常，因为如果不在本地运行大模型的话，那它本身的运行并不需要消耗很多资源。",
+      "source_paragraph_ids": [
+        "P011",
+        "P012",
+        "P013"
+      ],
+      "source_sentence_ids": [
+        "S030",
+        "S032",
+        "S033",
+        "S036",
+        "S037",
+        "S037",
+        "S040",
+        "S041"
+      ],
+      "start_sec": 58.0,
+      "end_sec": 82.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_screenshot",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 61.60000000000005,
+          "end": 65.10000000000005,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 67.40000000000013,
+          "end": 75.40000000000013,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 81.60000000000034,
+          "end": 82.0,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [
+        {
+          "start": 80.20000000000032,
+          "end": 81.60000000000034,
+          "mid": 80.90000000000032,
+          "duration": 1.4000000000000201
+        }
+      ],
+      "materials": null
+    },
+    {
+      "unit_id": "SU006",
+      "knowledge_type": "process",
+      "knowledge_topic": "Mac一键安装脚本执行",
+      "full_text": "我选择在Mac上运行，推荐使用一键安装脚本，会自动下载相关内容。执行后稍作等待，会自动进入onboard的配置过程。",
+      "source_paragraph_ids": [
+        "P014"
+      ],
+      "source_sentence_ids": [
+        "S042",
+        "S043"
+      ],
+      "start_sec": 82.0,
+      "end_sec": 86.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 82.60000000000001,
+          "end": 86.10000000000001,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU007",
+      "knowledge_type": "process",
+      "knowledge_topic": "Quickstart模式选择大模型供应商",
+      "full_text": "第一次使用推荐Quickstart模式，选择一个大模型供应商，基本上常见的都支持，对国内用户也很友好，像千问、minimax、智谱、Kimi都有。我有Codex的订阅，就选择OpenAI，然后选Codex CLI的OAuth。我有Codex的订阅，就选择OpenAI，然后选Codex CLI的OAuth，验证就可以了。",
+      "source_paragraph_ids": [
+        "P015",
+        "P016"
+      ],
+      "source_sentence_ids": [
+        "S046",
+        "S048",
+        "S049",
+        "S049",
+        "S051"
+      ],
+      "start_sec": 90.0,
+      "end_sec": 102.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_screenshot",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 95.80000000000008,
+          "end": 98.00000000000011,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 100.20000000000014,
+          "end": 100.60000000000015,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [
+        {
+          "start": 100.60000000000015,
+          "end": 102.0,
+          "mid": 101.30000000000007,
+          "duration": 1.3999999999998496
+        }
+      ],
+      "materials": null
+    },
+    {
+      "unit_id": "SU008",
+      "knowledge_type": "process",
+      "knowledge_topic": "选择Channel和聊天工具",
+      "full_text": "接下来选择Channel，让你通过聊天工具使用Cloudbot，我选择iMessage。可能对国内普通用户来说，其他工具更麻烦。选择iMessage后，还有需要补充的配置，稍后再说。",
+      "source_paragraph_ids": [
+        "P017"
+      ],
+      "source_sentence_ids": [
+        "S052",
+        "S054",
+        "S055",
+        "S056",
+        "S057"
+      ],
+      "start_sec": 102.0,
+      "end_sec": 114.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_screenshot",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 108.40000000000009,
+          "end": 114.0,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [
+        {
+          "start": 102.60000000000001,
+          "end": 105.20000000000005,
+          "mid": 103.90000000000003,
+          "duration": 2.600000000000037
+        },
+        {
+          "start": 105.80000000000005,
+          "end": 107.80000000000008,
+          "mid": 106.80000000000007,
+          "duration": 2.0000000000000284
+        }
+      ],
+      "materials": null
+    },
+    {
+      "unit_id": "SU009",
+      "knowledge_type": "process",
+      "knowledge_topic": "常用工具和基本配置选择",
+      "full_text": "会有常用工具选择和安装，随便选几个。最后有基本配置，正常选择。最后还有一些基本的配置，我们就正常选择。最后一步是让我们去选择使用的方式，就选择默认的CLI。",
+      "source_paragraph_ids": [
+        "P018",
+        "P019"
+      ],
+      "source_sentence_ids": [
+        "S058",
+        "S059",
+        "S061",
+        "S062"
+      ],
+      "start_sec": 114.0,
+      "end_sec": 124.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_screenshot",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 114.60000000000001,
+          "end": 116.20000000000003,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 118.60000000000007,
+          "end": 119.20000000000007,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [
+        {
+          "start": 116.20000000000003,
+          "end": 118.60000000000007,
+          "mid": 117.40000000000005,
+          "duration": 2.400000000000034
+        }
+      ],
+      "materials": null
+    },
+    {
+      "unit_id": "SU010",
+      "knowledge_type": "process",
+      "knowledge_topic": "首次进入命名配置",
+      "full_text": "第一次进入，它会让我们去给它起一个名字，还有告诉它我是谁。这个有点像玩游戏，我就告诉它，你就叫我馆长大人就好了。既然你是一个小机器人，我就叫你小鸡吧。",
+      "source_paragraph_ids": [
+        "P020"
+      ],
+      "source_sentence_ids": [
+        "S063",
+        "S066",
+        "S067"
+      ],
+      "start_sec": 124.0,
+      "end_sec": 134.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_derivation",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 123.9,
+          "end": 131.4,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU011",
+      "knowledge_type": "process",
+      "knowledge_topic": "Cloudbot终端与WebUI使用方式",
+      "full_text": "接下来我们就可以直接在终端里使用它了，这个时候的感觉就和Cloud Code差不多。但同时它也自带了WebUI，你可以打开使用，这里也带了Chat对话，还可以查看各种配置。如果你不习惯使用CLI的话，可以换成这种方式，但是仅仅这么用的话，就显示不出它的特点了。",
+      "source_paragraph_ids": [
+        "P021"
+      ],
+      "source_sentence_ids": [
+        "S070",
+        "S071",
+        "S072",
+        "S073",
+        "S076"
+      ],
+      "start_sec": 138.0,
+      "end_sec": 152.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 138.39999999999998,
+          "end": 152.0,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU012",
+      "knowledge_type": "process",
+      "knowledge_topic": "iMessage配置安装步骤",
+      "full_text": "所以我们要把前面的iMessage配置完成。要使用iMessage的话，需要安装一个CLI的工具，可以通过Brew安装，你也可以让Cloudbot自己去安装和配置。它会自己完成以后并且重启，非常方便。你也可以让Cloudbot自己去安装和配置，它会自己完成以后并且重启，非常方便。我再问一下它还需要什么去做配置，它会告诉我一些需要我自己去完成的内容。",
+      "source_paragraph_ids": [
+        "P022",
+        "P023"
+      ],
+      "source_sentence_ids": [
+        "S077",
+        "S078",
+        "S080",
+        "S082",
+        "S080",
+        "S081"
+      ],
+      "start_sec": 152.0,
+      "end_sec": 164.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 152.39999999999998,
+          "end": 163.59999999999934,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU013",
+      "knowledge_type": "process",
+      "knowledge_topic": "Mac系统权限配置与测试",
+      "full_text": "就是在Mac里的一些系统配置，这里需要进入到隐私与安全里，打开这个完全磁盘访问权限。我这里把Node和终端的权限都授权一下，然后再让它去发一条测试信息给我。第一次执行的时候会有一个弹窗，记得允许一下。",
+      "source_paragraph_ids": [
+        "P024"
+      ],
+      "source_sentence_ids": [
+        "S085",
+        "S086",
+        "S087",
+        "S088"
+      ],
+      "start_sec": 168.0,
+      "end_sec": 176.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 168.39999999999998,
+          "end": 175.89999999999998,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU014",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "iMessage账号使用提醒",
+      "full_text": "到这里配置就已经完成了，但是还有一个提醒，也是我个人的一个小经验：不要用同一个iMessage账号，它自己给自己发的消息会默认被忽略掉，所以需要给运行Cloud的机器单独配置一个iMessage账号。",
+      "source_paragraph_ids": [
+        "P025"
+      ],
+      "source_sentence_ids": [
+        "S089",
+        "S091",
+        "S092"
+      ],
+      "start_sec": 176.0,
+      "end_sec": 184.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 176.39999999999998,
+          "end": 180.39999999999998,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 181.29999999999967,
+          "end": 184.0,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU015",
+      "knowledge_type": "process",
+      "knowledge_topic": "开发功能实现流程",
+      "full_text": "配置好了以后，接下来我们来看两个实际使用的例子。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成以后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成以后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发，你不需要打开电脑，躺在床上就可以指挥它完成工作。它会调用本地的Codex或者Cloud Code去进行开发，你不需要打开电脑，躺在床上就可以指挥它完成工作。你也可以让它查看有没有新的Issue，如果是Bug就修复。",
+      "source_paragraph_ids": [
+        "P026",
+        "P027",
+        "P029"
+      ],
+      "source_sentence_ids": [
+        "S093",
+        "S095",
+        "S096",
+        "S097",
+        "S098",
+        "S099",
+        "S096",
+        "S097",
+        "S098",
+        "S099",
+        "S101",
+        "S101",
+        "S102"
+      ],
+      "start_sec": 184.0,
+      "end_sec": 204.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 184.59999999999997,
+          "end": 191.1999999999996,
+          "type": "mixed",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 199.5999999999991,
+          "end": 204.0999999999991,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU016",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "AI代码责任提醒",
+      "full_text": "对于实际项目要小心使用，代码虽然是AI写的，但责任要自己付。",
+      "source_paragraph_ids": [
+        "P028"
+      ],
+      "source_sentence_ids": [
+        "S103",
+        "S106"
+      ],
+      "start_sec": 204.0,
+      "end_sec": 212.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 210.7999999999996,
+          "end": 212.0,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU017",
+      "knowledge_type": "process",
+      "knowledge_topic": "语音总结与邮件发送流程",
+      "full_text": "第二个是日常中可以使用的例子，比如我给下级发了一段语音，它会自动帮我总结和拆分，内容可以直接复制使用。但我还要求它把具体任务发送给对应人的邮箱，并设置好提醒。我们可以看到它会自动完成各种操作，进入邮箱就能看到已经发好了邮件。",
+      "source_paragraph_ids": [
+        "P030"
+      ],
+      "source_sentence_ids": [
+        "S107",
+        "S110",
+        "S111",
+        "S112",
+        "S113",
+        "S116"
+      ],
+      "start_sec": 212.0,
+      "end_sec": 232.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_screenshot",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 216.6999999999997,
+          "end": 220.1999999999997,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 221.29999999999944,
+          "end": 225.29999999999944,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": [
+            {
+              "start": 223.59999999999934,
+              "end": 224.59999999999928,
+              "mid": 224.0999999999993,
+              "duration": 0.9999999999999432
+            }
+          ]
+        },
+        {
+          "start": 226.59999999999917,
+          "end": 227.5999999999991,
+          "type": "mixed",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 230.19999999999897,
+          "end": 230.79999999999893,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [
+        {
+          "start": 223.59999999999934,
+          "end": 224.59999999999928,
+          "mid": 224.0999999999993,
+          "duration": 0.9999999999999432
+        },
+        {
+          "start": 224.99999999999926,
+          "end": 225.9999999999992,
+          "mid": 225.49999999999923,
+          "duration": 0.9999999999999432
+        },
+        {
+          "start": 229.599999999999,
+          "end": 230.19999999999897,
+          "mid": 229.89999999999898,
+          "duration": 0.5999999999999659
+        },
+        {
+          "start": 230.79999999999893,
+          "end": 231.79999999999887,
+          "mid": 231.2999999999989,
+          "duration": 0.9999999999999432
+        }
+      ],
+      "materials": null
+    },
+    {
+      "unit_id": "SU018",
+      "knowledge_type": "process",
+      "knowledge_topic": "配置邮箱SMTP的提醒",
+      "full_text": "这里要提醒一下，想要发送邮件的话，需要提前配置邮箱的SMTP，这个过程我省略掉了。如果不会配置可以问Cloudbot，它会告诉你怎么配置，按照要求操作就可以了。",
+      "source_paragraph_ids": [
+        "P031"
+      ],
+      "source_sentence_ids": [
+        "S117",
+        "S118"
+      ],
+      "start_sec": 232.0,
+      "end_sec": 236.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 234.99999999999983,
+          "end": 236.0,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU019",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot效果与使用场景建议",
+      "full_text": "怎么样，感觉Cloudbot的效果如何呢？这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得，你可以去里面找一找灵感。",
+      "source_paragraph_ids": [
+        "P032"
+      ],
+      "source_sentence_ids": [
+        "S121",
+        "S122",
+        "S123",
+        "S127"
+      ],
+      "start_sec": 240.0,
+      "end_sec": 254.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_screenshot",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 241.7999999999999,
+          "end": 244.2999999999999,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": [
+            {
+              "start": 242.39999999999986,
+              "end": 242.99999999999983,
+              "mid": 242.69999999999985,
+              "duration": 0.5999999999999659
+            }
+          ]
+        },
+        {
+          "start": 245.99999999999966,
+          "end": 246.39999999999964,
+          "type": "mixed",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 248.5999999999995,
+          "end": 249.19999999999948,
+          "type": "mixed",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 251.19999999999936,
+          "end": 254.19999999999936,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [
+        {
+          "start": 242.39999999999986,
+          "end": 242.99999999999983,
+          "mid": 242.69999999999985,
+          "duration": 0.5999999999999659
+        },
+        {
+          "start": 244.79999999999973,
+          "end": 245.99999999999966,
+          "mid": 245.3999999999997,
+          "duration": 1.1999999999999318
+        },
+        {
+          "start": 246.39999999999964,
+          "end": 247.79999999999956,
+          "mid": 247.0999999999996,
+          "duration": 1.3999999999999204
+        }
+      ],
+      "materials": null
+    },
+    {
+      "unit_id": "SU020",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot使用本地模型的建议",
+      "full_text": "Cloudbot还有一个非常重要的点，就是可以使用本地的模型。这里官方给的建议是LM Studio去配合MiniMax 2.1，但是MiniMax 2.1确实有点大，最小的我本地也跑不了，所以我只能换成是最新的一个JRM 4.7。那模型这部分我就跳过了，其实也就是直接下载运行就可以了。你可以去里面找一找灵感。Cloudbot还有一个非常重要的点，就是可以使用本地的模型。如果实在不知道怎么弄，可以去翻一下我之前的视频，本地跑模型我已经介绍过很多了。最小的我本地也跑不了，所以我只能换成最新的JRM 4.7。模型这部分我就跳过了，直接下载运行就可以了。",
+      "source_paragraph_ids": [
+        "P033",
+        "P034",
+        "P035",
+        "P036"
+      ],
+      "source_sentence_ids": [
+        "S126",
+        "S128",
+        "S129",
+        "S130",
+        "S127",
+        "S128",
+        "S131",
+        "S134",
+        "S136",
+        "S132",
+        "S133"
+      ],
+      "start_sec": 250.0,
+      "end_sec": 272.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "mixed",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 251.19999999999993,
+          "end": 252.59999999999985,
+          "type": "mixed",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 259.8999999999994,
+          "end": 262.3999999999994,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 264.59999999999917,
+          "end": 268.19999999999897,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        },
+        {
+          "start": 270.7999999999988,
+          "end": 272.0,
+          "type": "mixed",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU021",
+      "knowledge_type": "process",
+      "knowledge_topic": "本地模型在Cloudbot中的配置方法",
+      "full_text": "有了本地模型以后，你可以直接在Cloudbot里做配置，或者也可以在Cloudbot里告诉它你要怎么修改，然后让它自己去执行。",
+      "source_paragraph_ids": [
+        "P037"
+      ],
+      "source_sentence_ids": [
+        "S135",
+        "S137"
+      ],
+      "start_sec": 268.0,
+      "end_sec": 274.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 270.29999999999984,
+          "end": 274.0,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU022",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "引入Cloudbot架构解析",
+      "full_text": "看过安装、配置和使用以后，我们再来深入地解析一下它的架构。Cloudbot非常让我惊艳，尤其是它完整的架构设计。看过安装、配置和使用以后，我们再来深入地解析一下它的架构。",
+      "source_paragraph_ids": [
+        "P038",
+        "P039"
+      ],
+      "source_sentence_ids": [
+        "S138",
+        "S141",
+        "S139",
+        "S141",
+        "S142"
+      ],
+      "start_sec": 274.0,
+      "end_sec": 284.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_derivation",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 281.79999999999956,
+          "end": 284.0,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU023",
+      "knowledge_type": "concrete",
+      "knowledge_topic": "Cloudbot架构图与Gateway介绍",
+      "full_text": "这是我弄的一个架构图，首先我们来看一下最外层是各种的接入，比如像各种的Channel。这些接入都会接入到Cloudbot的Gateway，这个也是Cloudbot的核心中枢，它负责的就是统一的管理会话，还有路由不同的渠道。",
+      "source_paragraph_ids": [
+        "P040"
+      ],
+      "source_sentence_ids": [
+        "S143",
+        "S146"
+      ],
+      "start_sec": 284.0,
+      "end_sec": 292.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 284.4,
+          "end": 292.0,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU024",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Agent Runtime功能与扩展模块",
+      "full_text": "再接下来就是Agent Runtime，它会调用用户配置的大语言模型来生成响应、规划任务并执行具体的操作。为了让Agent能够具体做事，Cloudbot还配置了可插拔的Tools和Skills，这些扩展模块封装了像文件的操作、浏览器的控制、还有定时任务等能力，就可以让智能体去执行具体的操作了。而且还可以接入不同的节点，在不同的节点上去完成各种任务。",
+      "source_paragraph_ids": [
+        "P041",
+        "P042"
+      ],
+      "source_sentence_ids": [
+        "S148",
+        "S150",
+        "S151",
+        "S150",
+        "S151",
+        "S152"
+      ],
+      "start_sec": 294.0,
+      "end_sec": 304.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_K4_continuous",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 295.9999999999999,
+          "end": 303.9999999999999,
+          "type": "K3_K4_continuous",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU025",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "长期记忆机制原理",
+      "full_text": "最底层是长期的记忆机制，通过本地存储的Markdown等文件，去积累用户的偏好和历史的上下文，来实现这种跨对话的连续感知。",
+      "source_paragraph_ids": [
+        "P043"
+      ],
+      "source_sentence_ids": [
+        "S153",
+        "S155"
+      ],
+      "start_sec": 304.0,
+      "end_sec": 310.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_derivation",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 307.6999999999998,
+          "end": 310.6999999999998,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU026",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot开源项目评价",
+      "full_text": "最后来说一些我个人的感受：作为一个开源项目来说，它的完成度是非常高的，虽然目前也有一些不完善，但你确实没办法要求它用一个月的时间就全面超过商业的产品。",
+      "source_paragraph_ids": [
+        "P044"
+      ],
+      "source_sentence_ids": [
+        "S156",
+        "S158"
+      ],
+      "start_sec": 310.0,
+      "end_sec": 316.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_derivation",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 310.4,
+          "end": 316.9,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    },
+    {
+      "unit_id": "SU027",
+      "knowledge_type": "abstract",
+      "knowledge_topic": "Cloudbot服务概念与优势",
+      "full_text": "而且我还看到它有几点非常值得关注：第一就是Cloudbot强调这种服务的概念，让AI实现24小时的工作，再配合上底层的工具和skill去在后台完成各种任务。第二个就是接入的方式非常友好，通过聊天工具的方式可以大大的提升使用的便捷性。第三个就是它的长期记忆机制，再配合上各种定时任务，它会不断的记住用户的喜好和习惯，然后去主动性的形成一些定期任务，而且我觉得它还有更多的潜力可以去挖掘。",
+      "source_paragraph_ids": [
+        "P045",
+        "P046",
+        "P047"
+      ],
+      "source_sentence_ids": [
+        "S159",
+        "S161",
+        "S162",
+        "S165",
+        "S166",
+        "S167"
+      ],
+      "start_sec": 316.0,
+      "end_sec": 334.0,
+      "display_form": "unknown",
+      "confidence": 0.95,
+      "modality": "video_only",
+      "knowledge_subtype": "K3_derivation",
+      "screenshot_times": [],
+      "action_segments": [
+        {
+          "start": 328.7999999999993,
+          "end": 334.0,
+          "type": "K3_derivation",
+          "internal_stable_islands": []
+        }
+      ],
+      "stable_islands": [],
+      "materials": null
+    }
+  ]
+}

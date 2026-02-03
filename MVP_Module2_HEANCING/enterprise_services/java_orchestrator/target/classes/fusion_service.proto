@@ -1,0 +1,297 @@
+syntax = "proto3";
+
+package com.mvp.module2.fusion.grpc;
+
+option java_multiple_files = true;
+option java_package = "com.mvp.module2.fusion.grpc";
+option java_outer_classname = "FusionServiceProto";
+
+service FusionComputeService {
+    // 1. Submit a video for feature extraction (Sync/Blocking)
+    // Java calls this to trigger Python processing.
+    rpc ExtractFeatures (FeatureRequest) returns (FeatureResponse);
+
+    // 1.1 BATCH: Submit multiple segments at once to avoid connection overhead
+    rpc ExtractFeaturesBatch (BatchFeatureRequest) returns (BatchFeatureResponse);
+
+    // 2. Health Check (for Java Sentinel/Resilience4j)
+    rpc Ping (Empty) returns (HealthStatus);
+    // 3. Select the best screenshot from a video segment
+    rpc SelectBestFrame (FrameSelectionRequest) returns (FrameSelectionResponse);
+
+    // 4. Compute perceptual hash for a list of frames (for MaterialOptimizer)
+    rpc ComputeFrameHash (FrameHashRequest) returns (FrameHashResponse);
+
+    // 5. Strict Parity: Fault Detection utilizing Python LLM
+    rpc DetectFaults (DetectFaultsRequest) returns (DetectFaultsResponse);
+
+    // 6. Strict Parity: Cognitive Text Generation
+    rpc GenerateEnhancementText (GenerateTextRequest) returns (GenerateTextResponse);
+
+    // 7. Strict Parity: Global Material Optimization (Clustering & Deduplication)
+    rpc OptimizeMaterials (OptimizeMaterialsRequest) returns (OptimizeMaterialsResponse);
+
+    // 8. Extract a video clip from the source video
+    rpc ExtractVideoClip (VideoClipRequest) returns (VideoClipResponse);
+
+    // ========== V7.x: Modality Classification ==========
+    // 9. Get modality classification for a video segment
+    // Python performs CV analysis and returns modality decision
+    rpc GetModalityClassification (ModalityClassificationRequest) returns (ModalityClassificationResponse);
+    
+    // 10. Generate screenshot at specific timestamp
+    rpc GenerateScreenshot (GenerateScreenshotRequest) returns (GenerateScreenshotResponse);
+}
+
+
+message ContextConfig {
+    string sentences_path = 1;
+    string subtitles_path = 2;
+    string merge_data_path = 3;
+    string main_topic = 4;
+}
+
+message FeatureRequest {
+    string request_id = 1;
+    string video_path = 2;       // Local shared path or S3 URL
+    TimeRange time_range = 3;    // Optional: process only a specific clip
+    AnalysisConfig config = 4;
+    string segment_text = 5;    // Transcription/ASR text for the segment
+    string context_before = 6;  // Context previous sentence
+    string context_after = 7;   // Context next sentence
+    ContextConfig context_config = 8;
+}
+
+message TimeRange {
+    double start_sec = 1;
+    double end_sec = 2;
+}
+
+message AnalysisConfig {
+    bool enable_ocr = 1;
+    bool enable_asr = 2;
+    double mse_threshold = 3;    // Optional override
+    string indicator_config_json = 4; // JSON serialized class1/class2 indicators
+}
+
+message SubtitleItem {
+    string text = 1;
+    double start = 2;
+    double end = 3;
+    int32 index = 4;
+}
+
+message SemanticFeatures {
+    string knowledge_type = 1;      // "process" | "spatial" | "abstract"
+    double context_similarity = 2;
+    double domain_consistency = 3;
+    repeated string matched_keywords = 4;
+    bool has_sequence_pattern = 5;
+    bool has_hierarchy_pattern = 6;
+    bool has_process_words = 7;
+    bool has_spatial_words = 8;
+    double confidence = 9;
+}
+
+message FeatureResponse {
+    string request_id = 1;
+    bool success = 2;
+    string error_message = 3;
+
+    // Feature Data
+    double duration_sec = 4;
+    VisualFeatures visual_features = 5;
+    SemanticFeatures semantic_features = 6;
+    
+    // For large data like screenshots or tensor dumps, pass the Key/Path
+    string result_redis_key = 7; 
+}
+
+message VisualFeatures {
+    double avg_mse = 1;
+    double avg_ssim = 2;
+    bool is_potential_dynamic = 3;
+    int32 element_count = 4;
+    // New fields for Strict Parity
+    string visual_type = 7; // "static" | "dynamic" | "mixed"
+    double action_density = 8;
+    bool has_math_formula = 9;
+    bool has_static_visual_structure = 10;
+    double visual_confidence = 11;
+    double segment_start = 12;
+    double segment_end = 13;
+    
+    string ocr_full_text = 5;
+    string asr_segment_text = 6;
+    
+    // 🚀 Phase 7.0: Advanced Metrics for Parity
+    double animation_end_time = 14;
+    repeated float ssim_seq = 15;
+    double avg_edge_flux = 16;
+}
+
+message DetectFaultsRequest {
+    string request_id = 1;
+    VisualFeatures visual_features = 2; // Need visual context
+    SemanticFeatures semantic_features = 3; // Need semantic context (fault class 1, etc)
+    string fault_text = 4; // Text to check
+    repeated SubtitleItem subtitle_context = 5; // Window of subtitles
+    string main_topic = 7;
+    ContextConfig context_config = 8;
+}
+
+message DetectFaultsResponse {
+    bool has_fault = 1;
+    string fault_type = 2; // "logic", "visual", "process"
+    string detection_reason = 3;
+    string suggested_enhancement_text = 4;
+}
+
+message Empty {}
+
+message HealthStatus {
+    bool alive = 1;
+    string cpu_load = 2;
+    string gpu_memory_usage = 3;
+}
+
+message FrameSelectionRequest {
+    string request_id = 1;
+    string video_path = 2;
+    double start_sec = 3;
+    double end_sec = 4;
+}
+
+message FrameSelectionResponse {
+    bool success = 1;
+    string error_message = 2;
+    string best_frame_path = 3; 
+    double timestamp = 4;
+    double score = 5;
+}
+
+message FrameHashRequest {
+    string request_id = 1;
+    string video_path = 2;
+    repeated double timestamps = 3; 
+}
+
+message FrameHashResponse {
+    bool success = 1;
+    string error_message = 2;
+    map<string, string> timestamp_to_hash = 3; 
+}
+
+message GenerateTextRequest {
+    string request_id = 1;
+    VisualFeatures visual_features = 2; 
+    SemanticFeatures semantic_features = 3;
+    string domain = 4;
+    string fault_type = 5;
+    string visual_description = 6;
+    string context_before = 7;
+    string context_after = 8;
+    ContextConfig context_config = 9;
+}
+
+message GenerateTextResponse {
+    bool success = 1;
+    string generated_text = 2;
+}
+
+message OptimizeMaterialsRequest {
+    string request_id = 1;
+    string video_path = 2;
+    // List of candidates to optimize
+    repeated MaterialCandidate candidates = 3;
+}
+
+message MaterialCandidate {
+    string enhancement_id = 1;
+    double timestamp_start = 2;
+    double timestamp_end = 3;
+    string fault_text = 4; // For semantic calibration
+    repeated string media_paths = 5; // Local paths
+    string enhancement_type = 6; // VIDEO, SCREENSHOT, TEXT
+}
+
+message OptimizeMaterialsResponse {
+    bool success = 1;
+    string error_message = 2;
+    // Set of enhancement_ids to KEEP (or remove, logic dependent. Let's say KEPT ids)
+    repeated string kept_enhancement_ids = 3;
+    map<string, string> redundancy_reasons = 4; // id -> reason
+}
+
+message VideoClipRequest {
+    string request_id = 1;
+    string video_path = 2;
+    double start_sec = 3;
+    double end_sec = 4;
+    string output_dir = 5; // Optional: specify output location
+}
+
+message VideoClipResponse {
+    bool success = 1;
+    string error_message = 2;
+    string clip_path = 3;
+    double duration = 4;
+}
+
+message BatchFeatureRequest {
+    repeated FeatureRequest requests = 1;
+}
+
+message BatchFeatureResponse {
+    repeated FeatureResponse responses = 1;
+}
+
+// ============================================================================
+// V7.x: Modality Classification Messages
+// ============================================================================
+
+message ModalityClassificationRequest {
+    string request_id = 1;
+    string video_path = 2;
+    double start_sec = 3;
+    double end_sec = 4;
+}
+
+message ModalityClassificationResponse {
+    bool success = 1;
+    string error_message = 2;
+    
+    // V7.x Modality Classification Result
+    string modality = 3;              // screenshot / video_only / video_screenshot / discard
+    string knowledge_subtype = 4;     // K1_K2_stepwise / K3_derivation / K4_operation / presentation / stable
+    repeated double screenshot_times = 5;  // Optimal screenshot timestamps for K3
+    
+    // Debug/Diagnostic info
+    repeated ActionSegmentProto action_segments = 6;
+    int32 stable_island_count = 7;
+    int32 action_unit_count = 8;
+}
+
+message ActionSegmentProto {
+    double start_sec = 1;
+    double end_sec = 2;
+    string modality = 3;
+    string subtype = 4;
+    int32 duration_ms = 5;
+    double ssim_drop = 6;
+}
+
+message GenerateScreenshotRequest {
+    string request_id = 1;
+    string video_path = 2;
+    double timestamp = 3;
+    string output_dir = 4;
+}
+
+message GenerateScreenshotResponse {
+    bool success = 1;
+    string error_message = 2;
+    string screenshot_path = 3;
+    int32 width = 4;
+    int32 height = 5;
+}

@@ -1,0 +1,207 @@
+# Module 2 Complete Configuration
+# 模块2完整配置文件
+#
+# 包含所有可调参数,避免硬编码
+# 维护: 可以随时调整参数,无需修改代码
+
+# =============================================================================
+# 第1类断层: 抽象逻辑缺失 + 指代缺失 (从fault_detection_config.yaml继承)
+# =============================================================================
+# 见 fault_detection_config.yaml
+
+# =============================================================================
+# 语义特征提取配置
+# =============================================================================
+semantic_feature_config:
+  # Sentence-BERT模型
+  model_name: "paraphrase-multilingual-MiniLM-L12-v2"
+  
+  # 模式检测关键词
+  pattern_detection:
+    sequence_indicators:
+      - "→"
+      - "->"
+      - "首先"
+      - "然后"
+      - "接着"
+      - "最后"
+      - "第一"
+      - "第二"
+      - "第三"
+      - "步骤1"
+      - "步骤2"
+      - "先"
+      - "后"
+      - "再"
+      - "之后"
+      - "接下来"
+    
+    hierarchy_indicators:
+      - "包含"
+      - "分为"
+      - "组成"
+      - "构成"
+      - "由...组成"
+      - "上层"
+      - "下层"
+      - "子"
+      - "父"
+      - "嵌套"
+
+# =============================================================================
+# 多模态融合决策配置
+# =============================================================================
+multimodal_fusion_config:
+  # 三层权重 (必须加起来等于1.0)
+  weights:
+    semantic: 0.4  # 语义特征权重
+    visual: 0.5    # 视觉特征权重
+    domain: 0.1    # 领域先验权重
+  
+  # 领域先验规则
+  domain_rules:
+    算法:
+      spatial: 0.2
+      process: 0.8
+    AI框架:
+      spatial: 0.7
+      process: 0.3
+    数学:
+      spatial: 0.5
+      process: 0.5
+    # 可以添加更多领域
+    深度学习:
+      spatial: 0.6
+      process: 0.4
+    数据库:
+      spatial: 0.6
+      process: 0.4
+  
+  # 决策阈值
+  decision_thresholds:
+    high_confidence: 0.7  # 高置信度阈值
+    low_confidence: 0.5   # 低置信度阈值
+
+# =============================================================================
+# 置信度计算配置
+# =============================================================================
+confidence_config:
+  # C_text权重 (内部语义置信度)
+  c_text_weight: 0.4
+  
+  # C_multi权重 (外部多模态验证置信度)
+  c_multi_weight: 0.6
+  
+  # C_text内部权重
+  c_text_components:
+    s_ctx_weight: 0.5    # 上下文相似度
+    p_norm_weight: 0.3   # 困惑度 (MVP阶段简化为固定值)
+    k_domain_weight: 0.2 # 领域一致性
+  
+  # C_multi分类别权重
+  c_multi_components:
+    # 第2类 (具象性): OCR文本 + 视觉元素
+    class2_text_weight: 0.6
+    class2_visual_weight: 0.4
+    
+    # 第3类 (过程性): 步骤匹配 + 时序匹配
+    class3_step_weight: 0.5
+    class3_sequence_weight: 0.5
+  
+  # 综合置信度等级划分阈值
+  confidence_levels:
+    high_threshold: 0.8   # >= 0.8 为高置信度
+    medium_threshold: 0.6 # >= 0.6 为中置信度
+    # < 0.6 为低置信度
+  
+  # 无多模态证据时的兜底系数
+  fallback_multiplier: 0.8  # C_multi = C_text × 0.8
+
+# =============================================================================
+# 视觉特征提取配置
+# =============================================================================
+visual_feature_config:
+  # 帧差异阈值
+  thresholds:
+    static_mse: 100       # MSE < 100 为稳定帧
+    dynamic_mse: 300      # MSE > 300 为动态帧
+    static_rate: 5.0      # 差异率 < 5% 为静态
+    dynamic_rate: 15.0    # 差异率 > 15% 为动态
+    min_stable_duration: 3.0  # 最小稳定持续时间(秒)
+  
+  # 视觉元素检测
+  element_detection:
+    min_rectangles_for_architecture: 3  # 检测到>=3个矩形认为是架构图
+    canny_low_threshold: 50
+    canny_high_threshold: 150
+  
+  # 采样参数
+  sampling:
+    default_sample_rate: 1  # 默认采样率 (每N帧取1帧)
+
+# =============================================================================
+# 文字补充生成配置
+# =============================================================================
+text_generation_config:
+  # LLM参数
+  llm:
+    model: "deepseek-chat"
+    temperature: 0.3
+    max_tokens: 500
+  
+  # 文字补充长度限制
+  length_constraints:
+    min_length: 50   # 最少字符数
+    max_length: 300  # 最多字符数
+    target_length: 150  # 目标字符数
+
+# =============================================================================
+# 截图选择配置
+# =============================================================================
+screenshot_config:
+  # 评分权重
+  scoring_weights:
+    s1_stability: 0.5    # 稳定性评分权重
+    s4_no_occlusion: 0.5 # 无遮挡评分权重
+  
+  # 稳定性评分参数
+  stability:
+    stable_frame_count: 15      # 连续15帧算稳定 (0.5秒@30fps)
+    very_stable_count: 30       # 连续30帧更稳定
+    stable_bonus: 2.0           # 稳定加分
+    very_stable_bonus: 4.0      # 非常稳定加分
+  
+  # 无遮挡评分参数
+  no_occlusion:
+    # 待实现
+
+# =============================================================================
+# 视频片段截取配置
+# =============================================================================
+video_clip_config:
+  # 动作检测阈值
+  action_detection:
+    min_mse_change: 50          # 最小MSE变化认为是动作
+    action_start_threshold: 100 # 动作开始阈值
+    action_end_threshold: 80    # 动作结束阈值
+  
+  # 区间扩展参数
+  interval_extension:
+    extend_before_sec: 2.0  # 动作前扩展时间
+    extend_after_sec: 2.0   # 动作后扩展时间
+    max_clip_duration: 30.0 # 最大片段长度(秒)
+    min_clip_duration: 3.0  # 最小片段长度(秒)
+
+# =============================================================================
+# 全局参数
+# =============================================================================
+global_params:
+  # 日志级别
+  log_level: "INFO"
+  
+  # 并发控制
+  max_concurrent_tasks: 10
+  
+  # 缓存设置
+  enable_cache: true
+  cache_ttl_seconds: 3600

@@ -1,0 +1,18 @@
+# Module 2 requirements - add pyyaml
+# Week 1 Day 1-2: Data Loading
+
+# Core dependencies
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pyyaml>=6.0  # Configuration file loading
+
+# Will be needed later
+sentence-transformers>=2.2.0  # Sentence-BERT for semantic similarity
+openai>=1.0.0  # LLM API
+opencv-python>=4.8.0  # CV processing
+pillow>=10.0.0  # Image processing
+openai-whisper>=1.0.0  # ASR
+pytesseract>=0.3.10  # OCR
+ffmpeg-python>=0.2.0  # Video processing
+numpy>=1.24.0
+scipy>=1.11.0
