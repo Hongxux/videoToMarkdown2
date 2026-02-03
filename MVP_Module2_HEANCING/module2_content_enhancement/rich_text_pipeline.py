@@ -261,9 +261,7 @@ class RichTextPipeline:
         units = result.semantic_units
         logger.info(f"  → {len(units)} semantic units created")
         
-        # Stage 2: V7.x 模态分类
-        logger.info("[Stage 2] Modality Classification")
-        units = await self._apply_modality_classification(units, cache_path=modality_cache)
+
         
         # Stage 3: 素材生成 (并行优化)
         logger.info("[Stage 3] Material Generation (Parallel)")
@@ -504,7 +502,6 @@ class RichTextPipeline:
                 "end_sec": unit.end_sec,
                 "full_text": getattr(unit, 'full_text', ''),
                 "text": getattr(unit, 'full_text', ''),  # 兼容性字段
-                "modality": getattr(unit, 'modality', 'screenshot'),  # V9.0: 可能废弃
                 "stable_islands": getattr(unit, 'stable_islands', []),
                 "action_segments": getattr(unit, 'action_segments', []),
                 # 保存素材需求 (用于Phase2B匹配外部素材)
@@ -567,7 +564,6 @@ class RichTextPipeline:
                 start_sec=item["start_sec"],
                 end_sec=item["end_sec"]
             )
-            unit.modality = item.get("modality", "video")
             unit.stable_islands = item.get("stable_islands", [])
             unit.action_segments = item.get("action_segments", [])
             
@@ -615,9 +611,6 @@ class RichTextPipeline:
             for unit_id, result_data in cv_results.items():
                 if unit_id in unit_map:
                     unit = unit_map[unit_id]
-                    # 更新模态和分类
-                    unit.modality = result_data.get("modality", unit.modality)
-                    unit.knowledge_subtype = result_data.get("knowledgeSubtype", unit.knowledge_subtype)
                     
                     # 更新稳定岛 (从驼峰转下划线)
                     pb_islands = result_data.get("stableIslands", [])

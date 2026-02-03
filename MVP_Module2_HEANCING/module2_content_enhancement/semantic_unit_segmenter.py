@@ -50,16 +50,12 @@ class SemanticUnit:
     source_sentence_ids: List[str]        # 来源句子ID (S001, S002, ...)
     start_sec: float = 0.0                # 起始时间
     end_sec: float = 0.0                  # 结束时间
-    display_form: str = "unknown"         # [DEPRECATED] Retained for compatibility
     confidence: float = 0.0               # LLM判定置信度
-    screenshot_times: List[float] = None  # V7.x: 截图时间点 [根据modality: 1/2/3个]
     action_segments: List[Dict] = None    # V7.x: 动作区间详情 [{start, end, type}]
     stable_islands: List[Dict] = None     # V7.x: 稳定岛区间 [{start, end, mid, duration}]
     materials: Any = None                 # V7.x: 生成的素材集合 (MaterialSet)
 
     def __post_init__(self):
-        if self.screenshot_times is None:
-            self.screenshot_times = []
         if self.action_segments is None:
             self.action_segments = []
         if self.stable_islands is None:
@@ -672,13 +668,8 @@ class SemanticUnitSegmenter:
         logger.info("=== Step 2: LLM Semantic Aggregation ===")
         step2_result = await self.segment(paragraphs, sentence_timestamps, batch_size)
         
-        # Step 3: 展示形式校验
-        logger.info("=== Step 3: Display Form Validation ===")
-        final_units = self.apply_display_form_validation(
-            step2_result.semantic_units,
-            video_path,
-            sample_interval
-        )
+        # Step 3: 展示形式校验 (已移除 - V7.x 废弃)
+        final_units = step2_result.semantic_units
         
         elapsed_ms = (time.time() - start_time) * 1000
         
@@ -1030,12 +1021,7 @@ class SemanticUnitSegmenter:
                 "source_sentence_ids": u.source_sentence_ids,
                 "start_sec": u.start_sec,
                 "end_sec": u.end_sec,
-                "display_form": u.display_form,
                 "confidence": u.confidence,
-                # V7.x 模态分类字段
-                "modality": u.modality,
-                "knowledge_subtype": u.knowledge_subtype,
-                "screenshot_times": u.screenshot_times,
                 "action_segments": u.action_segments
             }
             # 添加CV校验结果 (如果存在)
@@ -1074,90 +1060,7 @@ class SemanticUnitSegmenter:
     # V7.x: Modality Classification (Material Completion Logic)
     # =========================================================================
     
-    def apply_modality_classification(
-        self, 
-        units: List[SemanticUnit], 
-        video_path: str
-    ) -> List[SemanticUnit]:
-        """
-        V7.x 模态分类主入口 (Plan A: gRPC透传)
-        
-        对每个语义单元执行CV模态分类，更新 modality 和 knowledge_subtype 字段。
-        
-        决策流程:
-        1. CV状态检测 → stable_islands, action_units
-        2. 有效性过滤 → transition/noise → discard
-        3. 模态子分类 → K1/K2/K3/K4/presentation
-        4. 截图时间点 → K3需要3锚点
-        
-        Args:
-            units: 语义单元列表 (含 start_sec, end_sec)
-            video_path: 视频路径
-            
-        Returns:
-            更新后的语义单元列表 (含 modality, knowledge_subtype, screenshot_times)
-        """
-        from module2_content_enhancement.cv_knowledge_validator import CVKnowledgeValidator
-        
-        logger.info(f"V7.x Modality Classification: {len(units)} units")
-        
-        with CVKnowledgeValidator(video_path) as validator:
-            for unit in units:
-                try:
-                    # Step 1: CV状态检测
-                    stable_islands, action_units, redundancy = validator.detect_visual_states(
-                        unit.start_sec, unit.end_sec
-                    )
-                    
-                    # Step 2: 主动作判定
-                    if action_units:
-                        # 取最长的动作作为主动作
-                        primary_action = max(action_units, key=lambda a: a.duration_ms)
-                        
-                        unit.modality = primary_action.modality
-                        unit.knowledge_subtype = primary_action.knowledge_subtype
-                        
-                        # Step 3: K3需要截图时间点
-                        if primary_action.modality == "video_screenshot":
-                            unit.screenshot_times = validator._extract_key_screenshot_times(
-                                primary_action)
-                        
-                        # 保存动作详情 (用于调试/下游)
-                        unit.action_segments = [{
-                            "start_sec": a.start_sec,
-                            "end_sec": a.end_sec,
-                            "modality": a.modality,
-                            "subtype": a.knowledge_subtype,
-                            "duration_ms": a.duration_ms
-                        } for a in action_units]
-                        
-                    elif stable_islands:
-                        # 纯稳定 → 截图
-                        unit.modality = "screenshot"
-                        unit.knowledge_subtype = "stable"
-                        # 取最长稳定岛的中点作为截图时间
-                        longest_stable = max(stable_islands, key=lambda s: s.duration_ms)
-                        unit.screenshot_times = [(longest_stable.start_sec + longest_stable.end_sec) / 2]
-                    else:
-                        # 无内容 → 文本
-                        unit.modality = "text_only"
-                        unit.knowledge_subtype = "no_visual"
-                    
-                    logger.debug(f"Unit {unit.unit_id} [{unit.start_sec:.1f}s-{unit.end_sec:.1f}s]: "
-                               f"modality={unit.modality}, subtype={unit.knowledge_subtype}")
-                               
-                except Exception as e:
-                    logger.warning(f"Modality classification failed for {unit.unit_id}: {e}")
-                    unit.modality = "unknown"
-                    unit.knowledge_subtype = "error"
-        
-        # 统计
-        modality_counts = {}
-        for u in units:
-            modality_counts[u.modality] = modality_counts.get(u.modality, 0) + 1
-        logger.info(f"Modality distribution: {modality_counts}")
-        
-        return units
+
 
 
 
