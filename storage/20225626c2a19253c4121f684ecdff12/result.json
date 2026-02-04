@@ -1,0 +1,518 @@
+{
+  "title": "video",
+  "source_video": "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\video.mp4",
+  "total_duration_sec": 520.3330000000001,
+  "generated_at": "2026-02-04T20:28:29.423171",
+  "sections": [
+    {
+      "unit_id": "SU001",
+      "title": "Cloudbot项目介绍与热度",
+      "body_text": "最近有一个开源项目实在是太火了，整个硅谷都为之疯狂。它就是Cloudbot，一个可以7天24小时待命，并且可以使用聊天工具去操控的AI Agent。我知道很多人都对它非常感兴趣，刚好Mac mini咱们也有，今天我们就来聊一聊如何玩转Cloudbot，以及它的效果如何。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        0.0,
+        12.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU002",
+      "title": "作者背景与创业故事",
+      "body_text": "在开始技术内容之前，我想先聊一聊作者的故事，因为实在有点传奇。作者Pietro Deberger，对，就是这哥们。你以为他是又一个挤进AI创业圈的投机者吗？我告诉你，人家早就已经实现了财富自由。他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？人家早就已经实现了财富自由，他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？",
+      "knowledge_type": "abstract",
+      "time_range": [
+        12.0,
+        46.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU003",
+      "title": "Cloudbot产品功能与特性",
+      "body_text": "总之不到一年，人家就捣鼓出了Cloudbot，一款运行在你自己设备上的个人AI助手。你可以通过你熟悉的工具来让它工作，比如像WhatsApp、Telegram或者是iMessage。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        46.0,
+        54.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU004",
+      "title": "Cloudbot项目热度与影响",
+      "body_text": "而且不到一个月就已经超过了40K的Star，现在还在飞速的增长，整个AI圈都在为它疯狂。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        56.0,
+        62.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU005",
+      "title": "项目安装环境说明",
+      "body_text": "那接下来我们就进入技术的部分，来看一下如何安装和使用它。项目的安装还是非常容易的，虽然默认是推荐Mac，但是你肯定想知道是不是必须得买一个Mac mini。当然不是，实际上不仅只有Mac，你也可以在Linux或者是Windows上使用WSL来安装，网上也有人在树莓派的设备上运行。网上也有人在树莓派的设备上成功安装运行了，这很正常，因为如果不在本地运行大模型的话，那它本身的运行并不需要消耗很多资源。",
+      "knowledge_type": "process",
+      "time_range": [
+        58.0,
+        82.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU006",
+      "title": "Mac安装与配置启动",
+      "body_text": "我选择在Mac上运行，推荐使用一键安装脚本，会自动下载相关内容。执行后稍作等待，会自动进入onboard的配置过程。",
+      "knowledge_type": "process",
+      "time_range": [
+        82.0,
+        86.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU007",
+      "title": "Quickstart模式选择供应商",
+      "body_text": "第一次使用推荐Quickstart模式，选择一个大模型供应商，基本上常见的都支持，对国内用户也很友好，像千问、minimax、智谱、Kimi都有。我有Codex的订阅，就选择OpenAI，然后选Codex CLI的OAuth。我有Codex的订阅，就选择OpenAI，然后选Codex CLI的OAuth，验证就可以了。",
+      "knowledge_type": "process",
+      "time_range": [
+        90.0,
+        102.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU008",
+      "title": "选择Channel与iMessage配置",
+      "body_text": "接下来选择Channel，让你通过聊天工具使用Cloudbot，我选择iMessage。可能对国内普通用户来说，其他工具更麻烦。选择iMessage后，还有需要补充的配置，稍后再说。",
+      "knowledge_type": "process",
+      "time_range": [
+        102.0,
+        114.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU009",
+      "title": "工具选择与基本配置",
+      "body_text": "会有常用工具选择和安装，随便选几个。最后有基本配置，正常选择。最后还有一些基本的配置，我们就正常选择。最后一步是让我们去选择使用的方式，就选择默认的CLI。",
+      "knowledge_type": "process",
+      "time_range": [
+        114.0,
+        124.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU010",
+      "title": "首次进入命名设置",
+      "body_text": "第一次进入，它会让我们去给它起一个名字，还有告诉它我是谁。这个有点像玩游戏，我就告诉它，你就叫我馆长大人就好了。既然你是一个小机器人，我就叫你小鸡吧。",
+      "knowledge_type": "process",
+      "time_range": [
+        124.0,
+        134.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU011",
+      "title": "使用终端和WebUI操作",
+      "body_text": "接下来我们就可以直接在终端里使用它了，这个时候的感觉就和Cloud Code差不多。但同时它也自带了WebUI，你可以打开使用，这里也带了Chat对话，还可以查看各种配置。如果你不习惯使用CLI的话，可以换成这种方式，但是仅仅这么用的话，就显示不出它的特点了。",
+      "knowledge_type": "process",
+      "time_range": [
+        138.0,
+        152.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU012",
+      "title": "安装和配置iMessage CLI工具",
+      "body_text": "所以我们要把前面的iMessage配置完成。要使用iMessage的话，需要安装一个CLI的工具，可以通过Brew安装，你也可以让Cloudbot自己去安装和配置。它会自己完成以后并且重启，非常方便。你也可以让Cloudbot自己去安装和配置，它会自己完成以后并且重启，非常方便。我再问一下它还需要什么去做配置，它会告诉我一些需要我自己去完成的内容。",
+      "knowledge_type": "process",
+      "time_range": [
+        152.0,
+        164.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU013",
+      "title": "Mac系统权限配置和测试",
+      "body_text": "就是在Mac里的一些系统配置，这里需要进入到隐私与安全里，打开这个完全磁盘访问权限。我这里把Node和终端的权限都授权一下，然后再让它去发一条测试信息给我。第一次执行的时候会有一个弹窗，记得允许一下。",
+      "knowledge_type": "process",
+      "time_range": [
+        168.0,
+        176.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU014",
+      "title": "iMessage账号配置提醒",
+      "body_text": "到这里配置就已经完成了，但是还有一个提醒，也是我个人的一个小经验：不要用同一个iMessage账号，它自己给自己发的消息会默认被忽略掉，所以需要给运行Cloud的机器单独配置一个iMessage账号。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        176.0,
+        184.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU015",
+      "title": "开发功能实现流程",
+      "body_text": "配置好了以后，接下来我们来看两个实际使用的例子。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成以后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成以后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发，你不需要打开电脑，躺在床上就可以指挥它完成工作。它会调用本地的Codex或者Cloud Code去进行开发，你不需要打开电脑，躺在床上就可以指挥它完成工作。你也可以让它查看有没有新的Issue，如果是Bug就修复。",
+      "knowledge_type": "process",
+      "time_range": [
+        184.0,
+        204.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU016",
+      "title": "AI代码责任提醒",
+      "body_text": "对于实际项目要小心使用，代码虽然是AI写的，但责任要自己付。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        204.0,
+        212.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU017",
+      "title": "语音总结和邮件发送流程",
+      "body_text": "第二个是日常中可以使用的例子，比如我给下级发了一段语音，它会自动帮我总结和拆分，内容可以直接复制使用。但我还要求它把具体任务发送给对应人的邮箱，并设置好提醒。我们可以看到它会自动完成各种操作，进入邮箱就能看到已经发好了邮件。",
+      "knowledge_type": "process",
+      "time_range": [
+        212.0,
+        232.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU018",
+      "title": "配置邮箱SMTP的提醒",
+      "body_text": "这里要提醒一下，想要发送邮件的话，需要提前配置邮箱的SMTP，这个过程我省略掉了。如果不会配置可以问Cloudbot，它会告诉你怎么配置，按照要求操作就可以了。",
+      "knowledge_type": "process",
+      "time_range": [
+        232.0,
+        236.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU019",
+      "title": "Cloudbot效果评估与使用建议",
+      "body_text": "怎么样，感觉Cloudbot的效果如何呢？这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得，你可以去里面找一找灵感。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        240.0,
+        254.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU020",
+      "title": "Cloudbot本地模型使用建议",
+      "body_text": "Cloudbot还有一个非常重要的点，就是可以使用本地的模型。这里官方给的建议是LM Studio去配合MiniMax 2.1，但是MiniMax 2.1确实有点大，最小的我本地也跑不了，所以我只能换成是最新的一个JRM 4.7。那模型这部分我就跳过了，其实也就是直接下载运行就可以了。你可以去里面找一找灵感。Cloudbot还有一个非常重要的点，就是可以使用本地的模型。如果实在不知道怎么弄，可以去翻一下我之前的视频，本地跑模型我已经介绍过很多了。最小的我本地也跑不了，所以我只能换成最新的JRM 4.7。模型这部分我就跳过了，直接下载运行就可以了。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        250.0,
+        272.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU021",
+      "title": "本地模型配置与执行方法",
+      "body_text": "有了本地模型以后，你可以直接在Cloudbot里做配置，或者也可以在Cloudbot里告诉它你要怎么修改，然后让它自己去执行。",
+      "knowledge_type": "process",
+      "time_range": [
+        268.0,
+        274.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU022",
+      "title": "Cloudbot架构解析引入",
+      "body_text": "看过安装、配置和使用以后，我们再来深入地解析一下它的架构。Cloudbot非常让我惊艳，尤其是它完整的架构设计。看过安装、配置和使用以后，我们再来深入地解析一下它的架构。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        274.0,
+        284.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU023",
+      "title": "Cloudbot架构图解析",
+      "body_text": "这是我弄的一个架构图，首先我们来看一下最外层是各种的接入，比如像各种的Channel。这些接入都会接入到Cloudbot的Gateway，这个也是Cloudbot的核心中枢，它负责的就是统一的管理会话，还有路由不同的渠道。",
+      "knowledge_type": "concrete",
+      "time_range": [
+        284.0,
+        292.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU024",
+      "title": "Agent Runtime的功能与作用",
+      "body_text": "再接下来就是Agent Runtime，它会调用用户配置的大语言模型来生成响应、规划任务并执行具体的操作。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        294.0,
+        302.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU025",
+      "title": "Cloudbot的Tools和Skills扩展",
+      "body_text": "为了让Agent能够具体做事，Cloudbot还配置了可插拔的Tools和Skills，这些扩展模块封装了像文件的操作、浏览器的控制、还有定时任务等能力，就可以让智能体去执行具体的操作了。而且还可以接入不同的节点，在不同的节点上去完成各种任务。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        294.0,
+        304.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU026",
+      "title": "长期记忆机制的原理",
+      "body_text": "最底层是长期的记忆机制，通过本地存储的Markdown等文件，去积累用户的偏好和历史的上下文，来实现这种跨对话的连续感知。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        304.0,
+        310.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU027",
+      "title": "个人对开源项目的评价",
+      "body_text": "最后来说一些我个人的感受：作为一个开源项目来说，它的完成度是非常高的，虽然目前也有一些不完善，但你确实没办法要求它用一个月的时间就全面超过商业的产品。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        310.0,
+        316.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU028",
+      "title": "Cloudbot的服务概念与优势",
+      "body_text": "而且我还看到它有几点非常值得关注：第一就是Cloudbot强调这种服务的概念，让AI实现24小时的工作，再配合上底层的工具和skill去在后台完成各种任务。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        316.0,
+        322.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU029",
+      "title": "Cloudbot的接入方式优势",
+      "body_text": "第二个就是接入的方式非常友好，通过聊天工具的方式可以大大的提升使用的便捷性。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        322.0,
+        324.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    },
+    {
+      "unit_id": "SU030",
+      "title": "长期记忆与定时任务的潜力",
+      "body_text": "第三个就是它的长期记忆机制，再配合上各种定时任务，它会不断的记住用户的喜好和习惯，然后去主动性的形成一些定期任务，而且我觉得它还有更多的潜力可以去挖掘。",
+      "knowledge_type": "abstract",
+      "time_range": [
+        328.0,
+        334.0
+      ],
+      "materials": {
+        "clip": "",
+        "screenshots": [],
+        "labels": [],
+        "action_classifications": []
+      },
+      "layout_hint": "default"
+    }
+  ]
+}

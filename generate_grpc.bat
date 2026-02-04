@@ -1,9 +1,9 @@
 @echo off
-REM gRPC代码生成脚本 (Windows)
+REM gRPC浠ｇ爜鐢熸垚鑴氭湰 (Windows)
 REM 
-REM 用法: .\generate_grpc.bat
+REM 鐢ㄦ硶: .\generate_grpc.bat
 REM 
-REM 需要先安装:
+REM 闇€瑕佸厛瀹夎:
 REM   - grpcio-tools: pip install grpcio-tools
 
 echo ========================================
@@ -13,16 +13,14 @@ echo ========================================
 SET SCRIPT_DIR=%~dp0
 SET PROTO_DIR=%SCRIPT_DIR%proto
 SET PYTHON_OUT=%SCRIPT_DIR%generated_grpc
-SET PYTHON_TARGET=%SCRIPT_DIR%MVP_Module2_HEANCING\module2_content_enhancement\grpc_generated
 
 echo.
 echo Proto directory: %PROTO_DIR%
 echo Python output: %PYTHON_OUT%
 echo.
 
-REM 创建输出目录
+REM 鍒涘缓杈撳嚭鐩綍
 if not exist "%PYTHON_OUT%" mkdir "%PYTHON_OUT%"
-if not exist "%PYTHON_TARGET%" mkdir "%PYTHON_TARGET%"
 
 echo [1/3] Generating Python gRPC code...
 python -m grpc_tools.protoc ^
@@ -42,19 +40,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo [OK] Python gRPC code generated
 
 echo.
-echo [2/3] Copying Python gRPC files to project...
-copy /Y "%PYTHON_OUT%\video_processing_pb2.py" "%PYTHON_TARGET%\"
-copy /Y "%PYTHON_OUT%\video_processing_pb2_grpc.py" "%PYTHON_TARGET%\"
-
-REM 创建 __init__.py
-echo # Generated gRPC code > "%PYTHON_TARGET%\__init__.py"
-echo from .video_processing_pb2 import * >> "%PYTHON_TARGET%\__init__.py"
-echo from .video_processing_pb2_grpc import * >> "%PYTHON_TARGET%\__init__.py"
-
-echo [OK] Python files copied to: %PYTHON_TARGET%
-
-echo.
-echo [Extra] Copying Python gRPC files to root proto folder (for server)...
+echo [2/3] Copying Python gRPC files to root proto folder (for server)...
 copy /Y "%PYTHON_OUT%\video_processing_pb2.py" "%PROTO_DIR%\"
 copy /Y "%PYTHON_OUT%\video_processing_pb2_grpc.py" "%PROTO_DIR%\"
 echo [OK] Python files copied to: %PROTO_DIR%
@@ -71,8 +57,8 @@ echo ========================================
 echo.
 echo Generated files:
 echo   [Python]
-echo     %PYTHON_TARGET%\video_processing_pb2.py
-echo     %PYTHON_TARGET%\video_processing_pb2_grpc.py
+echo     %PROTO_DIR%\video_processing_pb2.py
+echo     %PROTO_DIR%\video_processing_pb2_grpc.py
 echo.
 echo   [Java]
 echo     Auto-generated during: mvn compile
