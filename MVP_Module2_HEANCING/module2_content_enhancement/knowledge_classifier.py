@@ -122,8 +122,6 @@ USER_PROMPT_TEMPLATE = """请分析以下动作单元:
 **字幕文本**: 
 {action_subtitles}"""
 
-# Legacy template for backward compatibility (deprecated)
-PROMPT_TEMPLATE = SYSTEM_PROMPT + "\n\n" + USER_PROMPT_TEMPLATE
 
 
 class KnowledgeClassifier:
@@ -163,117 +161,6 @@ class KnowledgeClassifier:
     def enabled(self) -> bool:
         return self._enabled
     
-    async def classify(
-        self,
-        title: str,
-        full_text: str,
-        action_start: float,
-        action_end: float,
-        action_subtitles: str
-    ) -> Dict:
-        """
-        对动作单元进行知识分类
-        
-        Args:
-            title: 语义单元标题
-            full_text: 语义单元完整文本内容
-            action_start: 动作单元开始时间 (秒)
-            action_end: 动作单元结束时间 (秒)
-            action_subtitles: 动作单元时间范围内的字幕文本
-            
-        Returns:
-            dict: 分类结果，包含 knowledge_type, confidence, key_evidence 等
-        """
-        # 💥 1. 缓存键生成 (使用 MD5 避免过长)
-        import hashlib
-        cache_key = hashlib.md5(f"{title}|{action_subtitles}".encode('utf-8')).hexdigest()
-        
-        # 💥 2. 检查内存缓存
-        if not hasattr(self, '_cache'):
-            self._cache = {}
-            # 尝试加载本地缓存文件 (可选，这里简化为内存级持久化，若需跨进程可读写文件)
-            # self._load_cache() 
-            
-        if cache_key in self._cache:
-            # logger.debug(f"Cache hit for {title[:10]}...")
-            return self._cache[cache_key]
-
-        if not self._enabled:
-            # 未启用时返回默认值
-            return {
-                "knowledge_type": "过程性知识",
-                "confidence": 0.5,
-                "key_evidence": "API未配置，使用默认分类",
-                "subject": "抽象知识/算法/机制",
-                "description": "标准化步骤",
-                "goal": "还原流程"
-            }
-        
-        # 🚀 V3: 使用拆分的 Prompt 实现前缀缓存 (KV Cache)
-        user_prompt = USER_PROMPT_TEMPLATE.format(
-            title=title,
-            full_text=full_text,
-            action_start=action_start,
-            action_end=action_end,
-            action_subtitles=action_subtitles
-        )
-        
-        try:
-            # 🚀 使用集中式 LLMClient (自带连接池+自适应并发)
-            # system_message 固定不变，触发 LLM KV Cache
-            content, _, _ = await self._llm_client.complete_text(
-                prompt=user_prompt,
-                system_message=SYSTEM_PROMPT
-            )
-            
-            # 提取 JSON
-            if content.startswith("```"):
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
-            
-            result = json.loads(content)
-            logger.debug(f"Classification result: {result.get('knowledge_type')} "
-                        f"(conf={result.get('confidence', 0):.0%})")
-            
-            # 💥 3. 写入缓存
-            if hasattr(self, '_cache'):
-                self._cache[cache_key] = result
-                
-            return result
-            
-        except Exception as e:
-            logger.error(f"Knowledge classification failed: {e}")
-            return {
-                "knowledge_type": "过程性知识",
-                "confidence": 0.5,
-                "key_evidence": f"分类失败: {str(e)[:20]}",
-                "subject": "抽象知识/算法/机制",
-                "description": "标准化步骤",
-                "goal": "还原流程"
-            }
-    
-    def classify_batch(
-        self,
-        semantic_unit_title: str,
-        semantic_unit_text: str,
-        action_segments: list,
-        subtitles: list
-    ) -> list:
-        """
-        批量分类多个动作单元
-        
-        Args:
-            semantic_unit_title: 语义单元标题
-            semantic_unit_text: 语义单元完整文本
-            action_segments: 动作单元列表，每个包含 start, end
-            subtitles: 字幕列表，每个包含 start_sec, end_sec, corrected_text
-            
-        Returns:
-            list: 每个动作单元的分类结果
-        """
-
-    # 🚀 V3: Batch Prompt 也拆分为 System + User 实现前缀缓存
     BATCH_SYSTEM_PROMPT = """你是一个基于【第一性原理】的 AI 知识架构师。你的任务是透过表面的关键词（形式），洞察字幕产生的根本动机（语义）。
 
 ## 核心原则：去形式化，重语义
@@ -331,9 +218,6 @@ class KnowledgeClassifier:
 
 ## 待分析动作单元列表
 {batch_content}"""
-
-    # Legacy template for backward compatibility
-    BATCH_PROMPT_TEMPLATE = BATCH_SYSTEM_PROMPT + "\n\n" + BATCH_USER_TEMPLATE
 
     async def classify_batch(
         self,
@@ -550,16 +434,3 @@ ID: {item['id']}
         
         return "\n".join(texts) if texts else "(无字幕)"
     
-    def _parse_subtitle(self, sub) -> tuple:
-        """解析字幕对象，返回 (start_sec, end_sec, text)"""
-        if hasattr(sub, 'start_sec'):
-            # CorrectedSubtitle dataclass
-            sub_start = sub.start_sec
-            sub_end = sub.end_sec
-            text = getattr(sub, 'corrected_text', getattr(sub, 'text', ''))
-        else:
-            # dict 格式
-            sub_start = sub.get("start_sec", 0)
-            sub_end = sub.get("end_sec", 0)
-            text = sub.get("corrected_text", sub.get("text", ""))
-        return sub_start, sub_end, text

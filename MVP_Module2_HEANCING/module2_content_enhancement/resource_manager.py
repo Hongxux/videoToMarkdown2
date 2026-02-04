@@ -3,7 +3,6 @@
 
 提供:
 - ThreadPoolExecutor: IO密集型操作 (ffmpeg调用、文件读写)
-- ProcessPoolExecutor: CPU密集型操作 (帧质量分析、CV计算)
 - VideoCapture: 视频资源复用
 """
 
@@ -13,7 +12,7 @@ import atexit
 import logging
 import threading
 from typing import Dict, Optional
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +32,6 @@ class ResourceManager:
     
     # 默认配置
     DEFAULT_IO_WORKERS = 4      # IO线程数
-    DEFAULT_CPU_WORKERS = None  # CPU进程数 (None = cpu_count)
     
     def __new__(cls):
         if cls._instance is None:
@@ -49,7 +47,6 @@ class ResourceManager:
         
         self._initialized = True
         self._io_executor: Optional[ThreadPoolExecutor] = None
-        self._cpu_executor: Optional[ProcessPoolExecutor] = None
         self._video_captures: Dict[str, cv2.VideoCapture] = {}
         self._video_locks: Dict[str, threading.Lock] = {}
         
@@ -72,19 +69,6 @@ class ResourceManager:
             )
             logger.info(f"Created IO ThreadPoolExecutor with {workers} workers")
         return self._io_executor
-    
-    # ==========================================================================
-    # CPU 进程池 (帧质量分析, CV计算)
-    # ==========================================================================
-    
-    def get_cpu_executor(self, max_workers: int = None) -> ProcessPoolExecutor:
-        """获取 CPU 进程池 (懒加载)"""
-        if self._cpu_executor is None:
-            workers = max_workers or self.DEFAULT_CPU_WORKERS
-            self._cpu_executor = ProcessPoolExecutor(max_workers=workers)
-            actual = workers or os.cpu_count()
-            logger.info(f"Created CPU ProcessPoolExecutor with {actual} workers")
-        return self._cpu_executor
     
     # ==========================================================================
     # 视频资源管理 (复用 VideoCapture)
@@ -127,16 +111,6 @@ class ResourceManager:
                 "duration": cap.get(cv2.CAP_PROP_FRAME_COUNT) / max(1, cap.get(cv2.CAP_PROP_FPS))
             }
     
-    def release_video(self, video_path: str):
-        """释放指定视频资源"""
-        abs_path = os.path.abspath(video_path)
-        if abs_path in self._video_captures:
-            self._video_captures[abs_path].release()
-            del self._video_captures[abs_path]
-            if abs_path in self._video_locks:
-                del self._video_locks[abs_path]
-            logger.debug(f"Released video: {abs_path}")
-            
     def extract_frames(self, video_path: str, start_sec: float, end_sec: float, 
                        fps: float) -> list:
         """
@@ -203,10 +177,6 @@ class ResourceManager:
             logger.debug("IO executor shutdown")
         
         # 关闭进程池
-        if self._cpu_executor:
-            self._cpu_executor.shutdown(wait=True)
-            self._cpu_executor = None
-            logger.debug("CPU executor shutdown")
         
         # 释放所有视频资源
         for path, cap in list(self._video_captures.items()):
@@ -230,8 +200,3 @@ def get_resource_manager() -> ResourceManager:
 def get_io_executor() -> ThreadPoolExecutor:
     """快捷方式: 获取 IO 线程池"""
     return get_resource_manager().get_io_executor()
-
-
-def get_cpu_executor() -> ProcessPoolExecutor:
-    """快捷方式: 获取 CPU 进程池"""
-    return get_resource_manager().get_cpu_executor()

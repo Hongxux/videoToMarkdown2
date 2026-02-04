@@ -1,7 +1,7 @@
 """
 Configuration Loader
 
-Load configuration from YAML files for fault detection and other modules.
+Load configuration from YAML files for module2 components.
 """
 
 import yaml
@@ -31,47 +31,6 @@ class ConfigLoader:
         
         self.config_dir = Path(config_dir)
         self._cache = {}
-    
-    def load_fault_detection_config(
-        self,
-        custom_config_path: Optional[str] = None
-    ) -> Dict[str, Any]:
-        """
-        加载断层检测配置
-        
-        Args:
-            custom_config_path: 自定义配置文件路径 (可选)
-        
-        Returns:
-            配置字典
-        """
-        # 加载默认配置
-        default_config_path = self.config_dir / "fault_detection_config.yaml"
-        
-        if not default_config_path.exists():
-            raise FileNotFoundError(
-                f"Default fault detection config not found: {default_config_path}"
-            )
-        
-        with open(default_config_path, 'r', encoding='utf-8') as f:
-            config = yaml.safe_load(f)
-        
-        logger.info(f"Loaded default fault detection config from {default_config_path}")
-        
-        # 如果有自定义配置,合并
-        if custom_config_path:
-            custom_path = Path(custom_config_path)
-            if custom_path.exists():
-                with open(custom_path, 'r', encoding='utf-8') as f:
-                    custom_config = yaml.safe_load(f)
-                
-                # 深度合并配置
-                config = self._deep_merge(config, custom_config)
-                logger.info(f"Merged custom config from {custom_path}")
-            else:
-                logger.warning(f"Custom config not found: {custom_path}, using default")
-        
-        return config
     
     def load_dictionaries(self) -> Dict[str, Any]:
         """
@@ -104,32 +63,6 @@ class ConfigLoader:
                 result[key] = value
         
         return result
-    
-    def get_class1_indicators(self, config: Dict) -> Dict[str, list]:
-        """从配置中提取第1类断层关键词"""
-        return config.get("class1_indicators", {})
-    
-    def get_class2_indicators(self, config: Dict) -> Dict[str, list]:
-        """从配置中提取第2类断层关键词"""
-        return config.get("class2_indicators", {})
-    
-    def get_detection_params(self, config: Dict) -> Dict[str, Any]:
-        """从配置中提取检测参数"""
-        return config.get("detection_params", {})
-    
-    def get_domain_config(self, config: Dict, domain: str) -> Dict[str, Any]:
-        """
-        获取领域特定配置
-        
-        Args:
-            config: 完整配置
-            domain: 领域名称 (算法/AI框架/数学)
-        
-        Returns:
-            领域特定配置
-        """
-        domain_specific = config.get("domain_specific", {})
-        return domain_specific.get(domain, {})
 
 
 def load_module2_config(config_dir: str = None) -> Dict[str, Any]:
@@ -161,7 +94,7 @@ def load_module2_config(config_dir: str = None) -> Dict[str, Any]:
     dict_config = loader.load_dictionaries()
     if dict_config:
         config = loader._deep_merge(config, dict_config)
-        logger.info(f"Merged external dictionaries into config")
+        logger.info("Merged external dictionaries into config")
     
     return config
 

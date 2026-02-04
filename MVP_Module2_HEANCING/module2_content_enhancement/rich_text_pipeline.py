@@ -32,7 +32,6 @@ from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass, asdict
 
 from .data_loader import load_corrected_subtitles, load_merged_segments
-from .timestamp_mapper import TimestampMapper
 from .semantic_unit_segmenter import SemanticUnitSegmenter, SemanticUnit
 from .cv_knowledge_validator import CVKnowledgeValidator
 from .concrete_knowledge_validator import ConcreteKnowledgeValidator
@@ -140,7 +139,6 @@ class RichTextPipeline:
             self.paragraphs = []
         
         # 初始化组件
-        self.timestamp_mapper = TimestampMapper(self.subtitles)
         self.segmenter = SemanticUnitSegmenter()
         
         # ScreenshotSelector (懒加载，需要 visual_extractor 依赖)
