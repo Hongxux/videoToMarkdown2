@@ -21,6 +21,7 @@ private static final long serialVersionUID = 0L;
     knowledgeType_ = "";
     actionUnits_ = java.util.Collections.emptyList();
     fullText_ = "";
+    stableIslands_ = java.util.Collections.emptyList();
   }
 
   @java.lang.Override
@@ -239,6 +240,67 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int STABLE_ISLANDS_FIELD_NUMBER = 7;
+  @SuppressWarnings("serial")
+  private java.util.List<com.mvp.videoprocessing.grpc.StableIsland> stableIslands_;
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  @java.lang.Override
+  public java.util.List<com.mvp.videoprocessing.grpc.StableIsland> getStableIslandsList() {
+    return stableIslands_;
+  }
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  @java.lang.Override
+  public java.util.List<? extends com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
+      getStableIslandsOrBuilderList() {
+    return stableIslands_;
+  }
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  @java.lang.Override
+  public int getStableIslandsCount() {
+    return stableIslands_.size();
+  }
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  @java.lang.Override
+  public com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index) {
+    return stableIslands_.get(index);
+  }
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  @java.lang.Override
+  public com.mvp.videoprocessing.grpc.StableIslandOrBuilder getStableIslandsOrBuilder(
+      int index) {
+    return stableIslands_.get(index);
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -271,6 +333,9 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(fullText_)) {
       com.google.protobuf.GeneratedMessageV3.writeString(output, 6, fullText_);
     }
+    for (int i = 0; i < stableIslands_.size(); i++) {
+      output.writeMessage(7, stableIslands_.get(i));
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -301,6 +366,10 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(fullText_)) {
       size += com.google.protobuf.GeneratedMessageV3.computeStringSize(6, fullText_);
     }
+    for (int i = 0; i < stableIslands_.size(); i++) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeMessageSize(7, stableIslands_.get(i));
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -330,6 +399,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getActionUnitsList())) return false;
     if (!getFullText()
         .equals(other.getFullText())) return false;
+    if (!getStableIslandsList()
+        .equals(other.getStableIslandsList())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -357,6 +428,10 @@ private static final long serialVersionUID = 0L;
     }
     hash = (37 * hash) + FULL_TEXT_FIELD_NUMBER;
     hash = (53 * hash) + getFullText().hashCode();
+    if (getStableIslandsCount() > 0) {
+      hash = (37 * hash) + STABLE_ISLANDS_FIELD_NUMBER;
+      hash = (53 * hash) + getStableIslandsList().hashCode();
+    }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -500,6 +575,13 @@ private static final long serialVersionUID = 0L;
       }
       bitField0_ = (bitField0_ & ~0x00000010);
       fullText_ = "";
+      if (stableIslandsBuilder_ == null) {
+        stableIslands_ = java.util.Collections.emptyList();
+      } else {
+        stableIslands_ = null;
+        stableIslandsBuilder_.clear();
+      }
+      bitField0_ = (bitField0_ & ~0x00000040);
       return this;
     }
 
@@ -541,6 +623,15 @@ private static final long serialVersionUID = 0L;
         result.actionUnits_ = actionUnits_;
       } else {
         result.actionUnits_ = actionUnitsBuilder_.build();
+      }
+      if (stableIslandsBuilder_ == null) {
+        if (((bitField0_ & 0x00000040) != 0)) {
+          stableIslands_ = java.util.Collections.unmodifiableList(stableIslands_);
+          bitField0_ = (bitField0_ & ~0x00000040);
+        }
+        result.stableIslands_ = stableIslands_;
+      } else {
+        result.stableIslands_ = stableIslandsBuilder_.build();
       }
     }
 
@@ -654,6 +745,32 @@ private static final long serialVersionUID = 0L;
         bitField0_ |= 0x00000020;
         onChanged();
       }
+      if (stableIslandsBuilder_ == null) {
+        if (!other.stableIslands_.isEmpty()) {
+          if (stableIslands_.isEmpty()) {
+            stableIslands_ = other.stableIslands_;
+            bitField0_ = (bitField0_ & ~0x00000040);
+          } else {
+            ensureStableIslandsIsMutable();
+            stableIslands_.addAll(other.stableIslands_);
+          }
+          onChanged();
+        }
+      } else {
+        if (!other.stableIslands_.isEmpty()) {
+          if (stableIslandsBuilder_.isEmpty()) {
+            stableIslandsBuilder_.dispose();
+            stableIslandsBuilder_ = null;
+            stableIslands_ = other.stableIslands_;
+            bitField0_ = (bitField0_ & ~0x00000040);
+            stableIslandsBuilder_ = 
+              com.google.protobuf.GeneratedMessageV3.alwaysUseFieldBuilders ?
+                 getStableIslandsFieldBuilder() : null;
+          } else {
+            stableIslandsBuilder_.addAllMessages(other.stableIslands_);
+          }
+        }
+      }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
       return this;
@@ -718,6 +835,19 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000020;
               break;
             } // case 50
+            case 58: {
+              com.mvp.videoprocessing.grpc.StableIsland m =
+                  input.readMessage(
+                      com.mvp.videoprocessing.grpc.StableIsland.parser(),
+                      extensionRegistry);
+              if (stableIslandsBuilder_ == null) {
+                ensureStableIslandsIsMutable();
+                stableIslands_.add(m);
+              } else {
+                stableIslandsBuilder_.addMessage(m);
+              }
+              break;
+            } // case 58
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1293,6 +1423,318 @@ private static final long serialVersionUID = 0L;
       bitField0_ |= 0x00000020;
       onChanged();
       return this;
+    }
+
+    private java.util.List<com.mvp.videoprocessing.grpc.StableIsland> stableIslands_ =
+      java.util.Collections.emptyList();
+    private void ensureStableIslandsIsMutable() {
+      if (!((bitField0_ & 0x00000040) != 0)) {
+        stableIslands_ = new java.util.ArrayList<com.mvp.videoprocessing.grpc.StableIsland>(stableIslands_);
+        bitField0_ |= 0x00000040;
+       }
+    }
+
+    private com.google.protobuf.RepeatedFieldBuilderV3<
+        com.mvp.videoprocessing.grpc.StableIsland, com.mvp.videoprocessing.grpc.StableIsland.Builder, com.mvp.videoprocessing.grpc.StableIslandOrBuilder> stableIslandsBuilder_;
+
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public java.util.List<com.mvp.videoprocessing.grpc.StableIsland> getStableIslandsList() {
+      if (stableIslandsBuilder_ == null) {
+        return java.util.Collections.unmodifiableList(stableIslands_);
+      } else {
+        return stableIslandsBuilder_.getMessageList();
+      }
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public int getStableIslandsCount() {
+      if (stableIslandsBuilder_ == null) {
+        return stableIslands_.size();
+      } else {
+        return stableIslandsBuilder_.getCount();
+      }
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index) {
+      if (stableIslandsBuilder_ == null) {
+        return stableIslands_.get(index);
+      } else {
+        return stableIslandsBuilder_.getMessage(index);
+      }
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder setStableIslands(
+        int index, com.mvp.videoprocessing.grpc.StableIsland value) {
+      if (stableIslandsBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        ensureStableIslandsIsMutable();
+        stableIslands_.set(index, value);
+        onChanged();
+      } else {
+        stableIslandsBuilder_.setMessage(index, value);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder setStableIslands(
+        int index, com.mvp.videoprocessing.grpc.StableIsland.Builder builderForValue) {
+      if (stableIslandsBuilder_ == null) {
+        ensureStableIslandsIsMutable();
+        stableIslands_.set(index, builderForValue.build());
+        onChanged();
+      } else {
+        stableIslandsBuilder_.setMessage(index, builderForValue.build());
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder addStableIslands(com.mvp.videoprocessing.grpc.StableIsland value) {
+      if (stableIslandsBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        ensureStableIslandsIsMutable();
+        stableIslands_.add(value);
+        onChanged();
+      } else {
+        stableIslandsBuilder_.addMessage(value);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder addStableIslands(
+        int index, com.mvp.videoprocessing.grpc.StableIsland value) {
+      if (stableIslandsBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        ensureStableIslandsIsMutable();
+        stableIslands_.add(index, value);
+        onChanged();
+      } else {
+        stableIslandsBuilder_.addMessage(index, value);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder addStableIslands(
+        com.mvp.videoprocessing.grpc.StableIsland.Builder builderForValue) {
+      if (stableIslandsBuilder_ == null) {
+        ensureStableIslandsIsMutable();
+        stableIslands_.add(builderForValue.build());
+        onChanged();
+      } else {
+        stableIslandsBuilder_.addMessage(builderForValue.build());
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder addStableIslands(
+        int index, com.mvp.videoprocessing.grpc.StableIsland.Builder builderForValue) {
+      if (stableIslandsBuilder_ == null) {
+        ensureStableIslandsIsMutable();
+        stableIslands_.add(index, builderForValue.build());
+        onChanged();
+      } else {
+        stableIslandsBuilder_.addMessage(index, builderForValue.build());
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder addAllStableIslands(
+        java.lang.Iterable<? extends com.mvp.videoprocessing.grpc.StableIsland> values) {
+      if (stableIslandsBuilder_ == null) {
+        ensureStableIslandsIsMutable();
+        com.google.protobuf.AbstractMessageLite.Builder.addAll(
+            values, stableIslands_);
+        onChanged();
+      } else {
+        stableIslandsBuilder_.addAllMessages(values);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder clearStableIslands() {
+      if (stableIslandsBuilder_ == null) {
+        stableIslands_ = java.util.Collections.emptyList();
+        bitField0_ = (bitField0_ & ~0x00000040);
+        onChanged();
+      } else {
+        stableIslandsBuilder_.clear();
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public Builder removeStableIslands(int index) {
+      if (stableIslandsBuilder_ == null) {
+        ensureStableIslandsIsMutable();
+        stableIslands_.remove(index);
+        onChanged();
+      } else {
+        stableIslandsBuilder_.remove(index);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public com.mvp.videoprocessing.grpc.StableIsland.Builder getStableIslandsBuilder(
+        int index) {
+      return getStableIslandsFieldBuilder().getBuilder(index);
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public com.mvp.videoprocessing.grpc.StableIslandOrBuilder getStableIslandsOrBuilder(
+        int index) {
+      if (stableIslandsBuilder_ == null) {
+        return stableIslands_.get(index);  } else {
+        return stableIslandsBuilder_.getMessageOrBuilder(index);
+      }
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public java.util.List<? extends com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
+         getStableIslandsOrBuilderList() {
+      if (stableIslandsBuilder_ != null) {
+        return stableIslandsBuilder_.getMessageOrBuilderList();
+      } else {
+        return java.util.Collections.unmodifiableList(stableIslands_);
+      }
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public com.mvp.videoprocessing.grpc.StableIsland.Builder addStableIslandsBuilder() {
+      return getStableIslandsFieldBuilder().addBuilder(
+          com.mvp.videoprocessing.grpc.StableIsland.getDefaultInstance());
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public com.mvp.videoprocessing.grpc.StableIsland.Builder addStableIslandsBuilder(
+        int index) {
+      return getStableIslandsFieldBuilder().addBuilder(
+          index, com.mvp.videoprocessing.grpc.StableIsland.getDefaultInstance());
+    }
+    /**
+     * <pre>
+     * 🚀 CV结果中的稳定岛
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+     */
+    public java.util.List<com.mvp.videoprocessing.grpc.StableIsland.Builder> 
+         getStableIslandsBuilderList() {
+      return getStableIslandsFieldBuilder().getBuilderList();
+    }
+    private com.google.protobuf.RepeatedFieldBuilderV3<
+        com.mvp.videoprocessing.grpc.StableIsland, com.mvp.videoprocessing.grpc.StableIsland.Builder, com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
+        getStableIslandsFieldBuilder() {
+      if (stableIslandsBuilder_ == null) {
+        stableIslandsBuilder_ = new com.google.protobuf.RepeatedFieldBuilderV3<
+            com.mvp.videoprocessing.grpc.StableIsland, com.mvp.videoprocessing.grpc.StableIsland.Builder, com.mvp.videoprocessing.grpc.StableIslandOrBuilder>(
+                stableIslands_,
+                ((bitField0_ & 0x00000040) != 0),
+                getParentForChildren(),
+                isClean());
+        stableIslands_ = null;
+      }
+      return stableIslandsBuilder_;
     }
     @java.lang.Override
     public final Builder setUnknownFields(

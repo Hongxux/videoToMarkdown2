@@ -10,33 +10,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 4.200000000000001,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含背景音乐或画面过渡。根据上下文标题和完整文本，这是视频的开场部分，用于引入话题和吸引观众，属于介绍性内容，不包含任何步骤、操作、推演或配置命令。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 2.1999999999999997
-  }, {
-    "end_sec" : 5.8000000000000025,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含背景音乐或画面过渡。根据上下文标题和完整文本，这是视频的开场部分，用于引入话题和吸引观众，属于介绍性内容，不包含任何步骤、操作、推演或配置命令。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 5.400000000000002
-  }, {
-    "end_sec" : 8.600000000000001,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含背景音乐或画面过渡。根据上下文标题和完整文本，这是视频的开场部分，用于引入话题和吸引观众，属于介绍性内容，不包含任何步骤、操作、推演或配置命令。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 8.200000000000003
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -53,41 +29,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 15.999999999999986,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅提供时间信息。结合全局上下文（介绍作者背景故事），此片段很可能是在展示作者照片、相关图片或进行非技术性讲述，不包含任何步骤、操作、逻辑推理或配置命令。因此，根据缺省原则，归类为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 12.399999999999999
-  }, {
-    "end_sec" : 30.599999999999934,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅提供时间信息。结合全局上下文（介绍作者背景故事），此片段很可能是在展示作者照片、相关图片或进行非技术性讲述，不包含任何步骤、操作、逻辑推理或配置命令。因此，根据缺省原则，归类为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 18.999999999999975
-  }, {
-    "end_sec" : 38.000000000000014,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅提供时间信息。结合全局上下文（介绍作者背景故事），此片段很可能是在展示作者照片、相关图片或进行非技术性讲述，不包含任何步骤、操作、逻辑推理或配置命令。因此，根据缺省原则，归类为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 33.799999999999955
-  }, {
-    "end_sec" : 46.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅提供时间信息。结合全局上下文（介绍作者背景故事），此片段很可能是在展示作者照片、相关图片或进行非技术性讲述，不包含任何步骤、操作、逻辑推理或配置命令。因此，根据缺省原则，归类为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 42.80000000000008
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -104,17 +48,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 54.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了Cloudbot是什么（一款个人AI助手）及其特点（运行在个人设备上，可通过特定工具工作）。这是对产品概念、功能和适用场景的介绍，没有包含任何步骤、因果推理、具体操作或配置命令。因此，它属于对概念和功能的讲解。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 46.80000000000001
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -131,17 +67,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 62.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了项目（如一个开源项目）在短时间内获得大量关注（Star数）和快速增长的现状，并提及了行业（AI圈）的反应。这属于对现象、事实或状态的陈述和解释，不包含任何步骤、操作、因果推理或配置命令。因此，根据缺省原则，归类为'讲解型'。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 55.900000000000006
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -163,7 +91,7 @@
   "action_units" : [ {
     "end_sec" : 65.0000000000001,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文为项目安装的通用介绍和平台兼容性说明，属于概念解释和背景介绍，不含具体步骤、操作、因果推理或配置命令。因此判定为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文主要介绍了项目安装的兼容性（Mac/Linux/Windows/WSL/树莓派）和资源消耗情况，属于对安装环境的概括性介绍和解释，不包含具体的操作步骤、因果推演或配置命令。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -171,7 +99,7 @@
   }, {
     "end_sec" : 74.40000000000023,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文为项目安装的通用介绍和平台兼容性说明，属于概念解释和背景介绍，不含具体步骤、操作、因果推理或配置命令。因此判定为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文主要介绍了项目安装的兼容性（Mac/Linux/Windows/WSL/树莓派）和资源消耗情况，属于对安装环境的概括性介绍和解释，不包含具体的操作步骤、因果推演或配置命令。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -179,7 +107,7 @@
   }, {
     "end_sec" : 82.0,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文为项目安装的通用介绍和平台兼容性说明，属于概念解释和背景介绍，不含具体步骤、操作、因果推理或配置命令。因此判定为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文主要介绍了项目安装的兼容性（Mac/Linux/Windows/WSL/树莓派）和资源消耗情况，属于对安装环境的概括性介绍和解释，不包含具体的操作步骤、因果推演或配置命令。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -206,7 +134,7 @@
   "action_units" : [ {
     "end_sec" : 83.00000000000001,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其内容可能为视频中的操作演示，但无具体文字描述，无法判定为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其内容可能对应视频中的操作演示，但缺乏具体的动作描述或步骤说明，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -214,7 +142,7 @@
   }, {
     "end_sec" : 86.00000000000003,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其内容可能为视频中的操作演示，但无具体文字描述，无法判定为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其内容可能对应视频中的操作演示，但缺乏具体的动作描述或步骤说明，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -241,7 +169,7 @@
   "action_units" : [ {
     "end_sec" : 93.60000000000005,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、逻辑或配置命令的情况下，应归为讲解型。",
+    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、推理或配置命令的情况下，应归类为讲解型。其可能伴随画面展示或口头讲解，但文本信息不足以判定为其他类型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -249,7 +177,7 @@
   }, {
     "end_sec" : 99.40000000000008,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、逻辑或配置命令的情况下，应归为讲解型。",
+    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、推理或配置命令的情况下，应归类为讲解型。其可能伴随画面展示或口头讲解，但文本信息不足以判定为其他类型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -276,8 +204,8 @@
   "action_units" : [ {
     "end_sec" : 114.20000000000009,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了选择Channel（如iMessage）的意图和后续配置说明，但当前单元本身未展示任何具体步骤、操作、因果推理或配置命令。因此，根据缺省原则，归类为讲解型。",
-    "confidence" : 0.7,
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了选择Channel（如iMessage）的意图、原因（对国内用户其他工具更麻烦）以及后续计划（稍后补充配置）。这属于对操作意图、原因和未来计划的说明，没有包含具体的操作步骤、因果推演、操作动词或配置命令。因此，判定为讲解型知识。",
+    "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
     "start_sec" : 108.20000000000009
@@ -303,7 +231,7 @@
   "action_units" : [ {
     "end_sec" : 116.00000000000003,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用过程，但该单元本身未展示任何具体步骤、操作、因果推理或配置命令，属于对整体流程的概括性说明。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但未提供具体的操作步骤、因果推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，应归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -311,7 +239,7 @@
   }, {
     "end_sec" : 121.60000000000011,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用过程，但该单元本身未展示任何具体步骤、操作、因果推理或配置命令，属于对整体流程的概括性说明。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但未提供具体的操作步骤、因果推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，应归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -319,7 +247,7 @@
   }, {
     "end_sec" : 123.60000000000014,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用过程，但该单元本身未展示任何具体步骤、操作、因果推理或配置命令，属于对整体流程的概括性说明。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但未提供具体的操作步骤、因果推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，应归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -344,21 +272,29 @@
   "knowledge_type" : "讲解型",
   "cv_validated" : true,
   "action_units" : [ {
-    "end_sec" : 129.0,
+    "end_sec" : 129.66666666666663,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了用户首次进入系统时，为系统和自己命名的过程。这是一个描述性的、基于个人体验的叙述，没有包含任何步骤、操作、因果推理或配置命令。因此，它属于讲解型知识。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了首次进入系统时的命名过程，属于对过去事件的描述性讲解，不含步骤、操作、推演或配置命令。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
-    "start_sec" : 125.70000000000003
+    "start_sec" : 125.66666666666664
   }, {
-    "end_sec" : 131.79999999999984,
+    "end_sec" : 132.00000000000006,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了用户首次进入系统时，为系统和自己命名的过程。这是一个描述性的、基于个人体验的叙述，没有包含任何步骤、操作、因果推理或配置命令。因此，它属于讲解型知识。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了首次进入系统时的命名过程，属于对过去事件的描述性讲解，不含步骤、操作、推演或配置命令。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
-    "start_sec" : 131.19999999999987
+    "start_sec" : 131.33333333333337
+  }, {
+    "end_sec" : 134.0,
+    "action_type" : "mixed",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了首次进入系统时的命名过程，属于对过去事件的描述性讲解，不含步骤、操作、推演或配置命令。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 0,
+    "start_sec" : 133.66666666666677
   } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -381,7 +317,7 @@
   "action_units" : [ {
     "end_sec" : 141.19999999999982,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容均为对工具使用方式的描述和比较，但本单元本身不包含任何具体的步骤、操作、逻辑推理或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。",
+    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述和对比，但本单元本身没有提供任何具体的步骤、操作、逻辑推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，缺省归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -389,7 +325,7 @@
   }, {
     "end_sec" : 143.59999999999968,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容均为对工具使用方式的描述和比较，但本单元本身不包含任何具体的步骤、操作、逻辑推理或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。",
+    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述和对比，但本单元本身没有提供任何具体的步骤、操作、逻辑推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，缺省归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -397,7 +333,7 @@
   }, {
     "end_sec" : 149.49999999999955,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容均为对工具使用方式的描述和比较，但本单元本身不包含任何具体的步骤、操作、逻辑推理或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。",
+    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述和对比，但本单元本身没有提供任何具体的步骤、操作、逻辑推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，缺省归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -424,7 +360,7 @@
   "action_units" : [ {
     "end_sec" : 155.79999999999978,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述。根据上下文，其内容可能与前后的iMessage配置讨论相关，但缺乏明确的步骤、操作、逻辑或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，无法提取具体描述。根据上下文，其内容可能延续前文关于iMessage配置的说明，但缺乏具体步骤、操作、逻辑或配置命令，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -432,7 +368,7 @@
   }, {
     "end_sec" : 163.99999999999932,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述。根据上下文，其内容可能与前后的iMessage配置讨论相关，但缺乏明确的步骤、操作、逻辑或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，无法提取具体描述。根据上下文，其内容可能延续前文关于iMessage配置的说明，但缺乏具体步骤、操作、逻辑或配置命令，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -459,7 +395,7 @@
   "action_units" : [ {
     "end_sec" : 169.9999999999999,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元虽然没有字幕，但根据其时间点（168.8-170.0）紧接在描述“需要进入到隐私与安全里，打开这个完全磁盘访问权限”的全局上下文之后，可以合理推断用户正在执行“进入系统偏好设置 -> 隐私与安全 -> 完全磁盘访问权限”这一系列具体的界面导航和点击操作。这符合实操的定义：包含操作动词（如点击、进入）和操作对象（如系统偏好设置、隐私与安全）。",
+    "reasoning" : "该动作单元虽无字幕，但根据其紧邻的上下文（‘需要进入到隐私与安全里，打开这个完全磁盘访问权限’）可以推断，用户正在执行一个具体的操作。该操作涉及在Mac系统设置中导航并修改权限，符合‘操作动词+对象’（如点击、打开）的实操判定标准。",
     "confidence" : 0.9,
     "knowledge_type" : "实操",
     "id" : 0,
@@ -467,7 +403,7 @@
   }, {
     "end_sec" : 176.09999999999974,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元虽然没有字幕，但根据其时间点（168.8-170.0）紧接在描述“需要进入到隐私与安全里，打开这个完全磁盘访问权限”的全局上下文之后，可以合理推断用户正在执行“进入系统偏好设置 -> 隐私与安全 -> 完全磁盘访问权限”这一系列具体的界面导航和点击操作。这符合实操的定义：包含操作动词（如点击、进入）和操作对象（如系统偏好设置、隐私与安全）。",
+    "reasoning" : "该动作单元虽无字幕，但根据其紧邻的上下文（‘需要进入到隐私与安全里，打开这个完全磁盘访问权限’）可以推断，用户正在执行一个具体的操作。该操作涉及在Mac系统设置中导航并修改权限，符合‘操作动词+对象’（如点击、打开）的实操判定标准。",
     "confidence" : 0.9,
     "knowledge_type" : "实操",
     "id" : 0,
@@ -489,33 +425,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 176.99999999999994,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。在给定的全局上下文中，没有提供任何可分析的描述性内容、步骤、操作或逻辑推理。因此，无法归类为过程性知识、推演、实操或环境配置，只能归为缺省类型“讲解型”。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 176.39999999999998
-  }, {
-    "end_sec" : 179.5999999999998,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。在给定的全局上下文中，没有提供任何可分析的描述性内容、步骤、操作或逻辑推理。因此，无法归类为过程性知识、推演、实操或环境配置，只能归为缺省类型“讲解型”。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 178.99999999999983
-  }, {
-    "end_sec" : 184.0,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。在给定的全局上下文中，没有提供任何可分析的描述性内容、步骤、操作或逻辑推理。因此，无法归类为过程性知识、推演、实操或环境配置，只能归为缺省类型“讲解型”。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 183.59999999999957
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -537,7 +449,7 @@
   "action_units" : [ {
     "end_sec" : 186.89999999999998,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它位于描述开发例子之前，可能是一个过渡或演示画面。由于没有具体的操作步骤、因果推理、配置命令或明确的讲解内容，无法归类为其他类型，因此归为缺省类型“讲解型”。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -545,7 +457,7 @@
   }, {
     "end_sec" : 192.5999999999995,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它位于描述开发例子之前，可能是一个过渡或演示画面。由于没有具体的操作步骤、因果推理、配置命令或明确的讲解内容，无法归类为其他类型，因此归为缺省类型“讲解型”。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -553,7 +465,7 @@
   }, {
     "end_sec" : 197.39999999999924,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它位于描述开发例子之前，可能是一个过渡或演示画面。由于没有具体的操作步骤、因果推理、配置命令或明确的讲解内容，无法归类为其他类型，因此归为缺省类型“讲解型”。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -561,7 +473,7 @@
   }, {
     "end_sec" : 203.1999999999989,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它位于描述开发例子之前，可能是一个过渡或演示画面。由于没有具体的操作步骤、因果推理、配置命令或明确的讲解内容，无法归类为其他类型，因此归为缺省类型“讲解型”。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -583,25 +495,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 207.79999999999978,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文为一句关于AI代码使用责任的提醒，属于一般性说明或告诫，不含步骤、操作、因果推理或配置命令。因此，该单元内容为概念性或告诫性讲解。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 205.4999999999999
-  }, {
-    "end_sec" : 212.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文为一句关于AI代码使用责任的提醒，属于一般性说明或告诫，不含步骤、操作、因果推理或配置命令。因此，该单元内容为概念性或告诫性讲解。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 209.3999999999997
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -623,7 +519,7 @@
   "action_units" : [ {
     "end_sec" : 223.4999999999995,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述的是一个AI助手功能的例子，属于对功能效果的陈述和展示（“我们可以看到它会自动完成各种操作”），没有包含具体的操作步骤、因果推理、配置命令或用户执行的动作。因此，归类为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述的是一个功能示例（语音自动总结、拆分、发邮件、设提醒），属于对系统功能的介绍和展示，没有包含具体的操作步骤、因果推理、配置命令或用户执行的动作。因此，它属于知识或功能的讲解。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -631,7 +527,7 @@
   }, {
     "end_sec" : 229.799999999999,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述的是一个AI助手功能的例子，属于对功能效果的陈述和展示（“我们可以看到它会自动完成各种操作”），没有包含具体的操作步骤、因果推理、配置命令或用户执行的动作。因此，归类为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述的是一个功能示例（语音自动总结、拆分、发邮件、设提醒），属于对系统功能的介绍和展示，没有包含具体的操作步骤、因果推理、配置命令或用户执行的动作。因此，它属于知识或功能的讲解。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -672,25 +568,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 248.00000000000023,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含沉默或非语言信息。根据分析框架，它不包含任何步骤、因果逻辑、操作动词或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。根据缺省规则，应归为讲解型，表示可能是一个停顿、过渡或非语言强调。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 247.66666666666688
-  }, {
-    "end_sec" : 254.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含沉默或非语言信息。根据分析框架，它不包含任何步骤、因果逻辑、操作动词或配置命令，因此无法归类为过程性知识、推演、实操或环境配置。根据缺省规则，应归为讲解型，表示可能是一个停顿、过渡或非语言强调。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 251.33333333333366
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -707,25 +587,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 262.3999999999994,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含沉默或非语言信息。根据分析框架，无法从中提取出包含步骤、因果逻辑、具体操作或配置命令的知识。因此，它不满足过程性知识、推演、实操或环境配置的任何严格判定标准，应归类为讲解型（或非知识性内容）。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 259.8999999999994
-  }, {
-    "end_sec" : 271.3999999999988,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含沉默或非语言信息。根据分析框架，无法从中提取出包含步骤、因果逻辑、具体操作或配置命令的知识。因此，它不满足过程性知识、推演、实操或环境配置的任何严格判定标准，应归类为讲解型（或非知识性内容）。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 270.7999999999988
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -747,7 +611,7 @@
   "action_units" : [ {
     "end_sec" : 272.39999999999975,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了在拥有本地模型后，用户可以在Cloudbot中进行配置或指令修改的可能性。它没有包含具体的操作步骤（如点击、输入）、因果逻辑推演、或具体的配置命令。内容属于对功能或操作方式的概括性介绍，因此归类为讲解型。",
+    "reasoning" : "该动作单元描述了在拥有本地模型后，用户可以在Cloudbot中进行配置或通过指令让Cloudbot自行修改。这是一个概括性的功能说明，没有包含具体的操作步骤（如点击哪里、输入什么命令）、因果推理或环境配置细节。因此，它属于对可能操作的讲解，而非具体的实操、推演或配置过程。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -769,25 +633,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 278.9999999999997,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文表明视频正从安装、配置、使用转向对架构的深入解析，这是一个介绍和过渡性的内容，属于概念性介绍和讲解，不包含具体的步骤、操作、推演或配置命令。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 274.59999999999997
-  }, {
-    "end_sec" : 284.0999999999996,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文表明视频正从安装、配置、使用转向对架构的深入解析，这是一个介绍和过渡性的内容，属于概念性介绍和讲解，不包含具体的步骤、操作、推演或配置命令。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 280.0999999999996
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -804,25 +652,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "concrete",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 286.4,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了架构图的组成部分和核心组件（Gateway）的功能，属于对静态结构和功能的介绍，不包含步骤、操作、因果推理或配置命令。因此，符合讲解型知识的特征。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 284.4
-  }, {
-    "end_sec" : 291.79999999999956,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了架构图的组成部分和核心组件（Gateway）的功能，属于对静态结构和功能的介绍，不包含步骤、操作、因果推理或配置命令。因此，符合讲解型知识的特征。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 288.19999999999976
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -839,17 +671,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 302.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了Agent Runtime的功能（调用模型、生成响应、规划任务、执行操作），这是一个对系统组件功能的解释性说明。它不包含任何步骤序列、因果推理、具体操作指令或环境配置命令，因此不满足过程性知识、推演、实操或环境配置的判定标准。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 295.7999999999999
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -866,17 +690,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 304.0,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了Cloudbot的功能特性（配置可插拔的Tools和Skills，封装操作能力，接入不同节点），属于对系统架构和能力的解释说明。它不包含具体的操作步骤、因果推理、配置命令或操作指令，因此不符合过程性知识、推演、实操或环境配置的严格判定标准。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 295.7999999999999
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -893,17 +709,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 310.7999999999998,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了系统的底层机制（长期的记忆机制）及其实现方式（通过本地存储的Markdown等文件）和目标（积累用户偏好和历史上下文，实现跨对话的连续感知）。这是一个对系统架构或功能的解释性说明，不包含步骤序列、因果推理、具体操作指令或环境配置命令。因此，根据缺省规则，归类为'讲解型'。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 307.7999999999998
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -920,17 +728,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 313.5999999999998,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元是演讲者分享个人对开源项目的感受和评价，属于主观观点陈述。内容不包含步骤、因果推理、具体操作或环境配置命令，因此不符合过程性知识、推演、实操或环境配置的判定标准。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 310.19999999999993
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -947,17 +747,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 321.99999999999966,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了Cloudbot的特点（强调服务概念、24小时工作、配合工具和技能完成任务），属于对产品特性或概念的介绍和解释，没有包含步骤、因果推理、具体操作或配置命令。因此，根据缺省原则，归类为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 316.79999999999995
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -974,17 +766,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 323.19999999999993,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元描述了产品的一个特性（接入方式友好，通过聊天工具提升便捷性），属于对概念或优势的陈述和解释，没有包含任何步骤、操作、因果推理或配置命令。因此，根据缺省规则，归类为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 322.4
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -1001,17 +785,9 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "abstract",
   "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 333.99999999999966,
-    "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了系统的长期记忆机制和定时任务的功能与潜力。主体是抽象的系统功能（长期记忆机制、定时任务），描述方式是解释其作用（记住喜好、形成任务、有潜力），目标是让听众知晓该功能。它不包含明确的操作步骤、因果推理、具体操作动词或环境配置命令，因此不满足过程性知识、推演、实操或环境配置的严格判定标准。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 329.5999999999999
-  } ],
+  "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]

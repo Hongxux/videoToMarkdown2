@@ -311,6 +311,7 @@ message SemanticUnitForMaterialGeneration {
     double end_sec = 4;
     repeated ActionUnitForMaterialGeneration action_units = 5;
     string full_text = 6; // Needed for text-matching or refinement
+    repeated StableIsland stable_islands = 7; // 🚀 Missing link for CV results
 }
 
 message ActionUnitForMaterialGeneration {

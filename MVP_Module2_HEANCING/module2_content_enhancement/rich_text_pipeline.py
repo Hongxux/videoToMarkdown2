@@ -519,6 +519,7 @@ class RichTextPipeline:
                 },
                 # V9.0 新增字段
                 "knowledge_type": getattr(unit, 'knowledge_type', ''),
+                "knowledge_topic": getattr(unit, 'knowledge_topic', ''),
                 "cv_validated": getattr(unit, 'cv_validated', False),
                 # V9.0: 带有 LLM 分类结果的动作单元列表
                 "action_units": getattr(unit, 'action_units', []),

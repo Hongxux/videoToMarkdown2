@@ -95,4 +95,48 @@ public interface SemanticUnitForMaterialGenerationOrBuilder extends
    */
   com.google.protobuf.ByteString
       getFullTextBytes();
+
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  java.util.List<com.mvp.videoprocessing.grpc.StableIsland> 
+      getStableIslandsList();
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index);
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  int getStableIslandsCount();
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  java.util.List<? extends com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
+      getStableIslandsOrBuilderList();
+  /**
+   * <pre>
+   * 🚀 CV结果中的稳定岛
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
+   */
+  com.mvp.videoprocessing.grpc.StableIslandOrBuilder getStableIslandsOrBuilder(
+      int index);
 }

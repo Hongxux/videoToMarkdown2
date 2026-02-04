@@ -294,51 +294,52 @@ public final class VideoProcessingProto {
       "\030\006 \001(\t\"\211\001\n\037GenerateMaterialRequestsReque" +
       "st\022\017\n\007task_id\030\001 \001(\t\022A\n\005units\030\002 \003(\01322.vid" +
       "eoprocessing.SemanticUnitForMaterialGene" +
-      "ration\022\022\n\nvideo_path\030\003 \001(\t\"\313\001\n!SemanticU" +
+      "ration\022\022\n\nvideo_path\030\003 \001(\t\"\202\002\n!SemanticU" +
       "nitForMaterialGeneration\022\017\n\007unit_id\030\001 \001(" +
       "\t\022\026\n\016knowledge_type\030\002 \001(\t\022\021\n\tstart_sec\030\003" +
       " \001(\001\022\017\n\007end_sec\030\004 \001(\001\022F\n\014action_units\030\005 " +
       "\003(\01320.videoprocessing.ActionUnitForMater" +
-      "ialGeneration\022\021\n\tfull_text\030\006 \001(\t\"i\n\037Acti" +
-      "onUnitForMaterialGeneration\022\n\n\002id\030\001 \001(\005\022" +
-      "\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end_sec\030\003 \001(\001\022\026\n\016k" +
-      "nowledge_type\030\004 \001(\t\"\274\001\n GenerateMaterial" +
-      "RequestsResponse\022\017\n\007success\030\001 \001(\010\022?\n\023scr" +
-      "eenshot_requests\030\002 \003(\0132\".videoprocessing" +
-      ".ScreenshotRequest\0223\n\rclip_requests\030\003 \003(" +
-      "\0132\034.videoprocessing.ClipRequest\022\021\n\terror" +
-      "_msg\030\004 \001(\t\"*\n\027ReleaseResourcesRequest\022\017\n" +
-      "\007task_id\030\001 \001(\t\"r\n\030ReleaseResourcesRespon" +
-      "se\022\017\n\007success\030\001 \001(\010\022\017\n\007message\030\002 \001(\t\022\033\n\023" +
-      "freed_workers_count\030\003 \001(\005\022\027\n\017freed_memor" +
-      "y_mb\030\004 \001(\0022\363\007\n\026VideoProcessingService\022T\n" +
-      "\rDownloadVideo\022 .videoprocessing.Downloa" +
-      "dRequest\032!.videoprocessing.DownloadRespo" +
-      "nse\022Z\n\017TranscribeVideo\022\".videoprocessing" +
-      ".TranscribeRequest\032#.videoprocessing.Tra" +
-      "nscribeResponse\022P\n\rProcessStage1\022\036.video" +
-      "processing.Stage1Request\032\037.videoprocessi" +
-      "ng.Stage1Response\022Y\n\024AnalyzeSemanticUnit" +
-      "s\022\037.videoprocessing.AnalyzeRequest\032 .vid" +
-      "eoprocessing.AnalyzeResponse\022W\n\020Assemble" +
-      "RichText\022 .videoprocessing.AssembleReque" +
-      "st\032!.videoprocessing.AssembleResponse\022^\n" +
-      "\017ValidateCVBatch\022$.videoprocessing.CVVal" +
-      "idationRequest\032%.videoprocessing.CVValid" +
-      "ationResponse\022{\n\026ClassifyKnowledgeBatch\022" +
-      "/.videoprocessing.KnowledgeClassificatio" +
-      "nRequest\0320.videoprocessing.KnowledgeClas" +
-      "sificationResponse\022\177\n\030GenerateMaterialRe" +
-      "quests\0220.videoprocessing.GenerateMateria" +
-      "lRequestsRequest\0321.videoprocessing.Gener" +
-      "ateMaterialRequestsResponse\022i\n\022ReleaseCV" +
-      "Resources\022(.videoprocessing.ReleaseResou" +
-      "rcesRequest\032).videoprocessing.ReleaseRes" +
-      "ourcesResponse\022X\n\013HealthCheck\022#.videopro" +
-      "cessing.HealthCheckRequest\032$.videoproces" +
-      "sing.HealthCheckResponseB9\n\034com.mvp.vide" +
-      "oprocessing.grpcB\024VideoProcessingProtoP\001" +
-      "\220\001\001b\006proto3"
+      "ialGeneration\022\021\n\tfull_text\030\006 \001(\t\0225\n\016stab" +
+      "le_islands\030\007 \003(\0132\035.videoprocessing.Stabl" +
+      "eIsland\"i\n\037ActionUnitForMaterialGenerati" +
+      "on\022\n\n\002id\030\001 \001(\005\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end" +
+      "_sec\030\003 \001(\001\022\026\n\016knowledge_type\030\004 \001(\t\"\274\001\n G" +
+      "enerateMaterialRequestsResponse\022\017\n\007succe" +
+      "ss\030\001 \001(\010\022?\n\023screenshot_requests\030\002 \003(\0132\"." +
+      "videoprocessing.ScreenshotRequest\0223\n\rcli" +
+      "p_requests\030\003 \003(\0132\034.videoprocessing.ClipR" +
+      "equest\022\021\n\terror_msg\030\004 \001(\t\"*\n\027ReleaseReso" +
+      "urcesRequest\022\017\n\007task_id\030\001 \001(\t\"r\n\030Release" +
+      "ResourcesResponse\022\017\n\007success\030\001 \001(\010\022\017\n\007me" +
+      "ssage\030\002 \001(\t\022\033\n\023freed_workers_count\030\003 \001(\005" +
+      "\022\027\n\017freed_memory_mb\030\004 \001(\0022\363\007\n\026VideoProce" +
+      "ssingService\022T\n\rDownloadVideo\022 .videopro" +
+      "cessing.DownloadRequest\032!.videoprocessin" +
+      "g.DownloadResponse\022Z\n\017TranscribeVideo\022\"." +
+      "videoprocessing.TranscribeRequest\032#.vide" +
+      "oprocessing.TranscribeResponse\022P\n\rProces" +
+      "sStage1\022\036.videoprocessing.Stage1Request\032" +
+      "\037.videoprocessing.Stage1Response\022Y\n\024Anal" +
+      "yzeSemanticUnits\022\037.videoprocessing.Analy" +
+      "zeRequest\032 .videoprocessing.AnalyzeRespo" +
+      "nse\022W\n\020AssembleRichText\022 .videoprocessin" +
+      "g.AssembleRequest\032!.videoprocessing.Asse" +
+      "mbleResponse\022^\n\017ValidateCVBatch\022$.videop" +
+      "rocessing.CVValidationRequest\032%.videopro" +
+      "cessing.CVValidationResponse\022{\n\026Classify" +
+      "KnowledgeBatch\022/.videoprocessing.Knowled" +
+      "geClassificationRequest\0320.videoprocessin" +
+      "g.KnowledgeClassificationResponse\022\177\n\030Gen" +
+      "erateMaterialRequests\0220.videoprocessing." +
+      "GenerateMaterialRequestsRequest\0321.videop" +
+      "rocessing.GenerateMaterialRequestsRespon" +
+      "se\022i\n\022ReleaseCVResources\022(.videoprocessi" +
+      "ng.ReleaseResourcesRequest\032).videoproces" +
+      "sing.ReleaseResourcesResponse\022X\n\013HealthC" +
+      "heck\022#.videoprocessing.HealthCheckReques" +
+      "t\032$.videoprocessing.HealthCheckResponseB" +
+      "9\n\034com.mvp.videoprocessing.grpcB\024VideoPr" +
+      "ocessingProtoP\001\220\001\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -529,7 +530,7 @@ public final class VideoProcessingProto {
     internal_static_videoprocessing_SemanticUnitForMaterialGeneration_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_SemanticUnitForMaterialGeneration_descriptor,
-        new java.lang.String[] { "UnitId", "KnowledgeType", "StartSec", "EndSec", "ActionUnits", "FullText", });
+        new java.lang.String[] { "UnitId", "KnowledgeType", "StartSec", "EndSec", "ActionUnits", "FullText", "StableIslands", });
     internal_static_videoprocessing_ActionUnitForMaterialGeneration_descriptor =
       getDescriptor().getMessageTypes().get(31);
     internal_static_videoprocessing_ActionUnitForMaterialGeneration_fieldAccessorTable = new

@@ -614,6 +614,7 @@ public class PythonGrpcClient {
         public double endSec;
         public String fullText;
         public List<ActionSegmentResult> actionUnits = new ArrayList<>();
+        public List<StableIslandResult> stableIslands = new ArrayList<>(); // 🚀 CV结果中的稳定岛
     }
     
     public static class ScreenshotRequestDTO {
@@ -664,6 +665,20 @@ public class PythonGrpcClient {
                                     .setStartSec(as.startSec)
                                     .setEndSec(as.endSec)
                                     .setKnowledgeType(as.actionType != null ? as.actionType : "")
+                                    .build()
+                            );
+                        }
+                    }
+                    
+                    // 🚀 添加稳定岛数据
+                    if (unit.stableIslands != null) {
+                        for (StableIslandResult si : unit.stableIslands) {
+                            unitBuilder.addStableIslands(
+                                com.mvp.videoprocessing.grpc.StableIsland.newBuilder()
+                                    .setStartSec(si.startSec)
+                                    .setEndSec(si.endSec)
+                                    .setMidSec(si.midSec)
+                                    .setDurationSec(si.durationSec)
                                     .build()
                             );
                         }

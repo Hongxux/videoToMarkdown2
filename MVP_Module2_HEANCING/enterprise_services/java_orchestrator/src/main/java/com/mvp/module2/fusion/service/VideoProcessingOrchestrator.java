@@ -347,11 +347,15 @@ public class VideoProcessingOrchestrator {
             in.knowledgeType = (String) u.getOrDefault("knowledge_type", "");
             in.fullText = (String) u.getOrDefault("full_text", u.getOrDefault("text", ""));
             
-            // 🚀 Add CV Action Units
+            // 🚀 Add CV Action Units and Stable Islands
             if (cvResults.containsKey(uid)) {
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {
                     in.actionUnits.addAll(cvRes.actionSegments);
+                }
+                // 🚀 关键修复: 传递稳定岛数据
+                if (cvRes.stableIslands != null) {
+                    in.stableIslands.addAll(cvRes.stableIslands);
                 }
             }
             return in;

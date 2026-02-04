@@ -876,16 +876,27 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         "stable_islands": []  # 稍后填充
                     })
                 
+                # 🚀 关键修复: 从 proto 提取 stable_islands
+                stable_islands = []
+                for si in u.stable_islands:
+                    stable_islands.append({
+                        "start_sec": si.start_sec,
+                        "end_sec": si.end_sec,
+                        "mid_sec": si.mid_sec,
+                        "duration_sec": si.duration_sec
+                    })
+                
                 unit = SemanticUnit(
                     unit_id=u.unit_id,
                     knowledge_type=u.knowledge_type,
-                    knowledge_topic=u.title or "未知主题",
+                    knowledge_topic=getattr(u, 'knowledge_topic', None) or getattr(u, 'title', None) or "未知主题",
                     full_text=u.full_text,
                     source_paragraph_ids=[],
                     source_sentence_ids=[],
                     start_sec=u.start_sec,
                     end_sec=u.end_sec,
-                    action_segments=action_segments
+                    action_segments=action_segments,
+                    stable_islands=stable_islands  # 🚀 传入稳定岛
                 )
                 units.append(unit)
             
@@ -916,21 +927,17 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 
             
             # 🚀 V9.0 优化：批量并行截图选择（ProcessPool）
+            # 现在所有类型都从 ValidateCVBatch 获得稳定岛
+            # (process 通过 CV 检测，concrete/abstract 通过先粗后细检测)
             logger.info(f"[{task_id}] Starting parallel screenshot selection...")
-            screenshot_tasks = []  # process 类型：已有稳定岛的任务
-            coarse_fine_units = []  # concrete/abstract 类型：需要先粗后细的任务
+            screenshot_tasks = []
             
             for unit in units:
                 unit_id = unit.unit_id
                 result = filter_results.get(unit_id, {})
                 all_stable_islands = result.get('all_stable_islands', [])
                 
-                # 判断 knowledge_type
-                kt = (unit.knowledge_type or "").lower()
-                is_process = kt in ("process", "过程性", "过程")
-                
-                if all_stable_islands and is_process:
-                    # 🚀 process 类型：CV 已检测稳定岛，使用 select_from_shared_frames
+                if all_stable_islands:
                     for i, island in enumerate(all_stable_islands):
                         # 扩展范围
                         expanded_range = calculator.expand_range(
@@ -945,12 +952,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             "expanded_end": expanded_range['end']
                         })
                 else:
-                    # 🚀 concrete/abstract 类型：需要先粗后细截图选择
-                    coarse_fine_units.append({
+                    # 回退：如果没有稳定岛，使用单元中点
+                    screenshot_tasks.append({
                         "unit_id": unit_id,
-                        "start_sec": float(unit.start_sec),
-                        "end_sec": float(unit.end_sec),
-                        "knowledge_type": unit.knowledge_type
+                        "island_index": 0,
+                        "expanded_start": float(unit.start_sec),
+                        "expanded_end": min(float(unit.end_sec), float(unit.start_sec) + 2.0)
                     })
             
             if screenshot_tasks:
@@ -1010,87 +1017,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 # Step 5: 清理 SharedMemory
                 # FrameRegistry 会自动管理，无需手动清理
                 logger.info(f"[{task_id}] Parallel screenshot selection completed: {len(final_ss)} screenshots")
-            
-            # 🚀 V9.1: 为 concrete/abstract 类型执行先粗后细截图选择
-            if coarse_fine_units:
-                logger.info(f"[{task_id}] Running Coarse-Fine selection for {len(coarse_fine_units)} non-process units...")
-                from cv_worker import run_coarse_fine_screenshot_task
-                
-                # Stage 1: 主进程批量读取粗采样帧
-                COARSE_FPS = 2.0
-                coarse_interval = 1.0 / COARSE_FPS
-                
-                import cv2
-                cap = cv2.VideoCapture(video_path)
-                fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-                total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                
-                coarse_shm_map = {}
-                for cf_unit in coarse_fine_units:
-                    uid = cf_unit["unit_id"]
-                    start_sec = cf_unit["start_sec"]
-                    end_sec = cf_unit["end_sec"]
-                    
-                    frame_map = {}
-                    t = start_sec
-                    while t < end_sec:
-                        frame_idx = int(t * fps)
-                        frame_idx = max(0, min(frame_idx, total_frames - 1))
-                        
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                        ret, frame = cap.read()
-                        
-                        if ret and frame is not None:
-                            self.frame_registry.register_frame(frame_idx, frame)
-                            shm_ref = self.frame_registry.get_shm_ref(frame_idx)
-                            if shm_ref:
-                                frame_map[t] = shm_ref
-                            del frame
-                        
-                        t += coarse_interval
-                    
-                    coarse_shm_map[uid] = frame_map
-                
-                cap.release()
-                
-                # Stage 2: 调度到 Worker
-                loop = asyncio.get_event_loop()
-                cf_futures = []
-                for cf_unit in coarse_fine_units:
-                    uid = cf_unit["unit_id"]
-                    future = loop.run_in_executor(
-                        self.cv_pool,
-                        functools.partial(
-                            run_coarse_fine_screenshot_task,
-                            unit_id=uid,
-                            start_sec=cf_unit["start_sec"],
-                            end_sec=cf_unit["end_sec"],
-                            coarse_shm_frames=coarse_shm_map.get(uid, {}),
-                            coarse_interval=coarse_interval,
-                            fine_shm_frames_by_island=None
-                        )
-                    )
-                    cf_futures.append(future)
-                
-                cf_results = await asyncio.gather(*cf_futures, return_exceptions=True)
-                
-                # Stage 3: 构建 ScreenshotRequest
-                for cf_result in cf_results:
-                    if isinstance(cf_result, Exception):
-                        logger.warning(f"Coarse-Fine exception: {cf_result}")
-                        continue
-                    if not isinstance(cf_result, dict):
-                        continue
-                    
-                    for ss in cf_result.get("screenshots", []):
-                        final_ss.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=f"{cf_result['unit_id']}_island{ss.get('island_index', 0)}",
-                            timestamp_sec=ss.get("timestamp_sec", 0),
-                            label=f"稳定岛{ss.get('island_index', 0)}",
-                            semantic_unit_id=cf_result['unit_id']
-                        ))
-                
-                logger.info(f"[{task_id}] Coarse-Fine selection completed: added screenshots for {len(coarse_fine_units)} units")
             
             logger.info(f"[{task_id}] Generated {len(final_clips)} clips, {len(final_ss)} screenshots")
                 
@@ -1366,6 +1292,87 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         finally:
             cap.release()
     
+    def _batch_read_coarse_frames_to_shm(
+        self, 
+        video_path: str, 
+        units_data: list,
+        coarse_fps: float = 2.0
+    ) -> dict:
+        """
+        🚀 批量读取粗采样帧到 SharedMemory (Thread-Safe, 用于粗采样阶段)
+        
+        Args:
+            units_data: [{"unit_id": str, "start_sec": float, "end_sec": float}, ...]
+            coarse_fps: 粗采样帧率 (默认 2fps)
+        
+        Returns:
+            {unit_id: {timestamp: shm_ref}}
+        """
+        import cv2
+        
+        coarse_interval = 1.0 / coarse_fps
+        coarse_shm_map = {}
+        
+        cap = cv2.VideoCapture(video_path)
+        try:
+            if not cap.isOpened():
+                return {}
+            
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            # 收集所有需要读取的时间戳
+            all_requests = []  # (timestamp, unit_id)
+            for u in units_data:
+                uid = u["unit_id"]
+                start_sec = u["start_sec"]
+                end_sec = u["end_sec"]
+                
+                t = start_sec
+                while t < end_sec:
+                    all_requests.append((t, uid))
+                    t += coarse_interval
+            
+            # 按时间排序优化 seek
+            all_requests.sort(key=lambda x: x[0])
+            
+            # 批量读取
+            valid_refs = {}  # frame_idx -> shm_ref
+            for req_time, uid in all_requests:
+                frame_idx = int(req_time * fps)
+                frame_idx = max(0, min(frame_idx, total_frames - 1))
+                
+                if frame_idx in valid_refs:
+                    # 已读取，复用
+                    if uid not in coarse_shm_map:
+                        coarse_shm_map[uid] = {}
+                    coarse_shm_map[uid][req_time] = valid_refs[frame_idx]
+                    continue
+                
+                # Seek if needed
+                curr = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                if curr != frame_idx:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    self.frame_registry.register_frame(frame_idx, frame)
+                    ref = self.frame_registry.get_shm_ref(frame_idx)
+                    if ref:
+                        valid_refs[frame_idx] = ref
+                        if uid not in coarse_shm_map:
+                            coarse_shm_map[uid] = {}
+                        coarse_shm_map[uid][req_time] = ref
+                    del frame
+            
+            return coarse_shm_map
+            
+        except Exception as e:
+            logger.warning(f"Coarse batch read failed: {e}")
+            return {}
+        finally:
+            cap.release()
+    
     async def _batch_read_frames_for_screenshots(
         self, 
         video_path: str, 
@@ -1507,48 +1514,110 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             logger.info(f"[{task_id}] Dynamic Batch Config: Size={BATCH_SIZE} (Available RAM={avail_gb:.1f}GB)")
             results_data = []
+            cf_results_data = []  # 先粗后细结果
             
             loop = asyncio.get_running_loop()
             
-            for i in range(0, len(all_units_data), BATCH_SIZE):
-                batch_units = all_units_data[i : i + BATCH_SIZE]
-                current_batch_idx = i // BATCH_SIZE + 1
-                logger.info(f"[{task_id}] Processing Batch {current_batch_idx} ({len(batch_units)} units)...")
+            # 🚀 Phase 1: 并行 IO - 同时读取 CV 帧和先粗后细帧
+            logger.info(f"[{task_id}] Starting parallel IO phase...")
+            
+            COARSE_FPS = 2.0
+            coarse_interval = 1.0 / COARSE_FPS
+            
+            # 并行启动两个 IO 任务
+            io_futures = []
+            
+            # IO 任务 1: CV 帧批量读取 (process 类型)
+            if all_units_data:
+                cv_io_future = loop.run_in_executor(
+                    None,
+                    self._batch_read_frames_to_shm,
+                    video_path,
+                    all_units_data
+                )
+                io_futures.append(("cv", cv_io_future))
+            
+            # IO 任务 2: 先粗后细帧批量读取 (concrete/abstract 类型)
+            if skipped_units:
+                cf_io_future = loop.run_in_executor(
+                    None,
+                    self._batch_read_coarse_frames_to_shm,
+                    video_path,
+                    skipped_units,
+                    COARSE_FPS
+                )
+                io_futures.append(("cf", cf_io_future))
+            
+            # 等待所有 IO 完成
+            io_results = {}
+            for io_type, io_future in io_futures:
+                io_results[io_type] = await io_future
+            
+            shm_map = io_results.get("cv", {})
+            coarse_shm_map = io_results.get("cf", {})
+            
+            logger.info(f"[{task_id}] IO phase complete: CV={len(shm_map)} units, CF={len(coarse_shm_map)} units")
+            
+            # 🚀 Phase 2: 并行 Compute - 同时提交所有任务
+            logger.info(f"[{task_id}] Starting parallel compute phase...")
+            
+            all_futures = []  # (类型, future)
+            
+            # Compute 任务 1: CV 验证任务 (process 类型)
+            for unit_data in all_units_data:
+                unit_id = unit_data["unit_id"]
+                shm_frames = shm_map.get(unit_id, None)
                 
-                # 1. IO: Batch Read Frames (Thread Pool)
-                # 使用 run_in_executor 避免阻塞 Asyncio Loop
-                shm_map = await loop.run_in_executor(
-                    None, 
-                    self._batch_read_frames_to_shm, 
-                    video_path, 
-                    batch_units
+                task_func = functools.partial(
+                    run_cv_validation_task,
+                    video_path,
+                    unit_data,
+                    shm_frames
+                )
+                future = loop.run_in_executor(self.cv_process_pool, task_func)
+                all_futures.append(("cv", unit_id, future))
+            
+            # Compute 任务 2: 先粗后细任务 (concrete/abstract 类型)
+            if skipped_units:
+                from cv_worker import run_coarse_fine_screenshot_task
+                
+                for skipped_unit in skipped_units:
+                    uid = skipped_unit["unit_id"]
+                    future = loop.run_in_executor(
+                        self.cv_process_pool,
+                        functools.partial(
+                            run_coarse_fine_screenshot_task,
+                            unit_id=uid,
+                            start_sec=skipped_unit["start_sec"],
+                            end_sec=skipped_unit["end_sec"],
+                            coarse_shm_frames=coarse_shm_map.get(uid, {}),
+                            coarse_interval=coarse_interval,
+                            fine_shm_frames_by_island=None
+                        )
+                    )
+                    all_futures.append(("cf", uid, future))
+            
+            logger.info(f"[{task_id}] Submitted {len(all_futures)} tasks to ProcessPool")
+            
+            # 🚀 Phase 3: 并行等待所有任务完成
+            if all_futures:
+                all_results = await asyncio.gather(
+                    *[f[2] for f in all_futures], 
+                    return_exceptions=True
                 )
                 
-                # 2. CPU: Submit Tasks (Process Pool)
-                futures = []
-                for unit_data in batch_units:
-                    unit_id = unit_data["unit_id"]
-                    shm_frames = shm_map.get(unit_id, None)
-                    
-                    task_func = functools.partial(
-                        run_cv_validation_task,
-                        video_path,
-                        unit_data,
-                        shm_frames
-                    )
-                    futures.append(loop.run_in_executor(self.cv_process_pool, task_func))
-                
-                if futures:
-                    # 并行等待当前批次
-                    batch_results = await asyncio.gather(*futures, return_exceptions=True)
-                    results_data.extend(batch_results)
-                
-                # 3. Memory Guard: Cleanup
-                # SharedMemory 生命周期由 SharedFrameRegistry 管理 (LRU)
-                # 但我们需要强制清理主进程的临时对象和碎片
-                del shm_map
-                del futures
-                gc.collect() # 🚀 Critical for OOM prevention
+                # 分类结果
+                for i, (task_type, unit_id, _) in enumerate(all_futures):
+                    result = all_results[i]
+                    if task_type == "cv":
+                        results_data.append(result)
+                    else:  # cf
+                        cf_results_data.append(result)
+            
+            # Memory Guard
+            del shm_map
+            del coarse_shm_map
+            gc.collect()
             
             # 4. 构建响应
             pb_results = []
@@ -1594,16 +1663,34 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     action_segments=pb_actions
                 ))
             
-            # 🚀 为跳过的单元 (concrete/abstract) 返回空结果
-            # 注意: 实际的先粗后细截图选择在 GenerateMaterialRequests 中执行
-            for skipped_unit in skipped_units:
+            # 🚀 处理先粗后细结果
+            for cf_result in cf_results_data:
+                if isinstance(cf_result, Exception):
+                    logger.error(f"Coarse-Fine task exception: {cf_result}")
+                    continue
+                if not isinstance(cf_result, dict):
+                    continue
+                
+                pb_islands = []
+                for ss in cf_result.get("screenshots", []):
+                    ts = float(ss.get("timestamp_sec", 0))
+                    island_start = float(ss.get("island_start", ts - 0.5))
+                    island_end = float(ss.get("island_end", ts + 0.5))
+                    
+                    pb_islands.append(video_processing_pb2.StableIsland(
+                        start_sec=island_start,
+                        end_sec=island_end,
+                        mid_sec=ts,
+                        duration_sec=island_end - island_start
+                    ))
+                
                 pb_results.append(video_processing_pb2.CVValidationResult(
-                    unit_id=str(skipped_unit.get("unit_id", "")),
-                    stable_islands=[],  # 稳定岛将在 GenerateMaterialRequests 中通过先粗后细方法检测
-                    action_segments=[]  # 非 process 类型没有动作单元
+                    unit_id=str(cf_result.get("unit_id", "")),
+                    stable_islands=pb_islands,
+                    action_segments=[]
                 ))
             
-            logger.info(f"[{task_id}] All Batches Completed. Total Results: {len(pb_results)} (incl. {len(skipped_units)} skipped units)")
+            logger.info(f"[{task_id}] All tasks completed. Total Results: {len(pb_results)} (CV={len(results_data)}, CF={len(cf_results_data)})")
             
             return video_processing_pb2.CVValidationResponse(
                 success=True,
