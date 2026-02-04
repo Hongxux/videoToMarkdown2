@@ -22,6 +22,7 @@ import grpc
 import gc
 import numpy as np
 from grpc import aio
+import functools
 
 # 添加项目路径
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -785,7 +786,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             async def process_unit(u):
                 async with sem:
                     action_segments = [
-                        {"start": au.start_sec, "end": au.end_sec, "id": au.id} 
+                        {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id} 
                         for au in u.action_units
                     ]
                     
@@ -1020,7 +1021,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         continue
                     
                     future = loop.run_in_executor(
-                        self.cv_pool,  # 复用现有的 ProcessPool
+                        self.cv_process_pool,  # 复用现有的 ProcessPool
                         functools.partial(
                             run_screenshot_selection_task,
                             video_path=video_path,

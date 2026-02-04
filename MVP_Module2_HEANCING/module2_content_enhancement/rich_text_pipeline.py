@@ -717,8 +717,8 @@ class RichTextPipeline:
                 # 为每个动作单元准备字幕
                 subtitles = self.subtitles  # 已加载的字幕
                 classification_results = await classifier.classify_batch(
-                    semantic_unit_title=unit.title,
-                    semantic_unit_text=unit.core_text,
+                    semantic_unit_title=getattr(unit, "knowledge_topic", "未知主题"),
+                    semantic_unit_text=getattr(unit, "full_text", ""),
                     action_segments=[
                         {"start": a.get('start_sec', 0), "end": a.get('end_sec', 0), "id": f"action_{i}"}
                         for i, a in enumerate(merged_stage1)
