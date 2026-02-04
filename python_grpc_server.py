@@ -1278,8 +1278,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     async def GenerateMaterialRequests(self, request, context):
         """
         执行逻辑：
-        1) 构建 RichTextPipeline/KnowledgeClassifier/截图范围计算器。
-        2) 将 gRPC 单元转为 SemanticUnit 并执行两阶段合并 + LLM 过滤。
+        1) 构建 RichTextPipeline/截图范围计算器。
+        2) 将 gRPC 单元转为 SemanticUnit 并执行两阶段合并 + 复用 action_units 知识类型过滤。
         3) 为过滤后的动作生成 clip 请求。
         4) 汇总稳定岛，计算截图范围并选择最佳截图。
         5) 更新 semantic_units_phase2a.json 并返回素材请求。
@@ -1300,7 +1300,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         补充说明：
         新架构流程：
         1. 第一阶段合并：动作单元按时间合并（间隔 < 1s）
-        2. LLM 过滤：剔除讲解型/噪声类型
+        2. 基于 action_units 知识类型过滤：剔除讲解型/噪声类型
         3. 第二阶段合并：同类型动作按间隔 < 5s 合并
         4. 全局截图：基于稳定岛范围选择最佳截图"""
         task_id = request.task_id
@@ -1313,7 +1313,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             # 🚀 V9.0: 使用 RichTextPipeline 的两阶段合并逻辑
             from MVP_Module2_HEANCING.module2_content_enhancement.rich_text_pipeline import RichTextPipeline
-            from MVP_Module2_HEANCING.module2_content_enhancement.knowledge_classifier import KnowledgeClassifier
             from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_range_calculator import ScreenshotRangeCalculator
             
             # 初始化组件
@@ -1332,7 +1331,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 step6_path=step6_path,
                 sentence_timestamps_path=sentence_timestamps_path
             )
-            classifier = KnowledgeClassifier()
             # 🚀 Fix: Ensure video_duration is a float
             video_duration = float(request.video_duration) if hasattr(request, 'video_duration') and request.video_duration else 0.0
             calculator = ScreenshotRangeCalculator(video_duration)
@@ -1376,9 +1374,67 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 )
                 units.append(unit)
             
-            # 🚀 核心：两阶段合并 + LLM 分类过滤
-            logger.info(f"[{task_id}] Running two-stage merge + LLM classification...")
-            filter_results = await pipeline._classify_and_filter_actions(units, classifier)
+            # 🚀 核心：两阶段合并 + 复用 action_units 的知识类型（不再二次分类）
+            logger.info(f"[{task_id}] Running two-stage merge with existing action_units knowledge_type...")
+            filter_results = {}
+            STAGE1_GAP_THRESHOLD = 1.0
+            STAGE2_GAP_THRESHOLD = 5.0
+            EXPLAINABLE_TYPES = ['讲解', '概念', '原理', '定义', '背景', '解释', 'Concept', 'Principle', 'explanation']
+            NOISE_TYPES = ['noise', 'transition', '噪点', '转场']
+
+            for unit in units:
+                unit_id = unit.unit_id
+                action_segments = unit.action_segments or []
+                stable_islands = unit.stable_islands or []
+
+                if not action_segments:
+                    # 无动作单元，只用稳定岛生成截图
+                    filter_results[unit_id] = {
+                        'clip_actions': [],
+                        'all_stable_islands': stable_islands,
+                        'crossed_islands_stage1': [],
+                        'crossed_islands_stage2': []
+                    }
+                    continue
+
+                # 第一阶段合并（按时间邻近合并，不改变知识类型）
+                sorted_actions = sorted(action_segments, key=lambda x: x.get('start_sec', 0))
+                merged_stage1, crossed_stage1 = pipeline._merge_actions_local(
+                    sorted_actions, stable_islands, STAGE1_GAP_THRESHOLD
+                )
+
+                # 补齐缺失知识类型：做什么是兜底；为什么是避免误过滤；权衡是可能偏向 unit 级判断
+                for a in merged_stage1:
+                    if not a.get('knowledge_type'):
+                        a['knowledge_type'] = unit.knowledge_type or '过程性知识'
+
+                # 过滤讲解型/噪声类型，仅保留需要视频的动作
+                video_worthy_actions = []
+                for a in merged_stage1:
+                    k_type = str(a.get('knowledge_type', ''))
+                    is_explainable = any(t in k_type for t in EXPLAINABLE_TYPES)
+                    is_noise = any(t in k_type.lower() for t in NOISE_TYPES)
+                    if not is_explainable and not is_noise:
+                        video_worthy_actions.append(a)
+                    else:
+                        logger.debug(f"[{unit_id}] Filtered action [{a.get('start_sec', 0):.1f}s-{a.get('end_sec', 0):.1f}s]: type={k_type}")
+
+                # 第二阶段合并（只对保留的动作合并）
+                merged_stage2, crossed_stage2 = pipeline._merge_actions_local_stage2(
+                    video_worthy_actions, stable_islands, STAGE2_GAP_THRESHOLD
+                )
+
+                # 收集稳定岛用于截图
+                all_stable = pipeline._collect_all_stable_islands_local(
+                    merged_stage2, stable_islands, crossed_stage1, crossed_stage2
+                )
+
+                filter_results[unit_id] = {
+                    'clip_actions': merged_stage2,
+                    'all_stable_islands': all_stable,
+                    'crossed_islands_stage1': crossed_stage1,
+                    'crossed_islands_stage2': crossed_stage2
+                }
             
             # 生成素材请求
             final_ss = []
@@ -1528,6 +1584,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     import json
                     with open(semantic_units_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
+
+                    # 兼容两种结构：列表 or {"semantic_units": [...]}
+                    if isinstance(data, dict):
+                        units_data = data.get("semantic_units", [])
+                    else:
+                        units_data = data
                     
                     # 构建 unit_id -> 素材请求映射
                     unit_ss_map = {}
@@ -1562,7 +1624,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         if u.action_units:
                             unit_action_map[u.unit_id] = [
                                 {
-                                    "id": i,
+                                    "id": au.id if hasattr(au, 'id') else i,
                                     "start_sec": au.start_sec,
                                     "end_sec": au.end_sec,
                                     "action_type": au.action_type,
@@ -1574,7 +1636,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             ]
                     
                     # 更新 JSON 数据
-                    for item in data:
+                    for item in units_data:
                         unit_id = item.get("unit_id", "")
                         
                         # 更新素材请求
@@ -1589,6 +1651,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         
                         # 标记 CV 验证完成
                         item["cv_validated"] = True
+
+                    if isinstance(data, dict):
+                        data["semantic_units"] = units_data
                     
                     # 保存更新后的 JSON
                     with open(semantic_units_path, 'w', encoding='utf-8') as f:

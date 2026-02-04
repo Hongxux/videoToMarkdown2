@@ -59,3 +59,14 @@
 - 预防方案（测试/监控/校验/回滚）：合并前运行编译检查；IDE 启用缺失导入提示。
 - 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java
 - 复盘要点：签名与排序改动要同步检查 import。
+
+## 2026-02-04 material_requests 未写回 semantic_units_phase2a.json
+- 日期：2026-02-04
+- 现象与影响范围：semantic_units_phase2a.json 中所有 material_requests 为空，导致后续对齐困难。
+- 触发条件：文件结构为 dict 或更新逻辑未覆盖到 semantic_units 列表。
+- 根因定位：写回逻辑仅按列表遍历，未兼容 {semantic_units: [...]} 结构，导致更新未生效。
+- 修复措施：写回时兼容列表/字典结构，统一更新 semantic_units 列表。
+- 验证方式：重新生成素材请求后检查 material_requests 中截图/切片条目。
+- 预防方案（测试/监控/校验/回滚）：为语义单元文件增加结构校验；写回后记录条目数量。
+- 相关文件/接口：python_grpc_server.py
+- 复盘要点：跨阶段文件格式必须显式兼容或统一规范。
