@@ -626,7 +626,10 @@ class ScreenshotSelector:
             f2 = cv2.cvtColor(frames[i+1], cv2.COLOR_BGR2GRAY).astype(np.float32)
             mse = np.mean((f1 - f2) ** 2) / (255 * 255)
             mse_values.append(mse)
-        mse_values.append(0.0)
+        if mse_values:
+            mse_values.append(mse_values[-1])
+        else:
+            mse_values.append(0.0)
         
         # 选择最佳帧
         best_score = -1

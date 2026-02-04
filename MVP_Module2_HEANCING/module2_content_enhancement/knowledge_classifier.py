@@ -355,8 +355,8 @@ class KnowledgeClassifier:
         items = []
         avg_len = 0
         for i, action in enumerate(action_segments):
-            start = action.get("start", 0)
-            end = action.get("end", 0)
+            start = action.get("start_sec", 0)
+            end = action.get("end_sec", 0)
             subs = self._get_subtitles_in_range(start, end)
 
             avg_len += len(subs)

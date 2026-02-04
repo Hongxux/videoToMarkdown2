@@ -187,3 +187,47 @@ Java 端利用 **Streaming RPC 的本质（长连接 + 分块传输）** 以及 
 2.  **超大规模并发**：例如单机需要同时处理 1000+ 个视频流，此时 Blocking Thread 模型会导致 JVM 线程资源耗尽。
 
 **决策总结**：在这个场景下，引入 Flux 就像 **“开着法拉利去超市买菜”**。简单的 **“电动车” (Iterator + Loop)** 才是轻量、高效且易维护的最优解。
+
+---
+
+## 7. 踩坑记录：线程饥饿与专用 IO 线程池 (Thread Starvation & Dedicated IO Pool)
+
+### 7.1 问题现象 (The Idle Bubble)
+在上线 Server Streaming 架构后，我们观察到一个反直觉的现象：
+*   **现象**: Python 端的日志显示流式响应正常且快速 (Stage 1)，但在开始发送数据后，系统出现了约 20 秒的 **"全系统空闲" (Idle Gap)**，CPU 使用率骤降，没有任何任务在执行。
+*   **矛盾**: 理论上流式响应应该让后续任务 (LLM分类) 立即启动，为何会停顿？
+
+### 7.2 根本原因 (Root Cause Analysis)
+经过排查，问题出在 **Java 8 `CompletableFuture` 的默认线程池机制**与 **阻塞式 gRPC 调用** 的冲突上。
+
+1.  **ForkJoinPool.commonPool() 的局限**: 
+    当使用 `CompletableFuture.supplyAsync()` 而不指定线程池时，默认使用 `ForkJoinPool.commonPool()`。该池的核心线程数通常等于 CPU 核心数 (例如 16)。
+2.  **Streaming 的连锁反应**: 
+    `ValidateCVBatch` 的流式回调会极快地产生大量 (例如 20-30 个) `ClassifyKnowledgeBatch` 任务。
+3.  **阻塞式占坑**: 
+    这些分类任务内部调用了 gRPC (IO 操作)，并**阻塞等待**响应 (为了流控或重试)。
+4.  **死锁/饥饿 (Starvation)**: 
+    这 16 个核心线程迅速被前 16 个分类任务占满并阻塞住。此时，`commonPool` 已无可用线程。
+    *   **关键点**: gRPC 的底层网络回调、新的 `supplyAsync` 提交、甚至某些系统级操作都需要申请 `commonPool` 的线程。
+    *   **结果**: 系统进入假死状态，直到第一批 gRPC 超时或完成，释放出线程，由于 IO 阻塞导致 CPU 利用率为 0。
+
+### 7.3 解决方案 (Solution)
+**原则**: 永远不要在计算密集型的 `ForkJoinPool` 中运行阻塞式 IO 任务。
+
+我们在 `KnowledgeClassificationOrchestrator` 中引入了 **专用的 IO 线程池 (CachedThreadPool)**：
+
+```java
+// 🚀 Dedicated IO Executor to prevent ForkJoinPool starvation
+private final ExecutorService ioExecutor = Executors.newCachedThreadPool();
+
+// 在提交任务时显式指定线程池
+return CompletableFuture.supplyAsync(() -> {
+    // 阻塞式 gRPC 调用
+    return grpcClient.classifyKnowledgeBatchAsync(...).join();
+}, ioExecutor); // <--- 指定 ioExecutor
+```
+
+**效果**:
+*   `ioExecutor` 会为每个阻塞的任务创建一个新线程 (Cached)，不会占用 `commonPool` 的宝贵资源。
+*   `commonPool` 保持空闲，可用于处理 CPU 计算、回调触发和任务调度。
+*   **Idle Bubble 消失**，即使在大量并发 IO 任务下，系统依然能保持顺滑的流式处理。

@@ -48,6 +48,9 @@ public class KnowledgeClassificationOrchestrator {
     // Circuit Breaker for LLM
     private final CircuitBreaker circuitBreaker;
     
+    // 🚀 Dedicated IO Executor to prevent ForkJoinPool starvation
+    private final java.util.concurrent.ExecutorService ioExecutor;
+    
     public KnowledgeClassificationOrchestrator() {
         CircuitBreakerConfig config = CircuitBreakerConfig.custom()
             .failureRateThreshold(50)
@@ -55,6 +58,9 @@ public class KnowledgeClassificationOrchestrator {
             .slidingWindowSize(10)
             .build();
         this.circuitBreaker = CircuitBreakerRegistry.of(config).circuitBreaker("llmClassification");
+        
+        // Use a cached pool for IO-bound blocking gRPC calls
+        this.ioExecutor = java.util.concurrent.Executors.newCachedThreadPool();
     }
     
     /**
@@ -129,7 +135,7 @@ public class KnowledgeClassificationOrchestrator {
             } finally {
                 semaphore.release();
             }
-        });
+        }, ioExecutor);
     }
     
     private List<KnowledgeResultItem> loadFromCache(String taskId, String path) {

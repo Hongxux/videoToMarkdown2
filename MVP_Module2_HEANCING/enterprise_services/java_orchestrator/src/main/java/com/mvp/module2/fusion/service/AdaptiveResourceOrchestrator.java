@@ -18,8 +18,8 @@ public class AdaptiveResourceOrchestrator {
     
     // 资源定义: 上限设为物理核心数，但初始只给一半，实行保守启动
     private final int MAX_PHYSICAL_CORES = Runtime.getRuntime().availableProcessors();
-    // 初始保守并发: 核心数的一半 (至少2)
-    private int currentTargetConcurrency = Math.max(2, MAX_PHYSICAL_CORES / 2);
+    // 初始并发: 默认跑满物理核心 (相信 Python 端的 ProcessPool 调度能力)
+    private int currentTargetConcurrency = Math.max(4, MAX_PHYSICAL_CORES);
     
     private final OperatingSystemMXBean osBean;
     private final Semaphore computePool;

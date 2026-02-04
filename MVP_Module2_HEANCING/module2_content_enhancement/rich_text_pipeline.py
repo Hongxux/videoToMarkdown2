@@ -1127,16 +1127,16 @@ class RichTextPipeline:
                 current = action_segments[0].copy()
                 
                 for next_action in action_segments[1:]:
-                    gap = next_action.get("start", 0) - current.get("end", 0)
+                    gap = next_action.get("start_sec", 0) - current.get("end_sec", 0)
                     
                     if gap < 1.0:  # 间隔小于1秒，合并
                         # 扩展当前动作的结束时间
-                        current["end"] = next_action.get("end", current.get("end", 0))
+                        current["end_sec"] = next_action.get("end_sec", current.get("end_sec", 0))
                         # 合并内部稳定岛
                         current_islands = current.get("internal_stable_islands", [])
                         next_islands = next_action.get("internal_stable_islands", [])
                         current["internal_stable_islands"] = current_islands + next_islands
-                        logger.info(f"Merged actions: gap={gap:.2f}s → [{current['start']:.1f}s-{current['end']:.1f}s]")
+                        logger.info(f"Merged actions: gap={gap:.2f}s → [{current['start_sec']:.1f}s-{current['end_sec']:.1f}s]")
                     else:
                         merged_actions.append(current)
                         current = next_action.copy()
@@ -1149,16 +1149,15 @@ class RichTextPipeline:
                 action_segments = merged_actions
             
             # 🚀 批量并行分类 (优化速度)
-            batch_classifications = self._knowledge_classifier.classify_batch(
-                semantic_unit_title=unit.knowledge_topic,
+            batch_classifications = await self._knowledge_classifier.classify_batch(
+                semantic_unit_title=getattr(unit, 'knowledge_topic', '未知主题'),
                 semantic_unit_text=getattr(unit, 'full_text', getattr(unit, 'text', '')),
-                action_segments=action_segments,
-                subtitles=self.subtitles
+                action_segments=action_segments
             )
             
             for i, (action, classification) in enumerate(zip(action_segments, batch_classifications)):
-                action_start = action.get("start", unit.start_sec)
-                action_end = action.get("end", unit.end_sec)
+                action_start = action.get("start_sec", unit.start_sec)
+                action_end = action.get("end_sec", unit.end_sec)
                 action_type = action.get("type", "K4_operation")
                 
                 # 获取该动作单元内部的稳定岛
@@ -1307,7 +1306,7 @@ class RichTextPipeline:
         for action in action_segments:
             if "classification" in action:
                 action_classifications.append({
-                    "time_range": [action.get("start", 0), action.get("end", 0)],
+                    "time_range": [action.get("start_sec", 0), action.get("end_sec", 0)],
                     **action["classification"]
                 })
         materials.action_classifications = action_classifications
@@ -1341,10 +1340,10 @@ class RichTextPipeline:
             current = action_segments[0].copy()
             
             for next_action in action_segments[1:]:
-                gap = next_action.get("start", 0) - current.get("end", 0)
+                gap = next_action.get("start_sec", 0) - current.get("end_sec", 0)
                 
                 if gap < 1.0:
-                    current["end"] = next_action.get("end", current.get("end", 0))
+                    current["end_sec"] = next_action.get("end_sec", current.get("end_sec", 0))
                     current_islands = current.get("internal_stable_islands", [])
                     next_islands = next_action.get("internal_stable_islands", [])
                     current["internal_stable_islands"] = current_islands + next_islands
@@ -1358,16 +1357,15 @@ class RichTextPipeline:
         if action_segments:
             # 🚀 批量并行分类 (优化速度)
             batch_classifications = await self._knowledge_classifier.classify_batch(
-                semantic_unit_title=unit.knowledge_topic,
+                semantic_unit_title=getattr(unit, 'knowledge_topic', '未知主题'),
                 semantic_unit_text=getattr(unit, 'full_text', getattr(unit, 'text', '')),
-                action_segments=action_segments,
-                subtitles=self.subtitles
+                action_segments=action_segments
             )
 
             # ==== 有动作单元 ====
             for i, (action, classification) in enumerate(zip(action_segments, batch_classifications)):
-                action_start = action.get("start", unit.start_sec)
-                action_end = action.get("end", unit.end_sec)
+                action_start = action.get("start_sec", unit.start_sec)
+                action_end = action.get("end_sec", unit.end_sec)
                 action_internal_islands = action.get("internal_stable_islands", [])
                 
                 # 💥 句子边界对齐

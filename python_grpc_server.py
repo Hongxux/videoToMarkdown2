@@ -20,6 +20,7 @@ from typing import Optional, List, Dict
 
 import grpc
 import gc
+import numpy as np
 from grpc import aio
 
 # 添加项目路径
@@ -879,8 +880,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 action_segments = []
                 for au in u.action_units:
                     action_segments.append({
-                        "start": au.start_sec,
-                        "end": au.end_sec,
+                        "start_sec": au.start_sec,
+                        "end_sec": au.end_sec,
                         "knowledge_type": au.knowledge_type,
                         "stable_islands": []  # 稍后填充
                     })

@@ -45,7 +45,8 @@ public class CVValidationOrchestrator {
     private final CircuitBreaker circuitBreaker;
     private final Retry retry;
     
-    // 每批次处理的单元数 (设为1实现细粒度控制)
+    // 每批次处理的单元数 (强制设为1，配合流式响应实现最大化并行度)
+    // 解释: 只有当 batchSize=1 时，Java端的 semaphore 释放粒度才能与 Python 端的 ProcessPool完成粒度完全对齐。
     private static final int DEFAULT_BATCH_SIZE = 1;
     // 单批次超时秒数
     private static final int BATCH_TIMEOUT_SEC = 6000;  // 单个 unit 最多 10 分钟
@@ -95,12 +96,12 @@ public class CVValidationOrchestrator {
             List<SemanticUnitInput> units,
             String outputDir) {
         
+        Map<String, CVValidationUnitResult> resultMap = new ConcurrentHashMap<>();
+        
         List<CompletableFuture<Boolean>> futures = validateBatchesAsync(taskId, videoPath, units, outputDir, unitResult -> {
             resultMap.put(unitResult.unitId, unitResult);
         });
         if (futures == null) return Collections.emptyMap();
-
-        Map<String, CVValidationUnitResult> resultMap = new ConcurrentHashMap<>();
         try {
             CompletableFuture<Void> allFutures = CompletableFuture.allOf(
                 futures.toArray(new CompletableFuture[0])
