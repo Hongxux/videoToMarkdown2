@@ -147,6 +147,9 @@ public class VideoProcessingOrchestrator {
             unitsList = list != null ? list : new ArrayList<>();
         }
             
+            // 🚀 Enrich units with subtitles (since SemanticSegmenter cache doesn't have them)
+            enrichUnitsWithSubtitles(unitsList, s1.step2JsonPath);
+            
             // 5. 🚀 STAGED PARALLEL PIPELINE: 
             // - For Dynamic Units: CV -> Classify (Sequential)
             // - For Static Units: Classify (Immediate Parallel)
@@ -376,18 +379,10 @@ public class VideoProcessingOrchestrator {
             // 🚀 V7.6: Always update top-level knowledge_type first
             // This ensures Phase 2B Python pipeline sees the correct classification 
             // even if CV modality is screenshot (no actions) or other edge cases.
-            if (classMap.containsKey(uid)) {
-                Map<Integer, KnowledgeResultItem> unitRes = classMap.get(uid);
-                String bestType = null;
-                // Prefer Action-1, then Action-0, then any
-                if (unitRes.containsKey(1)) bestType = unitRes.get(1).knowledgeType;
-                else if (unitRes.containsKey(0)) bestType = unitRes.get(0).knowledgeType;
-                else if (!unitRes.isEmpty()) bestType = unitRes.values().iterator().next().knowledgeType;
-                
-                if (bestType != null) {
-                    unit.put("knowledge_type", bestType);
-                }
-            }
+            // 🚀 V7.8: Do NOT overwrite Unit-Level knowledge_type with Action-Level classification.
+            // The LLM results are specific to individual actions (e.g. "Explainer" action within "Process" unit).
+            // We should trust the Unit Type from Stage 1 (Segmentation) or explicit Unit classification (if added later).
+            // if (classMap.containsKey(uid)) { ... } // REMOVED
             
             // 1. Update CV results (Sync structure with Python expectation)
             if (cvResults.containsKey(uid)) {
@@ -438,6 +433,51 @@ public class VideoProcessingOrchestrator {
         }
     }
     
+    private void enrichUnitsWithSubtitles(List<Map<String, Object>> units, String step2Path) {
+        try {
+            File s2File = new File(step2Path);
+            if (!s2File.exists()) {
+                logger.warn("Step 2 JSON not found at {}, skipping subtitle enrichment", step2Path);
+                return;
+            }
+            JsonNode root = objectMapper.readTree(s2File);
+            JsonNode subsNode = root.path("output").path("corrected_subtitles");
+            List<Map<String, Object>> allSubtitles = new ArrayList<>();
+            
+            if (subsNode.isArray()) {
+                for (JsonNode node : subsNode) {
+                    Map<String, Object> sub = new HashMap<>();
+                    sub.put("start_sec", node.get("start_sec").asDouble());
+                    sub.put("end_sec", node.get("end_sec").asDouble());
+                    sub.put("text", node.get("corrected_text").asText());
+                    allSubtitles.add(sub);
+                }
+            }
+            
+            // Assign to units based on time overlap
+            for (Map<String, Object> unit : units) {
+                double uStart = parseDouble(unit.getOrDefault("start_sec", unit.get("timestamp_start")), 0.0);
+                double uEnd = parseDouble(unit.getOrDefault("end_sec", unit.get("timestamp_end")), 0.0);
+                
+                List<Map<String, Object>> unitSubs = new ArrayList<>();
+                for (Map<String, Object> sub : allSubtitles) {
+                    double sStart = (double) sub.get("start_sec");
+                    double sEnd = (double) sub.get("end_sec");
+                    
+                    // Check overlap: max(start) < min(end)
+                    if (Math.max(uStart, sStart) < Math.min(uEnd, sEnd)) {
+                        unitSubs.add(sub);
+                    }
+                }
+                unit.put("subtitles", unitSubs);
+            }
+            logger.info("Enriched {} units with subtitles from Step 2", units.size());
+            
+        } catch (Exception e) {
+            logger.error("Failed to enrich units with subtitles", e);
+        }
+    }
+
     private void updateProgress(String taskId, double progress, String message) {
         if (progressCallback != null) progressCallback.onProgress(taskId, progress, message);
         logger.info("[{}] {} ({}%)", taskId, message, (int)(progress * 100));

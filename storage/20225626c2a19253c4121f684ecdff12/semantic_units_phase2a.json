@@ -11,6 +11,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot项目介绍与热度",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -30,6 +31,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "作者背景与创业故事",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -49,6 +51,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot产品功能与特性",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -68,6 +71,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot项目热度与影响",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -87,11 +91,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "项目安装环境说明",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 65.0000000000001,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文主要介绍了项目安装的兼容性（Mac/Linux/Windows/WSL/树莓派）和资源消耗情况，属于对安装环境的概括性介绍和解释，不包含具体的操作步骤、因果推演或配置命令。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文主要介绍了项目安装的平台兼容性（Mac、Linux、Windows WSL、树莓派），并解释了原因（不运行大模型则资源消耗低）。这属于对安装环境的背景介绍和解释，没有包含具体的安装步骤、操作指令、因果推演或配置命令。因此，归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -99,7 +104,7 @@
   }, {
     "end_sec" : 74.40000000000023,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文主要介绍了项目安装的兼容性（Mac/Linux/Windows/WSL/树莓派）和资源消耗情况，属于对安装环境的概括性介绍和解释，不包含具体的操作步骤、因果推演或配置命令。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文主要介绍了项目安装的平台兼容性（Mac、Linux、Windows WSL、树莓派），并解释了原因（不运行大模型则资源消耗低）。这属于对安装环境的背景介绍和解释，没有包含具体的安装步骤、操作指令、因果推演或配置命令。因此，归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -107,7 +112,7 @@
   }, {
     "end_sec" : 82.0,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文主要介绍了项目安装的兼容性（Mac/Linux/Windows/WSL/树莓派）和资源消耗情况，属于对安装环境的概括性介绍和解释，不包含具体的操作步骤、因果推演或配置命令。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文主要介绍了项目安装的平台兼容性（Mac、Linux、Windows WSL、树莓派），并解释了原因（不运行大模型则资源消耗低）。这属于对安装环境的背景介绍和解释，没有包含具体的安装步骤、操作指令、因果推演或配置命令。因此，归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -129,24 +134,17 @@
     "screenshot_requests" : [ ],
     "clip_requests" : [ ]
   },
-  "knowledge_type" : "讲解型",
+  "knowledge_type" : "环境配置",
+  "knowledge_topic" : "Mac安装与配置启动",
   "cv_validated" : true,
   "action_units" : [ {
-    "end_sec" : 83.00000000000001,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其内容可能对应视频中的操作演示，但缺乏具体的动作描述或步骤说明，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 82.4
-  }, {
-    "end_sec" : 86.00000000000003,
+    "end_sec" : 86.0,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其内容可能对应视频中的操作演示，但缺乏具体的动作描述或步骤说明，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元描述了在特定操作系统（Mac）上运行软件的方法，核心是使用“一键安装脚本”来自动下载内容并启动配置过程。这明确涉及软件的安装和环境准备，包含“执行”脚本这一配置命令，符合环境配置类型的判定标准。",
     "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
+    "knowledge_type" : "环境配置",
     "id" : 0,
-    "start_sec" : 84.00000000000003
+    "start_sec" : 84.3333333333333
   } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -165,11 +163,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "Quickstart模式选择供应商",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 93.60000000000005,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、推理或配置命令的情况下，应归类为讲解型。其可能伴随画面展示或口头讲解，但文本信息不足以判定为其他类型。",
+    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、推理或配置命令的情况下，应归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -177,7 +176,7 @@
   }, {
     "end_sec" : 99.40000000000008,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、推理或配置命令的情况下，应归类为讲解型。其可能伴随画面展示或口头讲解，但文本信息不足以判定为其他类型。",
+    "reasoning" : "该动作单元无字幕，无法提取具体描述性内容。根据分析框架，在缺乏明确步骤、操作、推理或配置命令的情况下，应归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -200,11 +199,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "选择Channel与iMessage配置",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 114.20000000000009,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了选择Channel（如iMessage）的意图、原因（对国内用户其他工具更麻烦）以及后续计划（稍后补充配置）。这属于对操作意图、原因和未来计划的说明，没有包含具体的操作步骤、因果推演、操作动词或配置命令。因此，判定为讲解型知识。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了选择Channel（如iMessage）的意图、原因（国内用户使用其他工具麻烦）以及后续配置的预告。这属于对操作背景、原因和后续计划的解释说明，不包含具体的操作步骤、因果推演或配置命令。因此，归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -227,11 +227,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "工具选择与基本配置",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 116.00000000000003,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但未提供具体的操作步骤、因果推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，应归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但该单元本身未展示任何具体步骤、操作、逻辑推理或配置命令，属于对整体流程的概括性说明，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -239,7 +240,7 @@
   }, {
     "end_sec" : 121.60000000000011,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但未提供具体的操作步骤、因果推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，应归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但该单元本身未展示任何具体步骤、操作、逻辑推理或配置命令，属于对整体流程的概括性说明，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -247,7 +248,7 @@
   }, {
     "end_sec" : 123.60000000000014,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但未提供具体的操作步骤、因果推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，应归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了工具选择、安装和配置的通用流程，但该单元本身未展示任何具体步骤、操作、逻辑推理或配置命令，属于对整体流程的概括性说明，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -270,31 +271,24 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "首次进入命名设置",
   "cv_validated" : true,
   "action_units" : [ {
-    "end_sec" : 129.66666666666663,
+    "end_sec" : 129.0,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了首次进入系统时的命名过程，属于对过去事件的描述性讲解，不含步骤、操作、推演或配置命令。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了用户首次进入系统时，为系统和自己命名的过程，这是一个叙述性的描述，不包含任何步骤、操作、因果推理或配置命令。因此，它属于对事件或状态的讲解。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
-    "start_sec" : 125.66666666666664
+    "start_sec" : 125.70000000000003
   }, {
-    "end_sec" : 132.00000000000006,
+    "end_sec" : 131.79999999999984,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了首次进入系统时的命名过程，属于对过去事件的描述性讲解，不含步骤、操作、推演或配置命令。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了用户首次进入系统时，为系统和自己命名的过程，这是一个叙述性的描述，不包含任何步骤、操作、因果推理或配置命令。因此，它属于对事件或状态的讲解。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
-    "start_sec" : 131.33333333333337
-  }, {
-    "end_sec" : 134.0,
-    "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。上下文描述了首次进入系统时的命名过程，属于对过去事件的描述性讲解，不含步骤、操作、推演或配置命令。",
-    "confidence" : 0.9,
-    "knowledge_type" : "讲解型",
-    "id" : 0,
-    "start_sec" : 133.66666666666677
+    "start_sec" : 131.19999999999987
   } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -313,11 +307,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "使用终端和WebUI操作",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 141.19999999999982,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述和对比，但本单元本身没有提供任何具体的步骤、操作、逻辑推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，缺省归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述，但本单元本身不包含任何具体的步骤、操作、推理或配置命令，无法归类为其他类型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -325,7 +320,7 @@
   }, {
     "end_sec" : 143.59999999999968,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述和对比，但本单元本身没有提供任何具体的步骤、操作、逻辑推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，缺省归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述，但本单元本身不包含任何具体的步骤、操作、推理或配置命令，无法归类为其他类型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -333,7 +328,7 @@
   }, {
     "end_sec" : 149.49999999999955,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述和对比，但本单元本身没有提供任何具体的步骤、操作、逻辑推理或配置命令。因此，无法归类为过程性知识、推演、实操或环境配置，缺省归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间戳。根据上下文，其前后内容为对工具使用方式的描述，但本单元本身不包含任何具体的步骤、操作、推理或配置命令，无法归类为其他类型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -356,11 +351,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "安装和配置iMessage CLI工具",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 155.79999999999978,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述。根据上下文，其内容可能延续前文关于iMessage配置的说明，但缺乏具体步骤、操作、逻辑或配置命令，因此归类为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了使用iMessage需要安装CLI工具、可通过Brew安装、Cloudbot可自动安装配置并重启等背景信息，但未在ID:0的时间段内呈现具体的步骤序列、因果推理、操作指令或配置命令。因此，根据缺省规则，归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -368,7 +364,7 @@
   }, {
     "end_sec" : 163.99999999999932,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，无法提取具体描述。根据上下文，其内容可能延续前文关于iMessage配置的说明，但缺乏具体步骤、操作、逻辑或配置命令，因此归类为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了使用iMessage需要安装CLI工具、可通过Brew安装、Cloudbot可自动安装配置并重启等背景信息，但未在ID:0的时间段内呈现具体的步骤序列、因果推理、操作指令或配置命令。因此，根据缺省规则，归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -391,11 +387,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "实操",
+  "knowledge_topic" : "Mac系统权限配置和测试",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 169.9999999999999,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元虽无字幕，但根据其紧邻的上下文（‘需要进入到隐私与安全里，打开这个完全磁盘访问权限’）可以推断，用户正在执行一个具体的操作。该操作涉及在Mac系统设置中导航并修改权限，符合‘操作动词+对象’（如点击、打开）的实操判定标准。",
+    "reasoning" : "该动作单元虽然没有字幕，但结合全局上下文（‘这里需要进入到隐私与安全里，打开这个完全磁盘访问权限’）可以推断，用户正在执行具体的系统操作。这些操作通常涉及导航菜单、点击按钮等，符合‘操作动词+对象’的实操判定标准。",
     "confidence" : 0.9,
     "knowledge_type" : "实操",
     "id" : 0,
@@ -403,7 +400,7 @@
   }, {
     "end_sec" : 176.09999999999974,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元虽无字幕，但根据其紧邻的上下文（‘需要进入到隐私与安全里，打开这个完全磁盘访问权限’）可以推断，用户正在执行一个具体的操作。该操作涉及在Mac系统设置中导航并修改权限，符合‘操作动词+对象’（如点击、打开）的实操判定标准。",
+    "reasoning" : "该动作单元虽然没有字幕，但结合全局上下文（‘这里需要进入到隐私与安全里，打开这个完全磁盘访问权限’）可以推断，用户正在执行具体的系统操作。这些操作通常涉及导航菜单、点击按钮等，符合‘操作动词+对象’的实操判定标准。",
     "confidence" : 0.9,
     "knowledge_type" : "实操",
     "id" : 0,
@@ -426,6 +423,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "iMessage账号配置提醒",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -445,11 +443,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "开发功能实现流程",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 186.89999999999998,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其前后内容均为讲解如何使用工具进行开发，但本单元本身无具体描述、步骤或操作，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -457,7 +456,7 @@
   }, {
     "end_sec" : 192.5999999999995,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其前后内容均为讲解如何使用工具进行开发，但本单元本身无具体描述、步骤或操作，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -465,7 +464,7 @@
   }, {
     "end_sec" : 197.39999999999924,
     "action_type" : "mixed",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其前后内容均为讲解如何使用工具进行开发，但本单元本身无具体描述、步骤或操作，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -473,7 +472,7 @@
   }, {
     "end_sec" : 203.1999999999989,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，它可能对应视频中的演示或过渡画面，但缺乏具体的描述、步骤、操作或逻辑推理，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
+    "reasoning" : "该动作单元无字幕，仅包含时间信息。根据上下文，其前后内容均为讲解如何使用工具进行开发，但本单元本身无具体描述、步骤或操作，无法归类为过程性知识、推演、实操或环境配置。因此，根据缺省规则，归为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -496,6 +495,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "AI代码责任提醒",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -515,11 +515,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "语音总结和邮件发送流程",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 223.4999999999995,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述的是一个功能示例（语音自动总结、拆分、发邮件、设提醒），属于对系统功能的介绍和展示，没有包含具体的操作步骤、因果推理、配置命令或用户执行的动作。因此，它属于知识或功能的讲解。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了一个AI助手自动处理语音、总结、拆分、发送邮件和设置提醒的功能示例。此单元没有展示具体的操作步骤、因果推理或配置命令，仅作为整体功能描述的一部分，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -527,7 +528,7 @@
   }, {
     "end_sec" : 229.799999999999,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述的是一个功能示例（语音自动总结、拆分、发邮件、设提醒），属于对系统功能的介绍和展示，没有包含具体的操作步骤、因果推理、配置命令或用户执行的动作。因此，它属于知识或功能的讲解。",
+    "reasoning" : "该动作单元无字幕，仅依赖全局上下文。全局上下文描述了一个AI助手自动处理语音、总结、拆分、发送邮件和设置提醒的功能示例。此单元没有展示具体的操作步骤、因果推理或配置命令，仅作为整体功能描述的一部分，因此归类为讲解型。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -550,6 +551,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "process",
+  "knowledge_topic" : "配置邮箱SMTP的提醒",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -569,6 +571,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot效果评估与使用建议",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -588,6 +591,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot本地模型使用建议",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -607,11 +611,12 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "讲解型",
+  "knowledge_topic" : "本地模型配置与执行方法",
   "cv_validated" : true,
   "action_units" : [ {
     "end_sec" : 272.39999999999975,
     "action_type" : "knowledge",
-    "reasoning" : "该动作单元描述了在拥有本地模型后，用户可以在Cloudbot中进行配置或通过指令让Cloudbot自行修改。这是一个概括性的功能说明，没有包含具体的操作步骤（如点击哪里、输入什么命令）、因果推理或环境配置细节。因此，它属于对可能操作的讲解，而非具体的实操、推演或配置过程。",
+    "reasoning" : "该动作单元描述了在拥有本地模型后，用户可以在Cloudbot中进行配置或通过指令让其自行修改。这是一个概括性的功能说明，没有包含具体的操作步骤（如点击哪里、输入什么命令）、因果推理或环境配置细节。因此，它属于对系统功能或可能性的讲解。",
     "confidence" : 0.9,
     "knowledge_type" : "讲解型",
     "id" : 0,
@@ -634,6 +639,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot架构解析引入",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -653,6 +659,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "concrete",
+  "knowledge_topic" : "Cloudbot架构图解析",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -672,6 +679,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Agent Runtime的功能与作用",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -691,6 +699,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot的Tools和Skills扩展",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -710,6 +719,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "长期记忆机制的原理",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -729,6 +739,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "个人对开源项目的评价",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -748,6 +759,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot的服务概念与优势",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -767,6 +779,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "Cloudbot的接入方式优势",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
@@ -786,6 +799,7 @@
     "clip_requests" : [ ]
   },
   "knowledge_type" : "abstract",
+  "knowledge_topic" : "长期记忆与定时任务的潜力",
   "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
