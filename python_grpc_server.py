@@ -1,11 +1,15 @@
 """
-Python gRPC Server for Video Processing
-
-🔑 V2 架构: 支持 Java-Python 分层协作
-- 全局单例资源管理
-- Phase2A: analyze_only (语义分析)
-- Phase2B: assemble_only (富文本组装)
-"""
+模块说明：Python gRPC 服务端，承接 Java 编排请求并驱动视频处理流水线。
+执行逻辑：
+1) 暴露下载、转写、Stage1、Phase2A/2B、CV 验证等 gRPC 接口。
+2) 统一输出目录到 storage/{hash}，集中管理中间产物。
+3) 管理全局资源与并行执行（ProcessPool + SharedMemory）。
+实现方式：grpc.aio + RichTextPipeline + CVKnowledgeValidator + SharedFrameRegistry。
+核心价值：打通 Java-Python 调用链，集中资源管理与缓存复用。
+输入：
+- gRPC 请求参数（视频路径/URL、配置路径、任务数据）。
+输出：
+- gRPC 响应/流式结果与落盘文件路径。"""
 
 import os
 import sys
@@ -15,8 +19,13 @@ import asyncio
 import threading
 import psutil
 import traceback
+import time
+import hashlib
+import shutil
 from concurrent import futures
 from typing import Optional, List, Dict
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 import grpc
 import gc
@@ -61,6 +70,159 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# 输出目录统一规则
+# =============================================================================
+
+def _is_http_url(value: str) -> bool:
+    """
+    执行逻辑：
+    1) 判空并统一小写。
+    2) 判断是否以 http:// 或 https:// 开头。
+    实现方式：字符串前缀匹配。
+    核心价值：区分远程 URL 与本地路径，避免错误处理。
+    决策逻辑：
+    - 条件：not value
+    - 条件：value.startswith("http://") or value.startswith("https://")
+    依据来源（证据链）：
+    - 输入参数：value。
+    输入参数：
+    - value: URL 或路径字符串（类型：str）。
+    输出参数：
+    - bool：是否为 http/https URL。
+    """
+    if not value:
+        return False
+    lower = value.lower()
+    return lower.startswith("http://") or lower.startswith("https://")
+
+
+def _normalize_local_video_path(video_path: str) -> str:
+    """
+    执行逻辑：
+    1) 为空则直接返回。
+    2) 处理 file:// URL 并转换为本地绝对路径。
+    3) 其他路径统一转为绝对路径。
+    实现方式：urlparse + url2pathname + os.path.abspath。
+    核心价值：保证路径规范化，便于 hash 与缓存复用。
+    决策逻辑：
+    - 条件：not video_path
+    - 条件：video_path 以 file:// 开头
+    - 条件：parsed.netloc 非空时转为 UNC 路径
+    依据来源（证据链）：
+    - 输入参数：video_path。
+    - URL 字段：parsed.netloc、parsed.path。
+    输入参数：
+    - video_path: 本地路径或 file:// URL（类型：str）。
+    输出参数：
+    - 规范化后的绝对路径字符串。
+    """
+    if not video_path:
+        return video_path
+    lower = video_path.lower()
+    if lower.startswith("file://"):
+        parsed = urlparse(video_path)
+        path = url2pathname(parsed.path)
+        if parsed.netloc and parsed.netloc not in ("", "localhost"):
+            path = f"//{parsed.netloc}{path}"
+        return os.path.abspath(path)
+    return os.path.abspath(video_path)
+
+
+def _normalize_output_dir(video_path: str) -> str:
+    """
+    执行逻辑：
+    1) 计算 storage_root 与视频绝对路径。
+    2) 若视频已在 storage 下，返回其父目录。
+    3) 否则对路径规范化并计算 md5 作为输出目录。
+    实现方式：os.path + hashlib.md5。
+    核心价值：统一输出目录规则，便于复用与清理。
+    决策逻辑：
+    - 条件：os.path.commonpath([abs_video_path, storage_root]) == storage_root
+    - 条件：跨盘符导致 commonpath 抛错时走 hash 分支
+    依据来源（证据链）：
+    - 文件系统路径：abs_video_path、storage_root。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    输出参数：
+    - 输出目录路径（storage/{hash} 或已存在的父目录）。
+    补充说明：
+    统一输出目录到 storage/{hash}：
+    - 若视频已在 storage 下，直接使用其父目录
+    - 若为本地路径，按规范化绝对路径计算 hash"""
+    storage_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "storage"))
+    abs_video_path = _normalize_local_video_path(video_path)
+    
+    try:
+        if os.path.commonpath([abs_video_path, storage_root]) == storage_root:
+            return os.path.dirname(abs_video_path)
+    except ValueError:
+        # 不同盘符时 commonpath 会抛错，直接走 hash 分支
+        pass
+    
+    normalized = os.path.normcase(abs_video_path)
+    path_hash = hashlib.md5(normalized.encode("utf-8")).hexdigest()
+    return os.path.join(storage_root, path_hash)
+
+
+def _ensure_local_video_in_storage(video_path: str) -> str:
+    """
+    执行逻辑：
+    1) 若为空或为 HTTP URL，直接返回原路径。
+    2) 若已在 storage 下则直接返回。
+    3) 创建 storage 目录并优先硬链接，失败则复制。
+    实现方式：os.link + shutil.copy2。
+    核心价值：保证视频与中间产物同域，便于缓存与清理。
+    决策逻辑：
+    - 条件：not video_path or _is_http_url(video_path)
+    - 条件：commonpath 判断已在 storage 下
+    - 条件：target_path 已存在则直接复用
+    - 条件：硬链接失败则回退到复制
+    依据来源（证据链）：
+    - 输入参数：video_path。
+    - 文件系统状态：目标文件是否存在、硬链接异常。
+    输入参数：
+    - video_path: 本地路径或 URL（类型：str）。
+    输出参数：
+    - 归档后的本地视频路径（storage 目录内）。
+    """
+    if not video_path or _is_http_url(video_path):
+        return video_path
+
+    abs_video_path = _normalize_local_video_path(video_path)
+    output_dir = _normalize_output_dir(abs_video_path)
+    storage_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "storage"))
+
+    try:
+        if os.path.commonpath([abs_video_path, storage_root]) == storage_root:
+            return abs_video_path
+    except ValueError:
+        # 不同盘符时 commonpath 会抛错，直接走复制/硬链接分支
+        pass
+
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        target_path = os.path.join(output_dir, os.path.basename(abs_video_path))
+
+        if os.path.exists(target_path):
+            return target_path
+
+        try:
+            os.link(abs_video_path, target_path)
+            logger.info(f"Linked local video into storage: {target_path}")
+            return target_path
+        except Exception:
+            # 硬链接失败则复制：做什么是降级保证；为什么是跨盘/权限限制常见；权衡是多一次磁盘写入
+            pass
+
+        shutil.copy2(abs_video_path, target_path)
+        logger.info(f"Copied local video into storage: {target_path}")
+        return target_path
+    except Exception as e:
+        logger.warning(f"Failed to place local video in storage, fallback to original path: {e}")
+        return abs_video_path
+
+
+# =============================================================================
 # 🚀 CV 验证模块级函数 (ThreadPool 兼容)
 # =============================================================================
 
@@ -71,17 +233,26 @@ _cv_validator_lock = threading.Lock()
 
 def run_cv_validation_unit(video_path: str, unit_data: dict) -> dict:
     """
-    单个语义单元的 CV 验证 (在 ThreadPool Worker 中执行)
-    
-    使用线程内全局缓存避免重复创建 CVKnowledgeValidator
-    
-    Args:
-        video_path: 视频路径
-        unit_data: {"unit_id", "start_sec", "end_sec", "knowledge_type"}
-    
-    Returns:
-        验证结果字典
-    """
+    执行逻辑：
+    1) 从缓存获取或创建 CVKnowledgeValidator。
+    2) 调用 detect_visual_states 获取稳定岛与动作段。
+    3) 序列化结果并推断 modality/knowledge_subtype。
+    4) 异常时返回包含 error 的兜底结果。
+    实现方式：线程内缓存 + CVKnowledgeValidator API 调用。
+    核心价值：为 CV 批处理提供稳定的单元级验证能力。
+    决策逻辑：
+    - 条件：video_path not in _cv_validator_cache
+    - 条件：not action_units and stable_islands（判定为截图型）
+    - 条件：action_units 存在时按首个动作判定 modality
+    - 条件：hasattr(au, 'internal_stable_islands') and au.internal_stable_islands
+    依据来源（证据链）：
+    - 输入参数：video_path、unit_data。
+    - CV 输出：stable_islands、action_units。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    - unit_data: 单元数据（含 start_sec/end_sec/unit_id）。
+    输出参数：
+    - dict：unit_id、modality、knowledge_subtype、stable_islands、action_segments（失败时含 error）。"""
     global _cv_validator_cache, _cv_validator_lock
     
     try:
@@ -172,15 +343,35 @@ def run_cv_validation_unit(video_path: str, unit_data: dict) -> dict:
 
 class GlobalResourceManager:
     """
-    全局资源管理器 - 单例模式
-    
-    🔑 确保 Whisper/LLM/Vision 等模型只加载一次，
-    多次 gRPC 调用复用，避免重复加载。
-    """
+    类说明：全局资源单例，集中管理转写器、分类器、Vision AI 与 CV 缓存。
+    执行逻辑：
+    1) 通过单例模式确保进程内共享资源。
+    2) 采用 lazy load 按需初始化，减少冷启动开销。
+    3) 为视频级工具与验证器提供缓存复用。
+    实现方式：双重检查锁 + 属性惰性初始化。
+    核心价值：避免重复初始化昂贵组件，提高并发稳定性。
+    输入：
+    - initialize 的 config 配置（可选）。
+    输出：
+    - 各资源实例或内部缓存更新。"""
     _instance = None
     _lock = threading.Lock()
     
     def __new__(cls):
+        """
+        执行逻辑：
+        1) 若实例不存在则创建。
+        2) 通过双重检查锁避免竞态。
+        实现方式：线程锁 + 类变量缓存。
+        核心价值：保证全局资源单例。
+        决策逻辑：
+        - 条件：cls._instance is None
+        依据来源（证据链）：
+        - 类变量：GlobalResourceManager._instance。
+        输入参数：
+        - 无。
+        输出参数：
+        - GlobalResourceManager 单例实例。"""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -189,7 +380,20 @@ class GlobalResourceManager:
         return cls._instance
     
     def initialize(self, config: dict = None):
-        """仅保存配置，资源改为延迟加载"""
+        """
+        执行逻辑：
+        1) 若已初始化则直接返回。
+        2) 设置配置并初始化资源缓存容器。
+        实现方式：内部状态赋值 + 锁保护。
+        核心价值：确保资源初始化只执行一次。
+        决策逻辑：
+        - 条件：self._initialized
+        依据来源（证据链）：
+        - 对象内部状态：self._initialized。
+        输入参数：
+        - config: 配置对象/字典（类型：dict）。
+        输出参数：
+        - 无（仅更新内部状态与缓存）。"""
         if self._initialized:
             return
         
@@ -212,6 +416,20 @@ class GlobalResourceManager:
 
     @property
     def transcriber(self):
+        """
+        执行逻辑：
+        1) 懒加载 Transcriber 实例。
+        2) 返回已缓存的转写器。
+        实现方式：双重检查锁 + 延迟导入。
+        核心价值：减少冷启动时间并复用昂贵资源。
+        决策逻辑：
+        - 条件：self._transcriber is None
+        依据来源（证据链）：
+        - 对象内部状态：self._transcriber。
+        输入参数：
+        - 无。
+        输出参数：
+        - Transcriber 实例或 None。"""
         if self._transcriber is None:
             with self._lock:
                 if self._transcriber is None:
@@ -225,6 +443,20 @@ class GlobalResourceManager:
 
     @property
     def knowledge_classifier(self):
+        """
+        执行逻辑：
+        1) 懒加载 KnowledgeClassifier。
+        2) 返回已缓存的分类器实例。
+        实现方式：双重检查锁 + 延迟导入。
+        核心价值：避免重复初始化 LLM 相关资源。
+        决策逻辑：
+        - 条件：self._knowledge_classifier is None
+        依据来源（证据链）：
+        - 对象内部状态：self._knowledge_classifier。
+        输入参数：
+        - 无。
+        输出参数：
+        - KnowledgeClassifier 实例或 None。"""
         if self._knowledge_classifier is None:
             with self._lock:
                 if self._knowledge_classifier is None:
@@ -239,6 +471,20 @@ class GlobalResourceManager:
 
     @property
     def vision_client(self):
+        """
+        执行逻辑：
+        1) 懒加载 Vision AI 客户端。
+        2) 返回已缓存的客户端实例。
+        实现方式：双重检查锁 + get_vision_ai_client。
+        核心价值：复用连接池，避免重复创建。
+        决策逻辑：
+        - 条件：self._vision_client is None
+        依据来源（证据链）：
+        - 对象内部状态：self._vision_client。
+        输入参数：
+        - 无。
+        输出参数：
+        - Vision AI 客户端实例或 None。"""
         if self._vision_client is None:
             with self._lock:
                 if self._vision_client is None:
@@ -251,7 +497,21 @@ class GlobalResourceManager:
         return self._vision_client
     
     def _init_llm_client(self, config):
-        """初始化 LLM 客户端"""
+        """
+        执行逻辑：
+        1) 从配置或环境变量读取 DeepSeek API Key。
+        2) 有 Key 则创建 OpenAI 客户端，否则置空。
+        实现方式：OpenAI SDK + 配置字段解析。
+        核心价值：为知识分类等模块提供统一 LLM 入口。
+        决策逻辑：
+        - 条件：api_key 存在才初始化客户端
+        依据来源（证据链）：
+        - 配置字段：deepseek_api_key、deepseek_base_url。
+        - 环境变量：DEEPSEEK_API_KEY。
+        输入参数：
+        - config: 配置字典（包含 deepseek_* 字段）。
+        输出参数：
+        - 无（仅更新 self.llm_client）。"""
         try:
             from openai import OpenAI
             api_key = config.get("deepseek_api_key") or os.getenv("DEEPSEEK_API_KEY")
@@ -269,7 +529,16 @@ class GlobalResourceManager:
             self.llm_client = None
     
     def _init_media_tools(self, config):
-        """初始化 Vision AI 客户端 (Media Tools 现改为按视频初始化)"""
+        """
+        执行逻辑：
+        1) 初始化 Vision AI 客户端（全局连接池）。
+        2) 清理视频级视觉工具引用，等待按视频惰性创建。
+        实现方式：get_vision_ai_client + 成员变量置空。
+        核心价值：保持资源集中管理，降低跨视频污染风险。
+        输入参数：
+        - config: 配置字典。
+        输出参数：
+        - 无（仅更新内部状态）。"""
         try:
             # Vision AI Client is global as it handles connections/pool
             from MVP_Module2_HEANCING.module2_content_enhancement.vision_ai_client import get_vision_ai_client
@@ -286,7 +555,17 @@ class GlobalResourceManager:
             self.vision_client = None
 
     def _init_transcriber(self, config):
-        """初始化 Whisper Transcriber 并预加载模型"""
+        """
+        执行逻辑：
+        1) 读取 whisper_model/whisper_device 配置。
+        2) 根据 CPU 核心数计算并行 worker 数（最少 2，最多 8）。
+        3) 初始化 Transcriber 并尝试预加载模型。
+        实现方式：Transcriber + int8 量化 + 并行转录。
+        核心价值：在保证稳定性的前提下提升转写吞吐。
+        输入参数：
+        - config: 配置字典（whisper_model/whisper_device）。
+        输出参数：
+        - 无（仅更新 self.transcriber）。"""
         try:
             logger.info("  → Initializing Whisper Transcriber (this may take a while)...")
             # 默认配置
@@ -324,12 +603,40 @@ class GlobalResourceManager:
 
     # 🚀 CV Validators Cache (global singleton per video)
     def _init_video_tools_cache(self):
+        """
+        执行逻辑：
+        1) 初始化视频级工具缓存容器。
+        2) 创建缓存锁以支持并发访问。
+        实现方式：字典 + threading.Lock。
+        核心价值：复用视觉工具，避免重复初始化。
+        决策逻辑：
+        - 条件：not hasattr(self, '_video_tools')
+        依据来源（证据链）：
+        - 对象内部状态：是否已存在 _video_tools。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅更新内部缓存）。"""
         if not hasattr(self, "_video_tools"):
             self._video_tools = {} # video_path -> {extractor, selector}
             self._video_tools_lock = threading.Lock()
 
     def get_screenshot_selector(self, video_path: str):
-        """获取或创建该视频专用的 ScreenshotSelector"""
+        """
+        执行逻辑：
+        1) 检查视频级缓存是否已有 selector。
+        2) 缺失时创建 VisualFeatureExtractor 与 ScreenshotSelector。
+        实现方式：缓存字典 + 惰性初始化。
+        核心价值：按视频复用视觉提取器，减少重复开销。
+        决策逻辑：
+        - 条件：video_path not in self._video_tools
+        依据来源（证据链）：
+        - 输入参数：video_path。
+        - 对象内部状态：self._video_tools。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - ScreenshotSelector 实例。"""
         self._init_video_tools_cache()
         with self._video_tools_lock:
             if video_path not in self._video_tools:
@@ -344,10 +651,20 @@ class GlobalResourceManager:
 
     def get_cv_validator(self, video_path: str):
         """
-        获取或创建 CV 验证器（全局单例，按视频路径缓存）
-        
-        避免重复加载视频和模型，提高性能
-        """
+        执行逻辑：
+        1) 检查视频级 CV 验证器缓存。
+        2) 缺失时创建 CVKnowledgeValidator 并写入缓存。
+        实现方式：缓存字典 + 惰性初始化。
+        核心价值：避免重复打开视频与重复初始化 CV 模型。
+        决策逻辑：
+        - 条件：video_path not in self._cv_validators
+        依据来源（证据链）：
+        - 输入参数：video_path。
+        - 对象内部状态：self._cv_validators。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - CVKnowledgeValidator 实例。"""
         with self._cv_validator_lock:
             if video_path not in self._cv_validators:
                 logger.info(f"🔄 Creating CVKnowledgeValidator for: {video_path}")
@@ -361,7 +678,20 @@ class GlobalResourceManager:
             return self._cv_validators[video_path]
     
     def cleanup_cv_validators(self):
-        """清理所有 CV 验证器（释放资源）"""
+        """
+        执行逻辑：
+        1) 遍历并清理所有缓存的 CV 验证器。
+        2) 清空缓存字典释放引用。
+        实现方式：循环调用 cleanup + clear。
+        核心价值：释放视频级资源，避免内存泄漏。
+        决策逻辑：
+        - 条件：hasattr(validator, 'cleanup')
+        依据来源（证据链）：
+        - 验证器对象：是否存在 cleanup 方法。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅更新内部缓存与资源状态）。"""
         with self._cv_validator_lock:
             for video_path, validator in self._cv_validators.items():
                 try:
@@ -375,12 +705,33 @@ class GlobalResourceManager:
 
 class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceServicer):
     """
-    gRPC Service 实现
-    
-    实现 video_processing.proto 中定义的所有 RPC 方法
-    """
+    类说明：gRPC 服务实现，承载视频处理各阶段的编排与调度。
+    执行逻辑：
+    1) 初始化全局资源与并行执行环境（ProcessPool + SharedMemory）。
+    2) 按 RPC 请求触发下载、转写、Stage1/Phase2A/2B、CV 验证等流程。
+    3) 统一输出路径与缓存策略，保证跨阶段复用。
+    实现方式：grpc.aio + RichTextPipeline + GlobalResourceManager。
+    核心价值：把 Java 编排请求稳定映射到 Python 处理链路。"""
     
     def __init__(self, config: dict = None):
+        """
+        执行逻辑：
+        1) 保存配置并初始化 GlobalResourceManager。
+        2) 初始化任务计数与并发控制。
+        3) 根据 CPU/内存评估并设置 CV ProcessPool 大小。
+        4) 创建 ProcessPool 与 SharedFrameRegistry。
+        实现方式：psutil 评估资源 + ProcessPoolExecutor。
+        核心价值：保证 CV 并发在可用资源范围内稳定运行。
+        决策逻辑：
+        - 条件：hasattr(mem, 'transferable')（Windows 下优先使用 transferable）
+        - 条件：cv_worker_count 由 CPU 核数与内存阈值共同限制
+        依据来源（证据链）：
+        - 运行指标：psutil.virtual_memory().available/transferable。
+        - 运行指标：multiprocessing.cpu_count()。
+        输入参数：
+        - config: 配置对象/字典（类型：dict）。
+        输出参数：
+        - 无（仅更新内部状态与进程池）。"""
         self.config = config or {}
         
         # 🔑 使用全局资源管理器
@@ -429,7 +780,17 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     
     async def HealthCheck(self, request, context):
-        """健康检查"""
+        """
+        执行逻辑：
+        1) 读取当前 CPU/内存使用情况。
+        2) 组装 ServerStatus 并返回健康响应。
+        实现方式：psutil 系统指标采集。
+        核心价值：为 Java 编排侧提供可观测性信号。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - HealthCheckResponse（含健康状态、版本、活跃任务数与资源占用）。"""
         # 获取系统状态
         cpu_percent = psutil.cpu_percent()
         memory = psutil.virtual_memory()
@@ -449,7 +810,18 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         )
 
     async def DownloadVideo(self, request, context):
-        """步骤1: 下载视频"""
+        """
+        执行逻辑：
+        1) 以 URL 哈希创建 storage/{hash} 目录。
+        2) 调用 VideoProcessor 下载视频到固定文件名。
+        3) 计算文件大小与时长并返回结果。
+        实现方式：VideoProcessor.download + ffprobe。
+        核心价值：统一下载路径，便于后续复用与清理。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - DownloadResponse（含 video_path、file_size_bytes、duration_sec）。"""
         task_id = request.task_id
         video_url = request.video_url
         # output_dir 从 request 中获取，但我们会覆盖为统一的 storage 目录
@@ -507,9 +879,29 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             self._decrement_tasks()
     
     async def TranscribeVideo(self, request, context):
-        """步骤2: Whisper 转录"""
+        """
+        执行逻辑：
+        1) 将视频归档到 storage/{hash} 并确定输出目录。
+        2) 若已有 subtitles.txt 则直接复用，否则调用 Transcriber 生成。
+        3) 保存字幕并返回路径与摘要预览。
+        实现方式：全局 Transcriber + 文件系统读写。
+        核心价值：复用缓存字幕，减少重复转写成本。
+        决策逻辑：
+        - 条件：os.path.exists(subtitle_path)
+        - 条件：not transcriber（无法初始化时直接失败）
+        - 条件：len(subtitle_text) > 100（仅返回摘要）
+        依据来源（证据链）：
+        - 文件系统状态：subtitle_path 是否存在。
+        - 内部状态：self.resources.transcriber。
+        - 字符长度：subtitle_text 长度。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - TranscribeResponse（含 subtitle_path 与 subtitle_text 摘要）。"""
         task_id = request.task_id
-        video_path = request.video_path
+        # 统一本地视频归档到 storage/{hash}：做什么是同域化；为什么是便于复用与清理；权衡是新增一次 I/O
+        video_path = _ensure_local_video_in_storage(request.video_path)
         language = request.language or "zh"
         
         logger.info(f"[{task_id}] TranscribeVideo: {video_path}")
@@ -517,9 +909,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         try:
             self._increment_tasks()
             
-            # 🔑 统一存储: 使用视频所在目录作为输出目录
-            # video_path 已经是绝对路径，所以 dirname 也是绝对路径
-            output_dir = os.path.dirname(video_path)
+            # 统一输出目录到 storage/{hash}：做什么是集中字幕产物；为什么是避免源目录污染；权衡是多一次路径映射
+            output_dir = _normalize_output_dir(video_path)
             
             # 确保目录存在
             os.makedirs(output_dir, exist_ok=True)
@@ -568,15 +959,30 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             self._decrement_tasks()
     
     async def ProcessStage1(self, request, context):
-        """步骤3: Stage1 处理"""
+        """
+        执行逻辑：
+        1) 归档视频并确定 intermediates 目录。
+        2) 若 step2/step6 已存在则直接复用。
+        3) 否则调用 Stage1 pipeline 生成中间产物。
+        实现方式：run_pipeline + 文件系统读写。
+        核心价值：避免重复计算，保障 Stage1 可复用。
+        决策逻辑：
+        - 条件：os.path.exists(step2_path) and os.path.exists(step6_path)
+        依据来源（证据链）：
+        - 文件系统状态：step2_path、step6_path 是否存在。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - Stage1Response（含 step2/step6 路径与 sentence_timestamps）。"""
         task_id = request.task_id
-        video_path = os.path.abspath(request.video_path) # Convert to absolute path immediately
+        # 统一本地视频归档到 storage/{hash}：做什么是保证中间产物同域；为什么是避免路径分散；权衡是可能增加一次复制/链接
+        video_path = _ensure_local_video_in_storage(request.video_path)
         subtitle_path = os.path.abspath(request.subtitle_path) # Convert to absolute path immediately
         max_step = request.max_step or 24
         
-        # 🔑 统一存储: 使用视频所在目录作为输出目录
-        # video_path 已经是绝对路径，所以 dirname 也是绝对路径
-        output_dir = os.path.dirname(video_path)
+        # 统一输出目录到 storage/{hash}：做什么是聚合中间产物；为什么是保证后续阶段可复用；权衡是需要额外路径计算
+        output_dir = _normalize_output_dir(video_path)
         intermediates_dir = os.path.join(output_dir, "intermediates")
         
         # 确保目录存在
@@ -625,20 +1031,33 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     
     async def AnalyzeSemanticUnits(self, request, context):
         """
-        🔑 V2 步骤4: Phase2A - 语义分析 + 时间戳提取
-        
-        不执行 FFmpeg，只收集素材需求
-        """
+        执行逻辑：
+        1) 归档视频并确定 Phase2A 输出目录。
+        2) 若 semantic_units_phase2a.json 已存在则直接复用并解析。
+        3) 否则构建 RichTextPipeline + VisualFeatureExtractor 执行 analyze_only。
+        4) 将 screenshot/clip 结果转换为 protobuf 返回。
+        实现方式：RichTextPipeline + JSON 读写。
+        核心价值：复用 Phase2A 结果，避免重复分析。
+        决策逻辑：
+        - 条件：os.path.exists(semantic_units_path)
+        依据来源（证据链）：
+        - 文件系统状态：semantic_units_path 是否存在。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - AnalyzeResponse（含 screenshot_requests/clip_requests/semantic_units_json_path）。"""
         import os  # Explicit local import
         import sys
         print(f"DEBUG: Entering AnalyzeSemanticUnits with os={os} and sys.modules.get('os')={sys.modules.get('os')}", flush=True)
         task_id = request.task_id
-        video_path = os.path.abspath(request.video_path) # Convert to absolute path immediately
+        # 统一本地视频归档到 storage/{hash}：做什么是统一 Phase2A 路径；为什么是避免素材找不到；权衡是多一次 I/O
+        video_path = _ensure_local_video_in_storage(request.video_path)
         step2_json_path = os.path.abspath(request.step2_json_path) if request.step2_json_path else "" # Convert to absolute path immediately
         step6_json_path = os.path.abspath(request.step6_json_path) if request.step6_json_path else "" # Convert to absolute path immediately
         
-        # 🔑 统一存储: 使用视频所在目录，并补全为绝对路径
-        output_dir = os.path.dirname(video_path)
+        # 统一输出目录到 storage/{hash}：做什么是让 Phase2A 产物与后续一致；为什么是减少跨目录查找；权衡是忽略外部路径差异
+        output_dir = _normalize_output_dir(video_path)
         semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
         
         logger.info(f"[{task_id}] AnalyzeSemanticUnits (Phase2A), output_dir={output_dir}")
@@ -695,9 +1114,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     error_msg=""
                 )
             
-            # 🔑 统一存储: 使用视频所在目录作为输出目录，并补全为绝对路径
-            output_dir = os.path.dirname(video_path) # video_path is already absolute
-            semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
             
             # 确保目录存在
             os.makedirs(output_dir, exist_ok=True)
@@ -762,9 +1178,24 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     async def ClassifyKnowledgeBatch(self, request, context):
         """
-        🚀 V4: Phase2A - Step 2: Knowledge Classification
-        Classifier now reads subtitles directly from step2_path
-        """
+        执行逻辑：
+        1) 获取 KnowledgeClassifier 并设置 Step2 路径（可选）。
+        2) 使用 Semaphore 限制并发，批量分类 action_segments。
+        3) 汇总结果并转换为 protobuf 返回。
+        实现方式：asyncio.gather + KnowledgeClassifier.classify_batch。
+        核心价值：批量调用 LLM 降低延迟与成本。
+        决策逻辑：
+        - 条件：not classifier
+        - 条件：hasattr(request, 'step2_path') and request.step2_path
+        - 条件：i >= len(action_segments)
+        依据来源（证据链）：
+        - 输入参数：request.step2_path。
+        - 分类结果长度与 action_segments 数量。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - KnowledgeClassificationResponse（包含结果列表与错误信息）。"""
         task_id = request.task_id
         try:
             self._increment_tasks()
@@ -784,6 +1215,21 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             sem = asyncio.Semaphore(30) # 允许 30 个并发请求
 
             async def process_unit(u):
+                """
+                执行逻辑：
+                1) 从语义单元构造 action_segments。
+                2) 调用 classifier.classify_batch 获取分类结果。
+                3) 对齐 action_segments 生成 protobuf 结果列表。
+                实现方式：构造列表 + 异步调用 + 结果对齐。
+                核心价值：在单元内保持结果与 action 对齐。
+                决策逻辑：
+                - 条件：i >= len(action_segments)
+                依据来源（证据链）：
+                - action_segments 长度与 batch_results 长度。
+                输入参数：
+                - u: 函数入参（类型：未标注）。
+                输出参数：
+                - List[KnowledgeClassificationResult]（该单元的分类结果）。"""
                 async with sem:
                     action_segments = [
                         {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id} 
@@ -831,16 +1277,35 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     async def GenerateMaterialRequests(self, request, context):
         """
-        🚀 V9.0: Phase2A - Material Request Generation (Two-Stage Merge + Global Screenshot)
-        
+        执行逻辑：
+        1) 构建 RichTextPipeline/KnowledgeClassifier/截图范围计算器。
+        2) 将 gRPC 单元转为 SemanticUnit 并执行两阶段合并 + LLM 过滤。
+        3) 为过滤后的动作生成 clip 请求。
+        4) 汇总稳定岛，计算截图范围并选择最佳截图。
+        5) 更新 semantic_units_phase2a.json 并返回素材请求。
+        实现方式：RichTextPipeline._classify_and_filter_actions + ScreenshotSelector。
+        核心价值：统一素材请求生成逻辑，保证截图/剪辑与语义一致。
+        决策逻辑：
+        - 条件：screenshot_tasks
+        - 条件：hasattr(request, 'video_duration') and request.video_duration（否则默认 0.0）
+        - 条件：all_stable_islands（无稳定岛时回退到中点策略）
+        依据来源（证据链）：
+        - 输入参数：request.video_duration、request.units。
+        - 过滤结果：clip_actions、all_stable_islands。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - GenerateMaterialRequestsResponse（含 screenshot_requests/clip_requests）。
+        补充说明：
         新架构流程：
-        1. 第一阶段合并：所有 ActionUnit，间隔 < 1s
-        2. LLM 分类过滤：丢弃"讲解型"和"Noise/Transition"
-        3. 第二阶段合并：筛选后的 ActionUnit，同类型，间隔 < 5s
-        4. 全局截图提取：从所有稳定岛（内部+外部+被跨越）生成截图
-        """
+        1. 第一阶段合并：动作单元按时间合并（间隔 < 1s）
+        2. LLM 过滤：剔除讲解型/噪声类型
+        3. 第二阶段合并：同类型动作按间隔 < 5s 合并
+        4. 全局截图：基于稳定岛范围选择最佳截图"""
         task_id = request.task_id
-        video_path = request.video_path
+        # 统一本地视频归档到 storage/{hash}：做什么是保证素材生成可追溯；为什么是与前序一致；权衡是增加一次拷贝/链接
+        video_path = _ensure_local_video_in_storage(request.video_path)
         
         
         try:
@@ -852,7 +1317,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_range_calculator import ScreenshotRangeCalculator
             
             # 初始化组件
-            output_dir = os.path.dirname(video_path)
+            output_dir = _normalize_output_dir(video_path)
             intermediates_dir = os.path.join(output_dir, "intermediates")
             
             # 🔑 构造中间文件路径 (用于加载字幕和上下文)
@@ -1056,7 +1521,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 
             # 🚀 V9.0: 更新 semantic_units_phase2a.json 包含完整的素材信息
             try:
-                output_dir = os.path.dirname(video_path)
+                output_dir = _normalize_output_dir(video_path)
                 semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
                 
                 if os.path.exists(semantic_units_path):
@@ -1150,23 +1615,32 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     
     async def AssembleRichText(self, request, context):
         """
-        🔑 V2 步骤6: Phase2B - Vision AI 验证 + 富文本组装
-        
-        使用 Java FFmpeg 生成的截图和切片
-        """
+        执行逻辑：
+        1) 归档视频并规范化输入路径。
+        2) 创建 RichTextPipeline 执行 assemble_only。
+        3) 统计截图/剪辑数量并返回结果路径。
+        实现方式：RichTextPipeline + 文件系统统计。
+        核心价值：统一 Phase2B 富文本组装输出。
+        决策逻辑：
+        - 条件：os.path.exists(clips_dir)
+        - 条件：os.path.exists(screenshots_dir)
+        依据来源（证据链）：
+        - 文件系统状态：clips_dir、screenshots_dir 是否存在。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - AssembleResponse（含 markdown/json 路径与统计信息）。"""
         task_id = request.task_id
         semantic_units_json_path = os.path.abspath(request.semantic_units_json_path) # Convert to absolute path immediately
         screenshots_dir = os.path.abspath(request.screenshots_dir) # Convert to absolute path immediately
         clips_dir = os.path.abspath(request.clips_dir) # Convert to absolute path immediately
-        video_path = os.path.abspath(request.video_path) # Convert to absolute path immediately
+        # 统一本地视频归档到 storage/{hash}：做什么是确保最终装配可追溯；为什么是与前序同域；权衡是可能增加一次 I/O
+        video_path = _ensure_local_video_in_storage(request.video_path)
         title = request.title or "视频内容"
         
-        # 🔑 检查还补全输出目录为绝对路径 (解决 Permission denied: '.' 问题)
-        output_dir = request.output_dir
-        if not output_dir or output_dir == ".":
-            output_dir = os.path.dirname(video_path) # video_path is already absolute
-        else:
-            output_dir = os.path.abspath(output_dir)
+        # 统一输出目录到 storage/{hash}：做什么是让最终产物同域聚合；为什么是便于回放定位；权衡是覆盖调用方传入的 output_dir
+        output_dir = _normalize_output_dir(video_path)
         
         # 确保目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -1231,7 +1705,23 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             self._decrement_tasks()
     
     def _get_video_duration(self, video_path: str) -> float:
-        """获取视频时长"""
+        """
+        执行逻辑：
+        1) 若文件不存在则返回默认时长。
+        2) 调用 ffprobe 解析视频时长。
+        3) 解析失败时返回默认值。
+        实现方式：subprocess.run + ffprobe。
+        核心价值：为下载/剪辑等流程提供时长信息。
+        决策逻辑：
+        - 条件：not os.path.exists(video_path)
+        - 条件：result.returncode == 0 and result.stdout.strip()
+        依据来源（证据链）：
+        - 输入参数：video_path。
+        - 子进程输出：ffprobe 返回码与 stdout。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - float：视频时长（秒）。"""
         try:
             if not os.path.exists(video_path):
                 return 300.0
@@ -1248,18 +1738,52 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             return 300.0  # 默认5分钟
     
     def _increment_tasks(self):
+        """
+        执行逻辑：
+        1) 加锁更新活跃任务计数。
+        2) 为健康检查与负载控制提供依据。
+        实现方式：线程锁保护的计数自增。
+        核心价值：可观测性与并发控制。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅更新内部计数）。"""
         with self._task_lock:
             self._active_tasks += 1
     
     def _decrement_tasks(self):
+        """
+        执行逻辑：
+        1) 加锁减少活跃任务计数。
+        2) 保持任务计数与实际运行一致。
+        实现方式：线程锁保护的计数自减。
+        核心价值：准确反映负载状态。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅更新内部计数）。"""
         with self._task_lock:
             self._active_tasks -= 1
             
     def _batch_read_frames_to_shm(self, video_path: str, units_data: list) -> dict:
         """
-        Helper to read frames for a batch of units into SharedMemory (Thread-Safe).
-        Executed in asyncio thread pool.
-        """
+        执行逻辑：
+        1) 为每个单元采样 start/mid/end 三个时间点。
+        2) 批量读取视频帧并写入 SharedMemory。
+        3) 返回 unit_id 到帧引用的映射。
+        实现方式：OpenCV VideoCapture + SharedFrameRegistry。
+        核心价值：减少重复 IO，提升 CV 并行吞吐。
+        决策逻辑：
+        - 条件：not cap.isOpened()
+        - 条件：frame_idx in valid_shm_refs
+        - 条件：int(curr) != frame_idx
+        依据来源（证据链）：
+        - 视频元数据：FPS、总帧数。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - units_data: 函数入参（类型：list）。
+        输出参数：
+        - dict：{unit_id: {frame_idx: shm_ref}}。"""
         shm_map = {} # unit_id -> {frame_idx: shm_ref}
         import cv2
         
@@ -1333,15 +1857,24 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         coarse_fps: float = 2.0
     ) -> dict:
         """
-        🚀 批量读取粗采样帧到 SharedMemory (Thread-Safe, 用于粗采样阶段)
-        
-        Args:
-            units_data: [{"unit_id": str, "start_sec": float, "end_sec": float}, ...]
-            coarse_fps: 粗采样帧率 (默认 2fps)
-        
-        Returns:
-            {unit_id: {timestamp: shm_ref}}
-        """
+        执行逻辑：
+        1) 按 coarse_fps 在区间内均匀采样时间点。
+        2) 批量读取帧并写入 SharedMemory。
+        3) 返回 unit_id 到采样帧引用的映射。
+        实现方式：OpenCV VideoCapture + SharedFrameRegistry。
+        核心价值：为先粗后细路径提供高效帧采样。
+        决策逻辑：
+        - 条件：not cap.isOpened()
+        - 条件：frame_idx in valid_refs
+        - 条件：curr != frame_idx
+        依据来源（证据链）：
+        - 视频元数据：FPS、总帧数。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - units_data: 函数入参（类型：list）。
+        - coarse_fps: 函数入参（类型：float）。
+        输出参数：
+        - dict：{unit_id: {timestamp: shm_ref}}。"""
         import cv2
         
         coarse_interval = 1.0 / coarse_fps
@@ -1413,29 +1946,23 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         screenshot_tasks: List[dict]
     ) -> Dict[str, Dict[float, dict]]:
         """
-        🚀 批量读取截图选择所需的帧到 SharedMemory
-        
-        Args:
-            screenshot_tasks: [
-                {
-                    "unit_id": str,
-                    "island_index": int,
-                    "expanded_start": float,
-                    "expanded_end": float
-                },
-                ...
-            ]
-        
-        Returns:
-            {
-                "SU001_island0": {
-                    12.5: {shm_name, shape, dtype},
-                    13.0: {shm_name, shape, dtype},
-                    ...
-                },
-                ...
-            }
-        """
+        执行逻辑：
+        1) 依据截图范围按 0.5s 采样时间点。
+        2) 读取对应帧并写入 SharedMemory。
+        3) 返回每个截图任务对应的帧引用映射。
+        实现方式：OpenCV VideoCapture + SharedFrameRegistry。
+        核心价值：批量读帧减少 IO，提升截图选择速度。
+        决策逻辑：
+        - 条件：frame_map
+        - 条件：not ret or frame is None
+        - 条件：shm_ref
+        依据来源（证据链）：
+        - 视频元数据：FPS、总帧数。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - screenshot_tasks: 函数入参（类型：List[dict]）。
+        输出参数：
+        - dict：{unit_id_island: {timestamp: shm_ref}}。"""
         import cv2
         
         shm_map = {}
@@ -1492,13 +2019,24 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     async def ValidateCVBatch(self, request, context):
         """
-        🚀 V6: CV验证 (Java 控制 + ProcessPool + SharedMemory + Chunked Processing)
-        
-        优化策略:
-        1. Batch Reading: 分批预读帧到 SharedMemory (IO优化)
-        2. ProcessPool: 提交纯计算任务 (CPU优化)
-        3. Memory Guard: 每批次处理完强制 GC，防止 OOM
-        """
+        执行逻辑：
+        1) 按知识类型分流：process 走完整 CV，abstract/concrete 走先粗后细。
+        2) 动态计算批大小并分块读帧到 SharedMemory。
+        3) 提交 CV Worker 计算稳定岛与动作段，流式返回。
+        实现方式：ProcessPool + SharedFrameRegistry + asyncio 流式输出。
+        核心价值：在资源可控前提下提升 CV 批处理吞吐。
+        决策逻辑：
+        - 条件：skipped_units
+        - 条件：kt in ('abstract', '讲解型', '抽象', 'concrete', '具象')
+        - 条件：all_units_data
+        依据来源（证据链）：
+        - 输入参数：request.semantic_units、knowledge_type。
+        - 系统指标：psutil.virtual_memory().available。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - CVValidationResponse 流（包含稳定岛与动作段结果）。"""
         from cv_worker import run_cv_validation_task
         import functools
         
@@ -1549,163 +2087,250 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             logger.info(f"[{task_id}] Dynamic Batch Config: Size={BATCH_SIZE} (Available RAM={avail_gb:.1f}GB)")
             results_data = []
             cf_results_data = []  # 先粗后细结果
+            total_io_ms = 0.0
+            total_compute_ms = 0.0
+            total_tasks = 0
+            io_chunks = 0
+            compute_chunks = 0
             
             loop = asyncio.get_running_loop()
             
-            # 🚀 Phase 1: 并行 IO - 同时读取 CV 帧和先粗后细帧
-            logger.info(f"[{task_id}] Starting parallel IO phase...")
-            
+            # 流式门闸：按批次读取 + 计算 + 回传，IO/Compute 重叠
             COARSE_FPS = 2.0
             coarse_interval = 1.0 / COARSE_FPS
-            
-            # 并行启动两个 IO 任务
-            io_futures = []
-            
-            # IO 任务 1: CV 帧批量读取 (process 类型)
-            if all_units_data:
-                cv_io_future = loop.run_in_executor(
-                    None,
-                    self._batch_read_frames_to_shm,
-                    video_path,
-                    all_units_data
-                )
-                io_futures.append(("cv", cv_io_future))
-            
-            # IO 任务 2: 先粗后细帧批量读取 (concrete/abstract 类型)
-            if skipped_units:
-                cf_io_future = loop.run_in_executor(
-                    None,
-                    self._batch_read_coarse_frames_to_shm,
-                    video_path,
-                    skipped_units,
-                    COARSE_FPS
-                )
-                io_futures.append(("cf", cf_io_future))
-            
-            # 等待所有 IO 完成
-            io_results = {}
-            for io_type, io_future in io_futures:
-                io_results[io_type] = await io_future
-            
-            shm_map = io_results.get("cv", {})
-            coarse_shm_map = io_results.get("cf", {})
-            
-            logger.info(f"[{task_id}] IO phase complete: CV={len(shm_map)} units, CF={len(coarse_shm_map)} units")
-            
-            # 🚀 Phase 2: 并行 Compute - 同时提交所有任务
-            logger.info(f"[{task_id}] Starting parallel compute phase...")
-            
-            all_futures = []  # (类型, future)
-            
-            # Compute 任务 1: CV 验证任务 (process 类型)
-            for unit_data in all_units_data:
-                unit_id = unit_data["unit_id"]
-                shm_frames = shm_map.get(unit_id, None)
-                
-                task_func = functools.partial(
-                    run_cv_validation_task,
-                    video_path,
-                    unit_data,
-                    shm_frames
-                )
-                future = loop.run_in_executor(self.cv_process_pool, task_func)
-                all_futures.append(("cv", unit_id, future))
-            
-            # Compute 任务 2: 先粗后细任务 (concrete/abstract 类型)
-            if skipped_units:
-                from cv_worker import run_coarse_fine_screenshot_task
-                
-                for skipped_unit in skipped_units:
-                    uid = skipped_unit["unit_id"]
-                    future = loop.run_in_executor(
-                        self.cv_process_pool,
-                        functools.partial(
-                            run_coarse_fine_screenshot_task,
-                            unit_id=uid,
-                            start_sec=skipped_unit["start_sec"],
-                            end_sec=skipped_unit["end_sec"],
-                            coarse_shm_frames=coarse_shm_map.get(uid, {}),
-                            coarse_interval=coarse_interval,
-                            fine_shm_frames_by_island=None
-                        )
-                    )
-                    all_futures.append(("cf", uid, future))
-            
-            logger.info(f"[{task_id}] Submitted {len(all_futures)} tasks to ProcessPool")
-            
-            # 🚀 Phase 3: 并行等待并流式返回结果
-            if all_futures:
-                logger.info(f"[{task_id}] Entering streaming response phase (total {len(all_futures)} tasks)")
-                
-                # 包装任务以携带元数据 (unit_id, task_type)
-                async def wrap_task(fut, t_type, uid):
-                    try:
-                        res = await fut
-                        if isinstance(res, dict):
-                            res['unit_id'] = uid  # 确保 unit_id 存在
-                        return t_type, uid, res
-                    except Exception as e:
-                        logger.error(f"Task failed for {uid} ({t_type}): {e}")
-                        return t_type, uid, e
 
-                wrapped_tasks = [wrap_task(f[2], f[0], f[1]) for f in all_futures]
-                
-                for completed_coro in asyncio.as_completed(wrapped_tasks):
-                    task_type, unit_id, res = await completed_coro
-                    
-                    if isinstance(res, Exception):
+            def chunk_list(items, size):
+                return [items[i:i + size] for i in range(0, len(items), size)]
+
+            cv_chunks = chunk_list(all_units_data, BATCH_SIZE) if all_units_data else []
+            cf_chunks = chunk_list(skipped_units, BATCH_SIZE) if skipped_units else []
+            total_chunks = max(len(cv_chunks), len(cf_chunks))
+
+            logger.info(f"[{task_id}] Streaming gate enabled: chunks={total_chunks}, batch={BATCH_SIZE}")
+
+            async def wrap_task(fut, t_type, uid):
+                """
+                执行逻辑：
+                1) 等待任务完成并补齐 unit_id。
+                2) 捕获异常并返回统一结构。
+                实现方式：await 任务 + 结果类型判断。
+                核心价值：保证流式结果包含上下文，避免单任务阻塞。
+                决策逻辑：
+                - 条件：res 为 dict 时补回 unit_id
+                - 条件：任务异常时返回异常对象
+                依据来源（证据链）：
+                - 任务结果类型与异常捕获。
+                输入参数：
+                - fut: awaitable 任务。
+                - t_type: 任务类型标记。
+                - uid: 语义单元 ID。
+                输出参数：
+                - (t_type, uid, result|exception) 元组。
+                """
+                try:
+                    res = await fut
+                    if isinstance(res, dict):
+                        res['unit_id'] = uid  # 补回 unit_id，确保结果可追溯
+                    return t_type, uid, res
+                except Exception as e:
+                    logger.error(f"Task failed for {uid} ({t_type}): {e}")
+                    return t_type, uid, e
+
+            async def read_chunk(cv_chunk, cf_chunk):
+                """
+                执行逻辑：
+                1) 并行读取 CV 与 coarse-fine 的帧到共享内存。
+                2) 汇总 IO 结果与耗时并返回。
+                实现方式：loop.run_in_executor + batch_read 方法。
+                核心价值：IO 与计算解耦，降低等待时间。
+                决策逻辑：
+                - 条件：cv_chunk/cf_chunk 为空则直接返回空结果
+                依据来源（证据链）：
+                - 输入参数：cv_chunk、cf_chunk。
+                输入参数：
+                - cv_chunk: process 单元列表。
+                - cf_chunk: coarse-fine 单元列表。
+                输出参数：
+                - (shm_map, coarse_shm_map, io_ms, cv_count, cf_count)。
+                """
+                io_start = time.perf_counter()
+                if not cv_chunk and not cf_chunk:
+                    return {}, {}, 0.0, 0, 0
+
+                io_futures = []
+                if cv_chunk:
+                    cv_io_future = loop.run_in_executor(
+                        None,
+                        self._batch_read_frames_to_shm,
+                        video_path,
+                        cv_chunk
+                    )
+                    io_futures.append(("cv", cv_io_future))
+
+                if cf_chunk:
+                    cf_io_future = loop.run_in_executor(
+                        None,
+                        self._batch_read_coarse_frames_to_shm,
+                        video_path,
+                        cf_chunk,
+                        COARSE_FPS
+                    )
+                    io_futures.append(("cf", cf_io_future))
+
+                io_results = {}
+                for io_type, io_future in io_futures:
+                    io_results[io_type] = await io_future
+
+                shm_map = io_results.get("cv", {})
+                coarse_shm_map = io_results.get("cf", {})
+
+                io_ms = (time.perf_counter() - io_start) * 1000.0
+                return shm_map, coarse_shm_map, io_ms, len(cv_chunk), len(cf_chunk)
+
+            if total_chunks > 0:
+                prefetch_task = asyncio.create_task(
+                    read_chunk(
+                        cv_chunks[0] if len(cv_chunks) > 0 else [],
+                        cf_chunks[0] if len(cf_chunks) > 0 else []
+                    )
+                )
+
+                for idx in range(total_chunks):
+                    cv_chunk = cv_chunks[idx] if idx < len(cv_chunks) else []
+                    cf_chunk = cf_chunks[idx] if idx < len(cf_chunks) else []
+
+                    if idx + 1 < total_chunks:
+                        next_cv = cv_chunks[idx + 1] if idx + 1 < len(cv_chunks) else []
+                        next_cf = cf_chunks[idx + 1] if idx + 1 < len(cf_chunks) else []
+                        next_task = asyncio.create_task(read_chunk(next_cv, next_cf))
+                    else:
+                        next_task = None
+
+                    shm_map, coarse_shm_map, io_ms, io_cv_cnt, io_cf_cnt = await prefetch_task
+                    prefetch_task = next_task
+                    logger.info(
+                        f"[{task_id}] Chunk {idx + 1}/{total_chunks} IO done: {io_ms:.1f}ms "
+                        f"(cv_units={io_cv_cnt}, cf_units={io_cf_cnt})"
+                    )
+                    total_io_ms += io_ms
+                    io_chunks += 1
+
+                    if not cv_chunk and not cf_chunk:
                         continue
-                    
-                    if not isinstance(res, dict): continue
-                    
-                    # 1. 构建 StableIslands
-                    pb_islands = []
-                    for si in res.get("stable_islands", []):
-                        if isinstance(si, dict):
-                            pb_islands.append(video_processing_pb2.StableIsland(
-                                start_sec=float(si.get("start_sec", 0.0)),
-                                end_sec=float(si.get("end_sec", 0.0)),
-                                mid_sec=float(si.get("mid_sec", 0.0)),
-                                duration_sec=float(si.get("duration_sec", 0.0))
-                            ))
-                    
-                    # 2. 构建 ActionSegments
-                    pb_actions = []
-                    for act in res.get("action_segments", []):
-                        if isinstance(act, dict):
-                            internal_islands = []
-                            for Isi in act.get("internal_stable_islands", []):
-                                internal_islands.append(video_processing_pb2.StableIsland(
-                                    start_sec=float(Isi.get("start_sec", 0.0)),
-                                    end_sec=float(Isi.get("end_sec", 0.0)),
-                                    mid_sec=float(Isi.get("mid_sec", 0.0)),
-                                    duration_sec=float(Isi.get("duration_sec", 0.0))
-                                ))
-                            
-                            pb_actions.append(video_processing_pb2.ActionSegment(
-                                start_sec=float(act.get("start_sec", 0.0)),
-                                end_sec=float(act.get("end_sec", 0.0)),
-                                action_type=str(act.get("action_type", "")),
-                                internal_stable_islands=internal_islands
-                            ))
-                    
-                    # 3. 组装结果并流式返回
-                    pb_result = video_processing_pb2.CVValidationResult(
-                        unit_id=unit_id,
-                        stable_islands=pb_islands,
-                        action_segments=pb_actions
-                    )
-                    
-                    yield video_processing_pb2.CVValidationResponse(
-                        success=True,
-                        results=[pb_result]
-                    )
-            
-            # Memory Guard
-            if 'shm_map' in locals(): del shm_map
-            if 'coarse_shm_map' in locals(): del coarse_shm_map
-            gc.collect()
-            
+
+                    logger.info(f"[{task_id}] Chunk {idx + 1}/{total_chunks}: CV={len(cv_chunk)}, CF={len(cf_chunk)}")
+
+                    # 阶段2：提交计算任务
+                    compute_start = time.perf_counter()
+                    all_futures = []
+
+                    for unit_data in cv_chunk:
+                        unit_id = unit_data["unit_id"]
+                        shm_frames = shm_map.get(unit_id, None)
+                        task_func = functools.partial(
+                            run_cv_validation_task,
+                            video_path,
+                            unit_data,
+                            shm_frames
+                        )
+                        future = loop.run_in_executor(self.cv_process_pool, task_func)
+                        all_futures.append(("cv", unit_id, future))
+
+                    if cf_chunk:
+                        from cv_worker import run_coarse_fine_screenshot_task
+                        for skipped_unit in cf_chunk:
+                            uid = skipped_unit["unit_id"]
+                            future = loop.run_in_executor(
+                                self.cv_process_pool,
+                                functools.partial(
+                                    run_coarse_fine_screenshot_task,
+                                    unit_id=uid,
+                                    start_sec=skipped_unit["start_sec"],
+                                    end_sec=skipped_unit["end_sec"],
+                                    coarse_shm_frames=coarse_shm_map.get(uid, {}),
+                                    coarse_interval=coarse_interval,
+                                    fine_shm_frames_by_island=None
+                                )
+                            )
+                            all_futures.append(("cf", uid, future))
+
+                    if all_futures:
+                        logger.info(f"[{task_id}] Chunk {idx + 1}: submitted {len(all_futures)} tasks")
+
+                        wrapped_tasks = [wrap_task(f[2], f[0], f[1]) for f in all_futures]
+                        for completed_coro in asyncio.as_completed(wrapped_tasks):
+                            task_type, unit_id, res = await completed_coro
+
+                            if isinstance(res, Exception):
+                                continue
+                            if not isinstance(res, dict):
+                                continue
+
+                            # 1. 组装 StableIslands
+                            pb_islands = []
+                            for si in res.get("stable_islands", []):
+                                if isinstance(si, dict):
+                                    pb_islands.append(video_processing_pb2.StableIsland(
+                                        start_sec=float(si.get("start_sec", 0.0)),
+                                        end_sec=float(si.get("end_sec", 0.0)),
+                                        mid_sec=float(si.get("mid_sec", 0.0)),
+                                        duration_sec=float(si.get("duration_sec", 0.0))
+                                    ))
+
+                            # 2. 组装 ActionSegments
+                            pb_actions = []
+                            for act in res.get("action_segments", []):
+                                if isinstance(act, dict):
+                                    internal_islands = []
+                                    for Isi in act.get("internal_stable_islands", []):
+                                        internal_islands.append(video_processing_pb2.StableIsland(
+                                            start_sec=float(Isi.get("start_sec", 0.0)),
+                                            end_sec=float(Isi.get("end_sec", 0.0)),
+                                            mid_sec=float(Isi.get("mid_sec", 0.0)),
+                                            duration_sec=float(Isi.get("duration_sec", 0.0))
+                                        ))
+
+                                    pb_actions.append(video_processing_pb2.ActionSegment(
+                                        start_sec=float(act.get("start_sec", 0.0)),
+                                        end_sec=float(act.get("end_sec", 0.0)),
+                                        action_type=str(act.get("action_type", "")),
+                                        internal_stable_islands=internal_islands
+                                    ))
+
+                            # 3. 生成 CVValidationResult 并回传
+                            pb_result = video_processing_pb2.CVValidationResult(
+                                unit_id=unit_id,
+                                stable_islands=pb_islands,
+                                action_segments=pb_actions
+                            )
+
+                            yield video_processing_pb2.CVValidationResponse(
+                                success=True,
+                                results=[pb_result]
+                            )
+                        compute_ms = (time.perf_counter() - compute_start) * 1000.0
+                        logger.info(
+                            f"[{task_id}] Chunk {idx + 1} compute done: {compute_ms:.1f}ms "
+                            f"(tasks={len(all_futures)})"
+                        )
+                        total_compute_ms += compute_ms
+                        total_tasks += len(all_futures)
+                        compute_chunks += 1
+
+                    # Memory Guard (chunk-level)
+                    if 'shm_map' in locals():
+                        del shm_map
+                    if 'coarse_shm_map' in locals():
+                        del coarse_shm_map
+                    gc.collect()
+            if total_chunks > 0:
+                avg_io = total_io_ms / max(1, io_chunks)
+                avg_compute = total_compute_ms / max(1, compute_chunks)
+                logger.info(
+                    f"[{task_id}] CVBatch totals: io={total_io_ms:.1f}ms (avg/chunk={avg_io:.1f}ms), "
+                    f"compute={total_compute_ms:.1f}ms (avg/chunk={avg_compute:.1f}ms), "
+                    f"tasks={total_tasks}, chunks={total_chunks}"
+                )
             logger.info(f"[{task_id}] ValidateCVBatch Streaming Complete")
             
         except Exception as e:
@@ -1720,7 +2345,17 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     # ========== 🚀 V6: 资源释放 ==========
     
     async def ReleaseCVResources(self, request, context):
-        """释放 CV 验证器资源"""
+        """
+        执行逻辑：
+        1) 清理 CV 验证器缓存。
+        2) 触发 GC 释放内存。
+        实现方式：cleanup_cv_validators + gc.collect。
+        核心价值：释放长期占用资源，保持进程稳定。
+        输入参数：
+        - request: 函数入参（类型：未标注）。
+        - context: 函数入参（类型：未标注）。
+        输出参数：
+        - ReleaseResourcesResponse（包含释放结果与提示信息）。"""
         task_id = request.task_id
         logger.info(f"[{task_id}] Request to ReleaseCVResources")
         
@@ -1748,7 +2383,22 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             )
 
 async def serve(host: str = "0.0.0.0", port: int = 50051):
-    """启动 gRPC 服务器"""
+    """
+    执行逻辑：
+    1) 创建 gRPC aio 服务器并注册服务。
+    2) 监听指定地址并启动服务。
+    3) 等待终止信号并执行优雅关闭。
+    实现方式：grpc.aio.server + 线程池执行器。
+    核心价值：提供稳定的 RPC 接入点。
+    决策逻辑：
+    - 条件：hasattr(servicer, 'process_pool')
+    依据来源（证据链）：
+    - Servicer 属性：process_pool 是否存在。
+    输入参数：
+    - host: 函数入参（类型：str）。
+    - port: 函数入参（类型：int）。
+    输出参数：
+    - 无（仅产生副作用，如启动/停止服务）。"""
     server = aio.server(
         futures.ThreadPoolExecutor(max_workers=50),
         options=[
@@ -1770,6 +2420,20 @@ async def serve(host: str = "0.0.0.0", port: int = 50051):
     
     # Graceful shutdown handler
     async def shutdown():
+        """
+        执行逻辑：
+        1) 停止 gRPC 服务器并等待完成。
+        2) 如存在进程池则执行关闭。
+        实现方式：server.stop + 条件判断。
+        核心价值：避免资源泄漏，保证优雅退出。
+        决策逻辑：
+        - 条件：hasattr(servicer, 'process_pool')
+        依据来源（证据链）：
+        - Servicer 属性：process_pool 是否存在。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如释放资源）。"""
         logger.info("Stopping server...")
         await server.stop(5)
         if hasattr(servicer, 'process_pool'):

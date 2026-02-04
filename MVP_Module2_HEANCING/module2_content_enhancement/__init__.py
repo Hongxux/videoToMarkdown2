@@ -1,18 +1,14 @@
 """
-Module 2: Content Enhancement (内容增强模块)
-
-MVP Implementation - Week 1 Day 1-2: Data Loading and Parsing
-
-This module implements the complete content enhancement system including:
-- Fault detection (断层识别)
-- Multimodal decision (多模态判断)
-- Media generation (素材生成)
-- Confidence calculation (置信度计算)
-
-V2: 支持 Java-Python 分层架构
-- Phase2A: analyze_only() - 语义分析 + 素材需求收集
-- Phase2B: assemble_only() - 外部素材应用 + 富文本组装
-"""
+模块说明：包初始化与公共导出。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 __version__ = "2.0.0"
 __author__ = "MVP Module 2 Team"

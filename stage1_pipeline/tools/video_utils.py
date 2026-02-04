@@ -1,8 +1,14 @@
 """
-视频处理工具
-
-提供视频切割、验证等功能，支持详细的日志记录
-"""
+模块说明：阶段工具 video_utils 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 import subprocess
 import os
 from pathlib import Path
@@ -20,18 +26,25 @@ def cut_video_segment(
     log_prefix: str = ""
 ) -> Optional[str]:
     """
-    切割视频片段
-    
-    Args:
-        source_video: 源视频路径
-        start_sec: 开始时间（秒）
-        end_sec: 结束时间（秒）
-        output_path: 输出文件路径
-        log_prefix: 日志前缀（便于追踪）
-    
-    Returns:
-        成功返回输出路径，失败返回None
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过子进程调用、文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not os.path.exists(source_video)
+    - 条件：end_sec <= start_sec
+    - 条件：result.returncode != 0
+    依据来源（证据链）：
+    - 输入参数：end_sec, output_path, source_video, start_sec。
+    输入参数：
+    - source_video: 函数入参（类型：str）。
+    - start_sec: 起止时间/区间边界（类型：float）。
+    - end_sec: 起止时间/区间边界（类型：float）。
+    - output_path: 文件路径（类型：str）。
+    - log_prefix: 函数入参（类型：str）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     try:
         # 参数验证
         if not os.path.exists(source_video):
@@ -106,11 +119,21 @@ def cut_video_segment(
 
 def validate_video_file(video_path: str) -> Tuple[bool, Optional[dict]]:
     """
-    验证视频文件有效性并获取元信息
-    
-    Returns:
-        (is_valid, metadata)
-    """
+    执行逻辑：
+    1) 整理待校验数据。
+    2) 按规则逐项校验并返回结果。
+    实现方式：通过JSON 解析/序列化、子进程调用、文件系统读写实现。
+    核心价值：提前发现数据/状态问题，降低运行风险。
+    决策逻辑：
+    - 条件：not os.path.exists(video_path)
+    - 条件：result.returncode != 0
+    - 条件：not video_streams
+    依据来源（证据链）：
+    - 输入参数：video_path。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     try:
         if not os.path.exists(video_path):
             return False, None
@@ -158,8 +181,18 @@ def validate_video_file(video_path: str) -> Tuple[bool, Optional[dict]]:
 
 def get_video_duration(video_path: str) -> Optional[float]:
     """
-    快速获取视频时长
-    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    决策逻辑：
+    - 条件：is_valid and metadata
+    依据来源（证据链）：
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     is_valid, metadata = validate_video_file(video_path)
     if is_valid and metadata:
         return metadata["duration"]

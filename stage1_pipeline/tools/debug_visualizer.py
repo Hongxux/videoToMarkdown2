@@ -1,3 +1,15 @@
+"""
+模块说明：阶段工具 debug_visualizer 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
+
 
 import cv2
 import numpy as np
@@ -7,9 +19,16 @@ import json
 
 class DebugVisualizer:
     """
-    可视化调试工具
-    用于生成峰值检测条带和校验覆盖图
-    """
+    类说明：封装 DebugVisualizer 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     @staticmethod
     def draw_peak_strip(
@@ -19,14 +38,24 @@ class DebugVisualizer:
         peak_time: float
     ):
         """
-        绘制峰值检测条带
-        
-        Args:
-            output_path: 输出图片路径
-            metrics_history: [{"t": 10.0, "score": 0.5}, ...]
-            frames: 候选帧列表 [(10.0, "path1.png"), ...]
-            peak_time: 最终选中的峰值时间
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not frames or not metrics_history
+        - 条件：not scores
+        - 条件：max_score == 0
+        依据来源（证据链）：
+        - 输入参数：frames, metrics_history, peak_time。
+        输入参数：
+        - output_path: 文件路径（类型：str）。
+        - metrics_history: 函数入参（类型：List[Dict[str, float]]）。
+        - frames: 数据列表/集合（类型：List[Tuple[float, str]]）。
+        - peak_time: 函数入参（类型：float）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if not frames or not metrics_history:
             return
             
@@ -79,6 +108,20 @@ class DebugVisualizer:
         if max_score == 0: max_score = 1.0
         
         def t_to_x(t):
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            决策逻辑：
+            - 条件：max_t > min_t
+            - 条件：len(frames) > 1
+            依据来源（证据链）：
+            输入参数：
+            - t: 函数入参（类型：未标注）。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             ratio = (t - min_t) / (max_t - min_t) if max_t > min_t else 0
             # 简单映射到整个宽度，实际应该对齐缩略图，这里简化处理
             return int(graph_x_star + ratio * graph_width) if len(frames) > 1 else padding + thumb_size[0]//2
@@ -121,13 +164,24 @@ class DebugVisualizer:
         result: Dict
     ):
         """
-        绘制校验覆盖图 (拒信单)
-        
-        Args:
-            input_path: 原始图片路径
-            output_path: 输出图片路径
-            result: 校验结果 {"is_qualified": False, "missing_elements": [...], "grade": "C"}
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：img is None
+        - 条件：not result.get('is_qualified')
+        - 条件：result.get('is_qualified')
+        依据来源（证据链）：
+        - 输入参数：result。
+        - 配置字段：is_qualified。
+        输入参数：
+        - input_path: 文件路径（类型：str）。
+        - output_path: 文件路径（类型：str）。
+        - result: 函数入参（类型：Dict）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         img = cv2.imread(input_path)
         if img is None:
             return

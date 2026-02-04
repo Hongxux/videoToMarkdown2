@@ -1,9 +1,18 @@
 """
-LangGraph Pipeline Definition
+模块说明：阶段1流水线 graph 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。
+补充说明：
 支持：
 - SQLite 持久化检查点（断点续跑）
-- 可配置的步骤中间产物输出
-"""
+- 可配置的步骤中间产物输出"""
 
 import asyncio
 import json
@@ -43,7 +52,17 @@ from .monitoring.metrics import MetricsCollector
 # ============================================================================
 
 class StepOutputConfig:
-    """步骤中间产物输出配置"""
+    """
+    类说明：封装 StepOutputConfig 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     # 默认输出的步骤（只保留关键节点：step2和step6）
     DEFAULT_ENABLED_STEPS = {
@@ -58,6 +77,25 @@ class StepOutputConfig:
         enable_all: bool = False,
         disable_all: bool = False
     ):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：disable_all
+        - 条件：enable_all
+        - 条件：enabled_steps is not None
+        依据来源（证据链）：
+        - 输入参数：disable_all, enable_all, enabled_steps。
+        输入参数：
+        - output_dir: 目录路径（类型：str）。
+        - enabled_steps: 开关/状态（类型：Optional[List[str]]）。
+        - enable_all: 开关/状态（类型：bool）。
+        - disable_all: 函数入参（类型：bool）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -71,11 +109,35 @@ class StepOutputConfig:
             self.enabled_steps = self.DEFAULT_ENABLED_STEPS.copy()
     
     def should_output(self, step_name: str) -> bool:
-        """检查步骤是否应该输出中间产物"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        输出参数：
+        - 布尔判断结果。"""
         return step_name in self.enabled_steps
     
     def save_step_output(self, step_name: str, state: Dict[str, Any]):
-        """保存步骤输出到文件"""
+        """
+        执行逻辑：
+        1) 组织输出结构与格式。
+        2) 写入目标路径并处理异常。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：统一输出格式，降低落盘与格式错误。
+        决策逻辑：
+        - 条件：not self.should_output(step_name)
+        依据来源（证据链）：
+        - 输入参数：step_name。
+        - 对象内部状态：self.should_output。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - state: 函数入参（类型：Dict[str, Any]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if not self.should_output(step_name):
             return
         
@@ -87,7 +149,23 @@ class StepOutputConfig:
             json.dump(step_output, f, ensure_ascii=False, indent=2, default=str)
     
     def _extract_step_output(self, step_name: str, state: Dict[str, Any]) -> Dict[str, Any]:
-        """提取步骤相关的输入和输出"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：field in state
+        - 条件：isinstance(value, list) and len(value) > 10
+        - 条件：value
+        依据来源（证据链）：
+        - 输入参数：state。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - state: 函数入参（类型：Dict[str, Any]）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         # 步骤 输入 -> 输出 字段映射
         step_io_map = {
             "step1_validate": {
@@ -249,10 +327,46 @@ def create_checkpointed_node(
     checkpointer: Optional[SQLiteCheckpointer] = None,
     output_config: Optional[StepOutputConfig] = None
 ):
-    """创建带检查点和输出的节点包装器"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：state.get('_resume_mode') and step_index <= last_index
+    - 条件：checkpointer
+    - 条件：output_config
+    依据来源（证据链）：
+    - 输入参数：checkpointer, output_config。
+    - 配置字段：_resume_mode。
+    输入参数：
+    - node_func: 函数入参（类型：未标注）。
+    - step_name: 函数入参（类型：str）。
+    - checkpointer: 函数入参（类型：Optional[SQLiteCheckpointer]）。
+    - output_config: 配置对象/字典（类型：Optional[StepOutputConfig]）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     
     async def wrapper(state: PipelineState) -> Dict[str, Any]:
         # 如果是断点续跑，且当前步骤已经完成，则跳过
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：state.get('_resume_mode') and step_index <= last_index
+        - 条件：checkpointer
+        - 条件：output_config
+        依据来源（证据链）：
+        - 输入参数：state。
+        - 配置字段：_resume_mode。
+        输入参数：
+        - state: 函数入参（类型：PipelineState）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         step_index = STEP_INDEX_MAP.get(step_name, 0)
         print(f"DEBUG: step={step_name} index={step_index} keys={'step7c_kp_merge' in STEP_INDEX_MAP}")
         last_index = state.get("_last_completed_index", -1)
@@ -323,18 +437,43 @@ def create_pipeline_graph(
     max_step: int = 24  # 🔑 新增: 最大执行到第几步，默认全部
 ) -> StateGraph:
     """
-    创建完整的 Stage1 处理流程图
-    
-    Args:
-        checkpointer: LangGraph MemorySaver (内存检查点)
-        sqlite_checkpointer: SQLite 持久化检查点
-        output_config: 步骤中间产物输出配置
-        max_step: 最大执行到第几步 (1-24)，用于提前终止
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：max_step < 24
+    - 条件：terminal_step
+    - 条件：checkpointer
+    依据来源（证据链）：
+    - 输入参数：checkpointer, max_step, output_config, sqlite_checkpointer。
+    - 配置字段：is_valid。
+    输入参数：
+    - checkpointer: 函数入参（类型：Optional[Any]）。
+    - sqlite_checkpointer: 函数入参（类型：Optional[SQLiteCheckpointer]）。
+    - output_config: 配置对象/字典（类型：Optional[StepOutputConfig]）。
+    - max_step: 函数入参（类型：int）。
+    输出参数：
+    - compile 对象或调用结果。"""
     graph = StateGraph(PipelineState)
     
     # 创建节点（可选包装）
     def add_node(name: str, func):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：sqlite_checkpointer or output_config
+        依据来源（证据链）：
+        输入参数：
+        - name: 函数入参（类型：str）。
+        - func: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if sqlite_checkpointer or output_config:
             wrapped = create_checkpointed_node(func, name, sqlite_checkpointer, output_config)
             graph.add_node(name, wrapped)
@@ -389,6 +528,21 @@ def create_pipeline_graph(
     # ========== 定义边 ==========
     
     def should_continue_after_step1(state: PipelineState) -> str:
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not state.get('is_valid', False)
+        依据来源（证据链）：
+        - 输入参数：state。
+        - 配置字段：is_valid。
+        输入参数：
+        - state: 函数入参（类型：PipelineState）。
+        输出参数：
+        - 字符串结果。"""
         if not state.get("is_valid", False):
             return "end"
         return "step2_correction"
@@ -498,23 +652,33 @@ async def run_pipeline(
     max_step: int = 24  # 🔑 新增: 最大执行到第几步，默认全部
 ) -> Dict[str, Any]:
     """
-    运行完整的 Stage1 管道
-    
-    Args:
-        video_path: 视频文件路径
-        subtitle_path: 字幕文件路径
-        output_dir: 输出目录
-        enable_checkpoints: 启用内存检查点
-        enable_sqlite: 启用 SQLite 持久化检查点
-        enable_logging: 启用日志文件输出
-        enable_traces: 启用 traces 输出
-        enable_metrics: 启用 metrics 输出
-        resume: 是否从上次中断处继续
-        output_steps: 需要输出中间产物的步骤列表
-        output_all_steps: 输出所有步骤的中间产物
-        thread_id: 线程ID（用于检查点）
-        max_step: 最大执行到第几步 (1-24)，用于提前终止流程
-    """
+    执行逻辑：
+    1) 组织处理流程与依赖调用。
+    2) 汇总中间结果并输出。
+    实现方式：通过文件系统读写实现。
+    核心价值：编排流程，保证步骤顺序与可追踪性。
+    决策逻辑：
+    - 条件：enable_logging
+    - 条件：thread_id is None
+    - 条件：enable_sqlite
+    依据来源（证据链）：
+    - 输入参数：enable_checkpoints, enable_logging, enable_metrics, enable_sqlite, enable_traces, thread_id。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    - subtitle_path: 文件路径（类型：str）。
+    - output_dir: 目录路径（类型：str）。
+    - enable_checkpoints: 开关/状态（类型：bool）。
+    - enable_sqlite: 开关/状态（类型：bool）。
+    - enable_logging: 开关/状态（类型：bool）。
+    - enable_traces: 开关/状态（类型：bool）。
+    - enable_metrics: 开关/状态（类型：bool）。
+    - resume: 函数入参（类型：bool）。
+    - output_steps: 函数入参（类型：Optional[List[str]]）。
+    - output_all_steps: 函数入参（类型：bool）。
+    - thread_id: 标识符（类型：Optional[str]）。
+    - max_step: 函数入参（类型：int）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     # 🔑 条件性创建日志
     if enable_logging:
         main_logger = setup_logging(f"{output_dir}/logs")
@@ -576,7 +740,31 @@ async def _execute_pipeline(
     graph, video_path, subtitle_path, output_dir,
     thread_id, resume, tracer, metrics, sqlite_checkpointer, main_logger
 ):
-    """执行管道的内部辅助函数"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：resume and sqlite_checkpointer
+    - 条件：last_checkpoint
+    - 条件：sqlite_checkpointer
+    依据来源（证据链）：
+    - 输入参数：resume, sqlite_checkpointer。
+    输入参数：
+    - graph: 函数入参（类型：未标注）。
+    - video_path: 文件路径（类型：未标注）。
+    - subtitle_path: 文件路径（类型：未标注）。
+    - output_dir: 目录路径（类型：未标注）。
+    - thread_id: 标识符（类型：未标注）。
+    - resume: 函数入参（类型：未标注）。
+    - tracer: 函数入参（类型：未标注）。
+    - metrics: 函数入参（类型：未标注）。
+    - sqlite_checkpointer: 函数入参（类型：未标注）。
+    - main_logger: 函数入参（类型：未标注）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     # 准备初始状态
     initial_state = create_initial_state(video_path, subtitle_path, output_dir)
     initial_state["_thread_id"] = thread_id
@@ -646,7 +834,19 @@ def run_pipeline_sync(
     output_dir: str = "output",
     **kwargs
 ) -> Dict[str, Any]:
-    """同步版本"""
+    """
+    执行逻辑：
+    1) 组织处理流程与依赖调用。
+    2) 汇总中间结果并输出。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：编排流程，保证步骤顺序与可追踪性。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    - subtitle_path: 文件路径（类型：str）。
+    - output_dir: 目录路径（类型：str）。
+    - **kwargs: 可变参数，含义由调用方决定。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     return asyncio.run(run_pipeline(
         video_path=video_path,
         subtitle_path=subtitle_path,
@@ -656,7 +856,16 @@ def run_pipeline_sync(
 
 
 def get_graph_mermaid() -> str:
-    """获取图的 Mermaid 表示"""
+    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    输入参数：
+    - 无。
+    输出参数：
+    - 字符串结果。"""
     return """graph TD
     subgraph Phase1["Phase 1: 前期准备"]
         S1[Step 1: 原材料确认]

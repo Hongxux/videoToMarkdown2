@@ -1,14 +1,14 @@
 """
-知识分类器 - 基于 LLM 三要素分析
-
-对动作单元进行四分类:
-- 过程性知识: 标准化步骤演示
-- 实操: 软件/工具操作
-- 推演: 数学推导/逻辑论证
-- 讲解型: 纯概念解释/背景介绍
-
-V1.0
-"""
+模块说明：Module2 内容增强中的 knowledge_classifier 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import json
@@ -125,20 +125,35 @@ USER_PROMPT_TEMPLATE = """请分析以下动作单元:
 
 
 class KnowledgeClassifier:
-    """基于 LLM 的知识分类器"""
+    """
+    类说明：封装 KnowledgeClassifier 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, step2_path: Optional[str] = None):
         """
-        初始化分类器
-        
-        🚀 V2: 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
-        🚀 V3: 支持直接从 step2_correction_output.json 读取字幕
-        
-        Args:
-            api_key: DeepSeek API Key (默认从环境变量 DEEPSEEK_API_KEY 获取)
-            base_url: API Base URL (默认 https://api.deepseek.com)
-            step2_path: Step 2 字幕文件路径 (可选，用于直接读取完整字幕)
-        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：not self.api_key
+        依据来源（证据链）：
+        - 对象内部状态：self.api_key。
+        输入参数：
+        - api_key: 函数入参（类型：Optional[str]）。
+        - base_url: 函数入参（类型：Optional[str]）。
+        - step2_path: 文件路径（类型：Optional[str]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.base_url = base_url or "https://api.deepseek.com"
         self.step2_path = step2_path
@@ -159,6 +174,16 @@ class KnowledgeClassifier:
     
     @property
     def enabled(self) -> bool:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 布尔判断结果。"""
         return self._enabled
     
     BATCH_SYSTEM_PROMPT = """你是一个基于【第一性原理】的 AI 知识架构师。你的任务是透过表面的关键词（形式），洞察字幕产生的根本动机（语义）。
@@ -226,12 +251,24 @@ class KnowledgeClassifier:
         action_segments: list
     ) -> list:
         """
-        批量并行分类 (Dynamic Batching Strategy)
-        
-        策略:
-        1. 根据文本长度动态决定 Batch Size (Prompt-Level Batching)
-        2. 使用 asyncio.gather 并发执行这些 Batch (Concurrent Execution)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not action_segments
+        - 条件：len(items) > 0
+        - 条件：avg_len < 30
+        依据来源（证据链）：
+        - 输入参数：action_segments。
+        - 对象内部状态：self._enabled。
+        输入参数：
+        - semantic_unit_title: 函数入参（类型：str）。
+        - semantic_unit_text: 函数入参（类型：str）。
+        - action_segments: 函数入参（类型：list）。
+        输出参数：
+        - 列表结果（与输入或处理结果一一对应）。"""
         if not action_segments:
             return []
 
@@ -275,6 +312,22 @@ class KnowledgeClassifier:
         results_map = {} # id -> result
         
         async def _process_chunk(chunk_items):
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            决策逻辑：
+            - 条件：not self._enabled
+            - 条件：isinstance(data, dict) and 'items' in data
+            - 条件：isinstance(data, list)
+            依据来源（证据链）：
+            - 对象内部状态：self._enabled。
+            输入参数：
+            - chunk_items: 函数入参（类型：未标注）。
+            输出参数：
+            - 列表结果（与输入或处理结果一一对应）。"""
             try:
                 # Build Batch Prompt
                 batch_content = ""
@@ -354,11 +407,20 @@ ID: {item['id']}
     
     def _load_all_subtitles(self) -> list:
         """
-        从 step2_correction_output.json 加载完整字幕列表（带缓存）
-        
-        Returns:
-            list: [{"start_sec": float, "end_sec": float, "corrected_text": str}, ...]
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._all_subtitles_cache is not None
+        - 条件：not self.step2_path or not os.path.exists(self.step2_path)
+        依据来源（证据链）：
+        - 对象内部状态：self._all_subtitles_cache, self.step2_path。
+        输入参数：
+        - 无。
+        输出参数：
+        - 列表结果（与输入或处理结果一一对应）。"""
         if self._all_subtitles_cache is not None:
             return self._all_subtitles_cache
         
@@ -390,15 +452,22 @@ ID: {item['id']}
     
     def _get_subtitles_in_range(self, start_sec: float, end_sec: float) -> str:
         """
-        从 Step 2 完整字幕中获取指定时间范围内的字幕文本（扩展到包含边界的完整字幕）
-        
-        Args:
-            start_sec: 动作单元起始时间
-            end_sec: 动作单元结束时间
-        
-        Returns:
-            str: 格式化的字幕文本
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not all_subtitles
+        - 条件：sub_start <= start_sec < sub_end
+        - 条件：sub_start < end_sec <= sub_end
+        依据来源（证据链）：
+        - 输入参数：end_sec, start_sec。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        输出参数：
+        - 字符串结果。"""
         # 从 Step 2 加载完整字幕
         all_subtitles = self._load_all_subtitles()
         

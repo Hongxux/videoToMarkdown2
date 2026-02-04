@@ -1,7 +1,14 @@
 """
-本地存储管理
-管理 sentence_timestamps.json 和 segment_timestamps.json
-"""
+模块说明：阶段工具 storage 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import json
 from pathlib import Path
@@ -11,12 +18,28 @@ from datetime import datetime
 
 class LocalStorage:
     """
-    本地存储管理器
-    
-    管理时间戳和临时文件的存储
-    """
+    类说明：封装 LocalStorage 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, storage_dir: str = "local_storage"):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - storage_dir: 目录路径（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         
@@ -38,20 +61,35 @@ class LocalStorage:
     
     def save_subtitle_timestamps(self, timestamps: Dict[str, Dict[str, Any]]):
         """
-        保存原始字幕时间戳（最精确的时间定位）
-        
-        Args:
-            timestamps: {
-                "SUB001": {"start_sec": 0.5, "end_sec": 3.2, "text": "前50字..."},
-                "SUB002": {"start_sec": 3.2, "end_sec": 6.1, "text": "前50字..."}
-            }
-        """
+        执行逻辑：
+        1) 组织输出结构与格式。
+        2) 写入目标路径并处理异常。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：统一输出格式，降低落盘与格式错误。
+        输入参数：
+        - timestamps: 函数入参（类型：Dict[str, Dict[str, Any]]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         with open(self.subtitle_timestamps_file, 'w', encoding='utf-8') as f:
             json.dump(timestamps, f, ensure_ascii=False, indent=2)
         self._subtitle_timestamps = timestamps
     
     def load_subtitle_timestamps(self) -> Dict[str, Dict[str, Any]]:
-        """加载原始字幕时间戳"""
+        """
+        执行逻辑：
+        1) 校验输入路径与参数。
+        2) 读取并解析为结构化对象。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：将外部数据转为内部结构，统一输入口径。
+        决策逻辑：
+        - 条件：self._subtitle_timestamps is not None
+        - 条件：not self.subtitle_timestamps_file.exists()
+        依据来源（证据链）：
+        - 对象内部状态：self._subtitle_timestamps, self.subtitle_timestamps_file。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         if self._subtitle_timestamps is not None:
             return self._subtitle_timestamps
             
@@ -63,16 +101,35 @@ class LocalStorage:
         return self._subtitle_timestamps
     
     def get_subtitle_timestamp(self, subtitle_id: str) -> Optional[Dict[str, Any]]:
-        """获取单个原始字幕的时间戳"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - subtitle_id: 标识符（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         timestamps = self.load_subtitle_timestamps()
         return timestamps.get(subtitle_id)
     
     def find_subtitle_by_text(self, text_fragment: str, max_results: int = 3) -> List[Dict[str, Any]]:
         """
-        根据文本片段查找原始字幕ID和时间戳
-        
-        Returns: [{"subtitle_id": "SUB001", "start_sec": 0.5, "end_sec": 3.2, "match_score": 0.95}, ...]
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：text_fragment[:20] in stored_text or stored_text in text_fragment
+        依据来源（证据链）：
+        - 输入参数：text_fragment。
+        输入参数：
+        - text_fragment: 函数入参（类型：str）。
+        - max_results: 函数入参（类型：int）。
+        输出参数：
+        - Dict[str, Any] 列表（与输入或处理结果一一对应）。"""
         timestamps = self.load_subtitle_timestamps()
         results = []
         
@@ -93,20 +150,35 @@ class LocalStorage:
     
     def save_sentence_timestamps(self, timestamps: Dict[str, Dict[str, float]]):
         """
-        保存句子时间戳
-        
-        Args:
-            timestamps: {
-                "S001": {"start_sec": 10.5, "end_sec": 15.2},
-                "S002": {"start_sec": 15.2, "end_sec": 20.1}
-            }
-        """
+        执行逻辑：
+        1) 组织输出结构与格式。
+        2) 写入目标路径并处理异常。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：统一输出格式，降低落盘与格式错误。
+        输入参数：
+        - timestamps: 函数入参（类型：Dict[str, Dict[str, float]]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         with open(self.sentence_timestamps_file, 'w', encoding='utf-8') as f:
             json.dump(timestamps, f, ensure_ascii=False, indent=2)
         self._sentence_timestamps = timestamps
         
     def load_sentence_timestamps(self) -> Dict[str, Dict[str, float]]:
-        """加载句子时间戳"""
+        """
+        执行逻辑：
+        1) 校验输入路径与参数。
+        2) 读取并解析为结构化对象。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：将外部数据转为内部结构，统一输入口径。
+        决策逻辑：
+        - 条件：self._sentence_timestamps is not None
+        - 条件：not self.sentence_timestamps_file.exists()
+        依据来源（证据链）：
+        - 对象内部状态：self._sentence_timestamps, self.sentence_timestamps_file。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         if self._sentence_timestamps is not None:
             return self._sentence_timestamps
             
@@ -118,17 +190,34 @@ class LocalStorage:
         return self._sentence_timestamps
     
     def get_sentence_timestamp(self, sentence_id: str) -> Optional[Dict[str, float]]:
-        """获取单个句子的时间戳"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - sentence_id: 标识符（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         timestamps = self.load_sentence_timestamps()
         return timestamps.get(sentence_id)
     
     def get_sentence_time_range(self, sentence_ids: List[str]) -> Dict[str, float]:
         """
-        获取多个句子的时间范围
-        
-        Returns:
-            {"start_sec": min_start, "end_sec": max_end}
-        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：not starts
+        - 条件：sid in timestamps
+        依据来源（证据链）：
+        输入参数：
+        - sentence_ids: 函数入参（类型：List[str]）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         timestamps = self.load_sentence_timestamps()
         starts = []
         ends = []
@@ -150,23 +239,35 @@ class LocalStorage:
     
     def save_segment_timestamps(self, timestamps: Dict[str, Dict[str, Any]]):
         """
-        保存段落/片段时间戳
-        
-        Args:
-            timestamps: {
-                "SEG001": {
-                    "start_sec": 10.5,
-                    "end_sec": 45.3,
-                    "source_sentence_ids": ["S001", "S002", "S003"]
-                }
-            }
-        """
+        执行逻辑：
+        1) 组织输出结构与格式。
+        2) 写入目标路径并处理异常。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：统一输出格式，降低落盘与格式错误。
+        输入参数：
+        - timestamps: 函数入参（类型：Dict[str, Dict[str, Any]]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         with open(self.segment_timestamps_file, 'w', encoding='utf-8') as f:
             json.dump(timestamps, f, ensure_ascii=False, indent=2)
         self._segment_timestamps = timestamps
         
     def load_segment_timestamps(self) -> Dict[str, Dict[str, Any]]:
-        """加载段落时间戳"""
+        """
+        执行逻辑：
+        1) 校验输入路径与参数。
+        2) 读取并解析为结构化对象。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：将外部数据转为内部结构，统一输入口径。
+        决策逻辑：
+        - 条件：self._segment_timestamps is not None
+        - 条件：not self.segment_timestamps_file.exists()
+        依据来源（证据链）：
+        - 对象内部状态：self._segment_timestamps, self.segment_timestamps_file。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         if self._segment_timestamps is not None:
             return self._segment_timestamps
             
@@ -178,7 +279,16 @@ class LocalStorage:
         return self._segment_timestamps
     
     def get_segment_timestamp(self, segment_id: str) -> Optional[Dict[str, Any]]:
-        """获取单个片段的时间戳"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - segment_id: 标识符（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         timestamps = self.load_segment_timestamps()
         return timestamps.get(segment_id)
     
@@ -186,23 +296,33 @@ class LocalStorage:
     
     def save_kp_timestamps(self, timestamps: Dict[str, Dict[str, Any]]):
         """
-        保存知识点时间戳
-        
-        Args:
-            timestamps: {
-                "KP001": {
-                    "start_sec": 10.5,
-                    "end_sec": 65.3,
-                    "segment_ids": ["SEG001", "SEG002"]
-                }
-            }
-        """
+        执行逻辑：
+        1) 组织输出结构与格式。
+        2) 写入目标路径并处理异常。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：统一输出格式，降低落盘与格式错误。
+        输入参数：
+        - timestamps: 函数入参（类型：Dict[str, Dict[str, Any]]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         kp_file = self.storage_dir / "kp_timestamps.json"
         with open(kp_file, "w", encoding="utf-8") as f:
             json.dump(timestamps, f, ensure_ascii=False, indent=2)
     
     def load_kp_timestamps(self) -> Dict[str, Dict[str, Any]]:
-        """加载知识点时间戳"""
+        """
+        执行逻辑：
+        1) 校验输入路径与参数。
+        2) 读取并解析为结构化对象。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：将外部数据转为内部结构，统一输入口径。
+        决策逻辑：
+        - 条件：not kp_file.exists()
+        依据来源（证据链）：
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         kp_file = self.storage_dir / "kp_timestamps.json"
         if not kp_file.exists():
             return {}
@@ -210,24 +330,65 @@ class LocalStorage:
             return json.load(f)
     
     def get_kp_timestamp(self, kp_id: str) -> Optional[Dict[str, Any]]:
-        """获取单个知识点的时间戳"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - kp_id: 标识符（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         timestamps = self.load_kp_timestamps()
         return timestamps.get(kp_id)
     
     # ========== 临时帧管理 ==========
     
     def get_temp_frame_path(self, instruction_id: str, frame_index: int) -> Path:
-        """获取临时帧保存路径"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - instruction_id: 标识符（类型：str）。
+        - frame_index: 函数入参（类型：int）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         return self.temp_frames_dir / f"{instruction_id}_{frame_index}.png"
     
     def list_temp_frames(self, instruction_id: Optional[str] = None) -> List[Path]:
-        """列出临时帧"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：instruction_id
+        依据来源（证据链）：
+        - 输入参数：instruction_id。
+        输入参数：
+        - instruction_id: 标识符（类型：Optional[str]）。
+        输出参数：
+        - Path 列表（与输入或处理结果一一对应）。"""
         if instruction_id:
             return list(self.temp_frames_dir.glob(f"{instruction_id}_*.png"))
         return list(self.temp_frames_dir.glob("*.png"))
     
     def cleanup_temp_frames(self, instruction_id: Optional[str] = None):
-        """清理临时帧"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - instruction_id: 标识符（类型：Optional[str]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         frames = self.list_temp_frames(instruction_id)
         for frame in frames:
             frame.unlink()
@@ -235,7 +396,17 @@ class LocalStorage:
     # ========== 检查点管理 ==========
     
     def save_checkpoint(self, step_name: str, data: Dict[str, Any]):
-        """保存检查点"""
+        """
+        执行逻辑：
+        1) 组织输出结构与格式。
+        2) 写入目标路径并处理异常。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：统一输出格式，降低落盘与格式错误。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - data: 数据列表/集合（类型：Dict[str, Any]）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         checkpoint_dir = self.storage_dir / "checkpoints"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         
@@ -246,7 +417,20 @@ class LocalStorage:
         return checkpoint_file
     
     def load_latest_checkpoint(self, step_name: str) -> Optional[Dict[str, Any]]:
-        """加载最新检查点"""
+        """
+        执行逻辑：
+        1) 校验输入路径与参数。
+        2) 读取并解析为结构化对象。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：将外部数据转为内部结构，统一输入口径。
+        决策逻辑：
+        - 条件：not checkpoint_dir.exists()
+        - 条件：not checkpoints
+        依据来源（证据链）：
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         checkpoint_dir = self.storage_dir / "checkpoints"
         if not checkpoint_dir.exists():
             return None
@@ -261,7 +445,21 @@ class LocalStorage:
     # ========== 工具方法 ==========
     
     def clear_all(self):
-        """清除所有存储"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.sentence_timestamps_file.exists()
+        - 条件：self.segment_timestamps_file.exists()
+        依据来源（证据链）：
+        - 对象内部状态：self.segment_timestamps_file, self.sentence_timestamps_file。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self.sentence_timestamps_file.exists():
             self.sentence_timestamps_file.unlink()
         if self.segment_timestamps_file.exists():
@@ -271,7 +469,16 @@ class LocalStorage:
         self._segment_timestamps = None
         
     def get_storage_info(self) -> Dict[str, Any]:
-        """获取存储信息"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         return {
             "storage_dir": str(self.storage_dir),
             "sentence_timestamps_count": len(self.load_sentence_timestamps()),

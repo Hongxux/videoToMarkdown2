@@ -1,24 +1,14 @@
 """
-Rich Text Pipeline - 完整语义单元到富文本流水线 (V2)
-
-输入:
-- video_path: 视频文件路径
-- step2_path: step2_correction_output.json (字幕+时间戳)
-- step6_path: step6_merge_cross_output.json (去噪段落)
-
-输出:
-- RichTextDocument (可导出 Markdown/HTML/JSON)
-
-流程:
-1. 语义单元切分 (LLM聚合)
-2. V7.x 模态分类 (CV检测)
-3. 素材生成 (使用 ScreenshotSelector 和 VideoClipExtractor)
-4. 富文本组装
-
-V2 变更:
-- 视频片段: 使用 VideoClipExtractor 传递动作单元起止时间
-- 截图提取: 使用 ScreenshotSelector 传递字幕对应时间范围
-"""
+模块说明：Module2 内容增强中的 rich_text_pipeline 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import difflib
@@ -50,7 +40,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PipelineConfig:
-    """流水线配置"""
+    """
+    类说明：封装 PipelineConfig 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     # 素材生成
     screenshot_quality: int = 95              # JPEG 质量
     clip_crf: int = 23                        # 视频压缩质量 (越小越好)
@@ -68,7 +68,17 @@ class PipelineConfig:
 
 @dataclass
 class ScreenshotRequest:
-    """截图请求 (Phase2A 输出)"""
+    """
+    类说明：封装 ScreenshotRequest 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     screenshot_id: str          # 截图ID，如 "SU001_action_1_head"
     timestamp_sec: float        # 截图时间点（秒）
     label: str                  # 标签 (head/tail/stable/fallback)
@@ -77,7 +87,17 @@ class ScreenshotRequest:
 
 @dataclass
 class ClipRequest:
-    """视频切片请求 (Phase2A 输出)"""
+    """
+    类说明：封装 ClipRequest 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     clip_id: str                # 切片ID，如 "SU001_action_1"
     start_sec: float            # 起始时间（秒）
     end_sec: float              # 结束时间（秒）
@@ -87,7 +107,17 @@ class ClipRequest:
 
 @dataclass
 class MaterialRequests:
-    """素材需求集合 (Phase2A 输出，交给Java执行)"""
+    """
+    类说明：封装 MaterialRequests 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     screenshot_requests: List[ScreenshotRequest]
     clip_requests: List[ClipRequest]
     action_classifications: List[Dict[str, Any]]  # 动作分类结果
@@ -95,13 +125,16 @@ class MaterialRequests:
 
 class RichTextPipeline:
     """
-    完整语义单元到富文本流水线 (V2)
-    
-    设计原则:
-    - 使用 ScreenshotSelector 选择最佳帧 (传递字幕时间范围)
-    - 使用 VideoClipExtractor 提取视频片段 (传递动作单元起止时间)
-    - 稳定岛位置由 CVKnowledgeValidator 计算
-    """
+    类说明：封装 RichTextPipeline 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(
         self,
@@ -112,6 +145,28 @@ class RichTextPipeline:
         config: PipelineConfig = None,
         sentence_timestamps_path: str = None
     ):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：step2_path
+        - 条件：step6_path
+        - 条件：self._knowledge_classifier.enabled
+        依据来源（证据链）：
+        - 输入参数：step2_path, step6_path。
+        - 对象内部状态：self._concrete_validator, self._knowledge_classifier。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - step2_path: 文件路径（类型：str）。
+        - step6_path: 文件路径（类型：str）。
+        - output_dir: 目录路径（类型：str）。
+        - config: 配置对象/字典（类型：PipelineConfig）。
+        - sentence_timestamps_path: 文件路径（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
         self.step2_path = step2_path
         self.step6_path = step6_path
@@ -161,14 +216,23 @@ class RichTextPipeline:
             logger.warning("Knowledge classifier disabled (API key not set)")
             
         # 💥 V7.5: 具象知识验证器 (用于过滤无效截图)
-        self._concrete_validator = ConcreteKnowledgeValidator()
+        self._concrete_validator = ConcreteKnowledgeValidator(output_dir=self.output_dir)
         if self._concrete_validator.enabled:
             logger.info("Concrete knowledge validator enabled (CV/Vision)")
         
         logger.info(f"Pipeline initialized: {len(self.subtitles)} subtitles, {len(self.paragraphs)} paragraphs")
     
     def set_visual_extractor(self, visual_extractor):
-        """设置视觉特征提取器 (共享依赖)"""
+        """
+        执行逻辑：
+        1) 校验输入值。
+        2) 更新内部状态或持久化。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：集中更新状态，保证一致性。
+        输入参数：
+        - visual_extractor: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self._visual_extractor = visual_extractor
         # 初始化 ScreenshotSelector
         self._screenshot_selector = ScreenshotSelector(
@@ -177,17 +241,34 @@ class RichTextPipeline:
         )
     
     def set_clip_extractor(self, extractor):
-        """设置视频片段提取器 (依赖注入)"""
+        """
+        执行逻辑：
+        1) 校验输入值。
+        2) 更新内部状态或持久化。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：集中更新状态，保证一致性。
+        输入参数：
+        - extractor: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self._clip_extractor = extractor
         self._clip_extractor.set_subtitles(self.subtitles)
     
     def _align_to_sentence_start(self, timestamp: float) -> float:
         """
-        对齐到句子边界 (起点)
-        
-        找到 ≤ timestamp 的最近句子开始时间
-        确保不会从句子中间开始
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：sub.start_sec <= timestamp
+        依据来源（证据链）：
+        - 输入参数：timestamp。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        输出参数：
+        - 数值型计算结果。"""
         best_start = 0.0
         for sub in self.subtitles:
             if sub.start_sec <= timestamp:
@@ -198,11 +279,21 @@ class RichTextPipeline:
     
     def _align_to_sentence_end(self, timestamp: float) -> float:
         """
-        对齐到句子边界 (终点)
-        
-        找到 ≥ timestamp 的最近句子结束时间
-        确保不会在句子中间结束
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：sub.end_sec >= timestamp
+        - 条件：self.subtitles
+        依据来源（证据链）：
+        - 输入参数：timestamp。
+        - 对象内部状态：self.subtitles。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        输出参数：
+        - 数值型计算结果。"""
         for sub in self.subtitles:
             if sub.end_sec >= timestamp:
                 return sub.end_sec
@@ -210,7 +301,21 @@ class RichTextPipeline:
         return self.subtitles[-1].end_sec if self.subtitles else timestamp
     
     def _load_paragraphs(self, step6_path: str) -> List[Dict]:
-        """加载 step6 段落"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：'output' in data and 'pure_text_script' in data['output']
+        - 条件：'pure_text_script' in data
+        依据来源（证据链）：
+        - 配置字段：output。
+        输入参数：
+        - step6_path: 文件路径（类型：str）。
+        输出参数：
+        - Dict 列表（与输入或处理结果一一对应）。"""
         with open(step6_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -222,7 +327,20 @@ class RichTextPipeline:
             raise ValueError("Invalid step6 format: missing pure_text_script")
     
     def _get_video_duration(self) -> float:
-        """获取视频时长"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not cap.isOpened()
+        - 条件：fps > 0
+        依据来源（证据链）：
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         cap = cv2.VideoCapture(self.video_path)
         if not cap.isOpened():
             return 0.0
@@ -233,11 +351,15 @@ class RichTextPipeline:
     
     async def run(self, title: str = "") -> RichTextDocument:
         """
-        执行完整流水线
-        
-        Returns:
-            RichTextDocument
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - title: 函数入参（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         logger.info("="*60)
         logger.info("Starting Rich Text Pipeline V2")
         logger.info("="*60)
@@ -282,11 +404,15 @@ class RichTextPipeline:
     
     async def analyze_only(self) -> Tuple[List[ScreenshotRequest], List[ClipRequest], str]:
         """
-        🔑 Phase2A: 仅执行语义分析（切分），返回基础语义单元
-        
-        供 gRPC AnalyzeSemanticUnits 接口调用。
-        🚀 优化: 跳过视觉验证和素材策划，由 Java 并行编排模块接管。
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - List[ScreenshotRequest], List[ClipRequest], str 列表（与输入或处理结果一一对应）。"""
         import os
         logger.info("="*60)
         logger.info("RichTextPipeline.analyze_only() - Phase2A (Segmentation only)")
@@ -333,21 +459,24 @@ class RichTextPipeline:
         subject: str = "数据结构与算法"
     ) -> Tuple[str, str]:
         """
-        🔑 Phase2B: 加载中间结果，应用外部素材，组装文档
-        
-        供 gRPC AssembleRichText 接口调用。
-        使用Java FFmpeg生成的截图和切片进行富文本组装，并调用MarkdownEnhancer增强。
-        
-        Args:
-            semantic_units_json_path: Phase2A 输出的语义单元JSON路径
-            screenshots_dir: Java FFmpeg 生成的截图目录
-            clips_dir: Java FFmpeg 生成的切片目录
-            title: 文档标题
-            subject: 学科名称 (用于MarkdownEnhancer层级划分)
-            
-        Returns:
-            Tuple[str, str]: (markdown_path, json_path)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：os.path.exists(cv_results_path)
+        - 条件：enhancer.enabled
+        - 条件：requests
+        依据来源（证据链）：
+        输入参数：
+        - semantic_units_json_path: 文件路径（类型：str）。
+        - screenshots_dir: 目录路径（类型：str）。
+        - clips_dir: 目录路径（类型：str）。
+        - title: 函数入参（类型：str）。
+        - subject: 函数入参（类型：str）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         from .markdown_enhancer import MarkdownEnhancer
         
         logger.info("="*60)
@@ -414,14 +543,21 @@ class RichTextPipeline:
     
     def _apply_external_materials(self, unit, screenshots_dir: str, clips_dir: str, requests):
         """
-        应用外部素材（Java FFmpeg 生成的截图和切片）
-        
-        Args:
-            unit: SemanticUnit 对象
-            screenshots_dir: 截图目录
-            clips_dir: 切片目录
-            requests: MaterialRequests 对象
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过HTTP 调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：os.path.exists(pattern)
+        依据来源（证据链）：
+        输入参数：
+        - unit: 函数入参（类型：未标注）。
+        - screenshots_dir: 目录路径（类型：str）。
+        - clips_dir: 目录路径（类型：str）。
+        - requests: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         materials = MaterialSet()
         
         # 1. 加载截图
@@ -456,15 +592,19 @@ class RichTextPipeline:
     
     def _assemble_document(self, units, title: str):
         """
-        组装富文本文档
-        
-        Args:
-            units: List[SemanticUnit]
-            title: 文档标题
-            
-        Returns:
-            RichTextDocument
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：materials is None
+        依据来源（证据链）：
+        输入参数：
+        - units: 函数入参（类型：未标注）。
+        - title: 函数入参（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         doc = RichTextDocument(
             title=title,
             source_video=self.video_path,
@@ -485,13 +625,19 @@ class RichTextPipeline:
     
     def _save_semantic_units(self, units: List[SemanticUnit], output_path: str):
         """
-        保存语义单元到JSON (供Phase2B加载)
-        
-        V9.0: 新增字段
-        - action_units: 带有 knowledge_type 和 confidence 的动作单元列表
-        - crossed_stable_islands: 被合并跨越的稳定岛
-        - cv_validated: CV 验证完成标记
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、HTTP 调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：hasattr(unit, '_material_requests')
+        依据来源（证据链）：
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        - output_path: 文件路径（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         data = []
         for unit in units:
             # 基础字段
@@ -540,13 +686,15 @@ class RichTextPipeline:
         json_path: str
     ) -> Tuple[List[SemanticUnit], Dict[str, MaterialRequests]]:
         """
-        加载语义单元和素材需求
-        
-        V9.0: 新增字段恢复
-        - action_units: 带有 knowledge_type 和 confidence 的动作单元列表
-        - crossed_stable_islands: 被合并跨越的稳定岛
-        - cv_validated: CV 验证完成标记
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、HTTP 调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - json_path: 文件路径（类型：str）。
+        输出参数：
+        - List[SemanticUnit], Dict[str, MaterialRequests] 列表（与输入或处理结果一一对应）。"""
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -595,12 +743,19 @@ class RichTextPipeline:
 
     def _merge_cv_results(self, units: List[SemanticUnit], cv_results_path: str):
         """
-        🚀 合并来自 Java 端的并行 CV 验证结果
-        
-        Args:
-            units: 待处理的语义单元列表
-            cv_results_path: .cv_results.json 路径
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：unit_id in unit_map
+        依据来源（证据链）：
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        - cv_results_path: 文件路径（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         try:
             with open(cv_results_path, 'r', encoding='utf-8') as f:
                 cv_results = json.load(f)
@@ -656,31 +811,32 @@ class RichTextPipeline:
         classifier: 'KnowledgeClassifier'
     ) -> Dict[str, Dict]:
         """
-        🚀 V9.0: 两阶段合并 + LLM分类过滤
-        
-        架构约束：保留现有 Java KnowledgeClassificationOrchestrator → Python 架构
-        
-        此方法用于本地处理，如需通过 Java 调用，应使用 ClassifyKnowledgeBatch gRPC。
-        
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not action_segments
+        - 条件：not is_explainable and (not is_noise)
+        - 条件：i < len(classification_results)
+        依据来源（证据链）：
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        - classifier: 函数入参（类型：'KnowledgeClassifier'）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。
+        补充说明：
         流程：
         1. 第一阶段合并（所有 ActionUnit，间隔 < 1s）
         2. LLM 分类（过程性知识/讲解型/结构性/概念性）
         3. 过滤：只保留过程性知识、实操、推演（不为视频生成讲解型）
         4. 第二阶段合并（筛选后的 ActionUnit，相同 knowledge_type，间隔 < 5s）
         5. 收集所有稳定岛用于截图提取
-        
-        Args:
-            units: 语义单元列表（已合并 CV 结果）
-            classifier: KnowledgeClassifier 实例
-            
-        Returns:
-            Dict[unit_id, {
-                'clip_actions': [...],      # 需要生成视频的 ActionUnit
-                'all_stable_islands': [...], # 所有稳定岛用于截图
-                'crossed_islands_stage1': [...],
-                'crossed_islands_stage2': [...]
-            }]
-        """
+        units: 语义单元列表（已合并 CV 结果）
+        classifier: KnowledgeClassifier 实例
+        'clip_actions': [...],      # 需要生成视频的 ActionUnit
+        'all_stable_islands': [...], # 所有稳定岛用于截图"""
         from .screenshot_range_calculator import ScreenshotRangeCalculator
         
         results = {}
@@ -790,7 +946,25 @@ class RichTextPipeline:
         stable_islands: List[Dict],
         gap_threshold: float
     ) -> Tuple[List[Dict], List[Dict]]:
-        """第一阶段本地合并"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(actions) <= 1
+        - 条件：gap < gap_threshold
+        - 条件：i_start >= current.get('end_sec', 0) and i_end <= next_action.get('start_sec', 0)
+        依据来源（证据链）：
+        - 输入参数：actions, gap_threshold。
+        - 配置字段：end_sec, start_sec。
+        输入参数：
+        - actions: 函数入参（类型：List[Dict]）。
+        - stable_islands: 函数入参（类型：List[Dict]）。
+        - gap_threshold: 阈值（类型：float）。
+        输出参数：
+        - List[Dict], List[Dict] 列表（与输入或处理结果一一对应）。"""
         if len(actions) <= 1:
             return actions, []
         
@@ -824,7 +998,25 @@ class RichTextPipeline:
         stable_islands: List[Dict],
         gap_threshold: float
     ) -> Tuple[List[Dict], List[Dict]]:
-        """第二阶段本地合并（需要相同 knowledge_type）"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(actions) <= 1
+        - 条件：gap < gap_threshold and same_type
+        - 条件：i_start >= current.get('end_sec', 0) and i_end <= next_action.get('start_sec', 0)
+        依据来源（证据链）：
+        - 输入参数：actions, gap_threshold。
+        - 配置字段：end_sec, start_sec。
+        输入参数：
+        - actions: 函数入参（类型：List[Dict]）。
+        - stable_islands: 函数入参（类型：List[Dict]）。
+        - gap_threshold: 阈值（类型：float）。
+        输出参数：
+        - List[Dict], List[Dict] 列表（与输入或处理结果一一对应）。"""
         if len(actions) <= 1:
             return actions, []
         
@@ -860,11 +1052,39 @@ class RichTextPipeline:
         crossed_stage1: List[Dict],
         crossed_stage2: List[Dict]
     ) -> List[Dict]:
-        """收集所有稳定岛用于截图"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：key not in seen
+        依据来源（证据链）：
+        输入参数：
+        - actions: 函数入参（类型：List[Dict]）。
+        - external_islands: 函数入参（类型：List[Dict]）。
+        - crossed_stage1: 函数入参（类型：List[Dict]）。
+        - crossed_stage2: 函数入参（类型：List[Dict]）。
+        输出参数：
+        - Dict 列表（与输入或处理结果一一对应）。"""
         all_islands = []
         seen = set()
         
         def add_island(island: Dict):
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            决策逻辑：
+            - 条件：key not in seen
+            依据来源（证据链）：
+            输入参数：
+            - island: 函数入参（类型：Dict）。
+            输出参数：
+            - 无（仅产生副作用，如日志/写盘/状态更新）。"""
             key = (round(island.get('start_sec', 0), 2), round(island.get('end_sec', 0), 2))
             if key not in seen:
                 seen.add(key)
@@ -895,14 +1115,19 @@ class RichTextPipeline:
     
     def _build_sentence_timestamps(self) -> Dict[str, Dict[str, float]]:
         """
-        构建 sentence_id → 时间戳 映射
-        
-        优先使用外部 sentence_timestamps.json，
-        否则回退到索引映射 S001 → subtitles[0]
-        
-        ❌ 已移除: 文本对齐逻辑 (_align_paragraphs_to_subtitles)
-        现在 KnowledgeClassifier 直接从 Step 2 读取字幕，不再依赖语义单元的时间戳正确性
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.sentence_timestamps_path and os.path.exists(self.sentence_timestamps_path)
+        依据来源（证据链）：
+        - 对象内部状态：self.sentence_timestamps_path。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         # 1. 优先从外部文件加载
         if self.sentence_timestamps_path and os.path.exists(self.sentence_timestamps_path):
             try:
@@ -930,8 +1155,22 @@ class RichTextPipeline:
         cache_path: str = None
     ) -> List[SemanticUnit]:
         """
-        对每个语义单元应用 V7.x 模态分类
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not units
+        - 条件：cache_path and os.path.exists(cache_path)
+        - 条件：cache_path
+        依据来源（证据链）：
+        - 输入参数：cache_path, units。
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        - cache_path: 文件路径（类型：str）。
+        输出参数：
+        - SemanticUnit 列表（与输入或处理结果一一对应）。"""
         if not units:
             return units
             
@@ -963,7 +1202,22 @@ class RichTextPipeline:
                         
                         # 为每个动作单元计算其内部的稳定岛
                         def get_internal_islands(action_start, action_end, all_islands):
-                            """获取落在动作区间内的稳定岛"""
+                            """
+                            执行逻辑：
+                            1) 读取内部状态或外部资源。
+                            2) 返回读取结果。
+                            实现方式：通过内部函数组合与条件判断实现。
+                            核心价值：提供一致读取接口，降低调用耦合。
+                            决策逻辑：
+                            - 条件：si.start_sec >= action_start and si.end_sec <= action_end
+                            依据来源（证据链）：
+                            - 输入参数：action_end, action_start。
+                            输入参数：
+                            - action_start: 起止时间/区间边界（类型：未标注）。
+                            - action_end: 起止时间/区间边界（类型：未标注）。
+                            - all_islands: 函数入参（类型：未标注）。
+                            输出参数：
+                            - 函数计算/封装后的结果对象。"""
                             internal = []
                             for si in all_islands:
                                 # 稳定岛在动作区间内部
@@ -1040,7 +1294,17 @@ class RichTextPipeline:
         return units
 
     def _save_modality_cache(self, units: List[SemanticUnit], path: str):
-        """保存模态分类缓存"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        - path: 文件路径（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         data = {
             "units": [asdict(u) for u in units]
         }
@@ -1048,7 +1312,20 @@ class RichTextPipeline:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
     def _load_modality_cache(self, path: str) -> List[SemanticUnit]:
-        """加载模态分类缓存"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：'materials' in filtered_data and isinstance(filtered_data['materials'], dict)
+        依据来源（证据链）：
+        - 配置字段：materials。
+        输入参数：
+        - path: 文件路径（类型：str）。
+        输出参数：
+        - SemanticUnit 列表（与输入或处理结果一一对应）。"""
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         
@@ -1072,15 +1349,30 @@ class RichTextPipeline:
     
     async def _generate_materials_parallel(self, units: List[SemanticUnit]):
         """
-        并行提取所有语义单元的素材
-        
-        使用 asyncio.Semaphore 控制并发数，避免资源竞争
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         MAX_CONCURRENT = 4  # 最大并发数
         semaphore = asyncio.Semaphore(MAX_CONCURRENT)
         
         async def process_unit(idx: int, unit: SemanticUnit):
-            """带信号量控制的单元素材提取"""
+            """
+            执行逻辑：
+            1) 组织处理流程与依赖调用。
+            2) 汇总中间结果并输出。
+            实现方式：通过内部方法调用/状态更新实现。
+            核心价值：编排流程，保证步骤顺序与可追踪性。
+            输入参数：
+            - idx: 函数入参（类型：int）。
+            - unit: 函数入参（类型：SemanticUnit）。
+            输出参数：
+            - 无（仅产生副作用，如日志/写盘/状态更新）。"""
             async with semaphore:
                 logger.info(f"  [{idx+1}/{len(units)}] {unit.unit_id}: {unit.modality}")
                 await self._generate_materials(unit)
@@ -1098,13 +1390,20 @@ class RichTextPipeline:
     
     async def _generate_materials(self, unit: SemanticUnit):
         """
-        根据检测到的稳定岛和动作单元生成素材
-        
-        提取规则:
-        - 规则一: 如果有 action 部分，不提取语义单元级 stable 部分的中间帧
-        - 规则二: 如果 action 内部有稳定岛，提取 视频首帧 + action内部稳定岛帧 + 视频末帧
-        - 无 action: 提取 stable 部分的中间帧
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：action_segments
+        - 条件：len(action_segments) >= 2
+        - 条件：stable_islands
+        依据来源（证据链）：
+        输入参数：
+        - unit: 函数入参（类型：SemanticUnit）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         materials = MaterialSet(modality=unit.modality)
         
         screenshot_paths = []
@@ -1316,14 +1615,20 @@ class RichTextPipeline:
     
     async def _collect_material_requests(self, unit: SemanticUnit) -> MaterialRequests:
         """
-        🔑 Phase2A: 收集素材需求（不执行FFmpeg）
-        
-        分析语义单元，返回需要的截图和切片列表，但不实际执行提取。
-        这些需求将返回给Java由FFmpeg并行执行。
-        
-        Returns:
-            MaterialRequests: 包含 screenshot_requests 和 clip_requests
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(action_segments) >= 2
+        - 条件：action_segments
+        - 条件：stable_islands
+        依据来源（证据链）：
+        输入参数：
+        - unit: 函数入参（类型：SemanticUnit）。
+        输出参数：
+        - MaterialRequests 对象（包含字段：screenshot_requests, clip_requests, action_classifications）。"""
         screenshot_requests: List[ScreenshotRequest] = []
         clip_requests: List[ClipRequest] = []
         action_classifications: List[Dict[str, Any]] = []
@@ -1522,14 +1827,25 @@ class RichTextPipeline:
         material_requests: MaterialRequests
     ):
         """
-        🔑 Phase2B: 应用外部素材（使用Java FFmpeg生成的截图和切片）
-        
-        Args:
-            unit: 语义单元
-            screenshots_dir: Java FFmpeg 生成的截图目录
-            clips_dir: Java FFmpeg 生成的切片目录
-            material_requests: Phase2A 收集的需求（用于匹配文件）
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：'讲解' in k_type or 'Explanation' in k_type
+        - 条件：allow_clip
+        - 条件：req.semantic_unit_id != unit.unit_id
+        依据来源（证据链）：
+        - 输入参数：unit。
+        - 对象内部状态：self._concrete_validator。
+        输入参数：
+        - unit: 函数入参（类型：SemanticUnit）。
+        - screenshots_dir: 目录路径（类型：str）。
+        - clips_dir: 目录路径（类型：str）。
+        - material_requests: 函数入参（类型：MaterialRequests）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         materials = MaterialSet()
         
         screenshot_paths = []
@@ -1621,10 +1937,23 @@ class RichTextPipeline:
         name: str
     ) -> str:
         """
-        使用 ScreenshotSelector 选择最佳帧
-        
-        传递字幕对应的时间范围
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._screenshot_selector
+        - 条件：result and result.screenshot_path
+        - 条件：os.path.exists(result.screenshot_path)
+        依据来源（证据链）：
+        - 对象内部状态：self._screenshot_selector。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - name: 函数入参（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         if not self._screenshot_selector:
             logger.warning("ScreenshotSelector not available, using fallback ffmpeg direct")
             return await self._extract_frame_ffmpeg_fallback(start_sec, end_sec, name)
@@ -1662,11 +1991,21 @@ class RichTextPipeline:
         fallback_ts: float
     ) -> float:
         """
-        🔑 视觉择优时间戳 (Phase2A 专用)
-        
-        选择指定范围内的最佳帧时间戳，但不实际保存图片。
-        用于给 Java 提帧提供更高质量的参考点。
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._screenshot_selector
+        依据来源（证据链）：
+        - 对象内部状态：self._screenshot_selector。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - fallback_ts: 函数入参（类型：float）。
+        输出参数：
+        - 数值型计算结果。"""
         if self._screenshot_selector:
             try:
                 # 调用 ScreenshotSelector，设置 save_image=False
@@ -1684,7 +2023,21 @@ class RichTextPipeline:
 
     
     async def _extract_frame_ffmpeg_fallback(self, start_sec: float, end_sec: float, name: str) -> str:
-        """FFmpeg 直接提取帧 (回退方案) - 异步版本"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、子进程调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：os.path.exists(output_path)
+        依据来源（证据链）：
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - name: 函数入参（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         import subprocess
         
         output_path = os.path.join(self.assets_dir, f"{name}.png")
@@ -1702,6 +2055,19 @@ class RichTextPipeline:
         ]
         
         def run_ffmpeg():
+            """
+            执行逻辑：
+            1) 组织处理流程与依赖调用。
+            2) 汇总中间结果并输出。
+            实现方式：通过子进程调用、文件系统读写实现。
+            核心价值：编排流程，保证步骤顺序与可追踪性。
+            决策逻辑：
+            - 条件：os.path.exists(output_path)
+            依据来源（证据链）：
+            输入参数：
+            - 无。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 return output_path if os.path.exists(output_path) else ""
@@ -1721,10 +2087,22 @@ class RichTextPipeline:
         name: str
     ) -> str:
         """
-        提取单个动作单元的视频片段
-        
-        使用 VideoClipExtractor 传递动作单元的精确起止时间
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._clip_extractor
+        - 条件：clip_result and clip_result.clip_path
+        依据来源（证据链）：
+        - 对象内部状态：self._clip_extractor。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - name: 函数入参（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         if not self._clip_extractor:
             logger.info(f"VideoClipExtractor not available for {name}, using ffmpeg fallback")
             return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
@@ -1750,7 +2128,21 @@ class RichTextPipeline:
             return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
     
     async def _extract_action_clip_ffmpeg(self, start_sec: float, end_sec: float, name: str) -> str:
-        """FFmpeg 直接提取动作单元视频片段 (回退方案) - 异步版本"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、子进程调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：os.path.exists(output_path)
+        依据来源（证据链）：
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - name: 函数入参（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         import subprocess
         
         output_path = os.path.join(self.assets_dir, f"{name}_clip.mp4")
@@ -1773,6 +2165,19 @@ class RichTextPipeline:
         ]
         
         def run_ffmpeg():
+            """
+            执行逻辑：
+            1) 组织处理流程与依赖调用。
+            2) 汇总中间结果并输出。
+            实现方式：通过子进程调用、文件系统读写实现。
+            核心价值：编排流程，保证步骤顺序与可追踪性。
+            决策逻辑：
+            - 条件：os.path.exists(output_path)
+            依据来源（证据链）：
+            输入参数：
+            - 无。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 return output_path if os.path.exists(output_path) else ""
@@ -1787,10 +2192,22 @@ class RichTextPipeline:
     
     async def _extract_video_clip(self, unit: SemanticUnit) -> str:
         """
-        使用 VideoClipExtractor 提取视频片段
-        
-        传递动作单元的起止时间
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._clip_extractor
+        - 条件：unit.action_segments
+        - 条件：clip_result and clip_result.clip_path
+        依据来源（证据链）：
+        - 输入参数：unit。
+        - 对象内部状态：self._clip_extractor。
+        输入参数：
+        - unit: 函数入参（类型：SemanticUnit）。
+        输出参数：
+        - 字符串结果。"""
         if not self._clip_extractor:
             logger.warning("VideoClipExtractor not available, using fallback ffmpeg")
             return await self._extract_clip_ffmpeg_fallback(unit)
@@ -1827,7 +2244,19 @@ class RichTextPipeline:
             return await self._extract_clip_ffmpeg_fallback(unit)
     
     async def _extract_clip_ffmpeg_fallback(self, unit: SemanticUnit) -> str:
-        """FFmpeg 回退方案 (简化版) - 异步版本"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、子进程调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：os.path.exists(output_path)
+        依据来源（证据链）：
+        输入参数：
+        - unit: 函数入参（类型：SemanticUnit）。
+        输出参数：
+        - 字符串结果。"""
         import subprocess
         
         output_path = os.path.join(self.assets_dir, f"{unit.unit_id}_clip.mp4")
@@ -1846,6 +2275,19 @@ class RichTextPipeline:
         ]
         
         def run_ffmpeg():
+            """
+            执行逻辑：
+            1) 组织处理流程与依赖调用。
+            2) 汇总中间结果并输出。
+            实现方式：通过子进程调用、文件系统读写实现。
+            核心价值：编排流程，保证步骤顺序与可追踪性。
+            决策逻辑：
+            - 条件：os.path.exists(output_path)
+            依据来源（证据链）：
+            输入参数：
+            - 无。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 return output_path if os.path.exists(output_path) else ""
@@ -1863,7 +2305,17 @@ class RichTextPipeline:
         units: List[SemanticUnit], 
         title: str
     ) -> RichTextDocument:
-        """组装富文本文档"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - units: 函数入参（类型：List[SemanticUnit]）。
+        - title: 函数入参（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         doc = RichTextDocument(
             title=title or "视频知识文档",
             source_video=self.video_path,

@@ -1,3 +1,15 @@
+"""
+模块说明：generate_universal_dict 相关能力的封装。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
+
 import jieba
 import pandas as pd
 from textrank4zh import TextRank4Keyword
@@ -38,6 +50,16 @@ DYNAMIC_FEATURES = ["步骤", "过程", "操作", "流程", "执行", "变换", 
 
 # ---------------------- 2. 通用工具初始化 ----------------------
 def ensure_resources():
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     print("Checking dependencies...")
     try:
         nltk.data.find('corpora/wordnet')
@@ -55,10 +77,21 @@ cc = OpenCC('s2t')
 # ---------------------- 3. 通用同义词提取（无场景绑定） ----------------------
 def get_universal_synonyms(word):
     """
-    通用同义词提取（适配任意领域，无需场景映射）
-    :param word: 核心词
-    :return: 通用同义词列表
-    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    决策逻辑：
+    - 条件：word not in universal_cn_en
+    - 条件：en_word in universal_en_cn
+    - 条件：k == en_word
+    依据来源（证据链）：
+    - 输入参数：word。
+    输入参数：
+    - word: 函数入参（类型：未标注）。
+    输出参数：
+    - list 对象或调用结果。"""
     # 通用中文核心词-英文映射（覆盖90%通用动词）
     universal_cn_en = {
         # 通用静态需求词
@@ -120,13 +153,18 @@ def get_universal_synonyms(word):
 # ---------------------- 4. 通用术语提取（自适应任意领域语料） ----------------------
 def extract_universal_terms(corpus, static_features, dynamic_features, top_k=20):
     """
-    通用术语提取（从任意领域语料中自动提取上下文词）
-    :param corpus: 通用语料
-    :param static_features: 静态特征词（通用维度）
-    :param dynamic_features: 动态特征词（通用维度）
-    :param top_k: 提取高频关键词数量
-    :return: 静态上下文词、动态上下文词
-    """
+    执行逻辑：
+    1) 扫描输入内容。
+    2) 过滤并提取目标子集。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：聚焦关键信息，减少后续处理成本。
+    输入参数：
+    - corpus: 函数入参（类型：未标注）。
+    - static_features: 函数入参（类型：未标注）。
+    - dynamic_features: 函数入参（类型：未标注）。
+    - top_k: 函数入参（类型：未标注）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     # 合并语料并预处理（通用文本清洗）
     full_text = " ".join([cc.convert(text) for text in corpus])  # 简繁统一
     full_text = re.sub(r"[^\u4e00-\u9fa5\s]", " ", full_text)    # 仅保留中文和空格
@@ -147,11 +185,16 @@ def extract_universal_terms(corpus, static_features, dynamic_features, top_k=20)
 # ---------------------- 5. 通用词典清洗（适配任意领域） ----------------------
 def universal_dict_clean(word_list, stop_words=None):
     """
-    通用词典清洗：去重、过滤停用词、过滤无效词
-    :param word_list: 待清洗词列表
-    :param stop_words: 通用停用词（可自定义）
-    :return: 清洗后的词列表
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - word_list: 数据列表/集合（类型：未标注）。
+    - stop_words: 函数入参（类型：未标注）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     # 通用停用词（无场景绑定）
     default_stop_words = {"的", "和", "与", "为", "之", "及", "其", "于", "也", "了", "是"}
     stop_words = stop_words or default_stop_words
@@ -166,6 +209,20 @@ def universal_dict_clean(word_list, stop_words=None):
     return clean_words
 
 def main():
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：dict_type == 'domain'
+    - 条件：words
+    依据来源（证据链）：
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     ensure_resources()
     
     print(f"Generating dictionary for domain: {DOMAIN_NAME}")
@@ -207,7 +264,20 @@ def main():
 
     # 8. 通用可视化输出
     def print_universal_dict(dict_data):
-        """通用词典打印（适配任意领域）"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：dict_type == 'domain'
+        - 条件：words
+        依据来源（证据链）：
+        输入参数：
+        - dict_data: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         print("="*60)
         print(f"✅ 【{dict_data['domain']}】通用分层词典生成完成（可直接使用）")
         print("="*60)

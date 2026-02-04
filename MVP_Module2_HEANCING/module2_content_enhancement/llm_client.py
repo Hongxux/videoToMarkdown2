@@ -1,9 +1,14 @@
 """
-LLM Client Wrapper
-
-Provides a simple interface compatible with DeepSeek API.
-Wraps the existing LLM client from stage1_pipeline for reuse.
-"""
+模块说明：Module2 内容增强中的 llm_client 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import json
@@ -30,13 +35,16 @@ logger = logging.getLogger(__name__)
 
 class AdaptiveConcurrencyLimiter:
     """
-    自适应并发控制器 (类似 TCP 拥塞控制的 AIMD 算法)
-    
-    策略:
-    - 成功请求: 线性增加并发 (Additive Increase)
-    - 失败请求 (429/超时): 乘法减少并发 (Multiplicative Decrease)
-    - 滑动窗口统计成功率
-    """
+    类说明：封装 AdaptiveConcurrencyLimiter 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(
         self,
@@ -47,6 +55,21 @@ class AdaptiveConcurrencyLimiter:
         decrease_factor: float = 0.5,
         window_size: int = 20
     ):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - initial_limit: 函数入参（类型：int）。
+        - min_limit: 函数入参（类型：int）。
+        - max_limit: 函数入参（类型：int）。
+        - increase_step: 函数入参（类型：int）。
+        - decrease_factor: 函数入参（类型：float）。
+        - window_size: 函数入参（类型：int）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.current_limit = initial_limit
         self.min_limit = min_limit
         self.max_limit = max_limit
@@ -64,15 +87,48 @@ class AdaptiveConcurrencyLimiter:
         logger.info(f"AdaptiveConcurrencyLimiter initialized: limit={initial_limit}, range=[{min_limit}, {max_limit}]")
     
     async def acquire(self):
-        """获取并发许可"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         await self._semaphore.acquire()
     
     def release(self):
-        """释放并发许可"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self._semaphore.release()
     
     async def record_success(self):
-        """记录成功请求"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(self.results) > self.window_size
+        - 条件：len(self.results) >= self.window_size
+        - 条件：success_rate > 0.9 and self.current_limit < self.max_limit
+        依据来源（证据链）：
+        - 对象内部状态：self.current_limit, self.max_limit, self.results, self.window_size。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         async with self._lock:
             self.results.append(True)
             if len(self.results) > self.window_size:
@@ -88,7 +144,23 @@ class AdaptiveConcurrencyLimiter:
                     logger.debug(f"Concurrency ↑ {old_limit} → {self.current_limit} (success_rate={success_rate:.0%})")
     
     async def record_failure(self, is_rate_limit: bool = False):
-        """记录失败请求"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(self.results) > self.window_size
+        - 条件：is_rate_limit
+        - 条件：old_limit != self.current_limit
+        依据来源（证据链）：
+        - 输入参数：is_rate_limit。
+        - 对象内部状态：self.current_limit, self.results, self.window_size。
+        输入参数：
+        - is_rate_limit: 开关/状态（类型：bool）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         async with self._lock:
             self.results.append(False)
             if len(self.results) > self.window_size:
@@ -108,14 +180,37 @@ class AdaptiveConcurrencyLimiter:
                 logger.warning(f"Concurrency ↓ {old_limit} → {self.current_limit} (rate_limit={is_rate_limit})")
     
     def _update_semaphore(self, old_limit: int, new_limit: int):
-        """更新信号量容量"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - old_limit: 函数入参（类型：int）。
+        - new_limit: 函数入参（类型：int）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         # 简化处理: 重新创建信号量 (协程安全)
         # 注意: 这不会立即释放已获取的许可，但新请求会使用新限制
         self._semaphore = asyncio.Semaphore(new_limit)
     
     @property
     def stats(self) -> Dict[str, Any]:
-        """获取统计信息"""
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        决策逻辑：
+        - 条件：self.results
+        依据来源（证据链）：
+        - 对象内部状态：self.results。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         success_rate = sum(self.results) / len(self.results) if self.results else 0
         return {
             "current_limit": self.current_limit,
@@ -130,23 +225,49 @@ class AdaptiveConcurrencyLimiter:
 
 class AdaptiveConnectionPoolManager:
     """
-    自适应连接池管理器
-    
-    根据 AdaptiveConcurrencyLimiter 的当前并发数动态调整连接池大小:
-    - max_connections = current_limit * 2 (预留缓冲)
-    - max_keepalive = current_limit
-    
-    当并发数变化超过阈值时，重建连接池。
-    """
+    类说明：封装 AdaptiveConnectionPoolManager 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、HTTP 调用实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self._client: Optional[httpx.AsyncClient] = None
         self._last_pool_size: int = 0
         self._rebuild_threshold: float = 0.3  # 30% 变化触发重建
         self._lock = asyncio.Lock()
     
     async def get_client(self, current_limit: int) -> httpx.AsyncClient:
-        """获取连接池客户端，必要时动态重建"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：self._client is not None
+        - 条件：change_ratio < self._rebuild_threshold
+        依据来源（证据链）：
+        - 对象内部状态：self._client, self._rebuild_threshold。
+        输入参数：
+        - current_limit: 函数入参（类型：int）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         target_pool_size = max(current_limit * 2, 20)  # 至少 20 连接
         
         # 检查是否需要重建
@@ -194,7 +315,16 @@ class AdaptiveConnectionPoolManager:
             return self._client
     
     def get_client_sync(self) -> Optional[httpx.AsyncClient]:
-        """同步获取客户端 (不再主动初始化，改为延迟到 async 上下文)"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         return self._client
 
 
@@ -202,7 +332,19 @@ class AdaptiveConnectionPoolManager:
 _global_pool_manager: Optional[AdaptiveConnectionPoolManager] = None
 
 def get_pool_manager() -> AdaptiveConnectionPoolManager:
-    """获取全局连接池管理器"""
+    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    决策逻辑：
+    - 条件：_global_pool_manager is None
+    依据来源（证据链）：
+    输入参数：
+    - 无。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     global _global_pool_manager
     if _global_pool_manager is None:
         _global_pool_manager = AdaptiveConnectionPoolManager()
@@ -213,7 +355,19 @@ def get_pool_manager() -> AdaptiveConnectionPoolManager:
 _global_concurrency_limiter: Optional[AdaptiveConcurrencyLimiter] = None
 
 def get_concurrency_limiter() -> AdaptiveConcurrencyLimiter:
-    """获取全局并发控制器"""
+    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    决策逻辑：
+    - 条件：_global_concurrency_limiter is None
+    依据来源（证据链）：
+    输入参数：
+    - 无。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     global _global_concurrency_limiter
     if _global_concurrency_limiter is None:
         _global_concurrency_limiter = AdaptiveConcurrencyLimiter(
@@ -226,7 +380,17 @@ def get_concurrency_limiter() -> AdaptiveConcurrencyLimiter:
 
 @dataclass
 class LLMResponse:
-    """LLM响应元数据"""
+    """
+    类说明：封装 LLMResponse 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     model: str
     prompt_tokens: int
     completion_tokens: int
@@ -236,14 +400,16 @@ class LLMResponse:
 
 class LLMClient:
     """
-    LLM客户端包装器
-    
-    🚀 V2 优化:
-    - 全局连接池 + HTTP/2
-    - gzip/br 压缩
-    - 自适应并发控制 (AIMD)
-    - 流式响应支持
-    """
+    类说明：封装 LLMClient 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(
         self,
@@ -252,6 +418,23 @@ class LLMClient:
         model: str = "deepseek-chat",
         temperature: float = 0.3
     ):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：not self.api_key
+        依据来源（证据链）：
+        - 对象内部状态：self.api_key。
+        输入参数：
+        - api_key: 函数入参（类型：str）。
+        - base_url: 函数入参（类型：str）。
+        - model: 模型/推理配置（类型：str）。
+        - temperature: 函数入参（类型：float）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.base_url = base_url
         self.model = model
@@ -268,7 +451,20 @@ class LLMClient:
         self.concurrency_limiter = get_concurrency_limiter()
     
     async def _ensure_openai_client(self):
-        """确保 OpenAI 异步客户端在当前事件循环中初始化"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._openai_client is None
+        依据来源（证据链）：
+        - 对象内部状态：self._openai_client。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self._openai_client is None:
             from openai import AsyncOpenAI
             # 获取或创建当前循环下的 http_client
@@ -283,7 +479,16 @@ class LLMClient:
         return self._openai_client
     
     async def _refresh_client_if_needed(self):
-        """动态刷新连接池 (当并发数变化显著时)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         from openai import AsyncOpenAI
         new_http_client = await self._pool_manager.get_client(self.concurrency_limiter.current_limit)
         # AsyncOpenAI 不支持运行时更换 http_client，所以这里仅触发池重建
@@ -303,10 +508,21 @@ class LLMClient:
         system_message: str = None
     ) -> Tuple[Dict[str, Any], LLMResponse, Any]:
         """
-        调用LLM并强制返回JSON
-        
-        🚀 V2: 集成自适应并发控制
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：system_message
+        - 条件：'402' in error_msg or 'Insufficient Balance' in error_msg
+        依据来源（证据链）：
+        - 输入参数：system_message。
+        输入参数：
+        - prompt: 文本内容（类型：str）。
+        - system_message: 函数入参（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         import time
         start_time = time.time()
         
@@ -393,10 +609,21 @@ class LLMClient:
         system_message: str = None
     ) -> Tuple[str, LLMResponse, Any]:
         """
-        调用LLM并返回纯文本
-        
-        🚀 V2: 集成自适应并发控制
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：system_message
+        - 条件：'402' in error_msg or 'Insufficient Balance' in error_msg
+        依据来源（证据链）：
+        - 输入参数：system_message。
+        输入参数：
+        - prompt: 文本内容（类型：str）。
+        - system_message: 函数入参（类型：str）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         import time
         start_time = time.time()
         
@@ -459,13 +686,14 @@ def create_llm_client(
     temperature: float = 0.3
 ) -> LLMClient:
     """
-    Factory function to create LLM client
-    
-    Args:
-        model: Model name
-        temperature: Sampling temperature
-    
-    Returns:
-        LLMClient instance
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - model: 模型/推理配置（类型：str）。
+    - temperature: 函数入参（类型：float）。
+    输出参数：
+    - LLMClient 对象或调用结果。"""
     return LLMClient(model=model, temperature=temperature)

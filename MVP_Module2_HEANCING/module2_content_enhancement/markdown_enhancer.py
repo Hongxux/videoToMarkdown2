@@ -1,14 +1,14 @@
 """
-Markdown 增强导出模块
-
-功能:
-1. HierarchyClassifier: 知识点层级划分 (一级/二级/三级)
-2. TextEnhancer: 正文补全 (OCR + 指代消解)
-3. LogicExtractor: 隐性逻辑提取 (Tab缩进 + 语义标签)
-4. ConcreteKnowledgeValidator: 具象性知识验证 (公式/图形检测)
-
-V2.0 - Obsidian 格式 + 具象性知识验证
-"""
+模块说明：Module2 内容增强中的 markdown_enhancer 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import json
@@ -127,7 +127,17 @@ LOGIC_EXTRACT_PROMPT = """你是教育逻辑分析专家，擅长挖掘教学口
 
 @dataclass
 class EnhancedSection:
-    """增强后的语义单元"""
+    """
+    类说明：封装 EnhancedSection 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     unit_id: str
     title: str
     level: int = 2                          # 1/2/3
@@ -147,20 +157,33 @@ class EnhancedSection:
 
 class MarkdownEnhancer:
     """
-    Markdown 增强导出器
-    
-    使用 LLM 进行:
-    1. 知识点层级划分
-    2. 正文补全增强
-    3. 隐性逻辑提取
-    """
+    类说明：封装 MarkdownEnhancer 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
         """
-        初始化 Markdown 增强器
-        
-        🚀 V3: 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
-        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：not self.api_key
+        依据来源（证据链）：
+        - 对象内部状态：self.api_key。
+        输入参数：
+        - api_key: 函数入参（类型：Optional[str]）。
+        - base_url: 函数入参（类型：Optional[str]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.base_url = base_url or "https://api.deepseek.com"
         
@@ -183,19 +206,33 @@ class MarkdownEnhancer:
     
     @property
     def enabled(self) -> bool:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 布尔判断结果。"""
         return self._enabled
     
     async def enhance(self, result_json_path: str, subject: str = "数据结构与算法") -> str:
         """
-        增强 Markdown 导出
-        
-        Args:
-            result_json_path: result.json 路径
-            subject: 学科名称 (用于层级划分 prompt)
-            
-        Returns:
-            增强后的 Markdown 内容
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not sections
+        依据来源（证据链）：
+        输入参数：
+        - result_json_path: 文件路径（类型：str）。
+        - subject: 函数入参（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         # 加载数据
         with open(result_json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
@@ -252,7 +289,21 @@ class MarkdownEnhancer:
         return markdown
     
     async def _classify_hierarchy(self, sections: List[Dict], subject: str) -> Dict[str, Dict]:
-        """知识点层级划分"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._enabled
+        依据来源（证据链）：
+        - 对象内部状态：self._enabled。
+        输入参数：
+        - sections: 函数入参（类型：List[Dict]）。
+        - subject: 函数入参（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         if not self._enabled:
             # 默认: 所有单元为二级
             return {s.get("unit_id", f"SU{i}"): {"level": 2, "parent_id": None} 
@@ -290,7 +341,23 @@ class MarkdownEnhancer:
                     for i, s in enumerate(sections)}
     
     async def _enhance_text(self, section: EnhancedSection) -> str:
-        """正文补全增强"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._enabled
+        - 条件：ac.get('knowledge_type') != '讲解型'
+        - 条件：action_info_list
+        依据来源（证据链）：
+        - 配置字段：knowledge_type。
+        - 对象内部状态：self._enabled。
+        输入参数：
+        - section: 函数入参（类型：EnhancedSection）。
+        输出参数：
+        - 字符串结果。"""
         if not self._enabled:
             return section.original_body
         
@@ -324,7 +391,24 @@ class MarkdownEnhancer:
             return section.original_body
     
     async def _extract_logic(self, section: EnhancedSection) -> str:
-        """隐性逻辑提取"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._enabled
+        - 条件：section.parent_id
+        - 条件：ac.get('knowledge_type') != '讲解型'
+        依据来源（证据链）：
+        - 输入参数：section。
+        - 配置字段：knowledge_type。
+        - 对象内部状态：self._enabled。
+        输入参数：
+        - section: 函数入参（类型：EnhancedSection）。
+        输出参数：
+        - 字符串结果。"""
         if not self._enabled:
             return section.enhanced_body
         
@@ -362,7 +446,20 @@ class MarkdownEnhancer:
             return section.enhanced_body
     
     def _assemble_markdown(self, title: str, sections: List[EnhancedSection]) -> str:
-        """组装最终 Markdown"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not level1_sections
+        依据来源（证据链）：
+        输入参数：
+        - title: 函数入参（类型：str）。
+        - sections: 函数入参（类型：List[EnhancedSection]）。
+        输出参数：
+        - 字符串结果。"""
         lines = []
         
         # 标题
@@ -399,7 +496,23 @@ class MarkdownEnhancer:
     
     
     def _render_section(self, section: EnhancedSection, indent: int = 0) -> List[str]:
-        """渲染单个语义单元 (V2: Obsidian 格式)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：section.structured_content
+        - 条件：section.video_clip and os.path.exists(section.video_clip)
+        - 条件：section.validated_screenshots
+        依据来源（证据链）：
+        - 输入参数：section。
+        输入参数：
+        - section: 函数入参（类型：EnhancedSection）。
+        - indent: 函数入参（类型：int）。
+        输出参数：
+        - str 列表（与输入或处理结果一一对应）。"""
         lines = []
         
         # 标题层级

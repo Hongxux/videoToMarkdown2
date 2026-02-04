@@ -1,13 +1,14 @@
 """
-Semantic Feature Extractor - Week 2 Day 9
-
-Implements NLP-based semantic feature analysis:
-- Context similarity (Sentence-BERT)
-- Domain keyword matching
-- Semantic role labeling
-
-Part of the three-layer multimodal fusion system.
-"""
+模块说明：Module2 内容增强中的 semantic_feature_extractor 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import logging
 from typing import List, Dict, Optional
@@ -26,10 +27,16 @@ _MAX_GLOBAL_CACHE_SIZE = 2000
 @dataclass
 class SemanticFeatures:
     """
-    语义特征分析结果
-    
-    用于多模态融合决策的语义维度
-    """
+    类说明：封装 SemanticFeatures 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     knowledge_type: str  # "process" | "spatial" | "abstract"
     
     # 上下文相似度 (S_ctx)
@@ -51,10 +58,16 @@ class SemanticFeatures:
 
 class SemanticFeatureExtractor:
     """
-    语义特征提取器
-    
-    基于Sentence-BERT和关键词匹配实现
-    """
+    类说明：封装 SemanticFeatureExtractor 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(
         self,
@@ -62,10 +75,23 @@ class SemanticFeatureExtractor:
         domain_keywords: Dict[str, List[str]] = None
     ):
         """
-        Args:
-            config: Module2配置字典 (如果为None,自动加载)
-            domain_keywords: 领域关键词字典
-        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、Torch 推理/张量计算、ONNX 推理、YAML 解析实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：config is None
+        - 条件：not self.sequence_indicators
+        - 条件：not self.hierarchy_indicators
+        依据来源（证据链）：
+        - 输入参数：config。
+        - 对象内部状态：self.hierarchy_indicators, self.sequence_indicators。
+        输入参数：
+        - config: 配置对象/字典（类型：Dict）。
+        - domain_keywords: 函数入参（类型：Dict[str, List[str]]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         # 加载配置
         if config is None:
             from .config_loader import load_module2_config
@@ -134,7 +160,22 @@ class SemanticFeatureExtractor:
     
     @property
     def model(self):
-        """懒加载Sentence-BERT模型 (🚀 Phase 5.1: Fixed UnboundLocalError & Redundancy)"""
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新、Torch 推理/张量计算、ONNX 推理实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        决策逻辑：
+        - 条件：self._model is not None
+        - 条件：self.use_onnx
+        - 条件：torch.get_num_threads() > 1
+        依据来源（证据链）：
+        - 对象内部状态：self._model, self.use_onnx。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self._model is not None:
             return self._model
             
@@ -170,9 +211,21 @@ class SemanticFeatureExtractor:
     
     async def classify_semantic_role(self, text: str) -> str:
         """
-        使用 BERT-tiny 判定句子的语义角色 (G/C/R/N)
-        基于原型向量的余弦相似度进行零样本判定
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not text.strip()
+        - 条件：max_sim < 0.4
+        - 条件：sim > max_sim
+        依据来源（证据链）：
+        - 输入参数：text。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         if not text.strip(): return "N"
         
         try:
@@ -208,7 +261,21 @@ class SemanticFeatureExtractor:
             return "C"
 
     async def get_embedding(self, text: str):
-        """获取文本 Embedding (含缓存支持)"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算、asyncio 异步调度实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：text in _GLOBAL_EMBEDDING_CACHE
+        依据来源（证据链）：
+        - 输入参数：text。
+        - 阈值常量：_GLOBAL_EMBEDDING_CACHE。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         # 尝试从全局缓存获取
         if text in _GLOBAL_EMBEDDING_CACHE:
             return _GLOBAL_EMBEDDING_CACHE[text]
@@ -225,7 +292,23 @@ class SemanticFeatureExtractor:
         return new_emb
 
     async def batch_get_embeddings(self, texts: List[str]) -> List[np.ndarray]:
-        """🚀 Phase 5.0 Performance: 批量获取 Embedding (深度优化点)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not texts
+        - 条件：to_encode_texts
+        - 条件：text in _GLOBAL_EMBEDDING_CACHE
+        依据来源（证据链）：
+        - 输入参数：texts。
+        - 阈值常量：_GLOBAL_EMBEDDING_CACHE。
+        输入参数：
+        - texts: 函数入参（类型：List[str]）。
+        输出参数：
+        - np.ndarray 列表（与输入或处理结果一一对应）。"""
         if not texts: return []
         
         results = [None] * len(texts)
@@ -256,6 +339,21 @@ class SemanticFeatureExtractor:
         return results
 
     def _update_cache(self, text, emb):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(_GLOBAL_EMBEDDING_CACHE) >= _MAX_GLOBAL_CACHE_SIZE
+        依据来源（证据链）：
+        - 阈值常量：_GLOBAL_EMBEDDING_CACHE, _MAX_GLOBAL_CACHE_SIZE。
+        输入参数：
+        - text: 文本内容（类型：未标注）。
+        - emb: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if len(_GLOBAL_EMBEDDING_CACHE) >= _MAX_GLOBAL_CACHE_SIZE:
              _GLOBAL_EMBEDDING_CACHE.popitem(last=False)
         _GLOBAL_EMBEDDING_CACHE[text] = emb
@@ -266,8 +364,24 @@ class SemanticFeatureExtractor:
         context: str
     ) -> float:
         """
-        计算文本与上下文的语义相似度 (异步入口, 同步推理保证稳定性)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not text.strip() or not context.strip()
+        - 条件：strings_to_encode
+        - 条件：(self._cache_hits + self._cache_misses) % 10 == 0
+        依据来源（证据链）：
+        - 输入参数：context, text。
+        - 阈值常量：_GLOBAL_EMBEDDING_CACHE, _MAX_GLOBAL_CACHE_SIZE。
+        - 对象内部状态：self._cache_hits, self._cache_misses, self._embedding_cache。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        - context: 函数入参（类型：str）。
+        输出参数：
+        - 数值型计算结果。"""
         if not text.strip() or not context.strip():
             return 0.0
         
@@ -337,18 +451,22 @@ class SemanticFeatureExtractor:
         domain: str
     ) -> tuple[float, List[str]]:
         """
-        计算领域知识一致性
-        
-        基于领域关键词匹配率:
-        K_domain = matched_count / total_keywords
-        
-        Args:
-            text: 目标文本
-            domain: 领域名称
-        
-        Returns:
-            (一致性分数, 匹配到的关键词列表)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：domain not in self.domain_keywords
+        - 条件：not keywords
+        依据来源（证据链）：
+        - 输入参数：domain。
+        - 对象内部状态：self.domain_keywords。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        - domain: 函数入参（类型：str）。
+        输出参数：
+        - float, List[str] 列表（与输入或处理结果一一对应）。"""
         if domain not in self.domain_keywords:
             logger.warning(f"Unknown domain: {domain}")
             return 0.5, []
@@ -367,14 +485,15 @@ class SemanticFeatureExtractor:
     
     def detect_pattern(self, text: str) -> Dict[str, bool]:
         """
-        检测文本中的模式
-        
-        - 序列模式: "A→B→C", "首先...然后...最后"
-        - 层级模式: "A包含B", "分为", "组成"
-        
-        Returns:
-            模式检测结果
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         # 序列模式关键词 (Already loaded in __init__)
         sequence_indicators = self.sequence_indicators
         
@@ -397,8 +516,24 @@ class SemanticFeatureExtractor:
         llm_suggestion: str = None
     ) -> tuple[str, bool, bool]:
         """
-        分类知识类型 (混合动力: LLM 建议优先 + 关键词校验)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：llm_suggestion == 'screenshot'
+        - 条件：has_process and knowledge_type == 'spatial'
+        - 条件：llm_suggestion == 'video'
+        依据来源（证据链）：
+        - 输入参数：llm_suggestion。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        - class1_indicators: 函数入参（类型：Dict[str, List[str]]）。
+        - class2_indicators: 函数入参（类型：Dict[str, List[str]]）。
+        - llm_suggestion: 函数入参（类型：str）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         # 1. 基础关键词统计
         spatial_keywords = class2_indicators.get("空间结构", [])
         spatial_count = sum(1 for kw in spatial_keywords if kw in text)
@@ -442,22 +577,21 @@ class SemanticFeatureExtractor:
         llm_suggestion: str = None
     ) -> SemanticFeatures:
         """
-        提取完整的语义特征
-        
-        这是主入口方法
-        
-        Args:
-            text: 目标文本
-            context_before: 前文上下文
-            context_after: 后文上下文
-            domain: 领域
-            class1_indicators: 第1类断层关键词
-            class2_indicators: 第2类断层关键词
-            llm_suggestion: LLM关于增强方式的建议 (Optional)
-        
-        Returns:
-            SemanticFeatures对象
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        - context_before: 函数入参（类型：str）。
+        - context_after: 函数入参（类型：str）。
+        - domain: 函数入参（类型：str）。
+        - class1_indicators: 函数入参（类型：Dict）。
+        - class2_indicators: 函数入参（类型：Dict）。
+        - llm_suggestion: 函数入参（类型：str）。
+        输出参数：
+        - SemanticFeatures 对象（包含字段：knowledge_type, context_similarity, domain_consistency, matched_keywords, has_sequence_pattern, has_hierarchy_pattern, has_process_words, has_spatial_words, confidence）。"""
         # 1. 上下文相似度 (现在是 await 调用)
         full_context = f"{context_before} {context_after}"
         S_ctx = await self.calculate_context_similarity(text, full_context)
@@ -502,16 +636,21 @@ class SemanticFeatureExtractor:
         has_keywords: bool
     ) -> float:
         """
-        计算语义特征的置信度
-        
-        基于:
-        - 上下文相似度
-        - 领域一致性
-        - 是否匹配关键词
-        
-        Returns:
-            置信度 0-1
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：has_keywords
+        依据来源（证据链）：
+        - 输入参数：has_keywords。
+        输入参数：
+        - S_ctx: 函数入参（类型：float）。
+        - K_domain: 函数入参（类型：float）。
+        - has_keywords: 函数入参（类型：bool）。
+        输出参数：
+        - 数值型计算结果。"""
         # 按照用户文档的内部语义置信度公式简化版
         # C_text = 0.5 × S_ctx + 0.2 × K_domain (省略困惑度)
         confidence = 0.5 * S_ctx + 0.2 * K_domain + 0.3 * (1.0 if has_keywords else 0.5)

@@ -1,7 +1,14 @@
 """
-指标收集器
-收集和聚合管道执行指标
-"""
+模块说明：阶段监控 metrics 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import json
 from dataclasses import dataclass, field
@@ -13,22 +20,63 @@ from collections import defaultdict
 
 @dataclass
 class TokenUsage:
-    """Token使用量"""
+    """
+    类说明：封装 TokenUsage 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     prompt_tokens: int = 0
     completion_tokens: int = 0
     
     @property
     def total_tokens(self) -> int:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         return self.prompt_tokens + self.completion_tokens
     
     def add(self, prompt: int, completion: int):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - prompt: 文本内容（类型：int）。
+        - completion: 函数入参（类型：int）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.prompt_tokens += prompt
         self.completion_tokens += completion
 
 
 @dataclass 
 class StepStats:
-    """步骤统计"""
+    """
+    类说明：封装 StepStats 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     executions: int = 0
     successes: int = 0
     failures: int = 0
@@ -41,16 +89,38 @@ class StepStats:
 
 class MetricsCollector:
     """
-    指标收集器
-    
+    类说明：封装 MetricsCollector 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。
+    补充说明：
     收集：
     - Token使用量（按步骤、按模型）
     - 执行时间
     - 成功/失败率
-    - LLM调用统计
-    """
+    - LLM调用统计"""
     
     def __init__(self, output_dir: Optional[Path] = None):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：output_dir
+        依据来源（证据链）：
+        - 输入参数：output_dir。
+        输入参数：
+        - output_dir: 目录路径（类型：Optional[Path]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.output_dir = Path(output_dir) if output_dir else Path("output/metrics")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -65,7 +135,22 @@ class MetricsCollector:
         duration_ms: float,
         success: bool = True
     ):
-        """记录步骤执行"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：success
+        依据来源（证据链）：
+        - 输入参数：success。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - duration_ms: 函数入参（类型：float）。
+        - success: 函数入参（类型：bool）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         stats = self._step_stats[step_name]
         stats.executions += 1
         stats.total_duration_ms += duration_ms
@@ -86,7 +171,20 @@ class MetricsCollector:
         completion_tokens: int,
         latency_ms: float
     ):
-        """记录LLM使用"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - model: 模型/推理配置（类型：str）。
+        - prompt_tokens: 函数入参（类型：int）。
+        - completion_tokens: 函数入参（类型：int）。
+        - latency_ms: 函数入参（类型：float）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         # 按步骤统计
         self._step_stats[step_name].token_usage.add(prompt_tokens, completion_tokens)
         
@@ -97,7 +195,22 @@ class MetricsCollector:
         self._llm_latencies.append(latency_ms)
         
     def get_summary(self) -> Dict:
-        """获取指标汇总"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：self._llm_latencies
+        - 条件：stats.executions > 0
+        - 条件：stats.min_duration_ms != float('inf')
+        依据来源（证据链）：
+        - 对象内部状态：self._llm_latencies。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         total_duration = (datetime.now() - self._start_time).total_seconds() * 1000
         
         # Token汇总
@@ -149,14 +262,36 @@ class MetricsCollector:
         }
     
     def save(self, filename: str = "metrics.json"):
-        """保存指标"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - filename: 函数入参（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         filepath = self.output_dir / filename
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(self.get_summary(), f, ensure_ascii=False, indent=2)
         return filepath
     
     def print_summary(self):
-        """打印摘要"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：stats['failures'] == 0
+        依据来源（证据链）：
+        - 配置字段：failures。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         summary = self.get_summary()
         
         print("\n" + "="*60)

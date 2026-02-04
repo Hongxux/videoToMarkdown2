@@ -1,13 +1,14 @@
 """
-Rich Text Document - 富文本文档数据结构
-
-用于表示语义单元到富文本的转换结果，支持 Markdown/HTML 导出。
-
-设计原则:
-- 每个 Section 对应一个 SemanticUnit
-- 素材路径使用相对路径 (便于迁移)
-- 布局灵活可配置
-"""
+模块说明：Module2 内容增强中的 rich_text_document 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import json
@@ -22,8 +23,16 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MaterialSet:
     """
-    语义单元的素材集合
-    """
+    类说明：封装 MaterialSet 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     clip_path: Optional[str] = None           # 视频片段路径
     screenshot_paths: List[str] = field(default_factory=list)  # 截图路径列表
     
@@ -38,8 +47,16 @@ class MaterialSet:
 @dataclass
 class RichTextSection:
     """
-    单个语义单元的富文本表示
-    """
+    类说明：封装 RichTextSection 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     # 基础信息
     unit_id: str
     title: str                                # knowledge_topic
@@ -58,8 +75,27 @@ class RichTextSection:
     layout_hint: str = "default"              # 可选: inline / block / gallery
     
     def duration_str(self) -> str:
-        """格式化时间范围字符串"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 字符串结果。"""
         def fmt(sec):
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            输入参数：
+            - sec: 函数入参（类型：未标注）。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             m, s = divmod(int(sec), 60)
             return f"{m}:{s:02d}"
         return f"{fmt(self.start_sec)} - {fmt(self.end_sec)}"
@@ -68,8 +104,16 @@ class RichTextSection:
 @dataclass
 class RichTextDocument:
     """
-    完整富文本文档
-    """
+    类说明：封装 RichTextDocument 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     title: str = ""
     sections: List[RichTextSection] = field(default_factory=list)
     
@@ -79,11 +123,29 @@ class RichTextDocument:
     generated_at: str = ""
     
     def add_section(self, section: RichTextSection):
-        """添加一个段落"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - section: 函数入参（类型：RichTextSection）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.sections.append(section)
     
     def to_dict(self) -> Dict[str, Any]:
-        """转换为可序列化字典"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         return {
             "title": self.title,
             "source_video": self.source_video,
@@ -109,7 +171,16 @@ class RichTextDocument:
         }
     
     def to_json(self, output_path: str) -> str:
-        """导出为 JSON"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - output_path: 文件路径（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
         logger.info(f"Exported JSON: {output_path}")
@@ -117,12 +188,21 @@ class RichTextDocument:
     
     def to_markdown(self, output_path: str, assets_relative_dir: str = "assets") -> str:
         """
-        导出为 Markdown
-        
-        Args:
-            output_path: 输出文件路径
-            assets_relative_dir: 素材相对目录 (相对于 md 文件)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.source_video
+        - 条件：self.total_duration_sec > 0
+        依据来源（证据链）：
+        - 对象内部状态：self.source_video, self.total_duration_sec。
+        输入参数：
+        - output_path: 文件路径（类型：str）。
+        - assets_relative_dir: 目录路径（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         lines = []
         
         # 标题
@@ -160,7 +240,24 @@ class RichTextDocument:
         idx: int,
         assets_dir: str
     ) -> List[str]:
-        """渲染单个段落为 Markdown"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：materials.clip_path
+        - 条件：materials.screenshot_paths
+        - 条件：len(materials.screenshot_paths) >= 2 or str(section.knowledge_type) in ['process', '过程性知识', '过程']
+        依据来源（证据链）：
+        - 输入参数：section。
+        输入参数：
+        - section: 函数入参（类型：RichTextSection）。
+        - idx: 函数入参（类型：int）。
+        - assets_dir: 目录路径（类型：str）。
+        输出参数：
+        - str 列表（与输入或处理结果一一对应）。"""
         lines = []
         
         # 标题
@@ -220,7 +317,21 @@ class RichTextDocument:
         return lines
     
     def _relative_path(self, abs_path: str, assets_dir: str) -> str:
-        """转换为相对路径"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not abs_path
+        依据来源（证据链）：
+        - 输入参数：abs_path。
+        输入参数：
+        - abs_path: 文件路径（类型：str）。
+        - assets_dir: 目录路径（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         if not abs_path:
             return ""
         filename = Path(abs_path).name
@@ -236,8 +347,16 @@ def create_section_from_semantic_unit(
     materials: MaterialSet
 ) -> RichTextSection:
     """
-    从 SemanticUnit 创建 RichTextSection
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - unit: 函数入参（类型：未标注）。
+    - materials: 函数入参（类型：MaterialSet）。
+    输出参数：
+    - RichTextSection 对象（包含字段：unit_id, title, body_text, knowledge_type, start_sec, end_sec, materials, layout_hint）。"""
     return RichTextSection(
         unit_id=unit.unit_id,
         title=unit.knowledge_topic,

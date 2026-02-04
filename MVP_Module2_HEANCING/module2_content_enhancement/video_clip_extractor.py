@@ -1,7 +1,14 @@
 """
-Video Clip Extractor - Week 3 Day 19-21
-Extracts video clips for process-based faults (Class 3) with Dual-Anchor recalibration.
-"""
+模块说明：Module2 内容增强中的 video_clip_extractor 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import logging
 import subprocess
@@ -18,7 +25,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VideoClip:
-    """视频片段结果"""
+    """
+    类说明：封装 VideoClip 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     clip_id: str
     fault_id: str
     
@@ -41,9 +58,16 @@ class VideoClip:
 @dataclass
 class RichMediaMetadata:
     """
-    🚀 V6.9.5: 富媒体元数据结构 (Rich Media Knowledge Component)
-    契合公理：表现形式经济性 + 知识载体完整性
-    """
+    类说明：封装 RichMediaMetadata 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     layout_type: str = "interactive_card"  # poster_with_clips, interactive_card
     poster_path: str = ""
     poster_timestamp: float = 0.0
@@ -52,6 +76,17 @@ class RichMediaMetadata:
 
 @dataclass
 class VideoClip:
+    """
+    类说明：封装 VideoClip 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     clip_id: str
     fault_id: str
     original_start: float
@@ -67,15 +102,37 @@ class VideoClip:
 
 class VideoClipExtractor:
     """
-    视频片段提取器 (第一性原理高精度版)
-    
-    核心策略:
-    1. 双锚点重标定 (Dual-Anchor): 不盲信 ASR，通过搜索窗发现物理跳变
-    2. 双向 MSE 极值扫描: 起始点向后找第一个峰值，结束点向前找最后一个定格点
-    3. 物理硬约束: 视频 EOF 强制截断
-    """
+    类说明：封装 VideoClipExtractor 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, visual_extractor, llm_client, config: Dict = None, semantic_extractor = None):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：not shutil.which(self.ffmpeg_path)
+        - 条件：not self.TRANSITION_KEYWORDS
+        - 条件：Path(alt_path).exists()
+        依据来源（证据链）：
+        - 对象内部状态：self.TRANSITION_KEYWORDS, self.ffmpeg_path。
+        输入参数：
+        - visual_extractor: 函数入参（类型：未标注）。
+        - llm_client: 客户端实例（类型：未标注）。
+        - config: 配置对象/字典（类型：Dict）。
+        - semantic_extractor: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.visual_extractor = visual_extractor
         self.llm = llm_client
         self.config = config or {}
@@ -134,19 +191,50 @@ class VideoClipExtractor:
         logger.info(f"VideoClipExtractor initialized (Dual-Anchor Mode active)")
 
     def set_subtitles(self, subtitles: List):
-        """Set subtitles for semantic boundary refinement"""
+        """
+        执行逻辑：
+        1) 校验输入值。
+        2) 更新内部状态或持久化。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：集中更新状态，保证一致性。
+        输入参数：
+        - subtitles: 数据列表/集合（类型：List）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.subtitles = subtitles
 
     async def extract_video_clip(self, timestamp_start, timestamp_end, output_dir=None, video_path=None, 
                                 fault_text="", source_subtitle_ids=None, output_name=None):
-        """Shim for backward compatibility (V3 enhanced)
-        
-        Args:
-            output_name: 规范化输出文件名 (如 SU001_action_1)
         """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        输入参数：
+        - timestamp_start: 起止时间/区间边界（类型：未标注）。
+        - timestamp_end: 起止时间/区间边界（类型：未标注）。
+        - output_dir: 目录路径（类型：未标注）。
+        - video_path: 文件路径（类型：未标注）。
+        - fault_text: 函数入参（类型：未标注）。
+        - source_subtitle_ids: 函数入参（类型：未标注）。
+        - output_name: 函数入参（类型：未标注）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         from dataclasses import dataclass
         @dataclass
         class MockFault:
+            """
+            类说明：封装 MockFault 的职责与行为。
+            执行逻辑：
+            1) 维护类内状态与依赖。
+            2) 通过方法组合对外提供能力。
+            实现方式：通过成员变量与方法调用实现。
+            核心价值：集中状态与方法，降低分散实现的复杂度。
+            输入：
+            - 构造函数与业务方法的入参。
+            输出：
+            - 方法返回结果或内部状态更新。"""
             fault_id: str
             timestamp_start: float
             timestamp_end: float
@@ -167,7 +255,24 @@ class VideoClipExtractor:
         return await self.extract_clip(fault, video_path, output_dir)
 
     async def extract_clip(self, fault_candidate, video_path: str, output_dir: str = None) -> VideoClip:
-        """提取视频片段 (包含物理-语义双向重标定)"""
+        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：final_s >= final_e - 0.1
+        - 条件：not is_valid_anim
+        - 条件：safe_start > original_start
+        依据来源（证据链）：
+        - 对象内部状态：self.MAX_CLIP_DURATION, self._clip_cache。
+        输入参数：
+        - fault_candidate: 函数入参（类型：未标注）。
+        - video_path: 文件路径（类型：str）。
+        - output_dir: 目录路径（类型：str）。
+        输出参数：
+        - VideoClip 对象（包含字段：clip_id, fault_id, original_start, original_end, extended_start, extended_end, clip_path, action_start_detected, action_end_detected, transition_text, rich_media）。"""
         logger.info(f"Process starting: Re-anchoring clip for {fault_candidate.fault_id}")
         
         # 0. 获取物理时长事实 (优先使用 ffprobe)
@@ -326,9 +431,26 @@ class VideoClipExtractor:
 
     async def _detect_best_physical_anchors(self, video_path, s_scan, e_scan, asr_s, asr_e, fault_text=""):
         """
-        高阶对齐算法：多模态评分驱动的视觉锚点选择 (性能优化版)
-        评分模型 = 0.5 * MSE强度 + 0.3 * 语义相似度(OCR) + 0.2 * 时序相似度
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        - 条件：sample_node.get('rect_count', 0) > 3 or sample_node.get('rectangle_count', 0) > 3
+        - 条件：mse > base_start_threshold
+        依据来源（证据链）：
+        - 配置字段：rect_count, rectangle_count, total。
+        输入参数：
+        - video_path: 文件路径（类型：未标注）。
+        - s_scan: 函数入参（类型：未标注）。
+        - e_scan: 函数入参（类型：未标注）。
+        - asr_s: 函数入参（类型：未标注）。
+        - asr_e: 函数入参（类型：未标注）。
+        - fault_text: 函数入参（类型：未标注）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         # 1. 自适应阈值设定
         base_start_threshold = self.ACTION_START_THRESHOLD
         base_end_threshold = self.ACTION_END_THRESHOLD
@@ -368,6 +490,21 @@ class VideoClipExtractor:
         # 2. 动态采样逻辑 (核心区 vs 边缘区权重分配)
         def calculate_anchor_score(mse_val, anchor_time, target_time):
             # A. MSE 归一化
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            决策逻辑：
+            - 条件：time_gap <= 1.5
+            依据来源（证据链）：
+            输入参数：
+            - mse_val: 函数入参（类型：未标注）。
+            - anchor_time: 函数入参（类型：未标注）。
+            - target_time: 函数入参（类型：未标注）。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             intensity = min(1.0, mse_val / base_start_threshold)
             
             # B. 时序相似度与区域权重
@@ -408,8 +545,23 @@ class VideoClipExtractor:
 
     async def _expand_logic_chain(self, anchor_time: float, is_start: bool) -> tuple[float, bool]:
         """
-        基于模型驱动的逻辑链拓宽 (Guide/Confirm 识别)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self.semantic_extractor
+        - 条件：not subs
+        - 条件：is_start
+        依据来源（证据链）：
+        - 输入参数：is_start。
+        - 对象内部状态：self.semantic_extractor。
+        输入参数：
+        - anchor_time: 函数入参（类型：float）。
+        - is_start: 起止时间/区间边界（类型：bool）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         if not self.semantic_extractor:
             return anchor_time, False
             
@@ -445,10 +597,23 @@ class VideoClipExtractor:
 
     async def _get_dynamic_padding(self, has_trans: bool, semantic_time: float, is_start: bool) -> float:
         """
-        动态计算冗余量 (A/B 分类)
-        A类 (Chapter): 转折词 + 视觉跳变 -> 0.3s
-        B类 (Process): 过程描述 -> 2.0s
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not is_start
+        - 条件：not has_trans
+        - 条件：has_visual_jump
+        依据来源（证据链）：
+        - 输入参数：has_trans, is_start。
+        输入参数：
+        - has_trans: 函数入参（类型：bool）。
+        - semantic_time: 函数入参（类型：float）。
+        - is_start: 起止时间/区间边界（类型：bool）。
+        输出参数：
+        - 数值型计算结果。"""
         if not is_start: return 0.2 # 结束点逻辑较简单
         if not has_trans: return 2.0 # 无转折词默认保守
         
@@ -470,7 +635,16 @@ class VideoClipExtractor:
             return 0.3 if has_trans else 2.0
 
     async def _check_scene_switch(self, timestamp: float) -> bool:
-        """🚀 V6.9: 检测指定时间点附近是否有场景切换 (通过自适应引擎)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        输出参数：
+        - 布尔判断结果。"""
         # 采样前后 0.5s，使用高精度引擎判定
         feat = await self.visual_extractor.extract_visual_features(
             max(0, timestamp - 0.5), timestamp + 0.5, sample_rate=4
@@ -479,7 +653,24 @@ class VideoClipExtractor:
         return feat.is_dynamic and feat.confidence > 0.6
 
     def _get_subtitles_near(self, t: float, before_s: float, after_s: float):
-        """获取时间点附近的字幕"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self.subtitles
+        - 条件：isinstance(s, dict)
+        - 条件：s_start < end_search and s_end > start_search
+        依据来源（证据链）：
+        - 对象内部状态：self.subtitles。
+        输入参数：
+        - t: 函数入参（类型：float）。
+        - before_s: 函数入参（类型：float）。
+        - after_s: 函数入参（类型：float）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if not self.subtitles:
             return []
             
@@ -511,7 +702,22 @@ class VideoClipExtractor:
         return results
 
     async def _has_transition_at_boundary(self, timestamp: float, is_start: bool) -> bool:
-        """检测指定时间点附近是否存在转折词"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not subs
+        - 条件：is_start
+        依据来源（证据链）：
+        - 输入参数：is_start。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        - is_start: 起止时间/区间边界（类型：bool）。
+        输出参数：
+        - 布尔判断结果。"""
         # 搜索半径 1.0s
         from .subtitle_utils import extract_subtitle_text_in_range
         subs = self.subtitles
@@ -526,8 +732,25 @@ class VideoClipExtractor:
 
     async def _refine_boundaries_semantically(self, v_start, v_end, fault_text, source_sub_ids) -> Tuple[float, float]:
         """
-        🚀 V3 Core: 语义精修升级——扩大窗口 + 句式完整性校验 + 边界互斥
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not extractor or not fault_text
+        - 条件：s_overlap
+        - 条件：e_overlap
+        依据来源（证据链）：
+        - 输入参数：fault_text。
+        - 对象内部状态：self._is_next_topic。
+        输入参数：
+        - v_start: 起止时间/区间边界（类型：未标注）。
+        - v_end: 起止时间/区间边界（类型：未标注）。
+        - fault_text: 函数入参（类型：未标注）。
+        - source_sub_ids: 函数入参（类型：未标注）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         try:
             extractor = self._get_semantic_extractor()
             if not extractor or not fault_text: return v_start, v_end
@@ -554,6 +777,19 @@ class VideoClipExtractor:
 
             async def get_sim(t):
                 # 🚀 V3: 扩大文本提取范围 (1.5s) 且限制在搜索窗内
+                """
+                执行逻辑：
+                1) 读取内部状态或外部资源。
+                2) 返回读取结果。
+                实现方式：通过内部方法调用/状态更新实现。
+                核心价值：提供一致读取接口，降低调用耦合。
+                决策逻辑：
+                - 条件：not text
+                依据来源（证据链）：
+                输入参数：
+                - t: 函数入参（类型：未标注）。
+                输出参数：
+                - 函数计算/封装后的结果对象。"""
                 text = extract_subtitle_text_in_range(subs, max(s_search_start, t - 1.5), min(s_search_end, t + 1.5))
                 if not text: return 0.0, False
                 sim_score = await extractor.calculate_context_similarity(fault_text, text)
@@ -595,8 +831,25 @@ class VideoClipExtractor:
 
     async def _get_complete_semantic_baseline(self, asr_s, asr_e, fault_text) -> Tuple[float, float]:
         """
-        🚀 V3 Core: 适配无标点subs：基于Pause Detection模拟完整句，锚定包含关键词的完整口语句
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not subs
+        - 条件：current_sentence['start'] is not None
+        - 条件：not start_sentence
+        依据来源（证据链）：
+        - 输入参数：asr_e, asr_s。
+        - 配置字段：end, start, text。
+        - 阈值常量：PAUSE_THRESHOLD。
+        输入参数：
+        - asr_s: 函数入参（类型：未标注）。
+        - asr_e: 函数入参（类型：未标注）。
+        - fault_text: 函数入参（类型：未标注）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         subs = self.subtitles
         if not subs: return asr_s, asr_e
 
@@ -671,9 +924,23 @@ class VideoClipExtractor:
 
     async def _recalibrate_physical_anchor(self, video_path, sem_start, sem_end, fault_text="") -> Tuple[float, float]:
         """
-        🚀 V3: 优化终止点逻辑：起始点严守句头，终止点取句尾+物理跳变的并集
-        基于第一性原理：语义优先，视觉辅助补充延迟。
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：final_end <= final_start
+        - 条件：final_end > sem_end + 3.0
+        依据来源（证据链）：
+        - 输入参数：sem_end。
+        输入参数：
+        - video_path: 文件路径（类型：未标注）。
+        - sem_start: 起止时间/区间边界（类型：未标注）。
+        - sem_end: 起止时间/区间边界（类型：未标注）。
+        - fault_text: 函数入参（类型：未标注）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         video_duration = self._get_video_duration(video_path)
         
         # 扩展扫描窗
@@ -707,14 +974,42 @@ class VideoClipExtractor:
         return final_start, final_end
 
     def _check_boundary_overlap(self, target_start, target_end) -> Tuple[bool, Optional[Dict]]:
-        """🚀 V3: 校验目标窗口是否与已确定片段重叠"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not (target_end <= seg['start'] or target_start >= seg['end'])
+        依据来源（证据链）：
+        - 输入参数：target_end, target_start。
+        - 配置字段：end, start。
+        输入参数：
+        - target_start: 起止时间/区间边界（类型：未标注）。
+        - target_end: 起止时间/区间边界（类型：未标注）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         for seg in self.confirmed_segments:
             if not (target_end <= seg["start"] or target_start >= seg["end"]):
                 return True, seg
         return False, None
 
     def _judge_sentence_completeness_no_punc(self, text: str) -> bool:
-        """🚀 V3: 无标点场景下的句式完整性判断"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not text
+        依据来源（证据链）：
+        - 输入参数：text。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        输出参数：
+        - 布尔判断结果。"""
         if not text: return False
         subject_words = {"我们", "我", "这个", "该", "算法", "公式", "它", "大家"}
         predicate_words = {"看", "讲", "分析", "总结", "推导", "理解", "做", "写", "求"}
@@ -722,7 +1017,24 @@ class VideoClipExtractor:
         return has_sub_pred and len(text) >= 5
 
     def _add_speech_flow_padding(self, start_time: float, end_time: float) -> Tuple[float, float]:
-        """🚀 V3: 为起止点添加口语语流缓冲 (0.2-0.3s)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.confirmed_segments
+        - 条件：final_s < prev_seg['end']
+        - 条件：prev_seg['end'] >= final_e - 0.1
+        依据来源（证据链）：
+        - 配置字段：end。
+        - 对象内部状态：self.confirmed_segments。
+        输入参数：
+        - start_time: 起止时间/区间边界（类型：float）。
+        - end_time: 起止时间/区间边界（类型：float）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         # 起始点预留缓冲，向前 0.2s
         final_s = max(0, start_time - 0.2)
         # 结束点预留缓冲，向后 0.3s
@@ -746,7 +1058,25 @@ class VideoClipExtractor:
         return final_s, final_e
 
     async def _search_semantic_boundary(self, anchor_time, is_start, window) -> List[float]:
-        """在窗口内搜索所有潜在的语义边界点"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not subs
+        - 条件：is_start
+        - 条件：any((kw in text for kw in self.TRANSITION_KEYWORDS))
+        依据来源（证据链）：
+        - 输入参数：is_start。
+        - 对象内部状态：self.TRANSITION_KEYWORDS。
+        输入参数：
+        - anchor_time: 函数入参（类型：未标注）。
+        - is_start: 起止时间/区间边界（类型：未标注）。
+        - window: 函数入参（类型：未标注）。
+        输出参数：
+        - float 列表（与输入或处理结果一一对应）。"""
         subs = self._get_subtitles_near(anchor_time, window if is_start else 0, 0 if is_start else window)
         candidates = []
         if not subs: return []
@@ -764,7 +1094,24 @@ class VideoClipExtractor:
         return candidates
 
     async def _expand_logic_chain_v2(self, anchor_time: float, is_start: bool) -> tuple[float, bool]:
-        """🚀 V2 Core: 逻辑链拓宽 (10s Window + 0.5s Buffer)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self.semantic_extractor
+        - 条件：not subs
+        - 条件：is_start
+        依据来源（证据链）：
+        - 输入参数：is_start。
+        - 对象内部状态：self.semantic_extractor。
+        输入参数：
+        - anchor_time: 函数入参（类型：float）。
+        - is_start: 起止时间/区间边界（类型：bool）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         if not self.semantic_extractor:
             return anchor_time, False
             
@@ -794,7 +1141,24 @@ class VideoClipExtractor:
         return anchor_time, False
 
     async def _get_dynamic_padding_v2(self, start_t, end_t, is_start) -> float:
-        """🚀 V2 Core: 基于语义单元分类的动态冗余"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：unit_type == 'chapter'
+        - 条件：unit_type == 'process'
+        - 条件：is_start
+        依据来源（证据链）：
+        - 输入参数：is_start。
+        输入参数：
+        - start_t: 起止时间/区间边界（类型：未标注）。
+        - end_t: 起止时间/区间边界（类型：未标注）。
+        - is_start: 起止时间/区间边界（类型：未标注）。
+        输出参数：
+        - 数值型计算结果。"""
         unit_type = self._classify_semantic_unit(start_t, end_t)
         
         # 基础缓冲 (0.5s)
@@ -812,7 +1176,22 @@ class VideoClipExtractor:
         return base_buffer + padding if is_start else 0.5 # 结束点稍短
 
     def _classify_semantic_unit(self, start, end) -> str:
-        """判定语义单元类型"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：any((kw in text for kw in ['首先', '其次', '第三', '总结']))
+        - 条件：duration > 10.0 or any((kw in text for kw in ['点击', '输入', '这里', '可以看到']))
+        - 条件：any((kw in text for kw in ['这就是', '算出来', '结果是']))
+        依据来源（证据链）：
+        输入参数：
+        - start: 起止时间/区间边界（类型：未标注）。
+        - end: 起止时间/区间边界（类型：未标注）。
+        输出参数：
+        - 字符串结果。"""
         duration = end - start
         # 简单 heuristic: 结合时长和关键词
         from .subtitle_utils import extract_subtitle_text_in_range
@@ -827,7 +1206,22 @@ class VideoClipExtractor:
         return "general"
 
     async def _is_next_topic(self, current_fault, next_text) -> bool:
-        """判定一段文本是否已经是“下一话题”"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not next_text or not self.semantic_extractor
+        依据来源（证据链）：
+        - 输入参数：next_text。
+        - 对象内部状态：self.semantic_extractor。
+        输入参数：
+        - current_fault: 函数入参（类型：未标注）。
+        - next_text: 函数入参（类型：未标注）。
+        输出参数：
+        - 布尔判断结果。"""
         if not next_text or not self.semantic_extractor: return False
         # 如果下一段文本与当前断层文本的相似度极低 (< 0.2)，则认为是下一话题
         sim = await self.semantic_extractor.calculate_context_similarity(current_fault, next_text)
@@ -835,9 +1229,23 @@ class VideoClipExtractor:
 
     async def validate_animation(self, video_path: str, start: float, end: float, fault_text: str) -> Tuple[bool, str]:
         """
-        Phase 4.4: 动画演示验证器 (通用过滤)
-        区分 'Semantic Demonstration' (保留) 和 'Transition/Decorative Animation' (丢弃)
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：duration < 0.8
+        - 条件：features.is_dynamic
+        - 条件：ssim < ssim_threshold
+        依据来源（证据链）：
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - start: 起止时间/区间边界（类型：float）。
+        - end: 起止时间/区间边界（类型：float）。
+        - fault_text: 函数入参（类型：str）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         duration = end - start
         
         # Layer 1: 时序目的性筛查
@@ -899,7 +1307,20 @@ class VideoClipExtractor:
             return True, "Validation Error (Pass Safe)", []
             
     def _get_semantic_extractor(self):
-        """延迟获取语义提取器实例"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not hasattr(self, '_semantic_extractor') or self._semantic_extractor is None
+        依据来源（证据链）：
+        - 对象内部状态：self._semantic_extractor。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if not hasattr(self, '_semantic_extractor') or self._semantic_extractor is None:
             try:
                 from .semantic_feature_extractor import SemanticFeatureExtractor
@@ -909,7 +1330,21 @@ class VideoClipExtractor:
         return self._semantic_extractor
 
     def _get_video_duration(self, video_path: str) -> float:
-        """多方案获取时长，支持 ffprobe (主) 和 cv2 (备)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、子进程调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：'ffmpeg.exe' in self.ffmpeg_path
+        - 条件：fps > 0
+        依据来源（证据链）：
+        - 对象内部状态：self.ffmpeg_path。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - 数值型计算结果。"""
         # 1. 尝试 ffprobe
         try:
             cmd = [
@@ -933,6 +1368,26 @@ class VideoClipExtractor:
             return dur
 
     def _export_clip_with_ffmpeg(self, video_path, start, end, fid, out_dir) -> str:
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、子进程调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：fid and fid.startswith('SU')
+        - 条件：opath.exists()
+        - 条件：existing_files
+        依据来源（证据链）：
+        - 输入参数：fid。
+        输入参数：
+        - video_path: 文件路径（类型：未标注）。
+        - start: 起止时间/区间边界（类型：未标注）。
+        - end: 起止时间/区间边界（类型：未标注）。
+        - fid: 标识符（类型：未标注）。
+        - out_dir: 目录路径（类型：未标注）。
+        输出参数：
+        - 字符串结果。"""
         out_dir = Path(out_dir or "video_clips")
         out_dir.mkdir(parents=True, exist_ok=True)
         dur = end - start
@@ -971,8 +1426,23 @@ class VideoClipExtractor:
 
     def _export_poster_at_timestamp(self, video_path: str, timestamp: float, fid: str, output_dir: str) -> str:
         """
-        🚀 V6.9.5: 导出指定时间戳的海报帧
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、子进程调用、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：fid and fid.startswith('SU')
+        - 条件：opath.exists()
+        依据来源（证据链）：
+        - 输入参数：fid。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - timestamp: 函数入参（类型：float）。
+        - fid: 标识符（类型：str）。
+        - output_dir: 目录路径（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         out_dir = Path(output_dir or "video_clips")
         out_dir.mkdir(parents=True, exist_ok=True)
         
@@ -997,8 +1467,20 @@ class VideoClipExtractor:
 
     async def _cognitive_value_check(self, text: str, clip_count: int) -> bool:
         """
-        🚀 V6.9.7 (The Brain): 调用 LLM 判断动效的认知价值
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self.llm
+        依据来源（证据链）：
+        - 对象内部状态：self.llm。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        - clip_count: 函数入参（类型：int）。
+        输出参数：
+        - 布尔判断结果。"""
         if not self.llm: return True
         
         prompt = (
@@ -1019,6 +1501,22 @@ class VideoClipExtractor:
             return True
 
     async def _generate_transition_text(self, fault, s, e) -> str:
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not txt.endswith(('.', ':', '。', '！'))
+        - 条件：':' in res
+        依据来源（证据链）：
+        输入参数：
+        - fault: 函数入参（类型：未标注）。
+        - s: 函数入参（类型：未标注）。
+        - e: 函数入参（类型：未标注）。
+        输出参数：
+        - 字符串结果。"""
         dur = e - s
         prompt = f"你是教育编辑。请为 {s:.1f}s-{e:.1f}s (时长{dur:.1f}s) 的教学视频生成一句 20 字以内的引导语。内容: {fault.fault_text}。输出格式: 过渡语: [内容]"
         try:
@@ -1031,10 +1529,21 @@ class VideoClipExtractor:
 
     async def extract_result_screenshot(self, video_path: str, start: float, end: float, output_dir: str = None) -> Tuple[Optional[str], float]:
         """
-        V6 Optimization: Re-use ScreenshotSelector for high-fidelity result extraction.
-        Instead of a simplified internal check, we treat the 'result window' as a candidate
-        for the full ScreenshotSelector logic (Stability Islands + Peak Info).
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：selection and selection.screenshot_path
+        依据来源（证据链）：
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - start: 起止时间/区间边界（类型：float）。
+        - end: 起止时间/区间边界（类型：float）。
+        - output_dir: 目录路径（类型：str）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         try:
             # 1. Define Result Window (Last 2.0s or 30% of clip)
             # Ensure window is valid

@@ -1,4 +1,7 @@
 """
+?????Module2 ?????? screenshot_selector ???
+??????????????????????
+???????????????????
 Screenshot Selector - Week 3 Day 16-18
 
 Selects the best frame from a time range for screenshot enhancement.
@@ -155,6 +158,11 @@ class ScreenshotSelector:
         visual_extractor,
         config: Dict = None
     ):
+        """
+        ?????????????????
+        ???????????????????????????
+        ????????????????????????
+        """
         self.visual_extractor = visual_extractor
         from .visual_element_detection_helpers import VisualElementDetector
         self.detector = VisualElementDetector()
@@ -1210,10 +1218,17 @@ class ScreenshotSelector:
             logger.error(f"Tiered debug trace failed: {e}", exc_info=True)
 
 
-    # Helper stubs for compatibility if needed
-    def _get_video_fps(self, path): return self.visual_extractor.fps
-    def _handle_empty_frames_complex(self, s, e, o): return self._create_empty_selection(s)
-    def _create_empty_selection(self, ts): return ScreenshotSelection(0, ts, "", 0,0,0,0,0,[])
+    # 兼容性兜底方法：做什么是保留旧接口；为什么是避免调用方断裂；权衡是逻辑较简化
+    def _get_video_fps(self, path):
+        return self.visual_extractor.fps
+
+    # 空帧兜底：做什么是返回空选择；为什么是保证下游流程不断；权衡是不再区分复杂空帧原因
+    def _handle_empty_frames_complex(self, s, e, o):
+        return self._create_empty_selection(s)
+
+    # 空选择构造：做什么是生成默认 ScreenshotSelection；为什么是统一返回结构；权衡是细节信息缺失
+    def _create_empty_selection(self, ts):
+        return ScreenshotSelection(0, ts, "", 0, 0, 0, 0, 0, [])
     def _save_screenshot(self, frame, ts, output_dir, output_name=None):
         """
         使用 FFmpeg 提取高分辨率帧

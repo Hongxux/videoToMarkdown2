@@ -1,7 +1,14 @@
 """
-文件校验工具
-用于 Step 1: 原材料确认
-"""
+模块说明：阶段工具 file_validator 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import re
@@ -11,14 +18,20 @@ from typing import List, Dict, Optional, Tuple
 
 def validate_video(video_path: str) -> Tuple[bool, Optional[str]]:
     """
-    校验视频文件有效性
-    
-    Args:
-        video_path: 视频文件路径
-        
-    Returns:
-        (is_valid, error_message)
-    """
+    执行逻辑：
+    1) 整理待校验数据。
+    2) 按规则逐项校验并返回结果。
+    实现方式：通过OpenCV 图像处理、文件系统读写实现。
+    核心价值：提前发现数据/状态问题，降低运行风险。
+    决策逻辑：
+    - 条件：not path.exists()
+    - 条件：not path.is_file()
+    - 条件：path.stat().st_size == 0
+    依据来源（证据链）：
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    输出参数：
+    - 多值结果元组（各元素含义见实现）。"""
     path = Path(video_path)
     
     if not path.exists():
@@ -57,14 +70,20 @@ def validate_video(video_path: str) -> Tuple[bool, Optional[str]]:
 
 def validate_subtitle(subtitle_path: str) -> Tuple[bool, Optional[str]]:
     """
-    校验字幕文件有效性
-    
-    Args:
-        subtitle_path: 字幕文件路径
-        
-    Returns:
-        (is_valid, error_message)
-    """
+    执行逻辑：
+    1) 整理待校验数据。
+    2) 按规则逐项校验并返回结果。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：提前发现数据/状态问题，降低运行风险。
+    决策逻辑：
+    - 条件：not path.exists()
+    - 条件：not path.is_file()
+    - 条件：path.stat().st_size == 0
+    依据来源（证据链）：
+    输入参数：
+    - subtitle_path: 文件路径（类型：str）。
+    输出参数：
+    - 多值结果元组（各元素含义见实现）。"""
     path = Path(subtitle_path)
     
     if not path.exists():
@@ -106,15 +125,21 @@ def read_subtitle_sample(
     count: int = 20
 ) -> List[Dict[str, any]]:
     """
-    读取字幕样本
-    
-    Args:
-        subtitle_path: 字幕文件路径
-        count: 读取条数
-        
-    Returns:
-        字幕列表 [{"subtitle_id": "SUB001", "text": "...", "start_sec": 0.0, "end_sec": 1.0}]
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：path.suffix.lower() == '.srt'
+    - 条件：path.suffix.lower() == '.vtt'
+    - 条件：path.suffix.lower() == '.txt'
+    依据来源（证据链）：
+    输入参数：
+    - subtitle_path: 文件路径（类型：str）。
+    - count: 函数入参（类型：int）。
+    输出参数：
+    - Dict[str, any] 列表（与输入或处理结果一一对应）。"""
     path = Path(subtitle_path)
     
     # 根据扩展名选择解析方式
@@ -132,7 +157,17 @@ def read_subtitle_sample(
 
 
 def _parse_srt(path: Path, count: int) -> List[Dict]:
-    """解析 SRT 字幕"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - path: 文件路径（类型：Path）。
+    - count: 函数入参（类型：int）。
+    输出参数：
+    - Dict 列表（与输入或处理结果一一对应）。"""
     subtitles = []
     
     try:
@@ -158,7 +193,17 @@ def _parse_srt(path: Path, count: int) -> List[Dict]:
 
 
 def _parse_vtt(path: Path, count: int) -> List[Dict]:
-    """解析 VTT 字幕"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - path: 文件路径（类型：Path）。
+    - count: 函数入参（类型：int）。
+    输出参数：
+    - Dict 列表（与输入或处理结果一一对应）。"""
     subtitles = []
     
     try:
@@ -184,7 +229,21 @@ def _parse_vtt(path: Path, count: int) -> List[Dict]:
 
 
 def _parse_txt(path: Path, count: int) -> List[Dict]:
-    """解析纯文本字幕（逐行，支持 Whisper 括号格式）"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not line
+    - 条件：match
+    依据来源（证据链）：
+    输入参数：
+    - path: 文件路径（类型：Path）。
+    - count: 函数入参（类型：int）。
+    输出参数：
+    - Dict 列表（与输入或处理结果一一对应）。"""
     subtitles = []
     
     try:
@@ -224,7 +283,20 @@ def _parse_txt(path: Path, count: int) -> List[Dict]:
 
 
 def _hms_to_sec(time_str: str) -> float:
-    """通用的 HMS 转秒工具 (支持 00:01:23 或 01:23)"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：len(parts) == 3
+    - 条件：len(parts) == 2
+    依据来源（证据链）：
+    输入参数：
+    - time_str: 函数入参（类型：str）。
+    输出参数：
+    - 数值型计算结果。"""
     parts = time_str.split(':')
     try:
         if len(parts) == 3:
@@ -238,7 +310,22 @@ def _hms_to_sec(time_str: str) -> float:
 
 
 def _parse_json(path: Path, count: int) -> List[Dict]:
-    """解析 JSON 字幕"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：isinstance(data, list)
+    - 条件：isinstance(data, dict)
+    - 条件：isinstance(item, dict)
+    依据来源（证据链）：
+    输入参数：
+    - path: 文件路径（类型：Path）。
+    - count: 函数入参（类型：int）。
+    输出参数：
+    - Dict 列表（与输入或处理结果一一对应）。"""
     import json
     
     with open(path, 'r', encoding='utf-8') as f:
@@ -273,27 +360,46 @@ def _parse_json(path: Path, count: int) -> List[Dict]:
 
 
 def _time_to_sec(time_str: str) -> float:
-    """SRT 时间转秒 (00:00:00,000)"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - time_str: 函数入参（类型：str）。
+    输出参数：
+    - 数值型计算结果。"""
     parts = time_str.replace(',', '.').split(':')
     return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
 
 
 def _time_to_sec_vtt(time_str: str) -> float:
-    """VTT 时间转秒 (00:00:00.000)"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - time_str: 函数入参（类型：str）。
+    输出参数：
+    - 数值型计算结果。"""
     parts = time_str.split(':')
     return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
 
 
 def extract_video_title(video_path: str) -> str:
     """
-    从文件名提取视频标题
-    
-    Args:
-        video_path: 视频文件路径
-        
-    Returns:
-        视频标题
-    """
+    执行逻辑：
+    1) 扫描输入内容。
+    2) 过滤并提取目标子集。
+    实现方式：通过文件系统读写实现。
+    核心价值：聚焦关键信息，减少后续处理成本。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    输出参数：
+    - 字符串结果。"""
     path = Path(video_path)
     stem = path.stem
     

@@ -1,9 +1,14 @@
 """
-Subtitle Text Extractor - Helper for Confidence Calculation
-
-Extracts text from existing corrected_subtitles within time range.
-No need for Whisper re-transcription!
-"""
+模块说明：Module2 内容增强中的 subtitle_utils 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import logging
 from typing import List, Dict, Any
@@ -17,26 +22,23 @@ def extract_subtitle_text_in_range(
     end_sec: float
 ) -> str:
     """
-    从已有字幕中提取时间范围内的文本
-    
-    **核心**: 复用Stage 1已转录且纠正的字幕,不重复调用Whisper
-    
-    Args:
-        corrected_subtitles: 字幕列表 (CorrectedSubtitle对象或字典)
-        start_sec: 起始时间(秒)
-        end_sec: 结束时间(秒)
-    
-    Returns:
-        合并后的文本字符串
-    
-    Example:
-        >>> subs = [
-        ...     {'start_sec': 10.0, 'end_sec': 15.0, 'corrected_text': 'Hello'},
-        ...     {'start_sec': 15.0, 'end_sec': 20.0, 'corrected_text': 'World'}
-        ... ]
-        >>> extract_subtitle_text_in_range(subs, 12.0, 18.0)
-        'Hello World'
-    """
+    执行逻辑：
+    1) 扫描输入内容。
+    2) 过滤并提取目标子集。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：聚焦关键信息，减少后续处理成本。
+    决策逻辑：
+    - 条件：isinstance(sub, dict)
+    - 条件：sub_start < end_sec and sub_end > start_sec
+    - 条件：hasattr(sub, 'start_sec')
+    依据来源（证据链）：
+    - 输入参数：end_sec, start_sec。
+    输入参数：
+    - corrected_subtitles: 函数入参（类型：List[Any]）。
+    - start_sec: 起止时间/区间边界（类型：float）。
+    - end_sec: 起止时间/区间边界（类型：float）。
+    输出参数：
+    - 字符串结果。"""
     texts = []
     
     for sub in corrected_subtitles:
@@ -74,16 +76,23 @@ async def calculate_subtitle_similarity(
     semantic_extractor=None
 ) -> float:
     """
-    计算补全文本与字幕文本的相似度
-    
-    Args:
-        completion_text: LLM生成的补全文本
-        subtitle_text: 从字幕提取的文本
-        semantic_extractor: SemanticFeatureExtractor实例 (可选)
-    
-    Returns:
-        相似度分数 0-1
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not subtitle_text or not completion_text
+    - 条件：semantic_extractor
+    - 条件：not words_comp or not words_sub
+    依据来源（证据链）：
+    - 输入参数：completion_text, semantic_extractor, subtitle_text。
+    输入参数：
+    - completion_text: 函数入参（类型：str）。
+    - subtitle_text: 函数入参（类型：str）。
+    - semantic_extractor: 函数入参（类型：未标注）。
+    输出参数：
+    - 数值型计算结果。"""
     if not subtitle_text or not completion_text:
         return 0.0
     
@@ -112,7 +121,22 @@ async def calculate_subtitle_similarity(
 
 
 def jaccard_similarity(str1: str, str2: str) -> float:
-    """计算两个字符串的 Jaccard 相似度"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not str1 or not str2
+    - 条件：union
+    依据来源（证据链）：
+    - 输入参数：str1, str2。
+    输入参数：
+    - str1: 函数入参（类型：str）。
+    - str2: 函数入参（类型：str）。
+    输出参数：
+    - 数值型计算结果。"""
     if not str1 or not str2:
         return 0.0
     s1 = set(list(str1))

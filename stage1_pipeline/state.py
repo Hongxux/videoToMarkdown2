@@ -1,7 +1,14 @@
 """
-Pipeline State Definition
-定义 LangGraph 状态结构，包含全链路追踪所需的所有字段
-"""
+模块说明：阶段1流水线 state 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 from typing import TypedDict, List, Optional, Dict, Any, Annotated
 from pydantic import BaseModel, Field
@@ -14,7 +21,17 @@ import operator
 # ============================================================================
 
 class SubtitleItem(BaseModel):
-    """原始字幕条目"""
+    """
+    类说明：封装 SubtitleItem 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     subtitle_id: str
     text: str
     start_sec: float
@@ -22,7 +39,17 @@ class SubtitleItem(BaseModel):
 
 
 class CorrectedSubtitle(BaseModel):
-    """纠错后的字幕"""
+    """
+    类说明：封装 CorrectedSubtitle 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     subtitle_id: str
     corrected_text: str
     start_sec: float
@@ -31,7 +58,17 @@ class CorrectedSubtitle(BaseModel):
 
 
 class MergedSentence(BaseModel):
-    """合并后的句子"""
+    """
+    类说明：封装 MergedSentence 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     sentence_id: str
     text: str
     start_sec: float
@@ -40,14 +77,34 @@ class MergedSentence(BaseModel):
 
 
 class CleanedSentence(BaseModel):
-    """清理后的句子"""
+    """
+    类说明：封装 CleanedSentence 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     sentence_id: str
     cleaned_text: str
     removed_items: List[str] = Field(default_factory=list)
 
 
 class Paragraph(BaseModel):
-    """合并后的段落"""
+    """
+    类说明：封装 Paragraph 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     paragraph_id: str
     text: str
     source_sentence_ids: List[str] = Field(default_factory=list)
@@ -55,7 +112,17 @@ class Paragraph(BaseModel):
 
 
 class ExtractedElements(BaseModel):
-    """提取的元素"""
+    """
+    类说明：封装 ExtractedElements 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     examples: List[Dict[str, str]] = Field(default_factory=list)
     analogies: List[Dict[str, str]] = Field(default_factory=list)
     concrete_words: List[Dict[str, str]] = Field(default_factory=list)
@@ -63,20 +130,50 @@ class ExtractedElements(BaseModel):
 
 
 class SemanticDimension(BaseModel):
-    """语义维度"""
+    """
+    类说明：封装 SemanticDimension 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     logic_relation: str = ""  # 因果/对比/递进/并列/条件
     hierarchy_type: str = ""  # 定义层/原理层/实现层/应用层/边界层
     description: str = ""
 
 
 class CoreSemantic(BaseModel):
-    """核心语义"""
+    """
+    类说明：封装 CoreSemantic 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     summary: str = ""  # 20-50字摘要
     label: str = ""    # 8字以内命名标签
 
 
 class KnowledgeSegment(BaseModel):
-    """知识点片段"""
+    """
+    类说明：封装 KnowledgeSegment 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     segment_id: str
     full_text: str
     knowledge_point: str
@@ -89,19 +186,49 @@ class KnowledgeSegment(BaseModel):
 
 
 class FaultLocation(BaseModel):
-    """断层位置"""
+    """
+    类说明：封装 FaultLocation 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     start_sec: float
     end_sec: float
 
 
 class MissingContent(BaseModel):
-    """缺失内容"""
+    """
+    类说明：封装 MissingContent 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     must_supplement: str = ""  # 必须补全的内容
     secondary_supplement: str = ""  # 次要补全内容
 
 
 class FaultCandidate(BaseModel):
-    """断层候选"""
+    """
+    类说明：封装 FaultCandidate 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     fault_id: str
     segment_id: str
     fault_type: int  # 1-10
@@ -112,7 +239,17 @@ class FaultCandidate(BaseModel):
 
 
 class SemanticFault(BaseModel):
-    """语义断层（精确定位后）"""
+    """
+    类说明：封装 SemanticFault 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     fault_id: str
     segment_id: str
     fault_type: int
@@ -123,7 +260,17 @@ class SemanticFault(BaseModel):
 
 
 class ScreenshotInstruction(BaseModel):
-    """截帧指令"""
+    """
+    类说明：封装 ScreenshotInstruction 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     instruction_id: str
     fault_id: str
     opencv_params: Dict[str, Any]
@@ -131,7 +278,17 @@ class ScreenshotInstruction(BaseModel):
 
 
 class CapturedFrame(BaseModel):
-    """截取的帧"""
+    """
+    类说明：封装 CapturedFrame 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     frame_id: str
     instruction_id: str
     timestamp: float
@@ -141,7 +298,17 @@ class CapturedFrame(BaseModel):
 
 
 class ValidatedFrame(BaseModel):
-    """校验后的帧"""
+    """
+    类说明：封装 ValidatedFrame 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     frame_id: str
     instruction_id: str
     fault_id: str
@@ -152,7 +319,17 @@ class ValidatedFrame(BaseModel):
 
 
 class RetryRecord(BaseModel):
-    """重试记录"""
+    """
+    类说明：封装 RetryRecord 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     round: int
     capture_params: Dict[str, Any]
     frame_path: str
@@ -165,7 +342,17 @@ class RetryRecord(BaseModel):
 # ============================================================================
 
 class StepTrace(BaseModel):
-    """步骤执行追踪"""
+    """
+    类说明：封装 StepTrace 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     step_name: str
     start_time: datetime
     end_time: Optional[datetime] = None
@@ -177,7 +364,17 @@ class StepTrace(BaseModel):
 
 
 class LLMCallRecord(BaseModel):
-    """LLM调用记录"""
+    """
+    类说明：封装 LLMCallRecord 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     step_name: str
     model: str
     prompt_tokens: int = 0
@@ -188,7 +385,17 @@ class LLMCallRecord(BaseModel):
 
 
 class ErrorRecord(BaseModel):
-    """错误记录"""
+    """
+    类说明：封装 ErrorRecord 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     step_name: str
     error_type: str
     error_message: str
@@ -201,12 +408,32 @@ class ErrorRecord(BaseModel):
 # ============================================================================
 
 def merge_lists(left: List, right: List) -> List:
-    """合并列表的 reducer"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - left: 函数入参（类型：List）。
+    - right: 函数入参（类型：List）。
+    输出参数：
+    - 列表结果（与输入或处理结果一一对应）。"""
     return left + right
 
 
 def merge_dicts(left: Dict, right: Dict) -> Dict:
-    """合并字典的 reducer"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - left: 函数入参（类型：Dict）。
+    - right: 函数入参（类型：Dict）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     merged = left.copy()
     merged.update(right)
     return merged
@@ -214,10 +441,16 @@ def merge_dicts(left: Dict, right: Dict) -> Dict:
 
 class PipelineState(TypedDict):
     """
-    Pipeline 状态定义
-    
-    使用 Annotated 类型来指定 reducer，支持增量更新
-    """
+    类说明：封装 PipelineState 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     # ========== 输入 ==========
     video_path: str
     subtitle_path: str
@@ -306,7 +539,18 @@ def create_initial_state(
     subtitle_path: str,
     output_dir: str = "output"
 ) -> PipelineState:
-    """创建初始状态"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    - subtitle_path: 文件路径（类型：str）。
+    - output_dir: 目录路径（类型：str）。
+    输出参数：
+    - PipelineState 对象或调用结果。"""
     return PipelineState(
         # 输入
         video_path=video_path,

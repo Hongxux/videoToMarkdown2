@@ -1,7 +1,14 @@
 """
-ERNIE Vision API 客户端
-用于视觉问答校验
-"""
+模块说明：阶段 LLM 适配 vision 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import base64
 import httpx
@@ -14,14 +21,47 @@ from .client import LLMClient, LLMConfig, LLMResponse
 
 
 class ERNIEVisionClient(LLMClient):
-    """ERNIE Vision API 客户端"""
+    """
+    类说明：封装 ERNIEVisionClient 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, config: LLMConfig):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - config: 配置对象/字典（类型：LLMConfig）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         super().__init__(config)
         self._client: Optional[httpx.AsyncClient] = None
         
     async def _get_client(self) -> httpx.AsyncClient:
-        """获取 HTTP 客户端"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._client is None
+        依据来源（证据链）：
+        - 对象内部状态：self._client。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self._client is None:
             self._client = httpx.AsyncClient(
                 headers={
@@ -33,13 +73,38 @@ class ERNIEVisionClient(LLMClient):
         return self._client
     
     async def close(self):
-        """关闭客户端"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._client
+        依据来源（证据链）：
+        - 对象内部状态：self._client。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self._client:
             await self._client.aclose()
             self._client = None
     
     def _encode_image(self, image_path: str) -> str:
-        """将图片编码为 base64"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not path.exists()
+        依据来源（证据链）：
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         path = Path(image_path)
         if not path.exists():
             raise FileNotFoundError(f"Image not found: {image_path}")
@@ -54,7 +119,24 @@ class ERNIEVisionClient(LLMClient):
         temperature: Optional[float] = None,
         **kwargs
     ) -> LLMResponse:
-        """完成文本生成（不含图片）"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：system_prompt
+        - 条件：temperature is not None
+        依据来源（证据链）：
+        - 输入参数：system_prompt, temperature。
+        输入参数：
+        - prompt: 文本内容（类型：str）。
+        - system_prompt: 函数入参（类型：Optional[str]）。
+        - temperature: 函数入参（类型：Optional[float]）。
+        - **kwargs: 可变参数，含义由调用方决定。
+        输出参数：
+        - LLMResponse 响应对象。"""
         client = await self._get_client()
         
         messages = []
@@ -105,13 +187,22 @@ class ERNIEVisionClient(LLMClient):
         **kwargs
     ) -> LLMResponse:
         """
-        带图片的完成
-        
-        Args:
-            prompt: 提示词
-            image_path: 图片路径
-            system_prompt: 系统提示词
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：system_prompt
+        依据来源（证据链）：
+        - 输入参数：system_prompt。
+        输入参数：
+        - prompt: 文本内容（类型：str）。
+        - image_path: 文件路径（类型：str）。
+        - system_prompt: 函数入参（类型：Optional[str]）。
+        - **kwargs: 可变参数，含义由调用方决定。
+        输出参数：
+        - LLMResponse 响应对象。"""
         client = await self._get_client()
         
         # 编码图片
@@ -182,13 +273,22 @@ class ERNIEVisionClient(LLMClient):
         **kwargs
     ) -> LLMResponse:
         """
-        带多张图片的完成
-        
-        Args:
-            prompt: 提示词
-            image_paths: 图片路径列表
-            system_prompt: 系统提示词
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：system_prompt
+        依据来源（证据链）：
+        - 输入参数：system_prompt。
+        输入参数：
+        - prompt: 文本内容（类型：str）。
+        - image_paths: 文件路径（类型：List[str]）。
+        - system_prompt: 函数入参（类型：Optional[str]）。
+        - **kwargs: 可变参数，含义由调用方决定。
+        输出参数：
+        - LLMResponse 响应对象。"""
         client = await self._get_client()
         
         # 构建多模态消息内容
@@ -250,7 +350,23 @@ class ERNIEVisionClient(LLMClient):
         system_prompt: Optional[str] = None,
         **kwargs
     ) -> Tuple[Dict, LLMResponse]:
-        """完成 JSON 生成，带自动修复功能"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：'```json' in content
+        - 条件：'```' in content
+        - 条件：repaired
+        依据来源（证据链）：
+        输入参数：
+        - prompt: 文本内容（类型：str）。
+        - system_prompt: 函数入参（类型：Optional[str]）。
+        - **kwargs: 可变参数，含义由调用方决定。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         response = await self.complete(prompt, system_prompt, **kwargs)
         
         content = response.content.strip()
@@ -279,7 +395,22 @@ class ERNIEVisionClient(LLMClient):
             raise ValueError(f"Failed to parse JSON: {e}\nContent: {content[:500]}")
     
     def _repair_json(self, content: str) -> Optional[str]:
-        """尝试修复常见的 JSON 格式错误"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：open_braces > close_braces
+        - 条件：open_brackets > close_brackets
+        - 条件：content.endswith(',}')
+        依据来源（证据链）：
+        - 输入参数：content。
+        输入参数：
+        - content: 文本内容（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         # 1. 修复缺失的结尾大括号
         open_braces = content.count('{')
         close_braces = content.count('}')
@@ -315,20 +446,23 @@ class ERNIEVisionClient(LLMClient):
         fault_type: str
     ) -> Dict[str, Any]:
         """
-        校验帧内容（步骤14专用）
-        
-        Args:
-            image_path: 帧图片路径
-            questions: 校验问题列表
-            fault_type: 断层类型
-            
-        Returns:
-            {
-                "answers": [...],
-                "grade": "A/B/C/不合格",
-                "extracted_content": {...}
-            }
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：'```json' in content
+        - 条件：core_total == 0
+        - 条件：secondary_yes >= secondary_total * 0.6
+        依据来源（证据链）：
+        - 输入参数：fault_type。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - questions: 函数入参（类型：List[Dict[str, Any]]）。
+        - fault_type: 函数入参（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         questions_text = "\n".join([
             f"{i+1}. [{q['question_id']}] {q['question']} (核心: {q.get('is_core', True)})"
             for i, q in enumerate(questions)

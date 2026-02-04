@@ -1,11 +1,20 @@
 """
-执行追踪器
+模块说明：阶段监控 tracer 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。
+补充说明：
 实现：
 - 步骤执行时间追踪
 - 状态变化追踪
 - 可视化执行流程
-- Mermaid 图导出
-"""
+- Mermaid 图导出"""
 
 import json
 from dataclasses import dataclass, field, asdict
@@ -16,7 +25,17 @@ from enum import Enum
 
 
 class EventType(str, Enum):
-    """事件类型"""
+    """
+    类说明：封装 EventType 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     STEP_START = "step_start"
     STEP_END = "step_end"
     STEP_ERROR = "step_error"
@@ -28,7 +47,17 @@ class EventType(str, Enum):
 
 @dataclass
 class TraceEvent:
-    """追踪事件"""
+    """
+    类说明：封装 TraceEvent 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     event_id: str
     step_name: str
     event_type: EventType
@@ -38,6 +67,16 @@ class TraceEvent:
     parent_event_id: Optional[str] = None
     
     def to_dict(self) -> Dict:
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         d = asdict(self)
         d["timestamp"] = self.timestamp.isoformat()
         d["event_type"] = self.event_type.value
@@ -46,7 +85,17 @@ class TraceEvent:
 
 @dataclass
 class StepMetrics:
-    """步骤指标"""
+    """
+    类说明：封装 StepMetrics 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     step_name: str
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
@@ -60,15 +109,37 @@ class StepMetrics:
 
 class PipelineTracer:
     """
-    管道执行追踪器
-    
+    类说明：封装 PipelineTracer 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。
+    补充说明：
     特性：
     - 实时追踪步骤执行
     - 收集性能指标
-    - 导出多种格式（JSON、Mermaid、HTML）
-    """
+    - 导出多种格式（JSON、Mermaid、HTML）"""
     
     def __init__(self, output_dir: Optional[Path] = None):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：output_dir
+        依据来源（证据链）：
+        - 输入参数：output_dir。
+        输入参数：
+        - output_dir: 目录路径（类型：Optional[Path]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.output_dir = Path(output_dir) if output_dir else Path("output/traces")
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
@@ -90,12 +161,37 @@ class PipelineTracer:
         ]
         
     def _generate_event_id(self) -> str:
-        """生成事件ID"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 字符串结果。"""
         self._event_counter += 1
         return f"evt_{self._event_counter:06d}"
     
     def trace_step_start(self, step_name: str, input_data: Optional[Dict] = None) -> str:
-        """追踪步骤开始"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：step_name not in self.step_metrics
+        - 条件：input_data
+        依据来源（证据链）：
+        - 输入参数：input_data, step_name。
+        - 对象内部状态：self.step_metrics。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - input_data: 函数入参（类型：Optional[Dict]）。
+        输出参数：
+        - 字符串结果。"""
         event_id = self._generate_event_id()
         event = TraceEvent(
             event_id=event_id,
@@ -121,7 +217,26 @@ class PipelineTracer:
         success: bool = True,
         parent_event_id: Optional[str] = None
     ) -> str:
-        """追踪步骤结束"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：step_name in self.step_metrics and self.step_metrics[step_name].start_time
+        - 条件：step_name in self.step_metrics
+        - 条件：success
+        依据来源（证据链）：
+        - 输入参数：output_data, step_name, success。
+        - 对象内部状态：self.step_metrics。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - output_data: 函数入参（类型：Optional[Dict]）。
+        - success: 函数入参（类型：bool）。
+        - parent_event_id: 标识符（类型：Optional[str]）。
+        输出参数：
+        - 字符串结果。"""
         event_id = self._generate_event_id()
         now = datetime.now()
         
@@ -150,7 +265,23 @@ class PipelineTracer:
         return event_id
     
     def trace_step_error(self, step_name: str, error: Exception, context: Optional[Dict] = None):
-        """追踪步骤错误"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：step_name in self.step_metrics
+        依据来源（证据链）：
+        - 输入参数：step_name。
+        - 对象内部状态：self.step_metrics。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - error: 函数入参（类型：Exception）。
+        - context: 函数入参（类型：Optional[Dict]）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         event_id = self._generate_event_id()
         event = TraceEvent(
             event_id=event_id,
@@ -178,7 +309,24 @@ class PipelineTracer:
         tokens: int,
         latency_ms: float
     ):
-        """追踪LLM调用"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：step_name in self.step_metrics
+        依据来源（证据链）：
+        - 输入参数：step_name。
+        - 对象内部状态：self.step_metrics。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - model: 模型/推理配置（类型：str）。
+        - tokens: 函数入参（类型：int）。
+        - latency_ms: 函数入参（类型：float）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         event_id = self._generate_event_id()
         event = TraceEvent(
             event_id=event_id,
@@ -196,7 +344,23 @@ class PipelineTracer:
         return event_id
     
     def trace_tool_call(self, step_name: str, tool_name: str, duration_ms: float):
-        """追踪工具调用"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：step_name in self.step_metrics
+        依据来源（证据链）：
+        - 输入参数：step_name。
+        - 对象内部状态：self.step_metrics。
+        输入参数：
+        - step_name: 函数入参（类型：str）。
+        - tool_name: 函数入参（类型：str）。
+        - duration_ms: 函数入参（类型：float）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         event_id = self._generate_event_id()
         event = TraceEvent(
             event_id=event_id,
@@ -213,7 +377,17 @@ class PipelineTracer:
         return event_id
     
     def checkpoint(self, name: str, data: Optional[Dict] = None):
-        """创建检查点"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - name: 函数入参（类型：str）。
+        - data: 数据列表/集合（类型：Optional[Dict]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         event = TraceEvent(
             event_id=self._generate_event_id(),
             step_name="checkpoint",
@@ -224,7 +398,21 @@ class PipelineTracer:
         self.events.append(event)
     
     def _summarize(self, data: Dict[str, Any]) -> Dict:
-        """创建数据摘要"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：isinstance(value, list)
+        - 条件：isinstance(value, dict)
+        - 条件：isinstance(value, str) and len(value) > 100
+        依据来源（证据链）：
+        输入参数：
+        - data: 数据列表/集合（类型：Dict[str, Any]）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         summary = {}
         for key, value in data.items():
             if isinstance(value, list):
@@ -238,11 +426,29 @@ class PipelineTracer:
         return summary
     
     def get_timeline(self) -> List[Dict]:
-        """获取执行时间线"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - 无。
+        输出参数：
+        - Dict 列表（与输入或处理结果一一对应）。"""
         return [event.to_dict() for event in self.events]
     
     def get_metrics_summary(self) -> Dict:
-        """获取指标汇总"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         total_duration = (datetime.now() - self._start_time).total_seconds() * 1000
         total_tokens = sum(m.total_tokens for m in self.step_metrics.values())
         total_llm_calls = sum(m.llm_calls for m in self.step_metrics.values())
@@ -265,7 +471,16 @@ class PipelineTracer:
         }
     
     def export_json(self, filename: str = "execution_trace.json"):
-        """导出JSON格式"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - filename: 函数入参（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         filepath = self.output_dir / filename
         export_data = {
             "start_time": self._start_time.isoformat(),
@@ -278,7 +493,22 @@ class PipelineTracer:
         return filepath
     
     def export_mermaid(self) -> str:
-        """导出Mermaid图"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：step in self.step_metrics
+        - 条件：current in self.step_metrics and next_step in self.step_metrics
+        - 条件：metrics.status == 'success'
+        依据来源（证据链）：
+        - 对象内部状态：self.step_metrics。
+        输入参数：
+        - 无。
+        输出参数：
+        - 字符串结果。"""
         lines = ["graph TD"]
         
         # 添加节点
@@ -307,7 +537,16 @@ class PipelineTracer:
         return "\n".join(lines)
     
     def save(self):
-        """保存追踪数据"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.export_json()
         
         # 保存Mermaid图

@@ -1,10 +1,14 @@
 """
-全局资源管理器 - 单例模式管理共享资源
-
-提供:
-- ThreadPoolExecutor: IO密集型操作 (ffmpeg调用、文件读写)
-- VideoCapture: 视频资源复用
-"""
+模块说明：Module2 内容增强中的 resource_manager 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import cv2
@@ -19,13 +23,16 @@ logger = logging.getLogger(__name__)
 
 class ResourceManager:
     """
-    全局资源管理器 (单例模式)
-    
-    用法:
-        from .resource_manager import get_resource_manager
-        rm = get_resource_manager()
-        executor = rm.get_io_executor()
-    """
+    类说明：封装 ResourceManager 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     _instance: Optional["ResourceManager"] = None
     _lock = threading.Lock()
@@ -34,6 +41,19 @@ class ResourceManager:
     DEFAULT_IO_WORKERS = 4      # IO线程数
     
     def __new__(cls):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：cls._instance is None
+        依据来源（证据链）：
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if cls._instance is None:
             with cls._lock:
                 if cls._instance is None:
@@ -42,6 +62,20 @@ class ResourceManager:
         return cls._instance
     
     def __init__(self):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、线程池并发实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：self._initialized
+        依据来源（证据链）：
+        - 对象内部状态：self._initialized。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self._initialized:
             return
         
@@ -60,7 +94,20 @@ class ResourceManager:
     # ==========================================================================
     
     def get_io_executor(self, max_workers: int = None) -> ThreadPoolExecutor:
-        """获取 IO 线程池 (懒加载)"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、线程池并发实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：self._io_executor is None
+        依据来源（证据链）：
+        - 对象内部状态：self._io_executor。
+        输入参数：
+        - max_workers: 函数入参（类型：int）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self._io_executor is None:
             workers = max_workers or self.DEFAULT_IO_WORKERS
             self._io_executor = ThreadPoolExecutor(
@@ -76,10 +123,20 @@ class ResourceManager:
     
     def get_video_capture(self, video_path: str) -> cv2.VideoCapture:
         """
-        获取视频捕获对象 (复用已打开的)
-        
-        注意: 调用者需要使用 get_video_lock() 保护多线程访问
-        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：abs_path not in self._video_captures
+        - 条件：not cap.isOpened()
+        依据来源（证据链）：
+        - 对象内部状态：self._video_captures。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         abs_path = os.path.abspath(video_path)
         
         if abs_path not in self._video_captures:
@@ -93,14 +150,36 @@ class ResourceManager:
         return self._video_captures[abs_path]
     
     def get_video_lock(self, video_path: str) -> threading.Lock:
-        """获取视频资源的锁 (用于多线程安全访问)"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：abs_path not in self._video_locks
+        依据来源（证据链）：
+        - 对象内部状态：self._video_locks。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         abs_path = os.path.abspath(video_path)
         if abs_path not in self._video_locks:
             self._video_locks[abs_path] = threading.Lock()
         return self._video_locks[abs_path]
     
     def get_video_info(self, video_path: str) -> Dict:
-        """获取视频信息 (缓存)"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         cap = self.get_video_capture(video_path)
         with self.get_video_lock(video_path):
             return {
@@ -114,12 +193,22 @@ class ResourceManager:
     def extract_frames(self, video_path: str, start_sec: float, end_sec: float, 
                        fps: float) -> list:
         """
-        🚀 优化版采样帧提取
-        
-        策略 (First Principle):
-        1. 顺序读取优于随机尋道 (OpenCV .set() 极慢)。
-        2. 若采样点密集且有序，seek一次后逐帧读取/跳帧。
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：target_pos_msec >= current_pos_msec and target_pos_msec - current_pos_msec < 2000
+        - 条件：ret and frame is not None
+        依据来源（证据链）：
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - fps: 函数入参（类型：float）。
+        输出参数：
+        - 列表结果（与输入或处理结果一一对应）。"""
         import numpy as np
         
         cap = self.get_video_capture(video_path)
@@ -167,7 +256,20 @@ class ResourceManager:
     # ==========================================================================
     
     def shutdown(self):
-        """关闭所有资源"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._io_executor
+        依据来源（证据链）：
+        - 对象内部状态：self._io_executor。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         logger.info("Shutting down ResourceManager...")
         
         # 关闭线程池
@@ -193,10 +295,28 @@ class ResourceManager:
 # =============================================================================
 
 def get_resource_manager() -> ResourceManager:
-    """获取全局资源管理器实例"""
+    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    输入参数：
+    - 无。
+    输出参数：
+    - ResourceManager 对象或调用结果。"""
     return ResourceManager()
 
 
 def get_io_executor() -> ThreadPoolExecutor:
-    """快捷方式: 获取 IO 线程池"""
+    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过线程池并发实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    输入参数：
+    - 无。
+    输出参数：
+    - get_io_executor 对象或调用结果。"""
     return get_resource_manager().get_io_executor()

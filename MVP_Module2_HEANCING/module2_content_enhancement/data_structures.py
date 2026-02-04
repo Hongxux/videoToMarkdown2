@@ -1,6 +1,14 @@
 """
-Centralized Data Structures for Content Enhancement Pipeline
-"""
+模块说明：Module2 内容增强中的 data_structures 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 from dataclasses import dataclass, field
 from enum import Enum
@@ -13,7 +21,17 @@ from typing import List, Dict, Optional, Any
 
 @dataclass
 class CorrectedSubtitle:
-    """校正后的单条字幕"""
+    """
+    类说明：封装 CorrectedSubtitle 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     subtitle_id: str
     text: str
     start_sec: float  # Aliased from timestamp_start for data_loader compatibility
@@ -26,9 +44,16 @@ class CorrectedSubtitle:
 @dataclass
 class CrossSentenceMergedSegment:
     """
-    跨句冗余合并后的完整语义句 - 来自步骤6的输出
-    这是文字补充的基础输入
-    """
+    类说明：封装 CrossSentenceMergedSegment 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     segment_id: str  # paragraph_id (P001, P002...)
     full_text: str  # 完整的语义段落
     source_sentence_ids: List[str]  # 来源句子ID
@@ -37,7 +62,17 @@ class CrossSentenceMergedSegment:
 
 @dataclass
 class Module2Input:
-    """Module 2 complete input"""
+    """
+    类说明：封装 Module2Input 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     corrected_subtitles: List[CorrectedSubtitle]
     merged_segments: List[CrossSentenceMergedSegment]
     video_path: str
@@ -54,7 +89,17 @@ class Module2Input:
 # ============================================================================
 
 class EnhancementType(Enum):
-    """补充类型"""
+    """
+    类说明：封装 EnhancementType 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     TEXT = "text"
     SCREENSHOT = "screenshot"
     VIDEO = "video"
@@ -62,14 +107,34 @@ class EnhancementType(Enum):
 
 
 class FaultClass(Enum):
-    """断层分类"""
+    """
+    类说明：封装 FaultClass 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     CLASS_1 = 1  # 抽象逻辑缺失 + 指代缺失
     CLASS_2 = 2  # 视觉信息缺失
     CLASS_3 = 3  # 可文字补全但需验证
 
 
 class ConfidenceLevel(Enum):
-    """置信度等级"""
+    """
+    类说明：封装 ConfidenceLevel 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     HIGH = "high"      # ≥ 0.8
     MEDIUM = "medium"  # 0.6-0.8
     LOW = "low"        # < 0.6
@@ -77,7 +142,17 @@ class ConfidenceLevel(Enum):
 
 @dataclass
 class TextSupplement:
-    """文字补充详细信息 (同步 TextGenerator 架构)"""
+    """
+    类说明：封装 TextSupplement 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     supplement_id: str
     fault_id: str
     generated_text: str
@@ -94,7 +169,17 @@ class TextSupplement:
 
 @dataclass
 class VideoMetadata:
-    """视频片段元数据"""
+    """
+    类说明：封装 VideoMetadata 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     transition_text: str  # 过渡引导语
     viewing_guidance: str = "" # 观看要点  
     post_summary: str = "" # 总结句
@@ -103,7 +188,17 @@ class VideoMetadata:
 
 @dataclass
 class Enhancement:
-    """增强结果项 - 最终导出的核心结构"""
+    """
+    类说明：封装 Enhancement 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     enhancement_id: str
     fault_id: str
     fault_class: FaultClass

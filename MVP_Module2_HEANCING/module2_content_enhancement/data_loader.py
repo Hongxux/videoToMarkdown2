@@ -1,12 +1,14 @@
 """
-Data Loader - Week 1 Day 1-2
-
-Loads input data from JSON files:
-1. corrected_subtitles from step2 output
-2. merged_segments (pure_text_script) from step6 output
-
-References existing implementation for correct JSON structure.
-"""
+模块说明：Module2 内容增强中的 data_loader 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import json
 import logging
@@ -24,33 +26,22 @@ logger = logging.getLogger(__name__)
 
 def load_corrected_subtitles(json_path: str) -> List[CorrectedSubtitle]:
     """
-    从JSON文件解析corrected_subtitles
-    
-    参考: stage1_pipeline/nodes/phase2_preprocessing.py step2_node输出格式
-    
-    Expected JSON structure:
-    {
-        "corrected_subtitles": [
-            {
-                "subtitle_id": "SUB001",
-                "corrected_text": "纠错后文本",
-                "start_sec": 10.5,
-                "end_sec": 12.3,
-                "corrections": [...]
-            }
-        ]
-    }
-    
-    Args:
-        json_path: Path to step2 output JSON file
-    
-    Returns:
-        List of CorrectedSubtitle objects
-    
-    Raises:
-        FileNotFoundError: If JSON file doesn't exist
-        ValueError: If JSON structure is invalid
-    """
+    执行逻辑：
+    1) 校验输入路径与参数。
+    2) 读取并解析为结构化对象。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：将外部数据转为内部结构，统一输入口径。
+    决策逻辑：
+    - 条件：not json_path
+    - 条件：not path.exists()
+    - 条件：'corrected_subtitles' not in data
+    依据来源（证据链）：
+    - 输入参数：json_path。
+    - 配置字段：output。
+    输入参数：
+    - json_path: 文件路径（类型：str）。
+    输出参数：
+    - CorrectedSubtitle 列表（与输入或处理结果一一对应）。"""
     if not json_path:
         logger.debug("load_corrected_subtitles: empty path provided, returning empty list")
         return []
@@ -109,28 +100,22 @@ def load_corrected_subtitles(json_path: str) -> List[CorrectedSubtitle]:
 
 def load_merged_segments(json_path: str) -> List[CrossSentenceMergedSegment]:
     """
-    从JSON文件解析merged_segments (步骤6的pure_text_script输出)
-    
-    参考: stage1_pipeline/nodes/phase2_preprocessing.py step6_node输出格式
-    
-    Expected JSON structure:
-    {
-        "pure_text_script": [
-            {
-                "paragraph_id": "P001",
-                "text": "完整的语义段落",
-                "source_sentence_ids": ["S001", "S002"],
-                "merge_type": "同义转述"
-            }
-        ]
-    }
-    
-    Args:
-        json_path: Path to step6 output JSON file
-    
-    Returns:
-        List of CrossSentenceMergedSegment objects
-    """
+    执行逻辑：
+    1) 校验输入路径与参数。
+    2) 读取并解析为结构化对象。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：将外部数据转为内部结构，统一输入口径。
+    决策逻辑：
+    - 条件：not json_path
+    - 条件：not path.exists()
+    - 条件：'pure_text_script' not in data
+    依据来源（证据链）：
+    - 输入参数：json_path。
+    - 配置字段：output。
+    输入参数：
+    - json_path: 文件路径（类型：str）。
+    输出参数：
+    - CrossSentenceMergedSegment 列表（与输入或处理结果一一对应）。"""
     if not json_path:
         logger.debug("load_merged_segments: empty path provided, returning empty list")
         return []
@@ -187,7 +172,20 @@ def load_merged_segments(json_path: str) -> List[CrossSentenceMergedSegment]:
 
 
 def _get_video_duration(video_path: str) -> float:
-    """获取视频物理时长(秒)"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过OpenCV 图像处理实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not cap.isOpened()
+    - 条件：fps > 0
+    依据来源（证据链）：
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    输出参数：
+    - 数值型计算结果。"""
     import cv2
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -200,8 +198,20 @@ def _get_video_duration(video_path: str) -> float:
 
 def sanitize_module_input(module_input: Module2Input) -> Module2Input:
     """
-    清理 ASR 时间戳漂移 (Hallucination Sanitizer)
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：duration <= 0
+    - 条件：pruned_subs > 0
+    - 条件：s.end_sec > duration
+    依据来源（证据链）：
+    输入参数：
+    - module_input: 函数入参（类型：Module2Input）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     duration = _get_video_duration(module_input.video_path)
     if duration <= 0:
         return module_input
@@ -225,7 +235,19 @@ def sanitize_module_input(module_input: Module2Input) -> Module2Input:
     return module_input
 
 def load_sentence_timestamps(json_path: str) -> Dict[str, Dict[str, float]]:
-    """从 local_storage 加载预计算的句子时间戳"""
+    """
+    执行逻辑：
+    1) 校验输入路径与参数。
+    2) 读取并解析为结构化对象。
+    实现方式：通过JSON 解析/序列化、文件系统读写实现。
+    核心价值：将外部数据转为内部结构，统一输入口径。
+    决策逻辑：
+    - 条件：not path.exists()
+    依据来源（证据链）：
+    输入参数：
+    - json_path: 文件路径（类型：str）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     path = Path(json_path)
     if not path.exists():
         logger.warning(f"sentence_timestamps JSON not found at {json_path}. Falling back to search.")
@@ -249,8 +271,26 @@ def create_module2_input(
     sentence_timestamps_path: str = None
 ) -> Module2Input:
     """
-    Create complete Module2Input from JSON files (with Duration Sanitization)
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：sentence_timestamps_path
+    - 条件：not Path(video_path).exists()
+    依据来源（证据链）：
+    - 输入参数：sentence_timestamps_path, video_path。
+    输入参数：
+    - corrected_subtitles_path: 文件路径（类型：str）。
+    - merged_segments_path: 文件路径（类型：str）。
+    - video_path: 文件路径（类型：str）。
+    - output_dir: 目录路径（类型：str）。
+    - domain: 函数入参（类型：str）。
+    - main_topic: 函数入参（类型：str）。
+    - sentence_timestamps_path: 文件路径（类型：str）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     logger.info("Creating Module2Input...")
     
     # Load data
@@ -286,11 +326,19 @@ def create_module2_input(
 
 def validate_input_consistency(module_input: Module2Input) -> Dict[str, Any]:
     """
-    Validate consistency between corrected_subtitles and merged_segments
-    
-    Returns:
-        Validation report dict
-    """
+    执行逻辑：
+    1) 整理待校验数据。
+    2) 按规则逐项校验并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提前发现数据/状态问题，降低运行风险。
+    决策逻辑：
+    - 条件：module_input.corrected_subtitles
+    依据来源（证据链）：
+    - 输入参数：module_input。
+    输入参数：
+    - module_input: 函数入参（类型：Module2Input）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     report = {
         "valid": True,
         "warnings": [],

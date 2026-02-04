@@ -1,15 +1,14 @@
 """
-Vision AI Client - 模块化 Vision API 调用
-
-功能:
-1. 统一的 Vision AI 接口 (支持 ERNIE Vision, OpenAI Vision 等)
-2. 自适应并发控制 (AIMD 算法)
-3. 结果缓存 (基于图片感知哈希)
-4. 连接池 + HTTP/2 + 压缩
-5. 重复帧检测 (pHash)
-
-V1.0 - 2024-02
-"""
+模块说明：Module2 内容增强中的 vision_ai_client 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import cv2
@@ -17,6 +16,7 @@ import json
 import asyncio
 import hashlib
 import logging
+import time
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -32,29 +32,35 @@ logger = logging.getLogger(__name__)
 
 class PerceptualHasher:
     """
-    感知哈希计算器
-    
-    使用 dHash (差异哈希) 算法:
-    - 缩放到 9x8 灰度图
-    - 计算相邻像素差异
-    - 生成 64-bit 哈希
-    
-    优点: 快速、对缩放/轻微变化鲁棒
-    """
+    类说明：封装 PerceptualHasher 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     HASH_SIZE = 8  # 8x8 = 64 bits
     
     @staticmethod
     def compute_dhash(image: np.ndarray) -> str:
         """
-        计算图像的差异哈希 (dHash)
-        
-        Args:
-            image: BGR 或灰度图像
-            
-        Returns:
-            16 字符十六进制字符串 (64 bits)
-        """
+        执行逻辑：
+        1) 准备输入数据。
+        2) 执行计算并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：提供量化结果，为上游决策提供依据。
+        决策逻辑：
+        - 条件：len(image.shape) == 3
+        依据来源（证据链）：
+        - 输入参数：image。
+        输入参数：
+        - image: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 字符串结果。"""
         # 转灰度
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -77,11 +83,20 @@ class PerceptualHasher:
     @staticmethod
     def compute_similarity(hash1: str, hash2: str) -> float:
         """
-        计算两个哈希的相似度 (汉明距离)
-        
-        Returns:
-            相似度 0.0 - 1.0 (1.0 = 完全相同)
-        """
+        执行逻辑：
+        1) 准备输入数据。
+        2) 执行计算并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：提供量化结果，为上游决策提供依据。
+        决策逻辑：
+        - 条件：len(hash1) != len(hash2)
+        依据来源（证据链）：
+        - 输入参数：hash1, hash2。
+        输入参数：
+        - hash1: 函数入参（类型：str）。
+        - hash2: 函数入参（类型：str）。
+        输出参数：
+        - 数值型计算结果。"""
         if len(hash1) != len(hash2):
             return 0.0
         
@@ -99,7 +114,19 @@ class PerceptualHasher:
     
     @staticmethod
     def compute_from_file(image_path: str) -> Optional[str]:
-        """从文件计算哈希"""
+        """
+        执行逻辑：
+        1) 准备输入数据。
+        2) 执行计算并返回结果。
+        实现方式：通过OpenCV 图像处理实现。
+        核心价值：提供量化结果，为上游决策提供依据。
+        决策逻辑：
+        - 条件：img is None
+        依据来源（证据链）：
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        输出参数：
+        - compute_dhash 对象或调用结果。"""
         try:
             img = cv2.imread(image_path)
             if img is None:
@@ -116,30 +143,49 @@ class PerceptualHasher:
 
 class HashCacheManager:
     """
-    感知哈希缓存管理器
-    
-    功能:
-    1. 缓存已处理图片的哈希值
-    2. 快速检测重复帧 (相似度 > 阈值)
-    3. 支持获取最相似的已处理帧
-    """
+    类说明：封装 HashCacheManager 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, similarity_threshold: float = 0.95):
         """
-        Args:
-            similarity_threshold: 相似度阈值，超过则判定为重复帧
-        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - similarity_threshold: 阈值（类型：float）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.threshold = similarity_threshold
         self._cache: Dict[str, Dict[str, Any]] = {}  # hash -> {path, result}
         self._path_to_hash: Dict[str, str] = {}  # path -> hash
     
     def check_duplicate(self, image_path: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
-        检查是否为重复帧
-        
-        Returns:
-            (is_duplicate, cached_result_if_duplicate)
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：current_hash is None
+        - 条件：current_hash in self._cache
+        - 条件：similarity >= self.threshold
+        依据来源（证据链）：
+        - 对象内部状态：self._cache, self.threshold。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         # 计算当前图片哈希
         current_hash = PerceptualHasher.compute_from_file(image_path)
         if current_hash is None:
@@ -165,14 +211,92 @@ class HashCacheManager:
         return False, None
     
     def store_result(self, image_path: str, result: Dict[str, Any]):
-        """存储验证结果"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：image_path in self._path_to_hash
+        - 条件：hash_key in self._cache
+        依据来源（证据链）：
+        - 输入参数：image_path。
+        - 对象内部状态：self._cache, self._path_to_hash。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - result: 函数入参（类型：Dict[str, Any]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if image_path in self._path_to_hash:
             hash_key = self._path_to_hash[image_path]
             if hash_key in self._cache:
                 self._cache[hash_key]["result"] = result
+
+    def load_results(self, cached_items: Dict[str, Dict[str, Any]]):
+        """
+        执行逻辑：
+        1) 校验输入路径与参数。
+        2) 读取并解析为结构化对象。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：将外部数据转为内部结构，统一输入口径。
+        决策逻辑：
+        - 条件：not cached_items
+        - 条件：hash_key in self._cache
+        依据来源（证据链）：
+        - 输入参数：cached_items。
+        - 对象内部状态：self._cache。
+        输入参数：
+        - cached_items: 函数入参（类型：Dict[str, Dict[str, Any]]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        if not cached_items:
+            return
+        for hash_key, item in cached_items.items():
+            if hash_key in self._cache:
+                continue
+            self._cache[hash_key] = {
+                "path": item.get("path", ""),
+                "result": item.get("result")
+            }
+
+    def export_results(self, include_empty: bool = False) -> Dict[str, Dict[str, Any]]:
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not include_empty and item.get('result') is None
+        依据来源（证据链）：
+        - 输入参数：include_empty。
+        - 配置字段：result。
+        输入参数：
+        - include_empty: 函数入参（类型：bool）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
+        exported = {}
+        for hash_key, item in self._cache.items():
+            if not include_empty and item.get("result") is None:
+                continue
+            exported[hash_key] = {
+                "path": item.get("path", ""),
+                "result": item.get("result")
+            }
+        return exported
     
     def get_stats(self) -> Dict[str, Any]:
-        """获取缓存统计"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         return {
             "cached_hashes": len(self._cache),
             "threshold": f"{self.threshold:.0%}"
@@ -185,10 +309,16 @@ class HashCacheManager:
 
 class VisionAIConcurrencyLimiter:
     """
-    Vision AI 专用自适应并发控制器
-    
-    Vision API 通常限流更严 (如 10 QPS)，所以默认值更保守
-    """
+    类说明：封装 VisionAIConcurrencyLimiter 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(
         self,
@@ -197,6 +327,19 @@ class VisionAIConcurrencyLimiter:
         max_limit: int = 60,
         decrease_factor: float = 0.5
     ):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - initial_limit: 函数入参（类型：int）。
+        - min_limit: 函数入参（类型：int）。
+        - max_limit: 函数入参（类型：int）。
+        - decrease_factor: 函数入参（类型：float）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.current_limit = initial_limit
         self.min_limit = min_limit
         self.max_limit = max_limit
@@ -210,12 +353,48 @@ class VisionAIConcurrencyLimiter:
         logger.info(f"VisionAIConcurrencyLimiter initialized: limit={initial_limit}, range=[{min_limit}, {max_limit}]")
     
     async def acquire(self):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         await self._semaphore.acquire()
     
     def release(self):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self._semaphore.release()
     
     async def record_success(self):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(self._results) > self._window_size
+        - 条件：len(self._results) >= self._window_size
+        - 条件：success_rate > 0.9 and self.current_limit < self.max_limit
+        依据来源（证据链）：
+        - 对象内部状态：self._results, self._window_size, self.current_limit, self.max_limit。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         async with self._lock:
             self._results.append(True)
             if len(self._results) > self._window_size:
@@ -230,6 +409,23 @@ class VisionAIConcurrencyLimiter:
                     logger.debug(f"Vision concurrency ↑ {old} → {self.current_limit}")
     
     async def record_failure(self, is_rate_limit: bool = False):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(self._results) > self._window_size
+        - 条件：is_rate_limit
+        - 条件：old != self.current_limit
+        依据来源（证据链）：
+        - 输入参数：is_rate_limit。
+        - 对象内部状态：self._results, self._window_size, self.current_limit。
+        输入参数：
+        - is_rate_limit: 开关/状态（类型：bool）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         async with self._lock:
             self._results.append(False)
             if len(self._results) > self._window_size:
@@ -252,7 +448,17 @@ class VisionAIConcurrencyLimiter:
 
 @dataclass
 class VisionAIConfig:
-    """Vision AI 配置"""
+    """
+    类说明：封装 VisionAIConfig 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     enabled: bool = False
     bearer_token: str = ""
     base_url: str = "https://qianfan.baidubce.com/v2/chat/completions"
@@ -267,16 +473,32 @@ class VisionAIConfig:
 
 class VisionAIClient:
     """
-    模块化 Vision AI 客户端
-    
-    功能:
-    1. 连接池 + HTTP/2
-    2. 自适应并发控制
-    3. 重复帧检测 (pHash)
-    4. 结果缓存
-    """
+    类说明：封装 VisionAIClient 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, config: Optional[VisionAIConfig] = None):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        决策逻辑：
+        - 条件：self.config.duplicate_detection_enabled
+        依据来源（证据链）：
+        - 对象内部状态：self.config。
+        输入参数：
+        - config: 配置对象/字典（类型：Optional[VisionAIConfig]）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.config = config or VisionAIConfig()
         
         # HTTP 客户端 (连接池 + HTTP/2)
@@ -295,11 +517,26 @@ class VisionAIClient:
             "total_requests": 0,
             "cache_hits": 0,
             "duplicate_skips": 0,
-            "api_calls": 0
+            "api_calls": 0,
+            "api_wait_ms_total": 0.0,
+            "api_wait_count": 0
         }
     
     async def _get_client(self) -> httpx.AsyncClient:
-        """获取或创建 HTTP 客户端"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._http_client is None
+        依据来源（证据链）：
+        - 对象内部状态：self._http_client。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self._http_client is None:
             self._http_client = httpx.AsyncClient(
                 limits=httpx.Limits(
@@ -320,16 +557,24 @@ class VisionAIClient:
         skip_duplicate_check: bool = False
     ) -> Dict[str, Any]:
         """
-        验证图像
-        
-        Args:
-            image_path: 图像路径
-            prompt: 验证提示词
-            skip_duplicate_check: 是否跳过重复检测
-            
-        Returns:
-            验证结果字典
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新、HTTP 调用、文件系统读写实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：not skip_duplicate_check and self._hash_cache
+        - 条件：not self.config.enabled or not self.config.bearer_token
+        - 条件：self._hash_cache
+        依据来源（证据链）：
+        - 输入参数：skip_duplicate_check。
+        - 对象内部状态：self._hash_cache, self.config。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - prompt: 文本内容（类型：str）。
+        - skip_duplicate_check: 函数入参（类型：bool）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         self._stats["total_requests"] += 1
         
         # Step 1: 重复帧检测
@@ -353,7 +598,21 @@ class VisionAIClient:
         return result
     
     async def _call_vision_api(self, image_path: str, prompt: str) -> Dict[str, Any]:
-        """调用 Vision API"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：response.status_code == 200
+        - 条件：response.status_code == 429
+        依据来源（证据链）：
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - prompt: 文本内容（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         import base64
         
         # 读取并编码图片
@@ -364,8 +623,12 @@ class VisionAIClient:
             logger.error(f"Failed to read image {image_path}: {e}")
             return {"error": str(e), "should_include": True}
         
-        # 获取并发许可
+        # 获取并发许可（统计等待耗时）
+        wait_start = time.perf_counter()
         await self._concurrency_limiter.acquire()
+        wait_ms = (time.perf_counter() - wait_start) * 1000.0
+        self._stats["api_wait_ms_total"] += wait_ms
+        self._stats["api_wait_count"] += 1
         
         try:
             client = await self._get_client()
@@ -390,11 +653,19 @@ class VisionAIClient:
                 "Content-Type": "application/json"
             }
             
-            # 发送请求
+            # 发送请求（统计 API 等待耗时）
+            req_start = time.perf_counter()
             response = await client.post(
                 self.config.base_url,
                 json=payload,
                 headers=headers
+            )
+            http_ms = (time.perf_counter() - req_start) * 1000.0
+            avg_wait = self._stats["api_wait_ms_total"] / max(1, self._stats["api_wait_count"])
+            logger.info(
+                f"Vision API timing: wait={wait_ms:.1f}ms, http={http_ms:.1f}ms, "
+                f"avg_wait={avg_wait:.1f}ms, calls={self._stats['api_wait_count']}, "
+                f"status={response.status_code}"
             )
             
             self._stats["api_calls"] += 1
@@ -422,24 +693,59 @@ class VisionAIClient:
         
         except Exception as e:
             await self._concurrency_limiter.record_failure(is_rate_limit=False)
-            logger.error(f"Vision API call failed: {e}")
+            http_ms = -1.0
+            if "req_start" in locals():
+                http_ms = (time.perf_counter() - req_start) * 1000.0
+            avg_wait = self._stats["api_wait_ms_total"] / max(1, self._stats["api_wait_count"])
+            logger.error(
+                f"Vision API call failed: {e} (wait={wait_ms:.1f}ms, http={http_ms:.1f}ms, "
+                f"avg_wait={avg_wait:.1f}ms, calls={self._stats['api_wait_count']})"
+            )
             return {"error": str(e), "should_include": True}
         
         finally:
             self._concurrency_limiter.release()
     
     def get_stats(self) -> Dict[str, Any]:
-        """获取统计信息"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：self._hash_cache
+        依据来源（证据链）：
+        - 对象内部状态：self._hash_cache。
+        输入参数：
+        - 无。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         stats = self._stats.copy()
         if self._hash_cache:
             stats["hash_cache"] = self._hash_cache.get_stats()
         stats["concurrency"] = {
             "current_limit": self._concurrency_limiter.current_limit
         }
+        if self._stats["api_wait_count"] > 0:
+            stats["api_wait_avg_ms"] = self._stats["api_wait_ms_total"] / self._stats["api_wait_count"]
         return stats
     
     async def close(self):
-        """关闭客户端"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._http_client
+        依据来源（证据链）：
+        - 对象内部状态：self._http_client。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self._http_client:
             await self._http_client.aclose()
             self._http_client = None
@@ -452,7 +758,19 @@ class VisionAIClient:
 _global_vision_client: Optional[VisionAIClient] = None
 
 def get_vision_ai_client(config: Optional[VisionAIConfig] = None) -> VisionAIClient:
-    """获取全局 Vision AI 客户端"""
+    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    决策逻辑：
+    - 条件：_global_vision_client is None
+    依据来源（证据链）：
+    输入参数：
+    - config: 配置对象/字典（类型：Optional[VisionAIConfig]）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     global _global_vision_client
     if _global_vision_client is None:
         _global_vision_client = VisionAIClient(config)

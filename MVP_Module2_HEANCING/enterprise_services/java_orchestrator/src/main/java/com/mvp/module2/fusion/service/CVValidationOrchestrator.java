@@ -13,6 +13,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.*;
@@ -46,10 +48,13 @@ public class CVValidationOrchestrator {
     private final Retry retry;
     
     // 每批次处理的单元数 (强制设为1，配合流式响应实现最大化并行度)
-    // 解释: 只有当 batchSize=1 时，Java端的 semaphore 释放粒度才能与 Python 端的 ProcessPool完成粒度完全对齐。
-    private static final int DEFAULT_BATCH_SIZE = 1;
+    // ?????????(?? 4?????????????????)
+    private static final int DEFAULT_BATCH_SIZE = 8;
     // 单批次超时秒数
     private static final int BATCH_TIMEOUT_SEC = 6000;  // 单个 unit 最多 10 分钟
+    // 缓存版本（配置变更时手动升级）
+    private static final String CV_CACHE_VERSION = "cv_v1";
+    private static final String CV_CACHE_FILE = "cv_validation_cache.json";
 
     
     public CVValidationOrchestrator() {
@@ -97,6 +102,11 @@ public class CVValidationOrchestrator {
             String outputDir) {
         
         Map<String, CVValidationUnitResult> resultMap = new ConcurrentHashMap<>();
+        Map<String, CVValidationUnitResult> cached = tryLoadCachedResults(taskId, videoPath, units, outputDir);
+        if (cached != null && !cached.isEmpty()) {
+            resultMap.putAll(cached);
+            return resultMap;
+        }
         
         List<CompletableFuture<Boolean>> futures = validateBatchesAsync(taskId, videoPath, units, outputDir, unitResult -> {
             resultMap.put(unitResult.unitId, unitResult);
@@ -110,6 +120,9 @@ public class CVValidationOrchestrator {
             allFutures.get(BATCH_TIMEOUT_SEC * Math.max(1, futures.size()), TimeUnit.SECONDS);
             
             // Results are already populated in resultMap via the consumer
+            if (units != null && !units.isEmpty() && resultMap.size() >= units.size()) {
+                saveCache(taskId, videoPath, units, outputDir, resultMap);
+            }
         } catch (Exception e) {
             logger.error("[{}] CV Validation failed: {}", taskId, e.getMessage());
         } finally {
@@ -174,29 +187,126 @@ public class CVValidationOrchestrator {
         return futures;
     }
     
-    private Map<String, CVValidationUnitResult> loadFromCache(String taskId, String path) {
+    public Map<String, CVValidationUnitResult> tryLoadCachedResults(
+            String taskId, String videoPath, List<SemanticUnitInput> units, String outputDir) {
+        String cachePath = getCvCachePath(outputDir);
+        String signature = buildCvSignature(videoPath, units, outputDir);
+        return loadFromCache(taskId, cachePath, signature, units != null ? units.size() : 0);
+    }
+
+    public void saveCache(
+            String taskId, String videoPath, List<SemanticUnitInput> units, String outputDir,
+            Map<String, CVValidationUnitResult> results) {
+        if (results == null || results.isEmpty()) return;
+        String cachePath = getCvCachePath(outputDir);
+        String signature = buildCvSignature(videoPath, units, outputDir);
+        saveToCache(taskId, cachePath, signature, results);
+    }
+
+    private String getCvCachePath(String outputDir) {
+        return outputDir + File.separator + "intermediates" + File.separator + CV_CACHE_FILE;
+    }
+
+    private String buildCvSignature(String videoPath, List<SemanticUnitInput> units, String outputDir) {
+        try {
+            File videoFile = new File(videoPath);
+            long videoSize = videoFile.exists() ? videoFile.length() : -1;
+            long videoMtime = videoFile.exists() ? videoFile.lastModified() : -1;
+            String urlHash = new File(outputDir).getName();
+
+            List<Map<String, Object>> unitList = new ArrayList<>();
+            if (units != null) {
+                List<SemanticUnitInput> sorted = new ArrayList<>(units);
+                sorted.sort(Comparator.comparing(u -> u.unitId));
+                for (SemanticUnitInput u : sorted) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("unit_id", u.unitId);
+                    item.put("start_sec", u.startSec);
+                    item.put("end_sec", u.endSec);
+                    item.put("knowledge_type", u.knowledgeType != null ? u.knowledgeType : "");
+                    unitList.add(item);
+                }
+            }
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("url_hash", urlHash);
+            payload.put("cv_version", CV_CACHE_VERSION);
+            payload.put("video_size", videoSize);
+            payload.put("video_mtime", videoMtime);
+            payload.put("units", unitList);
+
+            String raw = objectMapper.writeValueAsString(payload);
+            return sha256(raw);
+        } catch (Exception e) {
+            logger.warn("Failed to build CV signature: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    private Map<String, CVValidationUnitResult> loadFromCache(
+            String taskId, String path, String signature, int expectedUnits) {
         File file = new File(path);
         if (!file.exists()) return null;
         try {
-            return objectMapper.readValue(file, new com.fasterxml.jackson.core.type.TypeReference<Map<String, CVValidationUnitResult>>() {});
+            Map<String, Object> root = objectMapper.readValue(file, Map.class);
+            Map<String, Object> meta = (Map<String, Object>) root.get("meta");
+            if (meta == null || signature.isEmpty()) return null;
+            if (!signature.equals(meta.get("signature"))) return null;
+
+            Map<String, CVValidationUnitResult> results = objectMapper.convertValue(
+                root.get("results"),
+                new com.fasterxml.jackson.core.type.TypeReference<Map<String, CVValidationUnitResult>>() {}
+            );
+            if (results == null || results.isEmpty()) return null;
+            if (expectedUnits > 0 && results.size() < expectedUnits) {
+                logger.warn("[{}] CV cache incomplete: {}/{}", taskId, results.size(), expectedUnits);
+                return null;
+            }
+            logger.info("[{}] Reusing CV cache: {}", taskId, path);
+            return results;
         } catch (Exception e) {
             logger.warn("[{}] Failed to load CV cache: {}", taskId, e.getMessage());
         }
         return null;
     }
 
-    private void saveToCache(String taskId, String path, Map<String, CVValidationUnitResult> results) {
+    private void saveToCache(String taskId, String path, String signature, Map<String, CVValidationUnitResult> results) {
         try {
             File file = new File(path);
             file.getParentFile().mkdirs();
-            objectMapper.writeValue(file, results);
-            logger.info("[{}] ✅ CV results saved to cache: {}", taskId, path);
+
+            Map<String, Object> meta = new LinkedHashMap<>();
+            meta.put("signature", signature);
+            meta.put("version", CV_CACHE_VERSION);
+            meta.put("updated_at", System.currentTimeMillis());
+            meta.put("units_count", results.size());
+
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("meta", meta);
+            root.put("results", results);
+
+            objectMapper.writeValue(file, root);
+            logger.info("[{}] CV results saved to cache: {}", taskId, path);
         } catch (Exception e) {
             logger.warn("[{}] Failed to save CV cache: {}", taskId, e.getMessage());
         }
     }
-    
-    /**
+
+    private String sha256(String raw) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = md.digest(raw.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+/**
      * 使用熔断器和重试执行单批次流式验证
      */
     private boolean executeWithResilienceStreaming(

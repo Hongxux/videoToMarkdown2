@@ -1,6 +1,14 @@
 """
-Helper functions for screenshot instruction generation
-"""
+模块说明：阶段流程节点 screenshot_helpers 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import re
 from typing import Dict, List
@@ -8,13 +16,29 @@ from typing import Dict, List
 
 def generate_simplified_questions(source_type: str, source_data: Dict, must_content: str, secondary_content: str) -> List[Dict]:
     """
-    生成简化的校验问题，提高Vision API准确率
-    
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：source_type == 'fault'
+    - 条件：fault_type == 3
+    - 条件：key_elements
+    依据来源（证据链）：
+    - 输入参数：must_content, secondary_content, source_type。
+    输入参数：
+    - source_type: 函数入参（类型：str）。
+    - source_data: 函数入参（类型：Dict）。
+    - must_content: 函数入参（类型：str）。
+    - secondary_content: 函数入参（类型：str）。
+    输出参数：
+    - Dict 列表（与输入或处理结果一一对应）。
+    补充说明：
     策略：
     1. 将长问题拆分为多个短问题
     2. 根据断层类型定制问题模板
-    3. 避免要求完全匹配，改为检查关键要素
-    """
+    3. 避免要求完全匹配，改为检查关键要素"""
     questions = []
     
     if source_type == "fault":

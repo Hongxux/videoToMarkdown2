@@ -1,7 +1,14 @@
 """
-Phase 8: 归档规范执行
-Steps 23, 24
-"""
+模块说明：阶段流程节点 phase8_archive 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import subprocess
 from pathlib import Path
@@ -15,11 +22,21 @@ from ..monitoring.logger import get_logger
 
 async def step23_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤23：视频片段命名
-    
-    类型：Tool(FFmpeg) + 本地查询
-    核心动作：按规范命名核心视频片段
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过子进程调用、文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not core.get('video_needed')
+    - 条件：not time_range
+    - 条件：end <= start
+    依据来源（证据链）：
+    - 配置字段：video_needed。
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     logger = get_logger("step23_video_name", state.get("output_dir", "output/logs"))
     logger.start()
     
@@ -123,14 +140,20 @@ async def step23_node(state: PipelineState) -> Dict[str, Any]:
 
 async def step24_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤24：截图文件命名
-    
-    类型：代码规则
-    核心动作：按规范命名合格截图文件，关联文字稿知识点
-    
-    v7命名格式：{knowledge_point}_{scene_type}_{sequence}.png
-    示例：快速排序_流程流转类_1.png
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：processed_frames
+    - 条件：sid
+    - 条件：not knowledge_point
+    依据来源（证据链）：
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     logger = get_logger("step24_screenshot_name", state.get("output_dir", "output/logs"))
     logger.start()
     

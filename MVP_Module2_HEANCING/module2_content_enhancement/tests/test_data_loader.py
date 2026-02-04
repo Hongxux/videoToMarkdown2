@@ -1,8 +1,14 @@
 """
-Unit tests for data_loader module
-
-Tests JSON parsing and validation logic.
-"""
+模块说明：测试用例与断言集合。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import json
 import pytest
@@ -69,10 +75,29 @@ SAMPLE_MERGED_SEGMENTS = {
 
 
 class TestLoadCorrectedSubtitles:
-    """Test corrected_subtitles loading"""
+    """
+    类说明：封装 TestLoadCorrectedSubtitles 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def test_load_valid_json(self, tmp_path):
-        """Test loading valid corrected_subtitles JSON"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         json_file = tmp_path / "corrected_subtitles.json"
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(SAMPLE_CORRECTED_SUBTITLES, f)
@@ -89,12 +114,30 @@ class TestLoadCorrectedSubtitles:
         assert subtitles[1].corrections[0]["corrected"] == "核心"
     
     def test_load_missing_file(self):
-        """Test loading non-existent file"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         with pytest.raises(FileNotFoundError):
             load_corrected_subtitles("/nonexistent/file.json")
     
     def test_load_invalid_json(self, tmp_path):
-        """Test loading malformed JSON"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         json_file = tmp_path / "invalid.json"
         with open(json_file, 'w') as f:
             f.write("not valid json{")
@@ -103,7 +146,16 @@ class TestLoadCorrectedSubtitles:
             load_corrected_subtitles(str(json_file))
     
     def test_load_missing_required_field(self, tmp_path):
-        """Test loading JSON with missing required fields"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         invalid_data = {
             "corrected_subtitles": [
                 {
@@ -121,7 +173,16 @@ class TestLoadCorrectedSubtitles:
             load_corrected_subtitles(str(json_file))
     
     def test_load_negative_timestamp(self, tmp_path):
-        """Test validation catches negative timestamps"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         invalid_data = {
             "corrected_subtitles": [
                 {
@@ -142,10 +203,29 @@ class TestLoadCorrectedSubtitles:
 
 
 class TestLoadMergedSegments:
-    """Test merged_segments loading"""
+    """
+    类说明：封装 TestLoadMergedSegments 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def test_load_valid_json(self, tmp_path):
-        """Test loading valid merged_segments JSON"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         json_file = tmp_path / "merged_segments.json"
         with open(json_file, 'w', encoding='utf-8') as f:
             json.dump(SAMPLE_MERGED_SEGMENTS, f)
@@ -162,12 +242,30 @@ class TestLoadMergedSegments:
         assert len(segments[1].source_sentence_ids) == 1
     
     def test_load_missing_file(self):
-        """Test loading non-existent file"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         with pytest.raises(FileNotFoundError):
             load_merged_segments("/nonexistent/file.json")
     
     def test_load_missing_required_field(self, tmp_path):
-        """Test loading JSON with missing fields"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         invalid_data = {
             "pure_text_script": [
                 {
@@ -186,10 +284,29 @@ class TestLoadMergedSegments:
 
 
 class TestCreateModule2Input:
-    """Test complete Module2Input creation"""
+    """
+    类说明：封装 TestCreateModule2Input 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def test_create_valid_input(self, tmp_path):
-        """Test creating Module2Input from valid files"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         # Create test files
         sub_file = tmp_path / "corrected_subtitles.json"
         with open(sub_file, 'w', encoding='utf-8') as f:
@@ -221,7 +338,16 @@ class TestCreateModule2Input:
         assert Path(output_dir).exists()
     
     def test_create_missing_video(self, tmp_path):
-        """Test error when video file doesn't exist"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         sub_file = tmp_path / "corrected_subtitles.json"
         with open(sub_file, 'w', encoding='utf-8') as f:
             json.dump(SAMPLE_CORRECTED_SUBTITLES, f)
@@ -241,10 +367,29 @@ class TestCreateModule2Input:
 
 
 class TestValidateInputConsistency:
-    """Test input validation"""
+    """
+    类说明：封装 TestValidateInputConsistency 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def test_validate_valid_input(self, tmp_path):
-        """Test validation of valid input"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过JSON 解析/序列化、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - tmp_path: 文件路径（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         sub_file = tmp_path / "corrected_subtitles.json"
         with open(sub_file, 'w', encoding='utf-8') as f:
             json.dump(SAMPLE_CORRECTED_SUBTITLES, f)

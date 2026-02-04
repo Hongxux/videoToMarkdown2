@@ -1,13 +1,21 @@
 """
-CV Knowledge Validator - LLM+CV Collaborative Semantic Unit Validation
-
+模块说明：Module2 内容增强中的 cv_knowledge_validator 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。
+补充说明：
 基于第一性原理的视觉知识验证模块 v2.1：
 - 稳定岛检测 (ROI内SSIM≥0.9, ≥500ms)
-- 动作单元检测 (ROI内diff_ratio>0.05, ≥300ms)  
+- 动作单元检测 (ROI内diff_ratio>0.05, ≥300ms)
 - 视觉冗余5类细分 (转场/无关动作/空白/装饰/遮挡)
 - 视觉知识类型识别 (抽象/具象/过程)
 - 跨模态一致性校验
-
 性能优化:
 - ROI增量复用缓存
 - 帧特征增量缓存
@@ -15,12 +23,10 @@ CV Knowledge Validator - LLM+CV Collaborative Semantic Unit Validation
 - 状态判定轻量校验
 - 动态采样率适配
 - 批量增量并行处理
-
 多级采样策略:
 - 1fps: ROI检测
 - 5fps: 状态判定
-- 10fps: 边界精修
-"""
+- 10fps: 边界精修"""
 
 import cv2
 import numpy as np
@@ -42,7 +48,17 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 class CVConfig:
-    """CV Knowledge Validator 配置常量"""
+    """
+    类说明：封装 CVConfig 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     # 稳定岛/动作单元检测阈值
     TH_SSIM_STABLE = 0.9           # 稳定岛SSIM阈值
@@ -127,7 +143,17 @@ class CVConfig:
 # =============================================================================
 
 class VisualKnowledgeType(Enum):
-    """视觉知识类型"""
+    """
+    类说明：封装 VisualKnowledgeType 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     ABSTRACT = "abstract"    # 抽象: 纯人像/文字展示
     CONCRETE = "concrete"    # 具象: 静态图表/界面
     PROCESS = "process"      # 过程: 动态操作/动画
@@ -135,7 +161,17 @@ class VisualKnowledgeType(Enum):
 
 
 class RedundancyType(Enum):
-    """视觉冗余类型"""
+    """
+    类说明：封装 RedundancyType 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     RED_TRANSITION = "transition"     # 转场冗余
     RED_IRRELEVANT = "irrelevant"     # 无关动作冗余
     RED_BLANK = "blank"               # 空白画面冗余
@@ -144,7 +180,17 @@ class RedundancyType(Enum):
 
 
 class FrameState(Enum):
-    """帧状态"""
+    """
+    类说明：封装 FrameState 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     STABLE = "stable"         # 稳定岛
     ACTION = "action"         # 动作单元
     REDUNDANT = "redundant"   # 冗余
@@ -152,18 +198,48 @@ class FrameState(Enum):
 
 @dataclass
 class StableIsland:
-    """稳定岛"""
+    """
+    类说明：封装 StableIsland 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     start_sec: float
     end_sec: float
     avg_ssim: float
     
     @property
     def duration_ms(self) -> float:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         return (self.end_sec - self.start_sec) * 1000
 
 
 class Modality(Enum):
-    """素材模态类型"""
+    """
+    类说明：封装 Modality 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     DISCARD = "discard"           # 剔除，不生成素材
     SCREENSHOT = "screenshot"     # 纯截图 (K1/K2/呈现型)
     PRESENTATION = "presentation" # V7.2: 呈现型动态 (淡入/渐显) → 单张稳定截图
@@ -174,13 +250,16 @@ class Modality(Enum):
 @dataclass
 class ActionUnit:
     """
-    动作单元 (V9.0 - 两阶段合并 + LLM分类)
-    
-    分类层级:
-    1. 有效性分类: knowledge/transition/noise/mixed
-    2. LLM 知识分类: 过程性知识/实操/推演/讲解型
-    3. 模态子分类 (仅针对knowledge): K1/K2→截图, K3→视频+截图, K4→视频
-    """
+    类说明：封装 ActionUnit 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     start_sec: float
     end_sec: float
     avg_diff_ratio: float
@@ -199,18 +278,35 @@ class ActionUnit:
     
     @property
     def duration_ms(self) -> float:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         return (self.end_sec - self.start_sec) * 1000
     
     def classify(self) -> str:
         """
-        动态类型分类 (第一性原理 V6.9.5)
-        
-        分类优先级:
-        1. SSIM跌幅>50% → 容器切换型 (不论时长)
-        2. SSIM跌幅<20% + 时长≥1.5s → 知识生产型
-        3. 时长<0.3s → 噪点
-        4. 其他 → 混合/待定
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.ssim_drop > 0.5
+        - 条件：duration_s >= 1.5 and self.ssim_drop < 0.2
+        - 条件：duration_s < 0.3
+        依据来源（证据链）：
+        - 对象内部状态：self.ssim_drop。
+        输入参数：
+        - 无。
+        输出参数：
+        - 字符串结果。"""
         duration_s = self.duration_ms / 1000
         
         # 优先判断: SSIM大跌 = 容器切换 (场景突变)
@@ -231,15 +327,23 @@ class ActionUnit:
                           is_continuous_derivation: bool = False,
                           is_continuous_operation: bool = False) -> str:
         """
-        模态分类 (V7.0 - 知识生产型内部子分类)
-        
-        决策树:
-        - 无效动态 (transition/noise) → DISCARD
-        - 有内部稳定岛 (K1/K2) → SCREENSHOT
-        - 连续推演 (K3) → VIDEO_SCREENSHOT
-        - 连续操作 (K4) → VIDEO_ONLY
-        - mixed → SCREENSHOT (保守策略)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：action_type in ('transition', 'noise')
+        - 条件：action_type == 'mixed'
+        - 条件：action_type == 'knowledge'
+        依据来源（证据链）：
+        - 输入参数：has_internal_stable, is_continuous_derivation, is_continuous_operation。
+        输入参数：
+        - has_internal_stable: 函数入参（类型：bool）。
+        - is_continuous_derivation: 开关/状态（类型：bool）。
+        - is_continuous_operation: 开关/状态（类型：bool）。
+        输出参数：
+        - 字符串结果。"""
         action_type = self.classify()
         
         # 无效动态: 剔除
@@ -279,7 +383,17 @@ class ActionUnit:
 
 @dataclass
 class RedundancySegment:
-    """冗余区间"""
+    """
+    类说明：封装 RedundancySegment 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     start_sec: float
     end_sec: float
     redundancy_type: RedundancyType
@@ -287,12 +401,32 @@ class RedundancySegment:
     
     @property
     def duration_ms(self) -> float:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         return (self.end_sec - self.start_sec) * 1000
 
 
 @dataclass
 class VisionStats:
-    """视觉统计"""
+    """
+    类说明：封装 VisionStats 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     s_stable: float = 0.0      # 稳定岛占比
     s_action: float = 0.0      # 动作单元占比
     s_redundant: float = 0.0   # 冗余占比
@@ -304,7 +438,17 @@ class VisionStats:
 
 @dataclass
 class CVValidationResult:
-    """CV校验结果"""
+    """
+    类说明：封装 CVValidationResult 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     unit_id: str
     timeline: Tuple[float, float]
     
@@ -334,12 +478,32 @@ class CVValidationResult:
     
     @property
     def is_normal(self) -> bool:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 是否满足条件的判定结果（布尔标记）。"""
         return self.timeline_continuous and self.type_match and self.vision_unit_complete
 
 
 @dataclass
 class ConflictPackage:
-    """冲突包 (用于LLM重判)"""
+    """
+    类说明：封装 ConflictPackage 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     conflict_unit_id: str
     conflict_timeline: Tuple[float, float]
     vision_anchors: List[float]
@@ -353,14 +517,47 @@ class ConflictPackage:
 # =============================================================================
 
 class ROICache:
-    """ROI增量复用缓存 (措施1)"""
+    """
+    类说明：封装 ROICache 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, max_size: int = CVConfig.ROI_CACHE_SIZE):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - max_size: 函数入参（类型：int）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.cache: OrderedDict = OrderedDict()
         self.max_size = max_size
     
     def get(self, unit_end_sec: float) -> Optional[Tuple[int, int, int, int]]:
-        """获取最近的ROI"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：abs(end_sec - unit_end_sec) < 10
+        依据来源（证据链）：
+        - 输入参数：unit_end_sec。
+        输入参数：
+        - unit_end_sec: 起止时间/区间边界（类型：float）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         for end_sec, data in reversed(self.cache.items()):
             if abs(end_sec - unit_end_sec) < 10:  # 10秒内
                 return data['roi']
@@ -368,7 +565,23 @@ class ROICache:
     
     def put(self, unit_end_sec: float, roi: Tuple[int, int, int, int], 
             layout_feature: float, confidence: float):
-        """缓存ROI"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(self.cache) >= self.max_size
+        依据来源（证据链）：
+        - 对象内部状态：self.cache, self.max_size。
+        输入参数：
+        - unit_end_sec: 起止时间/区间边界（类型：float）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        - layout_feature: 函数入参（类型：float）。
+        - confidence: 函数入参（类型：float）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if len(self.cache) >= self.max_size:
             self.cache.popitem(last=False)
         self.cache[unit_end_sec] = {
@@ -378,21 +591,67 @@ class ROICache:
         }
     
     def get_last_layout_feature(self) -> Optional[float]:
-        """获取上一个单元的布局特征"""
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：self.cache
+        依据来源（证据链）：
+        - 对象内部状态：self.cache。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self.cache:
             return list(self.cache.values())[-1]['layout_feature']
         return None
 
 
 class FrameFeatureCache:
-    """帧特征增量缓存 (措施2)"""
+    """
+    类说明：封装 FrameFeatureCache 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, max_frames: int = CVConfig.FRAME_FEAT_CACHE_FRAMES):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - max_frames: 函数入参（类型：int）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.cache: OrderedDict = OrderedDict()
         self.max_frames = max_frames
     
     def get(self, timestamp: float) -> Optional[Dict]:
-        """获取缓存的帧特征"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：abs(ts - timestamp) < 0.1
+        依据来源（证据链）：
+        - 输入参数：timestamp。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         for ts, feat in self.cache.items():
             if abs(ts - timestamp) < 0.1:  # 100ms容差
                 return feat
@@ -400,7 +659,25 @@ class FrameFeatureCache:
     
     def put(self, timestamp: float, gray_roi: np.ndarray, 
             ssim_base: Optional[np.ndarray], diff_prev: float):
-        """缓存帧特征"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(self.cache) >= self.max_frames
+        - 条件：ssim_base is not None
+        依据来源（证据链）：
+        - 输入参数：ssim_base。
+        - 对象内部状态：self.cache, self.max_frames。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        - gray_roi: 函数入参（类型：np.ndarray）。
+        - ssim_base: 函数入参（类型：Optional[np.ndarray]）。
+        - diff_prev: 函数入参（类型：float）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if len(self.cache) >= self.max_frames:
             self.cache.popitem(last=False)
         self.cache[timestamp] = {
@@ -417,17 +694,29 @@ class FrameFeatureCache:
 
 class CVKnowledgeValidator:
     """
-    CV Knowledge Validator - LLM+CV协同校验器
-    
-    核心功能:
-    1. 稳定岛检测 (ROI内SSIM≥0.9, ≥500ms)
-    2. 动作单元检测 (ROI内diff_ratio>0.05, ≥300ms)
-    3. 视觉冗余5类细分
-    4. 视觉知识类型识别 (抽象/具象/过程/混杂)
-    5. 跨模态一致性校验
-    """
+    类说明：封装 CVKnowledgeValidator 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, video_path: str, use_resource_manager: bool = True):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - use_resource_manager: 函数入参（类型：bool）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
         self.use_resource_manager = use_resource_manager
         self.cap: Optional[cv2.VideoCapture] = None
@@ -445,7 +734,22 @@ class CVKnowledgeValidator:
         self._init_video()
     
     def _init_video(self):
-        """初始化视频"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.use_resource_manager
+        - 条件：not self.cap.isOpened()
+        - 条件：self.cap
+        依据来源（证据链）：
+        - 对象内部状态：self.cap, self.fps, self.target_width, self.use_resource_manager。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self.use_resource_manager:
             rm = get_resource_manager()
             self.cap = rm.get_video_capture(self.video_path)
@@ -472,7 +776,21 @@ class CVKnowledgeValidator:
         self.processing_scale = self.target_width / width if width > self.target_width else 1.0
     
     def _resize_frame(self, frame: np.ndarray) -> np.ndarray:
-        """统一调整帧大小以减少内存消耗"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.processing_scale < 1.0 and frame is not None
+        依据来源（证据链）：
+        - 输入参数：frame。
+        - 对象内部状态：self.processing_scale。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if self.processing_scale < 1.0 and frame is not None:
              # Fast resize using INTER_AREA for downsampling or INTER_LINEAR for speed
              # INTER_LINEAR is faster and sufficient for CV metrics
@@ -483,16 +801,52 @@ class CVKnowledgeValidator:
 
     
     def close(self):
-        """释放资源"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.cap
+        - 条件：not self.use_resource_manager
+        依据来源（证据链）：
+        - 对象内部状态：self.cap, self.use_resource_manager。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self.cap:
             if not self.use_resource_manager:
                 self.cap.release()
             self.cap = None
     
     def __enter__(self):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - exc_type: 函数入参（类型：未标注）。
+        - exc_val: 函数入参（类型：未标注）。
+        - exc_tb: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.close()
     
     # =========================================================================
@@ -502,11 +856,21 @@ class CVKnowledgeValidator:
     def _quick_redundancy_check(self, frame: np.ndarray, 
                                  roi: Optional[Tuple[int, int, int, int]] = None) -> Optional[RedundancyType]:
         """
-        轻量冗余初筛 (措施3)
-        
-        仅检测极端情况(纯黑/纯白)，避免误判正常画面
-        注意: 边缘检测对PPT类视频不适用(边缘本来就少)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：variance <= CVConfig.RED_LOW_VAR_THRESH
+        - 条件：len(frame.shape) == 3
+        依据来源（证据链）：
+        - 输入参数：frame。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        - roi: 函数入参（类型：Optional[Tuple[int, int, int, int]]）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
         
         # 仅检查: 亮度方差 (纯黑/纯白屏)
@@ -525,7 +889,20 @@ class CVKnowledgeValidator:
     # =========================================================================
     
     def _compute_layout_feature(self, frame: np.ndarray) -> float:
-        """计算布局特征值 (用于ROI复用判定)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frame.shape) == 3
+        依据来源（证据链）：
+        - 输入参数：frame。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
         # 8x8分块灰度均值
         h, w = gray.shape
@@ -540,11 +917,23 @@ class CVKnowledgeValidator:
     def _detect_roi(self, frame: np.ndarray, 
                     use_cache: bool = True) -> Optional[Tuple[int, int, int, int]]:
         """
-        检测核心知识ROI
-        
-        复用 VisualElementDetector.detect_structure_roi 逻辑:
-        边缘检测 + 轮廓外接矩形
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：use_cache
+        - 条件：not contours
+        - 条件：not all_points
+        依据来源（证据链）：
+        - 输入参数：frame, use_cache。
+        - 对象内部状态：self.roi_cache。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        - use_cache: 函数入参（类型：bool）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         # 措施1: 尝试复用缓存
         if use_cache:
             layout_feat = self._compute_layout_feature(frame)
@@ -607,7 +996,24 @@ class CVKnowledgeValidator:
     
     def _calculate_ssim_roi(self, frame1: np.ndarray, frame2: np.ndarray,
                              roi: Tuple[int, int, int, int]) -> float:
-        """计算ROI区域的SSIM"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：roi1.size == 0 or roi2.size == 0
+        - 条件：len(frame1.shape) == 3
+        - 条件：len(frame2.shape) == 3
+        依据来源（证据链）：
+        - 输入参数：frame1, frame2。
+        输入参数：
+        - frame1: 函数入参（类型：np.ndarray）。
+        - frame2: 函数入参（类型：np.ndarray）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 数值型计算结果。"""
         x1, y1, x2, y2 = roi
         
         gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY) if len(frame1.shape) == 3 else frame1
@@ -629,12 +1035,23 @@ class CVKnowledgeValidator:
     def _calculate_diff_ratio_roi(self, frame1: np.ndarray, frame2: np.ndarray,
                                    roi: Tuple[int, int, int, int]) -> float:
         """
-        计算ROI区域的变化像素比例
-        
-        🚀 V8.0: 智能干扰过滤
-        - 鼠标过滤: 形态学开运算 + 最小面积阈值
-        - 人物过滤: 边缘区域变化忽略
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：total_pixels == 0
+        - 条件：roi1.size == 0 or roi2.size == 0
+        - 条件：not CVConfig.MOTION_FILTER_ENABLED
+        依据来源（证据链）：
+        - 输入参数：frame1, frame2。
+        输入参数：
+        - frame1: 函数入参（类型：np.ndarray）。
+        - frame2: 函数入参（类型：np.ndarray）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 数值型计算结果。"""
         x1, y1, x2, y2 = roi
         roi_w = x2 - x1
         roi_h = y2 - y1
@@ -697,7 +1114,24 @@ class CVKnowledgeValidator:
     
     def _sample_frames(self, start_sec: float, end_sec: float, 
                        fps: float) -> List[Tuple[float, np.ndarray]]:
-        """按指定帧率采样 (优化版: 使用 ResourceManager 的顺序读取逻辑 + 自动缩放)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.use_resource_manager
+        - 条件：not raw_frames and self.cap
+        - 条件：ret and frame is not None
+        依据来源（证据链）：
+        - 对象内部状态：self.cap, self.use_resource_manager。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - fps: 函数入参（类型：float）。
+        输出参数：
+        - Tuple[float, np.ndarray] 列表（与输入或处理结果一一对应）。"""
         raw_frames = []
         if self.use_resource_manager:
             # 兼容: 如果 ResourceManager 返回 None 或空，回退到本地 cap
@@ -728,7 +1162,21 @@ class CVKnowledgeValidator:
     
     def _light_stable_check(self, frame: np.ndarray, prev_frame: np.ndarray,
                             roi: Tuple[int, int, int, int]) -> bool:
-        """轻量稳定状态校验 (仅检查5个局部区域)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：diff_ratio > CVConfig.TH_DIFF_RATIO
+        依据来源（证据链）：
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        - prev_frame: 函数入参（类型：np.ndarray）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 布尔判断结果。"""
         x1, y1, x2, y2 = roi
         w, h = x2 - x1, y2 - y1
         
@@ -760,12 +1208,16 @@ class CVKnowledgeValidator:
     
     def _should_trigger_edge_detection(self, ssim: float, diff_ratio: float) -> bool:
         """
-        死区触发模式: 仅在MSE/SSIM失效的伪静止场景启动边缘检测
-        
-        触发条件:
-        - diff_ratio极低 (MSE等效,像素变化微小)
-        - SSIM极高 (结构完整)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - ssim: 函数入参（类型：float）。
+        - diff_ratio: 函数入参（类型：float）。
+        输出参数：
+        - 布尔判断结果。"""
         ssim_drop = 1.0 - ssim
         return (
             diff_ratio < 0.01 and  # diff_ratio < 1% (等效MSE极低)
@@ -778,7 +1230,24 @@ class CVKnowledgeValidator:
     
     def _calculate_mse(self, frame1: np.ndarray, frame2: np.ndarray, 
                        roi: Tuple[int, int, int, int] = None) -> float:
-        """计算两帧之间的 MSE (均方误差)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：roi
+        - 条件：len(f1.shape) == 3
+        - 条件：len(f2.shape) == 3
+        依据来源（证据链）：
+        - 输入参数：roi。
+        输入参数：
+        - frame1: 函数入参（类型：np.ndarray）。
+        - frame2: 函数入参（类型：np.ndarray）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 数值型计算结果。"""
         if roi:
             x1, y1, x2, y2 = roi
             f1 = frame1[y1:y2, x1:x2]
@@ -799,14 +1268,22 @@ class CVKnowledgeValidator:
     def _refine_action_boundaries(self, action: ActionUnit, 
                                   roi: Tuple[int, int, int, int] = None) -> ActionUnit:
         """
-        V8.0: 复用 VideoClipExtractor 的起止点细化逻辑
-        
-        核心原理:
-        1. 起始点: 找到第一个 MSE 跳变帧 (视觉变化起点)
-        2. 终止点: 找到最后一个 MSE 跳变帧 + 后续稳定区 (视觉变化终点)
-        
-        评分模型 = 0.7 * MSE强度 + 0.3 * 时序相似度
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        - 条件：not mse_list
+        - 条件：final_end <= final_start
+        依据来源（证据链）：
+        - 输入参数：action。
+        输入参数：
+        - action: 函数入参（类型：ActionUnit）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - ActionUnit 对象（包含字段：start_sec, end_sec, avg_diff_ratio, action_type, ssim_drop, is_effective, knowledge_subtype, modality, has_internal_stable, knowledge_type, confidence, internal_stable_islands）。"""
         # 扩展扫描窗 (±2s)
         scan_start = max(0, action.start_sec - 2.0)
         scan_end = min(getattr(self, '_video_duration', action.end_sec + 10), action.end_sec + 2.0)
@@ -833,6 +1310,21 @@ class CVKnowledgeValidator:
         
         # 评分函数 (复用 VideoClipExtractor 逻辑)
         def calculate_anchor_score(mse_val: float, anchor_time: float, target_time: float) -> float:
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            决策逻辑：
+            - 条件：time_gap <= 1.5
+            依据来源（证据链）：
+            输入参数：
+            - mse_val: 函数入参（类型：float）。
+            - anchor_time: 函数入参（类型：float）。
+            - target_time: 函数入参（类型：float）。
+            输出参数：
+            - 数值型计算结果。"""
             intensity = min(1.0, mse_val / mse_threshold)
             time_gap = abs(anchor_time - target_time)
             zone_weight = 1.0 if time_gap <= 1.5 else 0.7
@@ -888,15 +1380,22 @@ class CVKnowledgeValidator:
                                      all_stable_islands: List[StableIsland],
                                      min_duration_ms: float = 500.0) -> bool:
         """
-        检测动作区间是否有内部稳定岛 (用于K1/K2判定)
-        
-        内部稳定岛定义: 
-        - stable.start > action.start (不是首部衔接)
-        - stable.end < action.end (不是尾部衔接)
-        - duration >= 500ms
-        
-        返回: True表示可静态化 → K1/K2, False表示连续型 → K3/K4
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：has_internal
+        - 条件：stable.start_sec > action.start_sec + 0.1 and stable.end_sec < action.end_sec - 0.1 and (stable.duration_ms >= min_duration_ms)
+        依据来源（证据链）：
+        - 输入参数：action, min_duration_ms。
+        输入参数：
+        - action: 函数入参（类型：ActionUnit）。
+        - all_stable_islands: 函数入参（类型：List[StableIsland]）。
+        - min_duration_ms: 函数入参（类型：float）。
+        输出参数：
+        - 布尔判断结果。"""
         internal_islands = []
         for stable in all_stable_islands:
             # 检查是否为内部稳定岛 (排除首尾衔接)
@@ -920,20 +1419,25 @@ class CVKnowledgeValidator:
                                   roi: Tuple[int, int, int, int],
                                   all_stable_islands: List[StableIsland]) -> bool:
         """
-        检测是否为呈现型动态 (V7.2)
-        
-        呈现型定义: 内容在首帧已完整存在(仅低可见度)，末帧只是变成完全可见
-        - 淡入/淡出、亮度渐变、透明度变化
-        - 信息等价于末帧稳定截图，不需要视频
-        
-        判定规则 (全部满足):
-        1. 空间分散度 > 0.75 (全局均匀变化)
-        2. diff_ratio 单调平滑 (无创作型波动)
-        3. 首尾帧内容IOU > 0.90 (二值化后)
-        4. 动作后有稳定岛 (呈现完成即静止)
-        
-        返回: True=呈现型(强制截图), False=非呈现型(继续常规判定)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 3
+        - 条件：len(action_frames) < 3
+        - 条件：len(action_frames) > 8
+        依据来源（证据链）：
+        - 输入参数：action, frames, roi。
+        - 对象内部状态：self._has_creation_features, self._is_monotonic_smooth。
+        输入参数：
+        - action: 函数入参（类型：ActionUnit）。
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        - all_stable_islands: 函数入参（类型：List[StableIsland]）。
+        输出参数：
+        - 布尔判断结果。"""
         if len(frames) < 3:
             return False
         
@@ -1010,7 +1514,23 @@ class CVKnowledgeValidator:
     
     def _calculate_spatial_spread(self, frames: List[Tuple[float, np.ndarray]],
                                    roi: Tuple[int, int, int, int]) -> float:
-        """计算变化像素的空间分散度 (0-1)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        - 条件：roi_area == 0
+        - 条件：prev_frame is not None
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 数值型计算结果。"""
         if len(frames) < 2:
             return 0.0
         
@@ -1040,7 +1560,22 @@ class CVKnowledgeValidator:
         return total_changed_pixels
     
     def _is_monotonic_smooth(self, series: List[float], tolerance: float = 0.02) -> bool:
-        """检测序列是否单调平滑 (允许小波动)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(series) < 2
+        - 条件：len(arr) > 0
+        依据来源（证据链）：
+        - 输入参数：series。
+        输入参数：
+        - series: 函数入参（类型：List[float]）。
+        - tolerance: 函数入参（类型：float）。
+        输出参数：
+        - 布尔判断结果。"""
         if len(series) < 2:
             return True
         
@@ -1062,7 +1597,24 @@ class CVKnowledgeValidator:
     
     def _calculate_frame_content_iou(self, frame1: np.ndarray, frame2: np.ndarray,
                                       roi: Tuple[int, int, int, int]) -> float:
-        """计算ROI内首尾帧内容重合度 (二值化后)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frame1.shape) == 3
+        - 条件：len(frame2.shape) == 3
+        - 条件：union > 0
+        依据来源（证据链）：
+        - 输入参数：frame1, frame2。
+        输入参数：
+        - frame1: 函数入参（类型：np.ndarray）。
+        - frame2: 函数入参（类型：np.ndarray）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 数值型计算结果。"""
         x1, y1, x2, y2 = roi
         
         gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY) if len(frame1.shape) == 3 else frame1
@@ -1089,18 +1641,22 @@ class CVKnowledgeValidator:
     def _has_creation_features(self, frames: List[Tuple[float, np.ndarray]],
                                 roi: Tuple[int, int, int, int]) -> bool:
         """
-        检测创作型强特征 (V7.3)
-        
-        如果检测到任意一个创作型特征，直接排除呈现型判定，
-        防止真实创作型动态被误判为呈现型。
-        
-        创作型强特征:
-        1. 局部像素增量 (创作型集中在局部区域，呈现型全局均匀)
-        2. 非均匀变化模式 (创作型有轨迹/笔迹，呈现型是渐变)
-        3. 内容边界扩展 (创作型边界逐渐扩大，呈现型边界不变)
-        
-        返回: True=有创作特征(非呈现型), False=无创作特征(可能是呈现型)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 3
+        - 条件：len(frames) > 10
+        - 条件：has_local_increment
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 布尔判断结果。"""
         if len(frames) < 3:
             return False
         
@@ -1134,13 +1690,21 @@ class CVKnowledgeValidator:
     def _detect_local_pixel_increment(self, frames: List[Tuple[float, np.ndarray]],
                                        roi: Tuple[int, int, int, int]) -> bool:
         """
-        检测局部像素增量 (创作型特征)
-        
-        创作型: 变化集中在某个局部区域 (如书写位置)
-        呈现型: 变化均匀分布在整个ROI
-        
-        实现: 将ROI划分为4x4网格，检查变化是否集中在少数网格
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：grid_h < 10 or grid_w < 10
+        - 条件：total_change == 0
+        - 条件：prev_frame is not None
+        依据来源（证据链）：
+        输入参数：
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 布尔判断结果。"""
         x1, y1, x2, y2 = roi
         grid_h = (y2 - y1) // 4
         grid_w = (x2 - x1) // 4
@@ -1184,13 +1748,21 @@ class CVKnowledgeValidator:
     def _detect_trace_pattern(self, frames: List[Tuple[float, np.ndarray]],
                                roi: Tuple[int, int, int, int]) -> bool:
         """
-        检测轨迹/笔迹模式 (创作型特征)
-        
-        创作型: 变化呈连续轨迹状 (手写/绘制)
-        呈现型: 变化是均匀渐变 (无轨迹)
-        
-        实现: 检测连续帧间变化区域的连通性
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：prev_frame is not None
+        - 条件：len(frame.shape) == 3
+        - 条件：len(prev_frame.shape) == 3
+        依据来源（证据链）：
+        输入参数：
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 布尔判断结果。"""
         x1, y1, x2, y2 = roi
         
         trace_count = 0
@@ -1230,13 +1802,22 @@ class CVKnowledgeValidator:
     def _detect_boundary_expansion(self, frames: List[Tuple[float, np.ndarray]],
                                     roi: Tuple[int, int, int, int]) -> bool:
         """
-        检测内容边界扩展 (创作型特征)
-        
-        创作型: 内容边界随时间逐渐扩大 (新内容逐步添加)
-        呈现型: 内容边界始终一致 (只是可见度变化)
-        
-        实现: 比较首帧和末帧的二值化内容边界框
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        - 条件：first_pixels == 0
+        - 条件：len(first_frame.shape) == 3
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 布尔判断结果。"""
         if len(frames) < 2:
             return False
         
@@ -1271,15 +1852,22 @@ class CVKnowledgeValidator:
     def _classify_continuous_type(self, frames: List[Tuple[float, np.ndarray]],
                                    roi: Tuple[int, int, int, int]) -> str:
         """
-        区分连续型动态的子类型 (K3/K4)
-        
-        纯CV方案:
-        - 有UI控件特征 → K4 (连续操作)
-        - 有手写/绘图轨迹特征 → K3 (连续推演)
-        - 无法判定 → 默认K3 (保守: 视频+截图)
-        
-        返回: "derivation" (K3) / "operation" (K4) / "ambiguous"
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        - 条件：has_localized_change and (not has_traced_change)
+        - 条件：prev_frame is None
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 字符串结果。"""
         if len(frames) < 2:
             return "ambiguous"
         
@@ -1336,15 +1924,22 @@ class CVKnowledgeValidator:
     def _extract_key_screenshot_times(self, action: ActionUnit,
                                        diff_ratios: List[Tuple[float, float]] = None) -> List[float]:
         """
-        提取K3类型的关键截图时间点 (3个锚点)
-        
-        规则:
-        1. 起点: action.start_sec
-        2. 终点: action.end_sec
-        3. 中段: 视觉变化拐点帧 (diff_ratio峰值), 无则用时间中点
-        
-        返回: [start_time, inflection_time, end_time]
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：diff_ratios
+        - 条件：inflection_time is None
+        - 条件：action.start_sec < t < action.end_sec and ratio > max_ratio
+        依据来源（证据链）：
+        - 输入参数：action, diff_ratios。
+        输入参数：
+        - action: 函数入参（类型：ActionUnit）。
+        - diff_ratios: 函数入参（类型：List[Tuple[float, float]]）。
+        输出参数：
+        - float 列表（与输入或处理结果一一对应）。"""
         start_time = action.start_sec
         end_time = action.end_sec
         
@@ -1372,13 +1967,24 @@ class CVKnowledgeValidator:
     def detect_visual_states(self, start_sec: float, end_sec: float
                               ) -> Tuple[List[StableIsland], List[ActionUnit], List[RedundancySegment]]:
         """
-        检测视觉状态区间 (三类互斥)
-        
-        多级采样:
-        - 1fps: ROI检测
-        - 5fps: 状态判定
-        - 10fps: 边界精修 (可选)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self.last_unit_complexity == 'low'
+        - 条件：len(frames) < 2
+        - 条件：not roi
+        依据来源（证据链）：
+        - 配置字段：m00。
+        - 阈值常量：M。
+        - 对象内部状态：self._light_stable_check, self.last_unit_complexity。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        输出参数：
+        - List[StableIsland], List[ActionUnit], List[RedundancySegment] 列表（与输入或处理结果一一对应）。"""
         stable_islands: List[StableIsland] = []
         action_units: List[ActionUnit] = []
         redundancy_segments: List[RedundancySegment] = []
@@ -1585,16 +2191,25 @@ class CVKnowledgeValidator:
                                 roi: Tuple[int, int, int, int] = None
                                 ) -> Tuple[List[StableIsland], List[ActionUnit], List[RedundancySegment]]:
         """
-        合并连续状态为区间
-        
-        V6.9.5增强: 
-        - 计算ActionUnit的ssim_drop用于分类
-        - 自动标记transition/noise为非有效动态
-        - 将非有效动作移入冗余段
-        
-        V7.2增强:
-        - 支持呈现型动态检测 (frames + roi)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not states
+        - 条件：states
+        - 条件：len(effective_actions) >= 2
+        依据来源（证据链）：
+        - 输入参数：frames, roi, states。
+        输入参数：
+        - states: 函数入参（类型：List[Tuple[float, FrameState, float]]）。
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - frames: 数据列表/集合（类型：List[Tuple[float, np.ndarray]]）。
+        - roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - List[StableIsland], List[ActionUnit], List[RedundancySegment] 列表（与输入或处理结果一一对应）。"""
         stable_islands: List[StableIsland] = []
         action_units: List[ActionUnit] = []
         redundancy_segments: List[RedundancySegment] = []
@@ -1827,18 +2442,23 @@ class CVKnowledgeValidator:
         all_stable_islands: List[StableIsland]
     ) -> Tuple[List[ActionUnit], List[StableIsland]]:
         """
-        第一阶段合并：去碎片（适用于所有 ActionUnit）
-        
-        条件：间隔 < 1s
-        目的：修正 CV 采样导致的碎片化
-        
-        Args:
-            action_units: 所有检测到的动作单元
-            all_stable_islands: 所有检测到的稳定岛（用于记录被跨越的）
-            
-        Returns:
-            (merged_units, crossed_stable_islands)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(action_units) <= 1
+        - 条件：len(merged) < len(action_units)
+        - 条件：gap < MERGE_GAP_THRESHOLD
+        依据来源（证据链）：
+        - 输入参数：action_units。
+        - 阈值常量：MERGE_GAP_THRESHOLD。
+        输入参数：
+        - action_units: 函数入参（类型：List[ActionUnit]）。
+        - all_stable_islands: 函数入参（类型：List[StableIsland]）。
+        输出参数：
+        - List[ActionUnit], List[StableIsland] 列表（与输入或处理结果一一对应）。"""
         if len(action_units) <= 1:
             return action_units, []
         
@@ -1890,20 +2510,24 @@ class CVKnowledgeValidator:
         semantic_unit_id: str = ""
     ) -> Tuple[List[ActionUnit], List[StableIsland]]:
         """
-        第二阶段合并：语义聚合（仅适用于通过 LLM 筛选的 ActionUnit）
-        
-        条件：
-        - knowledge_type 相同
-        - 间隔 < 5s
-        
-        Args:
-            action_units: 通过 LLM 筛选的动作单元
-            all_stable_islands: 所有检测到的稳定岛
-            semantic_unit_id: 语义单元 ID（用于日志）
-            
-        Returns:
-            (merged_units, crossed_stable_islands)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(action_units) <= 1
+        - 条件：len(merged) < len(action_units)
+        - 条件：gap < MERGE_GAP_THRESHOLD and same_type
+        依据来源（证据链）：
+        - 输入参数：action_units。
+        - 阈值常量：MERGE_GAP_THRESHOLD。
+        输入参数：
+        - action_units: 函数入参（类型：List[ActionUnit]）。
+        - all_stable_islands: 函数入参（类型：List[StableIsland]）。
+        - semantic_unit_id: 标识符（类型：str）。
+        输出参数：
+        - List[ActionUnit], List[StableIsland] 列表（与输入或处理结果一一对应）。"""
         if len(action_units) <= 1:
             return action_units, []
         
@@ -1962,7 +2586,18 @@ class CVKnowledgeValidator:
         end_sec: float,
         stable_islands: List[StableIsland]
     ) -> List[StableIsland]:
-        """获取指定时间范围内的稳定岛"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - stable_islands: 函数入参（类型：List[StableIsland]）。
+        输出参数：
+        - StableIsland 列表（与输入或处理结果一一对应）。"""
         return [
             island for island in stable_islands
             if island.end_sec > start_sec and island.start_sec < end_sec
@@ -1976,15 +2611,44 @@ class CVKnowledgeValidator:
         crossed_islands_stage2: List[StableIsland]
     ) -> List[StableIsland]:
         """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：key not in seen_times
+        - 条件：hasattr(unit, 'internal_stable_islands') and unit.internal_stable_islands
+        依据来源（证据链）：
+        输入参数：
+        - action_units: 函数入参（类型：List[ActionUnit]）。
+        - external_stable_islands: 函数入参（类型：List[StableIsland]）。
+        - crossed_islands_stage1: 函数入参（类型：List[StableIsland]）。
+        - crossed_islands_stage2: 函数入参（类型：List[StableIsland]）。
+        输出参数：
+        - StableIsland 列表（与输入或处理结果一一对应）。
+        补充说明：
         收集所有稳定岛用于截图提取：
         1. ActionUnit 内部的稳定岛
         2. ActionUnit 外部的稳定岛
-        3. 两次合并中被跨越的稳定岛
-        """
+        3. 两次合并中被跨越的稳定岛"""
         all_islands = []
         seen_times = set()  # 去重
         
         def add_island(island: StableIsland):
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            决策逻辑：
+            - 条件：key not in seen_times
+            依据来源（证据链）：
+            输入参数：
+            - island: 函数入参（类型：StableIsland）。
+            输出参数：
+            - 无（仅产生副作用，如日志/写盘/状态更新）。"""
             key = (round(island.start_sec, 2), round(island.end_sec, 2))
             if key not in seen_times:
                 seen_times.add(key)
@@ -2024,8 +2688,24 @@ class CVKnowledgeValidator:
                                         total_duration: float
                                         ) -> Tuple[VisualKnowledgeType, VisionStats]:
         """
-        视觉知识类型识别 (三级阶梯判定)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：total_duration <= 0
+        - 条件：accounted < total_duration
+        - 条件：max_p >= CVConfig.TH_ABSOLUTE_LEAD
+        依据来源（证据链）：
+        - 输入参数：total_duration。
+        输入参数：
+        - stable_islands: 函数入参（类型：List[StableIsland]）。
+        - action_units: 函数入参（类型：List[ActionUnit]）。
+        - redundancy_segments: 函数入参（类型：List[RedundancySegment]）。
+        - total_duration: 函数入参（类型：float）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         if total_duration <= 0:
             return VisualKnowledgeType.MIXED, VisionStats()
         
@@ -2087,11 +2767,19 @@ class CVKnowledgeValidator:
     
     def validate_batch(self, units: List[Dict[str, Any]]) -> List[CVValidationResult]:
         """
-        批量CV校验 (并行加速版)
-        
-        优化: 使用 ThreadPoolExecutor 并行处理多个语义单元
-        注意: OpenCV 的很多操作释放 GIL，IO 操作也能并行
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新、线程池并发实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：not units
+        依据来源（证据链）：
+        - 输入参数：units。
+        输入参数：
+        - units: 函数入参（类型：List[Dict[str, Any]]）。
+        输出参数：
+        - CVValidationResult 列表（与输入或处理结果一一对应）。"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
         
         results: List[CVValidationResult] = []
@@ -2149,8 +2837,24 @@ class CVKnowledgeValidator:
     def validate_single(self, unit_id: str, start_sec: float, end_sec: float,
                          llm_type: str) -> CVValidationResult:
         """
-        单语义单元CV校验
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：not type_match
+        - 条件：rs.duration_ms > 2000
+        - 条件：abs(si.start_sec - start_sec) < epsilon or abs(si.end_sec - end_sec) < epsilon
+        依据来源（证据链）：
+        - 输入参数：end_sec, start_sec。
+        输入参数：
+        - unit_id: 标识符（类型：str）。
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - llm_type: 函数入参（类型：str）。
+        输出参数：
+        - CVValidationResult 对象（包含字段：unit_id, timeline, vision_stats, main_vision_type, stable_islands, action_units, redundancy_segments, vision_anchors, timeline_continuous, type_match, vision_unit_complete, abnormal_type, abnormal_timeline, abnormal_reason）。"""
         total_duration = end_sec - start_sec
         
         # 1. 检测三类区间
@@ -2219,7 +2923,24 @@ class CVKnowledgeValidator:
     
     def _check_type_match(self, llm_type: str, vision_type: VisualKnowledgeType,
                            stats: VisionStats) -> bool:
-        """跨模态类型一致性校验"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：vision_type == VisualKnowledgeType.MIXED
+        - 条件：llm_type == 'abstract'
+        - 条件：llm_type == 'concrete'
+        依据来源（证据链）：
+        - 输入参数：llm_type, vision_type。
+        输入参数：
+        - llm_type: 函数入参（类型：str）。
+        - vision_type: 函数入参（类型：VisualKnowledgeType）。
+        - stats: 函数入参（类型：VisionStats）。
+        输出参数：
+        - 布尔判断结果。"""
         if vision_type == VisualKnowledgeType.MIXED:
             # 联合裁决
             if llm_type == "abstract":
@@ -2239,8 +2960,20 @@ class CVKnowledgeValidator:
     def generate_conflict_packages(self, results: List[CVValidationResult]
                                     ) -> List[ConflictPackage]:
         """
-        生成冲突包 (仅对异常单元)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：result.is_normal
+        - 条件：abs(anchor - si.start_sec) < 0.1
+        - 条件：abs(anchor - au.start_sec) < 0.1
+        依据来源（证据链）：
+        输入参数：
+        - results: 函数入参（类型：List[CVValidationResult]）。
+        输出参数：
+        - ConflictPackage 列表（与输入或处理结果一一对应）。"""
         packages: List[ConflictPackage] = []
         
         for result in results:
@@ -2284,7 +3017,16 @@ class CVKnowledgeValidator:
     # =========================================================================
     
     def to_dict(self, result: CVValidationResult) -> Dict[str, Any]:
-        """转换为可序列化字典"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - result: 函数入参（类型：CVValidationResult）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         return {
             "unit_id": result.unit_id,
             "timeline": list(result.timeline),

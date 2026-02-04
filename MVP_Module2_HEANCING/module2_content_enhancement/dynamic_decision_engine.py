@@ -1,3 +1,15 @@
+"""
+模块说明：Module2 内容增强中的 dynamic_decision_engine 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
+
 import numpy as np
 import cv2
 import logging
@@ -8,6 +20,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ActionWindow:
+    """
+    类说明：封装 ActionWindow 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     start_t: float
     end_t: float
     peak_mse: float
@@ -16,10 +39,27 @@ class ActionWindow:
 
 class GlobalAnalysisCache:
     """
-    🚀 V6.9: 全局分析缓存层
-    遵循“计算结果复用”原则，存储预处理后的帧和基础分析特征。
-    """
+    类说明：封装 GlobalAnalysisCache 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     def __init__(self, clip_id: str):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - clip_id: 标识符（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.clip_id = clip_id
         self.enhanced_frames: List[np.ndarray] = []
         self.timestamps: List[float] = []
@@ -30,6 +70,16 @@ class GlobalAnalysisCache:
         self.is_analyzed = False
 
     def clear(self):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.enhanced_frames.clear()
         self.timestamps.clear()
         self.mse_list.clear()
@@ -38,11 +88,28 @@ class GlobalAnalysisCache:
 
 class DynamicDecisionEngine:
     """
-    🚀 V6.9: 自适应动静决策引擎
-    基于 Profile 驱动，整合视觉事实与语义权重。
-    """
+    类说明：封装 DynamicDecisionEngine 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     def __init__(self):
         # 默认 Profile 配置 (对齐第一性原理)
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.profiles = {
             "formula": {
                 "mse_spike_multiplier": 3.0,    # 降低倍率要求 (V6.9.3 sensitivity boost)
@@ -72,9 +139,15 @@ class DynamicDecisionEngine:
 
     def preprocess_frames_adaptive(self, frames: List[np.ndarray]) -> List[np.ndarray]:
         """
-        🚀 图像预处理增强 (Scenario 1 解决方案)
-        集成 CLAHE 提升对比度，解决浅色笔迹漏判问题。
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[np.ndarray]）。
+        输出参数：
+        - np.ndarray 列表（与输入或处理结果一一对应）。"""
         enhanced = []
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         
@@ -94,8 +167,21 @@ class DynamicDecisionEngine:
 
     def compute_base_features(self, frames: List[np.ndarray], timestamps: List[float]) -> Dict[str, Any]:
         """
-        🚀 基础特征提取 (V6.9.2: 增加 SSIM 双特征支持)
-        """
+        执行逻辑：
+        1) 准备输入数据。
+        2) 执行计算并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：提供量化结果，为上游决策提供依据。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        - 条件：len(mse_list) >= 3
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[np.ndarray]）。
+        - timestamps: 函数入参（类型：List[float]）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         if len(frames) < 2:
             return {"mse_list": [], "mse_base": 0.0, "ssim_drop": 0.0}
             
@@ -122,8 +208,24 @@ class DynamicDecisionEngine:
     def detect_action_windows(self, mse_list: List[float], timestamps: List[float], 
                              mse_base: float, profile_name: str = "generic") -> List[ActionWindow]:
         """
-        🚀 多峰值动作检测 (Scenario 5 解决方案)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：is_spike and (not in_action)
+        - 条件：not is_spike and in_action
+        - 条件：is_spike and in_action
+        依据来源（证据链）：
+        - 输入参数：timestamps。
+        输入参数：
+        - mse_list: 数据列表/集合（类型：List[float]）。
+        - timestamps: 函数入参（类型：List[float]）。
+        - mse_base: 函数入参（类型：float）。
+        - profile_name: 函数入参（类型：str）。
+        输出参数：
+        - ActionWindow 列表（与输入或处理结果一一对应）。"""
         profile = self.profiles.get(profile_name, self.profiles["generic"])
         multiplier = profile["mse_spike_multiplier"]
         min_mse = profile["min_spike_mse"]
@@ -158,9 +260,26 @@ class DynamicDecisionEngine:
 
     def judge_is_dynamic(self, windows, avg_mse, total_duration, ssim_drop=0.0, profile_name="ppt_slide", edge_flux_data: Tuple[float, float] = (0.0, 0.0)):
         """
-        全量动静判定逻辑 (V6.9.7 Unified)
-        融合了 Spike (MSE), Structure (SSIM), Flow (Flux) 和 Cognitive Logic
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：flux_sum > 0.03 and flux_var < 0.005
+        - 条件：not windows
+        - 条件：is_knowledge_type
+        依据来源（证据链）：
+        - 输入参数：avg_mse, total_duration, windows。
+        输入参数：
+        - windows: 函数入参（类型：未标注）。
+        - avg_mse: 函数入参（类型：未标注）。
+        - total_duration: 函数入参（类型：未标注）。
+        - ssim_drop: 函数入参（类型：未标注）。
+        - profile_name: 函数入参（类型：未标注）。
+        - edge_flux_data: 函数入参（类型：Tuple[float, float]）。
+        输出参数：
+        - 结构化字典结果（包含字段：is_dynamic, reason, certainty, action_density）。"""
         profile = self.profiles.get(profile_name, self.profiles["ppt_slide"])
         
         # [Layer 0] 平滑流动态 (Smooth Flow) - 优先判定
@@ -238,10 +357,19 @@ class DynamicDecisionEngine:
 
     def calculate_ssim_feature(self, frames: List[np.ndarray]) -> float:
         """
-        🚀 V6.9.2: 计算 SSIM 跌幅特征 (用于区分容器切换)
-        Requires opencv-contrib or custom implementation. 
-        Here we use a simplified structural difference metric.
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 2
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[np.ndarray]）。
+        输出参数：
+        - 数值型计算结果。"""
         if len(frames) < 2: return 0.0
         
         # 简化版: 使用 Canny 边缘图的差异作为 Structural Proxy
@@ -257,10 +385,21 @@ class DynamicDecisionEngine:
 
     def calculate_edge_flux(self, frames: List[np.ndarray]) -> Tuple[float, float]:
         """
-        🚀 V6.9.4 Optimized: 计算边缘流能量与稳定性 (抗噪增强版)
-        Pipeline: Gaussian -> Canny -> Dilate -> Diff -> Erode -> Variance Scan
-        Returns: (flux_sum, flux_variance)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(frames) < 5
+        - 条件：not flux_list
+        - 条件：prev_edge is not None
+        依据来源（证据链）：
+        - 输入参数：frames。
+        输入参数：
+        - frames: 数据列表/集合（类型：List[np.ndarray]）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         if len(frames) < 5: return 0.0, 1.0
         
         flux_list = []

@@ -1,9 +1,14 @@
 """
-OCR Utilities - Tesseract Wrapper
-
-Wraps Tesseract OCR for screenshot text extraction.
-Used in Class 2 fault verification (C_multi calculation).
-"""
+模块说明：Module2 内容增强中的 ocr_utils 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import logging
 from typing import Optional, Dict, List, Tuple
@@ -16,20 +21,28 @@ logger = logging.getLogger(__name__)
 
 class OCRExtractor:
     """
-    OCR文字提取器
-    
-    包装Tesseract OCR,用于从截图中提取文字
-    
-    用途:
-    - 第2类断层(具象性)的C_multi验证
-    - 计算补全内容与截图OCR文本的匹配率
-    """
+    类说明：封装 OCRExtractor 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     def __init__(self, lang: str = "chi_sim+eng"):
         """
-        Args:
-           lang: Tesseract语言包 (chi_sim=简体中文, eng=英文)
-        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - lang: 函数入参（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.lang = lang
         
         # 1. 尝试初始化并绑定 Tesseract 二进制路径 (🚀 Windows 鲁棒化)
@@ -39,7 +52,21 @@ class OCRExtractor:
         self._check_tesseract()
     
     def _setup_tesseract_path(self):
-        """自动搜寻并绑定 Tesseract 二进制路径 (Windows 特化)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：sys.platform != 'win32'
+        - 条件：shutil.which('tesseract')
+        - 条件：p.exists()
+        依据来源（证据链）：
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         import sys
         if sys.platform != "win32":
             return
@@ -76,7 +103,16 @@ class OCRExtractor:
             logger.error(f"Error during Tesseract path setup: {e}")
 
     def _check_tesseract(self):
-        """检查Tesseract是否安装"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         try:
             import pytesseract
             # 尝试获取版本以验证 binary 可用性
@@ -94,15 +130,21 @@ class OCRExtractor:
         preprocess: bool = True
     ) -> str:
         """
-        从图片提取文字
-        
-        Args:
-            image_path: 图片路径
-            preprocess: 是否预处理 (灰度化、二值化)
-        
-        Returns:
-            提取的文本
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：image is None
+        - 条件：preprocess
+        依据来源（证据链）：
+        - 输入参数：preprocess。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - preprocess: 函数入参（类型：bool）。
+        输出参数：
+        - 字符串结果。"""
         try:
             import pytesseract
             
@@ -139,15 +181,20 @@ class OCRExtractor:
         preprocess: bool = True
     ) -> str:
         """
-        从视频帧提取文字 (for in-memory frames)
-        
-        Args:
-            frame: OpenCV图像 (np.ndarray)
-            preprocess: 是否预处理
-        
-        Returns:
-            提取的文本
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：preprocess
+        依据来源（证据链）：
+        - 输入参数：preprocess。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        - preprocess: 函数入参（类型：bool）。
+        输出参数：
+        - 字符串结果。"""
         try:
             import pytesseract
             
@@ -178,14 +225,18 @@ class OCRExtractor:
         frame: np.ndarray
     ) -> List[Dict]:
         """
-        从视频帧提取文字区域 (for screenshot selection)
-        
-        Args:
-            frame: OpenCV图像 (np.ndarray)
-        
-        Returns:
-            [{"text": "...", "x": 10, "y": 20, "w": 100, "h": 30, "confidence": 85}, ...]
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：text and confidence > 30
+        依据来源（证据链）：
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - Dict 列表（与输入或处理结果一一对应）。"""
         try:
             import pytesseract
             
@@ -229,11 +280,19 @@ class OCRExtractor:
         image_path: str
     ) -> List[Dict]:
         """
-        提取文字区域 (带位置信息)
-        
-        Returns:
-            [{"text": "...", "x": 10, "y": 20, "w": 100, "h": 30}, ...]
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：image is None
+        - 条件：text
+        依据来源（证据链）：
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        输出参数：
+        - Dict 列表（与输入或处理结果一一对应）。"""
         try:
             import pytesseract
             
@@ -276,13 +335,15 @@ class OCRExtractor:
     
     def _preprocess_image(self, image: np.ndarray) -> np.ndarray:
         """
-        图像预处理,提高OCR准确率
-        
-        步骤:
-        1. 灰度化
-        2. 去噪 (高斯模糊)
-        3. 二值化 (Otsu阈值)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - image: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         # 灰度化
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
@@ -300,12 +361,15 @@ class OCRExtractor:
     
     def _clean_ocr_text(self, text: str) -> str:
         """
-        清理OCR提取的文本
-        
-        - 移除多余空白
-        - 移除特殊字符
-        - 保留中英文和标点
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - text: 文本内容（类型：str）。
+        输出参数：
+        - 字符串结果。"""
         # 移除多余空白
         text = ' '.join(text.split())
         
@@ -320,17 +384,22 @@ class OCRExtractor:
         text2: str
     ) -> float:
         """
-        计算两段文本的匹配率
-        
-        用于比较补全内容与OCR文本的相似度
-        
-        策略:
-        1. 分词 (简单空格分割)
-        2. 计算词汇重叠率
-        
-        Returns:
-            匹配率 0-1
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not text1 or not text2
+        - 条件：not words1 or not words2
+        - 条件：union
+        依据来源（证据链）：
+        - 输入参数：text1, text2。
+        输入参数：
+        - text1: 函数入参（类型：str）。
+        - text2: 函数入参（类型：str）。
+        输出参数：
+        - 数值型计算结果。"""
         if not text1 or not text2:
             return 0.0
         
@@ -353,13 +422,33 @@ import threading
 
 class ThreadSafeMathOCR:
     """
-    数学公式专用的线程安全OCR单例 (V4)
-    支持 PaddleOCR 局部识别与 Tesseract 兜底
-    """
+    类说明：封装 ThreadSafeMathOCR 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     _instance = None
     _lock = threading.Lock()
     
     def __new__(cls):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not cls._instance
+        依据来源（证据链）：
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         if not cls._instance:
             with cls._lock:
                 if not cls._instance:
@@ -368,7 +457,16 @@ class ThreadSafeMathOCR:
         return cls._instance
         
     def _init_engines(self):
-        """初始化OCR引擎 (延迟加载)"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、Paddle 相关能力实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.paddle = None
         self.tesseract_available = False
         
@@ -396,9 +494,23 @@ class ThreadSafeMathOCR:
 
     def recognize_math(self, image: np.ndarray, roi_box: Optional[Tuple[int, int, int, int]] = None) -> List[Dict]:
         """
-        进行数学符号识别 (带锁)
-        :return: [{"text": "...", "score": 0.95, "roi": (x1,y1,x2,y2)}]
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算、Paddle 相关能力实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：roi_box
+        - 条件：self.paddle
+        - 条件：not results and self.tesseract_available
+        依据来源（证据链）：
+        - 输入参数：roi_box。
+        - 对象内部状态：self.paddle, self.tesseract_available。
+        输入参数：
+        - image: 函数入参（类型：np.ndarray）。
+        - roi_box: 函数入参（类型：Optional[Tuple[int, int, int, int]]）。
+        输出参数：
+        - Dict 列表（与输入或处理结果一一对应）。"""
         with self._lock:
             # 局部裁剪 (方案A)
             crop_img = image

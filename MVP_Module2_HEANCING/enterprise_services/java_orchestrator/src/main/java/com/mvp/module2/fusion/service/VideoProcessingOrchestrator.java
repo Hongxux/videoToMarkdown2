@@ -12,10 +12,18 @@ import org.springframework.stereotype.Service;
 
 import java.io.File;
 import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+import java.util.Locale;
 
 /**
  * 视频处理编排器 (V3 Parallel)
@@ -95,19 +103,29 @@ public class VideoProcessingOrchestrator {
         long startTime = System.currentTimeMillis();
         
         try {
-            // 确保输出目录存在
-            new File(outputDir).mkdirs();
             String videoPath = videoUrl;
             double videoDuration = 60; 
+            
+            // 统一本地任务输出目录：做什么是将本地路径映射到 storage/{hash}；为什么是保证中间产物集中；权衡是会新增一次文件复制/硬链接成本
+            if (!isHttpUrl(videoUrl)) {
+                videoPath = normalizeLocalVideoPath(videoUrl);
+                outputDir = resolveOutputDirForLocalVideo(videoPath);
+                new File(outputDir).mkdirs();
+                logger.info("[{}] 统一本地任务输出目录 -> {}", taskId, outputDir);
+                
+                // 将本地视频复制/硬链接到 storage/{hash}：做什么是让视频与产物同域；为什么是便于回放与清理；权衡是增加一次磁盘写入或链接操作
+                videoPath = ensureLocalVideoInStorage(videoPath, outputDir);
+            }
 
-            // ========== Step 1: 下载视频 (Python) ==========
-            if (videoUrl.startsWith("http")) {
-                updateProgress(taskId, 0.05, "下载视频中...");
+            // ========== Step 1: 下载视频 (Python) ==========（做什么：拉取视频；为什么：统一产物目录；权衡：依赖网络与 I/O）
+            if (isHttpUrl(videoUrl)) {
+                updateProgress(taskId, 0.05, "下载视频中..");
                 DownloadResult dl = grpcClient.downloadVideoAsync(taskId, videoUrl, outputDir, 300).get(5, TimeUnit.MINUTES);
                 if (!dl.success) throw new RuntimeException("Download failed: " + dl.errorMsg);
                 videoPath = dl.videoPath;
                 videoDuration = dl.durationSec;
                 outputDir = new File(videoPath).getParentFile().getAbsolutePath(); 
+                new File(outputDir).mkdirs();
             }
             
             DynamicTimeoutCalculator.TimeoutConfig timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
@@ -158,71 +176,107 @@ public class VideoProcessingOrchestrator {
             List<CompletableFuture<?>> allFutures = Collections.synchronizedList(new ArrayList<>());
             List<CompletableFuture<Boolean>> cvFuturesList = new ArrayList<>();
 
-            // A. Convert ALL units to CV Inputs & Sort (Weighted LPT)
+                        // A. Convert ALL units to CV Inputs & Sort (Weighted LPT)
             List<SemanticUnitInput> allInputs = convertToCVInputs(unitsList);
-            
-            // 🚀 Weighted LPT Scheduling (Java Side)
-            // Weight: CV(Process/Practical)=10, CF(Abstract/Explanation)=1
-            // Score = Duration * Weight
-            // Sort: Descending by Score
-            Collections.sort(allInputs, (o1, o2) -> {
-                double w1 = isCVTask(o1.knowledgeType) ? 10.0 : 1.0;
-                double w2 = isCVTask(o2.knowledgeType) ? 10.0 : 1.0;
-                double score1 = (o1.endSec - o1.startSec) * w1;
-                double score2 = (o2.endSec - o2.startSec) * w2;
-                return Double.compare(score2, score1); // Descending
-            });
-            
-            // B. Batch Validate (CV & CF mixed) with Streaming Callbacks
-            if (!allInputs.isEmpty()) {
-                List<CompletableFuture<Boolean>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir, unitResult -> {
-                    // 🚀 Callback: Triggered immediately when Python finishes a single unit
-                    cvResults.put(unitResult.unitId, unitResult);
-                    
-                    // 🔗 Immediate Chain: Individual unit classification
-                    List<Map<String, Object>> unitToClassify = unitsList.stream()
-                        .filter(u -> unitResult.unitId.equals((String)u.get("unit_id")))
-                        .collect(Collectors.toList());
-                    
-                    if (!unitToClassify.isEmpty()) {
-                        List<ClassificationInput> classInputs = convertToClassInputs(unitToClassify, cvResults);
-                        
-                        CompletableFuture<Void> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, s1.step2JsonPath)
-                            .thenAccept(classBatchRes -> {
-                                if (classBatchRes.success && classBatchRes.results != null) {
-                                    classResults.addAll(classBatchRes.results);
-                                    logger.info("[{}] ⚡ Incremental classification done for: {}", taskId, unitResult.unitId);
-                                }
-                            });
-                        
-                        // Add to global watch list (using a dedicated collection to avoid CME)
-                        allFutures.add(classFuture);
-                    }
+
+            // 尝试复用 CV + LLM 缓存：做什么是命中就跳过计算；为什么是降低成本；权衡是缓存可能过期
+            Map<String, CVValidationUnitResult> cachedCv = cvOrchestrator.tryLoadCachedResults(taskId, videoPath, allInputs, outputDir);
+            boolean cvCacheHit = cachedCv != null && !cachedCv.isEmpty();
+            boolean classCacheHit = false;
+            List<ClassificationInput> cachedClassInputs = null;
+
+            if (cvCacheHit) {
+                cvResults.putAll(cachedCv);
+                cachedClassInputs = convertToClassInputs(unitsList, cvResults);
+                List<KnowledgeResultItem> cachedClass = knowledgeOrchestrator.tryLoadCachedResults(
+                    taskId, cachedClassInputs, s1.step2JsonPath, outputDir);
+                if (cachedClass != null && !cachedClass.isEmpty()) {
+                    classResults.addAll(cachedClass);
+                    classCacheHit = true;
+                }
+            }
+
+            if (!cvCacheHit) {
+                // Weighted LPT Scheduling (Java Side)
+                // Weight: CV(Process/Practical)=10, CF(Abstract/Explanation)=1
+                // Score = Duration * Weight
+                // Sort: Descending by Score
+                Collections.sort(allInputs, (o1, o2) -> {
+                    double w1 = isCVTask(o1.knowledgeType) ? 10.0 : 1.0;
+                    double w2 = isCVTask(o2.knowledgeType) ? 10.0 : 1.0;
+                    double score1 = (o1.endSec - o1.startSec) * w1;
+                    double score2 = (o2.endSec - o2.startSec) * w2;
+                    return Double.compare(score2, score1); // Descending
                 });
-                
-                if (cvFutures != null) {
-                    for (CompletableFuture<Boolean> cvFuture : cvFutures) {
-                        cvFuturesList.add(cvFuture);
+
+                // B. Batch Validate (CV & CF mixed) with Streaming Callbacks
+                if (!allInputs.isEmpty()) {
+                    List<CompletableFuture<Boolean>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir, unitResult -> {
+                        // Callback: Triggered immediately when Python finishes a single unit
+                        cvResults.put(unitResult.unitId, unitResult);
+
+                        // Immediate Chain: Individual unit classification
+                        List<Map<String, Object>> unitToClassify = unitsList.stream()
+                            .filter(u -> unitResult.unitId.equals((String)u.get("unit_id")))
+                            .collect(Collectors.toList());
+
+                        if (!unitToClassify.isEmpty()) {
+                            List<ClassificationInput> classInputs = convertToClassInputs(unitToClassify, cvResults);
+
+                            CompletableFuture<Void> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, s1.step2JsonPath)
+                                .thenAccept(classBatchRes -> {
+                                    if (classBatchRes.success && classBatchRes.results != null) {
+                                        classResults.addAll(classBatchRes.results);
+                                        logger.info("[{}] Incremental classification done for: {}", taskId, unitResult.unitId);
+                                    }
+                                });
+
+                            // Add to global watch list (using a dedicated collection to avoid CME)
+                            allFutures.add(classFuture);
+                        }
+                    });
+
+                    if (cvFutures != null) {
+                        for (CompletableFuture<Boolean> cvFuture : cvFutures) {
+                            cvFuturesList.add(cvFuture);
+                        }
                     }
                 }
-            }
 
-            // D. Wait for CV/CF streaming to complete (this triggers all callbacks)
-            if (!cvFuturesList.isEmpty()) {
-                CompletableFuture.allOf(cvFuturesList.toArray(new CompletableFuture[0])).join();
-            }
-
-            // E. Wait for all triggered Classification tasks to finish
-            int pendingCount = 0;
-            while (true) {
-                CompletableFuture<?>[] pending;
-                synchronized(allFutures) {
-                    pending = allFutures.stream().filter(f -> !f.isDone()).toArray(CompletableFuture[]::new);
+                // D. Wait for CV/CF streaming to complete (this triggers all callbacks)
+                if (!cvFuturesList.isEmpty()) {
+                    CompletableFuture.allOf(cvFuturesList.toArray(new CompletableFuture[0])).join();
                 }
-                if (pending.length == 0) break;
-                CompletableFuture.allOf(pending).join();
+
+                // E. Wait for all triggered Classification tasks to finish
+                while (true) {
+                    CompletableFuture<?>[] pending;
+                    synchronized(allFutures) {
+                        pending = allFutures.stream().filter(f -> !f.isDone()).toArray(CompletableFuture[]::new);
+                    }
+                    if (pending.length == 0) break;
+                    CompletableFuture.allOf(pending).join();
+                }
+            } else if (!classCacheHit) {
+                // CV 缓存命中但 LLM 未命中：做什么是补齐分类；为什么是保证结果完整；权衡是增加一次 LLM 调用
+                List<ClassificationInput> classInputs = cachedClassInputs != null ? cachedClassInputs : convertToClassInputs(unitsList, cvResults);
+                List<KnowledgeResultItem> batchRes = knowledgeOrchestrator.classifyParallel(taskId, classInputs, s1.step2JsonPath, outputDir);
+                if (batchRes != null) {
+                    classResults.addAll(batchRes);
+                }
+            } else {
+                logger.info("[{}] Reusing CV + LLM caches, skip Phase2 analysis", taskId);
             }
-            
+
+            // 缓存落盘：做什么是保存计算结果；为什么是便于重跑；权衡是占用磁盘
+            if (!cvResults.isEmpty()) {
+                cvOrchestrator.saveCache(taskId, videoPath, allInputs, outputDir, cvResults);
+            }
+            if (!classResults.isEmpty()) {
+                List<ClassificationInput> classInputsForCache = cachedClassInputs != null ? cachedClassInputs : convertToClassInputs(unitsList, cvResults);
+                knowledgeOrchestrator.saveCache(taskId, classResults, classInputsForCache, s1.step2JsonPath, outputDir);
+            }
+
             logger.info("✅ Staged Analysis done. CV: {}, Class: {}", cvResults.size(), classResults.size());
             
             // 6. Merge & Update
@@ -239,17 +293,12 @@ public class VideoProcessingOrchestrator {
             MaterialGenerationResult matRes = grpcClient.generateMaterialRequestsAsync(taskId, matInputs, videoPath, 600).get(10, TimeUnit.MINUTES);
             
             if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
-            
             // 8. FFmpeg Extraction
             updateProgress(taskId, 0.80, "执行素材提取...");
-            // Map proto requests to javaCV requests
-            List<JavaCVFFmpegService.ScreenshotRequest> ssReqs = matRes.screenshotRequests.stream().map(r -> 
-                new JavaCVFFmpegService.ScreenshotRequest(r.screenshotId, r.timestampSec, r.label, r.semanticUnitId))
-                .collect(Collectors.toList());
-            List<JavaCVFFmpegService.ClipRequest> clipReqs = matRes.clipRequests.stream().map(r ->
-                new JavaCVFFmpegService.ClipRequest(r.clipId, r.startSec, r.endSec, r.knowledgeType, r.semanticUnitId))
-                .collect(Collectors.toList());
-                
+            // 合并 Phase2A 初始素材请求与后续生成请求：做什么是避免数据被忽略；为什么是保留上游召回；权衡是可能增加素材数量
+            List<JavaCVFFmpegService.ScreenshotRequest> ssReqs = mergeScreenshotRequests(ar.screenshotRequests, matRes.screenshotRequests);
+            List<JavaCVFFmpegService.ClipRequest> clipReqs = mergeClipRequests(ar.clipRequests, matRes.clipRequests);
+            
             JavaCVFFmpegService.ExtractionResult extractRes = ffmpegService.extractAllSync(videoPath, outputDir, ssReqs, clipReqs, timeouts.getFfmpegTimeoutSec());
             
             // 9. Phase2B Assembly
@@ -275,6 +324,247 @@ public class VideoProcessingOrchestrator {
             result.processingTimeMs = System.currentTimeMillis() - startTime;
         }
         return result;
+    }
+
+    // --- OutputDir 统一规则 ---
+    private boolean isHttpUrl(String value) {
+        if (value == null) return false;
+        String lower = value.toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://");
+    }
+
+    private String normalizeLocalVideoPath(String videoUrl) {
+        // 统一处理 file:// 和相对路径，避免 hash 因路径格式不同而漂移
+        try {
+            if (videoUrl != null && videoUrl.toLowerCase(Locale.ROOT).startsWith("file://")) {
+                return Paths.get(URI.create(videoUrl)).toAbsolutePath().normalize().toString();
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to parse file URI, fallback to raw path: {}", videoUrl);
+        }
+        return new File(videoUrl).getAbsolutePath();
+    }
+
+    private String resolveOutputDirForLocalVideo(String videoPath) {
+        Path storageRoot = resolveStorageRoot();
+        try {
+            Path absVideoPath = Paths.get(videoPath).toAbsolutePath().normalize();
+            if (isUnderPath(absVideoPath, storageRoot)) {
+                return absVideoPath.getParent().toString();
+            }
+        } catch (Exception e) {
+            // 解析失败时走 hash 路径，避免阻断主流程
+        }
+
+        String normalized = normalizePathForHash(videoPath);
+        String hash = md5Hex(normalized);
+        return storageRoot.resolve(hash).toString();
+    }
+
+    private String ensureLocalVideoInStorage(String videoPath, String outputDir) {
+        // 将本地视频复制/硬链接到 storage/{hash}：做什么是让视频与产物同域；为什么是便于回放与清理；权衡是增加一次 I/O
+        try {
+            Path source = Paths.get(videoPath).toAbsolutePath().normalize();
+            Path storageRoot = resolveStorageRoot();
+            if (isUnderPath(source, storageRoot)) {
+                return source.toString();
+            }
+
+            Path targetDir = Paths.get(outputDir).toAbsolutePath().normalize();
+            Files.createDirectories(targetDir);
+            String fileName = source.getFileName().toString();
+            Path target = targetDir.resolve(fileName);
+
+            if (Files.exists(target)) {
+                return target.toString();
+            }
+
+            try {
+                Files.createLink(target, source);
+                logger.info("Linked local video into storage: {}", target);
+                return target.toString();
+            } catch (Exception linkError) {
+                // 硬链接失败就复制：做什么是降级保证；为什么是跨盘/权限限制常见；权衡是多一次磁盘写入
+            }
+
+            Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
+            logger.info("Copied local video into storage: {}", target);
+            return target.toString();
+        } catch (Exception e) {
+            logger.warn("Failed to place local video in storage, fallback to original path: {}", videoPath);
+            return videoPath;
+        }
+    }
+
+    private Path resolveStorageRoot() {
+        // 通过仓库根目录定位 storage：做什么是让 Java/Python 产物同域；为什么是便于整理与回放；权衡是依赖工作目录结构
+        Path repoRoot = resolveRepoRoot();
+        Path storageRoot = repoRoot.resolve("storage").toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(storageRoot);
+        } catch (IOException e) {
+            logger.warn("Failed to create storage root: {}", storageRoot);
+        }
+        return storageRoot;
+    }
+
+    private Path resolveRepoRoot() {
+        // 逐层向上寻找仓库根标记，找不到则退回当前工作目录
+
+        Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (int i = 0; i < 6; i++) {
+            if (Files.exists(current.resolve("python_grpc_server.py"))
+                || (Files.isDirectory(current.resolve("proto")) && Files.isDirectory(current.resolve("MVP_Module2_HEANCING")))) {
+                return current;
+            }
+            Path parent = current.getParent();
+            if (parent == null) break;
+            current = parent;
+        }
+        return Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+    }
+
+    private boolean isUnderPath(Path path, Path root) {
+        try {
+            return path.toAbsolutePath().normalize().startsWith(root.toAbsolutePath().normalize());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private String normalizePathForHash(String path) {
+        // 统一 hash 输入：做什么是归一化路径；为什么是保证 Java/Python 结果一致；权衡是忽略符号链接真实路径
+        String abs = new File(path).getAbsolutePath();
+        String normalized = abs.replace('/', File.separatorChar);
+        if (File.separatorChar == '\\') {
+            normalized = normalized.toLowerCase(Locale.ROOT);
+        }
+        return normalized;
+    }
+
+    private String md5Hex(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] bytes = md.digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            throw new RuntimeException("MD5 hash failed", e);
+        }
+    }
+
+    // --- 素材请求合并 ---
+    private List<JavaCVFFmpegService.ScreenshotRequest> mergeScreenshotRequests(
+            List<PythonGrpcClient.ScreenshotRequest> phase2aRequests,
+            List<PythonGrpcClient.ScreenshotRequestDTO> generatedRequests) {
+        // 合并两路截图请求：做什么是保留 Phase2A 与生成结果；为什么是避免上游召回被忽略；权衡是可能略增重复提取
+        Map<String, JavaCVFFmpegService.ScreenshotRequest> merged = new LinkedHashMap<>();
+        appendScreenshotRequests(merged, phase2aRequests);
+        appendScreenshotRequestsFromDto(merged, generatedRequests);
+        return new ArrayList<>(merged.values());
+    }
+
+    private void appendScreenshotRequests(
+            Map<String, JavaCVFFmpegService.ScreenshotRequest> merged,
+            List<PythonGrpcClient.ScreenshotRequest> requests) {
+        if (requests == null) return;
+        for (PythonGrpcClient.ScreenshotRequest req : requests) {
+            if (req == null) continue;
+            String key = buildScreenshotKey(req.screenshotId, req.semanticUnitId, req.timestampSec);
+            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ScreenshotRequest(
+                req.screenshotId, req.timestampSec, req.label, req.semanticUnitId
+            ));
+        }
+    }
+
+    private void appendScreenshotRequestsFromDto(
+            Map<String, JavaCVFFmpegService.ScreenshotRequest> merged,
+            List<PythonGrpcClient.ScreenshotRequestDTO> requests) {
+        if (requests == null) return;
+        for (PythonGrpcClient.ScreenshotRequestDTO req : requests) {
+            if (req == null) continue;
+            String key = buildScreenshotKey(req.screenshotId, req.semanticUnitId, req.timestampSec);
+            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ScreenshotRequest(
+                req.screenshotId, req.timestampSec, req.label, req.semanticUnitId
+            ));
+        }
+    }
+
+    private String buildScreenshotKey(String screenshotId, String semanticUnitId, double timestampSec) {
+        String id = screenshotId != null ? screenshotId.trim() : "";
+        if (!id.isEmpty()) {
+            return "id:" + id;
+        }
+        String unit = semanticUnitId != null ? semanticUnitId.trim() : "";
+        return "ts:" + unit + "|" + Double.toString(timestampSec);
+    }
+
+    private List<JavaCVFFmpegService.ClipRequest> mergeClipRequests(
+            List<PythonGrpcClient.ClipRequest> phase2aRequests,
+            List<PythonGrpcClient.ClipRequestDTO> generatedRequests) {
+        // 合并两路切片请求：做什么是保留 Phase2A 与生成结果；为什么是避免素材断链；权衡是可能增加切片数量
+        Map<String, JavaCVFFmpegService.ClipRequest> merged = new LinkedHashMap<>();
+        appendClipRequests(merged, phase2aRequests);
+        appendClipRequestsFromDto(merged, generatedRequests);
+        return new ArrayList<>(merged.values());
+    }
+
+    private void appendClipRequests(
+            Map<String, JavaCVFFmpegService.ClipRequest> merged,
+            List<PythonGrpcClient.ClipRequest> requests) {
+        if (requests == null) return;
+        for (PythonGrpcClient.ClipRequest req : requests) {
+            if (req == null) continue;
+            String key = buildClipKey(req.clipId, req.semanticUnitId, req.startSec, req.endSec);
+            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ClipRequest(
+                req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId
+            ));
+        }
+    }
+
+    private void appendClipRequestsFromDto(
+            Map<String, JavaCVFFmpegService.ClipRequest> merged,
+            List<PythonGrpcClient.ClipRequestDTO> requests) {
+        if (requests == null) return;
+        for (PythonGrpcClient.ClipRequestDTO req : requests) {
+            if (req == null) continue;
+            String key = buildClipKey(req.clipId, req.semanticUnitId, req.startSec, req.endSec);
+            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ClipRequest(
+                req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId
+            ));
+        }
+    }
+
+    private String buildClipKey(String clipId, String semanticUnitId, double startSec, double endSec) {
+        String id = clipId != null ? clipId.trim() : "";
+        if (!id.isEmpty()) {
+            return "id:" + id;
+        }
+        String unit = semanticUnitId != null ? semanticUnitId.trim() : "";
+        return "range:" + unit + "|" + Double.toString(startSec) + "-" + Double.toString(endSec);
+    }
+
+    private void ensureActionIds(List<ActionSegmentResult> actions) {
+        // 统一 action_id：做什么是补齐/去重编号；为什么是保证分类结果可回写；权衡是编号可能随排序变化
+        if (actions == null || actions.isEmpty()) return;
+        Set<Integer> used = new HashSet<>();
+        int nextId = 1;
+        for (ActionSegmentResult as : actions) {
+            if (as == null) continue;
+            if (as.id > 0 && !used.contains(as.id)) {
+                used.add(as.id);
+                continue;
+            }
+            while (used.contains(nextId)) {
+                nextId++;
+            }
+            as.id = nextId;
+            used.add(nextId);
+            nextId++;
+        }
     }
     
     // --- Helpers ---
@@ -335,6 +625,8 @@ public class VideoProcessingOrchestrator {
                 }
             }
             
+            // 统一 action_id：做什么是为每个 action 分配稳定编号；为什么是保证分类结果能回写；权衡是编号依赖当前排序
+            ensureActionIds(in.actionUnits);
             // ❌ Removed: Subtitle mapping - Classifier reads directly from Step 2
             
             return in;
@@ -362,6 +654,8 @@ public class VideoProcessingOrchestrator {
                     in.stableIslands.addAll(cvRes.stableIslands);
                 }
             }
+            // 统一 action_id：做什么是保证下游一致性；为什么是便于跨阶段追踪；权衡是编号依赖当前排序
+            ensureActionIds(in.actionUnits);
             return in;
         }).collect(Collectors.toList());
     }

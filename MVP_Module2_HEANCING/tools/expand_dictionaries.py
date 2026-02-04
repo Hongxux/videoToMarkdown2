@@ -1,3 +1,15 @@
+"""
+模块说明：expand_dictionaries 相关能力的封装。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
+
 
 import yaml
 import json
@@ -17,6 +29,16 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("DictExpander")
 
 def ensure_resources():
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     try:
         nltk.data.find('corpora/wordnet')
     except LookupError:
@@ -25,8 +47,29 @@ def ensure_resources():
         nltk.download('omw-1.4')
 
 class UniversalMapper:
+    """
+    类说明：封装 UniversalMapper 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     def __init__(self):
         # A rich mapping of common Chinese concepts to English WordNet query terms
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.cn_to_en = {
             # Logic / Abstract
             "概念": "concept", "定义": "definition", "原因": "cause", "原理": "principle", 
@@ -99,6 +142,23 @@ class UniversalMapper:
         }
 
     def get_synonyms(self, word):
+        """
+        执行逻辑：
+        1) 读取内部状态或外部资源。
+        2) 返回读取结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：提供一致读取接口，降低调用耦合。
+        决策逻辑：
+        - 条件：word in self.cn_to_en
+        - 条件：en_term in self.en_to_cn
+        - 条件：en_syn in self.en_to_cn
+        依据来源（证据链）：
+        - 输入参数：word。
+        - 对象内部状态：self.cn_to_en, self.en_to_cn。
+        输入参数：
+        - word: 函数入参（类型：未标注）。
+        输出参数：
+        - list 对象或调用结果。"""
         synonyms = set()
         
         # 1. Direct Lookup via WordNet bridge
@@ -122,8 +182,21 @@ class UniversalMapper:
 
 def expand_list(word_list, mapper, top_k=5):
     """
-    Expand a list of words using the mapper.
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：len(final_list) > initial_count
+    - 条件：s != word
+    依据来源（证据链）：
+    输入参数：
+    - word_list: 数据列表/集合（类型：未标注）。
+    - mapper: 函数入参（类型：未标注）。
+    - top_k: 函数入参（类型：未标注）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     expanded_set = set(word_list)
     initial_count = len(expanded_set)
     
@@ -139,6 +212,23 @@ def expand_list(word_list, mapper, top_k=5):
     return final_list
 
 def recursive_expand(data, mapper):
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：isinstance(data, dict)
+    - 条件：isinstance(data, list)
+    - 条件：data and isinstance(data[0], str)
+    依据来源（证据链）：
+    - 输入参数：data。
+    输入参数：
+    - data: 数据列表/集合（类型：未标注）。
+    - mapper: 函数入参（类型：未标注）。
+    输出参数：
+    - 函数计算/封装后的结果对象。"""
     if isinstance(data, dict):
         new_dict = {}
         for k, v in data.items():
@@ -156,6 +246,20 @@ def recursive_expand(data, mapper):
         return data
 
 def main():
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过YAML 解析、文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not CONFIG_PATH.exists()
+    依据来源（证据链）：
+    - 阈值常量：CONFIG_PATH, CONFIG_PATH.exists。
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     if not CONFIG_PATH.exists():
         logger.error(f"Config file not found: {CONFIG_PATH}")
         return

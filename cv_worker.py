@@ -1,18 +1,14 @@
 """
-CV Validation Worker Module - 独立进程执行的 CV 验证函数
-
-该模块被 ProcessPoolExecutor 的 Worker 进程导入和执行，
-与主进程完全隔离，绕过 GIL 实现真正的 CPU 并行。
-
-🚀 V2: 支持共享内存零拷贝帧传递
-- 主进程预读帧并存入 SharedMemory
-- Worker 通过 shm_name 直接访问，无需序列化/反序列化
-
-设计原则:
-1. 每个 Worker 进程有独立的 VideoCapture (作为 fallback)
-2. 优先使用共享内存访问预读帧
-3. Worker 内部使用全局缓存避免重复初始化
-"""
+模块说明：cv_worker 相关能力的封装。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import os
 import logging
@@ -31,10 +27,18 @@ logger = logging.getLogger(__name__)
 
 def init_cv_worker():
     """
-    Worker 进程初始化函数 - ProcessPoolExecutor 的 initializer
-    
-    在每个子进程启动时调用一次
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过进程池并发实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：_initialized
+    依据来源（证据链）：
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     global _initialized
     
     if _initialized:
@@ -69,7 +73,19 @@ def init_cv_worker():
         logger.info(f"⚠️ 'resource' check skipped (Windows). Manual limit active: {_soft_limit_bytes/1024**3:.1f}GB")
 
 def _check_memory_usage():
-    """Manual memory check for environments without 'resource' module (e.g., Windows)"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：rss > _soft_limit_bytes
+    依据来源（证据链）：
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     try:
         process = psutil.Process(os.getpid())
         rss = process.memory_info().rss
@@ -83,14 +99,19 @@ def _check_memory_usage():
 
 def get_frame_from_shm(shm_ref: dict) -> Optional[np.ndarray]:
     """
-    从共享内存获取帧 (零拷贝)
-    
-    Args:
-        shm_ref: {"shm_name": str, "shape": tuple, "dtype": str}
-    
-    Returns:
-        numpy 数组 (共享内存视图) 或 None
-    """
+    执行逻辑：
+    1) 读取内部状态或外部资源。
+    2) 返回读取结果。
+    实现方式：通过NumPy 数值计算实现。
+    核心价值：提供一致读取接口，降低调用耦合。
+    决策逻辑：
+    - 条件：not all([shm_name, shape, dtype])
+    - 条件：shm_name not in _attached_shms
+    依据来源（证据链）：
+    输入参数：
+    - shm_ref: 函数入参（类型：dict）。
+    输出参数：
+    - copy 对象或调用结果。"""
     global _attached_shms
     
     try:
@@ -121,18 +142,23 @@ def get_frame_from_shm(shm_ref: dict) -> Optional[np.ndarray]:
 
 def run_cv_validation_task(video_path: str, unit_data: dict, shm_frames: dict = None) -> dict:
     """
-    单个语义单元的 CV 验证 - 在 Worker 进程中执行
-    
-    🚀 V2: 支持共享内存帧传递
-    
-    Args:
-        video_path: 视频文件路径
-        unit_data: {"unit_id", "start_sec", "end_sec", "knowledge_type"}
-        shm_frames: 可选，共享内存帧引用字典 {frame_idx: shm_ref}
-    
-    Returns:
-        验证结果字典
-    """
+    执行逻辑：
+    1) 组织处理流程与依赖调用。
+    2) 汇总中间结果并输出。
+    实现方式：通过文件系统读写实现。
+    核心价值：编排流程，保证步骤顺序与可追踪性。
+    决策逻辑：
+    - 条件：video_path not in _validator_cache
+    - 条件：shm_frames
+    - 条件：injected_count > 0
+    依据来源（证据链）：
+    - 输入参数：shm_frames, video_path。
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    - unit_data: 函数入参（类型：dict）。
+    - shm_frames: 函数入参（类型：dict）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     global _validator_cache
     
     # 🚀 Manual Memory Check (Windows Safety)
@@ -219,7 +245,19 @@ def run_cv_validation_task(video_path: str, unit_data: dict, shm_frames: dict = 
 
 
 def cleanup_worker_resources():
-    """清理 Worker 进程内的资源"""
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：hasattr(validator, 'close')
+    依据来源（证据链）：
+    输入参数：
+    - 无。
+    输出参数：
+    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
     global _validator_cache, _attached_shms
     
     # 关闭 Validators
@@ -250,32 +288,37 @@ def run_screenshot_selection_task(
     fps: float = 30.0
 ) -> dict:
     """
-    🚀 Worker 函数：在独立进程中执行截图选择
-    
+    执行逻辑：
+    1) 组织处理流程与依赖调用。
+    2) 汇总中间结果并输出。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：编排流程，保证步骤顺序与可追踪性。
+    决策逻辑：
+    - 条件：not frames
+    - 条件：selector_key not in _validator_cache
+    - 条件：frame is not None
+    依据来源（证据链）：
+    输入参数：
+    - video_path: 文件路径（类型：str）。
+    - unit_id: 标识符（类型：str）。
+    - island_index: 函数入参（类型：int）。
+    - expanded_start: 起止时间/区间边界（类型：float）。
+    - expanded_end: 起止时间/区间边界（类型：float）。
+    - shm_frames: 函数入参（类型：Dict[float, dict]）。
+    - fps: 函数入参（类型：float）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。
+    补充说明：
     调用 ScreenshotSelector.select_from_shared_frames()，保留完整的：
     - 波动容忍聚类
     - 岛屿博弈（过滤 + 去重）
     - 岛内择优
-    
-    Args:
-        video_path: 视频路径
-        unit_id: 语义单元 ID
-        island_index: 稳定岛索引
-        expanded_start: 扩展后的起始时间
-        expanded_end: 扩展后的结束时间
-        shm_frames: {timestamp: {shm_name, shape, dtype}}
-        fps: 视频帧率
-        
-    Returns:
-        {
-            "unit_id": str,
-            "island_index": int,
-            "selected_timestamp": float,
-            "quality_score": float,
-            "island_count": int,
-            "analyzed_frames": int
-        }
-    """
+    video_path: 视频路径
+    unit_id: 语义单元 ID
+    island_index: 稳定岛索引
+    expanded_start: 扩展后的起始时间
+    expanded_end: 扩展后的结束时间
+    fps: 视频帧率"""
     try:
         _check_memory_usage()
         
@@ -364,26 +407,26 @@ def run_coarse_fine_screenshot_task(
     fine_shm_frames_by_island: List[Dict[float, dict]] = None
 ) -> dict:
     """
-    🚀 先粗后细截图选择任务 - 使用 SharedMemory 帧 (主进程 IO，Worker 计算)
-    
-    架构: 主进程预读帧到 SharedMemory → Worker 接收并执行纯计算
-    
-    Args:
-        unit_id: 语义单元ID
-        start_sec: 时间范围起点
-        end_sec: 时间范围终点
-        coarse_shm_frames: {timestamp: shm_ref} 粗采样帧
-        coarse_interval: 粗采样间隔
-        fine_shm_frames_by_island: 可选，每个岛的细采样帧 [{timestamp: shm_ref}, ...]
-        
-    Returns:
-        {
-            "unit_id": str,
-            "stable_islands": [{"start_sec", "end_sec"}, ...],  # Stage 1 结果
-            "screenshots": [{"timestamp_sec", "score"}, ...],    # Stage 2 结果
-            "error": str (optional)
-        }
-    """
+    执行逻辑：
+    1) 组织处理流程与依赖调用。
+    2) 汇总中间结果并输出。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：编排流程，保证步骤顺序与可追踪性。
+    决策逻辑：
+    - 条件：len(coarse_frames) < 2
+    - 条件：'_validator_cache' not in globals()
+    - 条件：selector_key not in _validator_cache
+    依据来源（证据链）：
+    - 输入参数：fine_shm_frames_by_island。
+    输入参数：
+    - unit_id: 标识符（类型：str）。
+    - start_sec: 起止时间/区间边界（类型：float）。
+    - end_sec: 起止时间/区间边界（类型：float）。
+    - coarse_shm_frames: 函数入参（类型：Dict[float, dict]）。
+    - coarse_interval: 函数入参（类型：float）。
+    - fine_shm_frames_by_island: 函数入参（类型：List[Dict[float, dict]]）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     _check_memory_usage()
     
     try:

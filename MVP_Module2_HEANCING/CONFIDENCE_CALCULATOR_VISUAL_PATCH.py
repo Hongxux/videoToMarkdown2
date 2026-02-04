@@ -1,23 +1,34 @@
 """
-confidence_calculator.py - 视觉元素评分方法补充
-
-在confidence_calculator.py类中添加此方法:
-"""
+模块说明：CONFIDENCE_CALCULATOR_VISUAL_PATCH 相关能力的封装。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 def _calculate_visual_element_score(
     self,
     screenshot_path: str
 ) -> float:
     """
-    计算视觉元素评分M_visual (for Class 2 faults)
-    
-    策略:
-    1. 检测截图中的视觉元素 (矩形、圆形、箭头、线条)
-    2. 元素越多 → 架构图越复杂 → 分数越高
-    
-    Returns:
-        M_visual评分 0-1
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：image is None
+    - 条件：total_elements == 0
+    - 条件：total_elements <= 5
+    依据来源（证据链）：
+    输入参数：
+    - screenshot_path: 文件路径（类型：str）。
+    输出参数：
+    - 数值型计算结果。"""
     try:
         # 读取截图
         import cv2

@@ -1,7 +1,14 @@
 """
-OpenCV 截帧工具
-用于 Step 12-15
-"""
+模块说明：阶段工具 opencv_capture 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import cv2
 import numpy as np
@@ -12,7 +19,17 @@ from dataclasses import dataclass
 
 @dataclass
 class FrameResult:
-    """截帧结果"""
+    """
+    类说明：封装 FrameResult 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     frame_id: str
     timestamp: float
     frame_path: str
@@ -27,20 +44,39 @@ class FrameResult:
 
 class FrameCapture:
     """
-    帧截取器
-    
+    类说明：封装 FrameCapture 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。
+    补充说明：
     支持：
     - 精确时间点截帧
     - 多帧采样
     - 图像增强
-    - 质量校验
-    """
+    - 质量校验"""
     
     def __init__(
         self,
         video_path: str,
         output_dir: str = "temp_frames"
     ):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - output_dir: 目录路径（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -53,7 +89,21 @@ class FrameCapture:
         self._last_frame_path: Optional[str] = None # 用于复用截图文件
         
     def open(self) -> bool:
-        """打开视频"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._cap.isOpened()
+        - 条件：self._fps > 0
+        依据来源（证据链）：
+        - 对象内部状态：self._cap, self._fps。
+        输入参数：
+        - 无。
+        输出参数：
+        - 布尔判断结果。"""
         self._cap = cv2.VideoCapture(self.video_path)
         if not self._cap.isOpened():
             return False
@@ -65,32 +115,102 @@ class FrameCapture:
         return True
     
     def close(self):
-        """关闭视频"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：self._cap
+        依据来源（证据链）：
+        - 对象内部状态：self._cap。
+        输入参数：
+        - 无。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self._cap:
             self._cap.release()
             self._cap = None
     
     def __enter__(self):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - 无。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         self.open()
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - exc_type: 函数入参（类型：未标注）。
+        - exc_val: 函数入参（类型：未标注）。
+        - exc_tb: 函数入参（类型：未标注）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.close()
         
     @property
     def duration(self) -> float:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         return self._duration
     
     @property
     def fps(self) -> float:
+        """
+        执行逻辑：
+        1) 读取对象内部状态。
+        2) 返回属性值。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：对外提供统一读路径，便于维护与扩展。
+        输入参数：
+        - 无。
+        输出参数：
+        - 数值型计算结果。"""
         return self._fps
 
     def _seek_to_time(self, target_time: float) -> bool:
         """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._cap
+        - 条件：2 <= diff_ms < frame_time_ms * 30
+        - 条件：abs(actual_ms - target_ms) > 1000
+        依据来源（证据链）：
+        - 对象内部状态：self._cap, self._fps。
+        输入参数：
+        - target_time: 函数入参（类型：float）。
+        输出参数：
+        - 布尔判断结果。
+        补充说明：
         智能寻帧：
         1. 优先使用 grab() 推进（对于正向微调，速度快且稳）
-        2. 大跨度或反向寻帧使用 set()
-        """
+        2. 大跨度或反向寻帧使用 set()"""
         if not self._cap:
             self.open()
             
@@ -130,13 +250,24 @@ class FrameCapture:
         enhance_params: Optional[Dict[str, Any]] = None
     ) -> FrameResult:
         """
-        截取单帧
-        
-        Args:
-            timestamp: 时间戳（秒）
-            frame_id: 帧ID
-            enhance_params: 增强参数 {"sharpen": bool, "contrast_boost": float, "local_zoom": bool}
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._cap
+        - 条件：is_duplicate and self._last_frame_path and Path(self._last_frame_path).exists()
+        - 条件：enhance_params
+        依据来源（证据链）：
+        - 输入参数：enhance_params, timestamp。
+        - 对象内部状态：self._cap, self._last_frame_hash, self._last_frame_path。
+        输入参数：
+        - timestamp: 函数入参（类型：float）。
+        - frame_id: 标识符（类型：str）。
+        - enhance_params: 函数入参（类型：Optional[Dict[str, Any]]）。
+        输出参数：
+        - FrameResult 对象（包含字段：frame_id, timestamp, frame_path, width, height, brightness, sharpness, is_valid, invalid_reason, metadata）。"""
         if not self._cap:
             self.open()
         
@@ -234,15 +365,26 @@ class FrameCapture:
         step: float = 0.1
     ) -> FrameResult:
         """
-        智能截帧：在目标时间附近搜索最佳质量帧（最清晰且静止）
-        
-        Args:
-            target_time: 目标时间戳
-            frame_id: 帧ID
-            enhance_params: 增强参数
-            search_window: 搜索窗口大小（秒），也就是 +/- window/2
-            step: 搜索步长（秒）
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self._cap
+        - 条件：len(candidates_times) == 0
+        - 条件：best_frame is None
+        依据来源（证据链）：
+        - 输入参数：enhance_params。
+        - 对象内部状态：self._cap, self._last_frame_hash, self._last_frame_path。
+        输入参数：
+        - target_time: 函数入参（类型：float）。
+        - frame_id: 标识符（类型：str）。
+        - enhance_params: 函数入参（类型：Optional[Dict[str, Any]]）。
+        - search_window: 函数入参（类型：float）。
+        - step: 函数入参（类型：float）。
+        输出参数：
+        - FrameResult 对象（包含字段：frame_id, timestamp, frame_path, width, height, brightness, sharpness, is_valid, invalid_reason, metadata）。"""
         if not self._cap:
             self.open()
             
@@ -354,11 +496,15 @@ class FrameCapture:
         instruction: Dict[str, Any]
     ) -> List[FrameResult]:
         """
-        根据指令截取多帧
-        
-        Args:
-            instruction: 截帧指令
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - instruction: 函数入参（类型：Dict[str, Any]）。
+        输出参数：
+        - FrameResult 列表（与输入或处理结果一一对应）。"""
         results = []
         instruction_id = instruction["instruction_id"]
         params = instruction.get("opencv_params", {})
@@ -382,7 +528,24 @@ class FrameCapture:
         frame: np.ndarray, 
         params: Dict[str, Any]
     ) -> np.ndarray:
-        """应用图像增强"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：params.get('sharpen', False)
+        - 条件：contrast_boost != 1.0
+        - 条件：params.get('local_zoom', False)
+        依据来源（证据链）：
+        - 输入参数：params。
+        - 配置字段：local_zoom, sharpen。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        - params: 函数入参（类型：Dict[str, Any]）。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         result = frame.copy()
         
         # 锐化
@@ -418,7 +581,16 @@ class FrameCapture:
         return result
     
     def _calculate_quality(self, frame: np.ndarray) -> Tuple[float, float]:
-        """计算帧质量指标"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         # 平均亮度
@@ -436,15 +608,23 @@ class FrameCapture:
         thresholds: Optional[Dict[str, float]] = None
     ) -> Tuple[bool, Optional[str]]:
         """
-        校验帧质量 (Step 13)
-        
-        Args:
-            frame_path: 帧路径
-            thresholds: 阈值 {"min_brightness": 30, "min_sharpness": 100}
-            
-        Returns:
-            (is_valid, invalid_reason)
-        """
+        执行逻辑：
+        1) 整理待校验数据。
+        2) 按规则逐项校验并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：提前发现数据/状态问题，降低运行风险。
+        决策逻辑：
+        - 条件：frame is None
+        - 条件：brightness < thresholds['min_brightness']
+        - 条件：sharpness < thresholds['min_sharpness']
+        依据来源（证据链）：
+        - 输入参数：thresholds。
+        - 配置字段：min_brightness, min_sharpness。
+        输入参数：
+        - frame_path: 文件路径（类型：str）。
+        - thresholds: 阈值（类型：Optional[Dict[str, float]]）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         thresholds = thresholds or {"min_brightness": 30, "min_sharpness": 100}
         
         frame = cv2.imread(frame_path)
@@ -467,15 +647,21 @@ class FrameCapture:
         region: Optional[Tuple[int, int, int, int]] = None
     ) -> str:
         """
-        提取帧中的文字区域（用于 OCR 预处理）
-        
-        Args:
-            frame_path: 帧路径
-            region: 区域 (x, y, width, height)，None 表示全图
-            
-        Returns:
-            处理后的图片路径
-        """
+        执行逻辑：
+        1) 扫描输入内容。
+        2) 过滤并提取目标子集。
+        实现方式：通过OpenCV 图像处理实现。
+        核心价值：聚焦关键信息，减少后续处理成本。
+        决策逻辑：
+        - 条件：frame is None
+        - 条件：region
+        依据来源（证据链）：
+        - 输入参数：region。
+        输入参数：
+        - frame_path: 文件路径（类型：str）。
+        - region: 函数入参（类型：Optional[Tuple[int, int, int, int]]）。
+        输出参数：
+        - 字符串结果。"""
         frame = cv2.imread(frame_path)
         if frame is None:
             return frame_path
@@ -497,14 +683,40 @@ class FrameCapture:
 
 class SemanticPeakDetector:
     """
-    语义视觉峰值检测器
-    用于寻找 "信息量最丰富" 的瞬间
-    """
+    类说明：封装 SemanticPeakDetector 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     def __init__(self, cap: cv2.VideoCapture):
+        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - cap: 函数入参（类型：cv2.VideoCapture）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self._cap = cap
 
     def calculate_frame_metrics(self, frame: np.ndarray) -> Dict[str, float]:
-        """计算单帧的视觉信息指标"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
         # 1. 边缘密度 (Canny Edge Density) - 代理: 文本/图表丰富度
@@ -521,13 +733,21 @@ class SemanticPeakDetector:
 
     def detect_peak(self, start_sec: float, end_sec: float, step_sec: float = 0.5) -> Tuple[float, List[Dict[str, float]]]:
         """
-        在时间范围内检测信息峰值
-        
-        策略:
-        1. 扫描 [start, end] 区间
-        2. 计算每帧的 Edge Density
-        3. 寻找局部最大值
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not ret or frame is None
+        - 条件：score > max_score
+        依据来源（证据链）：
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - step_sec: 函数入参（类型：float）。
+        输出参数：
+        - float, List[Dict[str, float]] 列表（与输入或处理结果一一对应）。"""
         timestamps = np.arange(start_sec, end_sec, step_sec)
         best_time = start_sec
         max_score = -1.0
@@ -564,19 +784,21 @@ def calculate_capture_times(
     fault_location: Dict[str, float]
 ) -> Dict[str, Any]:
     """
-    计算截帧时间 (Step 10)
-    
-    Args:
-        strategy_match: 策略匹配结果
-        fault_location: 断层位置 {"start_sec": 10.5, "end_sec": 15.2}
-        
-    Returns:
-        {
-            "capture_times": [10.5, 11.0, 11.5],
-            "fallback_range": {"start_sec": 10.0, "end_sec": 16.0, "step_sec": 0.5},
-            "peak_detect_params": { ... } # Optional
-        }
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：mode == 'peak_detect'
+    - 条件：peak_detect_params
+    - 条件：mode == '单帧精准'
+    依据来源（证据链）：
+    输入参数：
+    - strategy_match: 函数入参（类型：Dict[str, Any]）。
+    - fault_location: 函数入参（类型：Dict[str, float]）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     start = fault_location["start_sec"]
     end = fault_location["end_sec"]
     mode = strategy_match.get("mode", "单帧精准")

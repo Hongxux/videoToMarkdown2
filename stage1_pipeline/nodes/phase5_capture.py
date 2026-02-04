@@ -1,7 +1,14 @@
 """
-Phase 5: 截帧执行与质控
-Steps 12, 13, 14, 15, 15b
-"""
+模块说明：阶段流程节点 phase5_capture 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import asyncio
 from typing import Dict, Any, List, Optional
@@ -15,11 +22,21 @@ from ..monitoring.logger import get_logger
 
 async def step12_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤12：截帧策略执行
-    
-    类型：Tool(OpenCV)
-    核心动作：调用OpenCV执行截帧策略
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：peak_params
+    - 条件：peak_params and frames
+    - 条件：(idx + 1) % 5 == 0
+    依据来源（证据链）：
+    - 配置字段：peak_metrics_history。
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     logger = get_logger("step12_capture", state.get("output_dir", "output/logs"))
     logger.start()
     
@@ -36,6 +53,24 @@ async def step12_node(state: PipelineState) -> Dict[str, Any]:
         semaphore = asyncio.Semaphore(8)
         
         async def process_instruction(idx, instruction):
+            """
+            执行逻辑：
+            1) 组织处理流程与依赖调用。
+            2) 汇总中间结果并输出。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：编排流程，保证步骤顺序与可追踪性。
+            决策逻辑：
+            - 条件：peak_params
+            - 条件：peak_params and frames
+            - 条件：(idx + 1) % 5 == 0
+            依据来源（证据链）：
+            - 输入参数：idx, instruction。
+            - 配置字段：peak_metrics_history。
+            输入参数：
+            - idx: 函数入参（类型：未标注）。
+            - instruction: 函数入参（类型：未标注）。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             async with semaphore:
                 try:
                     # 每个任务使用独立的临时子目录，避免并发冲突
@@ -129,20 +164,40 @@ async def step12_node(state: PipelineState) -> Dict[str, Any]:
 
 async def deduplicate_frames(frames: List[Dict], threshold: int = 8) -> tuple[List[Dict], int]:
     """
-    帧去重：基于感知哈希去除相似帧
-    
-    Args:
-        frames: 帧列表
-        threshold: 哈希距离阈值（越小越严格，8是经验值）
-        
-    Returns:
-        (去重后的帧列表, 去重数量)
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过OpenCV 图像处理、NumPy 数值计算、asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not frames
+    - 条件：phash is None
+    - 条件：not is_duplicate
+    依据来源（证据链）：
+    - 输入参数：frames, threshold。
+    输入参数：
+    - frames: 数据列表/集合（类型：List[Dict]）。
+    - threshold: 阈值（类型：int）。
+    输出参数：
+    - List[Dict], int 列表（与输入或处理结果一一对应）。"""
     import cv2
     import numpy as np
     
     def compute_phash(image_path: str, hash_size: int = 8) -> Optional[np.ndarray]:
-        """计算感知哈希 (pHash)"""
+        """
+        执行逻辑：
+        1) 准备输入数据。
+        2) 执行计算并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：提供量化结果，为上游决策提供依据。
+        决策逻辑：
+        - 条件：img is None
+        依据来源（证据链）：
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - hash_size: 函数入参（类型：int）。
+        输出参数：
+        - flatten 对象或调用结果。"""
         try:
             img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
             if img is None:
@@ -164,7 +219,17 @@ async def deduplicate_frames(frames: List[Dict], threshold: int = 8) -> tuple[Li
             return None
     
     def hamming_distance(hash1: np.ndarray, hash2: np.ndarray) -> int:
-        """计算汉明距离"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - hash1: 函数入参（类型：np.ndarray）。
+        - hash2: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         return int(np.sum(hash1 != hash2))
     
     if not frames:
@@ -204,11 +269,21 @@ async def deduplicate_frames(frames: List[Dict], threshold: int = 8) -> tuple[Li
 
 async def step13_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤13：帧校验（黑屏/过渡帧检测 + 帧去重）
-    
-    类型：Tool(OpenCV)
-    核心动作：过滤黑屏、模糊过渡帧，去除相似帧
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not frame.get('is_valid', True)
+    - 条件：brightness < thresholds['min_brightness']
+    - 条件：is_valid
+    依据来源（证据链）：
+    - 配置字段：is_valid, min_brightness, min_sharpness。
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     logger = get_logger("step13_validate_frame", state.get("output_dir", "output/logs"))
     logger.start()
     
@@ -230,6 +305,23 @@ async def step13_node(state: PipelineState) -> Dict[str, Any]:
         # 并行处理初始校验（使用asyncio.gather分摊逻辑判断）
         async def process_frame(frame):
             # 如果在step12已经标记为无效，直接跳过
+            """
+            执行逻辑：
+            1) 组织处理流程与依赖调用。
+            2) 汇总中间结果并输出。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：编排流程，保证步骤顺序与可追踪性。
+            决策逻辑：
+            - 条件：not frame.get('is_valid', True)
+            - 条件：brightness < thresholds['min_brightness']
+            - 条件：sharpness < thresholds['min_sharpness']
+            依据来源（证据链）：
+            - 输入参数：frame。
+            - 配置字段：is_valid, min_brightness, min_sharpness。
+            输入参数：
+            - frame: 函数入参（类型：未标注）。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             if not frame.get("is_valid", True):
                 return frame, False, frame.get("invalid_reason", "Already invalid")
             
@@ -289,15 +381,21 @@ async def step13_node(state: PipelineState) -> Dict[str, Any]:
 
 def calculate_completeness(key_elements: List[str], extracted_elements: List[str]) -> float:
     """
-    计算key_elements的完整度
-    
-    Args:
-        key_elements: 期望的关键元素列表
-        extracted_elements: 从截图中提取的元素列表
-        
-    Returns:
-        完整度 (0.0 - 1.0)
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not key_elements
+    - 条件：key_lower in extracted.lower() or extracted.lower() in key_lower
+    依据来源（证据链）：
+    - 输入参数：key_elements。
+    输入参数：
+    - key_elements: 函数入参（类型：List[str]）。
+    - extracted_elements: 函数入参（类型：List[str]）。
+    输出参数：
+    - 数值型计算结果。"""
     if not key_elements:
         return 1.0
     
@@ -315,18 +413,27 @@ def calculate_completeness(key_elements: List[str], extracted_elements: List[str
 
 async def step14_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤14：AI Vision问答校验
-    
-    类型：LLM(Vision)
-    核心动作：通过问答方式校验帧内容是否满足断层补全需求
-    
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：unqualified_frames
+    - 条件：verification_tier == 'L1'
+    - 条件：not questions
+    依据来源（证据链）：
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。
+    补充说明：
     分级标准：
     - A级：完全清晰，核心问题全部回答正确
     - B级：基本符合，核心问题≥80%正确
     - C级：勉强可用，核心问题≥60%正确
     - C+级：key_elements完整度≥min_completeness（完整度达标采用）
-    - 不合格：核心问题<60%正确且完整度不达标
-    """
+    - 不合格：核心问题<60%正确且完整度不达标"""
     logger = get_logger("step14_vision_qa", state.get("output_dir", "output/logs"))
     logger.start()
     
@@ -349,7 +456,21 @@ async def step14_node(state: PipelineState) -> Dict[str, Any]:
         
         # 并发限制：最多同时处理5个Vision请求
         async def validate_single_frame(frame):
-            """并行处理单个帧的Vision校验"""
+            """
+            执行逻辑：
+            1) 整理待校验数据。
+            2) 按规则逐项校验并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：提前发现数据/状态问题，降低运行风险。
+            决策逻辑：
+            - 条件：verification_tier == 'L1'
+            - 条件：not questions
+            - 条件：grade == '不合格'
+            依据来源（证据链）：
+            输入参数：
+            - frame: 函数入参（类型：未标注）。
+            输出参数：
+            - 结构化字典结果（包含字段：grade, answers, completeness, is_qualified）。"""
             instruction = instruction_map.get(frame.get("instruction_id", ""), {})
             fault = fault_map.get(frame.get("fault_id", ""), {})
             segment_id = fault.get("segment_id", "") or frame.get("segment_id", "")
@@ -499,13 +620,25 @@ async def step14_node(state: PipelineState) -> Dict[str, Any]:
 
 async def step15_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤15：智能重试（校验失败时 + C+级低质量时）
-    
-    类型：Tool + LLM
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：total_retry_count == 0
+    - 条件：needs_retry
+    - 条件：tasks
+    依据来源（证据链）：
+    - 配置字段：success。
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。
+    补充说明：
     核心动作：
     1. 对不合格帧，基于历史截图和指令，生成更精确的重试指令
-    2. 对C+级低完整度帧，在时间上下文中采样，选择完整度最高的帧
-    """
+    2. 对C+级低完整度帧，在时间上下文中采样，选择完整度最高的帧"""
     logger = get_logger("step15_retry", state.get("output_dir", "output/logs"))
     logger.start()
     
@@ -636,8 +769,24 @@ async def step15_node(state: PipelineState) -> Dict[str, Any]:
 
 async def _retry_unqualified_frame(frame: Dict, video_path: str, output_dir: str, max_retries: int, logger) -> Dict:
     """
-    重试不合格帧：并发尝试多个时间偏移
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：valid_results
+    - 条件：not success
+    - 条件：success
+    依据来源（证据链）：
+    输入参数：
+    - frame: 函数入参（类型：Dict）。
+    - video_path: 文件路径（类型：str）。
+    - output_dir: 目录路径（类型：str）。
+    - max_retries: 函数入参（类型：int）。
+    - logger: 函数入参（类型：未标注）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。"""
     success = False
     new_frame = None
     
@@ -648,6 +797,18 @@ async def _retry_unqualified_frame(frame: Dict, video_path: str, output_dir: str
     offsets = [0.5 * i for i in range(1, max_retries + 1)]
     
     async def try_offset(i, offset, capture):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - i: 函数入参（类型：未标注）。
+        - offset: 函数入参（类型：未标注）。
+        - capture: 函数入参（类型：未标注）。
+        输出参数：
+        - 结构化字典结果（包含字段：round, capture_time, frame_path, is_valid, sharpness, frame_id）。"""
         new_time = frame["timestamp"] + offset
         new_frame_id = f"{frame['frame_id']}_r{i}"
         
@@ -715,13 +876,32 @@ async def _retry_unqualified_frame(frame: Dict, video_path: str, output_dir: str
 
 async def _retry_low_quality_frame(frame: Dict, video_path: str, output_dir: str, instruction_map: Dict, vision_client, semaphore, logger) -> Dict:
     """
-    重试C+级低完整度帧（新增逻辑 - 用户建议）
-    
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过asyncio 异步调度实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：not candidates
+    - 条件：best_candidate['completeness'] - original_completeness < improvement_threshold
+    - 条件：improved
+    依据来源（证据链）：
+    - 配置字段：completeness, core_questions_satisfied。
+    输入参数：
+    - frame: 函数入参（类型：Dict）。
+    - video_path: 文件路径（类型：str）。
+    - output_dir: 目录路径（类型：str）。
+    - instruction_map: 函数入参（类型：Dict）。
+    - vision_client: 客户端实例（类型：未标注）。
+    - semaphore: 函数入参（类型：未标注）。
+    - logger: 函数入参（类型：未标注）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。
+    补充说明：
     策略（用户优化）：
     1. 第一轮：上下浮动2s，每0.5s采样（共9个采样点）
     2. 第二轮：如果最佳候选仍低质量，在其时间点±0.25s精细化采样
-    3. 选择completeness最高或核心问题满足最多的帧
-    """
+    3. 选择completeness最高或核心问题满足最多的帧"""
     original_time = frame["timestamp"]
     original_completeness = frame.get("completeness", 0.0)
     instruction_id = frame.get("instruction_id", "")
@@ -739,6 +919,25 @@ async def _retry_low_quality_frame(frame: Dict, video_path: str, output_dir: str
     logger.debug(f"Retrying low-quality frame {frame['frame_id']} (completeness={original_completeness:.2f})")
     
     async def process_sample(idx, offset, capture, phase_name="p1"):
+        """
+        执行逻辑：
+        1) 组织处理流程与依赖调用。
+        2) 汇总中间结果并输出。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：编排流程，保证步骤顺序与可追踪性。
+        决策逻辑：
+        - 条件：sample_time < 0
+        - 条件：offset == 0 and phase_name == 'p1'
+        - 条件：not result.is_valid
+        依据来源（证据链）：
+        - 输入参数：offset, phase_name。
+        输入参数：
+        - idx: 函数入参（类型：未标注）。
+        - offset: 函数入参（类型：未标注）。
+        - capture: 函数入参（类型：未标注）。
+        - phase_name: 函数入参（类型：未标注）。
+        输出参数：
+        - 结构化字典结果（包含字段：frame_id, frame_path, timestamp, completeness, answers, is_original）。"""
         sample_time = original_time + offset
         if sample_time < 0:
             return None
@@ -822,6 +1021,22 @@ async def _retry_low_quality_frame(frame: Dict, video_path: str, output_dir: str
             base_time = best_phase1["timestamp"]
             
             async def process_refine(idx, offset, capture):
+                """
+                执行逻辑：
+                1) 组织处理流程与依赖调用。
+                2) 汇总中间结果并输出。
+                实现方式：通过内部函数组合与条件判断实现。
+                核心价值：编排流程，保证步骤顺序与可追踪性。
+                决策逻辑：
+                - 条件：sample_time < 0
+                - 条件：not result.is_valid
+                依据来源（证据链）：
+                输入参数：
+                - idx: 函数入参（类型：未标注）。
+                - offset: 函数入参（类型：未标注）。
+                - capture: 函数入参（类型：未标注）。
+                输出参数：
+                - 结构化字典结果（包含字段：frame_id, frame_path, timestamp, completeness, grade, answers, is_original, phase）。"""
                 sample_time = base_time + offset
                 if sample_time < 0:
                     return None
@@ -992,15 +1207,26 @@ CROP_RULES = {
 
 async def step15b_node(state: PipelineState) -> Dict[str, Any]:
     """
-    步骤15b：截图后处理（裁剪）
-    
-    类型：Tool(PIL)（可配置）
-    核心动作：裁剪去冗余 - 只保留核心区域，剔除空白边、无关元素
-    
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过内部函数组合与条件判断实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：enable_fixed_crop and scene_type and (scene_type in CROP_RULES)
+    - 条件：rule['strategy'] != 'none'
+    - 条件：processed_path
+    依据来源（证据链）：
+    - 配置字段：strategy。
+    - 阈值常量：CROP_RULES。
+    输入参数：
+    - state: 函数入参（类型：PipelineState）。
+    输出参数：
+    - 结构化结果字典（包含关键字段信息）。
+    补充说明：
     配置项（用户要求默认启用）：
     - enable_ai_crop: 是否启用AI生成裁剪描述 (default: False)
-    - enable_fixed_crop: 是否启用固定裁剪规则 (default: True)
-    """
+    - enable_fixed_crop: 是否启用固定裁剪规则 (default: True)"""
     logger = get_logger("step15b_postprocess", state.get("output_dir", "output/logs"))
     logger.start()
     
@@ -1090,16 +1316,21 @@ async def step15b_node(state: PipelineState) -> Dict[str, Any]:
 
 def _apply_crop(image_path: str, rule: Dict, output_dir: str) -> Optional[str]:
     """
-    应用裁剪规则到图片
-    
-    Args:
-        image_path: 原始图片路径
-        rule: 裁剪规则 {"margin_percent": int, "strategy": str}
-        output_dir: 输出目录
-        
-    Returns:
-        处理后图片路径，失败返回 None
-    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过文件系统读写实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：strategy == 'edge'
+    - 条件：strategy == 'center'
+    依据来源（证据链）：
+    输入参数：
+    - image_path: 文件路径（类型：str）。
+    - rule: 函数入参（类型：Dict）。
+    - output_dir: 目录路径（类型：str）。
+    输出参数：
+    - str 对象或调用结果。"""
     try:
         from PIL import Image
         from pathlib import Path

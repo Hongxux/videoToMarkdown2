@@ -1,7 +1,14 @@
 """
-Visual Element Detection Helper Methods
-Enhanced detection for arrows, connectors, and diagram shapes
-"""
+模块说明：Module2 内容增强中的 visual_element_detection_helpers 模块。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。"""
 
 import cv2
 import numpy as np
@@ -17,7 +24,28 @@ except ImportError:
     HAS_NUMBA = False
     # Dummy decorator
     def jit(*args, **kwargs):
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部函数组合与条件判断实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        输入参数：
+        - *args: 可变参数，含义由调用方决定。
+        - **kwargs: 可变参数，含义由调用方决定。
+        输出参数：
+        - 函数计算/封装后的结果对象。"""
         def decorator(func):
+            """
+            执行逻辑：
+            1) 准备必要上下文与参数。
+            2) 执行核心处理并返回结果。
+            实现方式：通过内部函数组合与条件判断实现。
+            核心价值：封装逻辑单元，提升复用与可维护性。
+            输入参数：
+            - func: 函数入参（类型：未标注）。
+            输出参数：
+            - 函数计算/封装后的结果对象。"""
             return func
         return decorator
 
@@ -27,6 +55,22 @@ logger = logging.getLogger(__name__)
 @jit(nopython=True, fastmath=True)
 def _fast_cosine_angle(v1: np.ndarray, v2: np.ndarray) -> float:
     # Numba np.linalg.norm requires float input
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过NumPy 数值计算实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    决策逻辑：
+    - 条件：norm_prod < 1e-06
+    - 条件：cos_angle > 1.0
+    - 条件：cos_angle < -1.0
+    依据来源（证据链）：
+    输入参数：
+    - v1: 函数入参（类型：np.ndarray）。
+    - v2: 函数入参（类型：np.ndarray）。
+    输出参数：
+    - 数值型计算结果。"""
     v1_f = v1.astype(np.float64)
     v2_f = v2.astype(np.float64)
     
@@ -42,22 +86,48 @@ def _fast_cosine_angle(v1: np.ndarray, v2: np.ndarray) -> float:
 
 @jit(nopython=True, fastmath=True)
 def _fast_point_dist(p1: np.ndarray, p2: np.ndarray) -> float:
+    """
+    执行逻辑：
+    1) 准备必要上下文与参数。
+    2) 执行核心处理并返回结果。
+    实现方式：通过NumPy 数值计算实现。
+    核心价值：封装逻辑单元，提升复用与可维护性。
+    输入参数：
+    - p1: 函数入参（类型：np.ndarray）。
+    - p2: 函数入参（类型：np.ndarray）。
+    输出参数：
+    - 数值型计算结果。"""
     return np.linalg.norm(p1 - p2)
 
 class VisualElementDetector:
-    """增强的视觉元素检测器"""
+    """
+    类说明：封装 VisualElementDetector 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     @staticmethod
     def detect_rectangles(edges: np.ndarray) -> int:
         """
-        检测矩形数量 (使用轮廓近似)
-        
-        Args:
-            edges: 边缘图像
-        
-        Returns:
-            矩形数量
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：area < 100
+        - 条件：len(approx) == 4
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         contours, _ = cv2.findContours(
             edges,
             cv2.RETR_EXTERNAL,
@@ -84,14 +154,18 @@ class VisualElementDetector:
     @staticmethod
     def detect_circles(gray: np.ndarray) -> int:
         """
-        检测圆形数量 (使用霍夫圆检测)
-        
-        Args:
-            gray: 灰度图像
-        
-        Returns:
-            圆形数量
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：circles is not None
+        依据来源（证据链）：
+        输入参数：
+        - gray: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         try:
             # 高斯模糊去噪
             blurred = cv2.GaussianBlur(gray, (9, 9), 2)
@@ -120,8 +194,22 @@ class VisualElementDetector:
     @staticmethod
     def detect_lines(edges: np.ndarray, line_type: str = "all") -> List[Tuple[float, float]]:
         """
-        检测直线 (使用霍夫线检测) 增强版: 支持类型过滤
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：lines is None
+        - 条件：line_type == 'horizontal' and abs(theta - np.pi / 2) > 0.1
+        - 条件：line_type == 'vertical' and abs(theta) > 0.1 and (abs(theta - np.pi) > 0.1)
+        依据来源（证据链）：
+        - 输入参数：line_type。
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - line_type: 函数入参（类型：str）。
+        输出参数：
+        - Tuple[float, float] 列表（与输入或处理结果一一对应）。"""
         lines = cv2.HoughLines(edges, rho=1, theta=np.pi / 180, threshold=100)
         if lines is None: return []
         
@@ -145,15 +233,40 @@ class VisualElementDetector:
     @staticmethod
     def detect_lines_p(edges: np.ndarray, min_length: int = 20, max_gap: int = 5) -> List[Tuple[int, int, int, int]]:
         """
-        概率霍夫直线检测 (返回线段)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：lines is None
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - min_length: 函数入参（类型：int）。
+        - max_gap: 函数入参（类型：int）。
+        输出参数：
+        - Tuple[int, int, int, int] 列表（与输入或处理结果一一对应）。"""
         lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, minLineLength=min_length, maxLineGap=max_gap)
         if lines is None: return []
         return [tuple(l[0]) for l in lines]
 
     @staticmethod
     def calculate_gravity_center(contour: np.ndarray) -> Optional[Tuple[float, float]]:
-        """计算轮廓重心"""
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：m['m00'] == 0
+        依据来源（证据链）：
+        - 配置字段：m00。
+        输入参数：
+        - contour: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         m = cv2.moments(contour)
         if m["m00"] == 0: return None
         return (m["m10"] / m["m00"], m["m01"] / m["m00"])
@@ -165,29 +278,22 @@ class VisualElementDetector:
         lines: Optional[List[Tuple[float, float]]] = None
     ) -> Dict[str, Any]:
         """
-        检测箭头并分类方向
-        
-        策略:
-        1. 检测三角形轮廓 (箭头头部)
-        2. 结合直线信息判断箭头方向
-        3. 基于角度分类: up/down/left/right/diagonal
-        
-        Args:
-            edges: 边缘图像
-            gray: 灰度图像
-            lines: 检测到的直线 (可选)
-        
-        Returns:
-            {
-                "total": 8,
-                "up": 2,
-                "down": 3,
-                "left": 1,
-                "right": 2,
-                "diagonal": 0,
-                "confidence": 0.85
-            }
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：total_arrows > 0
+        - 条件：area < 50 or area > 10000
+        - 条件：len(approx) == 3
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - gray: 函数入参（类型：np.ndarray）。
+        - lines: 函数入参（类型：Optional[List[Tuple[float, float]]]）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         contours, _ = cv2.findContours(
             edges,
             cv2.RETR_EXTERNAL,
@@ -245,16 +351,21 @@ class VisualElementDetector:
     @staticmethod
     def _classify_arrow_direction(points: np.ndarray) -> str:
         """
-        根据三角形顶点分类箭头方向
-        
-        策略: 找到最"尖"的顶点作为箭头指向
-        
-        Args:
-            points: 三角形的3个顶点坐标 [[x1,y1], [x2,y2], [x3,y3]]
-        
-        Returns:
-            方向: "up", "down", "left", "right", "diagonal"
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：len(points) != 3
+        - 条件：abs(dx) < abs(dy) * 0.5
+        - 条件：abs(dy) < abs(dx) * 0.5
+        依据来源（证据链）：
+        - 输入参数：points。
+        输入参数：
+        - points: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 字符串结果。"""
         if len(points) != 3:
             return "diagonal"
         
@@ -297,17 +408,19 @@ class VisualElementDetector:
     @staticmethod
     def detect_connectors(edges: np.ndarray, lines: List[Tuple[float, float]]) -> Dict[str, int]:
         """
-        检测流程图连接符 (T型连接、交叉点)
-        
-        策略: 检测边缘图像中线条的交叉点
-        
-        Args:
-            edges: 边缘图像
-            lines: 检测到的直线
-        
-        Returns:
-            {"t_junctions": 4, "intersections": 2}
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：density > 0.4
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - lines: 函数入参（类型：List[Tuple[float, float]]）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         # 简化实现: 基于边缘密度的启发式
         # 寻找高密度交叉区域
         kernel = np.ones((5, 5), np.uint8)
@@ -339,14 +452,20 @@ class VisualElementDetector:
     @staticmethod
     def detect_diamonds(edges: np.ndarray) -> int:
         """
-        检测菱形 (决策节点)
-        
-        Args:
-            edges: 边缘图像
-        
-        Returns:
-            菱形数量
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：area < 200
+        - 条件：len(approx) == 4
+        - 条件：0.6 < ratio < 1.0
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         contours, _ = cv2.findContours(
             edges,
             cv2.RETR_EXTERNAL,
@@ -387,16 +506,19 @@ class VisualElementDetector:
     @staticmethod
     def detect_clouds(edges: np.ndarray) -> int:
         """
-        检测云形状 (云服务图标)
-        
-        策略: 检测不规则的圆润轮廓
-        
-        Args:
-            edges: 边缘图像
-        
-        Returns:
-            云形状数量
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：area < 500
+        - 条件：0.5 < circularity < 0.8 and len(approx) > 6
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         contours, _ = cv2.findContours(
             edges,
             cv2.RETR_EXTERNAL,
@@ -429,12 +551,22 @@ class VisualElementDetector:
     @staticmethod
     def detect_math_formula(edges: np.ndarray, lines: List[Tuple[float, float]], rect_count: int) -> Dict[str, bool]:
         """
-        检测数学公式特征 (Heuristic Trigger V2 - Optimized)
-        基于第一性原理: 结构化空间关系 + 动态阈值适配
-        
-        1. 分数线: 动态宽长比(>5+res), 上下文有效内容密度(>=30%), 水平方向约束(<2°)
-        2. 上下标: 动态面积比(>1.5), 动态间距(<30%主宽), 垂直偏移趋势(>15%)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：w > 5 * res_factor and h > 5 * res_factor
+        - 条件：bw > bh * aspect_ratio_thresh and bw >= frac_min_len and (bh <= frac_max_height) and (bw < w_img * 0.4)
+        - 条件：0 < dist < spacing_thresh and has_overlap
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - lines: 函数入参（类型：List[Tuple[float, float]]）。
+        - rect_count: 函数入参（类型：int）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         has_fraction = False
         has_script = False
         
@@ -557,14 +689,21 @@ class VisualElementDetector:
     @staticmethod
     def detect_matrix_brackets(edges: np.ndarray, contours: List[np.ndarray]) -> int:
         """
-        检测矩阵大括号/中括号 (严谨算法)
-        
-        特征:
-        1. 高宽比显著 (H >> W)
-        2. 形状弯曲 (Solidity 低)
-        3. 左右对称性 (或者成对出现) -> 这里检测单个
-        4. 垂直投影覆盖率高
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：h < 40 or h < w * 2.5
+        - 条件：hull_area == 0
+        - 条件：0.2 < solidity < 0.7
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - contours: 函数入参（类型：List[np.ndarray]）。
+        输出参数：
+        - 数值型计算结果。"""
         count = 0
         h_img, w_img = edges.shape
         
@@ -608,12 +747,21 @@ class VisualElementDetector:
     @staticmethod
     def detect_sqrt(edges: np.ndarray, contours: List[np.ndarray]) -> int:
         """
-        检测根号 (严谨算法)
-        
-        特征:
-        1. "√" 形状: 左边短折线，中间尖角，右边长横线 (根号顶盖)
-        2. 关键点检测: 寻找多边形拟合后的锐角顶点
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：w < 30 or h < 20
+        - 条件：3 <= len(approx) <= 8
+        - 条件：len(points) >= 3
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        - contours: 函数入参（类型：List[np.ndarray]）。
+        输出参数：
+        - 数值型计算结果。"""
         count = 0
         for c in contours:
             # 1. 尺寸过滤
@@ -674,12 +822,20 @@ class VisualElementDetector:
     @staticmethod
     def detect_tables(edges: np.ndarray) -> bool:
         """
-        检测表格结构 (V4 Optimization)
-        
-        特征:
-        1. 存在多条平行的水平线和垂直线
-        2. 线条之间存在明显的网格状交叉
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：lines is None
+        - 条件：len(h_lines) >= 3 and len(v_lines) >= 2
+        - 条件：abs(y1 - y2) < 3
+        依据来源（证据链）：
+        输入参数：
+        - edges: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 布尔判断结果。"""
         h_img, w_img = edges.shape
         # 1. 检测直线
         # 使用概率霍夫变换寻找长线段
@@ -716,8 +872,21 @@ class VisualElementDetector:
     @staticmethod
     def analyze_frame(frame: np.ndarray) -> Dict[str, any]:
         """
-        全量检测每一帧的视觉元素 (Orchestrator)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：isinstance(frame, dict) and 'shm_name' in frame
+        - 条件：isinstance(frame, (bytes, np.ndarray)) and (not isinstance(frame, np.ndarray))
+        - 条件：frame is None
+        依据来源（证据链）：
+        - 输入参数：frame。
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 结构化结果字典（包含关键字段信息）。"""
         import cv2
         import os
         import time
@@ -817,14 +986,20 @@ class VisualElementDetector:
 
     def detect_structure_roi(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """
-        检测结构化内容的ROI区域 (Bounding Box)
-        
-        Args:
-            frame: 输入帧
-            
-        Returns:
-            (x1, y1, x2, y2) 或 None
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not contours
+        - 条件：not all_points
+        - 条件：cw * ch > min_area
+        依据来源（证据链）：
+        输入参数：
+        - frame: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             edges = cv2.Canny(gray, 50, 150)
@@ -879,15 +1054,22 @@ class VisualElementDetector:
 
     def judge_structure_dynamic(self, frame_sequence: List[np.ndarray], structure_roi: Tuple[int, int, int, int]) -> str:
         """
-        结构化图表的动静判定：区分静态图表和动态动画图表 (V6.3)
-        
-        Args:
-            frame_sequence: 核心区域的连续帧序列
-            structure_roi: (x1, y1, x2, y2)
-        
-        Returns:
-            "static" / "dynamic"
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not frame_sequence or not structure_roi
+        - 条件：len(roi_frames) < 2
+        - 条件：short_term_mean < 0.8 and long_term_mse < 1.5
+        依据来源（证据链）：
+        - 输入参数：frame_sequence, structure_roi。
+        输入参数：
+        - frame_sequence: 函数入参（类型：List[np.ndarray]）。
+        - structure_roi: 函数入参（类型：Tuple[int, int, int, int]）。
+        输出参数：
+        - 字符串结果。"""
         if not frame_sequence or not structure_roi:
             return "static"
             

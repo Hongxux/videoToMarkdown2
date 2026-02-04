@@ -13,9 +13,13 @@ import org.springframework.stereotype.Service;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -35,6 +39,8 @@ import java.util.stream.Collectors;
 public class KnowledgeClassificationOrchestrator {
     
     private static final Logger logger = LoggerFactory.getLogger(KnowledgeClassificationOrchestrator.class);
+    private static final String CLASS_CACHE_VERSION = "llm_v1";
+    private static final String CLASS_CACHE_FILE = "modality_classification_cache.json";
     
     @Autowired
     private PythonGrpcClient grpcClient;
@@ -71,8 +77,7 @@ public class KnowledgeClassificationOrchestrator {
      */
     public List<KnowledgeResultItem> classifyParallel(String taskId, List<ClassificationInput> units, String step2Path, String outputDir) {
         // 0. Cache Check
-        String cachePath = outputDir + "/intermediates/modality_classification_cache.json";
-        List<KnowledgeResultItem> cachedResults = loadFromCache(taskId, cachePath);
+        List<KnowledgeResultItem> cachedResults = tryLoadCachedResults(taskId, units, step2Path, outputDir);
         if (cachedResults != null) {
             logger.info("[{}] ✅ Reusing cached knowledge classification results", taskId);
             return cachedResults;
@@ -109,7 +114,7 @@ public class KnowledgeClassificationOrchestrator {
         logger.info("[{}] Classification complete. Success batches: {}/{}. Total results: {}", 
             taskId, successCount, batches.size(), allResults.size());
             
-        saveToCache(taskId, cachePath, allResults);
+        saveCache(taskId, allResults, units, step2Path, outputDir);
         return allResults;
     }
 
@@ -138,11 +143,78 @@ public class KnowledgeClassificationOrchestrator {
         }, ioExecutor);
     }
     
-    private List<KnowledgeResultItem> loadFromCache(String taskId, String path) {
+    public List<KnowledgeResultItem> tryLoadCachedResults(
+            String taskId, List<ClassificationInput> units, String step2Path, String outputDir) {
+        String cachePath = outputDir + File.separator + "intermediates" + File.separator + CLASS_CACHE_FILE;
+        String signature = buildSignature(units, step2Path, outputDir);
+        return loadFromCache(taskId, cachePath, signature);
+    }
+
+    public void saveCache(
+            String taskId, List<KnowledgeResultItem> results,
+            List<ClassificationInput> units, String step2Path, String outputDir) {
+        if (results == null || results.isEmpty()) return;
+        String cachePath = outputDir + File.separator + "intermediates" + File.separator + CLASS_CACHE_FILE;
+        String signature = buildSignature(units, step2Path, outputDir);
+        saveToCache(taskId, cachePath, signature, results);
+    }
+
+    private String buildSignature(List<ClassificationInput> units, String step2Path, String outputDir) {
+        try {
+            File step2File = step2Path != null ? new File(step2Path) : null;
+            long step2Size = (step2File != null && step2File.exists()) ? step2File.length() : -1;
+            long step2Mtime = (step2File != null && step2File.exists()) ? step2File.lastModified() : -1;
+            String urlHash = new File(outputDir).getName();
+
+            List<Map<String, Object>> unitList = new ArrayList<>();
+            if (units != null) {
+                List<ClassificationInput> sorted = new ArrayList<>(units);
+                sorted.sort(Comparator.comparing(u -> u.unitId));
+                for (ClassificationInput u : sorted) {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("unit_id", u.unitId);
+                    String textRaw = (u.title != null ? u.title : "") + "|" + (u.text != null ? u.text : "");
+                    item.put("text_hash", sha256(textRaw));
+
+                    List<Map<String, Object>> actions = new ArrayList<>();
+                    if (u.actionUnits != null) {
+                        for (ActionSegmentResult as : u.actionUnits) {
+                            Map<String, Object> a = new LinkedHashMap<>();
+                            a.put("start_sec", as.startSec);
+                            a.put("end_sec", as.endSec);
+                            a.put("id", as.id);
+                            actions.add(a);
+                        }
+                    }
+                    item.put("actions", actions);
+                    unitList.add(item);
+                }
+            }
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("url_hash", urlHash);
+            payload.put("llm_version", CLASS_CACHE_VERSION);
+            payload.put("step2_size", step2Size);
+            payload.put("step2_mtime", step2Mtime);
+            payload.put("units", unitList);
+
+            String raw = objectMapper.writeValueAsString(payload);
+            return sha256(raw);
+        } catch (Exception e) {
+            logger.warn("Failed to build classification signature: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    private List<KnowledgeResultItem> loadFromCache(String taskId, String path, String signature) {
         File file = new File(path);
         if (!file.exists()) return null;
         try {
             Map<String, Object> data = objectMapper.readValue(file, Map.class);
+            Map<String, Object> meta = (Map<String, Object>) data.get("meta");
+            if (meta == null || signature.isEmpty()) return null;
+            if (!signature.equals(meta.get("signature"))) return null;
+
             if (data.containsKey("units")) {
                 List<Map<String, Object>> units = (List<Map<String, Object>>) data.get("units");
                 return units.stream().map(u -> {
@@ -162,16 +234,36 @@ public class KnowledgeClassificationOrchestrator {
         return null;
     }
 
-    private void saveToCache(String taskId, String path, List<KnowledgeResultItem> results) {
+    private void saveToCache(String taskId, String path, String signature, List<KnowledgeResultItem> results) {
         try {
             File file = new File(path);
             file.getParentFile().mkdirs();
             Map<String, Object> data = new HashMap<>();
+            Map<String, Object> meta = new HashMap<>();
+            meta.put("signature", signature);
+            meta.put("version", CLASS_CACHE_VERSION);
+            meta.put("updated_at", System.currentTimeMillis());
+            meta.put("units_count", results.size());
+            data.put("meta", meta);
             data.put("units", results);
             objectMapper.writeValue(file, data);
-            logger.info("[{}] ✅ Knowledge classification results saved to cache: {}", taskId, path);
+            logger.info("[{}] Knowledge classification results saved to cache: {}", taskId, path);
         } catch (Exception e) {
             logger.warn("[{}] Failed to save classification cache: {}", taskId, e.getMessage());
+        }
+    }
+
+    private String sha256(String raw) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = md.digest(raw.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "";
         }
     }
 

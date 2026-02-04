@@ -1,12 +1,19 @@
 """
-帧边界分析器
-用于视频片段边界精细化的Python算法初筛
-
+模块说明：阶段工具 frame_analyzer 的实现。
+执行逻辑：
+1) 聚合本模块的类/函数，对外提供核心能力。
+2) 通过内部调用与外部依赖完成具体处理。
+实现方式：通过模块内函数组合与外部依赖调用实现。
+核心价值：统一模块职责边界，降低跨文件耦合成本。
+输入：
+- 调用方传入的参数与数据路径。
+输出：
+- 各函数/类返回的结构化结果或副作用。
+补充说明：
 核心功能：
 1. 在候选时间范围内提取关键帧（0.5s间隔）
 2. 使用SSIM像素对比检测边界
-3. 输出候选边界帧列表
-"""
+3. 输出候选边界帧列表"""
 
 import cv2
 import numpy as np
@@ -25,7 +32,17 @@ from .opencv_capture import FrameCapture, FrameResult
 
 @dataclass
 class BoundaryCandidate:
-    """边界候选帧"""
+    """
+    类说明：封装 BoundaryCandidate 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     frame_idx: int
     timestamp: float
     frame_path: str
@@ -36,7 +53,17 @@ class BoundaryCandidate:
 
 @dataclass 
 class BoundaryAnalysisResult:
-    """边界分析结果"""
+    """
+    类说明：封装 BoundaryAnalysisResult 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     start_candidates: List[BoundaryCandidate]
     end_candidates: List[BoundaryCandidate]
     all_frames: List[Dict[str, Any]]
@@ -45,10 +72,16 @@ class BoundaryAnalysisResult:
 
 class FrameBoundaryAnalyzer:
     """
-    帧边界分析器
-    
-    使用SSIM像素对比检测动画/实操的开始和结束边界
-    """
+    类说明：封装 FrameBoundaryAnalyzer 的职责与行为。
+    执行逻辑：
+    1) 维护类内状态与依赖。
+    2) 通过方法组合对外提供能力。
+    实现方式：通过成员变量与方法调用实现。
+    核心价值：集中状态与方法，降低分散实现的复杂度。
+    输入：
+    - 构造函数与业务方法的入参。
+    输出：
+    - 方法返回结果或内部状态更新。"""
     
     # 检测参数
     FRAME_INTERVAL = 0.5  # 默认降级间隔
@@ -63,13 +96,17 @@ class FrameBoundaryAnalyzer:
     
     def __init__(self, video_path: str, output_dir: str, session_id: str = "default"):
         """
-        初始化分析器
-        
-        Args:
-            video_path: 视频文件路径
-            output_dir: 基础输出目录
-            session_id: 会话ID，用于区分并发任务
-        """
+        执行逻辑：
+        1) 解析配置或依赖，准备运行环境。
+        2) 初始化对象状态、缓存与依赖客户端。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：在初始化阶段固化依赖，保证运行稳定性。
+        输入参数：
+        - video_path: 文件路径（类型：str）。
+        - output_dir: 目录路径（类型：str）。
+        - session_id: 标识符（类型：str）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
         self.output_dir = Path(output_dir)
         # 为并发任务使用唯一的临时目录
@@ -87,19 +124,27 @@ class FrameBoundaryAnalyzer:
         sample_step: Optional[float] = None
     ) -> BoundaryAnalysisResult:
         """
-        分析视频边界，采样完整帧序列供 Vision AI 分析
-        
-        职责：仅负责帧采样，不做边界判断
-        
-        Args:
-            rough_range: 粗略时间范围 {"start_sec": float, "end_sec": float}
-            title: 知识点标题（用于调试）
-            summary: 内容摘要（用于调试）
-            sample_step: 强制采样步长(秒)，若提供则覆盖自适应步长
-            
-        Returns:
-            BoundaryAnalysisResult: 包含完整帧序列的分析结果
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：sample_step
+        - 条件：len(frames_data) < 2
+        - 条件：additional_frames
+        依据来源（证据链）：
+        - 输入参数：sample_step。
+        - 配置字段：frame_path。
+        - 阈值常量：AOI_SSIM_THRESHOLD。
+        - 对象内部状态：self.FINE_INTERVAL。
+        输入参数：
+        - rough_range: 函数入参（类型：Dict[str, float]）。
+        - title: 函数入参（类型：str）。
+        - summary: 函数入参（类型：str）。
+        - sample_step: 函数入参（类型：Optional[float]）。
+        输出参数：
+        - BoundaryAnalysisResult 对象（包含字段：start_candidates, end_candidates, all_frames, search_range）。"""
         start_sec = rough_range.get("start_sec", 0)
         end_sec = rough_range.get("end_sec", 0)
         
@@ -183,8 +228,22 @@ class FrameBoundaryAnalyzer:
         interval: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """
-        在时间范围内提取帧
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：interval is None
+        - 条件：result.is_valid
+        依据来源（证据链）：
+        - 输入参数：interval。
+        输入参数：
+        - start_sec: 起止时间/区间边界（类型：float）。
+        - end_sec: 起止时间/区间边界（类型：float）。
+        - interval: 函数入参（类型：Optional[float]）。
+        输出参数：
+        - Dict[str, Any] 列表（与输入或处理结果一一对应）。"""
         if interval is None:
             interval = self.FRAME_INTERVAL
             
@@ -223,8 +282,18 @@ class FrameBoundaryAnalyzer:
     
     def _load_frames(self, frames_data: List[Dict]) -> List[np.ndarray]:
         """
-        加载帧图像到内存
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：frame is not None
+        依据来源（证据链）：
+        输入参数：
+        - frames_data: 函数入参（类型：List[Dict]）。
+        输出参数：
+        - np.ndarray 列表（与输入或处理结果一一对应）。"""
         frames = []
         for fd in frames_data:
             frame = cv2.imread(fd["frame_path"])
@@ -240,12 +309,25 @@ class FrameBoundaryAnalyzer:
         frames: List[np.ndarray]
     ) -> List[BoundaryCandidate]:
         """
-        检测动画开始候选帧
-        
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：ssim_score < self.START_SSIM_THRESHOLD
+        - 条件：self.DIFF_RATIO_MIN <= diff_ratio <= self.DIFF_RATIO_MAX
+        依据来源（证据链）：
+        - 对象内部状态：self.DIFF_RATIO_MAX, self.DIFF_RATIO_MIN, self.START_SSIM_THRESHOLD。
+        输入参数：
+        - frames_data: 函数入参（类型：List[Dict]）。
+        - frames: 数据列表/集合（类型：List[np.ndarray]）。
+        输出参数：
+        - BoundaryCandidate 列表（与输入或处理结果一一对应）。
+        补充说明：
         判断标准：
         1. 相邻帧SSIM < 0.9（存在显著差异）
-        2. 差异区域占比在5%-15%之间
-        """
+        2. 差异区域占比在5%-15%之间"""
         candidates = []
         
         for i in range(len(frames) - 1):
@@ -282,11 +364,25 @@ class FrameBoundaryAnalyzer:
         frames: List[np.ndarray]
     ) -> List[BoundaryCandidate]:
         """
-        检测动画结束候选帧
-        
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：ssim_score > self.END_SSIM_THRESHOLD
+        - 条件：stable_start_idx < 0
+        - 条件：stable_count >= self.STABLE_FRAME_COUNT
+        依据来源（证据链）：
+        - 对象内部状态：self.END_SSIM_THRESHOLD, self.STABLE_FRAME_COUNT。
+        输入参数：
+        - frames_data: 函数入参（类型：List[Dict]）。
+        - frames: 数据列表/集合（类型：List[np.ndarray]）。
+        输出参数：
+        - BoundaryCandidate 列表（与输入或处理结果一一对应）。
+        补充说明：
         判断标准：
-        1. 连续3-5帧SSIM > 0.95（画面稳定）
-        """
+        1. 连续3-5帧SSIM > 0.95（画面稳定）"""
         candidates = []
         stable_count = 0
         stable_start_idx = -1
@@ -330,11 +426,20 @@ class FrameBoundaryAnalyzer:
         frame2: np.ndarray
     ) -> Tuple[float, float]:
         """
-        比较两帧的相似度和差异占比
-        
-        Returns:
-            (ssim_score, diff_ratio)
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：HAS_SKIMAGE
+        依据来源（证据链）：
+        - 阈值常量：HAS_SKIMAGE。
+        输入参数：
+        - frame1: 函数入参（类型：np.ndarray）。
+        - frame2: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 多值结果元组（各元素含义见实现）。"""
         # 转为灰度图
         gray1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
         gray2 = cv2.cvtColor(frame2, cv2.COLOR_BGR2GRAY)
@@ -356,8 +461,20 @@ class FrameBoundaryAnalyzer:
     
     def _simple_ssim(self, img1: np.ndarray, img2: np.ndarray) -> float:
         """
-        简化的SSIM计算（用于没有skimage时的回退）
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过NumPy 数值计算实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：std1 == 0 or std2 == 0
+        - 条件：np.allclose(img1_f, img2_f)
+        依据来源（证据链）：
+        输入参数：
+        - img1: 函数入参（类型：np.ndarray）。
+        - img2: 函数入参（类型：np.ndarray）。
+        输出参数：
+        - 数值型计算结果。"""
         # 使用归一化互相关作为近似
         img1_f = img1.astype(np.float32) / 255.0
         img2_f = img2.astype(np.float32) / 255.0
@@ -379,9 +496,22 @@ class FrameBoundaryAnalyzer:
     
     def cleanup(self, force: bool = False):
         """
-        清理临时帧文件。
-        如果不强制清理，则只保留 active_paths 中的候选帧，其余删除。
-        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 执行核心处理并返回结果。
+        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
+        核心价值：封装逻辑单元，提升复用与可维护性。
+        决策逻辑：
+        - 条件：not self.frames_dir.exists()
+        - 条件：force
+        - 条件：Path(file).resolve() not in self.active_paths
+        依据来源（证据链）：
+        - 输入参数：force。
+        - 对象内部状态：self.active_paths, self.frames_dir。
+        输入参数：
+        - force: 函数入参（类型：bool）。
+        输出参数：
+        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if not self.frames_dir.exists():
             return
             
