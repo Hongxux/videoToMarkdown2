@@ -617,7 +617,7 @@ class MarkdownEnhancer:
         # V2: Obsidian 格式媒体嵌入
         # 视频片段
         if section.video_clip:
-            lines.append(f"> 📹 **操作演示**")
+            lines.append(f"> 📹 **{self._build_video_title(section)}**")
             lines.append(f"")
             lines.append(self._format_obsidian_embed(section.video_clip))
             lines.append("")
@@ -631,6 +631,38 @@ class MarkdownEnhancer:
             lines.append("")
         
         return lines
+
+    def _build_video_title(self, section: EnhancedSection) -> str:
+        """
+        根据动作单元的知识类型生成视频标题，避免固定“操作演示”。
+        """
+        def normalize_kt(value: str) -> str:
+            return (value or "").lower()
+
+        def map_title(kt: str) -> str:
+            if any(key in kt for key in ["讲解", "explanation", "abstract", "抽象"]):
+                return "概念讲解"
+            if any(key in kt for key in ["过程", "process"]):
+                return "过程演示"
+            if any(key in kt for key in ["具象", "concrete", "实例", "示例"]):
+                return "实例演示"
+            return "操作演示"
+
+        # 优先使用动作单元分类结果
+        if section.action_classifications:
+            best = None
+            best_conf = -1.0
+            for item in section.action_classifications:
+                conf = float(item.get("confidence", 0.0) or 0.0)
+                if conf > best_conf:
+                    best_conf = conf
+                    best = item
+            if best:
+                kt = normalize_kt(best.get("knowledge_type", ""))
+                return map_title(kt)
+
+        # 兜底使用段落知识类型
+        return map_title(normalize_kt(section.knowledge_type))
 
 
 # ==============================================================================

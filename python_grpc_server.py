@@ -1311,6 +1311,15 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         try:
             self._increment_tasks()
             
+            # 短日志：定位 Java -> Python 是否带上 action_units.knowledge_type
+            for u in request.units:
+                if u.action_units:
+                    first = u.action_units[0]
+                    logger.info(
+                        f"[{task_id}] MaterialRequests input: unit={u.unit_id}, actions={len(u.action_units)}, first_kt={first.knowledge_type}"
+                    )
+                    break
+            
             # 🚀 V9.0: 使用 RichTextPipeline 的两阶段合并逻辑
             from MVP_Module2_HEANCING.module2_content_enhancement.rich_text_pipeline import RichTextPipeline
             from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_range_calculator import ScreenshotRangeCalculator
@@ -1405,7 +1414,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
                 # 补齐缺失知识类型：做什么是兜底；为什么是避免误过滤；权衡是可能偏向 unit 级判断
                 for a in merged_stage1:
-                    if not a.get('knowledge_type'):
+                    k_type_raw = str(a.get('knowledge_type', '')).strip()
+                    if (not k_type_raw) or k_type_raw.lower() in ('knowledge', 'unknown'):
                         a['knowledge_type'] = unit.knowledge_type or '过程性知识'
 
                 # 过滤讲解型/噪声类型，仅保留需要视频的动作
@@ -1574,6 +1584,18 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 logger.info(f"[{task_id}] Parallel screenshot selection completed: {len(final_ss)} screenshots")
             
             logger.info(f"[{task_id}] Generated {len(final_clips)} clips, {len(final_ss)} screenshots")
+
+            # 兜底：若未生成任何截图请求，按单元中点补齐
+            if not final_ss and units:
+                for unit in units:
+                    mid_ts = (float(unit.start_sec) + float(unit.end_sec)) / 2
+                    final_ss.append(video_processing_pb2.ScreenshotRequest(
+                        screenshot_id=f"{unit.unit_id}_fallback",
+                        timestamp_sec=mid_ts,
+                        label="fallback",
+                        semantic_unit_id=unit.unit_id
+                    ))
+                logger.info(f"[{task_id}] Fallback screenshots generated: {len(final_ss)}")
                 
             # 🚀 V9.0: 更新 semantic_units_phase2a.json 包含完整的素材信息
             try:
@@ -1627,7 +1649,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                                     "id": au.id if hasattr(au, 'id') else i,
                                     "start_sec": au.start_sec,
                                     "end_sec": au.end_sec,
-                                    "action_type": au.action_type,
+                                    # action_type 可能不存在：做什么是兜底写入；为什么是避免写回失败；权衡是字段语义可能退化为知识类型
+                                    "action_type": getattr(au, "action_type", "") or getattr(au, "knowledge_type", ""),
                                     "knowledge_type": au.knowledge_type,
                                     "confidence": au.confidence,
                                     "reasoning": au.reasoning if hasattr(au, 'reasoning') else ""
@@ -1851,6 +1874,10 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         - dict：{unit_id: {frame_idx: shm_ref}}。"""
         shm_map = {} # unit_id -> {frame_idx: shm_ref}
         import cv2
+        import time
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
         
         # 1. Collect Requests
         frame_requests = [] # (time, unit_id)
@@ -1864,36 +1891,116 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
         # Sort by time to optimize seeking
         frame_requests.sort(key=lambda x: x[0])
+        if not frame_requests:
+            return {}
         
+        # 为顺序读 + 采样 + 并行解码做准备
+        open_start = time.perf_counter()
         cap = cv2.VideoCapture(video_path)
+        open_ms = (time.perf_counter() - open_start) * 1000.0
         try:
-            if not cap.isOpened(): return {}
+            if not cap.isOpened():
+                return {}
             fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             
-            valid_shm_refs = {}
-            
-            for req_time, uid in frame_requests:
+            frame_idx_set = set()
+            for req_time, _uid in frame_requests:
                 frame_idx = int(req_time * fps)
                 frame_idx = max(0, min(frame_idx, total_frames - 1))
+                frame_idx_set.add(frame_idx)
+            if not frame_idx_set:
+                return {}
+            frame_idx_list = sorted(frame_idx_set)
+            start_idx = frame_idx_list[0]
+            end_idx = frame_idx_list[-1]
+            
+            # 动态并行度：范围大/采样多时并行解码
+            range_span = end_idx - start_idx + 1
+            worker_count = min(4, max(1, len(frame_idx_list) // 30))
+            if range_span > 2000:
+                worker_count = max(worker_count, 2)
+            worker_count = min(worker_count, 4)
+            
+            def _decode_range(seg_start: int, seg_end: int):
+                t_open = time.perf_counter()
+                local_cap = cv2.VideoCapture(video_path)
+                local_open_ms = (time.perf_counter() - t_open) * 1000.0
+                if not local_cap.isOpened():
+                    return {}, local_open_ms, 0.0, 0.0, 0.0
                 
-                if frame_idx in valid_shm_refs: continue
+                t_seek = time.perf_counter()
+                local_cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start)
+                local_seek_ms = (time.perf_counter() - t_seek) * 1000.0
                 
-                # Seek & Read
-                curr = cap.get(cv2.CAP_PROP_POS_FRAMES)
-                # If frame_idx matches current, read direct. Else seek.
-                if int(curr) != frame_idx:
-                     cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                local_read_ms = 0.0
+                local_shm_ms = 0.0
+                local_refs = {}
+                curr_idx = seg_start
                 
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                     # 🚀 Write to SharedMemory
-                     self.frame_registry.register_frame(frame_idx, frame)
-                     ref = self.frame_registry.get_shm_ref(frame_idx)
-                     if ref: valid_shm_refs[frame_idx] = ref
-                     
-                     # 🚀 Immediate release from local heap
-                     del frame
+                while curr_idx <= seg_end:
+                    t0 = time.perf_counter()
+                    ret, frame = local_cap.read()
+                    local_read_ms += (time.perf_counter() - t0) * 1000.0
+                    if not ret or frame is None:
+                        break
+                    if curr_idx in frame_idx_set:
+                        t1 = time.perf_counter()
+                        self.frame_registry.register_frame(curr_idx, frame)
+                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        if ref:
+                            local_refs[curr_idx] = ref
+                        local_shm_ms += (time.perf_counter() - t1) * 1000.0
+                    del frame
+                    curr_idx += 1
+                
+                local_cap.release()
+                return local_refs, local_open_ms, local_seek_ms, local_read_ms, local_shm_ms
+            
+            # 单线程或并行解码
+            valid_shm_refs = {}
+            seek_ms = 0.0
+            read_ms = 0.0
+            shm_ms = 0.0
+            if worker_count <= 1:
+                seek_start = time.perf_counter()
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+                seek_ms = (time.perf_counter() - seek_start) * 1000.0
+                curr_idx = start_idx
+                while curr_idx <= end_idx:
+                    t0 = time.perf_counter()
+                    ret, frame = cap.read()
+                    read_ms += (time.perf_counter() - t0) * 1000.0
+                    if not ret or frame is None:
+                        break
+                    if curr_idx in frame_idx_set:
+                        t1 = time.perf_counter()
+                        self.frame_registry.register_frame(curr_idx, frame)
+                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        if ref:
+                            valid_shm_refs[curr_idx] = ref
+                        shm_ms += (time.perf_counter() - t1) * 1000.0
+                    del frame
+                    curr_idx += 1
+            else:
+                # 分段并行顺序读
+                seg_size = (range_span + worker_count - 1) // worker_count
+                ranges = []
+                for i in range(worker_count):
+                    seg_start = start_idx + i * seg_size
+                    seg_end = min(end_idx, seg_start + seg_size - 1)
+                    if seg_start <= seg_end:
+                        ranges.append((seg_start, seg_end))
+                
+                with ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
+                    futures = [executor.submit(_decode_range, s, e) for s, e in ranges]
+                    for fut in futures:
+                        local_refs, o_ms, s_ms, r_ms, m_ms = fut.result()
+                        valid_shm_refs.update(local_refs)
+                        open_ms += o_ms
+                        seek_ms += s_ms
+                        read_ms += r_ms
+                        shm_ms += m_ms
             
             # Re-map results to Unit ID
             for u in units_data:
@@ -1908,6 +2015,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 if u_map:
                     shm_map[uid] = u_map
                     
+            total_ms = open_ms + seek_ms + read_ms + shm_ms
+            logger.info(
+                f"Batch read frames: open={open_ms:.1f}ms, seek={seek_ms:.1f}ms, "
+                f"read={read_ms:.1f}ms, shm={shm_ms:.1f}ms, total={total_ms:.1f}ms, "
+                f"frames={len(frame_idx_list)}, range=[{start_idx},{end_idx}], workers={worker_count}"
+            )
             return shm_map
         except Exception as e:
             logger.warning(f"Batch read failed: {e}")
@@ -1941,11 +2054,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - dict：{unit_id: {timestamp: shm_ref}}。"""
         import cv2
+        import time
         
         coarse_interval = 1.0 / coarse_fps
         coarse_shm_map = {}
-        
+        open_start = time.perf_counter()
         cap = cv2.VideoCapture(video_path)
+        open_ms = (time.perf_counter() - open_start) * 1000.0
         try:
             if not cap.isOpened():
                 return {}
@@ -1965,38 +2080,118 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     all_requests.append((t, uid))
                     t += coarse_interval
             
-            # 按时间排序优化 seek
+            if not all_requests:
+                return {}
             all_requests.sort(key=lambda x: x[0])
             
-            # 批量读取
-            valid_refs = {}  # frame_idx -> shm_ref
+            # 批量读取（顺序读 + 采样）
+            frame_to_requests = {}  # frame_idx -> list[(uid, req_time)]
             for req_time, uid in all_requests:
                 frame_idx = int(req_time * fps)
                 frame_idx = max(0, min(frame_idx, total_frames - 1))
+                frame_to_requests.setdefault(frame_idx, []).append((uid, req_time))
+            
+            frame_idx_list = sorted(frame_to_requests.keys())
+            start_idx = frame_idx_list[0]
+            end_idx = frame_idx_list[-1]
+            
+            range_span = end_idx - start_idx + 1
+            worker_count = min(4, max(1, len(frame_idx_list) // 30))
+            if range_span > 2000:
+                worker_count = max(worker_count, 2)
+            worker_count = min(worker_count, 4)
+            
+            def _decode_range(seg_start: int, seg_end: int):
+                t_open = time.perf_counter()
+                local_cap = cv2.VideoCapture(video_path)
+                local_open_ms = (time.perf_counter() - t_open) * 1000.0
+                if not local_cap.isOpened():
+                    return {}, local_open_ms, 0.0, 0.0, 0.0
                 
-                if frame_idx in valid_refs:
-                    # 已读取，复用
+                t_seek = time.perf_counter()
+                local_cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start)
+                local_seek_ms = (time.perf_counter() - t_seek) * 1000.0
+                
+                local_read_ms = 0.0
+                local_shm_ms = 0.0
+                local_refs = {}
+                curr_idx = seg_start
+                
+                while curr_idx <= seg_end:
+                    t0 = time.perf_counter()
+                    ret, frame = local_cap.read()
+                    local_read_ms += (time.perf_counter() - t0) * 1000.0
+                    if not ret or frame is None:
+                        break
+                    if curr_idx in frame_to_requests:
+                        t1 = time.perf_counter()
+                        self.frame_registry.register_frame(curr_idx, frame)
+                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        if ref:
+                            local_refs[curr_idx] = ref
+                        local_shm_ms += (time.perf_counter() - t1) * 1000.0
+                    del frame
+                    curr_idx += 1
+                
+                local_cap.release()
+                return local_refs, local_open_ms, local_seek_ms, local_read_ms, local_shm_ms
+            
+            seek_ms = 0.0
+            read_ms = 0.0
+            shm_ms = 0.0
+            valid_refs = {}
+            if worker_count <= 1:
+                seek_start = time.perf_counter()
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+                seek_ms = (time.perf_counter() - seek_start) * 1000.0
+                
+                curr_idx = start_idx
+                while curr_idx <= end_idx:
+                    t0 = time.perf_counter()
+                    ret, frame = cap.read()
+                    read_ms += (time.perf_counter() - t0) * 1000.0
+                    if not ret or frame is None:
+                        break
+                    if curr_idx in frame_to_requests:
+                        t1 = time.perf_counter()
+                        self.frame_registry.register_frame(curr_idx, frame)
+                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        if ref:
+                            valid_refs[curr_idx] = ref
+                    shm_ms += (time.perf_counter() - t1) * 1000.0
+                    del frame
+                    curr_idx += 1
+            else:
+                seg_size = (range_span + worker_count - 1) // worker_count
+                ranges = []
+                for i in range(worker_count):
+                    seg_start = start_idx + i * seg_size
+                    seg_end = min(end_idx, seg_start + seg_size - 1)
+                    if seg_start <= seg_end:
+                        ranges.append((seg_start, seg_end))
+                
+                with ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
+                    futures = [executor.submit(_decode_range, s, e) for s, e in ranges]
+                    for fut in futures:
+                        local_refs, o_ms, s_ms, r_ms, m_ms = fut.result()
+                        valid_refs.update(local_refs)
+                        open_ms += o_ms
+                        seek_ms += s_ms
+                        read_ms += r_ms
+                        shm_ms += m_ms
+            
+            for frame_idx, ref in valid_refs.items():
+                for uid, req_time in frame_to_requests.get(frame_idx, []):
                     if uid not in coarse_shm_map:
                         coarse_shm_map[uid] = {}
-                    coarse_shm_map[uid][req_time] = valid_refs[frame_idx]
-                    continue
-                
-                # Seek if needed
-                curr = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                if curr != frame_idx:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    self.frame_registry.register_frame(frame_idx, frame)
-                    ref = self.frame_registry.get_shm_ref(frame_idx)
-                    if ref:
-                        valid_refs[frame_idx] = ref
-                        if uid not in coarse_shm_map:
-                            coarse_shm_map[uid] = {}
-                        coarse_shm_map[uid][req_time] = ref
-                    del frame
+                    coarse_shm_map[uid][req_time] = ref
             
+            total_ms = open_ms + seek_ms + read_ms + shm_ms
+            logger.info(
+                f"Coarse batch read: open={open_ms:.1f}ms, seek={seek_ms:.1f}ms, "
+                f"read={read_ms:.1f}ms, shm={shm_ms:.1f}ms, total={total_ms:.1f}ms, "
+                f"frames={len(frame_idx_list)}, range=[{start_idx},{end_idx}], workers={worker_count}"
+            )
             return coarse_shm_map
             
         except Exception as e:
@@ -2144,10 +2339,24 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 基础: 50. 依据内存向上调整.
             mem = psutil.virtual_memory()
             avail_gb = mem.available / (1024**3)
-            # 策略: 每 4GB 空闲内存增加 30 任务量. 
+            # 策略: 每 4GB 空闲内存增加 30 任务量.
             # 16GB 空闲 -> +120 -> 170. 4GB 空闲 -> 50.
             dynamic_batch = 50 + int((max(0, avail_gb - 4) / 4) * 30)
-            BATCH_SIZE = min(max(32, dynamic_batch), 200) # 限制范围 [32, 200]
+            # 为了提高单任务时延与 IO/Compute 重叠，降低 batch 上限
+            MIN_BATCH_SIZE = 8
+            MAX_BATCH_SIZE = 24
+            BATCH_SIZE = min(max(MIN_BATCH_SIZE, dynamic_batch), MAX_BATCH_SIZE)  # 初始限制范围 [8, 24]
+            # 单任务时延优先：根据单元数量强制生成多个 chunk
+            # 目标：尽量保证 >= 3 个 chunk，形成 IO/Compute 重叠
+            units_max = max(len(all_units_data), len(skipped_units))
+            TARGET_MIN_CHUNKS = 5
+            if units_max > 0:
+                latency_batch = max(1, (units_max + TARGET_MIN_CHUNKS - 1) // TARGET_MIN_CHUNKS)
+                BATCH_SIZE = min(BATCH_SIZE, latency_batch)
+                logger.info(
+                    f"[{task_id}] Latency batch adjust: units_max={units_max}, "
+                    f"target_chunks={TARGET_MIN_CHUNKS}, batch={BATCH_SIZE}"
+                )
             
             logger.info(f"[{task_id}] Dynamic Batch Config: Size={BATCH_SIZE} (Available RAM={avail_gb:.1f}GB)")
             results_data = []

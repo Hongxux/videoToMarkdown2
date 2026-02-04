@@ -500,8 +500,9 @@ class RichTextPipeline:
         logger.info("[Phase2B-2] Apply External Materials")
         for unit in units:
             requests = material_requests_map.get(unit.unit_id)
-            if requests:
-                self._apply_external_materials(unit, screenshots_dir, clips_dir, requests)
+            if not requests:
+                requests = MaterialRequests([], [], [])
+            self._apply_external_materials(unit, screenshots_dir, clips_dir, requests)
         
         # Stage 3: 富文本组装 (生成基础文档)
         logger.info("[Phase2B-3] Rich Text Assembly")
@@ -517,19 +518,20 @@ class RichTextPipeline:
         enhancer = MarkdownEnhancer()
         markdown_path = os.path.join(self.output_dir, "enhanced_output.md")
         
-        if enhancer.enabled:
-            try:
-                # 🚀 Stage 5: 直接 await 异步增强
-                enhanced_md = await enhancer.enhance(json_path, subject)
-                with open(markdown_path, 'w', encoding='utf-8') as f:
-                    f.write(enhanced_md)
-                logger.info(f"  → Enhanced markdown exported: {markdown_path}")
-            except Exception as e:
-                logger.error(f"  → Markdown enhancement failed: {e}, using fallback")
-                # 回退: 使用基础Markdown
-                document.to_markdown(markdown_path)
-        else:
-            logger.warning("  → MarkdownEnhancer disabled (DEEPSEEK_API_KEY not set)")
+        if not enhancer.enabled:
+            logger.warning("  → MarkdownEnhancer disabled (DEEPSEEK_API_KEY not set), using rule-based hierarchy")
+        try:
+            # 🚀 Stage 5: 直接 await 异步增强
+            enhanced_md = await enhancer.enhance(
+                json_path,
+                subject,
+                markdown_dir=os.path.dirname(markdown_path)
+            )
+            with open(markdown_path, 'w', encoding='utf-8') as f:
+                f.write(enhanced_md)
+            logger.info(f"  → Enhanced markdown exported: {markdown_path}")
+        except Exception as e:
+            logger.error(f"  → Markdown enhancement failed: {e}, using fallback")
             # 回退: 使用基础Markdown
             document.to_markdown(markdown_path)
         
@@ -540,55 +542,6 @@ class RichTextPipeline:
         logger.info("="*60)
         
         return markdown_path, json_path
-    
-    def _apply_external_materials(self, unit, screenshots_dir: str, clips_dir: str, requests):
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过HTTP 调用、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：os.path.exists(pattern)
-        依据来源（证据链）：
-        输入参数：
-        - unit: 函数入参（类型：未标注）。
-        - screenshots_dir: 目录路径（类型：str）。
-        - clips_dir: 目录路径（类型：str）。
-        - requests: 函数入参（类型：未标注）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        materials = MaterialSet()
-        
-        # 1. 加载截图
-        for ss_req in requests.screenshot_requests:
-            # 尝试多种可能的文件名模式
-            patterns = [
-                os.path.join(screenshots_dir, f"{ss_req.screenshot_id}.jpg"),
-                os.path.join(screenshots_dir, f"{ss_req.screenshot_id}.png"),
-                os.path.join(screenshots_dir, f"screenshot_{ss_req.screenshot_id}.jpg"),
-            ]
-            
-            for pattern in patterns:
-                if os.path.exists(pattern):
-                    materials.screenshots.append(pattern)
-                    materials.labels.append(ss_req.label)
-                    break
-        
-        # 2. 加载视频切片
-        for clip_req in requests.clip_requests:
-            patterns = [
-                os.path.join(clips_dir, f"{clip_req.clip_id}.mp4"),
-                os.path.join(clips_dir, f"clip_{clip_req.clip_id}.mp4"),
-            ]
-            
-            for pattern in patterns:
-                if os.path.exists(pattern):
-                    materials.clip = pattern
-                    break
-        
-        # 3. 保存到 unit 的 materials 属性
-        unit.materials = materials
     
     def _assemble_document(self, units, title: str):
         """
@@ -1850,37 +1803,58 @@ class RichTextPipeline:
         
         screenshot_paths = []
         screenshot_labels = []
-        
-        # 从外部目录查找截图
-        for req in material_requests.screenshot_requests:
-            if req.semantic_unit_id != unit.unit_id:
-                continue
-            
-            # 尝试多种可能的文件扩展名
-            for ext in [".png", ".jpg", ".jpeg"]:
-                expected_path = os.path.join(screenshots_dir, f"{req.screenshot_id}{ext}")
-                if os.path.exists(expected_path):
-                    # 💥 V7.5: 验证截图有效性
-                    is_valid = True
-                    if self._concrete_validator and req.label != "head" and req.label != "tail":
-                         # 首尾帧通常必须保留用于定位，中间帧/稳定岛帧需验证
-                         res = self._concrete_validator.validate(expected_path)
-                         if not res.should_include:
-                             logger.info(f"Removing negative screenshot: {req.screenshot_id} ({res.reason})")
-                             try:
-                                 os.remove(expected_path)
-                             except:
-                                 pass
-                             is_valid = False
-                    
-                    if is_valid:
-                        screenshot_paths.append(expected_path)
-                        screenshot_labels.append(req.label)
-                    break
-            else:
-                logger.debug(f"Screenshot not found: {req.screenshot_id}")
-        
-        # 从外部目录查找视频切片
+
+        def infer_label(name: str) -> str:
+            name_lower = name.lower()
+            if "head" in name_lower:
+                return "head"
+            if "tail" in name_lower:
+                return "tail"
+            if "island" in name_lower or "stable" in name_lower:
+                return "stable"
+            if "fallback" in name_lower:
+                return "fallback"
+            return "unknown"
+
+        # ?????????????????????????????
+        screenshot_candidates = []
+        if material_requests.screenshot_requests:
+            for req in material_requests.screenshot_requests:
+                if req.semantic_unit_id != unit.unit_id:
+                    continue
+                for ext in [".png", ".jpg", ".jpeg"]:
+                    expected_path = os.path.join(screenshots_dir, f"{req.screenshot_id}{ext}")
+                    if os.path.exists(expected_path):
+                        screenshot_candidates.append((expected_path, req.label, req.screenshot_id))
+                        break
+                else:
+                    logger.debug(f"Screenshot not found: {req.screenshot_id}")
+        else:
+            import glob
+            pattern = os.path.join(screenshots_dir, f"{unit.unit_id}*")
+            for path in sorted(glob.glob(pattern)):
+                ext = os.path.splitext(path)[1].lower()
+                if ext in (".png", ".jpg", ".jpeg"):
+                    name = Path(path).stem
+                    screenshot_candidates.append((path, infer_label(name), name))
+
+        for path, label, sid in screenshot_candidates:
+            is_valid = True
+            if self._concrete_validator:
+                res = self._concrete_validator.validate(path)
+                if not res.should_include:
+                    logger.info(f"Removing negative screenshot: {sid} ({res.reason})")
+                    try:
+                        os.remove(path)
+                    except Exception:
+                        pass
+                    is_valid = False
+
+            if is_valid:
+                screenshot_paths.append(path)
+                screenshot_labels.append(label)
+
+        # ???????????
         clip_path = ""
         # 💥 V7.5: 严格模态检查
         # 切片的唯一依据: 是否为非讲解型
@@ -1892,18 +1866,26 @@ class RichTextPipeline:
              logger.info(f"{unit.unit_id}: Suppressed clip for Explanation type ({k_type})")
 
         if allow_clip:
-            for req in material_requests.clip_requests:
-                if req.semantic_unit_id != unit.unit_id:
-                    continue
-                
-                for ext in [".mp4", ".webm", ".mkv"]:
-                    expected_path = os.path.join(clips_dir, f"{req.clip_id}{ext}")
-                    if os.path.exists(expected_path):
-                        clip_path = expected_path
-                        break
-                
-                if clip_path:
-                    break
+            clip_candidates = []
+            if material_requests.clip_requests:
+                for req in material_requests.clip_requests:
+                    if req.semantic_unit_id != unit.unit_id:
+                        continue
+                    for ext in [".mp4", ".webm", ".mkv"]:
+                        expected_path = os.path.join(clips_dir, f"{req.clip_id}{ext}")
+                        if os.path.exists(expected_path):
+                            clip_candidates.append(expected_path)
+                            break
+            else:
+                import glob
+                pattern = os.path.join(clips_dir, f"{unit.unit_id}*")
+                for path in sorted(glob.glob(pattern)):
+                    ext = os.path.splitext(path)[1].lower()
+                    if ext in (".mp4", ".webm", ".mkv"):
+                        clip_candidates.append(path)
+
+            if clip_candidates:
+                clip_path = clip_candidates[0]
         else:
             # 如果禁止切片但文件存在，清理之
              for req in material_requests.clip_requests:

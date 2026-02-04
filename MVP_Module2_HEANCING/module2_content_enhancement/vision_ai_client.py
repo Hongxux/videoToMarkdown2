@@ -503,6 +503,7 @@ class VisionAIClient:
         
         # HTTP 客户端 (连接池 + HTTP/2)
         self._http_client: Optional[httpx.AsyncClient] = None
+        self._client_loop = None
         
         # 并发控制
         self._concurrency_limiter = VisionAIConcurrencyLimiter()
@@ -537,7 +538,17 @@ class VisionAIClient:
         - 无。
         输出参数：
         - 函数计算/封装后的结果对象。"""
-        if self._http_client is None:
+        loop = asyncio.get_running_loop()
+        need_reset = (
+            self._http_client is None or
+            self._http_client.is_closed or
+            self._client_loop is None or
+            self._client_loop.is_closed() or
+            self._client_loop != loop
+        )
+        if need_reset:
+            if self._http_client and not self._http_client.is_closed:
+                await self._safe_close_client()
             self._http_client = httpx.AsyncClient(
                 limits=httpx.Limits(
                     max_connections=20,
@@ -547,8 +558,25 @@ class VisionAIClient:
                 timeout=httpx.Timeout(self.config.timeout, connect=10.0),
                 http2=True
             )
+            self._client_loop = loop
             logger.info("VisionAI HTTP client initialized: pool=20, http2=True")
         return self._http_client
+
+    async def _safe_close_client(self):
+        if not self._http_client:
+            return
+        if self._client_loop and self._client_loop.is_closed():
+            logger.warning("VisionAI HTTP client close skipped: event loop is closed")
+            self._http_client = None
+            self._client_loop = None
+            return
+        try:
+            await self._http_client.aclose()
+        except Exception as e:
+            logger.warning(f"VisionAI HTTP client close failed: {e}")
+        finally:
+            self._http_client = None
+            self._client_loop = None
     
     async def validate_image(
         self,
@@ -747,8 +775,7 @@ class VisionAIClient:
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self._http_client:
-            await self._http_client.aclose()
-            self._http_client = None
+            await self._safe_close_client()
 
 
 # =============================================================================

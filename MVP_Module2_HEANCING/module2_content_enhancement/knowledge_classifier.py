@@ -354,19 +354,12 @@ ID: {item['id']}
                     system_message=self.BATCH_SYSTEM_PROMPT
                 )
                 
-                # Parse JSON Array
-                try:
-                    data = json.loads(content)
-                    if isinstance(data, dict) and "items" in data:
-                        return data["items"]
-                    if isinstance(data, list):
-                        return data
-                    if "```json" in content:
-                        parsed = json.loads(content.split("```json")[1].split("```")[0])
-                        return parsed if isinstance(parsed, list) else []
-                except:
-                    logger.warning(f"Batch JSON parse failed: {content[:100]}...")
-                    return []
+                # Parse JSON Array (兼容 Markdown 包裹/尾随文本)
+                parsed_items = self._parse_batch_content(content)
+                if parsed_items:
+                    return parsed_items
+                logger.warning(f"Batch JSON parse failed: {content[:100]}...")
+                return []
                 
                 return []
             except Exception as e:
@@ -404,6 +397,57 @@ ID: {item['id']}
                 })
                 
         return final_results
+
+    def _parse_batch_content(self, content: str) -> list:
+        """
+        做什么：解析 LLM 批量返回的 JSON 列表。
+        为什么：LLM 输出可能包含代码围栏或尾随文本，直接 json.loads 失败。
+        权衡：容错解析可能忽略尾随非 JSON 信息。
+        """
+        if not content:
+            return []
+
+        text = content.strip()
+        candidates = []
+
+        # 1) 原始文本
+        candidates.append(text)
+
+        # 2) JSON 代码围栏
+        if "```json" in text:
+            parts = text.split("```json")
+            for part in parts[1:]:
+                candidate = part.split("```")[0].strip()
+                if candidate:
+                    candidates.append(candidate)
+
+        # 3) 截取最外层数组
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1 and end > start:
+            candidates.append(text[start:end + 1])
+
+        # 4) 截取最外层对象
+        start_obj = text.find("{")
+        end_obj = text.rfind("}")
+        if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
+            candidates.append(text[start_obj:end_obj + 1])
+
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict) and "items" in data:
+                    return data["items"] if isinstance(data["items"], list) else []
+                if isinstance(data, list):
+                    return data
+            except Exception:
+                continue
+
+        return []
     
     def _load_all_subtitles(self) -> list:
         """

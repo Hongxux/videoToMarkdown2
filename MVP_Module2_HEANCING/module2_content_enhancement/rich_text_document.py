@@ -277,43 +277,35 @@ class RichTextDocument:
         materials = section.materials
         
         if materials.clip_path:
-            # 优先渲染视频
+            # ??????
             clip_path = self._relative_path(materials.clip_path, assets_dir)
-            lines.append(f"**📹 过程演示**")
+            lines.append("**?? ????**")
             lines.append("")
-            lines.append(f'<video src="{clip_path}" controls width="100%"></video>')
+            lines.append(f"![[{clip_path}]]")
             lines.append("")
             
-            # 如果有截图，作为辅助关键帧图集 (video_screenshot 模式)
+            # ?????????????
             if materials.screenshot_paths:
-                if len(materials.screenshot_paths) >= 2 or str(section.knowledge_type) in ["process", "过程性知识", "过程"]:
-                     lines.append("**关键帧图集:**")
-                     lines.append("")
-                     headers = materials.screenshot_labels if materials.screenshot_labels else [f"帧{i+1}" for i in range(len(materials.screenshot_paths))]
-                     lines.append("| " + " | ".join(headers) + " |")
-                     lines.append("|" + "---|" * len(headers))
-                     imgs = [f"![]({self._relative_path(ss, assets_dir)})" for ss in materials.screenshot_paths]
-                     lines.append("| " + " | ".join(imgs) + " |")
-                     lines.append("")
+                lines.append("**???**")
+                lines.append("")
+                for i, ss in enumerate(materials.screenshot_paths):
+                    label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"?{i+1}"
+                    ss_path = self._relative_path(ss, assets_dir)
+                    lines.append(f"{label}")
+                    lines.append(f"![[{ss_path}]]")
+                    lines.append("")
             
         elif materials.screenshot_paths:
-            # 仅截图
-            if len(materials.screenshot_paths) == 1:
-                # 单张图 (screenshot 模式)
-                ss_path = self._relative_path(materials.screenshot_paths[0], assets_dir)
-                lines.append(f"![截图]({ss_path})")
+            # ???
+            lines.append("**??**")
+            lines.append("")
+            for i, ss in enumerate(materials.screenshot_paths):
+                label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"?{i+1}"
+                ss_path = self._relative_path(ss, assets_dir)
+                lines.append(f"{label}")
+                lines.append(f"![[{ss_path}]]")
                 lines.append("")
-            else:
-                 # 多张图 (图集模式)
-                 lines.append("**截图图集:**")
-                 lines.append("")
-                 headers = materials.screenshot_labels if materials.screenshot_labels else [f"帧{i+1}" for i in range(len(materials.screenshot_paths))]
-                 lines.append("| " + " | ".join(headers) + " |")
-                 lines.append("|" + "---|" * len(headers))
-                 imgs = [f"![]({self._relative_path(ss, assets_dir)})" for ss in materials.screenshot_paths]
-                 lines.append("| " + " | ".join(imgs) + " |")
-                 lines.append("")
-        
+
         return lines
     
     def _relative_path(self, abs_path: str, assets_dir: str) -> str:

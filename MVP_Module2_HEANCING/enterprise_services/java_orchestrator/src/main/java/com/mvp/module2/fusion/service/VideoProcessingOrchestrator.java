@@ -646,17 +646,24 @@ public class VideoProcessingOrchestrator {
             // 优先使用 action_units 的知识类型：做什么是避免二次分类；为什么是与语义回写一致；权衡是依赖上游回写完整性
             List<Map<String, Object>> unitActions = (List<Map<String, Object>>) u.get("action_units");
             if (unitActions != null && !unitActions.isEmpty()) {
+                // 短日志：定位 JSON -> Java 是否拿到 action_units.knowledge_type
+                Object firstKt = unitActions.get(0).get("knowledge_type");
+                logger.info("[{}] MatInputs from semantic_units: unit={}, actions={}, first_kt={}",
+                    "MaterialGen", uid, unitActions.size(), firstKt);
                 for (Map<String, Object> au : unitActions) {
                     ActionSegmentResult as = new ActionSegmentResult();
                     as.id = parseInt(au.get("id"), 0);
                     as.startSec = parseDouble(au.get("start_sec"), 0.0);
                     as.endSec = parseDouble(au.get("end_sec"), 0.0);
                     String kt = au.get("knowledge_type") != null ? au.get("knowledge_type").toString() : "";
-                    String at = au.get("action_type") != null ? au.get("action_type").toString() : "";
-                    as.actionType = !kt.isEmpty() ? kt : at;
+                    String fallback = in.knowledgeType != null ? in.knowledgeType : "";
+                    // 不再使用 action_type 兜底：做什么是避免“knowledge”误当知识类型；为什么是保证讲解型过滤生效；权衡是依赖 unit 级兜底
+                    as.actionType = !kt.isEmpty() ? kt : fallback;
                     in.actionUnits.add(as);
                 }
             } else if (cvResults.containsKey(uid)) {
+                logger.info("[{}] MatInputs fallback to CV actionSegments: unit={}, actions=0",
+                    "MaterialGen", uid);
                 // 兜底：没有 action_units 时，仍使用 CV 动作段，避免素材生成断链
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {

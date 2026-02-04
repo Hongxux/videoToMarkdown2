@@ -2,7 +2,7 @@
   "title": "video",
   "source_video": "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\video.mp4",
   "total_duration_sec": 520.3330000000001,
-  "generated_at": "2026-02-04T23:39:35.869152",
+  "generated_at": "2026-02-05T01:36:49.075275",
   "sections": [
     {
       "unit_id": "SU001",
@@ -49,8 +49,12 @@
       ],
       "materials": {
         "clip": "",
-        "screenshots": [],
-        "labels": [],
+        "screenshots": [
+          "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\screenshots\\SU003_island0.png"
+        ],
+        "labels": [
+          "stable"
+        ],
         "action_classifications": []
       },
       "layout_hint": "default"
@@ -100,8 +104,12 @@
       ],
       "materials": {
         "clip": "",
-        "screenshots": [],
-        "labels": [],
+        "screenshots": [
+          "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\screenshots\\SU006_island0.png"
+        ],
+        "labels": [
+          "stable"
+        ],
         "action_classifications": []
       },
       "layout_hint": "default"
@@ -134,8 +142,12 @@
       ],
       "materials": {
         "clip": "",
-        "screenshots": [],
-        "labels": [],
+        "screenshots": [
+          "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\screenshots\\SU008_island1.png"
+        ],
+        "labels": [
+          "stable"
+        ],
         "action_classifications": []
       },
       "layout_hint": "default"
@@ -287,8 +299,12 @@
       ],
       "materials": {
         "clip": "",
-        "screenshots": [],
-        "labels": [],
+        "screenshots": [
+          "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\screenshots\\SU017_island0.png"
+        ],
+        "labels": [
+          "stable"
+        ],
         "action_classifications": []
       },
       "layout_hint": "default"
