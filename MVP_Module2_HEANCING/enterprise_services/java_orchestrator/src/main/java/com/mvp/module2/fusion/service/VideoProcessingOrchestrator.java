@@ -149,37 +149,46 @@ public class VideoProcessingOrchestrator {
             
             // ❌ Removed: enrichUnitsWithSubtitles - Classifier now reads directly from Step 2
             
-            // 5. 🚀 STAGED PARALLEL PIPELINE: 
-            // - For Dynamic Units: CV -> Classify (Sequential)
-            // - For Static Units: Classify (Immediate Parallel)
-            updateProgress(taskId, 0.45, "执行级联并行分析 (CV -> 知识分类)...");
+            // 5. 🚀 UNIFIED PARALLEL PIPELINE (Optimized for LPT)
+            // Send ALL units to Python. Python will handle CV vs CF routing and LPT scheduling.
+            updateProgress(taskId, 0.45, "执行级联并行分析 (CV/CF 混合调度)...");
             
             Map<String, CVValidationUnitResult> cvResults = new ConcurrentHashMap<>();
             List<KnowledgeResultItem> classResults = Collections.synchronizedList(new ArrayList<>());
             List<CompletableFuture<?>> allFutures = new ArrayList<>();
 
-            // A. Separate Units
-            List<SemanticUnitInput> cvInputs = convertToCVInputs(unitsList);
-            Set<String> cvUnitIds = cvInputs.stream().map(i -> i.unitId).collect(Collectors.toSet());
+            // A. Convert ALL units to CV Inputs & Sort (Weighted LPT)
+            List<SemanticUnitInput> allInputs = convertToCVInputs(unitsList);
             
-            List<Map<String, Object>> staticUnits = unitsList.stream()
-                .filter(u -> !cvUnitIds.contains((String)u.get("unit_id")))
-                .collect(Collectors.toList());
-
-            // B. Branch 1: DYNAMIC Units (CV -> Classify)
-            if (!cvInputs.isEmpty()) {
-                List<CompletableFuture<CVBatchResult>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, cvInputs, outputDir);
+            // 🚀 Weighted LPT Scheduling (Java Side)
+            // Weight: CV(Process/Practical)=10, CF(Abstract/Explanation)=1
+            // Score = Duration * Weight
+            // Sort: Descending by Score
+            Collections.sort(allInputs, (o1, o2) -> {
+                double w1 = isCVTask(o1.knowledgeType) ? 10.0 : 1.0;
+                double w2 = isCVTask(o2.knowledgeType) ? 10.0 : 1.0;
+                double score1 = (o1.endSec - o1.startSec) * w1;
+                double score2 = (o2.endSec - o2.startSec) * w2;
+                return Double.compare(score2, score1); // Descending
+            });
+            
+            // B. Batch Validate (CV & CF mixed)
+            if (!allInputs.isEmpty()) {
+                // Java sends batches (e.g. 10 or 50 items). Python re-sorts them internally for LPT.
+                List<CompletableFuture<CVBatchResult>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir);
+                
                 if (cvFutures != null) {
                     for (CompletableFuture<CVBatchResult> cvFuture : cvFutures) {
-                        // 🔗 Chain: When CV batch finishes, immediately start Classification for that specific batch
+                        // 🔗 Chain: CV/CF -> Classify
                         CompletableFuture<Void> chainedFuture = cvFuture.thenComposeAsync(batchRes -> {
                             if (batchRes.success && batchRes.results != null) {
-                                // 1. Store CV results
+                                // 1. Store results
                                 for (CVValidationUnitResult r : batchRes.results) {
                                     cvResults.put(r.unitId, r);
                                 }
                                 
-                                // 2. Convert to classification inputs (using CV results)
+                                // 2. Classify (if needed)
+                                // Note: Even abstract units might need classification verification or text refinement
                                 List<String> batchIds = batchRes.results.stream().map(r -> r.unitId).collect(Collectors.toList());
                                 List<Map<String, Object>> batchUnits = unitsList.stream()
                                     .filter(u -> batchIds.contains((String)u.get("unit_id")))
@@ -197,21 +206,6 @@ public class VideoProcessingOrchestrator {
                         });
                         allFutures.add(chainedFuture);
                     }
-                }
-            }
-
-            // C. Branch 2: STATIC Units (Immediate Classify)
-            if (!staticUnits.isEmpty()) {
-                List<ClassificationInput> staticInputs = convertToClassInputs(staticUnits, cvResults);
-                int batchSize = 5;
-                for (int i = 0; i < staticInputs.size(); i += batchSize) {
-                    List<ClassificationInput> batch = staticInputs.subList(i, Math.min(i + batchSize, staticInputs.size()));
-                    CompletableFuture<ClassificationBatchResult> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, batch, s1.step2JsonPath);
-                    allFutures.add(classFuture.thenAccept(batchRes -> {
-                        if (batchRes.success && batchRes.results != null) {
-                            classResults.addAll(batchRes.results);
-                        }
-                    }));
                 }
             }
 
@@ -286,6 +280,14 @@ public class VideoProcessingOrchestrator {
             in.knowledgeType = (String) u.getOrDefault("knowledge_type", "");
             return in;
         }).collect(Collectors.toList());
+    }
+    
+    private boolean isCVTask(String kType) {
+        if (kType == null) return false;
+        String t = kType.toLowerCase();
+        // CV Types: Process, Practical (heavy CV)
+        // CF Types: Explanation, Abstract, Configuration, Deduction (light CF)
+        return t.contains("process") || t.contains("practical") || t.contains("过程") || t.contains("实操");
     }
     
     private List<ClassificationInput> convertToClassInputs(List<Map<String, Object>> units, Map<String, CVValidationUnitResult> cvResults) {

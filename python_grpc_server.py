@@ -866,7 +866,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 sentence_timestamps_path=sentence_timestamps_path
             )
             classifier = KnowledgeClassifier()
-            calculator = ScreenshotRangeCalculator(video_path)
+            # 🚀 Fix: Ensure video_duration is a float
+            video_duration = float(request.video_duration) if hasattr(request, 'video_duration') and request.video_duration else 0.0
+            calculator = ScreenshotRangeCalculator(video_duration)
             selector = self.resources.get_screenshot_selector(video_path)
             
             # 转换 gRPC units 为 SemanticUnit 对象
