@@ -95,7 +95,9 @@ public class CVValidationOrchestrator {
             List<SemanticUnitInput> units,
             String outputDir) {
         
-        List<CompletableFuture<CVBatchResult>> futures = validateBatchesAsync(taskId, videoPath, units, outputDir);
+        List<CompletableFuture<Boolean>> futures = validateBatchesAsync(taskId, videoPath, units, outputDir, unitResult -> {
+            resultMap.put(unitResult.unitId, unitResult);
+        });
         if (futures == null) return Collections.emptyMap();
 
         Map<String, CVValidationUnitResult> resultMap = new ConcurrentHashMap<>();
@@ -106,14 +108,7 @@ public class CVValidationOrchestrator {
             
             allFutures.get(BATCH_TIMEOUT_SEC * Math.max(1, futures.size()), TimeUnit.SECONDS);
             
-            for (CompletableFuture<CVBatchResult> future : futures) {
-                CVBatchResult batchResult = future.get();
-                if (batchResult.success && batchResult.results != null) {
-                    for (CVValidationUnitResult unitResult : batchResult.results) {
-                        resultMap.put(unitResult.unitId, unitResult);
-                    }
-                }
-            }
+            // Results are already populated in resultMap via the consumer
         } catch (Exception e) {
             logger.error("[{}] CV Validation failed: {}", taskId, e.getMessage());
         } finally {
@@ -136,9 +131,11 @@ public class CVValidationOrchestrator {
 
     /**
      * 并行启动批次，返回 Future 列表以供流水线编排
+     * 🚀 增强: 支持流式结果回调
      */
-    public List<CompletableFuture<CVBatchResult>> validateBatchesAsync(
-            String taskId, String videoPath, List<SemanticUnitInput> units, String outputDir) {
+    public List<CompletableFuture<Boolean>> validateBatchesAsync(
+            String taskId, String videoPath, List<SemanticUnitInput> units, 
+            String outputDir, java.util.function.Consumer<CVValidationUnitResult> resultConsumer) {
         
         if (units == null || units.isEmpty()) return null;
 
@@ -151,27 +148,24 @@ public class CVValidationOrchestrator {
         int batchSize = Math.max(1, DEFAULT_BATCH_SIZE * adaptiveLimit / 2);
         List<List<SemanticUnitInput>> batches = partition(units, batchSize);
         
-        List<CompletableFuture<CVBatchResult>> futures = new ArrayList<>();
+        List<CompletableFuture<Boolean>> futures = new ArrayList<>();
         Semaphore semaphore = adaptiveOrchestrator.getComputeSemaphore();
         
         for (int i = 0; i < batches.size(); i++) {
             final int batchIndex = i;
             final List<SemanticUnitInput> batch = batches.get(i);
             
-            CompletableFuture<CVBatchResult> future = CompletableFuture.supplyAsync(() -> {
+            CompletableFuture<Boolean> future = CompletableFuture.supplyAsync(() -> {
                 try {
                     semaphore.acquire();
                     try {
-                        return executeWithResilience(taskId, videoPath, batch, batchIndex);
+                        return executeWithResilienceStreaming(taskId, videoPath, batch, batchIndex, resultConsumer);
                     } finally {
                         semaphore.release();
                     }
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    CVBatchResult failResult = new CVBatchResult();
-                    failResult.success = false;
-                    failResult.errorMsg = "Interrupted";
-                    return failResult;
+                    return false;
                 }
             }, executor);
             futures.add(future);
@@ -202,32 +196,29 @@ public class CVValidationOrchestrator {
     }
     
     /**
-     * 使用熔断器和重试执行单批次验证
+     * 使用熔断器和重试执行单批次流式验证
      */
-    private CVBatchResult executeWithResilience(
+    private boolean executeWithResilienceStreaming(
             String taskId, String videoPath, 
-            List<SemanticUnitInput> batch, int batchIndex) {
+            List<SemanticUnitInput> batch, int batchIndex,
+            java.util.function.Consumer<CVValidationUnitResult> resultConsumer) {
         
         try {
-            // 包装调用：熔断器 -> 重试 -> 实际调用
             return circuitBreaker.executeSupplier(
                 Retry.decorateSupplier(retry, () -> {
                     try {
-                        return grpcClient.validateCVBatchAsync(
-                            taskId, videoPath, batch, BATCH_TIMEOUT_SEC
+                        return grpcClient.validateCVBatchStreaming(
+                            taskId, videoPath, batch, BATCH_TIMEOUT_SEC, resultConsumer
                         ).get(BATCH_TIMEOUT_SEC, TimeUnit.SECONDS);
                     } catch (Exception e) {
-                        throw new RuntimeException("gRPC call failed", e);
+                        throw new RuntimeException("gRPC streaming call failed", e);
                     }
                 })
             );
         } catch (Exception e) {
-            logger.error("[{}] Batch {} failed after retries: {}", 
+            logger.error("[{}] Streaming Batch {} failed after retries: {}", 
                 taskId, batchIndex, e.getMessage());
-            CVBatchResult failResult = new CVBatchResult();
-            failResult.success = false;
-            failResult.errorMsg = e.getMessage();
-            return failResult;
+            return false;
         }
     }
     

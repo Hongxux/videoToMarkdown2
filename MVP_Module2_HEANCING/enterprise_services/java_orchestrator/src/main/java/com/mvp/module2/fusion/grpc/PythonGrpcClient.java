@@ -414,13 +414,24 @@ public class PythonGrpcClient {
      * @param timeoutSec 超时秒数
      * @return CompletableFuture<CVBatchResult>
      */
-    public CompletableFuture<CVBatchResult> validateCVBatchAsync(
-            String taskId, String videoPath, List<SemanticUnitInput> units, int timeoutSec) {
+    /**
+     * 🚀 批量CV验证 (流式返回)
+     * 
+     * @param taskId 任务ID
+     * @param videoPath 视频路径
+     * @param units 语义单元列表
+     * @param timeoutSec 超时秒数
+     * @param resultConsumer 结果回调 (每完成一个 Unit 回调一次)
+     * @return CompletableFuture<Boolean> 任务是否启动成功
+     */
+    public CompletableFuture<Boolean> validateCVBatchStreaming(
+            String taskId, String videoPath, List<SemanticUnitInput> units, int timeoutSec, 
+            java.util.function.Consumer<CVValidationUnitResult> resultConsumer) {
+        
         return CompletableFuture.supplyAsync(() -> {
             try {
-                logger.info("[{}] ValidateCVBatch: {} units", taskId, units.size());
+                logger.info("[{}] ValidateCVBatch Streaming: {} units", taskId, units.size());
                 
-                // 构建请求
                 CVValidationRequest.Builder requestBuilder = CVValidationRequest.newBuilder()
                     .setTaskId(taskId)
                     .setVideoPath(videoPath);
@@ -435,62 +446,65 @@ public class PythonGrpcClient {
                             .build()
                     );
                 }
-                
-                // 调用gRPC
-                CVValidationResponse response = blockingStub
+
+                // 🚀 调用流式 gRPC (Blocking Stub 返回 Iterator)
+                java.util.Iterator<CVValidationResponse> responseIterator = blockingStub
                     .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
                     .validateCVBatch(requestBuilder.build());
-                
-                // 转换结果
-                CVBatchResult result = new CVBatchResult();
-                result.success = response.getSuccess();
-                result.errorMsg = response.getErrorMsg();
-                
-                for (com.mvp.videoprocessing.grpc.CVValidationResult pbResult : response.getResultsList()) {
-                    CVValidationUnitResult unitResult = new CVValidationUnitResult();
-                    unitResult.unitId = pbResult.getUnitId();
-                    
-                    // 转换 stable islands
-                    for (com.mvp.videoprocessing.grpc.StableIsland si : pbResult.getStableIslandsList()) {
-                        StableIslandResult islandResult = new StableIslandResult();
-                        islandResult.startSec = si.getStartSec();
-                        islandResult.endSec = si.getEndSec();
-                        islandResult.midSec = si.getMidSec();
-                        islandResult.durationSec = si.getDurationSec();
-                        unitResult.stableIslands.add(islandResult);
+
+                // 🚀 迭代流式结果
+                while (responseIterator.hasNext()) {
+                    CVValidationResponse response = responseIterator.next();
+                    if (!response.getSuccess()) {
+                        logger.error("[{}] Streaming response error: {}", taskId, response.getErrorMsg());
+                        continue;
                     }
-                    
-                    // 转换 action segments
-                    for (com.mvp.videoprocessing.grpc.ActionSegment as : pbResult.getActionSegmentsList()) {
-                        ActionSegmentResult segResult = new ActionSegmentResult();
-                        segResult.startSec = as.getStartSec();
-                        segResult.endSec = as.getEndSec();
-                        segResult.actionType = as.getActionType();
+
+                    for (com.mvp.videoprocessing.grpc.CVValidationResult pbResult : response.getResultsList()) {
+                        CVValidationUnitResult unitResult = new CVValidationUnitResult();
+                        unitResult.unitId = pbResult.getUnitId();
                         
-                        for (com.mvp.videoprocessing.grpc.StableIsland internalSi : as.getInternalStableIslandsList()) {
-                            StableIslandResult internalIsland = new StableIslandResult();
-                            internalIsland.startSec = internalSi.getStartSec();
-                            internalIsland.endSec = internalSi.getEndSec();
-                            internalIsland.midSec = internalSi.getMidSec();
-                            internalIsland.durationSec = internalSi.getDurationSec();
-                            segResult.internalStableIslands.add(internalIsland);
+                        // 转换 stable islands
+                        for (com.mvp.videoprocessing.grpc.StableIsland si : pbResult.getStableIslandsList()) {
+                            StableIslandResult islandResult = new StableIslandResult();
+                            islandResult.startSec = si.getStartSec();
+                            islandResult.endSec = si.getEndSec();
+                            islandResult.midSec = si.getMidSec();
+                            islandResult.durationSec = si.getDurationSec();
+                            unitResult.stableIslands.add(islandResult);
                         }
                         
-                        unitResult.actionSegments.add(segResult);
+                        // 转换 action segments
+                        for (com.mvp.videoprocessing.grpc.ActionSegment as : pbResult.getActionSegmentsList()) {
+                            ActionSegmentResult segResult = new ActionSegmentResult();
+                            segResult.startSec = as.getStartSec();
+                            segResult.endSec = as.getEndSec();
+                            segResult.actionType = as.getActionType();
+                            
+                            for (com.mvp.videoprocessing.grpc.StableIsland internalSi : as.getInternalStableIslandsList()) {
+                                StableIslandResult internalIsland = new StableIslandResult();
+                                internalIsland.startSec = internalSi.getStartSec();
+                                internalIsland.endSec = internalSi.getEndSec();
+                                internalIsland.midSec = internalSi.getMidSec();
+                                internalIsland.durationSec = internalSi.getDurationSec();
+                                segResult.internalStableIslands.add(internalIsland);
+                            }
+                            unitResult.actionSegments.add(segResult);
+                        }
+                        
+                        // 🚀 立即通知 Java
+                        if (resultConsumer != null) {
+                            resultConsumer.accept(unitResult);
+                        }
                     }
-                    
-                    result.results.add(unitResult);
                 }
                 
-                logger.info("[{}] ValidateCVBatch completed: {} results", taskId, result.results.size());
-                return result;
+                logger.info("[{}] ValidateCVBatch Streaming completed", taskId);
+                return true;
                 
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] ValidateCVBatch failed: {}", taskId, e.getStatus());
-                CVBatchResult result = new CVBatchResult();
-                result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
-                return result;
+            } catch (Exception e) {
+                logger.error("[{}] ValidateCVBatch Streaming failed: {}", taskId, e.getMessage());
+                return false;
             }
         });
     }

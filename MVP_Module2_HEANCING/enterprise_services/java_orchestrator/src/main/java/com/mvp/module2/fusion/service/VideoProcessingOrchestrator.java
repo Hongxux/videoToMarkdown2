@@ -155,7 +155,8 @@ public class VideoProcessingOrchestrator {
             
             Map<String, CVValidationUnitResult> cvResults = new ConcurrentHashMap<>();
             List<KnowledgeResultItem> classResults = Collections.synchronizedList(new ArrayList<>());
-            List<CompletableFuture<?>> allFutures = new ArrayList<>();
+            List<CompletableFuture<?>> allFutures = Collections.synchronizedList(new ArrayList<>());
+            List<CompletableFuture<Boolean>> cvFuturesList = new ArrayList<>();
 
             // A. Convert ALL units to CV Inputs & Sort (Weighted LPT)
             List<SemanticUnitInput> allInputs = convertToCVInputs(unitsList);
@@ -172,46 +173,54 @@ public class VideoProcessingOrchestrator {
                 return Double.compare(score2, score1); // Descending
             });
             
-            // B. Batch Validate (CV & CF mixed)
+            // B. Batch Validate (CV & CF mixed) with Streaming Callbacks
             if (!allInputs.isEmpty()) {
-                // Java sends batches (e.g. 10 or 50 items). Python re-sorts them internally for LPT.
-                List<CompletableFuture<CVBatchResult>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir);
+                List<CompletableFuture<Boolean>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir, unitResult -> {
+                    // 🚀 Callback: Triggered immediately when Python finishes a single unit
+                    cvResults.put(unitResult.unitId, unitResult);
+                    
+                    // 🔗 Immediate Chain: Individual unit classification
+                    List<Map<String, Object>> unitToClassify = unitsList.stream()
+                        .filter(u -> unitResult.unitId.equals((String)u.get("unit_id")))
+                        .collect(Collectors.toList());
+                    
+                    if (!unitToClassify.isEmpty()) {
+                        List<ClassificationInput> classInputs = convertToClassInputs(unitToClassify, cvResults);
+                        
+                        CompletableFuture<Void> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, s1.step2JsonPath)
+                            .thenAccept(classBatchRes -> {
+                                if (classBatchRes.success && classBatchRes.results != null) {
+                                    classResults.addAll(classBatchRes.results);
+                                    logger.info("[{}] ⚡ Incremental classification done for: {}", taskId, unitResult.unitId);
+                                }
+                            });
+                        
+                        // Add to global watch list (using a dedicated collection to avoid CME)
+                        allFutures.add(classFuture);
+                    }
+                });
                 
                 if (cvFutures != null) {
-                    for (CompletableFuture<CVBatchResult> cvFuture : cvFutures) {
-                        // 🔗 Chain: CV/CF -> Classify
-                        CompletableFuture<Void> chainedFuture = cvFuture.thenComposeAsync(batchRes -> {
-                            if (batchRes.success && batchRes.results != null) {
-                                // 1. Store results
-                                for (CVValidationUnitResult r : batchRes.results) {
-                                    cvResults.put(r.unitId, r);
-                                }
-                                
-                                // 2. Classify (if needed)
-                                // Note: Even abstract units might need classification verification or text refinement
-                                List<String> batchIds = batchRes.results.stream().map(r -> r.unitId).collect(Collectors.toList());
-                                List<Map<String, Object>> batchUnits = unitsList.stream()
-                                    .filter(u -> batchIds.contains((String)u.get("unit_id")))
-                                    .collect(Collectors.toList());
-                                
-                                List<ClassificationInput> classInputs = convertToClassInputs(batchUnits, cvResults);
-                                return knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, s1.step2JsonPath)
-                                    .thenAccept(classBatchRes -> {
-                                        if (classBatchRes.success && classBatchRes.results != null) {
-                                            classResults.addAll(classBatchRes.results);
-                                        }
-                                    });
-                            }
-                            return CompletableFuture.completedFuture(null);
-                        });
-                        allFutures.add(chainedFuture);
+                    for (CompletableFuture<Boolean> cvFuture : cvFutures) {
+                        cvFuturesList.add(cvFuture);
                     }
                 }
             }
 
-            // D. Wait for everything
-            if (!allFutures.isEmpty()) {
-                CompletableFuture.allOf(allFutures.toArray(new CompletableFuture[0])).join();
+            // D. Wait for CV/CF streaming to complete (this triggers all callbacks)
+            if (!cvFuturesList.isEmpty()) {
+                CompletableFuture.allOf(cvFuturesList.toArray(new CompletableFuture[0])).join();
+            }
+
+            // E. Wait for all triggered Classification tasks to finish
+            int pendingCount = 0;
+            while (true) {
+                CompletableFuture<?>[] pending;
+                synchronized(allFutures) {
+                    pending = allFutures.stream().filter(f -> !f.isDone()).toArray(CompletableFuture[]::new);
+                }
+                if (pending.length == 0) break;
+                CompletableFuture.allOf(pending).join();
             }
             
             logger.info("✅ Staged Analysis done. CV: {}, Class: {}", cvResults.size(), classResults.size());

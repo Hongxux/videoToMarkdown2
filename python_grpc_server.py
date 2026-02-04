@@ -1631,109 +1631,85 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             logger.info(f"[{task_id}] Submitted {len(all_futures)} tasks to ProcessPool")
             
-            # 🚀 Phase 3: 并行等待所有任务完成
+            # 🚀 Phase 3: 并行等待并流式返回结果
             if all_futures:
-                all_results = await asyncio.gather(
-                    *[f[2] for f in all_futures], 
-                    return_exceptions=True
-                )
+                logger.info(f"[{task_id}] Entering streaming response phase (total {len(all_futures)} tasks)")
                 
-                # 分类结果
-                for i, (task_type, unit_id, _) in enumerate(all_futures):
-                    result = all_results[i]
-                    if task_type == "cv":
-                        results_data.append(result)
-                    else:  # cf
-                        cf_results_data.append(result)
+                # 包装任务以携带元数据 (unit_id, task_type)
+                async def wrap_task(fut, t_type, uid):
+                    try:
+                        res = await fut
+                        if isinstance(res, dict):
+                            res['unit_id'] = uid  # 确保 unit_id 存在
+                        return t_type, uid, res
+                    except Exception as e:
+                        logger.error(f"Task failed for {uid} ({t_type}): {e}")
+                        return t_type, uid, e
+
+                wrapped_tasks = [wrap_task(f[2], f[0], f[1]) for f in all_futures]
+                
+                for completed_coro in asyncio.as_completed(wrapped_tasks):
+                    task_type, unit_id, res = await completed_coro
+                    
+                    if isinstance(res, Exception):
+                        continue
+                    
+                    if not isinstance(res, dict): continue
+                    
+                    # 1. 构建 StableIslands
+                    pb_islands = []
+                    for si in res.get("stable_islands", []):
+                        if isinstance(si, dict):
+                            pb_islands.append(video_processing_pb2.StableIsland(
+                                start_sec=float(si.get("start_sec", 0.0)),
+                                end_sec=float(si.get("end_sec", 0.0)),
+                                mid_sec=float(si.get("mid_sec", 0.0)),
+                                duration_sec=float(si.get("duration_sec", 0.0))
+                            ))
+                    
+                    # 2. 构建 ActionSegments
+                    pb_actions = []
+                    for act in res.get("action_segments", []):
+                        if isinstance(act, dict):
+                            internal_islands = []
+                            for Isi in act.get("internal_stable_islands", []):
+                                internal_islands.append(video_processing_pb2.StableIsland(
+                                    start_sec=float(Isi.get("start_sec", 0.0)),
+                                    end_sec=float(Isi.get("end_sec", 0.0)),
+                                    mid_sec=float(Isi.get("mid_sec", 0.0)),
+                                    duration_sec=float(Isi.get("duration_sec", 0.0))
+                                ))
+                            
+                            pb_actions.append(video_processing_pb2.ActionSegment(
+                                start_sec=float(act.get("start_sec", 0.0)),
+                                end_sec=float(act.get("end_sec", 0.0)),
+                                action_type=str(act.get("action_type", "")),
+                                internal_stable_islands=internal_islands
+                            ))
+                    
+                    # 3. 组装结果并流式返回
+                    pb_result = video_processing_pb2.CVValidationResult(
+                        unit_id=unit_id,
+                        stable_islands=pb_islands,
+                        action_segments=pb_actions
+                    )
+                    
+                    yield video_processing_pb2.CVValidationResponse(
+                        success=True,
+                        results=[pb_result]
+                    )
             
             # Memory Guard
-            del shm_map
-            del coarse_shm_map
+            if 'shm_map' in locals(): del shm_map
+            if 'coarse_shm_map' in locals(): del coarse_shm_map
             gc.collect()
             
-            # 4. 构建响应
-            pb_results = []
-            for res in results_data:
-                if isinstance(res, Exception):
-                    logger.error(f"CV worker exception: {res}")
-                    continue
-                if not isinstance(res, dict): continue
-                
-                # Result Construction
-                pb_islands = []
-                for si in res.get("stable_islands", []):
-                    if isinstance(si, dict):
-                        pb_islands.append(video_processing_pb2.StableIsland(
-                            start_sec=float(si.get("start_sec", 0.0)),
-                            end_sec=float(si.get("end_sec", 0.0)),
-                            mid_sec=float(si.get("mid_sec", 0.0)),
-                            duration_sec=float(si.get("duration_sec", 0.0))
-                        ))
-                
-                pb_actions = []
-                for act in res.get("action_segments", []):
-                    if isinstance(act, dict):
-                        internal_islands = []
-                        for Isi in act.get("internal_stable_islands", []):
-                            internal_islands.append(video_processing_pb2.StableIsland(
-                                start_sec=float(Isi.get("start_sec", 0.0)),
-                                end_sec=float(Isi.get("end_sec", 0.0)),
-                                mid_sec=float(Isi.get("mid_sec", 0.0)),
-                                duration_sec=float(Isi.get("duration_sec", 0.0))
-                            ))
-                        
-                        pb_actions.append(video_processing_pb2.ActionSegment(
-                            start_sec=float(act.get("start_sec", 0.0)),
-                            end_sec=float(act.get("end_sec", 0.0)),
-                            action_type=str(act.get("action_type", "")),
-                            internal_stable_islands=internal_islands
-                        ))
-                
-                pb_results.append(video_processing_pb2.CVValidationResult(
-                    unit_id=str(res.get("unit_id", "")),
-                    stable_islands=pb_islands,
-                    action_segments=pb_actions
-                ))
-            
-            # 🚀 处理先粗后细结果
-            for cf_result in cf_results_data:
-                if isinstance(cf_result, Exception):
-                    logger.error(f"Coarse-Fine task exception: {cf_result}")
-                    continue
-                if not isinstance(cf_result, dict):
-                    continue
-                
-                pb_islands = []
-                for ss in cf_result.get("screenshots", []):
-                    ts = float(ss.get("timestamp_sec", 0))
-                    island_start = float(ss.get("island_start", ts - 0.5))
-                    island_end = float(ss.get("island_end", ts + 0.5))
-                    
-                    pb_islands.append(video_processing_pb2.StableIsland(
-                        start_sec=island_start,
-                        end_sec=island_end,
-                        mid_sec=ts,
-                        duration_sec=island_end - island_start
-                    ))
-                
-                pb_results.append(video_processing_pb2.CVValidationResult(
-                    unit_id=str(cf_result.get("unit_id", "")),
-                    stable_islands=pb_islands,
-                    action_segments=[]
-                ))
-            
-            logger.info(f"[{task_id}] All tasks completed. Total Results: {len(pb_results)} (CV={len(results_data)}, CF={len(cf_results_data)})")
-            
-            return video_processing_pb2.CVValidationResponse(
-                success=True,
-                results=pb_results,
-                error_msg=""
-            )
+            logger.info(f"[{task_id}] ValidateCVBatch Streaming Complete")
             
         except Exception as e:
             logger.error(f"[{task_id}] ValidateCVBatch Failed: {e}")
             logger.error(traceback.format_exc())
-            return video_processing_pb2.CVValidationResponse(
+            yield video_processing_pb2.CVValidationResponse(
                 success=False,
                 results=[],
                 error_msg=str(e)
