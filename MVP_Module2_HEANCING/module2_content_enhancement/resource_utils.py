@@ -1,10 +1,7 @@
 import os
 import psutil
-import logging
-import asyncio
 from typing import Dict, Any
 
-logger = logging.getLogger(__name__)
 
 class ResourceOrchestrator:
     """
@@ -24,35 +21,6 @@ class ResourceOrchestrator:
         }
 
     @staticmethod
-    def get_adaptive_concurrency(base_multiplier: float = 1.0, cap: int = 16) -> int:
-        """
-        根据实时内存状态建议并发数。
-        可用内存越充裕，并发数越高。
-        """
-        status = ResourceOrchestrator.get_system_status()
-        available_gb = status["available_gb"]
-        percent = status["percent"]
-        cpu_count = status["cpu_count"]
-
-        # 1. 极致保障模式 (可用内存极其受限或使用率 > 90%)
-        if available_gb < 2.0 or percent > 90:
-            logger.warning(f"🚨 [OOM Risk]: Available RAM {available_gb:.1f}GB ({percent}%). Enforcing minimal concurrency (1).")
-            return 1
-            
-        # 2. 保守稳态模式 (可用内存 2-6GB 或使用率 75-90%)
-        if available_gb < 6.0 or percent > 75:
-            logger.info(f"⚖️ [Resource Constrained]: Available RAM {available_gb:.1f}GB. Limiting concurrency.")
-            return min(2, cpu_count)
-
-        # 3. 正常性能模式
-        # 并发建议 = CPU * 1.5 * (可用GB/8GB)
-        suggested = int(cpu_count * base_multiplier * min(2.0, available_gb / 8.0))
-        final_concurrency = max(2, min(suggested, cap))
-        
-        logger.info(f"🚀 [Performance Advisory]: Suggested concurrency {final_concurrency} (RAM {percent}%, {available_gb:.1f}GB free)")
-        return final_concurrency
-
-    @staticmethod
     def get_adaptive_cache_size(base_size: int = 50, per_gb_increment: int = 25) -> int:
         """
         根据可用内存调整缓存大小。
@@ -64,24 +32,3 @@ class ResourceOrchestrator:
         increment = int(available_gb * per_gb_increment)
         return min(base_size + increment, 1000)
 
-class AdaptiveSemaphore:
-    """
-    带自适应能力的信号量。
-    在每次请求进入时可选重新评估系统压力。
-    """
-    def __init__(self, base_cap: int = 4):
-        self.base_cap = base_cap
-        self._sem = asyncio.Semaphore(base_cap)
-        self._current_limit = base_cap
-
-    async def __aenter__(self):
-        # 动态调整逻辑可以更复杂，目前先静态初始化，支持未来扩展
-        await self._sem.acquire()
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        self._sem.release()
-
-    @property
-    def current_limit(self):
-        return self._current_limit

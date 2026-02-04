@@ -32,7 +32,7 @@ from enum import Enum
 from collections import OrderedDict
 import time
 from .resource_manager import get_resource_manager
-from .fast_metrics import fast_ssim, fast_diff_ratio, fast_mse
+from .fast_metrics import fast_ssim, fast_diff_ratio
 
 logger = logging.getLogger(__name__)
 

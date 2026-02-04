@@ -4,23 +4,10 @@ Memory optimized: Uses float32 to reduce memory footprint.
 """
 
 import numpy as np
-import logging
-
-logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Vectorized CV Metrics (Pure Numpy, No Loops)
 # =============================================================================
-
-def fast_mse(arr1: np.ndarray, arr2: np.ndarray) -> float:
-    """
-    Vectorized Mean Squared Error
-    memory: casts to float32 to save memory (vs default float64)
-    """
-    # 转换为 float32 避免 float64 的双倍内存开销
-    diff = arr1.astype(np.float32) - arr2.astype(np.float32)
-    return float(np.mean(diff * diff))
-
 
 def fast_ssim(arr1: np.ndarray, arr2: np.ndarray, c1=6.5025, c2=58.5225) -> float:
     """
