@@ -9,6 +9,10 @@ import numpy as np
 # Vectorized CV Metrics (Pure Numpy, No Loops)
 # =============================================================================
 
+def fast_mse(arr1: np.ndarray, arr2: np.ndarray) -> float:
+    diff = arr1.astype(np.float32) - arr2.astype(np.float32)
+    return float(np.mean(diff * diff))
+
 def fast_ssim(arr1: np.ndarray, arr2: np.ndarray, c1=6.5025, c2=58.5225) -> float:
     """
     Vectorized SSIM (Simplified)

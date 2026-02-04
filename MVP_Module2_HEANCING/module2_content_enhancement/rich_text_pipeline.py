@@ -1882,33 +1882,3 @@ class RichTextPipeline:
 # =============================================================================
 # CLI 入口
 # =============================================================================
-
-async def main():
-    """命令行测试入口"""
-    import sys
-    
-    # 测试数据路径
-    test_dir = "tests/test_data/video_01"
-    video_path = "d:/videoToMarkdownTest2/find_alg/video_01/downloads/video.mp4"
-    
-    pipeline = RichTextPipeline(
-        video_path=video_path,
-        step2_path=os.path.join(test_dir, "step2_correction_output.json"),
-        step6_path=os.path.join(test_dir, "step6_merge_cross_output.json"),
-        output_dir=os.path.join(test_dir, "rich_text_output")
-    )
-    
-    doc = await pipeline.run(title="顺序查找与平均查找长度")
-    
-    # 导出
-    doc.to_markdown(os.path.join(test_dir, "rich_text_output", "result.md"))
-    doc.to_json(os.path.join(test_dir, "rich_text_output", "result.json"))
-    
-    print(f"\n✅ Generated {len(doc.sections)} sections")
-    print(f"   Markdown: {test_dir}/rich_text_output/result.md")
-    print(f"   JSON: {test_dir}/rich_text_output/result.json")
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())

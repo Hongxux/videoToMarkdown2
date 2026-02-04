@@ -270,6 +270,3 @@ class TestValidateInputConsistency:
         assert report["subtitle_count"] == 3
         assert report["segment_count"] == 2
 
-
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])

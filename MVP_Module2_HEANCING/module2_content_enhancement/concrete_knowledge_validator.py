@@ -716,37 +716,3 @@ class ConcreteKnowledgeValidator:
 # ==============================================================================
 # Test Entry
 # ==============================================================================
-
-def test_validator():
-    """测试验证器"""
-    import sys
-    
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    
-    test_images = [
-        "d:/videoToMarkdownTest2/MVP_Module2_HEANCING/tests/test_data/video_01/rich_text_output/assets/SU001_action_1_head.png",
-        "d:/videoToMarkdownTest2/MVP_Module2_HEANCING/tests/test_data/video_01/rich_text_output/assets/SU002_action_1_head.png",
-    ]
-    
-    validator = ConcreteKnowledgeValidator()
-    
-    print("=" * 80)
-    print("Concrete Knowledge Validator Test")
-    print("=" * 80)
-    
-    for img_path in test_images:
-        if os.path.exists(img_path):
-            print(f"\nTesting: {Path(img_path).name}")
-            result = validator.validate(img_path)
-            print(f"  Has concrete: {result.has_concrete}")
-            print(f"  Has formula: {result.has_formula}")
-            print(f"  Confidence: {result.confidence:.1%}")
-            print(f"  Type: {result.concrete_type}")
-            print(f"  Should include: {result.should_include}")
-            print(f"  Reason: {result.reason}")
-        else:
-            print(f"\nSkipped (not found): {img_path}")
-
-
-if __name__ == "__main__":
-    test_validator()
