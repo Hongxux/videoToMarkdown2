@@ -70,3 +70,14 @@
 - 预防方案（测试/监控/校验/回滚）：为语义单元文件增加结构校验；写回后记录条目数量。
 - 相关文件/接口：python_grpc_server.py
 - 复盘要点：跨阶段文件格式必须显式兼容或统一规范。
+
+## 2026-02-04 素材生成复用 action_units 知识类型
+- 日期：2026-02-04
+- 现象与影响范围：素材生成阶段与语义回写知识类型不一致，导致 clip 生成与讲解型标注冲突。
+- 触发条件：MaterialGenerationInput 仅携带 CV actionSegments，缺少分类后的 knowledge_type。
+- 根因定位：Java 侧未将 semantic_units.action_units 的知识类型带入素材生成请求。
+- 修复措施：优先使用 semantic_units 的 action_units 构建素材生成输入，缺失时回退到 CV 动作段。
+- 验证方式：对比同一单元 action_units 的 knowledge_type 与 clip 生成结果是否一致。
+- 预防方案（测试/监控/校验/回滚）：在素材生成前校验 action_units 知识类型是否为空；必要时记录告警。
+- 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
+- 复盘要点：跨阶段知识类型应单点来源，避免 CV 动作类型被误当作知识类型。

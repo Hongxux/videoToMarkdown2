@@ -643,13 +643,30 @@ public class VideoProcessingOrchestrator {
             in.knowledgeType = (String) u.getOrDefault("knowledge_type", "");
             in.fullText = (String) u.getOrDefault("full_text", u.getOrDefault("text", ""));
             
-            // 🚀 Add CV Action Units and Stable Islands
-            if (cvResults.containsKey(uid)) {
+            // 优先使用 action_units 的知识类型：做什么是避免二次分类；为什么是与语义回写一致；权衡是依赖上游回写完整性
+            List<Map<String, Object>> unitActions = (List<Map<String, Object>>) u.get("action_units");
+            if (unitActions != null && !unitActions.isEmpty()) {
+                for (Map<String, Object> au : unitActions) {
+                    ActionSegmentResult as = new ActionSegmentResult();
+                    as.id = parseInt(au.get("id"), 0);
+                    as.startSec = parseDouble(au.get("start_sec"), 0.0);
+                    as.endSec = parseDouble(au.get("end_sec"), 0.0);
+                    String kt = au.get("knowledge_type") != null ? au.get("knowledge_type").toString() : "";
+                    String at = au.get("action_type") != null ? au.get("action_type").toString() : "";
+                    as.actionType = !kt.isEmpty() ? kt : at;
+                    in.actionUnits.add(as);
+                }
+            } else if (cvResults.containsKey(uid)) {
+                // 兜底：没有 action_units 时，仍使用 CV 动作段，避免素材生成断链
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {
                     in.actionUnits.addAll(cvRes.actionSegments);
                 }
-                // 🚀 关键修复: 传递稳定岛数据
+            }
+
+            // 关键修复: 传递稳定岛数据（用于截图范围）
+            if (cvResults.containsKey(uid)) {
+                CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.stableIslands != null) {
                     in.stableIslands.addAll(cvRes.stableIslands);
                 }
@@ -714,6 +731,16 @@ public class VideoProcessingOrchestrator {
         if (val instanceof Number) return ((Number) val).doubleValue();
         try {
             return Double.parseDouble(val.toString());
+        } catch (Exception e) {
+            return defaultVal;
+        }
+    }
+
+    private int parseInt(Object val, int defaultVal) {
+        if (val == null) return defaultVal;
+        if (val instanceof Number) return ((Number) val).intValue();
+        try {
+            return Integer.parseInt(val.toString());
         } catch (Exception e) {
             return defaultVal;
         }

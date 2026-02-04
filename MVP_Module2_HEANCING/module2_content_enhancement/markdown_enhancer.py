@@ -140,6 +140,7 @@ class EnhancedSection:
     - 方法返回结果或内部状态更新。"""
     unit_id: str
     title: str
+    knowledge_type: str = ""
     level: int = 2                          # 1/2/3
     parent_id: Optional[str] = None
     original_body: str = ""
@@ -203,6 +204,8 @@ class MarkdownEnhancer:
         
         # V2: assets 目录 (用于 Obsidian 相对路径)
         self._assets_dir = "assets"
+        # Obsidian 嵌入路径基准目录（默认使用输出 Markdown 所在目录）
+        self._markdown_dir = None
     
     @property
     def enabled(self) -> bool:
@@ -218,7 +221,12 @@ class MarkdownEnhancer:
         - 布尔判断结果。"""
         return self._enabled
     
-    async def enhance(self, result_json_path: str, subject: str = "数据结构与算法") -> str:
+    async def enhance(
+        self,
+        result_json_path: str,
+        subject: str = "数据结构与算法",
+        markdown_dir: Optional[str] = None
+    ) -> str:
         """
         执行逻辑：
         1) 准备必要上下文与参数。
@@ -236,6 +244,9 @@ class MarkdownEnhancer:
         # 加载数据
         with open(result_json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
+
+        # 记录 Markdown 目录，便于计算 Obsidian 相对路径
+        self._markdown_dir = os.path.abspath(markdown_dir) if markdown_dir else None
         
         sections = data.get("sections", [])
         title = data.get("title", "知识文档")
@@ -259,6 +270,7 @@ class MarkdownEnhancer:
             enhanced = EnhancedSection(
                 unit_id=unit_id,
                 title=section.get("title", ""),
+                knowledge_type=section.get("knowledge_type", ""),
                 level=level_info.get("level", 2),
                 parent_id=level_info.get("parent_id"),
                 original_body=section.get("body_text", ""),
@@ -276,6 +288,9 @@ class MarkdownEnhancer:
             enhanced.enhanced_body = await self._enhance_text(enhanced)
             
             enhanced_sections.append(enhanced)
+
+        # 层级兜底：修复无父级/无一级的情况，保证 Obsidian 能显示嵌套
+        self._normalize_hierarchy(enhanced_sections)
         
         # Step 3: 逻辑提取
         logger.info("Step 3: Logic Extraction")
@@ -321,8 +336,9 @@ class MarkdownEnhancer:
             content, _, _ = await self._llm_client.complete_text(
                 prompt=prompt
             )
-            
-            result = json.loads(content)
+
+            # 兼容代码块/前后缀的 JSON 输出
+            result = self._safe_json_loads(content)
             
             # 转换为 dict
             hierarchy = {}
@@ -339,6 +355,69 @@ class MarkdownEnhancer:
             logger.error(f"Hierarchy classification failed: {e}")
             return {s.get("unit_id", f"SU{i}"): {"level": 2, "parent_id": None} 
                     for i, s in enumerate(sections)}
+
+    def _safe_json_loads(self, content: str) -> Dict[str, Any]:
+        """
+        处理 LLM 可能输出的代码块或前后缀，尽量提取 JSON。
+        """
+        cleaned = (content or "").strip()
+        if "```" in cleaned:
+            if "```json" in cleaned:
+                cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
+            else:
+                cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            cleaned = cleaned[start:end + 1]
+        return json.loads(cleaned)
+
+    def _fallback_level(self, knowledge_type: str) -> int:
+        """
+        兜底层级映射：在无一级输出时提供最小可用层级。
+        """
+        kt = (knowledge_type or "").lower()
+        if kt in ("abstract", "抽象", "讲解型", "explanation"):
+            return 1
+        if kt in ("process", "过程", "过程性", "procedural"):
+            return 2
+        if kt in ("concrete", "具象", "具体"):
+            return 3
+        return 2
+
+    def _normalize_hierarchy(self, sections: List[EnhancedSection]) -> None:
+        """
+        修复缺失父级/异常层级，保证 Obsidian 嵌套结构可用。
+        """
+        if not sections:
+            return
+
+        has_level1 = any(s.level == 1 for s in sections)
+        if not has_level1:
+            for s in sections:
+                s.level = self._fallback_level(getattr(s, "knowledge_type", ""))
+
+        unit_index = {s.unit_id: i for i, s in enumerate(sections)}
+        level_stack = {1: None, 2: None}
+
+        for section in sections:
+            if section.level not in (1, 2, 3):
+                section.level = 2
+
+            if section.level == 1:
+                section.parent_id = None
+                level_stack[1] = section.unit_id
+                level_stack[2] = None
+                continue
+
+            if section.parent_id not in unit_index:
+                if section.level == 2:
+                    section.parent_id = level_stack.get(1)
+                else:
+                    section.parent_id = level_stack.get(2) or level_stack.get(1)
+
+            if section.level == 2:
+                level_stack[2] = section.unit_id
     
     async def _enhance_text(self, section: EnhancedSection) -> str:
         """
@@ -466,33 +545,35 @@ class MarkdownEnhancer:
         lines.append(f"# {title}")
         lines.append("")
         
-        # 按层级组织
-        level1_sections = [s for s in sections if s.level == 1]
-        
-        if not level1_sections:
-            # 没有一级标题，直接按顺序输出
-            for section in sections:
-                lines.extend(self._render_section(section))
-                lines.append("")
-        else:
-            # 有一级标题，按层级嵌套
-            for l1 in level1_sections:
-                lines.extend(self._render_section(l1))
-                lines.append("")
-                
-                # 找二级子节点
-                l2_sections = [s for s in sections if s.parent_id == l1.unit_id]
-                for l2 in l2_sections:
-                    lines.extend(self._render_section(l2, indent=1))
-                    lines.append("")
-                    
-                    # 找三级子节点
-                    l3_sections = [s for s in sections if s.parent_id == l2.unit_id]
-                    for l3 in l3_sections:
-                        lines.extend(self._render_section(l3, indent=2))
-                        lines.append("")
+        # 按原始顺序输出，并用标题层级体现嵌套
+        for section in sections:
+            indent = max(0, min(section.level - 1, 5))
+            lines.extend(self._render_section(section, indent=indent))
+            lines.append("")
         
         return "\n".join(lines)
+
+    def _format_obsidian_embed(self, file_path: str) -> str:
+        """
+        生成 Obsidian 嵌入路径，优先使用 Markdown 目录的相对路径。
+        """
+        if not file_path:
+            return ""
+
+        if os.path.isabs(file_path):
+            rel_path = ""
+            if self._markdown_dir:
+                try:
+                    rel_path = os.path.relpath(file_path, self._markdown_dir)
+                except Exception:
+                    rel_path = ""
+            if not rel_path:
+                rel_path = f"{self._assets_dir}/{Path(file_path).name}"
+        else:
+            rel_path = file_path
+
+        rel_path = rel_path.replace("\\", "/")
+        return f"![[{rel_path}]]"
     
     
     def _render_section(self, section: EnhancedSection, indent: int = 0) -> List[str]:
@@ -535,11 +616,10 @@ class MarkdownEnhancer:
         
         # V2: Obsidian 格式媒体嵌入
         # 视频片段
-        if section.video_clip and os.path.exists(section.video_clip):
-            video_name = Path(section.video_clip).name
+        if section.video_clip:
             lines.append(f"> 📹 **操作演示**")
             lines.append(f"")
-            lines.append(f"![[{self._assets_dir}/{video_name}]]")
+            lines.append(self._format_obsidian_embed(section.video_clip))
             lines.append("")
         
         # 验证后的截图
@@ -547,8 +627,7 @@ class MarkdownEnhancer:
             lines.append(f"> 🖼️ **关键帧**")
             lines.append("")
             for img_path in section.validated_screenshots:
-                img_name = Path(img_path).name
-                lines.append(f"![[{self._assets_dir}/{img_name}]]")
+                lines.append(self._format_obsidian_embed(img_path))
             lines.append("")
         
         return lines
