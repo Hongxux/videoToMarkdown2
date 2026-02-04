@@ -177,7 +177,7 @@ public final class VideoProcessingServiceGrpc {
       fullMethodName = SERVICE_NAME + '/' + "ValidateCVBatch",
       requestType = com.mvp.videoprocessing.grpc.CVValidationRequest.class,
       responseType = com.mvp.videoprocessing.grpc.CVValidationResponse.class,
-      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+      methodType = io.grpc.MethodDescriptor.MethodType.SERVER_STREAMING)
   public static io.grpc.MethodDescriptor<com.mvp.videoprocessing.grpc.CVValidationRequest,
       com.mvp.videoprocessing.grpc.CVValidationResponse> getValidateCVBatchMethod() {
     io.grpc.MethodDescriptor<com.mvp.videoprocessing.grpc.CVValidationRequest, com.mvp.videoprocessing.grpc.CVValidationResponse> getValidateCVBatchMethod;
@@ -186,7 +186,7 @@ public final class VideoProcessingServiceGrpc {
         if ((getValidateCVBatchMethod = VideoProcessingServiceGrpc.getValidateCVBatchMethod) == null) {
           VideoProcessingServiceGrpc.getValidateCVBatchMethod = getValidateCVBatchMethod =
               io.grpc.MethodDescriptor.<com.mvp.videoprocessing.grpc.CVValidationRequest, com.mvp.videoprocessing.grpc.CVValidationResponse>newBuilder()
-              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setType(io.grpc.MethodDescriptor.MethodType.SERVER_STREAMING)
               .setFullMethodName(generateFullMethodName(SERVICE_NAME, "ValidateCVBatch"))
               .setSampledToLocalTracing(true)
               .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
@@ -426,7 +426,7 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V3: CV验证批量并行处理 (Java编排调用)
+     * 🚀 V3: CV验证批量并行处理 (Java编排调用 - 流式返回)
      * </pre>
      */
     default void validateCVBatch(com.mvp.videoprocessing.grpc.CVValidationRequest request,
@@ -554,12 +554,12 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V3: CV验证批量并行处理 (Java编排调用)
+     * 🚀 V3: CV验证批量并行处理 (Java编排调用 - 流式返回)
      * </pre>
      */
     public void validateCVBatch(com.mvp.videoprocessing.grpc.CVValidationRequest request,
         io.grpc.stub.StreamObserver<com.mvp.videoprocessing.grpc.CVValidationResponse> responseObserver) {
-      io.grpc.stub.ClientCalls.asyncUnaryCall(
+      io.grpc.stub.ClientCalls.asyncServerStreamingCall(
           getChannel().newCall(getValidateCVBatchMethod(), getCallOptions()), request, responseObserver);
     }
 
@@ -671,11 +671,12 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V3: CV验证批量并行处理 (Java编排调用)
+     * 🚀 V3: CV验证批量并行处理 (Java编排调用 - 流式返回)
      * </pre>
      */
-    public com.mvp.videoprocessing.grpc.CVValidationResponse validateCVBatch(com.mvp.videoprocessing.grpc.CVValidationRequest request) {
-      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+    public java.util.Iterator<com.mvp.videoprocessing.grpc.CVValidationResponse> validateCVBatch(
+        com.mvp.videoprocessing.grpc.CVValidationRequest request) {
+      return io.grpc.stub.ClientCalls.blockingServerStreamingCall(
           getChannel(), getValidateCVBatchMethod(), getCallOptions(), request);
     }
 
@@ -784,17 +785,6 @@ public final class VideoProcessingServiceGrpc {
         com.mvp.videoprocessing.grpc.AssembleRequest request) {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getAssembleRichTextMethod(), getCallOptions()), request);
-    }
-
-    /**
-     * <pre>
-     * 🚀 V3: CV验证批量并行处理 (Java编排调用)
-     * </pre>
-     */
-    public com.google.common.util.concurrent.ListenableFuture<com.mvp.videoprocessing.grpc.CVValidationResponse> validateCVBatch(
-        com.mvp.videoprocessing.grpc.CVValidationRequest request) {
-      return io.grpc.stub.ClientCalls.futureUnaryCall(
-          getChannel().newCall(getValidateCVBatchMethod(), getCallOptions()), request);
     }
 
     /**
@@ -959,7 +949,7 @@ public final class VideoProcessingServiceGrpc {
                 service, METHODID_ASSEMBLE_RICH_TEXT)))
         .addMethod(
           getValidateCVBatchMethod(),
-          io.grpc.stub.ServerCalls.asyncUnaryCall(
+          io.grpc.stub.ServerCalls.asyncServerStreamingCall(
             new MethodHandlers<
               com.mvp.videoprocessing.grpc.CVValidationRequest,
               com.mvp.videoprocessing.grpc.CVValidationResponse>(

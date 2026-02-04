@@ -310,7 +310,7 @@ public final class VideoProcessingProto {
       "quest\022\017\n\007task_id\030\001 \001(\t\"r\n\030ReleaseResourc" +
       "esResponse\022\017\n\007success\030\001 \001(\010\022\017\n\007message\030\002" +
       " \001(\t\022\033\n\023freed_workers_count\030\003 \001(\005\022\027\n\017fre" +
-      "ed_memory_mb\030\004 \001(\0022\363\007\n\026VideoProcessingSe" +
+      "ed_memory_mb\030\004 \001(\0022\365\007\n\026VideoProcessingSe" +
       "rvice\022T\n\rDownloadVideo\022 .videoprocessing" +
       ".DownloadRequest\032!.videoprocessing.Downl" +
       "oadResponse\022Z\n\017TranscribeVideo\022\".videopr" +
@@ -322,22 +322,22 @@ public final class VideoProcessingProto {
       "st\032 .videoprocessing.AnalyzeResponse\022W\n\020" +
       "AssembleRichText\022 .videoprocessing.Assem" +
       "bleRequest\032!.videoprocessing.AssembleRes" +
-      "ponse\022^\n\017ValidateCVBatch\022$.videoprocessi" +
+      "ponse\022`\n\017ValidateCVBatch\022$.videoprocessi" +
       "ng.CVValidationRequest\032%.videoprocessing" +
-      ".CVValidationResponse\022{\n\026ClassifyKnowled" +
-      "geBatch\022/.videoprocessing.KnowledgeClass" +
-      "ificationRequest\0320.videoprocessing.Knowl" +
-      "edgeClassificationResponse\022\177\n\030GenerateMa" +
-      "terialRequests\0220.videoprocessing.Generat" +
-      "eMaterialRequestsRequest\0321.videoprocessi" +
-      "ng.GenerateMaterialRequestsResponse\022i\n\022R" +
-      "eleaseCVResources\022(.videoprocessing.Rele" +
-      "aseResourcesRequest\032).videoprocessing.Re" +
-      "leaseResourcesResponse\022X\n\013HealthCheck\022#." +
-      "videoprocessing.HealthCheckRequest\032$.vid" +
-      "eoprocessing.HealthCheckResponseB9\n\034com." +
-      "mvp.videoprocessing.grpcB\024VideoProcessin" +
-      "gProtoP\001\220\001\001b\006proto3"
+      ".CVValidationResponse0\001\022{\n\026ClassifyKnowl" +
+      "edgeBatch\022/.videoprocessing.KnowledgeCla" +
+      "ssificationRequest\0320.videoprocessing.Kno" +
+      "wledgeClassificationResponse\022\177\n\030Generate" +
+      "MaterialRequests\0220.videoprocessing.Gener" +
+      "ateMaterialRequestsRequest\0321.videoproces" +
+      "sing.GenerateMaterialRequestsResponse\022i\n" +
+      "\022ReleaseCVResources\022(.videoprocessing.Re" +
+      "leaseResourcesRequest\032).videoprocessing." +
+      "ReleaseResourcesResponse\022X\n\013HealthCheck\022" +
+      "#.videoprocessing.HealthCheckRequest\032$.v" +
+      "ideoprocessing.HealthCheckResponseB9\n\034co" +
+      "m.mvp.videoprocessing.grpcB\024VideoProcess" +
+      "ingProtoP\001\220\001\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,

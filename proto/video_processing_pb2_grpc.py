@@ -3,7 +3,7 @@
 import grpc
 import warnings
 
-import video_processing_pb2 as video__processing__pb2
+from proto import video_processing_pb2 as proto_dot_video__processing__pb2
 
 GRPC_GENERATED_VERSION = '1.76.0'
 GRPC_VERSION = grpc.__version__
@@ -18,7 +18,7 @@ except ImportError:
 if _version_not_supported:
     raise RuntimeError(
         f'The grpc package installed is at version {GRPC_VERSION},'
-        + ' but the generated code in video_processing_pb2_grpc.py depends on'
+        + ' but the generated code in proto/video_processing_pb2_grpc.py depends on'
         + f' grpcio>={GRPC_GENERATED_VERSION}.'
         + f' Please upgrade your grpc module to grpcio>={GRPC_GENERATED_VERSION}'
         + f' or downgrade your generated code using grpcio-tools<={GRPC_VERSION}.'
@@ -40,53 +40,53 @@ class VideoProcessingServiceStub(object):
         """
         self.DownloadVideo = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/DownloadVideo',
-                request_serializer=video__processing__pb2.DownloadRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.DownloadResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.DownloadRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.DownloadResponse.FromString,
                 _registered_method=True)
         self.TranscribeVideo = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/TranscribeVideo',
-                request_serializer=video__processing__pb2.TranscribeRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.TranscribeResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.TranscribeRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.TranscribeResponse.FromString,
                 _registered_method=True)
         self.ProcessStage1 = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/ProcessStage1',
-                request_serializer=video__processing__pb2.Stage1Request.SerializeToString,
-                response_deserializer=video__processing__pb2.Stage1Response.FromString,
+                request_serializer=proto_dot_video__processing__pb2.Stage1Request.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.Stage1Response.FromString,
                 _registered_method=True)
         self.AnalyzeSemanticUnits = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/AnalyzeSemanticUnits',
-                request_serializer=video__processing__pb2.AnalyzeRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.AnalyzeResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.AnalyzeRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.AnalyzeResponse.FromString,
                 _registered_method=True)
         self.AssembleRichText = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/AssembleRichText',
-                request_serializer=video__processing__pb2.AssembleRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.AssembleResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.AssembleRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.AssembleResponse.FromString,
                 _registered_method=True)
-        self.ValidateCVBatch = channel.unary_unary(
+        self.ValidateCVBatch = channel.unary_stream(
                 '/videoprocessing.VideoProcessingService/ValidateCVBatch',
-                request_serializer=video__processing__pb2.CVValidationRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.CVValidationResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.CVValidationRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.CVValidationResponse.FromString,
                 _registered_method=True)
         self.ClassifyKnowledgeBatch = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/ClassifyKnowledgeBatch',
-                request_serializer=video__processing__pb2.KnowledgeClassificationRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.KnowledgeClassificationResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.KnowledgeClassificationRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.KnowledgeClassificationResponse.FromString,
                 _registered_method=True)
         self.GenerateMaterialRequests = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/GenerateMaterialRequests',
-                request_serializer=video__processing__pb2.GenerateMaterialRequestsRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.GenerateMaterialRequestsResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.GenerateMaterialRequestsRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.GenerateMaterialRequestsResponse.FromString,
                 _registered_method=True)
         self.ReleaseCVResources = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/ReleaseCVResources',
-                request_serializer=video__processing__pb2.ReleaseResourcesRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.ReleaseResourcesResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.ReleaseResourcesRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.ReleaseResourcesResponse.FromString,
                 _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/HealthCheck',
-                request_serializer=video__processing__pb2.HealthCheckRequest.SerializeToString,
-                response_deserializer=video__processing__pb2.HealthCheckResponse.FromString,
+                request_serializer=proto_dot_video__processing__pb2.HealthCheckRequest.SerializeToString,
+                response_deserializer=proto_dot_video__processing__pb2.HealthCheckResponse.FromString,
                 _registered_method=True)
 
 
@@ -136,7 +136,7 @@ class VideoProcessingServiceServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def ValidateCVBatch(self, request, context):
-        """🚀 V3: CV验证批量并行处理 (Java编排调用)
+        """🚀 V3: CV验证批量并行处理 (Java编排调用 - 流式返回)
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -173,53 +173,53 @@ def add_VideoProcessingServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
             'DownloadVideo': grpc.unary_unary_rpc_method_handler(
                     servicer.DownloadVideo,
-                    request_deserializer=video__processing__pb2.DownloadRequest.FromString,
-                    response_serializer=video__processing__pb2.DownloadResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.DownloadRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.DownloadResponse.SerializeToString,
             ),
             'TranscribeVideo': grpc.unary_unary_rpc_method_handler(
                     servicer.TranscribeVideo,
-                    request_deserializer=video__processing__pb2.TranscribeRequest.FromString,
-                    response_serializer=video__processing__pb2.TranscribeResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.TranscribeRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.TranscribeResponse.SerializeToString,
             ),
             'ProcessStage1': grpc.unary_unary_rpc_method_handler(
                     servicer.ProcessStage1,
-                    request_deserializer=video__processing__pb2.Stage1Request.FromString,
-                    response_serializer=video__processing__pb2.Stage1Response.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.Stage1Request.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.Stage1Response.SerializeToString,
             ),
             'AnalyzeSemanticUnits': grpc.unary_unary_rpc_method_handler(
                     servicer.AnalyzeSemanticUnits,
-                    request_deserializer=video__processing__pb2.AnalyzeRequest.FromString,
-                    response_serializer=video__processing__pb2.AnalyzeResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.AnalyzeRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.AnalyzeResponse.SerializeToString,
             ),
             'AssembleRichText': grpc.unary_unary_rpc_method_handler(
                     servicer.AssembleRichText,
-                    request_deserializer=video__processing__pb2.AssembleRequest.FromString,
-                    response_serializer=video__processing__pb2.AssembleResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.AssembleRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.AssembleResponse.SerializeToString,
             ),
-            'ValidateCVBatch': grpc.unary_unary_rpc_method_handler(
+            'ValidateCVBatch': grpc.unary_stream_rpc_method_handler(
                     servicer.ValidateCVBatch,
-                    request_deserializer=video__processing__pb2.CVValidationRequest.FromString,
-                    response_serializer=video__processing__pb2.CVValidationResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.CVValidationRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.CVValidationResponse.SerializeToString,
             ),
             'ClassifyKnowledgeBatch': grpc.unary_unary_rpc_method_handler(
                     servicer.ClassifyKnowledgeBatch,
-                    request_deserializer=video__processing__pb2.KnowledgeClassificationRequest.FromString,
-                    response_serializer=video__processing__pb2.KnowledgeClassificationResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.KnowledgeClassificationRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.KnowledgeClassificationResponse.SerializeToString,
             ),
             'GenerateMaterialRequests': grpc.unary_unary_rpc_method_handler(
                     servicer.GenerateMaterialRequests,
-                    request_deserializer=video__processing__pb2.GenerateMaterialRequestsRequest.FromString,
-                    response_serializer=video__processing__pb2.GenerateMaterialRequestsResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.GenerateMaterialRequestsRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.GenerateMaterialRequestsResponse.SerializeToString,
             ),
             'ReleaseCVResources': grpc.unary_unary_rpc_method_handler(
                     servicer.ReleaseCVResources,
-                    request_deserializer=video__processing__pb2.ReleaseResourcesRequest.FromString,
-                    response_serializer=video__processing__pb2.ReleaseResourcesResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.ReleaseResourcesRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.ReleaseResourcesResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
-                    request_deserializer=video__processing__pb2.HealthCheckRequest.FromString,
-                    response_serializer=video__processing__pb2.HealthCheckResponse.SerializeToString,
+                    request_deserializer=proto_dot_video__processing__pb2.HealthCheckRequest.FromString,
+                    response_serializer=proto_dot_video__processing__pb2.HealthCheckResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -251,8 +251,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/DownloadVideo',
-            video__processing__pb2.DownloadRequest.SerializeToString,
-            video__processing__pb2.DownloadResponse.FromString,
+            proto_dot_video__processing__pb2.DownloadRequest.SerializeToString,
+            proto_dot_video__processing__pb2.DownloadResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -278,8 +278,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/TranscribeVideo',
-            video__processing__pb2.TranscribeRequest.SerializeToString,
-            video__processing__pb2.TranscribeResponse.FromString,
+            proto_dot_video__processing__pb2.TranscribeRequest.SerializeToString,
+            proto_dot_video__processing__pb2.TranscribeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -305,8 +305,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/ProcessStage1',
-            video__processing__pb2.Stage1Request.SerializeToString,
-            video__processing__pb2.Stage1Response.FromString,
+            proto_dot_video__processing__pb2.Stage1Request.SerializeToString,
+            proto_dot_video__processing__pb2.Stage1Response.FromString,
             options,
             channel_credentials,
             insecure,
@@ -332,8 +332,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/AnalyzeSemanticUnits',
-            video__processing__pb2.AnalyzeRequest.SerializeToString,
-            video__processing__pb2.AnalyzeResponse.FromString,
+            proto_dot_video__processing__pb2.AnalyzeRequest.SerializeToString,
+            proto_dot_video__processing__pb2.AnalyzeResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -359,8 +359,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/AssembleRichText',
-            video__processing__pb2.AssembleRequest.SerializeToString,
-            video__processing__pb2.AssembleResponse.FromString,
+            proto_dot_video__processing__pb2.AssembleRequest.SerializeToString,
+            proto_dot_video__processing__pb2.AssembleResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -382,12 +382,12 @@ class VideoProcessingService(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(
+        return grpc.experimental.unary_stream(
             request,
             target,
             '/videoprocessing.VideoProcessingService/ValidateCVBatch',
-            video__processing__pb2.CVValidationRequest.SerializeToString,
-            video__processing__pb2.CVValidationResponse.FromString,
+            proto_dot_video__processing__pb2.CVValidationRequest.SerializeToString,
+            proto_dot_video__processing__pb2.CVValidationResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -413,8 +413,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/ClassifyKnowledgeBatch',
-            video__processing__pb2.KnowledgeClassificationRequest.SerializeToString,
-            video__processing__pb2.KnowledgeClassificationResponse.FromString,
+            proto_dot_video__processing__pb2.KnowledgeClassificationRequest.SerializeToString,
+            proto_dot_video__processing__pb2.KnowledgeClassificationResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -440,8 +440,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/GenerateMaterialRequests',
-            video__processing__pb2.GenerateMaterialRequestsRequest.SerializeToString,
-            video__processing__pb2.GenerateMaterialRequestsResponse.FromString,
+            proto_dot_video__processing__pb2.GenerateMaterialRequestsRequest.SerializeToString,
+            proto_dot_video__processing__pb2.GenerateMaterialRequestsResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -467,8 +467,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/ReleaseCVResources',
-            video__processing__pb2.ReleaseResourcesRequest.SerializeToString,
-            video__processing__pb2.ReleaseResourcesResponse.FromString,
+            proto_dot_video__processing__pb2.ReleaseResourcesRequest.SerializeToString,
+            proto_dot_video__processing__pb2.ReleaseResourcesResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -494,8 +494,8 @@ class VideoProcessingService(object):
             request,
             target,
             '/videoprocessing.VideoProcessingService/HealthCheck',
-            video__processing__pb2.HealthCheckRequest.SerializeToString,
-            video__processing__pb2.HealthCheckResponse.FromString,
+            proto_dot_video__processing__pb2.HealthCheckRequest.SerializeToString,
+            proto_dot_video__processing__pb2.HealthCheckResponse.FromString,
             options,
             channel_credentials,
             insecure,

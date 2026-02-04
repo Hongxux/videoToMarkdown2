@@ -37,8 +37,8 @@ service VideoProcessingService {
     // 步骤6: Module2 Phase2B - Vision AI验证 + 富文本组装 (使用外部截图)
     rpc AssembleRichText(AssembleRequest) returns (AssembleResponse);
     
-    // 🚀 V3: CV验证批量并行处理 (Java编排调用)
-    rpc ValidateCVBatch(CVValidationRequest) returns (CVValidationResponse);
+    // 🚀 V3: CV验证批量并行处理 (Java编排调用 - 流式返回)
+    rpc ValidateCVBatch(CVValidationRequest) returns (stream CVValidationResponse);
     
     rpc ClassifyKnowledgeBatch(KnowledgeClassificationRequest) returns (KnowledgeClassificationResponse);
     rpc GenerateMaterialRequests(GenerateMaterialRequestsRequest) returns (GenerateMaterialRequestsResponse);
