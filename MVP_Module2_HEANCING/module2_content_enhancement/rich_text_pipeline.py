@@ -21,6 +21,7 @@ V2 变更:
 """
 
 import os
+import difflib
 import cv2
 import json
 import logging
@@ -890,14 +891,21 @@ class RichTextPipeline:
         all_islands.sort(key=lambda x: x.get('start_sec', 0))
         return all_islands
 
+
+    # ❌ Removed: _align_paragraphs_to_subtitles method
+    # 文本对齐逻辑已废弃，KnowledgeClassifier 现在直接从 Step 2 读取字幕
     
     def _build_sentence_timestamps(self) -> Dict[str, Dict[str, float]]:
         """
         构建 sentence_id → 时间戳 映射
         
-        优先使用外部 sentence_timestamps.json，回退到索引映射
+        优先使用外部 sentence_timestamps.json，
+        否则回退到索引映射 S001 → subtitles[0]
+        
+        ❌ 已移除: 文本对齐逻辑 (_align_paragraphs_to_subtitles)
+        现在 KnowledgeClassifier 直接从 Step 2 读取字幕，不再依赖语义单元的时间戳正确性
         """
-        # 💥 修复: 优先从外部文件加载预计算的时间戳
+        # 1. 优先从外部文件加载
         if self.sentence_timestamps_path and os.path.exists(self.sentence_timestamps_path):
             try:
                 with open(self.sentence_timestamps_path, 'r', encoding='utf-8') as f:
@@ -907,7 +915,7 @@ class RichTextPipeline:
             except Exception as e:
                 logger.warning(f"Failed to load external sentence_timestamps: {e}, falling back to index mapping")
         
-        # 回退: 使用索引规则 S001 → subtitles[0]
+        # 2. 回退: 使用索引规则 S001 → subtitles[0]
         timestamps = {}
         for i, sub in enumerate(self.subtitles):
             sid = f"S{i+1:03d}"
@@ -1606,52 +1614,9 @@ class RichTextPipeline:
         logger.debug(f"{unit.unit_id}: applied {len(screenshot_paths)} external screenshots, "
                      f"clip={'Yes' if clip_path else 'No'}")
     
-    def _get_subtitles_in_range(self, start_sec: float, end_sec: float) -> str:
-        """
-        获取指定时间范围内的字幕文本（扩展到包含边界的完整字幕）
-        
-        Bug Fix: 如果 start_sec=13.1s 落在 [12s, 14s] 的字幕区间，则从 12s 开始匹配；
-                 如果 end_sec=15.2s 落在 [14s, 16s] 的字幕区间，则到 16s 结束匹配。
-        """
-        # 第一遍：找到包含 start_sec 和 end_sec 的字幕边界
-        effective_start = start_sec
-        effective_end = end_sec
-        
-        for sub in self.subtitles:
-            sub_start, sub_end, _ = self._parse_subtitle(sub)
-            
-            # 如果 start_sec 落在这个字幕区间内，向前扩展
-            if sub_start <= start_sec < sub_end:
-                effective_start = min(effective_start, sub_start)
-            
-            # 如果 end_sec 落在这个字幕区间内，向后扩展
-            if sub_start < end_sec <= sub_end:
-                effective_end = max(effective_end, sub_end)
-        
-        # 第二遍：收集扩展后范围内的所有字幕
-        texts = []
-        for sub in self.subtitles:
-            sub_start, sub_end, text = self._parse_subtitle(sub)
-            
-            # 字幕与扩展后的时间范围有重叠
-            if sub_start < effective_end and sub_end > effective_start:
-                texts.append(f"[{sub_start:.1f}s] {text}")
-        
-        return "\n".join(texts) if texts else "(无字幕)"
-    
-    def _parse_subtitle(self, sub) -> tuple:
-        """解析字幕对象，返回 (start_sec, end_sec, text)"""
-        if hasattr(sub, 'start_sec'):
-            # CorrectedSubtitle dataclass
-            sub_start = sub.start_sec
-            sub_end = sub.end_sec
-            text = sub.corrected_text if hasattr(sub, 'corrected_text') else getattr(sub, 'text', '')
-        else:
-            # dict 格式
-            sub_start = sub.get("start_sec", 0)
-            sub_end = sub.get("end_sec", 0)
-            text = sub.get("corrected_text", sub.get("text", ""))
-        return sub_start, sub_end, text
+    # ❌ Removed: _get_subtitles_in_range() and _parse_subtitle() methods (45 lines)
+    # These methods are no longer used after subtitle refactoring.
+    # KnowledgeClassifier now handles subtitle retrieval directly from Step 2.
     
     async def _select_screenshot(
         self, 

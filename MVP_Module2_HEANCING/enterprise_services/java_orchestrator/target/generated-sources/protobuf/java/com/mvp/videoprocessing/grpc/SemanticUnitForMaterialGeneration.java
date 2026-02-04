@@ -245,7 +245,7 @@ private static final long serialVersionUID = 0L;
   private java.util.List<com.mvp.videoprocessing.grpc.StableIsland> stableIslands_;
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -256,7 +256,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -268,7 +268,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -279,7 +279,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -290,7 +290,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1439,7 +1439,7 @@ private static final long serialVersionUID = 0L;
 
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1453,7 +1453,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1467,7 +1467,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1481,7 +1481,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1502,7 +1502,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1520,7 +1520,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1540,7 +1540,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1561,7 +1561,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1579,7 +1579,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1597,7 +1597,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1616,7 +1616,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1633,7 +1633,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1650,7 +1650,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1661,7 +1661,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1675,7 +1675,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1690,7 +1690,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1701,7 +1701,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -1713,7 +1713,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * 🚀 CV结果中的稳定岛
+     * 🚀 Missing link for CV results
      * </pre>
      *
      * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>

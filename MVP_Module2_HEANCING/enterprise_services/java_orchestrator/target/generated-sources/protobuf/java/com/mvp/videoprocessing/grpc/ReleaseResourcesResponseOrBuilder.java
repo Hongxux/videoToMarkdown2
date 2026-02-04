@@ -9,17 +9,29 @@ public interface ReleaseResourcesResponseOrBuilder extends
     com.google.protobuf.MessageOrBuilder {
 
   /**
+   * <pre>
+   * 是否成功
+   * </pre>
+   *
    * <code>bool success = 1;</code>
    * @return The success.
    */
   boolean getSuccess();
 
   /**
+   * <pre>
+   * 结果消息
+   * </pre>
+   *
    * <code>string message = 2;</code>
    * @return The message.
    */
   java.lang.String getMessage();
   /**
+   * <pre>
+   * 结果消息
+   * </pre>
+   *
    * <code>string message = 2;</code>
    * @return The bytes for message.
    */
@@ -27,12 +39,20 @@ public interface ReleaseResourcesResponseOrBuilder extends
       getMessageBytes();
 
   /**
+   * <pre>
+   * 释放的 Worker 数量
+   * </pre>
+   *
    * <code>int32 freed_workers_count = 3;</code>
    * @return The freedWorkersCount.
    */
   int getFreedWorkersCount();
 
   /**
+   * <pre>
+   * 释放的内存（MB）
+   * </pre>
+   *
    * <code>float freed_memory_mb = 4;</code>
    * @return The freedMemoryMb.
    */

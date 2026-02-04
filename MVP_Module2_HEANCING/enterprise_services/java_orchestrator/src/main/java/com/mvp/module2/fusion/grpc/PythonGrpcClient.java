@@ -527,13 +527,14 @@ public class PythonGrpcClient {
     }
     
     public CompletableFuture<ClassificationBatchResult> classifyKnowledgeBatchAsync(
-            String taskId, List<ClassificationInput> units, int timeoutSec) {
+            String taskId, List<ClassificationInput> units, String step2Path, int timeoutSec) {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 logger.info("[{}] ClassifyKnowledgeBatch: {} units", taskId, units.size());
                 
                 KnowledgeClassificationRequest.Builder requestBuilder = KnowledgeClassificationRequest.newBuilder()
-                    .setTaskId(taskId);
+                    .setTaskId(taskId)
+                    .setStep2Path(step2Path != null ? step2Path : "");  // 🔑 传递 Step 2 路径
                     
                 for (ClassificationInput unit : units) {
                     SemanticUnitForClassification.Builder unitBuilder = SemanticUnitForClassification.newBuilder()
@@ -562,15 +563,7 @@ public class PythonGrpcClient {
                         );
                     }
                     
-                    for (SubtitleItem sub : unit.subtitles) {
-                        unitBuilder.addSubtitles(
-                            SubtitleForClassification.newBuilder()
-                                .setStartSec(sub.startSec)
-                                .setEndSec(sub.endSec)
-                                .setText(sub.text)
-                                .build()
-                        );
-                    }
+                    // ❌ Removed: Subtitle transmission - Classifier reads directly from step2_path
                     
                     requestBuilder.addUnits(unitBuilder.build());
                 }

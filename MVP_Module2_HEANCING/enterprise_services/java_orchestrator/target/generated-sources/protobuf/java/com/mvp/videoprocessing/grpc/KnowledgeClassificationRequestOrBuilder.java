@@ -63,4 +63,24 @@ public interface KnowledgeClassificationRequestOrBuilder extends
    */
   com.mvp.videoprocessing.grpc.SemanticUnitForClassificationOrBuilder getUnitsOrBuilder(
       int index);
+
+  /**
+   * <pre>
+   * Path to step2_correction_output.json
+   * </pre>
+   *
+   * <code>string step2_path = 3;</code>
+   * @return The step2Path.
+   */
+  java.lang.String getStep2Path();
+  /**
+   * <pre>
+   * Path to step2_correction_output.json
+   * </pre>
+   *
+   * <code>string step2_path = 3;</code>
+   * @return The bytes for step2Path.
+   */
+  com.google.protobuf.ByteString
+      getStep2PathBytes();
 }

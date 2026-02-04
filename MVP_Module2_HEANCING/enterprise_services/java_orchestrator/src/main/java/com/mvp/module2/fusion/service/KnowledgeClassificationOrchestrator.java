@@ -60,9 +60,10 @@ public class KnowledgeClassificationOrchestrator {
     /**
      * 执行并行分类
      * @param units 包含 CV 结果的语义单元
+     * @param step2Path Step 2 字幕文件路径
      * @param outputDir 输出目录
      */
-    public List<KnowledgeResultItem> classifyParallel(String taskId, List<ClassificationInput> units, String outputDir) {
+    public List<KnowledgeResultItem> classifyParallel(String taskId, List<ClassificationInput> units, String step2Path, String outputDir) {
         // 0. Cache Check
         String cachePath = outputDir + "/intermediates/modality_classification_cache.json";
         List<KnowledgeResultItem> cachedResults = loadFromCache(taskId, cachePath);
@@ -78,7 +79,7 @@ public class KnowledgeClassificationOrchestrator {
         
         List<CompletableFuture<ClassificationBatchResult>> futures = new ArrayList<>();
         for (List<ClassificationInput> batch : batches) {
-            futures.add(classifyBatchAsync(taskId, batch));
+            futures.add(classifyBatchAsync(taskId, batch, step2Path));
         }
         
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
@@ -106,7 +107,7 @@ public class KnowledgeClassificationOrchestrator {
         return allResults;
     }
 
-    public CompletableFuture<ClassificationBatchResult> classifyBatchAsync(String taskId, List<ClassificationInput> batch) {
+    public CompletableFuture<ClassificationBatchResult> classifyBatchAsync(String taskId, List<ClassificationInput> batch, String step2Path) {
         Semaphore semaphore = adaptiveOrch.getIOSemaphore();
         return CompletableFuture.supplyAsync(() -> {
             try {
@@ -114,7 +115,7 @@ public class KnowledgeClassificationOrchestrator {
                 return circuitBreaker.executeSupplier(() -> {
                     try {
                         // Using 600s timeout as per robustness tuning
-                        return grpcClient.classifyKnowledgeBatchAsync(taskId, batch, 600).join();
+                        return grpcClient.classifyKnowledgeBatchAsync(taskId, batch, step2Path, 600).join();
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }

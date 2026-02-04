@@ -760,7 +760,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     async def ClassifyKnowledgeBatch(self, request, context):
         """
-        🚀 V3: Phase2A - Step 2: Knowledge Classification (Parallel)
+        🚀 V4: Phase2A - Step 2: Knowledge Classification
+        Classifier now reads subtitles directly from step2_path
         """
         task_id = request.task_id
         try:
@@ -772,40 +773,46 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     success=False, error_msg="KnowledgeClassifier not initialized"
                 )
             
+            # 🔑 设置当前任务的 Step 2 路径（动态更新）
+            if hasattr(request, 'step2_path') and request.step2_path:
+                classifier.step2_path = request.step2_path
+                classifier._all_subtitles_cache = None  # 清除缓存
+            
+            # 🚀 DeepSeek 优化: 限制并发数
+            sem = asyncio.Semaphore(30) # 允许 30 个并发请求
+
             async def process_unit(u):
-                action_segments = [
-                    {"start": au.start_sec, "end": au.end_sec, "id": au.id} 
-                    for au in u.action_units
-                ]
-                subtitles = [
-                    {"start_sec": s.start_sec, "end_sec": s.end_sec, "corrected_text": s.text} 
-                    for s in u.subtitles
-                ]
-                
-                try:
-                    batch_results = await classifier.classify_batch(
-                        semantic_unit_title=u.title,
-                        semantic_unit_text=u.text,
-                        action_segments=action_segments,
-                        subtitles=subtitles
-                    )
+                async with sem:
+                    action_segments = [
+                        {"start": au.start_sec, "end": au.end_sec, "id": au.id} 
+                        for au in u.action_units
+                    ]
                     
-                    unit_results_proto = []
-                    for i, res in enumerate(batch_results):
-                        if i >= len(action_segments): break
-                        action_id = action_segments[i]["id"]
-                        unit_results_proto.append(video_processing_pb2.KnowledgeClassificationResult(
-                            unit_id=u.unit_id,
-                            action_id=action_id,
-                            knowledge_type=res.get("knowledge_type", "过程性知识"),
-                            confidence=res.get("confidence", 0.5),
-                            key_evidence=res.get("key_evidence", ""),
-                            reasoning=res.get("reasoning", "")
-                        ))
-                    return unit_results_proto
-                except Exception as e:
-                    logger.error(f"Unit {u.unit_id} classification failed: {e}")
-                    return []
+                    # ✅ 不再传递字幕，Classifier 直接从 Step 2 读取
+                    
+                    try:
+                        batch_results = await classifier.classify_batch(
+                            semantic_unit_title=u.title,
+                            semantic_unit_text=u.text,
+                            action_segments=action_segments
+                        )
+                        
+                        unit_results_proto = []
+                        for i, res in enumerate(batch_results):
+                            if i >= len(action_segments): break
+                            action_id = action_segments[i]["id"]
+                            unit_results_proto.append(video_processing_pb2.KnowledgeClassificationResult(
+                                unit_id=u.unit_id,
+                                action_id=action_id,
+                                knowledge_type=res.get("knowledge_type", "过程性知识"),
+                                confidence=res.get("confidence", 0.5),
+                                key_evidence=res.get("key_evidence", ""),
+                                reasoning=res.get("reasoning", "")
+                            ))
+                        return unit_results_proto
+                    except Exception as e:
+                        logger.error(f"Unit {u.unit_id} classification failed: {e}")
+                        return []
 
             tasks = [process_unit(u) for u in request.units]
             all_unit_results = await asyncio.gather(*tasks)
@@ -930,7 +937,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 现在所有类型都从 ValidateCVBatch 获得稳定岛
             # (process 通过 CV 检测，concrete/abstract 通过先粗后细检测)
             logger.info(f"[{task_id}] Starting parallel screenshot selection...")
-            screenshot_tasks = []
+            
+            # 1. 收集所有稳定岛 (批量处理以解决重叠)
+            all_islands_to_process = []  # [(start, end, "unit_id|index"), ...]
             
             for unit in units:
                 unit_id = unit.unit_id
@@ -939,22 +948,43 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 
                 if all_stable_islands:
                     for i, island in enumerate(all_stable_islands):
-                        # 扩展范围
-                        expanded_range = calculator.expand_range(
+                         # 使用 composite ID 追踪来源: "SU001|0"
+                        composite_id = f"{unit_id}|{i}"
+                        all_islands_to_process.append((
                             island.get('start_sec', 0),
-                            island.get('end_sec', 0)
-                        )
-                        
-                        screenshot_tasks.append({
-                            "unit_id": unit_id,
-                            "island_index": i,
-                            "expanded_start": expanded_range['start'],
-                            "expanded_end": expanded_range['end']
-                        })
-                else:
-                    # 回退：如果没有稳定岛，使用单元中点
+                            island.get('end_sec', 0),
+                            composite_id
+                        ))
+            
+            # 2. 批量计算截图范围 (解决重叠)
+            calculated_ranges = calculator.calculate_ranges(all_islands_to_process)
+            
+            # 3. 转换为截图任务
+            screenshot_tasks = []
+            
+            # 3.1 处理有稳定岛的单元
+            for r in calculated_ranges:
+                # 解码 composite ID
+                parts = r.semantic_unit_id.split("|")
+                if len(parts) == 2:
+                    u_id, idx_str = parts
                     screenshot_tasks.append({
-                        "unit_id": unit_id,
+                        "unit_id": u_id,
+                        "island_index": int(idx_str),
+                        "expanded_start": r.start_sec,
+                        "expanded_end": r.end_sec
+                    })
+            
+            # 3.2 处理完全没有稳定岛的单元 (回退到中点)
+            # 检查哪些 unit_id 没有生成截图任务
+            units_with_tasks = set(t["unit_id"] for t in screenshot_tasks)
+            
+            for unit in units:
+                if unit.unit_id not in units_with_tasks:
+                    # Double check if it really had no islands or if islands were filtered/merged out excessively?
+                    # If it had no islands initially, we fallback here.
+                    screenshot_tasks.append({
+                        "unit_id": unit.unit_id,
                         "island_index": 0,
                         "expanded_start": float(unit.start_sec),
                         "expanded_end": min(float(unit.end_sec), float(unit.start_sec) + 2.0)
@@ -1705,6 +1735,36 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 success=False,
                 results=[],
                 error_msg=str(e)
+            )
+
+    # ========== 🚀 V6: 资源释放 ==========
+    
+    async def ReleaseCVResources(self, request, context):
+        """释放 CV 验证器资源"""
+        task_id = request.task_id
+        logger.info(f"[{task_id}] Request to ReleaseCVResources")
+        
+        try:
+            # 清理所有缓存的验证器
+            self.resources.cleanup_cv_validators()
+            
+            # 强制 GC
+            import gc
+            gc.collect()
+            
+            return video_processing_pb2.ReleaseResourcesResponse(
+                success=True,
+                message="Successfully released all CV resources and cleared caches.",
+                freed_workers_count=0, # Currently we just clear dictionaries
+                freed_memory_mb=0.0    # Detailed memory tracking not implemented
+            )
+        except Exception as e:
+            logger.error(f"[{task_id}] ReleaseCVResources Failed: {e}")
+            return video_processing_pb2.ReleaseResourcesResponse(
+                success=False,
+                message=f"Failed to release resources: {str(e)}",
+                freed_workers_count=0,
+                freed_memory_mb=0.0
             )
 
 async def serve(host: str = "0.0.0.0", port: int = 50051):

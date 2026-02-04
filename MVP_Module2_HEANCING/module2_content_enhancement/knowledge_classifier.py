@@ -129,18 +129,22 @@ PROMPT_TEMPLATE = SYSTEM_PROMPT + "\n\n" + USER_PROMPT_TEMPLATE
 class KnowledgeClassifier:
     """基于 LLM 的知识分类器"""
     
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None, step2_path: Optional[str] = None):
         """
         初始化分类器
         
         🚀 V2: 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
+        🚀 V3: 支持直接从 step2_correction_output.json 读取字幕
         
         Args:
             api_key: DeepSeek API Key (默认从环境变量 DEEPSEEK_API_KEY 获取)
             base_url: API Base URL (默认 https://api.deepseek.com)
+            step2_path: Step 2 字幕文件路径 (可选，用于直接读取完整字幕)
         """
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.base_url = base_url or "https://api.deepseek.com"
+        self.step2_path = step2_path
+        self._all_subtitles_cache = None  # 缓存完整字幕列表
         
         if not self.api_key:
             logger.warning("DEEPSEEK_API_KEY not set, classification will be disabled")
@@ -270,30 +274,52 @@ class KnowledgeClassifier:
         """
 
     # 🚀 V3: Batch Prompt 也拆分为 System + User 实现前缀缓存
-    BATCH_SYSTEM_PROMPT = """你是一个知识类型分析专家，擅长批量分析教学视频的动作单元。
+    BATCH_SYSTEM_PROMPT = """你是一个基于【第一性原理】的 AI 知识架构师。你的任务是透过表面的关键词（形式），洞察字幕产生的根本动机（语义）。
 
-## 分析框架
-- 主体: 抽象/操作者/逻辑/概念/配置
-- 描述: 步骤/动作/推理/解释/配置命令
-- 目标: 还原/复刻/展示/知晓/复刻环境
-- 类型: 过程性知识/实操/推演/讲解型/环境配置
+## 核心原则：去形式化，重语义
+⚠️ **严禁** 仅凭“点击”、“因为”、“首先”等关键词进行机械分类。
+✅ **必须** 结合上下文，问自己：如果把这句话删掉，用户失去的是什么？（是失去了一个概念？失去了一个操作步骤？还是失去了一个逻辑证明？）
 
-## 严格判定标准
-1. 过程性知识: 必须含 ≥2 个步骤 ("首先/然后")
-2. 推演: 必须含 ≥1 个因果逻辑 ("因为/所以", "证明")
-3. 实操: 必须含 操作动词+对象 ("点击X", "输入Y")
-4. 环境配置: 必须含 配置修改/命令行 ("修改yml", "docker run")
-5. 缺省/不满足以上: 归为 "讲解型"
+## 一、五大本质公理 (Mutually Exclusive)
+
+1. **【讲解型】 (Explanation)**
+   - **失去它，用户失去了什么**：失去对事物定义的知晓，或看不到最终效果。
+   - **本质**：静态信息传递、概念定义、或 **最终效果展示 (Demo)**。
+   - **陷阱**：如果不涉及具体“怎么做”或“为什么”，仅仅是“看那里”，就是讲解型。
+
+2. **【环境配置】 (Configuration)**
+   - **失去它，用户失去了什么**：无法搭建起程序运行的舞台。
+   - **本质**：对依赖、参数、系统的设置。
+   - **特征**：对象通常是静态的文件、变量或系统服务。
+
+3. **【过程性知识】 (Process)**
+   - **失去它，用户失去了什么**：搞不懂事物内部是如何流转/运作的。
+   - **本质**：揭示 **机制、算法或逻辑的动态执行流**。
+   - **辨析**：它描述客观规律（如“数据包会经过路由器...”），而非主观操作（如“我去点击路由器的开关...”）。
+
+4. **【实操】 (Practical)**
+   - **失去它，用户失去了什么**：无法复刻具体的交互动作。
+   - **本质**：人与计算机的直接交互指令集。
+   - **特征**：必须包含明确的动作施加者（人）和操作对象。
+
+5. **【推演】 (Deduction)**
+   - **失去它，用户失去了什么**：只知其然，不知其所以然。
+   - **本质**：逻辑闭环的构建、设计哲学的论证。
+   - **辨析**：如果是在解释“为什么要这样设计”或“导致Bug的根本原因”，就是推演。
+
+## 二、认知优先级 (Cognitive Hierarchy)
+当内容混合时，按认知价值排序：
+**推演 (Why) > 实操/配置 (How to do) > 过程性知识 (How it works) > 讲解型 (What is it)**
 
 ## 输出格式 (JSON Array)
 [
     {
         "id": "item_index",
-        "knowledge_type": "...",
-        "confidence": 0.8,
-        "reasoning": "..."
-    },
-    ...
+        "knowledge_type": "过程性知识", 
+        "confidence": 0.95,
+        "reasoning": "虽然含有'点击'一词，但核心意图是解释点击触发后的事件冒泡机制，而非教用户复刻点击动作。",
+        "key_evidence": "事件会向上传递直到被捕获"
+    }
 ]
 仅输出 JSON 数组，无其他内容。"""
 
@@ -313,8 +339,7 @@ class KnowledgeClassifier:
         self,
         semantic_unit_title: str,
         semantic_unit_text: str,
-        action_segments: list,
-        subtitles: list
+        action_segments: list
     ) -> list:
         """
         批量并行分类 (Dynamic Batching Strategy)
@@ -332,7 +357,8 @@ class KnowledgeClassifier:
         for i, action in enumerate(action_segments):
             start = action.get("start", 0)
             end = action.get("end", 0)
-            subs = self._get_subtitles_in_range(subtitles, start, end)
+            subs = self._get_subtitles_in_range(start, end)
+
             avg_len += len(subs)
             items.append({
                 "id": i,
@@ -345,9 +371,14 @@ class KnowledgeClassifier:
             avg_len /= len(items)
         
         # 2. Dynamic Batch Size Determination
-        if avg_len < 100: 
+        # 🚀 DeepSeek Optimization: More aggressive batching for short texts
+        if avg_len < 30:
+            BATCH_SIZE = 20
+        elif avg_len < 100: 
+            BATCH_SIZE = 15
+        elif avg_len < 300:
             BATCH_SIZE = 10
-        elif avg_len < 500:
+        elif avg_len < 800:
             BATCH_SIZE = 5
         else:
             BATCH_SIZE = 2
@@ -437,19 +468,66 @@ ID: {item['id']}
                 
         return final_results
     
-    def _get_subtitles_in_range(self, subtitles: list, start_sec: float, end_sec: float) -> str:
+    def _load_all_subtitles(self) -> list:
         """
-        获取指定时间范围内的字幕文本（扩展到包含边界的完整字幕）
+        从 step2_correction_output.json 加载完整字幕列表（带缓存）
         
-        Bug Fix: 如果 start_sec=13.1s 落在 [12s, 14s] 的字幕区间，则从 12s 开始匹配；
-                 如果 end_sec=15.2s 落在 [14s, 16s] 的字幕区间，则到 16s 结束匹配。
+        Returns:
+            list: [{"start_sec": float, "end_sec": float, "corrected_text": str}, ...]
         """
+        if self._all_subtitles_cache is not None:
+            return self._all_subtitles_cache
+        
+        if not self.step2_path or not os.path.exists(self.step2_path):
+            logger.warning(f"Step 2 path not available: {self.step2_path}")
+            return []
+        
+        try:
+            with open(self.step2_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            subtitles = []
+            corrected_subs = data.get("output", {}).get("corrected_subtitles", [])
+            
+            for sub in corrected_subs:
+                subtitles.append({
+                    "start_sec": sub["start_sec"],
+                    "end_sec": sub["end_sec"],
+                    "corrected_text": sub["corrected_text"]
+                })
+            
+            self._all_subtitles_cache = subtitles
+            logger.info(f"Loaded {len(subtitles)} subtitles from Step 2")
+            return subtitles
+            
+        except Exception as e:
+            logger.error(f"Failed to load Step 2 subtitles: {e}")
+            return []
+    
+    def _get_subtitles_in_range(self, start_sec: float, end_sec: float) -> str:
+        """
+        从 Step 2 完整字幕中获取指定时间范围内的字幕文本（扩展到包含边界的完整字幕）
+        
+        Args:
+            start_sec: 动作单元起始时间
+            end_sec: 动作单元结束时间
+        
+        Returns:
+            str: 格式化的字幕文本
+        """
+        # 从 Step 2 加载完整字幕
+        all_subtitles = self._load_all_subtitles()
+        
+        if not all_subtitles:
+            return "(无字幕)"
+        
         # 第一遍：找到包含 start_sec 和 end_sec 的字幕边界
         effective_start = start_sec
         effective_end = end_sec
         
-        for sub in subtitles:
-            sub_start, sub_end, _ = self._parse_subtitle(sub)
+        for sub in all_subtitles:
+            sub_start = sub["start_sec"]
+            sub_end = sub["end_sec"]
             
             # 如果 start_sec 落在这个字幕区间内，向前扩展
             if sub_start <= start_sec < sub_end:
@@ -461,8 +539,10 @@ ID: {item['id']}
         
         # 第二遍：收集扩展后范围内的所有字幕
         texts = []
-        for sub in subtitles:
-            sub_start, sub_end, text = self._parse_subtitle(sub)
+        for sub in all_subtitles:
+            sub_start = sub["start_sec"]
+            sub_end = sub["end_sec"]
+            text = sub["corrected_text"]
             
             # 字幕与扩展后的时间范围有重叠
             if sub_start < effective_end and sub_end > effective_start:

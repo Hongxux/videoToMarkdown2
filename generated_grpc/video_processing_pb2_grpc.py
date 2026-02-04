@@ -78,6 +78,11 @@ class VideoProcessingServiceStub(object):
                 request_serializer=video__processing__pb2.GenerateMaterialRequestsRequest.SerializeToString,
                 response_deserializer=video__processing__pb2.GenerateMaterialRequestsResponse.FromString,
                 _registered_method=True)
+        self.ReleaseCVResources = channel.unary_unary(
+                '/videoprocessing.VideoProcessingService/ReleaseCVResources',
+                request_serializer=video__processing__pb2.ReleaseResourcesRequest.SerializeToString,
+                response_deserializer=video__processing__pb2.ReleaseResourcesResponse.FromString,
+                _registered_method=True)
         self.HealthCheck = channel.unary_unary(
                 '/videoprocessing.VideoProcessingService/HealthCheck',
                 request_serializer=video__processing__pb2.HealthCheckRequest.SerializeToString,
@@ -149,6 +154,13 @@ class VideoProcessingServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ReleaseCVResources(self, request, context):
+        """🚀 V6: 资源释放
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def HealthCheck(self, request, context):
         """健康检查
         """
@@ -198,6 +210,11 @@ def add_VideoProcessingServiceServicer_to_server(servicer, server):
                     servicer.GenerateMaterialRequests,
                     request_deserializer=video__processing__pb2.GenerateMaterialRequestsRequest.FromString,
                     response_serializer=video__processing__pb2.GenerateMaterialRequestsResponse.SerializeToString,
+            ),
+            'ReleaseCVResources': grpc.unary_unary_rpc_method_handler(
+                    servicer.ReleaseCVResources,
+                    request_deserializer=video__processing__pb2.ReleaseResourcesRequest.FromString,
+                    response_serializer=video__processing__pb2.ReleaseResourcesResponse.SerializeToString,
             ),
             'HealthCheck': grpc.unary_unary_rpc_method_handler(
                     servicer.HealthCheck,
@@ -425,6 +442,33 @@ class VideoProcessingService(object):
             '/videoprocessing.VideoProcessingService/GenerateMaterialRequests',
             video__processing__pb2.GenerateMaterialRequestsRequest.SerializeToString,
             video__processing__pb2.GenerateMaterialRequestsResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def ReleaseCVResources(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/videoprocessing.VideoProcessingService/ReleaseCVResources',
+            video__processing__pb2.ReleaseResourcesRequest.SerializeToString,
+            video__processing__pb2.ReleaseResourcesResponse.FromString,
             options,
             channel_credentials,
             insecure,

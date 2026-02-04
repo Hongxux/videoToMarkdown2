@@ -44,6 +44,10 @@ private static final long serialVersionUID = 0L;
   @SuppressWarnings("serial")
   private volatile java.lang.Object taskId_ = "";
   /**
+   * <pre>
+   * 任务唯一ID
+   * </pre>
+   *
    * <code>string task_id = 1;</code>
    * @return The taskId.
    */
@@ -61,6 +65,10 @@ private static final long serialVersionUID = 0L;
     }
   }
   /**
+   * <pre>
+   * 任务唯一ID
+   * </pre>
+   *
    * <code>string task_id = 1;</code>
    * @return The bytes for taskId.
    */
@@ -407,6 +415,10 @@ private static final long serialVersionUID = 0L;
 
     private java.lang.Object taskId_ = "";
     /**
+     * <pre>
+     * 任务唯一ID
+     * </pre>
+     *
      * <code>string task_id = 1;</code>
      * @return The taskId.
      */
@@ -423,6 +435,10 @@ private static final long serialVersionUID = 0L;
       }
     }
     /**
+     * <pre>
+     * 任务唯一ID
+     * </pre>
+     *
      * <code>string task_id = 1;</code>
      * @return The bytes for taskId.
      */
@@ -440,6 +456,10 @@ private static final long serialVersionUID = 0L;
       }
     }
     /**
+     * <pre>
+     * 任务唯一ID
+     * </pre>
+     *
      * <code>string task_id = 1;</code>
      * @param value The taskId to set.
      * @return This builder for chaining.
@@ -453,6 +473,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 任务唯一ID
+     * </pre>
+     *
      * <code>string task_id = 1;</code>
      * @return This builder for chaining.
      */
@@ -463,6 +487,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 任务唯一ID
+     * </pre>
+     *
      * <code>string task_id = 1;</code>
      * @param value The bytes for taskId to set.
      * @return This builder for chaining.

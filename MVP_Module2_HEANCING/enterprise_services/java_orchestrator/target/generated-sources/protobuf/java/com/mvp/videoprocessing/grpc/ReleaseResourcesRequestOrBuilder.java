@@ -9,11 +9,19 @@ public interface ReleaseResourcesRequestOrBuilder extends
     com.google.protobuf.MessageOrBuilder {
 
   /**
+   * <pre>
+   * 任务唯一ID
+   * </pre>
+   *
    * <code>string task_id = 1;</code>
    * @return The taskId.
    */
   java.lang.String getTaskId();
   /**
+   * <pre>
+   * 任务唯一ID
+   * </pre>
+   *
    * <code>string task_id = 1;</code>
    * @return The bytes for taskId.
    */

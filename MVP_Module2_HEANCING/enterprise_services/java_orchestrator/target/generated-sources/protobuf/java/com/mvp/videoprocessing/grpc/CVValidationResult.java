@@ -18,8 +18,6 @@ private static final long serialVersionUID = 0L;
   }
   private CVValidationResult() {
     unitId_ = "";
-    modality_ = "";
-    knowledgeSubtype_ = "";
     stableIslands_ = java.util.Collections.emptyList();
     actionSegments_ = java.util.Collections.emptyList();
   }
@@ -91,101 +89,7 @@ private static final long serialVersionUID = 0L;
     }
   }
 
-  public static final int MODALITY_FIELD_NUMBER = 2;
-  @SuppressWarnings("serial")
-  private volatile java.lang.Object modality_ = "";
-  /**
-   * <pre>
-   * 模态: screenshot/video_only/video_screenshot
-   * </pre>
-   *
-   * <code>string modality = 2;</code>
-   * @return The modality.
-   */
-  @java.lang.Override
-  public java.lang.String getModality() {
-    java.lang.Object ref = modality_;
-    if (ref instanceof java.lang.String) {
-      return (java.lang.String) ref;
-    } else {
-      com.google.protobuf.ByteString bs = 
-          (com.google.protobuf.ByteString) ref;
-      java.lang.String s = bs.toStringUtf8();
-      modality_ = s;
-      return s;
-    }
-  }
-  /**
-   * <pre>
-   * 模态: screenshot/video_only/video_screenshot
-   * </pre>
-   *
-   * <code>string modality = 2;</code>
-   * @return The bytes for modality.
-   */
-  @java.lang.Override
-  public com.google.protobuf.ByteString
-      getModalityBytes() {
-    java.lang.Object ref = modality_;
-    if (ref instanceof java.lang.String) {
-      com.google.protobuf.ByteString b = 
-          com.google.protobuf.ByteString.copyFromUtf8(
-              (java.lang.String) ref);
-      modality_ = b;
-      return b;
-    } else {
-      return (com.google.protobuf.ByteString) ref;
-    }
-  }
-
-  public static final int KNOWLEDGE_SUBTYPE_FIELD_NUMBER = 3;
-  @SuppressWarnings("serial")
-  private volatile java.lang.Object knowledgeSubtype_ = "";
-  /**
-   * <pre>
-   * 子分类
-   * </pre>
-   *
-   * <code>string knowledge_subtype = 3;</code>
-   * @return The knowledgeSubtype.
-   */
-  @java.lang.Override
-  public java.lang.String getKnowledgeSubtype() {
-    java.lang.Object ref = knowledgeSubtype_;
-    if (ref instanceof java.lang.String) {
-      return (java.lang.String) ref;
-    } else {
-      com.google.protobuf.ByteString bs = 
-          (com.google.protobuf.ByteString) ref;
-      java.lang.String s = bs.toStringUtf8();
-      knowledgeSubtype_ = s;
-      return s;
-    }
-  }
-  /**
-   * <pre>
-   * 子分类
-   * </pre>
-   *
-   * <code>string knowledge_subtype = 3;</code>
-   * @return The bytes for knowledgeSubtype.
-   */
-  @java.lang.Override
-  public com.google.protobuf.ByteString
-      getKnowledgeSubtypeBytes() {
-    java.lang.Object ref = knowledgeSubtype_;
-    if (ref instanceof java.lang.String) {
-      com.google.protobuf.ByteString b = 
-          com.google.protobuf.ByteString.copyFromUtf8(
-              (java.lang.String) ref);
-      knowledgeSubtype_ = b;
-      return b;
-    } else {
-      return (com.google.protobuf.ByteString) ref;
-    }
-  }
-
-  public static final int STABLE_ISLANDS_FIELD_NUMBER = 4;
+  public static final int STABLE_ISLANDS_FIELD_NUMBER = 2;
   @SuppressWarnings("serial")
   private java.util.List<com.mvp.videoprocessing.grpc.StableIsland> stableIslands_;
   /**
@@ -193,7 +97,7 @@ private static final long serialVersionUID = 0L;
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   @java.lang.Override
   public java.util.List<com.mvp.videoprocessing.grpc.StableIsland> getStableIslandsList() {
@@ -204,7 +108,7 @@ private static final long serialVersionUID = 0L;
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   @java.lang.Override
   public java.util.List<? extends com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
@@ -216,7 +120,7 @@ private static final long serialVersionUID = 0L;
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   @java.lang.Override
   public int getStableIslandsCount() {
@@ -227,7 +131,7 @@ private static final long serialVersionUID = 0L;
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   @java.lang.Override
   public com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index) {
@@ -238,7 +142,7 @@ private static final long serialVersionUID = 0L;
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   @java.lang.Override
   public com.mvp.videoprocessing.grpc.StableIslandOrBuilder getStableIslandsOrBuilder(
@@ -246,7 +150,7 @@ private static final long serialVersionUID = 0L;
     return stableIslands_.get(index);
   }
 
-  public static final int ACTION_SEGMENTS_FIELD_NUMBER = 5;
+  public static final int ACTION_SEGMENTS_FIELD_NUMBER = 3;
   @SuppressWarnings("serial")
   private java.util.List<com.mvp.videoprocessing.grpc.ActionSegment> actionSegments_;
   /**
@@ -254,7 +158,7 @@ private static final long serialVersionUID = 0L;
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   @java.lang.Override
   public java.util.List<com.mvp.videoprocessing.grpc.ActionSegment> getActionSegmentsList() {
@@ -265,7 +169,7 @@ private static final long serialVersionUID = 0L;
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   @java.lang.Override
   public java.util.List<? extends com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder> 
@@ -277,7 +181,7 @@ private static final long serialVersionUID = 0L;
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   @java.lang.Override
   public int getActionSegmentsCount() {
@@ -288,7 +192,7 @@ private static final long serialVersionUID = 0L;
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   @java.lang.Override
   public com.mvp.videoprocessing.grpc.ActionSegment getActionSegments(int index) {
@@ -299,7 +203,7 @@ private static final long serialVersionUID = 0L;
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   @java.lang.Override
   public com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder getActionSegmentsOrBuilder(
@@ -324,17 +228,11 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(unitId_)) {
       com.google.protobuf.GeneratedMessageV3.writeString(output, 1, unitId_);
     }
-    if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(modality_)) {
-      com.google.protobuf.GeneratedMessageV3.writeString(output, 2, modality_);
-    }
-    if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(knowledgeSubtype_)) {
-      com.google.protobuf.GeneratedMessageV3.writeString(output, 3, knowledgeSubtype_);
-    }
     for (int i = 0; i < stableIslands_.size(); i++) {
-      output.writeMessage(4, stableIslands_.get(i));
+      output.writeMessage(2, stableIslands_.get(i));
     }
     for (int i = 0; i < actionSegments_.size(); i++) {
-      output.writeMessage(5, actionSegments_.get(i));
+      output.writeMessage(3, actionSegments_.get(i));
     }
     getUnknownFields().writeTo(output);
   }
@@ -348,19 +246,13 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(unitId_)) {
       size += com.google.protobuf.GeneratedMessageV3.computeStringSize(1, unitId_);
     }
-    if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(modality_)) {
-      size += com.google.protobuf.GeneratedMessageV3.computeStringSize(2, modality_);
-    }
-    if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(knowledgeSubtype_)) {
-      size += com.google.protobuf.GeneratedMessageV3.computeStringSize(3, knowledgeSubtype_);
-    }
     for (int i = 0; i < stableIslands_.size(); i++) {
       size += com.google.protobuf.CodedOutputStream
-        .computeMessageSize(4, stableIslands_.get(i));
+        .computeMessageSize(2, stableIslands_.get(i));
     }
     for (int i = 0; i < actionSegments_.size(); i++) {
       size += com.google.protobuf.CodedOutputStream
-        .computeMessageSize(5, actionSegments_.get(i));
+        .computeMessageSize(3, actionSegments_.get(i));
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -379,10 +271,6 @@ private static final long serialVersionUID = 0L;
 
     if (!getUnitId()
         .equals(other.getUnitId())) return false;
-    if (!getModality()
-        .equals(other.getModality())) return false;
-    if (!getKnowledgeSubtype()
-        .equals(other.getKnowledgeSubtype())) return false;
     if (!getStableIslandsList()
         .equals(other.getStableIslandsList())) return false;
     if (!getActionSegmentsList()
@@ -400,10 +288,6 @@ private static final long serialVersionUID = 0L;
     hash = (19 * hash) + getDescriptor().hashCode();
     hash = (37 * hash) + UNIT_ID_FIELD_NUMBER;
     hash = (53 * hash) + getUnitId().hashCode();
-    hash = (37 * hash) + MODALITY_FIELD_NUMBER;
-    hash = (53 * hash) + getModality().hashCode();
-    hash = (37 * hash) + KNOWLEDGE_SUBTYPE_FIELD_NUMBER;
-    hash = (53 * hash) + getKnowledgeSubtype().hashCode();
     if (getStableIslandsCount() > 0) {
       hash = (37 * hash) + STABLE_ISLANDS_FIELD_NUMBER;
       hash = (53 * hash) + getStableIslandsList().hashCode();
@@ -544,22 +428,20 @@ private static final long serialVersionUID = 0L;
       super.clear();
       bitField0_ = 0;
       unitId_ = "";
-      modality_ = "";
-      knowledgeSubtype_ = "";
       if (stableIslandsBuilder_ == null) {
         stableIslands_ = java.util.Collections.emptyList();
       } else {
         stableIslands_ = null;
         stableIslandsBuilder_.clear();
       }
-      bitField0_ = (bitField0_ & ~0x00000008);
+      bitField0_ = (bitField0_ & ~0x00000002);
       if (actionSegmentsBuilder_ == null) {
         actionSegments_ = java.util.Collections.emptyList();
       } else {
         actionSegments_ = null;
         actionSegmentsBuilder_.clear();
       }
-      bitField0_ = (bitField0_ & ~0x00000010);
+      bitField0_ = (bitField0_ & ~0x00000004);
       return this;
     }
 
@@ -594,18 +476,18 @@ private static final long serialVersionUID = 0L;
 
     private void buildPartialRepeatedFields(com.mvp.videoprocessing.grpc.CVValidationResult result) {
       if (stableIslandsBuilder_ == null) {
-        if (((bitField0_ & 0x00000008) != 0)) {
+        if (((bitField0_ & 0x00000002) != 0)) {
           stableIslands_ = java.util.Collections.unmodifiableList(stableIslands_);
-          bitField0_ = (bitField0_ & ~0x00000008);
+          bitField0_ = (bitField0_ & ~0x00000002);
         }
         result.stableIslands_ = stableIslands_;
       } else {
         result.stableIslands_ = stableIslandsBuilder_.build();
       }
       if (actionSegmentsBuilder_ == null) {
-        if (((bitField0_ & 0x00000010) != 0)) {
+        if (((bitField0_ & 0x00000004) != 0)) {
           actionSegments_ = java.util.Collections.unmodifiableList(actionSegments_);
-          bitField0_ = (bitField0_ & ~0x00000010);
+          bitField0_ = (bitField0_ & ~0x00000004);
         }
         result.actionSegments_ = actionSegments_;
       } else {
@@ -617,12 +499,6 @@ private static final long serialVersionUID = 0L;
       int from_bitField0_ = bitField0_;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.unitId_ = unitId_;
-      }
-      if (((from_bitField0_ & 0x00000002) != 0)) {
-        result.modality_ = modality_;
-      }
-      if (((from_bitField0_ & 0x00000004) != 0)) {
-        result.knowledgeSubtype_ = knowledgeSubtype_;
       }
     }
 
@@ -675,21 +551,11 @@ private static final long serialVersionUID = 0L;
         bitField0_ |= 0x00000001;
         onChanged();
       }
-      if (!other.getModality().isEmpty()) {
-        modality_ = other.modality_;
-        bitField0_ |= 0x00000002;
-        onChanged();
-      }
-      if (!other.getKnowledgeSubtype().isEmpty()) {
-        knowledgeSubtype_ = other.knowledgeSubtype_;
-        bitField0_ |= 0x00000004;
-        onChanged();
-      }
       if (stableIslandsBuilder_ == null) {
         if (!other.stableIslands_.isEmpty()) {
           if (stableIslands_.isEmpty()) {
             stableIslands_ = other.stableIslands_;
-            bitField0_ = (bitField0_ & ~0x00000008);
+            bitField0_ = (bitField0_ & ~0x00000002);
           } else {
             ensureStableIslandsIsMutable();
             stableIslands_.addAll(other.stableIslands_);
@@ -702,7 +568,7 @@ private static final long serialVersionUID = 0L;
             stableIslandsBuilder_.dispose();
             stableIslandsBuilder_ = null;
             stableIslands_ = other.stableIslands_;
-            bitField0_ = (bitField0_ & ~0x00000008);
+            bitField0_ = (bitField0_ & ~0x00000002);
             stableIslandsBuilder_ = 
               com.google.protobuf.GeneratedMessageV3.alwaysUseFieldBuilders ?
                  getStableIslandsFieldBuilder() : null;
@@ -715,7 +581,7 @@ private static final long serialVersionUID = 0L;
         if (!other.actionSegments_.isEmpty()) {
           if (actionSegments_.isEmpty()) {
             actionSegments_ = other.actionSegments_;
-            bitField0_ = (bitField0_ & ~0x00000010);
+            bitField0_ = (bitField0_ & ~0x00000004);
           } else {
             ensureActionSegmentsIsMutable();
             actionSegments_.addAll(other.actionSegments_);
@@ -728,7 +594,7 @@ private static final long serialVersionUID = 0L;
             actionSegmentsBuilder_.dispose();
             actionSegmentsBuilder_ = null;
             actionSegments_ = other.actionSegments_;
-            bitField0_ = (bitField0_ & ~0x00000010);
+            bitField0_ = (bitField0_ & ~0x00000004);
             actionSegmentsBuilder_ = 
               com.google.protobuf.GeneratedMessageV3.alwaysUseFieldBuilders ?
                  getActionSegmentsFieldBuilder() : null;
@@ -769,16 +635,6 @@ private static final long serialVersionUID = 0L;
               break;
             } // case 10
             case 18: {
-              modality_ = input.readStringRequireUtf8();
-              bitField0_ |= 0x00000002;
-              break;
-            } // case 18
-            case 26: {
-              knowledgeSubtype_ = input.readStringRequireUtf8();
-              bitField0_ |= 0x00000004;
-              break;
-            } // case 26
-            case 34: {
               com.mvp.videoprocessing.grpc.StableIsland m =
                   input.readMessage(
                       com.mvp.videoprocessing.grpc.StableIsland.parser(),
@@ -790,8 +646,8 @@ private static final long serialVersionUID = 0L;
                 stableIslandsBuilder_.addMessage(m);
               }
               break;
-            } // case 34
-            case 42: {
+            } // case 18
+            case 26: {
               com.mvp.videoprocessing.grpc.ActionSegment m =
                   input.readMessage(
                       com.mvp.videoprocessing.grpc.ActionSegment.parser(),
@@ -803,7 +659,7 @@ private static final long serialVersionUID = 0L;
                 actionSegmentsBuilder_.addMessage(m);
               }
               break;
-            } // case 42
+            } // case 26
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -913,196 +769,12 @@ private static final long serialVersionUID = 0L;
       return this;
     }
 
-    private java.lang.Object modality_ = "";
-    /**
-     * <pre>
-     * 模态: screenshot/video_only/video_screenshot
-     * </pre>
-     *
-     * <code>string modality = 2;</code>
-     * @return The modality.
-     */
-    public java.lang.String getModality() {
-      java.lang.Object ref = modality_;
-      if (!(ref instanceof java.lang.String)) {
-        com.google.protobuf.ByteString bs =
-            (com.google.protobuf.ByteString) ref;
-        java.lang.String s = bs.toStringUtf8();
-        modality_ = s;
-        return s;
-      } else {
-        return (java.lang.String) ref;
-      }
-    }
-    /**
-     * <pre>
-     * 模态: screenshot/video_only/video_screenshot
-     * </pre>
-     *
-     * <code>string modality = 2;</code>
-     * @return The bytes for modality.
-     */
-    public com.google.protobuf.ByteString
-        getModalityBytes() {
-      java.lang.Object ref = modality_;
-      if (ref instanceof String) {
-        com.google.protobuf.ByteString b = 
-            com.google.protobuf.ByteString.copyFromUtf8(
-                (java.lang.String) ref);
-        modality_ = b;
-        return b;
-      } else {
-        return (com.google.protobuf.ByteString) ref;
-      }
-    }
-    /**
-     * <pre>
-     * 模态: screenshot/video_only/video_screenshot
-     * </pre>
-     *
-     * <code>string modality = 2;</code>
-     * @param value The modality to set.
-     * @return This builder for chaining.
-     */
-    public Builder setModality(
-        java.lang.String value) {
-      if (value == null) { throw new NullPointerException(); }
-      modality_ = value;
-      bitField0_ |= 0x00000002;
-      onChanged();
-      return this;
-    }
-    /**
-     * <pre>
-     * 模态: screenshot/video_only/video_screenshot
-     * </pre>
-     *
-     * <code>string modality = 2;</code>
-     * @return This builder for chaining.
-     */
-    public Builder clearModality() {
-      modality_ = getDefaultInstance().getModality();
-      bitField0_ = (bitField0_ & ~0x00000002);
-      onChanged();
-      return this;
-    }
-    /**
-     * <pre>
-     * 模态: screenshot/video_only/video_screenshot
-     * </pre>
-     *
-     * <code>string modality = 2;</code>
-     * @param value The bytes for modality to set.
-     * @return This builder for chaining.
-     */
-    public Builder setModalityBytes(
-        com.google.protobuf.ByteString value) {
-      if (value == null) { throw new NullPointerException(); }
-      checkByteStringIsUtf8(value);
-      modality_ = value;
-      bitField0_ |= 0x00000002;
-      onChanged();
-      return this;
-    }
-
-    private java.lang.Object knowledgeSubtype_ = "";
-    /**
-     * <pre>
-     * 子分类
-     * </pre>
-     *
-     * <code>string knowledge_subtype = 3;</code>
-     * @return The knowledgeSubtype.
-     */
-    public java.lang.String getKnowledgeSubtype() {
-      java.lang.Object ref = knowledgeSubtype_;
-      if (!(ref instanceof java.lang.String)) {
-        com.google.protobuf.ByteString bs =
-            (com.google.protobuf.ByteString) ref;
-        java.lang.String s = bs.toStringUtf8();
-        knowledgeSubtype_ = s;
-        return s;
-      } else {
-        return (java.lang.String) ref;
-      }
-    }
-    /**
-     * <pre>
-     * 子分类
-     * </pre>
-     *
-     * <code>string knowledge_subtype = 3;</code>
-     * @return The bytes for knowledgeSubtype.
-     */
-    public com.google.protobuf.ByteString
-        getKnowledgeSubtypeBytes() {
-      java.lang.Object ref = knowledgeSubtype_;
-      if (ref instanceof String) {
-        com.google.protobuf.ByteString b = 
-            com.google.protobuf.ByteString.copyFromUtf8(
-                (java.lang.String) ref);
-        knowledgeSubtype_ = b;
-        return b;
-      } else {
-        return (com.google.protobuf.ByteString) ref;
-      }
-    }
-    /**
-     * <pre>
-     * 子分类
-     * </pre>
-     *
-     * <code>string knowledge_subtype = 3;</code>
-     * @param value The knowledgeSubtype to set.
-     * @return This builder for chaining.
-     */
-    public Builder setKnowledgeSubtype(
-        java.lang.String value) {
-      if (value == null) { throw new NullPointerException(); }
-      knowledgeSubtype_ = value;
-      bitField0_ |= 0x00000004;
-      onChanged();
-      return this;
-    }
-    /**
-     * <pre>
-     * 子分类
-     * </pre>
-     *
-     * <code>string knowledge_subtype = 3;</code>
-     * @return This builder for chaining.
-     */
-    public Builder clearKnowledgeSubtype() {
-      knowledgeSubtype_ = getDefaultInstance().getKnowledgeSubtype();
-      bitField0_ = (bitField0_ & ~0x00000004);
-      onChanged();
-      return this;
-    }
-    /**
-     * <pre>
-     * 子分类
-     * </pre>
-     *
-     * <code>string knowledge_subtype = 3;</code>
-     * @param value The bytes for knowledgeSubtype to set.
-     * @return This builder for chaining.
-     */
-    public Builder setKnowledgeSubtypeBytes(
-        com.google.protobuf.ByteString value) {
-      if (value == null) { throw new NullPointerException(); }
-      checkByteStringIsUtf8(value);
-      knowledgeSubtype_ = value;
-      bitField0_ |= 0x00000004;
-      onChanged();
-      return this;
-    }
-
     private java.util.List<com.mvp.videoprocessing.grpc.StableIsland> stableIslands_ =
       java.util.Collections.emptyList();
     private void ensureStableIslandsIsMutable() {
-      if (!((bitField0_ & 0x00000008) != 0)) {
+      if (!((bitField0_ & 0x00000002) != 0)) {
         stableIslands_ = new java.util.ArrayList<com.mvp.videoprocessing.grpc.StableIsland>(stableIslands_);
-        bitField0_ |= 0x00000008;
+        bitField0_ |= 0x00000002;
        }
     }
 
@@ -1114,7 +786,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public java.util.List<com.mvp.videoprocessing.grpc.StableIsland> getStableIslandsList() {
       if (stableIslandsBuilder_ == null) {
@@ -1128,7 +800,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public int getStableIslandsCount() {
       if (stableIslandsBuilder_ == null) {
@@ -1142,7 +814,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index) {
       if (stableIslandsBuilder_ == null) {
@@ -1156,7 +828,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder setStableIslands(
         int index, com.mvp.videoprocessing.grpc.StableIsland value) {
@@ -1177,7 +849,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder setStableIslands(
         int index, com.mvp.videoprocessing.grpc.StableIsland.Builder builderForValue) {
@@ -1195,7 +867,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder addStableIslands(com.mvp.videoprocessing.grpc.StableIsland value) {
       if (stableIslandsBuilder_ == null) {
@@ -1215,7 +887,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder addStableIslands(
         int index, com.mvp.videoprocessing.grpc.StableIsland value) {
@@ -1236,7 +908,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder addStableIslands(
         com.mvp.videoprocessing.grpc.StableIsland.Builder builderForValue) {
@@ -1254,7 +926,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder addStableIslands(
         int index, com.mvp.videoprocessing.grpc.StableIsland.Builder builderForValue) {
@@ -1272,7 +944,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder addAllStableIslands(
         java.lang.Iterable<? extends com.mvp.videoprocessing.grpc.StableIsland> values) {
@@ -1291,12 +963,12 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder clearStableIslands() {
       if (stableIslandsBuilder_ == null) {
         stableIslands_ = java.util.Collections.emptyList();
-        bitField0_ = (bitField0_ & ~0x00000008);
+        bitField0_ = (bitField0_ & ~0x00000002);
         onChanged();
       } else {
         stableIslandsBuilder_.clear();
@@ -1308,7 +980,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public Builder removeStableIslands(int index) {
       if (stableIslandsBuilder_ == null) {
@@ -1325,7 +997,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public com.mvp.videoprocessing.grpc.StableIsland.Builder getStableIslandsBuilder(
         int index) {
@@ -1336,7 +1008,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public com.mvp.videoprocessing.grpc.StableIslandOrBuilder getStableIslandsOrBuilder(
         int index) {
@@ -1350,7 +1022,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public java.util.List<? extends com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
          getStableIslandsOrBuilderList() {
@@ -1365,7 +1037,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public com.mvp.videoprocessing.grpc.StableIsland.Builder addStableIslandsBuilder() {
       return getStableIslandsFieldBuilder().addBuilder(
@@ -1376,7 +1048,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public com.mvp.videoprocessing.grpc.StableIsland.Builder addStableIslandsBuilder(
         int index) {
@@ -1388,7 +1060,7 @@ private static final long serialVersionUID = 0L;
      * 稳定岛列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+     * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
      */
     public java.util.List<com.mvp.videoprocessing.grpc.StableIsland.Builder> 
          getStableIslandsBuilderList() {
@@ -1401,7 +1073,7 @@ private static final long serialVersionUID = 0L;
         stableIslandsBuilder_ = new com.google.protobuf.RepeatedFieldBuilderV3<
             com.mvp.videoprocessing.grpc.StableIsland, com.mvp.videoprocessing.grpc.StableIsland.Builder, com.mvp.videoprocessing.grpc.StableIslandOrBuilder>(
                 stableIslands_,
-                ((bitField0_ & 0x00000008) != 0),
+                ((bitField0_ & 0x00000002) != 0),
                 getParentForChildren(),
                 isClean());
         stableIslands_ = null;
@@ -1412,9 +1084,9 @@ private static final long serialVersionUID = 0L;
     private java.util.List<com.mvp.videoprocessing.grpc.ActionSegment> actionSegments_ =
       java.util.Collections.emptyList();
     private void ensureActionSegmentsIsMutable() {
-      if (!((bitField0_ & 0x00000010) != 0)) {
+      if (!((bitField0_ & 0x00000004) != 0)) {
         actionSegments_ = new java.util.ArrayList<com.mvp.videoprocessing.grpc.ActionSegment>(actionSegments_);
-        bitField0_ |= 0x00000010;
+        bitField0_ |= 0x00000004;
        }
     }
 
@@ -1426,7 +1098,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public java.util.List<com.mvp.videoprocessing.grpc.ActionSegment> getActionSegmentsList() {
       if (actionSegmentsBuilder_ == null) {
@@ -1440,7 +1112,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public int getActionSegmentsCount() {
       if (actionSegmentsBuilder_ == null) {
@@ -1454,7 +1126,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public com.mvp.videoprocessing.grpc.ActionSegment getActionSegments(int index) {
       if (actionSegmentsBuilder_ == null) {
@@ -1468,7 +1140,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder setActionSegments(
         int index, com.mvp.videoprocessing.grpc.ActionSegment value) {
@@ -1489,7 +1161,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder setActionSegments(
         int index, com.mvp.videoprocessing.grpc.ActionSegment.Builder builderForValue) {
@@ -1507,7 +1179,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder addActionSegments(com.mvp.videoprocessing.grpc.ActionSegment value) {
       if (actionSegmentsBuilder_ == null) {
@@ -1527,7 +1199,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder addActionSegments(
         int index, com.mvp.videoprocessing.grpc.ActionSegment value) {
@@ -1548,7 +1220,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder addActionSegments(
         com.mvp.videoprocessing.grpc.ActionSegment.Builder builderForValue) {
@@ -1566,7 +1238,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder addActionSegments(
         int index, com.mvp.videoprocessing.grpc.ActionSegment.Builder builderForValue) {
@@ -1584,7 +1256,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder addAllActionSegments(
         java.lang.Iterable<? extends com.mvp.videoprocessing.grpc.ActionSegment> values) {
@@ -1603,12 +1275,12 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder clearActionSegments() {
       if (actionSegmentsBuilder_ == null) {
         actionSegments_ = java.util.Collections.emptyList();
-        bitField0_ = (bitField0_ & ~0x00000010);
+        bitField0_ = (bitField0_ & ~0x00000004);
         onChanged();
       } else {
         actionSegmentsBuilder_.clear();
@@ -1620,7 +1292,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public Builder removeActionSegments(int index) {
       if (actionSegmentsBuilder_ == null) {
@@ -1637,7 +1309,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public com.mvp.videoprocessing.grpc.ActionSegment.Builder getActionSegmentsBuilder(
         int index) {
@@ -1648,7 +1320,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder getActionSegmentsOrBuilder(
         int index) {
@@ -1662,7 +1334,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public java.util.List<? extends com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder> 
          getActionSegmentsOrBuilderList() {
@@ -1677,7 +1349,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public com.mvp.videoprocessing.grpc.ActionSegment.Builder addActionSegmentsBuilder() {
       return getActionSegmentsFieldBuilder().addBuilder(
@@ -1688,7 +1360,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public com.mvp.videoprocessing.grpc.ActionSegment.Builder addActionSegmentsBuilder(
         int index) {
@@ -1700,7 +1372,7 @@ private static final long serialVersionUID = 0L;
      * 动作单元列表
      * </pre>
      *
-     * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+     * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
      */
     public java.util.List<com.mvp.videoprocessing.grpc.ActionSegment.Builder> 
          getActionSegmentsBuilderList() {
@@ -1713,7 +1385,7 @@ private static final long serialVersionUID = 0L;
         actionSegmentsBuilder_ = new com.google.protobuf.RepeatedFieldBuilderV3<
             com.mvp.videoprocessing.grpc.ActionSegment, com.mvp.videoprocessing.grpc.ActionSegment.Builder, com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder>(
                 actionSegments_,
-                ((bitField0_ & 0x00000010) != 0),
+                ((bitField0_ & 0x00000004) != 0),
                 getParentForChildren(),
                 isClean());
         actionSegments_ = null;

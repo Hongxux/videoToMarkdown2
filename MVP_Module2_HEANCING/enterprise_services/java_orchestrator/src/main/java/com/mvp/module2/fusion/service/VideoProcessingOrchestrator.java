@@ -147,8 +147,7 @@ public class VideoProcessingOrchestrator {
             unitsList = list != null ? list : new ArrayList<>();
         }
             
-            // 🚀 Enrich units with subtitles (since SemanticSegmenter cache doesn't have them)
-            enrichUnitsWithSubtitles(unitsList, s1.step2JsonPath);
+            // ❌ Removed: enrichUnitsWithSubtitles - Classifier now reads directly from Step 2
             
             // 5. 🚀 STAGED PARALLEL PIPELINE: 
             // - For Dynamic Units: CV -> Classify (Sequential)
@@ -187,7 +186,7 @@ public class VideoProcessingOrchestrator {
                                     .collect(Collectors.toList());
                                 
                                 List<ClassificationInput> classInputs = convertToClassInputs(batchUnits, cvResults);
-                                return knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs)
+                                return knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, s1.step2JsonPath)
                                     .thenAccept(classBatchRes -> {
                                         if (classBatchRes.success && classBatchRes.results != null) {
                                             classResults.addAll(classBatchRes.results);
@@ -207,7 +206,7 @@ public class VideoProcessingOrchestrator {
                 int batchSize = 5;
                 for (int i = 0; i < staticInputs.size(); i += batchSize) {
                     List<ClassificationInput> batch = staticInputs.subList(i, Math.min(i + batchSize, staticInputs.size()));
-                    CompletableFuture<ClassificationBatchResult> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, batch);
+                    CompletableFuture<ClassificationBatchResult> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, batch, s1.step2JsonPath);
                     allFutures.add(classFuture.thenAccept(batchRes -> {
                         if (batchRes.success && batchRes.results != null) {
                             classResults.addAll(batchRes.results);
@@ -325,17 +324,8 @@ public class VideoProcessingOrchestrator {
                 }
             }
             
-            // Map Subtitles
-            List<Map<String, Object>> subs = (List<Map<String, Object>>) u.get("subtitles");
-            if (subs != null) {
-                for (Map<String, Object> sub : subs) {
-                    SubtitleItem si = new SubtitleItem();
-                    si.startSec = parseDouble(sub.get("start_sec"), 0.0);
-                    si.endSec = parseDouble(sub.get("end_sec"), 0.0);
-                    si.text = (String) sub.get("text");
-                    in.subtitles.add(si);
-                }
-            }
+            // ❌ Removed: Subtitle mapping - Classifier reads directly from Step 2
+            
             return in;
         }).collect(Collectors.toList());
     }
@@ -433,51 +423,9 @@ public class VideoProcessingOrchestrator {
         }
     }
     
-    private void enrichUnitsWithSubtitles(List<Map<String, Object>> units, String step2Path) {
-        try {
-            File s2File = new File(step2Path);
-            if (!s2File.exists()) {
-                logger.warn("Step 2 JSON not found at {}, skipping subtitle enrichment", step2Path);
-                return;
-            }
-            JsonNode root = objectMapper.readTree(s2File);
-            JsonNode subsNode = root.path("output").path("corrected_subtitles");
-            List<Map<String, Object>> allSubtitles = new ArrayList<>();
-            
-            if (subsNode.isArray()) {
-                for (JsonNode node : subsNode) {
-                    Map<String, Object> sub = new HashMap<>();
-                    sub.put("start_sec", node.get("start_sec").asDouble());
-                    sub.put("end_sec", node.get("end_sec").asDouble());
-                    sub.put("text", node.get("corrected_text").asText());
-                    allSubtitles.add(sub);
-                }
-            }
-            
-            // Assign to units based on time overlap
-            for (Map<String, Object> unit : units) {
-                double uStart = parseDouble(unit.getOrDefault("start_sec", unit.get("timestamp_start")), 0.0);
-                double uEnd = parseDouble(unit.getOrDefault("end_sec", unit.get("timestamp_end")), 0.0);
-                
-                List<Map<String, Object>> unitSubs = new ArrayList<>();
-                for (Map<String, Object> sub : allSubtitles) {
-                    double sStart = (double) sub.get("start_sec");
-                    double sEnd = (double) sub.get("end_sec");
-                    
-                    // Check overlap: max(start) < min(end)
-                    if (Math.max(uStart, sStart) < Math.min(uEnd, sEnd)) {
-                        unitSubs.add(sub);
-                    }
-                }
-                unit.put("subtitles", unitSubs);
-            }
-            logger.info("Enriched {} units with subtitles from Step 2", units.size());
-            
-        } catch (Exception e) {
-            logger.error("Failed to enrich units with subtitles", e);
-        }
-    }
-
+    // ❌ Removed: enrichUnitsWithSubtitles method
+    // Classifier now reads subtitles directly from step2_path
+    
     private void updateProgress(String taskId, double progress, String message) {
         if (progressCallback != null) progressCallback.onProgress(taskId, progress, message);
         logger.info("[{}] {} ({}%)", taskId, message, (int)(progress * 100));

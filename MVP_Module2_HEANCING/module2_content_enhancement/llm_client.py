@@ -217,9 +217,9 @@ def get_concurrency_limiter() -> AdaptiveConcurrencyLimiter:
     global _global_concurrency_limiter
     if _global_concurrency_limiter is None:
         _global_concurrency_limiter = AdaptiveConcurrencyLimiter(
-            initial_limit=10,
+            initial_limit=20,
             min_limit=2,
-            max_limit=50
+            max_limit=300
         )
     return _global_concurrency_limiter
 

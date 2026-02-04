@@ -19,6 +19,7 @@ private static final long serialVersionUID = 0L;
   private KnowledgeClassificationRequest() {
     taskId_ = "";
     units_ = java.util.Collections.emptyList();
+    step2Path_ = "";
   }
 
   @java.lang.Override
@@ -141,6 +142,53 @@ private static final long serialVersionUID = 0L;
     return units_.get(index);
   }
 
+  public static final int STEP2_PATH_FIELD_NUMBER = 3;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object step2Path_ = "";
+  /**
+   * <pre>
+   * Path to step2_correction_output.json
+   * </pre>
+   *
+   * <code>string step2_path = 3;</code>
+   * @return The step2Path.
+   */
+  @java.lang.Override
+  public java.lang.String getStep2Path() {
+    java.lang.Object ref = step2Path_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      step2Path_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * Path to step2_correction_output.json
+   * </pre>
+   *
+   * <code>string step2_path = 3;</code>
+   * @return The bytes for step2Path.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getStep2PathBytes() {
+    java.lang.Object ref = step2Path_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      step2Path_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -161,6 +209,9 @@ private static final long serialVersionUID = 0L;
     for (int i = 0; i < units_.size(); i++) {
       output.writeMessage(2, units_.get(i));
     }
+    if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(step2Path_)) {
+      com.google.protobuf.GeneratedMessageV3.writeString(output, 3, step2Path_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -176,6 +227,9 @@ private static final long serialVersionUID = 0L;
     for (int i = 0; i < units_.size(); i++) {
       size += com.google.protobuf.CodedOutputStream
         .computeMessageSize(2, units_.get(i));
+    }
+    if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(step2Path_)) {
+      size += com.google.protobuf.GeneratedMessageV3.computeStringSize(3, step2Path_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -196,6 +250,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getTaskId())) return false;
     if (!getUnitsList()
         .equals(other.getUnitsList())) return false;
+    if (!getStep2Path()
+        .equals(other.getStep2Path())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -213,6 +269,8 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + UNITS_FIELD_NUMBER;
       hash = (53 * hash) + getUnitsList().hashCode();
     }
+    hash = (37 * hash) + STEP2_PATH_FIELD_NUMBER;
+    hash = (53 * hash) + getStep2Path().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -352,6 +410,7 @@ private static final long serialVersionUID = 0L;
         unitsBuilder_.clear();
       }
       bitField0_ = (bitField0_ & ~0x00000002);
+      step2Path_ = "";
       return this;
     }
 
@@ -400,6 +459,9 @@ private static final long serialVersionUID = 0L;
       int from_bitField0_ = bitField0_;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.taskId_ = taskId_;
+      }
+      if (((from_bitField0_ & 0x00000004) != 0)) {
+        result.step2Path_ = step2Path_;
       }
     }
 
@@ -478,6 +540,11 @@ private static final long serialVersionUID = 0L;
           }
         }
       }
+      if (!other.getStep2Path().isEmpty()) {
+        step2Path_ = other.step2Path_;
+        bitField0_ |= 0x00000004;
+        onChanged();
+      }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
       return this;
@@ -522,6 +589,11 @@ private static final long serialVersionUID = 0L;
               }
               break;
             } // case 18
+            case 26: {
+              step2Path_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000004;
+              break;
+            } // case 26
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -921,6 +993,98 @@ private static final long serialVersionUID = 0L;
         units_ = null;
       }
       return unitsBuilder_;
+    }
+
+    private java.lang.Object step2Path_ = "";
+    /**
+     * <pre>
+     * Path to step2_correction_output.json
+     * </pre>
+     *
+     * <code>string step2_path = 3;</code>
+     * @return The step2Path.
+     */
+    public java.lang.String getStep2Path() {
+      java.lang.Object ref = step2Path_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        step2Path_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * Path to step2_correction_output.json
+     * </pre>
+     *
+     * <code>string step2_path = 3;</code>
+     * @return The bytes for step2Path.
+     */
+    public com.google.protobuf.ByteString
+        getStep2PathBytes() {
+      java.lang.Object ref = step2Path_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        step2Path_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * Path to step2_correction_output.json
+     * </pre>
+     *
+     * <code>string step2_path = 3;</code>
+     * @param value The step2Path to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStep2Path(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      step2Path_ = value;
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Path to step2_correction_output.json
+     * </pre>
+     *
+     * <code>string step2_path = 3;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearStep2Path() {
+      step2Path_ = getDefaultInstance().getStep2Path();
+      bitField0_ = (bitField0_ & ~0x00000004);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Path to step2_correction_output.json
+     * </pre>
+     *
+     * <code>string step2_path = 3;</code>
+     * @param value The bytes for step2Path to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStep2PathBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      step2Path_ = value;
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
     }
     @java.lang.Override
     public final Builder setUnknownFields(

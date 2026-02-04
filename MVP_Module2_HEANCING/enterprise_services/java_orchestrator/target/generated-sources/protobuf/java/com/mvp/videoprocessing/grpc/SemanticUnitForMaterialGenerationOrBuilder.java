@@ -98,7 +98,7 @@ public interface SemanticUnitForMaterialGenerationOrBuilder extends
 
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -107,7 +107,7 @@ public interface SemanticUnitForMaterialGenerationOrBuilder extends
       getStableIslandsList();
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -115,7 +115,7 @@ public interface SemanticUnitForMaterialGenerationOrBuilder extends
   com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index);
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -123,7 +123,7 @@ public interface SemanticUnitForMaterialGenerationOrBuilder extends
   int getStableIslandsCount();
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>
@@ -132,7 +132,7 @@ public interface SemanticUnitForMaterialGenerationOrBuilder extends
       getStableIslandsOrBuilderList();
   /**
    * <pre>
-   * 🚀 CV结果中的稳定岛
+   * 🚀 Missing link for CV results
    * </pre>
    *
    * <code>repeated .videoprocessing.StableIsland stable_islands = 7;</code>

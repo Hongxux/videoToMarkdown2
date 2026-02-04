@@ -45,50 +45,46 @@ public interface SemanticUnitForClassificationOrBuilder extends
       getTextBytes();
 
   /**
+   * <pre>
+   * subtitles removed - classifier reads directly from step2_path
+   * </pre>
+   *
    * <code>repeated .videoprocessing.ActionUnitForClassification action_units = 4;</code>
    */
   java.util.List<com.mvp.videoprocessing.grpc.ActionUnitForClassification> 
       getActionUnitsList();
   /**
+   * <pre>
+   * subtitles removed - classifier reads directly from step2_path
+   * </pre>
+   *
    * <code>repeated .videoprocessing.ActionUnitForClassification action_units = 4;</code>
    */
   com.mvp.videoprocessing.grpc.ActionUnitForClassification getActionUnits(int index);
   /**
+   * <pre>
+   * subtitles removed - classifier reads directly from step2_path
+   * </pre>
+   *
    * <code>repeated .videoprocessing.ActionUnitForClassification action_units = 4;</code>
    */
   int getActionUnitsCount();
   /**
+   * <pre>
+   * subtitles removed - classifier reads directly from step2_path
+   * </pre>
+   *
    * <code>repeated .videoprocessing.ActionUnitForClassification action_units = 4;</code>
    */
   java.util.List<? extends com.mvp.videoprocessing.grpc.ActionUnitForClassificationOrBuilder> 
       getActionUnitsOrBuilderList();
   /**
+   * <pre>
+   * subtitles removed - classifier reads directly from step2_path
+   * </pre>
+   *
    * <code>repeated .videoprocessing.ActionUnitForClassification action_units = 4;</code>
    */
   com.mvp.videoprocessing.grpc.ActionUnitForClassificationOrBuilder getActionUnitsOrBuilder(
-      int index);
-
-  /**
-   * <code>repeated .videoprocessing.SubtitleForClassification subtitles = 5;</code>
-   */
-  java.util.List<com.mvp.videoprocessing.grpc.SubtitleForClassification> 
-      getSubtitlesList();
-  /**
-   * <code>repeated .videoprocessing.SubtitleForClassification subtitles = 5;</code>
-   */
-  com.mvp.videoprocessing.grpc.SubtitleForClassification getSubtitles(int index);
-  /**
-   * <code>repeated .videoprocessing.SubtitleForClassification subtitles = 5;</code>
-   */
-  int getSubtitlesCount();
-  /**
-   * <code>repeated .videoprocessing.SubtitleForClassification subtitles = 5;</code>
-   */
-  java.util.List<? extends com.mvp.videoprocessing.grpc.SubtitleForClassificationOrBuilder> 
-      getSubtitlesOrBuilderList();
-  /**
-   * <code>repeated .videoprocessing.SubtitleForClassification subtitles = 5;</code>
-   */
-  com.mvp.videoprocessing.grpc.SubtitleForClassificationOrBuilder getSubtitlesOrBuilder(
       int index);
 }

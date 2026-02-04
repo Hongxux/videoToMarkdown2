@@ -43,6 +43,10 @@ private static final long serialVersionUID = 0L;
   public static final int SUCCESS_FIELD_NUMBER = 1;
   private boolean success_ = false;
   /**
+   * <pre>
+   * 是否成功
+   * </pre>
+   *
    * <code>bool success = 1;</code>
    * @return The success.
    */
@@ -55,6 +59,10 @@ private static final long serialVersionUID = 0L;
   @SuppressWarnings("serial")
   private volatile java.lang.Object message_ = "";
   /**
+   * <pre>
+   * 结果消息
+   * </pre>
+   *
    * <code>string message = 2;</code>
    * @return The message.
    */
@@ -72,6 +80,10 @@ private static final long serialVersionUID = 0L;
     }
   }
   /**
+   * <pre>
+   * 结果消息
+   * </pre>
+   *
    * <code>string message = 2;</code>
    * @return The bytes for message.
    */
@@ -93,6 +105,10 @@ private static final long serialVersionUID = 0L;
   public static final int FREED_WORKERS_COUNT_FIELD_NUMBER = 3;
   private int freedWorkersCount_ = 0;
   /**
+   * <pre>
+   * 释放的 Worker 数量
+   * </pre>
+   *
    * <code>int32 freed_workers_count = 3;</code>
    * @return The freedWorkersCount.
    */
@@ -104,6 +120,10 @@ private static final long serialVersionUID = 0L;
   public static final int FREED_MEMORY_MB_FIELD_NUMBER = 4;
   private float freedMemoryMb_ = 0F;
   /**
+   * <pre>
+   * 释放的内存（MB）
+   * </pre>
+   *
    * <code>float freed_memory_mb = 4;</code>
    * @return The freedMemoryMb.
    */
@@ -512,6 +532,10 @@ private static final long serialVersionUID = 0L;
 
     private boolean success_ ;
     /**
+     * <pre>
+     * 是否成功
+     * </pre>
+     *
      * <code>bool success = 1;</code>
      * @return The success.
      */
@@ -520,6 +544,10 @@ private static final long serialVersionUID = 0L;
       return success_;
     }
     /**
+     * <pre>
+     * 是否成功
+     * </pre>
+     *
      * <code>bool success = 1;</code>
      * @param value The success to set.
      * @return This builder for chaining.
@@ -532,6 +560,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 是否成功
+     * </pre>
+     *
      * <code>bool success = 1;</code>
      * @return This builder for chaining.
      */
@@ -544,6 +576,10 @@ private static final long serialVersionUID = 0L;
 
     private java.lang.Object message_ = "";
     /**
+     * <pre>
+     * 结果消息
+     * </pre>
+     *
      * <code>string message = 2;</code>
      * @return The message.
      */
@@ -560,6 +596,10 @@ private static final long serialVersionUID = 0L;
       }
     }
     /**
+     * <pre>
+     * 结果消息
+     * </pre>
+     *
      * <code>string message = 2;</code>
      * @return The bytes for message.
      */
@@ -577,6 +617,10 @@ private static final long serialVersionUID = 0L;
       }
     }
     /**
+     * <pre>
+     * 结果消息
+     * </pre>
+     *
      * <code>string message = 2;</code>
      * @param value The message to set.
      * @return This builder for chaining.
@@ -590,6 +634,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 结果消息
+     * </pre>
+     *
      * <code>string message = 2;</code>
      * @return This builder for chaining.
      */
@@ -600,6 +648,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 结果消息
+     * </pre>
+     *
      * <code>string message = 2;</code>
      * @param value The bytes for message to set.
      * @return This builder for chaining.
@@ -616,6 +668,10 @@ private static final long serialVersionUID = 0L;
 
     private int freedWorkersCount_ ;
     /**
+     * <pre>
+     * 释放的 Worker 数量
+     * </pre>
+     *
      * <code>int32 freed_workers_count = 3;</code>
      * @return The freedWorkersCount.
      */
@@ -624,6 +680,10 @@ private static final long serialVersionUID = 0L;
       return freedWorkersCount_;
     }
     /**
+     * <pre>
+     * 释放的 Worker 数量
+     * </pre>
+     *
      * <code>int32 freed_workers_count = 3;</code>
      * @param value The freedWorkersCount to set.
      * @return This builder for chaining.
@@ -636,6 +696,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 释放的 Worker 数量
+     * </pre>
+     *
      * <code>int32 freed_workers_count = 3;</code>
      * @return This builder for chaining.
      */
@@ -648,6 +712,10 @@ private static final long serialVersionUID = 0L;
 
     private float freedMemoryMb_ ;
     /**
+     * <pre>
+     * 释放的内存（MB）
+     * </pre>
+     *
      * <code>float freed_memory_mb = 4;</code>
      * @return The freedMemoryMb.
      */
@@ -656,6 +724,10 @@ private static final long serialVersionUID = 0L;
       return freedMemoryMb_;
     }
     /**
+     * <pre>
+     * 释放的内存（MB）
+     * </pre>
+     *
      * <code>float freed_memory_mb = 4;</code>
      * @param value The freedMemoryMb to set.
      * @return This builder for chaining.
@@ -668,6 +740,10 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * 释放的内存（MB）
+     * </pre>
+     *
      * <code>float freed_memory_mb = 4;</code>
      * @return This builder for chaining.
      */

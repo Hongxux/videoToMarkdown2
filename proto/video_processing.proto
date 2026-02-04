@@ -43,6 +43,9 @@ service VideoProcessingService {
     rpc ClassifyKnowledgeBatch(KnowledgeClassificationRequest) returns (KnowledgeClassificationResponse);
     rpc GenerateMaterialRequests(GenerateMaterialRequestsRequest) returns (GenerateMaterialRequestsResponse);
     
+    // 🚀 V6: 资源释放
+    rpc ReleaseCVResources(ReleaseResourcesRequest) returns (ReleaseResourcesResponse);
+    
     // 健康检查
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 }
@@ -254,6 +257,7 @@ message KnowledgeClassificationRequest {
     string task_id = 1;
     // Batch of units to classify in parallel
     repeated SemanticUnitForClassification units = 2;
+    string step2_path = 3;  // Path to step2_correction_output.json
 }
 
 message SemanticUnitForClassification {
@@ -261,7 +265,7 @@ message SemanticUnitForClassification {
     string title = 2;
     string text = 3;
     repeated ActionUnitForClassification action_units = 4;
-    repeated SubtitleForClassification subtitles = 5;
+    // subtitles removed - classifier reads directly from step2_path
 }
 
 // ActionUnitForClassification (re-using checking for conflict, seems ok)
@@ -326,4 +330,19 @@ message GenerateMaterialRequestsResponse {
     repeated ScreenshotRequest screenshot_requests = 2;
     repeated ClipRequest clip_requests = 3;
     string error_msg = 4;
+}
+
+// ==========================================
+// 🚀 V6: 资源释放
+// ==========================================
+
+message ReleaseResourcesRequest {
+    string task_id = 1;         // 任务唯一ID
+}
+
+message ReleaseResourcesResponse {
+    bool success = 1;           // 是否成功
+    string message = 2;         // 结果消息
+    int32 freed_workers_count = 3; // 释放的 Worker 数量
+    float freed_memory_mb = 4;     // 释放的内存（MB）
 }

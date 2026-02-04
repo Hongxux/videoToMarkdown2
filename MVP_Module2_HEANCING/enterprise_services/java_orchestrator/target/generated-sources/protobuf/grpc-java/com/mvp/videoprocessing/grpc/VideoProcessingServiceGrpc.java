@@ -450,7 +450,7 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V6: 显式释放 CV 资源
+     * 🚀 V6: 资源释放
      * </pre>
      */
     default void releaseCVResources(com.mvp.videoprocessing.grpc.ReleaseResourcesRequest request,
@@ -581,7 +581,7 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V6: 显式释放 CV 资源
+     * 🚀 V6: 资源释放
      * </pre>
      */
     public void releaseCVResources(com.mvp.videoprocessing.grpc.ReleaseResourcesRequest request,
@@ -695,7 +695,7 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V6: 显式释放 CV 资源
+     * 🚀 V6: 资源释放
      * </pre>
      */
     public com.mvp.videoprocessing.grpc.ReleaseResourcesResponse releaseCVResources(com.mvp.videoprocessing.grpc.ReleaseResourcesRequest request) {
@@ -815,7 +815,7 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
-     * 🚀 V6: 显式释放 CV 资源
+     * 🚀 V6: 资源释放
      * </pre>
      */
     public com.google.common.util.concurrent.ListenableFuture<com.mvp.videoprocessing.grpc.ReleaseResourcesResponse> releaseCVResources(

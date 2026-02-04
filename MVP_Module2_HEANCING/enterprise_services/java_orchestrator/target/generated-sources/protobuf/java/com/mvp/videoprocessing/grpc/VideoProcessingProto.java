@@ -254,92 +254,90 @@ public final class VideoProcessingProto {
       "\003 \001(\001\022\026\n\016knowledge_type\030\004 \001(\t\"p\n\024CVValid" +
       "ationResponse\022\017\n\007success\030\001 \001(\010\0224\n\007result" +
       "s\030\002 \003(\0132#.videoprocessing.CVValidationRe" +
-      "sult\022\021\n\terror_msg\030\003 \001(\t\"\302\001\n\022CVValidation" +
-      "Result\022\017\n\007unit_id\030\001 \001(\t\022\020\n\010modality\030\002 \001(" +
-      "\t\022\031\n\021knowledge_subtype\030\003 \001(\t\0225\n\016stable_i" +
-      "slands\030\004 \003(\0132\035.videoprocessing.StableIsl" +
-      "and\0227\n\017action_segments\030\005 \003(\0132\036.videoproc" +
-      "essing.ActionSegment\"Y\n\014StableIsland\022\021\n\t" +
-      "start_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001(\001\022\017\n\007mid_" +
-      "sec\030\003 \001(\001\022\024\n\014duration_sec\030\004 \001(\001\"\210\001\n\rActi" +
-      "onSegment\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007end_sec\030" +
-      "\002 \001(\001\022\023\n\013action_type\030\003 \001(\t\022>\n\027internal_s" +
-      "table_islands\030\004 \003(\0132\035.videoprocessing.St" +
-      "ableIsland\"\024\n\022HealthCheckRequest\"|\n\023Heal" +
-      "thCheckResponse\022\017\n\007healthy\030\001 \001(\010\022\017\n\007vers" +
-      "ion\030\002 \001(\t\022\024\n\014active_tasks\030\003 \001(\005\022-\n\006statu" +
-      "s\030\004 \001(\0132\035.videoprocessing.ServerStatus\"o" +
-      "\n\014ServerStatus\022\023\n\013cpu_percent\030\001 \001(\001\022\026\n\016m" +
-      "emory_percent\030\002 \001(\001\022\033\n\023available_memory_" +
-      "mb\030\003 \001(\003\022\025\n\rgpu_available\030\004 \001(\010\"p\n\036Knowl" +
-      "edgeClassificationRequest\022\017\n\007task_id\030\001 \001" +
-      "(\t\022=\n\005units\030\002 \003(\0132..videoprocessing.Sema" +
-      "nticUnitForClassification\"\320\001\n\035SemanticUn" +
-      "itForClassification\022\017\n\007unit_id\030\001 \001(\t\022\r\n\005" +
-      "title\030\002 \001(\t\022\014\n\004text\030\003 \001(\t\022B\n\014action_unit" +
-      "s\030\004 \003(\0132,.videoprocessing.ActionUnitForC" +
-      "lassification\022=\n\tsubtitles\030\005 \003(\0132*.video" +
-      "processing.SubtitleForClassification\"M\n\033" +
-      "ActionUnitForClassification\022\n\n\002id\030\001 \001(\005\022" +
-      "\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end_sec\030\003 \001(\001\"M\n\031S" +
-      "ubtitleForClassification\022\021\n\tstart_sec\030\001 " +
-      "\001(\001\022\017\n\007end_sec\030\002 \001(\001\022\014\n\004text\030\003 \001(\t\"\206\001\n\037K" +
-      "nowledgeClassificationResponse\022\017\n\007succes" +
-      "s\030\001 \001(\010\022?\n\007results\030\002 \003(\0132..videoprocessi" +
-      "ng.KnowledgeClassificationResult\022\021\n\terro" +
-      "r_msg\030\003 \001(\t\"\230\001\n\035KnowledgeClassificationR" +
-      "esult\022\017\n\007unit_id\030\001 \001(\t\022\021\n\taction_id\030\002 \001(" +
-      "\005\022\026\n\016knowledge_type\030\003 \001(\t\022\022\n\nconfidence\030" +
-      "\004 \001(\001\022\024\n\014key_evidence\030\005 \001(\t\022\021\n\treasoning" +
-      "\030\006 \001(\t\"\211\001\n\037GenerateMaterialRequestsReque" +
-      "st\022\017\n\007task_id\030\001 \001(\t\022A\n\005units\030\002 \003(\01322.vid" +
-      "eoprocessing.SemanticUnitForMaterialGene" +
-      "ration\022\022\n\nvideo_path\030\003 \001(\t\"\202\002\n!SemanticU" +
-      "nitForMaterialGeneration\022\017\n\007unit_id\030\001 \001(" +
-      "\t\022\026\n\016knowledge_type\030\002 \001(\t\022\021\n\tstart_sec\030\003" +
-      " \001(\001\022\017\n\007end_sec\030\004 \001(\001\022F\n\014action_units\030\005 " +
-      "\003(\01320.videoprocessing.ActionUnitForMater" +
-      "ialGeneration\022\021\n\tfull_text\030\006 \001(\t\0225\n\016stab" +
-      "le_islands\030\007 \003(\0132\035.videoprocessing.Stabl" +
-      "eIsland\"i\n\037ActionUnitForMaterialGenerati" +
-      "on\022\n\n\002id\030\001 \001(\005\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end" +
-      "_sec\030\003 \001(\001\022\026\n\016knowledge_type\030\004 \001(\t\"\274\001\n G" +
-      "enerateMaterialRequestsResponse\022\017\n\007succe" +
-      "ss\030\001 \001(\010\022?\n\023screenshot_requests\030\002 \003(\0132\"." +
-      "videoprocessing.ScreenshotRequest\0223\n\rcli" +
-      "p_requests\030\003 \003(\0132\034.videoprocessing.ClipR" +
-      "equest\022\021\n\terror_msg\030\004 \001(\t\"*\n\027ReleaseReso" +
-      "urcesRequest\022\017\n\007task_id\030\001 \001(\t\"r\n\030Release" +
-      "ResourcesResponse\022\017\n\007success\030\001 \001(\010\022\017\n\007me" +
-      "ssage\030\002 \001(\t\022\033\n\023freed_workers_count\030\003 \001(\005" +
-      "\022\027\n\017freed_memory_mb\030\004 \001(\0022\363\007\n\026VideoProce" +
-      "ssingService\022T\n\rDownloadVideo\022 .videopro" +
-      "cessing.DownloadRequest\032!.videoprocessin" +
-      "g.DownloadResponse\022Z\n\017TranscribeVideo\022\"." +
-      "videoprocessing.TranscribeRequest\032#.vide" +
-      "oprocessing.TranscribeResponse\022P\n\rProces" +
-      "sStage1\022\036.videoprocessing.Stage1Request\032" +
-      "\037.videoprocessing.Stage1Response\022Y\n\024Anal" +
-      "yzeSemanticUnits\022\037.videoprocessing.Analy" +
-      "zeRequest\032 .videoprocessing.AnalyzeRespo" +
-      "nse\022W\n\020AssembleRichText\022 .videoprocessin" +
-      "g.AssembleRequest\032!.videoprocessing.Asse" +
-      "mbleResponse\022^\n\017ValidateCVBatch\022$.videop" +
-      "rocessing.CVValidationRequest\032%.videopro" +
-      "cessing.CVValidationResponse\022{\n\026Classify" +
-      "KnowledgeBatch\022/.videoprocessing.Knowled" +
-      "geClassificationRequest\0320.videoprocessin" +
-      "g.KnowledgeClassificationResponse\022\177\n\030Gen" +
-      "erateMaterialRequests\0220.videoprocessing." +
-      "GenerateMaterialRequestsRequest\0321.videop" +
-      "rocessing.GenerateMaterialRequestsRespon" +
-      "se\022i\n\022ReleaseCVResources\022(.videoprocessi" +
-      "ng.ReleaseResourcesRequest\032).videoproces" +
-      "sing.ReleaseResourcesResponse\022X\n\013HealthC" +
-      "heck\022#.videoprocessing.HealthCheckReques" +
-      "t\032$.videoprocessing.HealthCheckResponseB" +
-      "9\n\034com.mvp.videoprocessing.grpcB\024VideoPr" +
-      "ocessingProtoP\001\220\001\001b\006proto3"
+      "sult\022\021\n\terror_msg\030\003 \001(\t\"\225\001\n\022CVValidation" +
+      "Result\022\017\n\007unit_id\030\001 \001(\t\0225\n\016stable_island" +
+      "s\030\002 \003(\0132\035.videoprocessing.StableIsland\0227" +
+      "\n\017action_segments\030\003 \003(\0132\036.videoprocessin" +
+      "g.ActionSegment\"Y\n\014StableIsland\022\021\n\tstart" +
+      "_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001(\001\022\017\n\007mid_sec\030\003" +
+      " \001(\001\022\024\n\014duration_sec\030\004 \001(\001\"\210\001\n\rActionSeg" +
+      "ment\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001(\001" +
+      "\022\023\n\013action_type\030\003 \001(\t\022>\n\027internal_stable" +
+      "_islands\030\004 \003(\0132\035.videoprocessing.StableI" +
+      "sland\"\024\n\022HealthCheckRequest\"|\n\023HealthChe" +
+      "ckResponse\022\017\n\007healthy\030\001 \001(\010\022\017\n\007version\030\002" +
+      " \001(\t\022\024\n\014active_tasks\030\003 \001(\005\022-\n\006status\030\004 \001" +
+      "(\0132\035.videoprocessing.ServerStatus\"o\n\014Ser" +
+      "verStatus\022\023\n\013cpu_percent\030\001 \001(\001\022\026\n\016memory" +
+      "_percent\030\002 \001(\001\022\033\n\023available_memory_mb\030\003 " +
+      "\001(\003\022\025\n\rgpu_available\030\004 \001(\010\"\204\001\n\036Knowledge" +
+      "ClassificationRequest\022\017\n\007task_id\030\001 \001(\t\022=" +
+      "\n\005units\030\002 \003(\0132..videoprocessing.Semantic" +
+      "UnitForClassification\022\022\n\nstep2_path\030\003 \001(" +
+      "\t\"\221\001\n\035SemanticUnitForClassification\022\017\n\007u" +
+      "nit_id\030\001 \001(\t\022\r\n\005title\030\002 \001(\t\022\014\n\004text\030\003 \001(" +
+      "\t\022B\n\014action_units\030\004 \003(\0132,.videoprocessin" +
+      "g.ActionUnitForClassification\"M\n\033ActionU" +
+      "nitForClassification\022\n\n\002id\030\001 \001(\005\022\021\n\tstar" +
+      "t_sec\030\002 \001(\001\022\017\n\007end_sec\030\003 \001(\001\"M\n\031Subtitle" +
+      "ForClassification\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007" +
+      "end_sec\030\002 \001(\001\022\014\n\004text\030\003 \001(\t\"\206\001\n\037Knowledg" +
+      "eClassificationResponse\022\017\n\007success\030\001 \001(\010" +
+      "\022?\n\007results\030\002 \003(\0132..videoprocessing.Know" +
+      "ledgeClassificationResult\022\021\n\terror_msg\030\003" +
+      " \001(\t\"\230\001\n\035KnowledgeClassificationResult\022\017" +
+      "\n\007unit_id\030\001 \001(\t\022\021\n\taction_id\030\002 \001(\005\022\026\n\016kn" +
+      "owledge_type\030\003 \001(\t\022\022\n\nconfidence\030\004 \001(\001\022\024" +
+      "\n\014key_evidence\030\005 \001(\t\022\021\n\treasoning\030\006 \001(\t\"" +
+      "\211\001\n\037GenerateMaterialRequestsRequest\022\017\n\007t" +
+      "ask_id\030\001 \001(\t\022A\n\005units\030\002 \003(\01322.videoproce" +
+      "ssing.SemanticUnitForMaterialGeneration\022" +
+      "\022\n\nvideo_path\030\003 \001(\t\"\202\002\n!SemanticUnitForM" +
+      "aterialGeneration\022\017\n\007unit_id\030\001 \001(\t\022\026\n\016kn" +
+      "owledge_type\030\002 \001(\t\022\021\n\tstart_sec\030\003 \001(\001\022\017\n" +
+      "\007end_sec\030\004 \001(\001\022F\n\014action_units\030\005 \003(\01320.v" +
+      "ideoprocessing.ActionUnitForMaterialGene" +
+      "ration\022\021\n\tfull_text\030\006 \001(\t\0225\n\016stable_isla" +
+      "nds\030\007 \003(\0132\035.videoprocessing.StableIsland" +
+      "\"i\n\037ActionUnitForMaterialGeneration\022\n\n\002i" +
+      "d\030\001 \001(\005\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end_sec\030\003 " +
+      "\001(\001\022\026\n\016knowledge_type\030\004 \001(\t\"\274\001\n Generate" +
+      "MaterialRequestsResponse\022\017\n\007success\030\001 \001(" +
+      "\010\022?\n\023screenshot_requests\030\002 \003(\0132\".videopr" +
+      "ocessing.ScreenshotRequest\0223\n\rclip_reque" +
+      "sts\030\003 \003(\0132\034.videoprocessing.ClipRequest\022" +
+      "\021\n\terror_msg\030\004 \001(\t\"*\n\027ReleaseResourcesRe" +
+      "quest\022\017\n\007task_id\030\001 \001(\t\"r\n\030ReleaseResourc" +
+      "esResponse\022\017\n\007success\030\001 \001(\010\022\017\n\007message\030\002" +
+      " \001(\t\022\033\n\023freed_workers_count\030\003 \001(\005\022\027\n\017fre" +
+      "ed_memory_mb\030\004 \001(\0022\363\007\n\026VideoProcessingSe" +
+      "rvice\022T\n\rDownloadVideo\022 .videoprocessing" +
+      ".DownloadRequest\032!.videoprocessing.Downl" +
+      "oadResponse\022Z\n\017TranscribeVideo\022\".videopr" +
+      "ocessing.TranscribeRequest\032#.videoproces" +
+      "sing.TranscribeResponse\022P\n\rProcessStage1" +
+      "\022\036.videoprocessing.Stage1Request\032\037.video" +
+      "processing.Stage1Response\022Y\n\024AnalyzeSema" +
+      "nticUnits\022\037.videoprocessing.AnalyzeReque" +
+      "st\032 .videoprocessing.AnalyzeResponse\022W\n\020" +
+      "AssembleRichText\022 .videoprocessing.Assem" +
+      "bleRequest\032!.videoprocessing.AssembleRes" +
+      "ponse\022^\n\017ValidateCVBatch\022$.videoprocessi" +
+      "ng.CVValidationRequest\032%.videoprocessing" +
+      ".CVValidationResponse\022{\n\026ClassifyKnowled" +
+      "geBatch\022/.videoprocessing.KnowledgeClass" +
+      "ificationRequest\0320.videoprocessing.Knowl" +
+      "edgeClassificationResponse\022\177\n\030GenerateMa" +
+      "terialRequests\0220.videoprocessing.Generat" +
+      "eMaterialRequestsRequest\0321.videoprocessi" +
+      "ng.GenerateMaterialRequestsResponse\022i\n\022R" +
+      "eleaseCVResources\022(.videoprocessing.Rele" +
+      "aseResourcesRequest\032).videoprocessing.Re" +
+      "leaseResourcesResponse\022X\n\013HealthCheck\022#." +
+      "videoprocessing.HealthCheckRequest\032$.vid" +
+      "eoprocessing.HealthCheckResponseB9\n\034com." +
+      "mvp.videoprocessing.grpcB\024VideoProcessin" +
+      "gProtoP\001\220\001\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -452,7 +450,7 @@ public final class VideoProcessingProto {
     internal_static_videoprocessing_CVValidationResult_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_CVValidationResult_descriptor,
-        new java.lang.String[] { "UnitId", "Modality", "KnowledgeSubtype", "StableIslands", "ActionSegments", });
+        new java.lang.String[] { "UnitId", "StableIslands", "ActionSegments", });
     internal_static_videoprocessing_StableIsland_descriptor =
       getDescriptor().getMessageTypes().get(18);
     internal_static_videoprocessing_StableIsland_fieldAccessorTable = new
@@ -488,13 +486,13 @@ public final class VideoProcessingProto {
     internal_static_videoprocessing_KnowledgeClassificationRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_KnowledgeClassificationRequest_descriptor,
-        new java.lang.String[] { "TaskId", "Units", });
+        new java.lang.String[] { "TaskId", "Units", "Step2Path", });
     internal_static_videoprocessing_SemanticUnitForClassification_descriptor =
       getDescriptor().getMessageTypes().get(24);
     internal_static_videoprocessing_SemanticUnitForClassification_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_SemanticUnitForClassification_descriptor,
-        new java.lang.String[] { "UnitId", "Title", "Text", "ActionUnits", "Subtitles", });
+        new java.lang.String[] { "UnitId", "Title", "Text", "ActionUnits", });
     internal_static_videoprocessing_ActionUnitForClassification_descriptor =
       getDescriptor().getMessageTypes().get(25);
     internal_static_videoprocessing_ActionUnitForClassification_fieldAccessorTable = new

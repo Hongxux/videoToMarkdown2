@@ -30,50 +30,10 @@ public interface CVValidationResultOrBuilder extends
 
   /**
    * <pre>
-   * 模态: screenshot/video_only/video_screenshot
-   * </pre>
-   *
-   * <code>string modality = 2;</code>
-   * @return The modality.
-   */
-  java.lang.String getModality();
-  /**
-   * <pre>
-   * 模态: screenshot/video_only/video_screenshot
-   * </pre>
-   *
-   * <code>string modality = 2;</code>
-   * @return The bytes for modality.
-   */
-  com.google.protobuf.ByteString
-      getModalityBytes();
-
-  /**
-   * <pre>
-   * 子分类
-   * </pre>
-   *
-   * <code>string knowledge_subtype = 3;</code>
-   * @return The knowledgeSubtype.
-   */
-  java.lang.String getKnowledgeSubtype();
-  /**
-   * <pre>
-   * 子分类
-   * </pre>
-   *
-   * <code>string knowledge_subtype = 3;</code>
-   * @return The bytes for knowledgeSubtype.
-   */
-  com.google.protobuf.ByteString
-      getKnowledgeSubtypeBytes();
-
-  /**
-   * <pre>
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   java.util.List<com.mvp.videoprocessing.grpc.StableIsland> 
       getStableIslandsList();
@@ -82,7 +42,7 @@ public interface CVValidationResultOrBuilder extends
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   com.mvp.videoprocessing.grpc.StableIsland getStableIslands(int index);
   /**
@@ -90,7 +50,7 @@ public interface CVValidationResultOrBuilder extends
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   int getStableIslandsCount();
   /**
@@ -98,7 +58,7 @@ public interface CVValidationResultOrBuilder extends
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   java.util.List<? extends com.mvp.videoprocessing.grpc.StableIslandOrBuilder> 
       getStableIslandsOrBuilderList();
@@ -107,7 +67,7 @@ public interface CVValidationResultOrBuilder extends
    * 稳定岛列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.StableIsland stable_islands = 4;</code>
+   * <code>repeated .videoprocessing.StableIsland stable_islands = 2;</code>
    */
   com.mvp.videoprocessing.grpc.StableIslandOrBuilder getStableIslandsOrBuilder(
       int index);
@@ -117,7 +77,7 @@ public interface CVValidationResultOrBuilder extends
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   java.util.List<com.mvp.videoprocessing.grpc.ActionSegment> 
       getActionSegmentsList();
@@ -126,7 +86,7 @@ public interface CVValidationResultOrBuilder extends
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   com.mvp.videoprocessing.grpc.ActionSegment getActionSegments(int index);
   /**
@@ -134,7 +94,7 @@ public interface CVValidationResultOrBuilder extends
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   int getActionSegmentsCount();
   /**
@@ -142,7 +102,7 @@ public interface CVValidationResultOrBuilder extends
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   java.util.List<? extends com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder> 
       getActionSegmentsOrBuilderList();
@@ -151,7 +111,7 @@ public interface CVValidationResultOrBuilder extends
    * 动作单元列表
    * </pre>
    *
-   * <code>repeated .videoprocessing.ActionSegment action_segments = 5;</code>
+   * <code>repeated .videoprocessing.ActionSegment action_segments = 3;</code>
    */
   com.mvp.videoprocessing.grpc.ActionSegmentOrBuilder getActionSegmentsOrBuilder(
       int index);
