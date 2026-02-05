@@ -667,7 +667,12 @@ public class VideoProcessingOrchestrator {
                 // 兜底：没有 action_units 时，仍使用 CV 动作段，避免素材生成断链
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {
-                    in.actionUnits.addAll(cvRes.actionSegments);
+                    for (ActionSegmentResult as : cvRes.actionSegments) {
+                        if (in.knowledgeType != null && !in.knowledgeType.isEmpty()) {
+                            as.actionType = in.knowledgeType;
+                        }
+                        in.actionUnits.add(as);
+                    }
                 }
             }
 

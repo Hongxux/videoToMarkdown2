@@ -124,8 +124,8 @@
 - 关键决策与理由：
   - 引入 Adaptive Action Envelope（自适应动作包络）：仅对知识类型为 `实操/推演/环境配置(配置)` 的动作生效，优先保证“定位→执行→结果确认”闭环。
   - 短语义单元（<=20s）：直接取 `unit.start_sec ~ unit.end_sec`，并对起止做视频边界裁剪（模仿 `visual_feature_extractor.py` 的安全边界策略），避免切分破坏完整性。
-  - 增加短单元强制整段开关（`force_short_unit`）：在 GenerateMaterialRequests 对已判定为 clip 的动作开启，避免 action knowledge_type 缺失导致短单元未整段。
   - 长语义单元：基于 `Union(Action, SentenceOverlappingAction)` 扩边（start -0.4s，end +1.0s），并强制 `end <= unit.end_sec`，暂不跨越下一个语义单元。
+  - 修复素材生成数据链：Java 侧构造 MaterialInputs 时若缺少 action_units，则用 unit 级 `knowledge_type` 覆盖 CV actionType，避免动作知识类型断链；同时 gRPC 传递 action_id 不再写死 0，保证下游回写一致。
   - 多动作融合：同一语义单元内将动作段合并阈值由 `<1.0s` 放宽到 `<5.0s`，降低“只截到其中一段”的概率。
   - 下游统一使用包络：GenerateMaterialRequests 直接用动作包络生成 clip（并在无字幕时保留动作边界），避免 Phase2A 跳过素材请求导致包络逻辑不生效。
 - 兼容性影响：clip 时间范围可能变长；素材数量不变但单 clip 更可能覆盖多动作；下游按 `unit.end_sec` 截断后不再跨到下一单元画面。

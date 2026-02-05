@@ -668,7 +668,7 @@ public class PythonGrpcClient {
                         for (ActionSegmentResult as : unit.actionUnits) {
                             unitBuilder.addActionUnits(
                                 ActionUnitForMaterialGeneration.newBuilder()
-                                    .setId(0) // Default ID or use as.id if available
+                                    .setId(as.id)
                                     .setStartSec(as.startSec)
                                     .setEndSec(as.endSec)
                                     .setKnowledgeType(as.actionType != null ? as.actionType : "")

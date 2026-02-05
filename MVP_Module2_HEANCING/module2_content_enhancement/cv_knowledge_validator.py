@@ -1147,10 +1147,24 @@ class CVKnowledgeValidator:
             interval = 1.0 / fps
             t = start_sec
             while t <= end_sec:
-                self.cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
-                ret, frame = self.cap.read()
-                if ret and frame is not None:
-                    raw_frames.append((t, frame))
+                try:
+                    if not isinstance(self.cap, cv2.VideoCapture):
+                        logger.error(f"self.cap is not cv2.VideoCapture: {type(self.cap)}")
+                        break
+                    
+                    if not self.cap.isOpened():
+                        logger.warning(f"self.cap is not opened: {self.video_path}")
+                        break
+
+                    self.cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                    ret, frame = self.cap.read()
+                    if ret and frame is not None:
+                        raw_frames.append((t, frame))
+                    else:
+                        logger.warning(f"Failed to read frame at {t}s")
+                except Exception as e:
+                    logger.error(f"Error reading frame at {t}s: {e}, cap={self.cap}")
+                    break
                 t += interval
         
         # 🚀 统一缩放帧

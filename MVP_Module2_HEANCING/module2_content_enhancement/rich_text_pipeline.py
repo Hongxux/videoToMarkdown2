@@ -374,8 +374,7 @@ class RichTextPipeline:
         knowledge_type: str,
         short_unit_threshold_sec: float = 20.0,
         pre_buffer_sec: float = 0.4,
-        post_buffer_sec: float = 1.0,
-        force_short_unit: bool = False
+        post_buffer_sec: float = 1.0
     ) -> Tuple[float, float]:
         """
         做什么：根据知识类型计算动作截取范围（Adaptive Action Envelope）。
@@ -394,8 +393,8 @@ class RichTextPipeline:
         base_start = min(float(action_start), float(sentence_start))
         base_end = max(float(action_end), float(sentence_end))
 
-        # 1) 短单元：直接取整段（可强制用于 clip-worthy 场景）
-        if unit_duration > 0 and unit_duration <= short_unit_threshold_sec and (is_target_type or force_short_unit):
+        # 1) 短单元：直接取整段
+        if unit_duration > 0 and unit_duration <= short_unit_threshold_sec and is_target_type:
             start_sec, end_sec = unit_start, unit_end
         elif is_target_type:
             # 2) 长单元：在 Union(Action, Sentence) 基础上扩边
@@ -1519,20 +1518,18 @@ class RichTextPipeline:
                 
                 logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%}) - {classification.get('key_evidence', '')[:30]}")
 
-                # 🚀 Adaptive Action Envelope: clip 语义单元短时可整段；且 clip 结束不跨越 unit.end_sec
-                force_short_unit = knowledge_type != "讲解型"
+                # 🚀 Adaptive Action Envelope: 语义单元短时可整段；且 clip 结束不跨越 unit.end_sec
                 envelope_start, envelope_end = self._compute_action_envelope(
                     unit=unit,
                     action_start=action_start,
                     action_end=action_end,
                     sentence_start=sentence_start,
                     sentence_end=sentence_end,
-                    knowledge_type=knowledge_type,
-                    force_short_unit=force_short_unit
+                    knowledge_type=knowledge_type
                 )
                 logger.warning(
                     f"{unit.unit_id} action_{i+1}: envelope [{envelope_start:.2f}s-{envelope_end:.2f}s] "
-                    f"(knowledge_type={knowledge_type}, force_short_unit={force_short_unit})"
+                    f"(knowledge_type={knowledge_type})"
                 )
                 
                 # 根据分类决定素材策略
@@ -1728,20 +1725,18 @@ class RichTextPipeline:
                 
                 logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%})")
 
-                # 🚀 Adaptive Action Envelope: clip 语义单元短时可整段；且 clip 结束不跨越 unit.end_sec
-                force_short_unit = knowledge_type != "讲解型"
+                # 🚀 Adaptive Action Envelope: 语义单元短时可整段；且 clip 结束不跨越 unit.end_sec
                 envelope_start, envelope_end = self._compute_action_envelope(
                     unit=unit,
                     action_start=action_start,
                     action_end=action_end,
                     sentence_start=sentence_start,
                     sentence_end=sentence_end,
-                    knowledge_type=knowledge_type,
-                    force_short_unit=force_short_unit
+                    knowledge_type=knowledge_type
                 )
                 logger.warning(
                     f"{unit.unit_id} action_{i+1}: envelope [{envelope_start:.2f}s-{envelope_end:.2f}s] "
-                    f"(knowledge_type={knowledge_type}, force_short_unit={force_short_unit})"
+                    f"(knowledge_type={knowledge_type})"
                 )
                 
                 # 根据分类决定素材策略

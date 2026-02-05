@@ -767,8 +767,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         cpu_cores = multiprocessing.cpu_count()
         # [User Request] 1.5GB per worker
         max_workers_by_ram = max(1, int((available_ram_gb - 4) / 1.5))
-        self.cv_worker_count = min(max(1, cpu_cores-1), max_workers_by_ram, 8)
-        logger.info(f"🚀 CV ProcessPool Config: {self.cv_worker_count} workers (Limit by RAM: {max_workers_by_ram}, CPU: {cpu_cores})") 
+        # 🚀 OOM Fix: Force max workers to 4 on Windows to prevent PageFile overflow
+        self.cv_worker_count = min(max(1, cpu_cores-1), max_workers_by_ram, 6)
+        logger.info(f"🚀 CV ProcessPool Config: {self.cv_worker_count} workers (Limit by RAM: {max_workers_by_ram}, CPU: {cpu_cores}, HardCap: 4)") 
 
         
         # 创建 ProcessPool (使用 spawn 方式确保 Windows 兼容)
@@ -1398,6 +1399,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 转换 gRPC units 为 SemanticUnit 对象
             from MVP_Module2_HEANCING.module2_content_enhancement.semantic_unit_segmenter import SemanticUnit
             units = []
+            
             for u in request.units:
                 # 转换 action_units
                 action_segments = []
@@ -1408,6 +1410,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         "knowledge_type": au.knowledge_type,
                         "stable_islands": []  # 稍后填充
                     })
+                    logger.info("======GenerateMaterialRequests开始进行转换======")
+                    logger.info(f"Action Unit: start_sec={au.start_sec}, end_sec={au.end_sec}, knowledge_type={au.knowledge_type}")
                 
                 # 🚀 关键修复: 从 proto 提取 stable_islands
                 stable_islands = []
@@ -1512,7 +1516,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     action_start = float(action.get('start_sec', 0))
                     action_end = float(action.get('end_sec', 0))
                     knowledge_type = action.get('knowledge_type') or unit.knowledge_type or '过程性知识'
-                    
+                    logger.info(f"[{task_id}] 为过滤后的动作单元生成视频切片 for unit={unit_id}, action{i}, kt={knowledge_type}")
                     # Sentence 对齐：无字幕时保持动作边界，避免起点被拉到 0
                     if getattr(pipeline, "subtitles", None):
                         sentence_start = pipeline._align_to_sentence_start(action_start)
@@ -1522,15 +1526,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         sentence_end = action_end
                     
                     # 自适应动作包络（与 rich_text_pipeline 保持一致）
-                    force_short_unit = True  # clip_actions 已过滤为需要视频的动作，短单元可直接整段
                     envelope_start, envelope_end = pipeline._compute_action_envelope(
                         unit=unit,
                         action_start=action_start,
                         action_end=action_end,
                         sentence_start=sentence_start,
                         sentence_end=sentence_end,
-                        knowledge_type=knowledge_type,
-                        force_short_unit=force_short_unit
+                        knowledge_type=knowledge_type
                     )
                     unit_start = float(getattr(unit, "start_sec", 0.0))
                     unit_end = float(getattr(unit, "end_sec", 0.0))
@@ -1540,7 +1542,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         f"unit[{unit_start:.2f}-{unit_end:.2f}={unit_duration:.2f}s] "
                         f"action[{action_start:.2f}-{action_end:.2f}] "
                         f"envelope[{envelope_start:.2f}-{envelope_end:.2f}] "
-                        f"kt={knowledge_type}, force_short_unit={force_short_unit}"
+                        f"kt={knowledge_type}"
                     )
                     
                     final_clips.append(video_processing_pb2.ClipRequest(

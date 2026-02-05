@@ -32,6 +32,163 @@ import psutil
 
 logger = logging.getLogger(__name__)
 
+T = TypeVar("T")
+
+
+# =============================================================================
+# 🚀 LLM Result Cache + In-flight Dedup (参考：LLM调用优化.md「结果缓存」)
+# =============================================================================
+
+def _env_bool(name: str, default: bool) -> bool:
+    """
+    做什么：解析环境变量为 bool。
+    为什么：性能开关需要支持不改代码的快速调参（例如线上临时关闭缓存/打开 logprobs）。
+    权衡：仅支持常见 true/false 表达，非法值回退默认值。
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    val = str(raw).strip().lower()
+    if val in {"1", "true", "yes", "y", "on"}:
+        return True
+    if val in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
+@dataclass
+class _LLMCacheEntry:
+    """
+    做什么：保存一次 LLM 调用的可复用结果（payload + usage）。
+    为什么：重复 prompt 在重跑/并发竞态/批处理时非常常见，缓存可直接降本提速。
+    权衡：缓存命中率与内存占用存在 trade-off，需要 TTL 与容量控制。
+    """
+    payload: Any
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    logprobs: Any
+    created_at: float
+    expires_at: float
+
+
+class _AsyncLRUTTLCache:
+    """
+    做什么：异步安全的 LRU + TTL 内存缓存。
+    为什么：Module2 以单进程跑批为主，内存缓存收益高且实现轻量。
+    权衡：不做跨进程共享；容量与 TTL 由环境变量控制。
+    """
+
+    def __init__(self, max_items: int, ttl_seconds: int):
+        self._max_items = max(1, int(max_items))
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._items: "OrderedDict[str, _LLMCacheEntry]" = OrderedDict()
+        self._lock = asyncio.Lock()
+        self._hits = 0
+        self._misses = 0
+
+    def now(self) -> float:
+        return time.time()
+
+    def ttl_seconds(self) -> int:
+        return self._ttl_seconds
+
+    async def get(self, key: str) -> Optional[_LLMCacheEntry]:
+        now = self.now()
+        async with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            if entry.expires_at <= now:
+                try:
+                    del self._items[key]
+                except Exception:
+                    pass
+                self._misses += 1
+                return None
+            self._items.move_to_end(key, last=True)
+            self._hits += 1
+            return entry
+
+    async def set(self, key: str, entry: _LLMCacheEntry) -> None:
+        async with self._lock:
+            self._items[key] = entry
+            self._items.move_to_end(key, last=True)
+            while len(self._items) > self._max_items:
+                self._items.popitem(last=False)
+
+    async def stats(self) -> Dict[str, Any]:
+        async with self._lock:
+            total = self._hits + self._misses
+            hit_rate = (self._hits / total) if total else 0.0
+            return {
+                "items": len(self._items),
+                "hits": self._hits,
+                "misses": self._misses,
+                "hit_rate": f"{hit_rate:.0%}",
+                "ttl_seconds": self._ttl_seconds,
+                "max_items": self._max_items,
+            }
+
+
+class _AsyncInFlightDeduper:
+    """
+    做什么：对同一 cache_key 的并发请求进行合并（singleflight）。
+    为什么：高并发下“相同 prompt 同时触发”会造成重复调用与排队，去重后可显著提升吞吐。
+    权衡：仅在进程内生效；leader 失败会把异常广播给所有等待者。
+    """
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._inflight: Dict[str, asyncio.Future] = {}
+
+    async def run(self, key: str, fn: Callable[[], Awaitable[T]]) -> T:
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            fut = self._inflight.get(key)
+            if fut is None:
+                fut = loop.create_future()
+                self._inflight[key] = fut
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            return await fut
+
+        try:
+            result = await fn()
+            if not fut.done():
+                fut.set_result(result)
+            return result
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+            raise
+        finally:
+            async with self._lock:
+                self._inflight.pop(key, None)
+
+
+# 全局缓存与去重器（模块内所有 LLMClient 实例共享）
+_GLOBAL_CACHE = _AsyncLRUTTLCache(
+    max_items=_env_int("MODULE2_LLM_CACHE_MAX_ITEMS", 1024),
+    ttl_seconds=_env_int("MODULE2_LLM_CACHE_TTL_SECONDS", 3600),
+)
+_GLOBAL_DEDUPER = _AsyncInFlightDeduper()
+
 
 # =============================================================================
 # 🚀 Adaptive Concurrency Controller (AIMD Algorithm)
@@ -463,7 +620,10 @@ class LLMClient:
         api_key: str = None,
         base_url: str = "https://api.deepseek.com/v1",
         model: str = "deepseek-chat",
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        enable_logprobs: Optional[bool] = None,
+        cache_enabled: Optional[bool] = None,
+        inflight_dedup_enabled: Optional[bool] = None
     ):
         """
         执行逻辑：
@@ -486,6 +646,31 @@ class LLMClient:
         self.base_url = base_url
         self.model = model
         self.temperature = temperature
+        # 🚀 性能开关：默认关闭 logprobs（当前调用点普遍未使用，且会增加服务端计算与返回体积）
+        self._enable_logprobs = (
+            _env_bool("MODULE2_LLM_ENABLE_LOGPROBS", False)
+            if enable_logprobs is None
+            else bool(enable_logprobs)
+        )
+        # 🚀 结果缓存：命中时可直接跳过网络调用（参考 LLM调用优化.md）
+        self._cache_enabled = (
+            _env_bool("MODULE2_LLM_CACHE_ENABLED", True)
+            if cache_enabled is None
+            else bool(cache_enabled)
+        )
+        # 🚀 In-flight 去重：并发同 prompt 时只打一次请求
+        self._inflight_dedup_enabled = (
+            _env_bool("MODULE2_LLM_INFLIGHT_DEDUP_ENABLED", True)
+            if inflight_dedup_enabled is None
+            else bool(inflight_dedup_enabled)
+        )
+        # 缓存大小保护（避免超长 prompt/response 占用过多内存）
+        self._cache_max_prompt_chars = _env_int("MODULE2_LLM_CACHE_MAX_PROMPT_CHARS", 20000)
+        self._cache_max_response_chars = _env_int("MODULE2_LLM_CACHE_MAX_RESPONSE_CHARS", 20000)
+        # 资源 cap 采样节流：避免每个请求都触发 psutil 调用带来的额外开销
+        self._resource_cap_interval_ms = _env_int("MODULE2_LLM_RESOURCE_CAP_INTERVAL_MS", 500)
+        self._last_resource_cap_check_ts = 0.0
+        self._last_resource_cap_base_limit: Optional[int] = None
         # 最大请求 token 上限与估算粒度
         self.max_request_tokens = 4000
         self.token_unit = 800
@@ -552,6 +737,60 @@ class LLMClient:
         base = len(prompt or '') + len(system_message or '')
         return max(1, int(base / 4))
 
+    def _make_cache_key(
+        self,
+        kind: str,
+        prompt: str,
+        system_message: Optional[str],
+        *,
+        response_format: str = "",
+        enable_logprobs: bool = False,
+    ) -> str:
+        """
+        做什么：生成缓存键（SHA256）。
+        为什么：保证 prompt/参数 一致时才复用结果，避免“不同参数同 prompt”误命中。
+        权衡：key 生成有轻微 CPU 开销，但远小于一次网络调用。
+        """
+        h = hashlib.sha256()
+        h.update(str(kind).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(self.base_url).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(self.model).encode("utf-8"))
+        h.update(b"\0")
+        h.update(repr(float(self.temperature)).encode("utf-8"))
+        h.update(b"\0")
+        h.update(str(response_format).encode("utf-8"))
+        h.update(b"\0")
+        h.update(b"1" if enable_logprobs else b"0")
+        h.update(b"\0")
+        if system_message:
+            h.update(system_message.encode("utf-8"))
+        h.update(b"\0")
+        if prompt:
+            h.update(prompt.encode("utf-8"))
+        return h.hexdigest()
+
+    def _cacheable(self, prompt: str, system_message: Optional[str]) -> bool:
+        """
+        做什么：判断是否允许缓存本次请求。
+        为什么：超长 prompt 缓存收益低且容易占用大量内存。
+        权衡：仅做字符数级别的快速判断。
+        """
+        if not self._cache_enabled:
+            return False
+        total_chars = len(prompt or "") + len(system_message or "")
+        return total_chars <= int(self._cache_max_prompt_chars)
+
+    def _entry_to_metadata(self, entry: _LLMCacheEntry) -> "LLMResponse":
+        return LLMResponse(
+            model=entry.model,
+            prompt_tokens=int(entry.prompt_tokens),
+            completion_tokens=int(entry.completion_tokens),
+            total_tokens=int(entry.total_tokens),
+            latency_ms=0.0,
+        )
+
     def _compute_resource_cap(self, base_limit: int) -> int:
         """
         执行逻辑：基于 CPU/内存占用估算并发上限。
@@ -598,6 +837,18 @@ class LLMClient:
         实现方式：当资源紧张时设置 external cap；资源充裕时解除 cap。
         核心价值：让并发在高压下自动收敛，优先保证单任务时延稳定。"""
         base_limit = int(self.concurrency_limiter.current_limit)
+
+        # 🚀 节流：避免每个请求都调用 psutil（在高并发/高频调用下这部分会形成可观的 CPU 开销）
+        now = time.time()
+        if (
+            int(self._resource_cap_interval_ms) > 0
+            and self._last_resource_cap_base_limit == base_limit
+            and (now - float(self._last_resource_cap_check_ts)) * 1000.0 < float(self._resource_cap_interval_ms)
+        ):
+            return
+        self._last_resource_cap_check_ts = now
+        self._last_resource_cap_base_limit = base_limit
+
         resource_cap = int(self._compute_resource_cap(base_limit))
         if resource_cap >= base_limit:
             await self.concurrency_limiter.set_external_cap(None)
@@ -615,7 +866,8 @@ class LLMClient:
     async def complete_json(
         self,
         prompt: str,
-        system_message: str = None
+        system_message: str = None,
+        need_logprobs: bool = False
     ) -> Tuple[Dict[str, Any], LLMResponse, Any]:
         """
         执行逻辑：
@@ -633,86 +885,142 @@ class LLMClient:
         - system_message: 函数入参（类型：str）。
         输出参数：
         - 结构化结果字典（包含关键字段信息）。"""
-        import time
-        start_time = time.time()
-        
-        messages = []
-        if system_message:
-            messages.append({"role": "system", "content": system_message})
-        messages.append({"role": "user", "content": prompt})
-        
-        client = await self._ensure_openai_client()
+        enable_logprobs = bool(need_logprobs or self._enable_logprobs)
 
-        acquired_permits = 0
-
-        # 估算 token 并获取加权 permits（字符/4 -> token）
-        est_tokens = self._estimate_tokens(prompt, system_message)
-        permits = self._compute_permits(est_tokens)
-        await self._apply_resource_cap()
-
-        # 获取并发许可（按 token 加权）
-        acquired_permits = await self.concurrency_limiter.acquire(permits)
-        
-        try:
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                response_format={"type": "json_object"},
-                logprobs=True,
-                top_logprobs=1
+        cache_key: Optional[str] = None
+        if self._cacheable(prompt, system_message):
+            cache_key = self._make_cache_key(
+                "json",
+                prompt,
+                system_message,
+                response_format="json_object",
+                enable_logprobs=enable_logprobs,
             )
-            
-            # 解析JSON
-            content = response.choices[0].message.content
-            parsed = json.loads(content)
-            
-            # 提取logprobs (用于Perplexity计算)
-            lprobs = response.choices[0].logprobs
-            
-            # 构建响应元数据
-            latency_ms = (time.time() - start_time) * 1000
-            metadata = LLMResponse(
-                model=response.model,
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens,
-                latency_ms=latency_ms
-            )
-            
-            logger.info(f"LLM call completed: {metadata.total_tokens} tokens, "
-                       f"{latency_ms:.0f}ms")
-            
-            # 🚀 记录成功
-            await self.concurrency_limiter.record_success()
-            
-            return parsed, metadata, lprobs
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON from LLM response: {e}")
-            logger.error(f"Raw content: {content}")
-            await self.concurrency_limiter.record_failure(is_rate_limit=False)
-            raise ValueError(f"LLM returned invalid JSON: {e}")
-        
-        except Exception as e:
-            error_msg = str(e)
-            
-            # 🚀 检测 429 (Rate Limit) 错误
-            is_rate_limit = "429" in error_msg or "rate" in error_msg.lower() or "Too Many Requests" in error_msg
-            await self.concurrency_limiter.record_failure(is_rate_limit=is_rate_limit)
-            
-            # 💥 V8.1: 增强对 402 (余额不足) 的识别
-            if "402" in error_msg or "Insufficient Balance" in error_msg:
-                logger.error("❌ DeepSeek API 余额不足 (Error 402). 请检查您的账户余额并充值。")
-                raise ValueError("DeepSeek API 提取失败: 账户余额不足 (Error 402)。建议充值或更换 API Key。") from e
-            
-            logger.error(f"LLM API call failed (JSON): {e}")
-            raise
-        
-        finally:
-            # 🚀 释放并发许可
-            if acquired_permits:
-                await self.concurrency_limiter.release(acquired_permits)
+            cached = await _GLOBAL_CACHE.get(cache_key)
+            if cached is not None:
+                try:
+                    parsed_cached = json.loads(cached.payload)
+                    return parsed_cached, self._entry_to_metadata(cached), cached.logprobs
+                except Exception as e:
+                    logger.debug(f"LLM cache entry JSON parse failed, bypassing cache: {e}")
+
+        async def _do_request():
+            import time
+            start_time = time.time()
+
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": prompt})
+
+            client = await self._ensure_openai_client()
+
+            acquired_permits = 0
+
+            # 估算 token 并获取加权 permits（字符/4 -> token）
+            est_tokens = self._estimate_tokens(prompt, system_message)
+            permits = self._compute_permits(est_tokens)
+            await self._apply_resource_cap()
+
+            # 获取并发许可（按 token 加权）
+            acquired_permits = await self.concurrency_limiter.acquire(permits)
+
+            try:
+                kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": self.temperature,
+                    "response_format": {"type": "json_object"},
+                }
+                if enable_logprobs:
+                    kwargs["logprobs"] = True
+                    kwargs["top_logprobs"] = 1
+
+                response = await client.chat.completions.create(**kwargs)
+
+                # 解析JSON
+                content = response.choices[0].message.content
+                parsed = json.loads(content)
+
+                # 提取logprobs (可选)
+                lprobs = getattr(response.choices[0], "logprobs", None) if enable_logprobs else None
+
+                # 构建响应元数据
+                latency_ms = (time.time() - start_time) * 1000
+                metadata = LLMResponse(
+                    model=response.model,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    latency_ms=latency_ms,
+                )
+
+                logger.info(
+                    f"LLM call completed: {metadata.total_tokens} tokens, {latency_ms:.0f}ms"
+                )
+
+                # 🚀 记录成功
+                await self.concurrency_limiter.record_success()
+
+                # 🚀 写入缓存（超长响应跳过）
+                if (
+                    cache_key
+                    and self._cache_enabled
+                    and isinstance(content, str)
+                    and len(content) <= int(self._cache_max_response_chars)
+                ):
+                    now = _GLOBAL_CACHE.now()
+                    await _GLOBAL_CACHE.set(
+                        cache_key,
+                        _LLMCacheEntry(
+                            payload=content,
+                            model=metadata.model,
+                            prompt_tokens=metadata.prompt_tokens,
+                            completion_tokens=metadata.completion_tokens,
+                            total_tokens=metadata.total_tokens,
+                            logprobs=lprobs,
+                            created_at=now,
+                            expires_at=now + float(_GLOBAL_CACHE.ttl_seconds()),
+                        ),
+                    )
+
+                return parsed, metadata, lprobs
+
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON from LLM response: {e}")
+                logger.error(f"Raw content: {content}")
+                await self.concurrency_limiter.record_failure(is_rate_limit=False)
+                raise ValueError(f"LLM returned invalid JSON: {e}")
+
+            except Exception as e:
+                error_msg = str(e)
+
+                # 🚀 检测 429 (Rate Limit) 错误
+                is_rate_limit = (
+                    "429" in error_msg
+                    or "rate" in error_msg.lower()
+                    or "Too Many Requests" in error_msg
+                )
+                await self.concurrency_limiter.record_failure(is_rate_limit=is_rate_limit)
+
+                # 💥 V8.1: 增强对 402 (余额不足) 的识别
+                if "402" in error_msg or "Insufficient Balance" in error_msg:
+                    logger.error("❌ DeepSeek API 余额不足 (Error 402). 请检查您的账户余额并充值。")
+                    raise ValueError(
+                        "DeepSeek API 提取失败: 账户余额不足 (Error 402)。建议充值或更换 API Key。"
+                    ) from e
+
+                logger.error(f"LLM API call failed (JSON): {e}")
+                raise
+
+            finally:
+                # 🚀 释放并发许可
+                if acquired_permits:
+                    await self.concurrency_limiter.release(acquired_permits)
+
+        if cache_key and self._inflight_dedup_enabled:
+            return await _GLOBAL_DEDUPER.run(cache_key, _do_request)
+        return await _do_request()
     
     @retry(
         stop=stop_after_attempt(3),
@@ -724,7 +1032,8 @@ class LLMClient:
     async def complete_text(
         self,
         prompt: str,
-        system_message: str = None
+        system_message: str = None,
+        need_logprobs: bool = False
     ) -> Tuple[str, LLMResponse, Any]:
         """
         执行逻辑：
@@ -742,71 +1051,122 @@ class LLMClient:
         - system_message: 函数入参（类型：str）。
         输出参数：
         - 多值结果元组（各元素含义见实现）。"""
-        import time
-        start_time = time.time()
-        
-        messages = []
-        if system_message:
-            messages.append({"role": "system", "content": system_message})
-        messages.append({"role": "user", "content": prompt})
-        
-        client = await self._ensure_openai_client()
-        acquired_permits = 0
+        enable_logprobs = bool(need_logprobs or self._enable_logprobs)
 
-        # 估算 token 并获取加权 permits（字符/4 -> token）
-        est_tokens = self._estimate_tokens(prompt, system_message)
-        permits = self._compute_permits(est_tokens)
-        await self._apply_resource_cap()
+        cache_key: Optional[str] = None
+        if self._cacheable(prompt, system_message):
+            cache_key = self._make_cache_key(
+                "text",
+                prompt,
+                system_message,
+                response_format="",
+                enable_logprobs=enable_logprobs,
+            )
+            cached = await _GLOBAL_CACHE.get(cache_key)
+            if cached is not None:
+                return str(cached.payload), self._entry_to_metadata(cached), cached.logprobs
 
-        # 获取并发许可（按 token 加权）
-        acquired_permits = await self.concurrency_limiter.acquire(permits)
-        try:
-            response = await client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-                logprobs=True,
-                top_logprobs=1
-            )
-            
-            content = response.choices[0].message.content
-            lprobs = response.choices[0].logprobs
-            
-            latency_ms = (time.time() - start_time) * 1000
-            metadata = LLMResponse(
-                model=response.model,
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens,
-                latency_ms=latency_ms
-            )
-            
-            logger.info(f"LLM call completed: {metadata.total_tokens} tokens")
-            
-            # 🚀 记录成功
-            await self.concurrency_limiter.record_success()
-            
-            return content, metadata, lprobs
-            
-        except Exception as e:
-            error_msg = str(e)
-            
-            # 🚀 检测 429 (Rate Limit) 错误
-            is_rate_limit = "429" in error_msg or "rate" in error_msg.lower() or "Too Many Requests" in error_msg
-            await self.concurrency_limiter.record_failure(is_rate_limit=is_rate_limit)
-            
-            # 💥 V8.1: 增强对 402 (余额不足) 的识别
-            if "402" in error_msg or "Insufficient Balance" in error_msg:
-                logger.error("❌ DeepSeek API 余额不足 (Error 402). 请检查您的账户余额并充值。")
-                raise ValueError("DeepSeek API 提取失败: 账户余额不足 (Error 402)。建议充值或更换 API Key。") from e
-                
-            logger.error(f"LLM API call failed: {e}")
-            raise
-        
-        finally:
-            # 🚀 释放并发许可
-            if acquired_permits:
-                await self.concurrency_limiter.release(acquired_permits)
+        async def _do_request():
+            import time
+            start_time = time.time()
+
+            messages = []
+            if system_message:
+                messages.append({"role": "system", "content": system_message})
+            messages.append({"role": "user", "content": prompt})
+
+            client = await self._ensure_openai_client()
+            acquired_permits = 0
+
+            # 估算 token 并获取加权 permits（字符/4 -> token）
+            est_tokens = self._estimate_tokens(prompt, system_message)
+            permits = self._compute_permits(est_tokens)
+            await self._apply_resource_cap()
+
+            # 获取并发许可（按 token 加权）
+            acquired_permits = await self.concurrency_limiter.acquire(permits)
+            try:
+                kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "temperature": self.temperature,
+                }
+                if enable_logprobs:
+                    kwargs["logprobs"] = True
+                    kwargs["top_logprobs"] = 1
+
+                response = await client.chat.completions.create(**kwargs)
+
+                content = response.choices[0].message.content
+                lprobs = getattr(response.choices[0], "logprobs", None) if enable_logprobs else None
+
+                latency_ms = (time.time() - start_time) * 1000
+                metadata = LLMResponse(
+                    model=response.model,
+                    prompt_tokens=response.usage.prompt_tokens,
+                    completion_tokens=response.usage.completion_tokens,
+                    total_tokens=response.usage.total_tokens,
+                    latency_ms=latency_ms,
+                )
+
+                logger.info(f"LLM call completed: {metadata.total_tokens} tokens")
+
+                # 🚀 记录成功
+                await self.concurrency_limiter.record_success()
+
+                # 🚀 写入缓存（超长响应跳过）
+                if (
+                    cache_key
+                    and self._cache_enabled
+                    and isinstance(content, str)
+                    and len(content) <= int(self._cache_max_response_chars)
+                ):
+                    now = _GLOBAL_CACHE.now()
+                    await _GLOBAL_CACHE.set(
+                        cache_key,
+                        _LLMCacheEntry(
+                            payload=content,
+                            model=metadata.model,
+                            prompt_tokens=metadata.prompt_tokens,
+                            completion_tokens=metadata.completion_tokens,
+                            total_tokens=metadata.total_tokens,
+                            logprobs=lprobs,
+                            created_at=now,
+                            expires_at=now + float(_GLOBAL_CACHE.ttl_seconds()),
+                        ),
+                    )
+
+                return content, metadata, lprobs
+
+            except Exception as e:
+                error_msg = str(e)
+
+                # 🚀 检测 429 (Rate Limit) 错误
+                is_rate_limit = (
+                    "429" in error_msg
+                    or "rate" in error_msg.lower()
+                    or "Too Many Requests" in error_msg
+                )
+                await self.concurrency_limiter.record_failure(is_rate_limit=is_rate_limit)
+
+                # 💥 V8.1: 增强对 402 (余额不足) 的识别
+                if "402" in error_msg or "Insufficient Balance" in error_msg:
+                    logger.error("❌ DeepSeek API 余额不足 (Error 402). 请检查您的账户余额并充值。")
+                    raise ValueError(
+                        "DeepSeek API 提取失败: 账户余额不足 (Error 402)。建议充值或更换 API Key。"
+                    ) from e
+
+                logger.error(f"LLM API call failed: {e}")
+                raise
+
+            finally:
+                # 🚀 释放并发许可
+                if acquired_permits:
+                    await self.concurrency_limiter.release(acquired_permits)
+
+        if cache_key and self._inflight_dedup_enabled:
+            return await _GLOBAL_DEDUPER.run(cache_key, _do_request)
+        return await _do_request()
 
 
 def create_llm_client(
