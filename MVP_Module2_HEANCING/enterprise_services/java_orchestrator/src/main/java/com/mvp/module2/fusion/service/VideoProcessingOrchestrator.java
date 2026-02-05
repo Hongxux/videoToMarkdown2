@@ -724,11 +724,20 @@ public class VideoProcessingOrchestrator {
                         actionMap.put("id", as.id);
                         
                         // 2. Apply Knowledge Type to this specific action
+                        // 始终写入 knowledge_type 字段：做什么是保证下游解析稳定；为什么是避免字段缺失导致默认值/策略误判；权衡是可能写入 unit 级兜底类型
+                        String unitKt = unit.get("knowledge_type") != null ? unit.get("knowledge_type").toString() : "";
+                        actionMap.put("knowledge_type", unitKt);
+
                         if (classMap.containsKey(uid) && classMap.get(uid).containsKey(as.id)) {
                             KnowledgeResultItem kri = classMap.get(uid).get(as.id);
                             actionMap.put("knowledge_type", kri.knowledgeType);
                             actionMap.put("reasoning", kri.reasoning);
                             actionMap.put("confidence", kri.confidence);
+                        } else {
+                            logger.warn(
+                                "[SemanticWriteBack] Missing action-level knowledge_type: unit={}, action_id={}, range=[{}-{}], actionType={}, unit_kt={}",
+                                uid, as.id, as.startSec, as.endSec, as.actionType, unitKt
+                            );
                         }
                         actionsOut.add(actionMap);
                     }

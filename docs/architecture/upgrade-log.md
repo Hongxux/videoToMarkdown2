@@ -137,6 +137,7 @@
   - 短语义单元（<=20s）：直接取 `unit.start_sec ~ unit.end_sec`，并对起止做视频边界裁剪（模仿 `visual_feature_extractor.py` 的安全边界策略），避免切分破坏完整性。
   - 长语义单元：基于 `Union(Action, SentenceOverlappingAction)` 扩边（start -0.4s，end +1.0s），并强制 `end <= unit.end_sec`，暂不跨越下一个语义单元。
   - 修复素材生成数据链：Java 侧构造 MaterialInputs 时若缺少 action_units，则用 unit 级 `knowledge_type` 覆盖 CV actionType，避免动作知识类型断链；同时 gRPC 传递 action_id 不再写死 0，保证下游回写一致。
+  - 修复 LLM 分类缓存读取断链：`modality_classification_cache.json` 按对象序列化为 camelCase（unitId/actionId/knowledgeType），旧 loader 按 snake_case 读取会“误命中缓存但字段为空”，导致 action_units.knowledge_type 缺失；现兼容两种命名并在无有效字段时忽略缓存强制重算。
   - 多动作融合：同一语义单元内将动作段合并阈值由 `<1.0s` 放宽到 `<5.0s`，降低“只截到其中一段”的概率。
   - 下游统一使用包络：GenerateMaterialRequests 直接用动作包络生成 clip（并在无字幕时保留动作边界），避免 Phase2A 跳过素材请求导致包络逻辑不生效。
 - 兼容性影响：clip 时间范围可能变长；素材数量不变但单 clip 更可能覆盖多动作；下游按 `unit.end_sec` 截断后不再跨到下一单元画面。

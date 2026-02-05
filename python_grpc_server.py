@@ -13,10 +13,189 @@
 
 import os
 import sys
-print("🚀 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) 🚀", flush=True)
+
+
+def _reconfigure_stdio_errors() -> None:
+    """
+    执行逻辑：
+    1) 尝试将 stdout/stderr 的 errors 策略设为 backslashreplace。
+    2) 避免在 Windows/Java 子进程管道等非 UTF-8 环境输出 emoji 时抛 UnicodeEncodeError。
+    实现方式：sys.stdout.reconfigure / sys.stderr.reconfigure。
+    核心价值：提升启动阶段可观测性与稳定性，避免“打印一行后卡住/退出”的误判。
+    决策逻辑：
+    - 条件：stream 支持 reconfigure。
+    - 条件：仅设置 errors，不强制修改 encoding（避免影响终端显示）。
+    依据来源（证据链）：
+    - 报错样例：UnicodeEncodeError: 'gbk' codec can't encode character '\\U0001f680'。
+    输入参数：无。
+    输出参数：无（仅修改 stdout/stderr 行为）。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")
+        except Exception:
+            pass
+
+
+def _safe_print(message: str) -> None:
+    """
+    执行逻辑：
+    1) 优先按原字符串输出并 flush。
+    2) 若遇到编码异常，则将不可编码字符转义后再输出。
+    实现方式：print + UnicodeEncodeError fallback（ascii/backslashreplace）。
+    核心价值：让启动日志在被管道捕获/重定向时仍可输出，不因 emoji 导致直接退出。
+    输入参数：
+    - message: 待输出字符串（类型：str）。
+    输出参数：无（仅产生副作用：stdout 输出）。"""
+    try:
+        print(message, flush=True)
+    except UnicodeEncodeError:
+        safe = message.encode("ascii", "backslashreplace").decode("ascii")
+        print(safe, flush=True)
+
+
+def _is_truthy_env(name: str) -> bool:
+    """
+    执行逻辑：读取 env 并判断是否为真值开关。
+    实现方式：字符串归一化 + 集合判断。
+    核心价值：统一环境变量开关解析，减少分支重复。
+    输入参数：
+    - name: 环境变量名（类型：str）。
+    输出参数：
+    - bool：是否为真值。"""
+    value = os.getenv(name, "").strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+_reconfigure_stdio_errors()
+
+_DEBUG_IMPORTS = _is_truthy_env("GRPC_SERVER_DEBUG_IMPORTS")
+_CHECK_DEPS = False
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--check-deps",
+        action="store_true",
+        help="仅做依赖预检并退出（用于排查启动卡住/导入失败）。",
+    )
+    parser.add_argument(
+        "--debug-imports",
+        action="store_true",
+        help="启动阶段打印关键 import 的进度（也可用 env: GRPC_SERVER_DEBUG_IMPORTS=1）。",
+    )
+    _args, _unknown = parser.parse_known_args()
+    _CHECK_DEPS = _args.check_deps
+    _DEBUG_IMPORTS = _DEBUG_IMPORTS or _args.debug_imports
+
+
+def _boot(msg: str) -> None:
+    """
+    执行逻辑：在启动调试模式下输出一条 bootstrap 日志。
+    实现方式：读取全局开关 + _safe_print。
+    核心价值：定位“卡在 import/初始化哪一步”。
+    输入参数：
+    - msg: 日志内容（类型：str）。
+    输出参数：无（仅产生副作用：stdout 输出）。"""
+    if _DEBUG_IMPORTS:
+        _safe_print(msg)
+
+
+def _prepend_sys_path(path_value: str) -> None:
+    """
+    执行逻辑：将路径插入 sys.path 头部（去重）。
+    实现方式：包含性判断 + sys.path.insert(0, ...)。
+    核心价值：保证内部包可被导入，同时避免重复插入造成 sys.path 膨胀。
+    输入参数：
+    - path_value: 待插入路径（类型：str）。
+    输出参数：无（仅修改 sys.path）。"""
+    if not path_value:
+        return
+    if path_value in sys.path:
+        return
+    sys.path.insert(0, path_value)
+
+
+def _run_dependency_preflight() -> int:
+    """
+    执行逻辑：
+    1) 逐项尝试 import 关键依赖与关键模块。
+    2) 汇总缺失模块与导入异常并输出可执行的修复建议。
+    实现方式：importlib.import_module + 异常收集。
+    核心价值：把“启动卡住/导入失败”转化为可定位、可执行的安装清单。
+    输入参数：无。
+    输出参数：
+    - int：0=通过；2=失败（缺失/异常）。"""
+    import importlib
+    import traceback as _tb
+
+    # 覆盖 python_grpc_server.py 顶部 import 以及其主要依赖链路
+    modules_to_check = [
+        ("psutil", "psutil"),
+        ("grpc", "grpcio"),
+        ("grpc.aio", "grpcio"),
+        ("numpy", "numpy"),
+        # gRPC 生成代码与内部模块（能进一步暴露缺失的三方依赖）
+        ("proto.video_processing_pb2", None),
+        ("proto.video_processing_pb2_grpc", None),
+        ("stage1_pipeline.graph", None),
+        ("videoToMarkdown.knowledge_engine.core.video", None),
+        ("videoToMarkdown.knowledge_engine.core.transcription", None),
+        ("MVP_Module2_HEANCING.module2_content_enhancement", None),
+    ]
+
+    missing_modules = set()
+    import_errors: list[tuple[str, str]] = []
+
+    for module_name, _pip_hint in modules_to_check:
+        _boot(f"[CHECK] import {module_name}")
+        try:
+            importlib.import_module(module_name)
+        except ModuleNotFoundError as e:
+            missing_modules.add(e.name or module_name)
+        except Exception:
+            import_errors.append((module_name, _tb.format_exc()))
+
+    if missing_modules or import_errors:
+        _safe_print("依赖预检失败：以下问题可能导致服务启动停在启动行后无后续日志。")
+
+        if missing_modules:
+            _safe_print("缺失模块（ModuleNotFoundError）：")
+            for name in sorted(missing_modules):
+                _safe_print(f"- {name}")
+
+        if import_errors:
+            _safe_print("导入异常（非缺失模块）：")
+            for module_name, detail in import_errors:
+                _safe_print(f"- {module_name}")
+                _safe_print(detail.strip())
+
+        _safe_print("建议修复：")
+        _safe_print("1) 先安装统一依赖：pip install -r requirements.grpc_server.txt")
+        _safe_print("2) 若仍失败：python python_grpc_server.py --check-deps --debug-imports")
+        return 2
+
+    _safe_print("依赖预检通过。")
+    return 0
+
+
+_safe_print("🚀 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) 🚀")
+
+# 添加项目路径（尽量前置，便于 --check-deps 也能检查内部模块）
+current_dir = os.path.dirname(os.path.abspath(__file__))
+_prepend_sys_path(current_dir)
+_prepend_sys_path(os.path.dirname(current_dir))
+_prepend_sys_path(os.path.join(current_dir, "MVP_Module2_HEANCING"))
+_prepend_sys_path(os.path.join(current_dir, "proto"))
+
+if _CHECK_DEPS:
+    raise SystemExit(_run_dependency_preflight())
+_boot("[BOOT] import logging")
 import logging
 import asyncio
 import threading
+_boot("[BOOT] import psutil")
 import psutil
 import traceback
 import time
@@ -27,29 +206,27 @@ from typing import Optional, List, Dict
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+_boot("[BOOT] import grpc")
 import grpc
 import gc
+_boot("[BOOT] import numpy")
 import numpy as np
 from grpc import aio
 import functools
 
-# 添加项目路径
-current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, current_dir)
-sys.path.insert(0, os.path.dirname(current_dir))
-# 🔑 添加 MVP_Module2_HEANCING 目录，使内部 'from module2_content_enhancement.xxx' 导入生效
-sys.path.insert(0, os.path.join(current_dir, "MVP_Module2_HEANCING"))
-# 🔑 添加 proto 目录，解决 gRPC 生成代码内部导入 pb2 失败的问题
-sys.path.insert(0, os.path.join(current_dir, "proto"))
-
 # gRPC 生成的代码 (需要先运行 protoc 生成)
+_boot("[BOOT] import gRPC pb2/pb2_grpc")
 from proto import video_processing_pb2
 from proto import video_processing_pb2_grpc
 
 # 模块导入
+_boot("[BOOT] import stage1_pipeline.graph")
 from stage1_pipeline.graph import run_pipeline
+_boot("[BOOT] import videoToMarkdown (VideoProcessor)")
 from videoToMarkdown.knowledge_engine.core.video import VideoProcessor
+_boot("[BOOT] import videoToMarkdown (Transcriber)")
 from videoToMarkdown.knowledge_engine.core.transcription import Transcriber
+_boot("[BOOT] import MVP_Module2_HEANCING.module2_content_enhancement")
 from MVP_Module2_HEANCING.module2_content_enhancement import (
     RichTextPipeline,
     PipelineConfig,
@@ -1370,6 +1547,50 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         f"[{task_id}] MaterialRequests input: unit={u.unit_id}, actions={len(u.action_units)}, first_kt={first.knowledge_type}"
                     )
                     break
+
+            # 💥 断链探针：上游 knowledge_type 缺失/疑似 CV actionType（用于定位默认值/字段错用）
+            import re
+            coarse_unit_types = {"abstract", "process", "concrete", "configuration", "deduction", "practical", "scan", "scanning"}
+            for u in request.units:
+                if not u.action_units:
+                    continue
+                unit_kt = (getattr(u, "knowledge_type", "") or "").strip()
+                missing_cnt = 0
+                cv_like_cnt = 0
+                default_like_cnt = 0
+                example = ""
+
+                for au in u.action_units:
+                    kt_raw = getattr(au, "knowledge_type", "")
+                    kt = (kt_raw or "").strip()
+                    kt_lower = kt.lower()
+
+                    is_missing = (not kt) or kt_lower in {"unknown", "knowledge", "none", "null"}
+                    is_cv_like = bool(re.match(r"(?i)^k\\d+_", kt)) or any(
+                        m in kt_lower for m in ("operation", "click", "drag", "scroll", "mouse", "keyboard")
+                    )
+                    is_default_like = (kt == unit_kt) and (unit_kt.lower() in coarse_unit_types)
+
+                    if is_missing:
+                        missing_cnt += 1
+                    elif is_cv_like:
+                        cv_like_cnt += 1
+                    elif is_default_like:
+                        default_like_cnt += 1
+
+                    if (is_missing or is_cv_like or is_default_like) and not example:
+                        example = (
+                            f"action_id={getattr(au, 'id', 0)}, kt={kt!r}, "
+                            f"start={getattr(au, 'start_sec', 0.0):.2f}, end={getattr(au, 'end_sec', 0.0):.2f}"
+                        )
+
+                if missing_cnt or cv_like_cnt or default_like_cnt:
+                    logger.warning(
+                        f"[{task_id}] 上游 knowledge_type 缺失/疑似 CV actionType: "
+                        f"unit={u.unit_id}, actions={len(u.action_units)}, "
+                        f"missing={missing_cnt}, cv_like={cv_like_cnt}, default_like={default_like_cnt}, "
+                        f"unit_kt={unit_kt!r}, example=({example})"
+                    )
             
             # 🚀 V9.0: 使用 RichTextPipeline 的两阶段合并逻辑
             from MVP_Module2_HEANCING.module2_content_enhancement.rich_text_pipeline import RichTextPipeline

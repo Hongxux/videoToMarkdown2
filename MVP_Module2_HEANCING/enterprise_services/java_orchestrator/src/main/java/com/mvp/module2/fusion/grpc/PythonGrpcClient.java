@@ -11,8 +11,12 @@ import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import java.util.Arrays;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -665,14 +669,58 @@ public class PythonGrpcClient {
                             .setFullText(unit.fullText != null ? unit.fullText : "");
                     
                     if (unit.actionUnits != null) {
+                        // 💥 断链探针：上游 knowledge_type 缺失/疑似 CV actionType（用于定位默认值/字段错用）
+                        final Set<String> coarseUnitTypes = new HashSet<>(Arrays.asList(
+                            "abstract", "process", "concrete", "configuration", "deduction", "practical", "scan", "scanning"
+                        ));
+                        final String unitKt = unit.knowledgeType != null ? unit.knowledgeType.trim() : "";
+                        int missingCnt = 0;
+                        int cvLikeCnt = 0;
+                        int defaultLikeCnt = 0;
+                        String example = "";
+
                         for (ActionSegmentResult as : unit.actionUnits) {
+                            final String kt = as.actionType != null ? as.actionType.trim() : "";
+                            final String ktLower = kt.toLowerCase(Locale.ROOT);
+                            final boolean isMissing = kt.isEmpty()
+                                || "unknown".equals(ktLower) || "knowledge".equals(ktLower)
+                                || "none".equals(ktLower) || "null".equals(ktLower);
+                            final boolean isCvLike = ktLower.matches("^k\\d+_.*")
+                                || ktLower.contains("operation") || ktLower.contains("click")
+                                || ktLower.contains("drag") || ktLower.contains("scroll")
+                                || ktLower.contains("mouse") || ktLower.contains("keyboard");
+                            final boolean isDefaultLike = !unitKt.isEmpty()
+                                && kt.equals(unitKt)
+                                && coarseUnitTypes.contains(unitKt.toLowerCase(Locale.ROOT));
+
+                            if (isMissing) {
+                                missingCnt++;
+                            } else if (isCvLike) {
+                                cvLikeCnt++;
+                            } else if (isDefaultLike) {
+                                defaultLikeCnt++;
+                            }
+
+                            if ((isMissing || isCvLike || isDefaultLike) && example.isEmpty()) {
+                                example = String.format(
+                                    "action_id=%d, kt=%s, start=%.2f, end=%.2f",
+                                    as.id, kt, as.startSec, as.endSec
+                                );
+                            }
                             unitBuilder.addActionUnits(
                                 ActionUnitForMaterialGeneration.newBuilder()
                                     .setId(as.id)
                                     .setStartSec(as.startSec)
                                     .setEndSec(as.endSec)
-                                    .setKnowledgeType(as.actionType != null ? as.actionType : "")
+                                    .setKnowledgeType(kt)
                                     .build()
+                            );
+                        }
+
+                        if (missingCnt > 0 || cvLikeCnt > 0 || defaultLikeCnt > 0) {
+                            logger.warn(
+                                "[{}] 上游 knowledge_type 缺失/疑似 CV actionType: unit={}, actions={}, missing={}, cv_like={}, default_like={}, unit_kt={}, example=({})",
+                                taskId, unit.unitId, unit.actionUnits.size(), missingCnt, cvLikeCnt, defaultLikeCnt, unitKt, example
                             );
                         }
                     }

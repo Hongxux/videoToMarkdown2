@@ -217,16 +217,36 @@ public class KnowledgeClassificationOrchestrator {
 
             if (data.containsKey("units")) {
                 List<Map<String, Object>> units = (List<Map<String, Object>>) data.get("units");
-                return units.stream().map(u -> {
+                // 兼容旧/新两种字段命名：
+                // - saveToCache(objectMapper) 默认使用 camelCase：unitId/actionId/knowledgeType/keyEvidence
+                // - 历史实现误按 snake_case 读取：unit_id/action_id/knowledge_type/key_evidence
+                // 若读取不兼容会造成“缓存命中但结果为空字段”，进而导致 action_units.knowledge_type 断链。
+                List<KnowledgeResultItem> parsed = units.stream().map(u -> {
                     KnowledgeResultItem item = new KnowledgeResultItem();
-                    item.unitId = (String) u.get("unit_id");
-                    item.actionId = parseInt(u.getOrDefault("action_id", 0), 0);
-                    item.knowledgeType = (String) u.get("knowledge_type");
+                    Object unitIdVal = u.containsKey("unit_id") ? u.get("unit_id") : u.get("unitId");
+                    item.unitId = unitIdVal != null ? unitIdVal.toString() : "";
+
+                    Object actionIdVal = u.containsKey("action_id") ? u.get("action_id") : u.getOrDefault("actionId", 0);
+                    item.actionId = parseInt(actionIdVal, 0);
+
+                    Object ktVal = u.containsKey("knowledge_type") ? u.get("knowledge_type") : u.get("knowledgeType");
+                    item.knowledgeType = ktVal != null ? ktVal.toString() : "";
                     item.confidence = parseDouble(u.get("confidence"), 1.0);
-                    item.keyEvidence = (String) u.get("key_evidence");
+                    Object evVal = u.containsKey("key_evidence") ? u.get("key_evidence") : u.get("keyEvidence");
+                    item.keyEvidence = evVal != null ? evVal.toString() : "";
                     item.reasoning = (String) u.get("reasoning");
                     return item;
                 }).collect(Collectors.toList());
+
+                long valid = parsed.stream()
+                    .filter(r -> r != null && r.unitId != null && !r.unitId.isEmpty()
+                        && r.knowledgeType != null && !r.knowledgeType.isEmpty())
+                    .count();
+                if (valid == 0 && !parsed.isEmpty()) {
+                    logger.warn("[{}] Classification cache seems invalid (field-name mismatch?), ignore: {}", taskId, path);
+                    return null;
+                }
+                return parsed;
             }
         } catch (Exception e) {
             logger.warn("[{}] Failed to load classification cache: {}", taskId, e.getMessage());
