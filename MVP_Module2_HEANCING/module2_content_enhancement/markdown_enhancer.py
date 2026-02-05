@@ -14,7 +14,7 @@ import os
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
 # 🚀 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
 import asyncio
@@ -122,6 +122,49 @@ LOGIC_EXTRACT_PROMPT = """你是教育逻辑分析专家，擅长挖掘教学口
 
 
 # ==============================================================================
+# 🚀 LLM 调用合并：一次请求完成「正文增强 + 逻辑结构化」（参考：LLM调用优化.md「批量请求合并」）
+# ==============================================================================
+
+COMBINED_SYSTEM_PROMPT = """你是教育内容编辑专家 + 教育逻辑分析专家。
+
+你的任务是对给定的教学文本执行两步：
+1) 正文增强：补全指代不明、修正口语化表达，但**不得**添加原文不存在的信息；保留数学公式，使用 LaTeX。
+2) 逻辑结构化：基于增强后的正文提取逻辑层次，用结构化 Markdown 表达。
+
+## 逻辑结构化要求
+- 使用 **语义标签+冒号** 体现逻辑关系
+- 通过 **Tab 缩进** 展现逻辑层次
+- 使用 **-** 等 Markdown 语法展现序列
+- 还原隐性逻辑
+- 不要在内容中直接写“总分关系/因果关系”等显式描述词
+- 将动作单元的 key_evidence 作为具体示例插入对应位置
+
+## 输出格式（JSON）
+{
+  "enhanced_body": "...",
+  "structured_content": "..."
+}
+
+只输出 JSON，不要输出解释、不要输出代码块标记。"""
+
+COMBINED_USER_PROMPT = """### 标题
+{title}
+
+### 层级信息
+{level_info}
+
+### 原始正文 (口语转录)
+{body_text}
+
+### 截图 OCR 结果 (包含公式)
+{ocr_text}
+
+### 动作单元信息
+{action_info}
+"""
+
+
+# ==============================================================================
 # Data Classes
 # ==============================================================================
 
@@ -206,6 +249,9 @@ class MarkdownEnhancer:
         self._assets_dir = "assets"
         # Obsidian 嵌入路径基准目录（默认使用输出 Markdown 所在目录）
         self._markdown_dir = None
+        # 🚀 调用合并开关：默认开启，失败时自动回退到两次调用
+        raw = (os.getenv("MODULE2_MARKDOWN_ENHANCER_COMBINE_CALLS", "1") or "").strip().lower()
+        self._combine_llm_calls = raw in ("1", "true", "yes", "y", "on")
     
     @property
     def enabled(self) -> bool:
@@ -435,6 +481,56 @@ class MarkdownEnhancer:
             if section.level == 2:
                 level_stack[2] = section.unit_id
     
+    async def _enhance_and_extract(self, section: EnhancedSection) -> Tuple[str, str]:
+        """
+        做什么：一次 LLM 调用同时完成「正文增强」与「逻辑结构化」。
+        为什么：减少 LLM 调用次数（2 次 -> 1 次），在 DeepSeek 成为瓶颈时可显著降低端到端时延与成本。
+        权衡：合并提示词会让单次请求更长；若模型输出不稳定则回退到两次调用路径。
+        """
+        if not self._enabled or not self._llm_client:
+            return section.original_body, section.original_body
+
+        # 构建动作单元信息（合并版，尽量覆盖增强与结构化所需证据）
+        action_info_list = []
+        for ac in section.action_classifications:
+            kt = ac.get("knowledge_type", "")
+            if kt != "讲解型":
+                action_info_list.append(
+                    f"- [{kt}] {ac.get('subject', '')} - {ac.get('description', '')}: {ac.get('key_evidence', '')}"
+                )
+        action_info = "\n".join(action_info_list) if action_info_list else "(无)"
+
+        # TODO: 实际项目中应调用 OCR 服务
+        ocr_text = "(OCR 功能待集成)"
+
+        level_names = {1: "一级(核心知识点)", 2: "二级(子知识点)", 3: "三级(支撑信息)"}
+        level_info = f"当前层级: {level_names.get(section.level, '二级')}"
+        if section.parent_id:
+            level_info += f", 父节点: {section.parent_id}"
+
+        user_prompt = COMBINED_USER_PROMPT.format(
+            title=section.title,
+            level_info=level_info,
+            body_text=section.original_body,
+            ocr_text=ocr_text,
+            action_info=action_info,
+        )
+
+        result, _, _ = await self._llm_client.complete_json(
+            prompt=user_prompt,
+            system_message=COMBINED_SYSTEM_PROMPT,
+        )
+
+        enhanced_body = (result.get("enhanced_body") or "").strip()
+        structured_content = (result.get("structured_content") or "").strip()
+
+        if not enhanced_body:
+            enhanced_body = section.original_body
+        if not structured_content:
+            structured_content = enhanced_body
+
+        return enhanced_body, structured_content
+
     async def _enhance_text(self, section: EnhancedSection) -> str:
         """
         执行逻辑：

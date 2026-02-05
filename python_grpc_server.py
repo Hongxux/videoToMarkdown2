@@ -2859,7 +2859,10 @@ async def serve(host: str = "0.0.0.0", port: int = 50051):
     - 无（仅产生副作用，如启动/停止服务）。"""
     # 初始化 gRPC 服务器与 Servicer
     server = aio.server()
+    logger.info("初始化 VideoProcessingServicer（首次 warmup 可能较慢）...")
+    init_t0 = time.perf_counter()
     servicer = VideoProcessingServicer()
+    logger.info(f"VideoProcessingServicer initialized in {time.perf_counter() - init_t0:.2f}s")
     video_processing_pb2_grpc.add_VideoProcessingServiceServicer_to_server(servicer, server)
 
     listen_addr = f"{host}:{port}"
