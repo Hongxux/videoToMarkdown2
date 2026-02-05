@@ -209,7 +209,8 @@ class RichTextPipeline:
         self.video_duration = self._get_video_duration()
         
         # 💥 V7.4: 知识分类器 (用于动作单元四分类)
-        self._knowledge_classifier = KnowledgeClassifier()
+        # 💥 V7.4: KnowledgeClassifier 直接从 Step2 读取字幕，需显式注入 step2_path（避免空字幕导致分类质量退化）
+        self._knowledge_classifier = KnowledgeClassifier(step2_path=self.step2_path)
         if self._knowledge_classifier.enabled:
             logger.info("Knowledge classifier enabled (DeepSeek API)")
         else:
@@ -1421,6 +1422,12 @@ class RichTextPipeline:
         - units: 函数入参（类型：List[SemanticUnit]）。
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        # 🚀 LLM 调用优化：跨 unit 预分类（参考 LLM调用优化.md「批量请求合并」）
+        # 做什么：将多个 unit 的动作单元合并批处理，显著减少 DeepSeek 请求次数。
+        # 为什么：单 unit 调一次 classify_batch 会把网络往返与调度开销放大，成为瓶颈。
+        # 权衡：单次 prompt 更长，依赖 KnowledgeClassifier 的 token_budget 动态分块与解析回退策略。
+        await self._preclassify_action_segments_multi_unit(units)
+
         MAX_CONCURRENT = 4  # 最大并发数
         semaphore = asyncio.Semaphore(MAX_CONCURRENT)
         
@@ -1450,6 +1457,107 @@ class RichTextPipeline:
         await asyncio.gather(*tasks)
         
         logger.info(f"  → All {len(units)} units processed in parallel")
+
+    async def _preclassify_action_segments_multi_unit(self, units: List[SemanticUnit]) -> None:
+        """
+        做什么：对多个语义单元的动作单元做“跨 unit”批量知识分类，并将结果回填到 action_segments[*].classification。
+        为什么：减少 LLM 调用次数与调度开销（参考 LLM调用优化.md），同时避免对已存在 knowledge_type 的动作重复分类。
+        权衡：需要构建批处理 payload 与索引映射；当批处理关闭/失败时不影响主流程（回退到 per-unit classify_batch）。
+        """
+        if not units:
+            return
+
+        classifier = getattr(self, "_knowledge_classifier", None)
+        if not classifier or not getattr(classifier, "enabled", False):
+            return
+
+        raw = (os.getenv("MODULE2_KC_MULTI_UNIT_ENABLED", "1") or "").strip().lower()
+        multi_unit_enabled = raw in ("1", "true", "yes", "y", "on")
+        if not (multi_unit_enabled and hasattr(classifier, "classify_units_batch")):
+            return
+
+        # 1) 预处理：动作融合（与 _generate_materials/_collect_material_requests 一致），并尽量复用已有 knowledge_type
+        units_payload = []
+        index_map: Dict[str, List[int]] = {}
+
+        for unit in units:
+            action_segments = getattr(unit, "action_segments", None) or []
+            if not action_segments:
+                continue
+
+            # 与 _generate_materials 相同的融合策略：gap<5s
+            if len(action_segments) >= 2:
+                merged_actions = self._merge_action_segments(action_segments, gap_threshold_sec=5.0)
+                action_segments = merged_actions
+                unit.action_segments = merged_actions
+
+            missing_indices: List[int] = []
+            missing_segments: List[Dict[str, Any]] = []
+            for idx, action in enumerate(action_segments):
+                # 已有 classification 或 knowledge_type → 直接回填（避免重复 LLM 调用）
+                cls = action.get("classification")
+                if isinstance(cls, dict) and cls.get("knowledge_type"):
+                    continue
+
+                kt = str(action.get("knowledge_type", "") or "").strip()
+                if kt:
+                    action["classification"] = {
+                        "knowledge_type": kt,
+                        "confidence": float(action.get("confidence", 0.5) or 0.5),
+                        "key_evidence": action.get("key_evidence", ""),
+                        "reasoning": action.get("reasoning", ""),
+                    }
+                    continue
+
+                missing_indices.append(idx)
+                missing_segments.append(
+                    {
+                        "start_sec": action.get("start_sec", getattr(unit, "start_sec", 0.0)),
+                        "end_sec": action.get("end_sec", getattr(unit, "end_sec", 0.0)),
+                        "id": action.get("id", f"action_{idx}"),
+                    }
+                )
+
+            if not missing_segments:
+                continue
+
+            index_map[unit.unit_id] = missing_indices
+            units_payload.append(
+                {
+                    "unit_id": unit.unit_id,
+                    "title": getattr(unit, "knowledge_topic", None) or "未知主题",
+                    "full_text": getattr(unit, "full_text", getattr(unit, "text", "")) or "",
+                    "action_segments": missing_segments,
+                }
+            )
+
+        if not units_payload:
+            return
+
+        # 2) 跨 unit 批量分类（内部包含 token_budget 动态分块 + JSON 解析回退）
+        try:
+            results_map = await classifier.classify_units_batch(units_payload)
+        except Exception as e:
+            logger.warning(f"Multi-unit preclassification failed: {e} -> fallback per-unit later")
+            return
+
+        # 3) 回填：仅填充缺失项，避免覆盖已有 classification
+        if not isinstance(results_map, dict):
+            return
+
+        for unit in units:
+            unit_id = unit.unit_id
+            if unit_id not in index_map:
+                continue
+
+            missing_indices = index_map[unit_id]
+            batch_results = results_map.get(unit_id, []) or []
+
+            for j, orig_idx in enumerate(missing_indices):
+                res = batch_results[j] if j < len(batch_results) else {}
+                if not isinstance(res, dict):
+                    res = {}
+                unit.action_segments[orig_idx]["classification"] = res
     
     async def _generate_materials(self, unit: SemanticUnit):
         """
@@ -1489,13 +1597,34 @@ class RichTextPipeline:
                         f"{unit.unit_id}: Post-merge (gap<5.0s) {len(action_segments)} → {len(merged_actions)} actions"
                     )
                 action_segments = merged_actions
+                unit.action_segments = merged_actions
             
-            # 🚀 批量并行分类 (优化速度)
-            batch_classifications = await self._knowledge_classifier.classify_batch(
-                semantic_unit_title=getattr(unit, 'knowledge_topic', '未知主题'),
-                semantic_unit_text=getattr(unit, 'full_text', getattr(unit, 'text', '')),
-                action_segments=action_segments
-            )
+            # 🚀 优化：优先复用预分类/上游 knowledge_type，缺失时才调用 LLM
+            for a in action_segments:
+                if isinstance(a.get("classification"), dict) and a.get("classification", {}).get("knowledge_type"):
+                    continue
+                kt = str(a.get("knowledge_type", "") or "").strip()
+                if kt:
+                    a["classification"] = {
+                        "knowledge_type": kt,
+                        "confidence": float(a.get("confidence", 0.5) or 0.5),
+                        "key_evidence": a.get("key_evidence", ""),
+                        "reasoning": a.get("reasoning", ""),
+                    }
+
+            if all(
+                isinstance(a.get("classification"), dict) and a.get("classification", {}).get("knowledge_type")
+                for a in action_segments
+            ):
+                batch_classifications = [a.get("classification", {}) for a in action_segments]
+            else:
+                batch_classifications = await self._knowledge_classifier.classify_batch(
+                    semantic_unit_title=getattr(unit, 'knowledge_topic', '未知主题'),
+                    semantic_unit_text=getattr(unit, 'full_text', getattr(unit, 'text', '')),
+                    action_segments=action_segments
+                )
+                for action, classification in zip(action_segments, batch_classifications):
+                    action["classification"] = classification
             
             for i, (action, classification) in enumerate(zip(action_segments, batch_classifications)):
                 action_start = action.get("start_sec", unit.start_sec)
@@ -1512,9 +1641,6 @@ class RichTextPipeline:
                 # Classification already done in batch
                 knowledge_type = classification.get("knowledge_type", "过程性知识")
                 confidence = classification.get("confidence", 0.5)
-                
-                # 存储分类结果到 action 中 (用于后续输出到 result.json)
-                action["classification"] = classification
                 
                 logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%}) - {classification.get('key_evidence', '')[:30]}")
 
@@ -1694,14 +1820,35 @@ class RichTextPipeline:
         # 💥 后处理: 多动作融合 (与_generate_materials保持一致)
         if len(action_segments) >= 2:
             action_segments = self._merge_action_segments(action_segments, gap_threshold_sec=5.0)
+            unit.action_segments = action_segments
         
         if action_segments:
-            # 🚀 批量并行分类 (优化速度)
-            batch_classifications = await self._knowledge_classifier.classify_batch(
-                semantic_unit_title=getattr(unit, 'knowledge_topic', '未知主题'),
-                semantic_unit_text=getattr(unit, 'full_text', getattr(unit, 'text', '')),
-                action_segments=action_segments
-            )
+            # 🚀 优化：优先复用预分类/上游 knowledge_type，缺失时才调用 LLM
+            for a in action_segments:
+                if isinstance(a.get("classification"), dict) and a.get("classification", {}).get("knowledge_type"):
+                    continue
+                kt = str(a.get("knowledge_type", "") or "").strip()
+                if kt:
+                    a["classification"] = {
+                        "knowledge_type": kt,
+                        "confidence": float(a.get("confidence", 0.5) or 0.5),
+                        "key_evidence": a.get("key_evidence", ""),
+                        "reasoning": a.get("reasoning", ""),
+                    }
+
+            if all(
+                isinstance(a.get("classification"), dict) and a.get("classification", {}).get("knowledge_type")
+                for a in action_segments
+            ):
+                batch_classifications = [a.get("classification", {}) for a in action_segments]
+            else:
+                batch_classifications = await self._knowledge_classifier.classify_batch(
+                    semantic_unit_title=getattr(unit, 'knowledge_topic', '未知主题'),
+                    semantic_unit_text=getattr(unit, 'full_text', getattr(unit, 'text', '')),
+                    action_segments=action_segments
+                )
+                for action, classification in zip(action_segments, batch_classifications):
+                    action["classification"] = classification
 
             # ==== 有动作单元 ====
             for i, (action, classification) in enumerate(zip(action_segments, batch_classifications)):

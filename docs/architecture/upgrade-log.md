@@ -190,3 +190,17 @@
 - 风险与回滚方案：若合并 prompt 引起分类质量下降或 JSON 解析不稳定，可设置 `MODULE2_KC_MULTI_UNIT_ENABLED=0` 立即回退；或下调 `MODULE2_KC_MULTI_TOKEN_BUDGET`/`MODULE2_KC_MULTI_MAX_UNITS_PER_CHUNK`/`MODULE2_KC_MULTI_FULL_TEXT_CHARS` 降低单次请求规模；必要时调低 `MODULE2_KC_MULTI_UNIT_FALLBACK_MISS_RATIO` 更激进回退。
 - 验证方式与结果：待用 unit 数较多的视频回归，观察日志中 LLM 请求次数是否显著下降，且返回结果与旧实现对齐。
 - 可复用经验：对“多 unit 独立分类”任务，优先将“批量合并 + 动态分块 + 稳定映射键 + Feature Flag 回退”作为默认工程化模板。
+
+## 2026-02-05 RichTextPipeline 跨 Unit 预分类（减少 DeepSeek 调用）
+- 日期：2026-02-05
+- 版本/分支/提交：未记录
+- 触发背景与问题：RichTextPipeline 在 `_generate_materials/_collect_material_requests` 中按 unit 调 `classify_batch`，当 unit 数较多时会产生大量 DeepSeek 请求，成为 Phase2B 素材生成的主要瓶颈；同时对已存在 `knowledge_type` 的动作重复分类会造成不必要的额外调用。
+- 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`（新增 `_preclassify_action_segments_multi_unit`，在 `_generate_materials_parallel` 前批量预分类；并优先复用 action_segments 已有 `knowledge_type/classification`）；`MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`（KnowledgeClassifier 注入 step2_path）。
+- 关键决策与理由：
+  - 复用 `KnowledgeClassifier.classify_units_batch` 的动态分块能力，将跨 unit 的分类请求合并，减少网络往返与调度开销。
+  - 对 action_segments 已带 `knowledge_type/classification` 的场景直接回填 `classification`，避免重复 LLM 调用。
+  - 批处理失败时仅记录告警，不阻断主流程；后续仍可回退到原 per-unit `classify_batch` 路径。
+- 兼容性影响：默认行为不变（Feature Flag 仍由 `MODULE2_KC_MULTI_UNIT_ENABLED` 控制）；预分类只回填 `action_segments[*].classification` 字段，不改变对外接口。
+- 风险与回滚方案：若批处理导致分类质量波动，可设置 `MODULE2_KC_MULTI_UNIT_ENABLED=0` 回退 per-unit；若只想保留“复用已有 knowledge_type”可继续使用上游 action_units 分类结果。
+- 验证方式与结果：运行 `python -m pytest -q` 通过；在 unit 数较多的任务中观察 DeepSeek 请求次数下降（chunk 数明显小于 unit 数）。
+- 可复用经验：在素材生成类 pipeline 中，将“预计算（分类）”从 per-unit 内循环上移到批处理层，可同时降低调用次数与整体时延。

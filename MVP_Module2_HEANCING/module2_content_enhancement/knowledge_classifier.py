@@ -631,9 +631,17 @@ ID: {item['id']}
                     system_message=self.BATCH_SYSTEM_PROMPT,
                 )
                 parsed_items = self._parse_batch_content(content)
+                if parsed_items:
+                    if external_limiter is not None:
+                        await external_limiter.record_success()
+                    return parsed_items
+
+                logger.warning(
+                    f"[MultiUnit] Batch JSON parse failed (units={len(chunk_units)}): {content[:120]}..."
+                )
                 if external_limiter is not None:
-                    await external_limiter.record_success()
-                return parsed_items or []
+                    await external_limiter.record_failure(is_rate_limit=False)
+                return []
             except Exception as e:
                 if external_limiter is not None:
                     error_msg = str(e)
@@ -649,6 +657,12 @@ ID: {item['id']}
         all_chunk_res = await asyncio.gather(*[_process_chunk(c) for c in chunks])
 
         # 4) 归并：key -> classification
+        def _safe_float(val: Any, default: float = 0.5) -> float:
+            try:
+                return float(val)
+            except Exception:
+                return float(default)
+
         results_map: Dict[str, Dict[str, Any]] = {}
         for chunk_res in all_chunk_res:
             for res in chunk_res or []:
@@ -659,7 +673,7 @@ ID: {item['id']}
                     continue
                 results_map[str(res_id)] = {
                     "knowledge_type": res.get("knowledge_type", "过程性知识"),
-                    "confidence": float(res.get("confidence", 0.5)),
+                    "confidence": _safe_float(res.get("confidence", 0.5), default=0.5),
                     "key_evidence": res.get("key_evidence", "") or res.get("reasoning", "")[:30],
                     "reasoning": res.get("reasoning", ""),
                 }
@@ -691,46 +705,428 @@ ID: {item['id']}
             return []
 
         text = content.strip()
-        candidates = []
+        candidates: List[str] = []
 
         # 1) 原始文本
         candidates.append(text)
 
-        # 2) JSON 代码围栏
-        if "```json" in text:
-            parts = text.split("```json")
-            for part in parts[1:]:
-                candidate = part.split("```")[0].strip()
-                if candidate:
-                    candidates.append(candidate)
+        # 2) Markdown code fence（```json 或 ```）
+        for m in re.finditer(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE):
+            fenced = (m.group(1) or "").strip()
+            if fenced:
+                candidates.append(fenced)
 
-        # 3) 截取最外层数组
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            candidates.append(text[start:end + 1])
+        # 3) 提取第一个“括号配平”的数组/对象（避免简单 rfind 在截断时失效）
+        balanced_array = self._extract_first_balanced_json(text, "[", "]")
+        if balanced_array:
+            candidates.append(balanced_array)
+        balanced_obj = self._extract_first_balanced_json(text, "{", "}")
+        if balanced_obj:
+            candidates.append(balanced_obj)
 
-        # 4) 截取最外层对象
-        start_obj = text.find("{")
-        end_obj = text.rfind("}")
-        if start_obj != -1 and end_obj != -1 and end_obj > start_obj:
-            candidates.append(text[start_obj:end_obj + 1])
-
-        seen = set()
+        seen: set = set()
+        single_obj: Optional[dict] = None
         for candidate in candidates:
+            if not candidate:
+                continue
             if candidate in seen:
                 continue
             seen.add(candidate)
+            data = self._loads_jsonish(candidate)
+            if isinstance(data, dict):
+                if "items" in data:
+                    items = data.get("items")
+                    return items if isinstance(items, list) else []
+                # 单个对象先暂存：优先尝试解析出数组/多对象，避免“数组截断”只返回第一个对象
+                if single_obj is None and ("knowledge_type" in data or ("id" in data and "confidence" in data)):
+                    single_obj = data
+            if isinstance(data, list):
+                return data
+
+        # 4) 最后兜底：尝试从原始文本中逐个抽取对象并解析（可救回“数组截断/逗号异常”导致的整体失败）
+        obj_texts = self._extract_top_level_objects(text)
+        if obj_texts:
+            parsed: List[dict] = []
+            for obj in obj_texts:
+                data = self._loads_jsonish(obj)
+                if isinstance(data, dict):
+                    parsed.append(data)
+            if parsed:
+                return parsed
+
+        if single_obj is not None:
+            return [single_obj]
+
+        return []
+
+    @staticmethod
+    def _extract_first_balanced_json(text: str, open_ch: str, close_ch: str) -> Optional[str]:
+        """
+        做什么：从文本中提取第一个“括号配平”的片段（数组或对象）。
+        为什么：LLM 输出被截断或夹杂多余文本时，find/rfind 容易截取到不完整片段。
+        权衡：只返回第一个闭合片段，若输出包含多个 JSON 片段会忽略后续。
+        """
+        if not text:
+            return None
+        depth = 0
+        start_idx: Optional[int] = None
+        in_str = False
+        quote = ""
+        escape = False
+        for i, ch in enumerate(text):
+            if in_str:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == quote:
+                    in_str = False
+                    quote = ""
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                continue
+            if ch == open_ch:
+                if depth == 0:
+                    start_idx = i
+                depth += 1
+                continue
+            if ch == close_ch and depth > 0:
+                depth -= 1
+                if depth == 0 and start_idx is not None:
+                    return text[start_idx : i + 1]
+        return None
+
+    @staticmethod
+    def _extract_top_level_objects(text: str) -> List[str]:
+        """
+        做什么：从文本中抽取顶层 JSON 对象片段（{...}）。
+        为什么：批量数组整体解析失败时，逐对象解析可最大化保留有效结果。
+        权衡：只抽取顶层对象；若文本里包含与 JSON 无关的大括号，可能引入噪声对象。
+        """
+        if not text:
+            return []
+        objs: List[str] = []
+        depth = 0
+        start_idx: Optional[int] = None
+        in_str = False
+        quote = ""
+        escape = False
+
+        for i, ch in enumerate(text):
+            if in_str:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == quote:
+                    in_str = False
+                    quote = ""
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                continue
+            if ch == "{":
+                if depth == 0:
+                    start_idx = i
+                depth += 1
+                continue
+            if ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start_idx is not None:
+                    seg = text[start_idx : i + 1].strip()
+                    if seg:
+                        objs.append(seg)
+                    start_idx = None
+        return objs
+
+    def _loads_jsonish(self, text: str) -> Any:
+        """
+        做什么：以“尽量不丢结果”为目标解析 JSON/类 JSON 文本。
+        为什么：LLM 输出常见偏差包括：尾随逗号、中文标点、代码围栏、字符串中包含未转义换行等。
+        权衡：会对文本做最小必要修复；若输出本身语义错误则仍会解析失败并回退。
+        """
+        if text is None:
+            return None
+        raw = str(text).strip().lstrip("\ufeff")
+        if not raw:
+            return None
+
+        # 1) 先尝试严格 JSON
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+
+        # 2) 尝试最小修复后再用 json.loads
+        normalized = self._normalize_jsonish_text(raw)
+        if normalized and normalized != raw:
             try:
-                data = json.loads(candidate)
-                if isinstance(data, dict) and "items" in data:
-                    return data["items"] if isinstance(data["items"], list) else []
-                if isinstance(data, list):
-                    return data
+                return json.loads(normalized)
+            except Exception:
+                pass
+
+        # 3) 再尝试 Python literal（兼容单引号/尾随逗号/True/False/None）
+        for candidate in (raw, normalized):
+            if not candidate:
+                continue
+            try:
+                py_text = self._jsonish_to_python_literal(candidate)
+                return ast.literal_eval(py_text)
             except Exception:
                 continue
 
-        return []
+        return None
+
+    @staticmethod
+    def _jsonish_to_python_literal(text: str) -> str:
+        """
+        做什么：把 JSON 关键字（true/false/null）转换为 Python literal。
+        为什么：ast.literal_eval 能容忍单引号与尾随逗号，比 json.loads 更宽容。
+        权衡：只在字符串外替换关键字，避免污染 reasoning/key_evidence 文本内容。
+        """
+        if not text:
+            return ""
+        out: List[str] = []
+        i = 0
+        in_str = False
+        quote = ""
+        escape = False
+
+        def _is_ident_char(ch: str) -> bool:
+            return ch.isalpha() or ch == "_"
+
+        while i < len(text):
+            ch = text[i]
+            if in_str:
+                out.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    in_str = False
+                    quote = ""
+                i += 1
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                out.append(ch)
+                i += 1
+                continue
+
+            if _is_ident_char(ch):
+                j = i + 1
+                while j < len(text) and (_is_ident_char(text[j]) or text[j].isdigit()):
+                    j += 1
+                word = text[i:j]
+                lower = word.lower()
+                if lower == "true":
+                    out.append("True")
+                elif lower == "false":
+                    out.append("False")
+                elif lower == "null":
+                    out.append("None")
+                else:
+                    out.append(word)
+                i = j
+                continue
+
+            out.append(ch)
+            i += 1
+
+        return "".join(out)
+
+    @staticmethod
+    def _normalize_jsonish_text(text: str) -> str:
+        """
+        做什么：对“近似 JSON”做最小化修复，让 json.loads 更容易成功。
+        为什么：JSON 解析失败往往是轻微格式问题（中文标点、尾随逗号、字符串控制字符）。
+        权衡：只在字符串外替换结构符号；字符串内仅转义控制字符，尽量不改语义。
+        """
+        if not text:
+            return ""
+
+        # 1) 统一常见引号（全局替换对语义影响很小，能显著提升解析成功率）
+        trans = str.maketrans(
+            {
+                "“": "\"",
+                "”": "\"",
+                "‘": "'",
+                "’": "'",
+            }
+        )
+        s = str(text).translate(trans).lstrip("\ufeff").strip()
+
+        # 2) 字符串外替换中文标点（避免把结构逗号/冒号输出成全角）
+        s = KnowledgeClassifier._replace_outside_strings(s, {"，": ",", "：": ":"})
+
+        # 3) 字符串内转义控制字符（\\n/\\r/\\t 等），否则严格 JSON 会失败
+        s = KnowledgeClassifier._escape_control_chars_in_strings(s)
+
+        # 4) 去除尾随逗号（例如 {"a":1,} 或 [1,]）
+        s = KnowledgeClassifier._remove_trailing_commas(s)
+
+        return s
+
+    @staticmethod
+    def _replace_outside_strings(text: str, mapping: Dict[str, str]) -> str:
+        if not text or not mapping:
+            return text
+        out: List[str] = []
+        in_str = False
+        quote = ""
+        escape = False
+        for ch in text:
+            if in_str:
+                out.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    in_str = False
+                    quote = ""
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                out.append(ch)
+                continue
+
+            out.append(mapping.get(ch, ch))
+        return "".join(out)
+
+    @staticmethod
+    def _escape_control_chars_in_strings(text: str) -> str:
+        if not text:
+            return ""
+        out: List[str] = []
+        in_str = False
+        quote = ""
+        escape = False
+        for ch in text:
+            if in_str:
+                if escape:
+                    out.append(ch)
+                    escape = False
+                    continue
+                if ch == "\\":
+                    out.append(ch)
+                    escape = True
+                    continue
+                if ch == quote:
+                    out.append(ch)
+                    in_str = False
+                    quote = ""
+                    continue
+                code = ord(ch)
+                if code < 0x20:
+                    if ch == "\n":
+                        out.append("\\n")
+                    elif ch == "\r":
+                        out.append("\\r")
+                    elif ch == "\t":
+                        out.append("\\t")
+                    else:
+                        out.append(f"\\u{code:04x}")
+                else:
+                    out.append(ch)
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                out.append(ch)
+                continue
+            out.append(ch)
+        return "".join(out)
+
+    @staticmethod
+    def _remove_trailing_commas(text: str) -> str:
+        if not text:
+            return ""
+        out: List[str] = []
+        i = 0
+        in_str = False
+        quote = ""
+        escape = False
+
+        while i < len(text):
+            ch = text[i]
+            if in_str:
+                out.append(ch)
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    in_str = False
+                    quote = ""
+                i += 1
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                out.append(ch)
+                i += 1
+                continue
+
+            if ch == ",":
+                j = i + 1
+                while j < len(text) and text[j] in {" ", "\t", "\r", "\n"}:
+                    j += 1
+                if j < len(text) and text[j] in {"}", "]"}:
+                    i += 1
+                    continue
+
+            out.append(ch)
+            i += 1
+
+        return "".join(out)
+
+    @staticmethod
+    def _normalize_batch_index(val: Any) -> Optional[int]:
+        """
+        做什么：将 LLM 返回的 id 归一为批量序号（0..N-1）。
+        为什么：LLM 可能输出 "0" / 0 / "ID:0" 等非严格格式；直接 int() 容易失败或抛异常。
+        权衡：只提取第一个整数；若输出完全不可解析则返回 None。
+        """
+        if val is None:
+            return None
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            try:
+                return int(val)
+            except Exception:
+                return None
+        s = str(val).strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except Exception:
+            pass
+        m = re.search(r"-?\d+", s)
+        if not m:
+            return None
+        try:
+            return int(m.group(0))
+        except Exception:
+            return None
     
     def _load_all_subtitles(self) -> list:
         """

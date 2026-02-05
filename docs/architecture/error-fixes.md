@@ -129,12 +129,15 @@
 ## 2026-02-05 LLM 批量分类 JSON 解析失败
 - 日期：2026-02-05
 - 现象与影响范围：Batch JSON parse failed，批量分类结果回退默认值，影响知识类型准确性。
-- 触发条件：LLM 输出含代码围栏/尾随文本导致 json.loads 失败。
-- 根因定位：解析仅尝试直接 json.loads，未做围栏与截取兼容。
-- 修复措施：增加容错解析，支持围栏、数组/对象截取。
-- 验证方式：观察日志中 Batch JSON parse failed 是否显著减少，分类结果正常回写。
-- 预防方案（测试/监控/校验/回滚）：对 LLM 输出加入格式校验；保留原始输出用于排查。
-- 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/knowledge_classifier.py
+- 触发条件：LLM 输出“接近 JSON”但不严格（代码围栏/尾随文本、尾随逗号、中文标点（，：）、字符串内未转义换行/控制字符、数组截断缺少闭合 `]` 等）。
+- 根因定位：解析与回填链路假设严格 `json.loads` 可用；当数组整体不合法时会导致整 chunk 结果全丢；批量 id 映射也较脆弱（如 `"ID:0"`）。
+- 修复措施：
+  - 引入 JSONish 容错解析：修复常见标点/尾随逗号/控制字符，兼容代码围栏与“括号配平”截取，并在数组失败时逐对象抽取以最大化保留有效结果。
+  - 解析失败自动拆分 chunk 重试；对缺失项做一次缩小范围重试，尽量避免整批回退默认值。
+  - 批量 id 归一：兼容 `"0"`/`0`/`"ID:0"` 等格式，稳定映射回原序号。
+- 验证方式：运行 `python -m pytest -q`；在真实任务中观察 Batch JSON parse failed/Batch Miss 明显下降，分类结果不再大量回退默认值。
+- 预防方案（测试/监控/校验/回滚）：保留解析回归用例；统计 Batch Miss 比例并告警；通过 `MODULE2_KC_BATCH_SPLIT_MAX_DEPTH` 限制拆分重试深度，必要时可回退旧策略。
+- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/knowledge_classifier.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_knowledge_classifier_parse.py`
 - 复盘要点：LLM 输出必须做容错解析，避免批量结果全量回退。
 
 ## 2026-02-05 VisionAI 关闭时 Event loop is closed

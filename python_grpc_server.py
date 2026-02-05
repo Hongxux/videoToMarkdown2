@@ -1258,8 +1258,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - AnalyzeResponse（含 screenshot_requests/clip_requests/semantic_units_json_path）。"""
         import os  # Explicit local import
-        import sys
-        print(f"DEBUG: Entering AnalyzeSemanticUnits with os={os} and sys.modules.get('os')={sys.modules.get('os')}", flush=True)
         task_id = request.task_id
         # 统一本地视频归档到 storage/{hash}：做什么是统一 Phase2A 路径；为什么是避免素材找不到；权衡是多一次 I/O
         video_path = _ensure_local_video_in_storage(request.video_path)
@@ -1288,7 +1286,10 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             # 🔑 检查是否已存在 Phase2A 输出（缓存复用）
             if os.path.exists(semantic_units_path):
-                logger.info(f"[{task_id}] ✅ Reusing existing Phase2A output: {semantic_units_path}")
+                logger.warning(
+                    f"[{task_id}] ✅ Reusing existing Phase2A output: {semantic_units_path} "
+                    f"(cache hit -> 不会进入 _collect_material_requests；如需验证新策略请删除该文件后重跑)"
+                )
                 
                 # 从已有文件中提取 screenshot 和 clip 请求
                 import json
