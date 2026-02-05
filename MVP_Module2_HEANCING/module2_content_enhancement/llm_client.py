@@ -25,6 +25,7 @@ from tenacity import (
     before_sleep_log
 )
 import httpx
+import psutil
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,8 @@ class AdaptiveConcurrencyLimiter:
         self.max_limit = max_limit
         self.increase_step = increase_step
         self.decrease_factor = decrease_factor
+        self._external_cap: Optional[int] = None
+        self._effective_limit = initial_limit
         
         # 滑动窗口统计
         self.window_size = window_size
@@ -140,7 +143,7 @@ class AdaptiveConcurrencyLimiter:
                 if success_rate > 0.9 and self.current_limit < self.max_limit:
                     old_limit = self.current_limit
                     self.current_limit = min(self.current_limit + self.increase_step, self.max_limit)
-                    self._update_semaphore(old_limit, self.current_limit)
+                    self._apply_effective_limit(old_limit)
                     logger.debug(f"Concurrency ↑ {old_limit} → {self.current_limit} (success_rate={success_rate:.0%})")
     
     async def record_failure(self, is_rate_limit: bool = False):
@@ -176,7 +179,7 @@ class AdaptiveConcurrencyLimiter:
                 self.current_limit = max(self.current_limit - 1, self.min_limit)
             
             if old_limit != self.current_limit:
-                self._update_semaphore(old_limit, self.current_limit)
+                self._apply_effective_limit(old_limit)
                 logger.warning(f"Concurrency ↓ {old_limit} → {self.current_limit} (rate_limit={is_rate_limit})")
     
     def _update_semaphore(self, old_limit: int, new_limit: int):
@@ -194,6 +197,43 @@ class AdaptiveConcurrencyLimiter:
         # 简化处理: 重新创建信号量 (协程安全)
         # 注意: 这不会立即释放已获取的许可，但新请求会使用新限制
         self._semaphore = asyncio.Semaphore(new_limit)
+
+    def _apply_effective_limit(self, old_limit: int):
+        """
+        执行逻辑：
+        1) 计算“自适应并发”与“外部上限”的最小值。
+        2) 必要时更新信号量以生效新的并发上限。
+        实现方式：使用 _external_cap 作为硬上限，与 current_limit 取最小值。
+        核心价值：让资源/Token 约束覆盖 AIMD 的增长，保证稳定性。
+        输入参数：
+        - old_limit: 变更前的并发上限（类型：int）。
+        输出参数：
+        - 无（仅产生副作用，如日志/状态更新）。"""
+        new_limit = self.current_limit
+        if self._external_cap is not None:
+            new_limit = min(new_limit, self._external_cap)
+        new_limit = max(self.min_limit, min(new_limit, self.max_limit))
+        if new_limit != self._effective_limit:
+            old = self._effective_limit
+            self._effective_limit = new_limit
+            self._update_semaphore(old, new_limit)
+
+    def set_external_cap(self, cap: Optional[int]):
+        """
+        执行逻辑：
+        1) 设置外部并发上限（可由资源或 Token 估算）。
+        2) 触发有效并发上限更新。
+        实现方式：保存 _external_cap 并调用 _apply_effective_limit。
+        核心价值：将资源/请求规模约束统一到并发控制中。
+        输入参数：
+        - cap: 外部上限（类型：Optional[int]，None 表示解除）。
+        输出参数：
+        - 无（仅产生副作用，如日志/状态更新）。"""
+        if cap is None:
+            self._external_cap = None
+        else:
+            self._external_cap = max(self.min_limit, min(int(cap), self.max_limit))
+        self._apply_effective_limit(self._effective_limit)
     
     @property
     def stats(self) -> Dict[str, Any]:
@@ -439,6 +479,9 @@ class LLMClient:
         self.base_url = base_url
         self.model = model
         self.temperature = temperature
+        # 最大请求 token 上限与估算粒度
+        self.max_request_tokens = 4000
+        self.token_unit = 800
         if not self.api_key:
             raise ValueError("DEEPSEEK_API_KEY not found in environment")
         
@@ -494,6 +537,55 @@ class LLMClient:
         # AsyncOpenAI 不支持运行时更换 http_client，所以这里仅触发池重建
         # 新请求会自动使用更新后的池
     
+    def _estimate_tokens(self, prompt: str, system_message: Optional[str] = None) -> int:
+        """
+        执行逻辑：按字符数/4 估算 token，最少返回 1。
+        实现方式：len(prompt) + len(system_message) 的线性估算。
+        核心价值：快速估算请求规模以进行并发调度。"""
+        base = len(prompt or '') + len(system_message or '')
+        return max(1, int(base / 4))
+
+    def _compute_resource_cap(self, base_limit: int) -> int:
+        """
+        执行逻辑：基于 CPU/内存占用估算并发上限。
+        实现方式：按占用比例设置衰减因子。
+        核心价值：避免资源紧张时并发过高导致抖动。"""
+        try:
+            cpu_percent = psutil.cpu_percent(interval=None)
+            mem_percent = psutil.virtual_memory().percent
+        except Exception:
+            return base_limit
+        cpu_factor = 1.0
+        mem_factor = 1.0
+        if cpu_percent > 90:
+            cpu_factor = 0.3
+        elif cpu_percent > 80:
+            cpu_factor = 0.5
+        elif cpu_percent > 70:
+            cpu_factor = 0.7
+        if mem_percent > 90:
+            mem_factor = 0.3
+        elif mem_percent > 80:
+            mem_factor = 0.5
+        elif mem_percent > 75:
+            mem_factor = 0.7
+        return max(1, int(base_limit * cpu_factor * mem_factor))
+
+    def _apply_dynamic_cap(self, est_tokens: int):
+        """
+        执行逻辑：根据 token 规模 + 系统资源设置外部并发上限。
+        实现方式：基于 token 比例与资源因子计算 cap，写入 limiter。
+        核心价值：在保证单任务时延的同时，动态平衡吞吐。"""
+        base_limit = self.concurrency_limiter.current_limit
+        # token 规模越大，并发上限越低
+        token_factor = max(1.0, est_tokens / float(self.token_unit))
+        token_cap = max(self.concurrency_limiter.min_limit, int(base_limit / token_factor))
+        if est_tokens > self.max_request_tokens:
+            token_cap = 1
+        resource_cap = self._compute_resource_cap(base_limit)
+        cap = min(base_limit, token_cap, resource_cap)
+        self.concurrency_limiter.set_external_cap(cap)
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
@@ -532,8 +624,12 @@ class LLMClient:
         messages.append({"role": "user", "content": prompt})
         
         client = await self._ensure_openai_client()
-        
-        # 🚀 获取并发许可
+
+        # 估算 token 并应用外部并发上限
+        est_tokens = self._estimate_tokens(prompt, system_message)
+        self._apply_dynamic_cap(est_tokens)
+
+        # 获取并发许可
         await self.concurrency_limiter.acquire()
         
         try:
@@ -633,6 +729,12 @@ class LLMClient:
         messages.append({"role": "user", "content": prompt})
         
         client = await self._ensure_openai_client()
+        # 估算 token 并应用外部并发上限
+        est_tokens = self._estimate_tokens(prompt, system_message)
+        self._apply_dynamic_cap(est_tokens)
+
+        # 获取并发许可
+        await self.concurrency_limiter.acquire()
         try:
             response = await client.chat.completions.create(
                 model=self.model,

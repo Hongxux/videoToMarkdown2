@@ -325,18 +325,27 @@ class KnowledgeClassifier:
         if len(items) > 0:
             avg_len /= len(items)
         
-        # 2. Dynamic Batch Size Determination
-        # 🚀 DeepSeek Optimization: More aggressive batching for short texts
-        if avg_len < 30:
-            BATCH_SIZE = 20
-        elif avg_len < 100: 
-            BATCH_SIZE = 15
-        elif avg_len < 300:
-            BATCH_SIZE = 10
-        elif avg_len < 800:
-            BATCH_SIZE = 5
-        else:
-            BATCH_SIZE = 2
+        # 2. Dynamic Batch Size Determination（按 token 与资源动态调整）
+        # 估算 token：字符/4（用户确认）
+        avg_tokens = max(1, int(avg_len / 4))
+        token_budget = 3500  # 预留系统提示与结构化输出空间
+        BATCH_SIZE = max(1, min(20, token_budget // avg_tokens))
+        
+        # 资源保护：CPU/内存高时下调 batch
+        try:
+            import psutil
+            cpu_percent = psutil.cpu_percent(interval=None)
+            mem_percent = psutil.virtual_memory().percent
+            if cpu_percent > 85 or mem_percent > 85:
+                BATCH_SIZE = max(1, int(BATCH_SIZE * 0.5))
+            elif cpu_percent > 70 or mem_percent > 75:
+                BATCH_SIZE = max(1, int(BATCH_SIZE * 0.7))
+        except Exception as e:
+            logger.debug(f"Resource check skipped: {e}")
+        
+        # 保底：确保单批 token 不超过 4k
+        if avg_tokens * BATCH_SIZE > 4000:
+            BATCH_SIZE = max(1, 4000 // avg_tokens)
             
         chunks = [items[i:i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
         

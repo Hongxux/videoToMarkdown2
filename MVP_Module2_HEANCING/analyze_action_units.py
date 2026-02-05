@@ -12,7 +12,8 @@
 
 import json
 import os
-from openai import OpenAI
+import asyncio
+from MVP_Module2_HEANCING.module2_content_enhancement.llm_client import LLMClient
 
 # 路径配置
 RESULT_PATH = "d:/videoToMarkdownTest2/MVP_Module2_HEANCING/tests/test_data/video_01/rich_text_output/result.json"
@@ -121,7 +122,14 @@ def get_subtitles_in_range(subtitles: list, start_sec: float, end_sec: float) ->
     return "\n".join(texts) if texts else "(无字幕)"
 
 
-def analyze_with_llm(title: str, full_text: str, action_start: float, action_end: float, action_subtitles: str) -> dict:
+async def analyze_with_llm(
+    title: str,
+    full_text: str,
+    action_start: float,
+    action_end: float,
+    action_subtitles: str,
+    llm_client: LLMClient
+) -> dict:
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -129,8 +137,7 @@ def analyze_with_llm(title: str, full_text: str, action_start: float, action_end
     实现方式：通过JSON 解析/序列化实现。
     核心价值：封装逻辑单元，提升复用与可维护性。
     决策逻辑：
-    - 条件：content.startswith('```')
-    - 条件：content.startswith('json')
+    - 条件：依赖 LLMClient.complete_json 返回结构化结果
     依据来源（证据链）：
     输入参数：
     - title: 函数入参（类型：str）。
@@ -140,11 +147,6 @@ def analyze_with_llm(title: str, full_text: str, action_start: float, action_end
     - action_subtitles: 函数入参（类型：str）。
     输出参数：
     - 结构化结果字典（包含关键字段信息）。"""
-    client = OpenAI(
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url="https://api.deepseek.com"
-    )
-    
     prompt = PROMPT_TEMPLATE.format(
         title=title,
         full_text=full_text,
@@ -152,26 +154,12 @@ def analyze_with_llm(title: str, full_text: str, action_start: float, action_end
         action_end=action_end,
         action_subtitles=action_subtitles
     )
-    
-    response = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.1
-    )
-    
-    content = response.choices[0].message.content.strip()
-    # 提取JSON
-    if content.startswith("```"):
-        content = content.split("```")[1]
-        if content.startswith("json"):
-            content = content[4:]
-    
-    return json.loads(content)
+
+    parsed, _, _ = await llm_client.complete_json(prompt=prompt)
+    return parsed
 
 
-def main():
+async def main():
     # 加载数据
     """
     执行逻辑：
@@ -193,6 +181,12 @@ def main():
         result_data = json.load(f)
     
     subtitles = load_subtitles(SUBTITLE_PATH)
+    llm_client = LLMClient(
+        api_key=os.getenv("DEEPSEEK_API_KEY"),
+        base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat",
+        temperature=0.1
+    )
     
     print("=" * 90)
     print("动作单元三要素分析 V4 (含讲解型 + 置信度)")
@@ -235,12 +229,13 @@ def main():
             print(f"\n  --- 动作 {i+1} [{action_start:.1f}s - {action_end:.1f}s] ---")
             
             try:
-                analysis = analyze_with_llm(
+                analysis = await analyze_with_llm(
                     title=title,
                     full_text=body_text,
                     action_start=action_start,
                     action_end=action_end,
-                    action_subtitles=action_subs
+                    action_subtitles=action_subs,
+                    llm_client=llm_client
                 )
                 
                 conf = analysis.get('confidence', 0)
@@ -313,4 +308,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

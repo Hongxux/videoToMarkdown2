@@ -137,11 +137,12 @@
 - 日期：2026-02-05
 - 版本/分支/提交：未记录
 - 触发背景与问题：Vision API 有 60 req/min 硬限流且存在排队抖动；_vision_validate_v3 频繁 asyncio.run 导致事件循环与连接池反复创建；ClassifyKnowledgeBatch 固定并发难以逼近吞吐上限。
-- 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/vision_ai_client.py`（严格限流 + 后台事件循环桥接）；`MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py`（同步调用复用单一 loop）；`python_grpc_server.py`（LLM 分类并发探测）。
+- 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/vision_ai_client.py`（严格限流 + 后台事件循环桥接）；`MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py`（同步调用复用单一 loop）；`python_grpc_server.py`（LLM 分类并发探测）；`MVP_Module2_HEANCING/module2_content_enhancement/llm_client.py`（LLM 调度器动态外部上限）；`MVP_Module2_HEANCING/analyze_action_units.py`（统一走 LLM 调度器）。
 - 关键决策与理由：
   - Vision API 增加严格 60 req/min 匀速器，优先解决硬限流与 429 抖动。
   - _vision_validate_v3 通过后台事件循环 + run_coroutine_threadsafe 复用连接池与并发 limiter，避免反复建/销毁 loop。
   - ClassifyKnowledgeBatch 使用 AIMD 探测并发上限，成功率高则逐步增压，失败时回退。
+  - LLM 调度器在每次调用前根据 token 估算（字符/4，最大 4k）与 CPU/内存占用设置外部上限，优先保障单任务时延并对大请求降并发。
 - 兼容性影响：Vision 调用被严格节流，峰值吞吐下降但时延更稳定；LLM 分类并发由固定值变为动态调整。
 - 风险与回滚方案：如节流导致时延过长，可调高 rate_limit_per_minute 或回退限流逻辑；如并发探测引起波动，可恢复固定 Semaphore 或下调 max_limit。
 - 验证方式与结果：运行包含 Vision 校验 + LLM 分类的任务，确认 Vision API timing 日志包含 rate_wait 且 429 降低；观察分类并发随负载变化且无异常。
