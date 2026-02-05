@@ -1875,21 +1875,40 @@ class RichTextPipeline:
                     if req.semantic_unit_id != unit.unit_id:
                         continue
                     for ext in [".mp4", ".webm", ".mkv"]:
+                        # 尝试1: 直接使用 clip_id
                         expected_path = os.path.join(clips_dir, f"{req.clip_id}{ext}")
                         if os.path.exists(expected_path):
                             logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found clip at: {expected_path}")
                             clip_candidates.append(expected_path)
                             break
-                        else:
-                            logger.debug(f"DEBUG_CLIP [{unit.unit_id}] Clip not found at: {expected_path}")
+                        
+                        # 尝试2: 增加 clip_ 前缀 (解决 clip_SU... 命名不一致问题)
+                        expected_path_prefix = os.path.join(clips_dir, f"clip_{req.clip_id}{ext}")
+                        if os.path.exists(expected_path_prefix):
+                            logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found clip (with prefix) at: {expected_path_prefix}")
+                            clip_candidates.append(expected_path_prefix)
+                            break
+                        
+                        logger.debug(f"DEBUG_CLIP [{unit.unit_id}] Clip not found at: {expected_path} or {expected_path_prefix}")
             else:
                 import glob
-                pattern = os.path.join(clips_dir, f"{unit.unit_id}*")
-                logger.info(f"DEBUG_CLIP [{unit.unit_id}] No specific clip requests, trying glob: {pattern}")
-                for path in sorted(glob.glob(pattern)):
-                    ext = os.path.splitext(path)[1].lower()
-                    if ext in (".mp4", ".webm", ".mkv"):
-                        clip_candidates.append(path)
+                # 尝试1: 直接匹配 unit_id*
+                pattern1 = os.path.join(clips_dir, f"{unit.unit_id}*")
+                # 尝试2: 匹配 clip_unit_id*
+                pattern2 = os.path.join(clips_dir, f"clip_{unit.unit_id}*")
+                
+                logger.info(f"DEBUG_CLIP [{unit.unit_id}] No specific clip requests, trying globs: {pattern1}, {pattern2}")
+                
+                candidates = set()
+                for p in sorted(glob.glob(pattern1)):
+                     if os.path.splitext(p)[1].lower() in (".mp4", ".webm", ".mkv"):
+                        candidates.add(p)
+                for p in sorted(glob.glob(pattern2)):
+                     if os.path.splitext(p)[1].lower() in (".mp4", ".webm", ".mkv"):
+                        candidates.add(p)
+                
+                clip_candidates.extend(sorted(list(candidates)))
+                
                 logger.info(f"DEBUG_CLIP [{unit.unit_id}] Glob found {len(clip_candidates)} candidates")
 
             if clip_candidates:

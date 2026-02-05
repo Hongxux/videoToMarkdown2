@@ -69,9 +69,24 @@
   - CV 流式门闸：ValidateCVBatch 改为 chunk 化处理，IO/Compute 重叠，边计算边回传结果。
   - 动态 chunk：基于 unit 数量强制最少 chunk（目标 >= 5）以提高重叠与时延表现。
   - CV batch 上限下调：限制 batch 上限以避免单 chunk，提升流式效果。
+  - 粗采样兜底：coarse 采样不足时回退到 3 点采样（start/mid/end），避免 Insufficient coarse frames。
   - 读帧剖析日志：在 _batch_read_frames_to_shm/_batch_read_coarse_frames_to_shm 输出 open/seek/read/shm/total 分阶段耗时。
-  - 顺序读+采样：将随机 seek 改为顺序读并仅采样目标帧，减少关键帧回溯解码开销。
-  - 并行解码：按区间拆分顺序读，使用多线程并行解码（每段独立 VideoCapture）。
+  - 顺序读+采样：
+    - 做法：先收集目标 frame_idx（去重/排序），只 seek 到最小帧；顺序 read 到最大帧，仅在命中目标帧时写入 shm，其余帧直接丢弃。
+    - 机制收益：避免“每帧随机 seek”导致的 GOP 回溯解码，解码变为线性扫描，减少重复解码与磁盘随机访问。
+    - 为什么提升明显：随机 seek 在 H.264/H.265 下需要从关键帧回溯解码到目标帧；顺序读只解码一次区间，CPU 利用率更高、总耗时显著下降。
+  - 并行解码：
+    - 做法：当范围较大/采样较多时，将帧区间切分为多段，使用多线程并行解码；每段独立 VideoCapture 顺序读。
+    - 机制收益：把线性解码拆成多段并行，缩短总耗时，并提高 CPU 利用率。
+  - 持续喂任务流水线：
+    - 做法：，IO 读取完成即提交任务；使用 inflight 上限控制内存移除 chunk 屏障，边提交边回收完成任务。
+    - 机制收益：避免长尾任务阻塞下一批，减少 worker 空闲，提高整体 CPU 利用率与吞吐。
+  - 任务统一与尾部合并：
+    - 做法：将 cv/cf 任务合并为统一列表按任务数分 chunk；尾部 chunk 过小则与上一批合并（tail-merge）。
+    - 机制收益：避免尾部小批导致大量 worker 空闲，提升并行度稳定性。
+  - 禁用嵌套并行：
+    - 做法：在 CV worker 内设置 OMP/MKL/OPENBLAS/NUMEXPR/VECLIB 线程为 1，并设置 cv2.setNumThreads(1)。
+    - 机制收益：避免单进程内部多线程抢占核，确保多进程并行更均衡。
   - Vision API 等待剖析：记录 wait/http/avg_wait，明确 API 等待瓶颈。
   - Vision 事件循环修复：AsyncClient 绑定事件循环，检测 loop 关闭/切换后重建，避免 Event loop is closed。
   - CV/Vision 缓存：url_hash+配置签名复用 Vision 结果，pHash 去重与持久化缓存。

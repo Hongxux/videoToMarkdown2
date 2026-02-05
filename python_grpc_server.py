@@ -1642,6 +1642,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         })
                     
                     # 从请求中提取 action_units 信息
+                    # 统一兼容 protobuf 对象与 dict，避免缺失字段导致回写失败
+                    def _safe_get_action_field(action_unit, field_name: str, default_value):
+                        if isinstance(action_unit, dict):
+                            return action_unit.get(field_name, default_value)
+                        return getattr(action_unit, field_name, default_value)
+
                     for u in request.units:
                         if u.action_units:
                             unit_action_map[u.unit_id] = [
@@ -1651,9 +1657,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                                     "end_sec": au.end_sec,
                                     # action_type 可能不存在：做什么是兜底写入；为什么是避免写回失败；权衡是字段语义可能退化为知识类型
                                     "action_type": getattr(au, "action_type", "") or getattr(au, "knowledge_type", ""),
-                                    "knowledge_type": au.knowledge_type,
-                                    "confidence": au.confidence,
-                                    "reasoning": au.reasoning if hasattr(au, 'reasoning') else ""
+                                    "knowledge_type": _safe_get_action_field(au, "knowledge_type", ""),
+                                    "confidence": _safe_get_action_field(au, "confidence", 0.0),
+                                    "reasoning": _safe_get_action_field(au, "reasoning", "")
                                 }
                                 for i, au in enumerate(u.action_units)
                             ]
@@ -1875,9 +1881,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         shm_map = {} # unit_id -> {frame_idx: shm_ref}
         import cv2
         import time
-        from concurrent.futures import ThreadPoolExecutor
         import threading
-        from concurrent.futures import ThreadPoolExecutor
         
         # 1. Collect Requests
         frame_requests = [] # (time, unit_id)
@@ -1993,8 +1997,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         ranges.append((seg_start, seg_end))
                 
                 with futures.ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
-                    futures = [executor.submit(_decode_range, s, e) for s, e in ranges]
-                    for fut in futures:
+                    future_list = [executor.submit(_decode_range, s, e) for s, e in ranges]
+                    for fut in future_list:
                         local_refs, o_ms, s_ms, r_ms, m_ms = fut.result()
                         valid_shm_refs.update(local_refs)
                         open_ms += o_ms
@@ -2079,6 +2083,10 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 while t < end_sec:
                     all_requests.append((t, uid))
                     t += coarse_interval
+                # 兜底：区间过短时至少采样 start/mid/end
+                if start_sec >= end_sec or not any(req_uid == uid for _ts, req_uid in all_requests):
+                    mid = (start_sec + end_sec) / 2
+                    all_requests.extend([(start_sec, uid), (mid, uid), (end_sec, uid)])
             
             if not all_requests:
                 return {}
@@ -2170,9 +2178,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     if seg_start <= seg_end:
                         ranges.append((seg_start, seg_end))
                 
-                with ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
-                    futures = [executor.submit(_decode_range, s, e) for s, e in ranges]
-                    for fut in futures:
+                with futures.ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
+                    future_list = [executor.submit(_decode_range, s, e) for s, e in ranges]
+                    for fut in future_list:
                         local_refs, o_ms, s_ms, r_ms, m_ms = fut.result()
                         valid_refs.update(local_refs)
                         open_ms += o_ms
@@ -2185,6 +2193,33 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     if uid not in coarse_shm_map:
                         coarse_shm_map[uid] = {}
                     coarse_shm_map[uid][req_time] = ref
+
+            # 兜底：若粗采样仍不足，回退到 3 点采样（start/mid/end）
+            missing_units = []
+            for u in units_data:
+                uid = u["unit_id"]
+                if uid not in coarse_shm_map or len(coarse_shm_map[uid]) < 2:
+                    missing_units.append(u)
+            if missing_units:
+                logger.warning(
+                    f"Coarse frames insufficient for {len(missing_units)} units, fallback to 3-point sampling"
+                )
+                fallback_map = self._batch_read_frames_to_shm(video_path, missing_units)
+                for u in missing_units:
+                    uid = u["unit_id"]
+                    if uid not in coarse_shm_map:
+                        coarse_shm_map[uid] = {}
+                    start_sec = u["start_sec"]
+                    end_sec = u["end_sec"]
+                    mid = (start_sec + end_sec) / 2
+                    for t in (start_sec, mid, end_sec):
+                        frame_idx = int(t * fps)
+                        frame_idx = max(0, min(frame_idx, total_frames - 1))
+                        ref = None
+                        if uid in fallback_map:
+                            ref = fallback_map[uid].get(str(frame_idx)) or fallback_map[uid].get(frame_idx)
+                        if ref:
+                            coarse_shm_map[uid][t] = ref
             
             total_ms = open_ms + seek_ms + read_ms + shm_ms
             logger.info(
@@ -2348,7 +2383,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             BATCH_SIZE = min(max(MIN_BATCH_SIZE, dynamic_batch), MAX_BATCH_SIZE)  # 初始限制范围 [8, 24]
             # 单任务时延优先：根据单元数量强制生成多个 chunk
             # 目标：尽量保证 >= 3 个 chunk，形成 IO/Compute 重叠
-            units_max = max(len(all_units_data), len(skipped_units))
+            units_total = len(all_units_data) + len(skipped_units)
+            units_max = units_total
             TARGET_MIN_CHUNKS = 5
             if units_max > 0:
                 latency_batch = max(1, (units_max + TARGET_MIN_CHUNKS - 1) // TARGET_MIN_CHUNKS)
@@ -2362,10 +2398,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             results_data = []
             cf_results_data = []  # 先粗后细结果
             total_io_ms = 0.0
-            total_compute_ms = 0.0
             total_tasks = 0
             io_chunks = 0
-            compute_chunks = 0
+            completed_tasks = 0
             
             loop = asyncio.get_running_loop()
             
@@ -2376,11 +2411,35 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             def chunk_list(items, size):
                 return [items[i:i + size] for i in range(0, len(items), size)]
 
-            cv_chunks = chunk_list(all_units_data, BATCH_SIZE) if all_units_data else []
-            cf_chunks = chunk_list(skipped_units, BATCH_SIZE) if skipped_units else []
-            total_chunks = max(len(cv_chunks), len(cf_chunks))
+            tasks = []
+            for u in all_units_data:
+                tasks.append({"type": "cv", "unit": u})
+            for u in skipped_units:
+                tasks.append({"type": "cf", "unit": u})
+            if tasks:
+                tasks.sort(key=lambda x: x["unit"].get("start_sec", 0.0))
+            logger.info(
+                f"[{task_id}] Task unify: cv={len(all_units_data)}, cf={len(skipped_units)}, total={len(tasks)}"
+            )
 
-            logger.info(f"[{task_id}] Streaming gate enabled: chunks={total_chunks}, batch={BATCH_SIZE}")
+            task_chunks = chunk_list(tasks, BATCH_SIZE) if tasks else []
+            # tail-merge：尾部太小则合并到前一批
+            if len(task_chunks) >= 2:
+                tail_size = len(task_chunks[-1])
+                merge_threshold = max(1, BATCH_SIZE // 2)
+                if tail_size < merge_threshold:
+                    task_chunks[-2].extend(task_chunks[-1])
+                    task_chunks.pop()
+                    logger.info(
+                        f"[{task_id}] Tail merge: last_size={tail_size} -> merged_size={len(task_chunks[-1])}"
+                    )
+            total_chunks = len(task_chunks)
+            max_inflight = max(1, self.cv_worker_count * 2)
+
+            logger.info(
+                f"[{task_id}] Streaming gate pipeline: chunks={total_chunks}, batch={BATCH_SIZE}, "
+                f"inflight={max_inflight}"
+            )
 
             async def wrap_task(fut, t_type, uid):
                 """
@@ -2410,7 +2469,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     logger.error(f"Task failed for {uid} ({t_type}): {e}")
                     return t_type, uid, e
 
-            async def read_chunk(cv_chunk, cf_chunk):
+            async def read_chunk(task_chunk):
                 """
                 执行逻辑：
                 1) 并行读取 CV 与 coarse-fine 的帧到共享内存。
@@ -2418,18 +2477,19 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 实现方式：loop.run_in_executor + batch_read 方法。
                 核心价值：IO 与计算解耦，降低等待时间。
                 决策逻辑：
-                - 条件：cv_chunk/cf_chunk 为空则直接返回空结果
+                - 条件：task_chunk 为空则直接返回空结果
                 依据来源（证据链）：
-                - 输入参数：cv_chunk、cf_chunk。
+                - 输入参数：task_chunk。
                 输入参数：
-                - cv_chunk: process 单元列表。
-                - cf_chunk: coarse-fine 单元列表。
+                - task_chunk: 统一任务列表（cv/cf 混合）。
                 输出参数：
                 - (shm_map, coarse_shm_map, io_ms, cv_count, cf_count)。
                 """
                 io_start = time.perf_counter()
-                if not cv_chunk and not cf_chunk:
+                if not task_chunk:
                     return {}, {}, 0.0, 0, 0
+                cv_chunk = [t["unit"] for t in task_chunk if t["type"] == "cv"]
+                cf_chunk = [t["unit"] for t in task_chunk if t["type"] == "cf"]
 
                 io_futures = []
                 if cv_chunk:
@@ -2461,22 +2521,76 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 io_ms = (time.perf_counter() - io_start) * 1000.0
                 return shm_map, coarse_shm_map, io_ms, len(cv_chunk), len(cf_chunk)
 
-            if total_chunks > 0:
-                prefetch_task = asyncio.create_task(
-                    read_chunk(
-                        cv_chunks[0] if len(cv_chunks) > 0 else [],
-                        cf_chunks[0] if len(cf_chunks) > 0 else []
+            async def drain_completed(pending_tasks):
+                if not pending_tasks:
+                    return pending_tasks, 0, []
+                done, pending = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+                completed_count = 0
+                responses = []
+                for done_task in done:
+                    try:
+                        task_type, unit_id, res = done_task.result()
+                    except Exception as e:
+                        logger.error(f"Task wrapper failed: {e}")
+                        continue
+
+                    if isinstance(res, Exception):
+                        continue
+                    if not isinstance(res, dict):
+                        continue
+
+                    # 1. 组装 StableIslands
+                    pb_islands = []
+                    for si in res.get("stable_islands", []):
+                        if isinstance(si, dict):
+                            pb_islands.append(video_processing_pb2.StableIsland(
+                                start_sec=float(si.get("start_sec", 0.0)),
+                                end_sec=float(si.get("end_sec", 0.0)),
+                                mid_sec=float(si.get("mid_sec", 0.0)),
+                                duration_sec=float(si.get("duration_sec", 0.0))
+                            ))
+
+                    # 2. 组装 ActionSegments
+                    pb_actions = []
+                    for act in res.get("action_segments", []):
+                        if isinstance(act, dict):
+                            internal_islands = []
+                            for Isi in act.get("internal_stable_islands", []):
+                                internal_islands.append(video_processing_pb2.StableIsland(
+                                    start_sec=float(Isi.get("start_sec", 0.0)),
+                                    end_sec=float(Isi.get("end_sec", 0.0)),
+                                    mid_sec=float(Isi.get("mid_sec", 0.0)),
+                                    duration_sec=float(Isi.get("duration_sec", 0.0))
+                                ))
+
+                            pb_actions.append(video_processing_pb2.ActionSegment(
+                                start_sec=float(act.get("start_sec", 0.0)),
+                                end_sec=float(act.get("end_sec", 0.0)),
+                                action_type=str(act.get("action_type", "")),
+                                internal_stable_islands=internal_islands
+                            ))
+
+                    # 3. 生成 CVValidationResult 并回传
+                    pb_result = video_processing_pb2.CVValidationResult(
+                        unit_id=unit_id,
+                        stable_islands=pb_islands,
+                        action_segments=pb_actions
                     )
-                )
 
-                for idx in range(total_chunks):
-                    cv_chunk = cv_chunks[idx] if idx < len(cv_chunks) else []
-                    cf_chunk = cf_chunks[idx] if idx < len(cf_chunks) else []
+                    responses.append(video_processing_pb2.CVValidationResponse(
+                        success=True,
+                        results=[pb_result]
+                    ))
+                    completed_count += 1
+                return pending, completed_count, responses
 
+            if total_chunks > 0:
+                prefetch_task = asyncio.create_task(read_chunk(task_chunks[0]))
+                pending = set()
+
+                for idx, task_chunk in enumerate(task_chunks):
                     if idx + 1 < total_chunks:
-                        next_cv = cv_chunks[idx + 1] if idx + 1 < len(cv_chunks) else []
-                        next_cf = cf_chunks[idx + 1] if idx + 1 < len(cf_chunks) else []
-                        next_task = asyncio.create_task(read_chunk(next_cv, next_cf))
+                        next_task = asyncio.create_task(read_chunk(task_chunks[idx + 1]))
                     else:
                         next_task = None
 
@@ -2489,107 +2603,54 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     total_io_ms += io_ms
                     io_chunks += 1
 
-                    if not cv_chunk and not cf_chunk:
+                    if not task_chunk:
                         continue
 
-                    logger.info(f"[{task_id}] Chunk {idx + 1}/{total_chunks}: CV={len(cv_chunk)}, CF={len(cf_chunk)}")
-
-                    # 阶段2：提交计算任务
-                    compute_start = time.perf_counter()
-                    all_futures = []
-
-                    for unit_data in cv_chunk:
+                    # 提交任务（持续喂入）
+                    from cv_worker import run_coarse_fine_screenshot_task
+                    submitted = 0
+                    for t in task_chunk:
+                        unit_data = t["unit"]
                         unit_id = unit_data["unit_id"]
-                        shm_frames = shm_map.get(unit_id, None)
-                        task_func = functools.partial(
-                            run_cv_validation_task,
-                            video_path,
-                            unit_data,
-                            shm_frames
-                        )
-                        future = loop.run_in_executor(self.cv_process_pool, task_func)
-                        all_futures.append(("cv", unit_id, future))
-
-                    if cf_chunk:
-                        from cv_worker import run_coarse_fine_screenshot_task
-                        for skipped_unit in cf_chunk:
-                            uid = skipped_unit["unit_id"]
+                        if t["type"] == "cv":
+                            shm_frames = shm_map.get(unit_id, None)
+                            task_func = functools.partial(
+                                run_cv_validation_task,
+                                video_path,
+                                unit_data,
+                                shm_frames
+                            )
+                            future = loop.run_in_executor(self.cv_process_pool, task_func)
+                            pending.add(asyncio.create_task(wrap_task(future, "cv", unit_id)))
+                        else:
                             future = loop.run_in_executor(
                                 self.cv_process_pool,
                                 functools.partial(
                                     run_coarse_fine_screenshot_task,
-                                    unit_id=uid,
-                                    start_sec=skipped_unit["start_sec"],
-                                    end_sec=skipped_unit["end_sec"],
-                                    coarse_shm_frames=coarse_shm_map.get(uid, {}),
+                                    unit_id=unit_id,
+                                    start_sec=unit_data["start_sec"],
+                                    end_sec=unit_data["end_sec"],
+                                    coarse_shm_frames=coarse_shm_map.get(unit_id, {}),
                                     coarse_interval=coarse_interval,
                                     fine_shm_frames_by_island=None
                                 )
                             )
-                            all_futures.append(("cf", uid, future))
+                            pending.add(asyncio.create_task(wrap_task(future, "cf", unit_id)))
+                        submitted += 1
+                    total_tasks += submitted
+                    logger.info(
+                        f"[{task_id}] Feed chunk {idx + 1}/{total_chunks}: submitted={submitted}, inflight={len(pending)}"
+                    )
 
-                    if all_futures:
-                        logger.info(f"[{task_id}] Chunk {idx + 1}: submitted {len(all_futures)} tasks")
-
-                        wrapped_tasks = [wrap_task(f[2], f[0], f[1]) for f in all_futures]
-                        for completed_coro in asyncio.as_completed(wrapped_tasks):
-                            task_type, unit_id, res = await completed_coro
-
-                            if isinstance(res, Exception):
-                                continue
-                            if not isinstance(res, dict):
-                                continue
-
-                            # 1. 组装 StableIslands
-                            pb_islands = []
-                            for si in res.get("stable_islands", []):
-                                if isinstance(si, dict):
-                                    pb_islands.append(video_processing_pb2.StableIsland(
-                                        start_sec=float(si.get("start_sec", 0.0)),
-                                        end_sec=float(si.get("end_sec", 0.0)),
-                                        mid_sec=float(si.get("mid_sec", 0.0)),
-                                        duration_sec=float(si.get("duration_sec", 0.0))
-                                    ))
-
-                            # 2. 组装 ActionSegments
-                            pb_actions = []
-                            for act in res.get("action_segments", []):
-                                if isinstance(act, dict):
-                                    internal_islands = []
-                                    for Isi in act.get("internal_stable_islands", []):
-                                        internal_islands.append(video_processing_pb2.StableIsland(
-                                            start_sec=float(Isi.get("start_sec", 0.0)),
-                                            end_sec=float(Isi.get("end_sec", 0.0)),
-                                            mid_sec=float(Isi.get("mid_sec", 0.0)),
-                                            duration_sec=float(Isi.get("duration_sec", 0.0))
-                                        ))
-
-                                    pb_actions.append(video_processing_pb2.ActionSegment(
-                                        start_sec=float(act.get("start_sec", 0.0)),
-                                        end_sec=float(act.get("end_sec", 0.0)),
-                                        action_type=str(act.get("action_type", "")),
-                                        internal_stable_islands=internal_islands
-                                    ))
-
-                            # 3. 生成 CVValidationResult 并回传
-                            pb_result = video_processing_pb2.CVValidationResult(
-                                unit_id=unit_id,
-                                stable_islands=pb_islands,
-                                action_segments=pb_actions
-                            )
-
-                            yield video_processing_pb2.CVValidationResponse(
-                                success=True,
-                                results=[pb_result]
-                            )
-                        compute_ms = (time.perf_counter() - compute_start) * 1000.0
+                    # inflight 控制：避免任务堆积导致内存爆
+                    while len(pending) >= max_inflight:
                         logger.info(
-                            f"[{task_id}] Chunk {idx + 1} compute done: {compute_ms:.1f}ms "
-                            f"(tasks={len(all_futures)})"
+                            f"[{task_id}] Inflight throttle: pending={len(pending)}, limit={max_inflight}"
                         )
-                        total_compute_ms += compute_ms
-                        total_tasks += len(all_futures)
-                        compute_chunks += 1
+                        pending, completed, responses = await drain_completed(pending)
+                        for resp in responses:
+                            yield resp
+                        completed_tasks += completed
 
                     # Memory Guard (chunk-level)
                     if 'shm_map' in locals():
@@ -2597,13 +2658,18 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     if 'coarse_shm_map' in locals():
                         del coarse_shm_map
                     gc.collect()
+
+                # drain remaining tasks
+                while pending:
+                    pending, completed, responses = await drain_completed(pending)
+                    for resp in responses:
+                        yield resp
+                    completed_tasks += completed
             if total_chunks > 0:
                 avg_io = total_io_ms / max(1, io_chunks)
-                avg_compute = total_compute_ms / max(1, compute_chunks)
                 logger.info(
                     f"[{task_id}] CVBatch totals: io={total_io_ms:.1f}ms (avg/chunk={avg_io:.1f}ms), "
-                    f"compute={total_compute_ms:.1f}ms (avg/chunk={avg_compute:.1f}ms), "
-                    f"tasks={total_tasks}, chunks={total_chunks}"
+                    f"tasks={total_tasks}, completed={completed_tasks}, chunks={total_chunks}"
                 )
             logger.info(f"[{task_id}] ValidateCVBatch Streaming Complete")
             
@@ -2673,18 +2739,6 @@ async def serve(host: str = "0.0.0.0", port: int = 50051):
     - port: 函数入参（类型：int）。
     输出参数：
     - 无（仅产生副作用，如启动/停止服务）。"""
-    server = aio.server(
-        futures.ThreadPoolExecutor(max_workers=50),
-        options=[
-            ('grpc.max_send_message_length', 50 * 1024 * 1024),
-            ('grpc.max_receive_message_length', 50 * 1024 * 1024)
-        ]
-    )
-    
-    # 添加服务
-    servicer = VideoProcessingServicer()
-    video_processing_pb2_grpc.add_VideoProcessingServiceServicer_to_server(servicer, server)
-    
     listen_addr = f"{host}:{port}"
     server.add_insecure_port(listen_addr)
     

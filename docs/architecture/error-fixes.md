@@ -167,3 +167,23 @@
 - 预防方案（测试/监控/校验/回滚）：增加单元测试覆盖 worker_count>1 分支；启动时增加关键依赖符号自检。
 - 相关文件/接口：python_grpc_server.py
 - 复盘要点：并行分支应避免未导入符号的隐式依赖。
+## 2026-02-05 Batch read futures 变量遮蔽
+- 日期：2026-02-05
+- 现象与影响范围：日志出现 "Batch read failed: cannot access local variable 'futures' where it is not associated with a value"，批量读帧直接失败。
+- 触发条件：进入 _batch_read_frames_to_shm 的并行解码分支（worker_count > 1）。
+- 根因定位：函数内将列表命名为 futures，导致与模块级 futures 名称冲突；同时引用 futures.ThreadPoolExecutor 时触发局部变量未赋值错误。
+- 修复措施：将列表变量改名为 future_list，避免遮蔽模块名称；统一使用 futures.ThreadPoolExecutor。
+- 验证方式：再次运行批量读帧，确认不再出现上述告警，且 Batch read frames timing 正常输出。
+- 预防方案（测试/监控/校验/回滚）：增加分支覆盖测试（worker_count>1）；避免使用与模块同名的局部变量。
+- 相关文件/接口：python_grpc_server.py
+- 复盘要点：局部变量命名应避免与导入模块同名，尤其在异常分支不易暴露。
+## 2026-02-05 更新 semantic_units_phase2a.json 时 confidence 字段缺失
+- 日期：2026-02-05
+- 现象与影响范围：日志出现 "Failed to update semantic_units_phase2a.json: confidence"，导致 action_units 回写中断。
+- 触发条件：GenerateMaterialRequests 使用 ActionUnitForMaterialGeneration（不含 confidence/reasoning）时触发。
+- 根因定位：回写逻辑直接访问 au.confidence/au.reasoning，字段在该消息类型中不存在。
+- 修复措施：新增安全字段读取，兼容 protobuf 对象与 dict，缺失字段使用默认值。
+- 验证方式：再次执行 GenerateMaterialRequests，确认 semantic_units_phase2a.json 可更新且无告警。
+- 预防方案（测试/监控/校验/回滚）：为不同 action_unit 类型增加回写回归用例；在回写前记录字段缺失统计。
+- 相关文件/接口：python_grpc_server.py
+- 复盘要点：跨消息类型回写需做字段兼容，避免直接访问可选字段。

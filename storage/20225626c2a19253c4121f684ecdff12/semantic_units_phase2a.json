@@ -12,7 +12,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot项目介绍与热度",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -32,7 +32,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "作者背景与创业故事",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -52,7 +52,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot产品功能与特性",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -72,7 +72,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot项目热度与影响",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -92,8 +92,32 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "项目安装环境说明",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 65.0000000000001,
+    "action_type" : "knowledge",
+    "reasoning" : "这段内容是对开发者行为（快速开发出产品）的调侃和背景描述，旨在介绍项目诞生的时间背景和趣味性。它不涉及任何安装、配置、操作步骤、工作原理或逻辑论证。如果删除，用户失去的是对项目开发背景和趣味性的了解。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 58.400000000000006
+  }, {
+    "end_sec" : 74.40000000000023,
+    "action_type" : "knowledge",
+    "reasoning" : "这段内容是对Cloudbot产品的定义和定位介绍，说明了它是什么（个人AI助手）以及其基本特性（运行在本地、可通过熟悉工具工作）。它没有提供具体的安装、配置或操作指令，也没有解释其内部工作原理或设计原因。如果删除，用户失去的是对产品是什么以及其基本形态的知晓。",
+    "confidence" : 0.95,
+    "knowledge_type" : "讲解型",
+    "id" : 2,
+    "start_sec" : 67.40000000000013
+  }, {
+    "end_sec" : 82.0,
+    "action_type" : "knowledge",
+    "reasoning" : "这段内容（结合上下文ID:0）是继续强调项目开发速度之快，属于对项目背景信息的补充。它不包含任何技术性的指导或解释。如果删除，用户失去的是对项目开发周期更精确的了解。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 3,
+    "start_sec" : 80.40000000000032
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -112,8 +136,24 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "Mac安装与配置启动",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 83.00000000000001,
+    "action_type" : "mixed",
+    "reasoning" : "这句话的核心是陈述一个客观事实（Star数超过40K），用于说明项目的受欢迎程度或现状。如果删掉，用户失去的是对一个项目状态（流行度）的知晓。它不涉及如何操作、内部机制或逻辑论证。",
+    "confidence" : 0.95,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 82.4
+  }, {
+    "end_sec" : 86.00000000000003,
+    "action_type" : "knowledge",
+    "reasoning" : "这两句话（“现在还在飞速的增长”和“整个AI圈都在为它疯狂”）是对项目当前趋势和影响力的描述和评价。如果删掉，用户失去的是对项目动态和行业反响的了解。这属于静态信息传递和效果展示，而非操作、配置、机制或推演。",
+    "confidence" : 0.95,
+    "knowledge_type" : "讲解型",
+    "id" : 2,
+    "start_sec" : 84.00000000000003
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -132,8 +172,24 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "Quickstart模式选择供应商",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 93.60000000000005,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话是视频的引入和整体评价，旨在告知用户“安装和使用”是接下来的主题，并给出“安装容易”的结论性评价。如果删掉，用户失去的是对后续内容主题的知晓和对安装难度的初步判断，属于静态信息传递和效果展示。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 91.40000000000002
+  }, {
+    "end_sec" : 99.40000000000008,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话的核心意图是主动提出并解答一个用户可能存在的潜在疑问或顾虑（“是不是必须买Mac”），旨在论证或澄清项目的平台兼容性设计，消除用户的误解。如果删掉，用户失去的是对“为什么可以不用Mac”这一设计考量的理解。",
+    "confidence" : 0.85,
+    "knowledge_type" : "推演",
+    "id" : 2,
+    "start_sec" : 95.40000000000008
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -152,8 +208,16 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "选择Channel与iMessage配置",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 114.20000000000009,
+    "action_type" : "knowledge",
+    "reasoning" : "这段话的核心是陈述一个事实（有人在树莓派上成功运行）并给出一个常识性评价（这很正常）。它没有涉及如何安装、为何能运行的具体机制、或任何需要用户执行的操作。如果删掉，用户只是失去了一个背景信息或一个已知案例的知晓。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 108.20000000000009
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -172,8 +236,32 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "工具选择与基本配置",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 116.00000000000003,
+    "action_type" : "mixed",
+    "reasoning" : "这句话解释了“为什么要在本地运行大模型”的根本原因或前提条件，构建了一个逻辑论证的起点。如果删掉，用户失去的是对后续选择（如选择Mac运行）的动机和理由的理解。",
+    "confidence" : 0.9,
+    "knowledge_type" : "推演",
+    "id" : 1,
+    "start_sec" : 114.60000000000001
+  }, {
+    "end_sec" : 121.60000000000011,
+    "action_type" : "mixed",
+    "reasoning" : "这句话陈述了用户（或讲述者）在给定上下文（需要在本地运行）后做出的一个选择。它告知了用户“我选择了什么”，是一种静态的信息传递。如果删掉，用户失去的是对当前选择结果的知晓。",
+    "confidence" : 0.85,
+    "knowledge_type" : "讲解型",
+    "id" : 2,
+    "start_sec" : 121.2000000000001
+  }, {
+    "end_sec" : 123.60000000000014,
+    "action_type" : "mixed",
+    "reasoning" : "这句话提供了一个推荐的工具（一键安装脚本），属于静态的信息传递和建议。它没有描述如何执行安装（实操），也没有解释为什么这个脚本好（推演）。如果删掉，用户失去的是一个可用的工具选项信息。",
+    "confidence" : 0.8,
+    "knowledge_type" : "讲解型",
+    "id" : 3,
+    "start_sec" : 123.20000000000013
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -192,8 +280,24 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "首次进入命名设置",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 129.0,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话描述了程序安装后自动执行的一系列内部流程（下载、等待、进入配置过程），揭示了软件启动时的客观运作机制，而非指导用户进行具体操作。用户失去的是对软件初始化流程的理解。",
+    "confidence" : 0.9,
+    "knowledge_type" : "过程性知识",
+    "id" : 1,
+    "start_sec" : 125.70000000000003
+  }, {
+    "end_sec" : 131.79999999999984,
+    "action_type" : "mixed",
+    "reasoning" : "这句话是对当前软件界面状态或功能的描述，告知用户接下来会发生什么（需要配置内容）。它没有涉及如何配置的具体步骤，也没有解释为什么需要配置。用户失去的是对当前阶段（配置阶段）的知晓。",
+    "confidence" : 0.95,
+    "knowledge_type" : "讲解型",
+    "id" : 2,
+    "start_sec" : 131.19999999999987
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -212,8 +316,32 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "使用终端和WebUI操作",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 141.19999999999982,
+    "action_type" : "mixed",
+    "reasoning" : "这句话是对产品“对国内用户友好”这一特性的陈述和定义，属于静态信息传递。如果删掉，用户会失去对该产品一个关键特性的知晓。它不涉及如何配置、如何操作、内部机制或设计原因。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 140.79999999999984
+  }, {
+    "end_sec" : 143.59999999999968,
+    "action_type" : "mixed",
+    "reasoning" : "这句话列举了产品支持的模型，是对其功能范围的静态说明。如果删掉，用户会失去对产品具体支持哪些国内模型的知晓。它没有描述如何选择或使用这些模型。",
+    "confidence" : 0.95,
+    "knowledge_type" : "讲解型",
+    "id" : 2,
+    "start_sec" : 142.99999999999972
+  }, {
+    "end_sec" : 149.49999999999955,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话描述了用户在配置界面中进行的一系列具体选择操作（“选择OpenAI”、“选Codex CLI的OAuth”），并且有明确的动作施加者（“我”）和操作对象（配置选项）。如果删掉，用户会失去复刻这一配置步骤的具体指引。上下文“我有Codex的订阅”是为后续操作提供前提，核心是操作指令。",
+    "confidence" : 0.85,
+    "knowledge_type" : "实操",
+    "id" : 3,
+    "start_sec" : 145.49999999999955
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -232,8 +360,24 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "安装和配置iMessage CLI工具",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 155.79999999999978,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话描述了配置过程中的一个步骤选项（选择Channel）及其目的（通过聊天工具），属于静态信息传递。如果删掉，用户会失去对“选择Channel”这个配置项及其用途的知晓。它没有描述用户如何操作，也没有解释其背后的机制或原因。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 153.2999999999999
+  }, {
+    "end_sec" : 163.99999999999932,
+    "action_type" : "mixed",
+    "reasoning" : "这句话在比较不同工具的优劣，隐含了“为什么选择当前工具”的逻辑论证。如果删掉，用户会失去一个支持当前方案（使用Cloudbot）的理由，即“知其然（用这个），不知其所以然（为什么不用别的）”。它是在构建一个选择逻辑。",
+    "confidence" : 0.85,
+    "knowledge_type" : "推演",
+    "id" : 2,
+    "start_sec" : 162.5999999999994
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -252,8 +396,24 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "Mac系统权限配置和测试",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 169.9999999999999,
+    "action_type" : "mixed",
+    "reasoning" : "这句话的核心意图是告知用户某个话题将在未来讨论，是一种信息预告。如果删掉，用户失去的是对后续内容安排的知晓，属于静态信息传递。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 168.79999999999995
+  }, {
+    "end_sec" : 176.09999999999974,
+    "action_type" : "knowledge",
+    "reasoning" : "字幕内容（“让我们去选择和安装”、“我们随便选几个就好了”）明确指示了用户需要执行的具体交互动作（选择、安装）。如果删掉，用户将失去明确的、可复刻的操作步骤。",
+    "confidence" : 0.95,
+    "knowledge_type" : "实操",
+    "id" : 2,
+    "start_sec" : 172.09999999999974
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -272,7 +432,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "iMessage账号配置提醒",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -292,8 +452,40 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "开发功能实现流程",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 186.89999999999998,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话描述了首次进入系统时的初始状态和系统要求（起名字），属于对系统初始行为的静态信息传递。如果删掉，用户会失去对系统初始交互内容的知晓。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 184.39999999999998
+  }, {
+    "end_sec" : 192.5999999999995,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话描述了用户需要向系统提供身份信息这一事实，并做了一个类比（像玩游戏）。它没有涉及具体的配置步骤或操作指令，仅仅是告知用户需要做什么。如果删掉，用户会失去对“需要告知身份”这一要求的知晓。",
+    "confidence" : 0.85,
+    "knowledge_type" : "讲解型",
+    "id" : 2,
+    "start_sec" : 188.99999999999972
+  }, {
+    "end_sec" : 197.39999999999924,
+    "action_type" : "mixed",
+    "reasoning" : "这句话是用户直接对系统发出的具体指令（“你就叫我馆长大人就好了”），是一个明确的人机交互动作。如果删掉，用户会失去一个具体的、可复刻的操作步骤。",
+    "confidence" : 0.95,
+    "knowledge_type" : "实操",
+    "id" : 3,
+    "start_sec" : 195.99999999999932
+  }, {
+    "end_sec" : 203.1999999999989,
+    "action_type" : "knowledge",
+    "reasoning" : "前半句“那我就叫你小鸡吧”是用户对系统发出的命名指令，属于具体操作。后半句“接下来我们就可以直接在终端里使用它了”和“这个时候的感觉就和Cloud Code差不多”是讲解型，描述了操作后的状态和类比。但根据认知优先级，该单元的核心意图是完成命名操作并进入使用阶段，实操是其主要认知价值。如果删掉，用户会失去一个关键的交互动作（命名）和进入使用阶段的标志。",
+    "confidence" : 0.9,
+    "knowledge_type" : "实操",
+    "id" : 4,
+    "start_sec" : 199.5999999999991
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -312,7 +504,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "AI代码责任提醒",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -332,8 +524,24 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "语音总结和邮件发送流程",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 223.4999999999995,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话的核心意图是声明一个前置的、静态的系统设置需求。用户如果失去这句话，将不知道需要完成一个特定的配置（iMessage配置）才能让后续功能正常运行。它描述的是对系统或应用状态的设置，而非动态的操作流程或原理解释。",
+    "confidence" : 0.9,
+    "knowledge_type" : "环境配置",
+    "id" : 1,
+    "start_sec" : 220.9999999999995
+  }, {
+    "end_sec" : 229.799999999999,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话的核心意图是提供两种具体的、可执行的安装方法。用户如果失去这句话，将不知道如何获取和设置所需的软件（通过Brew或让Cloudbot自动执行）。它明确指出了人（用户）可以采取的动作（通过Brew安装，或让Cloudbot安装），属于交互指令集。",
+    "confidence" : 0.85,
+    "knowledge_type" : "实操",
+    "id" : 2,
+    "start_sec" : 227.0999999999991
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -352,7 +560,7 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "配置邮箱SMTP的提醒",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -372,7 +580,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot效果评估与使用建议",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -392,7 +600,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot本地模型使用建议",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -412,8 +620,16 @@
   },
   "knowledge_type" : "process",
   "knowledge_topic" : "本地模型配置与执行方法",
-  "cv_validated" : false,
-  "action_units" : [ ],
+  "cv_validated" : true,
+  "action_units" : [ {
+    "end_sec" : 272.39999999999975,
+    "action_type" : "knowledge",
+    "reasoning" : "这句话的核心意图是预告接下来的内容结构（两个例子，先讲开发的），属于对后续内容的导航和介绍。如果删掉，用户失去的是对接下来内容框架的知晓，而不是具体的操作、原理或逻辑论证。",
+    "confidence" : 0.9,
+    "knowledge_type" : "讲解型",
+    "id" : 1,
+    "start_sec" : 270.29999999999984
+  } ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
     "stage2" : [ ]
@@ -432,7 +648,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot架构解析引入",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -452,7 +668,7 @@
   },
   "knowledge_type" : "concrete",
   "knowledge_topic" : "Cloudbot架构图解析",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -472,7 +688,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Agent Runtime的功能与作用",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -492,7 +708,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot的Tools和Skills扩展",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -512,7 +728,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "长期记忆机制的原理",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -532,7 +748,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "个人对开源项目的评价",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -552,7 +768,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot的服务概念与优势",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -572,7 +788,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "Cloudbot的接入方式优势",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],
@@ -592,7 +808,7 @@
   },
   "knowledge_type" : "abstract",
   "knowledge_topic" : "长期记忆与定时任务的潜力",
-  "cv_validated" : false,
+  "cv_validated" : true,
   "action_units" : [ ],
   "crossed_stable_islands" : {
     "stage1" : [ ],

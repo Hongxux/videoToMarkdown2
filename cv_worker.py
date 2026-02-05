@@ -11,6 +11,12 @@
 - 各函数/类返回的结构化结果或副作用。"""
 
 import os
+# 禁用嵌套并行，避免单进程内部多线程抢占 CPU
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 import logging
 import psutil
 from typing import Dict, List, Tuple, Any, Optional
@@ -44,6 +50,19 @@ def init_cv_worker():
     if _initialized:
         return
     
+    # 禁用嵌套并行，避免单进程内部抢占多核
+    os.environ.setdefault("OMP_NUM_THREADS", "1")
+    os.environ.setdefault("MKL_NUM_THREADS", "1")
+    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+    try:
+        import cv2
+        cv2.setNumThreads(1)
+        logger.info("✅ Nested parallelism disabled: cv2 threads=1")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to set cv2 threads=1: {e}")
+
     # 配置子进程日志
     logging.basicConfig(
         level=logging.INFO,
