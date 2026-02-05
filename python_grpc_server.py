@@ -1954,12 +1954,30 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             start_idx = frame_idx_list[0]
             end_idx = frame_idx_list[-1]
             
-            # 动态并行度：范围大/采样多时并行解码
+            # 动态并行度：按“解码跨度(range_span)”自动升到 2~4 路并行解码
+            # 说明：
+            # - 目标帧很少但跨度很大时，顺序读仍需要解码整段区间；此时用 range_span 决策更靠谱。
+            # - 过小区间并行收益不明显，反而增加额外 open/seek 开销。
             range_span = end_idx - start_idx + 1
-            worker_count = min(4, max(1, len(frame_idx_list) // 30))
-            if range_span > 2000:
+            worker_count = 1
+            if range_span >= 150:
+                worker_count = 2
+            if range_span >= 600:
+                worker_count = 3
+            if range_span >= 1500:
+                worker_count = 4
+            # 若目标帧很多，也允许提升并行度（coarse 场景）
+            if len(frame_idx_list) >= 60:
                 worker_count = max(worker_count, 2)
+            if len(frame_idx_list) >= 150:
+                worker_count = max(worker_count, 3)
+            if len(frame_idx_list) >= 300:
+                worker_count = max(worker_count, 4)
             worker_count = min(worker_count, 4)
+            logger.info(
+                f"Decode workers decision: target_frames={len(frame_idx_list)}, "
+                f"range_span={range_span} -> workers={worker_count}"
+            )
             
             def _decode_range(seg_start: int, seg_end: int):
                 t_open = time.perf_counter()
@@ -2139,10 +2157,24 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             end_idx = frame_idx_list[-1]
             
             range_span = end_idx - start_idx + 1
-            worker_count = min(4, max(1, len(frame_idx_list) // 30))
-            if range_span > 2000:
+            worker_count = 1
+            if range_span >= 150:
+                worker_count = 2
+            if range_span >= 600:
+                worker_count = 3
+            if range_span >= 1500:
+                worker_count = 4
+            if len(frame_idx_list) >= 60:
                 worker_count = max(worker_count, 2)
+            if len(frame_idx_list) >= 150:
+                worker_count = max(worker_count, 3)
+            if len(frame_idx_list) >= 300:
+                worker_count = max(worker_count, 4)
             worker_count = min(worker_count, 4)
+            logger.info(
+                f"Decode workers decision (coarse): target_frames={len(frame_idx_list)}, "
+                f"range_span={range_span} -> workers={worker_count}"
+            )
             
             def _decode_range(seg_start: int, seg_end: int):
                 t_open = time.perf_counter()
