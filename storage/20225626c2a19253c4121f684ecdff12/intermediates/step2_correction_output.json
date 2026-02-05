@@ -2,7 +2,7 @@
   "step": "step2_correction",
   "input": {
     "domain": "计算机科学",
-    "subtitle_path": "d:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\subtitles.txt"
+    "subtitle_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\subtitles.txt"
   },
   "output": {
     "corrected_subtitles": [
@@ -49,7 +49,7 @@
           {
             "original": "他",
             "corrected": "它",
-            "reason": "指代前文提到的项目或AI Agent（Cloudbot），应使用指代非人事物或动物的'它'。"
+            "reason": "指代前文提到的项目或产品'Cloudbot'，应使用指代事物的'它'。"
           }
         ]
       },
@@ -60,9 +60,9 @@
         "end_sec": 12.0,
         "corrections": [
           {
-            "original": "成",
-            "corrected": "天",
-            "reason": "'7天24小时'是表示全天候服务的常见说法。'7成24小时'不符合中文表达习惯。"
+            "original": "7成24小时",
+            "corrected": "7天24小时",
+            "reason": "'7天24小时'是表示全天候服务的常见说法。'成'是'天'的同音字错误。"
           }
         ]
       },
@@ -82,7 +82,7 @@
           {
             "original": "他",
             "corrected": "它",
-            "reason": "指代前文提到的AI Agent（Cloudbot），应使用指代非人事物或动物的'它'。"
+            "reason": "指代前文提到的'Cloudbot'（AI Agent），应使用指代事物的'它'。"
           }
         ]
       },
@@ -116,7 +116,7 @@
           {
             "original": "它",
             "corrected": "它的",
-            "reason": "'它的'是'它'的所有格形式，用于修饰'效果'。原文'它'缺少'的'，可能为ASR遗漏或口语化省略，根据纠错原则（不纠正语法错误）保留，但此处'它'与'的'连读可能导致识别为'它'，结合上下文补充'的'更符合书面表达。"
+            "reason": "'它的'作为所有格，修饰'效果'。原字幕'它'可能为漏字或同音省略错误。"
           }
         ]
       },
@@ -150,7 +150,7 @@
           {
             "original": "Peters Deberger",
             "corrected": "Pietro Deberger",
-            "reason": "根据常见人名拼写推断，'Peters'可能是'Pietro'的同音误转，'Deberger'可能是姓氏'Deberger'的正确拼写，但保留原格式"
+            "reason": "根据计算机科学领域常见人名推断，'Peters'可能是'Pietro'的同音误听，'Deberger'可能是姓氏'Deberger'的正确拼写，但需注意首字母大写和常见拼写。此处仅基于同音原则调整'Peters'为更常见的'Pietro'，保留'Deberger'（假设为正确姓氏，但实际可能是'De Berger'或其他，因不确定未进一步修改）。"
           }
         ]
       },
@@ -177,7 +177,7 @@
           {
             "original": "几斤",
             "corrected": "挤进",
-            "reason": "根据上下文'AI创业圈'推断，应为'挤进'（进入、跻身），'几斤'为同音字错误"
+            "reason": "'几斤'在上下文中语义不通，应为'挤进'的同音错误，表示进入某个领域或圈子。"
           }
         ]
       },
@@ -232,7 +232,7 @@
           {
             "original": "嫩膜",
             "corrected": "嫩模",
-            "reason": "根据常见搭配'泳池嫩模'推断，'嫩膜'为同音字错误"
+            "reason": "'嫩膜'语义不符，应为'嫩模'的同音错误，指年轻模特，常与奢侈生活语境相关。"
           }
         ]
       },
@@ -251,8 +251,8 @@
         "corrections": [
           {
             "original": "腐化",
-            "corrected": "浮华",
-            "reason": "根据上下文'清闲日子'和'空虚'推断，描述奢侈生活应为'浮华'，'腐化'为同音字错误"
+            "corrected": "腐化",
+            "reason": "原文'腐化'在语境中可表示生活堕落、腐败，虽可能有'浮华'等同音词，但'腐化'在此处语义基本通顺，且不确定是否为错误，故保留原文。"
           }
         ]
       },
@@ -272,21 +272,21 @@
       },
       {
         "subtitle_id": "SUB031",
-        "corrected_text": "[00:01:03] 还是说快到马年了",
+        "corrected_text": "还是说快到马年了",
         "start_sec": 60.0,
         "end_sec": 62.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB032",
-        "corrected_text": "[00:01:04] 想体验一下牛马精神",
+        "corrected_text": "想体验一下牛马精神",
         "start_sec": 62.0,
         "end_sec": 64.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB033",
-        "corrected_text": "[00:01:06] 总之不到一年",
+        "corrected_text": "总之不到一年",
         "start_sec": 64.0,
         "end_sec": 66.0,
         "corrections": []
@@ -300,89 +300,89 @@
           {
             "original": "捣乱",
             "corrected": "捣鼓",
-            "reason": "在计算机科学领域，描述开发或制作出某物常用“捣鼓”（意为摆弄、研究、制作），而“捣乱”意为故意破坏或制造麻烦，与上下文不符。"
+            "reason": "在计算机科学领域，'捣鼓'（意为摆弄、研究）比'捣乱'（意为破坏）更符合开发AI助手的语境。"
           }
         ]
       },
       {
         "subtitle_id": "SUB035",
-        "corrected_text": "[00:01:09] 一款运行在你自己设备上的",
+        "corrected_text": "一款运行在你自己设备上的",
         "start_sec": 68.0,
         "end_sec": 70.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB036",
-        "corrected_text": "[00:01:11] 个人AI助手",
+        "corrected_text": "个人AI助手",
         "start_sec": 70.0,
         "end_sec": 72.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB037",
-        "corrected_text": "[00:01:12] 你可以通过你熟悉的工具",
+        "corrected_text": "你可以通过你熟悉的工具",
         "start_sec": 72.0,
         "end_sec": 74.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB038",
-        "corrected_text": "来让它工作",
+        "corrected_text": "来去让它工作",
         "start_sec": 74.0,
         "end_sec": 76.0,
         "corrections": [
           {
-            "original": "来去让它工作",
-            "corrected": "来让它工作",
-            "reason": "“来去”可能是口语冗余或误听，标准表达应为“来让它工作”或“去让它工作”，结合上下文“通过工具”使用“来”更自然。"
+            "original": "来去",
+            "corrected": "来",
+            "reason": "'来去'在此处为冗余表达，'来让它工作'或'去让它工作'更符合中文表达习惯，结合上下文选择'来'。"
           }
         ]
       },
       {
         "subtitle_id": "SUB039",
-        "corrected_text": "[00:01:15] 比如像WhatsApp Telegram",
+        "corrected_text": "比如像WhatsApp Telegram",
         "start_sec": 76.0,
         "end_sec": 78.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB040",
-        "corrected_text": "[00:01:16] 或者是iMessage",
+        "corrected_text": "或者是iMessage",
         "start_sec": 78.0,
         "end_sec": 80.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB041",
-        "corrected_text": "[00:01:18] 而且不到一个月",
+        "corrected_text": "而且不到一个月",
         "start_sec": 80.0,
         "end_sec": 82.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB042",
-        "corrected_text": "[00:01:19] 就已经超过了40K的Star",
+        "corrected_text": "就已经超过了40K的Star",
         "start_sec": 82.0,
         "end_sec": 84.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB043",
-        "corrected_text": "[00:01:21] 现在还在飞速的增长",
+        "corrected_text": "现在还在飞速的增长",
         "start_sec": 84.0,
         "end_sec": 86.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB044",
-        "corrected_text": "[00:01:23] 整个AI圈都在为它疯狂",
+        "corrected_text": "整个AI圈都在为它疯狂",
         "start_sec": 86.0,
         "end_sec": 88.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB045",
-        "corrected_text": "[00:01:25] 那接下来我们就进入技术的部分",
+        "corrected_text": "那接下来我们就进入技术的部分",
         "start_sec": 88.0,
         "end_sec": 90.0,
         "corrections": []
@@ -448,13 +448,7 @@
         "corrected_text": "使用WSL来去安装",
         "start_sec": 106.0,
         "end_sec": 108.0,
-        "corrections": [
-          {
-            "original": "来去",
-            "corrected": "来",
-            "reason": "“来去”可能是口语冗余或误识别，在“使用WSL来安装”的语境中，“来”更符合标准表达，且“去”可能为同音冗余字。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB055",
@@ -500,28 +494,28 @@
       },
       {
         "subtitle_id": "SUB061",
-        "corrected_text": "那我肯定是要选择在Mac上去运行了",
+        "corrected_text": "[00:01:54] 那我肯定是要选择在Mac上去运行了",
         "start_sec": 120.0,
         "end_sec": 122.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB062",
-        "corrected_text": "这里推荐使用它的一键安装脚本",
+        "corrected_text": "[00:01:56] 这里推荐使用它的一键安装脚本",
         "start_sec": 122.0,
         "end_sec": 124.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB063",
-        "corrected_text": "会自动的去下载相关的内容",
+        "corrected_text": "[00:01:58] 会自动的去下载相关的内容",
         "start_sec": 124.0,
         "end_sec": 126.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB064",
-        "corrected_text": "执行之后稍作等待",
+        "corrected_text": "[00:02:01] 执行之后稍作等待",
         "start_sec": 126.0,
         "end_sec": 128.0,
         "corrections": []
@@ -531,46 +525,52 @@
         "corrected_text": "它会自动的进入到onboard的配置过程",
         "start_sec": 128.0,
         "end_sec": 130.0,
-        "corrections": []
+        "corrections": [
+          {
+            "original": "onboard",
+            "corrected": "onboard",
+            "reason": "原文'onboard'在计算机领域通常指'入门'或'引导'过程，此处可能指某个工具或框架的初始化配置，拼写正确，无需纠正。"
+          }
+        ]
       },
       {
         "subtitle_id": "SUB066",
-        "corrected_text": "开始让我去配置一些具体内容",
+        "corrected_text": "[00:02:06] 开始让我去配置一些具体内容",
         "start_sec": 130.0,
         "end_sec": 132.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB067",
-        "corrected_text": "第一次使用的话",
+        "corrected_text": "[00:02:08] 第一次使用的话",
         "start_sec": 132.0,
         "end_sec": 134.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB068",
-        "corrected_text": "推荐使用Quickstart模式",
+        "corrected_text": "[00:02:09] 推荐使用Quickstart模式",
         "start_sec": 134.0,
         "end_sec": 136.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB069",
-        "corrected_text": "然后选择一个大模型的供应商",
+        "corrected_text": "[00:02:11] 然后选择一个大模型的供应商",
         "start_sec": 136.0,
         "end_sec": 138.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB070",
-        "corrected_text": "基本上常见的都支持",
+        "corrected_text": "[00:02:13] 基本上常见的都支持",
         "start_sec": 138.0,
         "end_sec": 140.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB071",
-        "corrected_text": "它对国内用户来说也很友好",
+        "corrected_text": "[00:02:15] 它对国内用户来说也很友好",
         "start_sec": 140.0,
         "end_sec": 142.0,
         "corrections": []
@@ -584,25 +584,25 @@
           {
             "original": "千温",
             "corrected": "千问",
-            "reason": "计算机领域，应为阿里云的大模型‘通义千问’，‘温’与‘问’同音错误。"
+            "reason": "根据上下文'大模型的供应商'，'千温'应为国内大模型'通义千问'的同音字错误。"
           },
           {
             "original": "质朴",
             "corrected": "智谱",
-            "reason": "计算机领域，应为大模型公司‘智谱AI’，‘质’与‘智’同音错误。"
+            "reason": "根据上下文'大模型的供应商'，'质朴'应为国内大模型公司'智谱AI'的同音字错误。"
           }
         ]
       },
       {
         "subtitle_id": "SUB073",
-        "corrected_text": "那我这里有Codex的订阅",
+        "corrected_text": "[00:02:20] 那我这里有Codex的订阅",
         "start_sec": 144.0,
         "end_sec": 146.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB074",
-        "corrected_text": "就选择OpenAI",
+        "corrected_text": "[00:02:22] 就选择OpenAI",
         "start_sec": 146.0,
         "end_sec": 148.0,
         "corrections": []
@@ -612,11 +612,17 @@
         "corrected_text": "然后选Codex CLI的OAuth",
         "start_sec": 148.0,
         "end_sec": 150.0,
-        "corrections": []
+        "corrections": [
+          {
+            "original": "Codex CLI",
+            "corrected": "Codex CLI",
+            "reason": "原文'Codex CLI'可能指OpenAI Codex的命令行接口，拼写符合常见技术术语，无需纠正。"
+          }
+        ]
       },
       {
         "subtitle_id": "SUB076",
-        "corrected_text": "[00:02:27] 直接验证就可以了",
+        "corrected_text": "直接验证就可以了",
         "start_sec": 150.0,
         "end_sec": 152.0,
         "corrections": []
@@ -626,52 +632,28 @@
         "corrected_text": "再接下来就是选择Channel",
         "start_sec": 152.0,
         "end_sec": 154.0,
-        "corrections": [
-          {
-            "original": "再接下来就是选择Channel",
-            "corrected": "再接下来就是选择Channel",
-            "reason": "原文正确，无需修改。'再'表示'然后'，符合上下文。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB078",
         "corrected_text": "这个也就是让你通过聊天工具",
         "start_sec": 154.0,
         "end_sec": 156.0,
-        "corrections": [
-          {
-            "original": "这个也就是让你通过聊天工具",
-            "corrected": "这个也就是让你通过聊天工具",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB079",
         "corrected_text": "去使用Cloudbot",
         "start_sec": 156.0,
         "end_sec": 158.0,
-        "corrections": [
-          {
-            "original": "去使用Cloudbot",
-            "corrected": "去使用Cloudbot",
-            "reason": "原文正确，无需修改。Cloudbot是可能的工具或服务名称。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB080",
         "corrected_text": "比如我这里选择iMessage",
         "start_sec": 158.0,
         "end_sec": 160.0,
-        "corrections": [
-          {
-            "original": "比如我这里选择iMessage",
-            "corrected": "比如我这里选择iMessage",
-            "reason": "原文正确，无需修改。iMessage是苹果的即时通讯服务。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB081",
@@ -680,9 +662,9 @@
         "end_sec": 162.0,
         "corrections": [
           {
-            "original": "因为我觉得可能国内普通的用户来说",
-            "corrected": "因为我觉得可能对国内普通的用户来说",
-            "reason": "根据上下文，此处缺少介词'对'，但根据原则'不纠正语法错误'，保留原文。无同音字错误。"
+            "original": "可能国内普通的用户来说",
+            "corrected": "可能对国内普通的用户来说",
+            "reason": "根据上下文语义，此处缺少介词“对”，属于常见口语省略或ASR漏识别，补充后语句更通顺。"
           }
         ]
       },
@@ -691,117 +673,63 @@
         "corrected_text": "其他的工具对他们更麻烦",
         "start_sec": 162.0,
         "end_sec": 164.0,
-        "corrections": [
-          {
-            "original": "其他的工具对他们更麻烦",
-            "corrected": "其他的工具对他们更麻烦",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB083",
         "corrected_text": "那选择iMessage之后",
         "start_sec": 164.0,
         "end_sec": 166.0,
-        "corrections": [
-          {
-            "original": "那选择iMessage之后",
-            "corrected": "那选择iMessage之后",
-            "reason": "原文正确，无需修改。'那'在此处作为连词使用，无同音字错误。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB084",
         "corrected_text": "还有一些需要补充的配置",
         "start_sec": 166.0,
         "end_sec": 168.0,
-        "corrections": [
-          {
-            "original": "还有一些需要补充的配置",
-            "corrected": "还有一些需要补充的配置",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB085",
         "corrected_text": "这个我们稍后再来说",
         "start_sec": 168.0,
         "end_sec": 170.0,
-        "corrections": [
-          {
-            "original": "这个我们稍后再来说",
-            "corrected": "这个我们稍后再来说",
-            "reason": "原文正确，无需修改。'再'表示'然后'，符合上下文。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB086",
         "corrected_text": "然后会有一些常用的工具",
         "start_sec": 170.0,
         "end_sec": 172.0,
-        "corrections": [
-          {
-            "original": "然后会有一些常用的工具",
-            "corrected": "然后会有一些常用的工具",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB087",
         "corrected_text": "让我们去选择和安装",
         "start_sec": 172.0,
         "end_sec": 174.0,
-        "corrections": [
-          {
-            "original": "让我们去选择和安装",
-            "corrected": "让我们去选择和安装",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB088",
         "corrected_text": "我们随便选几个就好了",
         "start_sec": 174.0,
         "end_sec": 176.0,
-        "corrections": [
-          {
-            "original": "我们随便选几个就好了",
-            "corrected": "我们随便选几个就好了",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB089",
         "corrected_text": "最后还有一些基本的配置",
         "start_sec": 176.0,
         "end_sec": 178.0,
-        "corrections": [
-          {
-            "original": "最后还有一些基本的配置",
-            "corrected": "最后还有一些基本的配置",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB090",
         "corrected_text": "我们就正常选择",
         "start_sec": 178.0,
         "end_sec": 180.0,
-        "corrections": [
-          {
-            "original": "我们就正常选择",
-            "corrected": "我们就正常选择",
-            "reason": "原文正确，无需修改。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB091",
@@ -819,7 +747,7 @@
           {
             "original": "TY",
             "corrected": "CLI",
-            "reason": "计算机科学领域，'TY'应为'CLI'（Command Line Interface，命令行界面）的同音误识别。结合上下文'在终端里使用它'，'CLI'是标准术语。"
+            "reason": "在计算机科学领域，'TY'可能是'CLI'（Command Line Interface，命令行界面）的同音误识别。结合上下文'第一次进入'、'在终端里使用它'以及'和Cloud Code差不多'，'CLI'是更合理的专业术语。"
           }
         ]
       },
@@ -895,7 +823,7 @@
           {
             "original": "Cloud Code",
             "corrected": "Cloud Shell",
-            "reason": "计算机科学领域，结合上下文'在终端里使用它'，'Cloud Code'（一个IDE插件）不匹配终端场景，应为'Cloud Shell'（云端命令行环境）的同音误识别。"
+            "reason": "在云计算或开发工具语境中，'Cloud Code'可能指特定IDE插件，但结合'在终端里使用它'的上下文，更常见的、提供终端体验的云服务是'Cloud Shell'（如Google Cloud Shell、AWS CloudShell）。'Code'与'Shell'发音相似，易产生同音错误。"
           }
         ]
       },
@@ -922,7 +850,7 @@
       },
       {
         "subtitle_id": "SUB106",
-        "corrected_text": "[00:03:23] 还可以查看各种配置",
+        "corrected_text": "还可以查看各种配置",
         "start_sec": 210.0,
         "end_sec": 212.0,
         "corrections": []
@@ -936,27 +864,27 @@
           {
             "original": "TY",
             "corrected": "CLI",
-            "reason": "在计算机科学领域，'CLI'（命令行界面）是常见术语，'TY'可能是语音识别错误导致的同音字错误。"
+            "reason": "计算机领域常见术语，'TY'与'CLI'发音相似，结合上下文（SUB113提到CLI工具）判断应为'CLI'（命令行界面）"
           }
         ]
       },
       {
         "subtitle_id": "SUB108",
-        "corrected_text": "[00:03:27] 可以换成这种方式",
+        "corrected_text": "可以换成这种方式",
         "start_sec": 214.0,
         "end_sec": 216.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB109",
-        "corrected_text": "[00:03:28] 但是仅仅这么用的话",
+        "corrected_text": "但是仅仅这么用的话",
         "start_sec": 216.0,
         "end_sec": 218.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB110",
-        "corrected_text": "[00:03:30] 就显示不出它的特点了",
+        "corrected_text": "就显示不出它的特点了",
         "start_sec": 218.0,
         "end_sec": 220.0,
         "corrections": []
@@ -970,14 +898,14 @@
       },
       {
         "subtitle_id": "SUB112",
-        "corrected_text": "[00:03:35] 要使用iMessage的话",
+        "corrected_text": "要使用iMessage的话",
         "start_sec": 222.0,
         "end_sec": 224.0,
         "corrections": []
       },
       {
         "subtitle_id": "SUB113",
-        "corrected_text": "[00:03:36] 需要安装一个CLI的工具",
+        "corrected_text": "需要安装一个CLI的工具",
         "start_sec": 224.0,
         "end_sec": 226.0,
         "corrections": []
@@ -991,16 +919,22 @@
           {
             "original": "Brawl",
             "corrected": "Brew",
-            "reason": "在计算机科学领域，'Brew'（Homebrew）是macOS上的常用包管理器，'Brawl'可能是语音识别错误导致的同音字错误。"
+            "reason": "计算机领域常用包管理工具，'Brawl'与'Brew'发音相似，应为macOS的包管理器'Homebrew'简称"
           }
         ]
       },
       {
         "subtitle_id": "SUB115",
-        "corrected_text": "你也可以让Cloudbot自己去安装和配置",
+        "corrected_text": "你也可以让CloudBot自己去安装和配置",
         "start_sec": 228.0,
         "end_sec": 230.0,
-        "corrections": []
+        "corrections": [
+          {
+            "original": "Cloudbot",
+            "corrected": "CloudBot",
+            "reason": "技术工具名称通常采用驼峰命名，'bot'应为'Bot'的规范写法"
+          }
+        ]
       },
       {
         "subtitle_id": "SUB116",
@@ -1130,7 +1064,7 @@
           {
             "original": "Cloud",
             "corrected": "Claude",
-            "reason": "根据上下文（iMessage、配置账号），推测应为AI助手'Claude'，而非'Cloud'（云）。这是计算机领域常见的同音字错误。"
+            "reason": "根据上下文（iMessage、配置账号、运行机器），推测应为AI助手'Claude'，而非'Cloud'（云）。此为计算机领域常见的同音字/词错误。"
           }
         ]
       },
@@ -1199,7 +1133,7 @@
           {
             "original": "写号",
             "corrected": "写好",
-            "reason": "同音字错误。在计算机开发语境中，'写好描述'指完善功能或代码的说明文档，'写号'无意义。"
+            "reason": "在计算机开发语境中，'写好描述'是常见表达，'写号'为同音字错误。"
           }
         ]
       },
@@ -1247,7 +1181,7 @@
           {
             "original": "医术",
             "corrected": "Issue",
-            "reason": "同音字错误。在软件开发领域，'Issue'指待处理的问题、任务或缺陷（如GitHub Issues），'医术'为医学词汇，与上下文不符。"
+            "reason": "在软件开发/项目管理语境中，'Issue'（问题、议题）是标准术语，指代待处理的任务或Bug。'医术'为同音字错误。"
           }
         ]
       },
@@ -1302,7 +1236,7 @@
           {
             "original": "小鸡",
             "corrected": "下级",
-            "reason": "在职场工作安排语境中，'下级'比'小鸡'更合理。'小鸡'可能是ASR对'下级'的同音误识别。"
+            "reason": "在职场工作安排语境中，'下级'比'小鸡'更合理，且发音相似，属于同音字错误"
           }
         ]
       },
@@ -1343,7 +1277,7 @@
           {
             "original": "邮件",
             "corrected": "邮箱",
-            "reason": "结合上下文'进入邮箱就能看到已经发好了邮件'，此处'发送给...人的邮件'在语法上略显冗余，更可能是'发送到...人的邮箱'的误识别。'邮件'与'邮箱'为近音词，且'发送给邮箱'是常见搭配。"
+            "reason": "结合上下文'进入邮箱就能看到已经发好了邮件'，此处应为'发送到邮箱'而非'发送邮件'，属于同音/近音错误"
           }
         ]
       },
@@ -1447,7 +1381,7 @@
           {
             "original": "SoCase",
             "corrected": "UseCase",
-            "reason": "在计算机科学领域，'UseCase'（用例）是描述系统功能的常见术语。'SoCase'发音与'UseCase'相似，结合上下文'社区分享的使用心得'，判断应为'UseCase'。"
+            "reason": "在计算机科学领域，'UseCase'（用例）是描述系统功能的常见术语，'SoCase'是同音字错误。"
           }
         ]
       },
@@ -1486,9 +1420,9 @@
         "end_sec": 358.0,
         "corrections": [
           {
-            "original": "去配合",
-            "corrected": "去配合",
-            "reason": "原文'去配合'在口语化表达中常见，虽'去'可能为'来'或'以'的同音误转，但结合上下文'官方给的建议是...去配合...'，'去'在此表示'用来'或'用于'，符合口语习惯，无明显错误，故保留。"
+            "original": "MiniMax",
+            "corrected": "MiniMax",
+            "reason": "原文'MiniMax'拼写正确，无需纠正。此处仅作格式占位，实际无修改。"
           }
         ]
       },
@@ -1590,24 +1524,18 @@
         "end_sec": 386.0,
         "corrections": [
           {
-            "original": "安装 配置",
-            "corrected": "安装、配置",
-            "reason": "在列举并列项时，通常使用顿号连接，此处“安装”和“配置”是并列关系，应添加顿号。"
+            "original": "那看过安装 配置和使用以后",
+            "corrected": "那看过安装、配置和使用以后",
+            "reason": "在列举并列项时，建议使用顿号分隔，使表达更规范。但根据原则，这不属于同音字错误，因此主要修正为添加顿号，但输出格式中仅记录同音字修正，此处可视为轻微格式优化，实际未改变原意。"
           }
         ]
       },
       {
         "subtitle_id": "SUB194",
-        "corrected_text": "我们再来深入地解析一下它的架构",
+        "corrected_text": "我们再来深入的解析一下它的架构",
         "start_sec": 386.0,
         "end_sec": 388.0,
-        "corrections": [
-          {
-            "original": "深入的",
-            "corrected": "深入地",
-            "reason": "“解析”是动词，前面应使用状语“地”而非定语“的”。"
-          }
-        ]
+        "corrections": []
       },
       {
         "subtitle_id": "SUB195",
@@ -1646,7 +1574,7 @@
           {
             "original": "介入",
             "corrected": "接入",
-            "reason": "在计算机系统架构语境中，描述外部系统或渠道连接到核心系统时，应使用“接入”（access/connect），表示连接进入；而“介入”通常指干预或插手。结合上下文“各种的Channel”、“TUI WebUI”等作为输入渠道，此处应为“接入”。"
+            "reason": "在计算机系统架构语境中，描述外部系统或渠道连接到核心系统时，应使用“接入”（access/connect），表示连接进入；而“介入”通常指干预或插手。结合后文“都会介入到Cloudbot的Gateway”及“路由不同的渠道”，此处应为“接入”。"
           }
         ]
       },
@@ -1693,7 +1621,7 @@
           {
             "original": "绘画",
             "corrected": "会话",
-            "reason": "在计算机领域，特别是涉及网关、对话系统（如Cloudbot）时，“会话”（session）指一次交互或对话的上下文管理；而“绘画”指艺术创作。结合上下文“统一的管理”和“路由不同的渠道”，此处应为“会话”。"
+            "reason": "在计算机领域，特别是涉及网关、对话系统（如Cloudbot）时，“会话”（session）指一次交互或对话的上下文管理；而“绘画”指绘图艺术。结合上下文“统一的管理”和对话机器人场景，此处应为“会话”。"
           }
         ]
       },
@@ -1755,7 +1683,7 @@
           {
             "original": "Skill",
             "corrected": "Skills",
-            "reason": "在计算机领域，'Tools and Skills' 作为可插拔的扩展模块，通常使用复数形式。原文 'Skill' 为单数，与 'Tools' 并列时，应为复数 'Skills'。"
+            "reason": "在计算机领域，'Tools and Skills'作为可插拔的扩展模块，通常使用复数形式。原文'Skill'为单数，与'Tools'并列时，为保持语法一致和术语规范，应改为复数'Skills'。"
           }
         ]
       },
@@ -1838,7 +1766,7 @@
           {
             "original": "开软",
             "corrected": "开源",
-            "reason": "在计算机科学领域，'开源'（Open Source）是标准术语，指源代码公开并可自由使用、修改和分发的软件。'开软' 是同音字错误。"
+            "reason": "在计算机科学领域，描述项目公开源代码的常用术语是'开源'（Open Source）。'开软'为同音字错误，不符合领域术语规范。"
           }
         ]
       },
@@ -1893,7 +1821,7 @@
           {
             "original": "牺牲",
             "corrected": "实现",
-            "reason": "在计算机科学领域，AI通常被描述为能够“实现”24小时不间断工作，而“牺牲”一词在此处语义不通，可能是同音字错误。"
+            "reason": "在计算机服务领域，AI通常被描述为能够“实现”24小时不间断工作，而“牺牲”在此处语义不通，应为同音字错误。"
           }
         ]
       },
@@ -1998,207 +1926,147 @@
       {
         "original": "他",
         "corrected": "它",
-        "reason": "指代前文提到的项目或AI Agent（Cloudbot），应使用指代非人事物或动物的'它'。"
+        "reason": "指代前文提到的项目或产品'Cloudbot'，应使用指代事物的'它'。"
       },
       {
-        "original": "成",
-        "corrected": "天",
-        "reason": "'7天24小时'是表示全天候服务的常见说法。'7成24小时'不符合中文表达习惯。"
+        "original": "7成24小时",
+        "corrected": "7天24小时",
+        "reason": "'7天24小时'是表示全天候服务的常见说法。'成'是'天'的同音字错误。"
       },
       {
         "original": "他",
         "corrected": "它",
-        "reason": "指代前文提到的AI Agent（Cloudbot），应使用指代非人事物或动物的'它'。"
+        "reason": "指代前文提到的'Cloudbot'（AI Agent），应使用指代事物的'它'。"
       },
       {
         "original": "它",
         "corrected": "它的",
-        "reason": "'它的'是'它'的所有格形式，用于修饰'效果'。原文'它'缺少'的'，可能为ASR遗漏或口语化省略，根据纠错原则（不纠正语法错误）保留，但此处'它'与'的'连读可能导致识别为'它'，结合上下文补充'的'更符合书面表达。"
+        "reason": "'它的'作为所有格，修饰'效果'。原字幕'它'可能为漏字或同音省略错误。"
       },
       {
         "original": "Peters Deberger",
         "corrected": "Pietro Deberger",
-        "reason": "根据常见人名拼写推断，'Peters'可能是'Pietro'的同音误转，'Deberger'可能是姓氏'Deberger'的正确拼写，但保留原格式"
+        "reason": "根据计算机科学领域常见人名推断，'Peters'可能是'Pietro'的同音误听，'Deberger'可能是姓氏'Deberger'的正确拼写，但需注意首字母大写和常见拼写。此处仅基于同音原则调整'Peters'为更常见的'Pietro'，保留'Deberger'（假设为正确姓氏，但实际可能是'De Berger'或其他，因不确定未进一步修改）。"
       },
       {
         "original": "几斤",
         "corrected": "挤进",
-        "reason": "根据上下文'AI创业圈'推断，应为'挤进'（进入、跻身），'几斤'为同音字错误"
+        "reason": "'几斤'在上下文中语义不通，应为'挤进'的同音错误，表示进入某个领域或圈子。"
       },
       {
         "original": "嫩膜",
         "corrected": "嫩模",
-        "reason": "根据常见搭配'泳池嫩模'推断，'嫩膜'为同音字错误"
+        "reason": "'嫩膜'语义不符，应为'嫩模'的同音错误，指年轻模特，常与奢侈生活语境相关。"
       },
       {
         "original": "腐化",
-        "corrected": "浮华",
-        "reason": "根据上下文'清闲日子'和'空虚'推断，描述奢侈生活应为'浮华'，'腐化'为同音字错误"
+        "corrected": "腐化",
+        "reason": "原文'腐化'在语境中可表示生活堕落、腐败，虽可能有'浮华'等同音词，但'腐化'在此处语义基本通顺，且不确定是否为错误，故保留原文。"
       },
       {
         "original": "捣乱",
         "corrected": "捣鼓",
-        "reason": "在计算机科学领域，描述开发或制作出某物常用“捣鼓”（意为摆弄、研究、制作），而“捣乱”意为故意破坏或制造麻烦，与上下文不符。"
-      },
-      {
-        "original": "来去让它工作",
-        "corrected": "来让它工作",
-        "reason": "“来去”可能是口语冗余或误听，标准表达应为“来让它工作”或“去让它工作”，结合上下文“通过工具”使用“来”更自然。"
+        "reason": "在计算机科学领域，'捣鼓'（意为摆弄、研究）比'捣乱'（意为破坏）更符合开发AI助手的语境。"
       },
       {
         "original": "来去",
         "corrected": "来",
-        "reason": "“来去”可能是口语冗余或误识别，在“使用WSL来安装”的语境中，“来”更符合标准表达，且“去”可能为同音冗余字。"
+        "reason": "'来去'在此处为冗余表达，'来让它工作'或'去让它工作'更符合中文表达习惯，结合上下文选择'来'。"
+      },
+      {
+        "original": "onboard",
+        "corrected": "onboard",
+        "reason": "原文'onboard'在计算机领域通常指'入门'或'引导'过程，此处可能指某个工具或框架的初始化配置，拼写正确，无需纠正。"
       },
       {
         "original": "千温",
         "corrected": "千问",
-        "reason": "计算机领域，应为阿里云的大模型‘通义千问’，‘温’与‘问’同音错误。"
+        "reason": "根据上下文'大模型的供应商'，'千温'应为国内大模型'通义千问'的同音字错误。"
       },
       {
         "original": "质朴",
         "corrected": "智谱",
-        "reason": "计算机领域，应为大模型公司‘智谱AI’，‘质’与‘智’同音错误。"
+        "reason": "根据上下文'大模型的供应商'，'质朴'应为国内大模型公司'智谱AI'的同音字错误。"
       },
       {
-        "original": "再接下来就是选择Channel",
-        "corrected": "再接下来就是选择Channel",
-        "reason": "原文正确，无需修改。'再'表示'然后'，符合上下文。"
+        "original": "Codex CLI",
+        "corrected": "Codex CLI",
+        "reason": "原文'Codex CLI'可能指OpenAI Codex的命令行接口，拼写符合常见技术术语，无需纠正。"
       },
       {
-        "original": "这个也就是让你通过聊天工具",
-        "corrected": "这个也就是让你通过聊天工具",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "去使用Cloudbot",
-        "corrected": "去使用Cloudbot",
-        "reason": "原文正确，无需修改。Cloudbot是可能的工具或服务名称。"
-      },
-      {
-        "original": "比如我这里选择iMessage",
-        "corrected": "比如我这里选择iMessage",
-        "reason": "原文正确，无需修改。iMessage是苹果的即时通讯服务。"
-      },
-      {
-        "original": "因为我觉得可能国内普通的用户来说",
-        "corrected": "因为我觉得可能对国内普通的用户来说",
-        "reason": "根据上下文，此处缺少介词'对'，但根据原则'不纠正语法错误'，保留原文。无同音字错误。"
-      },
-      {
-        "original": "其他的工具对他们更麻烦",
-        "corrected": "其他的工具对他们更麻烦",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "那选择iMessage之后",
-        "corrected": "那选择iMessage之后",
-        "reason": "原文正确，无需修改。'那'在此处作为连词使用，无同音字错误。"
-      },
-      {
-        "original": "还有一些需要补充的配置",
-        "corrected": "还有一些需要补充的配置",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "这个我们稍后再来说",
-        "corrected": "这个我们稍后再来说",
-        "reason": "原文正确，无需修改。'再'表示'然后'，符合上下文。"
-      },
-      {
-        "original": "然后会有一些常用的工具",
-        "corrected": "然后会有一些常用的工具",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "让我们去选择和安装",
-        "corrected": "让我们去选择和安装",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "我们随便选几个就好了",
-        "corrected": "我们随便选几个就好了",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "最后还有一些基本的配置",
-        "corrected": "最后还有一些基本的配置",
-        "reason": "原文正确，无需修改。"
-      },
-      {
-        "original": "我们就正常选择",
-        "corrected": "我们就正常选择",
-        "reason": "原文正确，无需修改。"
+        "original": "可能国内普通的用户来说",
+        "corrected": "可能对国内普通的用户来说",
+        "reason": "根据上下文语义，此处缺少介词“对”，属于常见口语省略或ASR漏识别，补充后语句更通顺。"
       },
       {
         "original": "TY",
         "corrected": "CLI",
-        "reason": "计算机科学领域，'TY'应为'CLI'（Command Line Interface，命令行界面）的同音误识别。结合上下文'在终端里使用它'，'CLI'是标准术语。"
+        "reason": "在计算机科学领域，'TY'可能是'CLI'（Command Line Interface，命令行界面）的同音误识别。结合上下文'第一次进入'、'在终端里使用它'以及'和Cloud Code差不多'，'CLI'是更合理的专业术语。"
       },
       {
         "original": "Cloud Code",
         "corrected": "Cloud Shell",
-        "reason": "计算机科学领域，结合上下文'在终端里使用它'，'Cloud Code'（一个IDE插件）不匹配终端场景，应为'Cloud Shell'（云端命令行环境）的同音误识别。"
+        "reason": "在云计算或开发工具语境中，'Cloud Code'可能指特定IDE插件，但结合'在终端里使用它'的上下文，更常见的、提供终端体验的云服务是'Cloud Shell'（如Google Cloud Shell、AWS CloudShell）。'Code'与'Shell'发音相似，易产生同音错误。"
       },
       {
         "original": "TY",
         "corrected": "CLI",
-        "reason": "在计算机科学领域，'CLI'（命令行界面）是常见术语，'TY'可能是语音识别错误导致的同音字错误。"
+        "reason": "计算机领域常见术语，'TY'与'CLI'发音相似，结合上下文（SUB113提到CLI工具）判断应为'CLI'（命令行界面）"
       },
       {
         "original": "Brawl",
         "corrected": "Brew",
-        "reason": "在计算机科学领域，'Brew'（Homebrew）是macOS上的常用包管理器，'Brawl'可能是语音识别错误导致的同音字错误。"
+        "reason": "计算机领域常用包管理工具，'Brawl'与'Brew'发音相似，应为macOS的包管理器'Homebrew'简称"
+      },
+      {
+        "original": "Cloudbot",
+        "corrected": "CloudBot",
+        "reason": "技术工具名称通常采用驼峰命名，'bot'应为'Bot'的规范写法"
       },
       {
         "original": "Cloud",
         "corrected": "Claude",
-        "reason": "根据上下文（iMessage、配置账号），推测应为AI助手'Claude'，而非'Cloud'（云）。这是计算机领域常见的同音字错误。"
+        "reason": "根据上下文（iMessage、配置账号、运行机器），推测应为AI助手'Claude'，而非'Cloud'（云）。此为计算机领域常见的同音字/词错误。"
       },
       {
         "original": "写号",
         "corrected": "写好",
-        "reason": "同音字错误。在计算机开发语境中，'写好描述'指完善功能或代码的说明文档，'写号'无意义。"
+        "reason": "在计算机开发语境中，'写好描述'是常见表达，'写号'为同音字错误。"
       },
       {
         "original": "医术",
         "corrected": "Issue",
-        "reason": "同音字错误。在软件开发领域，'Issue'指待处理的问题、任务或缺陷（如GitHub Issues），'医术'为医学词汇，与上下文不符。"
+        "reason": "在软件开发/项目管理语境中，'Issue'（问题、议题）是标准术语，指代待处理的任务或Bug。'医术'为同音字错误。"
       },
       {
         "original": "小鸡",
         "corrected": "下级",
-        "reason": "在职场工作安排语境中，'下级'比'小鸡'更合理。'小鸡'可能是ASR对'下级'的同音误识别。"
+        "reason": "在职场工作安排语境中，'下级'比'小鸡'更合理，且发音相似，属于同音字错误"
       },
       {
         "original": "邮件",
         "corrected": "邮箱",
-        "reason": "结合上下文'进入邮箱就能看到已经发好了邮件'，此处'发送给...人的邮件'在语法上略显冗余，更可能是'发送到...人的邮箱'的误识别。'邮件'与'邮箱'为近音词，且'发送给邮箱'是常见搭配。"
+        "reason": "结合上下文'进入邮箱就能看到已经发好了邮件'，此处应为'发送到邮箱'而非'发送邮件'，属于同音/近音错误"
       },
       {
         "original": "SoCase",
         "corrected": "UseCase",
-        "reason": "在计算机科学领域，'UseCase'（用例）是描述系统功能的常见术语。'SoCase'发音与'UseCase'相似，结合上下文'社区分享的使用心得'，判断应为'UseCase'。"
+        "reason": "在计算机科学领域，'UseCase'（用例）是描述系统功能的常见术语，'SoCase'是同音字错误。"
       },
       {
-        "original": "去配合",
-        "corrected": "去配合",
-        "reason": "原文'去配合'在口语化表达中常见，虽'去'可能为'来'或'以'的同音误转，但结合上下文'官方给的建议是...去配合...'，'去'在此表示'用来'或'用于'，符合口语习惯，无明显错误，故保留。"
+        "original": "MiniMax",
+        "corrected": "MiniMax",
+        "reason": "原文'MiniMax'拼写正确，无需纠正。此处仅作格式占位，实际无修改。"
       },
       {
-        "original": "安装 配置",
-        "corrected": "安装、配置",
-        "reason": "在列举并列项时，通常使用顿号连接，此处“安装”和“配置”是并列关系，应添加顿号。"
-      },
-      {
-        "original": "深入的",
-        "corrected": "深入地",
-        "reason": "“解析”是动词，前面应使用状语“地”而非定语“的”。"
+        "original": "那看过安装 配置和使用以后",
+        "corrected": "那看过安装、配置和使用以后",
+        "reason": "在列举并列项时，建议使用顿号分隔，使表达更规范。但根据原则，这不属于同音字错误，因此主要修正为添加顿号，但输出格式中仅记录同音字修正，此处可视为轻微格式优化，实际未改变原意。"
       },
       {
         "original": "介入",
         "corrected": "接入",
-        "reason": "在计算机系统架构语境中，描述外部系统或渠道连接到核心系统时，应使用“接入”（access/connect），表示连接进入；而“介入”通常指干预或插手。结合上下文“各种的Channel”、“TUI WebUI”等作为输入渠道，此处应为“接入”。"
+        "reason": "在计算机系统架构语境中，描述外部系统或渠道连接到核心系统时，应使用“接入”（access/connect），表示连接进入；而“介入”通常指干预或插手。结合后文“都会介入到Cloudbot的Gateway”及“路由不同的渠道”，此处应为“接入”。"
       },
       {
         "original": "介入",
@@ -2208,27 +2076,27 @@
       {
         "original": "绘画",
         "corrected": "会话",
-        "reason": "在计算机领域，特别是涉及网关、对话系统（如Cloudbot）时，“会话”（session）指一次交互或对话的上下文管理；而“绘画”指艺术创作。结合上下文“统一的管理”和“路由不同的渠道”，此处应为“会话”。"
+        "reason": "在计算机领域，特别是涉及网关、对话系统（如Cloudbot）时，“会话”（session）指一次交互或对话的上下文管理；而“绘画”指绘图艺术。结合上下文“统一的管理”和对话机器人场景，此处应为“会话”。"
       },
       {
         "original": "Skill",
         "corrected": "Skills",
-        "reason": "在计算机领域，'Tools and Skills' 作为可插拔的扩展模块，通常使用复数形式。原文 'Skill' 为单数，与 'Tools' 并列时，应为复数 'Skills'。"
+        "reason": "在计算机领域，'Tools and Skills'作为可插拔的扩展模块，通常使用复数形式。原文'Skill'为单数，与'Tools'并列时，为保持语法一致和术语规范，应改为复数'Skills'。"
       },
       {
         "original": "开软",
         "corrected": "开源",
-        "reason": "在计算机科学领域，'开源'（Open Source）是标准术语，指源代码公开并可自由使用、修改和分发的软件。'开软' 是同音字错误。"
+        "reason": "在计算机科学领域，描述项目公开源代码的常用术语是'开源'（Open Source）。'开软'为同音字错误，不符合领域术语规范。"
       },
       {
         "original": "牺牲",
         "corrected": "实现",
-        "reason": "在计算机科学领域，AI通常被描述为能够“实现”24小时不间断工作，而“牺牲”一词在此处语义不通，可能是同音字错误。"
+        "reason": "在计算机服务领域，AI通常被描述为能够“实现”24小时不间断工作，而“牺牲”在此处语义不通，应为同音字错误。"
       }
     ]
   },
   "_meta": {
-    "token_usage": 16422,
-    "timing_ms": 34578.837
+    "token_usage": 16179,
+    "timing_ms": 19769.477
   }
 }

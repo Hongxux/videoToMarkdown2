@@ -1,1376 +1,2003 @@
-[ {
-  "unit_id" : "SU001",
-  "start_sec" : 0.0,
-  "end_sec" : 24.0,
-  "full_text" : "最近有一个开源项目实在是太火了，整个硅谷都为之疯狂。它就是Cloudbot，一个可以7天24小时待命，并且可以使用聊天工具去操控的AI Agent。我知道很多人都对它非常的感兴趣，刚好Mac mini咱们也有，今天我们就来聊一聊如何玩转Cloudbot，以及它的效果如何。",
-  "text" : "最近有一个开源项目实在是太火了，整个硅谷都为之疯狂。它就是Cloudbot，一个可以7天24小时待命，并且可以使用聊天工具去操控的AI Agent。我知道很多人都对它非常的感兴趣，刚好Mac mini咱们也有，今天我们就来聊一聊如何玩转Cloudbot，以及它的效果如何。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU001_island0",
-      "timestamp_sec" : 4.0,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU001"
-    }, {
-      "screenshot_id" : "SU001_island1",
-      "timestamp_sec" : 5.5,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU001"
-    } ],
-    "clip_requests" : [ ]
+[
+  {
+    "unit_id": "SU001",
+    "start_sec": 0.0,
+    "end_sec": 24.0,
+    "full_text": "最近有一个开源项目实在是太火了，整个硅谷都为之疯狂。它就是Cloudbot，一个可以7天24小时待命，并且可以使用聊天工具去操控的AI Agent。我知道很多人都对它非常的感兴趣，刚好Mac mini咱们也有，今天我们就来聊一聊如何玩转Cloudbot，以及它的效果如何。",
+    "text": "最近有一个开源项目实在是太火了，整个硅谷都为之疯狂。它就是Cloudbot，一个可以7天24小时待命，并且可以使用聊天工具去操控的AI Agent。我知道很多人都对它非常的感兴趣，刚好Mac mini咱们也有，今天我们就来聊一聊如何玩转Cloudbot，以及它的效果如何。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU001_island0",
+          "timestamp_sec": 4.0,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU001"
+        },
+        {
+          "screenshot_id": "SU001_island1",
+          "timestamp_sec": 5.5,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU001"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "Cloudbot项目介绍",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot项目介绍",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU002",
-  "start_sec" : 24.0,
-  "end_sec" : 64.0,
-  "full_text" : "在开始技术内容之前，我想先聊一聊作者的故事，因为实在有点传奇。作者Pietro Deberger，对，就是这哥们。你以为他是又一个挤进AI创业圈的投机者吗？我告诉你，人家早就已经实现了财富自由。他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？人家早就已经实现了财富自由，他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？",
-  "text" : "在开始技术内容之前，我想先聊一聊作者的故事，因为实在有点传奇。作者Pietro Deberger，对，就是这哥们。你以为他是又一个挤进AI创业圈的投机者吗？我告诉你，人家早就已经实现了财富自由。他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？人家早就已经实现了财富自由，他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU002_island0",
-      "timestamp_sec" : 16.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU002"
-    }, {
-      "screenshot_id" : "SU002_island1",
-      "timestamp_sec" : 18.5,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU002"
-    }, {
-      "screenshot_id" : "SU002_island2",
-      "timestamp_sec" : 21.75,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU002"
-    }, {
-      "screenshot_id" : "SU002_island3",
-      "timestamp_sec" : 27.75,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU002"
-    }, {
-      "screenshot_id" : "SU002_island4",
-      "timestamp_sec" : 28.75,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU002"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU002",
+    "start_sec": 24.0,
+    "end_sec": 64.0,
+    "full_text": "在开始技术内容之前，我想先聊一聊作者的故事，因为实在有点传奇。作者Pietro Deberger，对，就是这哥们。你以为他是又一个挤进AI创业圈的投机者吗？我告诉你，人家早就已经实现了财富自由。他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？人家早就已经实现了财富自由，他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？那肯定就是豪宅跑车、泳池嫩模，可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？",
+    "text": "在开始技术内容之前，我想先聊一聊作者的故事，因为实在有点传奇。作者Pietro Deberger，对，就是这哥们。你以为他是又一个挤进AI创业圈的投机者吗？我告诉你，人家早就已经实现了财富自由。他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？人家早就已经实现了财富自由，他在15年前开始创业，2021年退出套现，小小的赚了一个亿还是欧元。有这么多钱要是我的话，那肯定就是豪宅跑车、泳池嫩模。可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？那肯定就是豪宅跑车、泳池嫩模，可是人家才过了4年的清闲日子，就觉得腐化的生活太让人空虚了，转回头来就开始全职写代码了。不是哥们，这写代码也这么上瘾吗？还是说快到马年了，想体验一下牛马精神？",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU002_island0",
+          "timestamp_sec": 16.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU002"
+        },
+        {
+          "screenshot_id": "SU002_island1",
+          "timestamp_sec": 18.5,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU002"
+        },
+        {
+          "screenshot_id": "SU002_island2",
+          "timestamp_sec": 21.75,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU002"
+        },
+        {
+          "screenshot_id": "SU002_island3",
+          "timestamp_sec": 27.75,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU002"
+        },
+        {
+          "screenshot_id": "SU002_island4",
+          "timestamp_sec": 28.75,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU002"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "作者背景故事",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "作者背景故事",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU003",
-  "start_sec" : 64.0,
-  "end_sec" : 88.0,
-  "full_text" : "总之不到一年，人家就捣鼓出了Cloudbot，一款运行在你自己设备上的个人AI助手。你可以通过你熟悉的工具来让它工作，比如像WhatsApp、Telegram或者是iMessage。而且不到一个月就已经超过了40K的Star，现在还在飞速的增长，整个AI圈都在为它疯狂。",
-  "text" : "总之不到一年，人家就捣鼓出了Cloudbot，一款运行在你自己设备上的个人AI助手。你可以通过你熟悉的工具来让它工作，比如像WhatsApp、Telegram或者是iMessage。而且不到一个月就已经超过了40K的Star，现在还在飞速的增长，整个AI圈都在为它疯狂。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU003_island0",
-      "timestamp_sec" : 33.25,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU003"
-    }, {
-      "screenshot_id" : "SU003_island1",
-      "timestamp_sec" : 35.0,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU003"
-    }, {
-      "screenshot_id" : "SU003_island2",
-      "timestamp_sec" : 37.0,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU003"
-    }, {
-      "screenshot_id" : "SU003_island3",
-      "timestamp_sec" : 37.75,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU003"
-    }, {
-      "screenshot_id" : "SU003_island4",
-      "timestamp_sec" : 39.75,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU003"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU003",
+    "start_sec": 64.0,
+    "end_sec": 80.0,
+    "full_text": "总之不到一年，人家就捣鼓出了Cloudbot，一款运行在你自己设备上的。你可以通过你熟悉的工具让它工作，比如WhatsApp、Telegram或者是iMessage。",
+    "text": "总之不到一年，人家就捣鼓出了Cloudbot，一款运行在你自己设备上的。你可以通过你熟悉的工具让它工作，比如WhatsApp、Telegram或者是iMessage。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU003_island0",
+          "timestamp_sec": 33.25,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU003"
+        },
+        {
+          "screenshot_id": "SU003_island1",
+          "timestamp_sec": 35.0,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU003"
+        },
+        {
+          "screenshot_id": "SU003_island2",
+          "timestamp_sec": 37.0,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU003"
+        },
+        {
+          "screenshot_id": "SU003_island3",
+          "timestamp_sec": 37.75,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU003"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "Cloudbot功能描述",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot功能与成就",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU004",
-  "start_sec" : 88.0,
-  "end_sec" : 122.0,
-  "full_text" : "那接下来我们就进入技术的部分，来看一下如何安装和使用它。项目的安装还是非常容易的，虽然默认是推荐Mac，但是你肯定想知道是不是必须得买一个Mac mini。当然不是，实际上不仅只有Mac，你也可以在Linux或者是Windows上使用WSL来安装。网上也有人在树莓派的设备上成功安装运行了。这很正常，因为如果不在本地运行大模型的话，那它本身的运行并不需要消耗很多资源。我选择在Mac上运行。",
-  "text" : "那接下来我们就进入技术的部分，来看一下如何安装和使用它。项目的安装还是非常容易的，虽然默认是推荐Mac，但是你肯定想知道是不是必须得买一个Mac mini。当然不是，实际上不仅只有Mac，你也可以在Linux或者是Windows上使用WSL来安装。网上也有人在树莓派的设备上成功安装运行了。这很正常，因为如果不在本地运行大模型的话，那它本身的运行并不需要消耗很多资源。我选择在Mac上运行。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU004_island0",
-      "timestamp_sec" : 44.70000000000002,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU004"
-    }, {
-      "screenshot_id" : "SU004_island1",
-      "timestamp_sec" : 46.30000000000004,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU004"
-    }, {
-      "screenshot_id" : "SU004_island2",
-      "timestamp_sec" : 49.400000000000084,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU004"
-    }, {
-      "screenshot_id" : "SU004_island3",
-      "timestamp_sec" : 52.40000000000013,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU004"
-    }, {
-      "screenshot_id" : "SU004_island4",
-      "timestamp_sec" : 57.5000000000002,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU004"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU004_action0",
-      "start_sec" : 112.5,
-      "end_sec" : 120.0,
-      "knowledge_type" : "推演",
-      "semantic_unit_id" : "SU004"
-    } ]
+  {
+    "unit_id": "SU004",
+    "start_sec": 80.0,
+    "end_sec": 88.0,
+    "full_text": "而且不到一个月，就已经超过了40K的Star，现在还在飞速的增长，整个AI圈都在为它疯狂。",
+    "text": "而且不到一个月，就已经超过了40K的Star，现在还在飞速的增长，整个AI圈都在为它疯狂。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU004_island0",
+          "timestamp_sec": 39.75,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU004"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "项目受欢迎程度描述",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "项目安装平台说明",
-  "cv_validated" : true,
-  "action_units" : [ {
-    "id" : 0,
-    "start_sec" : 88.60000000000001,
-    "end_sec" : 89.80000000000003,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 91.40000000000005,
-    "end_sec" : 93.60000000000008,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 95.4000000000001,
-    "end_sec" : 99.00000000000016,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 108.40000000000029,
-    "end_sec" : 113.40000000000029,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 115.40000000000039,
-    "end_sec" : 116.0000000000004,
-    "action_type" : "推演",
-    "knowledge_type" : "推演",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 121.20000000000047,
-    "end_sec" : 121.60000000000048,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  } ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU005",
-  "start_sec" : 122.0,
-  "end_sec" : 130.0,
-  "full_text" : "推荐使用一键安装脚本，它会自动下载相关内容，执行后稍作等待，就会自动进入onboard配置过程。",
-  "text" : "推荐使用一键安装脚本，它会自动下载相关内容，执行后稍作等待，就会自动进入onboard配置过程。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU005_island0",
-      "timestamp_sec" : 60.6,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU005"
-    }, {
-      "screenshot_id" : "SU005_island1",
-      "timestamp_sec" : 61.30000000000001,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU005"
-    }, {
-      "screenshot_id" : "SU005_island2",
-      "timestamp_sec" : 64.00000000000001,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU005"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU005_action0",
-      "start_sec" : 124.0,
-      "end_sec" : 130.0,
-      "knowledge_type" : "过程性知识",
-      "semantic_unit_id" : "SU005"
-    } ]
+  {
+    "unit_id": "SU005",
+    "start_sec": 88.0,
+    "end_sec": 114.0,
+    "full_text": "那接下来我们就进入技术的部分，看一下如何安装和使用它。项目安装非常容易，虽然默认推荐Mac，但你可能想知道是否必须买Mac mini？项目安装非常容易，虽然默认推荐Mac，但你可能想知道是否必须买Mac mini？当然不是，实际上不仅Mac，你也可以在Linux或Windows上使用WSL安装。网上也有人在树莓派设备上成功安装运行了，这很正常。",
+    "text": "那接下来我们就进入技术的部分，看一下如何安装和使用它。项目安装非常容易，虽然默认推荐Mac，但你可能想知道是否必须买Mac mini？项目安装非常容易，虽然默认推荐Mac，但你可能想知道是否必须买Mac mini？当然不是，实际上不仅Mac，你也可以在Linux或Windows上使用WSL安装。网上也有人在树莓派设备上成功安装运行了，这很正常。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU005_island0",
+          "timestamp_sec": 44.70000000000002,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU005"
+        },
+        {
+          "screenshot_id": "SU005_island1",
+          "timestamp_sec": 46.30000000000004,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU005"
+        },
+        {
+          "screenshot_id": "SU005_island2",
+          "timestamp_sec": 49.400000000000084,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU005"
+        },
+        {
+          "screenshot_id": "SU005_island3",
+          "timestamp_sec": 52.40000000000013,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU005"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU005_action0",
+          "start_sec": 93.6,
+          "end_sec": 101.0,
+          "knowledge_type": "推演",
+          "semantic_unit_id": "SU005"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "项目安装平台说明",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 88.60000000000001,
+        "end_sec": 89.80000000000003,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 91.40000000000005,
+        "end_sec": 93.60000000000008,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 95.4000000000001,
+        "end_sec": 99.00000000000016,
+        "action_type": "推演",
+        "knowledge_type": "推演",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 108.40000000000029,
+        "end_sec": 114.0,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "一键安装脚本使用",
-  "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 129.00000000000003,
-    "action_type" : "knowledge",
-    "id" : 1,
-    "start_sec" : 125.70000000000006
-  } ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU006",
-  "start_sec" : 130.0,
-  "end_sec" : 150.0,
-  "full_text" : "开始配置具体内容，第一次使用推荐Quickstart模式，选择一个大模型供应商，基本上常见的都支持，对国内用户也很友好，像千问、minimax、智谱、Kimi都有。我有Codex订阅，所以选择OpenAI，具体选的是Codex CLI的OAuth。",
-  "text" : "开始配置具体内容，第一次使用推荐Quickstart模式，选择一个大模型供应商，基本上常见的都支持，对国内用户也很友好，像千问、minimax、智谱、Kimi都有。我有Codex订阅，所以选择OpenAI，具体选的是Codex CLI的OAuth。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU006_island0",
-      "timestamp_sec" : 64.6,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island1",
-      "timestamp_sec" : 65.39999999999995,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island2",
-      "timestamp_sec" : 66.49999999999989,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island3",
-      "timestamp_sec" : 68.79999999999976,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island4",
-      "timestamp_sec" : 70.09999999999968,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island5",
-      "timestamp_sec" : 71.29999999999961,
-      "label" : "稳定岛5",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island6",
-      "timestamp_sec" : 72.69999999999953,
-      "label" : "稳定岛6",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "screenshot_id" : "SU006_island7",
-      "timestamp_sec" : 74.09999999999945,
-      "label" : "稳定岛7",
-      "semantic_unit_id" : "SU006"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU006_action0",
-      "start_sec" : 130.0,
-      "end_sec" : 150.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU006"
-    }, {
-      "clip_id" : "clip_SU006_action1",
-      "start_sec" : 130.0,
-      "end_sec" : 150.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU006"
-    } ]
+  {
+    "unit_id": "SU006",
+    "start_sec": 114.0,
+    "end_sec": 130.0,
+    "full_text": "如果不在本地运行大模型，它本身运行并不需要消耗很多资源。我选择在Mac上运行，推荐使用一键安装脚本，会自动下载相关内容，执行后稍作等待，就会自动进入onboard的配置过程。",
+    "text": "如果不在本地运行大模型，它本身运行并不需要消耗很多资源。我选择在Mac上运行，推荐使用一键安装脚本，会自动下载相关内容，执行后稍作等待，就会自动进入onboard的配置过程。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU006_island0",
+          "timestamp_sec": 57.500000000000014,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU006"
+        },
+        {
+          "screenshot_id": "SU006_island1",
+          "timestamp_sec": 60.300000000000054,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU006"
+        },
+        {
+          "screenshot_id": "SU006_island2",
+          "timestamp_sec": 61.30000000000007,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU006"
+        },
+        {
+          "screenshot_id": "SU006_island3",
+          "timestamp_sec": 64.00000000000007,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU006"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU006_action0",
+          "start_sec": 114.0,
+          "end_sec": 130.0,
+          "knowledge_type": "推演",
+          "semantic_unit_id": "SU006"
+        },
+        {
+          "clip_id": "clip_SU006_action1",
+          "start_sec": 114.0,
+          "end_sec": 130.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU006"
+        },
+        {
+          "clip_id": "clip_SU006_action2",
+          "start_sec": 124.0,
+          "end_sec": 130.0,
+          "knowledge_type": "过程性知识",
+          "semantic_unit_id": "SU006"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "本地运行资源与安装脚本",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 114.60000000000001,
+        "end_sec": 116.00000000000003,
+        "action_type": "推演",
+        "knowledge_type": "推演",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 121.2000000000001,
+        "end_sec": 121.60000000000011,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 123.20000000000013,
+        "end_sec": 123.60000000000014,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 125.70000000000017,
+        "end_sec": 129.00000000000014,
+        "action_type": "过程性知识",
+        "knowledge_type": "过程性知识",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "配置大模型供应商",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU007",
-  "start_sec" : 150.0,
-  "end_sec" : 170.0,
-  "full_text" : "接下来选择Channel，通过聊天工具使用Cloudbot，比如我选择iMessage，因为对国内普通的用户来说，其他的工具更麻烦。直接验证就可以了，选择iMessage之后，还有一些需要补充的配置，我们稍后再来说。",
-  "text" : "接下来选择Channel，通过聊天工具使用Cloudbot，比如我选择iMessage，因为对国内普通的用户来说，其他的工具更麻烦。直接验证就可以了，选择iMessage之后，还有一些需要补充的配置，我们稍后再来说。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU007_island0",
-      "timestamp_sec" : 74.6,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU007"
-    }, {
-      "screenshot_id" : "SU007_island1",
-      "timestamp_sec" : 76.89999999999986,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU007"
-    }, {
-      "screenshot_id" : "SU007_island2",
-      "timestamp_sec" : 77.39999999999984,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU007"
-    }, {
-      "screenshot_id" : "SU007_island3",
-      "timestamp_sec" : 81.4999999999996,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU007"
-    }, {
-      "screenshot_id" : "SU007_island4",
-      "timestamp_sec" : 83.1999999999995,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU007"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU007_action0",
-      "start_sec" : 150.0,
-      "end_sec" : 170.0,
-      "knowledge_type" : "推演",
-      "semantic_unit_id" : "SU007"
-    } ]
+  {
+    "unit_id": "SU007",
+    "start_sec": 130.0,
+    "end_sec": 150.0,
+    "full_text": "第一次使用推荐Quickstart模式，选择大模型供应商，常见都支持，对国内用户友好，千问、minimax、智谱、Kimi都有。我有Codex订阅，所以选择OpenAI，并选Codex CLI的OAuth。",
+    "text": "第一次使用推荐Quickstart模式，选择大模型供应商，常见都支持，对国内用户友好，千问、minimax、智谱、Kimi都有。我有Codex订阅，所以选择OpenAI，并选Codex CLI的OAuth。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU007_island0",
+          "timestamp_sec": 64.6,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island1",
+          "timestamp_sec": 65.39999999999995,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island2",
+          "timestamp_sec": 66.49999999999989,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island3",
+          "timestamp_sec": 68.79999999999976,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island4",
+          "timestamp_sec": 70.09999999999968,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island5",
+          "timestamp_sec": 71.29999999999961,
+          "label": "稳定岛5",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island6",
+          "timestamp_sec": 72.69999999999953,
+          "label": "稳定岛6",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "screenshot_id": "SU007_island7",
+          "timestamp_sec": 74.09999999999945,
+          "label": "稳定岛7",
+          "semantic_unit_id": "SU007"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU007_action0",
+          "start_sec": 130.0,
+          "end_sec": 150.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU007"
+        },
+        {
+          "clip_id": "clip_SU007_action1",
+          "start_sec": 130.0,
+          "end_sec": 150.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU007"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "Quickstart模式与大模型选择",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 131.19999999999993,
+        "end_sec": 131.7999999999999,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 135.09999999999968,
+        "end_sec": 138.59999999999968,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 140.7999999999994,
+        "end_sec": 141.19999999999936,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 142.99999999999926,
+        "end_sec": 143.59999999999923,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 5,
+        "start_sec": 145.4999999999991,
+        "end_sec": 149.4999999999991,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "选择聊天工具Channel",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU008",
-  "start_sec" : 170.0,
-  "end_sec" : 180.0,
-  "full_text" : "会有一些常用的工具让我们去选择和安装，随便选几个就好了。最后还有一些基本的配置，正常选择。",
-  "text" : "会有一些常用的工具让我们去选择和安装，随便选几个就好了。最后还有一些基本的配置，正常选择。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU008_island0",
-      "timestamp_sec" : 84.6,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU008"
-    }, {
-      "screenshot_id" : "SU008_island1",
-      "timestamp_sec" : 87.9999999999998,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU008"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU008",
+    "start_sec": 152.0,
+    "end_sec": 170.0,
+    "full_text": "接下来选择Channel，让你通过聊天工具使用Cloudbot，比如我选择iMessage。可能对国内普通用户来说，其他工具更麻烦。选择iMessage后，还有需要补充的配置，稍后再说。",
+    "text": "接下来选择Channel，让你通过聊天工具使用Cloudbot，比如我选择iMessage。可能对国内普通用户来说，其他工具更麻烦。选择iMessage后，还有需要补充的配置，稍后再说。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU008_island0",
+          "timestamp_sec": 75.6,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU008"
+        },
+        {
+          "screenshot_id": "SU008_island1",
+          "timestamp_sec": 76.89999999999992,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU008"
+        },
+        {
+          "screenshot_id": "SU008_island2",
+          "timestamp_sec": 77.39999999999989,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU008"
+        },
+        {
+          "screenshot_id": "SU008_island3",
+          "timestamp_sec": 81.49999999999966,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU008"
+        },
+        {
+          "screenshot_id": "SU008_island4",
+          "timestamp_sec": 83.19999999999956,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU008"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU008_action0",
+          "start_sec": 152.0,
+          "end_sec": 170.0,
+          "knowledge_type": "推演",
+          "semantic_unit_id": "SU008"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "Channel选择与配置",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 153.2999999999999,
+        "end_sec": 155.79999999999978,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 162.5999999999994,
+        "end_sec": 163.99999999999932,
+        "action_type": "推演",
+        "knowledge_type": "推演",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 166.79999999999916,
+        "end_sec": 170.29999999999916,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "选择安装常用工具",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU009",
-  "start_sec" : 180.0,
-  "end_sec" : 200.0,
-  "full_text" : "最后一步是让我们去选择使用的方式，选择默认的CLI。第一次进入时，它会让我们给它起一个名字，并告诉它我是谁。第一次进入，它会让我们给它起一个名字，告诉它我是谁。这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。你既然是一个小机器人，我就叫你小鸡吧。最后一步是让我们选择使用的方式，选择默认的CLI。",
-  "text" : "最后一步是让我们去选择使用的方式，选择默认的CLI。第一次进入时，它会让我们给它起一个名字，并告诉它我是谁。第一次进入，它会让我们给它起一个名字，告诉它我是谁。这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。你既然是一个小机器人，我就叫你小鸡吧。最后一步是让我们选择使用的方式，选择默认的CLI。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU009_island0",
-      "timestamp_sec" : 90.29999999999995,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU009"
-    }, {
-      "screenshot_id" : "SU009_island1",
-      "timestamp_sec" : 92.8999999999998,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU009"
-    }, {
-      "screenshot_id" : "SU009_island2",
-      "timestamp_sec" : 95.79999999999964,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU009"
-    }, {
-      "screenshot_id" : "SU009_island3",
-      "timestamp_sec" : 96.79999999999959,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU009"
-    }, {
-      "screenshot_id" : "SU009_island4",
-      "timestamp_sec" : 97.69999999999953,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU009"
-    }, {
-      "screenshot_id" : "SU009_island5",
-      "timestamp_sec" : 98.1999999999995,
-      "label" : "稳定岛5",
-      "semantic_unit_id" : "SU009"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU009_action0",
-      "start_sec" : 180.0,
-      "end_sec" : 200.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU009"
-    }, {
-      "clip_id" : "clip_SU009_action1",
-      "start_sec" : 180.0,
-      "end_sec" : 200.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU009"
-    } ]
+  {
+    "unit_id": "SU009",
+    "start_sec": 170.0,
+    "end_sec": 184.0,
+    "full_text": "会有常用工具选择和安装，随便选几个。最后有基本配置，正常选择。最后有基本配置，正常选择，最后一步是选择使用的方式，选择默认的CLI。",
+    "text": "会有常用工具选择和安装，随便选几个。最后有基本配置，正常选择。最后有基本配置，正常选择，最后一步是选择使用的方式，选择默认的CLI。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU009_island0",
+          "timestamp_sec": 84.6,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU009"
+        },
+        {
+          "screenshot_id": "SU009_island1",
+          "timestamp_sec": 87.9999999999998,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU009"
+        },
+        {
+          "screenshot_id": "SU009_island2",
+          "timestamp_sec": 89.29999999999973,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU009"
+        },
+        {
+          "screenshot_id": "SU009_island3",
+          "timestamp_sec": 90.29999999999967,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU009"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU009_action0",
+          "start_sec": 170.0,
+          "end_sec": 184.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU009"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "工具选择与基本配置",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 172.09999999999985,
+        "end_sec": 176.9999999999996,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 178.9999999999995,
+        "end_sec": 179.59999999999945,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 183.59999999999923,
+        "end_sec": 184.0,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "选择使用方式与命名",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU010",
-  "start_sec" : 190.0,
-  "end_sec" : 200.0,
-  "full_text" : "这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。你既然是一个小机器人，我就叫你小鸡吧。",
-  "text" : "这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。你既然是一个小机器人，我就叫你小鸡吧。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU010_island0",
-      "timestamp_sec" : 95.75,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU010"
-    }, {
-      "screenshot_id" : "SU010_island1",
-      "timestamp_sec" : 96.75,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU010"
-    }, {
-      "screenshot_id" : "SU010_island2",
-      "timestamp_sec" : 98.0,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU010"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU010",
+    "start_sec": 180.0,
+    "end_sec": 200.0,
+    "full_text": "最后一步是选择使用的方式，选择默认的CLI。第一次进入，它会让我们给它起一个名字，告诉它我是谁。这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。第一次进入，它会让我们给它起一个名字，告诉它我是谁。这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。既然你是一个小机器人，我就叫你小鸡吧。",
+    "text": "最后一步是选择使用的方式，选择默认的CLI。第一次进入，它会让我们给它起一个名字，告诉它我是谁。这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。第一次进入，它会让我们给它起一个名字，告诉它我是谁。这个有点像玩游戏，我告诉它，你就叫我馆长大人就好了。既然你是一个小机器人，我就叫你小鸡吧。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU010_island0",
+          "timestamp_sec": 90.29999999999995,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU010"
+        },
+        {
+          "screenshot_id": "SU010_island1",
+          "timestamp_sec": 92.8999999999998,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU010"
+        },
+        {
+          "screenshot_id": "SU010_island2",
+          "timestamp_sec": 95.79999999999964,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU010"
+        },
+        {
+          "screenshot_id": "SU010_island3",
+          "timestamp_sec": 96.79999999999959,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU010"
+        },
+        {
+          "screenshot_id": "SU010_island4",
+          "timestamp_sec": 97.69999999999953,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU010"
+        },
+        {
+          "screenshot_id": "SU010_island5",
+          "timestamp_sec": 98.1999999999995,
+          "label": "稳定岛5",
+          "semantic_unit_id": "SU010"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU010_action0",
+          "start_sec": 180.0,
+          "end_sec": 200.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU010"
+        },
+        {
+          "clip_id": "clip_SU010_action1",
+          "start_sec": 180.0,
+          "end_sec": 200.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU010"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "命名与身份配置",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 183.0999999999998,
+        "end_sec": 186.7999999999996,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 188.9999999999995,
+        "end_sec": 192.59999999999928,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 195.9999999999991,
+        "end_sec": 197.399999999999,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 199.5999999999989,
+        "end_sec": 200.0,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "命名比喻介绍",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU011",
-  "start_sec" : 200.0,
-  "end_sec" : 220.0,
-  "full_text" : "接下来我们就可以直接在终端里使用它，感觉就和Cloud Shell差不多。但同时它也自带了WebUI，你可以打开使用，这里也带了Chat对话，还可以查看各种配置。如果你不习惯使用CLI的话，可以换成这种方式，但是仅仅这么用的话，就显示不出它的特点了。",
-  "text" : "接下来我们就可以直接在终端里使用它，感觉就和Cloud Shell差不多。但同时它也自带了WebUI，你可以打开使用，这里也带了Chat对话，还可以查看各种配置。如果你不习惯使用CLI的话，可以换成这种方式，但是仅仅这么用的话，就显示不出它的特点了。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU011_island0",
-      "timestamp_sec" : 100.25,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU011"
-    }, {
-      "screenshot_id" : "SU011_island1",
-      "timestamp_sec" : 101.0,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU011"
-    }, {
-      "screenshot_id" : "SU011_island2",
-      "timestamp_sec" : 102.5,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU011"
-    }, {
-      "screenshot_id" : "SU011_island3",
-      "timestamp_sec" : 105.5,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU011"
-    }, {
-      "screenshot_id" : "SU011_island4",
-      "timestamp_sec" : 106.5,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU011"
-    }, {
-      "screenshot_id" : "SU011_island5",
-      "timestamp_sec" : 108.0,
-      "label" : "稳定岛5",
-      "semantic_unit_id" : "SU011"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU011",
+    "start_sec": 200.0,
+    "end_sec": 220.0,
+    "full_text": "接下来我们就可以直接在终端里使用它，感觉和Cloud Shell差不多。但同时它也自带了WebUI，你可以打开使用，这里也带了Chat对话，还可以查看各种配置。如果你不习惯使用CLI的话，可以换成这种方式。但是仅仅这么用的话，就显示不出它的特点了。",
+    "text": "接下来我们就可以直接在终端里使用它，感觉和Cloud Shell差不多。但同时它也自带了WebUI，你可以打开使用，这里也带了Chat对话，还可以查看各种配置。如果你不习惯使用CLI的话，可以换成这种方式。但是仅仅这么用的话，就显示不出它的特点了。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU011_island0",
+          "timestamp_sec": 101.09999999999991,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU011"
+        },
+        {
+          "screenshot_id": "SU011_island1",
+          "timestamp_sec": 102.69999999999982,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU011"
+        },
+        {
+          "screenshot_id": "SU011_island2",
+          "timestamp_sec": 103.39999999999978,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU011"
+        },
+        {
+          "screenshot_id": "SU011_island3",
+          "timestamp_sec": 107.29999999999956,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU011"
+        },
+        {
+          "screenshot_id": "SU011_island4",
+          "timestamp_sec": 107.99999999999952,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU011"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "介绍工具的基本使用方式",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 200.39999999999998,
+        "end_sec": 203.19999999999982,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 205.49999999999966,
+        "end_sec": 207.79999999999956,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "使用方式对比",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU012",
-  "start_sec" : 220.0,
-  "end_sec" : 254.0,
-  "full_text" : "所以我们要把前面的iMessage配置完成。要使用iMessage的话，需要安装一个CLI的工具，可以通过Brew安装，你也可以让Cloudbot自己去安装和配置，它会自己完成以后重启，非常的方便。你也可以让Cloudbot自己去安装和配置，它会自己完成以后重启，非常的方便。然后我再问一下它还需要什么配置，它会告诉我一些需要我自己完成的内容，就是在Mac里的一些系统配置。这里需要进入隐私与安全里，打开完全磁盘访问权限。我把Node和终端的权限都授权一下，再让它发一条测试信息给我。第一次执行的时候会有一个弹窗，记得允许一下。",
-  "text" : "所以我们要把前面的iMessage配置完成。要使用iMessage的话，需要安装一个CLI的工具，可以通过Brew安装，你也可以让Cloudbot自己去安装和配置，它会自己完成以后重启，非常的方便。你也可以让Cloudbot自己去安装和配置，它会自己完成以后重启，非常的方便。然后我再问一下它还需要什么配置，它会告诉我一些需要我自己完成的内容，就是在Mac里的一些系统配置。这里需要进入隐私与安全里，打开完全磁盘访问权限。我把Node和终端的权限都授权一下，再让它发一条测试信息给我。第一次执行的时候会有一个弹窗，记得允许一下。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU012_island0",
-      "timestamp_sec" : 109.6,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island1",
-      "timestamp_sec" : 110.99999999999991,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island2",
-      "timestamp_sec" : 112.69999999999982,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island3",
-      "timestamp_sec" : 114.39999999999972,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island4",
-      "timestamp_sec" : 116.89999999999958,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island5",
-      "timestamp_sec" : 117.79999999999953,
-      "label" : "稳定岛5",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island6",
-      "timestamp_sec" : 119.79999999999941,
-      "label" : "稳定岛6",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island7",
-      "timestamp_sec" : 120.29999999999939,
-      "label" : "稳定岛7",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island8",
-      "timestamp_sec" : 121.8999999999993,
-      "label" : "稳定岛8",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "screenshot_id" : "SU012_island9",
-      "timestamp_sec" : 123.69999999999919,
-      "label" : "稳定岛9",
-      "semantic_unit_id" : "SU012"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU012_action0",
-      "start_sec" : 224.5,
-      "end_sec" : 232.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "clip_id" : "clip_SU012_action1",
-      "start_sec" : 234.5,
-      "end_sec" : 240.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU012"
-    }, {
-      "clip_id" : "clip_SU012_action2",
-      "start_sec" : 248.5,
-      "end_sec" : 254.0,
-      "knowledge_type" : "实操",
-      "semantic_unit_id" : "SU012"
-    } ]
+  {
+    "unit_id": "SU012",
+    "start_sec": 216.0,
+    "end_sec": 222.0,
+    "full_text": "但是仅仅这么用的话，就显示不出它的特点了。所以我们要把前面的iMessage配置完成。但是仅仅这么用的话，就显示不出它的特点了，所以我们要把前面的iMessage配置完成。",
+    "text": "但是仅仅这么用的话，就显示不出它的特点了。所以我们要把前面的iMessage配置完成。但是仅仅这么用的话，就显示不出它的特点了，所以我们要把前面的iMessage配置完成。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU012_island0",
+          "timestamp_sec": 107.99999999999997,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU012"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU012_action0",
+          "start_sec": 216.0,
+          "end_sec": 222.0,
+          "knowledge_type": "环境配置",
+          "semantic_unit_id": "SU012"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "说明配置iMessage的必要性",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 220.99999999999972,
+        "end_sec": 222.0,
+        "action_type": "环境配置",
+        "knowledge_type": "环境配置",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "iMessage配置步骤",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU013",
-  "start_sec" : 254.0,
-  "end_sec" : 270.0,
-  "full_text" : "到这里配置就已经完成了，但是还有一个小的提醒，也是我个人的一个小经验：不要用同一个iMessage账号，它自己给自己发的消息会默认被忽略掉，所以需要给运行Cloud的机器单独配置一个iMessage账号。",
-  "text" : "到这里配置就已经完成了，但是还有一个小的提醒，也是我个人的一个小经验：不要用同一个iMessage账号，它自己给自己发的消息会默认被忽略掉，所以需要给运行Cloud的机器单独配置一个iMessage账号。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU013_island0",
-      "timestamp_sec" : 126.75,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU013"
-    }, {
-      "screenshot_id" : "SU013_island1",
-      "timestamp_sec" : 128.0,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU013"
-    }, {
-      "screenshot_id" : "SU013_island2",
-      "timestamp_sec" : 129.5,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU013"
-    }, {
-      "screenshot_id" : "SU013_island3",
-      "timestamp_sec" : 130.75,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU013"
-    }, {
-      "screenshot_id" : "SU013_island4",
-      "timestamp_sec" : 133.75,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU013"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU013",
+    "start_sec": 222.0,
+    "end_sec": 234.0,
+    "full_text": "要使用iMessage的话，需要安装一个CLI的工具，可以通过Brew来安装。你也可以让CloudBot自己去安装和配置，它会自己完成以后并且重启，非常的方便。",
+    "text": "要使用iMessage的话，需要安装一个CLI的工具，可以通过Brew来安装。你也可以让CloudBot自己去安装和配置，它会自己完成以后并且重启，非常的方便。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU013_island0",
+          "timestamp_sec": 110.99999999999997,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU013"
+        },
+        {
+          "screenshot_id": "SU013_island1",
+          "timestamp_sec": 112.69999999999987,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU013"
+        },
+        {
+          "screenshot_id": "SU013_island2",
+          "timestamp_sec": 114.39999999999978,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU013"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU013_action0",
+          "start_sec": 222.0,
+          "end_sec": 230.0,
+          "knowledge_type": "过程性知识",
+          "semantic_unit_id": "SU013"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "安装iMessage CLI工具的方法",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 222.39999999999998,
+        "end_sec": 222.99999999999994,
+        "action_type": "过程性知识",
+        "knowledge_type": "过程性知识",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 227.09999999999968,
+        "end_sec": 229.79999999999956,
+        "action_type": "过程性知识",
+        "knowledge_type": "过程性知识",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "iMessage账号提醒",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU014",
-  "start_sec" : 268.0,
-  "end_sec" : 294.0,
-  "full_text" : "接下来我们来看两个实际使用的例子。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发，这时你不需要再打开电脑，躺在床上就可以指挥它完成工作。",
-  "text" : "接下来我们来看两个实际使用的例子。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发，这时你不需要再打开电脑，躺在床上就可以指挥它完成工作。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU014_island0",
-      "timestamp_sec" : 135.1999999999999,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island1",
-      "timestamp_sec" : 135.69999999999987,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island2",
-      "timestamp_sec" : 138.9999999999997,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island3",
-      "timestamp_sec" : 140.2999999999996,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island4",
-      "timestamp_sec" : 140.89999999999958,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island5",
-      "timestamp_sec" : 143.09999999999945,
-      "label" : "稳定岛5",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island6",
-      "timestamp_sec" : 144.2999999999994,
-      "label" : "稳定岛6",
-      "semantic_unit_id" : "SU014"
-    }, {
-      "screenshot_id" : "SU014_island7",
-      "timestamp_sec" : 145.39999999999932,
-      "label" : "稳定岛7",
-      "semantic_unit_id" : "SU014"
-    } ],
-    "clip_requests" : [ {
-      "clip_id" : "clip_SU014_action0",
-      "start_sec" : 280.0,
-      "end_sec" : 288.0,
-      "knowledge_type" : "过程性知识",
-      "semantic_unit_id" : "SU014"
-    } ]
+  {
+    "unit_id": "SU014",
+    "start_sec": 230.0,
+    "end_sec": 254.0,
+    "full_text": "我再问一下它，还需要什么去做配置，它会告诉我一些内容需要我自己去完成的。这里需要进入到隐私与安全里，打开这个完全磁盘访问权限。我这里把Node和终端的权限都授权一下，我再让它去发一条测试信息给我。我再问一下它还需要什么配置，它会告诉我一些需要我自己完成的内容，之后它会自己完成并重启，非常方便。这里需要进入到隐私与安全里，打开完全磁盘访问权限，我把Node和终端的权限都授权一下，再让它去发一条测试信息给我。第一次执行的时候会有一个弹窗，记得允许一下。",
+    "text": "我再问一下它，还需要什么去做配置，它会告诉我一些内容需要我自己去完成的。这里需要进入到隐私与安全里，打开这个完全磁盘访问权限。我这里把Node和终端的权限都授权一下，我再让它去发一条测试信息给我。我再问一下它还需要什么配置，它会告诉我一些需要我自己完成的内容，之后它会自己完成并重启，非常方便。这里需要进入到隐私与安全里，打开完全磁盘访问权限，我把Node和终端的权限都授权一下，再让它去发一条测试信息给我。第一次执行的时候会有一个弹窗，记得允许一下。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU014_island0",
+          "timestamp_sec": 114.6,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU014"
+        },
+        {
+          "screenshot_id": "SU014_island1",
+          "timestamp_sec": 116.89999999999986,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU014"
+        },
+        {
+          "screenshot_id": "SU014_island2",
+          "timestamp_sec": 117.79999999999981,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU014"
+        },
+        {
+          "screenshot_id": "SU014_island3",
+          "timestamp_sec": 119.7999999999997,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU014"
+        },
+        {
+          "screenshot_id": "SU014_island4",
+          "timestamp_sec": 120.29999999999967,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU014"
+        },
+        {
+          "screenshot_id": "SU014_island5",
+          "timestamp_sec": 121.89999999999958,
+          "label": "稳定岛5",
+          "semantic_unit_id": "SU014"
+        },
+        {
+          "screenshot_id": "SU014_island6",
+          "timestamp_sec": 123.69999999999948,
+          "label": "稳定岛6",
+          "semantic_unit_id": "SU014"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU014_action0",
+          "start_sec": 249.6,
+          "end_sec": 254.0,
+          "knowledge_type": "实操",
+          "semantic_unit_id": "SU014"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "配置iMessage的权限和测试步骤",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 236.19999999999965,
+        "end_sec": 236.59999999999962,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 238.5999999999995,
+        "end_sec": 240.5999999999995,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 250.29999999999887,
+        "end_sec": 254.0,
+        "action_type": "实操",
+        "knowledge_type": "实操",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "开发功能实现流程",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU015",
-  "start_sec" : 294.0,
-  "end_sec" : 298.0,
-  "full_text" : "你也可以让它查看有没有新的Issue，如果是Bug就修复一下。",
-  "text" : "你也可以让它查看有没有新的Issue，如果是Bug就修复一下。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU015_island0",
-      "timestamp_sec" : 295.0,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU015"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU015",
+    "start_sec": 254.0,
+    "end_sec": 268.0,
+    "full_text": "到这里配置就已经完成了，但还有一个提醒，也是我的个人经验：不要用同一个iMessage账号，它自己给自己发的消息会默认被忽略掉，所以需要给运行Cloud的机器单独配置一个iMessage账号。",
+    "text": "到这里配置就已经完成了，但还有一个提醒，也是我的个人经验：不要用同一个iMessage账号，它自己给自己发的消息会默认被忽略掉，所以需要给运行Cloud的机器单独配置一个iMessage账号。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU015_island0",
+          "timestamp_sec": 126.75,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU015"
+        },
+        {
+          "screenshot_id": "SU015_island1",
+          "timestamp_sec": 128.0,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU015"
+        },
+        {
+          "screenshot_id": "SU015_island2",
+          "timestamp_sec": 129.5,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU015"
+        },
+        {
+          "screenshot_id": "SU015_island3",
+          "timestamp_sec": 130.75,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU015"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "配置完成后的提醒事项",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "Issue处理流程",
-  "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 298.0,
-    "action_type" : "knowledge",
-    "id" : 1,
-    "start_sec" : 295.7999999999999
-  } ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU016",
-  "start_sec" : 298.0,
-  "end_sec" : 304.0,
-  "full_text" : "对于实际的项目来说还是要小心使用，毕竟代码虽然是AI写的，但是责任还是要自己付的。",
-  "text" : "对于实际的项目来说还是要小心使用，毕竟代码虽然是AI写的，但是责任还是要自己付的。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU016_island0",
-      "timestamp_sec" : 149.0,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU016"
-    }, {
-      "screenshot_id" : "SU016_island1",
-      "timestamp_sec" : 150.0,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU016"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU016",
+    "start_sec": 268.0,
+    "end_sec": 294.0,
+    "full_text": "配置好以后，接下来我们看两个实际使用的例子。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。接下来我们看两个实际使用的例子，首先来一个开发的例子。比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发，你不需要再打开电脑，躺在床上就可以指挥它完成工作。",
+    "text": "配置好以后，接下来我们看两个实际使用的例子。首先来一个开发的例子，比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。接下来我们看两个实际使用的例子，首先来一个开发的例子。比如我有个项目，我可以直接发消息告诉它去帮我实现一个功能，比如完成一个商品详情的功能。开发完成后写好描述，并且提交PR，它会调用本地的Codex或者Cloud Code进行开发，你不需要再打开电脑，躺在床上就可以指挥它完成工作。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU016_island0",
+          "timestamp_sec": 135.1999999999999,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island1",
+          "timestamp_sec": 135.69999999999987,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island2",
+          "timestamp_sec": 138.9999999999997,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island3",
+          "timestamp_sec": 140.2999999999996,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island4",
+          "timestamp_sec": 140.89999999999958,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island5",
+          "timestamp_sec": 143.09999999999945,
+          "label": "稳定岛5",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island6",
+          "timestamp_sec": 144.2999999999994,
+          "label": "稳定岛6",
+          "semantic_unit_id": "SU016"
+        },
+        {
+          "screenshot_id": "SU016_island7",
+          "timestamp_sec": 145.39999999999932,
+          "label": "稳定岛7",
+          "semantic_unit_id": "SU016"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU016_action0",
+          "start_sec": 280.0,
+          "end_sec": 288.0,
+          "knowledge_type": "过程性知识",
+          "semantic_unit_id": "SU016"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "介绍开发功能的使用示例",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 270.29999999999984,
+        "end_sec": 272.39999999999975,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 274.5999999999996,
+        "end_sec": 278.9999999999994,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 280.0999999999993,
+        "end_sec": 286.5999999999993,
+        "action_type": "过程性知识",
+        "knowledge_type": "过程性知识",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 288.19999999999885,
+        "end_sec": 294.19999999999885,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "AI代码责任提醒",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU017",
-  "start_sec" : 290.0,
-  "end_sec" : 298.0,
-  "full_text" : "你不需要再打开电脑了，躺在床上就可以指挥它去把工作完成，比如让它去查看有没有新的Issue，如果是Bug就修复一下。",
-  "text" : "你不需要再打开电脑了，躺在床上就可以指挥它去把工作完成，比如让它去查看有没有新的Issue，如果是Bug就修复一下。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU017_island0",
-      "timestamp_sec" : 145.39999999999995,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU017"
-    }, {
-      "screenshot_id" : "SU017_island1",
-      "timestamp_sec" : 146.4999999999999,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU017"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU017",
+    "start_sec": 294.0,
+    "end_sec": 304.0,
+    "full_text": "你也可以让它查看有没有新的Issue，如果是Bug就修复一下。对于实际项目要小心使用，代码虽然是AI写的，责任还是要自己付。",
+    "text": "你也可以让它查看有没有新的Issue，如果是Bug就修复一下。对于实际项目要小心使用，代码虽然是AI写的，责任还是要自己付。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU017_island0",
+          "timestamp_sec": 295.0,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU017"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "AI处理Issue的流程与责任提醒",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 295.7999999999999,
+        "end_sec": 304.0,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "Cloudbot远程工作示例",
-  "cv_validated" : true,
-  "action_units" : [ {
-    "end_sec" : 293.9999999999998,
-    "action_type" : "knowledge",
-    "id" : 1,
-    "start_sec" : 289.9
-  }, {
-    "end_sec" : 298.0,
-    "action_type" : "knowledge",
-    "id" : 2,
-    "start_sec" : 295.79999999999967
-  } ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU018",
-  "start_sec" : 304.0,
-  "end_sec" : 326.0,
-  "full_text" : "再来看一个日常中可以使用的例子，比如我给下级发了一段语音，这个是我关于年会的一些安排。它会自动帮我总结和拆分，内容可以直接复制使用，但是我要求它要把具体的任务发送给相对应的人的邮箱。我们可以看到它会自动完成各种操作，进入邮箱就能看到已经发好了邮件。",
-  "text" : "再来看一个日常中可以使用的例子，比如我给下级发了一段语音，这个是我关于年会的一些安排。它会自动帮我总结和拆分，内容可以直接复制使用，但是我要求它要把具体的任务发送给相对应的人的邮箱。我们可以看到它会自动完成各种操作，进入邮箱就能看到已经发好了邮件。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU018_island0",
-      "timestamp_sec" : 152.99999999999991,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island1",
-      "timestamp_sec" : 153.79999999999987,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island2",
-      "timestamp_sec" : 154.49999999999983,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island3",
-      "timestamp_sec" : 155.59999999999977,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island4",
-      "timestamp_sec" : 156.29999999999973,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island5",
-      "timestamp_sec" : 158.19999999999962,
-      "label" : "稳定岛5",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island6",
-      "timestamp_sec" : 159.99999999999952,
-      "label" : "稳定岛6",
-      "semantic_unit_id" : "SU018"
-    }, {
-      "screenshot_id" : "SU018_island7",
-      "timestamp_sec" : 161.09999999999945,
-      "label" : "稳定岛7",
-      "semantic_unit_id" : "SU018"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU018",
+    "start_sec": 304.0,
+    "end_sec": 326.0,
+    "full_text": "第二个是日常中可以使用的例子，比如我给下级发了一段语音，这是我关于年会的一些安排。我们就可以看到它会自动完成各种操作，进入邮箱就能看到已经发好了邮件。第二个是日常中可以使用的例子，比如我给下级发了一段语音，这是我关于年会的一些安排。它会自动帮我总结和拆分，内容可以直接复制使用，但我还要求它把具体任务发送给对应人的邮箱，再给我设置好提醒。",
+    "text": "第二个是日常中可以使用的例子，比如我给下级发了一段语音，这是我关于年会的一些安排。我们就可以看到它会自动完成各种操作，进入邮箱就能看到已经发好了邮件。第二个是日常中可以使用的例子，比如我给下级发了一段语音，这是我关于年会的一些安排。它会自动帮我总结和拆分，内容可以直接复制使用，但我还要求它把具体任务发送给对应人的邮箱，再给我设置好提醒。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU018_island0",
+          "timestamp_sec": 152.99999999999991,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island1",
+          "timestamp_sec": 153.79999999999987,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island2",
+          "timestamp_sec": 154.49999999999983,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island3",
+          "timestamp_sec": 155.59999999999977,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island4",
+          "timestamp_sec": 156.29999999999973,
+          "label": "稳定岛4",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island5",
+          "timestamp_sec": 158.19999999999962,
+          "label": "稳定岛5",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island6",
+          "timestamp_sec": 159.99999999999952,
+          "label": "稳定岛6",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "screenshot_id": "SU018_island7",
+          "timestamp_sec": 161.09999999999945,
+          "label": "稳定岛7",
+          "semantic_unit_id": "SU018"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "语音转邮件任务自动化流程",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 307.7999999999998,
+        "end_sec": 310.7999999999998,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 310.1999999999996,
+        "end_sec": 313.59999999999945,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 316.7999999999993,
+        "end_sec": 323.1999999999989,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 323.89999999999884,
+        "end_sec": 326.39999999999884,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "Cloudbot语音任务处理示例",
-  "cv_validated" : true,
-  "action_units" : [ {
-    "id" : 0,
-    "start_sec" : 307.7999999999998,
-    "end_sec" : 310.7999999999998,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 310.1999999999996,
-    "end_sec" : 313.59999999999945,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 316.7999999999993,
-    "end_sec" : 323.1999999999989,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 323.89999999999884,
-    "end_sec" : 326.39999999999884,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  } ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU019",
-  "start_sec" : 326.0,
-  "end_sec" : 340.0,
-  "full_text" : "这里要提醒一下，想要发送邮件的话，需要提前配置邮箱的SMTP，这个过程我省略掉了。如果不会配可以问Cloudbot，它会告诉你怎么配置，按照要求操作就可以了。",
-  "text" : "这里要提醒一下，想要发送邮件的话，需要提前配置邮箱的SMTP，这个过程我省略掉了。如果不会配可以问Cloudbot，它会告诉你怎么配置，按照要求操作就可以了。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU019_island0",
-      "timestamp_sec" : 163.09999999999997,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU019"
-    }, {
-      "screenshot_id" : "SU019_island1",
-      "timestamp_sec" : 163.79999999999993,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU019"
-    }, {
-      "screenshot_id" : "SU019_island2",
-      "timestamp_sec" : 165.29999999999984,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU019"
-    }, {
-      "screenshot_id" : "SU019_island3",
-      "timestamp_sec" : 168.29999999999967,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU019"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU019",
+    "start_sec": 326.0,
+    "end_sec": 340.0,
+    "full_text": "这里也要提醒一下，想要发送邮件的话，需要提前配置一下邮箱的SMTP，这个过程我也省略掉了。如果你不会配的话可以问一下Cloudbot，它会告诉你怎么配置，你按照它的要求操作就可以了。",
+    "text": "这里也要提醒一下，想要发送邮件的话，需要提前配置一下邮箱的SMTP，这个过程我也省略掉了。如果你不会配的话可以问一下Cloudbot，它会告诉你怎么配置，你按照它的要求操作就可以了。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU019_island0",
+          "timestamp_sec": 163.09999999999997,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU019"
+        },
+        {
+          "screenshot_id": "SU019_island1",
+          "timestamp_sec": 163.79999999999993,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU019"
+        },
+        {
+          "screenshot_id": "SU019_island2",
+          "timestamp_sec": 165.29999999999984,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU019"
+        },
+        {
+          "screenshot_id": "SU019_island3",
+          "timestamp_sec": 168.29999999999967,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU019"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "邮箱SMTP配置操作指南",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 326.59999999999997,
+        "end_sec": 327.19999999999993,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 329.5999999999998,
+        "end_sec": 337.5999999999998,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 339.39999999999924,
+        "end_sec": 339.7999999999992,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "配置邮箱SMTP的提醒",
-  "cv_validated" : true,
-  "action_units" : [ {
-    "id" : 0,
-    "start_sec" : 326.59999999999997,
-    "end_sec" : 327.19999999999993,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 329.5999999999998,
-    "end_sec" : 337.5999999999998,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  }, {
-    "id" : 0,
-    "start_sec" : 339.39999999999924,
-    "end_sec" : 339.7999999999992,
-    "action_type" : "讲解型",
-    "knowledge_type" : "讲解型",
-    "confidence" : 0.0,
-    "reasoning" : ""
-  } ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU020",
-  "start_sec" : 340.0,
-  "end_sec" : 352.0,
-  "full_text" : "怎么样，感觉Cloudbot的效果如何呢？这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得，你可以去里面找一找灵感。",
-  "text" : "怎么样，感觉Cloudbot的效果如何呢？这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得，你可以去里面找一找灵感。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU020_island0",
-      "timestamp_sec" : 169.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU020"
-    }, {
-      "screenshot_id" : "SU020_island1",
-      "timestamp_sec" : 173.5,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU020"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU020",
+    "start_sec": 340.0,
+    "end_sec": 356.0,
+    "full_text": "怎么样，感觉Cloudbot的效果如何呢？这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得。这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得，你可以去里面找一找灵感。怎么样，感觉Cloudbot的效果如何呢？你可以去里面找一找灵感。Cloudbot还有一个非常重要的点，就是可以使用本地的模型。",
+    "text": "怎么样，感觉Cloudbot的效果如何呢？这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得。这里其实我也只发挥了它一小部分的能力。如果你不知道在什么场景当中去使用，你可以去看一下Cloudbot的UseCase，这里面有社区分享的使用心得，你可以去里面找一找灵感。怎么样，感觉Cloudbot的效果如何呢？你可以去里面找一找灵感。Cloudbot还有一个非常重要的点，就是可以使用本地的模型。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU020_island0",
+          "timestamp_sec": 169.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU020"
+        },
+        {
+          "screenshot_id": "SU020_island1",
+          "timestamp_sec": 173.5,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU020"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "Cloudbot效果评估与使用建议",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot能力与使用建议",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU021",
-  "start_sec" : 352.0,
-  "end_sec" : 364.0,
-  "full_text" : "Cloudbot还有一个非常重要的点，就是可以使用本地的模型。这里官方给的建议是LM Studio去配合MiniMax 2.1，但是MiniMax 2.1确实有点大，最小的我本地也跑不了，所以我只能换成是最新的一个JRM 4.7。",
-  "text" : "Cloudbot还有一个非常重要的点，就是可以使用本地的模型。这里官方给的建议是LM Studio去配合MiniMax 2.1，但是MiniMax 2.1确实有点大，最小的我本地也跑不了，所以我只能换成是最新的一个JRM 4.7。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU021_island0",
-      "timestamp_sec" : 179.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU021"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU021",
+    "start_sec": 352.0,
+    "end_sec": 368.0,
+    "full_text": "Cloudbot还有一个非常重要的点，就是可以使用本地的模型。这里官方给的建议是LM Studio去配合MiniMax 2.1，但是MiniMax 2.1确实有点大，最小的我本地也跑不了，所以我只能换成是最新的一个JRM 4.7。那模型这部分我就跳过了，其实也就是直接下载运行就可以了。",
+    "text": "Cloudbot还有一个非常重要的点，就是可以使用本地的模型。这里官方给的建议是LM Studio去配合MiniMax 2.1，但是MiniMax 2.1确实有点大，最小的我本地也跑不了，所以我只能换成是最新的一个JRM 4.7。那模型这部分我就跳过了，其实也就是直接下载运行就可以了。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU021_island0",
+          "timestamp_sec": 179.0999999999998,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU021"
+        },
+        {
+          "screenshot_id": "SU021_island1",
+          "timestamp_sec": 182.3999999999996,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU021"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU021_action0",
+          "start_sec": 352.0,
+          "end_sec": 368.0,
+          "knowledge_type": "推演",
+          "semantic_unit_id": "SU021"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "本地模型配置与运行步骤",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 352.59999999999997,
+        "end_sec": 355.59999999999997,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 357.99999999999966,
+        "end_sec": 361.79999999999944,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 363.79999999999933,
+        "end_sec": 364.3999999999993,
+        "action_type": "推演",
+        "knowledge_type": "推演",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 4,
+        "start_sec": 366.79999999999916,
+        "end_sec": 368.0,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot本地模型配置建议",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU022",
-  "start_sec" : 364.0,
-  "end_sec" : 374.0,
-  "full_text" : "模型这部分我就跳过了，其实也就是直接下载运行就可以了。如果不知道怎么弄，可以翻一下我之前的视频，本地跑模型我已经介绍过很多了。",
-  "text" : "模型这部分我就跳过了，其实也就是直接下载运行就可以了。如果不知道怎么弄，可以翻一下我之前的视频，本地跑模型我已经介绍过很多了。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU022_island0",
-      "timestamp_sec" : 182.39999999999995,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU022"
-    }, {
-      "screenshot_id" : "SU022_island1",
-      "timestamp_sec" : 184.8999999999998,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU022"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU022",
+    "start_sec": 360.0,
+    "end_sec": 374.0,
+    "full_text": "模型这部分我就跳过了，其实也就是直接下载运行就可以了。如果实在不知道怎么弄，可以去翻一下我之前的视频，本地跑模型我已经介绍过很多了。最小的我本地也跑不了，所以我只能换成最新的JRM 4.7。模型这部分我就跳过了，其实也就是直接下载运行就可以了。",
+    "text": "模型这部分我就跳过了，其实也就是直接下载运行就可以了。如果实在不知道怎么弄，可以去翻一下我之前的视频，本地跑模型我已经介绍过很多了。最小的我本地也跑不了，所以我只能换成最新的JRM 4.7。模型这部分我就跳过了，其实也就是直接下载运行就可以了。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU022_island0",
+          "timestamp_sec": 182.39999999999984,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU022"
+        },
+        {
+          "screenshot_id": "SU022_island1",
+          "timestamp_sec": 184.8999999999997,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU022"
+        }
+      ],
+      "clip_requests": [
+        {
+          "clip_id": "clip_SU022_action0",
+          "start_sec": 360.0,
+          "end_sec": 374.0,
+          "knowledge_type": "推演",
+          "semantic_unit_id": "SU022"
+        }
+      ]
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "模型下载与运行说明",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 360.59999999999997,
+        "end_sec": 361.7999999999999,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 363.7999999999998,
+        "end_sec": 364.39999999999975,
+        "action_type": "推演",
+        "knowledge_type": "推演",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 3,
+        "start_sec": 371.4999999999993,
+        "end_sec": 373.9999999999992,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "本地模型运行与学习指引",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU023",
-  "start_sec" : 374.0,
-  "end_sec" : 380.0,
-  "full_text" : "有了本地模型以后，你可以直接在Cloudbot里做配置，或者也可以在Cloudbot里告诉它。",
-  "text" : "有了本地模型以后，你可以直接在Cloudbot里做配置，或者也可以在Cloudbot里告诉它。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU023_island0",
-      "timestamp_sec" : 186.6,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU023"
-    }, {
-      "screenshot_id" : "SU023_island1",
-      "timestamp_sec" : 187.59999999999994,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU023"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU023",
+    "start_sec": 374.0,
+    "end_sec": 384.0,
+    "full_text": "有了本地模型以后，你可以直接在Cloudbot里去做配置，或者你也可以在Cloudbot里告诉它你要怎么去修改，然后让它自己去执行。",
+    "text": "有了本地模型以后，你可以直接在Cloudbot里去做配置，或者你也可以在Cloudbot里告诉它你要怎么去修改，然后让它自己去执行。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU023_island0",
+          "timestamp_sec": 186.6,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU023"
+        },
+        {
+          "screenshot_id": "SU023_island1",
+          "timestamp_sec": 187.59999999999994,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU023"
+        },
+        {
+          "screenshot_id": "SU023_island2",
+          "timestamp_sec": 191.19999999999973,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU023"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "process",
+    "knowledge_topic": "Cloudbot配置与执行方式",
+    "cv_validated": true,
+    "action_units": [
+      {
+        "id": 1,
+        "start_sec": 375.7999999999999,
+        "end_sec": 376.1999999999999,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      },
+      {
+        "id": 2,
+        "start_sec": 382.7999999999995,
+        "end_sec": 383.39999999999947,
+        "action_type": "讲解型",
+        "knowledge_type": "讲解型",
+        "confidence": 0.0,
+        "reasoning": ""
+      }
+    ],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "process",
-  "knowledge_topic" : "Cloudbot本地模型配置方法",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU024",
-  "start_sec" : 384.0,
-  "end_sec" : 392.0,
-  "full_text" : "看过安装、配置和使用以后，我们再来深入地解析一下它的架构。Cloudbot非常让我惊艳的，就是它的完整的架构设计。",
-  "text" : "看过安装、配置和使用以后，我们再来深入地解析一下它的架构。Cloudbot非常让我惊艳的，就是它的完整的架构设计。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU024_island0",
-      "timestamp_sec" : 191.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU024"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU024",
+    "start_sec": 384.0,
+    "end_sec": 392.0,
+    "full_text": "看过安装、配置和使用以后，我们再来深入的解析一下它的架构。其实Cloudbot非常让我惊艳的，就是它的完整的架构设计。",
+    "text": "看过安装、配置和使用以后，我们再来深入的解析一下它的架构。其实Cloudbot非常让我惊艳的，就是它的完整的架构设计。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU024_island0",
+          "timestamp_sec": 191.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU024"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "引入Cloudbot架构解析",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot架构解析引入",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU025",
-  "start_sec" : 392.0,
-  "end_sec" : 412.0,
-  "full_text" : "这是我弄的一个架构图，首先我们来看一下最外层是各种的接入，比如像各种的Channel。那这些接入都会接入到Cloudbot的Gateway，这个也是Cloudbot的核心中枢，它负责的就是统一的管理会话，还有路由不同的渠道，以及服务长期运行的逻辑。",
-  "text" : "这是我弄的一个架构图，首先我们来看一下最外层是各种的接入，比如像各种的Channel。那这些接入都会接入到Cloudbot的Gateway，这个也是Cloudbot的核心中枢，它负责的就是统一的管理会话，还有路由不同的渠道，以及服务长期运行的逻辑。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU025_island0",
-      "timestamp_sec" : 197.25,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU025"
-    }, {
-      "screenshot_id" : "SU025_island1",
-      "timestamp_sec" : 198.75,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU025"
-    }, {
-      "screenshot_id" : "SU025_island2",
-      "timestamp_sec" : 203.0,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU025"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU025",
+    "start_sec": 388.0,
+    "end_sec": 412.0,
+    "full_text": "Cloudbot非常让我惊艳的，就是它的完整的架构设计。这是我弄的一个架构图，首先我们来看一下最外层是各种的接入，比如像各种的Channel，还有TUI、WebUI或者是Mac的App。这些接入都会接入到Cloudbot的Gateway，这个也是Cloudbot的核心中枢，它负责统一的管理会话、路由不同的渠道，以及服务长期运行的逻辑。",
+    "text": "Cloudbot非常让我惊艳的，就是它的完整的架构设计。这是我弄的一个架构图，首先我们来看一下最外层是各种的接入，比如像各种的Channel，还有TUI、WebUI或者是Mac的App。这些接入都会接入到Cloudbot的Gateway，这个也是Cloudbot的核心中枢，它负责统一的管理会话、路由不同的渠道，以及服务长期运行的逻辑。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU025_island0",
+          "timestamp_sec": 195.0,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU025"
+        },
+        {
+          "screenshot_id": "SU025_island1",
+          "timestamp_sec": 197.25,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU025"
+        },
+        {
+          "screenshot_id": "SU025_island2",
+          "timestamp_sec": 198.75,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU025"
+        },
+        {
+          "screenshot_id": "SU025_island3",
+          "timestamp_sec": 203.0,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU025"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "concrete",
+    "knowledge_topic": "Cloudbot架构图与Gateway",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "concrete",
-  "knowledge_topic" : "Cloudbot架构图解析",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU026",
-  "start_sec" : 412.0,
-  "end_sec" : 434.0,
-  "full_text" : "再接下来就是Agent Runtime，它会调用用户配置的大元模型来去生成响应、规划任务，还有执行具体的操作。为了让Agent能够具体做事，Cloudbot还配置了可插拔的Tools和Skills。这些扩展模块封装了像文件的操作、浏览器的控制，还有定时任务等能力，就可以让智能体去执行具体的操作了。为了让Agent能够具体做事，Cloudbot配置了可插拔的Tools和Skills。这些扩展模块封装了文件操作、浏览器控制、定时任务等能力，使智能体能够执行具体操作，并且还可以接入不同节点，在不同节点上完成各种任务。",
-  "text" : "再接下来就是Agent Runtime，它会调用用户配置的大元模型来去生成响应、规划任务，还有执行具体的操作。为了让Agent能够具体做事，Cloudbot还配置了可插拔的Tools和Skills。这些扩展模块封装了像文件的操作、浏览器的控制，还有定时任务等能力，就可以让智能体去执行具体的操作了。为了让Agent能够具体做事，Cloudbot配置了可插拔的Tools和Skills。这些扩展模块封装了文件操作、浏览器控制、定时任务等能力，使智能体能够执行具体操作，并且还可以接入不同节点，在不同节点上完成各种任务。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU026_island0",
-      "timestamp_sec" : 206.0,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU026"
-    }, {
-      "screenshot_id" : "SU026_island1",
-      "timestamp_sec" : 208.25,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU026"
-    }, {
-      "screenshot_id" : "SU026_island2",
-      "timestamp_sec" : 209.75,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU026"
-    }, {
-      "screenshot_id" : "SU026_island3",
-      "timestamp_sec" : 210.75,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU026"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU026",
+    "start_sec": 412.0,
+    "end_sec": 420.0,
+    "full_text": "再接下来就是Agent Runtime，它会调用用户配置的大元模型来去生成响应、规划任务，还有执行具体的操作。",
+    "text": "再接下来就是Agent Runtime，它会调用用户配置的大元模型来去生成响应、规划任务，还有执行具体的操作。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU026_island0",
+          "timestamp_sec": 206.0,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU026"
+        },
+        {
+          "screenshot_id": "SU026_island1",
+          "timestamp_sec": 208.25,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU026"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "Agent Runtime功能描述",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Agent Runtime功能与扩展模块",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU027",
-  "start_sec" : 434.0,
-  "end_sec" : 442.0,
-  "full_text" : "最底层是长期的记忆机制，通过本地存储的Markdown等文件，去积累用户的偏好和历史的上下文，来实现这种跨对话的连续感知。",
-  "text" : "最底层是长期的记忆机制，通过本地存储的Markdown等文件，去积累用户的偏好和历史的上下文，来实现这种跨对话的连续感知。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU027_island0",
-      "timestamp_sec" : 216.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU027"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU027",
+    "start_sec": 420.0,
+    "end_sec": 434.0,
+    "full_text": "为了让Agent能够执行具体任务，Cloudbot配置了可插拔的Tools和Skills。这些扩展模块封装了文件操作、浏览器控制和定时任务等能力，使智能体能够执行具体操作。而且可以接入不同节点，在不同节点上完成任务。为了让Agent能够执行具体任务，Cloudbot还配置了可插拔的Tools和Skills，而且可以接入不同节点，在不同节点上完成任务。",
+    "text": "为了让Agent能够执行具体任务，Cloudbot配置了可插拔的Tools和Skills。这些扩展模块封装了文件操作、浏览器控制和定时任务等能力，使智能体能够执行具体操作。而且可以接入不同节点，在不同节点上完成任务。为了让Agent能够执行具体任务，Cloudbot还配置了可插拔的Tools和Skills，而且可以接入不同节点，在不同节点上完成任务。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU027_island0",
+          "timestamp_sec": 209.75,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU027"
+        },
+        {
+          "screenshot_id": "SU027_island1",
+          "timestamp_sec": 210.75,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU027"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "Tools和Skills扩展模块",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "长期记忆机制原理",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU028",
-  "start_sec" : 442.0,
-  "end_sec" : 480.0,
-  "full_text" : "最后来说一些我个人的感受。作为一个开源项目来说，它的完成度是非常高的，虽然目前也有一些不完善，但你确实没办法要求它用一个月的时间就全面超过商业的产品。但你确实没办法要求它用一个月的时间就全面超过商业的产品。而且我觉得它还有更多的潜力可以去挖掘。",
-  "text" : "最后来说一些我个人的感受。作为一个开源项目来说，它的完成度是非常高的，虽然目前也有一些不完善，但你确实没办法要求它用一个月的时间就全面超过商业的产品。但你确实没办法要求它用一个月的时间就全面超过商业的产品。而且我觉得它还有更多的潜力可以去挖掘。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU028_island0",
-      "timestamp_sec" : 220.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU028"
-    }, {
-      "screenshot_id" : "SU028_island1",
-      "timestamp_sec" : 231.5,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU028"
-    }, {
-      "screenshot_id" : "SU028_island2",
-      "timestamp_sec" : 232.5,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU028"
-    }, {
-      "screenshot_id" : "SU028_island3",
-      "timestamp_sec" : 233.75,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU028"
-    }, {
-      "screenshot_id" : "SU028_island4",
-      "timestamp_sec" : 236.25,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU028"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU028",
+    "start_sec": 434.0,
+    "end_sec": 442.0,
+    "full_text": "最底层是长期记忆机制，通过本地存储的Markdown等文件积累用户偏好和历史上下文，实现跨对话的连续感知。",
+    "text": "最底层是长期记忆机制，通过本地存储的Markdown等文件积累用户偏好和历史上下文，实现跨对话的连续感知。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU028_island0",
+          "timestamp_sec": 216.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU028"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "长期记忆机制的定义与功能",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot项目评价与潜力",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU029",
-  "start_sec" : 454.0,
-  "end_sec" : 480.0,
-  "full_text" : "而且我还看到它有几点非常值得关注：第一就是Cloudbot强调服务的概念，让AI实现24小时的工作，再配合上底层的工具和skill去在后台完成各种任务。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性；第三个就是它的长期记忆机制，再配合上各种定时任务，它会不断的记住用户的喜好和习惯，然后去主动性的形成一些定期任务，而且我觉得它还有更多的潜力可以去挖掘。",
-  "text" : "而且我还看到它有几点非常值得关注：第一就是Cloudbot强调服务的概念，让AI实现24小时的工作，再配合上底层的工具和skill去在后台完成各种任务。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性；第三个就是它的长期记忆机制，再配合上各种定时任务，它会不断的记住用户的喜好和习惯，然后去主动性的形成一些定期任务，而且我觉得它还有更多的潜力可以去挖掘。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU029_island0",
-      "timestamp_sec" : 226.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU029"
-    }, {
-      "screenshot_id" : "SU029_island1",
-      "timestamp_sec" : 231.5,
-      "label" : "稳定岛1",
-      "semantic_unit_id" : "SU029"
-    }, {
-      "screenshot_id" : "SU029_island2",
-      "timestamp_sec" : 232.5,
-      "label" : "稳定岛2",
-      "semantic_unit_id" : "SU029"
-    }, {
-      "screenshot_id" : "SU029_island3",
-      "timestamp_sec" : 233.75,
-      "label" : "稳定岛3",
-      "semantic_unit_id" : "SU029"
-    }, {
-      "screenshot_id" : "SU029_island4",
-      "timestamp_sec" : 236.25,
-      "label" : "稳定岛4",
-      "semantic_unit_id" : "SU029"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU029",
+    "start_sec": 442.0,
+    "end_sec": 454.0,
+    "full_text": "作为开源项目，它的完成度非常高，虽然目前也有一些不完善，但你确实没办法要求它用一个月的时间就全面超过商业的产品。",
+    "text": "作为开源项目，它的完成度非常高，虽然目前也有一些不完善，但你确实没办法要求它用一个月的时间就全面超过商业的产品。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU029_island0",
+          "timestamp_sec": 220.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU029"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "开源项目完成度评价",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "Cloudbot服务与接入方式特点",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
-  }
-}, {
-  "unit_id" : "SU030",
-  "start_sec" : 480.0,
-  "end_sec" : 484.0,
-  "full_text" : "这里是IT咖啡馆，我们下次再见。",
-  "text" : "这里是IT咖啡馆，我们下次再见。",
-  "stable_islands" : [ ],
-  "action_segments" : [ ],
-  "material_requests" : {
-    "screenshot_requests" : [ {
-      "screenshot_id" : "SU030_island0",
-      "timestamp_sec" : 239.5,
-      "label" : "稳定岛0",
-      "semantic_unit_id" : "SU030"
-    } ],
-    "clip_requests" : [ ]
+  {
+    "unit_id": "SU030",
+    "start_sec": 454.0,
+    "end_sec": 470.0,
+    "full_text": "而且我还看到它有几点非常值得关注：第一就是Cloudbot强调服务的概念，让AI实现24小时的工作，再配合上底层的工具和skill去在后台完成各种任务；第二就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。",
+    "text": "而且我还看到它有几点非常值得关注：第一就是Cloudbot强调服务的概念，让AI实现24小时的工作，再配合上底层的工具和skill去在后台完成各种任务；第二就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。第二个就是接入的方式非常友好，通过聊天工具的方式可以提升使用的便捷性。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU030_island0",
+          "timestamp_sec": 226.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU030"
+        },
+        {
+          "screenshot_id": "SU030_island1",
+          "timestamp_sec": 231.5,
+          "label": "稳定岛1",
+          "semantic_unit_id": "SU030"
+        },
+        {
+          "screenshot_id": "SU030_island2",
+          "timestamp_sec": 232.5,
+          "label": "稳定岛2",
+          "semantic_unit_id": "SU030"
+        },
+        {
+          "screenshot_id": "SU030_island3",
+          "timestamp_sec": 233.75,
+          "label": "稳定岛3",
+          "semantic_unit_id": "SU030"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "Cloudbot服务与接入方式特点",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   },
-  "knowledge_type" : "abstract",
-  "knowledge_topic" : "节目结束语",
-  "cv_validated" : true,
-  "action_units" : [ ],
-  "crossed_stable_islands" : {
-    "stage1" : [ ],
-    "stage2" : [ ]
+  {
+    "unit_id": "SU031",
+    "start_sec": 470.0,
+    "end_sec": 478.0,
+    "full_text": "第三个就是它的长期记忆机制，再配合上各种定时任务，它会不断的记住用户的喜好和习惯，然后去主动性的形成一些定期任务。",
+    "text": "第三个就是它的长期记忆机制，再配合上各种定时任务，它会不断的记住用户的喜好和习惯，然后去主动性的形成一些定期任务。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU031_island0",
+          "timestamp_sec": 236.25,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU031"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "长期记忆机制与定时任务结合",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
+  },
+  {
+    "unit_id": "SU032",
+    "start_sec": 478.0,
+    "end_sec": 480.0,
+    "full_text": "而且我觉得它还有更多的潜力可以挖掘。",
+    "text": "而且我觉得它还有更多的潜力可以挖掘。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU032_island0",
+          "timestamp_sec": 238.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU032"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "项目潜力展望",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
+  },
+  {
+    "unit_id": "SU033",
+    "start_sec": 480.0,
+    "end_sec": 484.0,
+    "full_text": "这里是IT咖啡馆，我们下次再见。",
+    "text": "这里是IT咖啡馆，我们下次再见。",
+    "stable_islands": [],
+    "action_segments": [],
+    "material_requests": {
+      "screenshot_requests": [
+        {
+          "screenshot_id": "SU033_island0",
+          "timestamp_sec": 239.5,
+          "label": "稳定岛0",
+          "semantic_unit_id": "SU033"
+        }
+      ],
+      "clip_requests": []
+    },
+    "knowledge_type": "abstract",
+    "knowledge_topic": "节目结束语",
+    "cv_validated": true,
+    "action_units": [],
+    "crossed_stable_islands": {
+      "stage1": [],
+      "stage2": []
+    }
   }
-} ]
+]

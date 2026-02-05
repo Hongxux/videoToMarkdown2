@@ -460,36 +460,61 @@ public class VideoProcessingOrchestrator {
     private List<JavaCVFFmpegService.ScreenshotRequest> mergeScreenshotRequests(
             List<PythonGrpcClient.ScreenshotRequest> phase2aRequests,
             List<PythonGrpcClient.ScreenshotRequestDTO> generatedRequests) {
-        // 合并两路截图请求：做什么是保留 Phase2A 与生成结果；为什么是避免上游召回被忽略；权衡是可能略增重复提取
+        // 合并两路截图请求：做什么是保留 Phase2A 与生成结果；为什么是避免上游召回被忽略；
+        // 关键修复：generatedRequests 优先（Phase2A 可能复用旧缓存导致时间戳/ID 与最新策略不一致）；
+        // 权衡：若两路同 ID 冲突将以 generated 覆盖 Phase2A，可能丢失 Phase2A 的旧请求，但确保“最新策略生效”。
         Map<String, JavaCVFFmpegService.ScreenshotRequest> merged = new LinkedHashMap<>();
-        appendScreenshotRequests(merged, phase2aRequests);
-        appendScreenshotRequestsFromDto(merged, generatedRequests);
+        appendScreenshotRequestsFromDtoPreferNew(merged, generatedRequests);
+        appendScreenshotRequestsIfAbsent(merged, phase2aRequests);
         return new ArrayList<>(merged.values());
     }
 
-    private void appendScreenshotRequests(
+    private void appendScreenshotRequestsIfAbsent(
             Map<String, JavaCVFFmpegService.ScreenshotRequest> merged,
             List<PythonGrpcClient.ScreenshotRequest> requests) {
         if (requests == null) return;
         for (PythonGrpcClient.ScreenshotRequest req : requests) {
             if (req == null) continue;
             String key = buildScreenshotKey(req.screenshotId, req.semanticUnitId, req.timestampSec);
-            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ScreenshotRequest(
-                req.screenshotId, req.timestampSec, req.label, req.semanticUnitId
-            ));
+            JavaCVFFmpegService.ScreenshotRequest existing = merged.get(key);
+            if (existing != null) {
+                if (!nearlyEqual(existing.timestampSec, req.timestampSec)
+                    || !safeEq(existing.semanticUnitId, req.semanticUnitId)) {
+                    logger.warn(
+                        "[ScreenshotMerge] Skip Phase2A due to generated present: id={}, old_ts={}, new_ts={}, old_su={}, new_su={}",
+                        req.screenshotId, existing.timestampSec, req.timestampSec, existing.semanticUnitId, req.semanticUnitId
+                    );
+                }
+                continue;
+            }
+            merged.put(
+                key,
+                new JavaCVFFmpegService.ScreenshotRequest(req.screenshotId, req.timestampSec, req.label, req.semanticUnitId)
+            );
         }
     }
 
-    private void appendScreenshotRequestsFromDto(
+    private void appendScreenshotRequestsFromDtoPreferNew(
             Map<String, JavaCVFFmpegService.ScreenshotRequest> merged,
             List<PythonGrpcClient.ScreenshotRequestDTO> requests) {
         if (requests == null) return;
         for (PythonGrpcClient.ScreenshotRequestDTO req : requests) {
             if (req == null) continue;
             String key = buildScreenshotKey(req.screenshotId, req.semanticUnitId, req.timestampSec);
-            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ScreenshotRequest(
-                req.screenshotId, req.timestampSec, req.label, req.semanticUnitId
-            ));
+            JavaCVFFmpegService.ScreenshotRequest existing = merged.get(key);
+            if (existing != null) {
+                if (!nearlyEqual(existing.timestampSec, req.timestampSec)
+                    || !safeEq(existing.semanticUnitId, req.semanticUnitId)) {
+                    logger.warn(
+                        "[ScreenshotMerge] Override by generated: id={}, old_ts={}, new_ts={}, old_su={}, new_su={}",
+                        req.screenshotId, existing.timestampSec, req.timestampSec, existing.semanticUnitId, req.semanticUnitId
+                    );
+                }
+            }
+            merged.put(
+                key,
+                new JavaCVFFmpegService.ScreenshotRequest(req.screenshotId, req.timestampSec, req.label, req.semanticUnitId)
+            );
         }
     }
 
@@ -505,36 +530,63 @@ public class VideoProcessingOrchestrator {
     private List<JavaCVFFmpegService.ClipRequest> mergeClipRequests(
             List<PythonGrpcClient.ClipRequest> phase2aRequests,
             List<PythonGrpcClient.ClipRequestDTO> generatedRequests) {
-        // 合并两路切片请求：做什么是保留 Phase2A 与生成结果；为什么是避免素材断链；权衡是可能增加切片数量
+        // 合并两路切片请求：做什么是保留 Phase2A 与生成结果；为什么是避免素材断链；
+        // 关键修复：generatedRequests 优先（Phase2A 可能复用旧 semantic_units_phase2a.json，导致 clipId 相同但时间段不同）；
+        // 权衡：同 clipId 冲突时以 generated 覆盖 Phase2A，确保“自适应动作包络”等新策略真正进入 FFmpeg 提取阶段。
         Map<String, JavaCVFFmpegService.ClipRequest> merged = new LinkedHashMap<>();
-        appendClipRequests(merged, phase2aRequests);
-        appendClipRequestsFromDto(merged, generatedRequests);
+        appendClipRequestsFromDtoPreferNew(merged, generatedRequests);
+        appendClipRequestsIfAbsent(merged, phase2aRequests);
         return new ArrayList<>(merged.values());
     }
 
-    private void appendClipRequests(
+    private void appendClipRequestsIfAbsent(
             Map<String, JavaCVFFmpegService.ClipRequest> merged,
             List<PythonGrpcClient.ClipRequest> requests) {
         if (requests == null) return;
         for (PythonGrpcClient.ClipRequest req : requests) {
             if (req == null) continue;
             String key = buildClipKey(req.clipId, req.semanticUnitId, req.startSec, req.endSec);
-            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ClipRequest(
-                req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId
-            ));
+            JavaCVFFmpegService.ClipRequest existing = merged.get(key);
+            if (existing != null) {
+                if (!nearlyEqual(existing.startSec, req.startSec)
+                    || !nearlyEqual(existing.endSec, req.endSec)
+                    || !safeEq(existing.semanticUnitId, req.semanticUnitId)) {
+                    logger.warn(
+                        "[ClipMerge] Skip Phase2A due to generated present: id={}, old=[{}-{}], new=[{}-{}], old_su={}, new_su={}",
+                        req.clipId, existing.startSec, existing.endSec, req.startSec, req.endSec, existing.semanticUnitId, req.semanticUnitId
+                    );
+                }
+                continue;
+            }
+            merged.put(
+                key,
+                new JavaCVFFmpegService.ClipRequest(req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId)
+            );
         }
     }
 
-    private void appendClipRequestsFromDto(
+    private void appendClipRequestsFromDtoPreferNew(
             Map<String, JavaCVFFmpegService.ClipRequest> merged,
             List<PythonGrpcClient.ClipRequestDTO> requests) {
         if (requests == null) return;
         for (PythonGrpcClient.ClipRequestDTO req : requests) {
             if (req == null) continue;
             String key = buildClipKey(req.clipId, req.semanticUnitId, req.startSec, req.endSec);
-            merged.computeIfAbsent(key, k -> new JavaCVFFmpegService.ClipRequest(
-                req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId
-            ));
+            JavaCVFFmpegService.ClipRequest existing = merged.get(key);
+            if (existing != null) {
+                if (!nearlyEqual(existing.startSec, req.startSec)
+                    || !nearlyEqual(existing.endSec, req.endSec)
+                    || !safeEq(existing.semanticUnitId, req.semanticUnitId)) {
+                    logger.warn(
+                        "[ClipMerge] Override by generated: id={}, old=[{}-{}], new=[{}-{}], old_su={}, new_su={}",
+                        req.clipId, existing.startSec, existing.endSec, req.startSec, req.endSec, existing.semanticUnitId, req.semanticUnitId
+                    );
+                }
+            }
+            merged.put(
+                key,
+                new JavaCVFFmpegService.ClipRequest(req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId)
+            );
         }
     }
 
@@ -545,6 +597,16 @@ public class VideoProcessingOrchestrator {
         }
         String unit = semanticUnitId != null ? semanticUnitId.trim() : "";
         return "range:" + unit + "|" + Double.toString(startSec) + "-" + Double.toString(endSec);
+    }
+
+    private boolean nearlyEqual(double a, double b) {
+        return Math.abs(a - b) <= 1e-3;
+    }
+
+    private boolean safeEq(String a, String b) {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+        return a.equals(b);
     }
 
     private void ensureActionIds(List<ActionSegmentResult> actions) {

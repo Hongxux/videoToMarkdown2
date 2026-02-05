@@ -12,8 +12,10 @@
 
 import os
 import json
+import re
+import ast
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
 # 🚀 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
 import asyncio
 
@@ -257,17 +259,20 @@ class KnowledgeClassifier:
 当内容混合时，按认知价值排序：
 **推演 (Why) > 实操/配置 (How to do) > 过程性知识 (How it works) > 讲解型 (What is it)**
 
-## 输出格式 (JSON Array)
-[
-    {
-        "id": "item_index",
-        "knowledge_type": "过程性知识", 
-        "confidence": 0.95,
-        "reasoning": "虽然含有'点击'一词，但核心意图是解释点击触发后的事件冒泡机制，而非教用户复刻点击动作。",
-        "key_evidence": "事件会向上传递直到被捕获"
-    }
-]
-仅输出 JSON 数组，无其他内容。"""
+    ## 输出格式 (JSON Array)
+    - 你必须返回 JSON 数组
+    - 每个对象必须包含字段：id / knowledge_type / confidence / reasoning / key_evidence
+    - 其中 id 必须严格等于输入中的 ID（用于回填映射）
+    [
+        {
+            "id": 0,
+            "knowledge_type": "过程性知识",
+            "confidence": 0.95,
+            "reasoning": "虽然含有'点击'一词，但核心意图是解释点击触发后的事件冒泡机制，而非教用户复刻点击动作。",
+            "key_evidence": "事件会向上传递直到被捕获"
+        }
+    ]
+    仅输出 JSON 数组，无其他内容。"""
 
     BATCH_USER_TEMPLATE = """请批量分析以下动作单元:
 
@@ -277,6 +282,17 @@ class KnowledgeClassifier:
 
 ## 待分析动作单元列表
 {batch_content}"""
+
+    MULTI_UNIT_USER_TEMPLATE = """请批量分析以下【多个语义单元】的动作单元。
+
+## 重要约束
+- 你必须返回 JSON 数组
+- 每个结果对象必须包含字段：id / knowledge_type / confidence / reasoning / key_evidence
+- 其中 id 必须严格等于输入 actions[*].id（格式形如 "SU001:action_1"），用于回填映射
+
+## 输入数据（JSON）
+{units_json}
+"""
 
     async def classify_batch(
         self,
@@ -364,8 +380,11 @@ class KnowledgeClassifier:
 
         # 3. Concurrent Execution
         results_map = {} # id -> result
+
+        # 解析失败时的拆分重试深度（避免极端情况下递归过深导致请求风暴）
+        max_split_depth = int(os.getenv("MODULE2_KC_BATCH_SPLIT_MAX_DEPTH", "6") or "6")
         
-        async def _process_chunk(chunk_items):
+        async def _process_chunk(chunk_items, split_depth: int = 0, is_retry: bool = False):
             """
             执行逻辑：
             1) 准备必要上下文与参数。
@@ -398,6 +417,8 @@ ID: {item['id']}
                     full_text=semantic_unit_text,
                     batch_content=batch_content
                 )
+                if is_retry:
+                    user_prompt += "\n\n⚠️ 请严格输出可被 json.loads 解析的 JSON 数组；不要使用 ``` 代码围栏；字符串中禁止未转义换行/制表符。"
                 
                 if not self._enabled:
                     return []
@@ -412,9 +433,17 @@ ID: {item['id']}
                 parsed_items = self._parse_batch_content(content)
                 if parsed_items:
                     return parsed_items
-                logger.warning(f"Batch JSON parse failed: {content[:100]}...")
-                return []
-                
+                logger.warning(
+                    f"Batch JSON parse failed (items={len(chunk_items)}, depth={split_depth}): {content[:120]}..."
+                )
+
+                # 兜底：常见原因是输出截断/格式漂移，尝试将 chunk 拆小后重试
+                if len(chunk_items) > 1 and split_depth < max_split_depth:
+                    mid = max(1, len(chunk_items) // 2)
+                    left = await _process_chunk(chunk_items[:mid], split_depth=split_depth + 1, is_retry=True)
+                    right = await _process_chunk(chunk_items[mid:], split_depth=split_depth + 1, is_retry=True)
+                    return (left or []) + (right or [])
+
                 return []
             except Exception as e:
                 logger.error(f"Chunk processing failed: {e}")
@@ -424,18 +453,41 @@ ID: {item['id']}
         tasks = [_process_chunk(chunk) for chunk in chunks]
         all_chunk_res = await asyncio.gather(*tasks)
         
+        def _safe_float(val: Any, default: float = 0.5) -> float:
+            try:
+                return float(val)
+            except Exception:
+                return float(default)
+
+        def _ingest_results(chunk_res: list) -> None:
+            for res in chunk_res or []:
+                if not isinstance(res, dict):
+                    continue
+                if "id" not in res:
+                    continue
+                idx = self._normalize_batch_index(res.get("id"))
+                if idx is None or not (0 <= idx < len(items)):
+                    logger.warning(f"Skip invalid batch result id: {res.get('id')!r}")
+                    continue
+
+                reasoning = str(res.get("reasoning", "") or "")
+                key_evidence = str(res.get("key_evidence", "") or "") or reasoning[:30]
+                results_map[idx] = {
+                    "knowledge_type": res.get("knowledge_type", "过程性知识"),
+                    "confidence": _safe_float(res.get("confidence", 0.5), default=0.5),
+                    "key_evidence": key_evidence,
+                    "reasoning": reasoning,
+                }
+
         for chunk_res in all_chunk_res:
-            if chunk_res:
-                for res in chunk_res:
-                    if isinstance(res, dict) and "id" in res:
-                        res_id = res["id"]
-                        norm_res = {
-                            "knowledge_type": res.get("knowledge_type", "过程性知识"),
-                            "confidence": float(res.get("confidence", 0.5)),
-                            "key_evidence": res.get("reasoning", "")[:30],
-                            "reasoning": res.get("reasoning", ""),
-                        }
-                        results_map[int(res_id)] = norm_res
+            _ingest_results(chunk_res or [])
+
+        # 兜底：若仍有缺失，尝试对缺失项做一次“缩小范围”的重试（避免整批回退默认值）
+        missing_indices = [i for i in range(len(items)) if i not in results_map]
+        if missing_indices and self._enabled:
+            retry_items = [items[i] for i in missing_indices]
+            retry_res = await _process_chunk(retry_items, split_depth=0, is_retry=True)
+            _ingest_results(retry_res or [])
 
         # 4. Assemble final results in order
         final_results = []
@@ -443,14 +495,191 @@ ID: {item['id']}
             if i in results_map:
                 final_results.append(results_map[i])
             else:
-                logger.warning(f"Item {i} missing from batch results, doing fallback classify")
+                logger.warning(f"Item {i} missing from batch results, using fallback default")
                 final_results.append({
                     "knowledge_type": "过程性知识", 
                     "confidence": 0.5,
-                    "key_evidence": "Batch Miss"
+                    "key_evidence": "Batch Miss",
+                    "reasoning": "批量分类缺失，已使用默认兜底。"
                 })
                 
         return final_results
+
+    async def classify_units_batch(self, units: list, external_limiter: Optional[Any] = None) -> Dict[str, list]:
+        """
+        做什么：对多个语义单元的动作单元做“跨 unit”批量分类。
+        为什么：单 unit 调一次 LLM 在大任务下会形成瓶颈；跨 unit 合并请求可显著降低调用次数与调度开销（参考 LLM调用优化.md）。
+        权衡：单次 prompt 更长，需通过 token_budget 动态分块避免超过上下文窗口；解析失败时回退到缺省结果。
+        输入：
+        - units: 形如 [{unit_id,title/full_text,action_segments:[{id,start_sec,end_sec}, ...]}, ...]
+        - external_limiter: 可选外部并发控制器（用于 gRPC 层 AIMD 探测），需支持 acquire/release/record_success/record_failure
+        输出：
+        - Dict[unit_id, list[classification]]（顺序与输入 action_segments 对齐）
+        """
+        if not units:
+            return {}
+
+        # 降级：未启用或无 client
+        if not self._enabled or not self._llm_client:
+            fallback: Dict[str, list] = {}
+            for u in units:
+                unit_id = str(u.get("unit_id", "") or "")
+                segs = u.get("action_segments", []) or []
+                fallback[unit_id] = [
+                    {"knowledge_type": "过程性知识", "confidence": 0.5, "key_evidence": "LLM Disabled"}
+                    for _ in segs
+                ]
+            return fallback
+
+        token_budget = int(os.getenv("MODULE2_KC_MULTI_TOKEN_BUDGET", "3500") or "3500")
+        max_units_per_chunk = int(os.getenv("MODULE2_KC_MULTI_MAX_UNITS_PER_CHUNK", "6") or "6")
+        max_full_text_chars = int(os.getenv("MODULE2_KC_MULTI_FULL_TEXT_CHARS", "600") or "600")
+
+        # 1) 预处理：构建每个 unit 的 payload（actions[*].id 用于回填）
+        unit_payloads = []
+        total_sub_chars = 0
+        total_actions = 0
+
+        for u in units:
+            unit_id = str(u.get("unit_id", "") or "")
+            title = str(u.get("title", "") or u.get("semantic_unit_title", "") or "")
+            full_text = str(u.get("full_text", "") or u.get("semantic_unit_text", "") or u.get("text", "") or "")
+            if max_full_text_chars > 0 and len(full_text) > max_full_text_chars:
+                full_text = full_text[:max_full_text_chars] + "..."
+
+            actions_in = u.get("action_segments", []) or []
+            actions_payload = []
+
+            for idx, action in enumerate(actions_in):
+                start = action.get("start_sec", 0)
+                end = action.get("end_sec", 0)
+                action_id = action.get("id", idx)
+                key = f"{unit_id}:{action_id}"
+                subs = self._get_subtitles_in_range(start, end)
+
+                total_sub_chars += len(subs)
+                total_actions += 1
+                actions_payload.append(
+                    {
+                        "id": key,
+                        "start": start,
+                        "end": end,
+                        "subtitles": subs,
+                    }
+                )
+
+            unit_payloads.append(
+                {
+                    "unit_id": unit_id,
+                    "title": title,
+                    "full_text": full_text,
+                    "actions": actions_payload,
+                }
+            )
+
+        avg_len = (total_sub_chars / total_actions) if total_actions else 0
+
+        # 2) 动态分块：按 token_budget 近似装箱，减少 LLM 请求次数
+        def est_unit_tokens(payload: dict) -> int:
+            base_chars = len(payload.get("title", "")) + len(payload.get("full_text", ""))
+            action_chars = 0
+            for a in payload.get("actions", []) or []:
+                action_chars += len(a.get("subtitles", ""))
+            return max(1, int((base_chars + action_chars) / 4))
+
+        chunks: List[List[dict]] = []
+        cur: List[dict] = []
+        cur_tokens = 0
+
+        for payload in unit_payloads:
+            u_tokens = est_unit_tokens(payload)
+            if cur and (cur_tokens + u_tokens > token_budget or len(cur) >= max_units_per_chunk):
+                chunks.append(cur)
+                cur = []
+                cur_tokens = 0
+            cur.append(payload)
+            cur_tokens += u_tokens
+        if cur:
+            chunks.append(cur)
+
+        # 3) Model Routing（沿用单 unit 的快慢模型策略）
+        selected_client = self._llm_client
+        model_name = self.smart_model
+        if avg_len < 300 and self._fast_llm_client:
+            selected_client = self._fast_llm_client
+            model_name = self.fast_model
+            logger.info(f"[MultiUnit] Routing to FAST model ({model_name}) | AvgLen: {avg_len:.0f} < 300")
+        else:
+            logger.info(f"[MultiUnit] Routing to SMART model ({model_name}) | AvgLen: {avg_len:.0f} >= 300")
+
+        logger.info(
+            f"[MultiUnit] {len(units)} units / {total_actions} actions -> {len(chunks)} chunks "
+            f"(token_budget={token_budget}, max_units_per_chunk={max_units_per_chunk})"
+        )
+
+        async def _process_chunk(chunk_units: List[dict]) -> list:
+            acquired = 0
+            try:
+                if external_limiter is not None:
+                    acquired = await external_limiter.acquire()
+
+                units_json = json.dumps(chunk_units, ensure_ascii=False, separators=(",", ":"))
+                user_prompt = self.MULTI_UNIT_USER_TEMPLATE.format(units_json=units_json)
+
+                content, _, _ = await selected_client.complete_text(
+                    prompt=user_prompt,
+                    system_message=self.BATCH_SYSTEM_PROMPT,
+                )
+                parsed_items = self._parse_batch_content(content)
+                if external_limiter is not None:
+                    await external_limiter.record_success()
+                return parsed_items or []
+            except Exception as e:
+                if external_limiter is not None:
+                    error_msg = str(e)
+                    is_rate = "429" in error_msg or "rate" in error_msg.lower() or "Too Many Requests" in error_msg
+                    await external_limiter.record_failure(is_rate_limit=is_rate)
+                logger.error(f"[MultiUnit] Chunk processing failed: {e}")
+                return []
+            finally:
+                if external_limiter is not None and acquired:
+                    await external_limiter.release(acquired)
+
+        # 并行处理 chunks（chunk 数量通常远小于 unit 数，能显著减少 API 调用次数）
+        all_chunk_res = await asyncio.gather(*[_process_chunk(c) for c in chunks])
+
+        # 4) 归并：key -> classification
+        results_map: Dict[str, Dict[str, Any]] = {}
+        for chunk_res in all_chunk_res:
+            for res in chunk_res or []:
+                if not isinstance(res, dict):
+                    continue
+                res_id = res.get("id")
+                if not res_id:
+                    continue
+                results_map[str(res_id)] = {
+                    "knowledge_type": res.get("knowledge_type", "过程性知识"),
+                    "confidence": float(res.get("confidence", 0.5)),
+                    "key_evidence": res.get("key_evidence", "") or res.get("reasoning", "")[:30],
+                    "reasoning": res.get("reasoning", ""),
+                }
+
+        # 5) 回填：按输入顺序组装 per-unit 结果
+        final: Dict[str, list] = {}
+        for u in units:
+            unit_id = str(u.get("unit_id", "") or "")
+            segs = u.get("action_segments", []) or []
+            out: List[Dict[str, Any]] = []
+            for idx, action in enumerate(segs):
+                action_id = action.get("id", idx)
+                key = f"{unit_id}:{action_id}"
+                if key in results_map:
+                    out.append(results_map[key])
+                else:
+                    out.append({"knowledge_type": "过程性知识", "confidence": 0.5, "key_evidence": "Batch Miss"})
+            final[unit_id] = out
+
+        return final
 
     def _parse_batch_content(self, content: str) -> list:
         """

@@ -176,3 +176,17 @@
 - 验证方式与结果：运行包含 Vision 校验 + LLM 分类的任务，确认 Vision API timing 日志包含 rate_wait 且 429 降低；观察分类并发随负载变化且无异常。
 - 可复用经验：外部硬限流服务应使用速率限制优先于并发控制；同步环境调用异步 API 应使用统一后台 loop 复用连接池。
 
+## 2026-02-05 ClassifyKnowledgeBatch 跨 Unit 动态分块批处理（降 LLM 调用次数）
+- 日期：2026-02-05
+- 版本/分支/提交：未记录
+- 触发背景与问题：ClassifyKnowledgeBatch 以“每个 unit 调一次 classify_batch”的方式触发大量 DeepSeek 请求，在 unit 数较多时网络往返与调度开销显著放大，成为整体瓶颈。
+- 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/knowledge_classifier.py`（新增 `classify_units_batch`：跨 unit 合并请求 + token_budget 动态分块）；`python_grpc_server.py`（ClassifyKnowledgeBatch 优先走 multi-unit 批处理，保留旧路径作为兼容回退）。
+- 关键决策与理由：
+  - 以“actions[*].id=unit_id:action_id”作为稳定映射键，批量输出 JSON 数组即可回填到 protobuf。
+  - 通过 token_budget + max_units_per_chunk 做装箱分块，避免单次 prompt 过大导致输出不稳定或超限。
+  - 保留环境变量 `MODULE2_KC_MULTI_UNIT_ENABLED` 作为 Feature Flag，必要时一键回退旧 per-unit 并发实现。
+  - 增加结果自检：若 `Batch Miss` 占比过高（`MODULE2_KC_MULTI_UNIT_FALLBACK_MISS_RATIO`，默认 0.4），触发回退到旧 per-unit 路径，避免“合并 prompt/解析不稳”导致整批默认值。
+- 兼容性影响：输出字段保持不变（仍返回 KnowledgeClassificationResult 列表）；当 multi-unit 批处理异常或结果自检失败时会回退旧路径。
+- 风险与回滚方案：若合并 prompt 引起分类质量下降或 JSON 解析不稳定，可设置 `MODULE2_KC_MULTI_UNIT_ENABLED=0` 立即回退；或下调 `MODULE2_KC_MULTI_TOKEN_BUDGET`/`MODULE2_KC_MULTI_MAX_UNITS_PER_CHUNK`/`MODULE2_KC_MULTI_FULL_TEXT_CHARS` 降低单次请求规模；必要时调低 `MODULE2_KC_MULTI_UNIT_FALLBACK_MISS_RATIO` 更激进回退。
+- 验证方式与结果：待用 unit 数较多的视频回归，观察日志中 LLM 请求次数是否显著下降，且返回结果与旧实现对齐。
+- 可复用经验：对“多 unit 独立分类”任务，优先将“批量合并 + 动态分块 + 稳定映射键 + Feature Flag 回退”作为默认工程化模板。

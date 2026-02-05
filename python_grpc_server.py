@@ -146,7 +146,7 @@ def _run_dependency_preflight() -> int:
     ]
 
     missing_modules = set()
-    import_errors: list[tuple[str, str]] = []
+    import_errors = []
 
     for module_name, _pip_hint in modules_to_check:
         _boot(f"[CHECK] import {module_name}")
@@ -1437,62 +1437,131 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 🚀 DeepSeek 并发探测：AIMD 动态逼近吞吐上限
             limiter = self._classify_concurrency_limiter
 
-            async def process_unit(u):
+            async def _classify_per_unit() -> list:
                 """
-                执行逻辑：
-                1) 从语义单元构造 action_segments。
-                2) 调用 classifier.classify_batch 获取分类结果。
-                3) 对齐 action_segments 生成 protobuf 结果列表。
-                实现方式：构造列表 + 异步调用 + 结果对齐。
-                核心价值：在单元内保持结果与 action 对齐。
-                决策逻辑：
-                - 条件：i >= len(action_segments)
-                依据来源（证据链）：
-                - action_segments 长度与 batch_results 长度。
-                输入参数：
-                - u: 函数入参（类型：未标注）。
-                输出参数：
-                - List[KnowledgeClassificationResult]（该单元的分类结果）。"""
-                acquired_permits = await limiter.acquire()
+                做什么：按 unit 并发调用 classify_batch（旧路径）。
+                为什么：当 multi-unit 合并请求失败/解析不稳定时，作为兼容回退。
+                权衡：LLM 调用次数更多，但稳定性更高。
+                """
+
+                async def process_unit(u):
+                    acquired_permits = await limiter.acquire()
+                    try:
+                        action_segments = [
+                            {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id}
+                            for au in u.action_units
+                        ]
+
+                        batch_results = await classifier.classify_batch(
+                            semantic_unit_title=u.title,
+                            semantic_unit_text=u.text,
+                            action_segments=action_segments,
+                        )
+
+                        await limiter.record_success()
+                        unit_results_proto = []
+                        for i, res in enumerate(batch_results):
+                            if i >= len(action_segments):
+                                break
+                            action_id = action_segments[i]["id"]
+                            unit_results_proto.append(
+                                video_processing_pb2.KnowledgeClassificationResult(
+                                    unit_id=u.unit_id,
+                                    action_id=action_id,
+                                    knowledge_type=res.get("knowledge_type", "过程性知识"),
+                                    confidence=res.get("confidence", 0.5),
+                                    key_evidence=res.get("key_evidence", ""),
+                                    reasoning=res.get("reasoning", ""),
+                                )
+                            )
+                        return unit_results_proto
+                    except Exception as e:
+                        await limiter.record_failure(is_rate_limit=False)
+                        logger.error(f"Unit {u.unit_id} classification failed: {e}")
+                        return []
+                    finally:
+                        if acquired_permits:
+                            await limiter.release(acquired_permits)
+
+                tasks = [process_unit(u) for u in request.units]
+                all_unit_results = await asyncio.gather(*tasks)
+                return [r for sublist in all_unit_results for r in sublist]
+
+            # 🚀 优化：跨 unit 合并请求（减少 LLM 调用次数），仍保留外部 limiter 做 AIMD 探测
+            flat_results = []
+            raw = (os.getenv("MODULE2_KC_MULTI_UNIT_ENABLED", "1") or "").strip().lower()
+            multi_unit_enabled = raw in ("1", "true", "yes", "y", "on")
+
+            if hasattr(classifier, "classify_units_batch") and multi_unit_enabled:
                 try:
-                    action_segments = [
-                        {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id}
-                        for au in u.action_units
-                    ]
-                    
-                    # 不再传递字幕，Classifier 直接从 Step 2 读取
-                    
-                    batch_results = await classifier.classify_batch(
-                        semantic_unit_title=u.title,
-                        semantic_unit_text=u.text,
-                        action_segments=action_segments
+                    units_payload = []
+                    unit_actions_map = {}
+                    for u in request.units:
+                        action_segments = [
+                            {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id}
+                            for au in u.action_units
+                        ]
+                        unit_actions_map[u.unit_id] = action_segments
+                        units_payload.append(
+                            {
+                                "unit_id": u.unit_id,
+                                "title": u.title,
+                                "full_text": u.text,
+                                "action_segments": action_segments,
+                            }
+                        )
+
+                    results_map = await classifier.classify_units_batch(
+                        units_payload, external_limiter=limiter
                     )
-                    
-                    await limiter.record_success()
-                    unit_results_proto = []
-                    for i, res in enumerate(batch_results):
-                        if i >= len(action_segments):
-                            break
-                        action_id = action_segments[i]["id"]
-                        unit_results_proto.append(video_processing_pb2.KnowledgeClassificationResult(
-                            unit_id=u.unit_id,
-                            action_id=action_id,
-                            knowledge_type=res.get("knowledge_type", "过程性知识"),
-                            confidence=res.get("confidence", 0.5),
-                            key_evidence=res.get("key_evidence", ""),
-                            reasoning=res.get("reasoning", "")
-                        ))
-                    return unit_results_proto
+
+                    # 结果自检：大量 Batch Miss 说明 JSON 解析或输出结构不稳定，触发回退
+                    total_actions = 0
+                    miss_actions = 0
+                    for u in request.units:
+                        action_segments = unit_actions_map.get(u.unit_id, [])
+                        total_actions += len(action_segments)
+                        batch_results = (
+                            results_map.get(u.unit_id, []) if isinstance(results_map, dict) else []
+                        )
+                        for i in range(len(action_segments)):
+                            res = batch_results[i] if i < len(batch_results) else {}
+                            if isinstance(res, dict) and res.get("key_evidence") == "Batch Miss":
+                                miss_actions += 1
+
+                    fallback_ratio = float(os.getenv("MODULE2_KC_MULTI_UNIT_FALLBACK_MISS_RATIO", "0.4") or "0.4")
+                    if total_actions > 0 and (
+                        (not isinstance(results_map, dict))
+                        or (not results_map)
+                        or ((miss_actions / total_actions) > fallback_ratio)
+                    ):
+                        raise RuntimeError(
+                            f"multi-unit results look invalid: miss={miss_actions}/{total_actions}, ratio>{fallback_ratio}"
+                        )
+
+                    for u in request.units:
+                        action_segments = unit_actions_map.get(u.unit_id, [])
+                        batch_results = (
+                            results_map.get(u.unit_id, []) if isinstance(results_map, dict) else []
+                        )
+                        for i, action in enumerate(action_segments):
+                            res = batch_results[i] if i < len(batch_results) else {}
+                            flat_results.append(
+                                video_processing_pb2.KnowledgeClassificationResult(
+                                    unit_id=u.unit_id,
+                                    action_id=action.get("id", ""),
+                                    knowledge_type=res.get("knowledge_type", "过程性知识"),
+                                    confidence=float(res.get("confidence", 0.5)),
+                                    key_evidence=res.get("key_evidence", ""),
+                                    reasoning=res.get("reasoning", ""),
+                                )
+                            )
                 except Exception as e:
-                    await limiter.record_failure(is_rate_limit=False)
-                    logger.error(f"Unit {u.unit_id} classification failed: {e}")
-                    return []
-                finally:
-                    if acquired_permits:
-                        await limiter.release(acquired_permits)
-            tasks = [process_unit(u) for u in request.units]
-            all_unit_results = await asyncio.gather(*tasks)
-            flat_results = [r for sublist in all_unit_results for r in sublist]
+                    logger.warning(f"[{task_id}] multi-unit classify failed: {e} -> fallback per-unit")
+                    flat_results = await _classify_per_unit()
+            else:
+                # 兼容：旧实现按 unit 并发（保持行为不变）
+                flat_results = await _classify_per_unit()
             
             return video_processing_pb2.KnowledgeClassificationResponse(
                 success=True, results=flat_results, error_msg=""
