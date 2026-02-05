@@ -259,7 +259,7 @@ class MarkdownEnhancer:
         hierarchy = await self._classify_hierarchy(sections, subject)
         
         # Step 2: 正文增强
-        logger.info("Step 2: Text Enhancement")
+        logger.info("Step 2: Text Enhancement (build tasks)")
         enhanced_sections = []
         for section in sections:
             unit_id = section.get("unit_id", "")
@@ -283,19 +283,35 @@ class MarkdownEnhancer:
             # enhanced.validated_screenshots = self._validate_screenshots(enhanced.screenshots)
             # 🚀 V3: 已经在 RichTextPipeline 中验证过，直接使用 (假设 screenshots 已过滤)
             enhanced.validated_screenshots = enhanced.screenshots
-            
-            # 增强正文
-            enhanced.enhanced_body = await self._enhance_text(enhanced)
-            
             enhanced_sections.append(enhanced)
 
         # 层级兜底：修复无父级/无一级的情况，保证 Obsidian 能显示嵌套
         self._normalize_hierarchy(enhanced_sections)
-        
-        # Step 3: 逻辑提取
-        logger.info("Step 3: Logic Extraction")
-        for section in enhanced_sections:
-            section.structured_content = await self._extract_logic(section)
+
+        # Step 2-3: 正文增强 + 逻辑提取（并行提交，按完成顺序流式处理）
+        logger.info("Step 2-3: Parallel LLM Enhance + Extract (as_completed)")
+
+        async def _process_one(idx: int, sec: EnhancedSection) -> int:
+            """
+            做什么：对单个语义单元执行“正文增强 -> 逻辑提取”两步。
+            为什么：两步互相依赖，但不同语义单元之间可并行，从而降低单任务总时延。
+            权衡：并行会增加瞬时 in-flight，请确保 LLMClient 的调度器生效（token 加权 + 资源 cap）。
+            """
+            sec.enhanced_body = await self._enhance_text(sec)
+            sec.structured_content = await self._extract_logic(sec)
+            return idx
+
+        tasks = [asyncio.create_task(_process_one(i, s)) for i, s in enumerate(enhanced_sections)]
+        completed = 0
+        for fut in asyncio.as_completed(tasks):
+            try:
+                await fut
+            except Exception as e:
+                logger.error(f"Section pipeline failed: {e}")
+            finally:
+                completed += 1
+                if completed == len(tasks) or completed % 5 == 0:
+                    logger.info(f"LLM sections completed: {completed}/{len(tasks)}")
         
         # Step 4: 组装 Markdown
         logger.info("Step 4: Assembling Markdown")

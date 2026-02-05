@@ -1,6 +1,6 @@
 ﻿# 系统架构概览
 
-更新日期：2026-02-04
+更新日期：2026-02-05
 范围：d:/videoToMarkdownTest2
 
 ## 系统目标与边界
@@ -116,7 +116,7 @@ flowchart TB
 2. `TaskProcessingWorker` 轮询任务 -> `VideoProcessingOrchestrator.processVideo`。
 3. gRPC `DownloadVideo` -> `VideoProcessor.download` -> `storage/{url_hash}/video.*`，Java 更新 `outputDir` 为该目录。
 4. gRPC `TranscribeVideo` -> `Transcriber` -> 字幕输出。
-5. gRPC `ProcessStage1` -> `stage1_pipeline.run_pipeline` -> step2/step6 + sentence timestamps。
+5. gRPC `ProcessStage1` -> `stage1_pipeline.run_pipeline` -> step2/step6 + sentence timestamps（sentence_timestamps 由 step4_clean_local 生成，Stage1 会复制到 intermediates 并返回路径；若缺失将补跑至至少 step4）。
 6. gRPC `AnalyzeSemanticUnits`（Phase2A）-> 语义单元 JSON + 初步素材请求。
 7. Java 并行验证：`ValidateCVBatch`（CV）+ `ClassifyKnowledgeBatch`（LLM）。
 8. gRPC `GenerateMaterialRequests` -> 生成截图/切片策略。
@@ -146,6 +146,7 @@ flowchart TB
 - Java-Python 分层：Java 负责编排与 FFmpeg，Python 负责模型推理与文本/语义处理。
 - gRPC 合约驱动：`proto/video_processing.proto` 统一跨语言接口。
 - 并行与资源治理：Java 侧 Semaphore + Python 侧 ProcessPool + SharedMemory 避免 GIL。
+- LLM 调度与批处理：集中式 LLMClient（连接池/HTTP2）+ token 加权 permits + 资源 cap；批量任务优先合并为 JSON Array Prompt，或用 `asyncio.as_completed` 流式消费并发结果以降低单任务时延。
 - Stage1 使用 LangGraph + checkpoint，支持中断恢复与中间产物持久化。
 - 可靠性：Circuit Breaker + Retry + 动态超时，降低 LLM/远程服务抖动。
 - 输出可追溯：保留 step2/step6/semantic_units 等中间产物便于回放与调试。

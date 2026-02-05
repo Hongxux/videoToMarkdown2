@@ -197,12 +197,18 @@ class ConcreteKnowledgeValidator:
             # 默认路径: 项目根目录/config.yaml
             project_root = Path(__file__).parent.parent.parent
             config_path = project_root / "config.yaml"
+            
+            # 修正: 如果根目录不存在，尝试 videoToMarkdown 子目录
+            if not config_path.exists():
+                alt_path = project_root / "videoToMarkdown" / "config.yaml"
+                if alt_path.exists():
+                    config_path = alt_path
         else:
             config_path = Path(config_path)
         
         if not config_path.exists():
-            logger.warning(f"config.yaml not found at {config_path}, using CV-only mode")
-            return None
+             logger.warning(f"config.yaml not found at {config_path} (checked root and videoToMarkdown subdir), using CV-only mode")
+             return None
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:

@@ -1006,22 +1006,46 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             self._increment_tasks()
             
             # 🔑 检查是否已存在输出文件（缓存复用）
-            if os.path.exists(step2_path) and os.path.exists(step6_path):
+            local_sentence_ts = os.path.join(output_dir, "local_storage", "sentence_timestamps.json")
+            need_sentence_ts = not os.path.exists(local_sentence_ts)
+            if os.path.exists(step2_path) and os.path.exists(step6_path) and not need_sentence_ts:
                 logger.info(f"[{task_id}] ✅ Reusing existing Stage1 outputs")
             else:
+                if os.path.exists(step2_path) and os.path.exists(step6_path) and need_sentence_ts:
+                    logger.warning(f"[{task_id}] sentence_timestamps.json missing, regenerating Step4 (and upstream) outputs")
                 # 🔑 调用 Stage1 Pipeline (支持 max_step)
+                # 确保 sentence_timestamps 至少经过 step4_clean_local 生成
+                effective_max_step = max_step if max_step >= 4 else 4
                 await run_pipeline(
                    video_path=video_path,
                    subtitle_path=subtitle_path,
                    output_dir=output_dir,
-                   max_step=max_step
+                   max_step=effective_max_step
                 )
+            
+            # 补齐 sentence_timestamps.json（来自 Stage1 local_storage）
+            intermediates_dir = os.path.join(output_dir, "intermediates")
+            os.makedirs(intermediates_dir, exist_ok=True)
+            inter_sentence_ts = os.path.join(intermediates_dir, "sentence_timestamps.json")
+            sentence_timestamps_path = ""
+            if os.path.exists(local_sentence_ts):
+                try:
+                    # 复制到 intermediates，供 Phase2A/Phase2B 统一读取
+                    import shutil
+                    shutil.copy2(local_sentence_ts, inter_sentence_ts)
+                    sentence_timestamps_path = inter_sentence_ts
+                except Exception as e:
+                    logger.warning(f"[{task_id}] Copy sentence_timestamps.json failed: {e}")
+                    sentence_timestamps_path = local_sentence_ts
+            else:
+                logger.warning(f"[{task_id}] sentence_timestamps.json not found at {local_sentence_ts}")
+                sentence_timestamps_path = inter_sentence_ts if os.path.exists(inter_sentence_ts) else ""
             
             return video_processing_pb2.Stage1Response(
                 success=True,
                 step2_json_path=step2_path,
                 step6_json_path=step6_path,
-                sentence_timestamps_path=os.path.join(output_dir, "sentence_timestamps.json"),
+                sentence_timestamps_path=sentence_timestamps_path,
                 error_msg=""
             )
             
@@ -1063,10 +1087,21 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         video_path = _ensure_local_video_in_storage(request.video_path)
         step2_json_path = os.path.abspath(request.step2_json_path) if request.step2_json_path else "" # Convert to absolute path immediately
         step6_json_path = os.path.abspath(request.step6_json_path) if request.step6_json_path else "" # Convert to absolute path immediately
+        sentence_timestamps_path = os.path.abspath(request.sentence_timestamps_path) if request.sentence_timestamps_path else ""
         
         # 统一输出目录到 storage/{hash}：做什么是让 Phase2A 产物与后续一致；为什么是减少跨目录查找；权衡是忽略外部路径差异
         output_dir = _normalize_output_dir(video_path)
         semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
+        if not sentence_timestamps_path:
+            # 默认使用 intermediates 路径（Stage1 已复制到此处）
+            sentence_timestamps_path = os.path.join(output_dir, "intermediates", "sentence_timestamps.json")
+            if not os.path.exists(sentence_timestamps_path):
+                # 回退到 local_storage
+                local_sentence_ts = os.path.join(output_dir, "local_storage", "sentence_timestamps.json")
+                if os.path.exists(local_sentence_ts):
+                    sentence_timestamps_path = local_sentence_ts
+                else:
+                    sentence_timestamps_path = ""
         
         logger.info(f"[{task_id}] AnalyzeSemanticUnits (Phase2A), output_dir={output_dir}")
         
@@ -1131,7 +1166,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 video_path=video_path,
                 step2_path=step2_json_path,
                 step6_path=step6_json_path,
-                output_dir=output_dir
+                output_dir=output_dir,
+                sentence_timestamps_path=sentence_timestamps_path
             )
             
             # 🚀 注入视觉提取器，使 Phase2A 能够执行视觉打分推荐最佳时间戳
@@ -1239,7 +1275,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 - u: 函数入参（类型：未标注）。
                 输出参数：
                 - List[KnowledgeClassificationResult]（该单元的分类结果）。"""
-                await limiter.acquire()
+                acquired_permits = await limiter.acquire()
                 try:
                     action_segments = [
                         {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id}
@@ -1274,7 +1310,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     logger.error(f"Unit {u.unit_id} classification failed: {e}")
                     return []
                 finally:
-                    limiter.release()
+                    if acquired_permits:
+                        await limiter.release(acquired_permits)
             tasks = [process_unit(u) for u in request.units]
             all_unit_results = await asyncio.gather(*tasks)
             flat_results = [r for sublist in all_unit_results for r in sublist]
@@ -1485,13 +1522,25 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         sentence_end = action_end
                     
                     # 自适应动作包络（与 rich_text_pipeline 保持一致）
+                    force_short_unit = True  # clip_actions 已过滤为需要视频的动作，短单元可直接整段
                     envelope_start, envelope_end = pipeline._compute_action_envelope(
                         unit=unit,
                         action_start=action_start,
                         action_end=action_end,
                         sentence_start=sentence_start,
                         sentence_end=sentence_end,
-                        knowledge_type=knowledge_type
+                        knowledge_type=knowledge_type,
+                        force_short_unit=force_short_unit
+                    )
+                    unit_start = float(getattr(unit, "start_sec", 0.0))
+                    unit_end = float(getattr(unit, "end_sec", 0.0))
+                    unit_duration = unit_end - unit_start
+                    logger.warning(
+                        f"[{task_id}] {unit_id} action{i}: "
+                        f"unit[{unit_start:.2f}-{unit_end:.2f}={unit_duration:.2f}s] "
+                        f"action[{action_start:.2f}-{action_end:.2f}] "
+                        f"envelope[{envelope_start:.2f}-{envelope_end:.2f}] "
+                        f"kt={knowledge_type}, force_short_unit={force_short_unit}"
                     )
                     
                     final_clips.append(video_processing_pb2.ClipRequest(

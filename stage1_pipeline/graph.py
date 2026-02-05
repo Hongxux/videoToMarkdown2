@@ -16,6 +16,7 @@
 
 import asyncio
 import json
+import logging  # 🔑 Added missing import
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
@@ -795,7 +796,8 @@ async def _execute_pipeline(
             main_logger.warning(f"No checkpoint found for thread {thread_id}, starting from scratch.")
     
     try:
-        tracer.checkpoint("pipeline_start", {"video": video_path, "thread_id": thread_id, "resume": resume})
+        if tracer:
+            tracer.checkpoint("pipeline_start", {"video": video_path, "thread_id": thread_id, "resume": resume})
         
         final_state = await graph.ainvoke(initial_state, config)
         
@@ -803,10 +805,12 @@ async def _execute_pipeline(
         if sqlite_checkpointer:
             sqlite_checkpointer.update_run_status(thread_id, "completed", "step24_screenshot_name", 28)
         
-        tracer.checkpoint("pipeline_end", {"status": "success"})
-        tracer.save()
-        metrics.save()
-        metrics.print_summary()
+        if tracer:
+            tracer.checkpoint("pipeline_end", {"status": "success"})
+            tracer.save()
+        if metrics:
+            metrics.save()
+            metrics.print_summary()
         
         main_logger.info("Pipeline completed successfully!")
         main_logger.info(f"Output: {final_state.get('output_markdown_path', 'N/A')}")
@@ -823,8 +827,9 @@ async def _execute_pipeline(
                 0
             )
         
-        tracer.checkpoint("pipeline_error", {"error": str(e)})
-        tracer.save()
+        if tracer:
+            tracer.checkpoint("pipeline_error", {"error": str(e)})
+            tracer.save()
         raise
 
 

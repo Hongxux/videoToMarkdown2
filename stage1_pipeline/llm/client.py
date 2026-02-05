@@ -231,11 +231,28 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
     输出参数：
     - 配置字典（常见键：ai、vision_ai）。"""
     path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
     
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    # Define search candidates
+    candidates = [
+        path,
+        Path("videoToMarkdown") / config_path,
+        Path("d:/videoToMarkdownTest2/videoToMarkdown/config.yaml"), # Hardcoded fallback as requested
+        # Search up the tree for videoToMarkdown directory
+    ]
+    
+    # Add recursive search up
+    current_dir = Path(__file__).resolve().parent
+    for _ in range(5):
+        candidates.append(current_dir / config_path)
+        candidates.append(current_dir / "videoToMarkdown" / config_path)
+        current_dir = current_dir.parent
+        
+    for candidate in candidates:
+        if candidate.exists():
+            with open(candidate, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f)
+                
+    raise FileNotFoundError(f"Config file not found. Searched: {[str(c) for c in candidates]}")
 
 
 def create_llm_client(

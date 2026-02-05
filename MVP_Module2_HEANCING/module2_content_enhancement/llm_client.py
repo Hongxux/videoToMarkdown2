@@ -13,9 +13,12 @@
 import os
 import json
 import time
+import math
+import hashlib
 import asyncio
 import logging
-from typing import Tuple, Dict, Any, List, Optional
+from collections import OrderedDict
+from typing import Tuple, Dict, Any, List, Optional, Callable, Awaitable, TypeVar
 from dataclasses import dataclass
 from tenacity import (
     retry,
@@ -83,13 +86,14 @@ class AdaptiveConcurrencyLimiter:
         self.window_size = window_size
         self.results: List[bool] = []  # True=成功, False=失败
         
-        # 信号量 (动态调整)
-        self._semaphore = asyncio.Semaphore(initial_limit)
+        # 并发控制（支持按 token 加权的 permits，避免多次 acquire 造成死锁）
         self._lock = asyncio.Lock()
+        self._cond = asyncio.Condition(self._lock)
+        self._in_use_permits: int = 0
         
         logger.info(f"AdaptiveConcurrencyLimiter initialized: limit={initial_limit}, range=[{min_limit}, {max_limit}]")
     
-    async def acquire(self):
+    async def acquire(self, permits: int = 1) -> int:
         """
         执行逻辑：
         1) 准备必要上下文与参数。
@@ -97,12 +101,20 @@ class AdaptiveConcurrencyLimiter:
         实现方式：通过内部方法调用/状态更新实现。
         核心价值：封装逻辑单元，提升复用与可维护性。
         输入参数：
-        - 无。
+        - permits: 需要占用的配额数（类型：int，默认 1）。
         输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        await self._semaphore.acquire()
+        - 实际占用的配额数（int，用于 release 对齐）。"""
+        permits = max(1, int(permits))
+        async with self._cond:
+            # permits 过大时降级为“独占”，避免永远等待
+            if permits > self._effective_limit:
+                permits = max(1, self._effective_limit)
+            while self._in_use_permits + permits > self._effective_limit:
+                await self._cond.wait()
+            self._in_use_permits += permits
+            return permits
     
-    def release(self):
+    async def release(self, permits: int = 1):
         """
         执行逻辑：
         1) 准备必要上下文与参数。
@@ -110,11 +122,14 @@ class AdaptiveConcurrencyLimiter:
         实现方式：通过内部方法调用/状态更新实现。
         核心价值：封装逻辑单元，提升复用与可维护性。
         输入参数：
-        - 无。
+        - permits: 释放的配额数（类型：int，默认 1）。
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        self._semaphore.release()
-    
+        permits = max(1, int(permits))
+        async with self._cond:
+            self._in_use_permits = max(0, self._in_use_permits - permits)
+            self._cond.notify_all()
+
     async def record_success(self):
         """
         执行逻辑：
@@ -132,7 +147,7 @@ class AdaptiveConcurrencyLimiter:
         - 无。
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        async with self._lock:
+        async with self._cond:
             self.results.append(True)
             if len(self.results) > self.window_size:
                 self.results.pop(0)
@@ -143,7 +158,7 @@ class AdaptiveConcurrencyLimiter:
                 if success_rate > 0.9 and self.current_limit < self.max_limit:
                     old_limit = self.current_limit
                     self.current_limit = min(self.current_limit + self.increase_step, self.max_limit)
-                    self._apply_effective_limit(old_limit)
+                    self._recompute_effective_limit_locked()
                     logger.debug(f"Concurrency ↑ {old_limit} → {self.current_limit} (success_rate={success_rate:.0%})")
     
     async def record_failure(self, is_rate_limit: bool = False):
@@ -164,7 +179,7 @@ class AdaptiveConcurrencyLimiter:
         - is_rate_limit: 开关/状态（类型：bool）。
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        async with self._lock:
+        async with self._cond:
             self.results.append(False)
             if len(self.results) > self.window_size:
                 self.results.pop(0)
@@ -179,61 +194,50 @@ class AdaptiveConcurrencyLimiter:
                 self.current_limit = max(self.current_limit - 1, self.min_limit)
             
             if old_limit != self.current_limit:
-                self._apply_effective_limit(old_limit)
+                self._recompute_effective_limit_locked()
                 logger.warning(f"Concurrency ↓ {old_limit} → {self.current_limit} (rate_limit={is_rate_limit})")
     
-    def _update_semaphore(self, old_limit: int, new_limit: int):
+    def _recompute_effective_limit_locked(self) -> Tuple[int, int]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - old_limit: 函数入参（类型：int）。
-        - new_limit: 函数入参（类型：int）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        # 简化处理: 重新创建信号量 (协程安全)
-        # 注意: 这不会立即释放已获取的许可，但新请求会使用新限制
-        self._semaphore = asyncio.Semaphore(new_limit)
-
-    def _apply_effective_limit(self, old_limit: int):
+        做什么：重算有效并发上限（= AIMD 上限 与 外部 cap 的最小值）。
+        为什么：外部 cap（资源治理）必须覆盖 AIMD 的增长，避免抖动与雪崩。
+        权衡：当 cap 下降时不会强行打断已在执行的请求，只对后续 acquire 生效。
         """
-        执行逻辑：
-        1) 计算“自适应并发”与“外部上限”的最小值。
-        2) 必要时更新信号量以生效新的并发上限。
-        实现方式：使用 _external_cap 作为硬上限，与 current_limit 取最小值。
-        核心价值：让资源/Token 约束覆盖 AIMD 的增长，保证稳定性。
-        输入参数：
-        - old_limit: 变更前的并发上限（类型：int）。
-        输出参数：
-        - 无（仅产生副作用，如日志/状态更新）。"""
-        new_limit = self.current_limit
+        old_eff = self._effective_limit
+        new_eff = self.current_limit
         if self._external_cap is not None:
-            new_limit = min(new_limit, self._external_cap)
-        new_limit = max(self.min_limit, min(new_limit, self.max_limit))
-        if new_limit != self._effective_limit:
-            old = self._effective_limit
-            self._effective_limit = new_limit
-            self._update_semaphore(old, new_limit)
+            new_eff = min(new_eff, self._external_cap)
+        new_eff = max(self.min_limit, min(new_eff, self.max_limit))
+        if new_eff != old_eff:
+            self._effective_limit = new_eff
+            # 唤醒等待 acquire 的协程
+            self._cond.notify_all()
+        return old_eff, new_eff
 
-    def set_external_cap(self, cap: Optional[int]):
+    async def set_external_cap(self, cap: Optional[int]):
         """
         执行逻辑：
         1) 设置外部并发上限（可由资源或 Token 估算）。
         2) 触发有效并发上限更新。
-        实现方式：保存 _external_cap 并调用 _apply_effective_limit。
+        实现方式：保存 _external_cap 并重算 effective_limit，唤醒等待中的 acquire。
         核心价值：将资源/请求规模约束统一到并发控制中。
         输入参数：
         - cap: 外部上限（类型：Optional[int]，None 表示解除）。
         输出参数：
         - 无（仅产生副作用，如日志/状态更新）。"""
-        if cap is None:
-            self._external_cap = None
-        else:
-            self._external_cap = max(self.min_limit, min(int(cap), self.max_limit))
-        self._apply_effective_limit(self._effective_limit)
+        async with self._cond:
+            if cap is None:
+                self._external_cap = None
+            else:
+                self._external_cap = max(self.min_limit, min(int(cap), self.max_limit))
+            self._recompute_effective_limit_locked()
+
+    @property
+    def effective_limit(self) -> int:
+        """
+        对外暴露当前有效并发上限（已叠加 external cap）。
+        """
+        return int(self._effective_limit)
     
     @property
     def stats(self) -> Dict[str, Any]:
@@ -254,6 +258,9 @@ class AdaptiveConcurrencyLimiter:
         success_rate = sum(self.results) / len(self.results) if self.results else 0
         return {
             "current_limit": self.current_limit,
+            "effective_limit": self._effective_limit,
+            "in_use_permits": self._in_use_permits,
+            "external_cap": self._external_cap,
             "success_rate": f"{success_rate:.0%}",
             "window_size": len(self.results)
         }
@@ -511,7 +518,7 @@ class LLMClient:
         if self._openai_client is None:
             from openai import AsyncOpenAI
             # 获取或创建当前循环下的 http_client
-            http_client = await self._pool_manager.get_client(self.concurrency_limiter.current_limit)
+            http_client = await self._pool_manager.get_client(self.concurrency_limiter.effective_limit)
             self._openai_client = AsyncOpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
@@ -533,7 +540,7 @@ class LLMClient:
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         from openai import AsyncOpenAI
-        new_http_client = await self._pool_manager.get_client(self.concurrency_limiter.current_limit)
+        new_http_client = await self._pool_manager.get_client(self.concurrency_limiter.effective_limit)
         # AsyncOpenAI 不支持运行时更换 http_client，所以这里仅触发池重建
         # 新请求会自动使用更新后的池
     
@@ -571,20 +578,31 @@ class LLMClient:
             mem_factor = 0.7
         return max(1, int(base_limit * cpu_factor * mem_factor))
 
-    def _apply_dynamic_cap(self, est_tokens: int):
+    def _compute_permits(self, est_tokens: int) -> int:
         """
-        执行逻辑：根据 token 规模 + 系统资源设置外部并发上限。
-        实现方式：基于 token 比例与资源因子计算 cap，写入 limiter。
-        核心价值：在保证单任务时延的同时，动态平衡吞吐。"""
-        base_limit = self.concurrency_limiter.current_limit
-        # token 规模越大，并发上限越低
-        token_factor = max(1.0, est_tokens / float(self.token_unit))
-        token_cap = max(self.concurrency_limiter.min_limit, int(base_limit / token_factor))
+        做什么：把单次请求的 token 规模映射为并发配额（permits）。
+        为什么：避免“按请求数”的并发让大请求把小请求拖慢；按 token 加权更贴近真实成本。
+        估算：token≈字符/4；每 token_unit(默认 800) 记为 1 个 permit。
+        """
+        est_tokens = max(1, int(est_tokens))
+        permits = int(math.ceil(est_tokens / float(self.token_unit)))
+        permits = max(1, permits)
+        # 超过约定上限时，倾向于独占（最终会在 limiter.acquire 内部降级）
         if est_tokens > self.max_request_tokens:
-            token_cap = 1
-        resource_cap = self._compute_resource_cap(base_limit)
-        cap = min(base_limit, token_cap, resource_cap)
-        self.concurrency_limiter.set_external_cap(cap)
+            permits = max(permits, int(self.concurrency_limiter.current_limit))
+        return permits
+
+    async def _apply_resource_cap(self):
+        """
+        执行逻辑：基于 CPU/内存占用对并发上限施加外部 cap。
+        实现方式：当资源紧张时设置 external cap；资源充裕时解除 cap。
+        核心价值：让并发在高压下自动收敛，优先保证单任务时延稳定。"""
+        base_limit = int(self.concurrency_limiter.current_limit)
+        resource_cap = int(self._compute_resource_cap(base_limit))
+        if resource_cap >= base_limit:
+            await self.concurrency_limiter.set_external_cap(None)
+        else:
+            await self.concurrency_limiter.set_external_cap(resource_cap)
 
     @retry(
         stop=stop_after_attempt(3),
@@ -625,12 +643,15 @@ class LLMClient:
         
         client = await self._ensure_openai_client()
 
-        # 估算 token 并应用外部并发上限
-        est_tokens = self._estimate_tokens(prompt, system_message)
-        self._apply_dynamic_cap(est_tokens)
+        acquired_permits = 0
 
-        # 获取并发许可
-        await self.concurrency_limiter.acquire()
+        # 估算 token 并获取加权 permits（字符/4 -> token）
+        est_tokens = self._estimate_tokens(prompt, system_message)
+        permits = self._compute_permits(est_tokens)
+        await self._apply_resource_cap()
+
+        # 获取并发许可（按 token 加权）
+        acquired_permits = await self.concurrency_limiter.acquire(permits)
         
         try:
             response = await client.chat.completions.create(
@@ -690,7 +711,8 @@ class LLMClient:
         
         finally:
             # 🚀 释放并发许可
-            self.concurrency_limiter.release()
+            if acquired_permits:
+                await self.concurrency_limiter.release(acquired_permits)
     
     @retry(
         stop=stop_after_attempt(3),
@@ -729,12 +751,15 @@ class LLMClient:
         messages.append({"role": "user", "content": prompt})
         
         client = await self._ensure_openai_client()
-        # 估算 token 并应用外部并发上限
-        est_tokens = self._estimate_tokens(prompt, system_message)
-        self._apply_dynamic_cap(est_tokens)
+        acquired_permits = 0
 
-        # 获取并发许可
-        await self.concurrency_limiter.acquire()
+        # 估算 token 并获取加权 permits（字符/4 -> token）
+        est_tokens = self._estimate_tokens(prompt, system_message)
+        permits = self._compute_permits(est_tokens)
+        await self._apply_resource_cap()
+
+        # 获取并发许可（按 token 加权）
+        acquired_permits = await self.concurrency_limiter.acquire(permits)
         try:
             response = await client.chat.completions.create(
                 model=self.model,
@@ -780,7 +805,8 @@ class LLMClient:
         
         finally:
             # 🚀 释放并发许可
-            self.concurrency_limiter.release()
+            if acquired_permits:
+                await self.concurrency_limiter.release(acquired_permits)
 
 
 def create_llm_client(
