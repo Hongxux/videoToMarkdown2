@@ -299,6 +299,116 @@ class RichTextPipeline:
                 return sub.end_sec
         # 如果没找到，返回最后一个字幕的结束时间
         return self.subtitles[-1].end_sec if self.subtitles else timestamp
+
+    def _clamp_time_range(self, start_sec: float, end_sec: float) -> Tuple[float, float]:
+        """
+        做什么：对时间区间做安全裁剪与归一化（对齐 visual_feature_extractor.py 的边界策略）。
+        为什么：动作包络扩边/整段回退可能产生负数/越界/反向区间，导致 FFmpeg/OpenCV 读帧失败或空素材。
+        权衡：当 video_duration 不可用时，仅保证 start>=0 且 end>=start，无法完全阻止越界，但不破坏主流程。
+        """
+        try:
+            start = float(start_sec)
+        except Exception:
+            start = 0.0
+
+        try:
+            end = float(end_sec)
+        except Exception:
+            end = start
+
+        # 先做基本约束，避免反向区间
+        start = max(0.0, start)
+        end = max(start, end)
+
+        # 再做视频边界裁剪（尽量模拟 visual_feature_extractor.py 对帧边界的处理）
+        if getattr(self, "video_duration", 0) and self.video_duration > 0:
+            max_end = float(self.video_duration)
+            start = max(0.0, min(start, max_end))
+            end = max(start, min(end, max_end))
+
+        return start, end
+
+    def _merge_action_segments(
+        self,
+        action_segments: List[Dict[str, Any]],
+        gap_threshold_sec: float = 5.0
+    ) -> List[Dict[str, Any]]:
+        """
+        做什么：将同一语义单元内、间隔小于阈值的多个动作段合并为一个动作段。
+        为什么：当前链路最终只保留第一个 clip（materials.clip_path），动作被切碎会导致“只截到其中一段”。
+        权衡：阈值放宽会让 clip 变长并包含更多间隙，但可换取动作语义单元的完整性。
+        """
+        if not action_segments:
+            return []
+        if len(action_segments) == 1:
+            return [action_segments[0].copy()]
+
+        merged_actions: List[Dict[str, Any]] = []
+        current = action_segments[0].copy()
+
+        for next_action in action_segments[1:]:
+            next_copy = next_action.copy()
+            gap = float(next_copy.get("start_sec", 0)) - float(current.get("end_sec", 0))
+
+            if gap < gap_threshold_sec:
+                # 扩展当前动作的结束时间
+                current["end_sec"] = max(float(current.get("end_sec", 0)), float(next_copy.get("end_sec", 0)))
+                # 合并内部稳定岛
+                current_islands = current.get("internal_stable_islands", [])
+                next_islands = next_copy.get("internal_stable_islands", [])
+                current["internal_stable_islands"] = current_islands + next_islands
+            else:
+                merged_actions.append(current)
+                current = next_copy
+
+        merged_actions.append(current)
+        return merged_actions
+
+    def _compute_action_envelope(
+        self,
+        unit: SemanticUnit,
+        action_start: float,
+        action_end: float,
+        sentence_start: float,
+        sentence_end: float,
+        knowledge_type: str,
+        short_unit_threshold_sec: float = 20.0,
+        pre_buffer_sec: float = 1.5,
+        post_buffer_sec: float = 2.0
+    ) -> Tuple[float, float]:
+        """
+        做什么：根据知识类型计算动作截取范围（Adaptive Action Envelope）。
+        为什么：对“实操/推演/配置”类动作，需覆盖定位准备→执行→结果确认，避免只截到像素变化瞬间。
+        权衡：短单元整段会增加片段长度；长单元扩边可能引入少量非核心画面，但提升闭环可理解性。
+        """
+        k_type = (knowledge_type or "").strip()
+        target_types = {"实操", "推演", "环境配置", "配置"}
+
+        unit_start = float(getattr(unit, "start_sec", 0.0))
+        unit_end = float(getattr(unit, "end_sec", 0.0))
+        unit_duration = unit_end - unit_start
+
+        # Sentence：与动作重叠的那句（由 _align_to_sentence_* 在字幕序列中定位）
+        base_start = min(float(action_start), float(sentence_start))
+        base_end = max(float(action_end), float(sentence_end))
+
+        if k_type in target_types:
+            # 1) 短单元：直接取整段，保证语义单元完备性
+            if unit_duration > 0 and unit_duration <= short_unit_threshold_sec:
+                start_sec, end_sec = unit_start, unit_end
+            else:
+                # 2) 长单元：在 Union(Action, Sentence) 基础上扩边
+                start_sec = base_start - pre_buffer_sec
+                end_sec = base_end + post_buffer_sec
+        else:
+            # 非目标类型：保持原策略，仅做句子边界对齐
+            start_sec, end_sec = base_start, base_end
+
+        # 约束：暂不跨越下一个语义单元（结束时间不超过 unit.end_sec）
+        end_sec = min(end_sec, unit_end)
+
+        # 最终安全裁剪（视频边界 + 反向区间）
+        return self._clamp_time_range(start_sec, end_sec)
     
     def _load_paragraphs(self, step6_path: str) -> List[Dict]:
         """
@@ -1371,31 +1481,13 @@ class RichTextPipeline:
             # ==== 有动作单元: 规则一 + 规则二 ====
             # 规则一: 不提取语义单元级 stable 部分 (跳过)
             
-            # 💥 后处理: 合并间隔 < 1.0s 的动作单元
+            # 💥 后处理: 多动作融合 (同一语义单元同主题，放宽合并间隔)
             if len(action_segments) >= 2:
-                merged_actions = []
-                current = action_segments[0].copy()
-                
-                for next_action in action_segments[1:]:
-                    gap = next_action.get("start_sec", 0) - current.get("end_sec", 0)
-                    
-                    if gap < 1.0:  # 间隔小于1秒，合并
-                        # 扩展当前动作的结束时间
-                        current["end_sec"] = next_action.get("end_sec", current.get("end_sec", 0))
-                        # 合并内部稳定岛
-                        current_islands = current.get("internal_stable_islands", [])
-                        next_islands = next_action.get("internal_stable_islands", [])
-                        current["internal_stable_islands"] = current_islands + next_islands
-                        logger.info(f"Merged actions: gap={gap:.2f}s → [{current['start_sec']:.1f}s-{current['end_sec']:.1f}s]")
-                    else:
-                        merged_actions.append(current)
-                        current = next_action.copy()
-                
-                merged_actions.append(current)
-                
+                merged_actions = self._merge_action_segments(action_segments, gap_threshold_sec=5.0)
                 if len(merged_actions) < len(action_segments):
-                    logger.info(f"{unit.unit_id}: Post-merge {len(action_segments)} → {len(merged_actions)} actions")
-                
+                    logger.info(
+                        f"{unit.unit_id}: Post-merge (gap<5.0s) {len(action_segments)} → {len(merged_actions)} actions"
+                    )
                 action_segments = merged_actions
             
             # 🚀 批量并行分类 (优化速度)
@@ -1413,14 +1505,9 @@ class RichTextPipeline:
                 # 获取该动作单元内部的稳定岛
                 action_internal_islands = action.get("internal_stable_islands", [])
                 
-                # 💥 句子边界对齐: 确保不会从句子/动作中间截断
-                # 策略: 扩展范围，不缩小 (确保完整包含动作)
-                sentence_aligned_start = self._align_to_sentence_start(action_start)
-                sentence_aligned_end = self._align_to_sentence_end(action_end)
-                
-                # 起点取更早的 (min), 终点取更晚的 (max)
-                aligned_start = min(action_start, sentence_aligned_start)
-                aligned_end = max(action_end, sentence_aligned_end)
+                # 💥 Sentence：与动作重叠的那句（按字幕时间戳定位）
+                sentence_start = self._align_to_sentence_start(action_start)
+                sentence_end = self._align_to_sentence_end(action_end)
                 
                 # Classification already done in batch
                 knowledge_type = classification.get("knowledge_type", "过程性知识")
@@ -1430,16 +1517,26 @@ class RichTextPipeline:
                 action["classification"] = classification
                 
                 logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%}) - {classification.get('key_evidence', '')[:30]}")
+
+                # 🚀 Adaptive Action Envelope: 实操/推演/配置 → 整段/扩边；且 clip 结束不跨越 unit.end_sec
+                envelope_start, envelope_end = self._compute_action_envelope(
+                    unit=unit,
+                    action_start=action_start,
+                    action_end=action_end,
+                    sentence_start=sentence_start,
+                    sentence_end=sentence_end,
+                    knowledge_type=knowledge_type
+                )
                 
                 # 根据分类决定素材策略
                 if knowledge_type == "讲解型":
                     # 💥 降级: 讲解型只截取首尾帧 + 稳定岛截图，不提取视频
                     logger.info(f"  → Downgrade to screenshots only (讲解型)")
                     
-                    # 首帧截图: 查找窗口为 [对齐起点, 动作起点]
-                    head_window_end = max(aligned_start + 0.5, action_start)
+                    # 首帧截图: 查找窗口为 [包络起点, 动作起点]
+                    head_window_end = min(max(envelope_start + 0.5, action_start), envelope_end)
                     head_ss = await self._select_screenshot(
-                        start_sec=aligned_start,
+                        start_sec=envelope_start,
                         end_sec=head_window_end,
                         name=f"{unit.unit_id}_action_{i+1}_head"
                     )
@@ -1461,11 +1558,11 @@ class RichTextPipeline:
                             screenshot_paths.append(island_ss)
                             screenshot_labels.append(f"动作{i+1}稳定帧{j+1}")
                     
-                    # 末帧截图: 查找窗口为 [动作终点, 对齐终点]
-                    tail_window_start = min(aligned_end - 0.5, action_end)
+                    # 末帧截图: 查找窗口为 [动作终点, 包络终点]
+                    tail_window_start = max(min(envelope_end - 0.5, action_end), envelope_start)
                     tail_ss = await self._select_screenshot(
                         start_sec=tail_window_start,
-                        end_sec=aligned_end,
+                        end_sec=envelope_end,
                         name=f"{unit.unit_id}_action_{i+1}_tail"
                     )
                     if tail_ss:
@@ -1475,19 +1572,19 @@ class RichTextPipeline:
                 else:
                     # 非讲解型: 提取视频 + 首尾帧 + 稳定岛截图
                     
-                    # 1. 提取视频片段 (使用对齐后的时间范围)
+                    # 1. 提取视频片段 (使用自适应动作包络时间范围)
                     clip_path = await self._extract_action_clip(
-                        start_sec=aligned_start,
-                        end_sec=aligned_end,
+                        start_sec=envelope_start,
+                        end_sec=envelope_end,
                         name=f"{unit.unit_id}_action_{i+1}"
                     )
                     if clip_path:
                         clip_paths.append(clip_path)
                     
-                    # 2. 提取首帧截图: 查找窗口为 [对齐起点, 动作起点]
-                    head_window_end = max(aligned_start + 0.5, action_start)
+                    # 2. 提取首帧截图: 查找窗口为 [包络起点, 动作起点]
+                    head_window_end = min(max(envelope_start + 0.5, action_start), envelope_end)
                     head_ss = await self._select_screenshot(
-                        start_sec=aligned_start,
+                        start_sec=envelope_start,
                         end_sec=head_window_end,
                         name=f"{unit.unit_id}_action_{i+1}_head"
                     )
@@ -1509,11 +1606,11 @@ class RichTextPipeline:
                             screenshot_paths.append(island_ss)
                             screenshot_labels.append(f"动作{i+1}稳定帧{j+1}")
                     
-                    # 4. 提取末帧截图: 查找窗口为 [动作终点, 对齐终点]
-                    tail_window_start = min(aligned_end - 0.5, action_end)
+                    # 4. 提取末帧截图: 查找窗口为 [动作终点, 包络终点]
+                    tail_window_start = max(min(envelope_end - 0.5, action_end), envelope_start)
                     tail_ss = await self._select_screenshot(
                         start_sec=tail_window_start,
-                        end_sec=aligned_end,
+                        end_sec=envelope_end,
                         name=f"{unit.unit_id}_action_{i+1}_tail"
                     )
                     if tail_ss:
@@ -1590,25 +1687,9 @@ class RichTextPipeline:
         stable_islands = getattr(unit, 'stable_islands', [])
         action_segments = getattr(unit, 'action_segments', [])
         
-        # 💥 后处理: 合并间隔 < 1.0s 的动作单元 (与_generate_materials保持一致)
+        # 💥 后处理: 多动作融合 (与_generate_materials保持一致)
         if len(action_segments) >= 2:
-            merged_actions = []
-            current = action_segments[0].copy()
-            
-            for next_action in action_segments[1:]:
-                gap = next_action.get("start_sec", 0) - current.get("end_sec", 0)
-                
-                if gap < 1.0:
-                    current["end_sec"] = next_action.get("end_sec", current.get("end_sec", 0))
-                    current_islands = current.get("internal_stable_islands", [])
-                    next_islands = next_action.get("internal_stable_islands", [])
-                    current["internal_stable_islands"] = current_islands + next_islands
-                else:
-                    merged_actions.append(current)
-                    current = next_action.copy()
-            
-            merged_actions.append(current)
-            action_segments = merged_actions
+            action_segments = self._merge_action_segments(action_segments, gap_threshold_sec=5.0)
         
         if action_segments:
             # 🚀 批量并行分类 (优化速度)
@@ -1624,11 +1705,9 @@ class RichTextPipeline:
                 action_end = action.get("end_sec", unit.end_sec)
                 action_internal_islands = action.get("internal_stable_islands", [])
                 
-                # 💥 句子边界对齐
-                sentence_aligned_start = self._align_to_sentence_start(action_start)
-                sentence_aligned_end = self._align_to_sentence_end(action_end)
-                aligned_start = min(action_start, sentence_aligned_start)
-                aligned_end = max(action_end, sentence_aligned_end)
+                # 💥 Sentence：与动作重叠的那句（按字幕时间戳定位）
+                sentence_start = self._align_to_sentence_start(action_start)
+                sentence_end = self._align_to_sentence_end(action_end)
                 
                 # Classification already done in batch
                 knowledge_type = classification.get("knowledge_type", "过程性知识")
@@ -1641,14 +1720,23 @@ class RichTextPipeline:
                 })
                 
                 logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%})")
+
+                # 🚀 Adaptive Action Envelope: 实操/推演/配置 → 整段/扩边；且 clip 结束不跨越 unit.end_sec
+                envelope_start, envelope_end = self._compute_action_envelope(
+                    unit=unit,
+                    action_start=action_start,
+                    action_end=action_end,
+                    sentence_start=sentence_start,
+                    sentence_end=sentence_end,
+                    knowledge_type=knowledge_type
+                )
                 
                 # 根据分类决定素材策略
                 if knowledge_type == "讲解型":
                     # 讲解型: 只需要截图，不需要视频
-                    # 首帧截图: 搜索窗口扩大为 动作起点 ±1.0s
-                    head_search_start = max(0, aligned_start - 1.0)
-                    head_search_end = aligned_start + 1.0
-                    fallback_head_ts = aligned_start
+                    # 首帧截图: 搜索窗口扩大为 包络起点 ±1.0s
+                    head_search_start, head_search_end = self._clamp_time_range(envelope_start - 1.0, envelope_start + 1.0)
+                    fallback_head_ts = envelope_start
                     head_ts = await self._select_screenshot_timestamp(head_search_start, head_search_end, fallback_head_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
@@ -1663,6 +1751,7 @@ class RichTextPipeline:
                         island_start = island.get("start", action_start)
                         island_end = island.get("end", action_end)
                         island_mid_fallback = (island_start + island_end) / 2
+                        island_start, island_end = self._clamp_time_range(island_start, island_end)
                         island_mid = await self._select_screenshot_timestamp(island_start, island_end, island_mid_fallback)
 
                         screenshot_requests.append(ScreenshotRequest(
@@ -1672,10 +1761,11 @@ class RichTextPipeline:
                             semantic_unit_id=unit.unit_id
                         ))
                     
-                    # 末帧截图: 搜索窗口扩大为 动作结束点 ±1.0s
-                    tail_search_start = max(0, aligned_end - 1.0)
-                    tail_search_end = aligned_end + 1.0
-                    fallback_tail_ts = aligned_end
+                    # 末帧截图: 搜索窗口扩大为 包络终点 ±1.0s
+                    tail_search_start, tail_search_end = self._clamp_time_range(envelope_end - 1.0, envelope_end + 1.0)
+                    tail_search_end = min(tail_search_end, float(getattr(unit, "end_sec", tail_search_end)))
+                    tail_search_start, tail_search_end = self._clamp_time_range(tail_search_start, tail_search_end)
+                    fallback_tail_ts = envelope_end
                     tail_ts = await self._select_screenshot_timestamp(tail_search_start, tail_search_end, fallback_tail_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
@@ -1690,16 +1780,15 @@ class RichTextPipeline:
                     # 视频切片
                     clip_requests.append(ClipRequest(
                         clip_id=f"{unit.unit_id}_action_{i+1}",
-                        start_sec=aligned_start,
-                        end_sec=aligned_end,
+                        start_sec=envelope_start,
+                        end_sec=envelope_end,
                         knowledge_type=knowledge_type,
                         semantic_unit_id=unit.unit_id
                     ))
                     
-                    # 首帧截图: 搜索窗口扩大为 动作起点 ±1.0s
-                    head_search_start = max(0, aligned_start - 1.0)
-                    head_search_end = aligned_start + 1.0
-                    fallback_head_ts = aligned_start
+                    # 首帧截图: 搜索窗口扩大为 包络起点 ±1.0s
+                    head_search_start, head_search_end = self._clamp_time_range(envelope_start - 1.0, envelope_start + 1.0)
+                    fallback_head_ts = envelope_start
                     head_ts = await self._select_screenshot_timestamp(head_search_start, head_search_end, fallback_head_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
@@ -1714,6 +1803,7 @@ class RichTextPipeline:
                         island_start = island.get("start", action_start)
                         island_end = island.get("end", action_end)
                         island_mid_fallback = (island_start + island_end) / 2
+                        island_start, island_end = self._clamp_time_range(island_start, island_end)
                         island_mid = await self._select_screenshot_timestamp(island_start, island_end, island_mid_fallback)
 
                         screenshot_requests.append(ScreenshotRequest(
@@ -1723,10 +1813,11 @@ class RichTextPipeline:
                             semantic_unit_id=unit.unit_id
                         ))
                     
-                    # 末帧截图: 搜索窗口扩大为 动作结束点 ±1.0s
-                    tail_search_start = max(0, aligned_end - 1.0)
-                    tail_search_end = aligned_end + 1.0
-                    fallback_tail_ts = aligned_end 
+                    # 末帧截图: 搜索窗口扩大为 包络终点 ±1.0s
+                    tail_search_start, tail_search_end = self._clamp_time_range(envelope_end - 1.0, envelope_end + 1.0)
+                    tail_search_end = min(tail_search_end, float(getattr(unit, "end_sec", tail_search_end)))
+                    tail_search_start, tail_search_end = self._clamp_time_range(tail_search_start, tail_search_end)
+                    fallback_tail_ts = envelope_end
                     tail_ts = await self._select_screenshot_timestamp(tail_search_start, tail_search_end, fallback_tail_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(

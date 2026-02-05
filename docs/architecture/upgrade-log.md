@@ -79,8 +79,17 @@
     - 做法：当范围较大/采样较多时，将帧区间切分为多段，使用多线程并行解码；每段独立 VideoCapture 顺序读。
     - 机制收益：把线性解码拆成多段并行，缩短总耗时，并提高 CPU 利用率。
   - 持续喂任务流水线：
-    - 做法：，IO 读取完成即提交任务；使用 inflight 上限控制内存移除 chunk 屏障，边提交边回收完成任务。
-    - 机制收益：避免长尾任务阻塞下一批，减少 worker 空闲，提高整体 CPU 利用率与吞吐。
+    - 做法：移除 chunk 屏障，改为“全局 pending in-flight 队列 + 背压节流”的流水线调度：
+      - 统一任务流：将 CV 与 coarse-fine 合并成统一任务列表（按 start_sec 排序）后再按任务数分 chunk。
+      - 持续喂入：每个 chunk 的 IO 完成后立刻提交任务到 ProcessPool，并将 wrapper task 放入 pending 集合；不再等待该 chunk 全部完成才进入下一批。
+      - 只等首个完成：使用 asyncio.wait(..., FIRST_COMPLETED) 仅等待至少一个任务完成即立刻 yield 结果，持续释放 pending，避免 chunk 级 barrier。
+      - 背压节流：设置 max_inflight（默认≈cv_worker_count*2），当 pending 达到上限时才 drain_completed，防止任务堆积导致内存爆。
+      - 最终 drain：所有 chunk 喂完后继续 drain pending 直到清空，保证结果完整输出。
+    - 机制收益：
+      - 避免长尾任务把整个 chunk 卡死，降低 worker 空闲概率。
+      - 让 CPU 更均匀被利用（worker 持续有活干），同时保留 IO/Compute 重叠与流式回传。
+    - 可观测性日志：
+      - Task unify / Tail merge / Streaming gate pipeline(inflight=...) / Feed chunk / Inflight throttle / completed 统计。
   - 任务统一与尾部合并：
     - 做法：将 cv/cf 任务合并为统一列表按任务数分 chunk；尾部 chunk 过小则与上一批合并（tail-merge）。
     - 机制收益：避免尾部小批导致大量 worker 空闲，提升并行度稳定性。
@@ -104,4 +113,19 @@
   - MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/CVValidationOrchestrator.java
   - MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java
   - MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
+
+## 2026-02-05 Adaptive Action Envelope：动作素材截取闭环化
+- 日期：2026-02-05
+- 版本/分支/提交：未记录
+- 触发背景与问题：动作单元往往只捕捉到“变化发生瞬间”，易错过定位/准备过程；断续多动作（连续点多处）会被切碎，且当前最终只保留第一个 clip，导致语义不完整。
+- 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`（素材生成 `_generate_materials`；素材请求 `_collect_material_requests`）。
+- 关键决策与理由：
+  - 引入 Adaptive Action Envelope（自适应动作包络）：仅对知识类型为 `实操/推演/环境配置(配置)` 的动作生效，优先保证“定位→执行→结果确认”闭环。
+  - 短语义单元（<=20s）：直接取 `unit.start_sec ~ unit.end_sec`，并对起止做视频边界裁剪（模仿 `visual_feature_extractor.py` 的安全边界策略），避免切分破坏完整性。
+  - 长语义单元：基于 `Union(Action, SentenceOverlappingAction)` 扩边（start -1.5s，end +2.0s），并强制 `end <= unit.end_sec`，暂不跨越下一个语义单元。
+  - 多动作融合：同一语义单元内将动作段合并阈值由 `<1.0s` 放宽到 `<5.0s`，降低“只截到其中一段”的概率。
+- 兼容性影响：clip 时间范围可能变长；素材数量不变但单 clip 更可能覆盖多动作；下游按 `unit.end_sec` 截断后不再跨到下一单元画面。
+- 风险与回滚方案：若 clip 过长导致耗时/体积上升，可下调扩边/合并阈值或回退到句子对齐策略；必要时恢复 `<1.0s` 合并阈值。
+- 验证方式与结果：待用包含“多次点击/配置生效确认”的视频单元回归，检查 clip 是否覆盖准备与结果静止期，且不跨越下一个语义单元。
+- 可复用经验：当链路最终只消费单个 clip 时，应在 clip 生成前显式做“语义单元完备性 + 动作包络”聚合，避免上游召回多段但下游只取其一。
 

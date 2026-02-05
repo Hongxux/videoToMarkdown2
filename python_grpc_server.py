@@ -2739,6 +2739,11 @@ async def serve(host: str = "0.0.0.0", port: int = 50051):
     - port: 函数入参（类型：int）。
     输出参数：
     - 无（仅产生副作用，如启动/停止服务）。"""
+    # 初始化 gRPC 服务器与 Servicer
+    server = aio.server()
+    servicer = VideoProcessingServicer()
+    video_processing_pb2_grpc.add_VideoProcessingServiceServicer_to_server(servicer, server)
+
     listen_addr = f"{host}:{port}"
     server.add_insecure_port(listen_addr)
     
