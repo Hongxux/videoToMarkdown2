@@ -1130,6 +1130,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             visual_extractor = VisualFeatureExtractor(video_path)
             pipeline.set_visual_extractor(visual_extractor)
             
+            logger.warning(f"[{task_id}] Entering _collect_material_requests via analyze_only()")
             # 🔑 调用 Phase2A: analyze_only
             screenshot_requests, clip_requests, semantic_units_path = await pipeline.analyze_only()
             
@@ -1459,11 +1460,33 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 
                 # 1. 为过滤后的动作单元生成视频切片
                 for i, action in enumerate(clip_actions):
+                    action_start = float(action.get('start_sec', 0))
+                    action_end = float(action.get('end_sec', 0))
+                    knowledge_type = action.get('knowledge_type') or unit.knowledge_type or '过程性知识'
+                    
+                    # Sentence 对齐：无字幕时保持动作边界，避免起点被拉到 0
+                    if getattr(pipeline, "subtitles", None):
+                        sentence_start = pipeline._align_to_sentence_start(action_start)
+                        sentence_end = pipeline._align_to_sentence_end(action_end)
+                    else:
+                        sentence_start = action_start
+                        sentence_end = action_end
+                    
+                    # 自适应动作包络（与 rich_text_pipeline 保持一致）
+                    envelope_start, envelope_end = pipeline._compute_action_envelope(
+                        unit=unit,
+                        action_start=action_start,
+                        action_end=action_end,
+                        sentence_start=sentence_start,
+                        sentence_end=sentence_end,
+                        knowledge_type=knowledge_type
+                    )
+                    
                     final_clips.append(video_processing_pb2.ClipRequest(
                         clip_id=f"clip_{unit_id}_action{i}",
-                        start_sec=float(action.get('start_sec', 0)),
-                        end_sec=float(action.get('end_sec', 0)),
-                        knowledge_type=action.get('knowledge_type', '过程性知识'),
+                        start_sec=envelope_start,
+                        end_sec=envelope_end,
+                        knowledge_type=knowledge_type,
                         semantic_unit_id=unit_id
                     ))
                 

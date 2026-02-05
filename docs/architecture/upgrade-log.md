@@ -119,13 +119,17 @@
 - 版本/分支/提交：未记录
 - 触发背景与问题：动作单元往往只捕捉到“变化发生瞬间”，易错过定位/准备过程；断续多动作（连续点多处）会被切碎，且当前最终只保留第一个 clip，导致语义不完整。
 - 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`（素材生成 `_generate_materials`；素材请求 `_collect_material_requests`）。
+- 改动范围补充（下游集成）：`python_grpc_server.py`（GenerateMaterialRequests：clip 生成使用动作包络，而非原始 action 边界）。
 - 关键决策与理由：
   - 引入 Adaptive Action Envelope（自适应动作包络）：仅对知识类型为 `实操/推演/环境配置(配置)` 的动作生效，优先保证“定位→执行→结果确认”闭环。
   - 短语义单元（<=20s）：直接取 `unit.start_sec ~ unit.end_sec`，并对起止做视频边界裁剪（模仿 `visual_feature_extractor.py` 的安全边界策略），避免切分破坏完整性。
   - 长语义单元：基于 `Union(Action, SentenceOverlappingAction)` 扩边（start -1.5s，end +2.0s），并强制 `end <= unit.end_sec`，暂不跨越下一个语义单元。
   - 多动作融合：同一语义单元内将动作段合并阈值由 `<1.0s` 放宽到 `<5.0s`，降低“只截到其中一段”的概率。
+  - 下游统一使用包络：GenerateMaterialRequests 直接用动作包络生成 clip（并在无字幕时保留动作边界），避免 Phase2A 跳过素材请求导致包络逻辑不生效。
 - 兼容性影响：clip 时间范围可能变长；素材数量不变但单 clip 更可能覆盖多动作；下游按 `unit.end_sec` 截断后不再跨到下一单元画面。
+- 兼容性影响补充：GenerateMaterialRequests 的 clip 起止将跟随包络策略（短单元整段、长单元扩边）。
 - 风险与回滚方案：若 clip 过长导致耗时/体积上升，可下调扩边/合并阈值或回退到句子对齐策略；必要时恢复 `<1.0s` 合并阈值。
 - 验证方式与结果：待用包含“多次点击/配置生效确认”的视频单元回归，检查 clip 是否覆盖准备与结果静止期，且不跨越下一个语义单元。
+- 验证方式补充：对比 GenerateMaterialRequests 输出的 clip 起止与 action 原始区间，确认包络对 `实操/推演/配置` 生效且无字幕时不被拉到 0。
 - 可复用经验：当链路最终只消费单个 clip 时，应在 clip 生成前显式做“语义单元完备性 + 动作包络”聚合，避免上游召回多段但下游只取其一。
 

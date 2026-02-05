@@ -1527,6 +1527,10 @@ class RichTextPipeline:
                     sentence_end=sentence_end,
                     knowledge_type=knowledge_type
                 )
+                logger.warning(
+                    f"{unit.unit_id} action_{i+1}: envelope [{envelope_start:.2f}s-{envelope_end:.2f}s] "
+                    f"(knowledge_type={knowledge_type})"
+                )
                 
                 # 根据分类决定素材策略
                 if knowledge_type == "讲解型":
@@ -1729,6 +1733,10 @@ class RichTextPipeline:
                     sentence_start=sentence_start,
                     sentence_end=sentence_end,
                     knowledge_type=knowledge_type
+                )
+                logger.warning(
+                    f"{unit.unit_id} action_{i+1}: envelope [{envelope_start:.2f}s-{envelope_end:.2f}s] "
+                    f"(knowledge_type={knowledge_type})"
                 )
                 
                 # 根据分类决定素材策略
