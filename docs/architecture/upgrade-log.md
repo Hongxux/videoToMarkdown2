@@ -115,6 +115,17 @@
   - MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java
   - MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
 
+## 2026-02-05 Module2 MarkdownEnhancer LLM 调用合并（降调用次数）
+- 日期：2026-02-05
+- 版本/分支/提交：未记录
+- 触发背景与问题：Stage5（MarkdownEnhancer）对每个语义单元执行“正文增强 + 逻辑结构化”两次 LLM 调用（串行依赖），在 DeepSeek 调用成为吞吐瓶颈时会放大网络往返与限流排队成本。
+- 改动范围（模块/接口/数据）：`MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`；新增合并提示词与合并调用逻辑；保持原两次调用路径作为回退。
+- 关键决策与理由：将两个强依赖步骤合并为一次 `complete_json` 请求，单次返回 `{enhanced_body, structured_content}`，把“2 次请求调度开销”压缩为“1 次”，并在失败时自动回退以保证稳定性。
+- 兼容性影响：默认开启合并调用；如需完全回退旧行为，可设置环境变量 `MODULE2_MARKDOWN_ENHANCER_COMBINE_CALLS=0`。
+- 风险与回滚方案：合并提示词更长可能导致 JSON 输出不稳定或触发 token 上限；已内置异常捕获并回退到两次调用；紧急回滚直接关闭合并开关。
+- 验证方式与结果：待使用一条 Phase2 任务回归观察日志中单 unit 的 LLM 请求次数是否从 2 降为 1，且产出的 Markdown 结构可被 Obsidian 正常渲染。
+- 可复用经验：对“强依赖的多步 LLM 流程”，优先尝试“单次结构化输出 + Feature Flag + 回退路径”，以稳定性换取可观的吞吐收益。
+
 ## 2026-02-05 Adaptive Action Envelope：动作素材截取闭环化
 - 日期：2026-02-05
 - 版本/分支/提交：未记录

@@ -343,6 +343,15 @@ class MarkdownEnhancer:
             为什么：两步互相依赖，但不同语义单元之间可并行，从而降低单任务总时延。
             权衡：并行会增加瞬时 in-flight，请确保 LLMClient 的调度器生效（token 加权 + 资源 cap）。
             """
+            if self._combine_llm_calls:
+                try:
+                    sec.enhanced_body, sec.structured_content = await self._enhance_and_extract(sec)
+                    return idx
+                except Exception as e:
+                    logger.warning(
+                        f"[{sec.unit_id}] Combined LLM call failed: {e} -> fallback to 2-step pipeline"
+                    )
+
             sec.enhanced_body = await self._enhance_text(sec)
             sec.structured_content = await self._extract_logic(sec)
             return idx
