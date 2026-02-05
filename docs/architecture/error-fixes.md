@@ -157,3 +157,13 @@
 - 预防方案（测试/监控/校验/回滚）：增加 material_requests 为空的回归用例；记录每个 unit 的 clip/screenshot 应用数量；必要时回退到只用显式 requests。
 - 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py
 - 复盘要点：素材匹配必须有兜底路径，即使请求缺失也要尝试文件前缀匹配。
+## 2026-02-05 Coarse batch read ThreadPoolExecutor 未定义
+- 日期：2026-02-05
+- 现象与影响范围：ValidateCVBatch 日志出现 "Coarse batch read failed: name 'ThreadPoolExecutor' is not defined"，粗采样批量读帧回退失败。
+- 触发条件：进入粗采样并行读帧分支（worker_count > 1）。
+- 根因定位：_batch_read_coarse_frames_to_shm 内直接使用 ThreadPoolExecutor，但未导入该符号。
+- 修复措施：改为使用已导入的 futures.ThreadPoolExecutor，避免 NameError。
+- 验证方式：跑含 coarse-fine 的 CVBatch，观察日志不再出现该告警，且有 Coarse batch read timing 输出。
+- 预防方案（测试/监控/校验/回滚）：增加单元测试覆盖 worker_count>1 分支；启动时增加关键依赖符号自检。
+- 相关文件/接口：python_grpc_server.py
+- 复盘要点：并行分支应避免未导入符号的隐式依赖。

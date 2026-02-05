@@ -1866,26 +1866,37 @@ class RichTextPipeline:
              logger.info(f"{unit.unit_id}: Suppressed clip for Explanation type ({k_type})")
 
         if allow_clip:
+            logger.info(f"DEBUG_CLIP [{unit.unit_id}] Checking clips in: {clips_dir} (Exists: {os.path.exists(clips_dir)})")
+            
             clip_candidates = []
             if material_requests.clip_requests:
+                logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found {len(material_requests.clip_requests)} clip requests from Phase 2A")
                 for req in material_requests.clip_requests:
                     if req.semantic_unit_id != unit.unit_id:
                         continue
                     for ext in [".mp4", ".webm", ".mkv"]:
                         expected_path = os.path.join(clips_dir, f"{req.clip_id}{ext}")
                         if os.path.exists(expected_path):
+                            logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found clip at: {expected_path}")
                             clip_candidates.append(expected_path)
                             break
+                        else:
+                            logger.debug(f"DEBUG_CLIP [{unit.unit_id}] Clip not found at: {expected_path}")
             else:
                 import glob
                 pattern = os.path.join(clips_dir, f"{unit.unit_id}*")
+                logger.info(f"DEBUG_CLIP [{unit.unit_id}] No specific clip requests, trying glob: {pattern}")
                 for path in sorted(glob.glob(pattern)):
                     ext = os.path.splitext(path)[1].lower()
                     if ext in (".mp4", ".webm", ".mkv"):
                         clip_candidates.append(path)
+                logger.info(f"DEBUG_CLIP [{unit.unit_id}] Glob found {len(clip_candidates)} candidates")
 
             if clip_candidates:
                 clip_path = clip_candidates[0]
+                logger.info(f"DEBUG_CLIP [{unit.unit_id}] Selected clip: {clip_path}")
+            else:
+                logger.warning(f"DEBUG_CLIP [{unit.unit_id}] No valid clips found after search")
         else:
             # 如果禁止切片但文件存在，清理之
              for req in material_requests.clip_requests:

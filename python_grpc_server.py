@@ -1992,7 +1992,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     if seg_start <= seg_end:
                         ranges.append((seg_start, seg_end))
                 
-                with ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
+                with futures.ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="cv_decode") as executor:
                     futures = [executor.submit(_decode_range, s, e) for s, e in ranges]
                     for fut in futures:
                         local_refs, o_ms, s_ms, r_ms, m_ms = fut.result()
