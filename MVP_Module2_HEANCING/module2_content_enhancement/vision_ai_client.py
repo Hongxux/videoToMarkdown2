@@ -17,6 +17,7 @@ import asyncio
 import hashlib
 import logging
 import time
+import threading
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -446,6 +447,100 @@ class VisionAIConcurrencyLimiter:
 # Vision AI 客户端
 # =============================================================================
 
+# =============================================================================
+# Vision AI 速率限制器 (严格 60 req/min)
+# =============================================================================
+
+class VisionAIRateLimiter:
+    """
+    作用：对 Vision API 做严格速率限制，避免 429 与抖动。
+    机制：最小时间间隔匀速器。
+    """
+
+    def __init__(self, rate_per_minute: int = 60):
+        self.rate_per_minute = rate_per_minute
+        self._interval = 60.0 / max(1, rate_per_minute) if rate_per_minute > 0 else 0.0
+        self._next_time = 0.0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._lock: Optional[asyncio.Lock] = None
+
+    def _ensure_loop(self) -> bool:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        if self._loop is None or self._loop.is_closed() or self._loop != loop or self._lock is None:
+            self._loop = loop
+            self._lock = asyncio.Lock()
+        return True
+
+    async def acquire(self) -> float:
+        """
+        返回等待秒数（用于统计）。
+        """
+        if self._interval <= 0:
+            return 0.0
+        if not self._ensure_loop():
+            raise RuntimeError("No running event loop for VisionAIRateLimiter")
+        async with self._lock:
+            now = time.monotonic()
+            wait_sec = max(0.0, self._next_time - now)
+            if wait_sec > 0:
+                await asyncio.sleep(wait_sec)
+                now = time.monotonic()
+            self._next_time = max(self._next_time, now) + self._interval
+            return wait_sec
+
+
+# =============================================================================
+# Vision AI 后台事件循环（同步调用桥接）
+# =============================================================================
+
+class VisionAIBackgroundLoop:
+    """
+    作用：提供单一后台事件循环，避免每次同步调用都创建/销毁 loop。
+    """
+
+    def __init__(self):
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._ready = threading.Event()
+
+    def _run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._ready.set()
+        loop.run_forever()
+
+    def get_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop and self._thread and self._thread.is_alive():
+            return self._loop
+        with self._lock:
+            if self._loop and self._thread and self._thread.is_alive():
+                return self._loop
+            self._ready.clear()
+            self._thread = threading.Thread(
+                target=self._run,
+                name="VisionAIBackgroundLoop",
+                daemon=True
+            )
+            self._thread.start()
+            self._ready.wait(timeout=5)
+            if not self._loop:
+                raise RuntimeError("VisionAIBackgroundLoop failed to start")
+        return self._loop
+
+    def submit(self, coro, timeout: Optional[float] = None):
+        loop = self.get_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result(timeout=timeout)
+
+
+_VISION_BG_LOOP = VisionAIBackgroundLoop()
+
+
 @dataclass
 class VisionAIConfig:
     """
@@ -465,6 +560,7 @@ class VisionAIConfig:
     model: str = "ernie-4.5-turbo-vl-32k"
     temperature: float = 0.3
     timeout: float = 60.0
+    rate_limit_per_minute: int = 60
     
     # 重复帧检测
     duplicate_detection_enabled: bool = True
@@ -507,6 +603,7 @@ class VisionAIClient:
         
         # 并发控制
         self._concurrency_limiter = VisionAIConcurrencyLimiter()
+        self._rate_limiter = VisionAIRateLimiter(self.config.rate_limit_per_minute)
         
         # 重复帧检测
         self._hash_cache = HashCacheManager(
@@ -520,7 +617,9 @@ class VisionAIClient:
             "duplicate_skips": 0,
             "api_calls": 0,
             "api_wait_ms_total": 0.0,
-            "api_wait_count": 0
+            "api_wait_count": 0,
+            "api_rate_wait_ms_total": 0.0,
+            "api_rate_wait_count": 0
         }
     
     async def _get_client(self) -> httpx.AsyncClient:
@@ -652,6 +751,11 @@ class VisionAIClient:
             return {"error": str(e), "should_include": True}
         
         # 获取并发许可（统计等待耗时）
+        rate_wait_sec = await self._rate_limiter.acquire()
+        rate_wait_ms = rate_wait_sec * 1000.0
+        self._stats["api_rate_wait_ms_total"] += rate_wait_ms
+        self._stats["api_rate_wait_count"] += 1
+
         wait_start = time.perf_counter()
         await self._concurrency_limiter.acquire()
         wait_ms = (time.perf_counter() - wait_start) * 1000.0
@@ -690,10 +794,11 @@ class VisionAIClient:
             )
             http_ms = (time.perf_counter() - req_start) * 1000.0
             avg_wait = self._stats["api_wait_ms_total"] / max(1, self._stats["api_wait_count"])
+            avg_rate_wait = self._stats["api_rate_wait_ms_total"] / max(1, self._stats["api_rate_wait_count"])
             logger.info(
-                f"Vision API timing: wait={wait_ms:.1f}ms, http={http_ms:.1f}ms, "
-                f"avg_wait={avg_wait:.1f}ms, calls={self._stats['api_wait_count']}, "
-                f"status={response.status_code}"
+                f"Vision API timing: rate_wait={rate_wait_ms:.1f}ms, wait={wait_ms:.1f}ms, http={http_ms:.1f}ms, "
+                f"avg_wait={avg_wait:.1f}ms, avg_rate_wait={avg_rate_wait:.1f}ms, "
+                f"calls={self._stats['api_wait_count']}, status={response.status_code}"
             )
             
             self._stats["api_calls"] += 1
@@ -726,7 +831,7 @@ class VisionAIClient:
                 http_ms = (time.perf_counter() - req_start) * 1000.0
             avg_wait = self._stats["api_wait_ms_total"] / max(1, self._stats["api_wait_count"])
             logger.error(
-                f"Vision API call failed: {e} (wait={wait_ms:.1f}ms, http={http_ms:.1f}ms, "
+                f"Vision API call failed: {e} (rate_wait={rate_wait_ms:.1f}ms, wait={wait_ms:.1f}ms, http={http_ms:.1f}ms, "
                 f"avg_wait={avg_wait:.1f}ms, calls={self._stats['api_wait_count']})"
             )
             return {"error": str(e), "should_include": True}
@@ -757,8 +862,25 @@ class VisionAIClient:
         }
         if self._stats["api_wait_count"] > 0:
             stats["api_wait_avg_ms"] = self._stats["api_wait_ms_total"] / self._stats["api_wait_count"]
+        if self._stats["api_rate_wait_count"] > 0:
+            stats["api_rate_wait_avg_ms"] = self._stats["api_rate_wait_ms_total"] / self._stats["api_rate_wait_count"]
         return stats
-    
+
+    def validate_image_sync(
+        self,
+        image_path: str,
+        prompt: str,
+        skip_duplicate_check: bool = False,
+        timeout: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        作用：在同步上下文中复用后台事件循环执行异步 Vision 调用。
+        """
+        return _VISION_BG_LOOP.submit(
+            self.validate_image(image_path, prompt, skip_duplicate_check=skip_duplicate_check),
+            timeout=timeout
+        )
+
     async def close(self):
         """
         执行逻辑：

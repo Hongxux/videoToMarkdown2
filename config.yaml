@@ -31,9 +31,9 @@ ai:
   
   # 内容分析模型
   analysis:
-    model: "deepseek-chat"
+    model: "deepseek-reasoner"
     temperature: 0.2
-    fast_model: ""        # 用于简单任务的快速模型 (可选，如 deepseek-lite)
+    fast_model: "deepseek-chat"        # 用于简单任务 (<300字符) 的快速模型
   
   # 主题识别模型
   topic:

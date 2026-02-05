@@ -163,13 +163,47 @@ class KnowledgeClassifier:
             logger.warning("DEEPSEEK_API_KEY not set, classification will be disabled")
             self._enabled = False
             self._llm_client = None
+            self._fast_llm_client = None
         else:
             self._enabled = True
+            
+            # Load config for model names
+            self.smart_model = "deepseek-chat"
+            self.fast_model = "deepseek-chat"
+            try:
+                import yaml
+                # Resolve path to config.yaml relative to this file
+                # d:\videoToMarkdownTest2\MVP_Module2_HEANCING\module2_content_enhancement\knowledge_classifier.py
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                config_path = os.path.join(base_dir, "config.yaml")
+
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f)
+                        ai_config = config.get("ai", {}).get("analysis", {})
+                        self.smart_model = ai_config.get("model", "deepseek-chat")
+                        self.fast_model = ai_config.get("fast_model") or "deepseek-chat"
+                    logger.info(f"Loaded knowledge models from config: Smart='{self.smart_model}', Fast='{self.fast_model}'")
+                else:
+                    logger.warning(f"Config not found at {config_path}, using defaults")
+            except Exception as e:
+                logger.warning(f"Failed to load config.yaml: {e}")
+
             # 🚀 使用集中式 LLMClient
             from .llm_client import LLMClient
+            
+            # Smart Client
             self._llm_client = LLMClient(
                 api_key=self.api_key,
-                base_url=self.base_url + "/v1"
+                base_url=self.base_url + "/v1",
+                model=self.smart_model
+            )
+            
+            # Fast Client
+            self._fast_llm_client = LLMClient(
+                api_key=self.api_key,
+                base_url=self.base_url + "/v1",
+                model=self.fast_model
             )
     
     @property
@@ -305,6 +339,17 @@ class KnowledgeClassifier:
             BATCH_SIZE = 2
             
         chunks = [items[i:i + BATCH_SIZE] for i in range(0, len(items), BATCH_SIZE)]
+        
+        # 🚀 Model Routing: Use Fast Model for simple/short tasks
+        selected_client = self._llm_client
+        model_name = self.smart_model
+        if avg_len < 300 and self._fast_llm_client:
+            selected_client = self._fast_llm_client
+            model_name = self.fast_model
+            logger.info(f"Routing to FAST model ({model_name}) | AvgLen: {avg_len:.0f} < 300")
+        else:
+            logger.info(f"Routing to SMART model ({model_name}) | AvgLen: {avg_len:.0f} >= 300")
+
         logger.info(f"Dynamic Batching: {len(items)} items, avg_len={avg_len:.0f} chars "
                     f"→ Batch Size {BATCH_SIZE}, {len(chunks)} chunks")
 
@@ -348,8 +393,8 @@ ID: {item['id']}
                 if not self._enabled:
                     return []
 
-                # 🚀 使用 LLMClient 进行异步调用，system_message 固定
-                content, _, _ = await self._llm_client.complete_text(
+                # 🚀 使用选定的 LLM Client 进行异步调用
+                content, _, _ = await selected_client.complete_text(
                     prompt=user_prompt,
                     system_message=self.BATCH_SYSTEM_PROMPT
                 )

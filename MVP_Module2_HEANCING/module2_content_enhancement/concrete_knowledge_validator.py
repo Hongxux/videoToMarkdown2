@@ -226,6 +226,7 @@ class ConcreteKnowledgeValidator:
                 base_url=vision_config.get("base_url", "https://qianfan.baidubce.com/v2/chat/completions"),
                 model=vision_config.get("vision_model", "ernie-4.5-turbo-vl-32k"),
                 temperature=vision_config.get("temperature", 0.3),
+                rate_limit_per_minute=vision_config.get("rate_limit_per_minute", 60),
                 duplicate_detection_enabled=vision_config.get("duplicate_detection", True),
                 similarity_threshold=vision_config.get("similarity_threshold", 0.95)
             )
@@ -502,8 +503,6 @@ class ConcreteKnowledgeValidator:
         - graphic_region: 函数入参（类型：np.ndarray）。
         输出参数：
         - ConcreteKnowledgeResult（基于 Vision AI 判定的具象结论）。"""
-        import asyncio
-        
         # 保存裁剪区域为临时文件
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
@@ -511,23 +510,12 @@ class ConcreteKnowledgeValidator:
             temp_path = tmp.name
         
         try:
-            # 调用异步 API (同步包装)
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # 如果已在异步上下文，创建新任务
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(
-                        asyncio.run,
-                        self._vision_client.validate_image(temp_path, CONCRETE_KNOWLEDGE_PROMPT)
-                    )
-                    api_result = future.result(timeout=60)
-            else:
-                api_result = asyncio.run(
-                    self._vision_client.validate_image(temp_path, CONCRETE_KNOWLEDGE_PROMPT)
-                )
-            
-            # 解析结果
+            # 使用单一后台事件循环同步调用，复用连接池与并发限制
+            api_result = self._vision_client.validate_image_sync(
+                temp_path,
+                CONCRETE_KNOWLEDGE_PROMPT,
+                timeout=60
+            )
             has_concrete = api_result.get("has_concrete_knowledge", "否") == "是"
             confidence = float(api_result.get("confidence", 0.5))
             concrete_type = api_result.get("concrete_type", "未知")

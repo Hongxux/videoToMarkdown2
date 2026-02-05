@@ -65,6 +65,7 @@ from MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor i
 # 🔑 Import tools for GenerateMaterialRequests
 from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector import ScreenshotSelector
 from MVP_Module2_HEANCING.module2_content_enhancement.video_clip_extractor import VideoClipExtractor
+from MVP_Module2_HEANCING.module2_content_enhancement.llm_client import AdaptiveConcurrencyLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -741,6 +742,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         # 活跃任务计数
         self._active_tasks = 0
         self._task_lock = threading.Lock()
+
+        # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
+        self._classify_concurrency_limiter = AdaptiveConcurrencyLimiter(
+            initial_limit=10,
+            min_limit=2,
+            max_limit=300
+        )
         
         # 🚀 V6: Java 控制并发 + Python ProcessPool + SharedMemory
         # - Java 控制发送多少并行请求 (熔断/重试)
@@ -1212,8 +1220,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 classifier.step2_path = request.step2_path
                 classifier._all_subtitles_cache = None  # 清除缓存
             
-            # 🚀 DeepSeek 优化: 限制并发数
-            sem = asyncio.Semaphore(30) # 允许 30 个并发请求
+            # 🚀 DeepSeek 并发探测：AIMD 动态逼近吞吐上限
+            limiter = self._classify_concurrency_limiter
 
             async def process_unit(u):
                 """
@@ -1231,38 +1239,42 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 - u: 函数入参（类型：未标注）。
                 输出参数：
                 - List[KnowledgeClassificationResult]（该单元的分类结果）。"""
-                async with sem:
+                await limiter.acquire()
+                try:
                     action_segments = [
-                        {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id} 
+                        {"start_sec": au.start_sec, "end_sec": au.end_sec, "id": au.id}
                         for au in u.action_units
                     ]
                     
-                    # ✅ 不再传递字幕，Classifier 直接从 Step 2 读取
+                    # 不再传递字幕，Classifier 直接从 Step 2 读取
                     
-                    try:
-                        batch_results = await classifier.classify_batch(
-                            semantic_unit_title=u.title,
-                            semantic_unit_text=u.text,
-                            action_segments=action_segments
-                        )
-                        
-                        unit_results_proto = []
-                        for i, res in enumerate(batch_results):
-                            if i >= len(action_segments): break
-                            action_id = action_segments[i]["id"]
-                            unit_results_proto.append(video_processing_pb2.KnowledgeClassificationResult(
-                                unit_id=u.unit_id,
-                                action_id=action_id,
-                                knowledge_type=res.get("knowledge_type", "过程性知识"),
-                                confidence=res.get("confidence", 0.5),
-                                key_evidence=res.get("key_evidence", ""),
-                                reasoning=res.get("reasoning", "")
-                            ))
-                        return unit_results_proto
-                    except Exception as e:
-                        logger.error(f"Unit {u.unit_id} classification failed: {e}")
-                        return []
-
+                    batch_results = await classifier.classify_batch(
+                        semantic_unit_title=u.title,
+                        semantic_unit_text=u.text,
+                        action_segments=action_segments
+                    )
+                    
+                    await limiter.record_success()
+                    unit_results_proto = []
+                    for i, res in enumerate(batch_results):
+                        if i >= len(action_segments):
+                            break
+                        action_id = action_segments[i]["id"]
+                        unit_results_proto.append(video_processing_pb2.KnowledgeClassificationResult(
+                            unit_id=u.unit_id,
+                            action_id=action_id,
+                            knowledge_type=res.get("knowledge_type", "过程性知识"),
+                            confidence=res.get("confidence", 0.5),
+                            key_evidence=res.get("key_evidence", ""),
+                            reasoning=res.get("reasoning", "")
+                        ))
+                    return unit_results_proto
+                except Exception as e:
+                    await limiter.record_failure(is_rate_limit=False)
+                    logger.error(f"Unit {u.unit_id} classification failed: {e}")
+                    return []
+                finally:
+                    limiter.release()
             tasks = [process_unit(u) for u in request.units]
             all_unit_results = await asyncio.gather(*tasks)
             flat_results = [r for sublist in all_unit_results for r in sublist]
