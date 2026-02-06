@@ -634,8 +634,16 @@ class VLMaterialGenerator:
                 time_window=time_window,
             )
             
-            # 使用进程池并行执行 CV 分析
-            max_workers = min(4, len([p for p in task_params if not p.get("skip")]))
+            # 使用进程池并行执行 CV 分析 (CPU核心数自适应)
+            import os
+            max_workers_config = self.screenshot_config.get("max_workers", "auto")
+            if max_workers_config == "auto":
+                # 自动: 使用CPU核心数
+                max_workers = min(os.cpu_count() or 4, len([p for p in task_params if not p.get("skip")]))
+            else:
+                # 手动指定
+                max_workers = min(int(max_workers_config), len([p for p in task_params if not p.get("skip")]))
+            
             if max_workers == 0:
                 logger.warning("所有预读任务失败，跳过 CV 优化")
                 return screenshot_requests
@@ -898,8 +906,16 @@ class VLMaterialGenerator:
             extractor = VisualFeatureExtractor(video_path)
             shm_registry = get_shared_frame_registry()
             
-            # 配置参数
-            max_workers = min(4, len(screenshot_requests))
+            # 配置参数 (CPU核心数自适应)
+            import os
+            max_workers_config = self.screenshot_config.get("max_workers", "auto")
+            if max_workers_config == "auto":
+                # 自动: 使用CPU核心数
+                max_workers = min(os.cpu_count() or 4, len(screenshot_requests))
+            else:
+                # 手动指定
+                max_workers = min(int(max_workers_config), len(screenshot_requests))
+            
             max_inflight_multiplier = int(self.screenshot_config.get("max_inflight_multiplier", 2))
             max_inflight = max_workers * max_inflight_multiplier
             sample_rate = int(self.screenshot_config.get("prefetch_sample_rate", 2))

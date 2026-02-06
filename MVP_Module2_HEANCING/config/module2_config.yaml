@@ -246,6 +246,7 @@ vl_material_generation:
     
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
+    max_workers: auto                     # Worker数: 'auto'=CPU核心数, 或手动指定如 8
     max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
     
     # 预读配置 (与批量模式共享)
