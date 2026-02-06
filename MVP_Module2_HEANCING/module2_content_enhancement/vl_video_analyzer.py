@@ -129,13 +129,16 @@ class VLVideoAnalyzer:
         return (
             "\n\n"
             "【输出硬性约束】\n"
-            "1) 只输出一个 JSON（不要 Markdown 代码块、不要解释、不要前后缀文字）。\n"
-            "2) 顶层必须是 JSON 数组：[{...}, {...}]。\n"
+            "1) 只输出一个标准的 JSON，不要任何 Markdown 代码块标签、不要解释、不要前后缀文字。\n"
+            "2) 顶层必须是一个平铺的 JSON 数组：[{...}, {...}]。\n"
             "3) 每个对象必须包含字段：id, knowledge_type, confidence, reasoning, key_evidence, "
             "clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。\n"
-            "4) key_evidence 必须是字符串数组，例如：[\"证据1\", \"证据2\"]，最多 5 条。\n"
-            "5) reasoning 请尽量短（建议 <= 180 字），避免长文本导致截断。\n"
-            "6) 如果无法可靠判断 clip_start_sec/clip_end_sec，请输出 -1。\n"
+            "4) key_evidence 必须是字符串数组，例如：[\"证据1\", \"证据2\"]。\n"
+            "5) reasoning 请尽量简练（建议 150 字以内），直接给出判断核心逻辑。\n"
+            "6) 时间边界判断规则：\n"
+            "   - 对于非【讲解型】内容，**禁止**随意输出 -1。请根据视觉变化（如：菜单出现/消失、鼠标点击、窗口切换、公式书写开始/结束）尽力估算起止时间。\n"
+            "   - 如果该知识类型贯穿整个视频片段，起始可设为 0.0，结束可设为片段总时长（或最后一个显著变化的时间戳）。\n"
+            "   - 只有在视觉信息完全无法支撑任何时间判断时，才允许对该项输出 -1。\n"
         )
     
     def _load_prompt_template(self) -> str:
@@ -404,10 +407,9 @@ class VLVideoAnalyzer:
         content_items: List[Dict[str, Any]] = [{
             "type": "text",
             "text": (
-                "注意：由于视频片段过大无法直接上传 data-uri，本次输入为抽取的关键帧。\n"
-                "你只能基于这些帧和它们的时间戳进行判断。\n"
-                "时间字段 clip_start_sec/clip_end_sec/suggested_screenshoot_timestamps："
-                "只能使用提供的时间戳或 -1。"
+                "注意：本次输入为从视频中抽取的关键帧及对应时间戳。\n"
+                "时间边界判断规则：请根据这些关键帧的变化，尽力估算 clip_start_sec 和 clip_end_sec。\n"
+                "如果连续几帧都属于同一知识类型，请以这几帧的时间跨度作为估算依据。"
             ),
         }]
         for idx, frame in enumerate(frames):
