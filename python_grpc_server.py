@@ -3355,6 +3355,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # ==================================================================
             # 路由侧：截图选择（concrete + process<=10s）
             # ==================================================================
+            vl_screenshot_requests = []
+            vl_clip_requests = []
             cv_screenshot_requests = []
             if cv_screenshot_units:
                 route_t0 = time.perf_counter()
@@ -3363,6 +3365,21 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 cpu_count = os.cpu_count() or 4
                 max_concurrency = max(1, min(4, cpu_count // 2))
                 semaphore = asyncio.Semaphore(max_concurrency)
+                batch_size = max(1, max_concurrency * 4)
+                total_units = len(cv_screenshot_units)
+                total_batches = (total_units + batch_size - 1) // batch_size
+
+                def _consume_vl_result(vl_result):
+                    if not vl_result.success:
+                        return False, vl_result.error_msg
+                    vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
+                    for ss in vl_result.screenshot_requests:
+                        if ss.get("semantic_unit_id", "") in vl_unit_ids:
+                            vl_screenshot_requests.append(ss)
+                    for clip in vl_result.clip_requests:
+                        if clip.get("semantic_unit_id", "") in vl_unit_ids:
+                            vl_clip_requests.append(clip)
+                    return True, ""
 
                 async def _run_cv_screenshot(unit):
                     unit_id = unit.get("unit_id", "")
@@ -3375,23 +3392,57 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         )
                     return unit_id, start_sec, end_sec, results
 
-                tasks = [_run_cv_screenshot(u) for u in cv_screenshot_units]
-                results = await asyncio.gather(*tasks)
-                for unit_id, start_sec, end_sec, ss_list in results:
-                    for idx, ss in enumerate(ss_list or []):
-                        ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
-                        cv_screenshot_requests.append({
-                            "screenshot_id": f"routed_ss_{unit_id}_{idx}",
-                            "timestamp_sec": ts,
-                            "label": f"routed_range_{idx}",
-                            "semantic_unit_id": unit_id
-                        })
+                vl_consumed = False
+                for batch_idx in range(total_batches):
+                    start = batch_idx * batch_size
+                    end = min(start + batch_size, total_units)
+                    batch_units = cv_screenshot_units[start:end]
+
+                    if vl_task and vl_task.done() and not vl_consumed:
+                        vl_result = vl_task.result()
+                        ok, err = _consume_vl_result(vl_result)
+                        if not ok:
+                            logger.warning(f"[{task_id}] VL 分析失败，提前回退: {err}")
+                            return video_processing_pb2.VLAnalysisResponse(
+                                success=True,
+                                vl_enabled=True,
+                                used_fallback=True,
+                                error_msg=err
+                            )
+                        vl_consumed = True
+                        if vl_t0 is None:
+                            vl_t0 = time.perf_counter()
+                        vl_ms = (time.perf_counter() - vl_t0) * 1000.0
+                        logger.info(
+                            f"[{task_id}] VL 结果提前合并: screenshots={len(vl_screenshot_requests)}, "
+                            f"clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
+                        )
+
+                    tasks = [_run_cv_screenshot(u) for u in batch_units]
+                    results = await asyncio.gather(*tasks)
+                    batch_screenshots = 0
+                    for unit_id, start_sec, end_sec, ss_list in results:
+                        for idx, ss in enumerate(ss_list or []):
+                            ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
+                            cv_screenshot_requests.append({
+                                "screenshot_id": f"routed_ss_{unit_id}_{idx}",
+                                "timestamp_sec": ts,
+                                "label": f"routed_range_{idx}",
+                                "semantic_unit_id": unit_id
+                            })
+                            batch_screenshots += 1
+
+                    logger.info(
+                        f"[{task_id}] 路由截图批次 {batch_idx + 1}/{total_batches}: "
+                        f"units={len(batch_units)}, batch_ss={batch_screenshots}, "
+                        f"total_ss={len(cv_screenshot_requests)}"
+                    )
 
                 route_ms = (time.perf_counter() - route_t0) * 1000.0
                 logger.info(
                     f"[{task_id}] 路由截图完成: units={len(cv_screenshot_units)}, "
                     f"screenshots={len(cv_screenshot_requests)}, ms={route_ms:.1f}, "
-                    f"concurrency={max_concurrency}"
+                    f"concurrency={max_concurrency}, batch_size={batch_size}"
                 )
 
             # ==================================================================
@@ -3413,34 +3464,37 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # ==================================================================
             # VL 分析：仅处理 process>10s 的单元
             # ==================================================================
-            vl_screenshot_requests = []
-            vl_clip_requests = []
             if vl_task:
-                vl_result = await vl_task
-                if not vl_result.success:
-                    logger.warning(f"[{task_id}] VL 鍒嗘瀽澶辫触锛岄渶瑕佸洖閫€: {vl_result.error_msg}")
-                    return video_processing_pb2.VLAnalysisResponse(
-                        success=True,
-                        vl_enabled=True,
-                        used_fallback=True,
-                        error_msg=vl_result.error_msg
+                if "vl_consumed" in locals() and vl_consumed:
+                    logger.info(
+                        f"[{task_id}] VL 已在批次处理中合并: "
+                        f"screenshots={len(vl_screenshot_requests)}, clips={len(vl_clip_requests)}"
                     )
+                else:
+                    vl_result = await vl_task
+                    if not vl_result.success:
+                        logger.warning(f"[{task_id}] VL 鍒嗘瀽澶辫触锛岄渶瑕佸洖閫€: {vl_result.error_msg}")
+                        return video_processing_pb2.VLAnalysisResponse(
+                            success=True,
+                            vl_enabled=True,
+                            used_fallback=True,
+                            error_msg=vl_result.error_msg
+                        )
+                    vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
+                    for ss in vl_result.screenshot_requests:
+                        if ss.get("semantic_unit_id", "") in vl_unit_ids:
+                            vl_screenshot_requests.append(ss)
+                    for clip in vl_result.clip_requests:
+                        if clip.get("semantic_unit_id", "") in vl_unit_ids:
+                            vl_clip_requests.append(clip)
 
-                vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
-                for ss in vl_result.screenshot_requests:
-                    if ss.get("semantic_unit_id", "") in vl_unit_ids:
-                        vl_screenshot_requests.append(ss)
-                for clip in vl_result.clip_requests:
-                    if clip.get("semantic_unit_id", "") in vl_unit_ids:
-                        vl_clip_requests.append(clip)
-
-                if vl_t0 is None:
-                    vl_t0 = time.perf_counter()
-                vl_ms = (time.perf_counter() - vl_t0) * 1000.0
-                logger.info(
-                    f"[{task_id}] VL 处理完成: units={len(vl_units)}, "
-                    f"screenshots={len(vl_screenshot_requests)}, clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
-                )
+                    if vl_t0 is None:
+                        vl_t0 = time.perf_counter()
+                    vl_ms = (time.perf_counter() - vl_t0) * 1000.0
+                    logger.info(
+                        f"[{task_id}] VL 处理完成: units={len(vl_units)}, "
+                        f"screenshots={len(vl_screenshot_requests)}, clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
+                    )
             else:
                 logger.info(f"[{task_id}] VL 路由为空: process>10s=0, 跳过 VL API")
 
