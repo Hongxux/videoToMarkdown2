@@ -81,6 +81,92 @@ class VLMaterialGenerator:
         """检查是否启用 VL 素材生成"""
         return self.enabled
     
+    def _get_cache_path(self, video_path: str, output_dir: str = None) -> Path:
+        """获取VL结果缓存文件路径"""
+        if output_dir:
+            cache_dir = Path(output_dir)
+        else:
+            cache_dir = Path(video_path).parent
+        
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / "vl_analysis_cache.json"
+    
+    def _save_vl_results(
+        self,
+        cache_path: Path,
+        analysis_results: List[Any],
+        task_metadata: List[Dict[str, Any]],
+        screenshot_requests: List[Dict[str, Any]],
+        clip_requests: List[Dict[str, Any]]
+    ) -> None:
+        """保存VL分析结果到JSON文件"""
+        try:
+            # 序列化分析结果
+            serialized_results = []
+            for idx, result in enumerate(analysis_results):
+                meta = task_metadata[idx] if idx < len(task_metadata) else {}
+                
+                if isinstance(result, Exception):
+                    serialized_results.append({
+                        "unit_id": meta.get("unit_id", f"task_{idx}"),
+                        "success": False,
+                        "error": str(result),
+                        "metadata": meta
+                    })
+                else:
+                    serialized_results.append({
+                        "unit_id": meta.get("unit_id", f"task_{idx}"),
+                        "success": result.success,
+                        "error_msg": result.error_msg if hasattr(result, 'error_msg') else "",
+                        "clip_requests": result.clip_requests if hasattr(result, 'clip_requests') else [],
+                        "screenshot_requests": result.screenshot_requests if hasattr(result, 'screenshot_requests') else [],
+                        "metadata": meta
+                    })
+            
+            cache_data = {
+                "version": "1.0",
+                "timestamp": str(Path(cache_path).stat().st_mtime) if cache_path.exists() else "",
+                "analysis_results": serialized_results,
+                "aggregated_screenshots": screenshot_requests,
+                "aggregated_clips": clip_requests,
+                "total_units": len(analysis_results),
+                "successful_units": sum(1 for r in serialized_results if r.get("success", False))
+            }
+            
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"✅ VL 分析结果已保存到缓存: {cache_path}")
+            logger.info(f"   - 总单元数: {cache_data['total_units']}")
+            logger.info(f"   - 成功单元: {cache_data['successful_units']}")
+            logger.info(f"   - 截图请求: {len(screenshot_requests)}")
+            logger.info(f"   - 视频片段: {len(clip_requests)}")
+            
+        except Exception as e:
+            logger.warning(f"保存VL结果缓存失败: {e}")
+    
+    def _load_vl_results(self, cache_path: Path) -> Optional[Dict[str, Any]]:
+        """从JSON文件加载VL分析结果"""
+        try:
+            if not cache_path.exists():
+                return None
+            
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+            
+            logger.info(f"✅ 从缓存加载VL分析结果: {cache_path}")
+            logger.info(f"   - 缓存版本: {cache_data.get('version', 'unknown')}")
+            logger.info(f"   - 总单元数: {cache_data.get('total_units', 0)}")
+            logger.info(f"   - 成功单元: {cache_data.get('successful_units', 0)}")
+            logger.info(f"   - 截图请求: {len(cache_data.get('aggregated_screenshots', []))}")
+            logger.info(f"   - 视频片段: {len(cache_data.get('aggregated_clips', []))}")
+            
+            return cache_data
+            
+        except Exception as e:
+            logger.warning(f"加载VL结果缓存失败: {e}")
+            return None
+    
     async def generate(
         self,
         video_path: str,
@@ -104,6 +190,19 @@ class VLMaterialGenerator:
             result.success = False
             result.error_msg = "VL 素材生成未启用"
             return result
+        
+        # 检查是否有缓存
+        cache_path = self._get_cache_path(video_path, output_dir)
+        use_cache = self.config.get("use_cache", True)
+        
+        if use_cache:
+            cached_data = self._load_vl_results(cache_path)
+            if cached_data:
+                logger.info("🚀 使用缓存的VL分析结果,跳过VL API调用")
+                result.screenshot_requests = cached_data.get("aggregated_screenshots", [])
+                result.clip_requests = cached_data.get("aggregated_clips", [])
+                result.success = True
+                return result
         
         try:
             # 1. 切割视频为语义单元片段
@@ -180,6 +279,16 @@ class VLMaterialGenerator:
                 all_screenshot_requests.extend(analysis_result.screenshot_requests)
             
             logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
+            
+            # 保存VL分析原始结果(CV优化前)
+            if self.config.get("save_cache", True):
+                self._save_vl_results(
+                    cache_path=cache_path,
+                    analysis_results=analysis_results,
+                    task_metadata=task_metadata,
+                    screenshot_requests=all_screenshot_requests,
+                    clip_requests=all_clip_requests
+                )
             
             # 3. 🚀 批量 CV 优化截图时间点
             if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
@@ -474,55 +583,18 @@ class VLMaterialGenerator:
             from cv_worker import run_screenshot_selection_task, init_cv_worker
             
             logger.info(f"🚀 初始化并行 CV 优化: {len(screenshot_requests)} 个请求")
-            
+             
             # 初始化帧提取器
             extractor = VisualFeatureExtractor(video_path)
             shm_registry = get_shared_frame_registry()
             
-            # 准备任务参数
-            task_params = []
-            for idx, req in enumerate(screenshot_requests):
-                original_ts = req.get("timestamp_sec", 0)
-                unit_id = req.get("unit_id", f"req_{idx}")
-                
-                # 计算搜索窗口
-                search_start = max(0, original_ts - time_window)
-                search_end = original_ts + time_window
-                
-                # 预读帧并注册到共享内存
-                frames, timestamps = extractor.extract_frames_fast(
-                    start_sec=search_start,
-                    end_sec=search_end,
-                    sample_rate=2,  # 较高采样率以获取更多候选帧
-                    target_height=360
-                )
-                
-                if not frames:
-                    logger.warning(f"预读帧失败: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
-                    task_params.append({
-                        "req": req,
-                        "skip": True
-                    })
-                    continue
-                
-                # 构建共享内存引用
-                shm_frames = {}
-                for ts in timestamps:
-                    frame_idx = int(ts * extractor.fps)
-                    shm_ref = shm_registry.get_shm_ref(frame_idx)
-                    if shm_ref:
-                        shm_frames[ts] = shm_ref
-                
-                task_params.append({
-                    "req": req,
-                    "skip": False,
-                    "unit_id": unit_id,
-                    "island_index": idx,
-                    "expanded_start": search_start,
-                    "expanded_end": search_end,
-                    "shm_frames": shm_frames,
-                    "fps": extractor.fps
-                })
+            # 准备任务参数（注意：此阶段是“主进程预读并写入共享内存”，会先串行跑完再启动进程池）
+            task_params = self._build_parallel_cv_task_params(
+                extractor=extractor,
+                shm_registry=shm_registry,
+                screenshot_requests=screenshot_requests,
+                time_window=time_window,
+            )
             
             # 使用进程池并行执行 CV 分析
             max_workers = min(4, len([p for p in task_params if not p.get("skip")]))
@@ -584,14 +656,159 @@ class VLMaterialGenerator:
             return optimized
             
         except ImportError as e:
-            logger.warning(f"❌ cv_worker 导入失败: {e} (sys.path={sys.path})，回退到串行模式")
+            error_msg = f"❌ cv_worker 导入失败: {e} (sys.path={sys.path[:3]}...)"
+            logger.warning(error_msg)
+            print(f"\n{'='*80}", flush=True)
+            print(f"[CV PARALLEL] {error_msg}", flush=True)
+            print(f"{'='*80}\n", flush=True)
+            import traceback
+            traceback.print_exc()
             return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
         except Exception as e:
-            logger.error(f"❌ 并行 CV 优化失败: {e}，回退到串行模式")
+            error_msg = f"❌ 并行 CV 优化失败: {e}"
+            logger.error(error_msg)
+            print(f"\n{'='*80}", flush=True)
+            print(f"[CV PARALLEL] {error_msg}", flush=True)
+            print(f"{'='*80}\n", flush=True)
             import traceback
             logger.error(traceback.format_exc())
+            traceback.print_exc()
             return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
     
+    def _build_parallel_cv_task_params(
+        self,
+        *,
+        extractor: Any,
+        shm_registry: Any,
+        screenshot_requests: List[Dict[str, Any]],
+        time_window: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        构建并行 CV 优化的任务参数。
+
+        为什么要拆出来：
+        - 用户常见误解：“已经初始化 ProcessPool 了，为什么还没多进程？”
+          实际上进程池启动在后面；本方法负责的“预读帧 -> 写入 SHM”必须在主进程先完成，
+          才能让 worker 零拷贝读取并计算。
+        - 同时这里是性能瓶颈（尤其短片段 duration<5s 时，extract_frames_fast 会走 OpenCV 随机访问）。
+
+        关键优化：当截图请求很多且窗口重叠明显时，优先做“Union 预读”（一次性预读覆盖范围），
+        避免对短视频反复 seek/read 导致看起来“卡在没开多进程”。
+
+        返回结构：每个元素为 dict，包含 req/skip/unit_id/island_index/expanded_start/expanded_end/shm_frames/fps。
+        """
+        if not screenshot_requests:
+            return []
+
+        # Union 预读的启发式参数：默认偏保守，只在“请求多 + 覆盖范围不大”时启用。
+        union_min_requests = int(self.screenshot_config.get("prefetch_union_min_requests", 20))
+        union_max_span_sec = float(self.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
+        sample_rate = int(self.screenshot_config.get("prefetch_sample_rate", 2))
+        target_height = int(self.screenshot_config.get("prefetch_target_height", 360))
+
+        task_params: List[Dict[str, Any]] = []
+
+        # 先计算每个请求的窗口，后续复用（避免重复计算 + 便于 union 策略决策）
+        windows: List[Tuple[float, float, str, Dict[str, Any]]] = []
+        for idx, req in enumerate(screenshot_requests):
+            original_ts = float(req.get("timestamp_sec", 0) or 0)
+            unit_id = req.get("unit_id", f"req_{idx}")
+            search_start = max(0.0, original_ts - time_window)
+            search_end = original_ts + time_window
+            windows.append((search_start, search_end, unit_id, req))
+
+        union_start = min(w[0] for w in windows)
+        union_end = max(w[1] for w in windows)
+        union_span = max(0.0, union_end - union_start)
+
+        use_union_prefetch = (len(screenshot_requests) >= union_min_requests) and (union_span <= union_max_span_sec)
+
+        if use_union_prefetch:
+            logger.info(
+                f"🧠 [Prefetch] 使用 Union 预读：reqs={len(screenshot_requests)}, "
+                f"span={union_span:.2f}s (阈值={union_max_span_sec:.2f}s)"
+            )
+            frames, timestamps = extractor.extract_frames_fast(
+                start_sec=union_start,
+                end_sec=union_end,
+                sample_rate=sample_rate,
+                target_height=target_height,
+            )
+            if not frames:
+                logger.warning(f"Union 预读帧失败: ({union_start:.2f}s-{union_end:.2f}s)，回退到逐请求预读")
+                use_union_prefetch = False
+            else:
+                # 预先把时间戳转换为 shm_ref，后续按窗口筛选即可
+                ts_to_shm_ref: Dict[float, Any] = {}
+                for ts in timestamps:
+                    frame_idx = int(ts * extractor.fps)
+                    shm_ref = shm_registry.get_shm_ref(frame_idx)
+                    if shm_ref:
+                        ts_to_shm_ref[ts] = shm_ref
+
+                for idx, (search_start, search_end, unit_id, req) in enumerate(windows):
+                    shm_frames = {
+                        ts: shm_ref
+                        for ts, shm_ref in ts_to_shm_ref.items()
+                        if (search_start <= ts <= search_end)
+                    }
+                    if not shm_frames:
+                        logger.warning(f"Union 预读未覆盖到候选帧: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
+                        task_params.append({"req": req, "skip": True})
+                        continue
+
+                    task_params.append(
+                        {
+                            "req": req,
+                            "skip": False,
+                            "unit_id": unit_id,
+                            "island_index": idx,
+                            "expanded_start": search_start,
+                            "expanded_end": search_end,
+                            "shm_frames": shm_frames,
+                            "fps": extractor.fps,
+                        }
+                    )
+
+        if not use_union_prefetch:
+            logger.info(
+                f"🧠 [Prefetch] 使用逐请求预读：reqs={len(screenshot_requests)}, "
+                f"union_span={union_span:.2f}s"
+            )
+            for idx, (search_start, search_end, unit_id, req) in enumerate(windows):
+                frames, timestamps = extractor.extract_frames_fast(
+                    start_sec=search_start,
+                    end_sec=search_end,
+                    sample_rate=sample_rate,
+                    target_height=target_height,
+                )
+                if not frames:
+                    logger.warning(f"预读帧失败: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
+                    task_params.append({"req": req, "skip": True})
+                    continue
+
+                shm_frames: Dict[float, Any] = {}
+                for ts in timestamps:
+                    frame_idx = int(ts * extractor.fps)
+                    shm_ref = shm_registry.get_shm_ref(frame_idx)
+                    if shm_ref:
+                        shm_frames[ts] = shm_ref
+
+                task_params.append(
+                    {
+                        "req": req,
+                        "skip": False,
+                        "unit_id": unit_id,
+                        "island_index": idx,
+                        "expanded_start": search_start,
+                        "expanded_end": search_end,
+                        "shm_frames": shm_frames,
+                        "fps": extractor.fps,
+                    }
+                )
+
+        return task_params
+
     def _should_fallback(self, error: Exception) -> bool:
         """
         检查是否应该回退到原有流程

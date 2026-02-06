@@ -219,7 +219,7 @@ vl_material_generation:
     model: "qwen3-vl-plus"
     api_key: "sk-bee8fc770460451da1cb9d8d0ab5f7a6"
     max_retries: 2
-    max_tokens: 8,192
+    max_tokens: 8192
     temperature: 0.2
     
     # 视频输入策略 (应对 DashScope 10MB data-uri 限制)
@@ -232,6 +232,12 @@ vl_material_generation:
     # 关键帧降级参数 (当视频过大无法直接传输时)
     max_input_frames: 6  # 最多抽取6帧
     max_image_dim: 1280  # 图片最大边长 (像素)
+  
+  # VL 结果缓存配置
+  use_cache: true   # 是否使用缓存 (跳过已分析的视频)
+  save_cache: true  # 是否保存分析结果到缓存
+  # 缓存文件: vl_analysis_cache.json (保存在视频同目录或output_dir下)
+  
   
   # 截图优化配置
   screenshot_optimization:

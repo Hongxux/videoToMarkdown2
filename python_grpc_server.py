@@ -261,6 +261,14 @@ from MVP_Module2_HEANCING.module2_content_enhancement.llm_client import Adaptive
 
 logger = logging.getLogger(__name__)
 
+# 配置日志级别和格式
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    force=True  # 强制重新配置,覆盖之前的配置
+)
+
+
 
 # =============================================================================
 # 输出目录统一规则
