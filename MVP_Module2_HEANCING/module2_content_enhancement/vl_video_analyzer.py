@@ -24,6 +24,7 @@ import base64
 import asyncio
 import logging
 import io
+import httpx
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
@@ -100,10 +101,18 @@ class VLVideoAnalyzer:
         self.max_input_frames = int(api_config.get("max_input_frames", 6))
         self.max_image_dim = int(api_config.get("max_image_dim", 1024))
         
+        # 初始化 HTTP 客户端 (带连接池和压缩)
+        self.http_client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            headers={"Accept-Encoding": "gzip, deflate"},
+            timeout=httpx.Timeout(120.0, connect=10.0)
+        )
+        
         # 初始化 OpenAI 兼容客户端
         self.client = AsyncOpenAI(
             api_key=api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            http_client=self.http_client
         )
         
         # 截图优化配置
@@ -119,6 +128,19 @@ class VLVideoAnalyzer:
         self._output_constraints = self._get_output_constraints()
         
         logger.info(f"VLVideoAnalyzer 初始化完成: model={self.model}")
+
+    def __del__(self):
+        """析构时确保资源释放 (注意: 在异步环境中，建议显式调用 close)"""
+        if hasattr(self, 'http_client') and not self.http_client.is_closed:
+            # 由于 __del__ 不支持 await，这里只能记录日志，
+            # 完整资源释放应调用 await self.close()
+            pass
+
+    async def close(self):
+        """显式关闭资源池"""
+        if hasattr(self, 'http_client'):
+            await self.http_client.aclose()
+            logger.info("VLVideoAnalyzer HTTP 客户端已关闭")
 
     def _get_output_constraints(self) -> str:
         """
@@ -361,9 +383,7 @@ class VLVideoAnalyzer:
         - 仍不可用：降级为抽取关键帧（image_url），并把每帧的时间戳作为文本标注提供给模型
         """
         if override_prompt:
-            prompt_text = self.prompt_template + "\n\n【重试补充要求】\n" + override_prompt + self._output_constraints
-        else:
-            prompt_text = self.prompt_template + self._output_constraints
+            user_text = "【重试补充要求】\n" + override_prompt + "\n"
 
         mode = (self.video_input_mode or "auto").lower()
         if mode not in ("auto", "data_uri", "dashscope_upload", "keyframes"):
@@ -379,25 +399,25 @@ class VLVideoAnalyzer:
         if mode in ("auto", "data_uri") and video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
             video_base64 = self._encode_video_base64(video_path)
             if video_base64:
-                return [{
-                    "role": "user",
-                    "content": [
+                return [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": [
                         {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_base64}"}},
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }]
+                        {"type": "text", "text": user_text + "请分析这段视频。"},
+                    ]}
+                ]
 
         # 2) DashScope File.upload 获取临时 URL（需要 dashscope SDK）
         if mode in ("auto", "dashscope_upload"):
             temp_url = await self._try_get_dashscope_temp_url(video_path)
             if temp_url:
-                return [{
-                    "role": "user",
-                    "content": [
+                return [
+                    {"role": "system", "content": system_content},
+                    {"role": "user", "content": [
                         {"type": "video_url", "video_url": {"url": temp_url}},
-                        {"type": "text", "text": prompt_text},
-                    ],
-                }]
+                        {"type": "text", "text": user_text + "请分析这段视频。"},
+                    ]}
+                ]
 
         # 3) 降级为关键帧
         frames = await self._extract_keyframes(video_path, max_frames=self.max_input_frames)
@@ -416,9 +436,13 @@ class VLVideoAnalyzer:
             content_items.append({"type": "text", "text": f"Frame {idx+1} @ {frame['timestamp_sec']:.2f}s"})
             content_items.append({"type": "image_url", "image_url": {"url": frame["data_uri"]}})
 
-        content_items.append({"type": "text", "text": prompt_text})
-
-        return [{"role": "user", "content": content_items}]
+        if user_text:
+            content_items.append({"type": "text", "text": user_text})
+        
+        return [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": content_items}
+        ]
 
     async def _try_get_dashscope_temp_url(self, video_path: str) -> Optional[str]:
         """
