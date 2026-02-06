@@ -2,6 +2,27 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-06 VL 素材生成模块（Qwen3-VL-Plus）
+- 日期：2026-02-06
+- 版本/分支/提交：未记录
+- 触发背景与问题：原有 GenerateMaterialRequests 依赖 CV 帧分析 + LLM 分类，对视频内容的理解有限；需要更直接的视频语义理解以生成更精准的截图/片段请求。
+- 改动范围（模块/接口/数据）：
+  - 新增 `MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`：Qwen3-VL-Plus API 客户端
+  - 新增 `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`：VL 素材生成编排器
+  - 修改 `module2_config.yaml`：添加 `vl_material_generation` 配置节
+  - 修改 `python_grpc_server.py`：在 `GenerateMaterialRequests` 中集成 VL 流程
+- 关键决策与理由：
+  - 可开关设计：通过 `vl_material_generation.enabled` 控制是否启用 VL 分析，便于 A/B 测试和回退
+  - 讲解型仅截图：知识类型为"讲解型"时不截取视频片段（无视觉操作价值），但仍截取截图
+  - 自动回退：VL 分析失败或配置未启用时，自动回退到原有 RichTextPipeline 流程
+  - 时间戳转换：VL 返回的相对时间戳（片段内）自动转换为绝对时间戳（原视频）
+  - 输入策略自适应：为兼容 DashScope 的 data-uri 单项 10MB 限制，按“data-uri(小片段) → DashScope File.upload 临时 URL（可选）→ 关键帧 image_url 降级”自动选择输入，降低 400 风险
+  - 输出约束与容错解析：提示词尾追加 JSON 硬性约束；解析端支持括号配对提取/去尾随逗号/修复 `key_evidence` 多字符串模式/字段名漂移，并在解析失败时以更严格约束重试
+- 兼容性影响：新增配置节 `vl_material_generation`；默认 `enabled: false`，不影响现有流程
+- 风险与回滚方案：设置 `vl_material_generation.enabled: false` 即可完全禁用 VL 模块
+- 验证方式与结果：单元测试通过（配置加载、时间戳转换、JSON 解析、VL API 调用）
+- 可复用经验：对 VL 类能力优先做"可开关 + 自动回退 + 时间戳归一"设计，降低集成风险
+
 ## 记录字段
 - 日期
 - 版本/分支/提交

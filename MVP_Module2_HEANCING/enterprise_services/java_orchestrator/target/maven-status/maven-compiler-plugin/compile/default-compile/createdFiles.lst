@@ -24,6 +24,7 @@ com\mvp\videoprocessing\grpc\AnalyzeRequest.class
 com\mvp\videoprocessing\grpc\CVValidationResultOrBuilder.class
 com\mvp\videoprocessing\grpc\SemanticUnitForMaterialGeneration$1.class
 com\mvp\videoprocessing\grpc\AnalyzeRequest$1.class
+com\mvp\module2\fusion\service\VideoProcessingOrchestrator$AnalysisResults.class
 com\mvp\videoprocessing\grpc\AnalyzeRequest$Builder.class
 com\mvp\videoprocessing\grpc\KnowledgeClassificationResponseOrBuilder.class
 com\mvp\videoprocessing\grpc\KnowledgeClassificationResult$Builder.class
@@ -51,6 +52,7 @@ com\mvp\videoprocessing\grpc\ScreenshotRequest.class
 com\mvp\videoprocessing\grpc\TranscribeRequestOrBuilder.class
 com\mvp\videoprocessing\grpc\AssembleResponse$Builder.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$SemanticUnitInput.class
+com\mvp\videoprocessing\grpc\VLAnalysisResponseOrBuilder.class
 com\mvp\module2\fusion\service\CVValidationOrchestrator.class
 com\mvp\module2\fusion\service\VideoProcessingOrchestrator$TaskContext.class
 com\mvp\videoprocessing\grpc\TranscribeResponseOrBuilder.class
@@ -126,10 +128,13 @@ com\mvp\videoprocessing\grpc\VideoProcessingServiceGrpc$3.class
 com\mvp\videoprocessing\grpc\KnowledgeClassificationResult.class
 com\mvp\videoprocessing\grpc\CVValidationRequest.class
 com\mvp\videoprocessing\grpc\SemanticUnitForCV$1.class
+com\mvp\videoprocessing\grpc\VLAnalysisRequestOrBuilder.class
 com\mvp\videoprocessing\grpc\ServerStatusOrBuilder.class
 com\mvp\videoprocessing\grpc\AssembleRequest$1.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$StableIslandResult.class
+com\mvp\videoprocessing\grpc\VLAnalysisRequest.class
 com\mvp\videoprocessing\grpc\AssembleResponse.class
+com\mvp\videoprocessing\grpc\VLAnalysisRequest$Builder.class
 com\mvp\videoprocessing\grpc\CVValidationResponse.class
 com\mvp\videoprocessing\grpc\SemanticUnitForClassification$Builder.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$ClipRequestDTO.class
@@ -150,7 +155,9 @@ com\mvp\module2\fusion\grpc\PythonGrpcClient$ClassificationBatchResult.class
 com\mvp\videoprocessing\grpc\StableIslandOrBuilder.class
 com\mvp\videoprocessing\grpc\Stage1Response.class
 com\mvp\videoprocessing\grpc\CVValidationRequestOrBuilder.class
+com\mvp\videoprocessing\grpc\VLAnalysisResponse$1.class
 com\mvp\videoprocessing\grpc\CVValidationResult$Builder.class
+com\mvp\module2\fusion\service\ModuleConfigService.class
 com\mvp\module2\fusion\websocket\TaskWebSocketHandler.class
 com\mvp\videoprocessing\grpc\ActionUnitForClassification$1.class
 com\mvp\videoprocessing\grpc\ActionUnitForMaterialGeneration$1.class
@@ -160,6 +167,7 @@ com\mvp\module2\fusion\scheduler\LoadBasedScheduler$SystemState.class
 com\mvp\videoprocessing\grpc\SemanticUnitForMaterialGenerationOrBuilder.class
 com\mvp\videoprocessing\grpc\AssembleStats$1.class
 com\mvp\videoprocessing\grpc\ClipRequestOrBuilder.class
+com\mvp\module2\fusion\grpc\PythonGrpcClient$VLAnalysisResult.class
 com\mvp\videoprocessing\grpc\AssembleStatsOrBuilder.class
 com\mvp\videoprocessing\grpc\KnowledgeClassificationResultOrBuilder.class
 com\mvp\videoprocessing\grpc\DownloadResponse$1.class
@@ -180,6 +188,8 @@ com\mvp\videoprocessing\grpc\ScreenshotRequest$Builder.class
 com\mvp\module2\fusion\FusionOrchestratorApplication.class
 com\mvp\module2\fusion\resilience\RetryPolicy.class
 com\mvp\videoprocessing\grpc\ActionSegmentOrBuilder.class
+com\mvp\videoprocessing\grpc\VLAnalysisResponse$Builder.class
+com\mvp\videoprocessing\grpc\VLAnalysisResponse.class
 com\mvp\module2\fusion\queue\TaskQueueManager$Priority.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$MaterialGenerationInput.class
 com\mvp\videoprocessing\grpc\ActionUnitForMaterialGenerationOrBuilder.class
@@ -213,4 +223,6 @@ com\mvp\module2\fusion\grpc\PythonGrpcClient$CVValidationUnitResult.class
 com\mvp\videoprocessing\grpc\SemanticUnitForCV$Builder.class
 com\mvp\videoprocessing\grpc\VideoProcessingServiceGrpc$AsyncService.class
 com\mvp\videoprocessing\grpc\SubtitleForClassificationOrBuilder.class
+com\mvp\videoprocessing\grpc\VLAnalysisRequest$1.class
+com\mvp\module2\fusion\service\VideoProcessingOrchestrator$ExtractionRequests.class
 com\mvp\videoprocessing\grpc\ReleaseResourcesRequest.class

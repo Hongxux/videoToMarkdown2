@@ -14,6 +14,7 @@ D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrat
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\src\main\java\com\mvp\module2\fusion\resilience\ResilientGrpcClient.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\TranscribeRequestOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\HealthCheckResponse.java
+D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\VLAnalysisRequest.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\ActionUnitForClassificationOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\ReleaseResourcesRequest.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\GenerateMaterialRequestsResponse.java
@@ -34,6 +35,7 @@ D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrat
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\ClipRequestOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\Stage1Response.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\DownloadRequest.java
+D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\VLAnalysisResponseOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\SemanticUnitForMaterialGeneration.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\src\main\java\com\mvp\module2\fusion\resilience\RetryPolicy.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\ServerStatusOrBuilder.java
@@ -42,6 +44,7 @@ D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrat
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\AssembleResponse.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\ReleaseResourcesResponse.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\CVValidationRequestOrBuilder.java
+D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\VLAnalysisResponse.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\StableIsland.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\grpc-java\com\mvp\videoprocessing\grpc\VideoProcessingServiceGrpc.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\ScreenshotRequest.java
@@ -54,6 +57,7 @@ D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrat
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\src\main\java\com\mvp\module2\fusion\config\WebConfig.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\AssembleRequest.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\DownloadResponse.java
+D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\VLAnalysisRequestOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\SemanticUnitForCV.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\src\main\java\com\mvp\module2\fusion\service\JavaCVFFmpegService.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\CVValidationResult.java
@@ -86,6 +90,7 @@ D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrat
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\AssembleStatsOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\CVValidationRequest.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\KnowledgeClassificationResultOrBuilder.java
+D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\src\main\java\com\mvp\module2\fusion\service\ModuleConfigService.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\VideoProcessingProto.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\HealthCheckResponseOrBuilder.java
 D:\videoToMarkdownTest2\MVP_Module2_HEANCING\enterprise_services\java_orchestrator\target\generated-sources\protobuf\java\com\mvp\videoprocessing\grpc\KnowledgeClassificationResult.java

@@ -263,6 +263,37 @@ public final class VideoProcessingServiceGrpc {
     return getGenerateMaterialRequestsMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.mvp.videoprocessing.grpc.VLAnalysisRequest,
+      com.mvp.videoprocessing.grpc.VLAnalysisResponse> getAnalyzeWithVLMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "AnalyzeWithVL",
+      requestType = com.mvp.videoprocessing.grpc.VLAnalysisRequest.class,
+      responseType = com.mvp.videoprocessing.grpc.VLAnalysisResponse.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.mvp.videoprocessing.grpc.VLAnalysisRequest,
+      com.mvp.videoprocessing.grpc.VLAnalysisResponse> getAnalyzeWithVLMethod() {
+    io.grpc.MethodDescriptor<com.mvp.videoprocessing.grpc.VLAnalysisRequest, com.mvp.videoprocessing.grpc.VLAnalysisResponse> getAnalyzeWithVLMethod;
+    if ((getAnalyzeWithVLMethod = VideoProcessingServiceGrpc.getAnalyzeWithVLMethod) == null) {
+      synchronized (VideoProcessingServiceGrpc.class) {
+        if ((getAnalyzeWithVLMethod = VideoProcessingServiceGrpc.getAnalyzeWithVLMethod) == null) {
+          VideoProcessingServiceGrpc.getAnalyzeWithVLMethod = getAnalyzeWithVLMethod =
+              io.grpc.MethodDescriptor.<com.mvp.videoprocessing.grpc.VLAnalysisRequest, com.mvp.videoprocessing.grpc.VLAnalysisResponse>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "AnalyzeWithVL"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.mvp.videoprocessing.grpc.VLAnalysisRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.mvp.videoprocessing.grpc.VLAnalysisResponse.getDefaultInstance()))
+              .setSchemaDescriptor(new VideoProcessingServiceMethodDescriptorSupplier("AnalyzeWithVL"))
+              .build();
+        }
+      }
+    }
+    return getAnalyzeWithVLMethod;
+  }
+
   private static volatile io.grpc.MethodDescriptor<com.mvp.videoprocessing.grpc.ReleaseResourcesRequest,
       com.mvp.videoprocessing.grpc.ReleaseResourcesResponse> getReleaseCVResourcesMethod;
 
@@ -450,6 +481,16 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
+     * 🔥 V7: VL-Based Analysis (使用 Qwen3-VL-Plus 直接分析视频，跳过 CV/LLM)
+     * </pre>
+     */
+    default void analyzeWithVL(com.mvp.videoprocessing.grpc.VLAnalysisRequest request,
+        io.grpc.stub.StreamObserver<com.mvp.videoprocessing.grpc.VLAnalysisResponse> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getAnalyzeWithVLMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
      * 🚀 V6: 资源释放
      * </pre>
      */
@@ -581,6 +622,17 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
+     * 🔥 V7: VL-Based Analysis (使用 Qwen3-VL-Plus 直接分析视频，跳过 CV/LLM)
+     * </pre>
+     */
+    public void analyzeWithVL(com.mvp.videoprocessing.grpc.VLAnalysisRequest request,
+        io.grpc.stub.StreamObserver<com.mvp.videoprocessing.grpc.VLAnalysisResponse> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getAnalyzeWithVLMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
      * 🚀 V6: 资源释放
      * </pre>
      */
@@ -696,6 +748,16 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
+     * 🔥 V7: VL-Based Analysis (使用 Qwen3-VL-Plus 直接分析视频，跳过 CV/LLM)
+     * </pre>
+     */
+    public com.mvp.videoprocessing.grpc.VLAnalysisResponse analyzeWithVL(com.mvp.videoprocessing.grpc.VLAnalysisRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getAnalyzeWithVLMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
      * 🚀 V6: 资源释放
      * </pre>
      */
@@ -805,6 +867,17 @@ public final class VideoProcessingServiceGrpc {
 
     /**
      * <pre>
+     * 🔥 V7: VL-Based Analysis (使用 Qwen3-VL-Plus 直接分析视频，跳过 CV/LLM)
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.mvp.videoprocessing.grpc.VLAnalysisResponse> analyzeWithVL(
+        com.mvp.videoprocessing.grpc.VLAnalysisRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getAnalyzeWithVLMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
      * 🚀 V6: 资源释放
      * </pre>
      */
@@ -834,8 +907,9 @@ public final class VideoProcessingServiceGrpc {
   private static final int METHODID_VALIDATE_CVBATCH = 5;
   private static final int METHODID_CLASSIFY_KNOWLEDGE_BATCH = 6;
   private static final int METHODID_GENERATE_MATERIAL_REQUESTS = 7;
-  private static final int METHODID_RELEASE_CVRESOURCES = 8;
-  private static final int METHODID_HEALTH_CHECK = 9;
+  private static final int METHODID_ANALYZE_WITH_VL = 8;
+  private static final int METHODID_RELEASE_CVRESOURCES = 9;
+  private static final int METHODID_HEALTH_CHECK = 10;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -885,6 +959,10 @@ public final class VideoProcessingServiceGrpc {
         case METHODID_GENERATE_MATERIAL_REQUESTS:
           serviceImpl.generateMaterialRequests((com.mvp.videoprocessing.grpc.GenerateMaterialRequestsRequest) request,
               (io.grpc.stub.StreamObserver<com.mvp.videoprocessing.grpc.GenerateMaterialRequestsResponse>) responseObserver);
+          break;
+        case METHODID_ANALYZE_WITH_VL:
+          serviceImpl.analyzeWithVL((com.mvp.videoprocessing.grpc.VLAnalysisRequest) request,
+              (io.grpc.stub.StreamObserver<com.mvp.videoprocessing.grpc.VLAnalysisResponse>) responseObserver);
           break;
         case METHODID_RELEASE_CVRESOURCES:
           serviceImpl.releaseCVResources((com.mvp.videoprocessing.grpc.ReleaseResourcesRequest) request,
@@ -969,6 +1047,13 @@ public final class VideoProcessingServiceGrpc {
               com.mvp.videoprocessing.grpc.GenerateMaterialRequestsResponse>(
                 service, METHODID_GENERATE_MATERIAL_REQUESTS)))
         .addMethod(
+          getAnalyzeWithVLMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.mvp.videoprocessing.grpc.VLAnalysisRequest,
+              com.mvp.videoprocessing.grpc.VLAnalysisResponse>(
+                service, METHODID_ANALYZE_WITH_VL)))
+        .addMethod(
           getReleaseCVResourcesMethod(),
           io.grpc.stub.ServerCalls.asyncUnaryCall(
             new MethodHandlers<
@@ -1038,6 +1123,7 @@ public final class VideoProcessingServiceGrpc {
               .addMethod(getValidateCVBatchMethod())
               .addMethod(getClassifyKnowledgeBatchMethod())
               .addMethod(getGenerateMaterialRequestsMethod())
+              .addMethod(getAnalyzeWithVLMethod())
               .addMethod(getReleaseCVResourcesMethod())
               .addMethod(getHealthCheckMethod())
               .build();

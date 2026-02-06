@@ -218,6 +218,31 @@
 - 触发条件：action_units 未成功回写知识分类结果；或 MaterialInputs 退化为使用 CV actionSegments（仅有 action_type）作为 knowledge_type。
 - 根因定位：跨阶段数据承载字段混用（action_type vs knowledge_type）+ 缓存/回写缺失时的默认值掩盖了真实断链。
 - 修复措施：在 Java->Python GenerateMaterialRequests 入参/出参链路增加“缺失/疑似 CV actionType/疑似默认值”的 WARNING 探针，打印 unit_id、action_id、范围与示例；并确保回写时始终写入 action_units.knowledge_type（至少为 unit 级兜底）。
+
+## 2026-02-06 VL 分析 data-uri 超限与 JSON 解析失败
+- 日期：2026-02-06
+- 现象与影响范围：
+  - DashScope 返回 `400 Bad Request: Exceeded limit on max bytes per data-uri item : 10485760`，部分语义单元 VL 分析直接失败。
+  - VL 返回内容偶发非合法 JSON（Markdown 包裹、截断、`key_evidence` 写成多个独立字符串等），触发 `JSONDecodeError` 并导致该语义单元结果丢失。
+- 触发条件：
+  - 使用 `video_url` 的 data-uri 方式上传本地 mp4 时，单个片段文件在 base64 后超过 10MB 单项限制。
+  - 模型输出包含自然语言/代码块包裹，或输出被截断；以及 `key_evidence` 字段格式漂移（字符串 vs 字符串数组）。
+- 根因定位：
+  - `VLVideoAnalyzer` 无条件将视频片段整体 base64 为 data-uri，未做大小门禁/降级策略。
+  - 解析逻辑只做了简单代码块提取 + `json.loads`，对“包裹文本/字段漂移/常见格式错误”缺乏容错与重试策略。
+- 修复措施：
+  - 输入侧：新增“自动输入策略”以满足 data-uri 10MB 限制：小文件走 data-uri；大文件优先尝试 DashScope `File.upload` 获取临时 URL（可选依赖）；不可用/失败则降级为抽取少量关键帧（`image_url`），并对图片做尺寸/质量压缩确保单项不超限。
+  - 输出侧：在提示词尾追加 JSON 硬性约束；解析侧增加括号配对提取、去尾随逗号、修复 `key_evidence` 多字符串模式、兼容字段名漂移（`suggested_screenshot_timestamps`），并在解析失败时用更严格约束重试。
+- 验证方式：
+  - 运行 `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_analyzer.py` 的 `test_json_parsing()`，覆盖 `key_evidence` 典型坏格式与“自然语言包裹 JSON”提取。
+  - 通过 `python -m py_compile` 校验模块语法；在真实任务中观察不再出现 data-uri 超限 400，且 JSON 解析失败显著减少。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：持续补充 VL 响应解析的坏格式用例（截断/字段漂移/尾随逗号）。
+  - 监控：对“输入降级路径（upload/keyframes）”计数与告警；对解析失败重试次数/失败率埋点。
+  - 校验：在发送前统一做 data-uri 单项大小检查；必要时强制 keyframes 模式快速止血。
+  - 回滚：将 `vl_material_generation.enabled` 置为 `false` 回退到原有生成链路。
+- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_analyzer.py`
+- 复盘要点：多模态输入必须显式考虑网关/供应商的 payload 限制；LLM 输出解析应按“非结构化输入”设计，配套约束、容错与重试闭环。
 - 验证方式：跑包含多动作单元的视频，检查日志出现“上游 knowledge_type 缺失/疑似 CV actionType”时能定位具体 unit/action；同时 semantic_units_phase2a.json 的 action_units 中 knowledge_type 不再缺失。
 - 预防方案（测试/监控/校验/回滚）：对 gRPC 入参做 schema 校验（action_units[*].knowledge_type 为空比例阈值告警）；为“无分类结果”提供显式标记而非静默默认；必要时回退到不依赖 knowledge_type 的保守裁剪策略。
 - 相关文件/接口：`python_grpc_server.py`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
@@ -233,3 +258,14 @@
 - 预防方案（测试/监控/校验/回滚）：缓存增加 schema_version；落盘时固定字段命名规范；增加缓存读写一致性的单测。
 - 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java`
 - 复盘要点：缓存属于“上游返回值”，必须定义稳定 schema，并对解析结果做完整性校验。
+
+## 2026-02-06 Java 编译缺失 CV/知识分类结果类型与 TimeoutConfig 类型
+- 日期：2026-02-06
+- 现象与影响范围：`fusion-orchestrator` 编译失败，`VideoProcessingOrchestrator` 报找不到 `CVValidationUnitResult`、`KnowledgeResultItem`、`DynamicTimeoutCalculator.Timeouts`。
+- 触发条件：执行 `mvn compile` 或构建流程时进入 Java 编译阶段。
+- 根因定位：错误导入 `CVValidationOrchestrator.CVValidationUnitResult` 与 `KnowledgeClassificationOrchestrator.KnowledgeResultItem`，实际类型定义在 `PythonGrpcClient` 内部；同时方法签名误用不存在的 `DynamicTimeoutCalculator.Timeouts`。
+- 修复措施：移除错误导入，使用已存在的 `PythonGrpcClient.*` 内部类型；将方法签名统一为 `DynamicTimeoutCalculator.TimeoutConfig`。
+- 验证方式：在 `java_orchestrator` 目录执行 `mvn -DskipTests compile`，确认编译通过。
+- 预防方案（测试/监控/校验/回滚）：统一 DTO/结果类的归属与命名，避免跨类重复定义；CI 中保留编译检查；IDE 开启“错误导入提示”并在重构后跑一次编译验证。
+- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 复盘要点：结果类型应集中定义，编排层只消费，不应误导向不存在的内部类。

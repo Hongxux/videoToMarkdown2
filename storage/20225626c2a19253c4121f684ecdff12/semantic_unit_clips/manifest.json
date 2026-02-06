@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-02-06 03:35:54",
+  "generated_at": "2026-02-06 16:35:19",
   "video_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\video.mp4",
   "semantic_units_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_units_phase2a.json",
   "out_dir": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips",
   "video_duration_sec": 520.362333,
   "min_duration_sec": 0.8,
-  "overwrite": false,
+  "overwrite": true,
   "ffmpeg": "ffmpeg",
   "global_warnings": [
     "SU010: overlaps with previous (SU009) start=180.000s < prev_end=184.000s",
@@ -13,11 +13,12 @@
     "SU014: overlaps with previous (SU013) start=230.000s < prev_end=234.000s",
     "SU021: overlaps with previous (SU020) start=352.000s < prev_end=356.000s",
     "SU022: overlaps with previous (SU021) start=360.000s < prev_end=368.000s",
-    "SU025: overlaps with previous (SU024) start=388.000s < prev_end=392.000s"
+    "SU025: overlaps with previous (SU024) start=388.000s < prev_end=392.000s",
+    "SU031: overlaps with previous (SU030) start=464.000s < prev_end=470.000s"
   ],
   "summary": {
-    "total_units": 33,
-    "success": 33,
+    "total_units": 34,
+    "success": 34,
     "skipped": 0,
     "failed": 0,
     "aborted_due_to_fail_fast": false
@@ -40,7 +41,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "0.000",
         "-i",
@@ -67,7 +68,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 3.588355541229248
+      "elapsed_sec": 3.7072155475616455
     },
     {
       "index": 2,
@@ -86,7 +87,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "24.000",
         "-i",
@@ -113,7 +114,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 3.573255777359009
+      "elapsed_sec": 4.1582207679748535
     },
     {
       "index": 3,
@@ -132,7 +133,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "64.000",
         "-i",
@@ -159,7 +160,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.5907294750213623
+      "elapsed_sec": 1.8402104377746582
     },
     {
       "index": 4,
@@ -178,7 +179,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "80.000",
         "-i",
@@ -205,7 +206,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.8070652484893799
+      "elapsed_sec": 0.9568338394165039
     },
     {
       "index": 5,
@@ -224,7 +225,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "88.000",
         "-i",
@@ -251,16 +252,16 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 2.162334442138672
+      "elapsed_sec": 2.536292791366577
     },
     {
       "index": 6,
       "unit_id": "SU006",
-      "knowledge_topic": "本地运行资源与安装脚本",
+      "knowledge_topic": "本地运行资源说明与安装步骤",
       "start_sec": 114.0,
       "end_sec": 130.0,
       "duration_sec": 16.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\006_SU006_本地运行资源与安装脚本_114.00-130.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\006_SU006_本地运行资源说明与安装步骤_114.00-130.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -270,7 +271,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "114.000",
         "-i",
@@ -293,20 +294,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\006_SU006_本地运行资源与安装脚本_114.00-130.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\006_SU006_本地运行资源说明与安装步骤_114.00-130.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.2857465744018555
+      "elapsed_sec": 1.4120216369628906
     },
     {
       "index": 7,
       "unit_id": "SU007",
-      "knowledge_topic": "Quickstart模式与大模型选择",
+      "knowledge_topic": "Quickstart模式配置步骤",
       "start_sec": 130.0,
       "end_sec": 150.0,
       "duration_sec": 20.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\007_SU007_Quickstart模式与大模型选择_130.00-150.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\007_SU007_Quickstart模式配置步骤_130.00-150.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -316,7 +317,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "130.000",
         "-i",
@@ -339,20 +340,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\007_SU007_Quickstart模式与大模型选择_130.00-150.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\007_SU007_Quickstart模式配置步骤_130.00-150.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.497011661529541
+      "elapsed_sec": 1.5814168453216553
     },
     {
       "index": 8,
       "unit_id": "SU008",
-      "knowledge_topic": "Channel选择与配置",
+      "knowledge_topic": "Channel选择与配置说明",
       "start_sec": 152.0,
       "end_sec": 170.0,
       "duration_sec": 18.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\008_SU008_Channel选择与配置_152.00-170.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\008_SU008_Channel选择与配置说明_152.00-170.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -362,7 +363,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "152.000",
         "-i",
@@ -385,20 +386,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\008_SU008_Channel选择与配置_152.00-170.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\008_SU008_Channel选择与配置说明_152.00-170.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.39701247215271
+      "elapsed_sec": 1.598691463470459
     },
     {
       "index": 9,
       "unit_id": "SU009",
-      "knowledge_topic": "工具选择与基本配置",
+      "knowledge_topic": "工具选择与基本配置步骤",
       "start_sec": 170.0,
       "end_sec": 184.0,
       "duration_sec": 14.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\009_SU009_工具选择与基本配置_170.00-184.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\009_SU009_工具选择与基本配置步骤_170.00-184.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -408,7 +409,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "170.000",
         "-i",
@@ -431,20 +432,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\009_SU009_工具选择与基本配置_170.00-184.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\009_SU009_工具选择与基本配置步骤_170.00-184.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.1895179748535156
+      "elapsed_sec": 1.554903268814087
     },
     {
       "index": 10,
       "unit_id": "SU010",
-      "knowledge_topic": "命名与身份配置",
+      "knowledge_topic": "首次进入命名与交互步骤",
       "start_sec": 180.0,
       "end_sec": 200.0,
       "duration_sec": 20.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\010_SU010_命名与身份配置_180.00-200.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\010_SU010_首次进入命名与交互步骤_180.00-200.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -454,7 +455,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "180.000",
         "-i",
@@ -477,11 +478,11 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\010_SU010_命名与身份配置_180.00-200.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\010_SU010_首次进入命名与交互步骤_180.00-200.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.5903823375701904
+      "elapsed_sec": 2.020066499710083
     },
     {
       "index": 11,
@@ -500,7 +501,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "200.000",
         "-i",
@@ -527,7 +528,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.718168020248413
+      "elapsed_sec": 1.8688862323760986
     },
     {
       "index": 12,
@@ -546,7 +547,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "216.000",
         "-i",
@@ -573,7 +574,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.6026544570922852
+      "elapsed_sec": 0.6004729270935059
     },
     {
       "index": 13,
@@ -592,7 +593,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "222.000",
         "-i",
@@ -619,7 +620,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.0862836837768555
+      "elapsed_sec": 1.0365519523620605
     },
     {
       "index": 14,
@@ -638,7 +639,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "230.000",
         "-i",
@@ -665,16 +666,16 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 2.2094247341156006
+      "elapsed_sec": 1.9810833930969238
     },
     {
       "index": 15,
       "unit_id": "SU015",
-      "knowledge_topic": "配置完成后的提醒事项",
+      "knowledge_topic": "配置iMessage的注意事项",
       "start_sec": 254.0,
       "end_sec": 268.0,
       "duration_sec": 14.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\015_SU015_配置完成后的提醒事项_254.00-268.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\015_SU015_配置iMessage的注意事项_254.00-268.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -684,7 +685,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "254.000",
         "-i",
@@ -707,20 +708,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\015_SU015_配置完成后的提醒事项_254.00-268.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\015_SU015_配置iMessage的注意事项_254.00-268.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.4805214405059814
+      "elapsed_sec": 1.3670530319213867
     },
     {
       "index": 16,
       "unit_id": "SU016",
-      "knowledge_topic": "介绍开发功能的使用示例",
+      "knowledge_topic": "使用工具进行开发的例子",
       "start_sec": 268.0,
       "end_sec": 294.0,
       "duration_sec": 26.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\016_SU016_介绍开发功能的使用示例_268.00-294.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\016_SU016_使用工具进行开发的例子_268.00-294.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=156.0"
@@ -730,7 +731,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "268.000",
         "-i",
@@ -753,11 +754,11 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\016_SU016_介绍开发功能的使用示例_268.00-294.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\016_SU016_使用工具进行开发的例子_268.00-294.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 2.233494520187378
+      "elapsed_sec": 2.1471705436706543
     },
     {
       "index": 17,
@@ -776,7 +777,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "294.000",
         "-i",
@@ -803,7 +804,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.076826810836792
+      "elapsed_sec": 1.1738319396972656
     },
     {
       "index": 18,
@@ -822,7 +823,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "304.000",
         "-i",
@@ -849,16 +850,16 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.8332722187042236
+      "elapsed_sec": 1.7909646034240723
     },
     {
       "index": 19,
       "unit_id": "SU019",
-      "knowledge_topic": "邮箱SMTP配置操作指南",
+      "knowledge_topic": "邮箱SMTP配置与Cloudbot协助",
       "start_sec": 326.0,
       "end_sec": 340.0,
       "duration_sec": 14.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\019_SU019_邮箱SMTP配置操作指南_326.00-340.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\019_SU019_邮箱SMTP配置与Cloudbot协助_326.00-340.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -868,7 +869,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "326.000",
         "-i",
@@ -891,11 +892,11 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\019_SU019_邮箱SMTP配置操作指南_326.00-340.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\019_SU019_邮箱SMTP配置与Cloudbot协助_326.00-340.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.13993239402771
+      "elapsed_sec": 1.1028754711151123
     },
     {
       "index": 20,
@@ -914,7 +915,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "340.000",
         "-i",
@@ -941,7 +942,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.5532586574554443
+      "elapsed_sec": 1.4554030895233154
     },
     {
       "index": 21,
@@ -960,7 +961,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "352.000",
         "-i",
@@ -987,7 +988,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.502450704574585
+      "elapsed_sec": 1.4412758350372314
     },
     {
       "index": 22,
@@ -1006,7 +1007,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "360.000",
         "-i",
@@ -1033,7 +1034,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.3898992538452148
+      "elapsed_sec": 1.3331189155578613
     },
     {
       "index": 23,
@@ -1052,7 +1053,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "374.000",
         "-i",
@@ -1079,7 +1080,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.9366447925567627
+      "elapsed_sec": 0.9102783203125
     },
     {
       "index": 24,
@@ -1098,7 +1099,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "384.000",
         "-i",
@@ -1125,7 +1126,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.8858072757720947
+      "elapsed_sec": 0.8401973247528076
     },
     {
       "index": 25,
@@ -1144,7 +1145,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "388.000",
         "-i",
@@ -1171,7 +1172,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 2.1781177520751953
+      "elapsed_sec": 2.1975810527801514
     },
     {
       "index": 26,
@@ -1190,7 +1191,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "412.000",
         "-i",
@@ -1217,7 +1218,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.7433359622955322
+      "elapsed_sec": 0.8436670303344727
     },
     {
       "index": 27,
@@ -1236,7 +1237,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "420.000",
         "-i",
@@ -1263,7 +1264,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.1446812152862549
+      "elapsed_sec": 1.133763074874878
     },
     {
       "index": 28,
@@ -1282,7 +1283,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "434.000",
         "-i",
@@ -1309,7 +1310,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.7414822578430176
+      "elapsed_sec": 0.7873353958129883
     },
     {
       "index": 29,
@@ -1328,7 +1329,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "442.000",
         "-i",
@@ -1355,7 +1356,7 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.9676735401153564
+      "elapsed_sec": 1.0437448024749756
     },
     {
       "index": 30,
@@ -1374,7 +1375,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "454.000",
         "-i",
@@ -1401,16 +1402,16 @@
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 1.3473548889160156
+      "elapsed_sec": 1.5041251182556152
     },
     {
       "index": 31,
       "unit_id": "SU031",
-      "knowledge_topic": "长期记忆机制与定时任务结合",
-      "start_sec": 470.0,
-      "end_sec": 478.0,
-      "duration_sec": 8.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\031_SU031_长期记忆机制与定时任务结合_470.00-478.00.mp4",
+      "knowledge_topic": "接入方式便捷性说明",
+      "start_sec": 464.0,
+      "end_sec": 470.0,
+      "duration_sec": 6.0,
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\031_SU031_接入方式便捷性说明_464.00-470.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -1420,7 +1421,53 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
+        "-ss",
+        "464.000",
+        "-i",
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\video.mp4",
+        "-t",
+        "6.000",
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\031_SU031_接入方式便捷性说明_464.00-470.00.mp4"
+      ],
+      "ffmpeg_returncode": 0,
+      "ffmpeg_stderr": "",
+      "elapsed_sec": 0.788341760635376
+    },
+    {
+      "index": 32,
+      "unit_id": "SU032",
+      "knowledge_topic": "长期记忆机制与定时任务结合",
+      "start_sec": 470.0,
+      "end_sec": 478.0,
+      "duration_sec": 8.0,
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\032_SU032_长期记忆机制与定时任务结合_470.00-478.00.mp4",
+      "status": "success",
+      "warnings": [
+        "timeout_sec=120.0"
+      ],
+      "ffmpeg_cmd": [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
         "-ss",
         "470.000",
         "-i",
@@ -1443,20 +1490,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\031_SU031_长期记忆机制与定时任务结合_470.00-478.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\032_SU032_长期记忆机制与定时任务结合_470.00-478.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.9392340183258057
+      "elapsed_sec": 0.9371991157531738
     },
     {
-      "index": 32,
-      "unit_id": "SU032",
+      "index": 33,
+      "unit_id": "SU033",
       "knowledge_topic": "项目潜力展望",
       "start_sec": 478.0,
       "end_sec": 480.0,
       "duration_sec": 2.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\032_SU032_项目潜力展望_478.00-480.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\033_SU033_项目潜力展望_478.00-480.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -1466,7 +1513,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "478.000",
         "-i",
@@ -1489,20 +1536,20 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\032_SU032_项目潜力展望_478.00-480.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\033_SU033_项目潜力展望_478.00-480.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.38349175453186035
+      "elapsed_sec": 0.39214181900024414
     },
     {
-      "index": 33,
-      "unit_id": "SU033",
+      "index": 34,
+      "unit_id": "SU034",
       "knowledge_topic": "节目结束语",
       "start_sec": 480.0,
       "end_sec": 484.0,
       "duration_sec": 4.0,
-      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\033_SU033_节目结束语_480.00-484.00.mp4",
+      "out_path": "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\034_SU034_节目结束语_480.00-484.00.mp4",
       "status": "success",
       "warnings": [
         "timeout_sec=120.0"
@@ -1512,7 +1559,7 @@
         "-hide_banner",
         "-loglevel",
         "error",
-        "-n",
+        "-y",
         "-ss",
         "480.000",
         "-i",
@@ -1535,11 +1582,11 @@
         "128k",
         "-movflags",
         "+faststart",
-        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\033_SU033_节目结束语_480.00-484.00.mp4"
+        "D:\\videoToMarkdownTest2\\storage\\20225626c2a19253c4121f684ecdff12\\semantic_unit_clips\\034_SU034_节目结束语_480.00-484.00.mp4"
       ],
       "ffmpeg_returncode": 0,
       "ffmpeg_stderr": "",
-      "elapsed_sec": 0.5894858837127686
+      "elapsed_sec": 0.6109123229980469
     }
   ]
 }

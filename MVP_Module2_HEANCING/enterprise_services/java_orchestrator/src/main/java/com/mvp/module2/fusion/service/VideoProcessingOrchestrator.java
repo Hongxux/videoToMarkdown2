@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient.*;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,6 +45,28 @@ import java.util.Locale;
 public class VideoProcessingOrchestrator {
     
     private static final Logger logger = LoggerFactory.getLogger(VideoProcessingOrchestrator.class);
+
+    // 内部类：统一素材请求结果
+    private static class ExtractionRequests {
+        List<JavaCVFFmpegService.ScreenshotRequest> screenshotRequests;
+        List<JavaCVFFmpegService.ClipRequest> clipRequests;
+        
+        public ExtractionRequests(List<JavaCVFFmpegService.ScreenshotRequest> ss, List<JavaCVFFmpegService.ClipRequest> clips) {
+            this.screenshotRequests = ss != null ? ss : new ArrayList<>();
+            this.clipRequests = clips != null ? clips : new ArrayList<>();
+        }
+    }
+
+    // 内部类：CV与知识分类分析结果
+    private static class AnalysisResults {
+        Map<String, CVValidationUnitResult> cvResults;
+        List<KnowledgeResultItem> classResults;
+        
+        public AnalysisResults(Map<String, CVValidationUnitResult> cv, List<KnowledgeResultItem> cls) {
+            this.cvResults = cv != null ? cv : new ConcurrentHashMap<>();
+            this.classResults = cls != null ? cls : new ArrayList<>();
+        }
+    }
     
     @Autowired
     private PythonGrpcClient grpcClient;
@@ -59,6 +82,9 @@ public class VideoProcessingOrchestrator {
     
     @Autowired
     private KnowledgeClassificationOrchestrator knowledgeOrchestrator;
+    
+    @Autowired
+    private ModuleConfigService configService;
     
     // 任务管理
     private final ConcurrentHashMap<String, TaskContext> activeTasks = new ConcurrentHashMap<>();
@@ -149,157 +175,34 @@ public class VideoProcessingOrchestrator {
                 .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
             if (!ar.success) throw new RuntimeException("Phase2A failed: " + ar.errorMsg);
             
-            // 🔑 Load Semantic Units from JSON for Java processing
-        File semanticFile = new File(ar.semanticUnitsJsonPath);
-        JsonNode rootNode = objectMapper.readTree(semanticFile);
-        final boolean originallyArray = rootNode.isArray();
-        final Map<String, Object> unitsMap;
-        final List<Map<String, Object>> unitsList;
-        
-        if (originallyArray) {
-            unitsList = objectMapper.convertValue(rootNode, new TypeReference<List<Map<String, Object>>>() {});
-            unitsMap = new HashMap<>(); // Dummy for the array branch
-        } else {
-            unitsMap = objectMapper.convertValue(rootNode, new TypeReference<Map<String, Object>>() {});
-            List<Map<String, Object>> list = (List<Map<String, Object>>) unitsMap.get("semantic_units");
-            unitsList = list != null ? list : new ArrayList<>();
-        }
+
             
-            // ❌ Removed: enrichUnitsWithSubtitles - Classifier now reads directly from Step 2
-            
-            // 5. 🚀 UNIFIED PARALLEL PIPELINE (Optimized for LPT)
-            // Send ALL units to Python. Python will handle CV vs CF routing and LPT scheduling.
-            updateProgress(taskId, 0.45, "执行级联并行分析 (CV/CF 混合调度)...");
-            
-            Map<String, CVValidationUnitResult> cvResults = new ConcurrentHashMap<>();
-            List<KnowledgeResultItem> classResults = Collections.synchronizedList(new ArrayList<>());
-            List<CompletableFuture<?>> allFutures = Collections.synchronizedList(new ArrayList<>());
-            List<CompletableFuture<Boolean>> cvFuturesList = new ArrayList<>();
+            // =====================================================================
+            // Phase 2: Hybrid Analysis (VL or Legacy CV/LLM)
+            // =====================================================================
+            ExtractionRequests materialRequests = null;
 
-                        // A. Convert ALL units to CV Inputs & Sort (Weighted LPT)
-            List<SemanticUnitInput> allInputs = convertToCVInputs(unitsList);
-
-            // 尝试复用 CV + LLM 缓存：做什么是命中就跳过计算；为什么是降低成本；权衡是缓存可能过期
-            Map<String, CVValidationUnitResult> cachedCv = cvOrchestrator.tryLoadCachedResults(taskId, videoPath, allInputs, outputDir);
-            boolean cvCacheHit = cachedCv != null && !cachedCv.isEmpty();
-            boolean classCacheHit = false;
-            List<ClassificationInput> cachedClassInputs = null;
-
-            if (cvCacheHit) {
-                cvResults.putAll(cachedCv);
-                cachedClassInputs = convertToClassInputs(unitsList, cvResults);
-                List<KnowledgeResultItem> cachedClass = knowledgeOrchestrator.tryLoadCachedResults(
-                    taskId, cachedClassInputs, s1.step2JsonPath, outputDir);
-                if (cachedClass != null && !cachedClass.isEmpty()) {
-                    classResults.addAll(cachedClass);
-                    classCacheHit = true;
-                }
-            }
-
-            if (!cvCacheHit) {
-                // Weighted LPT Scheduling (Java Side)
-                // Weight: CV(Process/Practical)=10, CF(Abstract/Explanation)=1
-                // Score = Duration * Weight
-                // Sort: Descending by Score
-                Collections.sort(allInputs, (o1, o2) -> {
-                    double w1 = isCVTask(o1.knowledgeType) ? 10.0 : 1.0;
-                    double w2 = isCVTask(o2.knowledgeType) ? 10.0 : 1.0;
-                    double score1 = (o1.endSec - o1.startSec) * w1;
-                    double score2 = (o2.endSec - o2.startSec) * w2;
-                    return Double.compare(score2, score1); // Descending
-                });
-
-                // B. Batch Validate (CV & CF mixed) with Streaming Callbacks
-                if (!allInputs.isEmpty()) {
-                    List<CompletableFuture<Boolean>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir, unitResult -> {
-                        // Callback: Triggered immediately when Python finishes a single unit
-                        cvResults.put(unitResult.unitId, unitResult);
-
-                        // Immediate Chain: Individual unit classification
-                        List<Map<String, Object>> unitToClassify = unitsList.stream()
-                            .filter(u -> unitResult.unitId.equals((String)u.get("unit_id")))
-                            .collect(Collectors.toList());
-
-                        if (!unitToClassify.isEmpty()) {
-                            List<ClassificationInput> classInputs = convertToClassInputs(unitToClassify, cvResults);
-
-                            CompletableFuture<Void> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, s1.step2JsonPath)
-                                .thenAccept(classBatchRes -> {
-                                    if (classBatchRes.success && classBatchRes.results != null) {
-                                        classResults.addAll(classBatchRes.results);
-                                        logger.info("[{}] Incremental classification done for: {}", taskId, unitResult.unitId);
-                                    }
-                                });
-
-                            // Add to global watch list (using a dedicated collection to avoid CME)
-                            allFutures.add(classFuture);
-                        }
-                    });
-
-                    if (cvFutures != null) {
-                        for (CompletableFuture<Boolean> cvFuture : cvFutures) {
-                            cvFuturesList.add(cvFuture);
-                        }
-                    }
-                }
-
-                // D. Wait for CV/CF streaming to complete (this triggers all callbacks)
-                if (!cvFuturesList.isEmpty()) {
-                    CompletableFuture.allOf(cvFuturesList.toArray(new CompletableFuture[0])).join();
-                }
-
-                // E. Wait for all triggered Classification tasks to finish
-                while (true) {
-                    CompletableFuture<?>[] pending;
-                    synchronized(allFutures) {
-                        pending = allFutures.stream().filter(f -> !f.isDone()).toArray(CompletableFuture[]::new);
-                    }
-                    if (pending.length == 0) break;
-                    CompletableFuture.allOf(pending).join();
-                }
-            } else if (!classCacheHit) {
-                // CV 缓存命中但 LLM 未命中：做什么是补齐分类；为什么是保证结果完整；权衡是增加一次 LLM 调用
-                List<ClassificationInput> classInputs = cachedClassInputs != null ? cachedClassInputs : convertToClassInputs(unitsList, cvResults);
-                List<KnowledgeResultItem> batchRes = knowledgeOrchestrator.classifyParallel(taskId, classInputs, s1.step2JsonPath, outputDir);
-                if (batchRes != null) {
-                    classResults.addAll(batchRes);
-                }
+            // 1. 尝试 VL 分析 (如果开启)
+            // 配置检查防止不必要的 RPC 调用和逻辑执行
+            if (configService.isVLEnabled()) {
+                materialRequests = tryVLAnalysis(taskId, videoPath, ar, outputDir, timeouts);
             } else {
-                logger.info("[{}] Reusing CV + LLM caches, skip Phase2 analysis", taskId);
+                logger.info("[{}] VL disabled in config.", taskId);
+            // 2. 回退/默认 Legacy 流程 (CV + LLM Analysis -> Material Generation)
+            // 如果 VL 成功，则 materialRequests 不为空，跳过此步骤
+                if (configService.isVLEnabled()) {
+                    logger.warn("[{}] Proceeding to Legacy Flow (Fallback or VL failed).", taskId);
+                } else {
+                    updateProgress(taskId, 0.45, "执行级联并行分析 (CV/LLM Legacy)...");
+                }
+                materialRequests = runLegacyAnalysis(taskId, videoPath, ar, s1, outputDir, timeouts);
             }
-
-            // 缓存落盘：做什么是保存计算结果；为什么是便于重跑；权衡是占用磁盘
-            if (!cvResults.isEmpty()) {
-                cvOrchestrator.saveCache(taskId, videoPath, allInputs, outputDir, cvResults);
-            }
-            if (!classResults.isEmpty()) {
-                List<ClassificationInput> classInputsForCache = cachedClassInputs != null ? cachedClassInputs : convertToClassInputs(unitsList, cvResults);
-                knowledgeOrchestrator.saveCache(taskId, classResults, classInputsForCache, s1.step2JsonPath, outputDir);
-            }
-
-            logger.info("✅ Staged Analysis done. CV: {}, Class: {}", cvResults.size(), classResults.size());
             
-            // 6. Merge & Update
-            updateSemanticUnits(unitsList, cvResults, classResults);
-            saveUpdatedSemantics(semanticFile, originallyArray ? unitsList : unitsMap); // Save back for Python Phase2B
-            
-            // 7. Generate Material Requests
-            // 6. Generate Material Requests (策略生成)
-            updateProgress(taskId, 0.70, "生成素材清单...");
-            List<MaterialGenerationInput> matInputs = convertToMatInputs(unitsList, cvResults);
-            
-            // 增加超时时间到 600s，避免高负载下超时
-            logger.info("[{}] Step 6: Generating Material Requests...", taskId);
-            MaterialGenerationResult matRes = grpcClient.generateMaterialRequestsAsync(taskId, matInputs, videoPath, 600).get(10, TimeUnit.MINUTES);
-            
-            if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
             // 8. FFmpeg Extraction
             updateProgress(taskId, 0.80, "执行素材提取...");
-            // 合并 Phase2A 初始素材请求与后续生成请求：做什么是避免数据被忽略；为什么是保留上游召回；权衡是可能增加素材数量
-            List<JavaCVFFmpegService.ScreenshotRequest> ssReqs = mergeScreenshotRequests(ar.screenshotRequests, matRes.screenshotRequests);
-            List<JavaCVFFmpegService.ClipRequest> clipReqs = mergeClipRequests(ar.clipRequests, matRes.clipRequests);
+
             
-            JavaCVFFmpegService.ExtractionResult extractRes = ffmpegService.extractAllSync(videoPath, outputDir, ssReqs, clipReqs, timeouts.getFfmpegTimeoutSec());
+            JavaCVFFmpegService.ExtractionResult extractRes = ffmpegService.extractAllSync(videoPath, outputDir, materialRequests.screenshotRequests, materialRequests.clipRequests, timeouts.getFfmpegTimeoutSec());
             
             // 9. Phase2B Assembly
             updateProgress(taskId, 0.90, "生成最终文档...");
@@ -852,4 +755,195 @@ public class VideoProcessingOrchestrator {
     }
     
     public Map<String, TaskContext> getActiveTasks() { return new ConcurrentHashMap<>(activeTasks); }
+
+    // --- Helper Methods ---
+    
+    private List<JavaCVFFmpegService.ScreenshotRequest> convertScreenshotRequests(List<ScreenshotRequestDTO> dtos) {
+        List<JavaCVFFmpegService.ScreenshotRequest> list = new ArrayList<>();
+        if (dtos == null) return list;
+        for (ScreenshotRequestDTO dto : dtos) {
+            list.add(new JavaCVFFmpegService.ScreenshotRequest(
+                dto.screenshotId, dto.timestampSec, dto.label, dto.semanticUnitId
+            ));
+        }
+        return list;
+    }
+
+    private List<JavaCVFFmpegService.ClipRequest> convertClipRequests(List<ClipRequestDTO> dtos) {
+        List<JavaCVFFmpegService.ClipRequest> list = new ArrayList<>();
+        if (dtos == null) return list;
+        for (ClipRequestDTO dto : dtos) {
+            list.add(new JavaCVFFmpegService.ClipRequest(
+                dto.clipId, dto.startSec, dto.endSec, dto.knowledgeType, dto.semanticUnitId
+            ));
+        }
+        return list;
+    }
+
+    // --- Extracted Methods ---
+
+    /**
+     * 尝试使用 VL 模型进行分析。如果成功，返回素材请求列表；否则返回 null 指示回退。
+     */
+    private ExtractionRequests tryVLAnalysis(String taskId, String videoPath, AnalyzeResult ar, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) {
+        updateProgress(taskId, 0.40, "执行 VL 视觉语言模型分析...");
+        try {
+            VLAnalysisResult vlResult = grpcClient.analyzeWithVLAsync(
+                taskId, videoPath, ar.semanticUnitsJsonPath, outputDir, 
+                timeouts.getPhase2aTimeoutSec())
+                .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
+
+            if (vlResult.success && vlResult.vlEnabled && !vlResult.usedFallback) {
+                logger.info("[{}] VL Analysis Success! Skipping legacy flow.", taskId);
+                return new ExtractionRequests(
+                    convertScreenshotRequests(vlResult.screenshotRequests),
+                    convertClipRequests(vlResult.clipRequests)
+                );
+            } else {
+                logger.warn("[{}] VL Analysis fallback reason: {}", taskId, vlResult.errorMsg);
+            }
+        } catch (Exception e) {
+            logger.error("[{}] VL Analysis failed with exception", taskId, e);
+        }
+        return null;
+    }
+
+    /**
+     * 执行传统的分析流程：CV/LLM 分析 -> 结果合并 -> 策略生成素材请求
+     */
+    private ExtractionRequests runLegacyAnalysis(String taskId, String videoPath, AnalyzeResult ar, Stage1Result s1, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) throws Exception {
+        // 🔑 Load Semantic Units
+        File semanticFile = new File(ar.semanticUnitsJsonPath);
+        JsonNode rootNode = objectMapper.readTree(semanticFile);
+        
+        final boolean originallyArray = rootNode.isArray();
+        final Map<String, Object> unitsMap;
+        final List<Map<String, Object>> unitsList;
+        
+        if (originallyArray) {
+            unitsList = objectMapper.convertValue(rootNode, new TypeReference<List<Map<String, Object>>>() {});
+            unitsMap = new HashMap<>(); 
+        } else {
+            unitsMap = objectMapper.convertValue(rootNode, new TypeReference<Map<String, Object>>() {});
+            List<Map<String, Object>> list = (List<Map<String, Object>>) unitsMap.get("semantic_units");
+            unitsList = list != null ? list : new ArrayList<>();
+        }
+
+        // 1. Execute Core Analysis (CV Validation + Knowledge Classification)
+        // 封装了复杂的并行调度和缓存复用逻辑
+        AnalysisResults analysisResults = executeHybridAnalysis(taskId, videoPath, unitsList, s1.step2JsonPath, outputDir);
+
+        // 2. Merge & Update
+        updateSemanticUnits(unitsList, analysisResults.cvResults, analysisResults.classResults);
+        saveUpdatedSemantics(semanticFile, originallyArray ? unitsList : unitsMap);
+
+        // 3. Generate Material Requests
+        updateProgress(taskId, 0.70, "生成素材清单...");
+        List<MaterialGenerationInput> matInputs = convertToMatInputs(unitsList, analysisResults.cvResults);
+        MaterialGenerationResult matRes = grpcClient.generateMaterialRequestsAsync(taskId, matInputs, videoPath, 600).get(10, TimeUnit.MINUTES);
+        if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
+
+        // 4. Merge Requests
+        return new ExtractionRequests(
+            mergeScreenshotRequests(ar.screenshotRequests, matRes.screenshotRequests),
+            mergeClipRequests(ar.clipRequests, matRes.clipRequests)
+        );
+    }
+
+    /**
+     * 核心分析逻辑：包含权重调度、缓存复用、并行执行
+     */
+    private AnalysisResults executeHybridAnalysis(String taskId, String videoPath, List<Map<String, Object>> unitsList, String step2JsonPath, String outputDir) {
+        updateProgress(taskId, 0.45, "执行级联并行分析 (CV/CF 混合调度)...");
+        
+        Map<String, CVValidationUnitResult> cvResults = new ConcurrentHashMap<>();
+        List<KnowledgeResultItem> classResults = Collections.synchronizedList(new ArrayList<>());
+        List<CompletableFuture<?>> allFutures = Collections.synchronizedList(new ArrayList<>());
+        List<CompletableFuture<Boolean>> cvFuturesList = new ArrayList<>();
+
+        // A. Convert ALL units to CV Inputs & Sort
+        List<SemanticUnitInput> allInputs = convertToCVInputs(unitsList);
+
+        // Cache Check
+        Map<String, CVValidationUnitResult> cachedCv = cvOrchestrator.tryLoadCachedResults(taskId, videoPath, allInputs, outputDir);
+        boolean cvCacheHit = cachedCv != null && !cachedCv.isEmpty();
+        boolean classCacheHit = false;
+        List<ClassificationInput> cachedClassInputs = null;
+
+        if (cvCacheHit) {
+            cvResults.putAll(cachedCv);
+            cachedClassInputs = convertToClassInputs(unitsList, cvResults);
+            List<KnowledgeResultItem> cachedClass = knowledgeOrchestrator.tryLoadCachedResults(taskId, cachedClassInputs, step2JsonPath, outputDir);
+            if (cachedClass != null && !cachedClass.isEmpty()) {
+                classResults.addAll(cachedClass);
+                classCacheHit = true;
+            }
+        }
+
+        if (!cvCacheHit) {
+            // Weighted LPT Scheduling
+            Collections.sort(allInputs, (o1, o2) -> {
+                double w1 = isCVTask(o1.knowledgeType) ? 10.0 : 1.0;
+                double w2 = isCVTask(o2.knowledgeType) ? 10.0 : 1.0;
+                double score1 = (o1.endSec - o1.startSec) * w1;
+                double score2 = (o2.endSec - o2.startSec) * w2;
+                return Double.compare(score2, score1);
+            });
+
+            if (!allInputs.isEmpty()) {
+                List<CompletableFuture<Boolean>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir, unitResult -> {
+                    cvResults.put(unitResult.unitId, unitResult);
+                    
+                    // Immediate Classification Chain
+                    List<Map<String, Object>> unitToClassify = unitsList.stream()
+                        .filter(u -> unitResult.unitId.equals((String)u.get("unit_id")))
+                        .collect(Collectors.toList());
+
+                    if (!unitToClassify.isEmpty()) {
+                        List<ClassificationInput> classInputs = convertToClassInputs(unitToClassify, cvResults);
+                        CompletableFuture<Void> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, step2JsonPath)
+                            .thenAccept(classBatchRes -> {
+                                if (classBatchRes.success && classBatchRes.results != null) {
+                                    classResults.addAll(classBatchRes.results);
+                                    logger.info("[{}] Incremental classification done for: {}", taskId, unitResult.unitId);
+                                }
+                            });
+                        allFutures.add(classFuture);
+                    }
+                });
+                if (cvFutures != null) cvFuturesList.addAll(cvFutures);
+            }
+
+            if (!cvFuturesList.isEmpty()) {
+                CompletableFuture.allOf(cvFuturesList.toArray(new CompletableFuture[0])).join();
+            }
+
+            // Wait for all classification tasks
+            while (true) {
+                CompletableFuture<?>[] pending;
+                synchronized(allFutures) {
+                    pending = allFutures.stream().filter(f -> !f.isDone()).toArray(CompletableFuture[]::new);
+                }
+                if (pending.length == 0) break;
+                CompletableFuture.allOf(pending).join();
+            }
+        } else if (!classCacheHit) {
+            // CV Hit but Class Miss
+            List<ClassificationInput> classInputs = cachedClassInputs != null ? cachedClassInputs : convertToClassInputs(unitsList, cvResults);
+            List<KnowledgeResultItem> batchRes = knowledgeOrchestrator.classifyParallel(taskId, classInputs, step2JsonPath, outputDir);
+            if (batchRes != null) classResults.addAll(batchRes);
+        } else {
+            logger.info("[{}] Reusing CV + LLM caches.", taskId);
+        }
+
+        // Cache Save
+        if (!cvResults.isEmpty()) cvOrchestrator.saveCache(taskId, videoPath, allInputs, outputDir, cvResults);
+        if (!classResults.isEmpty()) {
+            List<ClassificationInput> classInputsForCache = cachedClassInputs != null ? cachedClassInputs : convertToClassInputs(unitsList, cvResults);
+            knowledgeOrchestrator.saveCache(taskId, classResults, classInputsForCache, step2JsonPath, outputDir);
+        }
+        
+        logger.info("✅ Staged Analysis done. CV: {}, Class: {}", cvResults.size(), classResults.size());
+        return new AnalysisResults(cvResults, classResults);
+    }
 }

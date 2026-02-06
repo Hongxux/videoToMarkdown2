@@ -1681,6 +1681,11 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         f"unit_kt={unit_kt!r}, example=({example})"
                     )
             
+            # =====================================================================
+            # GenerateMaterialRequests 核心流程（CV/LLM 分析后的素材请求生成）
+            # =====================================================================
+
+            
             # 🚀 V9.0: 使用 RichTextPipeline 的两阶段合并逻辑
             from MVP_Module2_HEANCING.module2_content_enhancement.rich_text_pipeline import RichTextPipeline
             from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_range_calculator import ScreenshotRangeCalculator
@@ -3176,6 +3181,135 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
     # ========== 🚀 V6: 资源释放 ==========
     
+
+    async def AnalyzeWithVL(self, request, context):
+        """
+        🔥 V7: VL-Based Analysis - 使用 Qwen3-VL-Plus 直接分析视频
+        
+        完全跳过 CV/LLM 流程，直接使用视觉语言模型分析视频片段。
+        
+        流程：
+        1. 检查 VL 配置是否启用
+        2. 加载 semantic_units JSON
+        3. 对每个语义单元调用 VL 分析
+        4. 生成截图/片段请求（讲解型仅截图）
+        5. 返回结果供 Java FFmpeg 提取
+        
+        参数:
+            request: VLAnalysisRequest
+            context: gRPC context
+            
+        返回:
+            VLAnalysisResponse
+        """
+        task_id = request.task_id
+        video_path = request.video_path
+        semantic_units_path = request.semantic_units_json_path
+        output_dir = request.output_dir
+        
+        logger.info(f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}")
+        
+        try:
+            self._increment_tasks()
+            
+            # 加载 VL 配置
+            from MVP_Module2_HEANCING.module2_content_enhancement.config_loader import load_module2_config
+            vl_config = load_module2_config().get("vl_material_generation", {})
+            vl_enabled = vl_config.get("enabled", False)
+            
+            if not vl_enabled:
+                logger.info(f"[{task_id}] VL 模块未启用，返回 vl_enabled=False")
+                return video_processing_pb2.VLAnalysisResponse(
+                    success=True,
+                    vl_enabled=False,
+                    used_fallback=False,
+                    error_msg=""
+                )
+            
+            # 加载语义单元
+            import json
+            with open(semantic_units_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            if isinstance(data, dict) and "semantic_units" in data:
+                semantic_units = data["semantic_units"]
+            elif isinstance(data, list):
+                semantic_units = data
+            else:
+                semantic_units = []
+            
+            if not semantic_units:
+                logger.warning(f"[{task_id}] 无语义单元，跳过 VL 分析")
+                return video_processing_pb2.VLAnalysisResponse(
+                    success=True,
+                    vl_enabled=True,
+                    used_fallback=True,
+                    error_msg="No semantic units found"
+                )
+            
+            # 调用 VL 分析
+            from MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator import VLMaterialGenerator
+            
+            generator = VLMaterialGenerator(vl_config)
+            vl_result = await generator.generate(video_path, semantic_units, output_dir)
+            
+            if not vl_result.success:
+                logger.warning(f"[{task_id}] VL 分析失败，需要回退: {vl_result.error_msg}")
+                return video_processing_pb2.VLAnalysisResponse(
+                    success=True,
+                    vl_enabled=True,
+                    used_fallback=True,
+                    error_msg=vl_result.error_msg
+                )
+            
+            # 构建 gRPC 响应
+            screenshot_requests = []
+            for ss in vl_result.screenshot_requests:
+                screenshot_requests.append(video_processing_pb2.ScreenshotRequest(
+                    screenshot_id=ss.get("screenshot_id", ""),
+                    timestamp_sec=ss.get("timestamp_sec", 0.0),
+                    label=ss.get("label", ""),
+                    semantic_unit_id=ss.get("semantic_unit_id", "")
+                ))
+            
+            clip_requests = []
+            for clip in vl_result.clip_requests:
+                clip_requests.append(video_processing_pb2.ClipRequest(
+                    clip_id=clip.get("clip_id", ""),
+                    start_sec=clip.get("start_sec", 0.0),
+                    end_sec=clip.get("end_sec", 0.0),
+                    knowledge_type=clip.get("knowledge_type", ""),
+                    semantic_unit_id=clip.get("semantic_unit_id", "")
+                ))
+            
+            logger.info(
+                f"[{task_id}] VL 分析完成: units={len(semantic_units)}, "
+                f"screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
+            )
+            
+            return video_processing_pb2.VLAnalysisResponse(
+                success=True,
+                vl_enabled=True,
+                used_fallback=False,
+                screenshot_requests=screenshot_requests,
+                clip_requests=clip_requests,
+                units_analyzed=len(semantic_units),
+                vl_clips_generated=len(clip_requests),
+                vl_screenshots_generated=len(screenshot_requests),
+                error_msg=""
+            )
+            
+        except Exception as e:
+            logger.error(f"[{task_id}] AnalyzeWithVL 异常: {e}", exc_info=True)
+            return video_processing_pb2.VLAnalysisResponse(
+                success=False,
+                vl_enabled=True,
+                used_fallback=True,
+                error_msg=str(e)
+            )
+        finally:
+            self._decrement_tasks()
+
     async def ReleaseCVResources(self, request, context):
         """
         执行逻辑：

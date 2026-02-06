@@ -43,6 +43,9 @@ service VideoProcessingService {
     rpc ClassifyKnowledgeBatch(KnowledgeClassificationRequest) returns (KnowledgeClassificationResponse);
     rpc GenerateMaterialRequests(GenerateMaterialRequestsRequest) returns (GenerateMaterialRequestsResponse);
     
+    // 🔥 V7: VL-Based Analysis (使用 Qwen3-VL-Plus 直接分析视频，跳过 CV/LLM)
+    rpc AnalyzeWithVL(VLAnalysisRequest) returns (VLAnalysisResponse);
+    
     // 🚀 V6: 资源释放
     rpc ReleaseCVResources(ReleaseResourcesRequest) returns (ReleaseResourcesResponse);
     
@@ -345,4 +348,32 @@ message ReleaseResourcesResponse {
     string message = 2;         // 结果消息
     int32 freed_workers_count = 3; // 释放的 Worker 数量
     float freed_memory_mb = 4;     // 释放的内存（MB）
+}
+
+// ==========================================
+// 🔥 V7: VL-Based Analysis (Qwen3-VL-Plus)
+// ==========================================
+
+message VLAnalysisRequest {
+    string task_id = 1;                     // 任务唯一ID
+    string video_path = 2;                  // 视频文件路径
+    string semantic_units_json_path = 3;    // 语义单元 JSON 路径 (Phase2A 输出)
+    string output_dir = 4;                  // 输出目录
+}
+
+message VLAnalysisResponse {
+    bool success = 1;                               // 是否成功
+    bool vl_enabled = 2;                            // VL 模块是否启用
+    bool used_fallback = 3;                         // 是否回退到原有流程
+    
+    // 素材请求 (与现有格式兼容)
+    repeated ScreenshotRequest screenshot_requests = 4;  // 截图请求列表
+    repeated ClipRequest clip_requests = 5;              // 切片请求列表
+    
+    // VL 分析统计
+    int32 units_analyzed = 6;               // 分析的语义单元数量
+    int32 vl_clips_generated = 7;           // VL 生成的片段数量
+    int32 vl_screenshots_generated = 8;     // VL 生成的截图数量
+    
+    string error_msg = 9;                   // 错误信息
 }

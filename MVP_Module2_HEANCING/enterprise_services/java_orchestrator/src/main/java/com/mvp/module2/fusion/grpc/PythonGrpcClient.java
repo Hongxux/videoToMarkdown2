@@ -780,6 +780,97 @@ public class PythonGrpcClient {
         });
     }
 
+
+    // ========== 🔥 V7: VL-Based Analysis ==========
+    
+    public static class VLAnalysisResult {
+        public boolean success;
+        public boolean vlEnabled;
+        public boolean usedFallback;
+        public List<ScreenshotRequestDTO> screenshotRequests = new ArrayList<>();
+        public List<ClipRequestDTO> clipRequests = new ArrayList<>();
+        public int unitsAnalyzed;
+        public int vlClipsGenerated;
+        public int vlScreenshotsGenerated;
+        public String errorMsg;
+    }
+    
+    /**
+     * 🔥 V7: VL-Based Analysis - 使用 Qwen3-VL-Plus 直接分析视频
+     * 
+     * 完全跳过 CV/LLM 流程，直接使用视觉语言模型分析视频片段。
+     * 
+     * @param taskId 任务ID
+     * @param videoPath 视频路径
+     * @param semanticUnitsJsonPath 语义单元 JSON 路径
+     * @param outputDir 输出目录
+     * @param timeoutSec 超时秒数
+     * @return CompletableFuture<VLAnalysisResult>
+     */
+    public CompletableFuture<VLAnalysisResult> analyzeWithVLAsync(
+            String taskId, String videoPath, String semanticUnitsJsonPath,
+            String outputDir, int timeoutSec) {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                logger.info("[{}] Calling AnalyzeWithVL: {}", taskId, videoPath);
+                
+                VLAnalysisRequest request = VLAnalysisRequest.newBuilder()
+                    .setTaskId(taskId)
+                    .setVideoPath(videoPath)
+                    .setSemanticUnitsJsonPath(semanticUnitsJsonPath)
+                    .setOutputDir(outputDir)
+                    .build();
+                
+                VLAnalysisResponse response = blockingStub
+                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                    .analyzeWithVL(request);
+                
+                VLAnalysisResult result = new VLAnalysisResult();
+                result.success = response.getSuccess();
+                result.vlEnabled = response.getVlEnabled();
+                result.usedFallback = response.getUsedFallback();
+                result.unitsAnalyzed = response.getUnitsAnalyzed();
+                result.vlClipsGenerated = response.getVlClipsGenerated();
+                result.vlScreenshotsGenerated = response.getVlScreenshotsGenerated();
+                result.errorMsg = response.getErrorMsg();
+                
+                // 转换截图请求
+                for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
+                    ScreenshotRequestDTO r = new ScreenshotRequestDTO();
+                    r.screenshotId = req.getScreenshotId();
+                    r.timestampSec = req.getTimestampSec();
+                    r.label = req.getLabel();
+                    r.semanticUnitId = req.getSemanticUnitId();
+                    result.screenshotRequests.add(r);
+                }
+                
+                // 转换片段请求
+                for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
+                    ClipRequestDTO r = new ClipRequestDTO();
+                    r.clipId = req.getClipId();
+                    r.startSec = req.getStartSec();
+                    r.endSec = req.getEndSec();
+                    r.knowledgeType = req.getKnowledgeType();
+                    r.semanticUnitId = req.getSemanticUnitId();
+                    result.clipRequests.add(r);
+                }
+                
+                logger.info("[{}] AnalyzeWithVL completed: vlEnabled={}, usedFallback={}, screenshots={}, clips={}",
+                    taskId, result.vlEnabled, result.usedFallback, 
+                    result.screenshotRequests.size(), result.clipRequests.size());
+                
+                return result;
+                
+            } catch (StatusRuntimeException e) {
+                logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
+                VLAnalysisResult result = new VLAnalysisResult();
+                result.success = false;
+                result.errorMsg = e.getStatus().getDescription();
+                return result;
+            }
+        });
+    }
+
     // ========== 🚀 V6: 资源释放 ==========
     
     public static class ReleaseResourcesResult {

@@ -23,12 +23,18 @@ import json
 import base64
 import asyncio
 import logging
+import io
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+_DASHSCOPE_DATA_URI_ITEM_MAX_BYTES = 10 * 1024 * 1024  # 来自 DashScope 400 错误信息
+_DATA_URI_SAFETY_RATIO = 0.90  # 留出协议/编码冗余，避免卡边界导致 400
+_MAX_RAW_BYTES_FOR_BASE64_DATA_URI = int(_DASHSCOPE_DATA_URI_ITEM_MAX_BYTES * 3 / 4 * _DATA_URI_SAFETY_RATIO)
 
 
 @dataclass
@@ -76,10 +82,23 @@ class VLVideoAnalyzer:
         if not api_key:
             api_key_env = api_config.get("api_key_env", "DASHSCOPE_API_KEY")
             api_key = os.environ.get(api_key_env, "")
+        self._api_key = api_key
         
         self.base_url = api_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.model = api_config.get("model", "qwen3-vl-plus")
         self.max_retries = api_config.get("max_retries", 2)
+        
+        # 视频压缩配置 (API 限制 10MB)
+        self.max_video_size_mb = api_config.get("max_video_size_mb", 8)  # 留 2MB buffer
+        self.compression_crf = api_config.get("compression_crf", 28)  # 0-51, 越大压缩越多
+        self.max_tokens = api_config.get("max_tokens", 4096)
+        self.temperature = api_config.get("temperature", 0.2)
+
+        # 兼容 DashScope data-uri 限制的输入策略
+        # auto: data-uri(小文件) -> DashScope File.upload(若可用) -> 关键帧降级
+        self.video_input_mode = api_config.get("video_input_mode", "auto")
+        self.max_input_frames = int(api_config.get("max_input_frames", 6))
+        self.max_image_dim = int(api_config.get("max_image_dim", 1024))
         
         # 初始化 OpenAI 兼容客户端
         self.client = AsyncOpenAI(
@@ -97,8 +116,27 @@ class VLVideoAnalyzer:
         
         # 加载提示词模板
         self.prompt_template = self._load_prompt_template()
+        self._output_constraints = self._get_output_constraints()
         
         logger.info(f"VLVideoAnalyzer 初始化完成: model={self.model}")
+
+    def _get_output_constraints(self) -> str:
+        """
+        追加到提示词尾部的输出约束。
+
+        目标：降低模型输出 JSON 被 Markdown/自然语言污染、以及字段格式漂移导致的解析失败。
+        """
+        return (
+            "\n\n"
+            "【输出硬性约束】\n"
+            "1) 只输出一个 JSON（不要 Markdown 代码块、不要解释、不要前后缀文字）。\n"
+            "2) 顶层必须是 JSON 数组：[{...}, {...}]。\n"
+            "3) 每个对象必须包含字段：id, knowledge_type, confidence, reasoning, key_evidence, "
+            "clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。\n"
+            "4) key_evidence 必须是字符串数组，例如：[\"证据1\", \"证据2\"]，最多 5 条。\n"
+            "5) reasoning 请尽量短（建议 <= 180 字），避免长文本导致截断。\n"
+            "6) 如果无法可靠判断 clip_start_sec/clip_end_sec，请输出 -1。\n"
+        )
     
     def _load_prompt_template(self) -> str:
         """加载视频分析提示词模板"""
@@ -256,56 +294,170 @@ class VLVideoAnalyzer:
         Returns:
             VLAnalysisResult 列表
         """
-        # 将视频编码为 base64
-        video_base64 = self._encode_video_base64(video_path)
-        
-        if not video_base64:
-            raise ValueError(f"无法读取视频文件: {video_path}")
-        
-        # 构建消息
-        # 注意：Qwen3-VL-Plus 的 OpenAI 兼容接口对视频使用 'video_url' 类型
-        # 格式: data:video/mp4;base64,{base64_content}
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video_url",
-                        "video_url": {
-                            "url": f"data:video/mp4;base64,{video_base64}"
-                        }
-                    },
-                    {
-                        "type": "text",
-                        "text": self.prompt_template
-                    }
-                ]
-            }
-        ]
+        messages = await self._build_messages(video_path)
         
         # 调用 API（带重试）
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages
-                )
+                response_kwargs = {
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                }
+
+                if attempt > 0:
+                    response_kwargs["temperature"] = 0.0
+                    # DashScope 兼容接口不一定支持 response_format；仅在重试时尝试，避免影响正常路径
+                    # 注：json_object 仍可能返回对象而非数组，因此解析端也做兼容。
+                    response_kwargs["response_format"] = {"type": "json_object"}
+
+                try:
+                    response = await self.client.chat.completions.create(**response_kwargs)
+                except Exception as e:
+                    # 兼容部分 OpenAI 兼容网关不支持 response_format 的情况
+                    err_str = str(e).lower()
+                    if "response_format" in response_kwargs and ("response_format" in err_str or "unknown" in err_str):
+                        response_kwargs.pop("response_format", None)
+                        response = await self.client.chat.completions.create(**response_kwargs)
+                    else:
+                        raise
                 
                 content = response.choices[0].message.content
-                return self._parse_response(content)
+                finish_reason = getattr(response.choices[0], "finish_reason", None)
+                return self._parse_response(content, finish_reason=finish_reason)
                 
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
                     wait_time = 2 ** attempt
                     logger.warning(f"VL API 调用失败 (尝试 {attempt+1}/{self.max_retries+1}): {e}, 等待 {wait_time}s 重试")
+
+                    # 解析失败/截断时，下一次重试用更短的提示词，尽量只要 JSON
+                    err_str = str(e).lower()
+                    if "json" in err_str or "parse" in err_str or "decode" in err_str or "unterminated" in err_str:
+                        messages = await self._build_messages(
+                            video_path,
+                            override_prompt=(
+                                "你必须只输出 JSON 数组，不要任何解释。"
+                                "reasoning 尽量短，key_evidence 用字符串数组。"
+                            ),
+                        )
                     await asyncio.sleep(wait_time)
         
         raise last_error
+
+    async def _build_messages(self, video_path: str, override_prompt: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        构建多模态消息。
+
+        处理 DashScope 的 data-uri 单项 10MB 限制：
+        - 小视频：直接 data-uri video_url
+        - 大视频：优先尝试 DashScope File.upload 获取临时 URL（若安装了 dashscope）
+        - 仍不可用：降级为抽取关键帧（image_url），并把每帧的时间戳作为文本标注提供给模型
+        """
+        if override_prompt:
+            prompt_text = self.prompt_template + "\n\n【重试补充要求】\n" + override_prompt + self._output_constraints
+        else:
+            prompt_text = self.prompt_template + self._output_constraints
+
+        mode = (self.video_input_mode or "auto").lower()
+        if mode not in ("auto", "data_uri", "dashscope_upload", "keyframes"):
+            mode = "auto"
+
+        video_file_size = 0
+        try:
+            video_file_size = Path(video_path).stat().st_size
+        except Exception:
+            video_file_size = 0
+
+        # 1) data-uri（仅小文件安全）
+        if mode in ("auto", "data_uri") and video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
+            video_base64 = self._encode_video_base64(video_path)
+            if video_base64:
+                return [{
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_base64}"}},
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }]
+
+        # 2) DashScope File.upload 获取临时 URL（需要 dashscope SDK）
+        if mode in ("auto", "dashscope_upload"):
+            temp_url = await self._try_get_dashscope_temp_url(video_path)
+            if temp_url:
+                return [{
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": temp_url}},
+                        {"type": "text", "text": prompt_text},
+                    ],
+                }]
+
+        # 3) 降级为关键帧
+        frames = await self._extract_keyframes(video_path, max_frames=self.max_input_frames)
+        if not frames:
+            raise ValueError(f"无法读取视频文件或抽帧失败: {video_path}")
+
+        content_items: List[Dict[str, Any]] = [{
+            "type": "text",
+            "text": (
+                "注意：由于视频片段过大无法直接上传 data-uri，本次输入为抽取的关键帧。\n"
+                "你只能基于这些帧和它们的时间戳进行判断。\n"
+                "时间字段 clip_start_sec/clip_end_sec/suggested_screenshoot_timestamps："
+                "只能使用提供的时间戳或 -1。"
+            ),
+        }]
+        for idx, frame in enumerate(frames):
+            content_items.append({"type": "text", "text": f"Frame {idx+1} @ {frame['timestamp_sec']:.2f}s"})
+            content_items.append({"type": "image_url", "image_url": {"url": frame["data_uri"]}})
+
+        content_items.append({"type": "text", "text": prompt_text})
+
+        return [{"role": "user", "content": content_items}]
+
+    async def _try_get_dashscope_temp_url(self, video_path: str) -> Optional[str]:
+        """
+        使用 DashScope SDK 上传本地文件，获取临时 URL。
+
+        如果 dashscope SDK 不存在或上传失败，返回 None（由上层降级到关键帧）。
+        """
+        try:
+            import dashscope  # type: ignore
+        except Exception as e:
+            logger.debug(f"dashscope SDK 不可用，跳过临时 URL 上传: {e}")
+            return None
+
+        if not self._api_key:
+            return None
+
+        def _upload() -> Optional[str]:
+            dashscope.api_key = self._api_key
+            # Files.upload 需要 file_path 字符串参数
+            resp = dashscope.Files.upload(
+                file_path=video_path,
+                purpose="file-extract"
+            )
+            status_code = getattr(resp, "status_code", None)
+            output = getattr(resp, "output", None)
+            if status_code == 200 and output and isinstance(output, dict):
+                return output.get("url")
+            # 兼容 dict 形式返回
+            if isinstance(resp, dict) and resp.get("status_code") == 200:
+                return (resp.get("output") or {}).get("url")
+            message = getattr(resp, "message", None) or str(resp)
+            raise RuntimeError(f"DashScope Files.upload 失败: {message}")
+
+        try:
+            return await asyncio.to_thread(_upload)
+        except Exception as e:
+            logger.warning(f"DashScope 临时 URL 上传失败，降级关键帧: {e}")
+            return None
     
     def _encode_video_base64(self, video_path: str) -> Optional[str]:
-        """将视频文件编码为 base64"""
+        """将视频文件编码为 base64（仅适用于小文件）"""
         try:
             with open(video_path, "rb") as f:
                 return base64.b64encode(f.read()).decode("utf-8")
@@ -313,7 +465,110 @@ class VLVideoAnalyzer:
             logger.error(f"视频编码失败: {e}")
             return None
     
-    def _parse_response(self, content: str) -> List[VLAnalysisResult]:
+    async def _extract_keyframes(self, video_path: str, max_frames: int = 6) -> List[Dict[str, Any]]:
+        """
+        从视频中抽取少量关键帧并编码为 data-uri（image/jpeg）。
+
+        目标：绕过 DashScope 对单个 data-uri item 10MB 的限制。
+        """
+        try:
+            import cv2  # type: ignore
+            from PIL import Image  # type: ignore
+        except Exception as e:
+            logger.warning(f"关键帧抽取依赖不可用（opencv/pillow）：{e}")
+            return []
+
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        duration = (frame_count / fps) if fps > 0 and frame_count > 0 else 0.0
+
+        # 均匀采样，避免过多帧
+        if max_frames <= 0:
+            max_frames = 1
+        if duration <= 0:
+            timestamps = [0.0]
+        else:
+            # 避免取到末尾导致 seek 失败
+            end = max(0.0, duration - 0.05)
+            if max_frames == 1:
+                timestamps = [max(0.0, end * 0.5)]
+            else:
+                step = end / (max_frames - 1)
+                timestamps = [i * step for i in range(max_frames)]
+
+        frames: List[Dict[str, Any]] = []
+        for ts in timestamps:
+            try:
+                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                ok, frame_bgr = cap.read()
+                if not ok or frame_bgr is None:
+                    continue
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(frame_rgb)
+                data_uri = self._encode_image_as_jpeg_data_uri(image)
+                if not data_uri:
+                    continue
+                frames.append({"timestamp_sec": float(ts), "data_uri": data_uri})
+            except Exception:
+                continue
+
+        cap.release()
+        return frames
+
+    def _encode_image_as_jpeg_data_uri(self, image) -> Optional[str]:
+        """将 PIL.Image 编码为满足 10MB 限制的 JPEG data-uri。"""
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            return None
+
+        if not isinstance(image, Image.Image):
+            return None
+
+        # 先按最大边缩放
+        w, h = image.size
+        max_dim = max(1, int(self.max_image_dim))
+        if max(w, h) > max_dim:
+            if w >= h:
+                new_w = max_dim
+                new_h = max(1, int(h * (max_dim / w)))
+            else:
+                new_h = max_dim
+                new_w = max(1, int(w * (max_dim / h)))
+            image = image.resize((new_w, new_h))
+
+        quality = 82
+        scale_rounds = 0
+        while True:
+            buf = io.BytesIO()
+            try:
+                image.save(buf, format="JPEG", quality=quality, optimize=True)
+            except Exception:
+                image.save(buf, format="JPEG", quality=quality)
+
+            raw = buf.getvalue()
+            if len(raw) <= int(_DASHSCOPE_DATA_URI_ITEM_MAX_BYTES * _DATA_URI_SAFETY_RATIO):
+                b64 = base64.b64encode(raw).decode("utf-8")
+                return f"data:image/jpeg;base64,{b64}"
+
+            # 先降质量，再缩放
+            if quality > 45:
+                quality = max(45, quality - 10)
+                continue
+
+            if scale_rounds >= 4:
+                return None
+
+            w, h = image.size
+            image = image.resize((max(1, int(w * 0.85)), max(1, int(h * 0.85))))
+            scale_rounds += 1
+            quality = 82
+
+    def _parse_response(self, content: str, finish_reason: Optional[str] = None) -> List[VLAnalysisResult]:
         """
         解析 VL API 返回的内容
         
@@ -323,36 +578,145 @@ class VLVideoAnalyzer:
         Returns:
             VLAnalysisResult 列表
         """
-        # 尝试提取 JSON 代码块
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', content)
-        if json_match:
-            json_str = json_match.group(1).strip()
-        else:
-            # 尝试直接解析整个内容
-            json_str = content.strip()
-        
-        try:
-            data = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON 解析失败: {e}, 原内容: {content[:500]}")
-            raise ValueError(f"JSON 解析失败: {e}")
+        json_str = self._extract_json_candidate(content)
+
+        data = None
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                data = json.loads(json_str)
+                break
+            except json.JSONDecodeError as e:
+                last_err = e
+                # 常见修复：去掉尾随逗号
+                json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
+                # 常见修复：模型把 key_evidence 写成多个独立字符串（期望是数组）
+                json_str = self._repair_key_evidence_field(json_str)
+                if attempt == 2:
+                    break
+
+        if data is None:
+            finish_hint = f", finish_reason={finish_reason}" if finish_reason else ""
+            logger.error(f"JSON 解析失败: {last_err}{finish_hint}, 原内容: {content[:500]}")
+            raise ValueError(f"JSON 解析失败: {last_err}{finish_hint}")
         
         # 确保是列表
-        if not isinstance(data, list):
+        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
+            data = data["results"]
+        elif not isinstance(data, list):
             data = [data]
         
         results = []
         for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            key_evidence = item.get("key_evidence", "")
+            if isinstance(key_evidence, list):
+                key_evidence = "；".join([str(x) for x in key_evidence if x is not None])
+            else:
+                key_evidence = str(key_evidence) if key_evidence is not None else ""
+
+            # 兼容字段名漂移
+            timestamps = item.get("suggested_screenshoot_timestamps", None)
+            if timestamps is None:
+                timestamps = item.get("suggested_screenshot_timestamps", [])
+
             result = VLAnalysisResult(
                 id=item.get("id", 0),
                 knowledge_type=item.get("knowledge_type", ""),
                 confidence=item.get("confidence", 0.0),
                 reasoning=item.get("reasoning", ""),
-                key_evidence=item.get("key_evidence", ""),
+                key_evidence=key_evidence,
                 clip_start_sec=item.get("clip_start_sec", 0.0),
                 clip_end_sec=item.get("clip_end_sec", 0.0),
-                suggested_screenshoot_timestamps=item.get("suggested_screenshoot_timestamps", [])
+                suggested_screenshoot_timestamps=timestamps or []
             )
             results.append(result)
         
         return results
+
+    def _extract_json_candidate(self, content: str) -> str:
+        """
+        从模型回复中提取最可能的 JSON 片段。
+
+        处理场景：
+        - ```json ... ``` 代码块包裹
+        - 回复前后带自然语言
+        - 顶层为数组或对象
+        """
+        if not content:
+            return ""
+
+        # 1) 优先提取第一个代码块
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)```", content, flags=re.IGNORECASE)
+        if json_match:
+            return json_match.group(1).strip()
+
+        # 2) 尝试从第一个 { 或 [ 开始做括号配对提取
+        start_idx = None
+        for i, ch in enumerate(content):
+            if ch in "[{":
+                start_idx = i
+                break
+        if start_idx is None:
+            return content.strip()
+
+        extracted = self._extract_balanced_json(content[start_idx:])
+        return (extracted or content[start_idx:]).strip()
+
+    def _extract_balanced_json(self, s: str) -> Optional[str]:
+        """从字符串开头提取括号配对的 JSON（忽略字符串内部的括号）。"""
+        if not s or s[0] not in "[{":
+            return None
+
+        stack = []
+        in_str = False
+        escape = False
+        for i, ch in enumerate(s):
+            if in_str:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\\\":
+                    escape = True
+                    continue
+                if ch == "\"":
+                    in_str = False
+                continue
+
+            if ch == "\"":
+                in_str = True
+                continue
+
+            if ch in "[{":
+                stack.append(ch)
+            elif ch in "]}":
+                if not stack:
+                    return None
+                left = stack.pop()
+                if (left == "[" and ch != "]") or (left == "{" and ch != "}"):
+                    return None
+                if not stack:
+                    return s[: i + 1]
+
+        return None
+
+    def _repair_key_evidence_field(self, json_str: str) -> str:
+        """
+        修复模型常见输出：
+        "key_evidence": "a", "b", "c", "clip_start_sec": ...
+        将其改写为：
+        "key_evidence": ["a", "b", "c"], "clip_start_sec": ...
+        """
+        pattern = re.compile(
+            r"\"key_evidence\"\s*:\s*(?P<vals>\"(?:\\.|[^\"\\])*\"(?:\s*,\s*\"(?:\\.|[^\"\\])*\")+)(?=\s*,\s*\"[A-Za-z_][^\"]*\"\s*:)",
+            flags=re.MULTILINE,
+        )
+
+        def _repl(m: re.Match) -> str:
+            vals = m.group("vals")
+            parts = re.findall(r"\"(?:\\\\.|[^\"\\\\])*\"", vals)
+            return "\"key_evidence\": [" + ", ".join(parts) + "]"
+
+        return pattern.sub(_repl, json_str)

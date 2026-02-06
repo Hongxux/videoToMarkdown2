@@ -190,6 +190,16 @@ public final class VideoProcessingProto {
   static final 
     com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_videoprocessing_ReleaseResourcesResponse_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_videoprocessing_VLAnalysisRequest_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
+      internal_static_videoprocessing_VLAnalysisRequest_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_videoprocessing_VLAnalysisResponse_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
+      internal_static_videoprocessing_VLAnalysisResponse_fieldAccessorTable;
 
   public static com.google.protobuf.Descriptors.FileDescriptor
       getDescriptor() {
@@ -310,34 +320,47 @@ public final class VideoProcessingProto {
       "quest\022\017\n\007task_id\030\001 \001(\t\"r\n\030ReleaseResourc" +
       "esResponse\022\017\n\007success\030\001 \001(\010\022\017\n\007message\030\002" +
       " \001(\t\022\033\n\023freed_workers_count\030\003 \001(\005\022\027\n\017fre" +
-      "ed_memory_mb\030\004 \001(\0022\365\007\n\026VideoProcessingSe" +
-      "rvice\022T\n\rDownloadVideo\022 .videoprocessing" +
-      ".DownloadRequest\032!.videoprocessing.Downl" +
-      "oadResponse\022Z\n\017TranscribeVideo\022\".videopr" +
-      "ocessing.TranscribeRequest\032#.videoproces" +
-      "sing.TranscribeResponse\022P\n\rProcessStage1" +
-      "\022\036.videoprocessing.Stage1Request\032\037.video" +
-      "processing.Stage1Response\022Y\n\024AnalyzeSema" +
-      "nticUnits\022\037.videoprocessing.AnalyzeReque" +
-      "st\032 .videoprocessing.AnalyzeResponse\022W\n\020" +
-      "AssembleRichText\022 .videoprocessing.Assem" +
-      "bleRequest\032!.videoprocessing.AssembleRes" +
-      "ponse\022`\n\017ValidateCVBatch\022$.videoprocessi" +
-      "ng.CVValidationRequest\032%.videoprocessing" +
-      ".CVValidationResponse0\001\022{\n\026ClassifyKnowl" +
-      "edgeBatch\022/.videoprocessing.KnowledgeCla" +
-      "ssificationRequest\0320.videoprocessing.Kno" +
-      "wledgeClassificationResponse\022\177\n\030Generate" +
-      "MaterialRequests\0220.videoprocessing.Gener" +
-      "ateMaterialRequestsRequest\0321.videoproces" +
-      "sing.GenerateMaterialRequestsResponse\022i\n" +
-      "\022ReleaseCVResources\022(.videoprocessing.Re" +
-      "leaseResourcesRequest\032).videoprocessing." +
-      "ReleaseResourcesResponse\022X\n\013HealthCheck\022" +
-      "#.videoprocessing.HealthCheckRequest\032$.v" +
-      "ideoprocessing.HealthCheckResponseB9\n\034co" +
-      "m.mvp.videoprocessing.grpcB\024VideoProcess" +
-      "ingProtoP\001\220\001\001b\006proto3"
+      "ed_memory_mb\030\004 \001(\002\"n\n\021VLAnalysisRequest\022" +
+      "\017\n\007task_id\030\001 \001(\t\022\022\n\nvideo_path\030\002 \001(\t\022 \n\030" +
+      "semantic_units_json_path\030\003 \001(\t\022\022\n\noutput" +
+      "_dir\030\004 \001(\t\"\257\002\n\022VLAnalysisResponse\022\017\n\007suc" +
+      "cess\030\001 \001(\010\022\022\n\nvl_enabled\030\002 \001(\010\022\025\n\rused_f" +
+      "allback\030\003 \001(\010\022?\n\023screenshot_requests\030\004 \003" +
+      "(\0132\".videoprocessing.ScreenshotRequest\0223" +
+      "\n\rclip_requests\030\005 \003(\0132\034.videoprocessing." +
+      "ClipRequest\022\026\n\016units_analyzed\030\006 \001(\005\022\032\n\022v" +
+      "l_clips_generated\030\007 \001(\005\022 \n\030vl_screenshot" +
+      "s_generated\030\010 \001(\005\022\021\n\terror_msg\030\t \001(\t2\317\010\n" +
+      "\026VideoProcessingService\022T\n\rDownloadVideo" +
+      "\022 .videoprocessing.DownloadRequest\032!.vid" +
+      "eoprocessing.DownloadResponse\022Z\n\017Transcr" +
+      "ibeVideo\022\".videoprocessing.TranscribeReq" +
+      "uest\032#.videoprocessing.TranscribeRespons" +
+      "e\022P\n\rProcessStage1\022\036.videoprocessing.Sta" +
+      "ge1Request\032\037.videoprocessing.Stage1Respo" +
+      "nse\022Y\n\024AnalyzeSemanticUnits\022\037.videoproce" +
+      "ssing.AnalyzeRequest\032 .videoprocessing.A" +
+      "nalyzeResponse\022W\n\020AssembleRichText\022 .vid" +
+      "eoprocessing.AssembleRequest\032!.videoproc" +
+      "essing.AssembleResponse\022`\n\017ValidateCVBat" +
+      "ch\022$.videoprocessing.CVValidationRequest" +
+      "\032%.videoprocessing.CVValidationResponse0" +
+      "\001\022{\n\026ClassifyKnowledgeBatch\022/.videoproce" +
+      "ssing.KnowledgeClassificationRequest\0320.v" +
+      "ideoprocessing.KnowledgeClassificationRe" +
+      "sponse\022\177\n\030GenerateMaterialRequests\0220.vid" +
+      "eoprocessing.GenerateMaterialRequestsReq" +
+      "uest\0321.videoprocessing.GenerateMaterialR" +
+      "equestsResponse\022X\n\rAnalyzeWithVL\022\".video" +
+      "processing.VLAnalysisRequest\032#.videoproc" +
+      "essing.VLAnalysisResponse\022i\n\022ReleaseCVRe" +
+      "sources\022(.videoprocessing.ReleaseResourc" +
+      "esRequest\032).videoprocessing.ReleaseResou" +
+      "rcesResponse\022X\n\013HealthCheck\022#.videoproce" +
+      "ssing.HealthCheckRequest\032$.videoprocessi" +
+      "ng.HealthCheckResponseB9\n\034com.mvp.videop" +
+      "rocessing.grpcB\024VideoProcessingProtoP\001\220\001" +
+      "\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -553,6 +576,18 @@ public final class VideoProcessingProto {
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ReleaseResourcesResponse_descriptor,
         new java.lang.String[] { "Success", "Message", "FreedWorkersCount", "FreedMemoryMb", });
+    internal_static_videoprocessing_VLAnalysisRequest_descriptor =
+      getDescriptor().getMessageTypes().get(35);
+    internal_static_videoprocessing_VLAnalysisRequest_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
+        internal_static_videoprocessing_VLAnalysisRequest_descriptor,
+        new java.lang.String[] { "TaskId", "VideoPath", "SemanticUnitsJsonPath", "OutputDir", });
+    internal_static_videoprocessing_VLAnalysisResponse_descriptor =
+      getDescriptor().getMessageTypes().get(36);
+    internal_static_videoprocessing_VLAnalysisResponse_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
+        internal_static_videoprocessing_VLAnalysisResponse_descriptor,
+        new java.lang.String[] { "Success", "VlEnabled", "UsedFallback", "ScreenshotRequests", "ClipRequests", "UnitsAnalyzed", "VlClipsGenerated", "VlScreenshotsGenerated", "ErrorMsg", });
   }
 
   // @@protoc_insertion_point(outer_class_scope)

@@ -1,13 +1,13 @@
 ﻿# 系统架构概览
 
-更新日期：2026-02-05
+更新日期：2026-02-06
 范围：d:/videoToMarkdownTest2
 
 ## 系统目标与边界
 - 目标：将视频内容转为结构化知识文档（Markdown/JSON），并生成可复用素材（截图/视频片段）。
 - 输入：video URL/本地路径、任务优先级、输出目录（统一规则见下）、可选标题。
 - 输出：Markdown/JSON + 素材目录（screenshots/clips）+ 中间产物（step2/step6/semantic_units 等）。
-- 外部依赖：LLM（DeepSeek/OpenAI 兼容）、Vision AI、Whisper、FFmpeg/JavaCV、RabbitMQ（旁路链路）。
+- 外部依赖：LLM（DeepSeek/OpenAI 兼容）、Vision AI、Whisper、FFmpeg/JavaCV、RabbitMQ（旁路链路）、Qwen3-VL-Plus（VL 素材生成模块）。
 
 ## 路径规范（输出目录统一）
 - 统一规则：`outputDir` 必须归一到 `storage/{url_hash}`。
@@ -75,6 +75,8 @@ flowchart TB
   - `python_grpc_server.py`：gRPC 服务端 + 全局资源管理 + CV ProcessPool/SharedMemory
   - `stage1_pipeline/`：LangGraph Stage1 文本清洗与结构化
   - `MVP_Module2_HEANCING/module2_content_enhancement/`：Phase2A/2B 语义分割、素材策略与富文本组装
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`：VL 视频分析器（Qwen3-VL-Plus）
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`：VL 素材生成编排器
   - `videoToMarkdown/knowledge_engine/`：视频下载与转写
   - `cv_worker.py`：CV 子进程执行器
 - 协议与生成代码
@@ -138,6 +140,7 @@ flowchart TB
 - CV 模态判定：`CVKnowledgeValidator.detect_visual_states` 产出 stable islands / action units -> modality/knowledge_subtype。
 - 知识类型判定：`KnowledgeClassificationOrchestrator` 批量调用 LLM，失败由熔断/重试保护。
 - 素材策略：`GenerateMaterialRequests` 根据 CV 结果 + 知识类型决定截图 vs 片段。
+- VL 素材生成（可选）：启用 `vl_material_generation.enabled` 时，使用 Qwen3-VL-Plus 分析视频片段；讲解型仅截图不截片段。
 - 素材质量筛选：`ScreenshotSelector` / `VideoClipExtractor` 内部策略选择最优帧/片段。
 - 缓存复用：CV/分类结果写入 `outputDir/intermediates`，重复任务可复用。
 - 资源释放：`ReleaseCVResources` 主动回收 CV 资源，降低内存占用。

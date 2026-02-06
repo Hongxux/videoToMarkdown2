@@ -1,9 +1,9 @@
 @echo off
-REM gRPC浠ｇ爜鐢熸垚鑴氭湰 (Windows)
-REM 
-REM 鐢ㄦ硶: .\generate_grpc.bat
-REM 
-REM 闇€瑕佸厛瀹夎:
+REM gRPC Code Generator Script (Windows)
+REM
+REM Usage: .\generate_grpc.bat
+REM
+REM Prerequisites:
 REM   - grpcio-tools: pip install grpcio-tools
 
 echo ========================================
@@ -19,7 +19,7 @@ echo Proto directory: %PROTO_DIR%
 echo Python output: %PYTHON_OUT%
 echo.
 
-REM 鍒涘缓杈撳嚭鐩綍
+REM Create output directory
 if not exist "%PYTHON_OUT%" mkdir "%PYTHON_OUT%"
 
 echo [1/3] Generating Python gRPC code...

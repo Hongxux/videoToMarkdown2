@@ -88,7 +88,7 @@ class VLMaterialGenerator:
         output_dir: str = None
     ) -> VLGenerationResult:
         """
-        生成素材请求
+        生成素材请求 (并行化版本)
         
         Args:
             video_path: 原视频路径
@@ -117,42 +117,82 @@ class VLMaterialGenerator:
             if not clips_dir or not Path(clips_dir).exists():
                 raise RuntimeError("视频切割失败或输出目录不存在")
             
-            # 2. 逐个分析语义单元片段
-            logger.info(f"开始 VL 分析 {len(semantic_units)} 个语义单元...")
+            # 2. 🚀 并行 VL 分析 (使用 asyncio.gather)
+            logger.info(f"开始并行 VL 分析 {len(semantic_units)} 个语义单元...")
+            
+            # 构建分析任务列表
+            analysis_tasks = []
+            task_metadata = []  # 保存任务元数据以便后续匹配
             
             for su in semantic_units:
                 unit_id = su.get("unit_id", "")
                 start_sec = float(su.get("start_sec", 0))
+                end_sec = float(su.get("end_sec", 0))
                 
                 # 查找对应的视频片段
-                clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, su.get("end_sec", 0))
+                clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec)
                 
                 if not clip_path:
                     logger.warning(f"未找到语义单元 {unit_id} 的视频片段，跳过")
                     continue
                 
-                # 调用 VL 分析
-                analysis_result = await self.analyzer.analyze_clip(
+                # 创建异步分析任务
+                task = self.analyzer.analyze_clip(
                     clip_path=clip_path,
                     semantic_unit_start_sec=start_sec,
                     semantic_unit_id=unit_id
                 )
+                analysis_tasks.append(task)
+                task_metadata.append({
+                    "unit_id": unit_id,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "clip_path": clip_path
+                })
+            
+            # 并发执行所有 VL 分析任务
+            if analysis_tasks:
+                logger.info(f"🚀 启动 {len(analysis_tasks)} 个并行 VL 分析任务...")
+                analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
+                logger.info(f"✅ 并行 VL 分析完成，共 {len(analysis_results)} 个结果")
+            else:
+                analysis_results = []
+            
+            # 收集所有成功的分析结果
+            all_screenshot_requests = []
+            all_clip_requests = []
+            
+            for idx, analysis_result in enumerate(analysis_results):
+                meta = task_metadata[idx] if idx < len(task_metadata) else {}
+                unit_id = meta.get("unit_id", f"task_{idx}")
+                
+                # 处理异常情况
+                if isinstance(analysis_result, Exception):
+                    logger.warning(f"语义单元 {unit_id} VL 分析异常: {analysis_result}")
+                    continue
                 
                 if not analysis_result.success:
                     logger.warning(f"语义单元 {unit_id} VL 分析失败: {analysis_result.error_msg}")
                     continue
                 
-                # 3. 优化截图时间点
-                if self.screenshot_config.get("enabled", True):
-                    optimized_screenshots = await self._optimize_screenshot_timestamps(
-                        video_path=video_path,
-                        screenshot_requests=analysis_result.screenshot_requests
-                    )
-                    analysis_result.screenshot_requests = optimized_screenshots
-                
-                # 汇总结果
-                result.clip_requests.extend(analysis_result.clip_requests)
-                result.screenshot_requests.extend(analysis_result.screenshot_requests)
+                # 收集结果 (暂不优化截图时间点，后续批量处理)
+                all_clip_requests.extend(analysis_result.clip_requests)
+                all_screenshot_requests.extend(analysis_result.screenshot_requests)
+            
+            logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
+            
+            # 3. 🚀 批量 CV 优化截图时间点
+            if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
+                logger.info(f"开始批量 CV 优化 {len(all_screenshot_requests)} 个截图请求...")
+                optimized_screenshots = await self._optimize_screenshots_parallel(
+                    video_path=video_path,
+                    screenshot_requests=all_screenshot_requests
+                )
+                all_screenshot_requests = optimized_screenshots
+            
+            # 汇总最终结果
+            result.clip_requests = all_clip_requests
+            result.screenshot_requests = all_screenshot_requests
             
             logger.info(
                 f"VL 素材生成完成: clips={len(result.clip_requests)}, "
@@ -221,6 +261,28 @@ class VLMaterialGenerator:
                     return str(clips_dir)
             except Exception:
                 pass
+        
+        # 2. 备用检查：直接检查是否存在对应的 .mp4 文件
+        # 如果 manifest 丢失但文件都在，也可以复用
+        if clips_dir.exists():
+            try:
+                existing_clips = list(clips_dir.glob("*.mp4"))
+                if len(existing_clips) > 0:
+                    # 检查是否所有 unit_id 都有对应的片段
+                    missing_units = []
+                    for su in semantic_units:
+                        unit_id = su.get("unit_id", "")
+                        # 检查是否有包含 unit_id 的文件名
+                        if not any(unit_id in f.name for f in existing_clips):
+                            missing_units.append(unit_id)
+                    
+                    if not missing_units:
+                        logger.info(f"复用已存在的视频片段 (文件完整性检查通过): {clips_dir}")
+                        return str(clips_dir)
+                    else:
+                        logger.warning(f"无法复用视频片段，缺失: {len(missing_units)}/{len(semantic_units)} (e.g., {missing_units[:3]})")
+            except Exception as e:
+                logger.warning(f"文件完整性检查出错: {e}")
         
         # 执行切割命令
         cmd = [
@@ -373,6 +435,162 @@ class VLMaterialGenerator:
             return screenshot_requests
         
         return optimized
+    
+    async def _optimize_screenshots_parallel(
+        self,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        并行优化截图时间点 (使用 cv_worker 进程池 + 共享内存)
+        
+        架构:
+        1. 主进程预读帧并写入 SharedMemory
+        2. 提交任务到 ProcessPool
+        3. Worker 零拷贝读取帧并执行 CV 分析
+        
+        Args:
+            video_path: 原视频路径
+            screenshot_requests: 截图请求列表
+            
+        Returns:
+            List[Dict]: 优化后的截图请求
+        """
+        if not screenshot_requests:
+            return []
+        
+        time_window = self.screenshot_config.get("time_window_seconds", 1.0)
+        
+        try:
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+            from .visual_feature_extractor import VisualFeatureExtractor, get_shared_frame_registry
+            import sys
+            
+            # 尝试导入 cv_worker (位于项目根目录)
+            project_root = Path(__file__).resolve().parent.parent.parent
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+            
+            from cv_worker import run_screenshot_selection_task, init_cv_worker
+            
+            logger.info(f"🚀 初始化并行 CV 优化: {len(screenshot_requests)} 个请求")
+            
+            # 初始化帧提取器
+            extractor = VisualFeatureExtractor(video_path)
+            shm_registry = get_shared_frame_registry()
+            
+            # 准备任务参数
+            task_params = []
+            for idx, req in enumerate(screenshot_requests):
+                original_ts = req.get("timestamp_sec", 0)
+                unit_id = req.get("unit_id", f"req_{idx}")
+                
+                # 计算搜索窗口
+                search_start = max(0, original_ts - time_window)
+                search_end = original_ts + time_window
+                
+                # 预读帧并注册到共享内存
+                frames, timestamps = extractor.extract_frames_fast(
+                    start_sec=search_start,
+                    end_sec=search_end,
+                    sample_rate=2,  # 较高采样率以获取更多候选帧
+                    target_height=360
+                )
+                
+                if not frames:
+                    logger.warning(f"预读帧失败: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
+                    task_params.append({
+                        "req": req,
+                        "skip": True
+                    })
+                    continue
+                
+                # 构建共享内存引用
+                shm_frames = {}
+                for ts in timestamps:
+                    frame_idx = int(ts * extractor.fps)
+                    shm_ref = shm_registry.get_shm_ref(frame_idx)
+                    if shm_ref:
+                        shm_frames[ts] = shm_ref
+                
+                task_params.append({
+                    "req": req,
+                    "skip": False,
+                    "unit_id": unit_id,
+                    "island_index": idx,
+                    "expanded_start": search_start,
+                    "expanded_end": search_end,
+                    "shm_frames": shm_frames,
+                    "fps": extractor.fps
+                })
+            
+            # 使用进程池并行执行 CV 分析
+            max_workers = min(4, len([p for p in task_params if not p.get("skip")]))
+            if max_workers == 0:
+                logger.warning("所有预读任务失败，跳过 CV 优化")
+                return screenshot_requests
+            
+            logger.info(f"🚀 启动 {max_workers} 个 CV Worker 进程...")
+            
+            optimized = []
+            futures_map = {}
+            
+            loop = asyncio.get_event_loop()
+            
+            with ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker) as executor:
+                for param in task_params:
+                    if param.get("skip"):
+                        optimized.append(param["req"])
+                        continue
+                    
+                    future = loop.run_in_executor(
+                        executor,
+                        run_screenshot_selection_task,
+                        video_path,
+                        param["unit_id"],
+                        param["island_index"],
+                        param["expanded_start"],
+                        param["expanded_end"],
+                        param["shm_frames"],
+                        param["fps"]
+                    )
+                    futures_map[future] = param["req"]
+                
+                # 等待所有任务完成
+                if futures_map:
+                    results = await asyncio.gather(*futures_map.keys(), return_exceptions=True)
+                    
+                    for future, result in zip(futures_map.keys(), results):
+                        req = futures_map[future]
+                        original_ts = req.get("timestamp_sec", 0)
+                        
+                        if isinstance(result, Exception):
+                            logger.warning(f"CV Worker 异常: {result}")
+                            optimized.append(req)
+                        elif result and "selected_timestamp" in result:
+                            req["timestamp_sec"] = result["selected_timestamp"]
+                            req["_optimized"] = True
+                            req["_original_timestamp"] = original_ts
+                            req["_cv_quality_score"] = result.get("quality_score", 0)
+                            optimized.append(req)
+                            logger.debug(
+                                f"CV 优化: {original_ts:.2f}s -> {result['selected_timestamp']:.2f}s "
+                                f"(score={result.get('quality_score', 0):.3f})"
+                            )
+                        else:
+                            optimized.append(req)
+            
+            logger.info(f"✅ 并行 CV 优化完成: {len(optimized)} 个请求")
+            return optimized
+            
+        except ImportError as e:
+            logger.warning(f"❌ cv_worker 导入失败: {e} (sys.path={sys.path})，回退到串行模式")
+            return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
+        except Exception as e:
+            logger.error(f"❌ 并行 CV 优化失败: {e}，回退到串行模式")
+            import traceback
+            logger.error(traceback.format_exc())
+            return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
     
     def _should_fallback(self, error: Exception) -> bool:
         """
