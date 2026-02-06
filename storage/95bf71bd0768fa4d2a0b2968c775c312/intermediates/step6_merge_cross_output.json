@@ -1,0 +1,884 @@
+{
+  "step": "step6_merge_cross",
+  "input": {
+    "non_redundant_sentences": {
+      "_count": 202,
+      "_sample": [
+        {
+          "sentence_id": "S001",
+          "cleaned_text": "CloudBot一夜爆火，这是一个运行在本地电脑的开源AI助理。",
+          "removed_items": []
+        },
+        {
+          "sentence_id": "S002",
+          "cleaned_text": "短短几天内GitHub Star数量直线拉升，已经超过了12万。",
+          "removed_items": []
+        },
+        {
+          "sentence_id": "S003",
+          "cleaned_text": "本期视频我们带来一个CloudBot的全面攻略，看看CloudBot比起其他的AI agent有什么特色。",
+          "removed_items": []
+        }
+      ]
+    }
+  },
+  "output": {
+    "pure_text_script": [
+      {
+        "text": "CloudBot一夜爆火，这是一个运行在本地电脑的开源AI助理，短短几天内GitHub Star数量直线拉升，已经超过了12万。",
+        "source_sentence_ids": [
+          "S001",
+          "S002"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P001"
+      },
+      {
+        "text": "本期视频我们带来一个CloudBot的全面攻略，看看CloudBot比起其他的AI agent有什么特色。我准备了十几个案例的玩法大全，还会介绍一个接入国产模型的方案，让CloudBot在国内网络也能顺畅使用。",
+        "source_sentence_ids": [
+          "S003",
+          "S004"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P002"
+      },
+      {
+        "text": "视频开始之前先插入一个小插曲，由于CloudBot受到安苏尔佩克法务团队的压力，先是改名成了MultBot，现在又改名成了OpenCloud。我们做视频的速度还赶不上他改名的速度，所以本期视频我们还是统一叫他最开始的名字CloudBot。",
+        "source_sentence_ids": [
+          "S006",
+          "S009",
+          "S011"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P003"
+      },
+      {
+        "text": "CloudBot功能跟CloudCode和OpenCode都有点像，都可以处理文件、编码、调用skills、mcp等等帮我们处理工作。",
+        "source_sentence_ids": [
+          "S010",
+          "S012"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P004"
+      },
+      {
+        "text": "CloudBot的最大优势是可以接入各种聊天工具，也就是我们即使出门在外，手边没有电脑，只需要在聊天工具里面给CloudBot留个言，CloudBot就能自动干活。它还能把屏幕截图、执行过程等信息实时同步过来，非常的方便。",
+        "source_sentence_ids": [
+          "S013",
+          "S015",
+          "S016",
+          "S017"
+        ],
+        "merge_type": "断句错误重复与部分重复",
+        "paragraph_id": "P005"
+      },
+      {
+        "text": "第二个优点是，CloudBot自带了强大的定时系统，只需要用自然语言就能创建定时物，比如可以创建一个临时的提醒，还可以定时检查收件箱。",
+        "source_sentence_ids": [
+          "S019"
+        ],
+        "merge_type": "无需合并",
+        "paragraph_id": "P006"
+      },
+      {
+        "text": "它可以智能判断事情的紧急程度，选择是否用聊天工具跟用户进行沟通。比起传统的指令执行这种固定的流程，CloudBot就具有了很强的主观能动性。",
+        "source_sentence_ids": [
+          "S021",
+          "S023"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P007"
+      },
+      {
+        "text": "它的第三个优点是具有长期记忆，可以把记忆作为文件存储在本地，在日常的对话中能够搜索，并且把相关的记忆捞回上下文。随着日常使用，它还会主动去更新这些记忆文件，会有一种越用越聪明的感觉。",
+        "source_sentence_ids": [
+          "S024",
+          "S026",
+          "S027"
+        ],
+        "merge_type": "断句错误重复与跨句部分重复",
+        "paragraph_id": "P008"
+      },
+      {
+        "text": "好，我们先在本地把软件安装一下，任意一个能运行JS的环境都可以部署CloudBot。我最推荐使用Mac或者Linux系统的家庭服务器，现在最火的部署方案是使用Mac mini。",
+        "source_sentence_ids": [
+          "S028",
+          "S030",
+          "S031",
+          "S032",
+          "S033"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P009"
+      },
+      {
+        "text": "我最推荐使用Mac或者Linux系统的家庭服务器，现在最火的部署方案是使用Mac mini。",
+        "source_sentence_ids": [
+          "S031",
+          "S033",
+          "S034"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P010"
+      },
+      {
+        "text": "Mac mini的最大好处是Mac系统有不错的桌面环境，这样可以很方便地进行截图、操作浏览器等等；第二点是功耗比较低。",
+        "source_sentence_ids": [
+          "S035",
+          "S036",
+          "S037"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P011"
+      },
+      {
+        "text": "现在最火的部署方案是使用Mac mini。Mac mini的最大好处是Mac系统有不错的桌面环境，这样可以很方便地进行截图、操作浏览器等等。",
+        "source_sentence_ids": [
+          "S034",
+          "S035"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P012"
+      },
+      {
+        "text": "第二点是功耗比较低，7x24小时运行比较省电。",
+        "source_sentence_ids": [
+          "S036",
+          "S038"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P013"
+      },
+      {
+        "text": "第三个优点是CloudBot里面许多skills跟Mac生态是绑定的，没有Mac电脑的话，可以选择Linux操作系统，或者在Windows里面创建一个Linux虚拟机。",
+        "source_sentence_ids": [
+          "S039",
+          "S041",
+          "S042"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P014"
+      },
+      {
+        "text": "我选择的安装方式是NodeJS。我们来到NodeJS的官网，把第一个命令复制一下，然后打开终端执行一下。接着是第二个命令和第三个命令，这样NodeJS就安装完成了。",
+        "source_sentence_ids": [
+          "S043",
+          "S045",
+          "S046",
+          "S047",
+          "S048",
+          "S051"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P015"
+      },
+      {
+        "text": "下一步我们来到CloudBot的官网，在这里有一个一键安装命令。如果我们使用官网上的一键安装命令的话，注意要区分现在软件的名字，比如现在叫OpenCloud，后续所有操作的命令都应该是OpenCloud开头了。",
+        "source_sentence_ids": [
+          "S049",
+          "S050",
+          "S052",
+          "S053",
+          "S056"
+        ],
+        "merge_type": "断句错误重复与跨句部分重复",
+        "paragraph_id": "P016"
+      },
+      {
+        "text": "这里我选择NPM的安装方式，我们看到NPM这里的命令还是叫CloudBot，所以后续我输入的命令都应该还是CloudBot开头了。我把这个命令复制一下，粘贴到命令行窗口执行。",
+        "source_sentence_ids": [
+          "S054",
+          "S057",
+          "S058",
+          "S060"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P017"
+      },
+      {
+        "text": "安装完成后，我们输入命令CloudBot Onboard来进行初始化。",
+        "source_sentence_ids": [
+          "S061"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P018"
+      },
+      {
+        "text": "第一步先配置AI模型，因为我有OpenAI的Plus订阅，所以这里我选择OpenAI。当然下面也有很多不错的国产模型可以选择，视频的后半段我们再来配置使用国产模型。",
+        "source_sentence_ids": [
+          "S062",
+          "S064",
+          "S065",
+          "S066",
+          "S067"
+        ],
+        "merge_type": "断句错误重复与跨句部分重复",
+        "paragraph_id": "P019"
+      },
+      {
+        "text": "默认模型我选择GPT 3.5，接下来选择一个聊天工具，这里我选择的工具是WhatsApp。视频的后半段，我们再来看如何绑定国产的聊天工具。",
+        "source_sentence_ids": [
+          "S070",
+          "S071"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P020"
+      },
+      {
+        "text": "视频的后半段，我们再来配置使用国产模型，并看看如何绑定国产的聊天工具。",
+        "source_sentence_ids": [
+          "S067",
+          "S071"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P021"
+      },
+      {
+        "text": "选择OpenAI以后，再选择第二个ChatGPT登录，登录一下我的ChatGPT帐户，这样AI模型就配置完成。默认模型我选择GPT 3.5，接下来选择一个聊天工具，这里我选择的工具是WhatsApp。",
+        "source_sentence_ids": [
+          "S068",
+          "S070",
+          "S072"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P022"
+      },
+      {
+        "text": "接下来选择预装的Skills，按空格键打上对勾选中，这里可以按需进行选择安装。下面的这些API Key可以全部选择跳过。",
+        "source_sentence_ids": [
+          "S076",
+          "S077"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P023"
+      },
+      {
+        "text": "默认模型我选择GPT 3.5，接下来选择一个聊天工具，这里我选择的工具是WhatsApp。我们打开手机上的WhatsApp，点击右上角三个点，选择已关联设备，然后关联新设备，扫一下屏幕上的二维码。",
+        "source_sentence_ids": [
+          "S072",
+          "S074"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P024"
+      },
+      {
+        "text": "然后AI会询问我们一些关于人设方面的问题，我们回答一下，这样就配置完成。你可以给我的聊天工具发一个消息，我们看到手机上收到了消息，这样就完全配置成功了。",
+        "source_sentence_ids": [
+          "S080",
+          "S081",
+          "S082",
+          "S083"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P025"
+      },
+      {
+        "text": "我们先来介绍几个基础命令的使用，输入命令CloudBot Gateway，这个是启动主程序。",
+        "source_sentence_ids": [
+          "S084",
+          "S086"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P026"
+      },
+      {
+        "text": "我们可以通过关闭控制台来停止CloudBot的运行。在CloudBot后台运行的时候，我们可以新开一个窗口，输入命令CloudBot CLI。",
+        "source_sentence_ids": [
+          "S087",
+          "S088"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P027"
+      },
+      {
+        "text": "在 CloudBot 后台运行的时候，我们可以新开一个窗口，输入命令 CloudBot CLI，就可以进入这个控制台的对话界面。",
+        "source_sentence_ids": [
+          "S088",
+          "S090"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P028"
+      },
+      {
+        "text": "在CloudBot后台运行的时候，我们可以新开一个窗口，输入命令CloudBot CLI，就可以进入这个控制台的对话界面。输入命令CloudBot Dashboard，可以进入一个网页版的控制台，在这里可以进行基础的对话，上面还有很多配置，可以管理定时任务，管理Skills等等。",
+        "source_sentence_ids": [
+          "S090",
+          "S091",
+          "S093"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P029"
+      },
+      {
+        "text": "输入命令CloudBot Chat Logout，可以退出CloudBot上面登录过的聊天软件。输入命令Login，就可以重新登录，因为有的聊天软件可能隔几天就会掉线，我们可以使用这个命令。",
+        "source_sentence_ids": [
+          "S094",
+          "S096",
+          "S097"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P030"
+      },
+      {
+        "text": "我们来看CloudBot最有意思的一个功能，就是它的定时任务。定时任务赋予了CloudBot的一些主观能动性，让它变得更像一个智能的AE助手。",
+        "source_sentence_ids": [
+          "S099",
+          "S101",
+          "S102"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P031"
+      },
+      {
+        "text": "比如我输入这个命令：提醒我两分钟以后关闭它。CloudBot回复我好的，已经设定成功了。",
+        "source_sentence_ids": [
+          "S103",
+          "S104",
+          "S106"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P032"
+      },
+      {
+        "text": "定时任务赋予了CloudBot一些主观能动性，让它变得更像一个智能的AE助手。比如我输入命令“提醒我两分钟以后关闭它”，CloudBot会回复“好的，已经设定成功了”。",
+        "source_sentence_ids": [
+          "S102",
+          "S103",
+          "S104"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P033"
+      },
+      {
+        "text": "我们可以在网页版控制台的ChromeJob（即定时任务）选项卡中，看到CloudBot为我们设定的定时任务，这里会显示“两分钟后执行”。",
+        "source_sentence_ids": [
+          "S107",
+          "S108"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P034"
+      },
+      {
+        "text": "两分钟后，CloudBot就会把提醒消息推送到手机上，通知我去关闭它。",
+        "source_sentence_ids": [
+          "S110"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P035"
+      },
+      {
+        "text": "需要注意的是，CloudBot具有操作浏览器的能力，因此我们需要先在Mac里下载一个Chrome浏览器。",
+        "source_sentence_ids": [
+          "S111"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P036"
+      },
+      {
+        "text": "它就把这个消息推送到了手机上，提醒我去关闭器。",
+        "source_sentence_ids": [
+          "S112"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P037"
+      },
+      {
+        "text": "我要求CloudBot去MIT公开课下载Python课程的课件，放到我的桌面。我们看到CloudBot自动打开了Mac里面的Chrome浏览器，找到了MIT公开课的官网，并且搜索Python。",
+        "source_sentence_ids": [
+          "S114",
+          "S115",
+          "S116",
+          "S117"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P038"
+      },
+      {
+        "text": "它找到了几门Python课程，回复了我课程的编号，让我选择。这里我选择第一个，它又在浏览器里面通过课程编号找到了这门课，并且下载到了桌面。",
+        "source_sentence_ids": [
+          "S118",
+          "S120"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P039"
+      },
+      {
+        "text": "我们看到CloudBot自动打开了Mac里面的Chrome浏览器，找到了MIT公开课的官网，并且搜索Python。它找到了几门Python课程，回复了我课程的编号，让我选择。",
+        "source_sentence_ids": [
+          "S117",
+          "S118"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P040"
+      },
+      {
+        "text": "这里我选择第一个，它又在浏览器里面通过课程编号找到了这门课，并且下载到了桌面。我要求它解压出来，它调用Mac的命令行工具完成解压。",
+        "source_sentence_ids": [
+          "S120",
+          "S121",
+          "S123"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P041"
+      },
+      {
+        "text": "我要求它把第一节课的课件发给我，CloudBot成功找到课件并完成发送，效果不错。",
+        "source_sentence_ids": [
+          "S124",
+          "S126"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P042"
+      },
+      {
+        "text": "我选择第一个，它在浏览器里通过课程编号找到这门课，下载到桌面，然后我要求它解压出来，它调用Mac的命令行工具完成了解压。",
+        "source_sentence_ids": [
+          "S122",
+          "S123"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P043"
+      },
+      {
+        "text": "帕巴夏作为科技软件类博主，需要经常查看GitHub热点，所以我告诉CloudBot查阅GitHub上面的热点，做个中文简报发送给我。",
+        "source_sentence_ids": [
+          "S130",
+          "S131",
+          "S132"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P044"
+      },
+      {
+        "text": "我们来看一个把浏览器自动化与定时任务组合的案例。帕巴夏作为科技软件类博主，需要经常查看GitHub热点，于是我告诉CloudBot查阅GitHub上面的热点，做个中文简报发送给我。",
+        "source_sentence_ids": [
+          "S127",
+          "S130",
+          "S131"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P045"
+      },
+      {
+        "text": "CloudBot生成了一个定时任务，每天早晨8点都会自动执行工作流程，生成并发送中文简报给我。我们可以在CloudBot的控制后台查找到这个定时任务，效果不错。",
+        "source_sentence_ids": [
+          "S134",
+          "S135",
+          "S136",
+          "S137",
+          "S139"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P046"
+      },
+      {
+        "text": "除了操作浏览器，CloudBot还有图像识别等AI视觉方面的能力。",
+        "source_sentence_ids": [
+          "S141"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P047"
+      },
+      {
+        "text": "这里打开Mac mini的设置，进入隐私与安全设置中的屏幕与系统录音。我们在这里搜索终端两个字，给命令行终端添加上屏幕和录音的权限。",
+        "source_sentence_ids": [
+          "S142",
+          "S144",
+          "S145"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P048"
+      },
+      {
+        "text": "我们在这里搜索终端两个字，给命令行终端添加上屏幕和录音的权限。接下来重启一下CloudBot。",
+        "source_sentence_ids": [
+          "S145",
+          "S146",
+          "S147",
+          "S148"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P049"
+      },
+      {
+        "text": "我在手机里面说“请给现在的Mac截一个图”，Mac电脑当前的图片就发送到了我的手机上，可以实时的对状态进行监控。",
+        "source_sentence_ids": [
+          "S149",
+          "S151"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P050"
+      },
+      {
+        "text": "目前为止我们依赖的是海外的聊天工具，接下来我们把CloudBot接入飞书，让它在国内的网络也可以顺畅使用。",
+        "source_sentence_ids": [
+          "S150",
+          "S152"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P051"
+      },
+      {
+        "text": "我们先来到飞书开放平台，点击创建企业应用，填写一个名字与描述。接下来点击左侧添加应用能力，选择机器人。然后我们来到权限管理，点击添加权限，总共需要添加屏幕上。接下来来到版本管理与发布，填写一个版本号，点击发布。",
+        "source_sentence_ids": [
+          "S153",
+          "S156",
+          "S157",
+          "S161"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P052"
+      },
+      {
+        "text": "我们回到Mac终端，输入第一个命令安装飞书插件。第二个命令配置APPID，APPID可以在飞书开放平台凭证与基础信息里面找到，把ID粘贴到命令行里面执行一下。",
+        "source_sentence_ids": [
+          "S162",
+          "S165",
+          "S166",
+          "S167"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P053"
+      },
+      {
+        "text": "然后配置APPSecret，同样在凭证与基础信息里面找到，把Secret放到命令里面执行一下。",
+        "source_sentence_ids": [
+          "S170",
+          "S172"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P054"
+      },
+      {
+        "text": "下一个命令开启飞书频道，最后第四个命令把链接方式改成WebSocket。",
+        "source_sentence_ids": [
+          "S171",
+          "S173"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P055"
+      },
+      {
+        "text": "把链接方式改成WebSocket，然后重启CloudBot。",
+        "source_sentence_ids": [
+          "S174",
+          "S177"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P056"
+      },
+      {
+        "text": "这里总结了需要执行的几个命令，有需要的观众可以截图保存。",
+        "source_sentence_ids": [
+          "S178"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P057"
+      },
+      {
+        "text": "回到飞书开放平台，在事件与回调这里选择长连接，点击鉴比，点击添加事件，勾选接收消息，最后点击顶部的创建版本。我们再提交一个新的版本，这样飞书就配置完成了。",
+        "source_sentence_ids": [
+          "S176",
+          "S179",
+          "S180",
+          "S181"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P058"
+      },
+      {
+        "text": "在飞书的手机App里面，我们可以找到开发者助手，然后点击打开应用。",
+        "source_sentence_ids": [
+          "S182",
+          "S184"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P059"
+      },
+      {
+        "text": "飞书有一个非常可爱的机器人正在输入的表情。",
+        "source_sentence_ids": [
+          "S186"
+        ],
+        "merge_type": "不需要合并",
+        "paragraph_id": "P060"
+      },
+      {
+        "text": "然后点击打开应用，这里我打一个招呼：你好。",
+        "source_sentence_ids": [
+          "S187"
+        ],
+        "merge_type": "不需要合并",
+        "paragraph_id": "P061"
+      },
+      {
+        "text": "在飞书的手机App里面，我们可以找到开发者助手，然后点击打开应用。这里我打一个招呼：你好。",
+        "source_sentence_ids": [
+          "S184",
+          "S185"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P062"
+      },
+      {
+        "text": "我问他现在几点了，这里给出了回答。",
+        "source_sentence_ids": [
+          "S189",
+          "S191"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P063"
+      },
+      {
+        "text": "我让他给Mac截一个屏，他告诉我需要先在控制台跟他对话一次，开通权限才可以截屏。然后我们来到Mac上面的控制台，跟他对话一次，允许截屏，这样截屏完成。",
+        "source_sentence_ids": [
+          "S190",
+          "S192",
+          "S193"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P064"
+      },
+      {
+        "text": "我们看到飞书也同样可以传递文件、传递截屏。",
+        "source_sentence_ids": [
+          "S195",
+          "S197"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P065"
+      },
+      {
+        "text": "我们来到Mac上面的控制台，跟他对话一次，允许截屏，这样截屏完成。然后输入CloudBot Config来配置一下。",
+        "source_sentence_ids": [
+          "S193",
+          "S201"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P066"
+      },
+      {
+        "text": "我们把聊天方式换成了国内平台，AI模型同样也可以换成国内平台，CloudBot的作者推荐使用minimax。我们来到minimax开放平台，左侧选到接口密钥，然后创建一个API-K。",
+        "source_sentence_ids": [
+          "S196",
+          "S199",
+          "S200",
+          "S202"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P067"
+      },
+      {
+        "text": "我们打开Mac的控制台，输入CloudBot Config来配置一下，模型选择minimax，然后把刚才创建的minimax API-K填写进来，一路回车就配置完成。",
+        "source_sentence_ids": [
+          "S201",
+          "S203",
+          "S204",
+          "S206"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P068"
+      },
+      {
+        "text": "来到CloudBot的控制台，输入命令斜杠models，我们可以选择minimax模型，并把刚才创建的minimax API-K填写进来，一路回车就配置完成。",
+        "source_sentence_ids": [
+          "S205",
+          "S206",
+          "S207"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P069"
+      },
+      {
+        "text": "CloudBot的强大之处在于它内置的skills，可以把各种第三方的生态接入进来，比如这里的gogskills，可以把谷歌邮箱、日历文档等功能都接入CloudBot。",
+        "source_sentence_ids": [
+          "S209",
+          "S211"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P070"
+      },
+      {
+        "text": "来到CloudBot的控制台，输入命令斜杠models，我们可以选择minimax模型。选择完模型以后，我们再重启一下CloudBot，这样模型就切换完成了。",
+        "source_sentence_ids": [
+          "S207",
+          "S208"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P071"
+      },
+      {
+        "text": "我们点击这个安装按钮，这里要提醒一下大家，安装的时候要把Mac系统更新到最新版，否则有可能会失败。这样一键就安装完成，来到谷歌Cloud，我们在左侧菜单找到API与服务，选到OAuth权限请求页面，创建OAuth客户端，应用类型选择桌面APP。",
+        "source_sentence_ids": [
+          "S213",
+          "S214",
+          "S216",
+          "S217"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P072"
+      },
+      {
+        "text": "我们把生成的JSON文件保存下来，把文件拖拽进CloudBot，告诉它配置一下Google的认证。",
+        "source_sentence_ids": [
+          "S218"
+        ],
+        "merge_type": "无需合并",
+        "paragraph_id": "P073"
+      },
+      {
+        "text": "我们登录谷歌账号，并且授予权限，完成配置。",
+        "source_sentence_ids": [
+          "S219",
+          "S221"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P074"
+      },
+      {
+        "text": "我让它看看我的邮箱里有什么邮件，总结一下。",
+        "source_sentence_ids": [
+          "S222"
+        ],
+        "merge_type": "无需合并",
+        "paragraph_id": "P075"
+      },
+      {
+        "text": "AI提示我需要再开通一个机庙API的权限，按照提示开通权限，它可以读取到我的邮件。",
+        "source_sentence_ids": [
+          "S223",
+          "S225",
+          "S227"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P076"
+      },
+      {
+        "text": "我让它把所有的邮件移动到垃圾箱，成功完成。",
+        "source_sentence_ids": [
+          "S226",
+          "S228"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P077"
+      },
+      {
+        "text": "我在手机上让CloudBot帮我发送一封邮件，邮件可以成功发送。",
+        "source_sentence_ids": [
+          "S229",
+          "S231"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P078"
+      },
+      {
+        "text": "我让CloudBot设置两分钟一次的心跳检查，如果有发现新的邮件，就发消息通知我。",
+        "source_sentence_ids": [
+          "S232"
+        ],
+        "merge_type": "不需要合并",
+        "paragraph_id": "P079"
+      },
+      {
+        "text": "我给这个机庙邮箱发送一个邮件来测试一下。",
+        "source_sentence_ids": [
+          "S233",
+          "S235"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P080"
+      },
+      {
+        "text": "这里CloudBot成功给到了通知，我让它总结一下邮件内容，它也完成了总结。",
+        "source_sentence_ids": [
+          "S236"
+        ],
+        "merge_type": "无合并，单独成段",
+        "paragraph_id": "P081"
+      },
+      {
+        "text": "AI助手对接其他生态，一个重要的渠道就是MCP。我们可以在skills里面找到mcpporter，把这个skills安装一下。",
+        "source_sentence_ids": [
+          "S237",
+          "S240",
+          "S241"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P082"
+      },
+      {
+        "text": "接下来我告诉AI，用mcpporter来配置一个百度地图的mcp，我把这个mcp的说明文档贴给了它。AI提供了三种安装方案，我选择是DreamableHDDP。",
+        "source_sentence_ids": [
+          "S242",
+          "S244",
+          "S245",
+          "S247"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P083"
+      },
+      {
+        "text": "我用mcpporter来配置一个百度地图的mcp，我把这个mcp的说明文档贴给了它。同时，它要求我提供百度地图的API-K，我把这个API-K复制一下，粘贴给了它。",
+        "source_sentence_ids": [
+          "S246",
+          "S248"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P084"
+      },
+      {
+        "text": "配置完成后，它已经可以使用这个mcp查询到地理位置的坐标了，我们也可以在手机里面使用。",
+        "source_sentence_ids": [
+          "S251",
+          "S252"
+        ],
+        "merge_type": "跨句同义转述",
+        "paragraph_id": "P085"
+      },
+      {
+        "text": "我让它查询一下从青岛太平角公园到崂山仰口景区怎么走，这里成功给到了规划路线，效果不错。",
+        "source_sentence_ids": [
+          "S255",
+          "S256"
+        ],
+        "merge_type": "断句错误重复",
+        "paragraph_id": "P086"
+      },
+      {
+        "text": "我让它查询一下从青岛太平角公园到崂山仰口景区怎么走。",
+        "source_sentence_ids": [
+          "S257"
+        ],
+        "merge_type": "无合并",
+        "paragraph_id": "P087"
+      },
+      {
+        "text": "我们再来看一个skills的使用。这里有一个skills叫做coding agent，它可以驱动本地的codex、cloud code、open code等AI编程工具直接进行编程。",
+        "source_sentence_ids": [
+          "S259",
+          "S260",
+          "S261",
+          "S262"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P088"
+      },
+      {
+        "text": "这里我们先把这个skills安装一下，我在Mac电脑上登录了我的codex，接着我在手机上跟AI说，要用codex创建一个贪吃蛇的游戏。我们看到程序就编写好了，这样我们就通过cloud bolt驱动Codex完成了一个程序的开发。",
+        "source_sentence_ids": [
+          "S263",
+          "S265",
+          "S266",
+          "S267",
+          "S268"
+        ],
+        "merge_type": "跨句部分重复",
+        "paragraph_id": "P089"
+      }
+    ]
+  },
+  "_meta": {
+    "token_usage": 33847,
+    "timing_ms": 12047.929999999998
+  }
+}

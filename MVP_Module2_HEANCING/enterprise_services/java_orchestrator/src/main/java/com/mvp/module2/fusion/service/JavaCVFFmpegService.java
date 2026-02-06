@@ -204,8 +204,8 @@ public class JavaCVFFmpegService {
                 result.screenshotsDir = screenshotsDir;
                 result.clipsDir = clipsDir;
                 
-                logger.info("🚀 JavaCV extraction starting: {} screenshots, {} clips (JNI, no process spawn)",
-                    screenshotRequests.size(), clipRequests.size());
+                logger.info("🚀 JavaCV extraction starting: {} screenshots, {} clips, timeout={}s (JNI, no process spawn)",
+                    screenshotRequests.size(), clipRequests.size(), timeoutSeconds);
                 
                 // 批量提取截图
                 int screenshotSuccess = extractScreenshotsBatch(videoPath, screenshotsDir, screenshotRequests);
@@ -379,9 +379,17 @@ public class JavaCVFFmpegService {
             List<ClipRequest> clipRequests,
             int timeoutSeconds
     ) {
-        return extractAllAsync(videoPath, outputDir, screenshotRequests, clipRequests, timeoutSeconds)
-            .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
-            .join();
+        try {
+            return extractAllAsync(videoPath, outputDir, screenshotRequests, clipRequests, timeoutSeconds)
+                .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+                .join();
+        } catch (CompletionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof TimeoutException) {
+                throw new RuntimeException("FFmpeg extraction timeout after " + timeoutSeconds + "s", cause);
+            }
+            throw e;
+        }
     }
     
     /**

@@ -275,7 +275,9 @@ class VLVideoAnalyzer:
                 
                 # 生成视频片段请求
                 # 规则：讲解型不截取视频片段（只截图），其他类型截取视频片段
-                if ar.knowledge_type != "讲解型":
+                # 增强：处理模型可能带括号的情况，如 【讲解型】
+                k_type = ar.knowledge_type.strip("【】[]() ")
+                if k_type != "讲解型":
                     result.clip_requests.append({
                         "clip_id": f"vl_clip_{semantic_unit_id}_{i}",
                         "start_sec": ar.absolute_clip_start_sec,
@@ -382,6 +384,10 @@ class VLVideoAnalyzer:
         - 大视频：优先尝试 DashScope File.upload 获取临时 URL（若安装了 dashscope）
         - 仍不可用：降级为抽取关键帧（image_url），并把每帧的时间戳作为文本标注提供给模型
         """
+        # 基础提示词由系统角色承担，便于服务端缓存 (Prefix Caching)
+        system_content = self.prompt_template + self._output_constraints
+        
+        user_text = ""
         if override_prompt:
             user_text = "【重试补充要求】\n" + override_prompt + "\n"
 

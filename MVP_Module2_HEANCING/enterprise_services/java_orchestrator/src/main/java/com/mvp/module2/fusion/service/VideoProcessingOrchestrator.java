@@ -202,7 +202,14 @@ public class VideoProcessingOrchestrator {
             updateProgress(taskId, 0.80, "执行素材提取...");
 
             
-            JavaCVFFmpegService.ExtractionResult extractRes = ffmpegService.extractAllSync(videoPath, outputDir, materialRequests.screenshotRequests, materialRequests.clipRequests, timeouts.getFfmpegTimeoutSec());
+            int ffmpegTimeoutSec = calculateFfmpegTimeoutSec(taskId, videoDuration, materialRequests, timeouts);
+            JavaCVFFmpegService.ExtractionResult extractRes = ffmpegService.extractAllSync(
+                videoPath,
+                outputDir,
+                materialRequests.screenshotRequests,
+                materialRequests.clipRequests,
+                ffmpegTimeoutSec
+            );
             
             // 9. Phase2B Assembly
             updateProgress(taskId, 0.90, "生成最终文档...");
@@ -230,6 +237,47 @@ public class VideoProcessingOrchestrator {
     }
 
     // --- OutputDir 统一规则 ---
+    private int calculateFfmpegTimeoutSec(
+            String taskId,
+            double videoDurationSec,
+            ExtractionRequests requests,
+            DynamicTimeoutCalculator.TimeoutConfig timeouts
+    ) {
+        int baseTimeoutSec = timeouts != null ? timeouts.getFfmpegTimeoutSec() : 0;
+
+        int screenshotCount = (requests != null && requests.screenshotRequests != null) ? requests.screenshotRequests.size() : 0;
+        int clipCount = (requests != null && requests.clipRequests != null) ? requests.clipRequests.size() : 0;
+
+        double totalClipDurationSec = 0.0;
+        if (requests != null && requests.clipRequests != null) {
+            for (JavaCVFFmpegService.ClipRequest clip : requests.clipRequests) {
+                if (clip == null) continue;
+                totalClipDurationSec += Math.max(0.0, clip.endSec - clip.startSec);
+            }
+        }
+
+        // 经验估算：截图主要成本在 seek + 解码 + 写盘；切片主要成本在重复初始化 + 编码，且通常慢于实时。
+        double seekAndImageCostSec = screenshotCount * 0.8;
+        double clipInitCostSec = clipCount * 2.0;
+        double clipEncodeCostSec = totalClipDurationSec * 1.6;
+        double bufferSec = 120.0 + Math.max(0.0, videoDurationSec * 0.05);
+
+        int computedTimeoutSec = (int) Math.ceil((seekAndImageCostSec + clipInitCostSec + clipEncodeCostSec + bufferSec) * 1.2);
+        int finalTimeoutSec = Math.max(baseTimeoutSec, computedTimeoutSec);
+
+        logger.info(
+            "[{}] FFmpeg timeout computed: {}s (base={}s, screenshots={}, clips={}, clipDur={}s)",
+            taskId,
+            finalTimeoutSec,
+            baseTimeoutSec,
+            screenshotCount,
+            clipCount,
+            String.format(Locale.ROOT, "%.1f", totalClipDurationSec)
+        );
+
+        return finalTimeoutSec;
+    }
+
     private boolean isHttpUrl(String value) {
         if (value == null) return false;
         String lower = value.toLowerCase(Locale.ROOT);

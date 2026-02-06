@@ -279,6 +279,7 @@
   - SHM 淘汰/解绑：全局 SharedFrameRegistry 有 `max_frames` 上限，批量预读会触发 LRU 淘汰并 `unlink`；Worker 侧 attach 时出现 `SharedMemory not found`，进而读不到帧，任务等价“空转”。
 - 修复措施：
   - 以 chunk 作为 SHM 生命周期边界：每个 chunk 使用独立 SharedFrameRegistry，避免跨 chunk 淘汰 `unlink`。
+  - 预读读帧策略改为“单次 seek + 顺序 read 扫描”：只在命中的候选帧上 resize + 写入 SHM，避免短窗口下 OpenCV Random Access（频繁 `cap.set`）导致的极端慢预读，从而让 worker 持续有活干。
   - Union 预读 + 流式喂入：每个 chunk 先 Union 预读覆盖区间，再立即提交任务；维护全局 pending 队列并用 `FIRST_COMPLETED` drain 实现背压节流。
   - IO/Compute 重叠：通过 `streaming_overlap_buffers` 支持 double-buffer overlap；复用 gRPC 侧全局 ProcessPool（避免重复 spawn）。
   - 可观测性增强：支持 `CV_POOL_WARMUP=1` 输出 Worker PID 集合；Worker 日志包含 PID，并在“读不到帧”时输出 shm_name 样本。
@@ -286,3 +287,16 @@
 - 预防方案（测试/监控/校验/回滚）：新增单元测试覆盖 chunk 切分；运行时日志记录 submitted/completed；可通过 `streaming_pipeline=false` 或 `streaming_overlap_buffers=1` 回退到更稳的顺序 chunk。
 - 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/visual_feature_extractor.py`、`cv_worker.py`、`python_grpc_server.py`、`MVP_Module2_HEANCING/config/module2_config.yaml`
 - 复盘要点：SharedMemory 必须配套生命周期边界；“预读+全局缓存”在高并发下易触发淘汰与时序问题，需用 chunk/背压/可观测性闭环约束。
+
+## 2026-02-06 JavaCV FFmpeg 素材提取超时（TimeoutException）
+- 日期：2026-02-06
+- 现象与影响范围：进入 FFmpeg/JavaCV 提取阶段后约 4-5 分钟失败，`Pipeline Failed ... java.util.concurrent.TimeoutException`，任务状态变为 FAILED。
+- 触发条件：素材请求数量远高于按视频时长的估算（例如 700s 视频生成 225 screenshots + 92 clips），且 clip 提取为“逐段重新初始化 Grabber/Recorder + 编码写盘”，耗时显著高于简单计数估算。
+- 根因定位：`DynamicTimeoutCalculator.calculateTimeouts(videoDuration)` 的 `ffmpegTimeoutSec` 仅基于视频时长做粗估（estimatedScreenshots/estimatedClips），与实际 material_requests 数量/切片总时长脱钩，导致 `JavaCVFFmpegService.extractAllSync(...).orTimeout()` 提前触发。
+- 修复措施：
+  - 在 `VideoProcessingOrchestrator` 基于真实 `screenshotRequests.size()`、`clipRequests.size()` 以及 `sum(end-start)` 计算提取超时，并记录到日志。
+  - 在 `JavaCVFFmpegService` 输出提取开始日志时附带 timeout；超时时抛出更明确的错误信息（包含 timeout 秒数），便于排查。
+- 验证方式：对同一视频/同一 material_requests 重新执行，确认不再在约 292s（旧估算）处超时；日志中能看到 “FFmpeg timeout computed: ...” 且提取阶段可以完成或在更合理的阈值上超时。
+- 预防方案（测试/监控/校验/回滚）：将 “提取请求数量/总切片时长/计算出的 timeout” 纳入关键日志；当请求数量异常飙升时可增加告警与策略降采样（例如上限 clips/screenshots 或按单位合并去重）。
+- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+- 复盘要点：timeout 必须依赖“真实工作量”（请求数、切片总时长），而不是仅按视频时长做静态估算；错误信息要包含关键上下文，便于线上快速定位。

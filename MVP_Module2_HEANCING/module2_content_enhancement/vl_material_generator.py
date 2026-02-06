@@ -922,39 +922,76 @@ class VLMaterialGenerator:
         注意：此函数会被 asyncio.to_thread 调用，以实现主线程可 drain 已完成的 worker 结果，
         形成 IO/Compute 重叠。
         """
+        # 背景：短窗口（<5s）走 OpenCV Random Access（多次 cap.set）会非常慢，导致 worker 长时间空闲。
+        # 这里改为“单次 seek + 顺序 read 扫描”，只在命中的 target frame 上 resize + 写入 SHM。
+        # 这样 prefetch 成本大幅下降，CPU 更能花在 worker 计算上。
+        import cv2
+
+        video_path = getattr(extractor, "video_path", None) or getattr(extractor, "video", None)
+        if not video_path:
+            return None, {}, 0.0, 0.0
+
         t0 = time.perf_counter()
-        frames, timestamps = extractor.extract_frames_fast(
-            start_sec=union_start,
-            end_sec=union_end,
-            sample_rate=sample_rate,
-            target_height=target_height,
-            register_to_shm=False,
-        )
-        prefetch_ms = (time.perf_counter() - t0) * 1000.0
-
-        if not frames or not timestamps:
-            return None, {}, prefetch_ms, 0.0
-
-        # 该 chunk 内不允许淘汰：max_frames 至少覆盖本次预读的帧数
-        max_frames = max(10, len(frames) + 10)
-        registry = registry_cls(max_frames=max_frames)
-
-        t1 = time.perf_counter()
-        ts_to_shm_ref: Dict[float, Any] = {}
-        for frame, ts in zip(frames, timestamps):
-            frame_idx = int(float(ts) * extractor.fps)
-            registry.register_frame(frame_idx, frame)
-            shm_ref = registry.get_shm_ref(frame_idx)
-            if shm_ref:
-                ts_to_shm_ref[float(ts)] = shm_ref
-        register_ms = (time.perf_counter() - t1) * 1000.0
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None, {}, (time.perf_counter() - t0) * 1000.0, 0.0
 
         try:
-            frames.clear()
-        except Exception:
-            pass
+            fps = cap.get(cv2.CAP_PROP_FPS) or float(getattr(extractor, "fps", 30.0) or 30.0)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if total_frames <= 0:
+                total_frames = int(getattr(extractor, "frame_count", 0) or 0)
 
-        return registry, ts_to_shm_ref, prefetch_ms, register_ms
+            start_frame = int(max(0.0, union_start) * fps)
+            end_frame = int(max(0.0, union_end) * fps)
+            if total_frames > 0:
+                start_frame = max(0, min(start_frame, total_frames - 1))
+                end_frame = max(start_frame, min(end_frame, total_frames - 1))
+
+            step = max(1, int(sample_rate))
+            target_indices = set(range(start_frame, end_frame + 1, step))
+            target_indices.add(end_frame)
+
+            # 该 chunk 内不允许淘汰：max_frames 覆盖本次候选帧数
+            registry = registry_cls(max_frames=max(10, len(target_indices) + 10))
+
+            # Seek once, then sequential scan
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            current_idx = start_frame
+
+            ts_to_shm_ref: Dict[float, Any] = {}
+            register_ms = 0.0
+
+            while current_idx <= end_frame:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+
+                if current_idx in target_indices:
+                    # Downsample to proxy height for memory safety + speed
+                    h, w = frame.shape[:2]
+                    if h > 0 and w > 0 and target_height > 0:
+                        target_w = int((w / h) * target_height)
+                        target_w = (target_w // 2) * 2
+                        if target_w <= 0:
+                            target_w = 2
+                        frame = cv2.resize(frame, (target_w, target_height))
+
+                    ts = float(current_idx / fps) if fps > 0 else float(union_start)
+                    t_reg0 = time.perf_counter()
+                    registry.register_frame(current_idx, frame)
+                    shm_ref = registry.get_shm_ref(current_idx)
+                    register_ms += (time.perf_counter() - t_reg0) * 1000.0
+                    if shm_ref:
+                        ts_to_shm_ref[ts] = shm_ref
+
+                current_idx += 1
+
+            prefetch_total_ms = (time.perf_counter() - t0) * 1000.0
+            prefetch_ms = max(0.0, prefetch_total_ms - register_ms)
+            return registry, ts_to_shm_ref, prefetch_ms, register_ms
+        finally:
+            cap.release()
 
     def _build_task_params_from_ts_map(
         self,
