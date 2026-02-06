@@ -118,6 +118,17 @@
 ## 2026-02-04 讲解型仍生成 clip / 截图缺失
 - 日期：2026-02-04
 - 现象与影响范围：action_units 标注为讲解型仍生成 clip；部分任务未生成截图请求。
+
+## 2026-02-06 mult_steps 未传递到后续链路
+- 日期：2026-02-06
+- 现象与影响范围：semantic_units_phase2a.json 缺少 mult_steps 字段，VL 路由与多步提示无法生效。
+- 触发条件：语义单元切分生成了 mult_steps，但写盘与重载未包含该字段。
+- 根因定位：RichTextPipeline._save_semantic_units 手工序列化未写入 mult_steps；_load_semantic_units 未读取 mult_steps。
+- 修复措施：保存时写入 mult_steps；加载时回填到 SemanticUnit。
+- 验证方式：重新生成 semantic_units_phase2a.json，确认每个单元包含 mult_steps；VL 路由短过程单元按 mult_steps 分流。
+- 预防方案（测试/监控/校验/回滚）：新增语义单元字段完整性校验；阶段输出 JSON schema 校验；必要时回退到默认 mult_steps=false。
+- 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py
+- 复盘要点：手工序列化要同步新增字段，避免链路静默丢失。
 - 触发条件：action_units knowledge_type 为空或被“knowledge”占位；截图任务异常时无兜底。
 - 根因定位：Java 侧将 action_type 作为 knowledge_type 兜底，导致过滤失效；Python 未对占位类型归一。
 - 修复措施：Java 侧仅使用 knowledge_type 或 unit 级兜底；Python 对占位类型回退到 unit 级；追加截图请求兜底。

@@ -729,6 +729,7 @@ class RichTextPipeline:
                 # V9.0 新增字段
                 "knowledge_type": getattr(unit, 'knowledge_type', ''),
                 "knowledge_topic": getattr(unit, 'knowledge_topic', ''),
+                "mult_steps": getattr(unit, 'mult_steps', False),
                 "cv_validated": getattr(unit, 'cv_validated', False),
                 # V9.0: 带有 LLM 分类结果的动作单元列表
                 "action_units": getattr(unit, 'action_units', []),
@@ -774,7 +775,8 @@ class RichTextPipeline:
                 source_paragraph_ids=item.get("source_paragraph_ids", []),
                 source_sentence_ids=item.get("source_sentence_ids", []),
                 start_sec=item["start_sec"],
-                end_sec=item["end_sec"]
+                end_sec=item["end_sec"],
+                mult_steps=item.get("mult_steps", False)
             )
             unit.stable_islands = item.get("stable_islands", [])
             unit.action_segments = item.get("action_segments", [])
