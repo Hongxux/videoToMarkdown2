@@ -246,6 +246,7 @@ vl_material_generation:
     
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
+    streaming_overlap_buffers: 2          # 重叠缓冲 chunk 数: 2=double-buffer overlap, 1=顺序chunk(更稳)
     max_workers: auto                     # Worker数: 'auto'=CPU核心数, 或手动指定如 8
     max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
     
@@ -254,6 +255,7 @@ vl_material_generation:
     prefetch_target_height: 360           # 目标高度
     prefetch_union_min_requests: 20       # Union预读最小请求数
     prefetch_union_max_span_seconds: 10.0 # Union预读最大时间跨度
+    prefetch_chunk_max_requests: 1000     # 单 chunk 最大请求数(防御性上限)，主要由 max_span 控制切分
     
   # 回退行为配置
   fallback:

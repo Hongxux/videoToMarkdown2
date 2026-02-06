@@ -548,7 +548,14 @@ class VisualFeatureExtractor:
         except:
             return []
 
-    def extract_frames_fast(self, start_sec: float, end_sec: float, sample_rate: int = 2, target_height: int = 360) -> Tuple[List[np.ndarray], List[float]]:
+    def extract_frames_fast(
+        self,
+        start_sec: float,
+        end_sec: float,
+        sample_rate: int = 2,
+        target_height: int = 360,
+        register_to_shm: bool = True,
+    ) -> Tuple[List[np.ndarray], List[float]]:
         """
         执行逻辑：
         1) 扫描输入内容。
@@ -577,7 +584,7 @@ class VisualFeatureExtractor:
         # to ensure micro-movements (mouse, cursor) are captured and prevent duplicate frames.
         if duration < 5.0:
             logger.info(f"⚡ [Strategy] Clip duration {duration:.2f}s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.")
-            return self.extract_frames(start_sec, end_sec, sample_rate)
+            return self.extract_frames(start_sec, end_sec, sample_rate, register_to_shm=register_to_shm)
 
         expected_count = int(duration * (self.fps / sample_rate))
         
@@ -636,8 +643,9 @@ class VisualFeatureExtractor:
                 timestamp = start_sec + (i / target_fps)
                 frame_idx = int(timestamp * self.fps)  # Approximate index
                 
-                # 🚀 Phase 5.0 Performance: Register in SHM immediately
-                self.shm_registry.register_frame(frame_idx, frame)
+                # 🚀 Phase 5.0 Performance: Register in SHM immediately（可选）
+                if register_to_shm:
+                    self.shm_registry.register_frame(frame_idx, frame)
                 
                 frames.append(frame)
                 timestamps.append(timestamp)
@@ -667,15 +675,21 @@ class VisualFeatureExtractor:
                      f_last = frames[-1].astype(float)
                      mse = np.mean((f0 - f_last)**2)
                      if mse < 0.1:
-                         logger.warning(f"⚠️ [Fast Extract] All extracted frames appear identical (MSE={mse:.3f}). Fallback to Slow Mode.")
-                         return self.extract_frames(start_sec, end_sec, sample_rate)
+                          logger.warning(f"⚠️ [Fast Extract] All extracted frames appear identical (MSE={mse:.3f}). Fallback to Slow Mode.")
+                          return self.extract_frames(start_sec, end_sec, sample_rate, register_to_shm=register_to_shm)
 
             return frames, timestamps
         except Exception as e:
             logger.warning(f"Fast extract failed: {e}, falling back to slow mode")
-            return self.extract_frames(start_sec, end_sec, sample_rate)
+            return self.extract_frames(start_sec, end_sec, sample_rate, register_to_shm=register_to_shm)
 
-    def extract_frames(self, start_sec: float, end_sec: float, sample_rate: int = 1) -> Tuple[List[np.ndarray], List[float]]:
+    def extract_frames(
+        self,
+        start_sec: float,
+        end_sec: float,
+        sample_rate: int = 1,
+        register_to_shm: bool = True,
+    ) -> Tuple[List[np.ndarray], List[float]]:
         """
         执行逻辑：
         1) 扫描输入内容。
@@ -757,7 +771,8 @@ class VisualFeatureExtractor:
                     self._frame_cache.popitem(last=False)
                 
                 self._frame_cache[frame_idx] = frame
-                self.shm_registry.register_frame(frame_idx, frame)
+                if register_to_shm:
+                    self.shm_registry.register_frame(frame_idx, frame)
                 
                 frames.append(frame)
                 timestamps.append(frame_idx / self.fps)

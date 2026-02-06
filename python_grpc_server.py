@@ -969,8 +969,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         # [User Request] 1.5GB per worker
         max_workers_by_ram = max(1, int((available_ram_gb - 4) / 1.5))
         # 🚀 OOM Fix: Force max workers to 4 on Windows to prevent PageFile overflow
-        self.cv_worker_count = min(max(1, cpu_cores-1), max_workers_by_ram, 6)
-        logger.info(f"🚀 CV ProcessPool Config: {self.cv_worker_count} workers (Limit by RAM: {max_workers_by_ram}, CPU: {cpu_cores}, HardCap: 4)") 
+        HARD_CAP = 6
+        self.cv_worker_count = min(max(1, cpu_cores-1), max_workers_by_ram, HARD_CAP)
+        logger.info(
+            f"🚀 CV ProcessPool Config: {self.cv_worker_count} workers "
+            f"(Limit by RAM: {max_workers_by_ram}, CPU: {cpu_cores}, HardCap: {HARD_CAP})"
+        )
 
         
         # 创建 ProcessPool (使用 spawn 方式确保 Windows 兼容)
@@ -3258,7 +3262,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 调用 VL 分析
             from MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator import VLMaterialGenerator
             
-            generator = VLMaterialGenerator(vl_config)
+            generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
             vl_result = await generator.generate(video_path, semantic_units, output_dir)
             
             if not vl_result.success:

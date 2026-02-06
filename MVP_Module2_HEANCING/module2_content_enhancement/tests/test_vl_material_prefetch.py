@@ -1,46 +1,23 @@
 """
 VLMaterialGenerator 预读策略单元测试
 
-目标：验证“Union 预读”能把多次 extract_frames_fast 合并为 1 次，避免短片段高频 seek 导致看起来“没开多进程”。
+目标：验证“按时间聚类成 chunk + Union 预读”的任务构建逻辑，确保不会退化为逐请求随机访问。
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 
-class _FakeExtractor:
-    def __init__(self, fps: float = 30.0):
-        self.fps = fps
-        self.calls: List[Tuple[float, float, int, int]] = []
-
-    def extract_frames_fast(
-        self, *, start_sec: float, end_sec: float, sample_rate: int = 2, target_height: int = 360
-    ) -> Tuple[List[Any], List[float]]:
-        self.calls.append((start_sec, end_sec, sample_rate, target_height))
-        # 构造 0.0~2.0 的候选时间戳，模拟已写入 SHM 的帧集合
-        timestamps = [0.0, 0.5, 1.0, 1.5, 2.0]
-        frames = [object() for _ in timestamps]
-        return frames, timestamps
-
-
-class _FakeShmRegistry:
-    def get_shm_ref(self, frame_idx: int) -> str:
-        return f"shm://frame/{frame_idx}"
-
-
-def test_union_prefetch_calls_extract_once():
+def test_chunking_groups_requests_by_span():
     from MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator import VLMaterialGenerator
 
     generator = VLMaterialGenerator(
         {
             "enabled": True,
             "screenshot_optimization": {
-                # 降低阈值，方便测试触发 Union 预读
-                "prefetch_union_min_requests": 3,
                 "prefetch_union_max_span_seconds": 10.0,
-                "prefetch_sample_rate": 2,
-                "prefetch_target_height": 360,
+                "prefetch_chunk_max_requests": 1000,
             },
         }
     )
@@ -51,18 +28,42 @@ def test_union_prefetch_calls_extract_once():
         {"unit_id": "u3", "timestamp_sec": 1.7},
     ]
 
-    extractor = _FakeExtractor(fps=30.0)
-    shm_registry = _FakeShmRegistry()
-
-    task_params = generator._build_parallel_cv_task_params(
-        extractor=extractor,
-        shm_registry=shm_registry,
+    chunks = generator._build_screenshot_prefetch_chunks(
         screenshot_requests=requests,
         time_window=1.0,
+        max_span_seconds=10.0,
+        max_requests=1000,
     )
 
-    assert len(extractor.calls) == 1, "Union 预读应只调用一次 extract_frames_fast"
-    assert len(task_params) == 3
-    assert all(p.get("skip") is False for p in task_params)
-    assert all(p.get("shm_frames") for p in task_params), "每个请求应得到非空候选帧集合"
+    assert len(chunks) == 1
+    assert len(chunks[0]["windows"]) == 3
+    assert chunks[0]["union_start"] == 0.0  # min(ts-1.0) clamp to 0
+    assert abs(chunks[0]["union_end"] - 2.7) < 1e-6  # max(ts+1.0)
 
+
+def test_task_params_filter_ts_map():
+    from MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator import VLMaterialGenerator
+
+    generator = VLMaterialGenerator({"enabled": True, "screenshot_optimization": {}})
+
+    requests: List[Dict[str, Any]] = [
+        {"unit_id": "u1", "timestamp_sec": 0.2},
+        {"unit_id": "u2", "timestamp_sec": 0.9},
+    ]
+
+    chunks = generator._build_screenshot_prefetch_chunks(
+        screenshot_requests=requests,
+        time_window=1.0,
+        max_span_seconds=10.0,
+        max_requests=1000,
+    )
+    windows = chunks[0]["windows"]
+
+    # 模拟 Union 预读返回的候选时间戳集合
+    ts_to_shm_ref = {0.0: {"shm_name": "a", "shape": (1,), "dtype": "uint8"}, 1.0: {"shm_name": "b", "shape": (1,), "dtype": "uint8"}}
+
+    task_params = generator._build_task_params_from_ts_map(windows=windows, ts_to_shm_ref=ts_to_shm_ref, fps=30.0)
+
+    assert len(task_params) == 2
+    assert all(not p.get("skip") for p in task_params)
+    assert all(p.get("shm_frames") for p in task_params)

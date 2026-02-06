@@ -56,6 +56,14 @@ def init_cv_worker():
     
     if _initialized:
         return
+
+    # 配置子进程日志（尽早配置，避免初始化阶段日志丢失/格式不一致）
+    env_level = os.getenv("CV_WORKER_LOG_LEVEL", "").strip().upper()
+    level = getattr(logging, env_level, logging.INFO) if env_level else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s - CV_WORKER[%(process)d] - %(levelname)s - %(message)s",
+    )
     
     # 禁用嵌套并行，避免单进程内部抢占多核
     os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -78,12 +86,6 @@ def init_cv_worker():
         logger.info("✅ Nested parallelism disabled: cv2 threads=1")
     except Exception as e:
         logger.warning(f"⚠️ Failed to set cv2 threads=1: {e}")
-
-    # 配置子进程日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - CV_WORKER[%(process)d] - %(levelname)s - %(message)s'
-    )
     
     logger.info(f"🚀 CV Worker initialized with SharedMemory support (PID={os.getpid()})")
     _initialized = True
@@ -357,19 +359,35 @@ def run_screenshot_selection_task(
     fps: 视频帧率"""
     try:
         _check_memory_usage()
+
+        if _is_truthy_env("CV_WORKER_TASK_START_LOG", "0"):
+            logger.info(f"▶️ Task start: {unit_id}_island{island_index} (PID={os.getpid()})")
+        elif logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"▶️ Task start: {unit_id}_island{island_index} (PID={os.getpid()})")
         
         # 1. 从 SharedMemory 读取帧
         frames = []
         timestamps = []
         
+        shm_names_sample = []
         for ts, shm_ref in sorted(shm_frames.items()):
+            if len(shm_names_sample) < 3:
+                try:
+                    shm_name = shm_ref.get("shm_name")
+                    if shm_name:
+                        shm_names_sample.append(shm_name)
+                except Exception:
+                    pass
             frame = get_frame_from_shm(shm_ref)
             if frame is not None:
                 frames.append(frame)
                 timestamps.append(ts)
         
         if not frames:
-            logger.warning(f"No frames read from SharedMemory for {unit_id}_island{island_index}")
+            logger.warning(
+                f"No frames read from SharedMemory for {unit_id}_island{island_index} "
+                f"(PID={os.getpid()}, shm_sample={shm_names_sample})"
+            )
             return {
                 "unit_id": unit_id,
                 "island_index": island_index,
@@ -402,7 +420,7 @@ def run_screenshot_selection_task(
         )
         
         logger.info(
-            f"✅ Screenshot selected for {unit_id}_island{island_index}: "
+            f"✅ Screenshot selected for {unit_id}_island{island_index} (PID={os.getpid()}): "
             f"t={result['selected_timestamp']:.2f}s, score={result['quality_score']:.3f} "
             f"(islands={result['island_count']}, frames={result['analyzed_frames']})"
         )
@@ -441,6 +459,17 @@ def run_screenshot_selection_task(
             gc.collect()
         except Exception:
             pass
+
+
+def warmup_worker() -> int:
+    """
+    用于诊断 ProcessPool 是否真正分配任务到多个 Worker。
+
+    使用方式：主进程在开始并行截图选择前提交 N 个 warmup_worker 任务，收集返回的 PID 集合。
+    """
+    pid = os.getpid()
+    logger.info(f"🔥 Warmup worker task executed (PID={pid})")
+    return pid
 
 
 def run_coarse_fine_screenshot_task(

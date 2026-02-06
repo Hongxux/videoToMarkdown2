@@ -18,6 +18,9 @@ import json
 import logging
 import asyncio
 import subprocess
+import time
+import functools
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
@@ -47,12 +50,13 @@ class VLMaterialGenerator:
     4. 失败回退
     """
     
-    def __init__(self, config: Dict[str, Any] = None):
+    def __init__(self, config: Dict[str, Any] = None, *, cv_executor: Any = None):
         """
         初始化生成器
         
         Args:
             config: VL 素材生成配置（来自 module2_config.yaml）
+            cv_executor: 可选的外部 Executor（通常为 python_grpc_server 的全局 CV ProcessPool），用于复用进程池与 initializer。
         """
         if config is None:
             from .config_loader import load_module2_config
@@ -63,6 +67,9 @@ class VLMaterialGenerator:
         self.enabled = config.get("enabled", False)
         self.screenshot_config = config.get("screenshot_optimization", {})
         self.fallback_config = config.get("fallback", {})
+
+        # 可选复用 gRPC 侧的 ProcessPool（避免额外 spawn 多套进程池）
+        self._cv_executor = cv_executor
         
         # 延迟初始化分析器（避免不使用时加载）
         self._analyzer = None
@@ -195,102 +202,109 @@ class VLMaterialGenerator:
         cache_path = self._get_cache_path(video_path, output_dir)
         use_cache = self.config.get("use_cache", True)
         
+        # VL分析结果(来自缓存或新分析)
+        all_screenshot_requests = []
+        all_clip_requests = []
+        
         if use_cache:
             cached_data = self._load_vl_results(cache_path)
             if cached_data:
                 logger.info("🚀 使用缓存的VL分析结果,跳过VL API调用")
-                result.screenshot_requests = cached_data.get("aggregated_screenshots", [])
-                result.clip_requests = cached_data.get("aggregated_clips", [])
-                result.success = True
-                return result
+                all_screenshot_requests = cached_data.get("aggregated_screenshots", [])
+                all_clip_requests = cached_data.get("aggregated_clips", [])
+                # ⚠️  不直接返回!继续执行CV优化
+                logger.info(f"从缓存加载: screenshots={len(all_screenshot_requests)}, clips={len(all_clip_requests)}")
         
-        try:
-            # 1. 切割视频为语义单元片段
-            logger.info(f"开始切割视频: {video_path}")
-            clips_dir = await self._split_video_by_semantic_units(
-                video_path, 
-                semantic_units,
-                output_dir
-            )
-            
-            if not clips_dir or not Path(clips_dir).exists():
-                raise RuntimeError("视频切割失败或输出目录不存在")
-            
-            # 2. 🚀 并行 VL 分析 (使用 asyncio.gather)
-            logger.info(f"开始并行 VL 分析 {len(semantic_units)} 个语义单元...")
-            
-            # 构建分析任务列表
-            analysis_tasks = []
-            task_metadata = []  # 保存任务元数据以便后续匹配
-            
-            for su in semantic_units:
-                unit_id = su.get("unit_id", "")
-                start_sec = float(su.get("start_sec", 0))
-                end_sec = float(su.get("end_sec", 0))
-                
-                # 查找对应的视频片段
-                clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec)
-                
-                if not clip_path:
-                    logger.warning(f"未找到语义单元 {unit_id} 的视频片段，跳过")
-                    continue
-                
-                # 创建异步分析任务
-                task = self.analyzer.analyze_clip(
-                    clip_path=clip_path,
-                    semantic_unit_start_sec=start_sec,
-                    semantic_unit_id=unit_id
+        # 如果没有缓存,执行完整的VL分析流程
+        if not all_screenshot_requests and not all_clip_requests:
+            try:
+                # 1. 切割视频为语义单元片段
+                logger.info(f"开始切割视频: {video_path}")
+                clips_dir = await self._split_video_by_semantic_units(
+                    video_path, 
+                    semantic_units,
+                    output_dir
                 )
-                analysis_tasks.append(task)
-                task_metadata.append({
-                    "unit_id": unit_id,
-                    "start_sec": start_sec,
-                    "end_sec": end_sec,
-                    "clip_path": clip_path
-                })
-            
-            # 并发执行所有 VL 分析任务
-            if analysis_tasks:
+                
+                if not clips_dir or not Path(clips_dir).exists():
+                    raise RuntimeError("视频切割失败或输出目录不存在")
+                
+                # 2. 🚀 并行 VL 分析 (使用 asyncio.gather)
+                logger.info(f"开始并行 VL 分析 {len(semantic_units)} 个语义单元...")
+                
+                # 构建分析任务列表
+                analysis_tasks = []
+                task_metadata = []  # 保存任务元数据以便后续匹配
+                
+                for su in semantic_units:
+                    unit_id = su.get("unit_id", "")
+                    start_sec = float(su.get("start_sec", 0))
+                    end_sec = float(su.get("end_sec", 0))
+                    
+                    # 查找对应的视频片段
+                    clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec)
+                    
+                    if not clip_path:
+                        logger.warning(f"未找到语义单元 {unit_id} 的视频片段，跳过")
+                        continue
+                    
+                    # 创建异步分析任务
+                    task = self.analyzer.analyze_clip(
+                        clip_path=clip_path,
+                        semantic_unit_start_sec=start_sec,
+                        semantic_unit_id=unit_id
+                    )
+                    analysis_tasks.append(task)
+                    task_metadata.append({
+                        "unit_id": unit_id,
+                        "start_sec": start_sec,
+                        "end_sec": end_sec,
+                        "clip_path": clip_path
+                    })
+                
+                # 🚀 并行执行所有 VL 分析任务
                 logger.info(f"🚀 启动 {len(analysis_tasks)} 个并行 VL 分析任务...")
                 analysis_results = await asyncio.gather(*analysis_tasks, return_exceptions=True)
-                logger.info(f"✅ 并行 VL 分析完成，共 {len(analysis_results)} 个结果")
-            else:
-                analysis_results = []
-            
-            # 收集所有成功的分析结果
-            all_screenshot_requests = []
-            all_clip_requests = []
-            
-            for idx, analysis_result in enumerate(analysis_results):
-                meta = task_metadata[idx] if idx < len(task_metadata) else {}
-                unit_id = meta.get("unit_id", f"task_{idx}")
+                logger.info(f"✅ 并行 VL 分析完成,共 {len(analysis_results)} 个结果")
                 
-                # 处理异常情况
-                if isinstance(analysis_result, Exception):
-                    logger.warning(f"语义单元 {unit_id} VL 分析异常: {analysis_result}")
-                    continue
+                # 收集所有成功的分析结果
+                for idx, analysis_result in enumerate(analysis_results):
+                    meta = task_metadata[idx] if idx < len(task_metadata) else {}
+                    unit_id = meta.get("unit_id", f"task_{idx}")
+                    
+                    # 处理异常情况
+                    if isinstance(analysis_result, Exception):
+                        logger.warning(f"语义单元 {unit_id} VL 分析异常: {analysis_result}")
+                        continue
+                    
+                    if not analysis_result.success:
+                        logger.warning(f"语义单元 {unit_id} VL 分析失败: {analysis_result.error_msg}")
+                        continue
+                    
+                    # 收集结果 (暂不优化截图时间点，后续批量处理)
+                    all_clip_requests.extend(analysis_result.clip_requests)
+                    all_screenshot_requests.extend(analysis_result.screenshot_requests)
                 
-                if not analysis_result.success:
-                    logger.warning(f"语义单元 {unit_id} VL 分析失败: {analysis_result.error_msg}")
-                    continue
+                logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
                 
-                # 收集结果 (暂不优化截图时间点，后续批量处理)
-                all_clip_requests.extend(analysis_result.clip_requests)
-                all_screenshot_requests.extend(analysis_result.screenshot_requests)
-            
-            logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
-            
-            # 保存VL分析原始结果(CV优化前)
-            if self.config.get("save_cache", True):
-                self._save_vl_results(
-                    cache_path=cache_path,
-                    analysis_results=analysis_results,
-                    task_metadata=task_metadata,
-                    screenshot_requests=all_screenshot_requests,
-                    clip_requests=all_clip_requests
-                )
-            
-            # 3. 🚀 批量 CV 优化截图时间点
+                # 保存VL分析原始结果(CV优化前)
+                if self.config.get("save_cache", True):
+                    self._save_vl_results(
+                        cache_path=cache_path,
+                        analysis_results=analysis_results,
+                        task_metadata=task_metadata,
+                        screenshot_requests=all_screenshot_requests,
+                        clip_requests=all_clip_requests
+                    )
+                
+            except Exception as e:
+                logger.error(f"VL 分析失败: {e}")
+                result.success = False
+                result.error_msg = str(e)
+                return result
+        
+        # 3. 🚀 批量 CV 优化截图时间点 (无论是否使用缓存,都要执行!)
+        try:
             if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
                 logger.info(f"开始批量 CV 优化 {len(all_screenshot_requests)} 个截图请求...")
                 optimized_screenshots = await self._optimize_screenshots_parallel(
@@ -302,6 +316,7 @@ class VLMaterialGenerator:
             # 汇总最终结果
             result.clip_requests = all_clip_requests
             result.screenshot_requests = all_screenshot_requests
+            result.success = True
             
             logger.info(
                 f"VL 素材生成完成: clips={len(result.clip_requests)}, "
@@ -609,9 +624,10 @@ class VLMaterialGenerator:
         time_window = self.screenshot_config.get("time_window_seconds", 1.0)
         
         try:
-            from concurrent.futures import ProcessPoolExecutor, as_completed
-            from .visual_feature_extractor import VisualFeatureExtractor, get_shared_frame_registry
+            from concurrent.futures import ProcessPoolExecutor
+            from .visual_feature_extractor import VisualFeatureExtractor, SharedFrameRegistry
             import sys
+            import gc
             
             # 尝试导入 cv_worker (位于项目根目录)
             project_root = Path(__file__).resolve().parent.parent.parent
@@ -619,87 +635,130 @@ class VLMaterialGenerator:
                 sys.path.insert(0, str(project_root))
             
             from cv_worker import run_screenshot_selection_task, init_cv_worker
-            
-            logger.info(f"🚀 初始化并行 CV 优化: {len(screenshot_requests)} 个请求")
-             
-            # 初始化帧提取器
+
+            logger.info(f"🚀 [Batch Mode] 初始化并行 CV 优化: {len(screenshot_requests)} 个请求")
+
+            # 初始化帧提取器（主进程负责预读与写入 SHM）
             extractor = VisualFeatureExtractor(video_path)
-            shm_registry = get_shared_frame_registry()
-            
-            # 准备任务参数（注意：此阶段是“主进程预读并写入共享内存”，会先串行跑完再启动进程池）
-            task_params = self._build_parallel_cv_task_params(
-                extractor=extractor,
-                shm_registry=shm_registry,
+
+            # 配置参数
+            max_workers = self._resolve_max_workers(request_count=len(screenshot_requests))
+            max_inflight_multiplier = int(self.screenshot_config.get("max_inflight_multiplier", 2))
+            max_inflight = max(1, max_workers * max_inflight_multiplier)
+            sample_rate = int(self.screenshot_config.get("prefetch_sample_rate", 2))
+            target_height = int(self.screenshot_config.get("prefetch_target_height", 360))
+            chunk_max_span_sec = float(self.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
+            chunk_max_requests = int(self.screenshot_config.get("prefetch_chunk_max_requests", 1000))
+
+            chunks = self._build_screenshot_prefetch_chunks(
                 screenshot_requests=screenshot_requests,
                 time_window=time_window,
+                max_span_seconds=chunk_max_span_sec,
+                max_requests=chunk_max_requests,
             )
-            
-            # 使用进程池并行执行 CV 分析 (CPU核心数自适应)
-            import os
-            max_workers_config = self.screenshot_config.get("max_workers", "auto")
-            if max_workers_config == "auto":
-                # 自动: 使用CPU核心数
-                max_workers = min(os.cpu_count() or 4, len([p for p in task_params if not p.get("skip")]))
-            else:
-                # 手动指定
-                max_workers = min(int(max_workers_config), len([p for p in task_params if not p.get("skip")]))
-            
-            if max_workers == 0:
-                logger.warning("所有预读任务失败，跳过 CV 优化")
-                return screenshot_requests
-            
-            logger.info(f"🚀 启动 {max_workers} 个 CV Worker 进程...")
-            
-            optimized = []
-            futures_map = {}
-            
-            loop = asyncio.get_event_loop()
-            
-            with ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker) as executor:
-                for param in task_params:
-                    if param.get("skip"):
-                        optimized.append(param["req"])
-                        continue
-                    
-                    future = loop.run_in_executor(
-                        executor,
-                        run_screenshot_selection_task,
-                        video_path,
-                        param["unit_id"],
-                        param["island_index"],
-                        param["expanded_start"],
-                        param["expanded_end"],
-                        param["shm_frames"],
-                        param["fps"]
+
+            logger.info(
+                f"📦 [Batch Mode] Config: workers={max_workers}, inflight={max_inflight}, "
+                f"chunks={len(chunks)}, max_span={chunk_max_span_sec:.2f}s, max_req/chunk={chunk_max_requests}"
+            )
+
+            executor = self._cv_executor
+            created_executor = False
+            if executor is None:
+                executor = ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker)
+                created_executor = True
+
+            try:
+                loop = asyncio.get_running_loop()
+
+                # 可选 Warmup：诊断是否真的分发到多个 Worker
+                await self._maybe_warmup_pool(loop=loop, executor=executor, worker_count=max_workers)
+
+                submitted_tasks = 0
+                completed_tasks = 0
+
+                for chunk_id, chunk in enumerate(chunks):
+                    chunk_t0 = time.perf_counter()
+
+                    registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
+                        self._prefetch_union_frames_to_registry_sync,
+                        extractor,
+                        SharedFrameRegistry,
+                        chunk["union_start"],
+                        chunk["union_end"],
+                        sample_rate,
+                        target_height,
                     )
-                    futures_map[future] = param["req"]
-                
-                # 等待所有任务完成
-                if futures_map:
-                    results = await asyncio.gather(*futures_map.keys(), return_exceptions=True)
-                    
-                    for future, result in zip(futures_map.keys(), results):
-                        req = futures_map[future]
-                        original_ts = req.get("timestamp_sec", 0)
-                        
-                        if isinstance(result, Exception):
-                            logger.warning(f"CV Worker 异常: {result}")
-                            optimized.append(req)
-                        elif result and "selected_timestamp" in result:
-                            req["timestamp_sec"] = result["selected_timestamp"]
-                            req["_optimized"] = True
-                            req["_original_timestamp"] = original_ts
-                            req["_cv_quality_score"] = result.get("quality_score", 0)
-                            optimized.append(req)
-                            logger.debug(
-                                f"CV 优化: {original_ts:.2f}s -> {result['selected_timestamp']:.2f}s "
-                                f"(score={result.get('quality_score', 0):.3f})"
+
+                    try:
+                        if not ts_to_shm_ref:
+                            logger.warning(
+                                f"⚠️ [Batch Mode] Chunk {chunk_id + 1}/{len(chunks)} 预读失败，跳过该 chunk 的 CV 优化"
                             )
-                        else:
-                            optimized.append(req)
-            
-            logger.info(f"✅ 并行 CV 优化完成: {len(optimized)} 个请求")
-            return optimized
+                            continue
+
+                        task_params = self._build_task_params_from_ts_map(
+                            windows=chunk["windows"],
+                            ts_to_shm_ref=ts_to_shm_ref,
+                            fps=extractor.fps,
+                        )
+
+                        # 提交该 chunk 的所有任务并等待（chunk 级 barrier）
+                        futures = []
+                        meta = []
+                        for p in task_params:
+                            if p.get("skip"):
+                                continue
+                            req = p["req"]
+                            original_ts = req.get("timestamp_sec", 0)
+                            future = loop.run_in_executor(
+                                executor,
+                                functools.partial(
+                                    run_screenshot_selection_task,
+                                    video_path=video_path,
+                                    unit_id=p["unit_id"],
+                                    island_index=p["island_index"],
+                                    expanded_start=p["expanded_start"],
+                                    expanded_end=p["expanded_end"],
+                                    shm_frames=p["shm_frames"],
+                                    fps=p["fps"],
+                                ),
+                            )
+                            futures.append(future)
+                            meta.append((req, original_ts, p["unit_id"]))
+
+                        submitted_tasks += len(futures)
+
+                        if futures:
+                            results = await asyncio.gather(*futures, return_exceptions=True)
+                            for (req, original_ts, unit_id), r in zip(meta, results):
+                                completed_tasks += 1
+                                self._apply_selection_result(req=req, original_ts=original_ts, unit_id=unit_id, result=r)
+
+                        gc.collect()
+
+                        chunk_total_ms = (time.perf_counter() - chunk_t0) * 1000.0
+                        logger.info(
+                            f"✅ [Batch Mode] Chunk {chunk_id + 1}/{len(chunks)} done: "
+                            f"reqs={len(chunk['windows'])}, span={chunk['union_end'] - chunk['union_start']:.2f}s, "
+                            f"prefetch={prefetch_ms:.1f}ms, register={register_ms:.1f}ms, "
+                            f"submitted={len(futures)}, total={chunk_total_ms:.1f}ms"
+                        )
+                    finally:
+                        # cleanup chunk SHM：确保异常情况下也不会泄漏
+                        if registry is not None:
+                            try:
+                                registry.cleanup()
+                            except Exception as e:
+                                logger.debug(f"[Batch Mode] Chunk registry cleanup failed: {e}")
+
+                logger.info(
+                    f"✅ [Batch Mode] Completed: submitted_tasks={submitted_tasks}, completed_tasks={completed_tasks}"
+                )
+                return screenshot_requests
+            finally:
+                if created_executor:
+                    executor.shutdown(wait=True)
             
         except ImportError as e:
             error_msg = f"❌ cv_worker 导入失败: {e} (sys.path={sys.path[:3]}...)"
@@ -721,139 +780,247 @@ class VLMaterialGenerator:
             traceback.print_exc()
             return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
     
-    def _build_parallel_cv_task_params(
+    def _is_truthy_env(self, name: str, default: str = "0") -> bool:
+        value = os.getenv(name, default).strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
+
+    def _resolve_max_workers(self, request_count: int) -> int:
+        """
+        解析 max_workers 配置。
+
+        优先级：
+        1) 若注入了外部 executor，优先以其 max_workers 为准（保证日志/背压与实际一致）。
+        2) 否则读取配置 `screenshot_optimization.max_workers`：'auto' 或整数。
+
+        设计原则：Windows spawn 成本高，默认做安全上限保护（cap=6）。
+        """
+        # 1) injected executor 优先
+        if self._cv_executor is not None:
+            injected_workers = getattr(self._cv_executor, "_max_workers", None)
+            if isinstance(injected_workers, int) and injected_workers > 0:
+                return max(1, min(injected_workers, request_count))
+
+        # 2) config fallback
+        max_workers_config = self.screenshot_config.get("max_workers", "auto")
+        hard_cap = 6
+
+        if isinstance(max_workers_config, int):
+            desired = max_workers_config
+        else:
+            config_str = str(max_workers_config).strip().lower()
+            if config_str == "auto":
+                desired = max(1, (os.cpu_count() or 2) - 1)
+            else:
+                desired = int(config_str)
+
+        return max(1, min(desired, hard_cap, request_count))
+
+    def _build_screenshot_prefetch_chunks(
         self,
         *,
-        extractor: Any,
-        shm_registry: Any,
         screenshot_requests: List[Dict[str, Any]],
         time_window: float,
+        max_span_seconds: float,
+        max_requests: int,
     ) -> List[Dict[str, Any]]:
         """
-        构建并行 CV 优化的任务参数。
+        将截图请求按时间聚类为多个 chunk。
 
-        为什么要拆出来：
-        - 用户常见误解：“已经初始化 ProcessPool 了，为什么还没多进程？”
-          实际上进程池启动在后面；本方法负责的“预读帧 -> 写入 SHM”必须在主进程先完成，
-          才能让 worker 零拷贝读取并计算。
-        - 同时这里是性能瓶颈（尤其短片段 duration<5s 时，extract_frames_fast 会走 OpenCV 随机访问）。
+        目的：
+        - 每个 chunk 用一次 Union 预读覆盖区间，避免对短视频反复 seek/read；
+        - 同时把单次 Union 区间限制在 max_span_seconds 内，防止一次预读过大；
+        - 为 double-buffer overlap 预留“chunk 级 SHM 生命周期”边界，避免跨 chunk 淘汰 unlink。
 
-        关键优化：当截图请求很多且窗口重叠明显时，优先做“Union 预读”（一次性预读覆盖范围），
-        避免对短视频反复 seek/read 导致看起来“卡在没开多进程”。
-
-        返回结构：每个元素为 dict，包含 req/skip/unit_id/island_index/expanded_start/expanded_end/shm_frames/fps。
+        返回：chunk 列表，每个 chunk 包含：union_start/union_end/windows。
+        windows 内结构用于构建 worker 任务参数。
         """
         if not screenshot_requests:
             return []
 
-        # Union 预读的启发式参数：默认偏保守，只在“请求多 + 覆盖范围不大”时启用。
-        union_min_requests = int(self.screenshot_config.get("prefetch_union_min_requests", 20))
-        union_max_span_sec = float(self.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
-        sample_rate = int(self.screenshot_config.get("prefetch_sample_rate", 2))
-        target_height = int(self.screenshot_config.get("prefetch_target_height", 360))
-
-        task_params: List[Dict[str, Any]] = []
-
-        # 先计算每个请求的窗口，后续复用（避免重复计算 + 便于 union 策略决策）
-        windows: List[Tuple[float, float, str, Dict[str, Any]]] = []
+        windows = []
         for idx, req in enumerate(screenshot_requests):
-            original_ts = float(req.get("timestamp_sec", 0) or 0)
-            unit_id = req.get("unit_id", f"req_{idx}")
+            original_ts = float(req.get("timestamp_sec", 0) or 0.0)
             search_start = max(0.0, original_ts - time_window)
             search_end = original_ts + time_window
-            windows.append((search_start, search_end, unit_id, req))
-
-        union_start = min(w[0] for w in windows)
-        union_end = max(w[1] for w in windows)
-        union_span = max(0.0, union_end - union_start)
-
-        use_union_prefetch = (len(screenshot_requests) >= union_min_requests) and (union_span <= union_max_span_sec)
-
-        if use_union_prefetch:
-            logger.info(
-                f"🧠 [Prefetch] 使用 Union 预读：reqs={len(screenshot_requests)}, "
-                f"span={union_span:.2f}s (阈值={union_max_span_sec:.2f}s)"
+            unit_id = (
+                req.get("semantic_unit_id")
+                or req.get("unit_id")
+                or req.get("screenshot_id")
+                or f"req_{idx}"
             )
-            frames, timestamps = extractor.extract_frames_fast(
-                start_sec=union_start,
-                end_sec=union_end,
-                sample_rate=sample_rate,
-                target_height=target_height,
+            windows.append(
+                {
+                    "req": req,
+                    "order_idx": idx,
+                    "unit_id": unit_id,
+                    "island_index": idx,
+                    "original_ts": original_ts,
+                    "expanded_start": search_start,
+                    "expanded_end": search_end,
+                }
             )
-            if not frames:
-                logger.warning(f"Union 预读帧失败: ({union_start:.2f}s-{union_end:.2f}s)，回退到逐请求预读")
-                use_union_prefetch = False
-            else:
-                # 预先把时间戳转换为 shm_ref，后续按窗口筛选即可
-                ts_to_shm_ref: Dict[float, Any] = {}
-                for ts in timestamps:
-                    frame_idx = int(ts * extractor.fps)
-                    shm_ref = shm_registry.get_shm_ref(frame_idx)
-                    if shm_ref:
-                        ts_to_shm_ref[ts] = shm_ref
 
-                for idx, (search_start, search_end, unit_id, req) in enumerate(windows):
-                    shm_frames = {
-                        ts: shm_ref
-                        for ts, shm_ref in ts_to_shm_ref.items()
-                        if (search_start <= ts <= search_end)
-                    }
-                    if not shm_frames:
-                        logger.warning(f"Union 预读未覆盖到候选帧: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
-                        task_params.append({"req": req, "skip": True})
-                        continue
+        windows.sort(key=lambda w: w["original_ts"])
 
-                    task_params.append(
-                        {
-                            "req": req,
-                            "skip": False,
-                            "unit_id": unit_id,
-                            "island_index": idx,
-                            "expanded_start": search_start,
-                            "expanded_end": search_end,
-                            "shm_frames": shm_frames,
-                            "fps": extractor.fps,
-                        }
-                    )
+        chunks: List[Dict[str, Any]] = []
+        current: List[Dict[str, Any]] = []
+        union_start: Optional[float] = None
+        union_end: Optional[float] = None
 
-        if not use_union_prefetch:
-            logger.info(
-                f"🧠 [Prefetch] 使用逐请求预读：reqs={len(screenshot_requests)}, "
-                f"union_span={union_span:.2f}s"
+        def flush():
+            nonlocal current, union_start, union_end
+            if not current:
+                return
+            chunks.append(
+                {
+                    "union_start": float(union_start or 0.0),
+                    "union_end": float(union_end or 0.0),
+                    "windows": current,
+                }
             )
-            for idx, (search_start, search_end, unit_id, req) in enumerate(windows):
-                frames, timestamps = extractor.extract_frames_fast(
-                    start_sec=search_start,
-                    end_sec=search_end,
-                    sample_rate=sample_rate,
-                    target_height=target_height,
-                )
-                if not frames:
-                    logger.warning(f"预读帧失败: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
-                    task_params.append({"req": req, "skip": True})
-                    continue
+            current = []
+            union_start = None
+            union_end = None
 
-                shm_frames: Dict[float, Any] = {}
-                for ts in timestamps:
-                    frame_idx = int(ts * extractor.fps)
-                    shm_ref = shm_registry.get_shm_ref(frame_idx)
-                    if shm_ref:
-                        shm_frames[ts] = shm_ref
+        for w in windows:
+            if not current:
+                current = [w]
+                union_start = w["expanded_start"]
+                union_end = w["expanded_end"]
+                continue
 
-                task_params.append(
-                    {
-                        "req": req,
-                        "skip": False,
-                        "unit_id": unit_id,
-                        "island_index": idx,
-                        "expanded_start": search_start,
-                        "expanded_end": search_end,
-                        "shm_frames": shm_frames,
-                        "fps": extractor.fps,
-                    }
-                )
+            candidate_start = min(union_start, w["expanded_start"])  # type: ignore[arg-type]
+            candidate_end = max(union_end, w["expanded_end"])  # type: ignore[arg-type]
+            candidate_span = candidate_end - candidate_start
 
+            if (len(current) >= max_requests) or (candidate_span > max_span_seconds):
+                flush()
+                current = [w]
+                union_start = w["expanded_start"]
+                union_end = w["expanded_end"]
+                continue
+
+            current.append(w)
+            union_start = candidate_start
+            union_end = candidate_end
+
+        flush()
+        return chunks
+
+    def _prefetch_union_frames_to_registry_sync(
+        self,
+        extractor: Any,
+        registry_cls: Any,
+        union_start: float,
+        union_end: float,
+        sample_rate: int,
+        target_height: int,
+    ) -> Tuple[Any, Dict[float, Any], float, float]:
+        """
+        同步预读 + 写入 chunk 专属 SharedMemory Registry。
+
+        注意：此函数会被 asyncio.to_thread 调用，以实现主线程可 drain 已完成的 worker 结果，
+        形成 IO/Compute 重叠。
+        """
+        t0 = time.perf_counter()
+        frames, timestamps = extractor.extract_frames_fast(
+            start_sec=union_start,
+            end_sec=union_end,
+            sample_rate=sample_rate,
+            target_height=target_height,
+            register_to_shm=False,
+        )
+        prefetch_ms = (time.perf_counter() - t0) * 1000.0
+
+        if not frames or not timestamps:
+            return None, {}, prefetch_ms, 0.0
+
+        # 该 chunk 内不允许淘汰：max_frames 至少覆盖本次预读的帧数
+        max_frames = max(10, len(frames) + 10)
+        registry = registry_cls(max_frames=max_frames)
+
+        t1 = time.perf_counter()
+        ts_to_shm_ref: Dict[float, Any] = {}
+        for frame, ts in zip(frames, timestamps):
+            frame_idx = int(float(ts) * extractor.fps)
+            registry.register_frame(frame_idx, frame)
+            shm_ref = registry.get_shm_ref(frame_idx)
+            if shm_ref:
+                ts_to_shm_ref[float(ts)] = shm_ref
+        register_ms = (time.perf_counter() - t1) * 1000.0
+
+        try:
+            frames.clear()
+        except Exception:
+            pass
+
+        return registry, ts_to_shm_ref, prefetch_ms, register_ms
+
+    def _build_task_params_from_ts_map(
+        self,
+        *,
+        windows: List[Dict[str, Any]],
+        ts_to_shm_ref: Dict[float, Any],
+        fps: float,
+    ) -> List[Dict[str, Any]]:
+        task_params: List[Dict[str, Any]] = []
+        for w in windows:
+            search_start = float(w["expanded_start"])
+            search_end = float(w["expanded_end"])
+            shm_frames = {ts: ref for ts, ref in ts_to_shm_ref.items() if (search_start <= ts <= search_end)}
+            if not shm_frames:
+                task_params.append({"req": w["req"], "skip": True})
+                continue
+            task_params.append(
+                {
+                    "req": w["req"],
+                    "skip": False,
+                    "unit_id": w["unit_id"],
+                    "island_index": w["island_index"],
+                    "expanded_start": search_start,
+                    "expanded_end": search_end,
+                    "shm_frames": shm_frames,
+                    "fps": fps,
+                }
+            )
         return task_params
+
+    async def _maybe_warmup_pool(self, *, loop: asyncio.AbstractEventLoop, executor: Any, worker_count: int) -> None:
+        if not self._is_truthy_env("CV_POOL_WARMUP", "0"):
+            return
+
+        warmup_n = int(os.getenv("CV_POOL_WARMUP_N", str(worker_count)))
+        warmup_n = max(1, min(warmup_n, max(1, worker_count * 2)))
+        try:
+            from cv_worker import warmup_worker
+        except Exception as e:
+            logger.warning(f"Warmup skipped: cannot import warmup_worker: {e}")
+            return
+
+        futures = [loop.run_in_executor(executor, warmup_worker) for _ in range(warmup_n)]
+        results = await asyncio.gather(*futures, return_exceptions=True)
+        pids = sorted({r for r in results if isinstance(r, int)})
+        logger.info(f"🔥 [Warmup] tasks={warmup_n}, unique_pids={pids}")
+
+    def _apply_selection_result(self, *, req: Dict[str, Any], original_ts: float, unit_id: str, result: Any) -> None:
+        """
+        将 worker 返回结果写回到 request（原地更新）。
+
+        约束：不改变 screenshot_requests 的顺序；仅更新 timestamp_sec 与诊断字段。
+        """
+        if isinstance(result, Exception):
+            logger.warning(f"CV Worker 异常: {unit_id}: {result}")
+            return
+
+        if isinstance(result, dict) and "selected_timestamp" in result:
+            req["timestamp_sec"] = result["selected_timestamp"]
+            req["_optimized"] = True
+            req["_original_timestamp"] = original_ts
+            req["_cv_quality_score"] = result.get("quality_score", 0)
+            logger.debug(
+                f"CV 优化: {unit_id}: {original_ts:.2f}s → {result['selected_timestamp']:.2f}s "
+                f"(score={result.get('quality_score', 0):.3f})"
+            )
     
     async def _optimize_screenshots_streaming_pipeline(
         self,
@@ -890,8 +1057,9 @@ class VLMaterialGenerator:
         
         try:
             from concurrent.futures import ProcessPoolExecutor
-            from .visual_feature_extractor import VisualFeatureExtractor, get_shared_frame_registry
+            from .visual_feature_extractor import VisualFeatureExtractor, SharedFrameRegistry
             import sys
+            import gc
             
             # 导入 cv_worker
             project_root = Path(__file__).resolve().parent.parent.parent
@@ -904,127 +1072,224 @@ class VLMaterialGenerator:
             
             # 初始化帧提取器
             extractor = VisualFeatureExtractor(video_path)
-            shm_registry = get_shared_frame_registry()
-            
-            # 配置参数 (CPU核心数自适应)
-            import os
-            max_workers_config = self.screenshot_config.get("max_workers", "auto")
-            if max_workers_config == "auto":
-                # 自动: 使用CPU核心数
-                max_workers = min(os.cpu_count() or 4, len(screenshot_requests))
-            else:
-                # 手动指定
-                max_workers = min(int(max_workers_config), len(screenshot_requests))
-            
+
+            # 配置参数
+            max_workers = self._resolve_max_workers(request_count=len(screenshot_requests))
             max_inflight_multiplier = int(self.screenshot_config.get("max_inflight_multiplier", 2))
-            max_inflight = max_workers * max_inflight_multiplier
+            max_inflight = max(1, max_workers * max_inflight_multiplier)
+            overlap_buffers = int(self.screenshot_config.get("streaming_overlap_buffers", 2))
+            overlap_buffers = max(1, overlap_buffers)
+
             sample_rate = int(self.screenshot_config.get("prefetch_sample_rate", 2))
             target_height = int(self.screenshot_config.get("prefetch_target_height", 360))
-            
-            logger.info(f"   - Worker 数: {max_workers}")
-            logger.info(f"   - Max in-flight: {max_inflight}")
-            
-            # 流水线状态
-            pending_futures: set = set()
-            futures_map: Dict[asyncio.Future, Dict] = {}
-            completed_results: List[Dict] = []
-            
-            loop = asyncio.get_event_loop()
-            
-            with ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker) as executor:
-                # 流水线主循环: 边预读边提交
-                for idx, req in enumerate(screenshot_requests):
-                    original_ts = float(req.get("timestamp_sec", 0) or 0)
-                    unit_id = req.get("unit_id", f"req_{idx}")
-                    
-                    # 步骤1: 预读帧 (主进程 IO)
-                    search_start = max(0.0, original_ts - time_window)
-                    search_end = original_ts + time_window
-                    
-                    try:
-                        frames, timestamps = extractor.extract_frames_fast(
-                            start_sec=search_start,
-                            end_sec=search_end,
-                            sample_rate=sample_rate,
-                            target_height=target_height
-                        )
-                        
-                        if not frames:
-                            logger.warning(f"预读帧失败: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
-                            completed_results.append(req)
-                            continue
-                        
-                        # 写入 SharedMemory
-                        shm_frames: Dict[float, Any] = {}
-                        for ts in timestamps:
-                            frame_idx = int(ts * extractor.fps)
-                            shm_ref = shm_registry.get_shm_ref(frame_idx)
-                            if shm_ref:
-                                shm_frames[ts] = shm_ref
-                        
-                        if not shm_frames:
-                            logger.warning(f"未获取到有效帧: {unit_id}")
-                            completed_results.append(req)
-                            continue
-                        
-                    except Exception as e:
-                        logger.warning(f"预读异常: {unit_id}: {e}")
-                        completed_results.append(req)
-                        continue
-                    
-                    # 步骤2: 立即提交任务 (不等待其他请求)
-                    try:
-                        future = loop.run_in_executor(
-                            executor,
-                            run_screenshot_selection_task,
-                            video_path,
-                            unit_id,
-                            idx,
-                            search_start,
-                            search_end,
-                            shm_frames,
-                            extractor.fps
-                        )
-                        pending_futures.add(future)
-                        futures_map[future] = {
-                            "req": req,
-                            "unit_id": unit_id,
-                            "original_ts": original_ts
-                        }
-                    except Exception as e:
-                        logger.warning(f"任务提交失败: {unit_id}: {e}")
-                        completed_results.append(req)
-                        continue
-                    
-                    # 步骤3: 背压节流 (pending 达到上限时 drain)
-                    if len(pending_futures) >= max_inflight:
-                        logger.debug(f"⚠️  [Backpressure] Draining: {len(pending_futures)} >= {max_inflight}")
-                        await self._drain_completed_until_below_threshold(
-                            pending_futures,
-                            futures_map,
-                            completed_results,
-                            threshold=max_inflight - 1
-                        )
-                    
-                    # 步骤4: 可观测性日志 (每10个请求)
-                    if (idx + 1) % 10 == 0 or (idx + 1) == len(screenshot_requests):
-                        logger.info(
-                            f"📊 [Streaming] 进度: {idx + 1}/{len(screenshot_requests)}, "
-                            f"in-flight: {len(pending_futures)}, "
-                            f"completed: {len(completed_results)}"
-                        )
-                
-                # 步骤5: 最终 drain (确保所有任务完成)
-                logger.info(f"🔄 [Streaming] 最终 drain: {len(pending_futures)} 个待完成任务")
-                await self._drain_all_pending(pending_futures, futures_map, completed_results)
-            
-            optimized_count = sum(1 for r in completed_results if r.get("_optimized", False))
-            logger.info(
-                f"✅ [Streaming] 流式处理完成: {len(completed_results)} 个结果, "
-                f"优化率: {optimized_count}/{len(completed_results)}"
+            chunk_max_span_sec = float(self.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
+            chunk_max_requests = int(self.screenshot_config.get("prefetch_chunk_max_requests", 1000))
+
+            chunks = self._build_screenshot_prefetch_chunks(
+                screenshot_requests=screenshot_requests,
+                time_window=time_window,
+                max_span_seconds=chunk_max_span_sec,
+                max_requests=chunk_max_requests,
             )
-            
-            return completed_results
+
+            logger.info(
+                f"📦 [Streaming Pipeline] Config: workers={max_workers}, inflight={max_inflight}, "
+                f"overlap_buffers={overlap_buffers}, chunks={len(chunks)}, "
+                f"max_span={chunk_max_span_sec:.2f}s, max_req/chunk={chunk_max_requests}"
+            )
+
+            executor = self._cv_executor
+            created_executor = False
+            if executor is None:
+                executor = ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker)
+                created_executor = True
+
+            try:
+                loop = asyncio.get_running_loop()
+
+                # 可选 Warmup：诊断是否真的分发到多个 Worker
+                await self._maybe_warmup_pool(loop=loop, executor=executor, worker_count=max_workers)
+
+                pending: set = set()
+                futures_meta: Dict[asyncio.Future, Dict[str, Any]] = {}
+                active_chunks: deque = deque()  # list[dict]
+
+                submitted_tasks = 0
+                completed_tasks = 0
+
+                async def cleanup_finished_chunks():
+                    # 清理已完成的 chunk（必须等待该 chunk 的任务全部完成）
+                    for _ in range(len(active_chunks)):
+                        ctx = active_chunks[0]
+                        if ctx.get("closed") and ctx.get("pending", 0) <= 0:
+                            active_chunks.popleft()
+                            try:
+                                ctx["registry"].cleanup()
+                            except Exception as e:
+                                logger.debug(f"[Streaming Pipeline] Chunk registry cleanup failed: {e}")
+                        else:
+                            active_chunks.rotate(-1)
+
+                async def drain_first_completed():
+                    nonlocal pending, completed_tasks
+                    if not pending:
+                        return
+
+                    done, pending_new = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    pending = set(pending_new)
+
+                    for fut in done:
+                        completed_tasks += 1
+                        meta = futures_meta.pop(fut, None) or {}
+                        req = meta.get("req")
+                        if req is None:
+                            continue
+                        chunk_ctx = meta.get("chunk_ctx")
+                        original_ts = meta.get("original_ts", 0)
+                        unit_id = meta.get("unit_id", "unknown")
+                        started_at = meta.get("started_at", None)
+
+                        try:
+                            result = fut.result()
+                        except Exception as e:
+                            result = e
+                        self._apply_selection_result(req=req, original_ts=original_ts, unit_id=unit_id, result=result)
+
+                        if chunk_ctx is not None:
+                            chunk_ctx["pending"] -= 1
+                            chunk_ctx["completed"] += 1
+                            if started_at is not None:
+                                chunk_ctx["task_ms_sum"] += (time.perf_counter() - started_at) * 1000.0
+
+                    await cleanup_finished_chunks()
+
+                for chunk_id, chunk in enumerate(chunks):
+                    # overlap buffer 控制：最多保留 overlap_buffers 个 chunk 的 SHM
+                    while len(active_chunks) >= overlap_buffers:
+                        if not pending:
+                            ctx = active_chunks.popleft()
+                            try:
+                                ctx["registry"].cleanup()
+                            except Exception:
+                                pass
+                            continue
+                        await drain_first_completed()
+
+                    chunk_t0 = time.perf_counter()
+                    registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
+                        self._prefetch_union_frames_to_registry_sync,
+                        extractor,
+                        SharedFrameRegistry,
+                        chunk["union_start"],
+                        chunk["union_end"],
+                        sample_rate,
+                        target_height,
+                    )
+
+                    if not ts_to_shm_ref:
+                        logger.warning(
+                            f"⚠️ [Streaming Pipeline] Chunk {chunk_id + 1}/{len(chunks)} 预读失败，跳过该 chunk 的 CV 优化"
+                        )
+                        continue
+
+                    task_params = self._build_task_params_from_ts_map(
+                        windows=chunk["windows"],
+                        ts_to_shm_ref=ts_to_shm_ref,
+                        fps=extractor.fps,
+                    )
+
+                    chunk_ctx = {
+                        "chunk_id": chunk_id,
+                        "registry": registry,
+                        "submitted": 0,
+                        "completed": 0,
+                        "pending": 0,
+                        "closed": False,
+                        "prefetch_ms": prefetch_ms,
+                        "register_ms": register_ms,
+                        "task_ms_sum": 0.0,
+                    }
+                    active_chunks.append(chunk_ctx)
+
+                    submitted_in_chunk = 0
+                    for p in task_params:
+                        if p.get("skip"):
+                            continue
+                        while len(pending) >= max_inflight:
+                            await drain_first_completed()
+
+                        req = p["req"]
+                        original_ts = req.get("timestamp_sec", 0)
+                        started_at = time.perf_counter()
+                        fut = loop.run_in_executor(
+                            executor,
+                            functools.partial(
+                                run_screenshot_selection_task,
+                                video_path=video_path,
+                                unit_id=p["unit_id"],
+                                island_index=p["island_index"],
+                                expanded_start=p["expanded_start"],
+                                expanded_end=p["expanded_end"],
+                                shm_frames=p["shm_frames"],
+                                fps=p["fps"],
+                            ),
+                        )
+                        pending.add(fut)
+                        futures_meta[fut] = {
+                            "req": req,
+                            "original_ts": original_ts,
+                            "unit_id": p["unit_id"],
+                            "chunk_ctx": chunk_ctx,
+                            "started_at": started_at,
+                        }
+                        submitted_tasks += 1
+                        submitted_in_chunk += 1
+                        chunk_ctx["submitted"] += 1
+                        chunk_ctx["pending"] += 1
+
+                    chunk_ctx["closed"] = True
+
+                    chunk_total_ms = (time.perf_counter() - chunk_t0) * 1000.0
+                    logger.info(
+                        f"📌 [Streaming Pipeline] Feed chunk {chunk_id + 1}/{len(chunks)}: "
+                        f"reqs={len(chunk['windows'])}, span={chunk['union_end'] - chunk['union_start']:.2f}s, "
+                        f"prefetch={prefetch_ms:.1f}ms, register={register_ms:.1f}ms, "
+                        f"submitted={submitted_in_chunk}, inflight={len(pending)}, total={chunk_total_ms:.1f}ms"
+                    )
+
+                    gc.collect()
+
+                while pending:
+                    await drain_first_completed()
+
+                # 防御性 cleanup
+                while active_chunks:
+                    ctx = active_chunks.popleft()
+                    try:
+                        ctx["registry"].cleanup()
+                    except Exception:
+                        pass
+
+                logger.info(
+                    f"✅ [Streaming Pipeline] Completed: submitted_tasks={submitted_tasks}, completed_tasks={completed_tasks}"
+                )
+                return screenshot_requests
+            finally:
+                # 异常路径兜底：尽量 drain + cleanup，避免 SHM 泄漏（允许 best-effort 超时）
+                try:
+                    if "pending" in locals() and pending:
+                        await asyncio.wait(pending, timeout=5.0)
+                    if "active_chunks" in locals() and active_chunks:
+                        while active_chunks:
+                            ctx = active_chunks.popleft()
+                            try:
+                                ctx["registry"].cleanup()
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                if created_executor:
+                    executor.shutdown(wait=True)
             
         except ImportError as e:
             error_msg = f"❌ cv_worker 导入失败 (流式模式): {e}"
@@ -1046,88 +1311,6 @@ class VLMaterialGenerator:
             traceback.print_exc()
             return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
     
-    async def _drain_completed_until_below_threshold(
-        self,
-        pending: set,
-        futures_map: Dict[asyncio.Future, Dict],
-        results: List[Dict],
-        threshold: int
-    ) -> None:
-        """
-        背压节流: drain 直到 pending < threshold
-        
-        使用 FIRST_COMPLETED 持续消费结果,避免阻塞
-        """
-        while len(pending) >= threshold:
-            done, pending_new = await asyncio.wait(
-                pending,
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            pending.clear()
-            pending.update(pending_new)
-            
-            for future in done:
-                self._process_completed_future(future, futures_map, results)
-    
-    async def _drain_all_pending(
-        self,
-        pending: set,
-        futures_map: Dict[asyncio.Future, Dict],
-        results: List[Dict]
-    ) -> None:
-        """
-        最终 drain: 确保所有任务完成
-        
-        持续消费直到 pending 为空
-        """
-        while pending:
-            done, pending_new = await asyncio.wait(
-                pending,
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            pending.clear()
-            pending.update(pending_new)
-            
-            for future in done:
-                self._process_completed_future(future, futures_map, results)
-    
-    def _process_completed_future(
-        self,
-        future: asyncio.Future,
-        futures_map: Dict[asyncio.Future, Dict],
-        results: List[Dict]
-    ) -> None:
-        """
-        处理完成的任务
-        
-        从 futures_map 取出元数据,处理结果并添加到 results
-        """
-        metadata = futures_map.pop(future, {})
-        req = metadata.get("req")
-        if req is None:
-            logger.warning("完成的任务缺少元数据,跳过")
-            return
-        
-        original_ts = metadata.get("original_ts", 0)
-        unit_id = metadata.get("unit_id", "unknown")
-        
-        try:
-            result = future.result()
-            if result and "selected_timestamp" in result:
-                req["timestamp_sec"] = result["selected_timestamp"]
-                req["_optimized"] = True
-                req["_original_timestamp"] = original_ts
-                req["_cv_quality_score"] = result.get("quality_score", 0)
-                logger.debug(
-                    f"CV 优化: {unit_id}: {original_ts:.2f}s → {result['selected_timestamp']:.2f}s "
-                    f"(score={result.get('quality_score', 0):.3f})"
-                )
-            results.append(req)
-        except Exception as e:
-            logger.warning(f"CV Worker 异常: {unit_id}: {e}")
-            results.append(req)
-
-
     def _should_fallback(self, error: Exception) -> bool:
         """
         检查是否应该回退到原有流程

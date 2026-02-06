@@ -17,6 +17,7 @@
   - 自动回退：VL 分析失败或配置未启用时，自动回退到原有 RichTextPipeline 流程
   - 时间戳转换：VL 返回的相对时间戳（片段内）自动转换为绝对时间戳（原视频）
   - 截图时间点 CV 优化的“预读阶段”优先做 Union 预读：当请求多且窗口重叠明显时，一次性预读覆盖区间并写入 SHM，避免短片段高频 seek/read 造成“看起来没开多进程”的假象。
+  - 流式+背压+可回退的截图优化流水线：以 chunk 作为 SHM 生命周期边界（chunk 专属 registry，避免跨 chunk 淘汰 unlink）；每个 chunk 预读完成后立刻提交到 ProcessPool，使用 `FIRST_COMPLETED` drain 实现背压节流；通过 `streaming_overlap_buffers` 支持 double-buffer overlap，并复用 gRPC 侧全局 ProcessPool（避免重复 spawn）。
   - 输入策略自适应：为兼容 DashScope 的 data-uri 单项 10MB 限制，按“data-uri(小片段) → DashScope File.upload 临时 URL（可选）→ 关键帧 image_url 降级”自动选择输入，降低 400 风险
   - 输出约束与容错解析：提示词尾追加 JSON 硬性约束；解析端支持括号配对提取/去尾随逗号/修复 `key_evidence` 多字符串模式/字段名漂移，并在解析失败时以更严格约束重试
 - 兼容性影响：新增配置节 `vl_material_generation`；默认 `enabled: false`，不影响现有流程

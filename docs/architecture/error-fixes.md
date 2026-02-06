@@ -269,3 +269,20 @@
 - 预防方案（测试/监控/校验/回滚）：统一 DTO/结果类的归属与命名，避免跨类重复定义；CI 中保留编译检查；IDE 开启“错误导入提示”并在重构后跑一次编译验证。
 - 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
 - 复盘要点：结果类型应集中定义，编排层只消费，不应误导向不存在的内部类。
+
+## 2026-02-06 AnalyzeWithVL 截图优化“看起来没开多进程/Worker 空转”
+- 日期：2026-02-06
+- 现象与影响范围：VL 分析后进入截图时间点 CV 优化阶段，日志长时间停留在主进程预读（OpenCV Random Access），观察到仅 1 个新进程或 Worker 进程起来但几乎无有效任务；部分任务回退到中点时间戳。
+- 触发条件：截图请求数量较多（>100）且时间窗口高度重叠（尤其短视频/短片段）；使用全局 SharedFrameRegistry 写入 SHM；同时按“逐请求预读→再提交”的链路导致长时间无提交。
+- 根因定位：
+  - 预读阶段串行：在提交到 ProcessPool 前先完成大量 `extract_frames_fast`，导致“看起来没开多进程”。
+  - SHM 淘汰/解绑：全局 SharedFrameRegistry 有 `max_frames` 上限，批量预读会触发 LRU 淘汰并 `unlink`；Worker 侧 attach 时出现 `SharedMemory not found`，进而读不到帧，任务等价“空转”。
+- 修复措施：
+  - 以 chunk 作为 SHM 生命周期边界：每个 chunk 使用独立 SharedFrameRegistry，避免跨 chunk 淘汰 `unlink`。
+  - Union 预读 + 流式喂入：每个 chunk 先 Union 预读覆盖区间，再立即提交任务；维护全局 pending 队列并用 `FIRST_COMPLETED` drain 实现背压节流。
+  - IO/Compute 重叠：通过 `streaming_overlap_buffers` 支持 double-buffer overlap；复用 gRPC 侧全局 ProcessPool（避免重复 spawn）。
+  - 可观测性增强：支持 `CV_POOL_WARMUP=1` 输出 Worker PID 集合；Worker 日志包含 PID，并在“读不到帧”时输出 shm_name 样本。
+- 验证方式：跑 `AnalyzeWithVL`（截图请求 > 100），确认日志输出 workers/inflight/chunks/prefetch_ms/register_ms/submitted/completed；Worker 日志出现多个 PID 且有任务执行；`SharedMemory not found` 告警显著减少或消失。
+- 预防方案（测试/监控/校验/回滚）：新增单元测试覆盖 chunk 切分；运行时日志记录 submitted/completed；可通过 `streaming_pipeline=false` 或 `streaming_overlap_buffers=1` 回退到更稳的顺序 chunk。
+- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/visual_feature_extractor.py`、`cv_worker.py`、`python_grpc_server.py`、`MVP_Module2_HEANCING/config/module2_config.yaml`
+- 复盘要点：SharedMemory 必须配套生命周期边界；“预读+全局缓存”在高并发下易触发淘汰与时序问题，需用 chunk/背压/可观测性闭环约束。
