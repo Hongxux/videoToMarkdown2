@@ -13,6 +13,21 @@
 - 验证方式与结果
 - 可复用经验
 
+## 2026-02-06 主链路 CV 内存优化与缓存命中率统计
+- 日期：2026-02-06
+- 版本/分支/提交：未记录
+- 触发背景与问题：多进程 CV 占用偏高（OpenCV 运行时、float64 与数组拷贝导致单进程内存上涨）；缓存命中率缺少统一统计口径，难以判断“哪些缓存值得保留”。
+- 改动范围（模块/接口/数据）：`cv_worker.py`（OpenCV OpenCL/优化开关、零拷贝读取、数组释放）；`python_grpc_server.py`（任务级缓存统计与最终落盘）；`MVP_Module2_HEANCING/module2_content_enhancement/cache_metrics.py`（统一收敛器）；`cv_runtime_config.py`（CV 精度配置）；`screenshot_selector.py`/`visual_element_detection_helpers.py`（float32 默认）；`visual_feature_extractor.py`/`cv_knowledge_validator.py`/`semantic_feature_extractor.py`/`vision_ai_client.py`/`llm_client.py`/`resource_manager.py`（缓存命中率打点）；文档更新。
+- 关键决策与理由：
+  - 默认 float32 + 可回退：兼顾内存与精度，可通过 `CV_FLOAT_DTYPE=64` 回退。
+  - 禁用 OpenCL 运行时与可选优化路径：减少 OpenCV 运行时常驻内存。
+  - SharedMemory 零拷贝：默认视图读取，注入缓存时显式 copy，降低峰值占用。
+  - 统一缓存统计：模块内集中 hit/miss 口径，最终落盘便于分析。
+- 兼容性影响：新增环境变量 `CV_FLOAT_DTYPE`、`CV_DISABLE_OPENCV_OPT`、`MODULE2_CACHE_METRICS_ENABLE`、`MODULE2_CACHE_METRICS_RESET_ON_TASK`；新增落盘文件 `outputDir/intermediates/cache_metrics.json`；默认精度调整可能引入轻微数值差异。
+- 风险与回滚方案：如精度/性能异常，可设置 `CV_FLOAT_DTYPE=64` 或关闭 `CV_DISABLE_OPENCV_OPT`；如统计影响性能，可 `MODULE2_CACHE_METRICS_ENABLE=0`；必要时删除 `cache_metrics.json` 以回退。
+- 验证方式与结果：跑一条含 `ValidateCVBatch + AssembleRichText` 的主链路；检查 `cache_metrics.json` 是否生成；切换 `CV_FLOAT_DTYPE=64`/`CV_DISABLE_OPENCV_OPT=1` 验证可控回退。
+- 可复用经验：对多进程 CV 链路优先做“运行时裁剪 + 精度下调 + 零拷贝 + 统计闭环”，再做算法级优化。
+
 ## 2026-02-04 输出目录统一与文档补齐
 - 日期：2026-02-04
 - 版本/分支/提交：未记录

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass, field
 import httpx
+from . import cache_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +195,7 @@ class HashCacheManager:
         
         # 检查精确匹配
         if current_hash in self._cache:
+            cache_metrics.hit("module2.vision_ai.hash_cache")
             logger.info(f"Exact hash match for {Path(image_path).name}, reusing cached result")
             return True, self._cache[current_hash].get("result")
         
@@ -201,6 +203,7 @@ class HashCacheManager:
         for cached_hash, cached_data in self._cache.items():
             similarity = PerceptualHasher.compute_similarity(current_hash, cached_hash)
             if similarity >= self.threshold:
+                cache_metrics.hit("module2.vision_ai.hash_cache")
                 logger.info(f"Similar frame detected: {Path(image_path).name} ~ {cached_data.get('path', 'unknown')} "
                            f"(similarity={similarity:.1%})")
                 return True, cached_data.get("result")
@@ -208,7 +211,7 @@ class HashCacheManager:
         # 缓存当前哈希 (结果稍后填充)
         self._cache[current_hash] = {"path": image_path, "result": None}
         self._path_to_hash[image_path] = current_hash
-        
+        cache_metrics.miss("module2.vision_ai.hash_cache")
         return False, None
     
     def store_result(self, image_path: str, result: Dict[str, Any]):

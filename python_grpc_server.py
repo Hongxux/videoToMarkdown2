@@ -15,6 +15,21 @@ import os
 import sys
 
 
+def _configure_opencv_env() -> None:
+    """
+    执行逻辑：
+    1) 禁用 OpenCV OpenCL 运行时加载。
+    2) 避免无用组件占用内存。
+    实现方式：设置环境变量。
+    核心价值：降低单进程 OpenCV 运行时内存占用。
+    """
+    if not os.getenv("OPENCV_OPENCL_RUNTIME"):
+        os.environ["OPENCV_OPENCL_RUNTIME"] = "disabled"
+
+
+_configure_opencv_env()
+
+
 def _reconfigure_stdio_errors() -> None:
     """
     执行逻辑：
@@ -919,6 +934,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         # 活跃任务计数
         self._active_tasks = 0
         self._task_lock = threading.Lock()
+        self._cache_metrics_task_id = None
 
         # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
         self._classify_concurrency_limiter = AdaptiveConcurrencyLimiter(
@@ -1009,6 +1025,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - DownloadResponse（含 video_path、file_size_bytes、duration_sec）。"""
         task_id = request.task_id
+        self._cache_metrics_begin(task_id, "DownloadVideo")
         video_url = request.video_url
         # output_dir 从 request 中获取，但我们会覆盖为统一的 storage 目录
         
@@ -1086,6 +1103,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - TranscribeResponse（含 subtitle_path 与 subtitle_text 摘要）。"""
         task_id = request.task_id
+        self._cache_metrics_begin(task_id, "TranscribeVideo")
         # 统一本地视频归档到 storage/{hash}：做什么是同域化；为什么是便于复用与清理；权衡是新增一次 I/O
         video_path = _ensure_local_video_in_storage(request.video_path)
         language = request.language or "zh"
@@ -1162,6 +1180,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - Stage1Response（含 step2/step6 路径与 sentence_timestamps）。"""
         task_id = request.task_id
+        self._cache_metrics_begin(task_id, "ProcessStage1")
         # 统一本地视频归档到 storage/{hash}：做什么是保证中间产物同域；为什么是避免路径分散；权衡是可能增加一次复制/链接
         video_path = _ensure_local_video_in_storage(request.video_path)
         subtitle_path = os.path.abspath(request.subtitle_path) # Convert to absolute path immediately
@@ -2112,6 +2131,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         # 统一输出目录到 storage/{hash}：做什么是让最终产物同域聚合；为什么是便于回放定位；权衡是覆盖调用方传入的 output_dir
         output_dir = _normalize_output_dir(video_path)
+        self._cache_metrics_begin(task_id, "AssembleRichText")
         
         # 确保目录存在
         os.makedirs(output_dir, exist_ok=True)
@@ -2173,6 +2193,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 error_msg=str(e)
             )
         finally:
+            self._write_cache_metrics(output_dir, task_id, "AssembleRichText")
             self._decrement_tasks()
     
     def _get_video_duration(self, video_path: str) -> float:
@@ -2235,6 +2256,68 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         - 无（仅更新内部计数）。"""
         with self._task_lock:
             self._active_tasks -= 1
+
+    def _cache_metrics_begin(self, task_id: str, stage: str) -> None:
+        """
+        执行逻辑：
+        1) 按任务维度重置缓存统计（可配置）。
+        2) 设置当前任务与阶段上下文。
+        实现方式：调用 Module2 缓存统计器。
+        核心价值：统一命中率统计口径并支持落盘。
+        """
+        try:
+            from MVP_Module2_HEANCING.module2_content_enhancement import cache_metrics
+        except Exception:
+            return
+
+        if not task_id:
+            return
+
+        if cache_metrics.reset_on_task_enabled():
+            last_task = getattr(self, "_cache_metrics_task_id", None)
+            if last_task != task_id:
+                cache_metrics.reset()
+                self._cache_metrics_task_id = task_id
+
+        cache_metrics.set_context(task_id=task_id, stage=stage)
+
+    def _write_cache_metrics(self, output_dir: str, task_id: str, stage: str) -> None:
+        """
+        执行逻辑：
+        1) 生成缓存命中率快照。
+        2) 追加落盘到 intermediates/cache_metrics.json。
+        实现方式：JSON 追加写入。
+        核心价值：形成可追溯的缓存命中率报告。
+        """
+        try:
+            from MVP_Module2_HEANCING.module2_content_enhancement import cache_metrics
+        except Exception:
+            return
+
+        try:
+            import json
+            snapshot = cache_metrics.snapshot(task_id=task_id, stage=stage)
+            intermediates_dir = os.path.join(output_dir, "intermediates")
+            os.makedirs(intermediates_dir, exist_ok=True)
+            out_path = os.path.join(intermediates_dir, "cache_metrics.json")
+
+            records = []
+            if os.path.exists(out_path):
+                try:
+                    with open(out_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if isinstance(data, list):
+                            records = data
+                        elif isinstance(data, dict):
+                            records = [data]
+                except Exception:
+                    records = []
+
+            records.append(snapshot)
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(records, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning(f"Cache metrics write failed: {e}")
             
     def _batch_read_frames_to_shm(self, video_path: str, units_data: list) -> dict:
         """

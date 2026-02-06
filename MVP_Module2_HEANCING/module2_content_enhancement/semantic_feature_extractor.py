@@ -18,6 +18,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 from collections import OrderedDict
+from . import cache_metrics
 
 # 💥 性能优化: 全局共享嵌入缓存 (跨组件复用)
 _GLOBAL_EMBEDDING_CACHE = OrderedDict()
@@ -397,9 +398,11 @@ class SemanticFeatureExtractor:
                 if s in self._embedding_cache:
                     cached_vectors[s] = self._embedding_cache[s]
                     self._cache_hits += 1
+                    cache_metrics.hit("module2.semantic.embedding_cache")
                 else:
                     strings_to_encode.append(s)
                     self._cache_misses += 1
+                    cache_metrics.miss("module2.semantic.embedding_cache")
             
             # 如果有需要编码的文本
             if strings_to_encode:

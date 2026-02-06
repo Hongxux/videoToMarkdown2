@@ -37,6 +37,7 @@ from typing import List, Dict, Any, Optional, Tuple
 from enum import Enum
 from collections import OrderedDict
 import time
+from . import cache_metrics
 from .resource_manager import get_resource_manager
 from .fast_metrics import fast_ssim, fast_diff_ratio
 
@@ -560,7 +561,9 @@ class ROICache:
         - 多值结果元组（各元素含义见实现）。"""
         for end_sec, data in reversed(self.cache.items()):
             if abs(end_sec - unit_end_sec) < 10:  # 10秒内
+                cache_metrics.hit("module2.cv_validator.roi_cache")
                 return data['roi']
+        cache_metrics.miss("module2.cv_validator.roi_cache")
         return None
     
     def put(self, unit_end_sec: float, roi: Tuple[int, int, int, int], 
@@ -654,7 +657,9 @@ class FrameFeatureCache:
         - 结构化结果字典（包含关键字段信息）。"""
         for ts, feat in self.cache.items():
             if abs(ts - timestamp) < 0.1:  # 100ms容差
+                cache_metrics.hit("module2.cv_validator.frame_feature_cache")
                 return feat
+        cache_metrics.miss("module2.cv_validator.frame_feature_cache")
         return None
     
     def put(self, timestamp: float, gray_roi: np.ndarray, 
@@ -941,8 +946,10 @@ class CVKnowledgeValidator:
             if prev_feat and abs(layout_feat - prev_feat) / prev_feat < (1 - CVConfig.ROI_REUSE_SIM_THRESH):
                 cached_roi = list(self.roi_cache.cache.values())[-1]['roi'] if self.roi_cache.cache else None
                 if cached_roi:
+                    cache_metrics.hit("module2.cv_validator.roi_cache")
                     logger.debug("ROI cache hit, reusing previous ROI")
                     return cached_roi
+            cache_metrics.miss("module2.cv_validator.roi_cache")
         
         # 新检测ROI
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame

@@ -26,6 +26,7 @@ from multiprocessing import shared_memory
 import threading
 from .resource_utils import ResourceOrchestrator
 from .dynamic_decision_engine import DynamicDecisionEngine, GlobalAnalysisCache
+from . import cache_metrics
 
 # 💥 性能优化: 尝试引入 Numba JIT 加速
 # V5: CLIP Support
@@ -330,12 +331,16 @@ class SharedFrameRegistry:
         with self._lock:
             shm_name = self._registry.get(frame_idx)
             if not shm_name:
+                cache_metrics.miss("module2.shared_frame_registry.get_frame")
                 return None
             
             # 注意: 这里返回的 ndarray 保持了对 shm.buf 的引用
             # 调用者必须在进程结束前保持 shm 打开状态
             shm = self._shms.get(shm_name)
-            if not shm: return None
+            if not shm:
+                cache_metrics.miss("module2.shared_frame_registry.get_frame")
+                return None
+            cache_metrics.hit("module2.shared_frame_registry.get_frame")
             return np.ndarray(self._shape, dtype=self._dtype, buffer=shm.buf)
 
     def cleanup(self):
@@ -375,7 +380,10 @@ class SharedFrameRegistry:
         - 结构化结果字典（包含关键字段信息）。"""
         with self._lock:
             shm_name = self._registry.get(frame_idx)
-            if not shm_name: return None
+            if not shm_name:
+                cache_metrics.miss("module2.shared_frame_registry.get_shm_ref")
+                return None
+            cache_metrics.hit("module2.shared_frame_registry.get_shm_ref")
             return {
                 "shm_name": shm_name,
                 "shape": self._shape,
@@ -716,6 +724,7 @@ class VisualFeatureExtractor:
 
                 # 💥 性能优化: 缓存命中检查
                 if frame_idx in self._frame_cache:
+                    cache_metrics.hit("module2.visual_feature.frame_cache")
                     frame = self._frame_cache[frame_idx]
                     frames.append(frame)
                     timestamps.append(frame_idx / self.fps)
@@ -723,6 +732,7 @@ class VisualFeatureExtractor:
                     last_frame_proxy = frame
                     current_frame_idx += current_step
                     continue
+                cache_metrics.miss("module2.visual_feature.frame_cache")
 
                 # 💥 性能优化: 仅在不连续时调用 set()。如果连续，顺序 read() 效率更高
                 current_pos = int(local_cap.get(cv2.CAP_PROP_POS_FRAMES))
@@ -1273,7 +1283,10 @@ class VisualFeatureExtractor:
         start_sec = float(start_sec)
         end_sec = float(end_sec)
         segment_id = f"{start_sec:.2f}_{end_sec:.2f}_sr{sample_rate}"
-        return self._clip_caches.get(segment_id)
+        cache = self._clip_caches.get(segment_id)
+        if cache and cache.is_analyzed:
+            cache_metrics.hit("module2.visual_feature.clip_cache")
+        return cache
 
     async def extract_visual_features(self, start_sec: float, end_sec: float, sample_rate: int = 1) -> VisualFeatures:
         """
@@ -1309,6 +1322,7 @@ class VisualFeatureExtractor:
         
         # 2. 如果未分析，执行主提取与预处理
         if not cache.is_analyzed:
+            cache_metrics.miss("module2.visual_feature.clip_cache")
             # 2.1 基础提取
             # 💥 Fix: Use the custom executor (Visual Pool) instead of default (None)
             frames, timestamps = await loop.run_in_executor(
@@ -1339,6 +1353,8 @@ class VisualFeatureExtractor:
             cache.ssim_seq = ssim_seq # V5
             cache.avg_edge_flux = avg_edge_flux # V5
             cache.is_analyzed = True
+        else:
+            cache_metrics.hit("module2.visual_feature.clip_cache")
             
             # 释放原始帧内存 (保留增强帧在缓存中直到本次方法结束)
             del frames
@@ -1451,6 +1467,7 @@ class VisualFeatureExtractor:
             all_sampled_hashes.append(h)
             
             if h not in self._analysis_cache:
+                cache_metrics.miss("module2.visual_feature.analysis_cache")
                 # 构造 SHM 任务 (使用 Zero-Copy 引用)
                 shm_ref = self.shm_registry.get_shm_ref(frame_idx)
                 
@@ -1460,6 +1477,7 @@ class VisualFeatureExtractor:
                 else:
                     tasks_to_run.append((h, shm_ref))
             else:
+                cache_metrics.hit("module2.visual_feature.analysis_cache")
                 self._analysis_hits += 1
                 self._analysis_cache.move_to_end(h)
 

@@ -20,6 +20,7 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
 import time
+from .cv_runtime_config import CV_FLOAT_DTYPE, CV_FLOAT_DEPTH
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,7 @@ def _analyze_frame_quality_worker(frame: np.ndarray) -> Tuple[float, float, floa
         
         # B. 物理防抖 (Laplacian Variance)
         # 越高越清晰，越低越模糊
-        laplacian_var = cv2.Laplacian(roi_gray, cv2.CV_64F).var()
+        laplacian_var = cv2.Laplacian(roi_gray, CV_FLOAT_DEPTH).var()
         
         # C. 信息熵 (Shannon Entropy)
         hist = cv2.calcHist([roi_gray], [0], None, [256], [0, 256])
@@ -128,14 +129,15 @@ def _analyze_frame_quality_worker(frame: np.ndarray) -> Tuple[float, float, floa
         shannon_entropy = -np.sum(hist_norm * np.log2(hist_norm))
         
         # D. 边缘锐度 (Sobel Magnitude Mean - 辅助)
-        gx = cv2.Sobel(roi_gray, cv2.CV_64F, 1, 0, ksize=3)
-        gy = cv2.Sobel(roi_gray, cv2.CV_64F, 0, 1, ksize=3)
+        gx = cv2.Sobel(roi_gray, CV_FLOAT_DEPTH, 1, 0, ksize=3)
+        gy = cv2.Sobel(roi_gray, CV_FLOAT_DEPTH, 0, 1, ksize=3)
         mag = cv2.sqrt(gx**2 + gy**2)
         sharpness_score = np.mean(mag)
         
         # E. 对比度
-        max_v, min_v = np.max(roi_gray).astype(float), np.min(roi_gray).astype(float)
-        contrast_score = (max_v - min_v) / (max_v + min_v + 1e-6)
+        max_v = np.max(roi_gray).astype(CV_FLOAT_DTYPE)
+        min_v = np.min(roi_gray).astype(CV_FLOAT_DTYPE)
+        contrast_score = float((max_v - min_v) / (max_v + min_v + 1e-6))
         
         return laplacian_var, shannon_entropy, sharpness_score, contrast_score
     except Exception as e:
@@ -247,7 +249,9 @@ class ScreenshotSelector:
         # 2. 计算帧间 MSE 差异（同步版本）
         mse_diffs = []
         for i in range(len(frames) - 1):
-            diff = np.mean((frames[i].astype(np.float32) - frames[i+1].astype(np.float32)) ** 2)
+            f1 = frames[i].astype(CV_FLOAT_DTYPE, copy=False)
+            f2 = frames[i + 1].astype(CV_FLOAT_DTYPE, copy=False)
+            diff = np.mean((f1 - f2) ** 2)
             mse_diffs.append(diff)
         mse_diffs.append(0.0)  # 补齐最后一帧
         
@@ -570,8 +574,8 @@ class ScreenshotSelector:
         # 计算相邻帧 MSE
         mse_values = []
         for i in range(len(frames) - 1):
-            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
-            f2 = cv2.cvtColor(frames[i+1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
+            f2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
             mse = np.mean((f1 - f2) ** 2) / (255 * 255)
             mse_values.append(mse)
         mse_values.append(0.0)
@@ -630,8 +634,8 @@ class ScreenshotSelector:
         # 计算 MSE
         mse_values = []
         for i in range(len(frames) - 1):
-            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(np.float32)
-            f2 = cv2.cvtColor(frames[i+1], cv2.COLOR_BGR2GRAY).astype(np.float32)
+            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
+            f2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
             mse = np.mean((f1 - f2) ** 2) / (255 * 255)
             mse_values.append(mse)
         if mse_values:

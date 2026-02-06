@@ -15,6 +15,7 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional, Any
 import logging
 import gc
+from .cv_runtime_config import CV_FLOAT_DTYPE
 
 # 🚀 Performance: Enable Numba JIT
 try:
@@ -71,8 +72,8 @@ def _fast_cosine_angle(v1: np.ndarray, v2: np.ndarray) -> float:
     - v2: 函数入参（类型：np.ndarray）。
     输出参数：
     - 数值型计算结果。"""
-    v1_f = v1.astype(np.float64)
-    v2_f = v2.astype(np.float64)
+    v1_f = v1.astype(CV_FLOAT_DTYPE)
+    v2_f = v2.astype(CV_FLOAT_DTYPE)
     
     norm_prod = np.linalg.norm(v1_f) * np.linalg.norm(v2_f)
     if norm_prod < 1e-6:
@@ -1083,7 +1084,7 @@ class VisualElementDetector:
             # Convert to gray for MSE
             if len(roi.shape) == 3:
                 roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-            roi_frames.append(roi.astype(np.float32))
+            roi_frames.append(roi.astype(CV_FLOAT_DTYPE, copy=False))
             
         if len(roi_frames) < 2: return "static"
         
@@ -1115,7 +1116,9 @@ class VisualElementDetector:
                  if len(f2.shape) == 3:
                      f2 = cv2.cvtColor(f2, cv2.COLOR_BGR2GRAY)
 
-                 mse = np.mean((f1.astype(float) - f2.astype(float)) ** 2)
+                 f1_f = f1.astype(CV_FLOAT_DTYPE, copy=False)
+                 f2_f = f2.astype(CV_FLOAT_DTYPE, copy=False)
+                 mse = np.mean((f1_f - f2_f) ** 2)
                  global_short_flux.append(mse)
              
              avg_global = np.mean(global_short_flux) if global_short_flux else 0.0

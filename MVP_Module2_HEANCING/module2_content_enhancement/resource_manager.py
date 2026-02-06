@@ -17,6 +17,7 @@ import logging
 import threading
 from typing import Dict, Optional
 from concurrent.futures import ThreadPoolExecutor
+from . import cache_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -139,13 +140,17 @@ class ResourceManager:
         - 函数计算/封装后的结果对象。"""
         abs_path = os.path.abspath(video_path)
         
-        if abs_path not in self._video_captures:
-            cap = cv2.VideoCapture(abs_path)
-            if not cap.isOpened():
-                raise RuntimeError(f"Cannot open video: {video_path}")
-            self._video_captures[abs_path] = cap
-            self._video_locks[abs_path] = threading.Lock()
-            logger.debug(f"Opened video: {abs_path}")
+        if abs_path in self._video_captures:
+            cache_metrics.hit("module2.resource.video_capture")
+            return self._video_captures[abs_path]
+
+        cache_metrics.miss("module2.resource.video_capture")
+        cap = cv2.VideoCapture(abs_path)
+        if not cap.isOpened():
+            raise RuntimeError(f"Cannot open video: {video_path}")
+        self._video_captures[abs_path] = cap
+        self._video_locks[abs_path] = threading.Lock()
+        logger.debug(f"Opened video: {abs_path}")
         
         return self._video_captures[abs_path]
     

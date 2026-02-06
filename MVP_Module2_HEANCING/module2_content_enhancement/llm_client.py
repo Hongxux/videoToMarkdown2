@@ -29,6 +29,7 @@ from tenacity import (
 )
 import httpx
 import psutil
+from . import cache_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ class _AsyncLRUTTLCache:
             entry = self._items.get(key)
             if entry is None:
                 self._misses += 1
+                cache_metrics.miss("module2.llm.result_cache")
                 return None
             if entry.expires_at <= now:
                 try:
@@ -117,9 +119,11 @@ class _AsyncLRUTTLCache:
                 except Exception:
                     pass
                 self._misses += 1
+                cache_metrics.miss("module2.llm.result_cache")
                 return None
             self._items.move_to_end(key, last=True)
             self._hits += 1
+            cache_metrics.hit("module2.llm.result_cache")
             return entry
 
     async def set(self, key: str, entry: _LLMCacheEntry) -> None:

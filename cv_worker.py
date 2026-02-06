@@ -17,7 +17,9 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 import logging
+import gc
 import psutil
 from typing import Dict, List, Tuple, Any, Optional
 from multiprocessing import shared_memory
@@ -29,6 +31,11 @@ _initialized = False
 _attached_shms: Dict[str, shared_memory.SharedMemory] = {}  # 已附加的共享内存
 
 logger = logging.getLogger(__name__)
+
+
+def _is_truthy_env(name: str, default: str = "0") -> bool:
+    value = os.getenv(name, default).strip().lower()
+    return value in {"1", "true", "yes", "y", "on"}
 
 
 def init_cv_worker():
@@ -59,6 +66,15 @@ def init_cv_worker():
     try:
         import cv2
         cv2.setNumThreads(1)
+        try:
+            cv2.ocl.setUseOpenCL(False)
+        except Exception:
+            pass
+        if _is_truthy_env("CV_DISABLE_OPENCV_OPT", "0"):
+            try:
+                cv2.setUseOptimized(False)
+            except Exception:
+                pass
         logger.info("✅ Nested parallelism disabled: cv2 threads=1")
     except Exception as e:
         logger.warning(f"⚠️ Failed to set cv2 threads=1: {e}")
@@ -116,7 +132,7 @@ def _check_memory_usage():
         pass
 
 
-def get_frame_from_shm(shm_ref: dict) -> Optional[np.ndarray]:
+def get_frame_from_shm(shm_ref: dict, copy: bool = False) -> Optional[np.ndarray]:
     """
     执行逻辑：
     1) 读取内部状态或外部资源。
@@ -129,8 +145,9 @@ def get_frame_from_shm(shm_ref: dict) -> Optional[np.ndarray]:
     依据来源（证据链）：
     输入参数：
     - shm_ref: 函数入参（类型：dict）。
+    - copy: 是否拷贝（类型：bool）。
     输出参数：
-    - copy 对象或调用结果。"""
+    - ndarray 对象或调用结果。"""
     global _attached_shms
     
     try:
@@ -152,7 +169,7 @@ def get_frame_from_shm(shm_ref: dict) -> Optional[np.ndarray]:
         
         shm = _attached_shms[shm_name]
         frame = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
-        return frame.copy()  # 返回副本，避免共享内存被回收后访问
+        return frame.copy() if copy else frame
         
     except Exception as e:
         logger.warning(f"Failed to get frame from SharedMemory: {e}")
@@ -205,7 +222,7 @@ def run_cv_validation_task(video_path: str, unit_data: dict, shm_frames: dict = 
                 if frame is not None:
                     # 注入到 Validator 的内部缓存 (如果支持)
                     if hasattr(validator, '_frame_cache'):
-                        validator._frame_cache[int(frame_idx_str)] = frame
+                        validator._frame_cache[int(frame_idx_str)] = frame.copy()
                         injected_count += 1
             if injected_count > 0:
                 logger.debug(f"Injected {injected_count} frames from SharedMemory")
@@ -348,7 +365,7 @@ def run_screenshot_selection_task(
         for ts, shm_ref in sorted(shm_frames.items()):
             frame = get_frame_from_shm(shm_ref)
             if frame is not None:
-                frames.append(frame.copy())  # 复制以避免 SharedMemory 生命周期问题
+                frames.append(frame)
                 timestamps.append(ts)
         
         if not frames:
@@ -415,6 +432,15 @@ def run_screenshot_selection_task(
             "analyzed_frames": 0,
             "error": str(e)
         }
+    finally:
+        try:
+            if "frames" in locals():
+                del frames
+            if "timestamps" in locals():
+                del timestamps
+            gc.collect()
+        except Exception:
+            pass
 
 
 def run_coarse_fine_screenshot_task(
@@ -456,7 +482,7 @@ def run_coarse_fine_screenshot_task(
         for ts, shm_ref in sorted(coarse_shm_frames.items()):
             frame = get_frame_from_shm(shm_ref)
             if frame is not None:
-                coarse_frames.append(frame.copy())
+                coarse_frames.append(frame)
                 coarse_timestamps.append(ts)
         
         if len(coarse_frames) < 2:
@@ -509,7 +535,7 @@ def run_coarse_fine_screenshot_task(
                 for ts, shm_ref in sorted(fine_shm_frames.items()):
                     frame = get_frame_from_shm(shm_ref)
                     if frame is not None:
-                        fine_frames.append(frame.copy())
+                        fine_frames.append(frame)
                         fine_timestamps.append(ts)
                 
                 if not fine_frames:
@@ -579,3 +605,16 @@ def run_coarse_fine_screenshot_task(
             "end_sec": end_sec,
             "error": str(e)
         }
+    finally:
+        try:
+            if "coarse_frames" in locals():
+                del coarse_frames
+            if "coarse_timestamps" in locals():
+                del coarse_timestamps
+            if "fine_frames" in locals():
+                del fine_frames
+            if "fine_timestamps" in locals():
+                del fine_timestamps
+            gc.collect()
+        except Exception:
+            pass
