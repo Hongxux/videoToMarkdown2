@@ -240,6 +240,28 @@ class VLMaterialGenerator:
                     unit_id = su.get("unit_id", "")
                     start_sec = float(su.get("start_sec", 0))
                     end_sec = float(su.get("end_sec", 0))
+                    duration = max(0.0, end_sec - start_sec)
+                    knowledge_type = (su.get("knowledge_type", "") or "").lower()
+                    mult_steps = bool(su.get("mult_steps", False))
+                    extra_prompt = None
+                    if knowledge_type == "process" and duration > 10.0 and mult_steps:
+                        extra_prompt = (
+                            "该视频片段属于多步骤配置/推演/实操，请你提取的视频片段能剔除冗余部分。"
+                            "冗余部分包括但不限于："
+                            "知识讲解、解释却没有进行实际操作；"
+                            "镜头长时间拍一行命令/JSON/YAML/IP/端口/路径；"
+                            "口述逐字念命令、念参数、念配置键值；"
+                            "打字过程全程拍摄（无特殊校验/无弹窗，仅普通输入）；"
+                            "视频开头/中间长时间口述背景/前置条件/版本要求；"
+                            "对着 PPT/纯文本页面念概念、念约束、念依赖清单；"
+                            "纯口头梳理流程且无实际操作；"
+                            "全程拍摄加载条、安装进度、服务启动等待；"
+                            "重复刷新或重复检查且无新信息；"
+                            "机械重复话术或无意义过渡；"
+                            "画面已显示结果却口述复述。"
+                            "截图选择要求：多步骤中的每一步终态截图，以及每一步需要学习者记忆的关键帧截图。"
+                            "若冗余较多仍需返回最小可用片段，不要返回空片段。"
+                        )
                     
                     # 查找对应的视频片段
                     clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec)
@@ -252,7 +274,8 @@ class VLMaterialGenerator:
                     task = self.analyzer.analyze_clip(
                         clip_path=clip_path,
                         semantic_unit_start_sec=start_sec,
-                        semantic_unit_id=unit_id
+                        semantic_unit_id=unit_id,
+                        extra_prompt=extra_prompt
                     )
                     analysis_tasks.append(task)
                     task_metadata.append({

@@ -3330,7 +3330,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 if duration <= 10.0:
                     routing_stats["process_short"] += 1
                     cv_screenshot_units.append(unit)
-                    cv_clip_units.append(unit)
+                    if unit.get("mult_steps", False):
+                        cv_clip_units.append(unit)
                 else:
                     routing_stats["process_long"] += 1
                     vl_units.append(unit)

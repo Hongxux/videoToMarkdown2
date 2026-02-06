@@ -141,6 +141,7 @@ public class VideoProcessingOrchestrator {
                 
                 // 将本地视频复制/硬链接到 storage/{hash}：做什么是让视频与产物同域；为什么是便于回放与清理；权衡是增加一次磁盘写入或链接操作
                 videoPath = ensureLocalVideoInStorage(videoPath, outputDir);
+                videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
             }
 
             // ========== Step 1: 下载视频 (Python) ==========（做什么：拉取视频；为什么：统一产物目录；权衡：依赖网络与 I/O）
@@ -152,6 +153,9 @@ public class VideoProcessingOrchestrator {
                 videoDuration = dl.durationSec;
                 outputDir = new File(videoPath).getParentFile().getAbsolutePath(); 
                 new File(outputDir).mkdirs();
+            }
+            if (videoDuration <= 0) {
+                videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
             }
             
             DynamicTimeoutCalculator.TimeoutConfig timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
@@ -263,19 +267,46 @@ public class VideoProcessingOrchestrator {
         double bufferSec = 120.0 + Math.max(0.0, videoDurationSec * 0.05);
 
         int computedTimeoutSec = (int) Math.ceil((seekAndImageCostSec + clipInitCostSec + clipEncodeCostSec + bufferSec) * 1.2);
-        int finalTimeoutSec = Math.max(baseTimeoutSec, computedTimeoutSec);
+        int mergedTimeoutSec = Math.max(baseTimeoutSec, computedTimeoutSec);
+
+        double scale = configService != null ? configService.getFfmpegTimeoutMultiplier() : 1.0;
+        if (scale <= 0) scale = 1.0;
+        int minTimeoutSec = configService != null ? configService.getFfmpegTimeoutMinSec() : 0;
+        int maxTimeoutSec = configService != null ? configService.getFfmpegTimeoutMaxSec() : 0;
+
+        int scaledTimeoutSec = (int) Math.ceil(mergedTimeoutSec * scale);
+        if (minTimeoutSec > 0) scaledTimeoutSec = Math.max(scaledTimeoutSec, minTimeoutSec);
+        if (maxTimeoutSec > 0) scaledTimeoutSec = Math.min(scaledTimeoutSec, maxTimeoutSec);
 
         logger.info(
-            "[{}] FFmpeg timeout computed: {}s (base={}s, screenshots={}, clips={}, clipDur={}s)",
+            "[{}] FFmpeg timeout computed: {}s -> {}s (base={}s, scale={}, min={}, max={}, screenshots={}, clips={}, clipDur={}s)",
             taskId,
-            finalTimeoutSec,
+            mergedTimeoutSec,
+            scaledTimeoutSec,
             baseTimeoutSec,
+            String.format(Locale.ROOT, "%.2f", scale),
+            minTimeoutSec,
+            maxTimeoutSec,
             screenshotCount,
             clipCount,
             String.format(Locale.ROOT, "%.1f", totalClipDurationSec)
         );
 
-        return finalTimeoutSec;
+        return scaledTimeoutSec;
+    }
+
+    private double resolveVideoDurationSec(String taskId, String videoPath, double fallbackSec) {
+        double probed = ffmpegService.probeVideoDurationSec(videoPath);
+        if (probed > 0) {
+            logger.info("[{}] Probed video duration: {}s", taskId, String.format(Locale.ROOT, "%.1f", probed));
+            return probed;
+        }
+        if (fallbackSec > 0) {
+            logger.warn("[{}] Failed to probe video duration, fallback={}s", taskId, String.format(Locale.ROOT, "%.1f", fallbackSec));
+        } else {
+            logger.warn("[{}] Failed to probe video duration, fallback=0", taskId);
+        }
+        return fallbackSec;
     }
 
     private boolean isHttpUrl(String value) {

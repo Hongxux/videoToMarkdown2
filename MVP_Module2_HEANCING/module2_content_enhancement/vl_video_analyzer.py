@@ -237,7 +237,8 @@ class VLVideoAnalyzer:
         self,
         clip_path: str,
         semantic_unit_start_sec: float,
-        semantic_unit_id: str
+        semantic_unit_id: str,
+        extra_prompt: Optional[str] = None
     ) -> VLClipAnalysisResponse:
         """
         分析单个视频片段
@@ -254,7 +255,7 @@ class VLVideoAnalyzer:
         
         try:
             # 调用 VL API
-            analysis_results = await self._call_vl_api(clip_path)
+            analysis_results = await self._call_vl_api(clip_path, extra_prompt=extra_prompt)
             
             if not analysis_results:
                 result.success = False
@@ -311,7 +312,7 @@ class VLVideoAnalyzer:
         
         return result
     
-    async def _call_vl_api(self, video_path: str) -> List[VLAnalysisResult]:
+    async def _call_vl_api(self, video_path: str, extra_prompt: Optional[str] = None) -> List[VLAnalysisResult]:
         """
         调用 Qwen3-VL-Plus API 分析视频
         
@@ -321,7 +322,7 @@ class VLVideoAnalyzer:
         Returns:
             VLAnalysisResult 列表
         """
-        messages = await self._build_messages(video_path)
+        messages = await self._build_messages(video_path, extra_prompt=extra_prompt)
         
         # 调用 API（带重试）
         last_error = None
@@ -366,6 +367,7 @@ class VLVideoAnalyzer:
                     if "json" in err_str or "parse" in err_str or "decode" in err_str or "unterminated" in err_str:
                         messages = await self._build_messages(
                             video_path,
+                            extra_prompt=extra_prompt,
                             override_prompt=(
                                 "你必须只输出 JSON 数组，不要任何解释。"
                                 "reasoning 尽量短，key_evidence 用字符串数组。"
@@ -375,7 +377,12 @@ class VLVideoAnalyzer:
         
         raise last_error
 
-    async def _build_messages(self, video_path: str, override_prompt: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def _build_messages(
+        self,
+        video_path: str,
+        extra_prompt: Optional[str] = None,
+        override_prompt: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         构建多模态消息。
 
@@ -388,8 +395,10 @@ class VLVideoAnalyzer:
         system_content = self.prompt_template + self._output_constraints
         
         user_text = ""
+        if extra_prompt:
+            user_text += extra_prompt.strip() + "\n"
         if override_prompt:
-            user_text = "【重试补充要求】\n" + override_prompt + "\n"
+            user_text = "【重试补充要求】\n" + override_prompt + "\n" + user_text
 
         mode = (self.video_input_mode or "auto").lower()
         if mode not in ("auto", "data_uri", "dashscope_upload", "keyframes"):

@@ -44,6 +44,24 @@
 - 验证方式与结果：混合类型单任务验证 `used_fallback=false`，检查截图/片段数量与路由统计一致。
 - 可复用经验：在高成本模型前增加规则路由，用低成本 CV 优先覆盖，配套合并去重与可回滚策略。
 
+## 2026-02-06 语义单元提示词优化 + mult_steps 驱动 VL 提示
+- 日期：2026-02-06
+- 版本/分支/提交：未记录
+- 触发背景与问题：语义单元切分存在目标不完整、拆分边界不稳定；多步骤实操需要更强的 VL 去冗余与截图规则。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/semantic_unit_segmenter.py`：SYSTEM/USER 提示词更新
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`：支持 extra_prompt
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`：对 mult_steps=true 追加 extra_prompt
+  - `python_grpc_server.py`：短过程 mult_steps=false 仅截图
+- 关键决策与理由：
+  - 拆分规则分层：完整目标边界为一般拆分依据；操作对象本质改变为强制拆分条件。
+  - mult_steps=true 的长过程片段追加去冗余提示，避免无效时段占用 clip。
+  - 截图要求明确为“每一步终态 + 关键记忆帧”，保证复现性。
+- 兼容性影响：输出结构不变，仅提示词与路由策略更新。
+- 风险与回滚方案：如切分或 VL 质量下降，可回退提示词或禁用 extra_prompt。
+- 验证方式与结果：检查切分边界稳定性与多步片段裁剪效果；确认短过程 mult_steps=false 不生成 clip。
+- 可复用经验：将语义规则明确为“目标边界 + 强制拆分”，并对多步流程引入冗余剔除约束。
+
 ## 记录字段
 - 日期
 - 版本/分支/提交

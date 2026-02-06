@@ -300,3 +300,16 @@
 - 预防方案（测试/监控/校验/回滚）：将 “提取请求数量/总切片时长/计算出的 timeout” 纳入关键日志；当请求数量异常飙升时可增加告警与策略降采样（例如上限 clips/screenshots 或按单位合并去重）。
 - 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
 - 复盘要点：timeout 必须依赖“真实工作量”（请求数、切片总时长），而不是仅按视频时长做静态估算；错误信息要包含关键上下文，便于线上快速定位。
+
+## 2026-02-06 本地视频时长未探测导致超时偏低
+- 日期：2026-02-06
+- 现象与影响范围：本地视频任务偶发在素材提取或前置阶段出现 `TimeoutException`，超时阈值与实际时长明显不匹配。
+- 触发条件：输入为本地路径且未下载；或下载返回时长为 0；同时素材请求数量较多/磁盘性能偏慢。
+- 根因定位：本地路径分支未探测真实视频时长，`videoDuration` 使用默认值（60s），导致动态超时与实际耗时脱钩；FFmpeg 超时缺少可配置的环境缩放。
+- 修复措施：
+  - 使用 JavaCV Grabber 探测本地视频时长，并在下载时长缺失时回退探测。
+  - 增加 `ffmpeg_extraction` 配置（timeout_multiplier/min/max），在计算超时后进行可配置缩放。
+- 验证方式：用本地视频跑一条主链路，日志出现 “Probed video duration” 与 “FFmpeg timeout computed: X -> Y”；超时不再过早触发。
+- 预防方案（测试/监控/校验/回滚）：保留时长探测日志；在配置中按硬件性能调整 `timeout_multiplier`；必要时将 `max_timeout_sec` 设为 0 以避免误裁剪。
+- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`、`MVP_Module2_HEANCING/config/module2_config.yaml`
+- 复盘要点：动态超时必须依赖真实输入特征（时长/请求规模），并允许按环境做缩放以避免“同样逻辑不同机器超时”的漂移。

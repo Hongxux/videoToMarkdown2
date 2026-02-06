@@ -110,6 +110,32 @@ public class JavaCVFFmpegService {
             }
         });
     }
+
+    public double probeVideoDurationSec(String videoPath) {
+        if (videoPath == null || videoPath.isEmpty()) {
+            return 0.0;
+        }
+
+        try {
+            FFmpegFrameGrabber grabber = getGrabber(videoPath);
+            double durationSec = grabber.getLengthInTime() / 1_000_000.0;
+            if (durationSec <= 0) {
+                int frames = grabber.getLengthInFrames();
+                double fps = grabber.getFrameRate();
+                if (frames > 0 && fps > 0) {
+                    durationSec = frames / fps;
+                }
+            }
+            if (durationSec > 0) {
+                logger.debug("Probed video duration: {}s ({})", durationSec, videoPath);
+                return durationSec;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to probe video duration for {}: {}", videoPath, e.getMessage());
+        }
+
+        return 0.0;
+    }
     
     /**
      * 释放指定视频的 Grabber（处理完成后调用）
