@@ -25,6 +25,25 @@
 - 验证方式与结果：单元测试通过（配置加载、时间戳转换、JSON 解析、VL API 调用）
 - 可复用经验：对 VL 类能力优先做"可开关 + 自动回退 + 时间戳归一"设计，降低集成风险
 
+## 2026-02-06 VL 路由层（knowledge_type + 时长）
+- 日期：2026-02-06
+- 版本/分支/提交：未记录
+- 触发背景与问题：VL 成本高，abstract/concrete/短过程单元收益低；同时 Java 侧会因 used_fallback 触发 legacy 流程，导致重复计算。
+- 改动范围（模块/接口/数据）：
+  - `python_grpc_server.py`：`AnalyzeWithVL` 增加路由分流、CV 截图、短过程 clip、合并去重
+  - `resource_manager.get_io_executor`：复用 IO 线程池（调用）
+- 关键决策与理由：
+  - `abstract` 全跳过；`concrete` 与 `process<=10s` 走 CV 截图；`process>10s` 才进入 VL。
+  - `process<=10s` 直接输出整段 clip，避免 VL 成本。
+  - 路由截图使用 `selector.select_screenshots_for_range_sync`，范围限定在语义单元；保留全部截图结果。
+  - 只要路由+VL 成功返回即 `used_fallback=false`，避免 Java 侧回退；VL 失败仍保留 fallback。
+  - IO 线程池 + 并发信号量限制，减少资源争抢并与 VL 任务异步重叠。
+  - 合并去重：按 `semantic_unit_id + 时间 + label`/`knowledge_type` 统一归一。
+- 兼容性影响：gRPC 接口不变；不写回 `semantic_units_phase2a.json` 的 `material_requests`；关闭 `vl_material_generation.enabled` 即回退旧路由。
+- 风险与回滚方案：若路由策略不稳定可关闭 VL 或回退旧实现；截图质量异常可降低并发或切回 legacy。
+- 验证方式与结果：混合类型单任务验证 `used_fallback=false`，检查截图/片段数量与路由统计一致。
+- 可复用经验：在高成本模型前增加规则路由，用低成本 CV 优先覆盖，配套合并去重与可回滚策略。
+
 ## 记录字段
 - 日期
 - 版本/分支/提交

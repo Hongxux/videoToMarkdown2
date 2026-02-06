@@ -3255,62 +3255,271 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
                     vl_enabled=True,
-                    used_fallback=True,
+                    used_fallback=False,
                     error_msg="No semantic units found"
                 )
             
             # 调用 VL 分析
+            # ==================================================================
+            # 路由层：按 knowledge_type + 时长分流（避免不必要的 VL 负载）
+            # ==================================================================
+            from MVP_Module2_HEANCING.module2_content_enhancement.resource_manager import get_io_executor
             from MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator import VLMaterialGenerator
-            
-            generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
-            vl_result = await generator.generate(video_path, semantic_units, output_dir)
-            
-            if not vl_result.success:
-                logger.warning(f"[{task_id}] VL 分析失败，需要回退: {vl_result.error_msg}")
-                return video_processing_pb2.VLAnalysisResponse(
-                    success=True,
-                    vl_enabled=True,
-                    used_fallback=True,
-                    error_msg=vl_result.error_msg
+
+            def _safe_float(value, default=0.0):
+                try:
+                    return float(value)
+                except Exception:
+                    return default
+
+            def _normalize_knowledge_type(raw_value):
+                kt = (str(raw_value).strip() if raw_value is not None else "").lower()
+                if kt not in {"abstract", "concrete", "process"}:
+                    return "process"
+                return kt
+
+            def _select_screenshots_sync(unit_id, start_sec, end_sec):
+                """
+                说明：在 IO 线程池中执行的同步截图选择。
+                取舍：每次调用创建轻量级 selector，避免多线程共享状态引发不稳定。
+                """
+                try:
+                    selector = ScreenshotSelector.create_lightweight()
+                    results = selector.select_screenshots_for_range_sync(
+                        video_path=video_path,
+                        start_sec=start_sec,
+                        end_sec=end_sec
+                    )
+                    if results:
+                        return results
+                except Exception as e:
+                    logger.warning(f"[{task_id}] 路由截图选择失败: unit={unit_id}, err={e}")
+                mid = (start_sec + end_sec) / 2 if end_sec >= start_sec else start_sec
+                return [{"timestamp_sec": mid, "score": 0.0}]
+
+            routing_stats = {
+                "total": len(semantic_units),
+                "abstract": 0,
+                "concrete": 0,
+                "process_short": 0,
+                "process_long": 0,
+                "unknown": 0
+            }
+            vl_units = []
+            cv_screenshot_units = []
+            cv_clip_units = []
+
+            for unit in semantic_units:
+                raw_kt = unit.get("knowledge_type", "")
+                kt = _normalize_knowledge_type(raw_kt)
+                if kt == "process" and not (str(raw_kt).strip().lower() in {"process"}):
+                    routing_stats["unknown"] += 1
+                start_sec = _safe_float(unit.get("start_sec", 0.0))
+                end_sec = _safe_float(unit.get("end_sec", 0.0))
+                duration = max(0.0, end_sec - start_sec)
+
+                if kt == "abstract":
+                    routing_stats["abstract"] += 1
+                    continue
+                if kt == "concrete":
+                    routing_stats["concrete"] += 1
+                    cv_screenshot_units.append(unit)
+                    continue
+
+                # process: 按时长分流
+                if duration <= 10.0:
+                    routing_stats["process_short"] += 1
+                    cv_screenshot_units.append(unit)
+                    cv_clip_units.append(unit)
+                else:
+                    routing_stats["process_long"] += 1
+                    vl_units.append(unit)
+
+            logger.info(
+                f"[{task_id}] VL 路由统计: total={routing_stats['total']}, "
+                f"abstract={routing_stats['abstract']}, concrete={routing_stats['concrete']}, "
+                f"process_short={routing_stats['process_short']}, process_long={routing_stats['process_long']}, "
+                f"unknown={routing_stats['unknown']}"
+            )
+
+            # ==================================================================
+            # 预启动 VL 任务（与路由侧截图并行，形成 IO/Compute 重叠）
+            # ==================================================================
+            vl_task = None
+            vl_t0 = None
+            if vl_units:
+                vl_t0 = time.perf_counter()
+                generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
+                vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
+
+            # ==================================================================
+            # 路由侧：截图选择（concrete + process<=10s）
+            # ==================================================================
+            cv_screenshot_requests = []
+            if cv_screenshot_units:
+                route_t0 = time.perf_counter()
+                loop = asyncio.get_event_loop()
+                executor = get_io_executor()
+                cpu_count = os.cpu_count() or 4
+                max_concurrency = max(1, min(4, cpu_count // 2))
+                semaphore = asyncio.Semaphore(max_concurrency)
+
+                async def _run_cv_screenshot(unit):
+                    unit_id = unit.get("unit_id", "")
+                    start_sec = _safe_float(unit.get("start_sec", 0.0))
+                    end_sec = _safe_float(unit.get("end_sec", 0.0))
+                    async with semaphore:
+                        results = await loop.run_in_executor(
+                            executor,
+                            functools.partial(_select_screenshots_sync, unit_id, start_sec, end_sec)
+                        )
+                    return unit_id, start_sec, end_sec, results
+
+                tasks = [_run_cv_screenshot(u) for u in cv_screenshot_units]
+                results = await asyncio.gather(*tasks)
+                for unit_id, start_sec, end_sec, ss_list in results:
+                    for idx, ss in enumerate(ss_list or []):
+                        ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
+                        cv_screenshot_requests.append({
+                            "screenshot_id": f"routed_ss_{unit_id}_{idx}",
+                            "timestamp_sec": ts,
+                            "label": f"routed_range_{idx}",
+                            "semantic_unit_id": unit_id
+                        })
+
+                route_ms = (time.perf_counter() - route_t0) * 1000.0
+                logger.info(
+                    f"[{task_id}] 路由截图完成: units={len(cv_screenshot_units)}, "
+                    f"screenshots={len(cv_screenshot_requests)}, ms={route_ms:.1f}, "
+                    f"concurrency={max_concurrency}"
                 )
-            
-            # 构建 gRPC 响应
-            screenshot_requests = []
-            for ss in vl_result.screenshot_requests:
-                screenshot_requests.append(video_processing_pb2.ScreenshotRequest(
+
+            # ==================================================================
+            # 路由侧：短过程 clip（process<=10s）
+            # ==================================================================
+            cv_clip_requests = []
+            for unit in cv_clip_units:
+                unit_id = unit.get("unit_id", "")
+                start_sec = _safe_float(unit.get("start_sec", 0.0))
+                end_sec = _safe_float(unit.get("end_sec", 0.0))
+                cv_clip_requests.append({
+                    "clip_id": f"routed_clip_{unit_id}",
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "knowledge_type": unit.get("knowledge_type", ""),
+                    "semantic_unit_id": unit_id
+                })
+
+            # ==================================================================
+            # VL 分析：仅处理 process>10s 的单元
+            # ==================================================================
+            vl_screenshot_requests = []
+            vl_clip_requests = []
+            if vl_task:
+                vl_result = await vl_task
+                if not vl_result.success:
+                    logger.warning(f"[{task_id}] VL 鍒嗘瀽澶辫触锛岄渶瑕佸洖閫€: {vl_result.error_msg}")
+                    return video_processing_pb2.VLAnalysisResponse(
+                        success=True,
+                        vl_enabled=True,
+                        used_fallback=True,
+                        error_msg=vl_result.error_msg
+                    )
+
+                vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
+                for ss in vl_result.screenshot_requests:
+                    if ss.get("semantic_unit_id", "") in vl_unit_ids:
+                        vl_screenshot_requests.append(ss)
+                for clip in vl_result.clip_requests:
+                    if clip.get("semantic_unit_id", "") in vl_unit_ids:
+                        vl_clip_requests.append(clip)
+
+                if vl_t0 is None:
+                    vl_t0 = time.perf_counter()
+                vl_ms = (time.perf_counter() - vl_t0) * 1000.0
+                logger.info(
+                    f"[{task_id}] VL 处理完成: units={len(vl_units)}, "
+                    f"screenshots={len(vl_screenshot_requests)}, clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
+                )
+            else:
+                logger.info(f"[{task_id}] VL 路由为空: process>10s=0, 跳过 VL API")
+
+            # ==================================================================
+            # 合并 + 去重 + 稳定排序
+            # ==================================================================
+            def _dedup_screenshots(items):
+                seen = set()
+                deduped = []
+                for item in items:
+                    key = (
+                        item.get("semantic_unit_id", ""),
+                        float(item.get("timestamp_sec", 0.0)),
+                        item.get("label", "")
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(item)
+                deduped.sort(key=lambda x: (x.get("semantic_unit_id", ""), float(x.get("timestamp_sec", 0.0))))
+                return deduped
+
+            def _dedup_clips(items):
+                seen = set()
+                deduped = []
+                for item in items:
+                    key = (
+                        item.get("semantic_unit_id", ""),
+                        float(item.get("start_sec", 0.0)),
+                        float(item.get("end_sec", 0.0)),
+                        item.get("knowledge_type", "")
+                    )
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(item)
+                deduped.sort(key=lambda x: (x.get("semantic_unit_id", ""), float(x.get("start_sec", 0.0))))
+                return deduped
+
+            merged_screenshots = _dedup_screenshots(cv_screenshot_requests + vl_screenshot_requests)
+            merged_clips = _dedup_clips(cv_clip_requests + vl_clip_requests)
+
+            screenshot_requests = [
+                video_processing_pb2.ScreenshotRequest(
                     screenshot_id=ss.get("screenshot_id", ""),
                     timestamp_sec=ss.get("timestamp_sec", 0.0),
                     label=ss.get("label", ""),
                     semantic_unit_id=ss.get("semantic_unit_id", "")
-                ))
-            
-            clip_requests = []
-            for clip in vl_result.clip_requests:
-                clip_requests.append(video_processing_pb2.ClipRequest(
+                )
+                for ss in merged_screenshots
+            ]
+            clip_requests = [
+                video_processing_pb2.ClipRequest(
                     clip_id=clip.get("clip_id", ""),
                     start_sec=clip.get("start_sec", 0.0),
                     end_sec=clip.get("end_sec", 0.0),
                     knowledge_type=clip.get("knowledge_type", ""),
                     semantic_unit_id=clip.get("semantic_unit_id", "")
-                ))
-            
+                )
+                for clip in merged_clips
+            ]
+
             logger.info(
-                f"[{task_id}] VL 分析完成: units={len(semantic_units)}, "
-                f"screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
+                f"[{task_id}] AnalyzeWithVL 混合结果: total_units={len(semantic_units)}, "
+                f"vl_units={len(vl_units)}, screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
             )
-            
+
             return video_processing_pb2.VLAnalysisResponse(
                 success=True,
                 vl_enabled=True,
                 used_fallback=False,
                 screenshot_requests=screenshot_requests,
                 clip_requests=clip_requests,
-                units_analyzed=len(semantic_units),
-                vl_clips_generated=len(clip_requests),
-                vl_screenshots_generated=len(screenshot_requests),
+                units_analyzed=len(vl_units),
+                vl_clips_generated=len(vl_clip_requests),
+                vl_screenshots_generated=len(vl_screenshot_requests),
                 error_msg=""
             )
-            
+
         except Exception as e:
             logger.error(f"[{task_id}] AnalyzeWithVL 异常: {e}", exc_info=True)
             return video_processing_pb2.VLAnalysisResponse(
