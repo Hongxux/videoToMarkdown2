@@ -553,9 +553,47 @@ class VLMaterialGenerator:
         """
         并行优化截图时间点 (使用 cv_worker 进程池 + 共享内存)
         
+        支持两种模式:
+        - 流式模式 (streaming_pipeline=true): 边预读边提交,IO/Compute 重叠
+        - 批量模式 (streaming_pipeline=false): 批量预读后提交,保持向后兼容
+        
+        Args:
+            video_path: 原视频路径
+            screenshot_requests: 截图请求列表
+            
+        Returns:
+            List[Dict]: 优化后的截图请求
+        """
+        if not screenshot_requests:
+            return []
+        
+        # 检查是否启用流式处理 (默认启用)
+        use_streaming = self.screenshot_config.get("streaming_pipeline", True)
+        
+        if use_streaming:
+            logger.info(f"🚀 使用流式处理模式 (streaming_pipeline=true)")
+            return await self._optimize_screenshots_streaming_pipeline(
+                video_path,
+                screenshot_requests
+            )
+        else:
+            logger.info(f"🚀 使用批量处理模式 (streaming_pipeline=false)")
+            return await self._optimize_screenshots_batch_mode(
+                video_path,
+                screenshot_requests
+            )
+    
+    async def _optimize_screenshots_batch_mode(
+        self,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        批量模式: 批量预读所有帧后再提交任务 (原实现,保持向后兼容)
+        
         架构:
-        1. 主进程预读帧并写入 SharedMemory
-        2. 提交任务到 ProcessPool
+        1. 主进程预读所有帧并写入 SharedMemory
+        2. 批量提交所有任务到 ProcessPool
         3. Worker 零拷贝读取帧并执行 CV 分析
         
         Args:
@@ -808,6 +846,271 @@ class VLMaterialGenerator:
                 )
 
         return task_params
+    
+    async def _optimize_screenshots_streaming_pipeline(
+        self,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        流式处理流水线: 边预读边提交,实现 IO/Compute 重叠
+        
+        架构 (参考 upgrade-log.md 第119-130行):
+        1. 逐个预读帧并写入 SharedMemory
+        2. 立即提交任务到 ProcessPool  
+        3. 维护全局 pending in-flight 队列
+        4. 背压节流: pending 达到上限时 drain_completed
+        5. 持续流式返回结果
+        
+        收益:
+        - IO/Compute 重叠 (预读和计算并行)
+        - Worker 尽早开始工作 (不等所有预读完成)
+        - 降低内存峰值 (不需一次性加载所有帧)
+        - 流式输出结果
+        
+        Args:
+            video_path: 原视频路径
+            screenshot_requests: 截图请求列表
+            
+        Returns:
+            List[Dict]: 优化后的截图请求
+        """
+        if not screenshot_requests:
+            return []
+        
+        time_window = self.screenshot_config.get("time_window_seconds", 1.0)
+        
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            from .visual_feature_extractor import VisualFeatureExtractor, get_shared_frame_registry
+            import sys
+            
+            # 导入 cv_worker
+            project_root = Path(__file__).resolve().parent.parent.parent
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+            
+            from cv_worker import run_screenshot_selection_task, init_cv_worker
+            
+            logger.info(f"🚀 [Streaming Pipeline] 启动流式处理: {len(screenshot_requests)} 个请求")
+            
+            # 初始化帧提取器
+            extractor = VisualFeatureExtractor(video_path)
+            shm_registry = get_shared_frame_registry()
+            
+            # 配置参数
+            max_workers = min(4, len(screenshot_requests))
+            max_inflight_multiplier = int(self.screenshot_config.get("max_inflight_multiplier", 2))
+            max_inflight = max_workers * max_inflight_multiplier
+            sample_rate = int(self.screenshot_config.get("prefetch_sample_rate", 2))
+            target_height = int(self.screenshot_config.get("prefetch_target_height", 360))
+            
+            logger.info(f"   - Worker 数: {max_workers}")
+            logger.info(f"   - Max in-flight: {max_inflight}")
+            
+            # 流水线状态
+            pending_futures: set = set()
+            futures_map: Dict[asyncio.Future, Dict] = {}
+            completed_results: List[Dict] = []
+            
+            loop = asyncio.get_event_loop()
+            
+            with ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker) as executor:
+                # 流水线主循环: 边预读边提交
+                for idx, req in enumerate(screenshot_requests):
+                    original_ts = float(req.get("timestamp_sec", 0) or 0)
+                    unit_id = req.get("unit_id", f"req_{idx}")
+                    
+                    # 步骤1: 预读帧 (主进程 IO)
+                    search_start = max(0.0, original_ts - time_window)
+                    search_end = original_ts + time_window
+                    
+                    try:
+                        frames, timestamps = extractor.extract_frames_fast(
+                            start_sec=search_start,
+                            end_sec=search_end,
+                            sample_rate=sample_rate,
+                            target_height=target_height
+                        )
+                        
+                        if not frames:
+                            logger.warning(f"预读帧失败: {unit_id} ({search_start:.2f}s-{search_end:.2f}s)")
+                            completed_results.append(req)
+                            continue
+                        
+                        # 写入 SharedMemory
+                        shm_frames: Dict[float, Any] = {}
+                        for ts in timestamps:
+                            frame_idx = int(ts * extractor.fps)
+                            shm_ref = shm_registry.get_shm_ref(frame_idx)
+                            if shm_ref:
+                                shm_frames[ts] = shm_ref
+                        
+                        if not shm_frames:
+                            logger.warning(f"未获取到有效帧: {unit_id}")
+                            completed_results.append(req)
+                            continue
+                        
+                    except Exception as e:
+                        logger.warning(f"预读异常: {unit_id}: {e}")
+                        completed_results.append(req)
+                        continue
+                    
+                    # 步骤2: 立即提交任务 (不等待其他请求)
+                    try:
+                        future = loop.run_in_executor(
+                            executor,
+                            run_screenshot_selection_task,
+                            video_path,
+                            unit_id,
+                            idx,
+                            search_start,
+                            search_end,
+                            shm_frames,
+                            extractor.fps
+                        )
+                        pending_futures.add(future)
+                        futures_map[future] = {
+                            "req": req,
+                            "unit_id": unit_id,
+                            "original_ts": original_ts
+                        }
+                    except Exception as e:
+                        logger.warning(f"任务提交失败: {unit_id}: {e}")
+                        completed_results.append(req)
+                        continue
+                    
+                    # 步骤3: 背压节流 (pending 达到上限时 drain)
+                    if len(pending_futures) >= max_inflight:
+                        logger.debug(f"⚠️  [Backpressure] Draining: {len(pending_futures)} >= {max_inflight}")
+                        await self._drain_completed_until_below_threshold(
+                            pending_futures,
+                            futures_map,
+                            completed_results,
+                            threshold=max_inflight - 1
+                        )
+                    
+                    # 步骤4: 可观测性日志 (每10个请求)
+                    if (idx + 1) % 10 == 0 or (idx + 1) == len(screenshot_requests):
+                        logger.info(
+                            f"📊 [Streaming] 进度: {idx + 1}/{len(screenshot_requests)}, "
+                            f"in-flight: {len(pending_futures)}, "
+                            f"completed: {len(completed_results)}"
+                        )
+                
+                # 步骤5: 最终 drain (确保所有任务完成)
+                logger.info(f"🔄 [Streaming] 最终 drain: {len(pending_futures)} 个待完成任务")
+                await self._drain_all_pending(pending_futures, futures_map, completed_results)
+            
+            optimized_count = sum(1 for r in completed_results if r.get("_optimized", False))
+            logger.info(
+                f"✅ [Streaming] 流式处理完成: {len(completed_results)} 个结果, "
+                f"优化率: {optimized_count}/{len(completed_results)}"
+            )
+            
+            return completed_results
+            
+        except ImportError as e:
+            error_msg = f"❌ cv_worker 导入失败 (流式模式): {e}"
+            logger.warning(error_msg)
+            print(f"\n{'='*80}", flush=True)
+            print(f"[CV STREAMING] {error_msg}", flush=True)
+            print(f"{'='*80}\n", flush=True)
+            import traceback
+            traceback.print_exc()
+            return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
+        except Exception as e:
+            error_msg = f"❌ 流式处理失败: {e}"
+            logger.error(error_msg)
+            print(f"\n{'='*80}", flush=True)
+            print(f"[CV STREAMING] {error_msg}", flush=True)
+            print(f"{'='*80}\n", flush=True)
+            import traceback
+            logger.error(traceback.format_exc())
+            traceback.print_exc()
+            return await self._optimize_screenshot_timestamps(video_path, screenshot_requests)
+    
+    async def _drain_completed_until_below_threshold(
+        self,
+        pending: set,
+        futures_map: Dict[asyncio.Future, Dict],
+        results: List[Dict],
+        threshold: int
+    ) -> None:
+        """
+        背压节流: drain 直到 pending < threshold
+        
+        使用 FIRST_COMPLETED 持续消费结果,避免阻塞
+        """
+        while len(pending) >= threshold:
+            done, pending_new = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            pending.clear()
+            pending.update(pending_new)
+            
+            for future in done:
+                self._process_completed_future(future, futures_map, results)
+    
+    async def _drain_all_pending(
+        self,
+        pending: set,
+        futures_map: Dict[asyncio.Future, Dict],
+        results: List[Dict]
+    ) -> None:
+        """
+        最终 drain: 确保所有任务完成
+        
+        持续消费直到 pending 为空
+        """
+        while pending:
+            done, pending_new = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            pending.clear()
+            pending.update(pending_new)
+            
+            for future in done:
+                self._process_completed_future(future, futures_map, results)
+    
+    def _process_completed_future(
+        self,
+        future: asyncio.Future,
+        futures_map: Dict[asyncio.Future, Dict],
+        results: List[Dict]
+    ) -> None:
+        """
+        处理完成的任务
+        
+        从 futures_map 取出元数据,处理结果并添加到 results
+        """
+        metadata = futures_map.pop(future, {})
+        req = metadata.get("req")
+        if req is None:
+            logger.warning("完成的任务缺少元数据,跳过")
+            return
+        
+        original_ts = metadata.get("original_ts", 0)
+        unit_id = metadata.get("unit_id", "unknown")
+        
+        try:
+            result = future.result()
+            if result and "selected_timestamp" in result:
+                req["timestamp_sec"] = result["selected_timestamp"]
+                req["_optimized"] = True
+                req["_original_timestamp"] = original_ts
+                req["_cv_quality_score"] = result.get("quality_score", 0)
+                logger.debug(
+                    f"CV 优化: {unit_id}: {original_ts:.2f}s → {result['selected_timestamp']:.2f}s "
+                    f"(score={result.get('quality_score', 0):.3f})"
+                )
+            results.append(req)
+        except Exception as e:
+            logger.warning(f"CV Worker 异常: {unit_id}: {e}")
+            results.append(req)
+
 
     def _should_fallback(self, error: Exception) -> bool:
         """
