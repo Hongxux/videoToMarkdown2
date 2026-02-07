@@ -10,7 +10,7 @@
       "raw_response_json": [
         {
           "step_id": 1,
-          "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+          "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
           "clip_start_sec": 1.0,
           "clip_end_sec": 9.5,
           "instructional_keyframe_timestamp": [
@@ -19,17 +19,18 @@
         },
         {
           "step_id": 2,
-          "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
+          "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
           "clip_start_sec": 10.0,
-          "clip_end_sec": 23.5,
+          "clip_end_sec": 25.5,
           "instructional_keyframe_timestamp": [
-            22.0
+            19.5,
+            24.5
           ]
         },
         {
           "step_id": 3,
-          "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-          "clip_start_sec": 24.5,
+          "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
+          "clip_start_sec": 26.0,
           "clip_end_sec": 34.0,
           "instructional_keyframe_timestamp": [
             33.0
@@ -37,7 +38,7 @@
         },
         {
           "step_id": 4,
-          "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
+          "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
           "clip_start_sec": 34.5,
           "clip_end_sec": 47.5,
           "instructional_keyframe_timestamp": [
@@ -46,7 +47,7 @@
         },
         {
           "step_id": 5,
-          "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
+          "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
           "clip_start_sec": 48.0,
           "clip_end_sec": 54.0,
           "instructional_keyframe_timestamp": [
@@ -62,7 +63,7 @@
           "knowledge_type": "process",
           "semantic_unit_id": "SU004",
           "step_id": 1,
-          "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+          "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
           "action_brief": "clawdbot_npm",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
@@ -77,14 +78,14 @@
           ]
         },
         {
-          "clip_id": "SU004_step_02_clawdbot_onboarding_ai_openai_chatgpt_oauth",
+          "clip_id": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
           "start_sec": 184.29999999999995,
-          "end_sec": 209.30000000000007,
+          "end_sec": 216.96666666666707,
           "knowledge_type": "process",
           "semantic_unit_id": "SU004",
           "step_id": 2,
-          "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
-          "action_brief": "clawdbot_onboarding_ai_openai_chatgpt_oauth",
+          "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+          "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -93,36 +94,40 @@
             },
             {
               "start_sec": 202.0000000000001,
-              "end_sec": 209.30000000000007
+              "end_sec": 210.13333333333333
+            },
+            {
+              "start_sec": 215.80000000000032,
+              "end_sec": 216.96666666666707
             }
           ]
         },
         {
-          "clip_id": "SU004_step_03_whatsapp_whatsapp",
-          "start_sec": 215.96666666666707,
+          "clip_id": "SU004_step_03_whatsapp",
+          "start_sec": 217.46666666666707,
           "end_sec": 225.46666666666707,
           "knowledge_type": "process",
           "semantic_unit_id": "SU004",
           "step_id": 3,
-          "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-          "action_brief": "whatsapp_whatsapp",
+          "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
+          "action_brief": "whatsapp",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
-              "start_sec": 215.96666666666707,
+              "start_sec": 217.46666666666707,
               "end_sec": 225.46666666666707
             }
           ]
         },
         {
-          "clip_id": "SU004_step_04_skills_bird_api_key_agent",
+          "clip_id": "SU004_step_04_skills_bird_api_key",
           "start_sec": 225.96666666666707,
           "end_sec": 239.63333333333424,
           "knowledge_type": "process",
           "semantic_unit_id": "SU004",
           "step_id": 4,
-          "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
-          "action_brief": "skills_bird_api_key_agent",
+          "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
+          "action_brief": "skills_bird_api_key",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -136,14 +141,14 @@
           ]
         },
         {
-          "clip_id": "SU004_step_05_whatsapp",
+          "clip_id": "SU004_step_05_action",
           "start_sec": 240.13333333333424,
           "end_sec": 246.0,
           "knowledge_type": "process",
           "semantic_unit_id": "SU004",
           "step_id": 5,
-          "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
-          "action_brief": "whatsapp",
+          "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
+          "action_brief": "action",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -157,12 +162,12 @@
         {
           "screenshot_id": "SU004_step_01_clawdbot_npm_key_01",
           "timestamp_sec": 182.79999999999995,
-          "label": "step_01:访问clawdbot官网并复制NPM一键安装命令，在终端执行安装_keyframe_1",
+          "label": "step_01:访问clawdbot官网，复制NPM一键安装命令并执行安装_keyframe_1",
           "semantic_unit_id": "SU004",
           "_relative_timestamp": 26.79999999999994,
           "_semantic_unit_start": 156.0,
           "step_id": 1,
-          "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+          "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
           "action_brief": "clawdbot_npm",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
@@ -170,60 +175,75 @@
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU004_step_02_clawdbot_onboarding_ai_openai_chatgpt_oauth_key_01",
-          "timestamp_sec": 207.80000000000007,
-          "label": "step_02:执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式_keyframe_1",
+          "screenshot_id": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2_key_01",
+          "timestamp_sec": 205.30000000000007,
+          "label": "step_02:运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道_keyframe_1",
           "semantic_unit_id": "SU004",
-          "_relative_timestamp": 51.80000000000007,
+          "_relative_timestamp": 49.30000000000007,
           "_semantic_unit_start": 156.0,
           "step_id": 2,
-          "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
-          "action_brief": "clawdbot_onboarding_ai_openai_chatgpt_oauth",
+          "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+          "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU004_step_03_whatsapp_whatsapp_key_01",
+          "screenshot_id": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2_key_02",
+          "timestamp_sec": 215.96666666666707,
+          "label": "step_02:运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道_keyframe_2",
+          "semantic_unit_id": "SU004",
+          "_relative_timestamp": 59.96666666666706,
+          "_semantic_unit_start": 156.0,
+          "step_id": 2,
+          "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+          "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
+          "analysis_mode": "tutorial_stepwise",
+          "is_instructional_keyframe": true,
+          "keyframe_index": 2,
+          "_pre_pruned": true
+        },
+        {
+          "screenshot_id": "SU004_step_03_whatsapp_key_01",
           "timestamp_sec": 224.46666666666707,
-          "label": "step_03:选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码_keyframe_1",
+          "label": "step_03:在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定_keyframe_1",
           "semantic_unit_id": "SU004",
           "_relative_timestamp": 68.46666666666707,
           "_semantic_unit_start": 156.0,
           "step_id": 3,
-          "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-          "action_brief": "whatsapp_whatsapp",
+          "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
+          "action_brief": "whatsapp",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU004_step_04_skills_bird_api_key_agent_key_01",
+          "screenshot_id": "SU004_step_04_skills_bird_api_key_key_01",
           "timestamp_sec": 238.63333333333424,
-          "label": "step_04:选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent_keyframe_1",
+          "label": "step_04:在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面_keyframe_1",
           "semantic_unit_id": "SU004",
           "_relative_timestamp": 82.63333333333424,
           "_semantic_unit_start": 156.0,
           "step_id": 4,
-          "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
-          "action_brief": "skills_bird_api_key_agent",
+          "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
+          "action_brief": "skills_bird_api_key",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU004_step_05_whatsapp_key_01",
+          "screenshot_id": "SU004_step_05_action_key_01",
           "timestamp_sec": 245.13333333333424,
-          "label": "step_05:向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线_keyframe_1",
+          "label": "step_05:向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成_keyframe_1",
           "semantic_unit_id": "SU004",
           "_relative_timestamp": 89.13333333333424,
           "_semantic_unit_start": 156.0,
           "step_id": 5,
-          "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
-          "action_brief": "whatsapp",
+          "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
+          "action_brief": "action",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
@@ -297,60 +317,75 @@
       "raw_response_json": [
         {
           "step_id": 1,
-          "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+          "step_description": "在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标",
           "clip_start_sec": 9.0,
-          "clip_end_sec": 17.0,
+          "clip_end_sec": 14.0,
           "instructional_keyframe_timestamp": [
-            13.5,
-            16.8
+            13.8
           ]
         },
         {
           "step_id": 2,
-          "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-          "clip_start_sec": 18.0,
+          "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+          "clip_start_sec": 15.0,
           "clip_end_sec": 28.0,
           "instructional_keyframe_timestamp": [
-            20.5,
-            23.8,
-            27.0,
+            22.0,
             27.8
           ]
         },
         {
           "step_id": 3,
-          "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
+          "step_description": "在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置",
           "clip_start_sec": 29.0,
-          "clip_end_sec": 54.0,
+          "clip_end_sec": 40.0,
           "instructional_keyframe_timestamp": [
-            31.0,
-            40.0,
-            47.0,
-            53.5
+            39.5
           ]
         },
         {
           "step_id": 4,
-          "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-          "clip_start_sec": 59.0,
-          "clip_end_sec": 72.0,
+          "step_description": "在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket",
+          "clip_start_sec": 41.0,
+          "clip_end_sec": 52.0,
           "instructional_keyframe_timestamp": [
-            61.5,
-            64.5,
-            68.5,
-            71.5
+            51.5
           ]
         },
         {
           "step_id": 5,
-          "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
+          "step_description": "重启clawbot服务并汇总全部配置命令供用户截图保存",
+          "clip_start_sec": 53.0,
+          "clip_end_sec": 58.0,
+          "instructional_keyframe_timestamp": [
+            57.5
+          ]
+        },
+        {
+          "step_id": 6,
+          "step_description": "在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布",
+          "clip_start_sec": 59.0,
+          "clip_end_sec": 72.0,
+          "instructional_keyframe_timestamp": [
+            71.0
+          ]
+        },
+        {
+          "step_id": 7,
+          "step_description": "在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应",
           "clip_start_sec": 73.0,
+          "clip_end_sec": 84.0,
+          "instructional_keyframe_timestamp": [
+            83.5
+          ]
+        },
+        {
+          "step_id": 8,
+          "step_description": "处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件",
+          "clip_start_sec": 85.0,
           "clip_end_sec": 98.0,
           "instructional_keyframe_timestamp": [
-            77.0,
-            83.5,
-            91.5,
-            95.5
+            97.0
           ]
         }
       ],
@@ -358,46 +393,46 @@
         {
           "clip_id": "SU010_step_01_action",
           "start_sec": 425.0,
-          "end_sec": 433.0,
+          "end_sec": 430.0,
           "knowledge_type": "process",
           "semantic_unit_id": "SU010",
           "step_id": 1,
-          "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+          "step_description": "在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标",
           "action_brief": "action",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
               "start_sec": 425.0,
-              "end_sec": 433.0
+              "end_sec": 430.0
             }
           ]
         },
         {
-          "clip_id": "SU010_step_02_action",
-          "start_sec": 434.0,
+          "clip_id": "SU010_step_02_1_0_0",
+          "start_sec": 431.0,
           "end_sec": 444.0,
           "knowledge_type": "process",
           "semantic_unit_id": "SU010",
           "step_id": 2,
-          "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-          "action_brief": "action",
+          "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+          "action_brief": "1_0_0",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
-              "start_sec": 434.0,
+              "start_sec": 431.0,
               "end_sec": 444.0
             }
           ]
         },
         {
-          "clip_id": "SU010_step_03_mac_app_id_app_secret_websocket",
+          "clip_id": "SU010_step_03_mac_app_id_clawdbot_plugins_install_app_id_confi",
           "start_sec": 445.0,
-          "end_sec": 470.86666666666684,
+          "end_sec": 456.4,
           "knowledge_type": "process",
           "semantic_unit_id": "SU010",
           "step_id": 3,
-          "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-          "action_brief": "mac_app_id_app_secret_websocket",
+          "step_description": "在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置",
+          "action_brief": "mac_app_id_clawdbot_plugins_install_app_id_confi",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -406,22 +441,60 @@
             },
             {
               "start_sec": 448.99999999999994,
-              "end_sec": 468.1333333333333
-            },
-            {
-              "start_sec": 468.60000000000025,
-              "end_sec": 470.86666666666684
+              "end_sec": 456.4
             }
           ]
         },
         {
-          "clip_id": "SU010_step_04_action",
+          "clip_id": "SU010_step_04_mac_app_secret_app_secret_config_set_channels_fe",
+          "start_sec": 457.4,
+          "end_sec": 468.86666666666684,
+          "knowledge_type": "process",
+          "semantic_unit_id": "SU010",
+          "step_id": 4,
+          "step_description": "在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket",
+          "action_brief": "mac_app_secret_app_secret_config_set_channels_fe",
+          "analysis_mode": "tutorial_stepwise",
+          "segments": [
+            {
+              "start_sec": 457.4,
+              "end_sec": 468.1333333333333
+            },
+            {
+              "start_sec": 468.60000000000025,
+              "end_sec": 468.86666666666684
+            }
+          ]
+        },
+        {
+          "clip_id": "SU010_step_05_clawbot",
+          "start_sec": 469.86666666666684,
+          "end_sec": 476.13333333333384,
+          "knowledge_type": "process",
+          "semantic_unit_id": "SU010",
+          "step_id": 5,
+          "step_description": "重启clawbot服务并汇总全部配置命令供用户截图保存",
+          "action_brief": "clawbot",
+          "analysis_mode": "tutorial_stepwise",
+          "segments": [
+            {
+              "start_sec": 469.86666666666684,
+              "end_sec": 474.5333333333333
+            },
+            {
+              "start_sec": 475.8000000000003,
+              "end_sec": 476.13333333333384
+            }
+          ]
+        },
+        {
+          "clip_id": "SU010_step_06_action",
           "start_sec": 477.13333333333384,
           "end_sec": 490.13333333333384,
           "knowledge_type": "process",
           "semantic_unit_id": "SU010",
-          "step_id": 4,
-          "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
+          "step_id": 6,
+          "step_description": "在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布",
           "action_brief": "action",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
@@ -432,18 +505,35 @@
           ]
         },
         {
-          "clip_id": "SU010_step_05_app_moltbot_clawdbot",
+          "clip_id": "SU010_step_07_app_moltbot",
           "start_sec": 491.13333333333384,
-          "end_sec": 516.1333333333339,
+          "end_sec": 502.13333333333384,
           "knowledge_type": "process",
           "semantic_unit_id": "SU010",
-          "step_id": 5,
-          "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-          "action_brief": "app_moltbot_clawdbot",
+          "step_id": 7,
+          "step_description": "在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应",
+          "action_brief": "app_moltbot",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
               "start_sec": 491.13333333333384,
+              "end_sec": 502.13333333333384
+            }
+          ]
+        },
+        {
+          "clip_id": "SU010_step_08_mac_app",
+          "start_sec": 503.13333333333384,
+          "end_sec": 516.1333333333339,
+          "knowledge_type": "process",
+          "semantic_unit_id": "SU010",
+          "step_id": 8,
+          "step_description": "处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件",
+          "action_brief": "mac_app",
+          "analysis_mode": "tutorial_stepwise",
+          "segments": [
+            {
+              "start_sec": 503.13333333333384,
               "end_sec": 516.1333333333339
             }
           ]
@@ -452,13 +542,13 @@
       "screenshot_requests": [
         {
           "screenshot_id": "SU010_step_01_action_key_01",
-          "timestamp_sec": 429.5,
-          "label": "step_01:在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力_keyframe_1",
+          "timestamp_sec": 429.8,
+          "label": "step_01:在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标_keyframe_1",
           "semantic_unit_id": "SU010",
-          "_relative_timestamp": 13.5,
+          "_relative_timestamp": 13.8,
           "_semantic_unit_start": 416.0,
           "step_id": 1,
-          "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+          "step_description": "在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标",
           "action_brief": "action",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
@@ -466,258 +556,123 @@
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_01_action_key_02",
-          "timestamp_sec": 432.8,
-          "label": "step_01:在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力_keyframe_2",
+          "screenshot_id": "SU010_step_02_1_0_0_key_01",
+          "timestamp_sec": 438.0,
+          "label": "step_02:添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线_keyframe_1",
           "semantic_unit_id": "SU010",
-          "_relative_timestamp": 16.8,
-          "_semantic_unit_start": 416.0,
-          "step_id": 1,
-          "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
-          "action_brief": "action",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 2,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_02_action_key_01",
-          "timestamp_sec": 436.5,
-          "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_1",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 20.5,
+          "_relative_timestamp": 22.0,
           "_semantic_unit_start": 416.0,
           "step_id": 2,
-          "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-          "action_brief": "action",
+          "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+          "action_brief": "1_0_0",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_02_action_key_02",
-          "timestamp_sec": 439.8,
-          "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_2",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 23.8,
-          "_semantic_unit_start": 416.0,
-          "step_id": 2,
-          "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-          "action_brief": "action",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 2,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_02_action_key_03",
-          "timestamp_sec": 443.0,
-          "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_3",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 27.0,
-          "_semantic_unit_start": 416.0,
-          "step_id": 2,
-          "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-          "action_brief": "action",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 3,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_02_action_key_04",
+          "screenshot_id": "SU010_step_02_1_0_0_key_02",
           "timestamp_sec": 443.8,
-          "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_4",
+          "label": "step_02:添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线_keyframe_2",
           "semantic_unit_id": "SU010",
           "_relative_timestamp": 27.8,
           "_semantic_unit_start": 416.0,
           "step_id": 2,
-          "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-          "action_brief": "action",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 4,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_01",
-          "timestamp_sec": 447.0,
-          "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_1",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 31.0,
-          "_semantic_unit_start": 416.0,
-          "step_id": 3,
-          "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-          "action_brief": "mac_app_id_app_secret_websocket",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 1,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_02",
-          "timestamp_sec": 456.4,
-          "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_2",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 40.39999999999995,
-          "_semantic_unit_start": 416.0,
-          "step_id": 3,
-          "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-          "action_brief": "mac_app_id_app_secret_websocket",
+          "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+          "action_brief": "1_0_0",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 2,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_03",
-          "timestamp_sec": 463.4,
-          "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_3",
+          "screenshot_id": "SU010_step_03_mac_app_id_clawdbot_plugins_install_app_id_confi_key_01",
+          "timestamp_sec": 455.9,
+          "label": "step_03:在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置_keyframe_1",
           "semantic_unit_id": "SU010",
-          "_relative_timestamp": 47.39999999999995,
+          "_relative_timestamp": 39.89999999999995,
           "_semantic_unit_start": 416.0,
           "step_id": 3,
-          "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-          "action_brief": "mac_app_id_app_secret_websocket",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 3,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_04",
-          "timestamp_sec": 470.36666666666684,
-          "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_4",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 54.36666666666684,
-          "_semantic_unit_start": 416.0,
-          "step_id": 3,
-          "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-          "action_brief": "mac_app_id_app_secret_websocket",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 4,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_04_action_key_01",
-          "timestamp_sec": 479.63333333333384,
-          "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_1",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 63.63333333333383,
-          "_semantic_unit_start": 416.0,
-          "step_id": 4,
-          "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-          "action_brief": "action",
+          "step_description": "在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置",
+          "action_brief": "mac_app_id_clawdbot_plugins_install_app_id_confi",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_04_action_key_02",
-          "timestamp_sec": 482.63333333333384,
-          "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_2",
+          "screenshot_id": "SU010_step_04_mac_app_secret_app_secret_config_set_channels_fe_key_01",
+          "timestamp_sec": 467.9,
+          "label": "step_04:在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket_keyframe_1",
           "semantic_unit_id": "SU010",
-          "_relative_timestamp": 66.63333333333384,
+          "_relative_timestamp": 51.89999999999995,
           "_semantic_unit_start": 416.0,
           "step_id": 4,
-          "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-          "action_brief": "action",
+          "step_description": "在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket",
+          "action_brief": "mac_app_secret_app_secret_config_set_channels_fe",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
-          "keyframe_index": 2,
+          "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_04_action_key_03",
-          "timestamp_sec": 486.63333333333384,
-          "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_3",
+          "screenshot_id": "SU010_step_05_clawbot_key_01",
+          "timestamp_sec": 474.36666666666684,
+          "label": "step_05:重启clawbot服务并汇总全部配置命令供用户截图保存_keyframe_1",
           "semantic_unit_id": "SU010",
-          "_relative_timestamp": 70.63333333333384,
-          "_semantic_unit_start": 416.0,
-          "step_id": 4,
-          "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-          "action_brief": "action",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 3,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_04_action_key_04",
-          "timestamp_sec": 489.63333333333384,
-          "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_4",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 73.63333333333384,
-          "_semantic_unit_start": 416.0,
-          "step_id": 4,
-          "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-          "action_brief": "action",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 4,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_01",
-          "timestamp_sec": 495.13333333333384,
-          "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_1",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 79.13333333333384,
+          "_relative_timestamp": 58.36666666666684,
           "_semantic_unit_start": 416.0,
           "step_id": 5,
-          "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-          "action_brief": "app_moltbot_clawdbot",
+          "step_description": "重启clawbot服务并汇总全部配置命令供用户截图保存",
+          "action_brief": "clawbot",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_02",
+          "screenshot_id": "SU010_step_06_action_key_01",
+          "timestamp_sec": 489.13333333333384,
+          "label": "step_06:在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布_keyframe_1",
+          "semantic_unit_id": "SU010",
+          "_relative_timestamp": 73.13333333333384,
+          "_semantic_unit_start": 416.0,
+          "step_id": 6,
+          "step_description": "在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布",
+          "action_brief": "action",
+          "analysis_mode": "tutorial_stepwise",
+          "is_instructional_keyframe": true,
+          "keyframe_index": 1,
+          "_pre_pruned": true
+        },
+        {
+          "screenshot_id": "SU010_step_07_app_moltbot_key_01",
           "timestamp_sec": 501.63333333333384,
-          "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_2",
+          "label": "step_07:在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应_keyframe_1",
           "semantic_unit_id": "SU010",
           "_relative_timestamp": 85.63333333333384,
           "_semantic_unit_start": 416.0,
-          "step_id": 5,
-          "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-          "action_brief": "app_moltbot_clawdbot",
+          "step_id": 7,
+          "step_description": "在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应",
+          "action_brief": "app_moltbot",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
-          "keyframe_index": 2,
+          "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_03",
-          "timestamp_sec": 509.63333333333384,
-          "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_3",
+          "screenshot_id": "SU010_step_08_mac_app_key_01",
+          "timestamp_sec": 515.1333333333339,
+          "label": "step_08:处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件_keyframe_1",
           "semantic_unit_id": "SU010",
-          "_relative_timestamp": 93.63333333333384,
+          "_relative_timestamp": 99.13333333333384,
           "_semantic_unit_start": 416.0,
-          "step_id": 5,
-          "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-          "action_brief": "app_moltbot_clawdbot",
+          "step_id": 8,
+          "step_description": "处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件",
+          "action_brief": "mac_app",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
-          "keyframe_index": 3,
-          "_pre_pruned": true
-        },
-        {
-          "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_04",
-          "timestamp_sec": 513.6333333333339,
-          "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_4",
-          "semantic_unit_id": "SU010",
-          "_relative_timestamp": 97.63333333333384,
-          "_semantic_unit_start": 416.0,
-          "step_id": 5,
-          "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-          "action_brief": "app_moltbot_clawdbot",
-          "analysis_mode": "tutorial_stepwise",
-          "is_instructional_keyframe": true,
-          "keyframe_index": 4,
+          "keyframe_index": 1,
           "_pre_pruned": true
         }
       ],
@@ -796,17 +751,17 @@
       "raw_response_json": [
         {
           "step_id": 1,
-          "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
+          "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
           "clip_start_sec": 1.0,
           "clip_end_sec": 14.5,
           "instructional_keyframe_timestamp": [
-            5.5,
-            14.2
+            5.0,
+            14.0
           ]
         },
         {
           "step_id": 2,
-          "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
+          "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
           "clip_start_sec": 15.0,
           "clip_end_sec": 26.5,
           "instructional_keyframe_timestamp": [
@@ -816,7 +771,7 @@
         },
         {
           "step_id": 3,
-          "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
+          "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
           "clip_start_sec": 27.0,
           "clip_end_sec": 42.5,
           "instructional_keyframe_timestamp": [
@@ -827,24 +782,25 @@
         },
         {
           "step_id": 4,
-          "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
+          "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
           "clip_start_sec": 43.0,
-          "clip_end_sec": 53.0,
+          "clip_end_sec": 53.5,
           "instructional_keyframe_timestamp": [
-            52.5
+            51.0,
+            53.0
           ]
         }
       ],
       "clip_requests": [
         {
-          "clip_id": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins",
+          "clip_id": "SU012_step_01_clawdbot_skills_gateway_dashboard_gog_github_goo",
           "start_sec": 556.0,
           "end_sec": 585.4999999999999,
           "knowledge_type": "process",
           "semantic_unit_id": "SU012",
           "step_id": 1,
-          "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
-          "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+          "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
+          "action_brief": "clawdbot_skills_gateway_dashboard_gog_github_goo",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -862,14 +818,14 @@
           ]
         },
         {
-          "clip_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot",
+          "clip_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_gog_gmail",
           "start_sec": 585.9999999999999,
           "end_sec": 597.4999999999999,
           "knowledge_type": "process",
           "semantic_unit_id": "SU012",
           "step_id": 2,
-          "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
-          "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+          "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
+          "action_brief": "client_secret_json_clawdbot_gog_google_gog_gmail",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -879,14 +835,14 @@
           ]
         },
         {
-          "clip_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+          "clip_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
           "start_sec": 597.9999999999999,
           "end_sec": 621.0666666666671,
           "knowledge_type": "process",
           "semantic_unit_id": "SU012",
           "step_id": 3,
-          "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-          "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+          "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+          "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
@@ -904,142 +860,157 @@
           ]
         },
         {
-          "clip_id": "SU012_step_04_whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+          "clip_id": "SU012_step_04_clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
           "start_sec": 621.5666666666671,
-          "end_sec": 631.5666666666671,
+          "end_sec": 632.0666666666671,
           "knowledge_type": "process",
           "semantic_unit_id": "SU012",
           "step_id": 4,
-          "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
-          "action_brief": "whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+          "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
+          "action_brief": "clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
           "analysis_mode": "tutorial_stepwise",
           "segments": [
             {
               "start_sec": 621.5666666666671,
-              "end_sec": 631.5666666666671
+              "end_sec": 632.0666666666671
             }
           ]
         }
       ],
       "screenshot_requests": [
         {
-          "screenshot_id": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins_key_01",
-          "timestamp_sec": 575.1333333333333,
-          "label": "step_01:在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户_keyframe_1",
+          "screenshot_id": "SU012_step_01_clawdbot_skills_gateway_dashboard_gog_github_goo_key_01",
+          "timestamp_sec": 574.6333333333333,
+          "label": "step_01:介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名_keyframe_1",
           "semantic_unit_id": "SU012",
-          "_relative_timestamp": 20.133333333333294,
+          "_relative_timestamp": 19.633333333333294,
           "_semantic_unit_start": 555.0,
           "step_id": 1,
-          "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
-          "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+          "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
+          "action_brief": "clawdbot_skills_gateway_dashboard_gog_github_goo",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins_key_02",
-          "timestamp_sec": 585.1999999999999,
-          "label": "step_01:在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户_keyframe_2",
+          "screenshot_id": "SU012_step_01_clawdbot_skills_gateway_dashboard_gog_github_goo_key_02",
+          "timestamp_sec": 584.9999999999999,
+          "label": "step_01:介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名_keyframe_2",
           "semantic_unit_id": "SU012",
-          "_relative_timestamp": 30.199999999999882,
+          "_relative_timestamp": 29.999999999999883,
           "_semantic_unit_start": 555.0,
           "step_id": 1,
-          "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
-          "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+          "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
+          "action_brief": "clawdbot_skills_gateway_dashboard_gog_github_goo",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 2,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot_key_01",
+          "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_gog_gmail_key_01",
           "timestamp_sec": 591.9999999999999,
-          "label": "step_02:保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。_keyframe_1",
+          "label": "step_02:下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功_keyframe_1",
           "semantic_unit_id": "SU012",
           "_relative_timestamp": 36.999999999999886,
           "_semantic_unit_start": 555.0,
           "step_id": 2,
-          "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
-          "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+          "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
+          "action_brief": "client_secret_json_clawdbot_gog_google_gog_gmail",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot_key_02",
+          "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_gog_gmail_key_02",
           "timestamp_sec": 596.9999999999999,
-          "label": "step_02:保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。_keyframe_2",
+          "label": "step_02:下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功_keyframe_2",
           "semantic_unit_id": "SU012",
           "_relative_timestamp": 41.999999999999886,
           "_semantic_unit_start": 555.0,
           "step_id": 2,
-          "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
-          "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+          "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
+          "action_brief": "client_secret_json_clawdbot_gog_google_gog_gmail",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 2,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_01",
+          "screenshot_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl_key_01",
           "timestamp_sec": 608.4,
-          "label": "step_03:在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手_keyframe_1",
+          "label": "step_03:在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求_keyframe_1",
           "semantic_unit_id": "SU012",
           "_relative_timestamp": 53.39999999999998,
           "_semantic_unit_start": 555.0,
           "step_id": 3,
-          "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-          "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+          "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+          "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_02",
+          "screenshot_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl_key_02",
           "timestamp_sec": 612.9,
-          "label": "step_03:在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手_keyframe_2",
+          "label": "step_03:在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求_keyframe_2",
           "semantic_unit_id": "SU012",
           "_relative_timestamp": 57.89999999999998,
           "_semantic_unit_start": 555.0,
           "step_id": 3,
-          "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-          "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+          "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+          "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 2,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_03",
+          "screenshot_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl_key_03",
           "timestamp_sec": 616.9,
-          "label": "step_03:在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手_keyframe_3",
+          "label": "step_03:在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求_keyframe_3",
           "semantic_unit_id": "SU012",
           "_relative_timestamp": 61.89999999999998,
           "_semantic_unit_start": 555.0,
           "step_id": 3,
-          "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-          "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+          "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+          "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 3,
           "_pre_pruned": true
         },
         {
-          "screenshot_id": "SU012_step_04_whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo_key_01",
-          "timestamp_sec": 631.0666666666671,
-          "label": "step_04:在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。_keyframe_1",
+          "screenshot_id": "SU012_step_04_clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap_key_01",
+          "timestamp_sec": 629.5666666666671,
+          "label": "step_04:设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成_keyframe_1",
           "semantic_unit_id": "SU012",
-          "_relative_timestamp": 76.06666666666706,
+          "_relative_timestamp": 74.56666666666706,
           "_semantic_unit_start": 555.0,
           "step_id": 4,
-          "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
-          "action_brief": "whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+          "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
+          "action_brief": "clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
           "analysis_mode": "tutorial_stepwise",
           "is_instructional_keyframe": true,
           "keyframe_index": 1,
+          "_pre_pruned": true
+        },
+        {
+          "screenshot_id": "SU012_step_04_clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap_key_02",
+          "timestamp_sec": 631.5666666666671,
+          "label": "step_04:设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成_keyframe_2",
+          "semantic_unit_id": "SU012",
+          "_relative_timestamp": 76.56666666666706,
+          "_semantic_unit_start": 555.0,
+          "step_id": 4,
+          "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
+          "action_brief": "clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
+          "analysis_mode": "tutorial_stepwise",
+          "is_instructional_keyframe": true,
+          "keyframe_index": 2,
           "_pre_pruned": true
         }
       ],
@@ -1107,12 +1078,12 @@
     {
       "screenshot_id": "SU004_step_01_clawdbot_npm_key_01",
       "timestamp_sec": 182.79999999999995,
-      "label": "step_01:访问clawdbot官网并复制NPM一键安装命令，在终端执行安装_keyframe_1",
+      "label": "step_01:访问clawdbot官网，复制NPM一键安装命令并执行安装_keyframe_1",
       "semantic_unit_id": "SU004",
       "_relative_timestamp": 26.79999999999994,
       "_semantic_unit_start": 156.0,
       "step_id": 1,
-      "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+      "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
       "action_brief": "clawdbot_npm",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
@@ -1120,59 +1091,44 @@
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU004_step_02_clawdbot_onboarding_ai_openai_chatgpt_oauth_key_01",
-      "timestamp_sec": 207.80000000000007,
-      "label": "step_02:执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式_keyframe_1",
+      "screenshot_id": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2_key_01",
+      "timestamp_sec": 205.30000000000007,
+      "label": "step_02:运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道_keyframe_1",
       "semantic_unit_id": "SU004",
-      "_relative_timestamp": 51.80000000000007,
+      "_relative_timestamp": 49.30000000000007,
       "_semantic_unit_start": 156.0,
       "step_id": 2,
-      "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
-      "action_brief": "clawdbot_onboarding_ai_openai_chatgpt_oauth",
+      "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+      "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU004_step_03_whatsapp_whatsapp_key_01",
+      "screenshot_id": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2_key_02",
+      "timestamp_sec": 215.96666666666707,
+      "label": "step_02:运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道_keyframe_2",
+      "semantic_unit_id": "SU004",
+      "_relative_timestamp": 59.96666666666706,
+      "_semantic_unit_start": 156.0,
+      "step_id": 2,
+      "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+      "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 2,
+      "_pre_pruned": true
+    },
+    {
+      "screenshot_id": "SU004_step_03_whatsapp_key_01",
       "timestamp_sec": 224.46666666666707,
-      "label": "step_03:选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码_keyframe_1",
+      "label": "step_03:在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定_keyframe_1",
       "semantic_unit_id": "SU004",
       "_relative_timestamp": 68.46666666666707,
       "_semantic_unit_start": 156.0,
       "step_id": 3,
-      "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-      "action_brief": "whatsapp_whatsapp",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 1,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU004_step_04_skills_bird_api_key_agent_key_01",
-      "timestamp_sec": 238.63333333333424,
-      "label": "step_04:选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent_keyframe_1",
-      "semantic_unit_id": "SU004",
-      "_relative_timestamp": 82.63333333333424,
-      "_semantic_unit_start": 156.0,
-      "step_id": 4,
-      "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
-      "action_brief": "skills_bird_api_key_agent",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 1,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU004_step_05_whatsapp_key_01",
-      "timestamp_sec": 245.13333333333424,
-      "label": "step_05:向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线_keyframe_1",
-      "semantic_unit_id": "SU004",
-      "_relative_timestamp": 89.13333333333424,
-      "_semantic_unit_start": 156.0,
-      "step_id": 5,
-      "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
+      "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
       "action_brief": "whatsapp",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
@@ -1180,14 +1136,44 @@
       "_pre_pruned": true
     },
     {
+      "screenshot_id": "SU004_step_04_skills_bird_api_key_key_01",
+      "timestamp_sec": 238.63333333333424,
+      "label": "step_04:在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面_keyframe_1",
+      "semantic_unit_id": "SU004",
+      "_relative_timestamp": 82.63333333333424,
+      "_semantic_unit_start": 156.0,
+      "step_id": 4,
+      "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
+      "action_brief": "skills_bird_api_key",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 1,
+      "_pre_pruned": true
+    },
+    {
+      "screenshot_id": "SU004_step_05_action_key_01",
+      "timestamp_sec": 245.13333333333424,
+      "label": "step_05:向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成_keyframe_1",
+      "semantic_unit_id": "SU004",
+      "_relative_timestamp": 89.13333333333424,
+      "_semantic_unit_start": 156.0,
+      "step_id": 5,
+      "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
+      "action_brief": "action",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 1,
+      "_pre_pruned": true
+    },
+    {
       "screenshot_id": "SU010_step_01_action_key_01",
-      "timestamp_sec": 429.5,
-      "label": "step_01:在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力_keyframe_1",
+      "timestamp_sec": 429.8,
+      "label": "step_01:在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标_keyframe_1",
       "semantic_unit_id": "SU010",
-      "_relative_timestamp": 13.5,
+      "_relative_timestamp": 13.8,
       "_semantic_unit_start": 416.0,
       "step_id": 1,
-      "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+      "step_description": "在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标",
       "action_brief": "action",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
@@ -1195,378 +1181,258 @@
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU010_step_01_action_key_02",
-      "timestamp_sec": 432.8,
-      "label": "step_01:在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力_keyframe_2",
+      "screenshot_id": "SU010_step_02_1_0_0_key_01",
+      "timestamp_sec": 438.0,
+      "label": "step_02:添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线_keyframe_1",
       "semantic_unit_id": "SU010",
-      "_relative_timestamp": 16.8,
-      "_semantic_unit_start": 416.0,
-      "step_id": 1,
-      "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
-      "action_brief": "action",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 2,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_02_action_key_01",
-      "timestamp_sec": 436.5,
-      "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_1",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 20.5,
+      "_relative_timestamp": 22.0,
       "_semantic_unit_start": 416.0,
       "step_id": 2,
-      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-      "action_brief": "action",
+      "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+      "action_brief": "1_0_0",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU010_step_02_action_key_02",
-      "timestamp_sec": 439.8,
-      "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_2",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 23.8,
-      "_semantic_unit_start": 416.0,
-      "step_id": 2,
-      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-      "action_brief": "action",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 2,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_02_action_key_03",
-      "timestamp_sec": 443.0,
-      "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_3",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 27.0,
-      "_semantic_unit_start": 416.0,
-      "step_id": 2,
-      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-      "action_brief": "action",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 3,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_02_action_key_04",
+      "screenshot_id": "SU010_step_02_1_0_0_key_02",
       "timestamp_sec": 443.8,
-      "label": "step_02:进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置_keyframe_4",
+      "label": "step_02:添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线_keyframe_2",
       "semantic_unit_id": "SU010",
       "_relative_timestamp": 27.8,
       "_semantic_unit_start": 416.0,
       "step_id": 2,
-      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-      "action_brief": "action",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 4,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_01",
-      "timestamp_sec": 447.0,
-      "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_1",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 31.0,
-      "_semantic_unit_start": 416.0,
-      "step_id": 3,
-      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-      "action_brief": "mac_app_id_app_secret_websocket",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 1,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_02",
-      "timestamp_sec": 456.4,
-      "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_2",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 40.39999999999995,
-      "_semantic_unit_start": 416.0,
-      "step_id": 3,
-      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-      "action_brief": "mac_app_id_app_secret_websocket",
+      "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+      "action_brief": "1_0_0",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 2,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_03",
-      "timestamp_sec": 463.4,
-      "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_3",
+      "screenshot_id": "SU010_step_03_mac_app_id_clawdbot_plugins_install_app_id_confi_key_01",
+      "timestamp_sec": 455.9,
+      "label": "step_03:在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置_keyframe_1",
       "semantic_unit_id": "SU010",
-      "_relative_timestamp": 47.39999999999995,
+      "_relative_timestamp": 39.89999999999995,
       "_semantic_unit_start": 416.0,
       "step_id": 3,
-      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-      "action_brief": "mac_app_id_app_secret_websocket",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 3,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_03_mac_app_id_app_secret_websocket_key_04",
-      "timestamp_sec": 470.36666666666684,
-      "label": "step_03:在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式_keyframe_4",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 54.36666666666684,
-      "_semantic_unit_start": 416.0,
-      "step_id": 3,
-      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-      "action_brief": "mac_app_id_app_secret_websocket",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 4,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_04_action_key_01",
-      "timestamp_sec": 479.63333333333384,
-      "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_1",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 63.63333333333383,
-      "_semantic_unit_start": 416.0,
-      "step_id": 4,
-      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-      "action_brief": "action",
+      "step_description": "在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置",
+      "action_brief": "mac_app_id_clawdbot_plugins_install_app_id_confi",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU010_step_04_action_key_02",
-      "timestamp_sec": 482.63333333333384,
-      "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_2",
+      "screenshot_id": "SU010_step_04_mac_app_secret_app_secret_config_set_channels_fe_key_01",
+      "timestamp_sec": 467.9,
+      "label": "step_04:在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket_keyframe_1",
       "semantic_unit_id": "SU010",
-      "_relative_timestamp": 66.63333333333384,
+      "_relative_timestamp": 51.89999999999995,
       "_semantic_unit_start": 416.0,
       "step_id": 4,
-      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-      "action_brief": "action",
+      "step_description": "在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket",
+      "action_brief": "mac_app_secret_app_secret_config_set_channels_fe",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
-      "keyframe_index": 2,
+      "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU010_step_04_action_key_03",
-      "timestamp_sec": 486.63333333333384,
-      "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_3",
+      "screenshot_id": "SU010_step_05_clawbot_key_01",
+      "timestamp_sec": 474.36666666666684,
+      "label": "step_05:重启clawbot服务并汇总全部配置命令供用户截图保存_keyframe_1",
       "semantic_unit_id": "SU010",
-      "_relative_timestamp": 70.63333333333384,
-      "_semantic_unit_start": 416.0,
-      "step_id": 4,
-      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-      "action_brief": "action",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 3,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_04_action_key_04",
-      "timestamp_sec": 489.63333333333384,
-      "label": "step_04:在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布_keyframe_4",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 73.63333333333384,
-      "_semantic_unit_start": 416.0,
-      "step_id": 4,
-      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
-      "action_brief": "action",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 4,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_01",
-      "timestamp_sec": 495.13333333333384,
-      "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_1",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 79.13333333333384,
+      "_relative_timestamp": 58.36666666666684,
       "_semantic_unit_start": 416.0,
       "step_id": 5,
-      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-      "action_brief": "app_moltbot_clawdbot",
+      "step_description": "重启clawbot服务并汇总全部配置命令供用户截图保存",
+      "action_brief": "clawbot",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_02",
+      "screenshot_id": "SU010_step_06_action_key_01",
+      "timestamp_sec": 489.13333333333384,
+      "label": "step_06:在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布_keyframe_1",
+      "semantic_unit_id": "SU010",
+      "_relative_timestamp": 73.13333333333384,
+      "_semantic_unit_start": 416.0,
+      "step_id": 6,
+      "step_description": "在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布",
+      "action_brief": "action",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 1,
+      "_pre_pruned": true
+    },
+    {
+      "screenshot_id": "SU010_step_07_app_moltbot_key_01",
       "timestamp_sec": 501.63333333333384,
-      "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_2",
+      "label": "step_07:在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应_keyframe_1",
       "semantic_unit_id": "SU010",
       "_relative_timestamp": 85.63333333333384,
       "_semantic_unit_start": 416.0,
-      "step_id": 5,
-      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-      "action_brief": "app_moltbot_clawdbot",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 2,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_03",
-      "timestamp_sec": 509.63333333333384,
-      "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_3",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 93.63333333333384,
-      "_semantic_unit_start": 416.0,
-      "step_id": 5,
-      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-      "action_brief": "app_moltbot_clawdbot",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 3,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU010_step_05_app_moltbot_clawdbot_key_04",
-      "timestamp_sec": 513.6333333333339,
-      "label": "step_05:在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限_keyframe_4",
-      "semantic_unit_id": "SU010",
-      "_relative_timestamp": 97.63333333333384,
-      "_semantic_unit_start": 416.0,
-      "step_id": 5,
-      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-      "action_brief": "app_moltbot_clawdbot",
-      "analysis_mode": "tutorial_stepwise",
-      "is_instructional_keyframe": true,
-      "keyframe_index": 4,
-      "_pre_pruned": true
-    },
-    {
-      "screenshot_id": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins_key_01",
-      "timestamp_sec": 575.1333333333333,
-      "label": "step_01:在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户_keyframe_1",
-      "semantic_unit_id": "SU012",
-      "_relative_timestamp": 20.133333333333294,
-      "_semantic_unit_start": 555.0,
-      "step_id": 1,
-      "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
-      "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+      "step_id": 7,
+      "step_description": "在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应",
+      "action_brief": "app_moltbot",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins_key_02",
-      "timestamp_sec": 585.1999999999999,
-      "label": "step_01:在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户_keyframe_2",
+      "screenshot_id": "SU010_step_08_mac_app_key_01",
+      "timestamp_sec": 515.1333333333339,
+      "label": "step_08:处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件_keyframe_1",
+      "semantic_unit_id": "SU010",
+      "_relative_timestamp": 99.13333333333384,
+      "_semantic_unit_start": 416.0,
+      "step_id": 8,
+      "step_description": "处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件",
+      "action_brief": "mac_app",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 1,
+      "_pre_pruned": true
+    },
+    {
+      "screenshot_id": "SU012_step_01_clawdbot_skills_gateway_dashboard_gog_github_goo_key_01",
+      "timestamp_sec": 574.6333333333333,
+      "label": "step_01:介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名_keyframe_1",
       "semantic_unit_id": "SU012",
-      "_relative_timestamp": 30.199999999999882,
+      "_relative_timestamp": 19.633333333333294,
       "_semantic_unit_start": 555.0,
       "step_id": 1,
-      "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
-      "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+      "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
+      "action_brief": "clawdbot_skills_gateway_dashboard_gog_github_goo",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 1,
+      "_pre_pruned": true
+    },
+    {
+      "screenshot_id": "SU012_step_01_clawdbot_skills_gateway_dashboard_gog_github_goo_key_02",
+      "timestamp_sec": 584.9999999999999,
+      "label": "step_01:介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名_keyframe_2",
+      "semantic_unit_id": "SU012",
+      "_relative_timestamp": 29.999999999999883,
+      "_semantic_unit_start": 555.0,
+      "step_id": 1,
+      "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
+      "action_brief": "clawdbot_skills_gateway_dashboard_gog_github_goo",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 2,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot_key_01",
+      "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_gog_gmail_key_01",
       "timestamp_sec": 591.9999999999999,
-      "label": "step_02:保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。_keyframe_1",
+      "label": "step_02:下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功_keyframe_1",
       "semantic_unit_id": "SU012",
       "_relative_timestamp": 36.999999999999886,
       "_semantic_unit_start": 555.0,
       "step_id": 2,
-      "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
-      "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+      "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
+      "action_brief": "client_secret_json_clawdbot_gog_google_gog_gmail",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot_key_02",
+      "screenshot_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_gog_gmail_key_02",
       "timestamp_sec": 596.9999999999999,
-      "label": "step_02:保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。_keyframe_2",
+      "label": "step_02:下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功_keyframe_2",
       "semantic_unit_id": "SU012",
       "_relative_timestamp": 41.999999999999886,
       "_semantic_unit_start": 555.0,
       "step_id": 2,
-      "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
-      "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+      "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
+      "action_brief": "client_secret_json_clawdbot_gog_google_gog_gmail",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 2,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_01",
+      "screenshot_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl_key_01",
       "timestamp_sec": 608.4,
-      "label": "step_03:在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手_keyframe_1",
+      "label": "step_03:在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求_keyframe_1",
       "semantic_unit_id": "SU012",
       "_relative_timestamp": 53.39999999999998,
       "_semantic_unit_start": 555.0,
       "step_id": 3,
-      "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-      "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+      "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+      "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_02",
+      "screenshot_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl_key_02",
       "timestamp_sec": 612.9,
-      "label": "step_03:在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手_keyframe_2",
+      "label": "step_03:在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求_keyframe_2",
       "semantic_unit_id": "SU012",
       "_relative_timestamp": 57.89999999999998,
       "_semantic_unit_start": 555.0,
       "step_id": 3,
-      "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-      "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+      "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+      "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 2,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_03",
+      "screenshot_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl_key_03",
       "timestamp_sec": 616.9,
-      "label": "step_03:在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手_keyframe_3",
+      "label": "step_03:在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求_keyframe_3",
       "semantic_unit_id": "SU012",
       "_relative_timestamp": 61.89999999999998,
       "_semantic_unit_start": 555.0,
       "step_id": 3,
-      "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-      "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+      "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+      "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 3,
       "_pre_pruned": true
     },
     {
-      "screenshot_id": "SU012_step_04_whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo_key_01",
-      "timestamp_sec": 631.0666666666671,
-      "label": "step_04:在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。_keyframe_1",
+      "screenshot_id": "SU012_step_04_clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap_key_01",
+      "timestamp_sec": 629.5666666666671,
+      "label": "step_04:设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成_keyframe_1",
       "semantic_unit_id": "SU012",
-      "_relative_timestamp": 76.06666666666706,
+      "_relative_timestamp": 74.56666666666706,
       "_semantic_unit_start": 555.0,
       "step_id": 4,
-      "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
-      "action_brief": "whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+      "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
+      "action_brief": "clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
       "analysis_mode": "tutorial_stepwise",
       "is_instructional_keyframe": true,
       "keyframe_index": 1,
+      "_pre_pruned": true
+    },
+    {
+      "screenshot_id": "SU012_step_04_clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap_key_02",
+      "timestamp_sec": 631.5666666666671,
+      "label": "step_04:设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成_keyframe_2",
+      "semantic_unit_id": "SU012",
+      "_relative_timestamp": 76.56666666666706,
+      "_semantic_unit_start": 555.0,
+      "step_id": 4,
+      "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
+      "action_brief": "clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
+      "analysis_mode": "tutorial_stepwise",
+      "is_instructional_keyframe": true,
+      "keyframe_index": 2,
       "_pre_pruned": true
     }
   ],
@@ -1578,7 +1444,7 @@
       "knowledge_type": "process",
       "semantic_unit_id": "SU004",
       "step_id": 1,
-      "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+      "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
       "action_brief": "clawdbot_npm",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
@@ -1593,14 +1459,14 @@
       ]
     },
     {
-      "clip_id": "SU004_step_02_clawdbot_onboarding_ai_openai_chatgpt_oauth",
+      "clip_id": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
       "start_sec": 184.29999999999995,
-      "end_sec": 209.30000000000007,
+      "end_sec": 216.96666666666707,
       "knowledge_type": "process",
       "semantic_unit_id": "SU004",
       "step_id": 2,
-      "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
-      "action_brief": "clawdbot_onboarding_ai_openai_chatgpt_oauth",
+      "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+      "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1609,36 +1475,40 @@
         },
         {
           "start_sec": 202.0000000000001,
-          "end_sec": 209.30000000000007
+          "end_sec": 210.13333333333333
+        },
+        {
+          "start_sec": 215.80000000000032,
+          "end_sec": 216.96666666666707
         }
       ]
     },
     {
-      "clip_id": "SU004_step_03_whatsapp_whatsapp",
-      "start_sec": 215.96666666666707,
+      "clip_id": "SU004_step_03_whatsapp",
+      "start_sec": 217.46666666666707,
       "end_sec": 225.46666666666707,
       "knowledge_type": "process",
       "semantic_unit_id": "SU004",
       "step_id": 3,
-      "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-      "action_brief": "whatsapp_whatsapp",
+      "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
+      "action_brief": "whatsapp",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
-          "start_sec": 215.96666666666707,
+          "start_sec": 217.46666666666707,
           "end_sec": 225.46666666666707
         }
       ]
     },
     {
-      "clip_id": "SU004_step_04_skills_bird_api_key_agent",
+      "clip_id": "SU004_step_04_skills_bird_api_key",
       "start_sec": 225.96666666666707,
       "end_sec": 239.63333333333424,
       "knowledge_type": "process",
       "semantic_unit_id": "SU004",
       "step_id": 4,
-      "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
-      "action_brief": "skills_bird_api_key_agent",
+      "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
+      "action_brief": "skills_bird_api_key",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1652,14 +1522,14 @@
       ]
     },
     {
-      "clip_id": "SU004_step_05_whatsapp",
+      "clip_id": "SU004_step_05_action",
       "start_sec": 240.13333333333424,
       "end_sec": 246.0,
       "knowledge_type": "process",
       "semantic_unit_id": "SU004",
       "step_id": 5,
-      "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
-      "action_brief": "whatsapp",
+      "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
+      "action_brief": "action",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1671,46 +1541,46 @@
     {
       "clip_id": "SU010_step_01_action",
       "start_sec": 425.0,
-      "end_sec": 433.0,
+      "end_sec": 430.0,
       "knowledge_type": "process",
       "semantic_unit_id": "SU010",
       "step_id": 1,
-      "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+      "step_description": "在飞书开放平台创建企业自建应用，填写应用名称与描述，并选择图标",
       "action_brief": "action",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
           "start_sec": 425.0,
-          "end_sec": 433.0
+          "end_sec": 430.0
         }
       ]
     },
     {
-      "clip_id": "SU010_step_02_action",
-      "start_sec": 434.0,
+      "clip_id": "SU010_step_02_1_0_0",
+      "start_sec": 431.0,
       "end_sec": 444.0,
       "knowledge_type": "process",
       "semantic_unit_id": "SU010",
       "step_id": 2,
-      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
-      "action_brief": "action",
+      "step_description": "添加应用能力并配置机器人权限：进入‘添加应用能力’，选择‘机器人’，再进入‘权限管理’点击‘开通权限’，勾选所需权限项 / 完成版本管理与发布：填写应用版本号（如1.0.0），提交并点击‘发布’按钮完成上线",
+      "action_brief": "1_0_0",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
-          "start_sec": 434.0,
+          "start_sec": 431.0,
           "end_sec": 444.0
         }
       ]
     },
     {
-      "clip_id": "SU010_step_03_mac_app_id_app_secret_websocket",
+      "clip_id": "SU010_step_03_mac_app_id_clawdbot_plugins_install_app_id_confi",
       "start_sec": 445.0,
-      "end_sec": 470.86666666666684,
+      "end_sec": 456.4,
       "knowledge_type": "process",
       "semantic_unit_id": "SU010",
       "step_id": 3,
-      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
-      "action_brief": "mac_app_id_app_secret_websocket",
+      "step_description": "在Mac终端安装飞书插件并配置APP ID：执行clawdbot plugins install命令安装插件；从飞书开放平台复制App ID，执行config set channels.feishu.appId命令配置",
+      "action_brief": "mac_app_id_clawdbot_plugins_install_app_id_confi",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1719,22 +1589,60 @@
         },
         {
           "start_sec": 448.99999999999994,
-          "end_sec": 468.1333333333333
-        },
-        {
-          "start_sec": 468.60000000000025,
-          "end_sec": 470.86666666666684
+          "end_sec": 456.4
         }
       ]
     },
     {
-      "clip_id": "SU010_step_04_action",
+      "clip_id": "SU010_step_04_mac_app_secret_app_secret_config_set_channels_fe",
+      "start_sec": 457.4,
+      "end_sec": 468.86666666666684,
+      "knowledge_type": "process",
+      "semantic_unit_id": "SU010",
+      "step_id": 4,
+      "step_description": "在Mac终端配置APP Secret与连接模式：从飞书平台复制App Secret，执行config set channels.feishu.appSecret命令；设置enabled为true并修改connectionMode为websocket",
+      "action_brief": "mac_app_secret_app_secret_config_set_channels_fe",
+      "analysis_mode": "tutorial_stepwise",
+      "segments": [
+        {
+          "start_sec": 457.4,
+          "end_sec": 468.1333333333333
+        },
+        {
+          "start_sec": 468.60000000000025,
+          "end_sec": 468.86666666666684
+        }
+      ]
+    },
+    {
+      "clip_id": "SU010_step_05_clawbot",
+      "start_sec": 469.86666666666684,
+      "end_sec": 476.13333333333384,
+      "knowledge_type": "process",
+      "semantic_unit_id": "SU010",
+      "step_id": 5,
+      "step_description": "重启clawbot服务并汇总全部配置命令供用户截图保存",
+      "action_brief": "clawbot",
+      "analysis_mode": "tutorial_stepwise",
+      "segments": [
+        {
+          "start_sec": 469.86666666666684,
+          "end_sec": 474.5333333333333
+        },
+        {
+          "start_sec": 475.8000000000003,
+          "end_sec": 476.13333333333384
+        }
+      ]
+    },
+    {
+      "clip_id": "SU010_step_06_action",
       "start_sec": 477.13333333333384,
       "end_sec": 490.13333333333384,
       "knowledge_type": "process",
       "semantic_unit_id": "SU010",
-      "step_id": 4,
-      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
+      "step_id": 6,
+      "step_description": "在飞书开放平台配置事件回调：选择‘长连接’订阅方式，点击编辑添加‘接收消息’事件，保存后创建新版本并提交发布",
       "action_brief": "action",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
@@ -1745,31 +1653,48 @@
       ]
     },
     {
-      "clip_id": "SU010_step_05_app_moltbot_clawdbot",
+      "clip_id": "SU010_step_07_app_moltbot",
       "start_sec": 491.13333333333384,
-      "end_sec": 516.1333333333339,
+      "end_sec": 502.13333333333384,
       "knowledge_type": "process",
       "semantic_unit_id": "SU010",
-      "step_id": 5,
-      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
-      "action_brief": "app_moltbot_clawdbot",
+      "step_id": 7,
+      "step_description": "在飞书手机App中测试机器人功能：打开‘MoltBot机器人’会话，发送‘你好’和‘现在几点了’验证基础交互与时间响应",
+      "action_brief": "app_moltbot",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
           "start_sec": 491.13333333333384,
+          "end_sec": 502.13333333333384
+        }
+      ]
+    },
+    {
+      "clip_id": "SU010_step_08_mac_app",
+      "start_sec": 503.13333333333384,
+      "end_sec": 516.1333333333339,
+      "knowledge_type": "process",
+      "semantic_unit_id": "SU010",
+      "step_id": 8,
+      "step_description": "处理截屏权限并完成文件传递：收到机器人提示需先授权；跳转至Mac控制台对话确认设备所有权后，返回App成功获取截图并接收文件",
+      "action_brief": "mac_app",
+      "analysis_mode": "tutorial_stepwise",
+      "segments": [
+        {
+          "start_sec": 503.13333333333384,
           "end_sec": 516.1333333333339
         }
       ]
     },
     {
-      "clip_id": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins",
+      "clip_id": "SU012_step_01_clawdbot_skills_gateway_dashboard_gog_github_goo",
       "start_sec": 556.0,
       "end_sec": 585.4999999999999,
       "knowledge_type": "process",
       "semantic_unit_id": "SU012",
       "step_id": 1,
-      "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
-      "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+      "step_description": "介绍clawdbot的skills功能并演示在Gateway Dashboard中一键安装第三方技能（如gog、github等） / 在Google Cloud Console中导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户端ID，选择应用类型为桌面应用并命名",
+      "action_brief": "clawdbot_skills_gateway_dashboard_gog_github_goo",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1787,14 +1712,14 @@
       ]
     },
     {
-      "clip_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot",
+      "clip_id": "SU012_step_02_client_secret_json_clawdbot_gog_google_gog_gmail",
       "start_sec": 585.9999999999999,
       "end_sec": 597.4999999999999,
       "knowledge_type": "process",
       "semantic_unit_id": "SU012",
       "step_id": 2,
-      "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
-      "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+      "step_description": "下载生成的client_secret.json文件，并将其拖入clawdbot终端进行gog认证配置 / 登录Google账号并授予gog访问权限（包括Gmail、Calendar、Docs等），完成授权后返回终端确认连接成功",
+      "action_brief": "client_secret_json_clawdbot_gog_google_gog_gmail",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1804,14 +1729,14 @@
       ]
     },
     {
-      "clip_id": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+      "clip_id": "SU012_step_03_clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
       "start_sec": 597.9999999999999,
       "end_sec": 621.0666666666671,
       "knowledge_type": "process",
       "semantic_unit_id": "SU012",
       "step_id": 3,
-      "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
-      "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+      "step_description": "在clawdbot终端中查询最近邮件并总结内容；当遇到403权限不足时，按提示启用Gmail API并等待生效，再次执行命令成功读取邮件摘要 / 指令clawdbot将所有邮件移动到垃圾箱，系统提供两种方案并确认选择方案1，执行后显示已移动43封邮件完成操作 / 通过手机WhatsApp向clawdbot发送指令，要求",
+      "action_brief": "clawdbot_403_gmail_api_clawdbot_1_43_whatsapp_cl",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
@@ -1829,19 +1754,19 @@
       ]
     },
     {
-      "clip_id": "SU012_step_04_whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+      "clip_id": "SU012_step_04_clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
       "start_sec": 621.5666666666671,
-      "end_sec": 631.5666666666671,
+      "end_sec": 632.0666666666671,
       "knowledge_type": "process",
       "semantic_unit_id": "SU012",
       "step_id": 4,
-      "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
-      "action_brief": "whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+      "step_description": "设置clawdbot每2分钟检查Gmail未读邮件，发现新邮件即通过WhatsApp通知；随后从Gmail发送测试邮件，clawdbot成功检测并推送通知含发件人与主题 / 在WhatsApp中要求clawdbot总结新邮件内容，其返回包含版本号、标题及Bug Fixes列表的结构化摘要，确认任务完成",
+      "action_brief": "clawdbot_2_gmail_whatsapp_gmail_clawdbot_whatsap",
       "analysis_mode": "tutorial_stepwise",
       "segments": [
         {
           "start_sec": 621.5666666666671,
-          "end_sec": 631.5666666666671
+          "end_sec": 632.0666666666671
         }
       ]
     }

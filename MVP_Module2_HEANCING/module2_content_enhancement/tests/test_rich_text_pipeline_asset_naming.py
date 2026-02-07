@@ -63,7 +63,7 @@ def test_collect_material_requests_uses_title_and_action_description(tmp_path):
     assert "su900_open" in screenshot_id.lower()
 
 
-def test_apply_external_materials_reorganizes_into_unit_assets_dir(tmp_path):
+def test_apply_external_materials_uses_existing_assets_without_copy(tmp_path):
     pipeline, output_dir = _build_pipeline(tmp_path)
 
     class _AlwaysInclude:
@@ -77,10 +77,9 @@ def test_apply_external_materials_reorganizes_into_unit_assets_dir(tmp_path):
 
     pipeline._concrete_validator = _AlwaysInclude()
 
-    screenshots_dir = tmp_path / "incoming_screens"
-    clips_dir = tmp_path / "incoming_clips"
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
     (screenshots_dir / "SU901").mkdir(parents=True, exist_ok=True)
-    (clips_dir / "SU901").mkdir(parents=True, exist_ok=True)
 
     source_img = screenshots_dir / "SU901" / "random_name.png"
     source_img.write_bytes(b"img")
@@ -127,8 +126,8 @@ def test_apply_external_materials_reorganizes_into_unit_assets_dir(tmp_path):
     )
 
     assert unit.materials is not None
-    assert unit.materials.screenshot_paths, "screenshot should be found and normalized"
-    assert unit.materials.clip_path, "clip should be found and normalized"
+    assert unit.materials.screenshot_paths, "screenshot should be found"
+    assert unit.materials.clip_path, "clip should be found"
 
     screenshot_path = Path(unit.materials.screenshot_paths[0])
     clip_path = Path(unit.materials.clip_path)
@@ -137,17 +136,12 @@ def test_apply_external_materials_reorganizes_into_unit_assets_dir(tmp_path):
     assert clip_path.exists()
     assert screenshot_path.parent.name == "SU901"
     assert clip_path.parent.name == "SU901"
-    assert screenshot_path.name.lower().startswith("su901_")
-    assert clip_path.name.lower().startswith("su901_")
-
-    # ??????????? assets ???
-    assets_dir = output_dir / "assets" / "SU901"
-    assert str(screenshot_path).startswith(str(assets_dir))
-    assert str(clip_path).startswith(str(assets_dir))
+    assert screenshot_path == source_img.resolve()
+    assert clip_path == source_clip.resolve()
 
 
-def test_apply_external_materials_prefers_request_id_for_normalized_names(tmp_path):
-    pipeline, _ = _build_pipeline(tmp_path)
+def test_apply_external_materials_prefers_request_id_path_without_copy(tmp_path):
+    pipeline, output_dir = _build_pipeline(tmp_path)
 
     class _AlwaysInclude:
         def validate(self, image_path: str):
@@ -160,14 +154,10 @@ def test_apply_external_materials_prefers_request_id_for_normalized_names(tmp_pa
 
     pipeline._concrete_validator = _AlwaysInclude()
 
-    screenshots_dir = tmp_path / "incoming_screens"
-    clips_dir = tmp_path / "incoming_clips"
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     clips_dir.mkdir(parents=True, exist_ok=True)
-
-    # ?????????????????? request_id ???????
-    (screenshots_dir / "raw_abc.png").write_bytes(b"img")
-    (clips_dir / "raw_clip.mp4").write_bytes(b"video")
 
     unit = SemanticUnit(
         unit_id="SU902",
@@ -201,7 +191,6 @@ def test_apply_external_materials_prefers_request_id_for_normalized_names(tmp_pa
         action_classifications=[],
     )
 
-    # 请求 ID 含语义单元子路径，提取阶段应能直接命中该层级
     screenshot_incoming_path = screenshots_dir / f"{requests.screenshot_requests[0].screenshot_id}.png"
     clip_incoming_path = clips_dir / f"{requests.clip_requests[0].clip_id}.mp4"
     screenshot_incoming_path.parent.mkdir(parents=True, exist_ok=True)
@@ -219,15 +208,15 @@ def test_apply_external_materials_prefers_request_id_for_normalized_names(tmp_pa
     screenshot_path = Path(unit.materials.screenshot_paths[0])
     clip_path = Path(unit.materials.clip_path)
 
-    assert "open_settings" in screenshot_path.name.lower()
-    assert "open_settings" in clip_path.name.lower()
+    assert screenshot_path == screenshot_incoming_path.resolve()
+    assert clip_path == clip_incoming_path.resolve()
 
 
 def test_apply_external_materials_validates_concept_screenshots(tmp_path):
-    pipeline, _ = _build_pipeline(tmp_path)
+    pipeline, output_dir = _build_pipeline(tmp_path)
 
-    screenshots_dir = tmp_path / "incoming_screens"
-    clips_dir = tmp_path / "incoming_clips"
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     clips_dir.mkdir(parents=True, exist_ok=True)
 
@@ -296,10 +285,10 @@ def test_apply_external_materials_validates_concept_screenshots(tmp_path):
 
 
 def test_apply_external_materials_skips_validation_for_process(tmp_path):
-    pipeline, _ = _build_pipeline(tmp_path)
+    pipeline, output_dir = _build_pipeline(tmp_path)
 
-    screenshots_dir = tmp_path / "incoming_screens"
-    clips_dir = tmp_path / "incoming_clips"
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
     screenshots_dir.mkdir(parents=True, exist_ok=True)
     clips_dir.mkdir(parents=True, exist_ok=True)
 
@@ -346,3 +335,127 @@ def test_apply_external_materials_skips_validation_for_process(tmp_path):
     )
 
     assert len(unit.materials.screenshot_paths) == 1
+
+
+def test_apply_external_materials_skips_non_assets_candidates_in_no_copy_mode(tmp_path):
+    pipeline, _ = _build_pipeline(tmp_path)
+
+    class _AlwaysInclude:
+        def validate(self, image_path: str):
+            class _Result:
+                should_include = True
+                reason = "ok"
+                img_description = "ok"
+
+            return _Result()
+
+    pipeline._concrete_validator = _AlwaysInclude()
+
+    screenshots_dir = tmp_path / "incoming_screens"
+    clips_dir = tmp_path / "incoming_clips"
+    (screenshots_dir / "SU905").mkdir(parents=True, exist_ok=True)
+    (clips_dir / "SU905").mkdir(parents=True, exist_ok=True)
+    (screenshots_dir / "SU905" / "shot.png").write_bytes(b"img")
+    (clips_dir / "SU905" / "clip.mp4").write_bytes(b"clip")
+
+    unit = SemanticUnit(
+        unit_id="SU905",
+        knowledge_type="process",
+        knowledge_topic="Install NodeJS",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=20.0,
+    )
+
+    requests = MaterialRequests(
+        screenshot_requests=[
+            ScreenshotRequest(
+                screenshot_id="missing_id",
+                timestamp_sec=1.0,
+                label="head",
+                semantic_unit_id="SU905",
+            )
+        ],
+        clip_requests=[
+            ClipRequest(
+                clip_id="missing_clip",
+                start_sec=0.0,
+                end_sec=5.0,
+                knowledge_type="process",
+                semantic_unit_id="SU905",
+            )
+        ],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(screenshots_dir),
+        clips_dir=str(clips_dir),
+        material_requests=requests,
+    )
+
+    assert unit.materials is not None
+    assert unit.materials.screenshot_paths == []
+    assert unit.materials.clip_path == ""
+
+
+def test_apply_external_materials_reuses_prevalidated_concrete_result(tmp_path):
+    pipeline, output_dir = _build_pipeline(tmp_path)
+
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    shot_name = "SU906_head"
+    shot_path = screenshots_dir / f"{shot_name}.png"
+    shot_path.write_bytes(b"img")
+
+    unit = SemanticUnit(
+        unit_id="SU906",
+        knowledge_type="abstract",
+        knowledge_topic="Coref Reuse",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=20.0,
+    )
+
+    class _Result:
+        should_include = True
+        reason = "prevalidated"
+        img_description = "prevalidated_desc"
+
+    class _FailValidator:
+        def validate(self, image_path: str):
+            raise AssertionError("validate should not be called when prevalidated cache exists")
+
+    pipeline._concrete_validator = _FailValidator()
+    pipeline._prevalidated_concrete_results[str(shot_path.resolve())] = _Result()
+
+    requests = MaterialRequests(
+        screenshot_requests=[
+            ScreenshotRequest(
+                screenshot_id=shot_name,
+                timestamp_sec=1.0,
+                label="head",
+                semantic_unit_id="SU906",
+            )
+        ],
+        clip_requests=[],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(screenshots_dir),
+        clips_dir=str(clips_dir),
+        material_requests=requests,
+    )
+
+    assert len(unit.materials.screenshot_paths) == 1
+    assert unit.materials.screenshot_items[0]["img_description"] == "prevalidated_desc"

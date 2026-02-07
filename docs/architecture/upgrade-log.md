@@ -507,3 +507,183 @@
 - 可复用经验：
   - “LLM 结构化占位 + 本地确定性绑定”可复用于其它知识类型，且能在不改协议情况下提升图文对齐。
 
+## 2026-02-08 Phase2B 语义单元素材对齐升级（imgneeded 协议 + unit 目录化请求ID）
+- 日期：2026-02-08
+- 版本/分支/提交：未记录
+- 触发背景与问题：
+  - Phase2B 在 abstract/concrete 的图文组装中，图片占位符协议与提示词存在历史格式混用（`[IMG:img_id]` 等），导致替换口径不一致。
+  - 素材提取链路中请求 ID 与实际落盘路径在部分流程仍偏扁平，语义单元级素材命中依赖兜底匹配，不利于稳定读取与排障。
+  - 用户要求在 Phase2B 中对 abstract/concrete 先进行图片校验（`concrete_knowledge_validator`）并剔除不合格图片，再让 DeepSeek 根据图片描述插入占位符，最后替换为 Obsidian 嵌入语法。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - 新增 `_build_unit_relative_request_id(...)`：统一生成 `"{unit_id}/{request_base}"` 形式请求 ID。
+    - `_collect_material_requests(...)`：截图/切片请求 ID 全量切换为 unit 相对路径形式（含 action/stable/fallback 分支）。
+    - `_apply_external_materials(...)`：
+      - 图片校验范围调整为仅 `abstract/concrete`（process 不再走 `concrete_knowledge_validator`）。
+      - 增强候选查找优先级与路径去重，优先命中 request_id 指定路径与 unit 子目录。
+      - 增加校验统计日志（kept/rejected）与“无素材命中”告警。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - `STRUCTURED_TEXT_*_PROMPT` 改为新占位协议：`【imgneeded_{img_id}】`。
+    - `_replace_image_placeholders(...)` 仅匹配并替换新协议占位符，替换目标复用 `_format_obsidian_embed(...)`。
+    - 保留 `_append_missing_image_embeds(...)` 作为 LLM 漏插时兜底。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py`
+    - 新增/重写 `imgneeded` 正向替换测试。
+    - 新增旧占位符不替换但会触发 Supplemental images 兜底的测试。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+    - 补充请求 ID 带 `unit_id/` 的断言。
+    - 增加带子路径 request_id 的素材命中测试。
+    - 对齐“仅 concept（abstract/concrete）进行图片校验”的新行为。
+- 关键决策与理由：
+  - 决策1：请求 ID 统一目录化（`unit_id/...`），在提取阶段即完成素材分组。
+    - 为什么：从源头消除后置重组依赖，降低跨单元串素材风险。
+    - 权衡：调用方（Java/FFmpeg）需按相对路径写文件，否则需依赖 Phase2B 兜底匹配。
+  - 决策2：占位符协议收敛为单一格式 `【imgneeded_{img_id}】`。
+    - 为什么：减少 LLM 产物歧义与替换逻辑复杂度，提升可测性。
+    - 权衡：旧格式不再自动替换，需通过兜底补图或上游提示词迁移覆盖。
+  - 决策3：图片校验仅作用于 abstract/concrete。
+    - 为什么：符合“概念型先验图像有效性过滤”的目标，避免 process 单元误删关键帧。
+    - 权衡：process 单元质量依赖其自身流程与截图策略，不再复用 concept 的校验器。
+- 兼容性影响：
+  - `ScreenshotRequest.screenshot_id` 与 `ClipRequest.clip_id` 的可用形态从“纯名称”扩展为“unit 子路径相对 ID”；协议字段未新增。
+  - Markdown 占位符协议升级到 `imgneeded`，旧格式在替换阶段不再兼容。
+- 风险与回滚方案：
+  - 若外部提取器未按 request_id 相对路径落盘，可能出现首轮命中下降；可临时依赖 fallback 搜索兜底，并在编排侧补齐目录化写盘。
+  - 若业务需要短期兼容旧占位符，可在 `_replace_image_placeholders` 追加旧正则分支并以开关控制。
+  - 回滚路径：恢复 `_collect_material_requests` 的旧 ID 生成方式与旧占位符正则。
+- 验证方式与结果：
+  - 单元测试覆盖：
+    - `imgneeded` 替换、旧占位符兜底、process 非教程渲染、request_id 子路径命中。
+  - 语法检查：对关键模块执行 `python -m py_compile`。
+- 可复用经验：
+  - 对“跨语言编排 + 文件落盘”链路，优先将目录语义编码到请求 ID，可显著降低后置匹配复杂度。
+  - 对 LLM 占位协议应保持“单一合法格式 + 兜底渲染”双层保障，避免生产输出受提示词波动影响。
+
+## 2026-02-08 Phase2A/Assets 耗时优化（路由截图流式 + 热路径对象复用）
+- 日期：2026-02-08
+- 版本/分支/提交：未记录
+- 触发背景与问题：
+  - 线上日志显示 `screenshot_selector` 的 `Coarse-Fine selection` 单任务耗时高（100s~300s 级），且路由截图阶段总体 wall time 过长。
+  - 原路由截图为 `ThreadPool + batch gather`，并发上限固定且喂料不连续，存在“阶段性空转 + 阻塞等待”现象。
+  - Phase2A 热路径存在重复对象构建（segmenter / VisualFeatureExtractor），增加请求时延与初始化开销。
+- 改动范围（模块/接口/数据）：
+  - `python_grpc_server.py`
+    - 路由截图新增 `process_streaming` 模式：`asyncio.Queue` 生产者-消费者 + `cv_process_pool` 执行 `run_select_screenshots_for_range_task`。
+    - 保留 `legacy_batch` 兼容路径，可通过配置开关回退。
+    - 新增路由截图 PID/进度日志（active_pids、queue 长度），用于验证真实并发。
+    - `RichTextPipeline` 构造处统一注入 `self.resources.semantic_unit_segmenter` 单例，减少 `SemanticUnitSegmenter/LLM client` 热路径重复初始化。
+  - `cv_worker.py`
+    - 新增 `run_select_screenshots_for_range_task(...)`：路由截图专用 worker 入口，返回 `worker_pid` 与 `elapsed_ms` 诊断字段。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/screenshot_selector.py`
+    - 粗/细采样切换为“按时间戳顺序读帧”策略，降低随机 seek 频率。
+    - `select_best_frame_from_frames` 增加并行质量评分（小规模 ThreadPool）。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`
+    - 新增按 `video_path` 的 `VisualFeatureExtractor` 缓存复用，并接入 screenshot optimization 的 batch/streaming 路径。
+  - `MVP_Module2_HEANCING/config/module2_config.yaml`
+    - 新增/落地配置：
+      - `vl_material_generation.routing.screenshot_pipeline_mode`
+      - `vl_material_generation.routing.screenshot_worker_count`
+      - `vl_material_generation.routing.screenshot_queue_maxsize`
+      - `vl_material_generation.routing.screenshot_coarse_fps`
+      - `vl_material_generation.routing.screenshot_fine_fps`
+      - `vl_material_generation.screenshot_optimization.reuse_visual_extractor`
+- 关键决策与理由：
+  - 决策1：路由截图从线程批处理切换为进程流式（默认）。
+    - 为什么：coarse-fine 计算与解码均为重 CPU/IO，进程池隔离 + 持续喂料更能稳定压榨多核。
+    - 权衡：调度复杂度上升，但保留 `legacy_batch` 可快速回退。
+  - 决策2：截图读帧采用顺序读取优先策略。
+    - 为什么：减少 `cap.set(...)` 频次，降低随机寻址造成的解码抖动。
+    - 权衡：对稀疏跳读场景收益有限，但在连续区间 coarse/fine 采样场景收益稳定。
+  - 决策3：单例注入 segmenter + 缓存复用 extractor。
+    - 为什么：降低 Phase2A 热路径对象构建与客户端初始化成本。
+    - 权衡：引入生命周期管理风险，采用按 `video_path` 缓存与兼容开关控制。
+- 兼容性影响：
+  - gRPC/proto 无字段变更。
+  - 路由截图默认执行路径变更为 `process_streaming`；如需旧行为，可将 `screenshot_pipeline_mode` 设为 `legacy_batch`。
+- 风险与回滚方案：
+  - 若发现特定环境进程池不稳定，可切回 `legacy_batch`。
+  - 若 extractor 缓存导致资源占用偏高，可关闭 `reuse_visual_extractor`。
+  - 若顺序读帧在极端跳读场景退化，可回退到旧的随机 seek 读取实现。
+- 验证方式与结果：
+  - 代码层：`python -m py_compile` 覆盖修改模块，确认语法正确。
+  - 运行层：建议对同一视频对比 `route_ms`、`active_pids`、`Coarse-Fine` 单任务时延分布与 CPU 利用率。
+- 可复用经验：
+  - 对长耗时“段处理”任务，优先采用“流式喂料 + 背压队列 + worker PID 观测”三件套定位并发真实性与瓶颈。
+  - 对 CV/LLM 热路径优先做“对象复用”而非“阈值调参”，可在不改正确率口径下获得稳定时延收益。
+
+## 2026-02-07 Phase2B 素材直写与 no-copy 收敛
+- 日期：2026-02-07
+- 触发背景与问题：
+  - 语义单元截图/视频片段存在“先落中间目录，再在 Phase2B 二次复制/搬运”的路径，增加 IO 与命名分叉风险。
+  - 用户要求素材在提取阶段直接进入最终目录（`assets/{unit_id}/...`），并在 Phase2B 严格按该目录读取，不再来回复制。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+    - 输出根目录从 `screenshots/`、`clips/` 收敛为 `assets/`。
+    - 截图与切片按 `request_id` 直接写入 `assets` 子路径，写入前确保父目录存在。
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/FFmpegService.java`
+    - 与 JavaCV 版本一致：直写 `assets/`，并按 `request_id` 子路径创建目录后输出。
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - Phase2B 组装入参 `screenshots_dir` / `clips_dir` 统一传 `outputDir/assets`。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - `_apply_external_materials(...)` 去除复制逻辑（`copy2`），改为 no-copy 路径归一：仅接受已位于 `assets` 根目录下的素材。
+    - 对于不在 `assets` 下的候选素材直接跳过并记录 warning，避免隐式修复导致路径漂移。
+    - `_select_screenshot(...)` / `_extract_action_clip(...)` 在 no-copy 模式下不再 `move`，若第三方返回非目标路径则回退 ffmpeg 直写目标路径。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+    - 用例调整为验证“已有 assets 路径直接复用、不复制不重命名”。
+    - 新增 no-copy 负例：非 assets 来源候选会被跳过。
+- 关键决策与理由：
+  - 决策1：以 `request_id` 表达目录语义并在提取时一次性落位。
+    - 为什么：把“语义单元归档”前移到生成阶段，减少 Phase2B 复杂匹配与后处理 IO。
+  - 决策2：Phase2B 强约束 no-copy。
+    - 为什么：保证素材路径单一真源（single source of truth），避免同一素材多份副本引起引用不一致。
+- 兼容性影响：
+  - 不改变 gRPC/proto 字段，仅改变 `screenshots_dir` / `clips_dir` 语义为同一 `assets` 根目录。
+  - 若上游未按 `assets` 落位，Phase2B 将跳过该素材（有日志告警），不再自动复制修复。
+- 验证方式与结果：
+  - `python -m py_compile MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过。
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过（6 passed）。
+  - `mvn -q -DskipTests compile`（`enterprise_services/java_orchestrator`）通过。
+
+## 2026-02-08 Phase2B 指代断层预补全 + 低置信度视觉校验复用
+- 日期：2026-02-08
+- 触发背景与问题：
+  - 用户要求在 `concrete_knowledge_validator` 常规截图验证之前，先执行“指代断层补全”，并对低置信度补全结果做视觉确认。
+  - 需要避免同一截图在“预补全阶段”和“后续截图筛选阶段”重复调用 `concrete_knowledge_validator`。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py`
+    - 新增 `COREFERENCE_REPLACEMENT_PROMPT_TEMPLATE`。
+    - 新增 `validate_for_coreference(image_path, sentence_text, context_text="")`：
+      - 先复用 `validate(...)` 输出常规具象判断；
+      - 再调用 Vision 做句级指代补全；
+      - 返回字段新增 `replaced_text` / `replace_confidence` / `replace_reason` / `mode` / `concrete_result`。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/coreference_resolver.py`（新增）
+    - 封装 Phase2B 指代断层预补全流程：
+      - DeepSeek 识别+补全断层；
+      - 低置信度（<0.8）优先使用“句子时间范围内现成截图”做 Vision 补全；
+      - 无现成截图时调用 `screenshot_selector.select_screenshots_for_range_sync` 抽多图再尝试补全；
+      - 产出 `updated_text` 与 `prevalidated_results`（后续复用）。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - 新增 Stage：`[Phase2B-1.7] Coreference Gap Pre-Resolution`。
+    - `assemble_only` 中在应用外部素材前执行指代预补全并回写 `unit.full_text`。
+    - 新增运行态缓存 `self._prevalidated_concrete_results`，在 `_apply_external_materials` 中优先命中，避免重复调用 `validate(...)`。
+  - 测试：
+    - 新增 `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_coreference_resolver.py`。
+    - 扩展 `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`，覆盖 prevalidated 复用路径。
+- 关键决策与理由：
+  - 决策1：指代补全前置到 Phase2B 素材应用之前。
+    - 为什么：确保后续 Markdown 增强使用的是已补全文本，减少二次改写不一致。
+  - 决策2：低置信度才触发视觉补全（阈值 0.8）。
+    - 为什么：控制额外 Vision 调用成本，同时在高风险断层上提升准确率。
+  - 决策3：复用预校验结果到常规截图验证。
+    - 为什么：避免重复 API/CV 调用，降低耗时和成本，并保持判定一致性。
+- 兼容性影响：
+  - 不改变 gRPC/proto 对外接口。
+  - `concrete_knowledge_validator` 为新增方法与返回字段，不破坏既有 `validate(...)` 调用方。
+- 风险与回滚方案：
+  - 若视觉补全不稳定，可仅保留 DeepSeek 补全（通过关闭/替换 `CoreferenceResolver` 调用路径）。
+  - 若新增阶段影响时延，可将低置信度视觉补全阈值上调或临时禁用。
+- 验证方式与结果：
+  - 新增/扩展单元测试覆盖：
+    - DeepSeek 高置信度直替换；
+    - 低置信度触发 existing screenshot 视觉补全；
+    - 预校验结果在 `_apply_external_materials` 中命中复用。
+

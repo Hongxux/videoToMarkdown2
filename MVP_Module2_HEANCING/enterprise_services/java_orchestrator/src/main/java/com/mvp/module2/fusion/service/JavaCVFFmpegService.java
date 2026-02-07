@@ -254,13 +254,11 @@ public class JavaCVFFmpegService {
                     clipRequests != null ? new ArrayList<>(clipRequests) : new ArrayList<>();
 
                 // 创建输出目录
-                String screenshotsDir = Paths.get(outputDir, "screenshots").toString();
-                String clipsDir = Paths.get(outputDir, "clips").toString();
-                Files.createDirectories(Paths.get(screenshotsDir));
-                Files.createDirectories(Paths.get(clipsDir));
-                
-                result.screenshotsDir = screenshotsDir;
-                result.clipsDir = clipsDir;
+                String assetsDir = Paths.get(outputDir, "assets").toString();
+                Files.createDirectories(Paths.get(assetsDir));
+
+                result.screenshotsDir = assetsDir;
+                result.clipsDir = assetsDir;
                 
                 logger.info(
                     "🚀 JavaCV extraction starting: {} screenshots, {} clips, timeout={}s (producer-consumer)",
@@ -270,7 +268,7 @@ public class JavaCVFFmpegService {
                 // 阶段间采用生产者-消费者：material requests 进入队列后即可被消费提取
                 // 截图保持顺序复用同一个 grabber；clip 使用多 worker 并发消费。
                 CompletableFuture<Integer> screenshotConsumer = CompletableFuture.supplyAsync(
-                    () -> extractScreenshotsBatch(videoPath, screenshotsDir, safeScreenshotRequests),
+                    () -> extractScreenshotsBatch(videoPath, assetsDir, safeScreenshotRequests),
                     executorService
                 );
 
@@ -303,7 +301,7 @@ public class JavaCVFFmpegService {
                 for (int i = 0; i < clipWorkers; i++) {
                     final int workerIndex = i;
                     clipConsumers.add(CompletableFuture.supplyAsync(
-                        () -> consumeClipQueue(videoPath, clipsDir, clipQueue, workerIndex),
+                        () -> consumeClipQueue(videoPath, assetsDir, clipQueue, workerIndex),
                         executorService
                     ));
                 }
@@ -365,8 +363,12 @@ public class JavaCVFFmpegService {
                         BufferedImage image = converter.convert(frame);
                         
                         // 保存为 PNG
-                        String outputPath = Paths.get(outputDir, req.screenshotId + ".png").toString();
-                        ImageIO.write(image, "PNG", new File(outputPath));
+                        Path outputPath = Paths.get(outputDir, req.screenshotId + ".png");
+                        Path parentDir = outputPath.getParent();
+                        if (parentDir != null) {
+                            Files.createDirectories(parentDir);
+                        }
+                        ImageIO.write(image, "PNG", outputPath.toFile());
                         
                         success++;
                         totalScreenshots.incrementAndGet();
@@ -398,15 +400,19 @@ public class JavaCVFFmpegService {
         
         for (ClipRequest req : requests) {
             try {
-                String outputPath = Paths.get(outputDir, req.clipId + ".mp4").toString();
+                Path outputPath = Paths.get(outputDir, req.clipId + ".mp4");
+                Path parentDir = outputPath.getParent();
+                if (parentDir != null) {
+                    Files.createDirectories(parentDir);
+                }
                 boolean extracted;
                 if (req.segments != null && !req.segments.isEmpty()) {
-                    extracted = extractConcatClip(videoPath, outputPath, req.segments);
+                    extracted = extractConcatClip(videoPath, outputPath.toString(), req.segments);
                     if (!extracted) {
-                        extracted = extractSingleClip(videoPath, outputPath, req.startSec, req.endSec);
+                        extracted = extractSingleClip(videoPath, outputPath.toString(), req.startSec, req.endSec);
                     }
                 } else {
-                    extracted = extractSingleClip(videoPath, outputPath, req.startSec, req.endSec);
+                    extracted = extractSingleClip(videoPath, outputPath.toString(), req.startSec, req.endSec);
                 }
                 if (extracted) {
                     success++;
@@ -441,8 +447,12 @@ public class JavaCVFFmpegService {
                 }
 
                 try {
-                    String outputPath = Paths.get(outputDir, req.clipId + ".mp4").toString();
-                    boolean extracted = extractClipWithWorkerGrabber(workerGrabber, outputPath, req);
+                    Path outputPath = Paths.get(outputDir, req.clipId + ".mp4");
+                    Path parentDir = outputPath.getParent();
+                    if (parentDir != null) {
+                        Files.createDirectories(parentDir);
+                    }
+                    boolean extracted = extractClipWithWorkerGrabber(workerGrabber, outputPath.toString(), req);
                     if (extracted) {
                         success++;
                         totalClips.incrementAndGet();

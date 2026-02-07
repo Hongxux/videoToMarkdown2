@@ -249,8 +249,8 @@ public class VideoProcessingOrchestrator {
             updateProgress(taskId, 0.90, "生成最终文档...");
             
             String title = new File(videoPath).getName().replace(".mp4", "");
-            AssembleResult assembleRes = grpcClient.assembleRichTextAsync(taskId, videoPath, ar.semanticUnitsJsonPath, 
-                outputDir + "/screenshots", outputDir + "/clips", outputDir, title, timeouts.getPhase2bTimeoutSec())
+            AssembleResult assembleRes = grpcClient.assembleRichTextAsync(taskId, videoPath, ar.semanticUnitsJsonPath,
+                outputDir + "/assets", outputDir + "/assets", outputDir, title, timeouts.getPhase2bTimeoutSec())
                 .get(timeouts.getPhase2bTimeoutSec() + 60, TimeUnit.SECONDS);
                 
             if (!assembleRes.success) throw new RuntimeException("Assemble failed: " + assembleRes.errorMsg);

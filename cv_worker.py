@@ -20,6 +20,7 @@ os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
 os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 import logging
 import gc
+import time
 import psutil
 from typing import Dict, List, Tuple, Any, Optional
 from multiprocessing import shared_memory
@@ -459,6 +460,69 @@ def run_screenshot_selection_task(
             gc.collect()
         except Exception:
             pass
+
+
+def run_select_screenshots_for_range_task(
+    video_path: str,
+    unit_id: str,
+    start_sec: float,
+    end_sec: float,
+    coarse_fps: float = 2.0,
+    fine_fps: float = 10.0,
+) -> dict:
+    """
+    路由截图专用 Worker 入口：在进程池内执行完整 coarse-fine 选择。
+
+    保留原有 ScreenshotSelector 的选择逻辑，仅改变调度方式（主进程 -> ProcessPool）。
+    """
+    _check_memory_usage()
+    started_at = time.perf_counter()
+
+    try:
+        from MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector import ScreenshotSelector
+
+        global _validator_cache
+        if '_validator_cache' not in globals():
+            globals()['_validator_cache'] = {}
+        _validator_cache = globals()['_validator_cache']
+
+        selector_key = f"screenshot_selector_range_cf_{coarse_fps}_{fine_fps}"
+        if selector_key not in _validator_cache:
+            _validator_cache[selector_key] = ScreenshotSelector.create_lightweight()
+
+        selector = _validator_cache[selector_key]
+        screenshots = selector.select_screenshots_for_range_sync(
+            video_path=video_path,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            coarse_fps=coarse_fps,
+            fine_fps=fine_fps,
+        )
+
+        if not screenshots:
+            mid = (start_sec + end_sec) / 2 if end_sec >= start_sec else start_sec
+            screenshots = [{"timestamp_sec": mid, "score": 0.0}]
+
+        return {
+            "unit_id": unit_id,
+            "start_sec": float(start_sec),
+            "end_sec": float(end_sec),
+            "screenshots": screenshots,
+            "worker_pid": os.getpid(),
+            "elapsed_ms": (time.perf_counter() - started_at) * 1000.0,
+        }
+    except Exception as e:
+        logger.error(f"❌ Routed screenshot selection failed for {unit_id}: {e}")
+        fallback_mid = (start_sec + end_sec) / 2 if end_sec >= start_sec else start_sec
+        return {
+            "unit_id": unit_id,
+            "start_sec": float(start_sec),
+            "end_sec": float(end_sec),
+            "screenshots": [{"timestamp_sec": fallback_mid, "score": 0.0}],
+            "worker_pid": os.getpid(),
+            "elapsed_ms": (time.perf_counter() - started_at) * 1000.0,
+            "error": str(e),
+        }
 
 
 def warmup_worker() -> int:

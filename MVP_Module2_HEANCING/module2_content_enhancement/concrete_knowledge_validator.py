@@ -54,16 +54,47 @@ CONCRETE_KNOWLEDGE_PROMPT = """# 角色
 
 **混合型**：同时包含具象知识和抽象知识，仍标记为「存在具象性知识」
 
+# 图像描述要求 (Image Description)
+1. **可见文字**：如果文字很多（超过100字）则不需要全部列出，只需要输出概括性几句话的文字描述。
+ - 如果是命令行，必须输出正在执行的命令以及上一个执行的命令（如果能看到）
+ - 如果是代码，则必须输出光标对应的上下两行代码和光标对应的代码，如果没有光标则输出最新的三行代码
+ - 如果是文档，则输出光标对应的几行代码，以及可见的标题、粗体、斜体、高亮。
+ - 如果是公式，则输出公式本身。
+ - 如果是在进行配置，则输出配置的项、值和选项。
+2. **视觉元素**：显著的UI组件（按钮、图标、图表）、布局结构、所在是什么软件、命令行、终端、IDE、浏览器还是什么。
+禁止输出该图片无关焦点的背景信息。
+3. **动作/状态**：正在发生的操作（如“鼠标悬停在XX”，“终端显示报错”）。
+
 # 输出要求（严格JSON格式）
-{{
+{
     "has_concrete_knowledge": "是/否",
     "confidence": 0.0-1.0,
-    "concrete_type": "实物图/装置图/解剖图/实操界面/地形图/模型图/等等/无",
-    "reason": "简明判定依据",
-    "img_description": "One-sentence visual description for markdown image placement"
-}}
+    "img_description": "详细的中文图像描述，包含可见文字、视觉元素与动作状态"
+}
 
 请只输出JSON，不要有其他内容。"""
+
+
+COREFERENCE_REPLACEMENT_PROMPT_TEMPLATE = """# 角色
+你是教学视频中的指代消解专家。你的任务是结合图片内容，把句子中的“这个/它/该步骤/那个界面”等指代补全为具体对象。
+
+# 输入信息
+- 原句（只允许改写这句话）：{sentence_text}
+- 上下文（可为空）：{context_text}
+
+# 规则
+1. 仅改写原句，不要补充句外新事实。
+2. 改写结果必须可直接替换原句。
+3. 如果图片不足以提供信息，可保留原句但降低置信度。
+4. 输出严格 JSON，不要输出其他内容。
+
+# 输出格式
+{
+  "replaced_text": "可直接替换原句的文本",
+  "confidence": 0.0,
+  "reason": "简要说明为何这样补全"
+}
+"""
 
 
 # ==============================================================================
@@ -527,6 +558,18 @@ class ConcreteKnowledgeValidator:
                 CONCRETE_KNOWLEDGE_PROMPT,
                 timeout=60
             )
+
+            # 尝试修复被 Markdown 包裹的 JSON
+            if "raw_response" in api_result and "has_concrete_knowledge" not in api_result:
+                raw = api_result["raw_response"]
+                clean_raw = raw.replace("```json", "").replace("```", "").strip()
+                try:
+                    parsed = json.loads(clean_raw)
+                    if isinstance(parsed, dict):
+                        api_result.update(parsed)
+                except Exception:
+                    pass
+
             has_concrete = api_result.get("has_concrete_knowledge", "否") == "是"
             confidence = float(api_result.get("confidence", 0.5))
             concrete_type = api_result.get("concrete_type", "未知")
@@ -603,6 +646,115 @@ class ConcreteKnowledgeValidator:
                     results[idx] = self._default_result(True)
         
         return results
+
+    def validate_for_coreference(
+        self,
+        image_path: str,
+        sentence_text: str,
+        context_text: str = ""
+    ) -> Dict[str, Any]:
+        """
+        执行逻辑：
+        1) 先执行常规具象校验，复用现有缓存与保留判断。
+        2) Vision 可用时追加“指代补全”请求，输出 replaced_text 与置信度。
+        3) 汇总返回，供上游先替换句子并复用具象校验结果。
+        实现方式：validate + VisionAIClient.validate_image_sync。
+        核心价值：在不破坏现有截图校验链路前提下，增加句级指代修复能力。
+        决策逻辑：
+        - 条件：not sentence_text
+        - 条件：self._vision_enabled and self._vision_client
+        依据来源（证据链）：
+        - 输入参数：sentence_text、context_text。
+        - 对象内部状态：self._vision_enabled、self._vision_client。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - sentence_text: 文本内容（类型：str）。
+        - context_text: 文本内容（类型：str）。
+        输出参数：
+        - 结构化结果字典（包含 should_include/replaced_text/replace_confidence/concrete_result）。"""
+        base_result = self.validate(image_path=image_path, ocr_text="")
+        original_sentence = str(sentence_text or "").strip()
+
+        if not original_sentence:
+            return {
+                "should_include": base_result.should_include,
+                "confidence": float(base_result.confidence),
+                "reason": base_result.reason,
+                "img_description": base_result.img_description,
+                "replaced_text": "",
+                "replace_confidence": 0.0,
+                "replace_reason": "empty_sentence",
+                "mode": "coreference",
+                "concrete_result": base_result,
+            }
+
+        if not (self._vision_enabled and self._vision_client):
+            return {
+                "should_include": base_result.should_include,
+                "confidence": float(base_result.confidence),
+                "reason": base_result.reason,
+                "img_description": base_result.img_description,
+                "replaced_text": original_sentence,
+                "replace_confidence": 0.0,
+                "replace_reason": "vision_disabled",
+                "mode": "coreference",
+                "concrete_result": base_result,
+            }
+
+        prompt = COREFERENCE_REPLACEMENT_PROMPT_TEMPLATE.format(
+            sentence_text=original_sentence,
+            context_text=str(context_text or "").strip() or "(无)"
+        )
+
+        try:
+            api_result = self._vision_client.validate_image_sync(
+                image_path,
+                prompt,
+                skip_duplicate_check=True,
+                timeout=60,
+            )
+
+            if "raw_response" in api_result and "replaced_text" not in api_result:
+                raw = str(api_result.get("raw_response", "") or "")
+                clean_raw = raw.replace("```json", "").replace("```", "").strip()
+                try:
+                    parsed = json.loads(clean_raw)
+                    if isinstance(parsed, dict):
+                        api_result.update(parsed)
+                except Exception:
+                    pass
+
+            replaced_text = str(api_result.get("replaced_text") or "").strip()
+            replace_confidence = float(api_result.get("confidence", 0.0) or 0.0)
+            replace_reason = str(api_result.get("reason") or "").strip() or "vision_coreference"
+
+            if not replaced_text:
+                replaced_text = original_sentence
+
+            return {
+                "should_include": base_result.should_include,
+                "confidence": float(base_result.confidence),
+                "reason": base_result.reason,
+                "img_description": base_result.img_description,
+                "replaced_text": replaced_text,
+                "replace_confidence": replace_confidence,
+                "replace_reason": replace_reason,
+                "mode": "coreference",
+                "concrete_result": base_result,
+            }
+        except Exception as e:
+            logger.warning(f"validate_for_coreference failed: {e}")
+            return {
+                "should_include": base_result.should_include,
+                "confidence": float(base_result.confidence),
+                "reason": base_result.reason,
+                "img_description": base_result.img_description,
+                "replaced_text": original_sentence,
+                "replace_confidence": 0.0,
+                "replace_reason": f"vision_fallback: {e}",
+                "mode": "coreference",
+                "concrete_result": base_result,
+            }
     
     def _detect_math_formula(self, text: str = "", image: Optional[np.ndarray] = None) -> bool:
         """

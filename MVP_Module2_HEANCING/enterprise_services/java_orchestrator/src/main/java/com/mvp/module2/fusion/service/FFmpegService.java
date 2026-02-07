@@ -191,26 +191,24 @@ public class FFmpegService {
             
             try {
                 // 创建输出目录
-                String screenshotsDir = Paths.get(outputDir, "screenshots").toString();
-                String clipsDir = Paths.get(outputDir, "clips").toString();
-                
-                Files.createDirectories(Paths.get(screenshotsDir));
-                Files.createDirectories(Paths.get(clipsDir));
-                
-                result.screenshotsDir = screenshotsDir;
-                result.clipsDir = clipsDir;
+                String assetsDir = Paths.get(outputDir, "assets").toString();
+
+                Files.createDirectories(Paths.get(assetsDir));
+
+                result.screenshotsDir = assetsDir;
+                result.clipsDir = assetsDir;
                 
                 logger.info("Starting FFmpeg extraction: {} screenshots, {} clips",
                     screenshotRequests.size(), clipRequests.size());
                 
                 // 🔑 并行执行截图
                 List<CompletableFuture<Boolean>> screenshotFutures = screenshotRequests.stream()
-                    .map(req -> extractScreenshotAsync(videoPath, screenshotsDir, req))
+                    .map(req -> extractScreenshotAsync(videoPath, assetsDir, req))
                     .collect(Collectors.toList());
                 
                 // 🔑 并行执行切片
                 List<CompletableFuture<Boolean>> clipFutures = clipRequests.stream()
-                    .map(req -> extractClipAsync(videoPath, clipsDir, req))
+                    .map(req -> extractClipAsync(videoPath, assetsDir, req))
                     .collect(Collectors.toList());
                 
                 // 等待所有截图完成
@@ -252,7 +250,11 @@ public class FFmpegService {
             String videoPath, String outputDir, ScreenshotRequest request) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                String outputPath = Paths.get(outputDir, request.screenshotId + ".png").toString();
+                Path outputPath = Paths.get(outputDir, request.screenshotId + ".png");
+                Path parentDir = outputPath.getParent();
+                if (parentDir != null) {
+                    Files.createDirectories(parentDir);
+                }
                 
                 // 构建FFmpeg命令
                 // ffmpeg -ss <timestamp> -i <video> -frames:v 1 -q:v 2 <output>
@@ -263,7 +265,7 @@ public class FFmpegService {
                     "-frames:v", "1",
                     "-q:v", "2",
                     "-y",  // 覆盖已存在文件
-                    outputPath
+                    outputPath.toString()
                 );
                 
                 pb.redirectErrorStream(true);
@@ -302,7 +304,11 @@ public class FFmpegService {
             String videoPath, String outputDir, ClipRequest request) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                String outputPath = Paths.get(outputDir, request.clipId + ".mp4").toString();
+                Path outputPath = Paths.get(outputDir, request.clipId + ".mp4");
+                Path parentDir = outputPath.getParent();
+                if (parentDir != null) {
+                    Files.createDirectories(parentDir);
+                }
                 double duration = request.endSec - request.startSec;
                 
                 // 构建FFmpeg命令
@@ -316,7 +322,7 @@ public class FFmpegService {
                     "-crf", "23",
                     "-c:a", "aac",
                     "-y",
-                    outputPath
+                    outputPath.toString()
                 );
                 
                 pb.redirectErrorStream(true);

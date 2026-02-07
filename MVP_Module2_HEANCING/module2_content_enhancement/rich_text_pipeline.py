@@ -27,6 +27,8 @@ from .cv_knowledge_validator import CVKnowledgeValidator
 from .concrete_knowledge_validator import ConcreteKnowledgeValidator
 from .screenshot_selector import ScreenshotSelector
 from .knowledge_classifier import KnowledgeClassifier
+from .llm_client import LLMClient
+from .coreference_resolver import CoreferenceResolver
 from .resource_manager import get_resource_manager, get_io_executor
 from .rich_text_document import (
     RichTextDocument, 
@@ -144,7 +146,8 @@ class RichTextPipeline:
         step6_path: str,
         output_dir: str,
         config: PipelineConfig = None,
-        sentence_timestamps_path: str = None
+        sentence_timestamps_path: str = None,
+        segmenter: SemanticUnitSegmenter = None,
     ):
         """
         执行逻辑：
@@ -194,8 +197,8 @@ class RichTextPipeline:
             logger.info("Skip loading step6 (empty path)")
             self.paragraphs = []
         
-        # 初始化组件
-        self.segmenter = SemanticUnitSegmenter()
+        # 初始化组件（优先注入单例，避免热路径重复构建）
+        self.segmenter = segmenter if segmenter is not None else SemanticUnitSegmenter()
         
         # ScreenshotSelector (懒加载，需要 visual_extractor 依赖)
         self._screenshot_selector = None
@@ -221,6 +224,25 @@ class RichTextPipeline:
         self._concrete_validator = ConcreteKnowledgeValidator(output_dir=self.output_dir)
         if self._concrete_validator.enabled:
             logger.info("Concrete knowledge validator enabled (CV/Vision)")
+
+        # 指代断层预补全阶段复用缓存（image_abs_path -> ConcreteKnowledgeResult）
+        self._prevalidated_concrete_results: Dict[str, Any] = {}
+
+        # DeepSeek 客户端：用于指代断层识别与补全
+        self._coref_llm_client: Optional[LLMClient] = None
+        try:
+            if os.getenv("DEEPSEEK_API_KEY"):
+                self._coref_llm_client = LLMClient()
+        except Exception as e:
+            logger.warning(f"Coreference LLM client init failed: {e}")
+
+        # 指代断层预补全器
+        self._coreference_resolver = CoreferenceResolver(
+            llm_client=self._coref_llm_client,
+            concrete_validator=self._concrete_validator,
+            screenshot_selector=ScreenshotSelector.create_lightweight(),
+            confidence_threshold=0.8,
+        )
         
         logger.info(f"Pipeline initialized: {len(self.subtitles)} subtitles, {len(self.paragraphs)} paragraphs")
     
@@ -695,6 +717,30 @@ class RichTextPipeline:
         
         # Stage 2: 应用外部素材
         logger.info("[Phase2B-2] Apply External Materials")
+
+        # Stage 1.7: 指代断层预补全（低置信度触发视觉补全，并复用 concrete 验证结果）
+        logger.info("[Phase2B-1.7] Coreference Gap Pre-Resolution")
+        sentence_timestamps = self._build_sentence_timestamps()
+        for unit in units:
+            requests = material_requests_map.get(unit.unit_id)
+            if not requests:
+                requests = MaterialRequests([], [], [])
+            try:
+                coref_result = await self._coreference_resolver.resolve_unit_coreference(
+                    unit=unit,
+                    material_requests=requests,
+                    screenshots_dir=screenshots_dir,
+                    sentence_timestamps=sentence_timestamps,
+                    subtitles=self.subtitles,
+                    video_path=self.video_path,
+                )
+                if coref_result and coref_result.updated_text:
+                    unit.full_text = coref_result.updated_text
+                if coref_result and coref_result.prevalidated_results:
+                    self._prevalidated_concrete_results.update(coref_result.prevalidated_results)
+            except Exception as e:
+                logger.warning(f"{unit.unit_id}: coreference pre-resolution failed: {e}")
+
         for unit in units:
             requests = material_requests_map.get(unit.unit_id)
             if not requests:
@@ -2151,7 +2197,6 @@ class RichTextPipeline:
         - ???????????? unit ????????????????
         """
         import glob
-        import shutil
 
         materials = MaterialSet()
         screenshot_paths: List[str] = []
@@ -2180,13 +2225,10 @@ class RichTextPipeline:
         should_validate_screenshot = normalized_kt in {"abstract", "concrete"}
         allow_clip = normalized_kt == "process"
 
-        unit_prefix = self._build_unit_asset_prefix(unit)
         unit_title_slug = self._slugify_text(
             str(getattr(unit, "knowledge_topic", "") or getattr(unit, "title", "")),
             40,
         )
-        unit_asset_dir = Path(self.assets_dir) / str(unit.unit_id)
-        unit_asset_dir.mkdir(parents=True, exist_ok=True)
 
         def infer_label(name: str) -> str:
             name_lower = name.lower()
@@ -2267,21 +2309,31 @@ class RichTextPipeline:
                         found.append(file_path)
             return _deduplicate_paths(found)
 
-        def _copy_to_unit_dir(source_path: str, kind: str, label: str, index: int) -> str:
-            source = Path(source_path)
-            if not source.exists():
+        assets_root = Path(self.assets_dir)
+
+        def _normalize_existing_asset_path(source_path: str, kind: str, source_id: str) -> str:
+            candidate = Path(source_path)
+            if not candidate.exists():
                 return ""
 
-            ext = source.suffix.lower() or ".dat"
-            label_slug = self._slugify_text(label or kind, 60)
-            if label_slug == "item":
-                label_slug = kind
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = Path(os.path.abspath(str(candidate)))
 
-            target_name = f"{unit_prefix}_{kind}_{index:02d}_{label_slug}{ext}"
-            target = unit_asset_dir / target_name
-            if source.resolve() != target.resolve():
-                shutil.copy2(str(source), str(target))
-            return str(target)
+            try:
+                resolved.relative_to(assets_root.resolve())
+            except Exception:
+                logger.warning(
+                    "Skip %s outside assets in no-copy mode: unit=%s id=%s path=%s",
+                    kind,
+                    unit.unit_id,
+                    source_id,
+                    source_path,
+                )
+                return ""
+
+            return str(resolved)
 
         screenshot_candidates: List[Tuple[str, str, str]] = []
         if material_requests.screenshot_requests:
@@ -2315,12 +2367,20 @@ class RichTextPipeline:
                 screenshot_candidates.append((path_item, infer_label(stem), stem))
 
         rejected_screenshot_count = 0
-        for idx, (raw_path, label, sid) in enumerate(screenshot_candidates, start=1):
+        for _idx, (raw_path, label, sid) in enumerate(screenshot_candidates, start=1):
             is_valid = True
             img_description = ""
 
             if should_validate_screenshot and self._concrete_validator:
-                res = self._concrete_validator.validate(raw_path)
+                try:
+                    pre_key = str(Path(raw_path).resolve())
+                except Exception:
+                    pre_key = os.path.abspath(raw_path)
+
+                if pre_key in self._prevalidated_concrete_results:
+                    res = self._prevalidated_concrete_results[pre_key]
+                else:
+                    res = self._concrete_validator.validate(raw_path)
                 img_description = str(getattr(res, "img_description", "") or getattr(res, "reason", "")).strip()
                 if not res.should_include:
                     logger.info(f"Removing negative screenshot: {sid} ({res.reason})")
@@ -2330,9 +2390,7 @@ class RichTextPipeline:
             if not is_valid:
                 continue
 
-            # ???????? ID??????????????????
-            naming_label = sid or label
-            normalized_path = _copy_to_unit_dir(raw_path, "img", naming_label, idx)
+            normalized_path = _normalize_existing_asset_path(raw_path, "img", sid or label)
             if not normalized_path:
                 continue
 
@@ -2383,7 +2441,7 @@ class RichTextPipeline:
             clip_candidates = deduped_clip_candidates
             if clip_candidates:
                 selected, selected_label = clip_candidates[0]
-                clip_path = _copy_to_unit_dir(selected, "clip", selected_label, 1)
+                clip_path = _normalize_existing_asset_path(selected, "clip", selected_label)
         else:
             logger.info(f"Skip clip for non-process unit: {unit.unit_id} ({normalized_kt})")
 
@@ -2418,8 +2476,6 @@ class RichTextPipeline:
             return await self._extract_frame_ffmpeg_fallback(start_sec, end_sec, name)
     
         try:
-            import shutil
-    
             result = await self._screenshot_selector.select_screenshot(
                 video_path=self.video_path,
                 start_sec=start_sec,
@@ -2429,10 +2485,13 @@ class RichTextPipeline:
             )
     
             if result and result.screenshot_path and os.path.exists(result.screenshot_path):
-                if os.path.abspath(result.screenshot_path) != os.path.abspath(output_path):
-                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(result.screenshot_path, output_path)
-                return output_path
+                if os.path.abspath(result.screenshot_path) == os.path.abspath(output_path):
+                    return output_path
+                logger.warning(
+                    "ScreenshotSelector returned non-target path in no-copy mode, fallback ffmpeg direct: %s",
+                    result.screenshot_path,
+                )
+                return await self._extract_frame_ffmpeg_fallback(start_sec, end_sec, name)
             return ""
     
         except Exception as e:
@@ -2526,8 +2585,6 @@ class RichTextPipeline:
             return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
     
         try:
-            import shutil
-    
             clip_result = await self._clip_extractor.extract_video_clip(
                 timestamp_start=start_sec,
                 timestamp_end=end_sec,
@@ -2537,10 +2594,13 @@ class RichTextPipeline:
             )
     
             if clip_result and clip_result.clip_path and os.path.exists(clip_result.clip_path):
-                if os.path.abspath(clip_result.clip_path) != os.path.abspath(output_path):
-                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(clip_result.clip_path, output_path)
-                return output_path
+                if os.path.abspath(clip_result.clip_path) == os.path.abspath(output_path):
+                    return output_path
+                logger.warning(
+                    "VideoClipExtractor returned non-target path in no-copy mode, fallback ffmpeg direct: %s",
+                    clip_result.clip_path,
+                )
+                return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
     
             logger.warning(f"VideoClipExtractor returned no result for {name}")
             return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)

@@ -21,6 +21,7 @@ import subprocess
 import time
 import re
 import functools
+import threading
 from collections import deque
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
@@ -51,6 +52,9 @@ class VLMaterialGenerator:
     3. 截图时间点优化
     4. 失败回退
     """
+
+    _visual_extractor_cache: Dict[str, Any] = {}
+    _visual_extractor_cache_lock = threading.Lock()
     
     def __init__(self, config: Dict[str, Any] = None, *, cv_executor: Any = None):
         """
@@ -125,6 +129,25 @@ class VLMaterialGenerator:
         self._analyzer = None
         
         logger.info(f"VLMaterialGenerator 初始化完成: enabled={self.enabled}")
+
+    def _get_cached_visual_extractor(self, video_path: str):
+        """
+        获取或创建按 video_path 复用的 VisualFeatureExtractor。
+
+        目的：减少 screenshot optimization 热路径中的重复构建。
+        """
+        use_cache = bool(self.screenshot_config.get("reuse_visual_extractor", True))
+        if not use_cache:
+            from .visual_feature_extractor import VisualFeatureExtractor
+            return VisualFeatureExtractor(video_path)
+
+        with self._visual_extractor_cache_lock:
+            extractor = self._visual_extractor_cache.get(video_path)
+            if extractor is None:
+                from .visual_feature_extractor import VisualFeatureExtractor
+                extractor = VisualFeatureExtractor(video_path)
+                self._visual_extractor_cache[video_path] = extractor
+            return extractor
     
     @property
     def analyzer(self):
@@ -2124,7 +2147,7 @@ class VLMaterialGenerator:
         
         try:
             from concurrent.futures import ProcessPoolExecutor
-            from .visual_feature_extractor import VisualFeatureExtractor, SharedFrameRegistry
+            from .visual_feature_extractor import SharedFrameRegistry
             import sys
             import gc
             
@@ -2138,7 +2161,7 @@ class VLMaterialGenerator:
             logger.info(f"🚀 [Batch Mode] 初始化并行 CV 优化: {len(screenshot_requests)} 个请求")
 
             # 初始化帧提取器（主进程负责预读与写入 SHM）
-            extractor = VisualFeatureExtractor(video_path)
+            extractor = self._get_cached_visual_extractor(video_path)
 
             # 配置参数
             max_workers = self._resolve_max_workers(request_count=len(screenshot_requests))
@@ -2593,7 +2616,7 @@ class VLMaterialGenerator:
         
         try:
             from concurrent.futures import ProcessPoolExecutor
-            from .visual_feature_extractor import VisualFeatureExtractor, SharedFrameRegistry
+            from .visual_feature_extractor import SharedFrameRegistry
             import sys
             import gc
             
@@ -2607,7 +2630,7 @@ class VLMaterialGenerator:
             logger.info(f"🚀 [Streaming Pipeline] 启动流式处理: {len(screenshot_requests)} 个请求")
             
             # 初始化帧提取器
-            extractor = VisualFeatureExtractor(video_path)
+            extractor = self._get_cached_visual_extractor(video_path)
 
             # 配置参数
             max_workers = self._resolve_max_workers(request_count=len(screenshot_requests))

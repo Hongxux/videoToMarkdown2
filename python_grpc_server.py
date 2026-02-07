@@ -216,6 +216,7 @@ import traceback
 import time
 import hashlib
 import shutil
+from collections import Counter
 from concurrent import futures
 from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
@@ -1440,7 +1441,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 step2_path=step2_json_path,
                 step6_path=step6_json_path,
                 output_dir=output_dir,
-                sentence_timestamps_path=sentence_timestamps_path
+                sentence_timestamps_path=sentence_timestamps_path,
+                segmenter=self.resources.semantic_unit_segmenter,
             )
 
             # 复用全局单例切分器：做什么是避免每次 new Segmenter/LLMClient；为什么是降低 Phase2A 热路径开销；
@@ -1779,7 +1781,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 output_dir=output_dir,
                 step2_path=step2_path,
                 step6_path=step6_path,
-                sentence_timestamps_path=sentence_timestamps_path
+                sentence_timestamps_path=sentence_timestamps_path,
+                segmenter=self.resources.semantic_unit_segmenter,
             )
             # 🚀 Fix: Ensure video_duration is a float
             video_duration = float(request.video_duration) if hasattr(request, 'video_duration') and request.video_duration else 0.0
@@ -2233,7 +2236,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 video_path=video_path,
                 step2_path="",  # Phase2B 不需要
                 step6_path="",  # Phase2B 不需要
-                output_dir=output_dir
+                output_dir=output_dir,
+                segmenter=self.resources.semantic_unit_segmenter,
             )
             
             # 🔑 调用 Phase2B: assemble_only
@@ -3574,7 +3578,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     results = selector.select_screenshots_for_range_sync(
                         video_path=video_path,
                         start_sec=start_sec,
-                        end_sec=end_sec
+                        end_sec=end_sec,
+                        coarse_fps=_safe_float(routing_cfg.get("screenshot_coarse_fps", 2.0), 2.0),
+                        fine_fps=_safe_float(routing_cfg.get("screenshot_fine_fps", 10.0), 10.0),
                     )
                     if results:
                         return results
@@ -3601,6 +3607,22 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 _safe_float(routing_cfg.get("process_duration_threshold_sec", 20.0), 20.0)
             )
             force_process_preprocess = bool(routing_cfg.get("process_force_preprocess_before_routing", True))
+            route_screenshot_mode = str(routing_cfg.get("screenshot_pipeline_mode", "process_streaming")).strip().lower()
+            route_screenshot_queue_maxsize = max(
+                1,
+                int(_safe_float(routing_cfg.get("screenshot_queue_maxsize", max(8, self.cv_worker_count * 2)), max(8, self.cv_worker_count * 2))),
+            )
+            route_screenshot_worker_cfg = routing_cfg.get("screenshot_worker_count", "auto")
+            if str(route_screenshot_worker_cfg).strip().lower() == "auto":
+                route_screenshot_workers = max(1, min(self.cv_worker_count, 8))
+            else:
+                route_screenshot_workers = max(
+                    1,
+                    min(
+                        self.cv_worker_count,
+                        int(_safe_float(route_screenshot_worker_cfg, max(1, min(self.cv_worker_count, 8)))),
+                    ),
+                )
 
             process_units = []
             for unit in semantic_units:
@@ -3681,13 +3703,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             if cv_screenshot_units:
                 route_t0 = time.perf_counter()
                 loop = asyncio.get_event_loop()
-                executor = get_io_executor()
-                cpu_count = os.cpu_count() or 4
-                max_concurrency = max(1, min(4, cpu_count // 2))
-                semaphore = asyncio.Semaphore(max_concurrency)
-                batch_size = max(1, max_concurrency * 4)
                 total_units = len(cv_screenshot_units)
-                total_batches = (total_units + batch_size - 1) // batch_size
 
                 def _consume_vl_result(vl_result):
                     if not vl_result.success:
@@ -3703,77 +3719,202 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             vl_clip_requests.append(clip)
                     return True, ""
 
-                async def _run_cv_screenshot(unit):
-                    unit_id = unit.get("unit_id", "")
-                    start_sec = _safe_float(unit.get("start_sec", 0.0))
-                    end_sec = _safe_float(unit.get("end_sec", 0.0))
-                    async with semaphore:
-                        results = await loop.run_in_executor(
-                            executor,
-                            functools.partial(_select_screenshots_sync, unit_id, start_sec, end_sec)
-                        )
-                    return unit_id, start_sec, end_sec, results
-
                 vl_consumed = False
-                for batch_idx in range(total_batches):
-                    start = batch_idx * batch_size
-                    end = min(start + batch_size, total_units)
-                    batch_units = cv_screenshot_units[start:end]
+                if route_screenshot_mode == "process_streaming":
+                    from cv_worker import run_select_screenshots_for_range_task
 
-                    if vl_task and vl_task.done() and not vl_consumed:
-                        vl_result = vl_task.result()
-                        ok, err = _consume_vl_result(vl_result)
-                        if not ok:
-                            logger.warning(f"[{task_id}] VL 分析失败，提前回退: {err}")
-                            _persist_task_token_report({
-                                "status": "fallback",
-                                "vl_enabled": True,
-                                "used_fallback": True,
-                                "error_msg": err,
-                                "routing_stats": routing_stats,
-                                "token_stats": vl_token_stats,
-                            })
-                            return video_processing_pb2.VLAnalysisResponse(
-                                success=True,
-                                vl_enabled=True,
-                                used_fallback=True,
-                                error_msg=err
-                            )
-                        vl_consumed = True
-                        if vl_t0 is None:
-                            vl_t0 = time.perf_counter()
-                        vl_ms = (time.perf_counter() - vl_t0) * 1000.0
-                        logger.info(
-                            f"[{task_id}] VL 结果提前合并: screenshots={len(vl_screenshot_requests)}, "
-                            f"clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
-                        )
+                    coarse_fps = max(0.5, _safe_float(routing_cfg.get("screenshot_coarse_fps", 2.0), 2.0))
+                    fine_fps = max(1.0, _safe_float(routing_cfg.get("screenshot_fine_fps", 10.0), 10.0))
+                    ordered_units = sorted(
+                        list(enumerate(cv_screenshot_units)),
+                        key=lambda item: (_safe_float(item[1].get("start_sec", 0.0)), item[0]),
+                    )
 
-                    tasks = [_run_cv_screenshot(u) for u in batch_units]
-                    results = await asyncio.gather(*tasks)
-                    batch_screenshots = 0
-                    for unit_id, start_sec, end_sec, ss_list in results:
-                        for idx, ss in enumerate(ss_list or []):
+                    unit_queue: asyncio.Queue = asyncio.Queue(maxsize=route_screenshot_queue_maxsize)
+                    result_queue: asyncio.Queue = asyncio.Queue(maxsize=route_screenshot_queue_maxsize)
+                    pid_counter: Counter = Counter()
+
+                    async def _producer() -> None:
+                        for order_idx, unit in ordered_units:
+                            await unit_queue.put((order_idx, unit))
+                        for _ in range(route_screenshot_workers):
+                            await unit_queue.put(None)
+
+                    async def _consumer(worker_no: int) -> None:
+                        while True:
+                            item = await unit_queue.get()
+                            if item is None:
+                                unit_queue.task_done()
+                                break
+
+                            order_idx, unit = item
+                            unit_id = unit.get("unit_id", "")
+                            start_sec = _safe_float(unit.get("start_sec", 0.0))
+                            end_sec = _safe_float(unit.get("end_sec", 0.0))
+
+                            try:
+                                result = await loop.run_in_executor(
+                                    self.cv_process_pool,
+                                    functools.partial(
+                                        run_select_screenshots_for_range_task,
+                                        video_path=video_path,
+                                        unit_id=unit_id,
+                                        start_sec=start_sec,
+                                        end_sec=end_sec,
+                                        coarse_fps=coarse_fps,
+                                        fine_fps=fine_fps,
+                                    ),
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"[{task_id}] 路由截图 worker={worker_no} 异常: unit={unit_id}, err={e}"
+                                )
+                                mid = (start_sec + end_sec) / 2 if end_sec >= start_sec else start_sec
+                                result = {
+                                    "unit_id": unit_id,
+                                    "start_sec": start_sec,
+                                    "end_sec": end_sec,
+                                    "screenshots": [{"timestamp_sec": mid, "score": 0.0}],
+                                    "worker_pid": -1,
+                                    "elapsed_ms": 0.0,
+                                    "error": str(e),
+                                }
+
+                            await result_queue.put((order_idx, result))
+                            unit_queue.task_done()
+
+                    async def _collector(total_count: int) -> Dict[int, Dict[str, Any]]:
+                        collected: Dict[int, Dict[str, Any]] = {}
+                        done = 0
+                        log_every = max(1, total_count // 4)
+
+                        while done < total_count:
+                            order_idx, result = await result_queue.get()
+                            collected[order_idx] = result
+                            done += 1
+                            pid = result.get("worker_pid")
+                            if isinstance(pid, int):
+                                pid_counter[pid] += 1
+
+                            if done % log_every == 0 or done == total_count:
+                                logger.info(
+                                    f"[{task_id}] 路由截图流式进度: {done}/{total_count}, "
+                                    f"queue={unit_queue.qsize()}, active_pids={len(pid_counter)}"
+                                )
+                        return collected
+
+                    producer_task = asyncio.create_task(_producer())
+                    collector_task = asyncio.create_task(_collector(total_units))
+                    consumer_tasks = [
+                        asyncio.create_task(_consumer(i))
+                        for i in range(route_screenshot_workers)
+                    ]
+
+                    await producer_task
+                    await unit_queue.join()
+                    await asyncio.gather(*consumer_tasks)
+                    collected_results = await collector_task
+
+                    for order_idx, _ in ordered_units:
+                        result = collected_results.get(order_idx, {})
+                        unit_id = result.get("unit_id", "")
+                        start_sec = _safe_float(result.get("start_sec", 0.0))
+                        end_sec = _safe_float(result.get("end_sec", start_sec))
+                        ss_list = result.get("screenshots", []) or []
+                        for idx, ss in enumerate(ss_list):
                             ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
                             cv_screenshot_requests.append({
                                 "screenshot_id": f"routed_ss_{unit_id}_{idx}",
                                 "timestamp_sec": ts,
                                 "label": f"routed_range_{idx}",
-                                "semantic_unit_id": unit_id
+                                "semantic_unit_id": unit_id,
                             })
-                            batch_screenshots += 1
 
+                    route_ms = (time.perf_counter() - route_t0) * 1000.0
                     logger.info(
-                        f"[{task_id}] 路由截图批次 {batch_idx + 1}/{total_batches}: "
-                        f"units={len(batch_units)}, batch_ss={batch_screenshots}, "
-                        f"total_ss={len(cv_screenshot_requests)}"
+                        f"[{task_id}] 路由截图完成: units={len(cv_screenshot_units)}, "
+                        f"screenshots={len(cv_screenshot_requests)}, ms={route_ms:.1f}, "
+                        f"mode=process_streaming, workers={route_screenshot_workers}, "
+                        f"queue_maxsize={route_screenshot_queue_maxsize}, pids={sorted(pid_counter.keys())}"
                     )
+                else:
+                    executor = get_io_executor()
+                    cpu_count = os.cpu_count() or 4
+                    max_concurrency = max(1, min(4, cpu_count // 2))
+                    semaphore = asyncio.Semaphore(max_concurrency)
+                    batch_size = max(1, max_concurrency * 4)
+                    total_batches = (total_units + batch_size - 1) // batch_size
 
-                route_ms = (time.perf_counter() - route_t0) * 1000.0
-                logger.info(
-                    f"[{task_id}] 路由截图完成: units={len(cv_screenshot_units)}, "
-                    f"screenshots={len(cv_screenshot_requests)}, ms={route_ms:.1f}, "
-                    f"concurrency={max_concurrency}, batch_size={batch_size}"
-                )
+                    async def _run_cv_screenshot(unit):
+                        unit_id = unit.get("unit_id", "")
+                        start_sec = _safe_float(unit.get("start_sec", 0.0))
+                        end_sec = _safe_float(unit.get("end_sec", 0.0))
+                        async with semaphore:
+                            results = await loop.run_in_executor(
+                                executor,
+                                functools.partial(_select_screenshots_sync, unit_id, start_sec, end_sec)
+                            )
+                        return unit_id, start_sec, end_sec, results
+
+                    for batch_idx in range(total_batches):
+                        start = batch_idx * batch_size
+                        end = min(start + batch_size, total_units)
+                        batch_units = cv_screenshot_units[start:end]
+
+                        if vl_task and vl_task.done() and not vl_consumed:
+                            vl_result = vl_task.result()
+                            ok, err = _consume_vl_result(vl_result)
+                            if not ok:
+                                logger.warning(f"[{task_id}] VL 分析失败，提前回退: {err}")
+                                _persist_task_token_report({
+                                    "status": "fallback",
+                                    "vl_enabled": True,
+                                    "used_fallback": True,
+                                    "error_msg": err,
+                                    "routing_stats": routing_stats,
+                                    "token_stats": vl_token_stats,
+                                })
+                                return video_processing_pb2.VLAnalysisResponse(
+                                    success=True,
+                                    vl_enabled=True,
+                                    used_fallback=True,
+                                    error_msg=err
+                                )
+                            vl_consumed = True
+                            if vl_t0 is None:
+                                vl_t0 = time.perf_counter()
+                            vl_ms = (time.perf_counter() - vl_t0) * 1000.0
+                            logger.info(
+                                f"[{task_id}] VL 结果提前合并: screenshots={len(vl_screenshot_requests)}, "
+                                f"clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
+                            )
+
+                        tasks = [_run_cv_screenshot(u) for u in batch_units]
+                        results = await asyncio.gather(*tasks)
+                        batch_screenshots = 0
+                        for unit_id, start_sec, end_sec, ss_list in results:
+                            for idx, ss in enumerate(ss_list or []):
+                                ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
+                                cv_screenshot_requests.append({
+                                    "screenshot_id": f"routed_ss_{unit_id}_{idx}",
+                                    "timestamp_sec": ts,
+                                    "label": f"routed_range_{idx}",
+                                    "semantic_unit_id": unit_id
+                                })
+                                batch_screenshots += 1
+
+                        logger.info(
+                            f"[{task_id}] 路由截图批次 {batch_idx + 1}/{total_batches}: "
+                            f"units={len(batch_units)}, batch_ss={batch_screenshots}, "
+                            f"total_ss={len(cv_screenshot_requests)}"
+                        )
+
+                    route_ms = (time.perf_counter() - route_t0) * 1000.0
+                    logger.info(
+                        f"[{task_id}] 路由截图完成: units={len(cv_screenshot_units)}, "
+                        f"screenshots={len(cv_screenshot_requests)}, ms={route_ms:.1f}, "
+                        f"mode=legacy_batch, concurrency={max_concurrency}, batch_size={batch_size}"
+                    )
 
             # ==================================================================
             # 路由侧：短过程 clip（process<=10s）

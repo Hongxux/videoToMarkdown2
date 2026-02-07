@@ -15,7 +15,9 @@ Scoring system:
 import logging
 import cv2
 import numpy as np
+import os
 from typing import List, Dict, Optional, Tuple
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
@@ -445,6 +447,57 @@ class ScreenshotSelector:
         
         return best_idx, best_score
 
+    def _read_frames_at_timestamps_sequential(
+        self,
+        cap: cv2.VideoCapture,
+        timestamps: List[float],
+        video_fps: float,
+        total_frames: int,
+    ) -> Tuple[List[float], List[np.ndarray]]:
+        """
+        顺序读帧模式：按时间戳排序后，尽量以连续 read() 代替多次随机 seek。
+
+        目标：降低 cap.set(...) 高频调用带来的 IO/解码开销。
+        """
+        if not timestamps:
+            return [], []
+
+        valid_pairs = []
+        for ts in timestamps:
+            frame_idx = int(max(0.0, ts) * video_fps)
+            frame_idx = max(0, min(frame_idx, max(0, total_frames - 1)))
+            valid_pairs.append((float(ts), frame_idx))
+
+        valid_pairs.sort(key=lambda item: item[1])
+
+        out_timestamps: List[float] = []
+        out_frames: List[np.ndarray] = []
+
+        current_idx = None
+        for ts, target_idx in valid_pairs:
+            if current_idx is None:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+                current_idx = target_idx
+            elif target_idx < current_idx or (target_idx - current_idx) > 3:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_idx)
+                current_idx = target_idx
+            else:
+                while current_idx < target_idx:
+                    ret_skip, _ = cap.read()
+                    if not ret_skip:
+                        break
+                    current_idx += 1
+
+            ret, frame = cap.read()
+            if ret and frame is not None:
+                out_timestamps.append(ts)
+                out_frames.append(frame)
+                current_idx = (current_idx if current_idx is not None else target_idx) + 1
+            else:
+                current_idx = target_idx + 1
+
+        return out_timestamps, out_frames
+
     def select_screenshots_for_range_sync(
         self,
         video_path: str,
@@ -478,20 +531,20 @@ class ScreenshotSelector:
         video_duration = total_frames / video_fps
         end_sec = min(end_sec, video_duration)
         
-        # Stage 1: 粗采样
+        # Stage 1: 粗采样（顺序读帧，减少随机 seek）
         coarse_interval = 1.0 / coarse_fps
-        coarse_timestamps = []
-        coarse_frames = []
-        
+        coarse_ts_candidates = []
         t = start_sec
         while t < end_sec:
-            frame_idx = int(t * video_fps)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if ret and frame is not None:
-                coarse_timestamps.append(t)
-                coarse_frames.append(frame)
+            coarse_ts_candidates.append(t)
             t += coarse_interval
+
+        coarse_timestamps, coarse_frames = self._read_frames_at_timestamps_sequential(
+            cap=cap,
+            timestamps=coarse_ts_candidates,
+            video_fps=video_fps,
+            total_frames=total_frames,
+        )
         
         if len(coarse_frames) < 2:
             cap.release()
@@ -504,7 +557,7 @@ class ScreenshotSelector:
         if not islands:
             islands = [{"start_sec": start_sec, "end_sec": end_sec}]
         
-        # Stage 2: 细采样选最佳帧
+        # Stage 2: 细采样选最佳帧（顺序读帧 + 并行质量评分）
         results = []
         fine_interval = 1.0 / fine_fps
         
@@ -512,18 +565,18 @@ class ScreenshotSelector:
             island_start = island["start_sec"]
             island_end = island["end_sec"]
             
-            fine_timestamps = []
-            fine_frames = []
-            
+            fine_ts_candidates = []
             t = island_start
             while t < island_end:
-                frame_idx = int(t * video_fps)
-                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                ret, frame = cap.read()
-                if ret and frame is not None:
-                    fine_timestamps.append(t)
-                    fine_frames.append(frame)
+                fine_ts_candidates.append(t)
                 t += fine_interval
+
+            fine_timestamps, fine_frames = self._read_frames_at_timestamps_sequential(
+                cap=cap,
+                timestamps=fine_ts_candidates,
+                video_fps=video_fps,
+                total_frames=total_frames,
+            )
             
             if not fine_frames:
                 continue
@@ -541,7 +594,10 @@ class ScreenshotSelector:
         cap.release()
         
         elapsed = time.time() - t0
-        logger.info(f"Coarse-Fine selection [{start_sec:.1f}s-{end_sec:.1f}s]: {len(results)} screenshots in {elapsed:.2f}s")
+        logger.info(
+            f"Coarse-Fine selection [{start_sec:.1f}s-{end_sec:.1f}s]: "
+            f"{len(results)} screenshots in {elapsed:.2f}s (pid={os.getpid()})"
+        )
         
         return results
 
@@ -628,8 +684,13 @@ class ScreenshotSelector:
         if len(frames) == 1:
             return (timestamps[0], 0.5)
         
-        # 质量评估
-        quality_results = [_analyze_frame_quality_worker(f) for f in frames]
+        # 质量评估（并行）
+        worker_count = max(1, min(4, len(frames)))
+        if worker_count > 1:
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
+                quality_results = list(pool.map(_analyze_frame_quality_worker, frames))
+        else:
+            quality_results = [_analyze_frame_quality_worker(f) for f in frames]
         
         # 计算 MSE
         mse_values = []

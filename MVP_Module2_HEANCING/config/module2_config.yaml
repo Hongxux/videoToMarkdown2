@@ -233,6 +233,23 @@ vl_material_generation:
     # 有效时长 <= 阈值: 归入 process_short（CV 路由）
     # 有效时长 >  阈值: 归入 process_long（VL 路由）
     process_duration_threshold_sec: 40.0
+
+    # 路由截图流水线模式
+    # process_streaming: 使用进程池 + 生产者/消费者队列（推荐）
+    # legacy_batch: 保留历史线程池批处理模式（兼容回退）
+    screenshot_pipeline_mode: process_streaming
+
+    # 路由截图 worker 数
+    # auto: 跟随 gRPC CV 进程池能力自动确定
+    # int:  手动指定，最终会被限制在 [1, cv_worker_count]
+    screenshot_worker_count: auto
+
+    # 路由截图生产者-消费者队列大小（背压阈值）
+    screenshot_queue_maxsize: 16
+
+    # 路由截图 coarse/fine 采样率（与旧逻辑一致，作为显式可调参数）
+    screenshot_coarse_fps: 2.0
+    screenshot_fine_fps: 10.0
   
   # Qwen3-VL-Plus API 配置
   api:
@@ -318,6 +335,7 @@ vl_material_generation:
   screenshot_optimization:
     enabled: true
     time_window_seconds: 1.0  # 在建议时间戳前后各扩展 1 秒
+    reuse_visual_extractor: true         # 复用 VisualFeatureExtractor（按 video_path 缓存）
     
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠

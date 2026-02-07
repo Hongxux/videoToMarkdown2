@@ -4,7 +4,7 @@
   "raw_response": [
     {
       "step_id": 1,
-      "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+      "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
       "clip_start_sec": 1.0,
       "clip_end_sec": 9.5,
       "instructional_keyframe_timestamp": [
@@ -13,17 +13,18 @@
     },
     {
       "step_id": 2,
-      "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
+      "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
       "clip_start_sec": 10.0,
-      "clip_end_sec": 23.5,
+      "clip_end_sec": 25.5,
       "instructional_keyframe_timestamp": [
-        22.0
+        19.5,
+        24.5
       ]
     },
     {
       "step_id": 3,
-      "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-      "clip_start_sec": 24.5,
+      "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
+      "clip_start_sec": 26.0,
       "clip_end_sec": 34.0,
       "instructional_keyframe_timestamp": [
         33.0
@@ -31,7 +32,7 @@
     },
     {
       "step_id": 4,
-      "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
+      "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
       "clip_start_sec": 34.5,
       "clip_end_sec": 47.5,
       "instructional_keyframe_timestamp": [
@@ -40,7 +41,7 @@
     },
     {
       "step_id": 5,
-      "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
+      "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
       "clip_start_sec": 48.0,
       "clip_end_sec": 54.0,
       "instructional_keyframe_timestamp": [
@@ -51,7 +52,7 @@
   "steps": [
     {
       "step_id": 1,
-      "step_description": "访问clawdbot官网并复制NPM一键安装命令，在终端执行安装",
+      "step_description": "访问clawdbot官网，复制NPM一键安装命令并执行安装",
       "action_brief": "clawdbot_npm",
       "clip_start_sec": 157.0,
       "clip_end_sec": 183.79999999999995,
@@ -62,46 +63,47 @@
     },
     {
       "step_id": 2,
-      "step_description": "执行clawdbot onboarding初始化，配置AI模型为OpenAI并选择ChatGPT OAuth登录方式",
-      "action_brief": "clawdbot_onboarding_ai_openai_chatgpt_oauth",
+      "step_description": "运行clawdbot onboard命令启动初始化配置，选择OpenAI作为模型提供方并使用ChatGPT OAuth登录账户 / 确认AI模型配置完成，选择默认模型gpt-5.2，并选择WhatsApp作为聊天通道",
+      "action_brief": "clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2",
       "clip_start_sec": 184.29999999999995,
-      "clip_end_sec": 209.30000000000007,
-      "clip_file": "SU004_step_02_clawdbot_onboarding_ai_openai_chatgpt_oauth.mp4",
+      "clip_end_sec": 216.96666666666707,
+      "clip_file": "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2.mp4",
       "instructional_keyframes": [
-        "SU004_step_02_clawdbot_onboarding_ai_openai_chatgpt_oauth_key.png"
+        "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2_key.png",
+        "SU004_step_02_clawdbot_onboard_openai_chatgpt_oauth_ai_gpt_5_2_key_02.png"
       ]
     },
     {
       "step_id": 3,
-      "step_description": "选择WhatsApp作为聊天通道，并在手机端完成设备关联：打开WhatsApp > 已关联设备 > 关联新设备 > 扫描电脑端二维码",
-      "action_brief": "whatsapp_whatsapp",
-      "clip_start_sec": 215.96666666666707,
+      "step_description": "在手机WhatsApp中关联新设备：打开设置→已关联设备→关联新设备→扫描电脑端二维码完成绑定",
+      "action_brief": "whatsapp",
+      "clip_start_sec": 217.46666666666707,
       "clip_end_sec": 225.46666666666707,
-      "clip_file": "SU004_step_03_whatsapp_whatsapp.mp4",
+      "clip_file": "SU004_step_03_whatsapp.mp4",
       "instructional_keyframes": [
-        "SU004_step_03_whatsapp_whatsapp_key.png"
+        "SU004_step_03_whatsapp_key.png"
       ]
     },
     {
       "step_id": 4,
-      "step_description": "选择预装skills（如bird），跳过所有API Key配置，完成人设问答后启动Agent",
-      "action_brief": "skills_bird_api_key_agent",
+      "step_description": "在终端中选择预装skills（如bird），跳过所有API Key配置，完成人设问答后进入主界面",
+      "action_brief": "skills_bird_api_key",
       "clip_start_sec": 225.96666666666707,
       "clip_end_sec": 239.63333333333424,
-      "clip_file": "SU004_step_04_skills_bird_api_key_agent.mp4",
+      "clip_file": "SU004_step_04_skills_bird_api_key.mp4",
       "instructional_keyframes": [
-        "SU004_step_04_skills_bird_api_key_agent_key.png"
+        "SU004_step_04_skills_bird_api_key_key.png"
       ]
     },
     {
       "step_id": 5,
-      "step_description": "向聊天工具发送测试消息，验证配置成功：在终端输入指令后，手机WhatsApp收到消息并显示已上线",
-      "action_brief": "whatsapp",
+      "step_description": "向聊天工具发送测试消息，验证手机端成功接收消息，确认整个配置流程完成",
+      "action_brief": "action",
       "clip_start_sec": 240.13333333333424,
       "clip_end_sec": 246.0,
-      "clip_file": "SU004_step_05_whatsapp.mp4",
+      "clip_file": "SU004_step_05_action.mp4",
       "instructional_keyframes": [
-        "SU004_step_05_whatsapp_key.png"
+        "SU004_step_05_action_key.png"
       ]
     }
   ]

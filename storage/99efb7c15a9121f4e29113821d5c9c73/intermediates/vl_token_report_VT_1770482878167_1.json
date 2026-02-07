@@ -1,0 +1,29 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-02-08 01:00:36",
+  "task_id": "VT_1770482878167_1",
+  "video_path": "D:\\videoToMarkdownTest2\\storage\\99efb7c15a9121f4e29113821d5c9c73\\video.mp4",
+  "semantic_units_path": "D:\\videoToMarkdownTest2\\storage\\99efb7c15a9121f4e29113821d5c9c73\\semantic_units_phase2a.json",
+  "output_dir": "D:\\videoToMarkdownTest2\\storage\\99efb7c15a9121f4e29113821d5c9c73",
+  "status": "success",
+  "vl_enabled": true,
+  "used_fallback": false,
+  "routing_stats": {
+    "total": 14,
+    "abstract": 1,
+    "concrete": 0,
+    "process_short": 10,
+    "process_long": 3,
+    "process_preprocessed": 12,
+    "unknown": 0
+  },
+  "token_stats": {},
+  "result_counts": {
+    "semantic_units_total": 14,
+    "vl_units": 3,
+    "screenshots": 137,
+    "clips": 25,
+    "vl_clips_generated": 17,
+    "vl_screenshots_generated": 24
+  }
+}
