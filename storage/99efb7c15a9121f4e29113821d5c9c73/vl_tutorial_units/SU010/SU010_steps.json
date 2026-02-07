@@ -1,0 +1,134 @@
+{
+  "unit_id": "SU010",
+  "schema": "tutorial_stepwise_v1",
+  "raw_response": [
+    {
+      "step_id": 1,
+      "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+      "clip_start_sec": 9.0,
+      "clip_end_sec": 17.0,
+      "instructional_keyframe_timestamp": [
+        13.5,
+        16.8
+      ]
+    },
+    {
+      "step_id": 2,
+      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
+      "clip_start_sec": 18.0,
+      "clip_end_sec": 28.0,
+      "instructional_keyframe_timestamp": [
+        20.5,
+        23.8,
+        27.0,
+        27.8
+      ]
+    },
+    {
+      "step_id": 3,
+      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
+      "clip_start_sec": 29.0,
+      "clip_end_sec": 54.0,
+      "instructional_keyframe_timestamp": [
+        31.0,
+        40.0,
+        47.0,
+        53.5
+      ]
+    },
+    {
+      "step_id": 4,
+      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
+      "clip_start_sec": 59.0,
+      "clip_end_sec": 72.0,
+      "instructional_keyframe_timestamp": [
+        61.5,
+        64.5,
+        68.5,
+        71.5
+      ]
+    },
+    {
+      "step_id": 5,
+      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
+      "clip_start_sec": 73.0,
+      "clip_end_sec": 98.0,
+      "instructional_keyframe_timestamp": [
+        77.0,
+        83.5,
+        91.5,
+        95.5
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "step_id": 1,
+      "step_description": "在飞书开放平台创建企业应用，填写应用名称与描述，并添加机器人能力",
+      "action_brief": "action",
+      "clip_start_sec": 425.0,
+      "clip_end_sec": 433.0,
+      "clip_file": "SU010_step_01_action.mp4",
+      "instructional_keyframes": [
+        "SU010_step_01_action_key.png",
+        "SU010_step_01_action_key_02.png"
+      ]
+    },
+    {
+      "step_id": 2,
+      "step_description": "进入权限管理页面，开通机器人所需各项权限（如获取用户信息、接收消息等） / 配置应用版本号并发布应用，完成基础应用设置",
+      "action_brief": "action",
+      "clip_start_sec": 434.0,
+      "clip_end_sec": 444.0,
+      "clip_file": "SU010_step_02_action.mp4",
+      "instructional_keyframes": [
+        "SU010_step_02_action_key.png",
+        "SU010_step_02_action_key_02.png",
+        "SU010_step_02_action_key_03.png",
+        "SU010_step_02_action_key_04.png"
+      ]
+    },
+    {
+      "step_id": 3,
+      "step_description": "在Mac终端安装飞书插件，并配置APP ID、APP Secret、启用飞书通道及WebSocket连接模式",
+      "action_brief": "mac_app_id_app_secret_websocket",
+      "clip_start_sec": 445.0,
+      "clip_end_sec": 470.86666666666684,
+      "clip_file": "SU010_step_03_mac_app_id_app_secret_websocket.mp4",
+      "instructional_keyframes": [
+        "SU010_step_03_mac_app_id_app_secret_websocket_key.png",
+        "SU010_step_03_mac_app_id_app_secret_websocket_key_02.png",
+        "SU010_step_03_mac_app_id_app_secret_websocket_key_03.png",
+        "SU010_step_03_mac_app_id_app_secret_websocket_key_04.png"
+      ]
+    },
+    {
+      "step_id": 4,
+      "step_description": "在飞书开放平台配置事件回调：选择长连接方式，添加接收消息事件，并创建新版本提交发布",
+      "action_brief": "action",
+      "clip_start_sec": 477.13333333333384,
+      "clip_end_sec": 490.13333333333384,
+      "clip_file": "SU010_step_04_action.mp4",
+      "instructional_keyframes": [
+        "SU010_step_04_action_key.png",
+        "SU010_step_04_action_key_02.png",
+        "SU010_step_04_action_key_03.png",
+        "SU010_step_04_action_key_04.png"
+      ]
+    },
+    {
+      "step_id": 5,
+      "step_description": "在飞书App中与MoltBot机器人交互测试：发送问候、查询时间、请求截图；因权限限制需先在Clawdbot控制台确认设备所有权以开通截图权限",
+      "action_brief": "app_moltbot_clawdbot",
+      "clip_start_sec": 491.13333333333384,
+      "clip_end_sec": 516.1333333333339,
+      "clip_file": "SU010_step_05_app_moltbot_clawdbot.mp4",
+      "instructional_keyframes": [
+        "SU010_step_05_app_moltbot_clawdbot_key.png",
+        "SU010_step_05_app_moltbot_clawdbot_key_02.png",
+        "SU010_step_05_app_moltbot_clawdbot_key_03.png",
+        "SU010_step_05_app_moltbot_clawdbot_key_04.png"
+      ]
+    }
+  ]
+}

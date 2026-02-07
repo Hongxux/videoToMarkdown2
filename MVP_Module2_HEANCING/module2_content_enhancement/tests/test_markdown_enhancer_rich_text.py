@@ -56,7 +56,8 @@ def test_concrete_section_placeholder_replaced_with_obsidian_embed(tmp_path, mon
 
     enhancer = MarkdownEnhancer()
     enhancer._enabled = True
-    enhancer._llm_client = _FakeLLMClient("- \u5173\u952e\u6b65\u9aa4\n[IMG:SU001_img_01]\n- \u7ed3\u675f")
+    enhancer._llm_client = _FakeLLMClient("- key step\n【imgneeded_SU001_img_01】\n- end")
+
     async def _fake_hierarchy(sections, subject):
         return {"SU001": {"level": 2, "parent_id": None}}
 
@@ -70,7 +71,7 @@ def test_concrete_section_placeholder_replaced_with_obsidian_embed(tmp_path, mon
         )
     )
 
-    assert "[IMG:SU001_img_01]" not in markdown
+    assert "【imgneeded_SU001_img_01】" not in markdown
     assert "![[assets/SU001_img_01.png]]" in markdown
     assert "### Concrete Unit" in markdown
 
@@ -219,3 +220,175 @@ def test_hierarchy_level_mapping_keeps_deepseek_level_result(tmp_path, monkeypat
 
     assert "## Root Concept" in markdown
     assert "#### Leaf Detail" in markdown
+
+
+def test_concrete_imgneeded_placeholders_are_replaced(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img1 = assets_dir / "SU100_img_01.png"
+    img2 = assets_dir / "SU100_img_02.png"
+    img1.write_bytes(b"img1")
+    img2.write_bytes(b"img2")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU100",
+                "title": "Concrete Variants",
+                "knowledge_type": "concrete",
+                "body_text": "variant placeholder test",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img1), str(img2)],
+                    "screenshot_items": [
+                        {"img_id": "SU100_img_01", "img_path": str(img1), "img_description": "first"},
+                        {"img_id": "SU100_img_02", "img_path": str(img2), "img_description": "second"},
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient(
+        "line1 【imgneeded_SU100_img_01】\nline2 【imgneeded_SU100_img_02】\nline3"
+    )
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU100": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "【imgneeded_SU100_img_01】" not in markdown
+    assert "【imgneeded_SU100_img_02】" not in markdown
+    assert "![[assets/SU100_img_01.png]]" in markdown
+    assert "![[assets/SU100_img_02.png]]" in markdown
+
+
+def test_old_img_placeholder_not_replaced_but_supplemental_images_present(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU150_img_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU150",
+                "title": "Concrete Old Placeholder",
+                "knowledge_type": "concrete",
+                "body_text": "old placeholder body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU150_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "old format sample",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("line [IMG:SU150_img_01]")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU150": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "[IMG:SU150_img_01]" in markdown
+    assert "Supplemental images:" in markdown
+    assert "![[assets/SU150_img_01.png]]" in markdown
+
+
+def test_process_non_tutorial_uses_placeholder_replacement_and_video_tail(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU200_img_01.png"
+    clip_path = assets_dir / "SU200_clip_01.mp4"
+    img_path.write_bytes(b"img")
+    clip_path.write_bytes(b"clip")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU200",
+                "title": "Process Unit",
+                "knowledge_type": "process",
+                "body_text": "process concept body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU200_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "open menu",
+                        }
+                    ],
+                    "clip": str(clip_path),
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("step details\n【imgneeded_SU200_img_01】\ndone")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU200": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "【imgneeded_SU200_img_01】" not in markdown
+    assert "![[assets/SU200_img_01.png]]" in markdown
+    assert "> Video **" in markdown
+    assert "![[assets/SU200_clip_01.mp4]]" in markdown
+    assert "> Images **Keyframes**" not in markdown
+

@@ -49,6 +49,10 @@ public class JavaCVFFmpegService {
     // 统计
     private AtomicInteger totalScreenshots = new AtomicInteger(0);
     private AtomicInteger totalClips = new AtomicInteger(0);
+
+    // 生产者-消费者结束哨兵（clip 队列）
+    private static final ClipRequest CLIP_POISON_PILL =
+        new ClipRequest("__clip_poison__", 0.0, 0.0, "", "");
     
     @PostConstruct
     public void init() {
@@ -244,6 +248,11 @@ public class JavaCVFFmpegService {
             ExtractionResult result = new ExtractionResult();
             
             try {
+                List<ScreenshotRequest> safeScreenshotRequests =
+                    screenshotRequests != null ? new ArrayList<>(screenshotRequests) : new ArrayList<>();
+                List<ClipRequest> safeClipRequests =
+                    clipRequests != null ? new ArrayList<>(clipRequests) : new ArrayList<>();
+
                 // 创建输出目录
                 String screenshotsDir = Paths.get(outputDir, "screenshots").toString();
                 String clipsDir = Paths.get(outputDir, "clips").toString();
@@ -253,15 +262,60 @@ public class JavaCVFFmpegService {
                 result.screenshotsDir = screenshotsDir;
                 result.clipsDir = clipsDir;
                 
-                logger.info("🚀 JavaCV extraction starting: {} screenshots, {} clips, timeout={}s (JNI, no process spawn)",
-                    screenshotRequests.size(), clipRequests.size(), timeoutSeconds);
-                
-                // 批量提取截图
-                int screenshotSuccess = extractScreenshotsBatch(videoPath, screenshotsDir, screenshotRequests);
+                logger.info(
+                    "🚀 JavaCV extraction starting: {} screenshots, {} clips, timeout={}s (producer-consumer)",
+                    safeScreenshotRequests.size(), safeClipRequests.size(), timeoutSeconds
+                );
+
+                // 阶段间采用生产者-消费者：material requests 进入队列后即可被消费提取
+                // 截图保持顺序复用同一个 grabber；clip 使用多 worker 并发消费。
+                CompletableFuture<Integer> screenshotConsumer = CompletableFuture.supplyAsync(
+                    () -> extractScreenshotsBatch(videoPath, screenshotsDir, safeScreenshotRequests),
+                    executorService
+                );
+
+                int clipWorkers = resolveClipWorkerCount(safeClipRequests.size());
+                BlockingQueue<ClipRequest> clipQueue = new LinkedBlockingQueue<>();
+
+                CompletableFuture<Void> clipProducer = CompletableFuture.runAsync(() -> {
+                    try {
+                        for (ClipRequest req : safeClipRequests) {
+                            if (req != null) {
+                                clipQueue.put(req);
+                            }
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Clip producer interrupted", e);
+                    } finally {
+                        for (int i = 0; i < clipWorkers; i++) {
+                            try {
+                                clipQueue.put(CLIP_POISON_PILL);
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                break;
+                            }
+                        }
+                    }
+                }, executorService);
+
+                List<CompletableFuture<Integer>> clipConsumers = new ArrayList<>();
+                for (int i = 0; i < clipWorkers; i++) {
+                    final int workerIndex = i;
+                    clipConsumers.add(CompletableFuture.supplyAsync(
+                        () -> consumeClipQueue(videoPath, clipsDir, clipQueue, workerIndex),
+                        executorService
+                    ));
+                }
+
+                clipProducer.join();
+                int clipSuccess = 0;
+                for (CompletableFuture<Integer> consumer : clipConsumers) {
+                    clipSuccess += consumer.join();
+                }
+                int screenshotSuccess = screenshotConsumer.join();
+
                 result.successfulScreenshots = screenshotSuccess;
-                
-                // 批量提取视频片段
-                int clipSuccess = extractClipsBatch(videoPath, clipsDir, clipRequests);
                 result.successfulClips = clipSuccess;
                 
                 // 释放 Grabber（处理完成）
@@ -367,10 +421,110 @@ public class JavaCVFFmpegService {
     }
 
     /**
+     * clip 消费者：每个 worker 复用本地 grabber，避免每段 clip 都 start/stop。
+     */
+    private int consumeClipQueue(
+            String videoPath,
+            String outputDir,
+            BlockingQueue<ClipRequest> queue,
+            int workerIndex
+    ) {
+        int success = 0;
+        FFmpegFrameGrabber workerGrabber = null;
+        try {
+            workerGrabber = createWorkerGrabber(videoPath);
+            while (true) {
+                ClipRequest req = queue.take();
+                if (req == null) continue;
+                if (isPoisonPill(req)) {
+                    break;
+                }
+
+                try {
+                    String outputPath = Paths.get(outputDir, req.clipId + ".mp4").toString();
+                    boolean extracted = extractClipWithWorkerGrabber(workerGrabber, outputPath, req);
+                    if (extracted) {
+                        success++;
+                        totalClips.incrementAndGet();
+                    }
+                } catch (Exception e) {
+                    logger.error("Clip worker[{}] error: {} - {}", workerIndex, req.clipId, e.getMessage());
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            logger.error("Clip worker[{}] init failed: {}", workerIndex, e.getMessage());
+        } finally {
+            closeGrabber(workerGrabber);
+        }
+        return success;
+    }
+
+    private int resolveClipWorkerCount(int clipCount) {
+        if (clipCount <= 0) return 1;
+        int cpu = Runtime.getRuntime().availableProcessors();
+        // 权衡：clip 编码较重，worker 不宜过多；采用 CPU 一半并上限 6。
+        int candidate = Math.max(1, Math.min(cpu / 2, 6));
+        return Math.max(1, Math.min(candidate, clipCount));
+    }
+
+    private boolean isPoisonPill(ClipRequest request) {
+        return request == CLIP_POISON_PILL
+            || (request.clipId != null && request.clipId.equals(CLIP_POISON_PILL.clipId));
+    }
+
+    private FFmpegFrameGrabber createWorkerGrabber(String videoPath) throws Exception {
+        FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(videoPath);
+        grabber.start();
+        return grabber;
+    }
+
+    private void closeGrabber(FFmpegFrameGrabber grabber) {
+        if (grabber == null) return;
+        try {
+            grabber.stop();
+            grabber.release();
+        } catch (Exception e) {
+            logger.warn("Error closing worker grabber: {}", e.getMessage());
+        }
+    }
+
+    private boolean extractClipWithWorkerGrabber(
+            FFmpegFrameGrabber workerGrabber,
+            String outputPath,
+            ClipRequest request
+    ) {
+        if (request == null) return false;
+        if (request.segments != null && !request.segments.isEmpty()) {
+            boolean concatOk = extractConcatClipWithGrabber(workerGrabber, outputPath, request.segments);
+            if (concatOk) return true;
+        }
+        return extractSingleClipWithGrabber(workerGrabber, outputPath, request.startSec, request.endSec);
+    }
+
+    /**
      * 拼接多段视频片段为单个输出（去除段间空白）
      */
     private boolean extractConcatClip(String videoPath, String outputPath, List<ClipSegment> segments) {
-        if (segments == null || segments.isEmpty()) {
+        FFmpegFrameGrabber grabber = null;
+        try {
+            grabber = createWorkerGrabber(videoPath);
+            return extractConcatClipWithGrabber(grabber, outputPath, segments);
+        } catch (Exception e) {
+            logger.error("Concat clip extraction failed: {} - {}", outputPath, e.getMessage());
+            return false;
+        } finally {
+            closeGrabber(grabber);
+        }
+    }
+
+    private boolean extractConcatClipWithGrabber(
+            FFmpegFrameGrabber grabber,
+            String outputPath,
+            List<ClipSegment> segments
+    ) {
+        if (grabber == null || segments == null || segments.isEmpty()) {
             return false;
         }
 
@@ -385,13 +539,8 @@ public class JavaCVFFmpegService {
         }
         validSegments.sort((a, b) -> Double.compare(a.startSec, b.startSec));
 
-        FFmpegFrameGrabber grabber = null;
         FFmpegFrameRecorder recorder = null;
-
         try {
-            grabber = new FFmpegFrameGrabber(videoPath);
-            grabber.start();
-
             recorder = new FFmpegFrameRecorder(outputPath, grabber.getImageWidth(), grabber.getImageHeight(), grabber.getAudioChannels());
             recorder.setVideoCodec(avcodec.AV_CODEC_ID_H264);
             recorder.setAudioCodec(avcodec.AV_CODEC_ID_AAC);
@@ -403,6 +552,7 @@ public class JavaCVFFmpegService {
             recorder.start();
 
             long outputOffsetUs = 0L;
+            long lastRecordedTs = -1L;
             for (ClipSegment seg : validSegments) {
                 long startTimestamp = (long) (seg.startSec * 1_000_000);
                 long endTimestamp = (long) (seg.endSec * 1_000_000);
@@ -419,17 +569,23 @@ public class JavaCVFFmpegService {
                     }
                     long relativeTs = Math.max(0L, currentTs - startTimestamp);
                     long outputTs = outputOffsetUs + relativeTs;
+                    if (outputTs <= lastRecordedTs) {
+                        outputTs = lastRecordedTs + 1;
+                    }
                     recorder.setTimestamp(outputTs);
                     recorder.record(frame);
+                    lastRecordedTs = outputTs;
                 }
-                outputOffsetUs += Math.max(0L, endTimestamp - startTimestamp);
+                long segmentDurationUs = Math.max(0L, endTimestamp - startTimestamp);
+                long expectedOffsetUs = outputOffsetUs + segmentDurationUs;
+                long adjustedOffsetUs = lastRecordedTs >= 0 ? lastRecordedTs + 1 : expectedOffsetUs;
+                outputOffsetUs = Math.max(expectedOffsetUs, adjustedOffsetUs);
             }
 
             double durationSec = outputOffsetUs / 1_000_000.0;
             logger.debug("Concat clip saved: {} (segments={}, duration={:.2f}s)",
                 new File(outputPath).getName(), validSegments.size(), durationSec);
             return true;
-
         } catch (Exception e) {
             logger.error("Concat clip extraction failed: {} - {}", outputPath, e.getMessage());
             return false;
@@ -439,12 +595,8 @@ public class JavaCVFFmpegService {
                     recorder.stop();
                     recorder.release();
                 }
-                if (grabber != null) {
-                    grabber.stop();
-                    grabber.release();
-                }
             } catch (Exception e) {
-                logger.warn("Error closing grabber/recorder: {}", e.getMessage());
+                logger.warn("Error closing recorder: {}", e.getMessage());
             }
         }
     }
@@ -454,18 +606,31 @@ public class JavaCVFFmpegService {
      */
     private boolean extractSingleClip(String videoPath, String outputPath, double startSec, double endSec) {
         FFmpegFrameGrabber grabber = null;
-        FFmpegFrameRecorder recorder = null;
-        
         try {
-            grabber = new FFmpegFrameGrabber(videoPath);
-            grabber.start();
-            
-            // Seek 到起始位置
+            grabber = createWorkerGrabber(videoPath);
+            return extractSingleClipWithGrabber(grabber, outputPath, startSec, endSec);
+        } catch (Exception e) {
+            logger.error("Clip extraction failed: {} - {}", outputPath, e.getMessage());
+            return false;
+        } finally {
+            closeGrabber(grabber);
+        }
+    }
+
+    private boolean extractSingleClipWithGrabber(
+            FFmpegFrameGrabber grabber,
+            String outputPath,
+            double startSec,
+            double endSec
+    ) {
+        if (grabber == null) return false;
+
+        FFmpegFrameRecorder recorder = null;
+        try {
             long startTimestamp = (long) (startSec * 1_000_000);
             long endTimestamp = (long) (endSec * 1_000_000);
             grabber.setTimestamp(startTimestamp);
-            
-            // 创建 Recorder
+
             recorder = new FFmpegFrameRecorder(outputPath, grabber.getImageWidth(), grabber.getImageHeight(), grabber.getAudioChannels());
             recorder.setVideoCodec(avcodec.AV_CODEC_ID_H264);
             recorder.setAudioCodec(avcodec.AV_CODEC_ID_AAC);
@@ -475,8 +640,7 @@ public class JavaCVFFmpegService {
             recorder.setAudioBitrate(128_000);
             recorder.setSampleRate(grabber.getSampleRate() > 0 ? grabber.getSampleRate() : 44100);
             recorder.start();
-            
-            // 逐帧复制
+
             Frame frame;
             while ((frame = grabber.grab()) != null) {
                 if (grabber.getTimestamp() > endTimestamp) {
@@ -484,27 +648,21 @@ public class JavaCVFFmpegService {
                 }
                 recorder.record(frame);
             }
-            
-            logger.debug("Clip saved: {} ({:.1f}s - {:.1f}s)", 
+
+            logger.debug("Clip saved: {} ({:.1f}s - {:.1f}s)",
                 new File(outputPath).getName(), startSec, endSec);
             return true;
-            
         } catch (Exception e) {
             logger.error("Clip extraction failed: {} - {}", outputPath, e.getMessage());
             return false;
         } finally {
-            // 清理资源
             try {
                 if (recorder != null) {
                     recorder.stop();
                     recorder.release();
                 }
-                if (grabber != null) {
-                    grabber.stop();
-                    grabber.release();
-                }
             } catch (Exception e) {
-                logger.warn("Error closing grabber/recorder: {}", e.getMessage());
+                logger.warn("Error closing recorder: {}", e.getMessage());
             }
         }
     }

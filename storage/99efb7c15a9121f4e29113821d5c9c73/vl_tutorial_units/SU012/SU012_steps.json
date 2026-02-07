@@ -1,0 +1,96 @@
+{
+  "unit_id": "SU012",
+  "schema": "tutorial_stepwise_v1",
+  "raw_response": [
+    {
+      "step_id": 1,
+      "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
+      "clip_start_sec": 1.0,
+      "clip_end_sec": 14.5,
+      "instructional_keyframe_timestamp": [
+        5.5,
+        14.2
+      ]
+    },
+    {
+      "step_id": 2,
+      "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
+      "clip_start_sec": 15.0,
+      "clip_end_sec": 26.5,
+      "instructional_keyframe_timestamp": [
+        21.0,
+        26.0
+      ]
+    },
+    {
+      "step_id": 3,
+      "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
+      "clip_start_sec": 27.0,
+      "clip_end_sec": 42.5,
+      "instructional_keyframe_timestamp": [
+        33.5,
+        38.0,
+        42.0
+      ]
+    },
+    {
+      "step_id": 4,
+      "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
+      "clip_start_sec": 43.0,
+      "clip_end_sec": 53.0,
+      "instructional_keyframe_timestamp": [
+        52.5
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "step_id": 1,
+      "step_description": "在Clawdbot Gateway Dashboard中浏览内置Skills列表，说明其可接入第三方生态（如gog、github等），并演示点击'Install'按钮一键安装技能（如gog）。 / 进入Google Cloud Console，导航至API与服务 > 凭证 > OAuth权限请求页面，创建OAuth客户",
+      "action_brief": "clawdbot_gateway_dashboard_skills_gog_github_ins",
+      "clip_start_sec": 556.0,
+      "clip_end_sec": 585.4999999999999,
+      "clip_file": "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins.mp4",
+      "instructional_keyframes": [
+        "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins_key.png",
+        "SU012_step_01_clawdbot_gateway_dashboard_skills_gog_github_ins_key_02.png"
+      ]
+    },
+    {
+      "step_id": 2,
+      "step_description": "保存生成的client_secret.json文件，并将其拖入Clawdbot终端界面，执行配置命令以启用gog认证。 / 在浏览器中登录Google账号并授予Clawdbot访问Gmail、Calendar、Docs等权限，完成OAuth授权流程，返回终端确认已连接。",
+      "action_brief": "client_secret_json_clawdbot_gog_google_clawdbot",
+      "clip_start_sec": 585.9999999999999,
+      "clip_end_sec": 597.4999999999999,
+      "clip_file": "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot.mp4",
+      "instructional_keyframes": [
+        "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot_key.png",
+        "SU012_step_02_client_secret_json_clawdbot_gog_google_clawdbot_key_02.png"
+      ]
+    },
+    {
+      "step_id": 3,
+      "step_description": "在Clawdbot终端中输入指令查询最近邮件并要求总结；系统提示Gmail API未启用，按提示开启Gmail API后重试，成功返回近7天邮件概览及内容摘要。 / 指令Clawdbot将所有邮件移动至垃圾箱，系统提供两种方案供选择，用户选择方案1后，Clawdbot执行批量移动操作并反馈结果（共43封）。 / 通过手",
+      "action_brief": "clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb",
+      "clip_start_sec": 597.9999999999999,
+      "clip_end_sec": 621.0666666666671,
+      "clip_file": "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb.mp4",
+      "instructional_keyframes": [
+        "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key.png",
+        "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_02.png",
+        "SU012_step_03_clawdbot_gmail_api_gmail_api_7_clawdbot_1_clawdb_key_03.png"
+      ]
+    },
+    {
+      "step_id": 4,
+      "step_description": "在WhatsApp中设置Clawdbot每2分钟检查一次Gmail未读邮件，若有新邮件则通过WhatsApp通知；随后从Gmail发送测试邮件，Clawdbot检测到后立即推送通知并总结邮件内容（含版本号n8n 2.6.0及Bug Fixes列表）。",
+      "action_brief": "whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo",
+      "clip_start_sec": 621.5666666666671,
+      "clip_end_sec": 631.5666666666671,
+      "clip_file": "SU012_step_04_whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo.mp4",
+      "instructional_keyframes": [
+        "SU012_step_04_whatsapp_clawdbot_2_gmail_whatsapp_gmail_clawdbo_key.png"
+      ]
+    }
+  ]
+}

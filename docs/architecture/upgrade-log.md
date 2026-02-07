@@ -2,6 +2,55 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-07 Phase2A/Assets 性能优化（仅并发与复用，不改正确率策略）
+- 日期：2026-02-07
+- 版本/分支/提交：未记录
+- 触发背景与问题：
+  - 现网耗时统计显示 `Phase2A` 与 `assets` 阶段为主瓶颈。
+  - 用户要求仅进行“并发架构 + 资源复用 + 读帧提速”优化，明确不调整影响正确率的策略参数。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 增加提取流水线启动逻辑 `startExtractionPipeline(...)`，将素材请求生成后立即启动提取异步任务。
+    - `ExtractionRequests` 增加 `extractionFuture`，主流程在 `Phase2B` 前等待同一 future，避免重复提取。
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+    - `extractAllAsync` 改为生产者-消费者：截图消费与 clip 队列并发消费。
+    - clip 提取由串行改为多 worker 并发（`resolveClipWorkerCount`），并采用 worker-local grabber 复用。
+    - 新增 `extractSingleClipWithGrabber` / `extractConcatClipWithGrabber`，避免每段 clip 重复 `grabber.start()`。
+  - `python_grpc_server.py`
+    - `_batch_read_frames_for_screenshots` 改为“顺序读 + 并行解码”模式，复用 `_batch_read_frames_to_shm` 的高吞吐思路，减少随机 seek。
+    - `AnalyzeSemanticUnits` 不再每次 `new VisualFeatureExtractor`，改为按 `video_path` 从 `GlobalResourceManager` 缓存复用。
+    - `RichTextPipeline` 注入全局单例 `SemanticUnitSegmenter`，减少 Phase2A 热路径重复初始化。
+    - `ReleaseCVResources` 增加 `cleanup_visual_extractors`，统一资源回收。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/__init__.py`
+    - 导出 `SemanticUnitSegmenter`，供 gRPC 服务统一单例注入。
+- 关键决策与理由：
+  - 决策1：先建异步提取流水线，再在主流程等待 future。
+    - 为什么：满足“边生成边提取”并减少编排层空转等待。
+    - 权衡：增加 future 生命周期管理复杂度，但不改变素材语义与输出格式。
+  - 决策2：截图保持顺序复用，clip 走并发 worker。
+    - 为什么：截图是 seek 密集型，顺序读更稳；clip 是编码密集型，适合并发。
+    - 权衡：clip 并发过高会引发编码资源竞争，因此 worker 数限制为 `min(cpu/2, 6)`。
+  - 决策3：资源复用限定在“同进程 + 同视频路径”缓存。
+    - 为什么：能显著减少重复初始化成本且不改变算法判定。
+    - 权衡：缓存需要显式清理，因此在 `ReleaseCVResources` 扩展回收。
+- 兼容性影响：
+  - gRPC/REST 接口与数据协议未变。
+  - 素材请求生成逻辑、知识分类逻辑、VL 路由策略未改。
+- 风险与回滚方案：
+  - 若并发提取出现资源争用，可把 clip worker 数收敛到 1（退化为原串行）。
+  - 若发现缓存引起异常复用，可在 `ReleaseCVResources` 前强制清理，或暂时回退为每次新建。
+  - 回滚路径：恢复 `VideoProcessingOrchestrator` 提取调用为 `extractAllSync`，并恢复 `JavaCVFFmpegService` 原串行 clip 提取分支。
+- 验证方式与结果：
+  - 代码级验证：
+    - Python 语法检查通过：`python -m py_compile python_grpc_server.py`
+    - Java 编译校验通过：`mvn -DskipTests compile`（`java_orchestrator` 模块）
+  - 运行期建议：
+    - 观察日志中 `Start extraction producer-consumer pipeline` 与 `Reusing in-flight extraction future` 是否出现。
+    - 对比 `JavaCV extraction completed ... in xxxms` 与改造前基线。
+- 可复用经验：
+  - 对“生成请求 -> 重 I/O 执行”链路，可优先引入 producer-consumer future 桥接，而非一次性全量阻塞。
+  - 对视频类任务，先保证“顺序读+并行解码”的吞吐模型，再叠加算法优化，通常收益更稳定。
+
 ## 2026-02-07 VL 前置 stable 剔除预处理（process 单元降 token）
 - 日期：2026-02-07
 - 版本/分支/提交：未记录
@@ -414,4 +463,47 @@
   - tutorial regression tests still pass (11 passed) with the command above.
 - Reuse note:
   - The "LLM placeholders + local asset binding" pattern is reusable across markdown assembly modules.
+
+## 2026-02-07 RichText ?????????????????
+- ???2026-02-07
+- ????????abstract/concrete ????????? `materials.screenshot_items`????????????????????? markdown ???/???????
+- ???????/??/????
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - ???????`_slugify_text`?`_build_unit_asset_prefix`?`_build_action_brief`?`_build_request_base_name`?`_resolve_asset_output_path`?
+    - ?????????????? `assets/{unit_id}/...` ?????????? unit ??? action ???
+    - ?????? `_apply_external_materials` ?????????ID + ?????? + unit_id/title ???????????? `assets/{unit_id}/` ??????
+    - `clip/screenshot` ?? ID ???unit?? + action???????????????????
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+    - ?????????ID?????/???????????? unit ????
+- ????????
+  - ??????????????????????????????
+  - markdown ????????????????????????
+- ????????
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_tutorial_flow.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`
+  - ???17 passed?
+
+## 2026-02-08 process（非VL分步）链路补齐：截图校验 + 占位替换 + 尾部视频
+- 日期：2026-02-08
+- 触发背景与问题：`process` 语义单元在非 `tutorial_stepwise` 场景下，未统一走“结构化图片占位 -> 本地替换”的链路；截图校验仅覆盖 `abstract/concrete`，导致 process 输出在图文一致性上有缺口。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py`
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+- 关键决策与理由：
+  - 仅对 `process` 且“非 tutorial_stepwise”启用截图具象性校验，减少无效截图进入 markdown，同时不改变 tutorial 多步骤资产渲染行为。
+  - 非 tutorial 的 `process` 统一走 DeepSeek 结构化 + `[IMG:img_id]` 占位替换链路，保证图片插入点与文字逻辑同步。
+  - process 正文完成占位替换后，保留 `> Video` 尾部视频区块，但不再追加 `> Images Keyframes` 重复图片区块。
+- 兼容性影响：
+  - gRPC/proto 与 `result.json` 字段未变更。
+  - 仅 markdown 呈现策略变化：`process`（非 tutorial）从“末尾图块”调整为“正文插图优先 + 尾部视频”。
+- 风险与回滚方案：
+  - 若发现 process 图片召回不足，可回滚 `should_validate_screenshot` 的 process 条件；
+  - 若下游依赖末尾图块，可回滚 `_render_section` 中 process 图片块抑制逻辑。
+- 验证方式与结果：
+  - 新增与更新单元测试覆盖 process 非 tutorial 的占位替换、尾部视频、截图校验触发与 tutorial 豁免。
+  - 详细结果见本次提交测试输出。
+- 可复用经验：
+  - “LLM 结构化占位 + 本地确定性绑定”可复用于其它知识类型，且能在不改协议情况下提升图文对齐。
 

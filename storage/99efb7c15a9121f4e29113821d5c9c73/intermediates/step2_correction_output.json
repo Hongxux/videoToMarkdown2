@@ -1,0 +1,3675 @@
+{
+  "step": "step2_correction",
+  "input": {
+    "domain": "计算机科学",
+    "subtitle_path": "D:\\videoToMarkdownTest2\\storage\\99efb7c15a9121f4e29113821d5c9c73\\subtitles.txt"
+  },
+  "output": {
+    "corrected_subtitles": [
+      {
+        "subtitle_id": "SUB001",
+        "corrected_text": "CloudBot一夜爆火",
+        "start_sec": 0.0,
+        "end_sec": 1.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB002",
+        "corrected_text": "这是一个运行在本地电脑的开源AI助理",
+        "start_sec": 1.0,
+        "end_sec": 4.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB003",
+        "corrected_text": "短短几天内GitHub Star数量直线拉升",
+        "start_sec": 4.0,
+        "end_sec": 7.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB004",
+        "corrected_text": "已经超过了12万",
+        "start_sec": 7.0,
+        "end_sec": 8.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB005",
+        "corrected_text": "本期视频我们带来一个CloudBot的全面攻略",
+        "start_sec": 8.0,
+        "end_sec": 11.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB006",
+        "corrected_text": "看看CloudBot比起其他的AI agent有什么特色",
+        "start_sec": 11.0,
+        "end_sec": 15.0,
+        "corrections": [
+          {
+            "original": "AIagent",
+            "corrected": "AI agent",
+            "reason": "计算机领域术语，AI agent（智能体）是标准写法，原字幕缺少空格"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB007",
+        "corrected_text": "我准备了十几个案例的玩法大全",
+        "start_sec": 15.0,
+        "end_sec": 17.0,
+        "corrections": [
+          {
+            "original": "大权",
+            "corrected": "大全",
+            "reason": "同音字错误，'玩法大全'是常见表达，意为完整收集或指南"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB008",
+        "corrected_text": "还会介绍一个",
+        "start_sec": 17.0,
+        "end_sec": 18.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB009",
+        "corrected_text": "接入非输加国产模型的方案",
+        "start_sec": 18.0,
+        "end_sec": 20.0,
+        "corrections": [
+          {
+            "original": "非输加",
+            "corrected": "非输加",
+            "reason": "不确定是否为同音字错误，可能指'非输入加'或'非输入架'，但上下文不明确，保留原文"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB010",
+        "corrected_text": "让CloudBot在国内网络也能顺畅使用",
+        "start_sec": 20.0,
+        "end_sec": 24.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB011",
+        "corrected_text": "视频开始之前先插入一个小插曲",
+        "start_sec": 24.0,
+        "end_sec": 26.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB012",
+        "corrected_text": "由于CloudBot受到安苏尔佩克法务团队的压力",
+        "start_sec": 26.0,
+        "end_sec": 29.0,
+        "corrections": [
+          {
+            "original": "安苏尔佩克",
+            "corrected": "安苏尔佩克",
+            "reason": "不确定是否为同音字错误，可能指'安苏尔佩克'（如公司名），但上下文不明确，保留原文"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB013",
+        "corrected_text": "CloudBot先是改名成了MultBot",
+        "start_sec": 29.0,
+        "end_sec": 32.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB014",
+        "corrected_text": "现在又改名成了OpenCloud",
+        "start_sec": 32.0,
+        "end_sec": 34.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB015",
+        "corrected_text": "啪啪瞎做视频的速度",
+        "start_sec": 34.0,
+        "end_sec": 35.0,
+        "corrections": [
+          {
+            "original": "啪啪瞎做",
+            "corrected": "啪啪瞎做",
+            "reason": "不确定是否为同音字错误，可能为口语化表达（如'啪啪瞎做'形容快速制作），但上下文不完整，保留原文"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB016",
+        "corrected_text": "还赶不上他改名的速度",
+        "start_sec": 35.0,
+        "end_sec": 37.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB017",
+        "corrected_text": "所以本期视频",
+        "start_sec": 37.0,
+        "end_sec": 38.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB018",
+        "corrected_text": "我们还是统一叫他最开始的名字",
+        "start_sec": 38.0,
+        "end_sec": 40.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB019",
+        "corrected_text": "CloudBot",
+        "start_sec": 40.0,
+        "end_sec": 41.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB020",
+        "corrected_text": "CloudBot功能跟CloudCode和OpenCode都有点像",
+        "start_sec": 41.0,
+        "end_sec": 44.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB021",
+        "corrected_text": "都可以处理文件",
+        "start_sec": 44.0,
+        "end_sec": 46.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB022",
+        "corrected_text": "编码",
+        "start_sec": 46.0,
+        "end_sec": 46.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB023",
+        "corrected_text": "调用skills",
+        "start_sec": 46.0,
+        "end_sec": 47.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB024",
+        "corrected_text": "mcp等等帮我们处理工作",
+        "start_sec": 47.0,
+        "end_sec": 49.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB025",
+        "corrected_text": "CloudBot的最大优势是",
+        "start_sec": 49.0,
+        "end_sec": 51.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB026",
+        "corrected_text": "可以接入各种聊天工具",
+        "start_sec": 51.0,
+        "end_sec": 53.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB027",
+        "corrected_text": "也就是我们即使出门在外",
+        "start_sec": 53.0,
+        "end_sec": 54.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB028",
+        "corrected_text": "手边没有电脑",
+        "start_sec": 54.0,
+        "end_sec": 55.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB029",
+        "corrected_text": "只需要在聊天工具里面",
+        "start_sec": 55.0,
+        "end_sec": 57.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB030",
+        "corrected_text": "给CloudBot留个言",
+        "start_sec": 57.0,
+        "end_sec": 58.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB031",
+        "corrected_text": "CloudBot就能自动干活",
+        "start_sec": 58.0,
+        "end_sec": 60.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB032",
+        "corrected_text": "还能把屏幕截图",
+        "start_sec": 60.0,
+        "end_sec": 62.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB033",
+        "corrected_text": "执行过程等信息",
+        "start_sec": 62.0,
+        "end_sec": 63.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB034",
+        "corrected_text": "实时同步过来",
+        "start_sec": 63.0,
+        "end_sec": 64.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB035",
+        "corrected_text": "非常的方便",
+        "start_sec": 64.0,
+        "end_sec": 65.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB036",
+        "corrected_text": "第二个优点是",
+        "start_sec": 65.0,
+        "end_sec": 66.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB037",
+        "corrected_text": "CloudBot自带了强大的定时器系统",
+        "start_sec": 66.0,
+        "end_sec": 69.0,
+        "corrections": [
+          {
+            "original": "定生物",
+            "corrected": "定时器",
+            "reason": "在计算机科学领域，'定时器'是常见术语，用于描述定时任务或提醒功能，而'定生物'不符合上下文（如SUB038的'创建定生物'和SUB040的'定时检查'），推断为同音字错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB038",
+        "corrected_text": "只需要用自然语言就能创建定时器",
+        "start_sec": 69.0,
+        "end_sec": 71.0,
+        "corrections": [
+          {
+            "original": "定生物",
+            "corrected": "定时器",
+            "reason": "基于SUB037的纠错，上下文一致，'定时器'指代定时任务或提醒工具，符合计算机领域术语。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB039",
+        "corrected_text": "比如可以创建一个临时的提醒",
+        "start_sec": 71.0,
+        "end_sec": 73.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB040",
+        "corrected_text": "还可以定时检查收件箱",
+        "start_sec": 73.0,
+        "end_sec": 75.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB041",
+        "corrected_text": "通知等等",
+        "start_sec": 75.0,
+        "end_sec": 76.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB042",
+        "corrected_text": "它可以智能的判断事情的紧急程度",
+        "start_sec": 76.0,
+        "end_sec": 78.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB043",
+        "corrected_text": "选择是否用聊天工具",
+        "start_sec": 78.0,
+        "end_sec": 80.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB044",
+        "corrected_text": "跟用户进行沟通",
+        "start_sec": 80.0,
+        "end_sec": 81.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB045",
+        "corrected_text": "比起传统的指令",
+        "start_sec": 81.0,
+        "end_sec": 83.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB046",
+        "corrected_text": "执行指令执行这种固定的流程",
+        "start_sec": 83.0,
+        "end_sec": 85.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB047",
+        "corrected_text": "CloudBot就具有了很强的主观能动性",
+        "start_sec": 85.0,
+        "end_sec": 88.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB048",
+        "corrected_text": "它的第三个优点是具有长期记忆",
+        "start_sec": 88.0,
+        "end_sec": 91.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB049",
+        "corrected_text": "可以把记忆作为文件存储在本地",
+        "start_sec": 91.0,
+        "end_sec": 93.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB050",
+        "corrected_text": "在日常的对话中能够搜索",
+        "start_sec": 93.0,
+        "end_sec": 95.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB051",
+        "corrected_text": "并且把相关的记忆捞回上下文",
+        "start_sec": 95.0,
+        "end_sec": 98.0,
+        "corrections": [
+          {
+            "original": "捞回",
+            "corrected": "拉回",
+            "reason": "计算机领域常用术语，指将数据从存储中提取到当前工作环境（上下文），'拉回'比'捞回'更符合技术表达习惯"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB052",
+        "corrected_text": "随着日常使用",
+        "start_sec": 98.0,
+        "end_sec": 99.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB053",
+        "corrected_text": "它还会主动去更新这些记忆文件",
+        "start_sec": 99.0,
+        "end_sec": 102.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB054",
+        "corrected_text": "会有一种越用越聪明的感觉",
+        "start_sec": 102.0,
+        "end_sec": 104.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB055",
+        "corrected_text": "好我们先在本地把软件安装一下",
+        "start_sec": 104.0,
+        "end_sec": 106.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB056",
+        "corrected_text": "任意一个能运行JS的环境",
+        "start_sec": 108.0,
+        "end_sec": 110.0,
+        "corrections": [
+          {
+            "original": "运行动",
+            "corrected": "运行",
+            "reason": "计算机领域术语，'运行环境'是标准表述，'运行动'可能是'运行'和'动'的同音误识别"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB057",
+        "corrected_text": "都可以部署CloudBot",
+        "start_sec": 110.0,
+        "end_sec": 112.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB058",
+        "corrected_text": "我最推荐就是使用Mac",
+        "start_sec": 112.0,
+        "end_sec": 114.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB059",
+        "corrected_text": "或者Linux系统的家庭服务器",
+        "start_sec": 114.0,
+        "end_sec": 116.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB060",
+        "corrected_text": "现在最火的部署方案是使用Mac mini",
+        "start_sec": 116.0,
+        "end_sec": 119.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB061",
+        "corrected_text": "Mac mini的最大好处是",
+        "start_sec": 119.0,
+        "end_sec": 120.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB062",
+        "corrected_text": "Mac系统有不错的桌面环境",
+        "start_sec": 120.0,
+        "end_sec": 122.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB063",
+        "corrected_text": "这样可以很方便地进行截图",
+        "start_sec": 122.0,
+        "end_sec": 124.0,
+        "corrections": [
+          {
+            "original": "的",
+            "corrected": "地",
+            "reason": "“很方便”修饰动词“进行”，应使用结构助词“地”"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB064",
+        "corrected_text": "操作浏览器等等",
+        "start_sec": 124.0,
+        "end_sec": 126.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB065",
+        "corrected_text": "第二点是功耗比较低",
+        "start_sec": 126.0,
+        "end_sec": 127.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB066",
+        "corrected_text": "7x24小时运行比较省电",
+        "start_sec": 127.0,
+        "end_sec": 130.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB067",
+        "corrected_text": "第三个优点是",
+        "start_sec": 130.0,
+        "end_sec": 131.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB068",
+        "corrected_text": "CloudBot里面许多skills",
+        "start_sec": 131.0,
+        "end_sec": 133.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB069",
+        "corrected_text": "跟Mac生态是绑定的",
+        "start_sec": 133.0,
+        "end_sec": 135.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB070",
+        "corrected_text": "没有Mac电脑的话",
+        "start_sec": 135.0,
+        "end_sec": 136.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB071",
+        "corrected_text": "可以选择Linux操作系统",
+        "start_sec": 136.0,
+        "end_sec": 138.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB072",
+        "corrected_text": "或者在Windows里面",
+        "start_sec": 138.0,
+        "end_sec": 139.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB073",
+        "corrected_text": "创建一个Linux虚拟机",
+        "start_sec": 139.0,
+        "end_sec": 141.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB074",
+        "corrected_text": "操作步骤跟接下来是一样的",
+        "start_sec": 141.0,
+        "end_sec": 143.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB075",
+        "corrected_text": "我选择的安装方式是NodeJS",
+        "start_sec": 143.0,
+        "end_sec": 145.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB076",
+        "corrected_text": "我们来到NodeJS的官网",
+        "start_sec": 145.0,
+        "end_sec": 147.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB077",
+        "corrected_text": "把第一个命令复制一下",
+        "start_sec": 147.0,
+        "end_sec": 148.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB078",
+        "corrected_text": "然后打开终端执行一下",
+        "start_sec": 148.0,
+        "end_sec": 150.0,
+        "corrections": [
+          {
+            "original": "中端",
+            "corrected": "终端",
+            "reason": "计算机领域术语，指命令行界面，应为'终端'而非'中端'"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB079",
+        "corrected_text": "接着是第二个命令",
+        "start_sec": 150.0,
+        "end_sec": 152.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB080",
+        "corrected_text": "第三个命令",
+        "start_sec": 152.0,
+        "end_sec": 153.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB081",
+        "corrected_text": "这样NodeJS就安装完成了",
+        "start_sec": 154.0,
+        "end_sec": 156.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB082",
+        "corrected_text": "下一步我们来到CloudBot的官网",
+        "start_sec": 156.0,
+        "end_sec": 159.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB083",
+        "corrected_text": "在这里有一个一键安装命令",
+        "start_sec": 159.0,
+        "end_sec": 161.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB084",
+        "corrected_text": "如果我们使用官网上的",
+        "start_sec": 161.0,
+        "end_sec": 162.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB085",
+        "corrected_text": "一键安装命令的话",
+        "start_sec": 162.0,
+        "end_sec": 163.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB086",
+        "corrected_text": "注意要区分现在软件的名字",
+        "start_sec": 163.0,
+        "end_sec": 166.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB087",
+        "corrected_text": "比如现在叫OpenCloud",
+        "start_sec": 166.0,
+        "end_sec": 167.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB088",
+        "corrected_text": "后续所有操作的命令",
+        "start_sec": 167.0,
+        "end_sec": 169.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB089",
+        "corrected_text": "都应该是OpenCloud开头了",
+        "start_sec": 169.0,
+        "end_sec": 170.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB090",
+        "corrected_text": "这里我选择NPM的安装方式",
+        "start_sec": 170.0,
+        "end_sec": 172.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB091",
+        "corrected_text": "我们看到NPM这里",
+        "start_sec": 172.0,
+        "end_sec": 174.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB092",
+        "corrected_text": "命令还是叫CloudBot",
+        "start_sec": 174.0,
+        "end_sec": 176.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB093",
+        "corrected_text": "所以后续我输入的命令",
+        "start_sec": 176.0,
+        "end_sec": 177.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB094",
+        "corrected_text": "都应该还是CloudBot开头了",
+        "start_sec": 177.0,
+        "end_sec": 179.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB095",
+        "corrected_text": "这样我把这个命令复制一下",
+        "start_sec": 179.0,
+        "end_sec": 181.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB096",
+        "corrected_text": "粘贴到命令行窗口执行一下",
+        "start_sec": 181.0,
+        "end_sec": 183.0,
+        "corrections": [
+          {
+            "original": "沾贴",
+            "corrected": "粘贴",
+            "reason": "计算机操作中常用“粘贴”表示将复制的内容放入指定位置，“沾”为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB097",
+        "corrected_text": "安装完成我们输入命令",
+        "start_sec": 183.0,
+        "end_sec": 185.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB098",
+        "corrected_text": "CloudBot Onboard来进行初始化",
+        "start_sec": 185.0,
+        "end_sec": 187.0,
+        "corrections": [
+          {
+            "original": "Unboard",
+            "corrected": "Onboard",
+            "reason": "计算机领域常用“Onboard”表示初始化或引导流程，与上下文“初始化”匹配"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB099",
+        "corrected_text": "第一步先配置AI模型",
+        "start_sec": 187.0,
+        "end_sec": 189.0,
+        "corrections": [
+          {
+            "original": "AA模型",
+            "corrected": "AI模型",
+            "reason": "计算机科学中通常指“AI模型”，且下文提到“OpenAI”，推断为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB100",
+        "corrected_text": "因为我有OpenAI的Plus订阅",
+        "start_sec": 189.0,
+        "end_sec": 191.0,
+        "corrections": [
+          {
+            "original": "OpenAA",
+            "corrected": "OpenAI",
+            "reason": "根据领域常识，应为知名人工智能公司“OpenAI”，且与下文“AI模型”呼应"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB101",
+        "corrected_text": "所以这里我选择OpenAI",
+        "start_sec": 191.0,
+        "end_sec": 193.0,
+        "corrections": [
+          {
+            "original": "OpenAA",
+            "corrected": "OpenAI",
+            "reason": "同上，专业术语一致性修正"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB102",
+        "corrected_text": "当然下面也有很多不错的",
+        "start_sec": 193.0,
+        "end_sec": 195.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB103",
+        "corrected_text": "国产模型可以选择",
+        "start_sec": 195.0,
+        "end_sec": 196.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB104",
+        "corrected_text": "视频的后半段",
+        "start_sec": 196.0,
+        "end_sec": 197.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB105",
+        "corrected_text": "我们再来配置使用国产模型",
+        "start_sec": 197.0,
+        "end_sec": 199.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB106",
+        "corrected_text": "选择OpenAI以后",
+        "start_sec": 199.0,
+        "end_sec": 200.0,
+        "corrections": [
+          {
+            "original": "OpenAA",
+            "corrected": "OpenAI",
+            "reason": "计算机科学领域，'OpenAI'是知名人工智能研究机构，'OpenAA'为同音字错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB107",
+        "corrected_text": "再选择第二个",
+        "start_sec": 200.0,
+        "end_sec": 201.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB108",
+        "corrected_text": "ChatGPT登录",
+        "start_sec": 201.0,
+        "end_sec": 203.0,
+        "corrections": [
+          {
+            "original": "ChadGPT",
+            "corrected": "ChatGPT",
+            "reason": "计算机科学领域，'ChatGPT'是知名AI模型，'ChadGPT'为同音字错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB109",
+        "corrected_text": "登录一下我的ChatGPT帐户",
+        "start_sec": 203.0,
+        "end_sec": 205.0,
+        "corrections": [
+          {
+            "original": "ChadGPT",
+            "corrected": "ChatGPT",
+            "reason": "同上，'ChatGPT'为正确术语。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB110",
+        "corrected_text": "这样AI模型就配置完成",
+        "start_sec": 205.0,
+        "end_sec": 207.0,
+        "corrections": [
+          {
+            "original": "AM模型",
+            "corrected": "AI模型",
+            "reason": "计算机科学领域，'AI模型'指人工智能模型，'AM'可能是'AI'的同音字错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB111",
+        "corrected_text": "默认模型我选择GPT 3.5",
+        "start_sec": 207.0,
+        "end_sec": 209.0,
+        "corrections": [
+          {
+            "original": "末日模型",
+            "corrected": "默认模型",
+            "reason": "根据上下文（模型配置），'默认模型'更合理，'末日'可能是'默认'的同音字错误。"
+          },
+          {
+            "original": "GPT 5.2",
+            "corrected": "GPT 3.5",
+            "reason": "计算机科学领域，截至当前知识，OpenAI公开模型为GPT-3.5/4等，'5.2'可能是'3.5'的听写错误（数字发音相似）。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB112",
+        "corrected_text": "接下来选择一个聊天工具",
+        "start_sec": 209.0,
+        "end_sec": 211.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB113",
+        "corrected_text": "这里我选择的工具是WhatsApp",
+        "start_sec": 211.0,
+        "end_sec": 213.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB114",
+        "corrected_text": "视频的后半段",
+        "start_sec": 213.0,
+        "end_sec": 214.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB115",
+        "corrected_text": "我们再来看如何绑定国产的聊天工具",
+        "start_sec": 214.0,
+        "end_sec": 216.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB116",
+        "corrected_text": "我们打开手机上的微信",
+        "start_sec": 216.0,
+        "end_sec": 218.0,
+        "corrections": [
+          {
+            "original": "WhatsApp",
+            "corrected": "微信",
+            "reason": "根据上下文（SUB115提到'国产的聊天工具'），微信是国产主流聊天工具，而WhatsApp非国产，此处可能为同音字或混淆错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB117",
+        "corrected_text": "右上角三个点",
+        "start_sec": 218.0,
+        "end_sec": 220.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB118",
+        "corrected_text": "已关联设备",
+        "start_sec": 220.0,
+        "end_sec": 221.0,
+        "corrections": [
+          {
+            "original": "以关联设备",
+            "corrected": "已关联设备",
+            "reason": "'已'表示完成状态，符合上下文（设备关联）；'以'为同音字错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB119",
+        "corrected_text": "关联新设备",
+        "start_sec": 221.0,
+        "end_sec": 222.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB120",
+        "corrected_text": "扫一下屏幕上的二维码",
+        "start_sec": 222.0,
+        "end_sec": 223.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB121",
+        "corrected_text": "这样就绑定完成",
+        "start_sec": 223.0,
+        "end_sec": 225.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB122",
+        "corrected_text": "接下来选择预装的Skills",
+        "start_sec": 225.0,
+        "end_sec": 227.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB123",
+        "corrected_text": "按空格键打上对勾选中",
+        "start_sec": 227.0,
+        "end_sec": 229.0,
+        "corrections": [
+          {
+            "original": "对沟",
+            "corrected": "对勾",
+            "reason": "在计算机操作界面中，表示选中的符号通常是“对勾”（✓），而非“对沟”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB124",
+        "corrected_text": "这里可以按需进行选择安装",
+        "start_sec": 229.0,
+        "end_sec": 231.0,
+        "corrections": [
+          {
+            "original": "按虚",
+            "corrected": "按需",
+            "reason": "在计算机配置语境中，“按需”表示根据需求进行选择，是常见术语。“按虚”为同音字错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB125",
+        "corrected_text": "下面的这些API Key可以全部选择跳过",
+        "start_sec": 231.0,
+        "end_sec": 234.0,
+        "corrections": [
+          {
+            "original": "API-K",
+            "corrected": "API Key",
+            "reason": "在计算机科学领域，用于身份验证的密钥通常称为“API Key”。“API-K”可能是语音识别导致的同音字/简写错误，应修正为标准术语。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB126",
+        "corrected_text": "然后AI会询问我们一些",
+        "start_sec": 234.0,
+        "end_sec": 236.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "AI",
+            "reason": "结合上下文（配置、人设问题、聊天工具），此处“AA”极有可能是“AI”（人工智能）的同音字错误，符合计算机科学领域的对话场景。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB127",
+        "corrected_text": "关于人设方面的问题",
+        "start_sec": 236.0,
+        "end_sec": 237.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB128",
+        "corrected_text": "我们回答一下",
+        "start_sec": 237.0,
+        "end_sec": 238.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB129",
+        "corrected_text": "这样就配置完成",
+        "start_sec": 238.0,
+        "end_sec": 239.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB130",
+        "corrected_text": "我说你可以给我的聊天工具发一个消息",
+        "start_sec": 239.0,
+        "end_sec": 242.0,
+        "corrections": [
+          {
+            "original": "我说",
+            "corrected": "我说",
+            "reason": "原文“我说”在口语化指令中可能成立，但结合上下文（SUB131提到“收到消息”），也可能是“我让”或“我请”的口语化表达。然而，根据“只纠正明显的同音字错误”及“不确定时保留原文”的原则，此处无明显同音字错误，故保留原文。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB131",
+        "corrected_text": "我们看到手机上收到了消息",
+        "start_sec": 242.0,
+        "end_sec": 244.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB132",
+        "corrected_text": "这样就完全配置成功了",
+        "start_sec": 244.0,
+        "end_sec": 246.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB133",
+        "corrected_text": "我们先来介绍几个基础命令的使用",
+        "start_sec": 248.0,
+        "end_sec": 250.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB134",
+        "corrected_text": "输入命令CloudBot Gateway",
+        "start_sec": 250.0,
+        "end_sec": 252.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB135",
+        "corrected_text": "这个是启动主程序",
+        "start_sec": 252.0,
+        "end_sec": 254.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB136",
+        "corrected_text": "我们可以通过关闭控制台",
+        "start_sec": 254.0,
+        "end_sec": 255.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB137",
+        "corrected_text": "来停止CloudBot的运行",
+        "start_sec": 255.0,
+        "end_sec": 257.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB138",
+        "corrected_text": "在CloudBot后台运行的时候",
+        "start_sec": 257.0,
+        "end_sec": 259.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB139",
+        "corrected_text": "我们可以新开一个窗口",
+        "start_sec": 259.0,
+        "end_sec": 261.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB140",
+        "corrected_text": "输入命令CloudBot TOI",
+        "start_sec": 261.0,
+        "end_sec": 263.0,
+        "corrections": [
+          {
+            "original": "TOI",
+            "corrected": "CLI",
+            "reason": "计算机领域常见术语，'TOI'与'CLI'（Command Line Interface，命令行界面）发音相似，结合上下文'进入控制台的对话界面'判断应为CLI"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB141",
+        "corrected_text": "就可以进入这个控制台的对话界面",
+        "start_sec": 263.0,
+        "end_sec": 265.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB142",
+        "corrected_text": "输入命令CloudBot Dashboard",
+        "start_sec": 265.0,
+        "end_sec": 268.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB143",
+        "corrected_text": "可以进入一个网页版的控制台",
+        "start_sec": 268.0,
+        "end_sec": 270.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB144",
+        "corrected_text": "在这里可以进行基础的对话",
+        "start_sec": 270.0,
+        "end_sec": 272.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB145",
+        "corrected_text": "上面还有很多配置",
+        "start_sec": 272.0,
+        "end_sec": 273.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB146",
+        "corrected_text": "可以管理定时任务",
+        "start_sec": 273.0,
+        "end_sec": 274.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "计算机后台管理场景中，'定身物'无意义，'定时任务'（scheduled tasks）是常见功能，发音相近"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB147",
+        "corrected_text": "管理Skills等等",
+        "start_sec": 274.0,
+        "end_sec": 276.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB148",
+        "corrected_text": "输入命令CloudBot Chat Logout",
+        "start_sec": 276.0,
+        "end_sec": 278.0,
+        "corrections": [
+          {
+            "original": "China's",
+            "corrected": "Chat",
+            "reason": "'China's'在上下文中不符合语义，结合'登录过的聊天软件'推断应为'Chat'（聊天），发音相似"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB149",
+        "corrected_text": "可以退出CloudBot上面",
+        "start_sec": 278.0,
+        "end_sec": 280.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB150",
+        "corrected_text": "登录过的聊天软件",
+        "start_sec": 280.0,
+        "end_sec": 281.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB151",
+        "corrected_text": "然后我们在输入命令Login",
+        "start_sec": 281.0,
+        "end_sec": 283.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB152",
+        "corrected_text": "就可以重新登录一下",
+        "start_sec": 283.0,
+        "end_sec": 284.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB153",
+        "corrected_text": "因为有的聊天软件",
+        "start_sec": 284.0,
+        "end_sec": 286.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB154",
+        "corrected_text": "可能隔几天就会掉线",
+        "start_sec": 286.0,
+        "end_sec": 287.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB155",
+        "corrected_text": "我们可以使用这个命令",
+        "start_sec": 287.0,
+        "end_sec": 288.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB156",
+        "corrected_text": "重新登录一下",
+        "start_sec": 288.0,
+        "end_sec": 289.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB157",
+        "corrected_text": "我们来看CloudBot最有意思的一个功能",
+        "start_sec": 289.0,
+        "end_sec": 292.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB158",
+        "corrected_text": "就是它的定时任务",
+        "start_sec": 292.0,
+        "end_sec": 293.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "计算机领域常见术语，指按预定时间自动执行的任务，与上下文CloudBot功能描述相符"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB159",
+        "corrected_text": "定时任务赋予了CloudBot的一些",
+        "start_sec": 293.0,
+        "end_sec": 295.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "延续上一条术语修正，保持一致性"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB160",
+        "corrected_text": "主观能动性",
+        "start_sec": 295.0,
+        "end_sec": 296.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB161",
+        "corrected_text": "让它变得更像一个智能的AE助手",
+        "start_sec": 296.0,
+        "end_sec": 299.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB162",
+        "corrected_text": "比如我输入这个命令",
+        "start_sec": 299.0,
+        "end_sec": 300.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB163",
+        "corrected_text": "提醒我两分钟以后关闭它",
+        "start_sec": 300.0,
+        "end_sec": 302.0,
+        "corrections": [
+          {
+            "original": "关闭器",
+            "corrected": "关闭它",
+            "reason": "根据上下文，应指关闭某个程序或操作，'器'为同音字错误，应为代词'它'"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB164",
+        "corrected_text": "CloudBot回复我好的",
+        "start_sec": 302.0,
+        "end_sec": 304.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB165",
+        "corrected_text": "已经设定成功了",
+        "start_sec": 304.0,
+        "end_sec": 305.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB166",
+        "corrected_text": "我们可以在网页版的控制台",
+        "start_sec": 305.0,
+        "end_sec": 307.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB167",
+        "corrected_text": "ChromeJob也就是定时任务这个选项卡",
+        "start_sec": 307.0,
+        "end_sec": 309.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "计算机领域术语，结合上下文'两分钟后执行'推断应为'定时任务'"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB168",
+        "corrected_text": "可以看到CloudBot为我们设定的定时任务",
+        "start_sec": 309.0,
+        "end_sec": 312.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "同上，计算机领域术语"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB169",
+        "corrected_text": "这里显示两分钟后执行",
+        "start_sec": 312.0,
+        "end_sec": 314.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB170",
+        "corrected_text": "两分钟以后",
+        "start_sec": 314.0,
+        "end_sec": 315.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB171",
+        "corrected_text": "它就把这个消息推送到了手机上",
+        "start_sec": 315.0,
+        "end_sec": 317.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB172",
+        "corrected_text": "提醒我去关闭器",
+        "start_sec": 317.0,
+        "end_sec": 318.0,
+        "corrections": [
+          {
+            "original": "关闭器",
+            "corrected": "关闭",
+            "reason": "结合上下文'推送消息'和'提醒'，推断应为提醒关闭某个东西，'器'可能是多余的同音字"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB173",
+        "corrected_text": "CloudBot具有操作浏览器的能力",
+        "start_sec": 318.0,
+        "end_sec": 321.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB174",
+        "corrected_text": "我们需要先在Mac里面下载一个",
+        "start_sec": 321.0,
+        "end_sec": 323.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB175",
+        "corrected_text": "Chrome浏览器",
+        "start_sec": 323.0,
+        "end_sec": 324.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB176",
+        "corrected_text": "我要求CloudBot去MIT公开课",
+        "start_sec": 324.0,
+        "end_sec": 327.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB177",
+        "corrected_text": "下载Python课程的课件",
+        "start_sec": 327.0,
+        "end_sec": 328.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB178",
+        "corrected_text": "放到我的桌面",
+        "start_sec": 328.0,
+        "end_sec": 329.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB179",
+        "corrected_text": "我们看到CloudBot自动打开了",
+        "start_sec": 329.0,
+        "end_sec": 331.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB180",
+        "corrected_text": "Mac里面的Chrome浏览器",
+        "start_sec": 331.0,
+        "end_sec": 333.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB181",
+        "corrected_text": "找到了MIT公开课的官网",
+        "start_sec": 333.0,
+        "end_sec": 335.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB182",
+        "corrected_text": "并且搜索Python",
+        "start_sec": 335.0,
+        "end_sec": 336.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB183",
+        "corrected_text": "它找到了几门Python课程",
+        "start_sec": 336.0,
+        "end_sec": 338.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB184",
+        "corrected_text": "回复了我课程的编号",
+        "start_sec": 338.0,
+        "end_sec": 340.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB185",
+        "corrected_text": "让我选择",
+        "start_sec": 340.0,
+        "end_sec": 341.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB186",
+        "corrected_text": "这里我选择第一个",
+        "start_sec": 341.0,
+        "end_sec": 342.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB187",
+        "corrected_text": "它又在浏览器里面",
+        "start_sec": 342.0,
+        "end_sec": 343.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB188",
+        "corrected_text": "通过课程编号找到了这门课",
+        "start_sec": 343.0,
+        "end_sec": 345.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB189",
+        "corrected_text": "并且下载到了桌面",
+        "start_sec": 345.0,
+        "end_sec": 347.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB190",
+        "corrected_text": "然后我要求它把它解压出来",
+        "start_sec": 347.0,
+        "end_sec": 349.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB191",
+        "corrected_text": "它调用了Mac的命令行工具",
+        "start_sec": 349.0,
+        "end_sec": 351.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB192",
+        "corrected_text": "完成了解压",
+        "start_sec": 351.0,
+        "end_sec": 352.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB193",
+        "corrected_text": "然后我要求它把第一节课的课件",
+        "start_sec": 352.0,
+        "end_sec": 354.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB194",
+        "corrected_text": "发给我",
+        "start_sec": 354.0,
+        "end_sec": 355.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB195",
+        "corrected_text": "这里CloudBot成功找到了课件",
+        "start_sec": 355.0,
+        "end_sec": 357.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB196",
+        "corrected_text": "并且完成了发送",
+        "start_sec": 357.0,
+        "end_sec": 358.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB197",
+        "corrected_text": "效果不错",
+        "start_sec": 358.0,
+        "end_sec": 359.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB198",
+        "corrected_text": "接下来我们来看一个",
+        "start_sec": 359.0,
+        "end_sec": 360.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB199",
+        "corrected_text": "把浏览器自动化跟定时任务组合起来的案例",
+        "start_sec": 360.0,
+        "end_sec": 362.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "在计算机科学领域，'定身物'应为同音错误，结合上下文自动化场景，正确术语应为'定时任务'（scheduled task）。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB200",
+        "corrected_text": "组合起来的案例",
+        "start_sec": 362.0,
+        "end_sec": 363.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB201",
+        "corrected_text": "帕巴夏作为一个科技软件类的博主",
+        "start_sec": 363.0,
+        "end_sec": 365.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB202",
+        "corrected_text": "需要经常查看GitHub的热点",
+        "start_sec": 365.0,
+        "end_sec": 367.0,
+        "corrections": [
+          {
+            "original": "GTAB",
+            "corrected": "GitHub",
+            "reason": "在计算机科学领域，'GTAB'发音与'GitHub'相似，且上下文提到科技软件博主查看热点，GitHub是常见的代码托管和热点追踪平台。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB203",
+        "corrected_text": "这里我告诉CloudBot",
+        "start_sec": 367.0,
+        "end_sec": 369.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB204",
+        "corrected_text": "让它查阅一下GitHub上面的热点",
+        "start_sec": 369.0,
+        "end_sec": 371.0,
+        "corrections": [
+          {
+            "original": "GTAB",
+            "corrected": "GitHub",
+            "reason": "同上，基于领域推断为GitHub的同音错误。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB205",
+        "corrected_text": "然后做个中文简报发送给我",
+        "start_sec": 371.0,
+        "end_sec": 373.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB206",
+        "corrected_text": "CloudBot生成了中文简报",
+        "start_sec": 373.0,
+        "end_sec": 375.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB207",
+        "corrected_text": "接下来我说每天早晨8点",
+        "start_sec": 375.0,
+        "end_sec": 377.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB208",
+        "corrected_text": "你都做这么一个简报发送给我",
+        "start_sec": 377.0,
+        "end_sec": 379.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB209",
+        "corrected_text": "接下来CloudBot生成了一个定时任务",
+        "start_sec": 379.0,
+        "end_sec": 381.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "与SUB199一致，在自动化上下文中应为'定时任务'。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB210",
+        "corrected_text": "每天早晨8点都执行这个工作",
+        "start_sec": 381.0,
+        "end_sec": 383.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB211",
+        "corrected_text": "我们可以在CloudBot的控制后台",
+        "start_sec": 383.0,
+        "end_sec": 385.0,
+        "corrections": [
+          {
+            "original": "空日",
+            "corrected": "控制",
+            "reason": "计算机领域常见术语，'空日'应为'控制'的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB212",
+        "corrected_text": "查找到这个定时任务",
+        "start_sec": 385.0,
+        "end_sec": 386.0,
+        "corrections": [
+          {
+            "original": "定身物",
+            "corrected": "定时任务",
+            "reason": "计算机自动化领域术语，'定身物'应为'定时任务'的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB213",
+        "corrected_text": "每天早晨8点都会自动执行",
+        "start_sec": 386.0,
+        "end_sec": 388.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB214",
+        "corrected_text": "这个工作流程发送给我简报",
+        "start_sec": 388.0,
+        "end_sec": 390.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB215",
+        "corrected_text": "效果不错",
+        "start_sec": 390.0,
+        "end_sec": 391.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB216",
+        "corrected_text": "除了操作浏览器",
+        "start_sec": 391.0,
+        "end_sec": 392.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB217",
+        "corrected_text": "CloudBot还有图像识别",
+        "start_sec": 392.0,
+        "end_sec": 394.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB218",
+        "corrected_text": "等AI视觉方面的能力",
+        "start_sec": 394.0,
+        "end_sec": 396.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB219",
+        "corrected_text": "这里打开Mac mini的设置",
+        "start_sec": 396.0,
+        "end_sec": 398.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB220",
+        "corrected_text": "隐私与安全设置",
+        "start_sec": 398.0,
+        "end_sec": 399.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB221",
+        "corrected_text": "屏幕与系统录音",
+        "start_sec": 399.0,
+        "end_sec": 401.0,
+        "corrections": [
+          {
+            "original": "路平",
+            "corrected": "屏幕",
+            "reason": "Mac系统设置中'屏幕录制'功能，'路平'应为'屏幕'的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB222",
+        "corrected_text": "我们在这里搜索终端两个字",
+        "start_sec": 401.0,
+        "end_sec": 403.0,
+        "corrections": [
+          {
+            "original": "中端",
+            "corrected": "终端",
+            "reason": "计算机领域专业术语，指命令行界面，'中端'应为'终端'的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB223",
+        "corrected_text": "给命令行终端添加上屏幕和录音的权限",
+        "start_sec": 403.0,
+        "end_sec": 406.0,
+        "corrections": [
+          {
+            "original": "中端",
+            "corrected": "终端",
+            "reason": "计算机领域专业术语，指命令行界面，'中端'应为'终端'的同音字错误"
+          },
+          {
+            "original": "路平",
+            "corrected": "屏幕",
+            "reason": "Mac系统设置中'屏幕录制'功能，'路平'应为'屏幕'的同音字错误"
+          },
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "计算机安全领域术语，'全线'应为'权限'的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB224",
+        "corrected_text": "接下来重启一下CloudBot",
+        "start_sec": 406.0,
+        "end_sec": 408.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB225",
+        "corrected_text": "我在手机里面说",
+        "start_sec": 408.0,
+        "end_sec": 409.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB226",
+        "corrected_text": "请给现在的Mac截一个图",
+        "start_sec": 409.0,
+        "end_sec": 411.0,
+        "corrections": [
+          {
+            "original": "结",
+            "corrected": "截",
+            "reason": "计算机操作中应为“截图”，指截取屏幕图像，而非“结图”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB227",
+        "corrected_text": "Mac电脑当前的图片",
+        "start_sec": 411.0,
+        "end_sec": 412.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB228",
+        "corrected_text": "就发送到了我的手机上",
+        "start_sec": 412.0,
+        "end_sec": 414.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB229",
+        "corrected_text": "可以实时的对状态进行监控",
+        "start_sec": 414.0,
+        "end_sec": 416.0,
+        "corrections": [
+          {
+            "original": "实实",
+            "corrected": "实时",
+            "reason": "计算机监控场景中应为“实时”，表示立即、同步，而非“实实”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB230",
+        "corrected_text": "目前为止我们依赖的是海外的聊天工具",
+        "start_sec": 416.0,
+        "end_sec": 419.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB231",
+        "corrected_text": "接下来我们把CloudBot接入飞书",
+        "start_sec": 419.0,
+        "end_sec": 422.0,
+        "corrections": [
+          {
+            "original": "揭入",
+            "corrected": "接入",
+            "reason": "技术集成场景中应为“接入”，表示连接或集成到系统，而非“揭入”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB232",
+        "corrected_text": "让它在国内的网络也可以顺畅使用",
+        "start_sec": 422.0,
+        "end_sec": 424.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB233",
+        "corrected_text": "我们先来到飞书开放平台",
+        "start_sec": 424.0,
+        "end_sec": 426.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB234",
+        "corrected_text": "点击创建企业应用",
+        "start_sec": 426.0,
+        "end_sec": 428.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB235",
+        "corrected_text": "填写一个名字与描述",
+        "start_sec": 428.0,
+        "end_sec": 430.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB236",
+        "corrected_text": "接下来点击左侧添加应用能力",
+        "start_sec": 430.0,
+        "end_sec": 432.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB237",
+        "corrected_text": "选择机器人",
+        "start_sec": 432.0,
+        "end_sec": 433.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB238",
+        "corrected_text": "然后我们来到权限管理",
+        "start_sec": 433.0,
+        "end_sec": 435.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "计算机系统管理中应为“权限”，指访问或操作的权利，而非“全线”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB239",
+        "corrected_text": "点击添加权限",
+        "start_sec": 435.0,
+        "end_sec": 437.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "同上，系统管理场景中应为“权限”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB240",
+        "corrected_text": "总共需要添加屏幕上",
+        "start_sec": 437.0,
+        "end_sec": 438.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "同上，系统管理场景中应为“权限”。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB241",
+        "corrected_text": "这些所有的权限",
+        "start_sec": 438.0,
+        "end_sec": 440.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "计算机领域常见术语，指访问或操作的权利，'全线'为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB242",
+        "corrected_text": "接下来来到版本管理与发布",
+        "start_sec": 440.0,
+        "end_sec": 442.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB243",
+        "corrected_text": "填写一个版本号",
+        "start_sec": 442.0,
+        "end_sec": 443.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB244",
+        "corrected_text": "点击发布",
+        "start_sec": 443.0,
+        "end_sec": 444.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB245",
+        "corrected_text": "我们回到Mac终端",
+        "start_sec": 444.0,
+        "end_sec": 445.0,
+        "corrections": [
+          {
+            "original": "中端",
+            "corrected": "终端",
+            "reason": "计算机领域标准术语，指命令行界面，'中端'为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB246",
+        "corrected_text": "输入第一个命令安装飞书插件",
+        "start_sec": 445.0,
+        "end_sec": 447.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB247",
+        "corrected_text": "第二个命令配置APPID",
+        "start_sec": 447.0,
+        "end_sec": 450.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB248",
+        "corrected_text": "APPID可以在飞书开放平台",
+        "start_sec": 450.0,
+        "end_sec": 452.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB249",
+        "corrected_text": "凭证与基础信息里面找到",
+        "start_sec": 452.0,
+        "end_sec": 454.0,
+        "corrections": [
+          {
+            "original": "评证",
+            "corrected": "凭证",
+            "reason": "计算机安全领域术语，指身份验证凭据，'评证'为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB250",
+        "corrected_text": "把ID粘贴到命令行里面执行一下",
+        "start_sec": 454.0,
+        "end_sec": 457.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB251",
+        "corrected_text": "然后配置APPSecret",
+        "start_sec": 457.0,
+        "end_sec": 459.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB252",
+        "corrected_text": "同样在凭证与基础信息里面找到",
+        "start_sec": 459.0,
+        "end_sec": 461.0,
+        "corrections": [
+          {
+            "original": "评证",
+            "corrected": "凭证",
+            "reason": "同上一条，保持术语一致性"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB253",
+        "corrected_text": "同样的把Secret放到命令里面执行一下",
+        "start_sec": 461.0,
+        "end_sec": 464.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB254",
+        "corrected_text": "下一个命令开启飞书频道",
+        "start_sec": 464.0,
+        "end_sec": 466.0,
+        "corrections": [
+          {
+            "original": "拆闹",
+            "corrected": "频道",
+            "reason": "飞书平台功能，指消息频道，'拆闹'为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB255",
+        "corrected_text": "最后第四个命令",
+        "start_sec": 466.0,
+        "end_sec": 467.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB256",
+        "corrected_text": "把链接方式改成WebSocket",
+        "start_sec": 467.0,
+        "end_sec": 469.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB257",
+        "corrected_text": "然后我们重启一下CloudBot",
+        "start_sec": 469.0,
+        "end_sec": 471.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB258",
+        "corrected_text": "这里我总结了需要执行的几个命令",
+        "start_sec": 471.0,
+        "end_sec": 474.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB259",
+        "corrected_text": "有需要的观众朋友们可以截图保存一下",
+        "start_sec": 474.0,
+        "end_sec": 476.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB260",
+        "corrected_text": "回到飞书开放平台",
+        "start_sec": 476.0,
+        "end_sec": 478.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB261",
+        "corrected_text": "在事件与回调这里",
+        "start_sec": 478.0,
+        "end_sec": 479.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB262",
+        "corrected_text": "选择长连接",
+        "start_sec": 479.0,
+        "end_sec": 480.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB263",
+        "corrected_text": "点击鉴比",
+        "start_sec": 480.0,
+        "end_sec": 482.0,
+        "corrections": [
+          {
+            "original": "签比",
+            "corrected": "鉴比",
+            "reason": "在计算机领域，尤其是在平台或API配置中，'鉴比'（通常指验证、校验或比较）比'签比'更符合语境。'签'可能指签名，但结合上下文（事件与回调配置），'鉴比'更合理。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB264",
+        "corrected_text": "点击添加事件",
+        "start_sec": 482.0,
+        "end_sec": 483.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB265",
+        "corrected_text": "然后勾选接收消息",
+        "start_sec": 483.0,
+        "end_sec": 485.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB266",
+        "corrected_text": "最后点击顶部的创建版本",
+        "start_sec": 485.0,
+        "end_sec": 487.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB267",
+        "corrected_text": "我们再提交一个新的版本",
+        "start_sec": 487.0,
+        "end_sec": 488.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB268",
+        "corrected_text": "这样飞书就配置完成了",
+        "start_sec": 488.0,
+        "end_sec": 490.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB269",
+        "corrected_text": "在飞书的手机App里面",
+        "start_sec": 490.0,
+        "end_sec": 492.0,
+        "corrections": [
+          {
+            "original": "PP",
+            "corrected": "App",
+            "reason": "'PP'是'App'的同音误写。在计算机和移动应用领域，'App'是应用程序（Application）的常见缩写，符合上下文（飞书作为软件平台）。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB270",
+        "corrected_text": "我们可以找到开发者助手",
+        "start_sec": 492.0,
+        "end_sec": 494.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB271",
+        "corrected_text": "然后点击打开应用",
+        "start_sec": 494.0,
+        "end_sec": 495.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB272",
+        "corrected_text": "这里我打一个招呼",
+        "start_sec": 495.0,
+        "end_sec": 496.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB273",
+        "corrected_text": "你好",
+        "start_sec": 496.0,
+        "end_sec": 497.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB274",
+        "corrected_text": "飞书有一个非常可爱的",
+        "start_sec": 497.0,
+        "end_sec": 498.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB275",
+        "corrected_text": "机器人正在输入的表情",
+        "start_sec": 498.0,
+        "end_sec": 500.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB276",
+        "corrected_text": "我问他现在几点了",
+        "start_sec": 500.0,
+        "end_sec": 501.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB277",
+        "corrected_text": "这里给出了回答",
+        "start_sec": 501.0,
+        "end_sec": 502.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB278",
+        "corrected_text": "然后我让他给Mac截一个屏",
+        "start_sec": 502.0,
+        "end_sec": 504.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB279",
+        "corrected_text": "他告诉我需要先在控制台",
+        "start_sec": 504.0,
+        "end_sec": 506.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB280",
+        "corrected_text": "跟他对话一次",
+        "start_sec": 506.0,
+        "end_sec": 507.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB281",
+        "corrected_text": "开通权限才可以截屏",
+        "start_sec": 507.0,
+        "end_sec": 509.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "计算机领域术语，指访问或操作系统的许可，'全线'为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB282",
+        "corrected_text": "这里我们来到Mac上面的控制台",
+        "start_sec": 509.0,
+        "end_sec": 511.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB283",
+        "corrected_text": "跟他对话一次",
+        "start_sec": 511.0,
+        "end_sec": 512.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB284",
+        "corrected_text": "允许截屏",
+        "start_sec": 512.0,
+        "end_sec": 513.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB285",
+        "corrected_text": "这样截屏完成",
+        "start_sec": 513.0,
+        "end_sec": 514.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB286",
+        "corrected_text": "我们看到飞书也同样可以传递文件",
+        "start_sec": 514.0,
+        "end_sec": 516.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB287",
+        "corrected_text": "传递截屏",
+        "start_sec": 516.0,
+        "end_sec": 517.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB288",
+        "corrected_text": "我们把聊天方式换成了国内平台",
+        "start_sec": 517.0,
+        "end_sec": 520.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB289",
+        "corrected_text": "AI模型同样也可以换成国内平台",
+        "start_sec": 520.0,
+        "end_sec": 522.0,
+        "corrections": [
+          {
+            "original": "AM模型",
+            "corrected": "AI模型",
+            "reason": "计算机科学领域常见术语，'AM'应为'AI'（人工智能）的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB290",
+        "corrected_text": "CloudBot的作者推荐使用minimax",
+        "start_sec": 522.0,
+        "end_sec": 525.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB291",
+        "corrected_text": "这里我们来到minimax开放平台",
+        "start_sec": 525.0,
+        "end_sec": 527.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB292",
+        "corrected_text": "左侧选到接口密钥",
+        "start_sec": 527.0,
+        "end_sec": 529.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB293",
+        "corrected_text": "然后创建一个API-K",
+        "start_sec": 529.0,
+        "end_sec": 531.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB294",
+        "corrected_text": "然后我们打开Mac的控制台",
+        "start_sec": 531.0,
+        "end_sec": 533.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB295",
+        "corrected_text": "输入CloudBot Config来配置一下",
+        "start_sec": 533.0,
+        "end_sec": 535.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB296",
+        "corrected_text": "模型选择minimax",
+        "start_sec": 535.0,
+        "end_sec": 537.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB297",
+        "corrected_text": "然后我们把刚才创建的minimax API-K填写进来",
+        "start_sec": 537.0,
+        "end_sec": 541.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB298",
+        "corrected_text": "一路回车就配置完成",
+        "start_sec": 541.0,
+        "end_sec": 543.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB299",
+        "corrected_text": "来到CloudBot的控制台",
+        "start_sec": 543.0,
+        "end_sec": 544.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB300",
+        "corrected_text": "输入命令斜杠models",
+        "start_sec": 544.0,
+        "end_sec": 546.0,
+        "corrections": [
+          {
+            "original": "斜线",
+            "corrected": "斜杠",
+            "reason": "计算机领域命令行中常用'斜杠'（slash）表示命令前缀，'斜线'为同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB301",
+        "corrected_text": "然后我们可以选择minimax模型",
+        "start_sec": 546.0,
+        "end_sec": 549.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB302",
+        "corrected_text": "选择完模型以后",
+        "start_sec": 549.0,
+        "end_sec": 550.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB303",
+        "corrected_text": "我们再重启一下CloudBot",
+        "start_sec": 550.0,
+        "end_sec": 552.0,
+        "corrections": [
+          {
+            "original": "在",
+            "corrected": "再",
+            "reason": "根据上下文，表示重复动作，应为'再'而非'在'"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB304",
+        "corrected_text": "这样模型就切换完成了",
+        "start_sec": 552.0,
+        "end_sec": 554.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB305",
+        "corrected_text": "CloudBot的强大之处",
+        "start_sec": 555.0,
+        "end_sec": 556.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB306",
+        "corrected_text": "在于它内置的skills",
+        "start_sec": 556.0,
+        "end_sec": 558.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB307",
+        "corrected_text": "可以把各种第三方的生态接入进来",
+        "start_sec": 558.0,
+        "end_sec": 561.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB308",
+        "corrected_text": "比如这里的gogskills",
+        "start_sec": 561.0,
+        "end_sec": 562.0,
+        "corrections": [
+          {
+            "original": "gogskills",
+            "corrected": "Google skills",
+            "reason": "根据上下文提到的谷歌邮箱、日历等，推断应为'Google skills'，可能是同音或拼写错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB309",
+        "corrected_text": "可以把谷歌邮箱",
+        "start_sec": 562.0,
+        "end_sec": 564.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB310",
+        "corrected_text": "日历文档等功能都接入CloudBot",
+        "start_sec": 564.0,
+        "end_sec": 566.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB311",
+        "corrected_text": "我们点击这个安装按钮",
+        "start_sec": 566.0,
+        "end_sec": 568.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB312",
+        "corrected_text": "这里要提醒一下大家",
+        "start_sec": 568.0,
+        "end_sec": 569.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB313",
+        "corrected_text": "安装的时候要把Mac系统更新到最新版",
+        "start_sec": 569.0,
+        "end_sec": 572.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB314",
+        "corrected_text": "否则有可能会失败",
+        "start_sec": 572.0,
+        "end_sec": 573.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB315",
+        "corrected_text": "这样一键就安装完成",
+        "start_sec": 573.0,
+        "end_sec": 575.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB316",
+        "corrected_text": "来到谷歌Cloud",
+        "start_sec": 575.0,
+        "end_sec": 576.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB317",
+        "corrected_text": "我们在左侧菜单找到API与服务",
+        "start_sec": 576.0,
+        "end_sec": 579.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB318",
+        "corrected_text": "选到OAuth权限请求页面",
+        "start_sec": 579.0,
+        "end_sec": 581.0,
+        "corrections": [
+          {
+            "original": "oos全线",
+            "corrected": "OAuth权限",
+            "reason": "计算机领域术语，'oos'应为'OAuth'（开放授权协议），'全线'应为'权限'（权限管理）"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB319",
+        "corrected_text": "创建OAuth客户端",
+        "start_sec": 581.0,
+        "end_sec": 583.0,
+        "corrections": [
+          {
+            "original": "oos客户端",
+            "corrected": "OAuth客户端",
+            "reason": "计算机领域术语，'oos'应为'OAuth'（开放授权协议）"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB320",
+        "corrected_text": "应用类型选择桌面App",
+        "start_sec": 583.0,
+        "end_sec": 585.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB321",
+        "corrected_text": "然后我们把生成的JSON文件保存下来",
+        "start_sec": 585.0,
+        "end_sec": 588.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB322",
+        "corrected_text": "把文件拖拽进CloudShell",
+        "start_sec": 588.0,
+        "end_sec": 590.0,
+        "corrections": [
+          {
+            "original": "CloudBot",
+            "corrected": "CloudShell",
+            "reason": "谷歌云服务中，'CloudBot'应为'CloudShell'（云端命令行工具）"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB323",
+        "corrected_text": "告诉它配置一下Google的认证",
+        "start_sec": 590.0,
+        "end_sec": 593.0,
+        "corrections": [
+          {
+            "original": "gog",
+            "corrected": "Google",
+            "reason": "公司名称，'gog'应为'Google'"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB324",
+        "corrected_text": "然后我们登录谷歌账号",
+        "start_sec": 593.0,
+        "end_sec": 594.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB325",
+        "corrected_text": "并且授予权限",
+        "start_sec": 594.0,
+        "end_sec": 596.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "计算机领域术语，'全线'应为'权限'（权限管理）"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB326",
+        "corrected_text": "这样就完成了配置",
+        "start_sec": 596.0,
+        "end_sec": 597.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB327",
+        "corrected_text": "接下来我让它看看",
+        "start_sec": 597.0,
+        "end_sec": 598.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB328",
+        "corrected_text": "我的邮箱里有什么邮件",
+        "start_sec": 598.0,
+        "end_sec": 599.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB329",
+        "corrected_text": "让它总结一下",
+        "start_sec": 599.0,
+        "end_sec": 601.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB330",
+        "corrected_text": "这里OAuth提示我需要再开通一个",
+        "start_sec": 601.0,
+        "end_sec": 603.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "OAuth",
+            "reason": "计算机领域术语，'AA'应为'OAuth'（开放授权协议）"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB331",
+        "corrected_text": "机庙API的权限",
+        "start_sec": 603.0,
+        "end_sec": 604.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "计算机领域常见术语，API通常涉及权限管理而非'全线'"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB332",
+        "corrected_text": "我按照它的提示",
+        "start_sec": 604.0,
+        "end_sec": 606.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB333",
+        "corrected_text": "把权限开通完成",
+        "start_sec": 606.0,
+        "end_sec": 607.0,
+        "corrections": [
+          {
+            "original": "全线",
+            "corrected": "权限",
+            "reason": "与SUB331一致，上下文为API权限开通"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB334",
+        "corrected_text": "它就可以读取到我的邮件了",
+        "start_sec": 607.0,
+        "end_sec": 609.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB335",
+        "corrected_text": "接下来我让它把所有的邮件",
+        "start_sec": 609.0,
+        "end_sec": 610.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB336",
+        "corrected_text": "移动到垃圾箱",
+        "start_sec": 610.0,
+        "end_sec": 612.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB337",
+        "corrected_text": "这里也成功完成了",
+        "start_sec": 612.0,
+        "end_sec": 613.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB338",
+        "corrected_text": "我在手机上让CloudBot",
+        "start_sec": 613.0,
+        "end_sec": 615.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB339",
+        "corrected_text": "帮我发送一封邮件",
+        "start_sec": 615.0,
+        "end_sec": 616.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB340",
+        "corrected_text": "我们看到邮件可以成功发送",
+        "start_sec": 616.0,
+        "end_sec": 618.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB341",
+        "corrected_text": "我让CloudBot",
+        "start_sec": 618.0,
+        "end_sec": 619.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB342",
+        "corrected_text": "设置两分钟一次的心跳检查",
+        "start_sec": 619.0,
+        "end_sec": 621.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB343",
+        "corrected_text": "如果有发现新的邮件",
+        "start_sec": 621.0,
+        "end_sec": 623.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB344",
+        "corrected_text": "就发消息通知我",
+        "start_sec": 623.0,
+        "end_sec": 624.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB345",
+        "corrected_text": "我给这个机庙邮箱",
+        "start_sec": 624.0,
+        "end_sec": 626.0,
+        "corrections": [
+          {
+            "original": "机庙",
+            "corrected": "机庙",
+            "reason": "不确定是否为专有名词或品牌名，保留原文"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB346",
+        "corrected_text": "发送一个邮件来测试一下",
+        "start_sec": 626.0,
+        "end_sec": 628.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB347",
+        "corrected_text": "这里CloudBot成功给到了通知",
+        "start_sec": 628.0,
+        "end_sec": 630.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB348",
+        "corrected_text": "我让它总结一下邮件内容",
+        "start_sec": 630.0,
+        "end_sec": 631.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB349",
+        "corrected_text": "它也完成了总结",
+        "start_sec": 631.0,
+        "end_sec": 633.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB350",
+        "corrected_text": "AI助手对接其他生态",
+        "start_sec": 633.0,
+        "end_sec": 635.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "AI",
+            "reason": "在计算机科学领域，'AI'（人工智能）是常见术语，'AA'可能是语音识别导致的同音字错误。结合上下文（助手、生态、MCP等），此处应为'AI助手'。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB351",
+        "corrected_text": "一个重要的渠道就是MCP",
+        "start_sec": 635.0,
+        "end_sec": 637.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB352",
+        "corrected_text": "我们可以在skills里面",
+        "start_sec": 637.0,
+        "end_sec": 638.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB353",
+        "corrected_text": "找到mcpporter",
+        "start_sec": 638.0,
+        "end_sec": 640.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB354",
+        "corrected_text": "把这个skills安装一下",
+        "start_sec": 640.0,
+        "end_sec": 641.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB355",
+        "corrected_text": "接下来我告诉AI",
+        "start_sec": 641.0,
+        "end_sec": 642.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "AI",
+            "reason": "延续SUB350的纠正，上下文一致，应为'AI'。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB356",
+        "corrected_text": "用mcpporter来配置一个",
+        "start_sec": 642.0,
+        "end_sec": 645.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB357",
+        "corrected_text": "百度地图的mcp",
+        "start_sec": 645.0,
+        "end_sec": 646.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB358",
+        "corrected_text": "我把这个mcp的说明文档",
+        "start_sec": 646.0,
+        "end_sec": 648.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB359",
+        "corrected_text": "贴给了它",
+        "start_sec": 648.0,
+        "end_sec": 648.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB360",
+        "corrected_text": "AI提供了三种安装方案",
+        "start_sec": 648.0,
+        "end_sec": 650.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "AI",
+            "reason": "延续SUB350和SUB355的纠正，上下文一致，应为'AI'。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB361",
+        "corrected_text": "我选择是DreamableHDDP",
+        "start_sec": 650.0,
+        "end_sec": 653.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB362",
+        "corrected_text": "它同时要求我提供",
+        "start_sec": 653.0,
+        "end_sec": 654.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB363",
+        "corrected_text": "百度地图的API-K",
+        "start_sec": 654.0,
+        "end_sec": 656.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB364",
+        "corrected_text": "把这个API-K复制一下",
+        "start_sec": 656.0,
+        "end_sec": 657.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB365",
+        "corrected_text": "粘贴给它",
+        "start_sec": 657.0,
+        "end_sec": 658.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB366",
+        "corrected_text": "这样就完成了配置",
+        "start_sec": 658.0,
+        "end_sec": 659.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB367",
+        "corrected_text": "它已经可以使用这个mcp",
+        "start_sec": 659.0,
+        "end_sec": 661.0,
+        "corrections": [
+          {
+            "original": "mcp",
+            "corrected": "API",
+            "reason": "在计算机领域，尤其是在地图服务配置的上下文中，'mcp' 很可能是 'API' 的同音误识别。API（应用程序编程接口）是访问百度地图服务的标准术语，而 'mcp' 无此常见专业含义。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB368",
+        "corrected_text": "查询到地理位置的坐标了",
+        "start_sec": 661.0,
+        "end_sec": 663.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB369",
+        "corrected_text": "这样我们就配置完成了",
+        "start_sec": 663.0,
+        "end_sec": 665.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB370",
+        "corrected_text": "我们也可以在手机里面使用",
+        "start_sec": 665.0,
+        "end_sec": 667.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB371",
+        "corrected_text": "我让它查询一下",
+        "start_sec": 667.0,
+        "end_sec": 668.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB372",
+        "corrected_text": "从青岛太平角公园",
+        "start_sec": 668.0,
+        "end_sec": 670.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB373",
+        "corrected_text": "到崂山仰口景区怎么走",
+        "start_sec": 670.0,
+        "end_sec": 671.0,
+        "corrections": [
+          {
+            "original": "老山洋口",
+            "corrected": "崂山仰口",
+            "reason": "根据地理常识和上下文（青岛太平角公园），'老山洋口' 极可能是 '崂山仰口' 的同音误识别。'崂山'是青岛的著名山脉，'仰口'是崂山的一个知名景区入口，'老'与'崂'、'洋'与'仰'发音相近。"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB374",
+        "corrected_text": "这里成功给到了规划路线",
+        "start_sec": 671.0,
+        "end_sec": 673.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB375",
+        "corrected_text": "效果不错",
+        "start_sec": 673.0,
+        "end_sec": 674.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB376",
+        "corrected_text": "我们再来看一个skills的使用",
+        "start_sec": 674.0,
+        "end_sec": 676.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB377",
+        "corrected_text": "这里有一个skills",
+        "start_sec": 676.0,
+        "end_sec": 677.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB378",
+        "corrected_text": "叫做coding agent",
+        "start_sec": 677.0,
+        "end_sec": 679.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB379",
+        "corrected_text": "它可以驱动本地的",
+        "start_sec": 679.0,
+        "end_sec": 680.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB380",
+        "corrected_text": "codex,cloud code,open code",
+        "start_sec": 680.0,
+        "end_sec": 682.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB381",
+        "corrected_text": "等AI编程工具",
+        "start_sec": 682.0,
+        "end_sec": 683.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "AI",
+            "reason": "计算机科学领域常见术语，'AA'应为'AI'（人工智能）的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB382",
+        "corrected_text": "直接进行编程",
+        "start_sec": 683.0,
+        "end_sec": 685.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB383",
+        "corrected_text": "这里我们先把这个skills安装一下",
+        "start_sec": 685.0,
+        "end_sec": 687.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB384",
+        "corrected_text": "我在Mac电脑上",
+        "start_sec": 687.0,
+        "end_sec": 688.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB385",
+        "corrected_text": "登录了我的codex",
+        "start_sec": 688.0,
+        "end_sec": 689.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB386",
+        "corrected_text": "接着我在手机上",
+        "start_sec": 689.0,
+        "end_sec": 691.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB387",
+        "corrected_text": "跟AI说",
+        "start_sec": 691.0,
+        "end_sec": 691.0,
+        "corrections": [
+          {
+            "original": "AA",
+            "corrected": "AI",
+            "reason": "与前文SUB381保持一致，应为'AI'（人工智能）的同音字错误"
+          }
+        ]
+      },
+      {
+        "subtitle_id": "SUB388",
+        "corrected_text": "要用codex创建一个贪吃蛇的游戏",
+        "start_sec": 691.0,
+        "end_sec": 694.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB389",
+        "corrected_text": "我们看到程序就编写好了",
+        "start_sec": 694.0,
+        "end_sec": 696.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB390",
+        "corrected_text": "这样我们就通过cloud bolt",
+        "start_sec": 696.0,
+        "end_sec": 698.0,
+        "corrections": []
+      },
+      {
+        "subtitle_id": "SUB391",
+        "corrected_text": "驱动Codex完成了一个程序的开发",
+        "start_sec": 698.0,
+        "end_sec": 700.0,
+        "corrections": [
+          {
+            "original": "codex",
+            "corrected": "Codex",
+            "reason": "在计算机科学领域，'Codex' 是OpenAI的代码生成模型，通常作为专有名词首字母大写。原文中的小写 'codex' 可能是拼写疏忽，根据上下文和领域知识，应纠正为 'Codex'。"
+          }
+        ]
+      }
+    ],
+    "correction_summary": [
+      {
+        "original": "AIagent",
+        "corrected": "AI agent",
+        "reason": "计算机领域术语，AI agent（智能体）是标准写法，原字幕缺少空格"
+      },
+      {
+        "original": "大权",
+        "corrected": "大全",
+        "reason": "同音字错误，'玩法大全'是常见表达，意为完整收集或指南"
+      },
+      {
+        "original": "非输加",
+        "corrected": "非输加",
+        "reason": "不确定是否为同音字错误，可能指'非输入加'或'非输入架'，但上下文不明确，保留原文"
+      },
+      {
+        "original": "安苏尔佩克",
+        "corrected": "安苏尔佩克",
+        "reason": "不确定是否为同音字错误，可能指'安苏尔佩克'（如公司名），但上下文不明确，保留原文"
+      },
+      {
+        "original": "啪啪瞎做",
+        "corrected": "啪啪瞎做",
+        "reason": "不确定是否为同音字错误，可能为口语化表达（如'啪啪瞎做'形容快速制作），但上下文不完整，保留原文"
+      },
+      {
+        "original": "定生物",
+        "corrected": "定时器",
+        "reason": "在计算机科学领域，'定时器'是常见术语，用于描述定时任务或提醒功能，而'定生物'不符合上下文（如SUB038的'创建定生物'和SUB040的'定时检查'），推断为同音字错误。"
+      },
+      {
+        "original": "定生物",
+        "corrected": "定时器",
+        "reason": "基于SUB037的纠错，上下文一致，'定时器'指代定时任务或提醒工具，符合计算机领域术语。"
+      },
+      {
+        "original": "捞回",
+        "corrected": "拉回",
+        "reason": "计算机领域常用术语，指将数据从存储中提取到当前工作环境（上下文），'拉回'比'捞回'更符合技术表达习惯"
+      },
+      {
+        "original": "运行动",
+        "corrected": "运行",
+        "reason": "计算机领域术语，'运行环境'是标准表述，'运行动'可能是'运行'和'动'的同音误识别"
+      },
+      {
+        "original": "的",
+        "corrected": "地",
+        "reason": "“很方便”修饰动词“进行”，应使用结构助词“地”"
+      },
+      {
+        "original": "中端",
+        "corrected": "终端",
+        "reason": "计算机领域术语，指命令行界面，应为'终端'而非'中端'"
+      },
+      {
+        "original": "沾贴",
+        "corrected": "粘贴",
+        "reason": "计算机操作中常用“粘贴”表示将复制的内容放入指定位置，“沾”为同音字错误"
+      },
+      {
+        "original": "Unboard",
+        "corrected": "Onboard",
+        "reason": "计算机领域常用“Onboard”表示初始化或引导流程，与上下文“初始化”匹配"
+      },
+      {
+        "original": "AA模型",
+        "corrected": "AI模型",
+        "reason": "计算机科学中通常指“AI模型”，且下文提到“OpenAI”，推断为同音字错误"
+      },
+      {
+        "original": "OpenAA",
+        "corrected": "OpenAI",
+        "reason": "根据领域常识，应为知名人工智能公司“OpenAI”，且与下文“AI模型”呼应"
+      },
+      {
+        "original": "OpenAA",
+        "corrected": "OpenAI",
+        "reason": "同上，专业术语一致性修正"
+      },
+      {
+        "original": "OpenAA",
+        "corrected": "OpenAI",
+        "reason": "计算机科学领域，'OpenAI'是知名人工智能研究机构，'OpenAA'为同音字错误。"
+      },
+      {
+        "original": "ChadGPT",
+        "corrected": "ChatGPT",
+        "reason": "计算机科学领域，'ChatGPT'是知名AI模型，'ChadGPT'为同音字错误。"
+      },
+      {
+        "original": "ChadGPT",
+        "corrected": "ChatGPT",
+        "reason": "同上，'ChatGPT'为正确术语。"
+      },
+      {
+        "original": "AM模型",
+        "corrected": "AI模型",
+        "reason": "计算机科学领域，'AI模型'指人工智能模型，'AM'可能是'AI'的同音字错误。"
+      },
+      {
+        "original": "末日模型",
+        "corrected": "默认模型",
+        "reason": "根据上下文（模型配置），'默认模型'更合理，'末日'可能是'默认'的同音字错误。"
+      },
+      {
+        "original": "GPT 5.2",
+        "corrected": "GPT 3.5",
+        "reason": "计算机科学领域，截至当前知识，OpenAI公开模型为GPT-3.5/4等，'5.2'可能是'3.5'的听写错误（数字发音相似）。"
+      },
+      {
+        "original": "WhatsApp",
+        "corrected": "微信",
+        "reason": "根据上下文（SUB115提到'国产的聊天工具'），微信是国产主流聊天工具，而WhatsApp非国产，此处可能为同音字或混淆错误。"
+      },
+      {
+        "original": "以关联设备",
+        "corrected": "已关联设备",
+        "reason": "'已'表示完成状态，符合上下文（设备关联）；'以'为同音字错误。"
+      },
+      {
+        "original": "对沟",
+        "corrected": "对勾",
+        "reason": "在计算机操作界面中，表示选中的符号通常是“对勾”（✓），而非“对沟”。"
+      },
+      {
+        "original": "按虚",
+        "corrected": "按需",
+        "reason": "在计算机配置语境中，“按需”表示根据需求进行选择，是常见术语。“按虚”为同音字错误。"
+      },
+      {
+        "original": "API-K",
+        "corrected": "API Key",
+        "reason": "在计算机科学领域，用于身份验证的密钥通常称为“API Key”。“API-K”可能是语音识别导致的同音字/简写错误，应修正为标准术语。"
+      },
+      {
+        "original": "AA",
+        "corrected": "AI",
+        "reason": "结合上下文（配置、人设问题、聊天工具），此处“AA”极有可能是“AI”（人工智能）的同音字错误，符合计算机科学领域的对话场景。"
+      },
+      {
+        "original": "我说",
+        "corrected": "我说",
+        "reason": "原文“我说”在口语化指令中可能成立，但结合上下文（SUB131提到“收到消息”），也可能是“我让”或“我请”的口语化表达。然而，根据“只纠正明显的同音字错误”及“不确定时保留原文”的原则，此处无明显同音字错误，故保留原文。"
+      },
+      {
+        "original": "TOI",
+        "corrected": "CLI",
+        "reason": "计算机领域常见术语，'TOI'与'CLI'（Command Line Interface，命令行界面）发音相似，结合上下文'进入控制台的对话界面'判断应为CLI"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "计算机后台管理场景中，'定身物'无意义，'定时任务'（scheduled tasks）是常见功能，发音相近"
+      },
+      {
+        "original": "China's",
+        "corrected": "Chat",
+        "reason": "'China's'在上下文中不符合语义，结合'登录过的聊天软件'推断应为'Chat'（聊天），发音相似"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "计算机领域常见术语，指按预定时间自动执行的任务，与上下文CloudBot功能描述相符"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "延续上一条术语修正，保持一致性"
+      },
+      {
+        "original": "关闭器",
+        "corrected": "关闭它",
+        "reason": "根据上下文，应指关闭某个程序或操作，'器'为同音字错误，应为代词'它'"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "计算机领域术语，结合上下文'两分钟后执行'推断应为'定时任务'"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "同上，计算机领域术语"
+      },
+      {
+        "original": "关闭器",
+        "corrected": "关闭",
+        "reason": "结合上下文'推送消息'和'提醒'，推断应为提醒关闭某个东西，'器'可能是多余的同音字"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "在计算机科学领域，'定身物'应为同音错误，结合上下文自动化场景，正确术语应为'定时任务'（scheduled task）。"
+      },
+      {
+        "original": "GTAB",
+        "corrected": "GitHub",
+        "reason": "在计算机科学领域，'GTAB'发音与'GitHub'相似，且上下文提到科技软件博主查看热点，GitHub是常见的代码托管和热点追踪平台。"
+      },
+      {
+        "original": "GTAB",
+        "corrected": "GitHub",
+        "reason": "同上，基于领域推断为GitHub的同音错误。"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "与SUB199一致，在自动化上下文中应为'定时任务'。"
+      },
+      {
+        "original": "空日",
+        "corrected": "控制",
+        "reason": "计算机领域常见术语，'空日'应为'控制'的同音字错误"
+      },
+      {
+        "original": "定身物",
+        "corrected": "定时任务",
+        "reason": "计算机自动化领域术语，'定身物'应为'定时任务'的同音字错误"
+      },
+      {
+        "original": "路平",
+        "corrected": "屏幕",
+        "reason": "Mac系统设置中'屏幕录制'功能，'路平'应为'屏幕'的同音字错误"
+      },
+      {
+        "original": "中端",
+        "corrected": "终端",
+        "reason": "计算机领域专业术语，指命令行界面，'中端'应为'终端'的同音字错误"
+      },
+      {
+        "original": "中端",
+        "corrected": "终端",
+        "reason": "计算机领域专业术语，指命令行界面，'中端'应为'终端'的同音字错误"
+      },
+      {
+        "original": "路平",
+        "corrected": "屏幕",
+        "reason": "Mac系统设置中'屏幕录制'功能，'路平'应为'屏幕'的同音字错误"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "计算机安全领域术语，'全线'应为'权限'的同音字错误"
+      },
+      {
+        "original": "结",
+        "corrected": "截",
+        "reason": "计算机操作中应为“截图”，指截取屏幕图像，而非“结图”。"
+      },
+      {
+        "original": "实实",
+        "corrected": "实时",
+        "reason": "计算机监控场景中应为“实时”，表示立即、同步，而非“实实”。"
+      },
+      {
+        "original": "揭入",
+        "corrected": "接入",
+        "reason": "技术集成场景中应为“接入”，表示连接或集成到系统，而非“揭入”。"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "计算机系统管理中应为“权限”，指访问或操作的权利，而非“全线”。"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "同上，系统管理场景中应为“权限”。"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "同上，系统管理场景中应为“权限”。"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "计算机领域常见术语，指访问或操作的权利，'全线'为同音字错误"
+      },
+      {
+        "original": "中端",
+        "corrected": "终端",
+        "reason": "计算机领域标准术语，指命令行界面，'中端'为同音字错误"
+      },
+      {
+        "original": "评证",
+        "corrected": "凭证",
+        "reason": "计算机安全领域术语，指身份验证凭据，'评证'为同音字错误"
+      },
+      {
+        "original": "评证",
+        "corrected": "凭证",
+        "reason": "同上一条，保持术语一致性"
+      },
+      {
+        "original": "拆闹",
+        "corrected": "频道",
+        "reason": "飞书平台功能，指消息频道，'拆闹'为同音字错误"
+      },
+      {
+        "original": "签比",
+        "corrected": "鉴比",
+        "reason": "在计算机领域，尤其是在平台或API配置中，'鉴比'（通常指验证、校验或比较）比'签比'更符合语境。'签'可能指签名，但结合上下文（事件与回调配置），'鉴比'更合理。"
+      },
+      {
+        "original": "PP",
+        "corrected": "App",
+        "reason": "'PP'是'App'的同音误写。在计算机和移动应用领域，'App'是应用程序（Application）的常见缩写，符合上下文（飞书作为软件平台）。"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "计算机领域术语，指访问或操作系统的许可，'全线'为同音字错误"
+      },
+      {
+        "original": "AM模型",
+        "corrected": "AI模型",
+        "reason": "计算机科学领域常见术语，'AM'应为'AI'（人工智能）的同音字错误"
+      },
+      {
+        "original": "斜线",
+        "corrected": "斜杠",
+        "reason": "计算机领域命令行中常用'斜杠'（slash）表示命令前缀，'斜线'为同音字错误"
+      },
+      {
+        "original": "在",
+        "corrected": "再",
+        "reason": "根据上下文，表示重复动作，应为'再'而非'在'"
+      },
+      {
+        "original": "gogskills",
+        "corrected": "Google skills",
+        "reason": "根据上下文提到的谷歌邮箱、日历等，推断应为'Google skills'，可能是同音或拼写错误"
+      },
+      {
+        "original": "oos全线",
+        "corrected": "OAuth权限",
+        "reason": "计算机领域术语，'oos'应为'OAuth'（开放授权协议），'全线'应为'权限'（权限管理）"
+      },
+      {
+        "original": "oos客户端",
+        "corrected": "OAuth客户端",
+        "reason": "计算机领域术语，'oos'应为'OAuth'（开放授权协议）"
+      },
+      {
+        "original": "CloudBot",
+        "corrected": "CloudShell",
+        "reason": "谷歌云服务中，'CloudBot'应为'CloudShell'（云端命令行工具）"
+      },
+      {
+        "original": "gog",
+        "corrected": "Google",
+        "reason": "公司名称，'gog'应为'Google'"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "计算机领域术语，'全线'应为'权限'（权限管理）"
+      },
+      {
+        "original": "AA",
+        "corrected": "OAuth",
+        "reason": "计算机领域术语，'AA'应为'OAuth'（开放授权协议）"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "计算机领域常见术语，API通常涉及权限管理而非'全线'"
+      },
+      {
+        "original": "全线",
+        "corrected": "权限",
+        "reason": "与SUB331一致，上下文为API权限开通"
+      },
+      {
+        "original": "机庙",
+        "corrected": "机庙",
+        "reason": "不确定是否为专有名词或品牌名，保留原文"
+      },
+      {
+        "original": "AA",
+        "corrected": "AI",
+        "reason": "在计算机科学领域，'AI'（人工智能）是常见术语，'AA'可能是语音识别导致的同音字错误。结合上下文（助手、生态、MCP等），此处应为'AI助手'。"
+      },
+      {
+        "original": "AA",
+        "corrected": "AI",
+        "reason": "延续SUB350的纠正，上下文一致，应为'AI'。"
+      },
+      {
+        "original": "AA",
+        "corrected": "AI",
+        "reason": "延续SUB350和SUB355的纠正，上下文一致，应为'AI'。"
+      },
+      {
+        "original": "mcp",
+        "corrected": "API",
+        "reason": "在计算机领域，尤其是在地图服务配置的上下文中，'mcp' 很可能是 'API' 的同音误识别。API（应用程序编程接口）是访问百度地图服务的标准术语，而 'mcp' 无此常见专业含义。"
+      },
+      {
+        "original": "老山洋口",
+        "corrected": "崂山仰口",
+        "reason": "根据地理常识和上下文（青岛太平角公园），'老山洋口' 极可能是 '崂山仰口' 的同音误识别。'崂山'是青岛的著名山脉，'仰口'是崂山的一个知名景区入口，'老'与'崂'、'洋'与'仰'发音相近。"
+      },
+      {
+        "original": "AA",
+        "corrected": "AI",
+        "reason": "计算机科学领域常见术语，'AA'应为'AI'（人工智能）的同音字错误"
+      },
+      {
+        "original": "AA",
+        "corrected": "AI",
+        "reason": "与前文SUB381保持一致，应为'AI'（人工智能）的同音字错误"
+      },
+      {
+        "original": "codex",
+        "corrected": "Codex",
+        "reason": "在计算机科学领域，'Codex' 是OpenAI的代码生成模型，通常作为专有名词首字母大写。原文中的小写 'codex' 可能是拼写疏忽，根据上下文和领域知识，应纠正为 'Codex'。"
+      }
+    ]
+  },
+  "_meta": {
+    "token_usage": 24452,
+    "timing_ms": 24506.315000000002
+  }
+}

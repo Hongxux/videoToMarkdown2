@@ -29,6 +29,8 @@ from .rich_text_pipeline import (
     MaterialRequests
 )
 
+from .semantic_unit_segmenter import SemanticUnitSegmenter
+
 __all__ = [
     # Data Loader
     'load_corrected_subtitles',
@@ -42,4 +44,5 @@ __all__ = [
     'ScreenshotRequest',
     'ClipRequest',
     'MaterialRequests',
+    'SemanticUnitSegmenter',
 ]

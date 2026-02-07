@@ -50,10 +50,22 @@ public class VideoProcessingOrchestrator {
     private static class ExtractionRequests {
         List<JavaCVFFmpegService.ScreenshotRequest> screenshotRequests;
         List<JavaCVFFmpegService.ClipRequest> clipRequests;
+        CompletableFuture<JavaCVFFmpegService.ExtractionResult> extractionFuture;
         
         public ExtractionRequests(List<JavaCVFFmpegService.ScreenshotRequest> ss, List<JavaCVFFmpegService.ClipRequest> clips) {
             this.screenshotRequests = ss != null ? ss : new ArrayList<>();
             this.clipRequests = clips != null ? clips : new ArrayList<>();
+            this.extractionFuture = null;
+        }
+
+        public ExtractionRequests(
+                List<JavaCVFFmpegService.ScreenshotRequest> ss,
+                List<JavaCVFFmpegService.ClipRequest> clips,
+                CompletableFuture<JavaCVFFmpegService.ExtractionResult> extractionFuture
+        ) {
+            this.screenshotRequests = ss != null ? ss : new ArrayList<>();
+            this.clipRequests = clips != null ? clips : new ArrayList<>();
+            this.extractionFuture = extractionFuture;
         }
     }
 
@@ -185,6 +197,7 @@ public class VideoProcessingOrchestrator {
             // Phase 2: Hybrid Analysis (VL or Legacy CV/LLM)
             // =====================================================================
             ExtractionRequests materialRequests = null;
+            JavaCVFFmpegService.ExtractionResult extractRes;
 
             // 1. 尝试 VL 分析 (如果开启)
             // 配置检查防止不必要的 RPC 调用和逻辑执行
@@ -207,13 +220,30 @@ public class VideoProcessingOrchestrator {
 
             
             int ffmpegTimeoutSec = calculateFfmpegTimeoutSec(taskId, videoDuration, materialRequests, timeouts);
-            JavaCVFFmpegService.ExtractionResult extractRes = ffmpegService.extractAllSync(
-                videoPath,
-                outputDir,
-                materialRequests.screenshotRequests,
-                materialRequests.clipRequests,
-                ffmpegTimeoutSec
-            );
+            if (materialRequests.extractionFuture == null) {
+                materialRequests = startExtractionPipeline(
+                    taskId,
+                    videoPath,
+                    outputDir,
+                    materialRequests.screenshotRequests,
+                    materialRequests.clipRequests,
+                    ffmpegTimeoutSec
+                );
+            }
+            if (materialRequests.extractionFuture != null) {
+                logger.info("[{}] Reusing in-flight extraction future (producer-consumer path)", taskId);
+                extractRes = materialRequests.extractionFuture
+                    .orTimeout(ffmpegTimeoutSec, TimeUnit.SECONDS)
+                    .join();
+            } else {
+                extractRes = ffmpegService.extractAllSync(
+                    videoPath,
+                    outputDir,
+                    materialRequests.screenshotRequests,
+                    materialRequests.clipRequests,
+                    ffmpegTimeoutSec
+                );
+            }
             
             // 9. Phase2B Assembly
             updateProgress(taskId, 0.90, "生成最终文档...");
@@ -907,10 +937,9 @@ public class VideoProcessingOrchestrator {
 
             if (vlResult.success && vlResult.vlEnabled && !vlResult.usedFallback) {
                 logger.info("[{}] VL Analysis Success! Skipping legacy flow.", taskId);
-                return new ExtractionRequests(
-                    convertScreenshotRequests(vlResult.screenshotRequests),
-                    convertClipRequests(vlResult.clipRequests)
-                );
+                List<JavaCVFFmpegService.ScreenshotRequest> screenshots = convertScreenshotRequests(vlResult.screenshotRequests);
+                List<JavaCVFFmpegService.ClipRequest> clips = convertClipRequests(vlResult.clipRequests);
+                return startExtractionPipeline(taskId, videoPath, outputDir, screenshots, clips, 0);
             } else {
                 logger.warn("[{}] VL Analysis fallback reason: {}", taskId, vlResult.errorMsg);
             }
@@ -956,10 +985,36 @@ public class VideoProcessingOrchestrator {
         if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
 
         // 4. Merge Requests
-        return new ExtractionRequests(
-            mergeScreenshotRequests(ar.screenshotRequests, matRes.screenshotRequests),
-            mergeClipRequests(ar.clipRequests, matRes.clipRequests)
+        List<JavaCVFFmpegService.ScreenshotRequest> screenshots =
+            mergeScreenshotRequests(ar.screenshotRequests, matRes.screenshotRequests);
+        List<JavaCVFFmpegService.ClipRequest> clips =
+            mergeClipRequests(ar.clipRequests, matRes.clipRequests);
+        return startExtractionPipeline(taskId, videoPath, outputDir, screenshots, clips, 0);
+    }
+
+    private ExtractionRequests startExtractionPipeline(
+            String taskId,
+            String videoPath,
+            String outputDir,
+            List<JavaCVFFmpegService.ScreenshotRequest> screenshots,
+            List<JavaCVFFmpegService.ClipRequest> clips,
+            int timeoutSecHint
+    ) {
+        List<JavaCVFFmpegService.ScreenshotRequest> ss = screenshots != null ? screenshots : new ArrayList<>();
+        List<JavaCVFFmpegService.ClipRequest> cp = clips != null ? clips : new ArrayList<>();
+
+        logger.info(
+            "[{}] Start extraction producer-consumer pipeline: screenshots={}, clips={}",
+            taskId,
+            ss.size(),
+            cp.size()
         );
+
+        int extractionTimeout = timeoutSecHint > 0 ? timeoutSecHint : 3600;
+        CompletableFuture<JavaCVFFmpegService.ExtractionResult> extractionFuture =
+            ffmpegService.extractAllAsync(videoPath, outputDir, ss, cp, extractionTimeout);
+
+        return new ExtractionRequests(ss, cp, extractionFuture);
     }
 
     /**

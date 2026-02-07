@@ -256,6 +256,91 @@ class RichTextPipeline:
         self._clip_extractor = extractor
         self._clip_extractor.set_subtitles(self.subtitles)
     
+
+    def _slugify_text(self, value: str, max_len: int = 48) -> str:
+        """
+        ??????????????????
+
+        ???
+        - ?????????????????????
+        - ?????????????????? max_len?
+        """
+        raw = str(value or "").strip().lower()
+        if not raw:
+            return "item"
+
+        normalized: List[str] = []
+        for ch in raw:
+            if ch.isalnum():
+                normalized.append(ch)
+            else:
+                normalized.append("_")
+
+        slug = "".join(normalized)
+        while "__" in slug:
+            slug = slug.replace("__", "_")
+        slug = slug.strip("_")
+        if not slug:
+            slug = "item"
+
+        if len(slug) > max_len:
+            slug = slug[:max_len].rstrip("_")
+        return slug or "item"
+
+    def _build_unit_asset_prefix(self, unit: SemanticUnit) -> str:
+        """
+        ???????????`{unit_id}_{title_slug}`?
+        """
+        unit_title = str(
+            getattr(unit, "knowledge_topic", "")
+            or getattr(unit, "title", "")
+            or getattr(unit, "full_text", "")
+        ).strip()
+        title_slug = self._slugify_text(unit_title, max_len=40)
+        return f"{unit.unit_id}_{title_slug}"
+
+    def _build_action_brief(self, action: Dict[str, Any], classification: Dict[str, Any], index: int) -> str:
+        """
+        ?????????????????
+        """
+        candidates = [
+            classification.get("description", "") if isinstance(classification, dict) else "",
+            classification.get("subject", "") if isinstance(classification, dict) else "",
+            action.get("description", "") if isinstance(action, dict) else "",
+            action.get("type", "") if isinstance(action, dict) else "",
+        ]
+        for item in candidates:
+            slug = self._slugify_text(str(item or ""), max_len=36)
+            if slug and slug != "item":
+                return slug
+        return f"action_{index:02d}"
+
+    def _build_request_base_name(self, unit: SemanticUnit, suffix: str) -> str:
+        """
+        ???? ID / ???????????? + ???????????
+        """
+        return f"{self._build_unit_asset_prefix(unit)}_{self._slugify_text(suffix, max_len=48)}"
+
+    def _build_unit_relative_request_id(self, unit: SemanticUnit, suffix: str) -> str:
+        """
+        生成用于外部提取阶段的相对路径 ID，确保素材在提取时直接写入 `assets/{unit_id}/`。
+
+        为什么：Phase2A 先生成请求 ID，Java/FFmpeg 按该 ID 落盘；若 ID 不带语义单元目录，
+        会导致素材扁平化堆叠，Phase2B 再匹配时需要大量兜底逻辑，且易串单元。
+        """
+        return f"{unit.unit_id}/{self._build_request_base_name(unit, suffix)}"
+
+    def _resolve_asset_output_path(self, name: str, ext: str) -> str:
+        """
+        ????????? assets ???????????????
+        """
+        clean_name = str(name or "").strip().replace("\\", "/").strip("/")
+        if clean_name.lower().endswith(f".{ext.lower()}"):
+            clean_name = clean_name[: -(len(ext) + 1)]
+        abs_path = Path(self.assets_dir) / f"{clean_name}.{ext}"
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        return str(abs_path)
+
     def _align_to_sentence_start(self, timestamp: float) -> float:
         """
         执行逻辑：
@@ -1654,6 +1739,9 @@ class RichTextPipeline:
                 # Classification already done in batch
                 knowledge_type = classification.get("knowledge_type", "过程性知识")
                 confidence = classification.get("confidence", 0.5)
+                action_brief = self._build_action_brief(action, classification, i + 1)
+                asset_base = f"{unit.unit_id}/{self._build_request_base_name(unit, f'action_{i+1:02d}_{action_brief}')}"
+
                 
                 logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%}) - {classification.get('key_evidence', '')[:30]}")
 
@@ -1681,7 +1769,7 @@ class RichTextPipeline:
                     head_ss = await self._select_screenshot(
                         start_sec=envelope_start,
                         end_sec=head_window_end,
-                        name=f"{unit.unit_id}_action_{i+1}_head"
+                        name=f"{asset_base}_head"
                     )
                     if head_ss:
                         screenshot_paths.append(head_ss)
@@ -1695,7 +1783,7 @@ class RichTextPipeline:
                         island_ss = await self._select_screenshot(
                             start_sec=island_start,
                             end_sec=island_end,
-                            name=f"{unit.unit_id}_action_{i+1}_island_{j+1}"
+                            name=f"{asset_base}_island_{j+1:02d}"
                         )
                         if island_ss:
                             screenshot_paths.append(island_ss)
@@ -1706,7 +1794,7 @@ class RichTextPipeline:
                     tail_ss = await self._select_screenshot(
                         start_sec=tail_window_start,
                         end_sec=envelope_end,
-                        name=f"{unit.unit_id}_action_{i+1}_tail"
+                        name=f"{asset_base}_tail"
                     )
                     if tail_ss:
                         screenshot_paths.append(tail_ss)
@@ -1719,7 +1807,7 @@ class RichTextPipeline:
                     clip_path = await self._extract_action_clip(
                         start_sec=envelope_start,
                         end_sec=envelope_end,
-                        name=f"{unit.unit_id}_action_{i+1}"
+                        name=f"{asset_base}"
                     )
                     if clip_path:
                         clip_paths.append(clip_path)
@@ -1729,7 +1817,7 @@ class RichTextPipeline:
                     head_ss = await self._select_screenshot(
                         start_sec=envelope_start,
                         end_sec=head_window_end,
-                        name=f"{unit.unit_id}_action_{i+1}_head"
+                        name=f"{asset_base}_head"
                     )
                     if head_ss:
                         screenshot_paths.append(head_ss)
@@ -1743,7 +1831,7 @@ class RichTextPipeline:
                         island_ss = await self._select_screenshot(
                             start_sec=island_start,
                             end_sec=island_end,
-                            name=f"{unit.unit_id}_action_{i+1}_island_{j+1}"
+                            name=f"{asset_base}_island_{j+1:02d}"
                         )
                         if island_ss:
                             screenshot_paths.append(island_ss)
@@ -1754,7 +1842,7 @@ class RichTextPipeline:
                     tail_ss = await self._select_screenshot(
                         start_sec=tail_window_start,
                         end_sec=envelope_end,
-                        name=f"{unit.unit_id}_action_{i+1}_tail"
+                        name=f"{asset_base}_tail"
                     )
                     if tail_ss:
                         screenshot_paths.append(tail_ss)
@@ -1769,7 +1857,7 @@ class RichTextPipeline:
                 ss_path = await self._select_screenshot(
                     start_sec=island_start,
                     end_sec=island_end,
-                    name=f"{unit.unit_id}_stable_{i+1}"
+                    name=f"{unit.unit_id}/{self._build_request_base_name(unit, f'stable_{i+1:02d}')}"
                 )
                 if ss_path:
                     screenshot_paths.append(ss_path)
@@ -1780,7 +1868,7 @@ class RichTextPipeline:
             fallback_ss = await self._select_screenshot(
                 start_sec=unit.start_sec,
                 end_sec=unit.end_sec,
-                name=f"{unit.unit_id}_fallback"
+                name=f"{unit.unit_id}/{self._build_request_base_name(unit, 'fallback')}"
             )
             if fallback_ss:
                 screenshot_paths.append(fallback_ss)
@@ -1887,6 +1975,12 @@ class RichTextPipeline:
                 # Classification already done in batch
                 knowledge_type = classification.get("knowledge_type", "过程性知识")
                 confidence = classification.get("confidence", 0.5)
+                action_brief = self._build_action_brief(action, classification, i + 1)
+                request_base = self._build_unit_relative_request_id(
+                    unit,
+                    f"action_{i+1:02d}_{action_brief}",
+                )
+
                 
                 # 存储分类结果
                 action_classifications.append({
@@ -1919,7 +2013,7 @@ class RichTextPipeline:
                     head_ts = await self._select_screenshot_timestamp(head_search_start, head_search_end, fallback_head_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
-                        screenshot_id=f"{unit.unit_id}_action_{i+1}_head",
+                        screenshot_id=f"{request_base}_head",
                         timestamp_sec=head_ts,
                         label="head",
                         semantic_unit_id=unit.unit_id
@@ -1934,7 +2028,7 @@ class RichTextPipeline:
                         island_mid = await self._select_screenshot_timestamp(island_start, island_end, island_mid_fallback)
 
                         screenshot_requests.append(ScreenshotRequest(
-                            screenshot_id=f"{unit.unit_id}_action_{i+1}_island_{j+1}",
+                            screenshot_id=f"{request_base}_island_{j+1:02d}",
                             timestamp_sec=island_mid,
                             label="stable",
                             semantic_unit_id=unit.unit_id
@@ -1948,7 +2042,7 @@ class RichTextPipeline:
                     tail_ts = await self._select_screenshot_timestamp(tail_search_start, tail_search_end, fallback_tail_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
-                        screenshot_id=f"{unit.unit_id}_action_{i+1}_tail",
+                        screenshot_id=f"{request_base}_tail",
                         timestamp_sec=tail_ts,
                         label="tail",
                         semantic_unit_id=unit.unit_id
@@ -1958,7 +2052,7 @@ class RichTextPipeline:
                     # 非讲解型: 需要视频切片 + 首尾帧截图
                     # 视频切片
                     clip_requests.append(ClipRequest(
-                        clip_id=f"{unit.unit_id}_action_{i+1}",
+                        clip_id=request_base,
                         start_sec=envelope_start,
                         end_sec=envelope_end,
                         knowledge_type=knowledge_type,
@@ -1971,7 +2065,7 @@ class RichTextPipeline:
                     head_ts = await self._select_screenshot_timestamp(head_search_start, head_search_end, fallback_head_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
-                        screenshot_id=f"{unit.unit_id}_action_{i+1}_head",
+                        screenshot_id=f"{request_base}_head",
                         timestamp_sec=head_ts,
                         label="head",
                         semantic_unit_id=unit.unit_id
@@ -1986,7 +2080,7 @@ class RichTextPipeline:
                         island_mid = await self._select_screenshot_timestamp(island_start, island_end, island_mid_fallback)
 
                         screenshot_requests.append(ScreenshotRequest(
-                            screenshot_id=f"{unit.unit_id}_action_{i+1}_island_{j+1}",
+                            screenshot_id=f"{request_base}_island_{j+1:02d}",
                             timestamp_sec=island_mid,
                             label="stable",
                             semantic_unit_id=unit.unit_id
@@ -2000,7 +2094,7 @@ class RichTextPipeline:
                     tail_ts = await self._select_screenshot_timestamp(tail_search_start, tail_search_end, fallback_tail_ts)
                     
                     screenshot_requests.append(ScreenshotRequest(
-                        screenshot_id=f"{unit.unit_id}_action_{i+1}_tail",
+                        screenshot_id=f"{request_base}_tail",
                         timestamp_sec=tail_ts,
                         label="tail",
                         semantic_unit_id=unit.unit_id
@@ -2015,7 +2109,7 @@ class RichTextPipeline:
                 island_mid = await self._select_screenshot_timestamp(island_start, island_end, island_mid_fallback)
 
                 screenshot_requests.append(ScreenshotRequest(
-                    screenshot_id=f"{unit.unit_id}_stable_{i+1}",
+                    screenshot_id=self._build_unit_relative_request_id(unit, f"stable_{i+1:02d}"),
                     timestamp_sec=island_mid,
                     label="stable",
                     semantic_unit_id=unit.unit_id
@@ -2027,7 +2121,7 @@ class RichTextPipeline:
             best_ts = await self._select_screenshot_timestamp(unit.start_sec, unit.end_sec, fallback_ts)
             
             screenshot_requests.append(ScreenshotRequest(
-                screenshot_id=f"{unit.unit_id}_fallback",
+                screenshot_id=self._build_unit_relative_request_id(unit, "fallback"),
                 timestamp_sec=best_ts,
                 label="fallback",
                 semantic_unit_id=unit.unit_id
@@ -2050,43 +2144,49 @@ class RichTextPipeline:
         material_requests: MaterialRequests
     ):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、HTTP 调用、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：'讲解' in k_type or 'Explanation' in k_type
-        - 条件：allow_clip
-        - 条件：req.semantic_unit_id != unit.unit_id
-        依据来源（证据链）：
-        - 输入参数：unit。
-        - 对象内部状态：self._concrete_validator。
-        输入参数：
-        - unit: 函数入参（类型：SemanticUnit）。
-        - screenshots_dir: 目录路径（类型：str）。
-        - clips_dir: 目录路径（类型：str）。
-        - material_requests: 函数入参（类型：MaterialRequests）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        ???????????????? `assets/{unit_id}/`?
+
+        ???
+        - ???????????????????/???
+        - ???????????? unit ????????????????
+        """
+        import glob
+        import shutil
+
         materials = MaterialSet()
-        
-        screenshot_paths = []
-        screenshot_labels = []
-        screenshot_items = []
+        screenshot_paths: List[str] = []
+        screenshot_labels: List[str] = []
+        screenshot_items: List[Dict[str, Any]] = []
 
         def _normalize_knowledge_type(raw_type: str) -> str:
             lowered = (raw_type or "").strip().lower()
-            if any(key in lowered for key in ["process", "\u8fc7\u7a0b"]):
+            if any(key in lowered for key in ["process", "??", "??", "procedural"]):
                 return "process"
-            if any(key in lowered for key in ["concrete", "\u5177\u8c61", "\u5b9e\u4f8b"]):
+            if any(key in lowered for key in ["concrete", "??", "??", "??", "??"]):
                 return "concrete"
-            if any(key in lowered for key in ["abstract", "\u62bd\u8c61", "\u8bb2\u89e3", "explanation"]):
+            if any(key in lowered for key in ["abstract", "??", "??", "??", "explanation"]):
                 return "abstract"
             return lowered or "abstract"
 
         normalized_kt = _normalize_knowledge_type(str(getattr(unit, "knowledge_type", "") or ""))
+        tutorial_steps = getattr(unit, "instructional_steps", []) or []
+        is_tutorial_process = (
+            normalized_kt == "process"
+            and (
+                bool(getattr(unit, "mult_steps", False))
+                or len(tutorial_steps) > 1
+            )
+        )
         should_validate_screenshot = normalized_kt in {"abstract", "concrete"}
+        allow_clip = normalized_kt == "process"
+
+        unit_prefix = self._build_unit_asset_prefix(unit)
+        unit_title_slug = self._slugify_text(
+            str(getattr(unit, "knowledge_topic", "") or getattr(unit, "title", "")),
+            40,
+        )
+        unit_asset_dir = Path(self.assets_dir) / str(unit.unit_id)
+        unit_asset_dir.mkdir(parents=True, exist_ok=True)
 
         def infer_label(name: str) -> str:
             name_lower = name.lower()
@@ -2100,200 +2200,245 @@ class RichTextPipeline:
                 return "fallback"
             return "unknown"
 
-        # 收集截图候选：优先使用请求清单，缺失时按 unit_id 模糊匹配。
-        screenshot_candidates = []
+        def _deduplicate_paths(paths: List[str]) -> List[str]:
+            ordered: List[str] = []
+            seen: set[str] = set()
+            for path_item in paths:
+                try:
+                    key = str(Path(path_item).resolve())
+                except Exception:
+                    key = os.path.abspath(path_item)
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(path_item)
+            return ordered
+
+        def _collect_candidates_by_id(base_dir: str, req_id: str, exts: List[str]) -> List[str]:
+            candidates: List[str] = []
+            raw_id = str(req_id or "").strip().replace("\\", "/")
+            if not raw_id:
+                return candidates
+
+            raw_id = raw_id.strip("/")
+            raw_path = Path(raw_id)
+            base_name = raw_path.name
+            stem_name = raw_path.stem if raw_path.suffix else base_name
+            unit_prefixed_id = f"{unit.unit_id}/{raw_id}"
+
+            checks: List[Path] = []
+            if raw_path.suffix:
+                checks.extend([
+                    Path(base_dir) / raw_id,
+                    Path(base_dir) / unit_prefixed_id,
+                    Path(base_dir) / str(unit.unit_id) / base_name,
+                    Path(base_dir) / base_name,
+                ])
+
+            for ext in exts:
+                checks.extend([
+                    Path(base_dir) / f"{raw_id}{ext}",
+                    Path(base_dir) / f"{unit_prefixed_id}{ext}",
+                    Path(base_dir) / str(unit.unit_id) / f"{base_name}{ext}",
+                    Path(base_dir) / str(unit.unit_id) / f"{stem_name}{ext}",
+                    Path(base_dir) / f"{base_name}{ext}",
+                    Path(base_dir) / f"{stem_name}{ext}",
+                ])
+
+            for check in checks:
+                if check.exists():
+                    candidates.append(str(check))
+            return _deduplicate_paths(candidates)
+
+        def _collect_fallback_candidates(base_dir: str, exts: List[str]) -> List[str]:
+            exts_lower = {ext.lower() for ext in exts}
+            patterns = [
+                str(Path(base_dir) / str(unit.unit_id) / "**" / "*"),
+                str(Path(base_dir) / f"*{unit.unit_id}*"),
+            ]
+            if unit_title_slug and unit_title_slug != "item":
+                patterns.append(str(Path(base_dir) / f"*{unit_title_slug}*"))
+
+            found: List[str] = []
+            for pattern in patterns:
+                for file_path in glob.glob(pattern, recursive=True):
+                    suffix = Path(file_path).suffix.lower()
+                    if suffix in exts_lower:
+                        found.append(file_path)
+            return _deduplicate_paths(found)
+
+        def _copy_to_unit_dir(source_path: str, kind: str, label: str, index: int) -> str:
+            source = Path(source_path)
+            if not source.exists():
+                return ""
+
+            ext = source.suffix.lower() or ".dat"
+            label_slug = self._slugify_text(label or kind, 60)
+            if label_slug == "item":
+                label_slug = kind
+
+            target_name = f"{unit_prefix}_{kind}_{index:02d}_{label_slug}{ext}"
+            target = unit_asset_dir / target_name
+            if source.resolve() != target.resolve():
+                shutil.copy2(str(source), str(target))
+            return str(target)
+
+        screenshot_candidates: List[Tuple[str, str, str]] = []
         if material_requests.screenshot_requests:
             for req in material_requests.screenshot_requests:
                 if req.semantic_unit_id != unit.unit_id:
                     continue
-                for ext in [".png", ".jpg", ".jpeg"]:
-                    expected_path = os.path.join(screenshots_dir, f"{req.screenshot_id}{ext}")
-                    if os.path.exists(expected_path):
-                        screenshot_candidates.append((expected_path, req.label, req.screenshot_id))
-                        break
-                else:
-                    logger.debug(f"Screenshot not found: {req.screenshot_id}")
-        else:
-            import glob
-            pattern = os.path.join(screenshots_dir, f"{unit.unit_id}*")
-            for path in sorted(glob.glob(pattern)):
-                ext = os.path.splitext(path)[1].lower()
-                if ext in (".png", ".jpg", ".jpeg"):
-                    name = Path(path).stem
-                    screenshot_candidates.append((path, infer_label(name), name))
+                req_paths = _collect_candidates_by_id(
+                    screenshots_dir,
+                    req.screenshot_id,
+                    [".png", ".jpg", ".jpeg"],
+                )
+                for path_item in req_paths:
+                    screenshot_candidates.append((path_item, req.label, req.screenshot_id))
 
-        for path, label, sid in screenshot_candidates:
+        deduped_screenshot_candidates: List[Tuple[str, str, str]] = []
+        seen_screenshot_paths: set[str] = set()
+        for raw_path, label, sid in screenshot_candidates:
+            try:
+                candidate_key = str(Path(raw_path).resolve())
+            except Exception:
+                candidate_key = os.path.abspath(raw_path)
+            if candidate_key in seen_screenshot_paths:
+                continue
+            seen_screenshot_paths.add(candidate_key)
+            deduped_screenshot_candidates.append((raw_path, label, sid))
+        screenshot_candidates = deduped_screenshot_candidates
+
+        if not screenshot_candidates:
+            for path_item in _collect_fallback_candidates(screenshots_dir, [".png", ".jpg", ".jpeg"]):
+                stem = Path(path_item).stem
+                screenshot_candidates.append((path_item, infer_label(stem), stem))
+
+        rejected_screenshot_count = 0
+        for idx, (raw_path, label, sid) in enumerate(screenshot_candidates, start=1):
             is_valid = True
             img_description = ""
 
             if should_validate_screenshot and self._concrete_validator:
-                res = self._concrete_validator.validate(path)
+                res = self._concrete_validator.validate(raw_path)
                 img_description = str(getattr(res, "img_description", "") or getattr(res, "reason", "")).strip()
                 if not res.should_include:
                     logger.info(f"Removing negative screenshot: {sid} ({res.reason})")
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
                     is_valid = False
+                    rejected_screenshot_count += 1
 
-            if is_valid:
-                screenshot_paths.append(path)
-                screenshot_labels.append(label)
-                resolved_desc = img_description or label or sid
-                img_index = len(screenshot_items) + 1
-                screenshot_items.append({
-                    "img_id": f"{unit.unit_id}_img_{img_index:02d}",
-                    "img_path": path,
-                    "img_description": resolved_desc,
-                    "img_desription": resolved_desc,
-                    "label": label,
-                    "source_id": sid,
-                })
+            if not is_valid:
+                continue
 
-                # 视频切片回退匹配规则
+            # ???????? ID??????????????????
+            naming_label = sid or label
+            normalized_path = _copy_to_unit_dir(raw_path, "img", naming_label, idx)
+            if not normalized_path:
+                continue
+
+            screenshot_paths.append(normalized_path)
+            screenshot_labels.append(label or sid)
+            resolved_desc = img_description or label or sid
+            img_index = len(screenshot_items) + 1
+            screenshot_items.append({
+                "img_id": f"{unit.unit_id}_img_{img_index:02d}",
+                "img_path": normalized_path,
+                "img_description": resolved_desc,
+                "img_desription": resolved_desc,
+                "label": label,
+                "source_id": sid,
+            })
+
+        if should_validate_screenshot:
+            logger.info(
+                f"{unit.unit_id}: screenshot validation kept={len(screenshot_paths)}, "
+                f"rejected={rejected_screenshot_count}"
+            )
+
         clip_path = ""
-        # 💥 V7.5: 严格模态检查
-        # 切片的唯一依据: 是否为非讲解型
-        # 如果是 "讲解型" (Explanation)，则禁止切片，只保留截图
-        allow_clip = True
-        k_type = str(unit.knowledge_type)
-        if "讲解" in k_type or "Explanation" in k_type:
-             allow_clip = False
-             logger.info(f"{unit.unit_id}: Suppressed clip for Explanation type ({k_type})")
-
         if allow_clip:
-            logger.info(f"DEBUG_CLIP [{unit.unit_id}] Checking clips in: {clips_dir} (Exists: {os.path.exists(clips_dir)})")
-            
-            clip_candidates = []
+            clip_candidates: List[Tuple[str, str]] = []
             if material_requests.clip_requests:
-                logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found {len(material_requests.clip_requests)} clip requests from Phase 2A")
                 for req in material_requests.clip_requests:
                     if req.semantic_unit_id != unit.unit_id:
                         continue
-                    for ext in [".mp4", ".webm", ".mkv"]:
-                        # 尝试1: 直接使用 clip_id
-                        expected_path = os.path.join(clips_dir, f"{req.clip_id}{ext}")
-                        if os.path.exists(expected_path):
-                            logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found clip at: {expected_path}")
-                            clip_candidates.append(expected_path)
-                            break
-                        
-                        # 尝试2: 增加 clip_ 前缀 (解决 clip_SU... 命名不一致问题)
-                        expected_path_prefix = os.path.join(clips_dir, f"clip_{req.clip_id}{ext}")
-                        if os.path.exists(expected_path_prefix):
-                            logger.info(f"DEBUG_CLIP [{unit.unit_id}] Found clip (with prefix) at: {expected_path_prefix}")
-                            clip_candidates.append(expected_path_prefix)
-                            break
-                        
-                        logger.debug(f"DEBUG_CLIP [{unit.unit_id}] Clip not found at: {expected_path} or {expected_path_prefix}")
-            else:
-                import glob
-                # 尝试1: 直接匹配 unit_id*
-                pattern1 = os.path.join(clips_dir, f"{unit.unit_id}*")
-                # 尝试2: 匹配 clip_unit_id*
-                pattern2 = os.path.join(clips_dir, f"clip_{unit.unit_id}*")
-                
-                logger.info(f"DEBUG_CLIP [{unit.unit_id}] No specific clip requests, trying globs: {pattern1}, {pattern2}")
-                
-                candidates = set()
-                for p in sorted(glob.glob(pattern1)):
-                     if os.path.splitext(p)[1].lower() in (".mp4", ".webm", ".mkv"):
-                        candidates.add(p)
-                for p in sorted(glob.glob(pattern2)):
-                     if os.path.splitext(p)[1].lower() in (".mp4", ".webm", ".mkv"):
-                        candidates.add(p)
-                
-                clip_candidates.extend(sorted(list(candidates)))
-                
-                logger.info(f"DEBUG_CLIP [{unit.unit_id}] Glob found {len(clip_candidates)} candidates")
+                    for path_item in _collect_candidates_by_id(clips_dir, req.clip_id, [".mp4", ".webm", ".mkv"]):
+                        clip_candidates.append((path_item, req.clip_id))
 
+            if not clip_candidates:
+                for path_item in _collect_fallback_candidates(clips_dir, [".mp4", ".webm", ".mkv"]):
+                    clip_candidates.append((path_item, Path(path_item).stem))
+
+            deduped_clip_candidates: List[Tuple[str, str]] = []
+            seen_clip_paths: set[str] = set()
+            for clip_candidate_path, clip_candidate_label in clip_candidates:
+                try:
+                    candidate_key = str(Path(clip_candidate_path).resolve())
+                except Exception:
+                    candidate_key = os.path.abspath(clip_candidate_path)
+                if candidate_key in seen_clip_paths:
+                    continue
+                seen_clip_paths.add(candidate_key)
+                deduped_clip_candidates.append((clip_candidate_path, clip_candidate_label))
+            clip_candidates = deduped_clip_candidates
             if clip_candidates:
-                clip_path = clip_candidates[0]
-                logger.info(f"DEBUG_CLIP [{unit.unit_id}] Selected clip: {clip_path}")
-            else:
-                logger.warning(f"DEBUG_CLIP [{unit.unit_id}] No valid clips found after search")
+                selected, selected_label = clip_candidates[0]
+                clip_path = _copy_to_unit_dir(selected, "clip", selected_label, 1)
         else:
-            # 如果禁止切片但文件存在，清理之
-             for req in material_requests.clip_requests:
-                if req.semantic_unit_id != unit.unit_id: continue
-                for ext in [".mp4", ".webm", ".mkv"]:
-                    p = os.path.join(clips_dir, f"{req.clip_id}{ext}")
-                    if os.path.exists(p):
-                        try:
-                            os.remove(p)
-                            logger.info(f"Cleaned up suppressed clip: {p}")
-                        except: pass
-        
+            logger.info(f"Skip clip for non-process unit: {unit.unit_id} ({normalized_kt})")
+
         materials.screenshot_paths = screenshot_paths
         materials.screenshot_labels = screenshot_labels
         materials.screenshot_items = screenshot_items
         materials.clip_path = clip_path
         materials.action_classifications = material_requests.action_classifications
-        
+
         unit.materials = materials
-        
-        logger.debug(f"{unit.unit_id}: applied {len(screenshot_paths)} external screenshots, "
-                     f"clip={'Yes' if clip_path else 'No'}")
-    
-    # ❌ Removed: _get_subtitles_in_range() and _parse_subtitle() methods (45 lines)
-    # These methods are no longer used after subtitle refactoring.
-    # KnowledgeClassifier now handles subtitle retrieval directly from Step 2.
-    
+
+        logger.debug(
+            f"{unit.unit_id}: applied {len(screenshot_paths)} external screenshots, "
+            f"clip={'Yes' if clip_path else 'No'}"
+        )
+        if not screenshot_paths and not clip_path:
+            logger.warning(f"{unit.unit_id}: no external materials matched in Phase2B")
+
     async def _select_screenshot(
-        self, 
-        start_sec: float, 
-        end_sec: float, 
+        self,
+        start_sec: float,
+        end_sec: float,
         name: str
     ) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：not self._screenshot_selector
-        - 条件：result and result.screenshot_path
-        - 条件：os.path.exists(result.screenshot_path)
-        依据来源（证据链）：
-        - 对象内部状态：self._screenshot_selector。
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - name: 函数入参（类型：str）。
-        输出参数：
-        - 字符串结果。"""
+        ?????????????????? assets ??????
+        """
+        output_path = self._resolve_asset_output_path(name, "png")
+    
         if not self._screenshot_selector:
             logger.warning("ScreenshotSelector not available, using fallback ffmpeg direct")
             return await self._extract_frame_ffmpeg_fallback(start_sec, end_sec, name)
-        
+    
         try:
-            # 调用 ScreenshotSelector (V6.2 逻辑)
+            import shutil
+    
             result = await self._screenshot_selector.select_screenshot(
                 video_path=self.video_path,
                 start_sec=start_sec,
                 end_sec=end_sec,
-                output_dir=self.assets_dir,
-                output_name=name  # 💥 直接传递规范名称
+                output_dir=str(Path(output_path).parent),
+                output_name=Path(output_path).stem,
             )
-            
-            if result and result.screenshot_path:
-                # 💥 修复: 使用 move 而不是 copy，避免重复文件
-                import shutil
-                target_path = os.path.join(self.assets_dir, f"{name}.png")
-                if os.path.exists(result.screenshot_path):
-                    # 如果源文件和目标不同，移动文件
-                    if os.path.abspath(result.screenshot_path) != os.path.abspath(target_path):
-                        shutil.move(result.screenshot_path, target_path)
-                    return target_path
-                return result.screenshot_path
+    
+            if result and result.screenshot_path and os.path.exists(result.screenshot_path):
+                if os.path.abspath(result.screenshot_path) != os.path.abspath(output_path):
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(result.screenshot_path, output_path)
+                return output_path
             return ""
-
+    
         except Exception as e:
             logger.error(f"Screenshot selection failed: {e}")
             return await self._extract_frame_ffmpeg_fallback(start_sec, end_sec, name)
-
+    
     async def _select_screenshot_timestamp(
         self,
         start_sec: float,
@@ -2332,29 +2477,17 @@ class RichTextPipeline:
         return fallback_ts
 
     
+
     async def _extract_frame_ffmpeg_fallback(self, start_sec: float, end_sec: float, name: str) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、子进程调用、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：os.path.exists(output_path)
-        依据来源（证据链）：
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - name: 函数入参（类型：str）。
-        输出参数：
-        - 字符串结果。"""
+        ScreenshotSelector ??????? ffmpeg ?????????
+        """
         import subprocess
-        
-        output_path = os.path.join(self.assets_dir, f"{name}.png")
-        # 取中点时间
+    
+        output_path = self._resolve_asset_output_path(name, "png")
         timestamp = (start_sec + end_sec) / 2
         timestamp = max(0.1, min(timestamp, self.video_duration - 0.1))
-        
+    
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(timestamp),
@@ -2363,105 +2496,72 @@ class RichTextPipeline:
             "-q:v", "2",
             output_path
         ]
-        
+    
         def run_ffmpeg():
-            """
-            执行逻辑：
-            1) 组织处理流程与依赖调用。
-            2) 汇总中间结果并输出。
-            实现方式：通过子进程调用、文件系统读写实现。
-            核心价值：编排流程，保证步骤顺序与可追踪性。
-            决策逻辑：
-            - 条件：os.path.exists(output_path)
-            依据来源（证据链）：
-            输入参数：
-            - 无。
-            输出参数：
-            - 函数计算/封装后的结果对象。"""
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 return output_path if os.path.exists(output_path) else ""
             except Exception as e:
                 logger.error(f"FFmpeg frame extraction failed: {e}")
                 return ""
-        
-        # 使用 IO 线程池执行阻塞操作
+    
         loop = asyncio.get_running_loop()
         executor = get_io_executor()
         return await loop.run_in_executor(executor, run_ffmpeg)
     
+    
     async def _extract_action_clip(
-        self, 
-        start_sec: float, 
-        end_sec: float, 
+        self,
+        start_sec: float,
+        end_sec: float,
         name: str
     ) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：not self._clip_extractor
-        - 条件：clip_result and clip_result.clip_path
-        依据来源（证据链）：
-        - 对象内部状态：self._clip_extractor。
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - name: 函数入参（类型：str）。
-        输出参数：
-        - 字符串结果。"""
+        ??????????????? assets ???
+        """
+        output_path = self._resolve_asset_output_path(name, "mp4")
+    
         if not self._clip_extractor:
             logger.info(f"VideoClipExtractor not available for {name}, using ffmpeg fallback")
             return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
-        
+    
         try:
-            # 调用 VideoClipExtractor
+            import shutil
+    
             clip_result = await self._clip_extractor.extract_video_clip(
                 timestamp_start=start_sec,
                 timestamp_end=end_sec,
-                output_dir=self.assets_dir,
+                output_dir=str(Path(output_path).parent),
                 video_path=self.video_path,
-                output_name=name  # 💥 传递规范名称
+                output_name=Path(output_path).stem,
             )
-            
-            if clip_result and clip_result.clip_path:
-                return clip_result.clip_path
-            else:
-                logger.warning(f"VideoClipExtractor returned no result for {name}")
-                return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
-                
+    
+            if clip_result and clip_result.clip_path and os.path.exists(clip_result.clip_path):
+                if os.path.abspath(clip_result.clip_path) != os.path.abspath(output_path):
+                    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(clip_result.clip_path, output_path)
+                return output_path
+    
+            logger.warning(f"VideoClipExtractor returned no result for {name}")
+            return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
+    
         except Exception as e:
             logger.error(f"Action clip extraction failed for {name}: {e}")
             return await self._extract_action_clip_ffmpeg(start_sec, end_sec, name)
     
+    
     async def _extract_action_clip_ffmpeg(self, start_sec: float, end_sec: float, name: str) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、子进程调用、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：os.path.exists(output_path)
-        依据来源（证据链）：
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - name: 函数入参（类型：str）。
-        输出参数：
-        - 字符串结果。"""
+        Action ClipExtractor ??????? ffmpeg ?????????
+        """
         import subprocess
-        
-        output_path = os.path.join(self.assets_dir, f"{name}_clip.mp4")
+
+        output_path = self._resolve_asset_output_path(name, "mp4")
         duration = end_sec - start_sec
-        
-        # 安全边界
-        safe_start = max(0, start_sec - 0.2)  # 稍微提前开始
-        safe_duration = duration + 0.3  # 稍微延长结束
-        
+
+        safe_start = max(0, start_sec - 0.2)
+        safe_duration = duration + 0.3
+
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(safe_start),
@@ -2473,105 +2573,64 @@ class RichTextPipeline:
             "-b:a", "128k",
             output_path
         ]
-        
+
         def run_ffmpeg():
-            """
-            执行逻辑：
-            1) 组织处理流程与依赖调用。
-            2) 汇总中间结果并输出。
-            实现方式：通过子进程调用、文件系统读写实现。
-            核心价值：编排流程，保证步骤顺序与可追踪性。
-            决策逻辑：
-            - 条件：os.path.exists(output_path)
-            依据来源（证据链）：
-            输入参数：
-            - 无。
-            输出参数：
-            - 函数计算/封装后的结果对象。"""
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 return output_path if os.path.exists(output_path) else ""
             except Exception as e:
                 logger.error(f"FFmpeg action clip extraction failed: {e}")
                 return ""
-        
-        # 使用 IO 线程池执行阻塞操作
+
         loop = asyncio.get_running_loop()
         executor = get_io_executor()
         return await loop.run_in_executor(executor, run_ffmpeg)
-    
+
     async def _extract_video_clip(self, unit: SemanticUnit) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：not self._clip_extractor
-        - 条件：unit.action_segments
-        - 条件：clip_result and clip_result.clip_path
-        依据来源（证据链）：
-        - 输入参数：unit。
-        - 对象内部状态：self._clip_extractor。
-        输入参数：
-        - unit: 函数入参（类型：SemanticUnit）。
-        输出参数：
-        - 字符串结果。"""
+        ???????????????? ClipExtractor????? ffmpeg??
+        """
         if not self._clip_extractor:
             logger.warning("VideoClipExtractor not available, using fallback ffmpeg")
             return await self._extract_clip_ffmpeg_fallback(unit)
-        
+
         try:
-            # 获取动作区间
             if unit.action_segments:
-                # 使用动作单元的起止时间
                 action_start = min(seg["start"] for seg in unit.action_segments)
                 action_end = max(seg["end"] for seg in unit.action_segments)
             else:
-                # 使用语义单元时间
                 action_start = unit.start_sec
                 action_end = unit.end_sec
-            
-            # 调用 VideoClipExtractor (V3 Dual-Anchor recalibration)
+
             clip_result = await self._clip_extractor.extract_video_clip(
                 timestamp_start=action_start,
                 timestamp_end=action_end,
                 output_dir=self.assets_dir,
                 video_path=self.video_path,
-                fault_text=unit.text,  # 传递语义文本以进行精修 (Standard 2)
-                source_subtitle_ids=unit.source_subtitle_ids # 辅助对齐 (Standard 1)
+                fault_text=unit.text,
+                source_subtitle_ids=unit.source_subtitle_ids,
             )
-            
+
             if clip_result and clip_result.clip_path:
                 return clip_result.clip_path
-            else:
-                logger.warning(f"VideoClipExtractor returned no result for {unit.unit_id}")
-                return await self._extract_clip_ffmpeg_fallback(unit)
-                
+
+            logger.warning(f"VideoClipExtractor returned no result for {unit.unit_id}")
+            return await self._extract_clip_ffmpeg_fallback(unit)
+
         except Exception as e:
             logger.error(f"Video clip extraction failed for {unit.unit_id}: {e}")
             return await self._extract_clip_ffmpeg_fallback(unit)
-    
+
     async def _extract_clip_ffmpeg_fallback(self, unit: SemanticUnit) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、asyncio 异步调度、子进程调用、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：os.path.exists(output_path)
-        依据来源（证据链）：
-        输入参数：
-        - unit: 函数入参（类型：SemanticUnit）。
-        输出参数：
-        - 字符串结果。"""
+        ClipExtractor ??????? ffmpeg ??????????????
+        """
         import subprocess
-        
-        output_path = os.path.join(self.assets_dir, f"{unit.unit_id}_clip.mp4")
+
+        base_name = self._build_request_base_name(unit, "unit_clip")
+        output_path = self._resolve_asset_output_path(f"{unit.unit_id}/{base_name}", "mp4")
         duration = unit.end_sec - unit.start_sec
-        
+
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(unit.start_sec),
@@ -2583,62 +2642,18 @@ class RichTextPipeline:
             "-b:a", "128k",
             output_path
         ]
-        
+
         def run_ffmpeg():
-            """
-            执行逻辑：
-            1) 组织处理流程与依赖调用。
-            2) 汇总中间结果并输出。
-            实现方式：通过子进程调用、文件系统读写实现。
-            核心价值：编排流程，保证步骤顺序与可追踪性。
-            决策逻辑：
-            - 条件：os.path.exists(output_path)
-            依据来源（证据链）：
-            输入参数：
-            - 无。
-            输出参数：
-            - 函数计算/封装后的结果对象。"""
             try:
                 subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 return output_path if os.path.exists(output_path) else ""
             except Exception as e:
                 logger.error(f"FFmpeg fallback failed: {e}")
                 return ""
-        
-        # 使用 IO 线程池执行阻塞操作
+
         loop = asyncio.get_running_loop()
         executor = get_io_executor()
         return await loop.run_in_executor(executor, run_ffmpeg)
-    
-    def _assemble_document(
-        self, 
-        units: List[SemanticUnit], 
-        title: str
-    ) -> RichTextDocument:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - units: 函数入参（类型：List[SemanticUnit]）。
-        - title: 函数入参（类型：str）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
-        doc = RichTextDocument(
-            title=title or "视频知识文档",
-            source_video=self.video_path,
-            total_duration_sec=self.video_duration,
-            generated_at=datetime.now().isoformat()
-        )
-        
-        for unit in units:
-            materials = getattr(unit, 'materials', MaterialSet())
-            section = create_section_from_semantic_unit(unit, materials)
-            doc.add_section(section)
-        
-        return doc
 
 
 # =============================================================================

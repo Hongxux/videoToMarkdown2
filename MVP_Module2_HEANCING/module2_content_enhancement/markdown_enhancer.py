@@ -171,7 +171,8 @@ STRUCTURED_TEXT_SYSTEM_PROMPT = """你是教学内容结构化助手。
 要求：
 1) 仅基于给定文本改写，不补充外部事实。
 2) 直接输出 Markdown，不输出 JSON 或代码块。
-3) 如果给出图片候选，只能使用 [IMG:img_id] 作为图片占位符。
+3) 如果给出图片候选，请在对应句子的句末插入占位符，格式必须为【imgneeded_{img_id}】。
+4) 禁止使用其他占位符格式（例如 [IMG:img_id]、{IMG=img_id} 等）。
 """
 
 STRUCTURED_TEXT_USER_PROMPT = """## 语义单元
@@ -184,7 +185,8 @@ STRUCTURED_TEXT_USER_PROMPT = """## 语义单元
 ## 图片候选（可为空）
 {image_context}
 
-请输出结构化 Markdown；若有图片候选，请在合适位置插入 [IMG:img_id] 占位符。"""
+请输出结构化 Markdown；若有图片候选，请根据图片描述把对应图片插入到匹配句子的末尾，
+占位符必须使用【imgneeded_{img_id}】。"""
 # ==============================================================================
 # Data Classes
 # ==============================================================================
@@ -385,6 +387,15 @@ class MarkdownEnhancer:
 
             if normalized_kt in {"abstract", "concrete"}:
         # abstract/concrete: render structured body only.
+                sec.enhanced_body = sec.original_body
+                sec.structured_content = await self._build_structured_text_for_concept(sec)
+                return idx
+
+            if normalized_kt == "process":
+                # process（非 tutorial_stepwise）走与 abstract/concrete 一致的结构化插图链路：
+                # 1) DeepSeek 结构化正文
+                # 2) 【imgneeded_{img_id}】占位替换
+                # 3) 缺失图片兜底追加
                 sec.enhanced_body = sec.original_body
                 sec.structured_content = await self._build_structured_text_for_concept(sec)
                 return idx
@@ -751,15 +762,31 @@ class MarkdownEnhancer:
         if not content or not screenshot_items:
             return content
 
-        by_id = {str(item.get("img_id", "") or "").strip(): item for item in screenshot_items if isinstance(item, dict)}
-        by_id = {key: val for key, val in by_id.items() if key}
+        def _normalize_img_id(raw_id: Any) -> str:
+            value = str(raw_id or "").strip().strip("`'[]{}()<>")
+            value = re.sub(r"[^A-Za-z0-9_\-]", "", value)
+            return value.lower()
+
+        by_id: Dict[str, Dict[str, Any]] = {}
+        for item in screenshot_items:
+            if not isinstance(item, dict):
+                continue
+            img_id = _normalize_img_id(item.get("img_id", ""))
+            if not img_id:
+                continue
+            by_id[img_id] = item
+
         if not by_id:
             return content
 
-        pattern = re.compile(r"\[IMG:([A-Za-z0-9_\-]+)\]")
+        # 仅支持新占位符格式：【imgneeded_{img_id}】
+        pattern = re.compile(
+            r"【\s*imgneeded_([A-Za-z0-9_\-]+)\s*】",
+            flags=re.IGNORECASE,
+        )
 
         def _replace(match: re.Match[str]) -> str:
-            img_id = match.group(1)
+            img_id = _normalize_img_id(match.group(1))
             item = by_id.get(img_id)
             if not item:
                 return match.group(0)
@@ -797,7 +824,7 @@ class MarkdownEnhancer:
         base_text = (section.original_body or "").strip()
         image_items = self._build_concept_image_items(section)
 
-        image_context = "(?)"
+        image_context = "(none)"
         if image_items:
             image_context = "\n".join(
                 [f"- img_id={item['img_id']} | img_description={item['img_description']}" for item in image_items]
@@ -1101,7 +1128,8 @@ class MarkdownEnhancer:
             lines.append(self._format_obsidian_embed(section.video_clip))
             lines.append("")
 
-        if section.validated_screenshots:
+        # process（非 tutorial）正文已完成图片占位替换，不再重复追加末尾图片块。
+        if section.validated_screenshots and normalized_kt != "process":
             lines.append("> Images **Keyframes**")
             lines.append("")
             for img_path in section.validated_screenshots:

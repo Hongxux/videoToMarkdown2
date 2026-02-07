@@ -359,16 +359,19 @@
   - **新增区间级映射**：增加 `_map_pruned_interval_to_original_segments(...)`，把 pruned 区间映射回原时间轴的“实际命中子段”，支持跨 gap 的多段返回。
   - **收紧 segments 回写**：`clip_item["segments"]` 改为当前 clip 的 `abs_segments`（命中子段），不再写整单元保留段。
   - **统一边界兜底**：对 clip/screenshot 时间戳执行区间约束（clamp 到单元边界），防止越界进入 Java 侧。
+  - **Java 侧时间戳兜底**：`JavaCVFFmpegService.extractConcatClip` 对输出时间戳做单调递增校正，并用最后写入时间推进段间 offset，避免 muxer 因重复/回退 DTS 报错。
 - 验证方式：
   - 单元测试：`test_vl_pre_prune.py` 新增/更新以下用例并通过。
     - `test_find_clip_for_unit_avoids_substring_collision`（防 SU01/SU010 冲突）
     - `test_map_pruned_interval_to_original_segments_cross_gap`（跨剔除 gap 的区间映射）
     - `test_removed_intervals_require_stable_longer_than_3s`（阈值改为 >3s）
   - 语法检查：`py_compile` 通过。
+  - 复跑含 concat 的任务，确认不再出现 `non monotonically increasing dts` / `av_interleaved_write_frame() error -22`，且 clips 可正常落盘。
 - 预防方案（监控/测试/校验/回滚）：
   - 监控：增加“素材请求时间戳越界计数”“单元到 clip 命中冲突计数”“concat 失败计数”作为告警维度。
   - 测试：保留并扩展“unit_id 冲突命名”“跨 gap 映射”“越界 clamp”回归测试。
   - 校验：在进入 Java 提取前增加轻量校验（`segments` 去重、排序、重叠合并后再下发）。
+  - 兜底：Java 侧输出时间戳强制单调递增，降低异常数据对 concat 的致命影响。
   - 回滚：可临时关闭 `pre_vl_static_pruning.enabled` 回到未裁剪路径，保证主流程可用性。
-- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`docs/architecture/upgrade-log.md`
+- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`docs/architecture/upgrade-log.md`
 - 复盘要点：任何“先裁剪再理解”的链路，本质是“坐标系变换问题”；若 unit 绑定、时间基准、区间语义三者任一失真，下游必然表现为“片段重复 + 越界 + 拼接异常”。

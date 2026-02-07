@@ -1,0 +1,35 @@
+[
+  {
+    "enabled": true,
+    "task_id": "VT_1770475328954_1",
+    "stage": "AssembleRichText",
+    "ts": "2026-02-07 23:05:24",
+    "caches": {
+      "module2.resource.video_capture": {
+        "hits": 51,
+        "misses": 13,
+        "hit_rate": 0.796875
+      },
+      "module2.cv_validator.roi_cache": {
+        "hits": 0,
+        "misses": 16,
+        "hit_rate": 0.0
+      },
+      "module2.visual_feature.frame_cache": {
+        "hits": 0,
+        "misses": 248,
+        "hit_rate": 0.0
+      },
+      "module2.shared_frame_registry.get_shm_ref": {
+        "hits": 1452,
+        "misses": 0,
+        "hit_rate": 1.0
+      },
+      "module2.llm.result_cache": {
+        "hits": 0,
+        "misses": 12,
+        "hit_rate": 0.0
+      }
+    }
+  }
+]

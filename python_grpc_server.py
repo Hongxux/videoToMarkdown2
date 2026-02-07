@@ -247,7 +247,8 @@ from MVP_Module2_HEANCING.module2_content_enhancement import (
     PipelineConfig,
     ScreenshotRequest,
     ClipRequest,
-    MaterialRequests
+    MaterialRequests,
+    SemanticUnitSegmenter
 )
 from MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor import (
     VisualFeatureExtractor,
@@ -607,13 +608,81 @@ class GlobalResourceManager:
             self._vision_client = None
             self._transcriber = None
             self._knowledge_classifier = None
+            self._semantic_unit_segmenter = None
             
             # 🚀 CV Validators Cache
             self._cv_validators = {}
             self._cv_validator_lock = threading.Lock()
+
+            # 🚀 Visual Extractor 缓存（按 video_path 复用）
+            self._visual_extractors = {}
+            self._visual_extractors_lock = threading.Lock()
             
             self._initialized = True
             logger.info("✅ Global resources config saved (lazy loading enabled)")
+
+    @property
+    def semantic_unit_segmenter(self):
+        """
+        执行逻辑：
+        1) 懒加载语义切分器（含其 LLM 客户端）。
+        2) 返回进程内单例，避免每次 Phase2A 重复初始化。
+        实现方式：双重检查锁 + 单例缓存。
+        核心价值：减少 Phase2A 热路径上的对象构建与模型客户端初始化成本。
+        """
+        if self._semantic_unit_segmenter is None:
+            with self._lock:
+                if self._semantic_unit_segmenter is None:
+                    try:
+                        self._semantic_unit_segmenter = SemanticUnitSegmenter()
+                        logger.info("  → SemanticUnitSegmenter loaded lazily")
+                    except Exception as e:
+                        logger.error(f"SemanticUnitSegmenter init failed: {e}")
+        return self._semantic_unit_segmenter
+
+    def get_visual_extractor(self, video_path: str):
+        """
+        执行逻辑：
+        1) 检查 video_path 对应的视觉提取器缓存。
+        2) 缺失时创建并缓存 VisualFeatureExtractor。
+        实现方式：缓存字典 + 惰性初始化。
+        核心价值：避免 AnalyzeSemanticUnits 重复 new VisualFeatureExtractor。
+        """
+        with self._visual_extractors_lock:
+            if video_path not in self._visual_extractors:
+                logger.info(f"🔄 Creating VisualFeatureExtractor for: {video_path}")
+                self._visual_extractors[video_path] = VisualFeatureExtractor(video_path)
+            return self._visual_extractors[video_path]
+
+    def release_visual_extractor(self, video_path: str):
+        """
+        执行逻辑：
+        1) 从缓存中移除指定视频的视觉提取器。
+        2) 若对象提供 cleanup，则主动释放资源。
+        """
+        with self._visual_extractors_lock:
+            extractor = self._visual_extractors.pop(video_path, None)
+        if extractor is not None and hasattr(extractor, "cleanup"):
+            try:
+                extractor.cleanup()
+            except Exception:
+                pass
+
+    def cleanup_visual_extractors(self):
+        """
+        执行逻辑：
+        1) 清理全部缓存的视觉提取器。
+        2) 释放跨任务残留资源，避免内存持续增长。
+        """
+        with self._visual_extractors_lock:
+            extractors = list(self._visual_extractors.values())
+            self._visual_extractors.clear()
+        for extractor in extractors:
+            if hasattr(extractor, "cleanup"):
+                try:
+                    extractor.cleanup()
+                except Exception:
+                    pass
 
     @property
     def transcriber(self):
@@ -1373,9 +1442,15 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 output_dir=output_dir,
                 sentence_timestamps_path=sentence_timestamps_path
             )
+
+            # 复用全局单例切分器：做什么是避免每次 new Segmenter/LLMClient；为什么是降低 Phase2A 热路径开销；
+            # 权衡是该实例跨任务共享，需要保证其内部无任务级可变状态（当前满足）。
+            shared_segmenter = self.resources.semantic_unit_segmenter
+            if shared_segmenter is not None:
+                pipeline.segmenter = shared_segmenter
             
             # 🚀 注入视觉提取器，使 Phase2A 能够执行视觉打分推荐最佳时间戳
-            visual_extractor = VisualFeatureExtractor(video_path)
+            visual_extractor = self.resources.get_visual_extractor(video_path)
             pipeline.set_visual_extractor(visual_extractor)
             
             logger.warning(f"[{task_id}] Entering _collect_material_requests via analyze_only()")
@@ -2821,47 +2896,153 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         shm_map = {}
         cap = cv2.VideoCapture(video_path)
-        
+
         try:
-            fps = cap.get(cv2.CAP_PROP_FPS)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            
+
+            # 1) 收集任务采样点并建立 task -> frame_idx 映射
+            task_to_frame_idxs: Dict[str, List[int]] = {}
+            all_frame_idx_set = set()
             for task in screenshot_tasks:
                 key = f"{task['unit_id']}_island{task['island_index']}"
-                start_sec = task['expanded_start']
-                end_sec = task['expanded_end']
-                
-                # 采样帧（每 0.5s 一帧，确保覆盖扩展范围）
+                start_sec = float(task['expanded_start'])
+                end_sec = float(task['expanded_end'])
+
                 timestamps = np.arange(start_sec, end_sec + 0.1, 0.5)
-                frame_map = {}
-                
+                frame_idxs = []
                 for ts in timestamps:
-                    frame_idx = int(ts * fps)
-                    frame_idx = max(0, min(frame_idx, total_frames - 1))
-                    
-                    # Seek and read
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                    ret, frame = cap.read()
-                    
+                    idx = int(float(ts) * fps)
+                    idx = max(0, min(idx, max(0, total_frames - 1)))
+                    frame_idxs.append(idx)
+                    all_frame_idx_set.add(idx)
+                task_to_frame_idxs[key] = frame_idxs
+
+            if not all_frame_idx_set:
+                return {}
+
+            # 2) 顺序读 + 并行解码（复用 _batch_read_frames_to_shm 的高吞吐路径）
+            frame_idx_list = sorted(all_frame_idx_set)
+            start_idx = frame_idx_list[0]
+            end_idx = frame_idx_list[-1]
+            range_span = end_idx - start_idx + 1
+
+            worker_count = 1
+            if range_span >= 150:
+                worker_count = 2
+            if range_span >= 600:
+                worker_count = 3
+            if range_span >= 1500:
+                worker_count = 4
+            if len(frame_idx_list) >= 60:
+                worker_count = max(worker_count, 2)
+            if len(frame_idx_list) >= 150:
+                worker_count = max(worker_count, 3)
+            if len(frame_idx_list) >= 300:
+                worker_count = max(worker_count, 4)
+            worker_count = min(worker_count, 4)
+
+            open_ms = 0.0
+            seek_ms = 0.0
+            read_ms = 0.0
+            shm_ms = 0.0
+            valid_shm_refs = {}
+
+            def _decode_range(seg_start: int, seg_end: int):
+                t_open = time.perf_counter()
+                local_cap = cv2.VideoCapture(video_path)
+                local_open_ms = (time.perf_counter() - t_open) * 1000.0
+                if not local_cap.isOpened():
+                    return {}, local_open_ms, 0.0, 0.0, 0.0
+
+                t_seek = time.perf_counter()
+                local_cap.set(cv2.CAP_PROP_POS_FRAMES, seg_start)
+                local_seek_ms = (time.perf_counter() - t_seek) * 1000.0
+
+                local_refs = {}
+                local_read_ms = 0.0
+                local_shm_ms = 0.0
+                curr_idx = seg_start
+                while curr_idx <= seg_end:
+                    t0 = time.perf_counter()
+                    ret, frame = local_cap.read()
+                    local_read_ms += (time.perf_counter() - t0) * 1000.0
                     if not ret or frame is None:
-                        continue
-                    
-                    # 写入 SharedMemory（使用 FrameRegistry）
-                    self.frame_registry.register_frame(frame_idx, frame)
-                    shm_ref = self.frame_registry.get_shm_ref(frame_idx)
-                    
-                    if shm_ref:
-                        frame_map[ts] = shm_ref
-                    
-                    # 立即释放本地内存
+                        break
+                    if curr_idx in all_frame_idx_set:
+                        t1 = time.perf_counter()
+                        self.frame_registry.register_frame(curr_idx, frame)
+                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        if ref:
+                            local_refs[curr_idx] = ref
+                        local_shm_ms += (time.perf_counter() - t1) * 1000.0
                     del frame
-                
+                    curr_idx += 1
+
+                local_cap.release()
+                return local_refs, local_open_ms, local_seek_ms, local_read_ms, local_shm_ms
+
+            if worker_count <= 1:
+                seek_start = time.perf_counter()
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_idx)
+                seek_ms = (time.perf_counter() - seek_start) * 1000.0
+                curr_idx = start_idx
+                while curr_idx <= end_idx:
+                    t0 = time.perf_counter()
+                    ret, frame = cap.read()
+                    read_ms += (time.perf_counter() - t0) * 1000.0
+                    if not ret or frame is None:
+                        break
+                    if curr_idx in all_frame_idx_set:
+                        t1 = time.perf_counter()
+                        self.frame_registry.register_frame(curr_idx, frame)
+                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        if ref:
+                            valid_shm_refs[curr_idx] = ref
+                        shm_ms += (time.perf_counter() - t1) * 1000.0
+                    del frame
+                    curr_idx += 1
+            else:
+                seg_size = (range_span + worker_count - 1) // worker_count
+                ranges = []
+                for i in range(worker_count):
+                    seg_start = start_idx + i * seg_size
+                    seg_end = min(end_idx, seg_start + seg_size - 1)
+                    if seg_start <= seg_end:
+                        ranges.append((seg_start, seg_end))
+
+                with futures.ThreadPoolExecutor(max_workers=len(ranges), thread_name_prefix="ss_decode") as executor:
+                    future_list = [executor.submit(_decode_range, s, e) for s, e in ranges]
+                    for fut in future_list:
+                        local_refs, o_ms, s_ms, r_ms, m_ms = fut.result()
+                        valid_shm_refs.update(local_refs)
+                        open_ms += o_ms
+                        seek_ms += s_ms
+                        read_ms += r_ms
+                        shm_ms += m_ms
+
+            # 3) 回填任务映射
+            for key, idx_list in task_to_frame_idxs.items():
+                frame_map = {}
+                if not idx_list:
+                    continue
+                for idx in idx_list:
+                    ref = valid_shm_refs.get(idx)
+                    if ref:
+                        # 保持原接口：timestamp key 为 float，值为 shm_ref
+                        ts = float(idx / fps)
+                        frame_map[ts] = ref
                 if frame_map:
                     shm_map[key] = frame_map
-            
-            logger.info(f"✅ Batch read {len(shm_map)} screenshot tasks, total frames in SharedMemory")
+
+            total_ms = open_ms + seek_ms + read_ms + shm_ms
+            logger.info(
+                f"✅ Batch read screenshot frames: tasks={len(shm_map)}, "
+                f"open={open_ms:.1f}ms, seek={seek_ms:.1f}ms, read={read_ms:.1f}ms, "
+                f"shm={shm_ms:.1f}ms, total={total_ms:.1f}ms, frames={len(frame_idx_list)}, workers={worker_count}"
+            )
             return shm_map
-            
+
         except Exception as e:
             logger.error(f"❌ Batch read for screenshots failed: {e}")
             import traceback
@@ -3847,6 +4028,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         try:
             # 清理所有缓存的验证器
             self.resources.cleanup_cv_validators()
+            self.resources.cleanup_visual_extractors()
             
             # 强制 GC
             import gc
