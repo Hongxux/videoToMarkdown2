@@ -58,6 +58,7 @@ class SemanticUnit:
     action_segments: List[Dict] = None    # V7.x: 动作区间详情 [{start, end, type}]
     stable_islands: List[Dict] = None     # V7.x: 稳定岛区间 [{start, end, mid, duration}]
     materials: Any = None                 # V7.x: 生成的素材集合 (MaterialSet)
+    instructional_steps: List[Dict] = None # V8.0: 详细的操作步骤 (for tutorial_stepwise)
 
     def __post_init__(self):
         """

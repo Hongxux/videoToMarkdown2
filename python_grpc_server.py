@@ -3723,6 +3723,65 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 f"vl_units={len(vl_units)}, screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
             )
 
+            # ==================================================================
+            # 🚀 Persistence: Save instructional_steps back to JSON
+            # ==================================================================
+            try:
+                if vl_clip_requests:
+                    has_updates = False
+                    units_map = {u.get("unit_id"): u for u in semantic_units}
+                    
+                    # Group steps by unit
+                    unit_steps = {} # uid -> list of step dicts
+                    for clip in vl_clip_requests:
+                        if clip.get("analysis_mode") == "tutorial_stepwise":
+                            uid = clip.get("semantic_unit_id")
+                            if not uid: continue
+                            
+                            if uid not in unit_steps:
+                                unit_steps[uid] = []
+                            
+                            # Find matching screenshots
+                            step_ss_ids = []
+                            step_id = clip.get("step_id")
+                            for ss in vl_screenshot_requests:
+                                if ss.get("semantic_unit_id") == uid and ss.get("step_id") == step_id:
+                                    step_ss_ids.append(ss.get("screenshot_id"))
+                            
+                            unit_steps[uid].append({
+                                "step_id": step_id,
+                                "description": clip.get("step_description", ""),
+                                "timestamp_range": [clip.get("start_sec"), clip.get("end_sec")],
+                                "materials": {
+                                    "clip_id": clip.get("clip_id"),
+                                    "screenshot_ids": step_ss_ids
+                                }
+                            })
+                    
+                    for uid, steps in unit_steps.items():
+                        if uid in units_map:
+                            # Sort by step_id
+                            try:
+                                steps.sort(key=lambda x: int(x["step_id"]))
+                            except:
+                                pass
+                            units_map[uid]["instructional_steps"] = steps
+                            has_updates = True
+                    
+                    if has_updates:
+                        with open(semantic_units_path, "w", encoding="utf-8") as f:
+                            # Re-use 'data' structure loaded earlier
+                            if isinstance(data, dict):
+                                # Ensure we don't lose other top-level keys
+                                data["semantic_units"] = semantic_units 
+                                json.dump(data, f, ensure_ascii=False, indent=2)
+                            else:
+                                json.dump(semantic_units, f, ensure_ascii=False, indent=2)
+                        logger.info(f"[{task_id}] ✅ Persisted instructional_steps to {semantic_units_path}")
+
+            except Exception as e:
+                logger.error(f"[{task_id}] Failed to persist instructional_steps: {e}")
+
             _persist_task_token_report({
                 "status": "success",
                 "vl_enabled": True,

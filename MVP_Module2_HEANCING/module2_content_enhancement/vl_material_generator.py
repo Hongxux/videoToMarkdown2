@@ -98,6 +98,24 @@ class VLMaterialGenerator:
         self.pre_vl_mse_sample_fps = float(self.pre_vl_boundary_refine_config.get("mse_sample_fps", 2.0))
         self.pre_vl_mse_min_threshold = float(self.pre_vl_boundary_refine_config.get("mse_min_threshold", 64.0))
 
+
+        # AnalyzeWithVL ????????????? process??
+        self.routing_config = config.get("routing", {}) if isinstance(config.get("routing", {}), dict) else {}
+        self.process_duration_threshold_sec = float(self.routing_config.get("process_duration_threshold_sec", 20.0))
+
+        # ??????????????? + ??? process???
+        self.tutorial_mode_config = config.get("tutorial_mode", {}) if isinstance(config.get("tutorial_mode", {}), dict) else {}
+        self.tutorial_mode_enabled = bool(self.tutorial_mode_config.get("enabled", True))
+        self.tutorial_min_step_duration_sec = float(self.tutorial_mode_config.get("min_step_duration_sec", 5.0))
+        self.tutorial_export_assets = bool(self.tutorial_mode_config.get("export_assets", True))
+        self.tutorial_save_step_json = bool(self.tutorial_mode_config.get("save_step_json", True))
+        self.tutorial_assets_root_dir = str(self.tutorial_mode_config.get("assets_root_dir", "vl_tutorial_units") or "vl_tutorial_units")
+        self.tutorial_keyframe_image_ext = str(self.tutorial_mode_config.get("keyframe_image_ext", "png") or "png").lower()
+        if self.tutorial_keyframe_image_ext not in {"png", "jpg", "jpeg"}:
+            self.tutorial_keyframe_image_ext = "png"
+
+        # ????????????? clip ??????????????
+        self.merge_multistep_clip_requests = bool(config.get("merge_multistep_clip_requests", False))
         self._subtitle_cache: Dict[str, List[Dict[str, Any]]] = {}
 
         # 可选复用 gRPC 侧的 ProcessPool（避免额外 spawn 多套进程池）
@@ -157,6 +175,8 @@ class VLMaterialGenerator:
                         "unit_id": meta.get("unit_id", f"task_{idx}"),
                         "success": result.success,
                         "error_msg": result.error_msg if hasattr(result, 'error_msg') else "",
+                        "analysis_mode": getattr(result, "analysis_mode", "default"),
+                        "raw_response_json": getattr(result, "raw_response_json", []) or [],
                         "clip_requests": result.clip_requests if hasattr(result, 'clip_requests') else [],
                         "screenshot_requests": result.screenshot_requests if hasattr(result, 'screenshot_requests') else [],
                         "metadata": meta
@@ -208,13 +228,13 @@ class VLMaterialGenerator:
 
     def _should_merge_multistep_unit(self, unit: Dict[str, Any]) -> bool:
         """
-        判定是否需要做多段拼接合并（process>10s 且 mult_steps=true）
+        Whether to merge multi-step clips back into one clip (legacy compatibility).
         """
         knowledge_type = (unit.get("knowledge_type", "") or "").lower()
         start_sec = float(unit.get("start_sec", 0.0))
         end_sec = float(unit.get("end_sec", 0.0))
         duration = max(0.0, end_sec - start_sec)
-        return knowledge_type == "process" and duration > 10.0 and bool(unit.get("mult_steps", False))
+        return knowledge_type == "process" and duration > self.process_duration_threshold_sec and bool(unit.get("mult_steps", False))
 
     def _collect_segments_from_clip(self, clip: Dict[str, Any]) -> List[Dict[str, float]]:
         """
@@ -297,6 +317,259 @@ class VLMaterialGenerator:
             )
 
         return merged
+
+
+    def _is_tutorial_process_unit(self, semantic_unit: Dict[str, Any], duration_sec: float) -> bool:
+        """Decide whether this semantic unit should use tutorial-stepwise VL mode."""
+        if not self.tutorial_mode_enabled:
+            return False
+        knowledge_type = str(semantic_unit.get("knowledge_type", "") or "").strip().lower()
+        return (
+            knowledge_type == "process"
+            and bool(semantic_unit.get("mult_steps", False))
+            and float(duration_sec) > float(self.process_duration_threshold_sec)
+        )
+
+    def _build_tutorial_extra_prompt(self) -> str:
+        """Prompt for long multi-step process units in tutorial mode."""
+        return (
+            "Focus on creating a 1-on-1 operational tutorial instead of generic understanding. "
+            "Split the clip into complete steps. Keep explanation, execution, and result of the same step together. "
+            "Remove thinking time such as mouse wandering, hesitation, and idle waiting with no new information. "
+            "Each step must be at least 5 seconds; merge overly short steps with adjacent ones. "
+            "For each step, output step_description and instructional_keyframe_timestamp as true instructional keyframes "
+            "(prefer final state or just-before-submit moment)."
+        )
+
+    def _slugify_action_brief(self, text_value: str, max_len: int = 48) -> str:
+        raw = str(text_value or "").strip().lower()
+        raw = re.sub(r"[^a-z0-9]+", "_", raw)
+        raw = re.sub(r"_+", "_", raw).strip("_")
+        if not raw:
+            return "action"
+        if len(raw) > max_len:
+            return raw[:max_len].rstrip("_") or "action"
+        return raw
+
+    def _build_tutorial_unit_dir(self, output_dir: str, unit_id: str) -> Optional[Path]:
+        if not output_dir:
+            return None
+        safe_unit_id = str(unit_id or "UNKNOWN").strip() or "UNKNOWN"
+        base_dir = Path(output_dir) / self.tutorial_assets_root_dir / safe_unit_id
+        base_dir.mkdir(parents=True, exist_ok=True)
+        return base_dir
+
+    async def _export_clip_asset_with_ffmpeg(
+        self,
+        video_path: str,
+        start_sec: float,
+        end_sec: float,
+        output_path: Path,
+    ) -> bool:
+        if end_sec <= start_sec:
+            return False
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        duration_sec = end_sec - start_sec
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{start_sec:.6f}",
+            "-i",
+            video_path,
+            "-t",
+            f"{duration_sec:.6f}",
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "22",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                f"[VL-Tutorial] step clip export failed: file={output_path.name}, rc={proc.returncode}, "
+                f"err={stderr.decode('utf-8', errors='ignore')[:300]}"
+            )
+            return False
+        return output_path.exists() and output_path.stat().st_size > 0
+
+    async def _export_keyframe_with_ffmpeg(
+        self,
+        video_path: str,
+        timestamp_sec: float,
+        output_path: Path,
+    ) -> bool:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-ss",
+            f"{max(0.0, float(timestamp_sec)):.6f}",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+        ]
+        if output_path.suffix.lower() in {".jpg", ".jpeg"}:
+            cmd.extend(["-q:v", "2"])
+        cmd.append(str(output_path))
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logger.warning(
+                f"[VL-Tutorial] keyframe export failed: file={output_path.name}, rc={proc.returncode}, "
+                f"err={stderr.decode('utf-8', errors='ignore')[:300]}"
+            )
+            return False
+        return output_path.exists() and output_path.stat().st_size > 0
+
+    async def _save_tutorial_assets_for_unit(
+        self,
+        video_path: str,
+        output_dir: str,
+        unit_id: str,
+        clip_requests: List[Dict[str, Any]],
+        screenshot_requests: List[Dict[str, Any]],
+        raw_response_json: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Persist tutorial assets per semantic unit:
+        - step JSON
+        - step clips
+        - instructional keyframes
+        """
+        if not self.tutorial_export_assets:
+            return
+
+        unit_dir = self._build_tutorial_unit_dir(output_dir, unit_id)
+        if unit_dir is None:
+            return
+
+        tutorial_clips = [
+            c for c in (clip_requests or [])
+            if str(c.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise"
+            and str(c.get("semantic_unit_id", "")).strip() == str(unit_id)
+        ]
+        if not tutorial_clips and not (raw_response_json or []):
+            return
+
+        tutorial_screenshots = [
+            s for s in (screenshot_requests or [])
+            if str(s.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise"
+            and str(s.get("semantic_unit_id", "")).strip() == str(unit_id)
+        ]
+
+        screenshots_by_step: Dict[int, List[Dict[str, Any]]] = {}
+        for ss in tutorial_screenshots:
+            step_id = int(self._safe_float(ss.get("step_id", 0), 0.0))
+            screenshots_by_step.setdefault(step_id, []).append(ss)
+        for step_ss in screenshots_by_step.values():
+            step_ss.sort(key=lambda x: float(x.get("timestamp_sec", 0.0)))
+
+        ordered_clips = sorted(
+            tutorial_clips,
+            key=lambda c: (
+                int(self._safe_float(c.get("step_id", 0), 0.0)),
+                float(c.get("start_sec", 0.0)),
+            ),
+        )
+
+        step_manifest: List[Dict[str, Any]] = []
+        for idx, clip in enumerate(ordered_clips, start=1):
+            step_id = int(self._safe_float(clip.get("step_id", idx), float(idx)))
+            step_index = step_id if step_id > 0 else idx
+            step_description = str(clip.get("step_description", "") or "").strip()
+            action_brief = self._slugify_action_brief(
+                str(clip.get("action_brief", "") or step_description),
+            )
+            if action_brief == "action" and step_description:
+                action_brief = self._slugify_action_brief(step_description)
+
+            clip_filename = f"{unit_id}_step_{step_index:02d}_{action_brief}.mp4"
+            clip_output_path = unit_dir / clip_filename
+
+            start_sec = self._safe_float(clip.get("start_sec", 0.0), 0.0)
+            end_sec = self._safe_float(clip.get("end_sec", start_sec), start_sec)
+            if end_sec < start_sec:
+                start_sec, end_sec = end_sec, start_sec
+
+            clip_ok = await self._export_clip_asset_with_ffmpeg(
+                video_path=video_path,
+                start_sec=start_sec,
+                end_sec=end_sec,
+                output_path=clip_output_path,
+            )
+
+            keyframe_files: List[str] = []
+            step_keyframes = screenshots_by_step.get(step_id, [])
+            if not step_keyframes and step_id <= 0:
+                step_keyframes = screenshots_by_step.get(idx, [])
+
+            for key_idx, step_ss in enumerate(step_keyframes, start=1):
+                key_ts = self._safe_float(step_ss.get("timestamp_sec", start_sec), start_sec)
+                ext = "jpg" if self.tutorial_keyframe_image_ext == "jpeg" else self.tutorial_keyframe_image_ext
+                if key_idx == 1:
+                    key_name = f"{unit_id}_step_{step_index:02d}_{action_brief}_key.{ext}"
+                else:
+                    key_name = f"{unit_id}_step_{step_index:02d}_{action_brief}_key_{key_idx:02d}.{ext}"
+                key_path = unit_dir / key_name
+                key_ok = await self._export_keyframe_with_ffmpeg(
+                    video_path=video_path,
+                    timestamp_sec=key_ts,
+                    output_path=key_path,
+                )
+                if key_ok:
+                    keyframe_files.append(key_name)
+
+            step_manifest.append({
+                "step_id": step_index,
+                "step_description": step_description,
+                "action_brief": action_brief,
+                "clip_start_sec": start_sec,
+                "clip_end_sec": end_sec,
+                "clip_file": clip_filename if clip_ok else "",
+                "instructional_keyframes": keyframe_files,
+            })
+
+        if self.tutorial_save_step_json:
+            json_payload = {
+                "unit_id": unit_id,
+                "schema": "tutorial_stepwise_v1",
+                "raw_response": raw_response_json or [],
+                "steps": step_manifest,
+            }
+            json_path = unit_dir / f"{unit_id}_steps.json"
+            with open(json_path, "w", encoding="utf-8") as file_obj:
+                json.dump(json_payload, file_obj, ensure_ascii=False, indent=2)
 
     def _safe_float(self, value: Any, default: float = 0.0) -> float:
         """
@@ -1191,7 +1464,8 @@ class VLMaterialGenerator:
                 logger.info("🚀 使用缓存的VL分析结果,跳过VL API调用")
                 all_screenshot_requests = cached_data.get("aggregated_screenshots", [])
                 all_clip_requests = cached_data.get("aggregated_clips", [])
-                all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
+                if self.merge_multistep_clip_requests:
+                    all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
                 # ⚠️  不直接返回!继续执行CV优化
                 logger.info(f"从缓存加载: screenshots={len(all_screenshot_requests)}, clips={len(all_clip_requests)}")
         
@@ -1223,26 +1497,11 @@ class VLMaterialGenerator:
                     end_sec = float(su.get("end_sec", 0))
                     duration = max(0.0, end_sec - start_sec)
                     knowledge_type = (su.get("knowledge_type", "") or "").lower()
-                    mult_steps = bool(su.get("mult_steps", False))
                     extra_prompt = None
-                    if knowledge_type == "process" and duration > 10.0 and mult_steps:
-                        extra_prompt = (
-                            "该视频片段属于多步骤配置/推演/实操，请你提取的视频片段能剔除冗余部分。"
-                            "冗余部分包括但不限于："
-                            "知识讲解、解释却没有进行实际操作；"
-                            "镜头长时间拍一行命令/JSON/YAML/IP/端口/路径；"
-                            "口述逐字念命令、念参数、念配置键值；"
-                            "打字过程全程拍摄（无特殊校验/无弹窗，仅普通输入）；"
-                            "视频开头/中间长时间口述背景/前置条件/版本要求；"
-                            "对着 PPT/纯文本页面念概念、念约束、念依赖清单；"
-                            "纯口头梳理流程且无实际操作；"
-                            "全程拍摄加载条、安装进度、服务启动等待；"
-                            "重复刷新或重复检查且无新信息；"
-                            "机械重复话术或无意义过渡；"
-                            "画面已显示结果却口述复述。"
-                            "截图选择要求：多步骤中的每一步终态截图，以及每一步需要学习者记忆的关键帧截图。"
-                            "若冗余较多仍需返回最小可用片段，不要返回空片段。"
-                        )
+                    analysis_mode = "default"
+                    if self._is_tutorial_process_unit(su, duration):
+                        analysis_mode = "tutorial_stepwise"
+                        extra_prompt = self._build_tutorial_extra_prompt()
                     
                     # 查找对应的视频片段
                     clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec)
@@ -1274,7 +1533,8 @@ class VLMaterialGenerator:
                         clip_path=clip_path_for_vl,
                         semantic_unit_start_sec=start_sec,
                         semantic_unit_id=unit_id,
-                        extra_prompt=extra_prompt
+                        extra_prompt=extra_prompt,
+                        analysis_mode=analysis_mode
                     )
                     analysis_tasks.append(task)
                     task_metadata.append({
@@ -1285,6 +1545,7 @@ class VLMaterialGenerator:
                         "clip_path": clip_path,
                         "vl_clip_path": clip_path_for_vl,
                         "pre_prune": pre_prune_info,
+                        "analysis_mode": analysis_mode,
                     })
                 
                 # 🚀 并行执行所有 VL 分析任务
@@ -1413,12 +1674,23 @@ class VLMaterialGenerator:
                         abs_ts = self._safe_float(ss_item.get("timestamp_sec", unit_start_sec), unit_start_sec)
                         abs_ts = max(unit_start_sec, min(abs_ts, unit_end_sec))
                         ss_item["timestamp_sec"] = abs_ts
+                    if str(meta.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise":
+                        await self._save_tutorial_assets_for_unit(
+                            video_path=video_path,
+                            output_dir=output_dir or str(Path(video_path).parent),
+                            unit_id=unit_id,
+                            clip_requests=analysis_result.clip_requests,
+                            screenshot_requests=analysis_result.screenshot_requests,
+                            raw_response_json=getattr(analysis_result, "raw_response_json", []) or [],
+                        )
+
                     
                     # 收集结果 (暂不优化截图时间点，后续批量处理)
                     all_clip_requests.extend(analysis_result.clip_requests)
                     all_screenshot_requests.extend(analysis_result.screenshot_requests)
                 
-                all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
+                if self.merge_multistep_clip_requests:
+                    all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
                 logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
 
                 token_stats["saved_tokens_est"] = max(

@@ -13,6 +13,7 @@
 import os
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
@@ -164,6 +165,26 @@ COMBINED_USER_PROMPT = """### 标题
 """
 
 
+STRUCTURED_TEXT_SYSTEM_PROMPT = """你是教学内容结构化助手。
+请将给定语义单元整理为清晰的 Markdown 文本，适配 Obsidian 知识笔记。
+
+要求：
+1) 仅基于给定文本改写，不补充外部事实。
+2) 直接输出 Markdown，不输出 JSON 或代码块。
+3) 如果给出图片候选，只能使用 [IMG:img_id] 作为图片占位符。
+"""
+
+STRUCTURED_TEXT_USER_PROMPT = """## 语义单元
+- 标题: {title}
+- 知识类型: {knowledge_type}
+
+## 原始文本
+{body_text}
+
+## 图片候选（可为空）
+{image_context}
+
+请输出结构化 Markdown；若有图片候选，请在合适位置插入 [IMG:img_id] 占位符。"""
 # ==============================================================================
 # Data Classes
 # ==============================================================================
@@ -190,9 +211,12 @@ class EnhancedSection:
     enhanced_body: str = ""
     structured_content: str = ""            # 逻辑结构化后的内容
     screenshots: List[str] = field(default_factory=list)
+    screenshot_items: List[Dict[str, Any]] = field(default_factory=list)
     validated_screenshots: List[str] = field(default_factory=list)  # V2: 验证后的截图
     video_clip: str = ""                    # V2: 视频片段路径
     action_classifications: List[Dict] = field(default_factory=list)
+    mult_steps: bool = False
+    tutorial_steps: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ==============================================================================
@@ -249,6 +273,7 @@ class MarkdownEnhancer:
         self._assets_dir = "assets"
         # Obsidian 嵌入路径基准目录（默认使用输出 Markdown 所在目录）
         self._markdown_dir = None
+        self._result_dir = None
         # 🚀 调用合并开关：默认开启，失败时自动回退到两次调用
         raw = (os.getenv("MODULE2_MARKDOWN_ENHANCER_COMBINE_CALLS", "1") or "").strip().lower()
         self._combine_llm_calls = raw in ("1", "true", "yes", "y", "on")
@@ -293,6 +318,7 @@ class MarkdownEnhancer:
 
         # 记录 Markdown 目录，便于计算 Obsidian 相对路径
         self._markdown_dir = os.path.abspath(markdown_dir) if markdown_dir else None
+        self._result_dir = str(Path(result_json_path).resolve().parent)
         
         sections = data.get("sections", [])
         title = data.get("title", "知识文档")
@@ -321,14 +347,20 @@ class MarkdownEnhancer:
                 parent_id=level_info.get("parent_id"),
                 original_body=section.get("body_text", ""),
                 screenshots=materials.get("screenshots", []),
+                screenshot_items=materials.get("screenshot_items", []),
                 video_clip=materials.get("clip", ""),
-                action_classifications=materials.get("action_classifications", [])
+                action_classifications=materials.get("action_classifications", []),
+                mult_steps=bool(section.get("mult_steps", False)),
             )
             
-            # V2: 验证截图是否包含具象性知识
+            # V2: 截图验证由上游完成，这里直接使用过滤后的截图。
             # enhanced.validated_screenshots = self._validate_screenshots(enhanced.screenshots)
-            # 🚀 V3: 已经在 RichTextPipeline 中验证过，直接使用 (假设 screenshots 已过滤)
+            # V3: RichTextPipeline 已做过验证，避免重复调用。
             enhanced.validated_screenshots = enhanced.screenshots
+            enhanced.tutorial_steps = self._load_tutorial_steps(
+                unit_id=unit_id,
+                inline_steps=section.get("instructional_steps", []),
+            )
             enhanced_sections.append(enhanced)
 
         # 层级兜底：修复无父级/无一级的情况，保证 Obsidian 能显示嵌套
@@ -343,6 +375,20 @@ class MarkdownEnhancer:
             为什么：两步互相依赖，但不同语义单元之间可并行，从而降低单任务总时延。
             权衡：并行会增加瞬时 in-flight，请确保 LLMClient 的调度器生效（token 加权 + 资源 cap）。
             """
+            normalized_kt = self._normalize_knowledge_type(sec.knowledge_type)
+
+            if self._is_tutorial_process_section(sec):
+                # 教程型 process 直接走步骤渲染，不走通用逻辑抽取。
+                sec.enhanced_body = sec.original_body
+                sec.structured_content = ""
+                return idx
+
+            if normalized_kt in {"abstract", "concrete"}:
+        # abstract/concrete: render structured body only.
+                sec.enhanced_body = sec.original_body
+                sec.structured_content = await self._build_structured_text_for_concept(sec)
+                return idx
+
             if self._combine_llm_calls:
                 try:
                     sec.enhanced_body, sec.structured_content = await self._enhance_and_extract(sec)
@@ -489,6 +535,336 @@ class MarkdownEnhancer:
 
             if section.level == 2:
                 level_stack[2] = section.unit_id
+    def _normalize_knowledge_type(self, knowledge_type: str) -> str:
+        lowered = (knowledge_type or "").strip().lower()
+        if any(key in lowered for key in ("process", "过程", "操作", "procedural")):
+            return "process"
+        if any(key in lowered for key in ("concrete", "具象", "实例", "示例", "实操")):
+            return "concrete"
+        if any(key in lowered for key in ("abstract", "抽象", "讲解", "概念", "explanation")):
+            return "abstract"
+        return lowered or "abstract"
+
+    def _is_tutorial_process_section(self, section: EnhancedSection) -> bool:
+        if self._normalize_knowledge_type(section.knowledge_type) != "process":
+            return False
+        if not section.tutorial_steps:
+            return False
+        return bool(section.mult_steps or len(section.tutorial_steps) > 1)
+
+    def _load_tutorial_steps(self, unit_id: str, inline_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        def _safe_float(value: Any, default: float = 0.0) -> float:
+            try:
+                return float(value)
+            except Exception:
+                return float(default)
+
+        def _safe_int(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        def _to_abs(path_value: Any, base_dir: Optional[Path] = None) -> str:
+            raw = str(path_value or "").strip()
+            if not raw:
+                return ""
+            path_obj = Path(raw)
+            if not path_obj.is_absolute() and base_dir is not None:
+                path_obj = (base_dir / path_obj).resolve()
+            return str(path_obj)
+
+        def _extract_timestamps(step: Dict[str, Any]) -> List[float]:
+            values = step.get("instructional_keyframe_timestamp")
+            if values is None:
+                values = step.get("keyframe_timestamps")
+            if values is None:
+                values = step.get("suggested_screenshoot_timestamps")
+            if values is None:
+                values = step.get("suggested_screenshot_timestamps")
+            if values is None:
+                values = []
+            if not isinstance(values, list):
+                values = [values]
+            return [_safe_float(v, 0.0) for v in values]
+
+        def _normalize_step(raw_step: Dict[str, Any], order: int, base_dir: Optional[Path] = None) -> Dict[str, Any]:
+            step_id = _safe_int(raw_step.get("step_id", order), order)
+            step_desc = str(
+                raw_step.get("step_description")
+                or raw_step.get("description")
+                or raw_step.get("title")
+                or f"step_{step_id}"
+            ).strip()
+
+            start_val = raw_step.get("clip_start_sec")
+            end_val = raw_step.get("clip_end_sec")
+            if start_val is None or end_val is None:
+                time_range = raw_step.get("timestamp_range")
+                if isinstance(time_range, list) and len(time_range) >= 2:
+                    start_val = time_range[0]
+                    end_val = time_range[1]
+
+            if start_val is None:
+                start_val = raw_step.get("start_sec", 0.0)
+            if end_val is None:
+                end_val = raw_step.get("end_sec", start_val)
+
+            clip_start = _safe_float(start_val, 0.0)
+            clip_end = _safe_float(end_val, clip_start)
+            if clip_end < clip_start:
+                clip_start, clip_end = clip_end, clip_start
+
+            materials = raw_step.get("materials") if isinstance(raw_step.get("materials"), dict) else {}
+            clip_file = raw_step.get("clip_file") or raw_step.get("clip_path")
+            if not clip_file:
+                clip_file = materials.get("clip_path") or materials.get("clip")
+
+            keyframe_files = raw_step.get("instructional_keyframes")
+            if not isinstance(keyframe_files, list):
+                keyframe_files = []
+            if not keyframe_files:
+                material_images = materials.get("screenshot_paths") or materials.get("screenshots")
+                if isinstance(material_images, list):
+                    keyframe_files = material_images
+
+            return {
+                "step_id": step_id,
+                "step_description": step_desc,
+                "action_brief": str(raw_step.get("action_brief", "") or "").strip(),
+                "clip_start_sec": clip_start,
+                "clip_end_sec": clip_end,
+                "instructional_keyframe_timestamp": _extract_timestamps(raw_step),
+                "clip_file": _to_abs(clip_file, base_dir=base_dir),
+                "instructional_keyframes": [
+                    _to_abs(path_item, base_dir=base_dir)
+                    for path_item in keyframe_files
+                    if str(path_item or "").strip()
+                ],
+            }
+
+        by_step: Dict[int, Dict[str, Any]] = {}
+        for idx, raw in enumerate(inline_steps or [], start=1):
+            if isinstance(raw, dict):
+                normalized = _normalize_step(raw, idx)
+                by_step[normalized["step_id"]] = normalized
+
+        step_json_path: Optional[Path] = None
+        if self._result_dir:
+            result_dir = Path(self._result_dir)
+            expected_path = result_dir / "vl_tutorial_units" / str(unit_id) / f"{unit_id}_steps.json"
+            if expected_path.exists():
+                step_json_path = expected_path
+            else:
+                matches = sorted(result_dir.rglob(f"{unit_id}_steps.json"))
+                if matches:
+                    step_json_path = matches[0]
+
+        if step_json_path and step_json_path.exists():
+            try:
+                with open(step_json_path, "r", encoding="utf-8") as file_obj:
+                    payload = json.load(file_obj)
+
+                if isinstance(payload, dict):
+                    raw_steps = payload.get("raw_response") or []
+                    manifest_steps = payload.get("steps") or []
+                elif isinstance(payload, list):
+                    raw_steps = payload
+                    manifest_steps = []
+                else:
+                    raw_steps = []
+                    manifest_steps = []
+
+                base_dir = step_json_path.parent
+
+                for idx, raw in enumerate(raw_steps, start=1):
+                    if not isinstance(raw, dict):
+                        continue
+                    normalized = _normalize_step(raw, idx, base_dir=base_dir)
+                    existed = by_step.get(normalized["step_id"])
+                    if not existed:
+                        by_step[normalized["step_id"]] = normalized
+                    elif not existed.get("instructional_keyframe_timestamp"):
+                        existed["instructional_keyframe_timestamp"] = normalized["instructional_keyframe_timestamp"]
+
+                for idx, raw in enumerate(manifest_steps, start=1):
+                    if not isinstance(raw, dict):
+                        continue
+                    normalized = _normalize_step(raw, idx, base_dir=base_dir)
+                    existed = by_step.get(normalized["step_id"])
+                    if not existed:
+                        by_step[normalized["step_id"]] = normalized
+                        continue
+                    existed["step_description"] = normalized["step_description"] or existed["step_description"]
+                    existed["action_brief"] = normalized["action_brief"] or existed["action_brief"]
+                    existed["clip_start_sec"] = normalized["clip_start_sec"]
+                    existed["clip_end_sec"] = normalized["clip_end_sec"]
+                    if normalized["clip_file"]:
+                        existed["clip_file"] = normalized["clip_file"]
+                    if normalized["instructional_keyframes"]:
+                        existed["instructional_keyframes"] = normalized["instructional_keyframes"]
+            except Exception as exc:
+                logger.warning(f"Failed to load tutorial steps for {unit_id}: {exc}")
+
+        return sorted(
+            by_step.values(),
+            key=lambda item: (int(item.get("step_id", 0) or 0), float(item.get("clip_start_sec", 0.0))),
+        )
+
+    def _build_concept_image_items(self, section: EnhancedSection) -> List[Dict[str, Any]]:
+        if section.screenshot_items:
+            raw_items = section.screenshot_items
+        else:
+            raw_items = [
+                {
+                    "img_id": f"{section.unit_id}_img_{idx:02d}",
+                    "img_path": path,
+                    "img_description": f"image_{idx:02d}",
+                }
+                for idx, path in enumerate(section.validated_screenshots or section.screenshots, start=1)
+            ]
+
+        normalized: List[Dict[str, Any]] = []
+        for idx, raw in enumerate(raw_items, start=1):
+            if not isinstance(raw, dict):
+                continue
+            img_path = str(raw.get("img_path") or raw.get("path") or raw.get("file_path") or "").strip()
+            if not img_path:
+                continue
+            img_id = str(raw.get("img_id") or f"{section.unit_id}_img_{idx:02d}").strip()
+            img_description = str(
+                raw.get("img_description")
+                or raw.get("img_desription")
+                or raw.get("label")
+                or f"image_{idx:02d}"
+            ).strip()
+            normalized.append(
+                {
+                    "img_id": img_id,
+                    "img_path": img_path,
+                    "img_description": img_description,
+                }
+            )
+        return normalized
+
+    def _replace_image_placeholders(self, content: str, screenshot_items: List[Dict[str, Any]]) -> str:
+        if not content or not screenshot_items:
+            return content
+
+        by_id = {str(item.get("img_id", "") or "").strip(): item for item in screenshot_items if isinstance(item, dict)}
+        by_id = {key: val for key, val in by_id.items() if key}
+        if not by_id:
+            return content
+
+        pattern = re.compile(r"\[IMG:([A-Za-z0-9_\-]+)\]")
+
+        def _replace(match: re.Match[str]) -> str:
+            img_id = match.group(1)
+            item = by_id.get(img_id)
+            if not item:
+                return match.group(0)
+            img_path = str(item.get("img_path", "") or "").strip()
+            if not img_path:
+                return match.group(0)
+            return self._format_obsidian_embed(img_path)
+
+        return pattern.sub(_replace, content)
+
+    def _append_missing_image_embeds(self, content: str, screenshot_items: List[Dict[str, Any]]) -> str:
+        if not screenshot_items:
+            return content
+
+        missing: List[str] = []
+        for item in screenshot_items:
+            embed = self._format_obsidian_embed(str(item.get("img_path", "") or ""))
+            if not embed or embed in content:
+                continue
+            desc = str(item.get("img_description", "") or "").strip()
+            if desc:
+                missing.append(f"- {desc}: {embed}")
+            else:
+                missing.append(f"- {embed}")
+
+        if not missing:
+            return content
+
+        base = content or ""
+        if base and not base.endswith("\n"):
+            base += "\n"
+        return base + "\n" + "Supplemental images:\n" + "\n".join(missing)
+
+    async def _build_structured_text_for_concept(self, section: EnhancedSection) -> str:
+        base_text = (section.original_body or "").strip()
+        image_items = self._build_concept_image_items(section)
+
+        image_context = "(?)"
+        if image_items:
+            image_context = "\n".join(
+                [f"- img_id={item['img_id']} | img_description={item['img_description']}" for item in image_items]
+            )
+
+        if not self._enabled or not self._llm_client:
+            return self._append_missing_image_embeds(base_text, image_items)
+
+        prompt = STRUCTURED_TEXT_USER_PROMPT.format(
+            title=section.title,
+            knowledge_type=self._normalize_knowledge_type(section.knowledge_type),
+            body_text=base_text,
+            image_context=image_context,
+        )
+
+        try:
+            content, _, _ = await self._llm_client.complete_text(
+                prompt=prompt,
+                system_message=STRUCTURED_TEXT_SYSTEM_PROMPT,
+            )
+            structured = (content or "").strip() or base_text
+        except Exception as exc:
+            logger.warning(f"Structured text generation failed for {section.unit_id}: {exc}")
+            structured = base_text
+
+        structured = self._replace_image_placeholders(structured, image_items)
+        return self._append_missing_image_embeds(structured, image_items)
+
+    def _render_tutorial_steps(self, section: EnhancedSection) -> List[str]:
+        steps = section.tutorial_steps or []
+        if not steps:
+            return []
+
+        lines: List[str] = []
+        for order, step in enumerate(steps, start=1):
+            step_id = int(step.get("step_id", order) or order)
+            desc = str(step.get("step_description", "") or f"step_{step_id}").strip()
+            start_sec = float(step.get("clip_start_sec", 0.0) or 0.0)
+            end_sec = float(step.get("clip_end_sec", start_sec) or start_sec)
+            if end_sec < start_sec:
+                start_sec, end_sec = end_sec, start_sec
+
+            lines.append(f"{order}. {step_id}. {desc}: from {start_sec:.2f}s to {end_sec:.2f}s")
+
+            keyframes = step.get("instructional_keyframes") or []
+            timestamps = step.get("instructional_keyframe_timestamp") or []
+            if keyframes:
+                for idx, key_path in enumerate(keyframes, start=1):
+                    suffix = ""
+                    if idx <= len(timestamps):
+                        try:
+                            suffix = f" ({float(timestamps[idx - 1]):.2f}s)"
+                        except Exception:
+                            suffix = ""
+                    lines.append(f"    - Keyframe {idx}{suffix}: {self._format_obsidian_embed(str(key_path))}")
+            elif timestamps:
+                for idx, ts in enumerate(timestamps, start=1):
+                    lines.append(f"    - Keyframe {idx}: {float(ts):.2f}s")
+
+            clip_path = str(step.get("clip_file") or step.get("clip_path") or "").strip()
+            if clip_path:
+                lines.append(f"    - Step video: {self._format_obsidian_embed(clip_path)}")
+
+            lines.append("")
+
+        return lines
+
     
     async def _enhance_and_extract(self, section: EnhancedSection) -> Tuple[str, str]:
         """
@@ -668,8 +1044,8 @@ class MarkdownEnhancer:
         
         # 按原始顺序输出，并用标题层级体现嵌套
         for section in sections:
-            indent = max(0, min(section.level - 1, 5))
-            lines.extend(self._render_section(section, indent=indent))
+            # 移除缩进计算，直接渲染
+            lines.extend(self._render_section(section))
             lines.append("")
         
         return "\n".join(lines)
@@ -697,60 +1073,41 @@ class MarkdownEnhancer:
         return f"![[{rel_path}]]"
     
     
-    def _render_section(self, section: EnhancedSection, indent: int = 0) -> List[str]:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、文件系统读写实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：section.structured_content
-        - 条件：section.video_clip and os.path.exists(section.video_clip)
-        - 条件：section.validated_screenshots
-        依据来源（证据链）：
-        - 输入参数：section。
-        输入参数：
-        - section: 函数入参（类型：EnhancedSection）。
-        - indent: 函数入参（类型：int）。
-        输出参数：
-        - str 列表（与输入或处理结果一一对应）。"""
-        lines = []
-        
-        # 标题层级
-        header_level = min(section.level + 1, 6)  # ## 开始
+    def _render_section(self, section: EnhancedSection) -> List[str]:
+        lines: List[str] = []
+
+        header_level = min(section.level + 1, 6)
         header = "#" * header_level
-        
         lines.append(f"{header} {section.title}")
         lines.append("")
-        
-        # 结构化内容
-        if section.structured_content:
-            # 添加缩进
-            tab = "\t" * indent
-            for line in section.structured_content.split("\n"):
-                lines.append(f"{tab}{line}")
-        else:
-            lines.append(section.enhanced_body or section.original_body)
-        
-        lines.append("")
-        
-        # V2: Obsidian 格式媒体嵌入
-        # 视频片段
+
+        normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
+        if self._is_tutorial_process_section(section):
+            lines.extend(self._render_tutorial_steps(section))
+            return lines
+
+        body = (section.structured_content or section.enhanced_body or section.original_body or "").strip()
+        if body:
+            lines.extend(body.split("\n"))
+            lines.append("")
+
+        # abstract/concrete: render structured body only.
+        if normalized_kt in {"abstract", "concrete"}:
+            return lines
+
         if section.video_clip:
-            lines.append(f"> 📹 **{self._build_video_title(section)}**")
-            lines.append(f"")
+            lines.append(f"> Video **{self._build_video_title(section)}**")
+            lines.append("")
             lines.append(self._format_obsidian_embed(section.video_clip))
             lines.append("")
-        
-        # 验证后的截图
+
         if section.validated_screenshots:
-            lines.append(f"> 🖼️ **关键帧**")
+            lines.append("> Images **Keyframes**")
             lines.append("")
             for img_path in section.validated_screenshots:
                 lines.append(self._format_obsidian_embed(img_path))
             lines.append("")
-        
+
         return lines
 
     def _build_video_title(self, section: EnhancedSection) -> str:

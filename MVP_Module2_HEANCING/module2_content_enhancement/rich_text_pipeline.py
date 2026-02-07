@@ -740,6 +740,7 @@ class RichTextPipeline:
                 "knowledge_topic": getattr(unit, 'knowledge_topic', ''),
                 "mult_steps": getattr(unit, 'mult_steps', False),
                 "cv_validated": getattr(unit, 'cv_validated', False),
+                "instructional_steps": getattr(unit, 'instructional_steps', []),
                 # V9.0: 带有 LLM 分类结果的动作单元列表
                 "action_units": getattr(unit, 'action_units', []),
                 # V9.0: 两阶段合并过程中被跨越的稳定岛
@@ -791,6 +792,7 @@ class RichTextPipeline:
             unit.action_segments = item.get("action_segments", [])
             
             # V9.0: 恢复新字段
+            unit.instructional_steps = item.get("instructional_steps", [])
             unit.cv_validated = item.get("cv_validated", False)
             unit.action_units = item.get("action_units", [])
             unit.crossed_stable_islands = item.get("crossed_stable_islands", {
@@ -1787,6 +1789,17 @@ class RichTextPipeline:
         # ==== 组装素材集合 ====
         materials.screenshot_paths = screenshot_paths
         materials.screenshot_labels = screenshot_labels
+        materials.screenshot_items = [
+            {
+                "img_id": f"{unit.unit_id}_img_{idx + 1:02d}",
+                "img_path": path,
+                "img_description": screenshot_labels[idx] if idx < len(screenshot_labels) else f"image_{idx + 1}",
+                "img_desription": screenshot_labels[idx] if idx < len(screenshot_labels) else f"image_{idx + 1}",
+                "label": screenshot_labels[idx] if idx < len(screenshot_labels) else "",
+                "source_id": Path(path).stem,
+            }
+            for idx, path in enumerate(screenshot_paths)
+        ]
         materials.clip_path = clip_paths[0] if clip_paths else ""
         
         # 💥 V7.4: 提取动作单元分类结果
@@ -2060,6 +2073,20 @@ class RichTextPipeline:
         
         screenshot_paths = []
         screenshot_labels = []
+        screenshot_items = []
+
+        def _normalize_knowledge_type(raw_type: str) -> str:
+            lowered = (raw_type or "").strip().lower()
+            if any(key in lowered for key in ["process", "\u8fc7\u7a0b"]):
+                return "process"
+            if any(key in lowered for key in ["concrete", "\u5177\u8c61", "\u5b9e\u4f8b"]):
+                return "concrete"
+            if any(key in lowered for key in ["abstract", "\u62bd\u8c61", "\u8bb2\u89e3", "explanation"]):
+                return "abstract"
+            return lowered or "abstract"
+
+        normalized_kt = _normalize_knowledge_type(str(getattr(unit, "knowledge_type", "") or ""))
+        should_validate_screenshot = normalized_kt in {"abstract", "concrete"}
 
         def infer_label(name: str) -> str:
             name_lower = name.lower()
@@ -2073,7 +2100,7 @@ class RichTextPipeline:
                 return "fallback"
             return "unknown"
 
-        # ?????????????????????????????
+        # 收集截图候选：优先使用请求清单，缺失时按 unit_id 模糊匹配。
         screenshot_candidates = []
         if material_requests.screenshot_requests:
             for req in material_requests.screenshot_requests:
@@ -2097,8 +2124,11 @@ class RichTextPipeline:
 
         for path, label, sid in screenshot_candidates:
             is_valid = True
-            if self._concrete_validator:
+            img_description = ""
+
+            if should_validate_screenshot and self._concrete_validator:
                 res = self._concrete_validator.validate(path)
+                img_description = str(getattr(res, "img_description", "") or getattr(res, "reason", "")).strip()
                 if not res.should_include:
                     logger.info(f"Removing negative screenshot: {sid} ({res.reason})")
                     try:
@@ -2110,8 +2140,18 @@ class RichTextPipeline:
             if is_valid:
                 screenshot_paths.append(path)
                 screenshot_labels.append(label)
+                resolved_desc = img_description or label or sid
+                img_index = len(screenshot_items) + 1
+                screenshot_items.append({
+                    "img_id": f"{unit.unit_id}_img_{img_index:02d}",
+                    "img_path": path,
+                    "img_description": resolved_desc,
+                    "img_desription": resolved_desc,
+                    "label": label,
+                    "source_id": sid,
+                })
 
-        # ???????????
+                # 视频切片回退匹配规则
         clip_path = ""
         # 💥 V7.5: 严格模态检查
         # 切片的唯一依据: 是否为非讲解型
@@ -2187,6 +2227,7 @@ class RichTextPipeline:
         
         materials.screenshot_paths = screenshot_paths
         materials.screenshot_labels = screenshot_labels
+        materials.screenshot_items = screenshot_items
         materials.clip_path = clip_path
         materials.action_classifications = material_requests.action_classifications
         

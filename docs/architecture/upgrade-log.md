@@ -378,3 +378,40 @@
 - 风险与回滚方案：若批处理导致分类质量波动，可设置 `MODULE2_KC_MULTI_UNIT_ENABLED=0` 回退 per-unit；若只想保留“复用已有 knowledge_type”可继续使用上游 action_units 分类结果。
 - 验证方式与结果：运行 `python -m pytest -q` 通过；在 unit 数较多的任务中观察 DeepSeek 请求次数下降（chunk 数明显小于 unit 数）。
 - 可复用经验：在素材生成类 pipeline 中，将“预计算（分类）”从 per-unit 内循环上移到批处理层，可同时降低调用次数与整体时延。
+
+### 2026-02-07 VL tutorial mode refactor (step-only output)
+- Date: 2026-02-07
+- Background: long `process` units are used for tutorial replay; VL should focus on segmentation and instructional keyframes, not knowledge-type classification.
+- Scope:
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`: tutorial schema fixed to `step_id`, `step_description`, `clip_start_sec`, `clip_end_sec`, `instructional_keyframe_timestamp`.
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`: keep per-step clips in tutorial mode, export unit-level step JSON + step clips + keyframes.
+  - `MVP_Module2_HEANCING/config/module2_config.yaml`: tutorial and duration routing thresholds configurable.
+- Key decisions:
+  - Remove VL internal knowledge-type classification in tutorial path.
+  - Standardize asset naming: `{unit_id}_step_{index}_{action_brief}.mp4` and `{unit_id}_step_{index}_{action_brief}_key.png`.
+  - Persist one step JSON per semantic unit for Phase2B rich-text assembly.
+- Validation:
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_tutorial_flow.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py` passed (11 passed).
+
+## 2026-02-07 RichText assembly refactor (teaching-first)
+- Date: 2026-02-07
+- Background: the old markdown assembly was generic and did not fully consume tutorial step assets or screenshot metadata for abstract/concrete placement.
+- Scope:
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`:
+    - add knowledge type normalization + tutorial unit detection + step loading (inline + `{unit_id}_steps.json` merge),
+    - add abstract/concrete structured path with `img_id + img_description` placeholder flow `[IMG:img_id]` -> Obsidian embed,
+    - add process multistep ordered rendering with keyframes and step clips.
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py`: add rich-text unit tests.
+- Key decisions:
+  - Keep hierarchy mapping unchanged: still use DeepSeek level/parent_id output to map Obsidian headings.
+  - Abstract/concrete uses model placeholder positioning plus local deterministic replacement.
+  - Process multistep uses tutorial JSON assets directly; no extra clip merging at assembly stage.
+- Compatibility:
+  - If DeepSeek is unavailable, abstract/concrete falls back to source text + appended image embeds.
+  - If tutorial step JSON is missing, process falls back to normal section rendering.
+- Validation:
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py` passed (3 passed).
+  - tutorial regression tests still pass (11 passed) with the command above.
+- Reuse note:
+  - The "LLM placeholders + local asset binding" pattern is reusable across markdown assembly modules.
+

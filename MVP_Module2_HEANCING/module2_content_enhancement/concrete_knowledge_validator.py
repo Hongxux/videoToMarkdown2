@@ -59,7 +59,8 @@ CONCRETE_KNOWLEDGE_PROMPT = """# 角色
     "has_concrete_knowledge": "是/否",
     "confidence": 0.0-1.0,
     "concrete_type": "实物图/装置图/解剖图/实操界面/地形图/模型图/等等/无",
-    "reason": "简明判定依据"
+    "reason": "简明判定依据",
+    "img_description": "One-sentence visual description for markdown image placement"
 }}
 
 请只输出JSON，不要有其他内容。"""
@@ -90,6 +91,7 @@ class ConcreteKnowledgeResult:
     is_mixed: bool                  # 是否混合型
     non_text_ratio: float           # 非文本区域占比
     should_include: bool            # 是否应该插入截图
+    img_description: str = ""      # 图像描述，用于后续富文本插图占位
 
 
 # ==============================================================================
@@ -398,7 +400,8 @@ class ConcreteKnowledgeValidator:
                         reason=f"重复帧 (pHash相似度>{self._hash_cache.threshold:.0%})",
                         is_mixed=cached_result.get("is_mixed", False),
                         non_text_ratio=cached_result.get("non_text_ratio", 0.0),
-                        should_include=cached_result.get("should_include", True)
+                        should_include=cached_result.get("should_include", True),
+                        img_description=cached_result.get("img_description", cached_result.get("img_desription", ""))
                     )
                 elif isinstance(cached_result, ConcreteKnowledgeResult):
                     return cached_result
@@ -484,7 +487,9 @@ class ConcreteKnowledgeValidator:
                 "concrete_type": result.concrete_type,
                 "is_mixed": result.is_mixed,
                 "non_text_ratio": result.non_text_ratio,
-                "should_include": result.should_include
+                "should_include": result.should_include,
+                "img_description": result.img_description,
+                "img_desription": result.img_description
             }
             self._hash_cache.store_result(image_path, result_dict)
             self._save_persistent_cache()
@@ -526,6 +531,7 @@ class ConcreteKnowledgeValidator:
             confidence = float(api_result.get("confidence", 0.5))
             concrete_type = api_result.get("concrete_type", "未知")
             reason = api_result.get("reason", "Vision AI 判定")
+            img_description = str(api_result.get("img_description") or api_result.get("img_desription") or reason or "").strip()
             
             return ConcreteKnowledgeResult(
                 has_concrete=has_concrete,
@@ -535,7 +541,8 @@ class ConcreteKnowledgeValidator:
                 reason=reason,
                 is_mixed=False,
                 non_text_ratio=0.0,
-                should_include=has_concrete or confidence < 0.5  # 低置信度时保留
+                should_include=has_concrete or confidence < 0.5,  # keep low-confidence samples
+                img_description=img_description
             )
             
         except Exception as e:
@@ -548,7 +555,8 @@ class ConcreteKnowledgeValidator:
                 reason=f"Vision AI 调用失败: {e}",
                 is_mixed=False,
                 non_text_ratio=0.0,
-                should_include=True  # 失败时保守保留
+                should_include=True,  # fallback keep
+                img_description="description unavailable"
             )
         finally:
             # 清理临时文件
@@ -909,7 +917,8 @@ class ConcreteKnowledgeValidator:
                 reason=result.get("reason", ""),
                 is_mixed=False,
                 non_text_ratio=0.0,
-                should_include=should_include
+                should_include=should_include,
+                img_description=str(result.get("img_description") or result.get("img_desription") or result.get("reason", ""))
             )
             
         except Exception as e:
@@ -923,7 +932,8 @@ class ConcreteKnowledgeValidator:
                 reason=f"Vision API 调用失败: {e}，默认保留",
                 is_mixed=False,
                 non_text_ratio=0.0,
-                should_include=True
+                should_include=True,
+                img_description="description unavailable"
             )
     
     def _cv_only_validate(self, non_text_ratio: float, cv_page_type: str) -> ConcreteKnowledgeResult:

@@ -49,7 +49,12 @@ class VLAnalysisResult:
     clip_start_sec: float = 0.0  # 相对时间（片段内）
     clip_end_sec: float = 0.0    # 相对时间（片段内）
     suggested_screenshoot_timestamps: List[float] = field(default_factory=list)  # 相对时间
-    
+
+    # 教程模式新增字段
+    step_id: int = 0
+    step_description: str = ""
+    analysis_mode: str = "default"
+
     # 绝对时间（由 VLVideoAnalyzer.convert_timestamps 计算）
     absolute_clip_start_sec: float = 0.0
     absolute_clip_end_sec: float = 0.0
@@ -65,6 +70,8 @@ class VLClipAnalysisResponse:
     clip_requests: List[Dict[str, Any]] = field(default_factory=list)
     screenshot_requests: List[Dict[str, Any]] = field(default_factory=list)
     token_usage: Dict[str, int] = field(default_factory=dict)
+    analysis_mode: str = "default"
+    raw_response_json: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class VLVideoAnalyzer:
@@ -126,7 +133,10 @@ class VLVideoAnalyzer:
         
         # 加载提示词模板
         self.prompt_template = self._load_prompt_template()
-        self._output_constraints = self._get_output_constraints()
+
+        # Tutorial mode settings for long multi-step process units
+        tutorial_cfg = config.get("tutorial_mode", {}) if isinstance(config.get("tutorial_mode", {}), dict) else {}
+        self.tutorial_min_step_duration_sec = float(tutorial_cfg.get("min_step_duration_sec", 5.0))
         
         logger.info(f"VLVideoAnalyzer 初始化完成: model={self.model}")
 
@@ -143,12 +153,37 @@ class VLVideoAnalyzer:
             await self.http_client.aclose()
             logger.info("VLVideoAnalyzer HTTP 客户端已关闭")
 
-    def _get_output_constraints(self) -> str:
+    def _normalize_analysis_mode(self, analysis_mode: Optional[str]) -> str:
+        mode = str(analysis_mode or "default").strip().lower()
+        if mode in {"tutorial", "tutorial_stepwise", "teaching"}:
+            return "tutorial_stepwise"
+        return "default"
+
+    def _get_output_constraints(self, analysis_mode: str = "default") -> str:
         """
         追加到提示词尾部的输出约束。
 
         目标：降低模型输出 JSON 被 Markdown/自然语言污染、以及字段格式漂移导致的解析失败。
         """
+        mode = self._normalize_analysis_mode(analysis_mode)
+        if mode == "tutorial_stepwise":
+            return (
+                "\n\n"
+                "[Hard Constraints - Tutorial Stepwise Mode]\n"
+                "1) Output exactly one valid JSON array. No markdown, no prefix/suffix text, no explanations.\n"
+                "2) Each array item must be one complete step.\n"
+                "3) Required fields per item: step_id (Integer), step_description (String), "
+                "clip_start_sec (Float), clip_end_sec (Float), instructional_keyframe_timestamp (List[Float]).\n"
+                "4) Do not output reasoning, key_evidence, or knowledge_type fields.\n"
+                "5) Segmentation rules:\n"
+                "   - Keep explanation + execution + result of the same step together.\n"
+                "   - Remove thinking/hesitation time (mouse wandering, idle pause, no new information).\n"
+                "   - No step shorter than 5 seconds. Merge short steps with adjacent steps.\n"
+                "6) instructional_keyframe_timestamp must be true instructional keyframes, "
+                "prefer final state or just-before-submit moments.\n"
+                "7) Avoid -1 for timestamps; if action spans whole clip use [0.0, clip_duration].\n"
+            )
+
         return (
             "\n\n"
             "【输出硬性约束】\n"
@@ -162,7 +197,7 @@ class VLVideoAnalyzer:
             "   - 如果该知识类型贯穿整个视频片段，起始可设为 0.0，结束可设为片段总时长（或最后一个显著变化的时间戳）。\n"
             "   - 只有在视觉信息完全无法支撑任何时间判断时，才允许对该项输出 -1。\n"
         )
-    
+
     def _load_prompt_template(self) -> str:
         """加载视频分析提示词模板"""
         # 尝试从文件加载
@@ -234,83 +269,123 @@ class VLVideoAnalyzer:
         clip_path: str,
         semantic_unit_start_sec: float,
         semantic_unit_id: str,
-        extra_prompt: Optional[str] = None
+        extra_prompt: Optional[str] = None,
+        analysis_mode: str = "default"
     ) -> VLClipAnalysisResponse:
         """
-        分析单个视频片段
-        
+        分析单个视频片段。
+
         Args:
             clip_path: 视频片段文件路径
-            semantic_unit_start_sec: 语义单元在原视频中的起始时间
+            semantic_unit_start_sec: 语义单元在原视频中的起始时间（秒）
             semantic_unit_id: 语义单元 ID
-            
+            extra_prompt: 附加提示词（可选）
+            analysis_mode: default / tutorial_stepwise
+
         Returns:
-            VLClipAnalysisResponse 包含分析结果和素材请求
+            VLClipAnalysisResponse: 包含切片与关键帧请求的完整结果
         """
         result = VLClipAnalysisResponse()
-        
+        normalized_mode = self._normalize_analysis_mode(analysis_mode)
+        result.analysis_mode = normalized_mode
+
         try:
             # 调用 VL API
-            analysis_results, token_usage = await self._call_vl_api(clip_path, extra_prompt=extra_prompt)
+            analysis_results, token_usage, raw_json = await self._call_vl_api(
+                clip_path,
+                extra_prompt=extra_prompt,
+                analysis_mode=normalized_mode,
+            )
             result.token_usage = token_usage
-            
+            result.raw_response_json = raw_json or []
+
             if not analysis_results:
                 result.success = False
-                result.error_msg = "VL API 返回空结果"
+                result.error_msg = "VL API returned empty result"
                 return result
-            
-            # 转换时间戳并生成素材请求
+
+            # 计算并补齐绝对时间字段
             for i, ar in enumerate(analysis_results):
-                # 转换相对时间戳为绝对时间戳
+                ar.analysis_mode = normalized_mode
+
+                # 将相对时间转换为原视频绝对时间
                 ar.absolute_clip_start_sec = semantic_unit_start_sec + ar.clip_start_sec
                 ar.absolute_clip_end_sec = semantic_unit_start_sec + ar.clip_end_sec
                 ar.absolute_screenshot_timestamps = [
-                    semantic_unit_start_sec + ts 
+                    semantic_unit_start_sec + ts
                     for ts in ar.suggested_screenshoot_timestamps
                 ]
-                
+
                 result.analysis_results.append(ar)
-                
-                # 生成视频片段请求
-                # 规则：讲解型不截取视频片段（只截图），其他类型截取视频片段
-                # 增强：处理模型可能带括号的情况，如 【讲解型】
-                k_type = ar.knowledge_type.strip("【】[]() ")
-                if k_type != "讲解型":
+
+                step_id = int(ar.step_id) if int(ar.step_id) > 0 else (i + 1)
+                action_brief = self._sanitize_action_brief(ar.step_description)
+
+                if normalized_mode == "tutorial_stepwise":
+                    # 教程模式仅关注步骤切分与关键帧，不依赖 VL 返回 knowledge_type。
                     result.clip_requests.append({
-                        "clip_id": f"vl_clip_{semantic_unit_id}_{i}",
+                        "clip_id": f"{semantic_unit_id}_step_{step_id:02d}_{action_brief}",
                         "start_sec": ar.absolute_clip_start_sec,
                         "end_sec": ar.absolute_clip_end_sec,
-                        "knowledge_type": ar.knowledge_type,
-                        "semantic_unit_id": semantic_unit_id
-                    })
-                
-                # 生成截图请求（所有类型都截图，包括讲解型）
-                for j, ts in enumerate(ar.absolute_screenshot_timestamps):
-                    result.screenshot_requests.append({
-                        "screenshot_id": f"vl_ss_{semantic_unit_id}_{i}_{j}",
-                        "timestamp_sec": ts,
-                        "label": f"{ar.knowledge_type}_截图{j+1}",
+                        "knowledge_type": "process",
                         "semantic_unit_id": semantic_unit_id,
-                        # 保存相对时间戳用于后续优化
-                        "_relative_timestamp": ar.suggested_screenshoot_timestamps[j],
-                        "_semantic_unit_start": semantic_unit_start_sec
+                        "step_id": step_id,
+                        "step_description": ar.step_description,
+                        "action_brief": action_brief,
+                        "analysis_mode": normalized_mode,
                     })
-            
+                else:
+                    # 默认模式保留旧行为：讲解型不生成视频切片。
+                    k_type = str(ar.knowledge_type or "").strip("[]() \"'").lower()
+                    if k_type not in {"\u8bb2\u89e3\u578b", "explanation", "abstract_explanation"}:
+                        result.clip_requests.append({
+                            "clip_id": f"vl_clip_{semantic_unit_id}_{i}",
+                            "start_sec": ar.absolute_clip_start_sec,
+                            "end_sec": ar.absolute_clip_end_sec,
+                            "knowledge_type": ar.knowledge_type,
+                            "semantic_unit_id": semantic_unit_id,
+                            "step_id": step_id,
+                            "step_description": ar.step_description,
+                            "action_brief": action_brief,
+                            "analysis_mode": normalized_mode,
+                        })
+
+                for j, ts in enumerate(ar.absolute_screenshot_timestamps):
+                    screenshot_id = f"vl_ss_{semantic_unit_id}_{i}_{j}"
+                    label = f"{ar.knowledge_type}_screenshot_{j+1}"
+                    if normalized_mode == "tutorial_stepwise":
+                        screenshot_id = f"{semantic_unit_id}_step_{step_id:02d}_{action_brief}_key_{j+1:02d}"
+                        label = f"step_{step_id:02d}:{ar.step_description or action_brief}_keyframe_{j+1}"
+
+                    result.screenshot_requests.append({
+                        "screenshot_id": screenshot_id,
+                        "timestamp_sec": ts,
+                        "label": label,
+                        "semantic_unit_id": semantic_unit_id,
+                        "_relative_timestamp": ar.suggested_screenshoot_timestamps[j],
+                        "_semantic_unit_start": semantic_unit_start_sec,
+                        "step_id": step_id,
+                        "step_description": ar.step_description,
+                        "action_brief": action_brief,
+                        "analysis_mode": normalized_mode,
+                        "is_instructional_keyframe": normalized_mode == "tutorial_stepwise",
+                        "keyframe_index": j + 1,
+                    })
+
             result.success = True
             logger.info(
-                f"VL 分析完成: {semantic_unit_id}, "
+                f"VL analysis completed: {semantic_unit_id}, mode={normalized_mode}, "
                 f"clips={len(result.clip_requests)}, screenshots={len(result.screenshot_requests)}, "
                 f"prompt_tokens={result.token_usage.get('prompt_tokens', 0)}, "
                 f"total_tokens={result.token_usage.get('total_tokens', 0)}"
             )
-            
+
         except Exception as e:
-            logger.error(f"VL 分析失败 ({semantic_unit_id}): {e}")
+            logger.error(f"VL analysis failed ({semantic_unit_id}): {e}")
             result.success = False
             result.error_msg = str(e)
-        
+
         return result
-    
     def _extract_token_usage(self, response: Any) -> Dict[str, int]:
         """
         从 OpenAI 兼容响应中提取 token 使用量。
@@ -349,19 +424,26 @@ class VLVideoAnalyzer:
             "total_tokens": max(0, total_tokens),
         }
 
-    async def _call_vl_api(self, video_path: str, extra_prompt: Optional[str] = None) -> tuple[List[VLAnalysisResult], Dict[str, int]]:
+    async def _call_vl_api(
+        self,
+        video_path: str,
+        extra_prompt: Optional[str] = None,
+        analysis_mode: str = "default",
+    ) -> tuple[List[VLAnalysisResult], Dict[str, int], List[Dict[str, Any]]]:
         """
-        调用 Qwen3-VL-Plus API 分析视频
-        
-        Args:
-            video_path: 视频文件路径
-            
+        调用 Qwen3-VL-Plus API 并解析结果。
+
         Returns:
-            tuple: (VLAnalysisResult 列表, token usage)
+            tuple: (分析结果列表, token 使用量, 归一化 JSON 结果)
         """
-        messages = await self._build_messages(video_path, extra_prompt=extra_prompt)
-        
-        # 调用 API（带重试）
+        normalized_mode = self._normalize_analysis_mode(analysis_mode)
+        messages = await self._build_messages(
+            video_path,
+            extra_prompt=extra_prompt,
+            analysis_mode=normalized_mode,
+        )
+
+        # 调用 API（含重试）
         last_error = None
         for attempt in range(self.max_retries + 1):
             try:
@@ -374,52 +456,73 @@ class VLVideoAnalyzer:
 
                 if attempt > 0:
                     response_kwargs["temperature"] = 0.0
-                    # DashScope 兼容接口不一定支持 response_format；仅在重试时尝试，避免影响正常路径
-                    # 注：json_object 仍可能返回对象而非数组，因此解析端也做兼容。
+                    # DashScope 网关对 response_format 的兼容性不一致，需要容错。
+                    # 使用 json_object 可提升重试场景的 JSON 稳定性。
                     response_kwargs["response_format"] = {"type": "json_object"}
 
                 try:
                     response = await self.client.chat.completions.create(**response_kwargs)
                 except Exception as e:
-                    # 兼容部分 OpenAI 兼容网关不支持 response_format 的情况
+                    # 兼容非 OpenAI 官方网关：不支持 response_format 时回退。
                     err_str = str(e).lower()
                     if "response_format" in response_kwargs and ("response_format" in err_str or "unknown" in err_str):
                         response_kwargs.pop("response_format", None)
                         response = await self.client.chat.completions.create(**response_kwargs)
                     else:
                         raise
-                
+
                 content = response.choices[0].message.content
                 finish_reason = getattr(response.choices[0], "finish_reason", None)
                 token_usage = self._extract_token_usage(response)
-                return self._parse_response(content, finish_reason=finish_reason), token_usage
-                
+                parsed_results, raw_json = self._parse_response_with_payload(
+                    content,
+                    finish_reason=finish_reason,
+                    analysis_mode=normalized_mode,
+                )
+                return parsed_results, token_usage, raw_json
+
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries:
                     wait_time = 2 ** attempt
-                    logger.warning(f"VL API 调用失败 (尝试 {attempt+1}/{self.max_retries+1}): {e}, 等待 {wait_time}s 重试")
+                    logger.warning(f"VL API call failed (attempt {attempt+1}/{self.max_retries+1}): {e}, wait {wait_time}s")
 
-                    # 解析失败/截断时，下一次重试用更短的提示词，尽量只要 JSON
+                    # 若解析失败，附加更严格约束以提升下次 JSON 成功率。
                     err_str = str(e).lower()
                     if "json" in err_str or "parse" in err_str or "decode" in err_str or "unterminated" in err_str:
                         messages = await self._build_messages(
                             video_path,
                             extra_prompt=extra_prompt,
                             override_prompt=(
-                                "你必须只输出 JSON 数组，不要任何解释。"
-                                "不要输出 reasoning 或 key_evidence。"
+                                "You must output only a JSON array. No explanation text."
+                                "Do not output reasoning or key_evidence fields."
                             ),
+                            analysis_mode=normalized_mode,
                         )
                     await asyncio.sleep(wait_time)
-        
+
         raise last_error
+
+    def _get_tutorial_system_prompt(self) -> str:
+        """
+        教程模式系统提示词：仅做步骤切分与关键帧抽取。
+        """
+        return (
+            "You are an instructional video editor for 1-on-1 teaching replication.\n"
+            "Your only task is to split the clip into complete procedural steps and choose instructional keyframes.\n"
+            "Do NOT classify knowledge types.\n"
+            "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, instructional_keyframe_timestamp.\n"
+            "Keep explanation + execution + result in the same step.\n"
+            "Remove hesitation/thinking-only intervals with no new information.\n"
+            "Each step should be at least 5 seconds; merge overly short steps with neighbors."
+        )
 
     async def _build_messages(
         self,
         video_path: str,
         extra_prompt: Optional[str] = None,
-        override_prompt: Optional[str] = None
+        override_prompt: Optional[str] = None,
+        analysis_mode: str = "default"
     ) -> List[Dict[str, Any]]:
         """
         构建多模态消息。
@@ -429,12 +532,20 @@ class VLVideoAnalyzer:
         - 大视频：优先尝试 DashScope File.upload 获取临时 URL（若安装了 dashscope）
         - 仍不可用：降级为抽取关键帧（image_url），并把每帧的时间戳作为文本标注提供给模型
         """
-        # 基础提示词由系统角色承担，便于服务端缓存 (Prefix Caching)
-        system_content = (
-            self.prompt_template
-            + self._output_constraints
-            + "\n\n【任务】请根据输入的视频或关键帧进行分析，并按输出格式返回。"
-        )
+        # 统一构建系统提示词：教程模式不复用知识分类提示词。
+        normalized_mode = self._normalize_analysis_mode(analysis_mode)
+        if normalized_mode == "tutorial_stepwise":
+            system_content = (
+                self._get_tutorial_system_prompt()
+                + self._get_output_constraints(normalized_mode)
+                + "\n\n[Task] Split the procedural clip into steps and output stepwise JSON only."
+            )
+        else:
+            system_content = (
+                self.prompt_template
+                + self._get_output_constraints(normalized_mode)
+                + "\n\n[Task] Analyze the input video (or keyframes) and return JSON in the required schema."
+            )
         
         user_text = ""
         if extra_prompt:
@@ -484,7 +595,7 @@ class VLVideoAnalyzer:
         system_content += (
             "\n\n【关键帧输入说明】\n"
             "当输入为关键帧与时间戳时，请根据帧变化估算 clip_start_sec 与 clip_end_sec。\n"
-            "若连续多帧属于同一知识类型，以这些帧的时间跨度为估算依据。\n"
+            "If adjacent frames belong to the same step, estimate boundaries using their time span.\n"
         )
         content_items: List[Dict[str, Any]] = [{
             "type": "text",
@@ -652,16 +763,107 @@ class VLVideoAnalyzer:
             scale_rounds += 1
             quality = 82
 
-    def _parse_response(self, content: str, finish_reason: Optional[str] = None) -> List[VLAnalysisResult]:
+    def _sanitize_action_brief(self, text_value: str, max_len: int = 48) -> str:
+        """Shorten a step description into a filename-safe action brief."""
+        raw = str(text_value or "").strip().lower()
+        raw = re.sub(r"[^a-z0-9]+", "_", raw)
+        raw = re.sub(r"_+", "_", raw).strip("_")
+        if not raw:
+            return "action"
+        if len(raw) > max_len:
+            return raw[:max_len].rstrip("_") or "action"
+        return raw
+
+    def _safe_int(self, value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return int(default)
+
+    def _safe_float_value(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _normalize_timestamp_list(self, value: Any) -> List[float]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            value = [value]
+        normalized: List[float] = []
+        for item in value:
+            ts = self._safe_float_value(item, 0.0)
+            if ts >= 0.0:
+                normalized.append(ts)
+        normalized.sort()
+        return normalized
+
+    def _enforce_tutorial_step_constraints(self, results: List[VLAnalysisResult]) -> List[VLAnalysisResult]:
         """
-        解析 VL API 返回的内容
-        
-        Args:
-            content: API 返回的文本内容
-            
-        Returns:
-            VLAnalysisResult 列表
+        教程模式步骤后处理约束：
+        - 按时间排序并重排 step_id
+        - 将时长小于阈值的步骤与相邻步骤合并
         """
+        if not results:
+            return []
+
+        min_step_duration = max(0.0, float(self.tutorial_min_step_duration_sec))
+        ordered = sorted(results, key=lambda x: (float(x.clip_start_sec), float(x.clip_end_sec)))
+
+        merged: List[VLAnalysisResult] = []
+        idx = 0
+        while idx < len(ordered):
+            current = ordered[idx]
+            current_duration = max(0.0, float(current.clip_end_sec) - float(current.clip_start_sec))
+
+            # 优先并入前一步，避免打断语义连续性
+            if min_step_duration > 0.0 and current_duration < min_step_duration and len(ordered) > 1:
+                if merged:
+                    prev = merged[-1]
+                    prev.clip_end_sec = max(float(prev.clip_end_sec), float(current.clip_end_sec))
+                    combined_desc = " / ".join(filter(None, [prev.step_description, current.step_description]))
+                    prev.step_description = combined_desc[:160]
+                    prev.suggested_screenshoot_timestamps = sorted(
+                        set(prev.suggested_screenshoot_timestamps + current.suggested_screenshoot_timestamps)
+                    )
+                    idx += 1
+                    continue
+                if idx + 1 < len(ordered):
+                    nxt = ordered[idx + 1]
+                    nxt.clip_start_sec = min(float(nxt.clip_start_sec), float(current.clip_start_sec))
+                    combined_desc = " / ".join(filter(None, [current.step_description, nxt.step_description]))
+                    nxt.step_description = combined_desc[:160]
+                    nxt.suggested_screenshoot_timestamps = sorted(
+                        set(current.suggested_screenshoot_timestamps + nxt.suggested_screenshoot_timestamps)
+                    )
+                    idx += 1
+                    continue
+
+            merged.append(current)
+            idx += 1
+
+        for i, step in enumerate(merged, start=1):
+            step.step_id = i
+            step.id = i
+            step.analysis_mode = "tutorial_stepwise"
+            if not step.step_description:
+                step.step_description = f"step_{i}"
+            if step.clip_end_sec < step.clip_start_sec:
+                step.clip_start_sec, step.clip_end_sec = step.clip_end_sec, step.clip_start_sec
+
+        return merged
+
+    def _parse_response_with_payload(
+        self,
+        content: str,
+        finish_reason: Optional[str] = None,
+        analysis_mode: str = "default",
+    ) -> tuple[List[VLAnalysisResult], List[Dict[str, Any]]]:
+        """
+        解析 VL API 返回内容并提取可用 JSON。
+        """
+        normalized_mode = self._normalize_analysis_mode(analysis_mode)
         json_str = self._extract_json_candidate(content)
 
         data = None
@@ -672,54 +874,137 @@ class VLVideoAnalyzer:
                 break
             except json.JSONDecodeError as e:
                 last_err = e
-                # 常见修复：去掉尾随逗号
+                # 去除尾随逗号等常见 JSON 错误
                 json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
-                # 常见修复：模型把 key_evidence 写成多个独立字符串（期望是数组）
+                # 修复 key_evidence 字段的转义异常
                 json_str = self._repair_key_evidence_field(json_str)
                 if attempt == 2:
                     break
 
         if data is None:
             finish_hint = f", finish_reason={finish_reason}" if finish_reason else ""
-            logger.error(f"JSON 解析失败: {last_err}{finish_hint}, 原内容: {content[:500]}")
-            raise ValueError(f"JSON 解析失败: {last_err}{finish_hint}")
-        
-        # 确保是列表
-        if isinstance(data, dict) and "results" in data and isinstance(data["results"], list):
-            data = data["results"]
-        elif not isinstance(data, list):
-            data = [data]
-        
-        results = []
-        for item in data:
+            logger.error(f"JSON parse failed: {last_err}{finish_hint}, raw: {content[:500]}")
+            raise ValueError(f"JSON parse failed: {last_err}{finish_hint}")
+
+        if isinstance(data, dict):
+            if isinstance(data.get("results"), list):
+                items = data.get("results", [])
+            elif isinstance(data.get("steps"), list):
+                items = data.get("steps", [])
+            else:
+                items = [data]
+        elif isinstance(data, list):
+            items = data
+        else:
+            items = [data]
+
+        results: List[VLAnalysisResult] = []
+        normalized_payload: List[Dict[str, Any]] = []
+        has_step_schema = False
+
+        for index, item in enumerate(items):
             if not isinstance(item, dict):
                 continue
 
+            # 兼容教程 schema 与默认 schema
+            step_id = self._safe_int(item.get("step_id", item.get("id", index + 1)), index + 1)
+            step_description = str(
+                item.get("step_description", item.get("description", item.get("title", ""))) or ""
+            ).strip()
+
+            raw_timestamps = item.get("instructional_keyframe_timestamp", None)
+            if raw_timestamps is None:
+                raw_timestamps = item.get("instructional_keyframe_timestamps", None)
+            if raw_timestamps is None:
+                raw_timestamps = item.get("suggested_screenshoot_timestamps", None)
+            if raw_timestamps is None:
+                raw_timestamps = item.get("suggested_screenshot_timestamps", [])
+            timestamps = self._normalize_timestamp_list(raw_timestamps)
+
+            clip_start_sec = self._safe_float_value(item.get("clip_start_sec", 0.0), 0.0)
+            clip_end_sec = self._safe_float_value(item.get("clip_end_sec", 0.0), 0.0)
+            if clip_end_sec < clip_start_sec:
+                clip_start_sec, clip_end_sec = clip_end_sec, clip_start_sec
+
             key_evidence = item.get("key_evidence", "")
             if isinstance(key_evidence, list):
-                key_evidence = "；".join([str(x) for x in key_evidence if x is not None])
+                key_evidence = "; ".join([str(x) for x in key_evidence if x is not None])
             else:
                 key_evidence = str(key_evidence) if key_evidence is not None else ""
 
-            # 兼容字段名漂移
-            timestamps = item.get("suggested_screenshoot_timestamps", None)
-            if timestamps is None:
-                timestamps = item.get("suggested_screenshot_timestamps", [])
+            tutorial_like = bool(
+                ("step_id" in item)
+                or ("step_description" in item)
+                or ("instructional_keyframe_timestamp" in item)
+                or normalized_mode == "tutorial_stepwise"
+            )
+            has_step_schema = has_step_schema or tutorial_like
+
+            knowledge_type = str(item.get("knowledge_type", "") or "").strip()
+            if tutorial_like:
+                # 教程模式忽略模型返回的 knowledge_type，仅保留步骤结构
+                knowledge_type = "process"
 
             result = VLAnalysisResult(
-                id=item.get("id", 0),
-                knowledge_type=item.get("knowledge_type", ""),
-                confidence=item.get("confidence", 0.0),
-                reasoning=item.get("reasoning", ""),
+                id=self._safe_int(item.get("id", step_id), step_id),
+                knowledge_type=knowledge_type,
+                confidence=self._safe_float_value(item.get("confidence", 0.0), 0.0),
+                reasoning=str(item.get("reasoning", "") or ""),
                 key_evidence=key_evidence,
-                clip_start_sec=item.get("clip_start_sec", 0.0),
-                clip_end_sec=item.get("clip_end_sec", 0.0),
-                suggested_screenshoot_timestamps=timestamps or []
+                clip_start_sec=clip_start_sec,
+                clip_end_sec=clip_end_sec,
+                suggested_screenshoot_timestamps=timestamps,
+                step_id=step_id if tutorial_like else 0,
+                step_description=step_description,
+                analysis_mode="tutorial_stepwise" if tutorial_like else "default",
             )
             results.append(result)
-        
-        return results
 
+            if tutorial_like:
+                normalized_payload.append({
+                    "step_id": step_id,
+                    "step_description": step_description,
+                    "clip_start_sec": clip_start_sec,
+                    "clip_end_sec": clip_end_sec,
+                    "instructional_keyframe_timestamp": timestamps,
+                })
+            else:
+                normalized_payload.append({
+                    "id": self._safe_int(item.get("id", index), index),
+                    "knowledge_type": knowledge_type,
+                    "confidence": self._safe_float_value(item.get("confidence", 0.0), 0.0),
+                    "clip_start_sec": clip_start_sec,
+                    "clip_end_sec": clip_end_sec,
+                    "suggested_screenshoot_timestamps": timestamps,
+                })
+
+        if normalized_mode == "tutorial_stepwise" or has_step_schema:
+            results = self._enforce_tutorial_step_constraints(results)
+            normalized_payload = [
+                {
+                    "step_id": int(r.step_id),
+                    "step_description": str(r.step_description or "").strip(),
+                    "clip_start_sec": float(r.clip_start_sec),
+                    "clip_end_sec": float(r.clip_end_sec),
+                    "instructional_keyframe_timestamp": list(r.suggested_screenshoot_timestamps or []),
+                }
+                for r in results
+            ]
+
+        return results, normalized_payload
+
+    def _parse_response(
+        self,
+        content: str,
+        finish_reason: Optional[str] = None,
+        analysis_mode: str = "default",
+    ) -> List[VLAnalysisResult]:
+        results, _ = self._parse_response_with_payload(
+            content,
+            finish_reason=finish_reason,
+            analysis_mode=analysis_mode,
+        )
+        return results
     def _extract_json_candidate(self, content: str) -> str:
         """
         从模型回复中提取最可能的 JSON 片段。

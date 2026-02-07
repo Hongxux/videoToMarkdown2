@@ -1,0 +1,273 @@
+"""
+VL 教程模式测试：
+1) 解析 step schema 是否正确
+2) 校验多步骤 process 在 Phase2B 前的产物导出（mock VL + mock ffmpeg）
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any, Dict
+
+
+from MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator import VLMaterialGenerator
+from MVP_Module2_HEANCING.module2_content_enhancement.vl_video_analyzer import (
+    VLAnalysisResult,
+    VLClipAnalysisResponse,
+    VLVideoAnalyzer,
+)
+
+
+def _build_analyzer_config() -> Dict[str, Any]:
+    return {
+        "api": {
+            "api_key": "test",
+            "model": "test-model",
+        },
+        "tutorial_mode": {
+            "min_step_duration_sec": 5.0,
+        },
+        "screenshot_optimization": {"enabled": False},
+        "fallback": {"enabled": True},
+    }
+
+
+def _build_generator_config() -> Dict[str, Any]:
+    return {
+        "enabled": True,
+        "use_cache": False,
+        "save_cache": False,
+        "merge_multistep_clip_requests": False,
+        "routing": {
+            "process_duration_threshold_sec": 20.0,
+        },
+        "tutorial_mode": {
+            "enabled": True,
+            "min_step_duration_sec": 5.0,
+            "export_assets": True,
+            "assets_root_dir": "vl_tutorial_units",
+            "save_step_json": True,
+            "keyframe_image_ext": "png",
+        },
+        "pre_vl_static_pruning": {
+            "enabled": False,
+        },
+        "screenshot_optimization": {
+            "enabled": False,
+        },
+        "fallback": {
+            "enabled": True,
+        },
+        "api": {
+            "api_key": "test",
+            "model": "test-model",
+        },
+    }
+
+
+def test_tutorial_schema_parse_and_normalize():
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    payload = [
+        {
+            "step_id": 1,
+            "step_description": "Open settings",
+            "clip_start_sec": 0.0,
+            "clip_end_sec": 7.0,
+            "instructional_keyframe_timestamp": [6.2],
+        },
+        {
+            "step_id": 2,
+            "step_description": "Change port",
+            "clip_start_sec": 7.0,
+            "clip_end_sec": 13.0,
+            "instructional_keyframe_timestamp": [12.2],
+        },
+    ]
+    text = json.dumps(payload, ensure_ascii=False)
+
+    results, normalized = analyzer._parse_response_with_payload(
+        text,
+        analysis_mode="tutorial_stepwise",
+    )
+
+    assert len(results) == 2
+    assert results[0].step_id == 1
+    assert results[0].step_description == "Open settings"
+    assert results[0].knowledge_type == "process"
+    assert results[1].suggested_screenshoot_timestamps == [12.2]
+    assert normalized[0]["instructional_keyframe_timestamp"] == [6.2]
+    assert set(normalized[0].keys()) == {
+        "step_id",
+        "step_description",
+        "clip_start_sec",
+        "clip_end_sec",
+        "instructional_keyframe_timestamp",
+    }
+
+
+class _FakeAnalyzer:
+    async def analyze_clip(
+        self,
+        clip_path: str,
+        semantic_unit_start_sec: float,
+        semantic_unit_id: str,
+        extra_prompt: str | None = None,
+        analysis_mode: str = "default",
+    ) -> VLClipAnalysisResponse:
+        assert analysis_mode == "tutorial_stepwise"
+
+        result = VLClipAnalysisResponse(
+            success=True,
+            analysis_mode="tutorial_stepwise",
+            token_usage={"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+        )
+        result.raw_response_json = [
+            {
+                "step_id": 1,
+                "step_description": "open settings",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 8.0,
+                "instructional_keyframe_timestamp": [7.2],
+            },
+            {
+                "step_id": 2,
+                "step_description": "change port",
+                "clip_start_sec": 8.0,
+                "clip_end_sec": 17.0,
+                "instructional_keyframe_timestamp": [16.5],
+            },
+        ]
+        result.analysis_results = [
+            VLAnalysisResult(step_id=1, step_description="open settings"),
+            VLAnalysisResult(step_id=2, step_description="change port"),
+        ]
+        result.clip_requests = [
+            {
+                "clip_id": f"{semantic_unit_id}_step_01_open_settings",
+                "start_sec": semantic_unit_start_sec + 0.0,
+                "end_sec": semantic_unit_start_sec + 8.0,
+                "knowledge_type": "process",
+                "semantic_unit_id": semantic_unit_id,
+                "step_id": 1,
+                "step_description": "open settings",
+                "action_brief": "open_settings",
+                "analysis_mode": "tutorial_stepwise",
+            },
+            {
+                "clip_id": f"{semantic_unit_id}_step_02_change_port",
+                "start_sec": semantic_unit_start_sec + 8.0,
+                "end_sec": semantic_unit_start_sec + 17.0,
+                "knowledge_type": "process",
+                "semantic_unit_id": semantic_unit_id,
+                "step_id": 2,
+                "step_description": "change port",
+                "action_brief": "change_port",
+                "analysis_mode": "tutorial_stepwise",
+            },
+        ]
+        result.screenshot_requests = [
+            {
+                "screenshot_id": f"{semantic_unit_id}_step_01_open_settings_key_01",
+                "timestamp_sec": semantic_unit_start_sec + 7.2,
+                "label": "step_01 keyframe",
+                "semantic_unit_id": semantic_unit_id,
+                "step_id": 1,
+                "step_description": "open settings",
+                "action_brief": "open_settings",
+                "analysis_mode": "tutorial_stepwise",
+            },
+            {
+                "screenshot_id": f"{semantic_unit_id}_step_02_change_port_key_01",
+                "timestamp_sec": semantic_unit_start_sec + 16.5,
+                "label": "step_02 keyframe",
+                "semantic_unit_id": semantic_unit_id,
+                "step_id": 2,
+                "step_description": "change port",
+                "action_brief": "change_port",
+                "analysis_mode": "tutorial_stepwise",
+            },
+        ]
+        return result
+
+
+def test_generate_tutorial_assets_per_unit_full_flow_before_phase2b(tmp_path, monkeypatch):
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    semantic_units = [
+        {
+            "unit_id": "SU001",
+            "knowledge_type": "process",
+            "mult_steps": True,
+            "start_sec": 100.0,
+            "end_sec": 130.0,
+        }
+    ]
+
+    generator = VLMaterialGenerator(_build_generator_config())
+    generator._analyzer = _FakeAnalyzer()
+
+    clips_dir = tmp_path / "semantic_unit_clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = clips_dir / "001_SU001_demo_100.00-130.00.mp4"
+    clip_file.write_bytes(b"clip")
+
+    async def _fake_split_video_by_semantic_units(video_path, semantic_units, output_dir=None):
+        return str(clips_dir)
+
+    def _fake_find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec):
+        return str(clip_file)
+
+    async def _fake_prepare_pruned_clip_for_vl(clips_dir, semantic_unit, original_clip_path, force_preprocess=False):
+        return {
+            "applied": False,
+            "clip_path_for_vl": original_clip_path,
+            "pre_context_prompt": "",
+            "kept_segments": [],
+        }
+
+    async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"step-clip")
+        return True
+
+    async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"keyframe")
+        return True
+
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_split_video_by_semantic_units)
+    monkeypatch.setattr(generator, "_find_clip_for_unit", _fake_find_clip_for_unit)
+    monkeypatch.setattr(generator, "_prepare_pruned_clip_for_vl", _fake_prepare_pruned_clip_for_vl)
+    monkeypatch.setattr(generator, "_export_clip_asset_with_ffmpeg", _fake_export_clip_asset_with_ffmpeg)
+    monkeypatch.setattr(generator, "_export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    result = asyncio.run(
+        generator.generate(
+            video_path=str(video_path),
+            semantic_units=semantic_units,
+            output_dir=str(output_dir),
+        )
+    )
+
+    assert result.success is True
+    # 教程模式下应保留逐步骤切片，不进行合并
+    assert len(result.clip_requests) == 2
+
+    unit_dir = output_dir / "vl_tutorial_units" / "SU001"
+    assert unit_dir.exists()
+
+    assert (unit_dir / "SU001_step_01_open_settings.mp4").exists()
+    assert (unit_dir / "SU001_step_01_open_settings_key.png").exists()
+    assert (unit_dir / "SU001_step_02_change_port.mp4").exists()
+    assert (unit_dir / "SU001_step_02_change_port_key.png").exists()
+
+    json_path = unit_dir / "SU001_steps.json"
+    assert json_path.exists()
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    assert data.get("schema") == "tutorial_stepwise_v1"
+    assert len(data.get("raw_response", [])) == 2

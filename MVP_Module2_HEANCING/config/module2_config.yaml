@@ -1,4 +1,5 @@
 # Module 2 Complete Configuration
+
 # 模块2完整配置文件
 #
 # 包含所有可调参数,避免硬编码
@@ -231,7 +232,7 @@ vl_material_generation:
     # process 分流阈值（单位: 秒）
     # 有效时长 <= 阈值: 归入 process_short（CV 路由）
     # 有效时长 >  阈值: 归入 process_long（VL 路由）
-    process_duration_threshold_sec: 20.0
+    process_duration_threshold_sec: 40.0
   
   # Qwen3-VL-Plus API 配置
   api:
@@ -258,6 +259,12 @@ vl_material_generation:
   save_cache: true  # 是否保存分析结果到缓存
   # 缓存文件: vl_analysis_cache.json (保存在视频同目录或output_dir下)
 
+  # Compatibility flag: whether to merge multiple VL clips in one semantic unit
+  # false: keep step-level clips as-is (recommended for tutorial mode)
+  # true: merge into one clip with segments (legacy behavior)
+  merge_multistep_clip_requests: false
+
+
   # VL 前静态段剔除预处理（仅 process 单元）
   # 目的：先用 CV 识别 stable 区间，再剔除 stable 核心段，减少 VL 输入冗余与 token 成本。
   # 机制：对 stable 区间保留两侧边缘（keep_edge_sec），仅剔除中间核心段。
@@ -277,15 +284,37 @@ vl_material_generation:
   pre_vl_boundary_refine:
     enabled: true
     pause_threshold_sec: 0.3
-    start_buffer_sec: 0.5
-    end_buffer_sec: 0.5
+    start_buffer_sec: 0.2
+    end_buffer_sec: 0.3
     semantic_search_window_sec: 8.0
     mse_scan_after_end_sec: 3.0
     mse_sample_fps: 2.0
     mse_min_threshold: 64.0
   
   
-  # 截图优化配置
+  # Tutorial mode for long, multi-step process units
+  # Goal: produce step clips + instructional keyframes for teaching and replication.
+  tutorial_mode:
+    # Enable tutorial step schema output
+    enabled: true
+
+    # Minimum duration per step (seconds); shorter steps are merged
+    min_step_duration_sec: 5.0
+
+    # Export tutorial assets to output_dir/{assets_root_dir}/{unit_id}/
+    export_assets: true
+
+    # Root directory name under output_dir
+    assets_root_dir: "vl_tutorial_units"
+
+    # Save per-unit step JSON (including raw model step output)
+    save_step_json: true
+
+    # Keyframe image extension: png / jpg / jpeg
+    keyframe_image_ext: "png"
+
+
+  # Screenshot optimization settings
   screenshot_optimization:
     enabled: true
     time_window_seconds: 1.0  # 在建议时间戳前后各扩展 1 秒

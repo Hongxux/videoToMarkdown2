@@ -39,6 +39,7 @@ class MaterialSet:
     # 元信息
     # 元信息
     screenshot_labels: List[str] = field(default_factory=list)  # 截图标签 ["首帧", "稳定岛", "末帧"]
+    screenshot_items: List[Dict[str, Any]] = field(default_factory=list)  # 截图元信息（img_id/img_description/path）
     
     # V7.4: LLM 三要素分类结果
     action_classifications: List[Dict[str, Any]] = field(default_factory=list)
@@ -71,9 +72,11 @@ class RichTextSection:
     # 素材
     materials: MaterialSet = field(default_factory=MaterialSet)
     
-    # 布局提示
-    layout_hint: str = "default"              # 可选: inline / block / gallery
-    
+    # V8: Instructional Steps (for process type)
+    instructional_steps: List[Dict[str, Any]] = field(default_factory=list)
+    mult_steps: bool = False
+    layout_hint: str = "default"
+
     def duration_str(self) -> str:
         """
         执行逻辑：
@@ -162,8 +165,11 @@ class RichTextDocument:
                         "clip": s.materials.clip_path,
                         "screenshots": s.materials.screenshot_paths,
                         "labels": s.materials.screenshot_labels,
+                        "screenshot_items": s.materials.screenshot_items,
                         "action_classifications": s.materials.action_classifications
                     },
+                    "instructional_steps": s.instructional_steps,
+                    "mult_steps": s.mult_steps,
                     "layout_hint": s.layout_hint
                 }
                 for s in self.sections
@@ -273,39 +279,59 @@ class RichTextDocument:
         lines.append(section.body_text)
         lines.append("")
         
-        # 素材渲染 (根据 modality 灵活布局)
+        # 正文后的步骤渲染
+        if section.instructional_steps:
+             for step in section.instructional_steps:
+                 step_desc = step.get('step_description') or step.get('description') or ""
+                 lines.append(f"### Step {step.get('step_id')}: {step_desc}")
+                 mats = step.get('materials', {})
+                 # 步骤截图
+                 ss_paths = mats.get('screenshot_paths', [])
+                 if ss_paths:
+                     for ss in ss_paths:
+                        ss_path = self._relative_path(ss, assets_dir)
+                        lines.append(f"![Step Snapshot]({ss_path})")
+                 # 步骤 Clip
+                 clip_p = mats.get('clip_path')
+                 if clip_p:
+                     clip_path = self._relative_path(clip_p, assets_dir)
+                     lines.append(f"![Step Clip]({clip_path})")
+                 lines.append("")
+
+        # 素材渲染 (Fallback / Top-level)
         materials = section.materials
         
-        if materials.clip_path:
-            # ??????
-            clip_path = self._relative_path(materials.clip_path, assets_dir)
-            lines.append("**?? ????**")
-            lines.append("")
-            lines.append(f"![[{clip_path}]]")
-            lines.append("")
-            
-            # ?????????????
-            if materials.screenshot_paths:
-                lines.append("**???**")
+        if not section.instructional_steps:
+            if materials.clip_path:
+                # 视频优先
+                clip_path = self._relative_path(materials.clip_path, assets_dir)
+                lines.append("**视频演示**")
+                lines.append("")
+                lines.append(f"![[{clip_path}]]")
+                lines.append("")
+                
+                # 辅助关键帧
+                if materials.screenshot_paths:
+                    lines.append("**关键帧**")
+                    lines.append("")
+                    for i, ss in enumerate(materials.screenshot_paths):
+                        label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"图{i+1}"
+                        ss_path = self._relative_path(ss, assets_dir)
+                        lines.append(f"{label}")
+                        lines.append(f"![[{ss_path}]]")
+                        lines.append("")
+                
+            elif materials.screenshot_paths:
+                # 纯图
+                lines.append("**图解**")
                 lines.append("")
                 for i, ss in enumerate(materials.screenshot_paths):
-                    label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"?{i+1}"
+                    label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"图{i+1}"
                     ss_path = self._relative_path(ss, assets_dir)
                     lines.append(f"{label}")
                     lines.append(f"![[{ss_path}]]")
                     lines.append("")
-            
-        elif materials.screenshot_paths:
-            # ???
-            lines.append("**??**")
-            lines.append("")
-            for i, ss in enumerate(materials.screenshot_paths):
-                label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"?{i+1}"
-                ss_path = self._relative_path(ss, assets_dir)
-                lines.append(f"{label}")
-                lines.append(f"![[{ss_path}]]")
-                lines.append("")
-
+        
         return lines
     
     def _relative_path(self, abs_path: str, assets_dir: str) -> str:
@@ -357,5 +383,8 @@ def create_section_from_semantic_unit(
         start_sec=unit.start_sec,
         end_sec=unit.end_sec,
 
-        materials=materials
+        materials=materials,
+        instructional_steps=getattr(unit, "instructional_steps", []) or [],
+        mult_steps=bool(getattr(unit, "mult_steps", False)),
+        layout_hint="default"
     )
