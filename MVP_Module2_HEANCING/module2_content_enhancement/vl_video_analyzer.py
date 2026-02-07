@@ -64,6 +64,7 @@ class VLClipAnalysisResponse:
     analysis_results: List[VLAnalysisResult] = field(default_factory=list)
     clip_requests: List[Dict[str, Any]] = field(default_factory=list)
     screenshot_requests: List[Dict[str, Any]] = field(default_factory=list)
+    token_usage: Dict[str, int] = field(default_factory=dict)
 
 
 class VLVideoAnalyzer:
@@ -250,7 +251,8 @@ class VLVideoAnalyzer:
         
         try:
             # 调用 VL API
-            analysis_results = await self._call_vl_api(clip_path, extra_prompt=extra_prompt)
+            analysis_results, token_usage = await self._call_vl_api(clip_path, extra_prompt=extra_prompt)
+            result.token_usage = token_usage
             
             if not analysis_results:
                 result.success = False
@@ -297,7 +299,9 @@ class VLVideoAnalyzer:
             result.success = True
             logger.info(
                 f"VL 分析完成: {semantic_unit_id}, "
-                f"clips={len(result.clip_requests)}, screenshots={len(result.screenshot_requests)}"
+                f"clips={len(result.clip_requests)}, screenshots={len(result.screenshot_requests)}, "
+                f"prompt_tokens={result.token_usage.get('prompt_tokens', 0)}, "
+                f"total_tokens={result.token_usage.get('total_tokens', 0)}"
             )
             
         except Exception as e:
@@ -307,7 +311,45 @@ class VLVideoAnalyzer:
         
         return result
     
-    async def _call_vl_api(self, video_path: str, extra_prompt: Optional[str] = None) -> List[VLAnalysisResult]:
+    def _extract_token_usage(self, response: Any) -> Dict[str, int]:
+        """
+        从 OpenAI 兼容响应中提取 token 使用量。
+
+        兼容对象/字典两种网关返回形态，缺失字段时兜底为 0。
+        """
+        usage = getattr(response, "usage", None)
+        if usage is None and isinstance(response, dict):
+            usage = response.get("usage")
+
+        def _as_int(value: Any) -> int:
+            try:
+                return int(value)
+            except Exception:
+                return 0
+
+        if usage is None:
+            return {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            }
+
+        if isinstance(usage, dict):
+            prompt_tokens = _as_int(usage.get("prompt_tokens", 0))
+            completion_tokens = _as_int(usage.get("completion_tokens", 0))
+            total_tokens = _as_int(usage.get("total_tokens", prompt_tokens + completion_tokens))
+        else:
+            prompt_tokens = _as_int(getattr(usage, "prompt_tokens", 0))
+            completion_tokens = _as_int(getattr(usage, "completion_tokens", 0))
+            total_tokens = _as_int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens))
+
+        return {
+            "prompt_tokens": max(0, prompt_tokens),
+            "completion_tokens": max(0, completion_tokens),
+            "total_tokens": max(0, total_tokens),
+        }
+
+    async def _call_vl_api(self, video_path: str, extra_prompt: Optional[str] = None) -> tuple[List[VLAnalysisResult], Dict[str, int]]:
         """
         调用 Qwen3-VL-Plus API 分析视频
         
@@ -315,7 +357,7 @@ class VLVideoAnalyzer:
             video_path: 视频文件路径
             
         Returns:
-            VLAnalysisResult 列表
+            tuple: (VLAnalysisResult 列表, token usage)
         """
         messages = await self._build_messages(video_path, extra_prompt=extra_prompt)
         
@@ -349,7 +391,8 @@ class VLVideoAnalyzer:
                 
                 content = response.choices[0].message.content
                 finish_reason = getattr(response.choices[0], "finish_reason", None)
-                return self._parse_response(content, finish_reason=finish_reason)
+                token_usage = self._extract_token_usage(response)
+                return self._parse_response(content, finish_reason=finish_reason), token_usage
                 
             except Exception as e:
                 last_error = e

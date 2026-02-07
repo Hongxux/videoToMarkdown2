@@ -2,6 +2,56 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-07 VL 前置 stable 剔除预处理（process 单元降 token）
+- 日期：2026-02-07
+- 版本/分支/提交：未记录
+- 触发背景与问题：`process` 语义单元中存在长时间静态画面（如等待、静态配置页停留、口述无操作），直接送入 VL 会增加输入冗余与 token/时延成本。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/cv_knowledge_validator.py`：`detect_visual_states` 新增 `stable_only` 参数；在 `_merge_state_intervals` 增加 stable-only 早返回，跳过动作单元分类/边界细化/合并。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`：新增 VL 前预处理链路（stable 区间检测、核心段剔除、片段拼接、时间轴映射、上下文提示注入）。
+  - `MVP_Module2_HEANCING/config/module2_config.yaml`：新增 `vl_material_generation.pre_vl_static_pruning` 配置节。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`：新增单元测试（区间剔除、时间映射、上下文提示）。
+- 关键决策与理由：
+  - 复用既有 CV 检测主链路：继续使用“动态采样 + ROI 检测 + 帧级状态判定 + 边缘动画检测 + 连续状态合并”，仅裁剪为 stable-only 输出，避免重复造轮子。
+  - 仅作用于 `process` 单元：abstract/concrete 保持原行为，降低误伤风险。
+  - 剔除策略采用“边缘保留”：stable `[s,e]` 不整段删除，只剔除 `[s+1s, e-1s]` 核心段，兼顾成本与语义衔接。
+  - 拼接策略对齐现有实现：前置阶段生成的 `kept_segments` 与 JavaCV 现有 `segments` 拼接语义一致，便于端到端一致性。
+  - 时间轴可逆映射：VL 在裁剪片段上的相对时间戳映射回原始时间轴，保障截图/切片定位正确。
+  - 上下文补偿：向 VL 追加“完整文本上下文 + knowledge_topic + 保留/剔除区间”，降低因片段跳跃导致的误判。
+- 兼容性影响：默认开启但有阈值保护（最小时长、最小剔除比例等）；预处理失败自动回退原片段，不影响主链路可用性。
+- 风险与回滚方案：可通过 `vl_material_generation.pre_vl_static_pruning.enabled: false` 一键关闭；若担心语义损失可增大 `keep_edge_sec` 或提高 `min_removed_ratio`。
+- 验证方式与结果：新增单元测试覆盖“区间剔除边界、时间映射、上下文提示关键字段”；已有 VL/CV 主流程不改接口。
+- 可复用经验：在高成本模型前增加“可逆的结构化压缩层（区间剔除 + 时间映射 + 上下文补偿）”，通常比单纯调 prompt 更稳定地降低成本。
+
+### 2026-02-07 补充：按任务 token 节省率可观测性
+- 新增能力：在 `VLVideoAnalyzer` 捕获每次调用 `usage.prompt_tokens/completion_tokens/total_tokens`，并在 `VLMaterialGenerator` 汇总到任务级 `token_stats`。
+- 节省率定义（估算）：
+  - `actual_total`：真实 VL 返回 `total_tokens` 累加。
+  - `baseline_est`：对被前置裁剪的单元，按“token/保留秒数 * 原始时长”线性回推；未裁剪单元 baseline=actual。
+  - `saved_est = baseline_est - actual_total`，`saved_ratio = saved_est / baseline_est`。
+- 日志出口：`AnalyzeWithVL` 增加任务级日志 `VL Token节省估算`，输出 actual/baseline/saved/saved_ratio/pruned_units。
+- 取舍说明：当前基线是“工程估算值”而非 A/B 双跑实测值；优点是线上零额外成本，缺点是对“token 与时长非线性关系”存在误差。
+
+### 2026-02-07 补充：按任务落盘 token 报表 JSON
+- 新增能力：`AnalyzeWithVL` 在每个任务结束（success/fallback/exception/no_units/vl_disabled）都会落盘 token 报表。
+- 落盘路径：
+  - 任务文件：`{output_dir}/intermediates/vl_token_report_{task_id}.json`
+  - 最新快照：`{output_dir}/intermediates/vl_token_report_latest.json`
+- 报表字段（核心）：
+  - `status`、`vl_enabled`、`used_fallback`、`error_msg`
+  - `routing_stats`（abstract/concrete/process_short/process_long）
+  - `token_stats`（actual/baseline_est/saved_est/saved_ratio_est/pruned_units 等）
+  - `result_counts`（screenshots/clips/vl_units 等）
+- 设计取舍：报表写入不阻断主流程，落盘失败仅告警，避免因观测能力影响主链路可用性。
+
+### 2026-02-07 补充：延迟切割，仅切 VL 目标语义单元
+- 触发背景：此前进入 `VLMaterialGenerator.generate(...)` 后会按传入列表切割，但历史目录/清单可能来自更大集合，导致切片包含未使用片段，造成不必要 I/O 与编码开销。
+- 改动点：`vl_material_generator._split_video_by_semantic_units` 改为使用 `intermediates/semantic_units_vl_subset.json` 作为输入，并输出到 `semantic_unit_clips_vl/`。
+- 行为变化：
+  - 仅在确定需要 VL 分析（`AnalyzeWithVL` 已路由到 `vl_units`）后，才切割这些目标单元。
+  - 复用检查改为“当前 VL 目标单元是否齐全”，不再依赖全量 `semantic_units_phase2a.json`。
+- 收益：减少无效切片、降低前置耗时与磁盘占用，且与“只对 process_long 走 VL”路由策略严格对齐。
+
 ## 2026-02-06 VL 素材生成模块（Qwen3-VL-Plus）
 - 日期：2026-02-06
 - 版本/分支/提交：未记录

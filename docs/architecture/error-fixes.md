@@ -324,3 +324,20 @@
 - 预防方案（测试/监控/校验/回滚）：保留时长探测日志；在配置中按硬件性能调整 `timeout_multiplier`；必要时将 `max_timeout_sec` 设为 0 以避免误裁剪。
 - 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`、`MVP_Module2_HEANCING/config/module2_config.yaml`
 - 复盘要点：动态超时必须依赖真实输入特征（时长/请求规模），并允许按环境做缩放以避免“同样逻辑不同机器超时”的漂移。
+
+## 2026-02-07 VL 前置裁剪后时间轴偏移风险
+- 日期：2026-02-07
+- 现象与影响范围：对 `process` 单元做“stable 剔除 + 片段拼接”后，VL 输出时间戳若直接按原逻辑使用，会出现截图/切片定位偏移。
+- 触发条件：VL 输入不是完整原片段，而是裁剪拼接后的新片段；输出的 `clip_start_sec/clip_end_sec/screenshot_timestamps` 仍按新片段时间轴。
+- 根因定位：旧链路默认“VL 相对时间 == 原语义单元相对时间”，未考虑前置裁剪导致的时间轴非线性映射。
+- 修复措施：
+  - 在 `vl_material_generator.py` 增加 `kept_segments` 映射函数，将裁剪片段相对时间回映射到原语义单元时间轴。
+  - 回写 clip 时同时补齐 `segments`，复用 Java 侧拼接语义，防止中间被剔除段重新纳入素材。
+  - 增加单元测试覆盖“边缘保留剔除 + 时间映射”核心场景。
+- 验证方式：运行 `test_vl_pre_prune.py`，确认 `stable=[1,5]` 且 `keep_edge=1` 时仅剔除 `[2,4]`；验证裁剪时间 `3.0s` 映射回原时间 `5.0s`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 预处理默认保守阈值（`min_removed_ratio`、`min_keep_segment_sec`）防止过度裁剪。
+  - 记录预处理日志（`removed_ratio/stable_count/kept_count`）用于线上回归比对。
+  - 发生异常可通过 `pre_vl_static_pruning.enabled=false` 一键回退。
+- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`MVP_Module2_HEANCING/config/module2_config.yaml`
+- 复盘要点：任何“前置压缩输入”的策略都必须保证时间轴可逆映射，否则后续素材定位会系统性漂移。

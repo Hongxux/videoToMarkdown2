@@ -324,76 +324,39 @@ class SemanticUnitSegmenter:
                 split_count=0
             )
         
-        # 🚀 性能优化: 并行批处理 (Parallel Batch Processing)
-        # 将所有批次请求同时发送给 LLMClient，利用其内部的自适应并发控制
+        # 🚀 一次性发送所有段落（不分批）
+        # 构建 LLM 输入 - 包含所有段落
+        paragraphs_for_llm = [
+            {
+                "paragraph_id": p.get("paragraph_id", f"P{idx+1:03d}"),
+                "text": p.get("text", ""),
+                "source_sentence_ids": p.get("source_sentence_ids", [])
+            }
+            for idx, p in enumerate(paragraphs)
+        ]
         
-        tasks = []
-        batches = []
+        # 调用 LLM
+        prompt = USER_PROMPT_TEMPLATE.format(
+            paragraphs_json=json.dumps(paragraphs_for_llm, ensure_ascii=False, indent=2)
+        )
         
-        for i in range(0, len(paragraphs), batch_size):
-            batch = paragraphs[i:i+batch_size]
-            batches.append((i, batch)) # 保存索引以便排序 (虽然 gather 保持顺序，但为了清晰)
-            
-            # 构建 LLM 输入
-            paragraphs_for_llm = [
-                {
-                    "paragraph_id": p.get("paragraph_id", f"P{idx+1:03d}"),
-                    "text": p.get("text", ""),
-                    "source_sentence_ids": p.get("source_sentence_ids", [])
-                }
-                for idx, p in enumerate(batch, start=i)
-            ]
-            
-            # 调用 LLM (创建协程任务)
-            prompt = USER_PROMPT_TEMPLATE.format(
-                paragraphs_json=json.dumps(paragraphs_for_llm, ensure_ascii=False, indent=2)
-            )
-            
-            task = self.llm_client.complete_json(
+        logger.info(f"Sending single LLM request for {len(paragraphs)} paragraphs")
+        
+        try:
+            result_json, metadata, _ = await self.llm_client.complete_json(
                 prompt=prompt,
                 system_message=SYSTEM_PROMPT
             )
-            tasks.append(task)
             
-        logger.info(f"Starting {len(tasks)} parallel LLM batches for {len(paragraphs)} paragraphs")
-        
-        # 并行执行所有任务
-        # return_exceptions=True 允许部分失败而不中断整体
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # 处理结果
-        all_units = []
-        total_tokens = 0
-        merge_count = 0
-        split_count = 0
-        unit_counter = 1
-        
-        for i, result_or_exc in enumerate(results):
-            batch_idx, batch = batches[i]
-            
-            if isinstance(result_or_exc, Exception):
-                logger.error(f"LLM call failed for batch {i+1}: {result_or_exc}")
-                # 降级: 保持原段落不变
-                for p in batch:
-                    unit = SemanticUnit(
-                        unit_id=f"SU{unit_counter:03d}",
-                        knowledge_type="abstract",  # Default fallback
-                        knowledge_topic=p.get("text", "")[:20] + "...",
-                        full_text=p.get("text", ""),
-                        source_paragraph_ids=[p.get("paragraph_id", "")],
-                        source_sentence_ids=p.get("source_sentence_ids", []),
-                        confidence=0.5  # 低置信度标记降级
-                    )
-                    all_units.append(unit)
-                    unit_counter += 1
-                continue
-            
-            # 正常结果
-            result_json, metadata, _ = result_or_exc
-            total_tokens += metadata.total_tokens
+            # 处理结果
+            all_units = []
+            total_tokens = metadata.total_tokens
+            merge_count = 0
+            split_count = 0
+            unit_counter = 1
             
             units_data = result_json.get("semantic_units", [])
-            logger.debug(f"Batch {i+1} completed: {len(units_data)} units")
+            logger.debug(f"LLM returned {len(units_data)} semantic units")
             
             for u in units_data:
                 # 计算时间戳
@@ -427,6 +390,28 @@ class SemanticUnitSegmenter:
                     merge_count += 1
                 elif action == "split":
                     split_count += 1
+                    
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}")
+            # 降级: 保持原段落不变
+            all_units = []
+            total_tokens = 0
+            merge_count = 0
+            split_count = 0
+            unit_counter = 1
+            
+            for p in paragraphs:
+                unit = SemanticUnit(
+                    unit_id=f"SU{unit_counter:03d}",
+                    knowledge_type="abstract",  # Default fallback
+                    knowledge_topic=p.get("text", "")[:20] + "...",
+                    full_text=p.get("text", ""),
+                    source_paragraph_ids=[p.get("paragraph_id", "")],
+                    source_sentence_ids=p.get("source_sentence_ids", []),
+                    confidence=0.5  # 低置信度标记降级
+                )
+                all_units.append(unit)
+                unit_counter += 1
         
         elapsed_ms = (time.time() - start_time) * 1000
         

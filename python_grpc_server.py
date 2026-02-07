@@ -3268,6 +3268,47 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         video_path = request.video_path
         semantic_units_path = request.semantic_units_json_path
         output_dir = request.output_dir
+
+        def _persist_task_token_report(payload: dict) -> str:
+            """
+            按任务落盘 VL token 报表。
+
+            为什么：
+            1) 任务级可观测性需要可追溯文件，而不仅是日志；
+            2) 便于后续做离线聚合分析（成本、节省率、裁剪效果）。
+            """
+            try:
+                import json as _json
+
+                base_dir = output_dir or (os.path.dirname(video_path) if video_path else os.getcwd())
+                report_dir = os.path.join(base_dir, "intermediates")
+                os.makedirs(report_dir, exist_ok=True)
+
+                report_name = f"vl_token_report_{task_id}.json" if task_id else "vl_token_report_unknown.json"
+                report_path = os.path.join(report_dir, report_name)
+                latest_path = os.path.join(report_dir, "vl_token_report_latest.json")
+
+                report_payload = {
+                    "version": "1.0",
+                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "task_id": task_id,
+                    "video_path": video_path,
+                    "semantic_units_path": semantic_units_path,
+                    "output_dir": output_dir,
+                }
+                report_payload.update(payload or {})
+
+                with open(report_path, "w", encoding="utf-8") as report_file:
+                    _json.dump(report_payload, report_file, ensure_ascii=False, indent=2)
+
+                with open(latest_path, "w", encoding="utf-8") as latest_file:
+                    _json.dump(report_payload, latest_file, ensure_ascii=False, indent=2)
+
+                logger.info(f"[{task_id}] VL token报表已落盘: {report_path}")
+                return report_path
+            except Exception as report_error:
+                logger.warning(f"[{task_id}] VL token报表落盘失败: {report_error}")
+                return ""
         
         logger.info(f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}")
         
@@ -3281,6 +3322,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             if not vl_enabled:
                 logger.info(f"[{task_id}] VL 模块未启用，返回 vl_enabled=False")
+                _persist_task_token_report({
+                    "status": "vl_disabled",
+                    "vl_enabled": False,
+                    "used_fallback": False,
+                    "routing_stats": {},
+                    "token_stats": {},
+                })
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
                     vl_enabled=False,
@@ -3302,6 +3350,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             if not semantic_units:
                 logger.warning(f"[{task_id}] 无语义单元，跳过 VL 分析")
+                _persist_task_token_report({
+                    "status": "no_semantic_units",
+                    "vl_enabled": True,
+                    "used_fallback": False,
+                    "routing_stats": {"total": 0},
+                    "token_stats": {},
+                })
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
                     vl_enabled=True,
@@ -3398,6 +3453,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # ==================================================================
             vl_task = None
             vl_t0 = None
+            vl_token_stats = {}
             if vl_units:
                 vl_t0 = time.perf_counter()
                 generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
@@ -3423,6 +3479,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 def _consume_vl_result(vl_result):
                     if not vl_result.success:
                         return False, vl_result.error_msg
+                    nonlocal vl_token_stats
+                    vl_token_stats = getattr(vl_result, "token_stats", {}) or {}
                     vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
                     for ss in vl_result.screenshot_requests:
                         if ss.get("semantic_unit_id", "") in vl_unit_ids:
@@ -3454,6 +3512,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         ok, err = _consume_vl_result(vl_result)
                         if not ok:
                             logger.warning(f"[{task_id}] VL 分析失败，提前回退: {err}")
+                            _persist_task_token_report({
+                                "status": "fallback",
+                                "vl_enabled": True,
+                                "used_fallback": True,
+                                "error_msg": err,
+                                "routing_stats": routing_stats,
+                                "token_stats": vl_token_stats,
+                            })
                             return video_processing_pb2.VLAnalysisResponse(
                                 success=True,
                                 vl_enabled=True,
@@ -3525,6 +3591,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     vl_result = await vl_task
                     if not vl_result.success:
                         logger.warning(f"[{task_id}] VL 鍒嗘瀽澶辫触锛岄渶瑕佸洖閫€: {vl_result.error_msg}")
+                        _persist_task_token_report({
+                            "status": "fallback",
+                            "vl_enabled": True,
+                            "used_fallback": True,
+                            "error_msg": vl_result.error_msg,
+                            "routing_stats": routing_stats,
+                            "token_stats": vl_token_stats,
+                        })
                         return video_processing_pb2.VLAnalysisResponse(
                             success=True,
                             vl_enabled=True,
@@ -3546,6 +3620,16 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         f"[{task_id}] VL 处理完成: units={len(vl_units)}, "
                         f"screenshots={len(vl_screenshot_requests)}, clips={len(vl_clip_requests)}, ms={vl_ms:.1f}"
                     )
+
+                    if vl_token_stats:
+                        logger.info(
+                            f"[{task_id}] VL Token节省估算: "
+                            f"actual={vl_token_stats.get('total_tokens_actual', 0)}, "
+                            f"baseline_est={vl_token_stats.get('total_tokens_baseline_est', 0)}, "
+                            f"saved_est={vl_token_stats.get('saved_tokens_est', 0)}, "
+                            f"saved_ratio={float(vl_token_stats.get('saved_ratio_est', 0.0)) * 100:.2f}%, "
+                            f"pruned_units={vl_token_stats.get('pruned_units', 0)}/{vl_token_stats.get('vl_units', 0)}"
+                        )
             else:
                 logger.info(f"[{task_id}] VL 路由为空: process>10s=0, 跳过 VL API")
 
@@ -3607,6 +3691,22 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 f"vl_units={len(vl_units)}, screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
             )
 
+            _persist_task_token_report({
+                "status": "success",
+                "vl_enabled": True,
+                "used_fallback": False,
+                "routing_stats": routing_stats,
+                "token_stats": vl_token_stats,
+                "result_counts": {
+                    "semantic_units_total": len(semantic_units),
+                    "vl_units": len(vl_units),
+                    "screenshots": len(screenshot_requests),
+                    "clips": len(clip_requests),
+                    "vl_clips_generated": len(vl_clip_requests),
+                    "vl_screenshots_generated": len(vl_screenshot_requests),
+                },
+            })
+
             return video_processing_pb2.VLAnalysisResponse(
                 success=True,
                 vl_enabled=True,
@@ -3621,6 +3721,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
         except Exception as e:
             logger.error(f"[{task_id}] AnalyzeWithVL 异常: {e}", exc_info=True)
+            _persist_task_token_report({
+                "status": "exception",
+                "vl_enabled": True,
+                "used_fallback": True,
+                "error_msg": str(e),
+                "routing_stats": {},
+                "token_stats": {},
+            })
             return video_processing_pb2.VLAnalysisResponse(
                 success=False,
                 vl_enabled=True,

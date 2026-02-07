@@ -37,6 +37,7 @@ class VLGenerationResult:
     error_msg: str = ""
     used_fallback: bool = False
     fallback_reason: str = ""
+    token_stats: Dict[str, Any] = field(default_factory=dict)
 
 
 class VLMaterialGenerator:
@@ -67,6 +68,21 @@ class VLMaterialGenerator:
         self.enabled = config.get("enabled", False)
         self.screenshot_config = config.get("screenshot_optimization", {})
         self.fallback_config = config.get("fallback", {})
+
+        # VL 前预处理：剔除 process 单元中的长时间 stable 片段，降低 VL 输入冗余
+        # 关键取舍：
+        # 1) 默认仅对 process 单元生效，避免影响 abstract/concrete 的语义完整性。
+        # 2) 采用“stable 核心剔除 + 1s 边缘保留”，在节省成本与保留上下文之间平衡。
+        # 3) 若预处理失败，自动回退原始片段，保证主流程可用性。
+        self.pre_vl_pruning_config = config.get("pre_vl_static_pruning", {})
+        self.pre_vl_pruning_enabled = bool(self.pre_vl_pruning_config.get("enabled", True))
+        self.pre_vl_only_process = bool(self.pre_vl_pruning_config.get("only_process", True))
+        self.pre_vl_min_unit_duration_sec = float(self.pre_vl_pruning_config.get("min_unit_duration_sec", 10.0))
+        self.pre_vl_keep_edge_sec = float(self.pre_vl_pruning_config.get("keep_edge_sec", 1.0))
+        self.pre_vl_min_cut_span_sec = float(self.pre_vl_pruning_config.get("min_cut_span_sec", 0.8))
+        self.pre_vl_min_keep_segment_sec = float(self.pre_vl_pruning_config.get("min_keep_segment_sec", 0.5))
+        self.pre_vl_min_removed_ratio = float(self.pre_vl_pruning_config.get("min_removed_ratio", 0.10))
+        self.pre_vl_context_text_max_chars = int(self.pre_vl_pruning_config.get("context_text_max_chars", 800))
 
         # 可选复用 gRPC 侧的 ProcessPool（避免额外 spawn 多套进程池）
         self._cv_executor = cv_executor
@@ -265,6 +281,384 @@ class VLMaterialGenerator:
             )
 
         return merged
+
+    def _safe_float(self, value: Any, default: float = 0.0) -> float:
+        """
+        统一的数值转换入口。
+
+        为什么：语义单元 JSON 可能出现字符串数字、None 或脏数据，统一兜底可降低流程分支复杂度。
+        """
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _normalize_intervals(self, intervals: List[Tuple[float, float]], min_duration_sec: float = 1e-6) -> List[Tuple[float, float]]:
+        """
+        将区间列表排序并合并重叠/相邻区间。
+
+        为什么：稳定区间可能来自不同检测片段，先规范化可避免后续剪裁时重复处理。
+        """
+        if not intervals:
+            return []
+
+        ordered = sorted([(float(s), float(e)) for s, e in intervals if float(e) - float(s) > min_duration_sec], key=lambda x: x[0])
+        if not ordered:
+            return []
+
+        merged: List[Tuple[float, float]] = [ordered[0]]
+        for start_sec, end_sec in ordered[1:]:
+            last_start, last_end = merged[-1]
+            if start_sec <= last_end + 1e-6:
+                merged[-1] = (last_start, max(last_end, end_sec))
+            else:
+                merged.append((start_sec, end_sec))
+        return merged
+
+    def _subtract_intervals(
+        self,
+        base_interval: Tuple[float, float],
+        removed_intervals: List[Tuple[float, float]],
+        min_keep_segment_sec: float,
+    ) -> List[Tuple[float, float]]:
+        """
+        在 base 区间内扣除 removed 区间，得到保留区间。
+
+        为什么：stable 剔除的本质是区间差集，显式实现便于调试与单元测试验证边界。
+        """
+        base_start, base_end = base_interval
+        if base_end <= base_start:
+            return []
+
+        normalized_removed = self._normalize_intervals(removed_intervals)
+        keep: List[Tuple[float, float]] = []
+        cursor = base_start
+        for rm_start, rm_end in normalized_removed:
+            if rm_end <= base_start or rm_start >= base_end:
+                continue
+            cut_start = max(base_start, rm_start)
+            cut_end = min(base_end, rm_end)
+            if cut_start > cursor and (cut_start - cursor) >= min_keep_segment_sec:
+                keep.append((cursor, cut_start))
+            cursor = max(cursor, cut_end)
+        if base_end > cursor and (base_end - cursor) >= min_keep_segment_sec:
+            keep.append((cursor, base_end))
+        return keep
+
+    def _build_pruning_context_prompt(
+        self,
+        semantic_unit: Dict[str, Any],
+        kept_segments: List[Tuple[float, float]],
+        removed_segments: List[Tuple[float, float]],
+    ) -> str:
+        """
+        构造给 VL 的上下文提示词。
+
+        要点：
+        1) 明确告知这是“裁剪片段”而非原始完整视频。
+        2) 提供完整语义上下文（text/full_text）与标题（knowledge_topic）。
+        3) 给出保留/剔除时间段，帮助模型理解时间跳跃，降低误判。
+        """
+        knowledge_topic = str(semantic_unit.get("knowledge_topic", "") or "").strip()
+        full_text = str(semantic_unit.get("full_text", "") or "").strip()
+        text = str(semantic_unit.get("text", "") or "").strip()
+        context_text = full_text or text
+        if len(context_text) > self.pre_vl_context_text_max_chars:
+            context_text = context_text[: self.pre_vl_context_text_max_chars].rstrip() + "…"
+
+        def _fmt_segments(segments: List[Tuple[float, float]]) -> str:
+            if not segments:
+                return "无"
+            return "，".join([f"[{s:.2f}s-{e:.2f}s]" for s, e in segments])
+
+        # 注：该补充提示会拼接到原 extra_prompt 后，尽量保持短而信息密度高，控制 token 增量。
+        prompt = (
+            "【VL前置上下文说明】\n"
+            "当前输入并非完整语义单元视频，而是剔除长时间静态段后的拼接片段。\n"
+            f"语义单元标题(knowledge_topic)：{knowledge_topic or '未知'}\n"
+            f"语义单元完整文本上下文：{context_text or '无'}\n"
+            f"保留片段(原始时间轴)：{_fmt_segments(kept_segments)}\n"
+            f"已剔除静态片段核心区(原始时间轴)：{_fmt_segments(removed_segments)}\n"
+            "请基于上述上下文理解时间跳跃，不要把片段拼接处误判为语义突变；输出仍按原规则返回。"
+        )
+        return prompt
+
+    async def _detect_stable_islands_for_unit(
+        self,
+        clip_path: str,
+        unit_id: str,
+    ) -> List[Tuple[float, float]]:
+        """
+        使用现有 CVKnowledgeValidator 复用 stable 检测链路，仅输出稳定区间。
+
+        复用点：动态采样、ROI检测、帧级状态判定、边缘动画检测、连续状态合并。
+        跳过点：动作单元分类、边界细化、相邻动作合并（通过 stable_only=True 实现）。
+        """
+        from .cv_knowledge_validator import CVKnowledgeValidator
+
+        validator = CVKnowledgeValidator(clip_path)
+        try:
+            duration_sec = max(0.0, self._safe_float(getattr(validator, "duration_sec", 0.0), 0.0))
+            if duration_sec <= 0.0:
+                return []
+            stable_islands, _, _ = validator.detect_visual_states(0.0, duration_sec, stable_only=True)
+            intervals = []
+            for island in stable_islands:
+                intervals.append((float(island.start_sec), float(island.end_sec)))
+            normalized = self._normalize_intervals(intervals)
+            logger.info(f"[VL-PrePrune] unit={unit_id}: stable_islands={len(normalized)}")
+            return normalized
+        finally:
+            try:
+                validator.close()
+            except Exception:
+                pass
+
+    async def _concat_segments_with_ffmpeg(
+        self,
+        source_clip_path: str,
+        output_clip_path: str,
+        segments: List[Tuple[float, float]],
+    ) -> bool:
+        """
+        通过 ffmpeg concat demuxer 将多个区段拼接为新片段。
+
+        说明：Java 侧最终素材提取已使用相同“分段拼接”思想。
+        这里在 Python 侧前置复用该策略，避免引入新的拼接语义偏差。
+        """
+        if not segments:
+            return False
+
+        # 生成临时片段 + concat 列表文件
+        out_path = Path(output_clip_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_dir = out_path.parent / f"{out_path.stem}_parts"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        part_paths: List[Path] = []
+        try:
+            for index, (start_sec, end_sec) in enumerate(segments):
+                if end_sec <= start_sec:
+                    continue
+                duration_sec = end_sec - start_sec
+                part_path = tmp_dir / f"part_{index:03d}.mp4"
+                part_cmd = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-ss",
+                    f"{start_sec:.6f}",
+                    "-i",
+                    source_clip_path,
+                    "-t",
+                    f"{duration_sec:.6f}",
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a?",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "22",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-movflags",
+                    "+faststart",
+                    str(part_path),
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *part_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode != 0 or not part_path.exists() or part_path.stat().st_size <= 0:
+                    logger.warning(
+                        f"[VL-PrePrune] ffmpeg part cut failed: part={index}, rc={proc.returncode}, err={stderr.decode('utf-8', errors='ignore')[:300]}"
+                    )
+                    return False
+                part_paths.append(part_path)
+
+            if not part_paths:
+                return False
+
+            concat_file = tmp_dir / "concat_list.txt"
+            # ffmpeg concat demuxer 需要逐行 file 'path'
+            concat_lines = []
+            for path in part_paths:
+                safe_path = str(path).replace("'", "'\\''")
+                concat_lines.append(f"file '{safe_path}'")
+            concat_file.write_text("\n".join(concat_lines), encoding="utf-8")
+
+            concat_cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c",
+                "copy",
+                str(out_path),
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *concat_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await proc.communicate()
+            if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size <= 0:
+                logger.warning(
+                    f"[VL-PrePrune] ffmpeg concat failed: rc={proc.returncode}, err={stderr.decode('utf-8', errors='ignore')[:300]}"
+                )
+                return False
+            return True
+        finally:
+            # 临时文件 best-effort 清理，不影响主流程
+            try:
+                for part in part_paths:
+                    if part.exists():
+                        part.unlink(missing_ok=True)
+                concat_file = tmp_dir / "concat_list.txt"
+                if concat_file.exists():
+                    concat_file.unlink(missing_ok=True)
+                if tmp_dir.exists():
+                    tmp_dir.rmdir()
+            except Exception:
+                pass
+
+    def _map_pruned_relative_to_original(
+        self,
+        rel_value: float,
+        kept_segments: List[Tuple[float, float]],
+    ) -> float:
+        """
+        将“裁剪后片段相对时间”映射回“原始单元相对时间”。
+
+        为什么：VL 在裁剪后片段上输出的时间戳，必须还原到原视频时间轴，保证后续截图/切片定位正确。
+        """
+        remaining = max(0.0, float(rel_value))
+        for start_sec, end_sec in kept_segments:
+            seg_len = max(0.0, end_sec - start_sec)
+            if remaining <= seg_len + 1e-6:
+                return start_sec + remaining
+            remaining -= seg_len
+        # 越界兜底：映射到最后一个片段尾部
+        if kept_segments:
+            return kept_segments[-1][1]
+        return float(rel_value)
+
+    async def _prepare_pruned_clip_for_vl(
+        self,
+        clips_dir: str,
+        semantic_unit: Dict[str, Any],
+        original_clip_path: str,
+    ) -> Dict[str, Any]:
+        """
+        为单个语义单元生成“VL前静态段剔除”结果。
+
+        返回结构：
+        - applied: 是否实际应用了剔除
+        - clip_path_for_vl: 传给 VL 的片段路径（可能为原片段）
+        - kept_segments / removed_segments: 相对原片段时间轴的区间
+        - pre_context_prompt: 供 VL 追加的上下文提示
+        """
+        unit_id = str(semantic_unit.get("unit_id", "") or "")
+        start_sec = self._safe_float(semantic_unit.get("start_sec", 0.0), 0.0)
+        end_sec = self._safe_float(semantic_unit.get("end_sec", 0.0), 0.0)
+        duration_sec = max(0.0, end_sec - start_sec)
+        knowledge_type = str(semantic_unit.get("knowledge_type", "") or "").strip().lower()
+
+        default_result = {
+            "applied": False,
+            "clip_path_for_vl": original_clip_path,
+            "kept_segments": [(0.0, duration_sec)] if duration_sec > 0 else [],
+            "removed_segments": [],
+            "pre_context_prompt": "",
+        }
+
+        if not self.pre_vl_pruning_enabled:
+            return default_result
+        if self.pre_vl_only_process and knowledge_type != "process":
+            return default_result
+        if duration_sec < self.pre_vl_min_unit_duration_sec:
+            return default_result
+
+        try:
+            stable_intervals = await self._detect_stable_islands_for_unit(original_clip_path, unit_id)
+            if not stable_intervals:
+                return default_result
+
+            # 仅剔除稳定区间的“核心段”，边缘保留 keep_edge_sec
+            removed_intervals: List[Tuple[float, float]] = []
+            for stable_start, stable_end in stable_intervals:
+                core_start = stable_start + self.pre_vl_keep_edge_sec
+                core_end = stable_end - self.pre_vl_keep_edge_sec
+                if core_end - core_start >= self.pre_vl_min_cut_span_sec:
+                    removed_intervals.append((core_start, core_end))
+
+            removed_intervals = self._normalize_intervals(removed_intervals)
+            if not removed_intervals:
+                return default_result
+
+            kept_segments = self._subtract_intervals(
+                base_interval=(0.0, duration_sec),
+                removed_intervals=removed_intervals,
+                min_keep_segment_sec=self.pre_vl_min_keep_segment_sec,
+            )
+            if not kept_segments:
+                return default_result
+
+            removed_total = sum((e - s) for s, e in removed_intervals)
+            removed_ratio = removed_total / duration_sec if duration_sec > 0 else 0.0
+            if removed_ratio < self.pre_vl_min_removed_ratio:
+                # 剔除收益太小时不处理，避免额外编码开销和潜在语义损失
+                return default_result
+
+            pruned_dir = Path(clips_dir) / "vl_pruned_clips"
+            pruned_name = f"{Path(original_clip_path).stem}_pruned.mp4"
+            pruned_clip_path = str(pruned_dir / pruned_name)
+
+            ok = await self._concat_segments_with_ffmpeg(
+                source_clip_path=original_clip_path,
+                output_clip_path=pruned_clip_path,
+                segments=kept_segments,
+            )
+            if not ok:
+                return default_result
+
+            context_prompt = self._build_pruning_context_prompt(
+                semantic_unit=semantic_unit,
+                kept_segments=kept_segments,
+                removed_segments=removed_intervals,
+            )
+
+            logger.info(
+                f"[VL-PrePrune] applied: unit={unit_id}, removed_ratio={removed_ratio:.2%}, "
+                f"stable={len(stable_intervals)}, removed={len(removed_intervals)}, kept={len(kept_segments)}"
+            )
+
+            return {
+                "applied": True,
+                "clip_path_for_vl": pruned_clip_path,
+                "kept_segments": kept_segments,
+                "removed_segments": removed_intervals,
+                "pre_context_prompt": context_prompt,
+            }
+        except Exception as error:
+            logger.warning(f"[VL-PrePrune] failed for unit={unit_id}: {error}")
+            return default_result
     
     async def generate(
         self,
@@ -297,6 +691,23 @@ class VLMaterialGenerator:
         # VL分析结果(来自缓存或新分析)
         all_screenshot_requests = []
         all_clip_requests = []
+
+        # 任务级 token 统计
+        token_stats: Dict[str, Any] = {
+            "total_units": len(semantic_units or []),
+            "vl_units": 0,
+            "pruned_units": 0,
+            "prompt_tokens_actual": 0,
+            "completion_tokens_actual": 0,
+            "total_tokens_actual": 0,
+            # 基线定义：若不做前置裁剪，则 pruned 单元按 "原片段 token/秒 * 原始时长" 估算
+            # 非 pruned 单元基线=实际（因为路径一致）
+            "prompt_tokens_baseline_est": 0,
+            "completion_tokens_baseline_est": 0,
+            "total_tokens_baseline_est": 0,
+            "saved_tokens_est": 0,
+            "saved_ratio_est": 0.0,
+        }
         
         if use_cache:
             cached_data = self._load_vl_results(cache_path)
@@ -328,6 +739,7 @@ class VLMaterialGenerator:
                 # 构建分析任务列表
                 analysis_tasks = []
                 task_metadata = []  # 保存任务元数据以便后续匹配
+                token_stats["vl_units"] = len(semantic_units)
                 
                 for su in semantic_units:
                     unit_id = su.get("unit_id", "")
@@ -362,10 +774,28 @@ class VLMaterialGenerator:
                     if not clip_path:
                         logger.warning(f"未找到语义单元 {unit_id} 的视频片段，跳过")
                         continue
+
+                    # VL 前预处理：对 process 单元剔除 stable 核心区间并拼接新片段
+                    pre_prune_info = await self._prepare_pruned_clip_for_vl(
+                        clips_dir=clips_dir,
+                        semantic_unit=su,
+                        original_clip_path=clip_path,
+                    )
+                    clip_path_for_vl = pre_prune_info.get("clip_path_for_vl", clip_path)
+
+                    if pre_prune_info.get("applied"):
+                        token_stats["pruned_units"] += 1
+
+                    pre_context_prompt = str(pre_prune_info.get("pre_context_prompt", "") or "").strip()
+                    if pre_context_prompt:
+                        if extra_prompt:
+                            extra_prompt = extra_prompt + "\n\n" + pre_context_prompt
+                        else:
+                            extra_prompt = pre_context_prompt
                     
                     # 创建异步分析任务
                     task = self.analyzer.analyze_clip(
-                        clip_path=clip_path,
+                        clip_path=clip_path_for_vl,
                         semantic_unit_start_sec=start_sec,
                         semantic_unit_id=unit_id,
                         extra_prompt=extra_prompt
@@ -375,7 +805,10 @@ class VLMaterialGenerator:
                         "unit_id": unit_id,
                         "start_sec": start_sec,
                         "end_sec": end_sec,
-                        "clip_path": clip_path
+                        "unit_duration": duration,
+                        "clip_path": clip_path,
+                        "vl_clip_path": clip_path_for_vl,
+                        "pre_prune": pre_prune_info,
                     })
                 
                 # 🚀 并行执行所有 VL 分析任务
@@ -396,6 +829,73 @@ class VLMaterialGenerator:
                     if not analysis_result.success:
                         logger.warning(f"语义单元 {unit_id} VL 分析失败: {analysis_result.error_msg}")
                         continue
+
+                    # 汇总 token 使用与基线估算
+                    usage = getattr(analysis_result, "token_usage", {}) or {}
+                    prompt_actual = int(usage.get("prompt_tokens", 0) or 0)
+                    completion_actual = int(usage.get("completion_tokens", 0) or 0)
+                    total_actual = int(usage.get("total_tokens", prompt_actual + completion_actual) or 0)
+                    token_stats["prompt_tokens_actual"] += prompt_actual
+                    token_stats["completion_tokens_actual"] += completion_actual
+                    token_stats["total_tokens_actual"] += total_actual
+
+                    pre_prune_info = meta.get("pre_prune") or {}
+                    kept_segments = pre_prune_info.get("kept_segments") or []
+                    unit_duration = self._safe_float(meta.get("unit_duration", 0.0), 0.0)
+
+                    # 估算基线：对 pruned 单元做秒级线性回推（第一性近似），非 pruned 单元基线=实际
+                    if pre_prune_info.get("applied") and kept_segments:
+                        kept_duration = sum(max(0.0, e - s) for s, e in kept_segments)
+                        if kept_duration > 1e-6 and unit_duration > kept_duration:
+                            prompt_per_sec = prompt_actual / kept_duration
+                            completion_per_sec = completion_actual / kept_duration
+                            prompt_base = int(round(prompt_per_sec * unit_duration))
+                            completion_base = int(round(completion_per_sec * unit_duration))
+                            total_base = prompt_base + completion_base
+                        else:
+                            prompt_base = prompt_actual
+                            completion_base = completion_actual
+                            total_base = total_actual
+                    else:
+                        prompt_base = prompt_actual
+                        completion_base = completion_actual
+                        total_base = total_actual
+
+                    token_stats["prompt_tokens_baseline_est"] += max(0, prompt_base)
+                    token_stats["completion_tokens_baseline_est"] += max(0, completion_base)
+                    token_stats["total_tokens_baseline_est"] += max(0, total_base)
+
+                    # 若使用了预处理裁剪片段，需要将 VL 相对时间映射回原始时间轴
+                    if pre_prune_info.get("applied") and kept_segments:
+                        for clip_item in analysis_result.clip_requests:
+                            # clip 请求本身就是绝对时间：先转回单元相对时间，再映射回原始单元相对时间，再加单元起点
+                            rel_start = self._safe_float(clip_item.get("start_sec", start_sec), start_sec) - start_sec
+                            rel_end = self._safe_float(clip_item.get("end_sec", start_sec), start_sec) - start_sec
+                            mapped_rel_start = self._map_pruned_relative_to_original(rel_start, kept_segments)
+                            mapped_rel_end = self._map_pruned_relative_to_original(rel_end, kept_segments)
+                            abs_start = start_sec + mapped_rel_start
+                            abs_end = start_sec + mapped_rel_end
+                            if abs_end < abs_start:
+                                abs_start, abs_end = abs_end, abs_start
+                            clip_item["start_sec"] = abs_start
+                            clip_item["end_sec"] = abs_end
+                            # 同时给出 segments，复用 Java 侧拼接逻辑，避免中间被剔除段重新纳入
+                            clip_item["segments"] = [
+                                {
+                                    "start_sec": start_sec + seg_start,
+                                    "end_sec": start_sec + seg_end,
+                                }
+                                for seg_start, seg_end in kept_segments
+                            ]
+
+                        for ss_item in analysis_result.screenshot_requests:
+                            rel_ts = self._safe_float(ss_item.get("_relative_timestamp", 0.0), 0.0)
+                            mapped_rel_ts = self._map_pruned_relative_to_original(rel_ts, kept_segments)
+                            ss_item["timestamp_sec"] = start_sec + mapped_rel_ts
+                            ss_item["_relative_timestamp"] = mapped_rel_ts
+                            ss_item["_pre_pruned"] = True
+                    elif pre_prune_info.get("applied"):
+                        logger.warning(f"[VL-PrePrune] unit={unit_id} applied but no kept_segments, skip remap")
                     
                     # 收集结果 (暂不优化截图时间点，后续批量处理)
                     all_clip_requests.extend(analysis_result.clip_requests)
@@ -403,6 +903,25 @@ class VLMaterialGenerator:
                 
                 all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
                 logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
+
+                token_stats["saved_tokens_est"] = max(
+                    0,
+                    int(token_stats["total_tokens_baseline_est"] - token_stats["total_tokens_actual"]),
+                )
+                if token_stats["total_tokens_baseline_est"] > 0:
+                    token_stats["saved_ratio_est"] = float(token_stats["saved_tokens_est"]) / float(token_stats["total_tokens_baseline_est"])
+                else:
+                    token_stats["saved_ratio_est"] = 0.0
+
+                logger.info(
+                    "[VL-Token] units=%s, pruned=%s, actual_total=%s, baseline_est=%s, saved_est=%s, saved_ratio=%.2f%%",
+                    token_stats.get("vl_units", 0),
+                    token_stats.get("pruned_units", 0),
+                    token_stats.get("total_tokens_actual", 0),
+                    token_stats.get("total_tokens_baseline_est", 0),
+                    token_stats.get("saved_tokens_est", 0),
+                    float(token_stats.get("saved_ratio_est", 0.0)) * 100.0,
+                )
                 
                 # 保存VL分析原始结果(CV优化前)
                 if self.config.get("save_cache", True):
@@ -433,6 +952,7 @@ class VLMaterialGenerator:
             # 汇总最终结果
             result.clip_requests = all_clip_requests
             result.screenshot_requests = all_screenshot_requests
+            result.token_stats = token_stats
             result.success = True
             
             logger.info(
@@ -472,15 +992,35 @@ class VLMaterialGenerator:
         # 确定输出目录
         if output_dir is None:
             output_dir = str(Path(video_path).parent)
-        
-        clips_dir = Path(output_dir) / "semantic_unit_clips"
-        semantic_units_json = Path(output_dir) / "semantic_units_phase2a.json"
-        
-        # 确保语义单元 JSON 存在
-        if not semantic_units_json.exists():
-            # 创建临时 JSON 文件
-            with open(semantic_units_json, "w", encoding="utf-8") as f:
-                json.dump(semantic_units, f, ensure_ascii=False, indent=2)
+
+        # 仅为 VL 目标单元切割，避免复用全量 semantic_units_phase2a.json 导致无效切片。
+        clips_dir = Path(output_dir) / "semantic_unit_clips_vl"
+        intermediates_dir = Path(output_dir) / "intermediates"
+        intermediates_dir.mkdir(parents=True, exist_ok=True)
+        semantic_units_json = intermediates_dir / "semantic_units_vl_subset.json"
+
+        # 去重并过滤非法单元，确保后续切割列表与实际 VL 分析候选一致。
+        valid_units: List[Dict[str, Any]] = []
+        seen_unit_ids = set()
+        for unit in semantic_units or []:
+            unit_id = str(unit.get("unit_id", "") or "").strip()
+            start_sec = self._safe_float(unit.get("start_sec", 0.0), 0.0)
+            end_sec = self._safe_float(unit.get("end_sec", 0.0), 0.0)
+            if not unit_id:
+                continue
+            if end_sec <= start_sec:
+                continue
+            if unit_id in seen_unit_ids:
+                continue
+            seen_unit_ids.add(unit_id)
+            valid_units.append(unit)
+
+        if not valid_units:
+            raise ValueError("没有可用于 VL 分析的有效语义单元，跳过视频切割")
+
+        # 每次按“待分析子集”重写 JSON，确保切割范围与当前 VL 候选严格一致。
+        with open(semantic_units_json, "w", encoding="utf-8") as f:
+            json.dump(valid_units, f, ensure_ascii=False, indent=2)
         
         # 查找脚本路径
         project_root = Path(__file__).resolve().parent.parent.parent
@@ -498,8 +1038,18 @@ class VLMaterialGenerator:
                 # 检查是否切割成功
                 summary = manifest.get("summary", {})
                 if summary.get("success", 0) > 0 and summary.get("failed", 0) == 0:
-                    logger.info(f"复用已存在的视频片段: {clips_dir}")
-                    return str(clips_dir)
+                    # 只要当前所需 unit 都存在即可复用，不要求目录中仅包含当前子集。
+                    existing_clips = list(clips_dir.glob("*.mp4"))
+                    missing_units = []
+                    for su in valid_units:
+                        unit_id = su.get("unit_id", "")
+                        if not any(unit_id in f.name for f in existing_clips):
+                            missing_units.append(unit_id)
+                    if not missing_units:
+                        logger.info(f"复用已存在的 VL 目标视频片段: {clips_dir}")
+                        return str(clips_dir)
+                    logger.info(f"manifest 存在但仍需补切片: missing={len(missing_units)}")
+                
             except Exception:
                 pass
         
@@ -511,7 +1061,7 @@ class VLMaterialGenerator:
                 if len(existing_clips) > 0:
                     # 检查是否所有 unit_id 都有对应的片段
                     missing_units = []
-                    for su in semantic_units:
+                    for su in valid_units:
                         unit_id = su.get("unit_id", "")
                         # 检查是否有包含 unit_id 的文件名
                         if not any(unit_id in f.name for f in existing_clips):

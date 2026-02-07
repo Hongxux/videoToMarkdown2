@@ -1985,7 +1985,8 @@ class CVKnowledgeValidator:
     # =========================================================================
 
     
-    def detect_visual_states(self, start_sec: float, end_sec: float
+    def detect_visual_states(self, start_sec: float, end_sec: float,
+                              stable_only: bool = False
                               ) -> Tuple[List[StableIsland], List[ActionUnit], List[RedundancySegment]]:
         """
         执行逻辑：
@@ -2193,7 +2194,13 @@ class CVKnowledgeValidator:
         
         # 合并连续状态为区间 (V7.2: 传递frames和roi用于呈现型检测)
         stable_islands, action_units, redundancy_segments = self._merge_state_intervals(
-            states, start_sec, end_sec, frames=frames, roi=roi)
+            states,
+            start_sec,
+            end_sec,
+            frames=frames,
+            roi=roi,
+            stable_only=stable_only,
+        )
 
         
         # 更新复杂度 (用于下一单元动态采样)
@@ -2209,7 +2216,8 @@ class CVKnowledgeValidator:
     def _merge_state_intervals(self, states: List[Tuple[float, FrameState, float]],
                                 start_sec: float, end_sec: float,
                                 frames: List[Tuple[float, np.ndarray]] = None,
-                                roi: Tuple[int, int, int, int] = None
+                                roi: Tuple[int, int, int, int] = None,
+                                stable_only: bool = False
                                 ) -> Tuple[List[StableIsland], List[ActionUnit], List[RedundancySegment]]:
         """
         执行逻辑：
@@ -2319,6 +2327,11 @@ class CVKnowledgeValidator:
                     current_start, t, RedundancyType.RED_TRANSITION, "整段剔除"))
 
         
+        # 预处理场景：仅需要 stable 区间时，跳过动作单元分类/边界细化等昂贵阶段。
+        # 这样可复用前面的动态采样+ROI+帧级状态+边缘动画检测链路，同时降低计算开销。
+        if stable_only:
+            return stable_islands, action_units, redundancy_segments
+
         # V6.9.5: 后处理 - 分类并过滤非有效动作
         # V7.0: 增加模态子分类 (K1-K4)
         effective_actions = []
