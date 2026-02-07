@@ -170,6 +170,16 @@ public class JavaCVFFmpegService {
             this.semanticUnitId = semanticUnitId;
         }
     }
+
+    public static class ClipSegment {
+        public double startSec;
+        public double endSec;
+
+        public ClipSegment(double startSec, double endSec) {
+            this.startSec = startSec;
+            this.endSec = endSec;
+        }
+    }
     
     public static class ClipRequest {
         public String clipId;
@@ -177,13 +187,26 @@ public class JavaCVFFmpegService {
         public double endSec;
         public String knowledgeType;
         public String semanticUnitId;
+        public List<ClipSegment> segments;
         
         public ClipRequest(String clipId, double startSec, double endSec, String knowledgeType, String semanticUnitId) {
+            this(clipId, startSec, endSec, knowledgeType, semanticUnitId, null);
+        }
+
+        public ClipRequest(
+                String clipId,
+                double startSec,
+                double endSec,
+                String knowledgeType,
+                String semanticUnitId,
+                List<ClipSegment> segments
+        ) {
             this.clipId = clipId;
             this.startSec = startSec;
             this.endSec = endSec;
             this.knowledgeType = knowledgeType;
             this.semanticUnitId = semanticUnitId;
+            this.segments = segments != null ? segments : new ArrayList<>();
         }
     }
     
@@ -322,7 +345,15 @@ public class JavaCVFFmpegService {
         for (ClipRequest req : requests) {
             try {
                 String outputPath = Paths.get(outputDir, req.clipId + ".mp4").toString();
-                boolean extracted = extractSingleClip(videoPath, outputPath, req.startSec, req.endSec);
+                boolean extracted;
+                if (req.segments != null && !req.segments.isEmpty()) {
+                    extracted = extractConcatClip(videoPath, outputPath, req.segments);
+                    if (!extracted) {
+                        extracted = extractSingleClip(videoPath, outputPath, req.startSec, req.endSec);
+                    }
+                } else {
+                    extracted = extractSingleClip(videoPath, outputPath, req.startSec, req.endSec);
+                }
                 if (extracted) {
                     success++;
                     totalClips.incrementAndGet();
@@ -333,6 +364,89 @@ public class JavaCVFFmpegService {
         }
         
         return success;
+    }
+
+    /**
+     * 拼接多段视频片段为单个输出（去除段间空白）
+     */
+    private boolean extractConcatClip(String videoPath, String outputPath, List<ClipSegment> segments) {
+        if (segments == null || segments.isEmpty()) {
+            return false;
+        }
+
+        List<ClipSegment> validSegments = new ArrayList<>();
+        for (ClipSegment seg : segments) {
+            if (seg != null && seg.endSec > seg.startSec) {
+                validSegments.add(seg);
+            }
+        }
+        if (validSegments.isEmpty()) {
+            return false;
+        }
+        validSegments.sort((a, b) -> Double.compare(a.startSec, b.startSec));
+
+        FFmpegFrameGrabber grabber = null;
+        FFmpegFrameRecorder recorder = null;
+
+        try {
+            grabber = new FFmpegFrameGrabber(videoPath);
+            grabber.start();
+
+            recorder = new FFmpegFrameRecorder(outputPath, grabber.getImageWidth(), grabber.getImageHeight(), grabber.getAudioChannels());
+            recorder.setVideoCodec(avcodec.AV_CODEC_ID_H264);
+            recorder.setAudioCodec(avcodec.AV_CODEC_ID_AAC);
+            recorder.setFormat("mp4");
+            recorder.setFrameRate(grabber.getFrameRate());
+            recorder.setVideoBitrate(grabber.getVideoBitrate() > 0 ? grabber.getVideoBitrate() : 2_000_000);
+            recorder.setAudioBitrate(128_000);
+            recorder.setSampleRate(grabber.getSampleRate() > 0 ? grabber.getSampleRate() : 44100);
+            recorder.start();
+
+            long outputOffsetUs = 0L;
+            for (ClipSegment seg : validSegments) {
+                long startTimestamp = (long) (seg.startSec * 1_000_000);
+                long endTimestamp = (long) (seg.endSec * 1_000_000);
+                if (endTimestamp <= startTimestamp) {
+                    continue;
+                }
+
+                grabber.setTimestamp(startTimestamp);
+                Frame frame;
+                while ((frame = grabber.grab()) != null) {
+                    long currentTs = grabber.getTimestamp();
+                    if (currentTs > endTimestamp) {
+                        break;
+                    }
+                    long relativeTs = Math.max(0L, currentTs - startTimestamp);
+                    long outputTs = outputOffsetUs + relativeTs;
+                    recorder.setTimestamp(outputTs);
+                    recorder.record(frame);
+                }
+                outputOffsetUs += Math.max(0L, endTimestamp - startTimestamp);
+            }
+
+            double durationSec = outputOffsetUs / 1_000_000.0;
+            logger.debug("Concat clip saved: {} (segments={}, duration={:.2f}s)",
+                new File(outputPath).getName(), validSegments.size(), durationSec);
+            return true;
+
+        } catch (Exception e) {
+            logger.error("Concat clip extraction failed: {} - {}", outputPath, e.getMessage());
+            return false;
+        } finally {
+            try {
+                if (recorder != null) {
+                    recorder.stop();
+                    recorder.release();
+                }
+                if (grabber != null) {
+                    grabber.stop();
+                    grabber.release();
+                }
+            } catch (Exception e) {
+                logger.warn("Error closing grabber/recorder: {}", e.getMessage());
+            }
+        }
     }
     
     /**

@@ -103,6 +103,7 @@ class ClipRequest:
     end_sec: float              # 结束时间（秒）
     knowledge_type: str         # 知识类型 (过程性/讲解型/结构性/概念性)
     semantic_unit_id: str       # 所属语义单元ID
+    segments: Optional[List[Dict[str, float]]] = None  # 多段拼接切片（用于 VL 多段合并）
 
 
 @dataclass
@@ -721,8 +722,16 @@ class RichTextPipeline:
                         for r in getattr(unit, '_material_requests', MaterialRequests([], [], [])).screenshot_requests
                     ] if hasattr(unit, '_material_requests') else [],
                     "clip_requests": [
-                        {"clip_id": r.clip_id, "start_sec": r.start_sec, "end_sec": r.end_sec,
-                         "knowledge_type": r.knowledge_type, "semantic_unit_id": r.semantic_unit_id}
+                        {
+                            **{
+                                "clip_id": r.clip_id,
+                                "start_sec": r.start_sec,
+                                "end_sec": r.end_sec,
+                                "knowledge_type": r.knowledge_type,
+                                "semantic_unit_id": r.semantic_unit_id
+                            },
+                            **({"segments": r.segments} if getattr(r, "segments", None) else {})
+                        }
                         for r in getattr(unit, '_material_requests', MaterialRequests([], [], [])).clip_requests
                     ] if hasattr(unit, '_material_requests') else [],
                 },

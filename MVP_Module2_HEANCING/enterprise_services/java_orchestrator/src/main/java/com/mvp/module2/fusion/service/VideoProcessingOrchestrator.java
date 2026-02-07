@@ -542,7 +542,14 @@ public class VideoProcessingOrchestrator {
             }
             merged.put(
                 key,
-                new JavaCVFFmpegService.ClipRequest(req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId)
+                new JavaCVFFmpegService.ClipRequest(
+                    req.clipId,
+                    req.startSec,
+                    req.endSec,
+                    req.knowledgeType,
+                    req.semanticUnitId,
+                    convertClipSegments(req.segments)
+                )
             );
         }
     }
@@ -567,7 +574,14 @@ public class VideoProcessingOrchestrator {
             }
             merged.put(
                 key,
-                new JavaCVFFmpegService.ClipRequest(req.clipId, req.startSec, req.endSec, req.knowledgeType, req.semanticUnitId)
+                new JavaCVFFmpegService.ClipRequest(
+                    req.clipId,
+                    req.startSec,
+                    req.endSec,
+                    req.knowledgeType,
+                    req.semanticUnitId,
+                    convertClipSegments(req.segments)
+                )
             );
         }
     }
@@ -579,6 +593,20 @@ public class VideoProcessingOrchestrator {
         }
         String unit = semanticUnitId != null ? semanticUnitId.trim() : "";
         return "range:" + unit + "|" + Double.toString(startSec) + "-" + Double.toString(endSec);
+    }
+
+    private List<JavaCVFFmpegService.ClipSegment> convertClipSegments(List<PythonGrpcClient.ClipSegment> segments) {
+        List<JavaCVFFmpegService.ClipSegment> results = new ArrayList<>();
+        if (segments == null || segments.isEmpty()) {
+            return results;
+        }
+        for (PythonGrpcClient.ClipSegment seg : segments) {
+            if (seg == null) {
+                continue;
+            }
+            results.add(new JavaCVFFmpegService.ClipSegment(seg.startSec, seg.endSec));
+        }
+        return results;
     }
 
     private boolean nearlyEqual(double a, double b) {
@@ -853,7 +881,12 @@ public class VideoProcessingOrchestrator {
         if (dtos == null) return list;
         for (ClipRequestDTO dto : dtos) {
             list.add(new JavaCVFFmpegService.ClipRequest(
-                dto.clipId, dto.startSec, dto.endSec, dto.knowledgeType, dto.semanticUnitId
+                dto.clipId,
+                dto.startSec,
+                dto.endSec,
+                dto.knowledgeType,
+                dto.semanticUnitId,
+                convertClipSegments(dto.segments)
             ));
         }
         return list;

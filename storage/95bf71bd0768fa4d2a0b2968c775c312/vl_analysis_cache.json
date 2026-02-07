@@ -1,0 +1,3041 @@
+{
+  "version": "1.0",
+  "timestamp": "",
+  "analysis_results": [
+    {
+      "unit_id": "SU008",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU008_1",
+          "start_sec": 108.0,
+          "end_sec": 116.0,
+          "knowledge_type": "【环境配置】",
+          "semantic_unit_id": "SU008"
+        },
+        {
+          "clip_id": "vl_clip_SU008_2",
+          "start_sec": 117.0,
+          "end_sec": 118.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU008"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU008_0_0",
+          "timestamp_sec": 105.0,
+          "label": "【讲解型】_截图1",
+          "semantic_unit_id": "SU008",
+          "_relative_timestamp": 1.0,
+          "_semantic_unit_start": 104.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU008_1_0",
+          "timestamp_sec": 109.0,
+          "label": "【环境配置】_截图1",
+          "semantic_unit_id": "SU008",
+          "_relative_timestamp": 5.0,
+          "_semantic_unit_start": 104.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU008_1_1",
+          "timestamp_sec": 113.0,
+          "label": "【环境配置】_截图2",
+          "semantic_unit_id": "SU008",
+          "_relative_timestamp": 9.0,
+          "_semantic_unit_start": 104.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU008_2_0",
+          "timestamp_sec": 117.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU008",
+          "_relative_timestamp": 13.5,
+          "_semantic_unit_start": 104.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU008",
+        "start_sec": 104.0,
+        "end_sec": 119.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\008_SU008_CloudBot部署环境推荐_104.00-119.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU011",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU011_0",
+          "start_sec": 149.0,
+          "end_sec": 150.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU011"
+        },
+        {
+          "clip_id": "vl_clip_SU011_1",
+          "start_sec": 152.0,
+          "end_sec": 153.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU011"
+        },
+        {
+          "clip_id": "vl_clip_SU011_2",
+          "start_sec": 153.5,
+          "end_sec": 155.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU011"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU011_0_0",
+          "timestamp_sec": 149.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU011",
+          "_relative_timestamp": 8.5,
+          "_semantic_unit_start": 141.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU011_1_0",
+          "timestamp_sec": 152.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU011",
+          "_relative_timestamp": 11.5,
+          "_semantic_unit_start": 141.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU011_2_0",
+          "timestamp_sec": 154.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU011",
+          "_relative_timestamp": 13.5,
+          "_semantic_unit_start": 141.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU011",
+        "start_sec": 141.0,
+        "end_sec": 156.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\011_SU011_NodeJS安装步骤_141.00-156.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU012",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU012_0",
+          "start_sec": 156.2,
+          "end_sec": 157.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU012"
+        },
+        {
+          "clip_id": "vl_clip_SU012_1",
+          "start_sec": 159.5,
+          "end_sec": 169.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU012"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU012_0_0",
+          "timestamp_sec": 156.6,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU012",
+          "_relative_timestamp": 0.6,
+          "_semantic_unit_start": 156.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU012_1_0",
+          "timestamp_sec": 161.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU012",
+          "_relative_timestamp": 5.0,
+          "_semantic_unit_start": 156.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU012_1_1",
+          "timestamp_sec": 164.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU012",
+          "_relative_timestamp": 8.5,
+          "_semantic_unit_start": 156.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU012",
+        "start_sec": 156.0,
+        "end_sec": 170.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\012_SU012_CloudBot官网安装命令_156.00-170.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU013",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU013_0",
+          "start_sec": 171.0,
+          "end_sec": 182.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU013"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU013_0_0",
+          "timestamp_sec": 173.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU013",
+          "_relative_timestamp": 3.5,
+          "_semantic_unit_start": 170.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU013_0_1",
+          "timestamp_sec": 181.8,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU013",
+          "_relative_timestamp": 11.8,
+          "_semantic_unit_start": 170.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU013",
+        "start_sec": 170.0,
+        "end_sec": 183.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\013_SU013_NPM安装CloudBot步骤_170.00-183.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU015",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU015_0",
+          "start_sec": 188.0,
+          "end_sec": 193.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU015"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU015_0_0",
+          "timestamp_sec": 189.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU015",
+          "_relative_timestamp": 2.5,
+          "_semantic_unit_start": 187.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU015_0_1",
+          "timestamp_sec": 191.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU015",
+          "_relative_timestamp": 4.0,
+          "_semantic_unit_start": 187.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU015",
+        "start_sec": 187.0,
+        "end_sec": 199.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\015_SU015_配置AI模型步骤_187.00-199.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU017",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU017_0",
+          "start_sec": 200.0,
+          "end_sec": 208.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU017"
+        },
+        {
+          "clip_id": "vl_clip_SU017_1",
+          "start_sec": 210.0,
+          "end_sec": 225.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU017"
+        },
+        {
+          "clip_id": "vl_clip_SU017_2",
+          "start_sec": 226.0,
+          "end_sec": 230.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU017"
+        },
+        {
+          "clip_id": "vl_clip_SU017_3",
+          "start_sec": 235.0,
+          "end_sec": 245.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU017"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU017_0_0",
+          "timestamp_sec": 202.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 6.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_0_1",
+          "timestamp_sec": 205.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 9.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_0_2",
+          "timestamp_sec": 208.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 12.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_1_0",
+          "timestamp_sec": 212.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 16.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_1_1",
+          "timestamp_sec": 219.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 23.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_1_2",
+          "timestamp_sec": 221.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 25.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_1_3",
+          "timestamp_sec": 223.0,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 27.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_1_4",
+          "timestamp_sec": 224.5,
+          "label": "【实操】_截图5",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 28.5,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_2_0",
+          "timestamp_sec": 228.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 32.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_2_1",
+          "timestamp_sec": 230.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 34.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_3_0",
+          "timestamp_sec": 238.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 42.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_3_1",
+          "timestamp_sec": 240.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 44.0,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_3_2",
+          "timestamp_sec": 243.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 47.5,
+          "_semantic_unit_start": 196.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU017_3_3",
+          "timestamp_sec": 245.0,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU017",
+          "_relative_timestamp": 49.0,
+          "_semantic_unit_start": 196.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU017",
+        "start_sec": 196.0,
+        "end_sec": 246.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\016_SU017_配置AI模型和聊天工具_196.00-246.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU018",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU018_0",
+          "start_sec": 251.0,
+          "end_sec": 255.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU018"
+        },
+        {
+          "clip_id": "vl_clip_SU018_1",
+          "start_sec": 260.5,
+          "end_sec": 262.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU018"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU018_0_0",
+          "timestamp_sec": 254.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU018",
+          "_relative_timestamp": 6.5,
+          "_semantic_unit_start": 248.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU018_1_0",
+          "timestamp_sec": 261.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU018",
+          "_relative_timestamp": 13.0,
+          "_semantic_unit_start": 248.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU018_1_1",
+          "timestamp_sec": 262.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU018",
+          "_relative_timestamp": 14.0,
+          "_semantic_unit_start": 248.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU018",
+        "start_sec": 248.0,
+        "end_sec": 263.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\018_SU018_启动和停止CloudBot主程序_248.00-263.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU019",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU019_0",
+          "start_sec": 261.0,
+          "end_sec": 265.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU019"
+        },
+        {
+          "clip_id": "vl_clip_SU019_1",
+          "start_sec": 266.0,
+          "end_sec": 275.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU019"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU019_0_0",
+          "timestamp_sec": 264.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU019",
+          "_relative_timestamp": 7.5,
+          "_semantic_unit_start": 257.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU019_1_0",
+          "timestamp_sec": 269.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU019",
+          "_relative_timestamp": 12.0,
+          "_semantic_unit_start": 257.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU019_1_1",
+          "timestamp_sec": 273.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU019",
+          "_relative_timestamp": 16.0,
+          "_semantic_unit_start": 257.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU019_1_2",
+          "timestamp_sec": 275.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU019",
+          "_relative_timestamp": 18.0,
+          "_semantic_unit_start": 257.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU019",
+        "start_sec": 257.0,
+        "end_sec": 276.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\019_SU019_进入CloudBot控制台和网页版_257.00-276.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU020",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU020_0",
+          "start_sec": 276.2,
+          "end_sec": 284.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU020"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU020_0_0",
+          "timestamp_sec": 277.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU020",
+          "_relative_timestamp": 1.5,
+          "_semantic_unit_start": 276.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU020_0_1",
+          "timestamp_sec": 284.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU020",
+          "_relative_timestamp": 8.0,
+          "_semantic_unit_start": 276.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU020",
+        "start_sec": 276.0,
+        "end_sec": 288.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\020_SU020_退出和重新登录聊天软件_276.00-288.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU022",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU022_0",
+          "start_sec": 299.2,
+          "end_sec": 317.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU022"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU022_0_0",
+          "timestamp_sec": 302.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU022",
+          "_relative_timestamp": 3.0,
+          "_semantic_unit_start": 299.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU022_0_1",
+          "timestamp_sec": 310.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU022",
+          "_relative_timestamp": 11.5,
+          "_semantic_unit_start": 299.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU022_0_2",
+          "timestamp_sec": 315.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU022",
+          "_relative_timestamp": 16.5,
+          "_semantic_unit_start": 299.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU022",
+        "start_sec": 299.0,
+        "end_sec": 318.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\022_SU022_定时任务设定与执行_299.00-318.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU024",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU024_0",
+          "start_sec": 330.0,
+          "end_sec": 345.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU024"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU024_0_0",
+          "timestamp_sec": 331.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU024",
+          "_relative_timestamp": 7.0,
+          "_semantic_unit_start": 324.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU024_0_1",
+          "timestamp_sec": 336.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU024",
+          "_relative_timestamp": 12.0,
+          "_semantic_unit_start": 324.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU024_0_2",
+          "timestamp_sec": 342.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU024",
+          "_relative_timestamp": 18.0,
+          "_semantic_unit_start": 324.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU024_0_3",
+          "timestamp_sec": 345.0,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU024",
+          "_relative_timestamp": 21.0,
+          "_semantic_unit_start": 324.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU024",
+        "start_sec": 324.0,
+        "end_sec": 347.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\024_SU024_下载课件任务执行_324.00-347.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU025",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU025_0",
+          "start_sec": 342.0,
+          "end_sec": 351.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU025"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU025_0_0",
+          "timestamp_sec": 343.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU025",
+          "_relative_timestamp": 2.5,
+          "_semantic_unit_start": 341.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU025_0_1",
+          "timestamp_sec": 346.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU025",
+          "_relative_timestamp": 5.0,
+          "_semantic_unit_start": 341.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU025_0_2",
+          "timestamp_sec": 348.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU025",
+          "_relative_timestamp": 7.5,
+          "_semantic_unit_start": 341.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU025_0_3",
+          "timestamp_sec": 350.5,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU025",
+          "_relative_timestamp": 9.5,
+          "_semantic_unit_start": 341.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU025",
+        "start_sec": 341.0,
+        "end_sec": 352.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\025_SU025_CloudBot下载解压课程文件_341.00-352.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU027",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU027_0",
+          "start_sec": 369.0,
+          "end_sec": 390.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU027"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU027_0_0",
+          "timestamp_sec": 373.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU027",
+          "_relative_timestamp": 14.5,
+          "_semantic_unit_start": 359.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU027_0_1",
+          "timestamp_sec": 379.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU027",
+          "_relative_timestamp": 20.0,
+          "_semantic_unit_start": 359.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU027_0_2",
+          "timestamp_sec": 384.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU027",
+          "_relative_timestamp": 25.5,
+          "_semantic_unit_start": 359.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU027",
+        "start_sec": 359.0,
+        "end_sec": 391.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\027_SU027_CloudBot定时生成GitHub简报_359.00-391.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU029",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU029_0",
+          "start_sec": 396.2,
+          "end_sec": 405.8,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU029"
+        },
+        {
+          "clip_id": "vl_clip_SU029_1",
+          "start_sec": 402.0,
+          "end_sec": 405.8,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU029"
+        },
+        {
+          "clip_id": "vl_clip_SU029_2",
+          "start_sec": 406.5,
+          "end_sec": 408.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU029"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU029_0_0",
+          "timestamp_sec": 399.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU029",
+          "_relative_timestamp": 3.0,
+          "_semantic_unit_start": 396.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU029_0_1",
+          "timestamp_sec": 405.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU029",
+          "_relative_timestamp": 9.5,
+          "_semantic_unit_start": 396.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU029_1_0",
+          "timestamp_sec": 403.2,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU029",
+          "_relative_timestamp": 7.2,
+          "_semantic_unit_start": 396.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU029_1_1",
+          "timestamp_sec": 405.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU029",
+          "_relative_timestamp": 9.5,
+          "_semantic_unit_start": 396.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU029_2_0",
+          "timestamp_sec": 407.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU029",
+          "_relative_timestamp": 11.5,
+          "_semantic_unit_start": 396.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU029",
+        "start_sec": 396.0,
+        "end_sec": 409.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\029_SU029_配置终端权限并重启CloudBot_396.00-409.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU032",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU032_0",
+          "start_sec": 427.5,
+          "end_sec": 430.2,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU032"
+        },
+        {
+          "clip_id": "vl_clip_SU032_1",
+          "start_sec": 430.8,
+          "end_sec": 433.1,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU032"
+        },
+        {
+          "clip_id": "vl_clip_SU032_2",
+          "start_sec": 434.5,
+          "end_sec": 438.3,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU032"
+        },
+        {
+          "clip_id": "vl_clip_SU032_3",
+          "start_sec": 440.5,
+          "end_sec": 443.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU032"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU032_0_0",
+          "timestamp_sec": 429.8,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU032",
+          "_relative_timestamp": 5.8,
+          "_semantic_unit_start": 424.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU032_1_0",
+          "timestamp_sec": 432.9,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU032",
+          "_relative_timestamp": 8.9,
+          "_semantic_unit_start": 424.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU032_2_0",
+          "timestamp_sec": 437.7,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU032",
+          "_relative_timestamp": 13.7,
+          "_semantic_unit_start": 424.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU032_3_0",
+          "timestamp_sec": 442.8,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU032",
+          "_relative_timestamp": 18.8,
+          "_semantic_unit_start": 424.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU032",
+        "start_sec": 424.0,
+        "end_sec": 444.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\032_SU032_飞书应用创建与配置_424.00-444.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU033",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU033_0",
+          "start_sec": 445.0,
+          "end_sec": 447.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU033"
+        },
+        {
+          "clip_id": "vl_clip_SU033_1",
+          "start_sec": 450.0,
+          "end_sec": 456.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU033"
+        },
+        {
+          "clip_id": "vl_clip_SU033_2",
+          "start_sec": 458.0,
+          "end_sec": 464.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU033"
+        },
+        {
+          "clip_id": "vl_clip_SU033_3",
+          "start_sec": 465.0,
+          "end_sec": 469.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU033"
+        },
+        {
+          "clip_id": "vl_clip_SU033_4",
+          "start_sec": 469.5,
+          "end_sec": 470.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU033"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU033_0_0",
+          "timestamp_sec": 446.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 2.5,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_1_0",
+          "timestamp_sec": 451.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 7.5,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_1_1",
+          "timestamp_sec": 455.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 11.0,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_2_0",
+          "timestamp_sec": 459.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 15.5,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_2_1",
+          "timestamp_sec": 462.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 18.5,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_3_0",
+          "timestamp_sec": 466.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 22.0,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_3_1",
+          "timestamp_sec": 468.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 24.5,
+          "_semantic_unit_start": 444.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU033_4_0",
+          "timestamp_sec": 470.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU033",
+          "_relative_timestamp": 26.0,
+          "_semantic_unit_start": 444.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU033",
+        "start_sec": 444.0,
+        "end_sec": 471.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\033_SU033_终端安装与配置飞书插件_444.00-471.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU035",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU035_0",
+          "start_sec": 478.0,
+          "end_sec": 489.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU035"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU035_0_0",
+          "timestamp_sec": 479.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU035",
+          "_relative_timestamp": 3.5,
+          "_semantic_unit_start": 476.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU035_0_1",
+          "timestamp_sec": 482.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU035",
+          "_relative_timestamp": 6.0,
+          "_semantic_unit_start": 476.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU035_0_2",
+          "timestamp_sec": 484.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU035",
+          "_relative_timestamp": 8.5,
+          "_semantic_unit_start": 476.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU035_0_3",
+          "timestamp_sec": 486.5,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU035",
+          "_relative_timestamp": 10.5,
+          "_semantic_unit_start": 476.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU035_0_4",
+          "timestamp_sec": 488.5,
+          "label": "【实操】_截图5",
+          "semantic_unit_id": "SU035",
+          "_relative_timestamp": 12.5,
+          "_semantic_unit_start": 476.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU035",
+        "start_sec": 476.0,
+        "end_sec": 490.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\035_SU035_飞书事件回调配置_476.00-490.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU040",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU040_0",
+          "start_sec": 509.0,
+          "end_sec": 513.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU040"
+        },
+        {
+          "clip_id": "vl_clip_SU040_1",
+          "start_sec": 514.0,
+          "end_sec": 517.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU040"
+        },
+        {
+          "clip_id": "vl_clip_SU040_2",
+          "start_sec": 528.0,
+          "end_sec": 530.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU040"
+        },
+        {
+          "clip_id": "vl_clip_SU040_3",
+          "start_sec": 531.5,
+          "end_sec": 534.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU040"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU040_0_0",
+          "timestamp_sec": 510.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 8.5,
+          "_semantic_unit_start": 502.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU040_0_1",
+          "timestamp_sec": 512.8,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 10.8,
+          "_semantic_unit_start": 502.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU040_1_0",
+          "timestamp_sec": 515.2,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 13.2,
+          "_semantic_unit_start": 502.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU040_1_1",
+          "timestamp_sec": 516.7,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 14.7,
+          "_semantic_unit_start": 502.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU040_2_0",
+          "timestamp_sec": 528.8,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 26.8,
+          "_semantic_unit_start": 502.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU040_2_1",
+          "timestamp_sec": 530.2,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 28.2,
+          "_semantic_unit_start": 502.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU040_3_0",
+          "timestamp_sec": 532.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU040",
+          "_relative_timestamp": 30.5,
+          "_semantic_unit_start": 502.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU040",
+        "start_sec": 502.0,
+        "end_sec": 535.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\040_SU040_通过控制台开通截屏权限_502.00-535.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU042",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU042_0",
+          "start_sec": 528.0,
+          "end_sec": 530.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU042"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU042_0_0",
+          "timestamp_sec": 528.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU042",
+          "_relative_timestamp": 11.0,
+          "_semantic_unit_start": 517.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU042_0_1",
+          "timestamp_sec": 530.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU042",
+          "_relative_timestamp": 13.0,
+          "_semantic_unit_start": 517.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU042",
+        "start_sec": 517.0,
+        "end_sec": 531.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\042_SU042_创建minimax API密钥_517.00-531.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU043",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU043_0",
+          "start_sec": 532.0,
+          "end_sec": 535.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU043"
+        },
+        {
+          "clip_id": "vl_clip_SU043_1",
+          "start_sec": 536.0,
+          "end_sec": 537.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU043"
+        },
+        {
+          "clip_id": "vl_clip_SU043_2",
+          "start_sec": 538.0,
+          "end_sec": 541.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU043"
+        },
+        {
+          "clip_id": "vl_clip_SU043_3",
+          "start_sec": 541.5,
+          "end_sec": 543.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU043"
+        },
+        {
+          "clip_id": "vl_clip_SU043_4",
+          "start_sec": 544.0,
+          "end_sec": 548.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU043"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU043_0_0",
+          "timestamp_sec": 535.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU043",
+          "_relative_timestamp": 4.0,
+          "_semantic_unit_start": 531.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU043_1_0",
+          "timestamp_sec": 537.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU043",
+          "_relative_timestamp": 6.0,
+          "_semantic_unit_start": 531.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU043_2_0",
+          "timestamp_sec": 540.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU043",
+          "_relative_timestamp": 9.5,
+          "_semantic_unit_start": 531.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU043_3_0",
+          "timestamp_sec": 542.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU043",
+          "_relative_timestamp": 11.5,
+          "_semantic_unit_start": 531.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU043_4_0",
+          "timestamp_sec": 547.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU043",
+          "_relative_timestamp": 16.5,
+          "_semantic_unit_start": 531.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU043",
+        "start_sec": 531.0,
+        "end_sec": 549.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\043_SU043_配置CloudBot使用minimax模型_531.00-549.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU045",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU045_0",
+          "start_sec": 544.0,
+          "end_sec": 549.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU045"
+        },
+        {
+          "clip_id": "vl_clip_SU045_1",
+          "start_sec": 550.0,
+          "end_sec": 552.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU045"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU045_0_0",
+          "timestamp_sec": 545.0,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU045",
+          "_relative_timestamp": 2.0,
+          "_semantic_unit_start": 543.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU045_0_1",
+          "timestamp_sec": 547.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU045",
+          "_relative_timestamp": 4.5,
+          "_semantic_unit_start": 543.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU045_0_2",
+          "timestamp_sec": 549.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU045",
+          "_relative_timestamp": 6.0,
+          "_semantic_unit_start": 543.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU045_1_0",
+          "timestamp_sec": 550.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU045",
+          "_relative_timestamp": 7.5,
+          "_semantic_unit_start": 543.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU045_1_1",
+          "timestamp_sec": 552.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU045",
+          "_relative_timestamp": 9.0,
+          "_semantic_unit_start": 543.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU045",
+        "start_sec": 543.0,
+        "end_sec": 554.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\044_SU045_切换CloudBot模型_543.00-554.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU046",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU046_0",
+          "start_sec": 568.0,
+          "end_sec": 574.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU046"
+        },
+        {
+          "clip_id": "vl_clip_SU046_1",
+          "start_sec": 576.0,
+          "end_sec": 586.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU046"
+        },
+        {
+          "clip_id": "vl_clip_SU046_2",
+          "start_sec": 586.0,
+          "end_sec": 588.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU046"
+        },
+        {
+          "clip_id": "vl_clip_SU046_3",
+          "start_sec": 589.0,
+          "end_sec": 592.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU046"
+        },
+        {
+          "clip_id": "vl_clip_SU046_4",
+          "start_sec": 593.0,
+          "end_sec": 596.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU046"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU046_0_0",
+          "timestamp_sec": 568.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 2.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_0_1",
+          "timestamp_sec": 574.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 8.0,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_1_0",
+          "timestamp_sec": 576.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 10.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_1_1",
+          "timestamp_sec": 580.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 14.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_1_2",
+          "timestamp_sec": 583.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 17.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_1_3",
+          "timestamp_sec": 585.5,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 19.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_2_0",
+          "timestamp_sec": 586.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 20.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_2_1",
+          "timestamp_sec": 587.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 21.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_3_0",
+          "timestamp_sec": 589.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 23.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_3_1",
+          "timestamp_sec": 591.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 25.0,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_4_0",
+          "timestamp_sec": 593.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 27.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_4_1",
+          "timestamp_sec": 594.5,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 28.5,
+          "_semantic_unit_start": 566.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU046_4_2",
+          "timestamp_sec": 596.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU046",
+          "_relative_timestamp": 30.0,
+          "_semantic_unit_start": 566.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU046",
+        "start_sec": 566.0,
+        "end_sec": 597.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\046_SU046_安装并配置OAuth客户端_566.00-597.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU047",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU047_0",
+          "start_sec": 598.0,
+          "end_sec": 600.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU047"
+        },
+        {
+          "clip_id": "vl_clip_SU047_1",
+          "start_sec": 601.0,
+          "end_sec": 607.0,
+          "knowledge_type": "【环境配置】",
+          "semantic_unit_id": "SU047"
+        },
+        {
+          "clip_id": "vl_clip_SU047_2",
+          "start_sec": 607.0,
+          "end_sec": 608.0,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU047"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU047_0_0",
+          "timestamp_sec": 599.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU047",
+          "_relative_timestamp": 2.5,
+          "_semantic_unit_start": 597.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU047_1_0",
+          "timestamp_sec": 603.0,
+          "label": "【环境配置】_截图1",
+          "semantic_unit_id": "SU047",
+          "_relative_timestamp": 6.0,
+          "_semantic_unit_start": 597.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU047_1_1",
+          "timestamp_sec": 606.5,
+          "label": "【环境配置】_截图2",
+          "semantic_unit_id": "SU047",
+          "_relative_timestamp": 9.5,
+          "_semantic_unit_start": 597.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU047_2_0",
+          "timestamp_sec": 607.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU047",
+          "_relative_timestamp": 10.5,
+          "_semantic_unit_start": 597.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU047",
+        "start_sec": 597.0,
+        "end_sec": 609.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\047_SU047_读取并总结邮件_597.00-609.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU052",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU052_0",
+          "start_sec": 634.2,
+          "end_sec": 659.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU052"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU052_0_0",
+          "timestamp_sec": 641.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU052",
+          "_relative_timestamp": 8.5,
+          "_semantic_unit_start": 633.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU052_0_1",
+          "timestamp_sec": 649.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU052",
+          "_relative_timestamp": 16.0,
+          "_semantic_unit_start": 633.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU052_0_2",
+          "timestamp_sec": 657.5,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU052",
+          "_relative_timestamp": 24.5,
+          "_semantic_unit_start": 633.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU052_0_3",
+          "timestamp_sec": 659.5,
+          "label": "【实操】_截图4",
+          "semantic_unit_id": "SU052",
+          "_relative_timestamp": 26.5,
+          "_semantic_unit_start": 633.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU052",
+        "start_sec": 633.0,
+        "end_sec": 667.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\052_SU052_MCP技能安装与配置_633.00-667.00.mp4"
+      }
+    },
+    {
+      "unit_id": "SU054",
+      "success": true,
+      "error_msg": "",
+      "clip_requests": [
+        {
+          "clip_id": "vl_clip_SU054_0",
+          "start_sec": 686.0,
+          "end_sec": 698.5,
+          "knowledge_type": "【实操】",
+          "semantic_unit_id": "SU054"
+        }
+      ],
+      "screenshot_requests": [
+        {
+          "screenshot_id": "vl_ss_SU054_0_0",
+          "timestamp_sec": 686.5,
+          "label": "【实操】_截图1",
+          "semantic_unit_id": "SU054",
+          "_relative_timestamp": 12.5,
+          "_semantic_unit_start": 674.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU054_0_1",
+          "timestamp_sec": 695.0,
+          "label": "【实操】_截图2",
+          "semantic_unit_id": "SU054",
+          "_relative_timestamp": 21.0,
+          "_semantic_unit_start": 674.0
+        },
+        {
+          "screenshot_id": "vl_ss_SU054_0_2",
+          "timestamp_sec": 698.0,
+          "label": "【实操】_截图3",
+          "semantic_unit_id": "SU054",
+          "_relative_timestamp": 24.0,
+          "_semantic_unit_start": 674.0
+        }
+      ],
+      "metadata": {
+        "unit_id": "SU054",
+        "start_sec": 674.0,
+        "end_sec": 700.0,
+        "clip_path": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips\\054_SU054_Coding Agent技能演示_674.00-700.00.mp4"
+      }
+    }
+  ],
+  "aggregated_screenshots": [
+    {
+      "screenshot_id": "vl_ss_SU008_0_0",
+      "timestamp_sec": 105.0,
+      "label": "【讲解型】_截图1",
+      "semantic_unit_id": "SU008",
+      "_relative_timestamp": 1.0,
+      "_semantic_unit_start": 104.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU008_1_0",
+      "timestamp_sec": 109.0,
+      "label": "【环境配置】_截图1",
+      "semantic_unit_id": "SU008",
+      "_relative_timestamp": 5.0,
+      "_semantic_unit_start": 104.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU008_1_1",
+      "timestamp_sec": 113.0,
+      "label": "【环境配置】_截图2",
+      "semantic_unit_id": "SU008",
+      "_relative_timestamp": 9.0,
+      "_semantic_unit_start": 104.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU008_2_0",
+      "timestamp_sec": 117.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU008",
+      "_relative_timestamp": 13.5,
+      "_semantic_unit_start": 104.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU011_0_0",
+      "timestamp_sec": 149.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU011",
+      "_relative_timestamp": 8.5,
+      "_semantic_unit_start": 141.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU011_1_0",
+      "timestamp_sec": 152.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU011",
+      "_relative_timestamp": 11.5,
+      "_semantic_unit_start": 141.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU011_2_0",
+      "timestamp_sec": 154.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU011",
+      "_relative_timestamp": 13.5,
+      "_semantic_unit_start": 141.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU012_0_0",
+      "timestamp_sec": 156.6,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU012",
+      "_relative_timestamp": 0.6,
+      "_semantic_unit_start": 156.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU012_1_0",
+      "timestamp_sec": 161.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU012",
+      "_relative_timestamp": 5.0,
+      "_semantic_unit_start": 156.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU012_1_1",
+      "timestamp_sec": 164.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU012",
+      "_relative_timestamp": 8.5,
+      "_semantic_unit_start": 156.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU013_0_0",
+      "timestamp_sec": 173.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU013",
+      "_relative_timestamp": 3.5,
+      "_semantic_unit_start": 170.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU013_0_1",
+      "timestamp_sec": 181.8,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU013",
+      "_relative_timestamp": 11.8,
+      "_semantic_unit_start": 170.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU015_0_0",
+      "timestamp_sec": 189.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU015",
+      "_relative_timestamp": 2.5,
+      "_semantic_unit_start": 187.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU015_0_1",
+      "timestamp_sec": 191.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU015",
+      "_relative_timestamp": 4.0,
+      "_semantic_unit_start": 187.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_0_0",
+      "timestamp_sec": 202.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 6.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_0_1",
+      "timestamp_sec": 205.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 9.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_0_2",
+      "timestamp_sec": 208.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 12.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_1_0",
+      "timestamp_sec": 212.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 16.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_1_1",
+      "timestamp_sec": 219.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 23.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_1_2",
+      "timestamp_sec": 221.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 25.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_1_3",
+      "timestamp_sec": 223.0,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 27.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_1_4",
+      "timestamp_sec": 224.5,
+      "label": "【实操】_截图5",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 28.5,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_2_0",
+      "timestamp_sec": 228.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 32.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_2_1",
+      "timestamp_sec": 230.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 34.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_3_0",
+      "timestamp_sec": 238.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 42.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_3_1",
+      "timestamp_sec": 240.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 44.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_3_2",
+      "timestamp_sec": 243.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 47.5,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU017_3_3",
+      "timestamp_sec": 245.0,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU017",
+      "_relative_timestamp": 49.0,
+      "_semantic_unit_start": 196.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU018_0_0",
+      "timestamp_sec": 254.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU018",
+      "_relative_timestamp": 6.5,
+      "_semantic_unit_start": 248.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU018_1_0",
+      "timestamp_sec": 261.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU018",
+      "_relative_timestamp": 13.0,
+      "_semantic_unit_start": 248.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU018_1_1",
+      "timestamp_sec": 262.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU018",
+      "_relative_timestamp": 14.0,
+      "_semantic_unit_start": 248.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU019_0_0",
+      "timestamp_sec": 264.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU019",
+      "_relative_timestamp": 7.5,
+      "_semantic_unit_start": 257.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU019_1_0",
+      "timestamp_sec": 269.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU019",
+      "_relative_timestamp": 12.0,
+      "_semantic_unit_start": 257.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU019_1_1",
+      "timestamp_sec": 273.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU019",
+      "_relative_timestamp": 16.0,
+      "_semantic_unit_start": 257.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU019_1_2",
+      "timestamp_sec": 275.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU019",
+      "_relative_timestamp": 18.0,
+      "_semantic_unit_start": 257.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU020_0_0",
+      "timestamp_sec": 277.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU020",
+      "_relative_timestamp": 1.5,
+      "_semantic_unit_start": 276.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU020_0_1",
+      "timestamp_sec": 284.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU020",
+      "_relative_timestamp": 8.0,
+      "_semantic_unit_start": 276.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU022_0_0",
+      "timestamp_sec": 302.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU022",
+      "_relative_timestamp": 3.0,
+      "_semantic_unit_start": 299.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU022_0_1",
+      "timestamp_sec": 310.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU022",
+      "_relative_timestamp": 11.5,
+      "_semantic_unit_start": 299.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU022_0_2",
+      "timestamp_sec": 315.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU022",
+      "_relative_timestamp": 16.5,
+      "_semantic_unit_start": 299.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU024_0_0",
+      "timestamp_sec": 331.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU024",
+      "_relative_timestamp": 7.0,
+      "_semantic_unit_start": 324.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU024_0_1",
+      "timestamp_sec": 336.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU024",
+      "_relative_timestamp": 12.0,
+      "_semantic_unit_start": 324.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU024_0_2",
+      "timestamp_sec": 342.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU024",
+      "_relative_timestamp": 18.0,
+      "_semantic_unit_start": 324.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU024_0_3",
+      "timestamp_sec": 345.0,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU024",
+      "_relative_timestamp": 21.0,
+      "_semantic_unit_start": 324.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU025_0_0",
+      "timestamp_sec": 343.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU025",
+      "_relative_timestamp": 2.5,
+      "_semantic_unit_start": 341.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU025_0_1",
+      "timestamp_sec": 346.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU025",
+      "_relative_timestamp": 5.0,
+      "_semantic_unit_start": 341.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU025_0_2",
+      "timestamp_sec": 348.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU025",
+      "_relative_timestamp": 7.5,
+      "_semantic_unit_start": 341.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU025_0_3",
+      "timestamp_sec": 350.5,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU025",
+      "_relative_timestamp": 9.5,
+      "_semantic_unit_start": 341.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU027_0_0",
+      "timestamp_sec": 373.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU027",
+      "_relative_timestamp": 14.5,
+      "_semantic_unit_start": 359.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU027_0_1",
+      "timestamp_sec": 379.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU027",
+      "_relative_timestamp": 20.0,
+      "_semantic_unit_start": 359.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU027_0_2",
+      "timestamp_sec": 384.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU027",
+      "_relative_timestamp": 25.5,
+      "_semantic_unit_start": 359.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU029_0_0",
+      "timestamp_sec": 399.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU029",
+      "_relative_timestamp": 3.0,
+      "_semantic_unit_start": 396.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU029_0_1",
+      "timestamp_sec": 405.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU029",
+      "_relative_timestamp": 9.5,
+      "_semantic_unit_start": 396.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU029_1_0",
+      "timestamp_sec": 403.2,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU029",
+      "_relative_timestamp": 7.2,
+      "_semantic_unit_start": 396.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU029_1_1",
+      "timestamp_sec": 405.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU029",
+      "_relative_timestamp": 9.5,
+      "_semantic_unit_start": 396.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU029_2_0",
+      "timestamp_sec": 407.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU029",
+      "_relative_timestamp": 11.5,
+      "_semantic_unit_start": 396.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU032_0_0",
+      "timestamp_sec": 429.8,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU032",
+      "_relative_timestamp": 5.8,
+      "_semantic_unit_start": 424.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU032_1_0",
+      "timestamp_sec": 432.9,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU032",
+      "_relative_timestamp": 8.9,
+      "_semantic_unit_start": 424.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU032_2_0",
+      "timestamp_sec": 437.7,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU032",
+      "_relative_timestamp": 13.7,
+      "_semantic_unit_start": 424.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU032_3_0",
+      "timestamp_sec": 442.8,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU032",
+      "_relative_timestamp": 18.8,
+      "_semantic_unit_start": 424.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_0_0",
+      "timestamp_sec": 446.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 2.5,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_1_0",
+      "timestamp_sec": 451.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 7.5,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_1_1",
+      "timestamp_sec": 455.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 11.0,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_2_0",
+      "timestamp_sec": 459.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 15.5,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_2_1",
+      "timestamp_sec": 462.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 18.5,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_3_0",
+      "timestamp_sec": 466.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 22.0,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_3_1",
+      "timestamp_sec": 468.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 24.5,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU033_4_0",
+      "timestamp_sec": 470.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU033",
+      "_relative_timestamp": 26.0,
+      "_semantic_unit_start": 444.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU035_0_0",
+      "timestamp_sec": 479.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU035",
+      "_relative_timestamp": 3.5,
+      "_semantic_unit_start": 476.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU035_0_1",
+      "timestamp_sec": 482.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU035",
+      "_relative_timestamp": 6.0,
+      "_semantic_unit_start": 476.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU035_0_2",
+      "timestamp_sec": 484.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU035",
+      "_relative_timestamp": 8.5,
+      "_semantic_unit_start": 476.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU035_0_3",
+      "timestamp_sec": 486.5,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU035",
+      "_relative_timestamp": 10.5,
+      "_semantic_unit_start": 476.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU035_0_4",
+      "timestamp_sec": 488.5,
+      "label": "【实操】_截图5",
+      "semantic_unit_id": "SU035",
+      "_relative_timestamp": 12.5,
+      "_semantic_unit_start": 476.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_0_0",
+      "timestamp_sec": 510.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 8.5,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_0_1",
+      "timestamp_sec": 512.8,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 10.8,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_1_0",
+      "timestamp_sec": 515.2,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 13.2,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_1_1",
+      "timestamp_sec": 516.7,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 14.7,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_2_0",
+      "timestamp_sec": 528.8,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 26.8,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_2_1",
+      "timestamp_sec": 530.2,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 28.2,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU040_3_0",
+      "timestamp_sec": 532.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU040",
+      "_relative_timestamp": 30.5,
+      "_semantic_unit_start": 502.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU042_0_0",
+      "timestamp_sec": 528.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU042",
+      "_relative_timestamp": 11.0,
+      "_semantic_unit_start": 517.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU042_0_1",
+      "timestamp_sec": 530.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU042",
+      "_relative_timestamp": 13.0,
+      "_semantic_unit_start": 517.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU043_0_0",
+      "timestamp_sec": 535.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU043",
+      "_relative_timestamp": 4.0,
+      "_semantic_unit_start": 531.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU043_1_0",
+      "timestamp_sec": 537.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU043",
+      "_relative_timestamp": 6.0,
+      "_semantic_unit_start": 531.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU043_2_0",
+      "timestamp_sec": 540.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU043",
+      "_relative_timestamp": 9.5,
+      "_semantic_unit_start": 531.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU043_3_0",
+      "timestamp_sec": 542.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU043",
+      "_relative_timestamp": 11.5,
+      "_semantic_unit_start": 531.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU043_4_0",
+      "timestamp_sec": 547.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU043",
+      "_relative_timestamp": 16.5,
+      "_semantic_unit_start": 531.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU045_0_0",
+      "timestamp_sec": 545.0,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU045",
+      "_relative_timestamp": 2.0,
+      "_semantic_unit_start": 543.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU045_0_1",
+      "timestamp_sec": 547.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU045",
+      "_relative_timestamp": 4.5,
+      "_semantic_unit_start": 543.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU045_0_2",
+      "timestamp_sec": 549.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU045",
+      "_relative_timestamp": 6.0,
+      "_semantic_unit_start": 543.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU045_1_0",
+      "timestamp_sec": 550.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU045",
+      "_relative_timestamp": 7.5,
+      "_semantic_unit_start": 543.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU045_1_1",
+      "timestamp_sec": 552.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU045",
+      "_relative_timestamp": 9.0,
+      "_semantic_unit_start": 543.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_0_0",
+      "timestamp_sec": 568.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 2.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_0_1",
+      "timestamp_sec": 574.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 8.0,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_1_0",
+      "timestamp_sec": 576.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 10.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_1_1",
+      "timestamp_sec": 580.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 14.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_1_2",
+      "timestamp_sec": 583.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 17.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_1_3",
+      "timestamp_sec": 585.5,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 19.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_2_0",
+      "timestamp_sec": 586.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 20.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_2_1",
+      "timestamp_sec": 587.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 21.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_3_0",
+      "timestamp_sec": 589.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 23.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_3_1",
+      "timestamp_sec": 591.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 25.0,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_4_0",
+      "timestamp_sec": 593.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 27.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_4_1",
+      "timestamp_sec": 594.5,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 28.5,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU046_4_2",
+      "timestamp_sec": 596.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU046",
+      "_relative_timestamp": 30.0,
+      "_semantic_unit_start": 566.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU047_0_0",
+      "timestamp_sec": 599.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU047",
+      "_relative_timestamp": 2.5,
+      "_semantic_unit_start": 597.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU047_1_0",
+      "timestamp_sec": 603.0,
+      "label": "【环境配置】_截图1",
+      "semantic_unit_id": "SU047",
+      "_relative_timestamp": 6.0,
+      "_semantic_unit_start": 597.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU047_1_1",
+      "timestamp_sec": 606.5,
+      "label": "【环境配置】_截图2",
+      "semantic_unit_id": "SU047",
+      "_relative_timestamp": 9.5,
+      "_semantic_unit_start": 597.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU047_2_0",
+      "timestamp_sec": 607.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU047",
+      "_relative_timestamp": 10.5,
+      "_semantic_unit_start": 597.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU052_0_0",
+      "timestamp_sec": 641.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU052",
+      "_relative_timestamp": 8.5,
+      "_semantic_unit_start": 633.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU052_0_1",
+      "timestamp_sec": 649.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU052",
+      "_relative_timestamp": 16.0,
+      "_semantic_unit_start": 633.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU052_0_2",
+      "timestamp_sec": 657.5,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU052",
+      "_relative_timestamp": 24.5,
+      "_semantic_unit_start": 633.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU052_0_3",
+      "timestamp_sec": 659.5,
+      "label": "【实操】_截图4",
+      "semantic_unit_id": "SU052",
+      "_relative_timestamp": 26.5,
+      "_semantic_unit_start": 633.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU054_0_0",
+      "timestamp_sec": 686.5,
+      "label": "【实操】_截图1",
+      "semantic_unit_id": "SU054",
+      "_relative_timestamp": 12.5,
+      "_semantic_unit_start": 674.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU054_0_1",
+      "timestamp_sec": 695.0,
+      "label": "【实操】_截图2",
+      "semantic_unit_id": "SU054",
+      "_relative_timestamp": 21.0,
+      "_semantic_unit_start": 674.0
+    },
+    {
+      "screenshot_id": "vl_ss_SU054_0_2",
+      "timestamp_sec": 698.0,
+      "label": "【实操】_截图3",
+      "semantic_unit_id": "SU054",
+      "_relative_timestamp": 24.0,
+      "_semantic_unit_start": 674.0
+    }
+  ],
+  "aggregated_clips": [
+    {
+      "clip_id": "vl_clip_SU008_1",
+      "start_sec": 108.0,
+      "end_sec": 116.0,
+      "knowledge_type": "【环境配置】",
+      "semantic_unit_id": "SU008"
+    },
+    {
+      "clip_id": "vl_clip_SU008_2",
+      "start_sec": 117.0,
+      "end_sec": 118.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU008"
+    },
+    {
+      "clip_id": "vl_clip_SU011_0",
+      "start_sec": 149.0,
+      "end_sec": 150.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU011"
+    },
+    {
+      "clip_id": "vl_clip_SU011_1",
+      "start_sec": 152.0,
+      "end_sec": 153.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU011"
+    },
+    {
+      "clip_id": "vl_clip_SU011_2",
+      "start_sec": 153.5,
+      "end_sec": 155.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU011"
+    },
+    {
+      "clip_id": "vl_clip_SU012_0",
+      "start_sec": 156.2,
+      "end_sec": 157.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU012"
+    },
+    {
+      "clip_id": "vl_clip_SU012_1",
+      "start_sec": 159.5,
+      "end_sec": 169.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU012"
+    },
+    {
+      "clip_id": "vl_clip_SU013_0",
+      "start_sec": 171.0,
+      "end_sec": 182.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU013"
+    },
+    {
+      "clip_id": "vl_clip_SU015_0",
+      "start_sec": 188.0,
+      "end_sec": 193.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU015"
+    },
+    {
+      "clip_id": "vl_clip_SU017_0",
+      "start_sec": 200.0,
+      "end_sec": 208.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU017"
+    },
+    {
+      "clip_id": "vl_clip_SU017_1",
+      "start_sec": 210.0,
+      "end_sec": 225.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU017"
+    },
+    {
+      "clip_id": "vl_clip_SU017_2",
+      "start_sec": 226.0,
+      "end_sec": 230.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU017"
+    },
+    {
+      "clip_id": "vl_clip_SU017_3",
+      "start_sec": 235.0,
+      "end_sec": 245.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU017"
+    },
+    {
+      "clip_id": "vl_clip_SU018_0",
+      "start_sec": 251.0,
+      "end_sec": 255.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU018"
+    },
+    {
+      "clip_id": "vl_clip_SU018_1",
+      "start_sec": 260.5,
+      "end_sec": 262.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU018"
+    },
+    {
+      "clip_id": "vl_clip_SU019_0",
+      "start_sec": 261.0,
+      "end_sec": 265.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU019"
+    },
+    {
+      "clip_id": "vl_clip_SU019_1",
+      "start_sec": 266.0,
+      "end_sec": 275.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU019"
+    },
+    {
+      "clip_id": "vl_clip_SU020_0",
+      "start_sec": 276.2,
+      "end_sec": 284.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU020"
+    },
+    {
+      "clip_id": "vl_clip_SU022_0",
+      "start_sec": 299.2,
+      "end_sec": 317.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU022"
+    },
+    {
+      "clip_id": "vl_clip_SU024_0",
+      "start_sec": 330.0,
+      "end_sec": 345.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU024"
+    },
+    {
+      "clip_id": "vl_clip_SU025_0",
+      "start_sec": 342.0,
+      "end_sec": 351.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU025"
+    },
+    {
+      "clip_id": "vl_clip_SU027_0",
+      "start_sec": 369.0,
+      "end_sec": 390.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU027"
+    },
+    {
+      "clip_id": "vl_clip_SU029_0",
+      "start_sec": 396.2,
+      "end_sec": 405.8,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU029"
+    },
+    {
+      "clip_id": "vl_clip_SU029_1",
+      "start_sec": 402.0,
+      "end_sec": 405.8,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU029"
+    },
+    {
+      "clip_id": "vl_clip_SU029_2",
+      "start_sec": 406.5,
+      "end_sec": 408.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU029"
+    },
+    {
+      "clip_id": "vl_clip_SU032_0",
+      "start_sec": 427.5,
+      "end_sec": 430.2,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU032"
+    },
+    {
+      "clip_id": "vl_clip_SU032_1",
+      "start_sec": 430.8,
+      "end_sec": 433.1,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU032"
+    },
+    {
+      "clip_id": "vl_clip_SU032_2",
+      "start_sec": 434.5,
+      "end_sec": 438.3,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU032"
+    },
+    {
+      "clip_id": "vl_clip_SU032_3",
+      "start_sec": 440.5,
+      "end_sec": 443.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU032"
+    },
+    {
+      "clip_id": "vl_clip_SU033_0",
+      "start_sec": 445.0,
+      "end_sec": 447.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU033"
+    },
+    {
+      "clip_id": "vl_clip_SU033_1",
+      "start_sec": 450.0,
+      "end_sec": 456.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU033"
+    },
+    {
+      "clip_id": "vl_clip_SU033_2",
+      "start_sec": 458.0,
+      "end_sec": 464.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU033"
+    },
+    {
+      "clip_id": "vl_clip_SU033_3",
+      "start_sec": 465.0,
+      "end_sec": 469.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU033"
+    },
+    {
+      "clip_id": "vl_clip_SU033_4",
+      "start_sec": 469.5,
+      "end_sec": 470.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU033"
+    },
+    {
+      "clip_id": "vl_clip_SU035_0",
+      "start_sec": 478.0,
+      "end_sec": 489.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU035"
+    },
+    {
+      "clip_id": "vl_clip_SU040_0",
+      "start_sec": 509.0,
+      "end_sec": 513.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU040"
+    },
+    {
+      "clip_id": "vl_clip_SU040_1",
+      "start_sec": 514.0,
+      "end_sec": 517.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU040"
+    },
+    {
+      "clip_id": "vl_clip_SU040_2",
+      "start_sec": 528.0,
+      "end_sec": 530.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU040"
+    },
+    {
+      "clip_id": "vl_clip_SU040_3",
+      "start_sec": 531.5,
+      "end_sec": 534.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU040"
+    },
+    {
+      "clip_id": "vl_clip_SU042_0",
+      "start_sec": 528.0,
+      "end_sec": 530.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU042"
+    },
+    {
+      "clip_id": "vl_clip_SU043_0",
+      "start_sec": 532.0,
+      "end_sec": 535.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU043"
+    },
+    {
+      "clip_id": "vl_clip_SU043_1",
+      "start_sec": 536.0,
+      "end_sec": 537.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU043"
+    },
+    {
+      "clip_id": "vl_clip_SU043_2",
+      "start_sec": 538.0,
+      "end_sec": 541.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU043"
+    },
+    {
+      "clip_id": "vl_clip_SU043_3",
+      "start_sec": 541.5,
+      "end_sec": 543.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU043"
+    },
+    {
+      "clip_id": "vl_clip_SU043_4",
+      "start_sec": 544.0,
+      "end_sec": 548.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU043"
+    },
+    {
+      "clip_id": "vl_clip_SU045_0",
+      "start_sec": 544.0,
+      "end_sec": 549.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU045"
+    },
+    {
+      "clip_id": "vl_clip_SU045_1",
+      "start_sec": 550.0,
+      "end_sec": 552.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU045"
+    },
+    {
+      "clip_id": "vl_clip_SU046_0",
+      "start_sec": 568.0,
+      "end_sec": 574.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU046"
+    },
+    {
+      "clip_id": "vl_clip_SU046_1",
+      "start_sec": 576.0,
+      "end_sec": 586.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU046"
+    },
+    {
+      "clip_id": "vl_clip_SU046_2",
+      "start_sec": 586.0,
+      "end_sec": 588.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU046"
+    },
+    {
+      "clip_id": "vl_clip_SU046_3",
+      "start_sec": 589.0,
+      "end_sec": 592.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU046"
+    },
+    {
+      "clip_id": "vl_clip_SU046_4",
+      "start_sec": 593.0,
+      "end_sec": 596.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU046"
+    },
+    {
+      "clip_id": "vl_clip_SU047_0",
+      "start_sec": 598.0,
+      "end_sec": 600.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU047"
+    },
+    {
+      "clip_id": "vl_clip_SU047_1",
+      "start_sec": 601.0,
+      "end_sec": 607.0,
+      "knowledge_type": "【环境配置】",
+      "semantic_unit_id": "SU047"
+    },
+    {
+      "clip_id": "vl_clip_SU047_2",
+      "start_sec": 607.0,
+      "end_sec": 608.0,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU047"
+    },
+    {
+      "clip_id": "vl_clip_SU052_0",
+      "start_sec": 634.2,
+      "end_sec": 659.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU052"
+    },
+    {
+      "clip_id": "vl_clip_SU054_0",
+      "start_sec": 686.0,
+      "end_sec": 698.5,
+      "knowledge_type": "【实操】",
+      "semantic_unit_id": "SU054"
+    }
+  ],
+  "total_units": 25,
+  "successful_units": 25
+}

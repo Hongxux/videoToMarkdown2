@@ -87,4 +87,48 @@ public interface ClipRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getSemanticUnitIdBytes();
+
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  java.util.List<com.mvp.videoprocessing.grpc.ClipSegment> 
+      getSegmentsList();
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  com.mvp.videoprocessing.grpc.ClipSegment getSegments(int index);
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  int getSegmentsCount();
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  java.util.List<? extends com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder> 
+      getSegmentsOrBuilderList();
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder getSegmentsOrBuilder(
+      int index);
 }

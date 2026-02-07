@@ -59,12 +59,14 @@ com\mvp\videoprocessing\grpc\TranscribeResponseOrBuilder.class
 com\mvp\videoprocessing\grpc\CVValidationResult.class
 com\mvp\videoprocessing\grpc\ReleaseResourcesRequest$Builder.class
 com\mvp\videoprocessing\grpc\AssembleResponse$1.class
+com\mvp\videoprocessing\grpc\ClipSegment.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$ActionSegmentResult.class
 com\mvp\module2\fusion\resilience\CircuitBreaker.class
 com\mvp\module2\fusion\resilience\ResilientGrpcClient.class
 com\mvp\videoprocessing\grpc\CVValidationResponse$1.class
 com\mvp\videoprocessing\grpc\DownloadResponseOrBuilder.class
 com\mvp\module2\fusion\service\JavaCVFFmpegService$ClipRequest.class
+com\mvp\videoprocessing\grpc\ClipSegmentOrBuilder.class
 com\mvp\videoprocessing\grpc\ReleaseResourcesResponse$Builder.class
 com\mvp\videoprocessing\grpc\TranscribeRequest$1.class
 com\mvp\videoprocessing\grpc\VideoProcessingServiceGrpc$MethodHandlers.class
@@ -90,6 +92,7 @@ com\mvp\videoprocessing\grpc\SemanticUnitForCVOrBuilder.class
 com\mvp\videoprocessing\grpc\AnalyzeResponseOrBuilder.class
 com\mvp\videoprocessing\grpc\TranscriptSegment$Builder.class
 com\mvp\videoprocessing\grpc\ActionUnitForMaterialGeneration$Builder.class
+com\mvp\videoprocessing\grpc\ClipSegment$Builder.class
 com\mvp\videoprocessing\grpc\KnowledgeClassificationResponse$Builder.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$ScreenshotRequestDTO.class
 com\mvp\videoprocessing\grpc\ReleaseResourcesRequest$1.class
@@ -98,6 +101,7 @@ com\mvp\videoprocessing\grpc\HealthCheckRequest$Builder.class
 com\mvp\videoprocessing\grpc\ServerStatus$Builder.class
 com\mvp\videoprocessing\grpc\KnowledgeClassificationRequest$1.class
 com\mvp\videoprocessing\grpc\GenerateMaterialRequestsRequest$1.class
+com\mvp\module2\fusion\service\JavaCVFFmpegService$ClipSegment.class
 com\mvp\videoprocessing\grpc\Stage1Request.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$ReleaseResourcesResult.class
 com\mvp\videoprocessing\grpc\CVValidationRequest$Builder.class
@@ -132,6 +136,7 @@ com\mvp\videoprocessing\grpc\VLAnalysisRequestOrBuilder.class
 com\mvp\videoprocessing\grpc\ServerStatusOrBuilder.class
 com\mvp\videoprocessing\grpc\AssembleRequest$1.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$StableIslandResult.class
+com\mvp\module2\fusion\grpc\PythonGrpcClient$ClipSegment.class
 com\mvp\videoprocessing\grpc\VLAnalysisRequest.class
 com\mvp\videoprocessing\grpc\AssembleResponse.class
 com\mvp\videoprocessing\grpc\VLAnalysisRequest$Builder.class
@@ -190,6 +195,7 @@ com\mvp\module2\fusion\resilience\RetryPolicy.class
 com\mvp\videoprocessing\grpc\ActionSegmentOrBuilder.class
 com\mvp\videoprocessing\grpc\VLAnalysisResponse$Builder.class
 com\mvp\videoprocessing\grpc\VLAnalysisResponse.class
+com\mvp\videoprocessing\grpc\ClipSegment$1.class
 com\mvp\module2\fusion\queue\TaskQueueManager$Priority.class
 com\mvp\module2\fusion\grpc\PythonGrpcClient$MaterialGenerationInput.class
 com\mvp\videoprocessing\grpc\ActionUnitForMaterialGenerationOrBuilder.class

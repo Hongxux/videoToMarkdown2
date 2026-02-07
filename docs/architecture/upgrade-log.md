@@ -62,6 +62,24 @@
 - 验证方式与结果：检查切分边界稳定性与多步片段裁剪效果；确认短过程 mult_steps=false 不生成 clip。
 - 可复用经验：将语义规则明确为“目标边界 + 强制拆分”，并对多步流程引入冗余剔除约束。
 
+## 2026-02-07 VL 多段拼接合并（process>10s + mult_steps=true）
+- 日期：2026-02-07
+- 版本/分支/提交：未记录
+- 触发背景与问题：多步骤长过程单元在 VL 分析后可能产出多个片段，导致下游切片数量膨胀且内容分散，影响学习连续性。
+- 改动范围（模块/接口/数据）：
+  - `proto/video_processing.proto`：`ClipRequest` 新增 `segments` 字段；新增 `ClipSegment` 消息
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`：多段 clip 合并与 segments 生成
+  - `python_grpc_server.py`：gRPC 输出携带 segments
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator`：ClipRequest DTO 与 JavaCVFFmpegService 支持 segments 拼接
+- 关键决策与理由：
+  - 仅对 `process>10s` 且 `mult_steps=true` 的单元做拼接合并，避免影响短过程与非多步片段。
+  - 合并后只输出一个 clip，segments 表达多段拼接顺序，保证“去空白”的连续学习体验。
+  - `segments` 为空时保持旧 start/end 单段逻辑，确保向后兼容。
+- 兼容性影响：gRPC/Java DTO 新增 `segments` 字段；旧客户端不传 segments 时仍按单段切片。
+- 风险与回滚方案：如拼接导致切片异常，可暂时不发送 segments 回退到单段切片逻辑。
+- 验证方式与结果：人工构造多段 clip_requests 验证只生成一个 clip，输出时长≈各段时长之和。
+- 可复用经验：对“多段候选”的场景，优先用结构化 segments 表达，再由下游统一拼接。
+
 ## 记录字段
 - 日期
 - 版本/分支/提交

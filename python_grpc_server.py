@@ -217,7 +217,7 @@ import time
 import hashlib
 import shutil
 from concurrent import futures
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -1349,13 +1349,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     
                     # 获取 clips
                     for clip in material_reqs.get("clip_requests", []):
-                        pb_clips.append(video_processing_pb2.ClipRequest(
-                            clip_id=clip.get("clip_id", f"clip_{unit_id}"),
-                            start_sec=clip.get("start_sec", 0.0),
-                            end_sec=clip.get("end_sec", 0.0),
-                            knowledge_type=clip.get("knowledge_type", ""),
-                            semantic_unit_id=clip.get("semantic_unit_id", unit_id)
-                        ))
+                        pb_clips.append(self._build_clip_request_pb(clip, unit_id))
                 
                 logger.info(f"[{task_id}] Loaded from cache: {len(pb_screenshots)} screenshots, {len(pb_clips)} clips")
                 
@@ -1400,13 +1394,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             ]
             
             pb_clips = [
-                video_processing_pb2.ClipRequest(
-                    clip_id=r.clip_id,
-                    start_sec=r.start_sec,
-                    end_sec=r.end_sec,
-                    knowledge_type=r.knowledge_type,
-                    semantic_unit_id=r.semantic_unit_id
-                )
+                self._build_clip_request_pb(r, getattr(r, "semantic_unit_id", ""))
                 for r in clip_requests
             ]
             
@@ -1872,13 +1860,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         f"kt={knowledge_type}"
                     )
                     
-                    final_clips.append(video_processing_pb2.ClipRequest(
-                        clip_id=f"clip_{unit_id}_action{i}",
-                        start_sec=envelope_start,
-                        end_sec=envelope_end,
-                        knowledge_type=knowledge_type,
-                        semantic_unit_id=unit_id
-                    ))
+                    final_clips.append(self._build_clip_request_pb({
+                        "clip_id": f"clip_{unit_id}_action{i}",
+                        "start_sec": envelope_start,
+                        "end_sec": envelope_end,
+                        "knowledge_type": knowledge_type,
+                        "semantic_unit_id": unit_id
+                    }, unit_id))
                 
             
             # 🚀 V9.0 优化：批量并行截图选择（ProcessPool）
@@ -2245,6 +2233,68 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             return 300.0
         except:
             return 300.0  # 默认5分钟
+
+    def _build_clip_segments_pb(self, clip: Any) -> List[video_processing_pb2.ClipSegment]:
+        """
+        说明：将 clip 请求中的 segments 转为 protobuf 结构。
+        取舍：只保留 end_sec > start_sec 的片段，避免空段影响拼接。
+        """
+        segments = []
+        raw_segments = None
+        if isinstance(clip, dict):
+            raw_segments = clip.get("segments", None)
+        else:
+            raw_segments = getattr(clip, "segments", None)
+        if not raw_segments:
+            return segments
+
+        for seg in raw_segments:
+            if isinstance(seg, dict):
+                start_sec = seg.get("start_sec", seg.get("start", 0.0))
+                end_sec = seg.get("end_sec", seg.get("end", 0.0))
+            else:
+                start_sec = getattr(seg, "start_sec", 0.0)
+                end_sec = getattr(seg, "end_sec", 0.0)
+            try:
+                start_sec = float(start_sec)
+                end_sec = float(end_sec)
+            except Exception:
+                continue
+            if end_sec <= start_sec:
+                continue
+            segments.append(video_processing_pb2.ClipSegment(
+                start_sec=start_sec,
+                end_sec=end_sec
+            ))
+        return segments
+
+    def _build_clip_request_pb(self, clip: Any, default_unit_id: str = "") -> video_processing_pb2.ClipRequest:
+        """
+        说明：统一构建 ClipRequest（兼容 dict 与 dataclass）。
+        取舍：segments 为空则保持 start/end 单段逻辑，兼容旧版链路。
+        """
+        if isinstance(clip, dict):
+            clip_id = clip.get("clip_id", f"clip_{default_unit_id}")
+            start_sec = clip.get("start_sec", 0.0)
+            end_sec = clip.get("end_sec", 0.0)
+            knowledge_type = clip.get("knowledge_type", "")
+            semantic_unit_id = clip.get("semantic_unit_id", default_unit_id)
+        else:
+            clip_id = getattr(clip, "clip_id", f"clip_{default_unit_id}")
+            start_sec = getattr(clip, "start_sec", 0.0)
+            end_sec = getattr(clip, "end_sec", 0.0)
+            knowledge_type = getattr(clip, "knowledge_type", "")
+            semantic_unit_id = getattr(clip, "semantic_unit_id", default_unit_id)
+
+        segments = self._build_clip_segments_pb(clip)
+        return video_processing_pb2.ClipRequest(
+            clip_id=clip_id,
+            start_sec=float(start_sec),
+            end_sec=float(end_sec),
+            knowledge_type=knowledge_type,
+            semantic_unit_id=semantic_unit_id,
+            segments=segments
+        )
     
     def _increment_tasks(self):
         """
@@ -3548,13 +3598,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 for ss in merged_screenshots
             ]
             clip_requests = [
-                video_processing_pb2.ClipRequest(
-                    clip_id=clip.get("clip_id", ""),
-                    start_sec=clip.get("start_sec", 0.0),
-                    end_sec=clip.get("end_sec", 0.0),
-                    knowledge_type=clip.get("knowledge_type", ""),
-                    semantic_unit_id=clip.get("semantic_unit_id", "")
-                )
+                self._build_clip_request_pb(clip, clip.get("semantic_unit_id", ""))
                 for clip in merged_clips
             ]
 

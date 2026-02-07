@@ -71,6 +71,11 @@ public final class VideoProcessingProto {
     com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
       internal_static_videoprocessing_ClipRequest_fieldAccessorTable;
   static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_videoprocessing_ClipSegment_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
+      internal_static_videoprocessing_ClipSegment_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_videoprocessing_AssembleRequest_descriptor;
   static final 
     com.google.protobuf.GeneratedMessageV3.FieldAccessorTable
@@ -241,126 +246,128 @@ public final class VideoProcessingProto {
       "s_json_path\030\004 \001(\t\022\021\n\terror_msg\030\005 \001(\t\"j\n\021" +
       "ScreenshotRequest\022\025\n\rscreenshot_id\030\001 \001(\t" +
       "\022\025\n\rtimestamp_sec\030\002 \001(\001\022\r\n\005label\030\003 \001(\t\022\030" +
-      "\n\020semantic_unit_id\030\004 \001(\t\"t\n\013ClipRequest\022" +
-      "\017\n\007clip_id\030\001 \001(\t\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007e" +
-      "nd_sec\030\003 \001(\001\022\026\n\016knowledge_type\030\004 \001(\t\022\030\n\020" +
-      "semantic_unit_id\030\005 \001(\t\"\247\001\n\017AssembleReque" +
-      "st\022\017\n\007task_id\030\001 \001(\t\022\022\n\nvideo_path\030\002 \001(\t\022" +
-      " \n\030semantic_units_json_path\030\003 \001(\t\022\027\n\017scr" +
-      "eenshots_dir\030\004 \001(\t\022\021\n\tclips_dir\030\005 \001(\t\022\022\n" +
-      "\noutput_dir\030\006 \001(\t\022\r\n\005title\030\007 \001(\t\"\217\001\n\020Ass" +
-      "embleResponse\022\017\n\007success\030\001 \001(\010\022\025\n\rmarkdo" +
-      "wn_path\030\002 \001(\t\022\021\n\tjson_path\030\003 \001(\t\022-\n\005stat" +
-      "s\030\004 \001(\0132\036.videoprocessing.AssembleStats\022" +
-      "\021\n\terror_msg\030\005 \001(\t\"\226\001\n\rAssembleStats\022\026\n\016" +
-      "total_sections\030\001 \001(\005\022\031\n\021video_clips_coun" +
-      "t\030\002 \001(\005\022\031\n\021screenshots_count\030\003 \001(\005\022\027\n\017te" +
-      "xt_only_count\030\004 \001(\005\022\036\n\026vision_validated_" +
-      "count\030\005 \001(\005\"v\n\023CVValidationRequest\022\017\n\007ta" +
-      "sk_id\030\001 \001(\t\022\022\n\nvideo_path\030\002 \001(\t\022:\n\016seman" +
-      "tic_units\030\003 \003(\0132\".videoprocessing.Semant" +
-      "icUnitForCV\"`\n\021SemanticUnitForCV\022\017\n\007unit" +
-      "_id\030\001 \001(\t\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end_sec\030" +
-      "\003 \001(\001\022\026\n\016knowledge_type\030\004 \001(\t\"p\n\024CVValid" +
-      "ationResponse\022\017\n\007success\030\001 \001(\010\0224\n\007result" +
-      "s\030\002 \003(\0132#.videoprocessing.CVValidationRe" +
-      "sult\022\021\n\terror_msg\030\003 \001(\t\"\225\001\n\022CVValidation" +
-      "Result\022\017\n\007unit_id\030\001 \001(\t\0225\n\016stable_island" +
-      "s\030\002 \003(\0132\035.videoprocessing.StableIsland\0227" +
-      "\n\017action_segments\030\003 \003(\0132\036.videoprocessin" +
-      "g.ActionSegment\"Y\n\014StableIsland\022\021\n\tstart" +
-      "_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001(\001\022\017\n\007mid_sec\030\003" +
-      " \001(\001\022\024\n\014duration_sec\030\004 \001(\001\"\210\001\n\rActionSeg" +
-      "ment\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001(\001" +
-      "\022\023\n\013action_type\030\003 \001(\t\022>\n\027internal_stable" +
-      "_islands\030\004 \003(\0132\035.videoprocessing.StableI" +
-      "sland\"\024\n\022HealthCheckRequest\"|\n\023HealthChe" +
-      "ckResponse\022\017\n\007healthy\030\001 \001(\010\022\017\n\007version\030\002" +
-      " \001(\t\022\024\n\014active_tasks\030\003 \001(\005\022-\n\006status\030\004 \001" +
-      "(\0132\035.videoprocessing.ServerStatus\"o\n\014Ser" +
-      "verStatus\022\023\n\013cpu_percent\030\001 \001(\001\022\026\n\016memory" +
-      "_percent\030\002 \001(\001\022\033\n\023available_memory_mb\030\003 " +
-      "\001(\003\022\025\n\rgpu_available\030\004 \001(\010\"\204\001\n\036Knowledge" +
-      "ClassificationRequest\022\017\n\007task_id\030\001 \001(\t\022=" +
-      "\n\005units\030\002 \003(\0132..videoprocessing.Semantic" +
-      "UnitForClassification\022\022\n\nstep2_path\030\003 \001(" +
-      "\t\"\221\001\n\035SemanticUnitForClassification\022\017\n\007u" +
-      "nit_id\030\001 \001(\t\022\r\n\005title\030\002 \001(\t\022\014\n\004text\030\003 \001(" +
-      "\t\022B\n\014action_units\030\004 \003(\0132,.videoprocessin" +
-      "g.ActionUnitForClassification\"M\n\033ActionU" +
-      "nitForClassification\022\n\n\002id\030\001 \001(\005\022\021\n\tstar" +
-      "t_sec\030\002 \001(\001\022\017\n\007end_sec\030\003 \001(\001\"M\n\031Subtitle" +
-      "ForClassification\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007" +
-      "end_sec\030\002 \001(\001\022\014\n\004text\030\003 \001(\t\"\206\001\n\037Knowledg" +
-      "eClassificationResponse\022\017\n\007success\030\001 \001(\010" +
-      "\022?\n\007results\030\002 \003(\0132..videoprocessing.Know" +
-      "ledgeClassificationResult\022\021\n\terror_msg\030\003" +
-      " \001(\t\"\230\001\n\035KnowledgeClassificationResult\022\017" +
-      "\n\007unit_id\030\001 \001(\t\022\021\n\taction_id\030\002 \001(\005\022\026\n\016kn" +
-      "owledge_type\030\003 \001(\t\022\022\n\nconfidence\030\004 \001(\001\022\024" +
-      "\n\014key_evidence\030\005 \001(\t\022\021\n\treasoning\030\006 \001(\t\"" +
-      "\211\001\n\037GenerateMaterialRequestsRequest\022\017\n\007t" +
-      "ask_id\030\001 \001(\t\022A\n\005units\030\002 \003(\01322.videoproce" +
-      "ssing.SemanticUnitForMaterialGeneration\022" +
-      "\022\n\nvideo_path\030\003 \001(\t\"\202\002\n!SemanticUnitForM" +
-      "aterialGeneration\022\017\n\007unit_id\030\001 \001(\t\022\026\n\016kn" +
-      "owledge_type\030\002 \001(\t\022\021\n\tstart_sec\030\003 \001(\001\022\017\n" +
-      "\007end_sec\030\004 \001(\001\022F\n\014action_units\030\005 \003(\01320.v" +
-      "ideoprocessing.ActionUnitForMaterialGene" +
-      "ration\022\021\n\tfull_text\030\006 \001(\t\0225\n\016stable_isla" +
-      "nds\030\007 \003(\0132\035.videoprocessing.StableIsland" +
-      "\"i\n\037ActionUnitForMaterialGeneration\022\n\n\002i" +
-      "d\030\001 \001(\005\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end_sec\030\003 " +
-      "\001(\001\022\026\n\016knowledge_type\030\004 \001(\t\"\274\001\n Generate" +
-      "MaterialRequestsResponse\022\017\n\007success\030\001 \001(" +
-      "\010\022?\n\023screenshot_requests\030\002 \003(\0132\".videopr" +
-      "ocessing.ScreenshotRequest\0223\n\rclip_reque" +
-      "sts\030\003 \003(\0132\034.videoprocessing.ClipRequest\022" +
-      "\021\n\terror_msg\030\004 \001(\t\"*\n\027ReleaseResourcesRe" +
-      "quest\022\017\n\007task_id\030\001 \001(\t\"r\n\030ReleaseResourc" +
-      "esResponse\022\017\n\007success\030\001 \001(\010\022\017\n\007message\030\002" +
-      " \001(\t\022\033\n\023freed_workers_count\030\003 \001(\005\022\027\n\017fre" +
-      "ed_memory_mb\030\004 \001(\002\"n\n\021VLAnalysisRequest\022" +
-      "\017\n\007task_id\030\001 \001(\t\022\022\n\nvideo_path\030\002 \001(\t\022 \n\030" +
-      "semantic_units_json_path\030\003 \001(\t\022\022\n\noutput" +
-      "_dir\030\004 \001(\t\"\257\002\n\022VLAnalysisResponse\022\017\n\007suc" +
-      "cess\030\001 \001(\010\022\022\n\nvl_enabled\030\002 \001(\010\022\025\n\rused_f" +
-      "allback\030\003 \001(\010\022?\n\023screenshot_requests\030\004 \003" +
-      "(\0132\".videoprocessing.ScreenshotRequest\0223" +
-      "\n\rclip_requests\030\005 \003(\0132\034.videoprocessing." +
-      "ClipRequest\022\026\n\016units_analyzed\030\006 \001(\005\022\032\n\022v" +
-      "l_clips_generated\030\007 \001(\005\022 \n\030vl_screenshot" +
-      "s_generated\030\010 \001(\005\022\021\n\terror_msg\030\t \001(\t2\317\010\n" +
-      "\026VideoProcessingService\022T\n\rDownloadVideo" +
-      "\022 .videoprocessing.DownloadRequest\032!.vid" +
-      "eoprocessing.DownloadResponse\022Z\n\017Transcr" +
-      "ibeVideo\022\".videoprocessing.TranscribeReq" +
-      "uest\032#.videoprocessing.TranscribeRespons" +
-      "e\022P\n\rProcessStage1\022\036.videoprocessing.Sta" +
-      "ge1Request\032\037.videoprocessing.Stage1Respo" +
-      "nse\022Y\n\024AnalyzeSemanticUnits\022\037.videoproce" +
-      "ssing.AnalyzeRequest\032 .videoprocessing.A" +
-      "nalyzeResponse\022W\n\020AssembleRichText\022 .vid" +
-      "eoprocessing.AssembleRequest\032!.videoproc" +
-      "essing.AssembleResponse\022`\n\017ValidateCVBat" +
-      "ch\022$.videoprocessing.CVValidationRequest" +
-      "\032%.videoprocessing.CVValidationResponse0" +
-      "\001\022{\n\026ClassifyKnowledgeBatch\022/.videoproce" +
-      "ssing.KnowledgeClassificationRequest\0320.v" +
-      "ideoprocessing.KnowledgeClassificationRe" +
-      "sponse\022\177\n\030GenerateMaterialRequests\0220.vid" +
-      "eoprocessing.GenerateMaterialRequestsReq" +
-      "uest\0321.videoprocessing.GenerateMaterialR" +
-      "equestsResponse\022X\n\rAnalyzeWithVL\022\".video" +
-      "processing.VLAnalysisRequest\032#.videoproc" +
-      "essing.VLAnalysisResponse\022i\n\022ReleaseCVRe" +
-      "sources\022(.videoprocessing.ReleaseResourc" +
-      "esRequest\032).videoprocessing.ReleaseResou" +
-      "rcesResponse\022X\n\013HealthCheck\022#.videoproce" +
-      "ssing.HealthCheckRequest\032$.videoprocessi" +
-      "ng.HealthCheckResponseB9\n\034com.mvp.videop" +
-      "rocessing.grpcB\024VideoProcessingProtoP\001\220\001" +
-      "\001b\006proto3"
+      "\n\020semantic_unit_id\030\004 \001(\t\"\244\001\n\013ClipRequest" +
+      "\022\017\n\007clip_id\030\001 \001(\t\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007" +
+      "end_sec\030\003 \001(\001\022\026\n\016knowledge_type\030\004 \001(\t\022\030\n" +
+      "\020semantic_unit_id\030\005 \001(\t\022.\n\010segments\030\006 \003(" +
+      "\0132\034.videoprocessing.ClipSegment\"1\n\013ClipS" +
+      "egment\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001" +
+      "(\001\"\247\001\n\017AssembleRequest\022\017\n\007task_id\030\001 \001(\t\022" +
+      "\022\n\nvideo_path\030\002 \001(\t\022 \n\030semantic_units_js" +
+      "on_path\030\003 \001(\t\022\027\n\017screenshots_dir\030\004 \001(\t\022\021" +
+      "\n\tclips_dir\030\005 \001(\t\022\022\n\noutput_dir\030\006 \001(\t\022\r\n" +
+      "\005title\030\007 \001(\t\"\217\001\n\020AssembleResponse\022\017\n\007suc" +
+      "cess\030\001 \001(\010\022\025\n\rmarkdown_path\030\002 \001(\t\022\021\n\tjso" +
+      "n_path\030\003 \001(\t\022-\n\005stats\030\004 \001(\0132\036.videoproce" +
+      "ssing.AssembleStats\022\021\n\terror_msg\030\005 \001(\t\"\226" +
+      "\001\n\rAssembleStats\022\026\n\016total_sections\030\001 \001(\005" +
+      "\022\031\n\021video_clips_count\030\002 \001(\005\022\031\n\021screensho" +
+      "ts_count\030\003 \001(\005\022\027\n\017text_only_count\030\004 \001(\005\022" +
+      "\036\n\026vision_validated_count\030\005 \001(\005\"v\n\023CVVal" +
+      "idationRequest\022\017\n\007task_id\030\001 \001(\t\022\022\n\nvideo" +
+      "_path\030\002 \001(\t\022:\n\016semantic_units\030\003 \003(\0132\".vi" +
+      "deoprocessing.SemanticUnitForCV\"`\n\021Seman" +
+      "ticUnitForCV\022\017\n\007unit_id\030\001 \001(\t\022\021\n\tstart_s" +
+      "ec\030\002 \001(\001\022\017\n\007end_sec\030\003 \001(\001\022\026\n\016knowledge_t" +
+      "ype\030\004 \001(\t\"p\n\024CVValidationResponse\022\017\n\007suc" +
+      "cess\030\001 \001(\010\0224\n\007results\030\002 \003(\0132#.videoproce" +
+      "ssing.CVValidationResult\022\021\n\terror_msg\030\003 " +
+      "\001(\t\"\225\001\n\022CVValidationResult\022\017\n\007unit_id\030\001 " +
+      "\001(\t\0225\n\016stable_islands\030\002 \003(\0132\035.videoproce" +
+      "ssing.StableIsland\0227\n\017action_segments\030\003 " +
+      "\003(\0132\036.videoprocessing.ActionSegment\"Y\n\014S" +
+      "tableIsland\022\021\n\tstart_sec\030\001 \001(\001\022\017\n\007end_se" +
+      "c\030\002 \001(\001\022\017\n\007mid_sec\030\003 \001(\001\022\024\n\014duration_sec" +
+      "\030\004 \001(\001\"\210\001\n\rActionSegment\022\021\n\tstart_sec\030\001 " +
+      "\001(\001\022\017\n\007end_sec\030\002 \001(\001\022\023\n\013action_type\030\003 \001(" +
+      "\t\022>\n\027internal_stable_islands\030\004 \003(\0132\035.vid" +
+      "eoprocessing.StableIsland\"\024\n\022HealthCheck" +
+      "Request\"|\n\023HealthCheckResponse\022\017\n\007health" +
+      "y\030\001 \001(\010\022\017\n\007version\030\002 \001(\t\022\024\n\014active_tasks" +
+      "\030\003 \001(\005\022-\n\006status\030\004 \001(\0132\035.videoprocessing" +
+      ".ServerStatus\"o\n\014ServerStatus\022\023\n\013cpu_per" +
+      "cent\030\001 \001(\001\022\026\n\016memory_percent\030\002 \001(\001\022\033\n\023av" +
+      "ailable_memory_mb\030\003 \001(\003\022\025\n\rgpu_available" +
+      "\030\004 \001(\010\"\204\001\n\036KnowledgeClassificationReques" +
+      "t\022\017\n\007task_id\030\001 \001(\t\022=\n\005units\030\002 \003(\0132..vide" +
+      "oprocessing.SemanticUnitForClassificatio" +
+      "n\022\022\n\nstep2_path\030\003 \001(\t\"\221\001\n\035SemanticUnitFo" +
+      "rClassification\022\017\n\007unit_id\030\001 \001(\t\022\r\n\005titl" +
+      "e\030\002 \001(\t\022\014\n\004text\030\003 \001(\t\022B\n\014action_units\030\004 " +
+      "\003(\0132,.videoprocessing.ActionUnitForClass" +
+      "ification\"M\n\033ActionUnitForClassification" +
+      "\022\n\n\002id\030\001 \001(\005\022\021\n\tstart_sec\030\002 \001(\001\022\017\n\007end_s" +
+      "ec\030\003 \001(\001\"M\n\031SubtitleForClassification\022\021\n" +
+      "\tstart_sec\030\001 \001(\001\022\017\n\007end_sec\030\002 \001(\001\022\014\n\004tex" +
+      "t\030\003 \001(\t\"\206\001\n\037KnowledgeClassificationRespo" +
+      "nse\022\017\n\007success\030\001 \001(\010\022?\n\007results\030\002 \003(\0132.." +
+      "videoprocessing.KnowledgeClassificationR" +
+      "esult\022\021\n\terror_msg\030\003 \001(\t\"\230\001\n\035KnowledgeCl" +
+      "assificationResult\022\017\n\007unit_id\030\001 \001(\t\022\021\n\ta" +
+      "ction_id\030\002 \001(\005\022\026\n\016knowledge_type\030\003 \001(\t\022\022" +
+      "\n\nconfidence\030\004 \001(\001\022\024\n\014key_evidence\030\005 \001(\t" +
+      "\022\021\n\treasoning\030\006 \001(\t\"\211\001\n\037GenerateMaterial" +
+      "RequestsRequest\022\017\n\007task_id\030\001 \001(\t\022A\n\005unit" +
+      "s\030\002 \003(\01322.videoprocessing.SemanticUnitFo" +
+      "rMaterialGeneration\022\022\n\nvideo_path\030\003 \001(\t\"" +
+      "\202\002\n!SemanticUnitForMaterialGeneration\022\017\n" +
+      "\007unit_id\030\001 \001(\t\022\026\n\016knowledge_type\030\002 \001(\t\022\021" +
+      "\n\tstart_sec\030\003 \001(\001\022\017\n\007end_sec\030\004 \001(\001\022F\n\014ac" +
+      "tion_units\030\005 \003(\01320.videoprocessing.Actio" +
+      "nUnitForMaterialGeneration\022\021\n\tfull_text\030" +
+      "\006 \001(\t\0225\n\016stable_islands\030\007 \003(\0132\035.videopro" +
+      "cessing.StableIsland\"i\n\037ActionUnitForMat" +
+      "erialGeneration\022\n\n\002id\030\001 \001(\005\022\021\n\tstart_sec" +
+      "\030\002 \001(\001\022\017\n\007end_sec\030\003 \001(\001\022\026\n\016knowledge_typ" +
+      "e\030\004 \001(\t\"\274\001\n GenerateMaterialRequestsResp" +
+      "onse\022\017\n\007success\030\001 \001(\010\022?\n\023screenshot_requ" +
+      "ests\030\002 \003(\0132\".videoprocessing.ScreenshotR" +
+      "equest\0223\n\rclip_requests\030\003 \003(\0132\034.videopro" +
+      "cessing.ClipRequest\022\021\n\terror_msg\030\004 \001(\t\"*" +
+      "\n\027ReleaseResourcesRequest\022\017\n\007task_id\030\001 \001" +
+      "(\t\"r\n\030ReleaseResourcesResponse\022\017\n\007succes" +
+      "s\030\001 \001(\010\022\017\n\007message\030\002 \001(\t\022\033\n\023freed_worker" +
+      "s_count\030\003 \001(\005\022\027\n\017freed_memory_mb\030\004 \001(\002\"n" +
+      "\n\021VLAnalysisRequest\022\017\n\007task_id\030\001 \001(\t\022\022\n\n" +
+      "video_path\030\002 \001(\t\022 \n\030semantic_units_json_" +
+      "path\030\003 \001(\t\022\022\n\noutput_dir\030\004 \001(\t\"\257\002\n\022VLAna" +
+      "lysisResponse\022\017\n\007success\030\001 \001(\010\022\022\n\nvl_ena" +
+      "bled\030\002 \001(\010\022\025\n\rused_fallback\030\003 \001(\010\022?\n\023scr" +
+      "eenshot_requests\030\004 \003(\0132\".videoprocessing" +
+      ".ScreenshotRequest\0223\n\rclip_requests\030\005 \003(" +
+      "\0132\034.videoprocessing.ClipRequest\022\026\n\016units" +
+      "_analyzed\030\006 \001(\005\022\032\n\022vl_clips_generated\030\007 " +
+      "\001(\005\022 \n\030vl_screenshots_generated\030\010 \001(\005\022\021\n" +
+      "\terror_msg\030\t \001(\t2\317\010\n\026VideoProcessingServ" +
+      "ice\022T\n\rDownloadVideo\022 .videoprocessing.D" +
+      "ownloadRequest\032!.videoprocessing.Downloa" +
+      "dResponse\022Z\n\017TranscribeVideo\022\".videoproc" +
+      "essing.TranscribeRequest\032#.videoprocessi" +
+      "ng.TranscribeResponse\022P\n\rProcessStage1\022\036" +
+      ".videoprocessing.Stage1Request\032\037.videopr" +
+      "ocessing.Stage1Response\022Y\n\024AnalyzeSemant" +
+      "icUnits\022\037.videoprocessing.AnalyzeRequest" +
+      "\032 .videoprocessing.AnalyzeResponse\022W\n\020As" +
+      "sembleRichText\022 .videoprocessing.Assembl" +
+      "eRequest\032!.videoprocessing.AssembleRespo" +
+      "nse\022`\n\017ValidateCVBatch\022$.videoprocessing" +
+      ".CVValidationRequest\032%.videoprocessing.C" +
+      "VValidationResponse0\001\022{\n\026ClassifyKnowled" +
+      "geBatch\022/.videoprocessing.KnowledgeClass" +
+      "ificationRequest\0320.videoprocessing.Knowl" +
+      "edgeClassificationResponse\022\177\n\030GenerateMa" +
+      "terialRequests\0220.videoprocessing.Generat" +
+      "eMaterialRequestsRequest\0321.videoprocessi" +
+      "ng.GenerateMaterialRequestsResponse\022X\n\rA" +
+      "nalyzeWithVL\022\".videoprocessing.VLAnalysi" +
+      "sRequest\032#.videoprocessing.VLAnalysisRes" +
+      "ponse\022i\n\022ReleaseCVResources\022(.videoproce" +
+      "ssing.ReleaseResourcesRequest\032).videopro" +
+      "cessing.ReleaseResourcesResponse\022X\n\013Heal" +
+      "thCheck\022#.videoprocessing.HealthCheckReq" +
+      "uest\032$.videoprocessing.HealthCheckRespon" +
+      "seB9\n\034com.mvp.videoprocessing.grpcB\024Vide" +
+      "oProcessingProtoP\001\220\001\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -431,159 +438,165 @@ public final class VideoProcessingProto {
     internal_static_videoprocessing_ClipRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ClipRequest_descriptor,
-        new java.lang.String[] { "ClipId", "StartSec", "EndSec", "KnowledgeType", "SemanticUnitId", });
-    internal_static_videoprocessing_AssembleRequest_descriptor =
+        new java.lang.String[] { "ClipId", "StartSec", "EndSec", "KnowledgeType", "SemanticUnitId", "Segments", });
+    internal_static_videoprocessing_ClipSegment_descriptor =
       getDescriptor().getMessageTypes().get(11);
+    internal_static_videoprocessing_ClipSegment_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
+        internal_static_videoprocessing_ClipSegment_descriptor,
+        new java.lang.String[] { "StartSec", "EndSec", });
+    internal_static_videoprocessing_AssembleRequest_descriptor =
+      getDescriptor().getMessageTypes().get(12);
     internal_static_videoprocessing_AssembleRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_AssembleRequest_descriptor,
         new java.lang.String[] { "TaskId", "VideoPath", "SemanticUnitsJsonPath", "ScreenshotsDir", "ClipsDir", "OutputDir", "Title", });
     internal_static_videoprocessing_AssembleResponse_descriptor =
-      getDescriptor().getMessageTypes().get(12);
+      getDescriptor().getMessageTypes().get(13);
     internal_static_videoprocessing_AssembleResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_AssembleResponse_descriptor,
         new java.lang.String[] { "Success", "MarkdownPath", "JsonPath", "Stats", "ErrorMsg", });
     internal_static_videoprocessing_AssembleStats_descriptor =
-      getDescriptor().getMessageTypes().get(13);
+      getDescriptor().getMessageTypes().get(14);
     internal_static_videoprocessing_AssembleStats_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_AssembleStats_descriptor,
         new java.lang.String[] { "TotalSections", "VideoClipsCount", "ScreenshotsCount", "TextOnlyCount", "VisionValidatedCount", });
     internal_static_videoprocessing_CVValidationRequest_descriptor =
-      getDescriptor().getMessageTypes().get(14);
+      getDescriptor().getMessageTypes().get(15);
     internal_static_videoprocessing_CVValidationRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_CVValidationRequest_descriptor,
         new java.lang.String[] { "TaskId", "VideoPath", "SemanticUnits", });
     internal_static_videoprocessing_SemanticUnitForCV_descriptor =
-      getDescriptor().getMessageTypes().get(15);
+      getDescriptor().getMessageTypes().get(16);
     internal_static_videoprocessing_SemanticUnitForCV_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_SemanticUnitForCV_descriptor,
         new java.lang.String[] { "UnitId", "StartSec", "EndSec", "KnowledgeType", });
     internal_static_videoprocessing_CVValidationResponse_descriptor =
-      getDescriptor().getMessageTypes().get(16);
+      getDescriptor().getMessageTypes().get(17);
     internal_static_videoprocessing_CVValidationResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_CVValidationResponse_descriptor,
         new java.lang.String[] { "Success", "Results", "ErrorMsg", });
     internal_static_videoprocessing_CVValidationResult_descriptor =
-      getDescriptor().getMessageTypes().get(17);
+      getDescriptor().getMessageTypes().get(18);
     internal_static_videoprocessing_CVValidationResult_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_CVValidationResult_descriptor,
         new java.lang.String[] { "UnitId", "StableIslands", "ActionSegments", });
     internal_static_videoprocessing_StableIsland_descriptor =
-      getDescriptor().getMessageTypes().get(18);
+      getDescriptor().getMessageTypes().get(19);
     internal_static_videoprocessing_StableIsland_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_StableIsland_descriptor,
         new java.lang.String[] { "StartSec", "EndSec", "MidSec", "DurationSec", });
     internal_static_videoprocessing_ActionSegment_descriptor =
-      getDescriptor().getMessageTypes().get(19);
+      getDescriptor().getMessageTypes().get(20);
     internal_static_videoprocessing_ActionSegment_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ActionSegment_descriptor,
         new java.lang.String[] { "StartSec", "EndSec", "ActionType", "InternalStableIslands", });
     internal_static_videoprocessing_HealthCheckRequest_descriptor =
-      getDescriptor().getMessageTypes().get(20);
+      getDescriptor().getMessageTypes().get(21);
     internal_static_videoprocessing_HealthCheckRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_HealthCheckRequest_descriptor,
         new java.lang.String[] { });
     internal_static_videoprocessing_HealthCheckResponse_descriptor =
-      getDescriptor().getMessageTypes().get(21);
+      getDescriptor().getMessageTypes().get(22);
     internal_static_videoprocessing_HealthCheckResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_HealthCheckResponse_descriptor,
         new java.lang.String[] { "Healthy", "Version", "ActiveTasks", "Status", });
     internal_static_videoprocessing_ServerStatus_descriptor =
-      getDescriptor().getMessageTypes().get(22);
+      getDescriptor().getMessageTypes().get(23);
     internal_static_videoprocessing_ServerStatus_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ServerStatus_descriptor,
         new java.lang.String[] { "CpuPercent", "MemoryPercent", "AvailableMemoryMb", "GpuAvailable", });
     internal_static_videoprocessing_KnowledgeClassificationRequest_descriptor =
-      getDescriptor().getMessageTypes().get(23);
+      getDescriptor().getMessageTypes().get(24);
     internal_static_videoprocessing_KnowledgeClassificationRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_KnowledgeClassificationRequest_descriptor,
         new java.lang.String[] { "TaskId", "Units", "Step2Path", });
     internal_static_videoprocessing_SemanticUnitForClassification_descriptor =
-      getDescriptor().getMessageTypes().get(24);
+      getDescriptor().getMessageTypes().get(25);
     internal_static_videoprocessing_SemanticUnitForClassification_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_SemanticUnitForClassification_descriptor,
         new java.lang.String[] { "UnitId", "Title", "Text", "ActionUnits", });
     internal_static_videoprocessing_ActionUnitForClassification_descriptor =
-      getDescriptor().getMessageTypes().get(25);
+      getDescriptor().getMessageTypes().get(26);
     internal_static_videoprocessing_ActionUnitForClassification_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ActionUnitForClassification_descriptor,
         new java.lang.String[] { "Id", "StartSec", "EndSec", });
     internal_static_videoprocessing_SubtitleForClassification_descriptor =
-      getDescriptor().getMessageTypes().get(26);
+      getDescriptor().getMessageTypes().get(27);
     internal_static_videoprocessing_SubtitleForClassification_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_SubtitleForClassification_descriptor,
         new java.lang.String[] { "StartSec", "EndSec", "Text", });
     internal_static_videoprocessing_KnowledgeClassificationResponse_descriptor =
-      getDescriptor().getMessageTypes().get(27);
+      getDescriptor().getMessageTypes().get(28);
     internal_static_videoprocessing_KnowledgeClassificationResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_KnowledgeClassificationResponse_descriptor,
         new java.lang.String[] { "Success", "Results", "ErrorMsg", });
     internal_static_videoprocessing_KnowledgeClassificationResult_descriptor =
-      getDescriptor().getMessageTypes().get(28);
+      getDescriptor().getMessageTypes().get(29);
     internal_static_videoprocessing_KnowledgeClassificationResult_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_KnowledgeClassificationResult_descriptor,
         new java.lang.String[] { "UnitId", "ActionId", "KnowledgeType", "Confidence", "KeyEvidence", "Reasoning", });
     internal_static_videoprocessing_GenerateMaterialRequestsRequest_descriptor =
-      getDescriptor().getMessageTypes().get(29);
+      getDescriptor().getMessageTypes().get(30);
     internal_static_videoprocessing_GenerateMaterialRequestsRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_GenerateMaterialRequestsRequest_descriptor,
         new java.lang.String[] { "TaskId", "Units", "VideoPath", });
     internal_static_videoprocessing_SemanticUnitForMaterialGeneration_descriptor =
-      getDescriptor().getMessageTypes().get(30);
+      getDescriptor().getMessageTypes().get(31);
     internal_static_videoprocessing_SemanticUnitForMaterialGeneration_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_SemanticUnitForMaterialGeneration_descriptor,
         new java.lang.String[] { "UnitId", "KnowledgeType", "StartSec", "EndSec", "ActionUnits", "FullText", "StableIslands", });
     internal_static_videoprocessing_ActionUnitForMaterialGeneration_descriptor =
-      getDescriptor().getMessageTypes().get(31);
+      getDescriptor().getMessageTypes().get(32);
     internal_static_videoprocessing_ActionUnitForMaterialGeneration_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ActionUnitForMaterialGeneration_descriptor,
         new java.lang.String[] { "Id", "StartSec", "EndSec", "KnowledgeType", });
     internal_static_videoprocessing_GenerateMaterialRequestsResponse_descriptor =
-      getDescriptor().getMessageTypes().get(32);
+      getDescriptor().getMessageTypes().get(33);
     internal_static_videoprocessing_GenerateMaterialRequestsResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_GenerateMaterialRequestsResponse_descriptor,
         new java.lang.String[] { "Success", "ScreenshotRequests", "ClipRequests", "ErrorMsg", });
     internal_static_videoprocessing_ReleaseResourcesRequest_descriptor =
-      getDescriptor().getMessageTypes().get(33);
+      getDescriptor().getMessageTypes().get(34);
     internal_static_videoprocessing_ReleaseResourcesRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ReleaseResourcesRequest_descriptor,
         new java.lang.String[] { "TaskId", });
     internal_static_videoprocessing_ReleaseResourcesResponse_descriptor =
-      getDescriptor().getMessageTypes().get(34);
+      getDescriptor().getMessageTypes().get(35);
     internal_static_videoprocessing_ReleaseResourcesResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_ReleaseResourcesResponse_descriptor,
         new java.lang.String[] { "Success", "Message", "FreedWorkersCount", "FreedMemoryMb", });
     internal_static_videoprocessing_VLAnalysisRequest_descriptor =
-      getDescriptor().getMessageTypes().get(35);
+      getDescriptor().getMessageTypes().get(36);
     internal_static_videoprocessing_VLAnalysisRequest_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_VLAnalysisRequest_descriptor,
         new java.lang.String[] { "TaskId", "VideoPath", "SemanticUnitsJsonPath", "OutputDir", });
     internal_static_videoprocessing_VLAnalysisResponse_descriptor =
-      getDescriptor().getMessageTypes().get(36);
+      getDescriptor().getMessageTypes().get(37);
     internal_static_videoprocessing_VLAnalysisResponse_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_videoprocessing_VLAnalysisResponse_descriptor,

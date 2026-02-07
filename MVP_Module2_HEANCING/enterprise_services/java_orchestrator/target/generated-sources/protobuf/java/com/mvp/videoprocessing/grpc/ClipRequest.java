@@ -20,6 +20,7 @@ private static final long serialVersionUID = 0L;
     clipId_ = "";
     knowledgeType_ = "";
     semanticUnitId_ = "";
+    segments_ = java.util.Collections.emptyList();
   }
 
   @java.lang.Override
@@ -213,6 +214,67 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int SEGMENTS_FIELD_NUMBER = 6;
+  @SuppressWarnings("serial")
+  private java.util.List<com.mvp.videoprocessing.grpc.ClipSegment> segments_;
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  @java.lang.Override
+  public java.util.List<com.mvp.videoprocessing.grpc.ClipSegment> getSegmentsList() {
+    return segments_;
+  }
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  @java.lang.Override
+  public java.util.List<? extends com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder> 
+      getSegmentsOrBuilderList() {
+    return segments_;
+  }
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  @java.lang.Override
+  public int getSegmentsCount() {
+    return segments_.size();
+  }
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  @java.lang.Override
+  public com.mvp.videoprocessing.grpc.ClipSegment getSegments(int index) {
+    return segments_.get(index);
+  }
+  /**
+   * <pre>
+   * 多段拼接切片（为空则用 start/end 单段逻辑）
+   * </pre>
+   *
+   * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+   */
+  @java.lang.Override
+  public com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder getSegmentsOrBuilder(
+      int index) {
+    return segments_.get(index);
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -242,6 +304,9 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(semanticUnitId_)) {
       com.google.protobuf.GeneratedMessageV3.writeString(output, 5, semanticUnitId_);
     }
+    for (int i = 0; i < segments_.size(); i++) {
+      output.writeMessage(6, segments_.get(i));
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -267,6 +332,10 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessageV3.isStringEmpty(semanticUnitId_)) {
       size += com.google.protobuf.GeneratedMessageV3.computeStringSize(5, semanticUnitId_);
+    }
+    for (int i = 0; i < segments_.size(); i++) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeMessageSize(6, segments_.get(i));
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -295,6 +364,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getKnowledgeType())) return false;
     if (!getSemanticUnitId()
         .equals(other.getSemanticUnitId())) return false;
+    if (!getSegmentsList()
+        .equals(other.getSegmentsList())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -318,6 +389,10 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getKnowledgeType().hashCode();
     hash = (37 * hash) + SEMANTIC_UNIT_ID_FIELD_NUMBER;
     hash = (53 * hash) + getSemanticUnitId().hashCode();
+    if (getSegmentsCount() > 0) {
+      hash = (37 * hash) + SEGMENTS_FIELD_NUMBER;
+      hash = (53 * hash) + getSegmentsList().hashCode();
+    }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -454,6 +529,13 @@ private static final long serialVersionUID = 0L;
       endSec_ = 0D;
       knowledgeType_ = "";
       semanticUnitId_ = "";
+      if (segmentsBuilder_ == null) {
+        segments_ = java.util.Collections.emptyList();
+      } else {
+        segments_ = null;
+        segmentsBuilder_.clear();
+      }
+      bitField0_ = (bitField0_ & ~0x00000020);
       return this;
     }
 
@@ -480,9 +562,22 @@ private static final long serialVersionUID = 0L;
     @java.lang.Override
     public com.mvp.videoprocessing.grpc.ClipRequest buildPartial() {
       com.mvp.videoprocessing.grpc.ClipRequest result = new com.mvp.videoprocessing.grpc.ClipRequest(this);
+      buildPartialRepeatedFields(result);
       if (bitField0_ != 0) { buildPartial0(result); }
       onBuilt();
       return result;
+    }
+
+    private void buildPartialRepeatedFields(com.mvp.videoprocessing.grpc.ClipRequest result) {
+      if (segmentsBuilder_ == null) {
+        if (((bitField0_ & 0x00000020) != 0)) {
+          segments_ = java.util.Collections.unmodifiableList(segments_);
+          bitField0_ = (bitField0_ & ~0x00000020);
+        }
+        result.segments_ = segments_;
+      } else {
+        result.segments_ = segmentsBuilder_.build();
+      }
     }
 
     private void buildPartial0(com.mvp.videoprocessing.grpc.ClipRequest result) {
@@ -569,6 +664,32 @@ private static final long serialVersionUID = 0L;
         bitField0_ |= 0x00000010;
         onChanged();
       }
+      if (segmentsBuilder_ == null) {
+        if (!other.segments_.isEmpty()) {
+          if (segments_.isEmpty()) {
+            segments_ = other.segments_;
+            bitField0_ = (bitField0_ & ~0x00000020);
+          } else {
+            ensureSegmentsIsMutable();
+            segments_.addAll(other.segments_);
+          }
+          onChanged();
+        }
+      } else {
+        if (!other.segments_.isEmpty()) {
+          if (segmentsBuilder_.isEmpty()) {
+            segmentsBuilder_.dispose();
+            segmentsBuilder_ = null;
+            segments_ = other.segments_;
+            bitField0_ = (bitField0_ & ~0x00000020);
+            segmentsBuilder_ = 
+              com.google.protobuf.GeneratedMessageV3.alwaysUseFieldBuilders ?
+                 getSegmentsFieldBuilder() : null;
+          } else {
+            segmentsBuilder_.addAllMessages(other.segments_);
+          }
+        }
+      }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
       return this;
@@ -620,6 +741,19 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000010;
               break;
             } // case 42
+            case 50: {
+              com.mvp.videoprocessing.grpc.ClipSegment m =
+                  input.readMessage(
+                      com.mvp.videoprocessing.grpc.ClipSegment.parser(),
+                      extensionRegistry);
+              if (segmentsBuilder_ == null) {
+                ensureSegmentsIsMutable();
+                segments_.add(m);
+              } else {
+                segmentsBuilder_.addMessage(m);
+              }
+              break;
+            } // case 50
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -999,6 +1133,318 @@ private static final long serialVersionUID = 0L;
       bitField0_ |= 0x00000010;
       onChanged();
       return this;
+    }
+
+    private java.util.List<com.mvp.videoprocessing.grpc.ClipSegment> segments_ =
+      java.util.Collections.emptyList();
+    private void ensureSegmentsIsMutable() {
+      if (!((bitField0_ & 0x00000020) != 0)) {
+        segments_ = new java.util.ArrayList<com.mvp.videoprocessing.grpc.ClipSegment>(segments_);
+        bitField0_ |= 0x00000020;
+       }
+    }
+
+    private com.google.protobuf.RepeatedFieldBuilderV3<
+        com.mvp.videoprocessing.grpc.ClipSegment, com.mvp.videoprocessing.grpc.ClipSegment.Builder, com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder> segmentsBuilder_;
+
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public java.util.List<com.mvp.videoprocessing.grpc.ClipSegment> getSegmentsList() {
+      if (segmentsBuilder_ == null) {
+        return java.util.Collections.unmodifiableList(segments_);
+      } else {
+        return segmentsBuilder_.getMessageList();
+      }
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public int getSegmentsCount() {
+      if (segmentsBuilder_ == null) {
+        return segments_.size();
+      } else {
+        return segmentsBuilder_.getCount();
+      }
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public com.mvp.videoprocessing.grpc.ClipSegment getSegments(int index) {
+      if (segmentsBuilder_ == null) {
+        return segments_.get(index);
+      } else {
+        return segmentsBuilder_.getMessage(index);
+      }
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder setSegments(
+        int index, com.mvp.videoprocessing.grpc.ClipSegment value) {
+      if (segmentsBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        ensureSegmentsIsMutable();
+        segments_.set(index, value);
+        onChanged();
+      } else {
+        segmentsBuilder_.setMessage(index, value);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder setSegments(
+        int index, com.mvp.videoprocessing.grpc.ClipSegment.Builder builderForValue) {
+      if (segmentsBuilder_ == null) {
+        ensureSegmentsIsMutable();
+        segments_.set(index, builderForValue.build());
+        onChanged();
+      } else {
+        segmentsBuilder_.setMessage(index, builderForValue.build());
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder addSegments(com.mvp.videoprocessing.grpc.ClipSegment value) {
+      if (segmentsBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        ensureSegmentsIsMutable();
+        segments_.add(value);
+        onChanged();
+      } else {
+        segmentsBuilder_.addMessage(value);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder addSegments(
+        int index, com.mvp.videoprocessing.grpc.ClipSegment value) {
+      if (segmentsBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        ensureSegmentsIsMutable();
+        segments_.add(index, value);
+        onChanged();
+      } else {
+        segmentsBuilder_.addMessage(index, value);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder addSegments(
+        com.mvp.videoprocessing.grpc.ClipSegment.Builder builderForValue) {
+      if (segmentsBuilder_ == null) {
+        ensureSegmentsIsMutable();
+        segments_.add(builderForValue.build());
+        onChanged();
+      } else {
+        segmentsBuilder_.addMessage(builderForValue.build());
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder addSegments(
+        int index, com.mvp.videoprocessing.grpc.ClipSegment.Builder builderForValue) {
+      if (segmentsBuilder_ == null) {
+        ensureSegmentsIsMutable();
+        segments_.add(index, builderForValue.build());
+        onChanged();
+      } else {
+        segmentsBuilder_.addMessage(index, builderForValue.build());
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder addAllSegments(
+        java.lang.Iterable<? extends com.mvp.videoprocessing.grpc.ClipSegment> values) {
+      if (segmentsBuilder_ == null) {
+        ensureSegmentsIsMutable();
+        com.google.protobuf.AbstractMessageLite.Builder.addAll(
+            values, segments_);
+        onChanged();
+      } else {
+        segmentsBuilder_.addAllMessages(values);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder clearSegments() {
+      if (segmentsBuilder_ == null) {
+        segments_ = java.util.Collections.emptyList();
+        bitField0_ = (bitField0_ & ~0x00000020);
+        onChanged();
+      } else {
+        segmentsBuilder_.clear();
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public Builder removeSegments(int index) {
+      if (segmentsBuilder_ == null) {
+        ensureSegmentsIsMutable();
+        segments_.remove(index);
+        onChanged();
+      } else {
+        segmentsBuilder_.remove(index);
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public com.mvp.videoprocessing.grpc.ClipSegment.Builder getSegmentsBuilder(
+        int index) {
+      return getSegmentsFieldBuilder().getBuilder(index);
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder getSegmentsOrBuilder(
+        int index) {
+      if (segmentsBuilder_ == null) {
+        return segments_.get(index);  } else {
+        return segmentsBuilder_.getMessageOrBuilder(index);
+      }
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public java.util.List<? extends com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder> 
+         getSegmentsOrBuilderList() {
+      if (segmentsBuilder_ != null) {
+        return segmentsBuilder_.getMessageOrBuilderList();
+      } else {
+        return java.util.Collections.unmodifiableList(segments_);
+      }
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public com.mvp.videoprocessing.grpc.ClipSegment.Builder addSegmentsBuilder() {
+      return getSegmentsFieldBuilder().addBuilder(
+          com.mvp.videoprocessing.grpc.ClipSegment.getDefaultInstance());
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public com.mvp.videoprocessing.grpc.ClipSegment.Builder addSegmentsBuilder(
+        int index) {
+      return getSegmentsFieldBuilder().addBuilder(
+          index, com.mvp.videoprocessing.grpc.ClipSegment.getDefaultInstance());
+    }
+    /**
+     * <pre>
+     * 多段拼接切片（为空则用 start/end 单段逻辑）
+     * </pre>
+     *
+     * <code>repeated .videoprocessing.ClipSegment segments = 6;</code>
+     */
+    public java.util.List<com.mvp.videoprocessing.grpc.ClipSegment.Builder> 
+         getSegmentsBuilderList() {
+      return getSegmentsFieldBuilder().getBuilderList();
+    }
+    private com.google.protobuf.RepeatedFieldBuilderV3<
+        com.mvp.videoprocessing.grpc.ClipSegment, com.mvp.videoprocessing.grpc.ClipSegment.Builder, com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder> 
+        getSegmentsFieldBuilder() {
+      if (segmentsBuilder_ == null) {
+        segmentsBuilder_ = new com.google.protobuf.RepeatedFieldBuilderV3<
+            com.mvp.videoprocessing.grpc.ClipSegment, com.mvp.videoprocessing.grpc.ClipSegment.Builder, com.mvp.videoprocessing.grpc.ClipSegmentOrBuilder>(
+                segments_,
+                ((bitField0_ & 0x00000020) != 0),
+                getParentForChildren(),
+                isClean());
+        segments_ = null;
+      }
+      return segmentsBuilder_;
     }
     @java.lang.Override
     public final Builder setUnknownFields(

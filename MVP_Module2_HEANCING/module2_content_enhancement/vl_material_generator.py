@@ -173,6 +173,98 @@ class VLMaterialGenerator:
         except Exception as e:
             logger.warning(f"加载VL结果缓存失败: {e}")
             return None
+
+    def _should_merge_multistep_unit(self, unit: Dict[str, Any]) -> bool:
+        """
+        判定是否需要做多段拼接合并（process>10s 且 mult_steps=true）
+        """
+        knowledge_type = (unit.get("knowledge_type", "") or "").lower()
+        start_sec = float(unit.get("start_sec", 0.0))
+        end_sec = float(unit.get("end_sec", 0.0))
+        duration = max(0.0, end_sec - start_sec)
+        return knowledge_type == "process" and duration > 10.0 and bool(unit.get("mult_steps", False))
+
+    def _collect_segments_from_clip(self, clip: Dict[str, Any]) -> List[Dict[str, float]]:
+        """
+        从 clip 请求中抽取 segments；若未显式提供，则回退到 start/end。
+        """
+        segments: List[Dict[str, float]] = []
+        raw_segments = clip.get("segments") if isinstance(clip, dict) else None
+        if raw_segments:
+            for seg in raw_segments:
+                start_sec = float(seg.get("start_sec", seg.get("start", 0.0)))
+                end_sec = float(seg.get("end_sec", seg.get("end", 0.0)))
+                if end_sec > start_sec:
+                    segments.append({"start_sec": start_sec, "end_sec": end_sec})
+        else:
+            start_sec = float(clip.get("start_sec", 0.0))
+            end_sec = float(clip.get("end_sec", 0.0))
+            if end_sec > start_sec:
+                segments.append({"start_sec": start_sec, "end_sec": end_sec})
+        return segments
+
+    def _merge_multistep_clip_requests(
+        self,
+        semantic_units: List[Dict[str, Any]],
+        clip_requests: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        将 process>10s + mult_steps=true 的多个 clip 请求合并为单一拼接片段。
+        """
+        if not semantic_units:
+            return clip_requests
+
+        unit_map = {u.get("unit_id", ""): u for u in semantic_units}
+        merge_unit_ids = {u.get("unit_id", "") for u in semantic_units if self._should_merge_multistep_unit(u)}
+        if not merge_unit_ids:
+            return clip_requests
+
+        grouped: Dict[str, List[Dict[str, Any]]] = {uid: [] for uid in merge_unit_ids}
+        remaining: List[Dict[str, Any]] = []
+        for clip in clip_requests:
+            unit_id = clip.get("semantic_unit_id", "")
+            if unit_id in merge_unit_ids:
+                grouped.setdefault(unit_id, []).append(clip)
+            else:
+                remaining.append(clip)
+
+        merged = list(remaining)
+        for unit_id in merge_unit_ids:
+            unit = unit_map.get(unit_id, {})
+            clips = grouped.get(unit_id, [])
+            segments: List[Dict[str, float]] = []
+            knowledge_type = ""
+            for clip in clips:
+                if not knowledge_type:
+                    knowledge_type = clip.get("knowledge_type", "")
+                segments.extend(self._collect_segments_from_clip(clip))
+
+            if not segments:
+                start_sec = float(unit.get("start_sec", 0.0))
+                end_sec = float(unit.get("end_sec", start_sec))
+                if end_sec < start_sec:
+                    end_sec = start_sec
+                segments = [{"start_sec": start_sec, "end_sec": end_sec}]
+                if not knowledge_type:
+                    knowledge_type = unit.get("knowledge_type", "")
+
+            segments.sort(key=lambda s: s["start_sec"])
+            start_sec = min(seg["start_sec"] for seg in segments)
+            end_sec = max(seg["end_sec"] for seg in segments)
+            merged.append({
+                "clip_id": f"vl_clip_{unit_id}_merged",
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "knowledge_type": knowledge_type,
+                "semantic_unit_id": unit_id,
+                "segments": segments
+            })
+            logger.info(
+                f"VL 多段拼接合并: unit={unit_id}, segments={len(segments)}, "
+                f"range=[{start_sec:.2f}-{end_sec:.2f}]"
+            )
+
+        return merged
     
     async def generate(
         self,
@@ -212,6 +304,7 @@ class VLMaterialGenerator:
                 logger.info("🚀 使用缓存的VL分析结果,跳过VL API调用")
                 all_screenshot_requests = cached_data.get("aggregated_screenshots", [])
                 all_clip_requests = cached_data.get("aggregated_clips", [])
+                all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
                 # ⚠️  不直接返回!继续执行CV优化
                 logger.info(f"从缓存加载: screenshots={len(all_screenshot_requests)}, clips={len(all_clip_requests)}")
         
@@ -308,6 +401,7 @@ class VLMaterialGenerator:
                     all_clip_requests.extend(analysis_result.clip_requests)
                     all_screenshot_requests.extend(analysis_result.screenshot_requests)
                 
+                all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
                 logger.info(f"VL 分析汇总: clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
                 
                 # 保存VL分析原始结果(CV优化前)

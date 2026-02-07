@@ -220,6 +220,11 @@ public class PythonGrpcClient {
         public String label;
         public String semanticUnitId;
     }
+
+    public static class ClipSegment {
+        public double startSec;
+        public double endSec;
+    }
     
     public static class ClipRequest {
         public String clipId;
@@ -227,6 +232,7 @@ public class PythonGrpcClient {
         public double endSec;
         public String knowledgeType;
         public String semanticUnitId;
+        public List<ClipSegment> segments = new ArrayList<>();
     }
     
     public static class AnalyzeResult {
@@ -280,6 +286,7 @@ public class PythonGrpcClient {
                     r.endSec = req.getEndSec();
                     r.knowledgeType = req.getKnowledgeType();
                     r.semanticUnitId = req.getSemanticUnitId();
+                    r.segments = buildClipSegments(req.getSegmentsList());
                     result.clipRequests.add(r);
                 }
                 
@@ -641,6 +648,7 @@ public class PythonGrpcClient {
         public double endSec;
         public String knowledgeType;
         public String semanticUnitId;
+        public List<ClipSegment> segments = new ArrayList<>();
     }
 
     public static class MaterialGenerationResult {
@@ -766,6 +774,7 @@ public class PythonGrpcClient {
                     r.endSec = req.getEndSec();
                     r.knowledgeType = req.getKnowledgeType();
                     r.semanticUnitId = req.getSemanticUnitId();
+                    r.segments = buildClipSegments(req.getSegmentsList());
                     result.clipRequests.add(r);
                 }
                 
@@ -852,6 +861,7 @@ public class PythonGrpcClient {
                     r.endSec = req.getEndSec();
                     r.knowledgeType = req.getKnowledgeType();
                     r.semanticUnitId = req.getSemanticUnitId();
+                    r.segments = buildClipSegments(req.getSegmentsList());
                     result.clipRequests.add(r);
                 }
                 
@@ -911,6 +921,20 @@ public class PythonGrpcClient {
                 return result;
             }
         });
+    }
+
+    private List<ClipSegment> buildClipSegments(List<com.mvp.videoprocessing.grpc.ClipSegment> segments) {
+        List<ClipSegment> results = new ArrayList<>();
+        if (segments == null || segments.isEmpty()) {
+            return results;
+        }
+        for (com.mvp.videoprocessing.grpc.ClipSegment seg : segments) {
+            ClipSegment out = new ClipSegment();
+            out.startSec = seg.getStartSec();
+            out.endSec = seg.getEndSec();
+            results.add(out);
+        }
+        return results;
     }
 
 }
