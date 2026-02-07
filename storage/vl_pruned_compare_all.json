@@ -1,0 +1,724 @@
+{
+  "summary": {
+    "total_dirs": 1,
+    "total_items": 13,
+    "total_changed": 13
+  },
+  "reports": [
+    {
+      "pruned_dir": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips",
+      "total": 13,
+      "changed": 13,
+      "items": [
+        {
+          "unit_id": "SU004",
+          "topic": "安装NodeJS",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\001_SU004_安装NodeJS_141.00-156.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                3.6
+              ],
+              [
+                6.8,
+                15.0
+              ]
+            ],
+            "duration_sec": 11.823,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\001_SU004_安装NodeJS_141.00-156.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                15.0
+              ]
+            ],
+            "duration_sec": 15.023,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\001_SU004_安装NodeJS_141.00-156.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU005",
+          "topic": "安装CloudBot",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\002_SU005_安装CloudBot_156.00-187.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                4.8
+              ],
+              [
+                24.6,
+                31.0
+              ]
+            ],
+            "duration_sec": 11.223,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\002_SU005_安装CloudBot_156.00-187.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                6.1
+              ],
+              [
+                24.4,
+                31.0
+              ]
+            ],
+            "duration_sec": 12.723,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\002_SU005_安装CloudBot_156.00-187.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU006",
+          "topic": "初始化配置AI模型与聊天工具",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\003_SU006_初始化配置AI模型与聊天工具_187.00-246.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                2.0
+              ],
+              [
+                8.2,
+                10.6
+              ],
+              [
+                15.4,
+                21.6
+              ],
+              [
+                29.0,
+                39.4
+              ],
+              [
+                41.8,
+                44.2
+              ],
+              [
+                45.4,
+                48.6
+              ],
+              [
+                51.0,
+                59.0
+              ]
+            ],
+            "duration_sec": 34.623,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\003_SU006_初始化配置AI模型与聊天工具_187.00-246.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                3.533
+              ],
+              [
+                8.0,
+                13.233
+              ],
+              [
+                15.2,
+                23.1
+              ],
+              [
+                28.8,
+                40.933
+              ],
+              [
+                41.6,
+                45.0
+              ],
+              [
+                45.2,
+                59.0
+              ]
+            ],
+            "duration_sec": 46.023,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\003_SU006_初始化配置AI模型与聊天工具_187.00-246.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU007",
+          "topic": "基础命令使用",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\004_SU007_基础命令使用_248.00-288.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                8.0
+              ],
+              [
+                11.4,
+                29.4
+              ],
+              [
+                39.0,
+                40.0
+              ]
+            ],
+            "duration_sec": 27.023,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\004_SU007_基础命令使用_248.00-288.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                11.167
+              ],
+              [
+                11.2,
+                30.9
+              ],
+              [
+                38.8,
+                40.0
+              ]
+            ],
+            "duration_sec": 32.09,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\004_SU007_基础命令使用_248.00-288.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU008",
+          "topic": "定时任务功能演示",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\005_SU008_定时任务功能演示_289.00-324.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                2.2
+              ],
+              [
+                15.6,
+                17.8
+              ],
+              [
+                19.2,
+                21.8
+              ],
+              [
+                24.6,
+                27.8
+              ],
+              [
+                29.0,
+                31.2
+              ],
+              [
+                34.0,
+                35.0
+              ]
+            ],
+            "duration_sec": 13.423,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\005_SU008_定时任务功能演示_289.00-324.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                4.0
+              ],
+              [
+                15.4,
+                35.0
+              ]
+            ],
+            "duration_sec": 23.623,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\005_SU008_定时任务功能演示_289.00-324.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU009",
+          "topic": "浏览器自动化案例：下载课件",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\006_SU009_浏览器自动化案例：下载课件_324.00-359.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                1.6
+              ],
+              [
+                4.8,
+                7.0
+              ],
+              [
+                10.4,
+                14.6
+              ],
+              [
+                15.8,
+                19.0
+              ],
+              [
+                20.6,
+                26.6
+              ],
+              [
+                28.0,
+                35.0
+              ]
+            ],
+            "duration_sec": 24.223,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\006_SU009_浏览器自动化案例：下载课件_324.00-359.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                7.8
+              ],
+              [
+                10.2,
+                35.0
+              ]
+            ],
+            "duration_sec": 32.623,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\006_SU009_浏览器自动化案例：下载课件_324.00-359.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU010",
+          "topic": "定时任务与浏览器自动化组合案例",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\007_SU010_定时任务与浏览器自动化组合案例_359.00-391.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                2.0
+              ],
+              [
+                3.6,
+                5.8
+              ],
+              [
+                13.8,
+                21.8
+              ],
+              [
+                23.4,
+                25.6
+              ],
+              [
+                27.8,
+                32.0
+              ]
+            ],
+            "duration_sec": 18.623,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\007_SU010_定时任务与浏览器自动化组合案例_359.00-391.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                7.6
+              ],
+              [
+                13.6,
+                32.0
+              ]
+            ],
+            "duration_sec": 26.023,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\007_SU010_定时任务与浏览器自动化组合案例_359.00-391.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU011",
+          "topic": "图像识别功能配置与使用",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\008_SU011_图像识别功能配置与使用_391.00-416.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                5.6
+              ],
+              [
+                7.2,
+                18.4
+              ],
+              [
+                22.6,
+                25.0
+              ]
+            ],
+            "duration_sec": 19.223,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\008_SU011_图像识别功能配置与使用_391.00-416.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                25.0
+              ]
+            ],
+            "duration_sec": 25.023,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\008_SU011_图像识别功能配置与使用_391.00-416.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU012",
+          "topic": "接入飞书聊天工具",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\009_SU012_接入飞书聊天工具_416.00-535.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                1.6
+              ],
+              [
+                8.0,
+                10.2
+              ],
+              [
+                11.8,
+                19.2
+              ],
+              [
+                20.4,
+                29.6
+              ],
+              [
+                33.2,
+                35.4
+              ],
+              [
+                37.6,
+                46.8
+              ],
+              [
+                48.2,
+                50.6
+              ],
+              [
+                52.8,
+                57.0
+              ],
+              [
+                60.0,
+                75.8
+              ],
+              [
+                77.2,
+                81.4
+              ],
+              [
+                84.2,
+                89.8
+              ],
+              [
+                92.2,
+                94.4
+              ],
+              [
+                96.4,
+                98.6
+              ],
+              [
+                100.6,
+                102.8
+              ],
+              [
+                112.4,
+                116.6
+              ],
+              [
+                118.0,
+                119.0
+              ]
+            ],
+            "duration_sec": 75.823,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\009_SU012_接入飞书聊天工具_416.00-535.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                11.5
+              ],
+              [
+                11.6,
+                32.6
+              ],
+              [
+                33.0,
+                52.133
+              ],
+              [
+                52.6,
+                58.533
+              ],
+              [
+                59.8,
+                105.467
+              ],
+              [
+                112.2,
+                119.0
+              ]
+            ],
+            "duration_sec": 110.057,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\009_SU012_接入飞书聊天工具_416.00-535.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU013",
+          "topic": "切换AI模型到minimax",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\010_SU013_切换AI模型到minimax_517.00-554.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                1.8
+              ],
+              [
+                11.4,
+                15.6
+              ],
+              [
+                18.4,
+                20.8
+              ],
+              [
+                25.2,
+                27.4
+              ],
+              [
+                31.2,
+                35.0
+              ],
+              [
+                36.0,
+                37.0
+              ]
+            ],
+            "duration_sec": 15.423,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\010_SU013_切换AI模型到minimax_517.00-554.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                4.467
+              ],
+              [
+                11.2,
+                22.067
+              ],
+              [
+                25.0,
+                30.167
+              ],
+              [
+                31.0,
+                37.0
+              ]
+            ],
+            "duration_sec": 26.523,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\010_SU013_切换AI模型到minimax_517.00-554.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU014",
+          "topic": "接入谷歌生态（Gmail）",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\011_SU014_接入谷歌生态（Gmail）_555.00-633.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                1.6
+              ],
+              [
+                19.6,
+                21.8
+              ],
+              [
+                23.2,
+                25.4
+              ],
+              [
+                29.6,
+                35.0
+              ],
+              [
+                36.6,
+                39.2
+              ],
+              [
+                40.2,
+                47.2
+              ],
+              [
+                51.6,
+                59.8
+              ],
+              [
+                66.2,
+                74.4
+              ],
+              [
+                77.0,
+                78.0
+              ]
+            ],
+            "duration_sec": 38.423,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\011_SU014_接入谷歌生态（Gmail）_555.00-633.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                4.767
+              ],
+              [
+                19.4,
+                28.033
+              ],
+              [
+                29.4,
+                47.5
+              ],
+              [
+                51.4,
+                62.333
+              ],
+              [
+                66.0,
+                78.0
+              ]
+            ],
+            "duration_sec": 54.457,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\011_SU014_接入谷歌生态（Gmail）_555.00-633.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU015",
+          "topic": "配置百度地图MCP",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\012_SU015_配置百度地图MCP_633.00-674.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                2.8
+              ],
+              [
+                19.4,
+                21.8
+              ],
+              [
+                31.6,
+                33.8
+              ],
+              [
+                39.0,
+                41.0
+              ]
+            ],
+            "duration_sec": 9.423,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\012_SU015_配置百度地图MCP_633.00-674.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                5.467
+              ],
+              [
+                19.2,
+                24.067
+              ],
+              [
+                31.4,
+                41.0
+              ]
+            ],
+            "duration_sec": 19.957,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\012_SU015_配置百度地图MCP_633.00-674.00_pruned_after.mp4"
+          },
+          "changed": true
+        },
+        {
+          "unit_id": "SU016",
+          "topic": "使用coding agent驱动编程",
+          "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\013_SU016_使用coding agent驱动编程_674.00-700.00.mp4",
+          "before": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                2.0
+              ],
+              [
+                12.2,
+                17.2
+              ],
+              [
+                20.0,
+                26.0
+              ]
+            ],
+            "duration_sec": 13.023,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\013_SU016_使用coding agent驱动编程_674.00-700.00_pruned_before.mp4"
+          },
+          "after": {
+            "applied": true,
+            "kept_segments": [
+              [
+                0.0,
+                3.533
+              ],
+              [
+                12.0,
+                18.7
+              ],
+              [
+                19.8,
+                26.0
+              ]
+            ],
+            "duration_sec": 16.457,
+            "file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\compare_boundary_refine\\013_SU016_使用coding agent驱动编程_674.00-700.00_pruned_after.mp4"
+          },
+          "changed": true
+        }
+      ]
+    }
+  ]
+}

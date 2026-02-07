@@ -1,0 +1,35 @@
+{
+  "unit_id": "SU004",
+  "topic": "安装NodeJS",
+  "original_clip": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\001_SU004_安装NodeJS_141.00-156.00.mp4",
+  "before": {
+    "label": "boundary_refine_disabled",
+    "applied": true,
+    "kept_segments": [
+      [
+        0.0,
+        3.6
+      ],
+      [
+        6.800000000000004,
+        15.0
+      ]
+    ],
+    "kept_total_duration_sec": 11.8,
+    "output_file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\001_SU004_安装NodeJS_141.00-156.00_pruned_before.mp4",
+    "output_size_bytes": 893966
+  },
+  "after": {
+    "label": "boundary_refine_enabled",
+    "applied": true,
+    "kept_segments": [
+      [
+        0.0,
+        15.0
+      ]
+    ],
+    "kept_total_duration_sec": 15.0,
+    "output_file": "D:\\videoToMarkdownTest2\\storage\\95bf71bd0768fa4d2a0b2968c775c312\\semantic_unit_clips_vl\\vl_pruned_clips\\001_SU004_安装NodeJS_141.00-156.00_pruned_after.mp4",
+    "output_size_bytes": 935737
+  }
+}

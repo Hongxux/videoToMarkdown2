@@ -9,6 +9,7 @@ VL 前置静态段剔除逻辑单元测试。
 
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, Any
 
 
@@ -178,3 +179,66 @@ def test_find_clip_for_unit_avoids_substring_collision(tmp_path):
 
     assert selected is not None
     assert selected.endswith(file_su01.name)
+
+
+def test_split_complete_sentences_by_pause_threshold():
+    """
+    0.3s 及以上停顿应切出新的口语句。
+    """
+    generator = _build_generator()
+
+    subtitles = [
+        {"start_sec": 0.0, "end_sec": 0.5, "text": "第一句前半"},
+        {"start_sec": 0.5, "end_sec": 1.0, "text": "第一句后半"},
+        {"start_sec": 1.4, "end_sec": 1.8, "text": "第二句"},
+    ]
+
+    sentences = generator._split_complete_sentences_by_pause(subtitles)
+    assert len(sentences) == 2
+    assert abs(sentences[0]["start_sec"] - 0.0) < 1e-6
+    assert abs(sentences[0]["end_sec"] - 1.0) < 1e-6
+    assert abs(sentences[1]["start_sec"] - 1.4) < 1e-6
+
+
+def test_refine_kept_segments_before_concat_applies_semantic_physical_and_buffers(tmp_path, monkeypatch):
+    """
+    Stable 剔除后的 kept 片段在合并前会经历：
+    1) 语义句头回拉；2) 终点并入 MSE 跳变；3) 语流缓冲。
+    """
+    generator = _build_generator()
+
+    async def _fake_detect_segment_mse_jump_end(clip_path, semantic_end_sec, clip_duration_sec):
+        return min(clip_duration_sec, semantic_end_sec + 0.5)
+
+    monkeypatch.setattr(
+        generator,
+        "_detect_segment_mse_jump_end",
+        _fake_detect_segment_mse_jump_end,
+    )
+    monkeypatch.setattr(
+        generator,
+        "_load_subtitles_for_output_dir",
+        lambda _output_dir: [
+            {"start_sec": 100.0, "end_sec": 100.4, "text": "接下来我们看"},
+            {"start_sec": 100.4, "end_sec": 101.0, "text": "第一步操作"},
+            {"start_sec": 101.5, "end_sec": 102.0, "text": "好了这就是结果"},
+        ],
+    )
+
+    clips_dir = tmp_path / "semantic_unit_clips_vl"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    refined = asyncio.run(
+        generator._refine_kept_segments_before_concat(
+            clips_dir=str(clips_dir),
+            semantic_unit={"unit_id": "SU999", "start_sec": 100.0, "end_sec": 103.0},
+            original_clip_path=str(clips_dir / "dummy.mp4"),
+            kept_segments=[(0.5, 0.8)],
+        )
+    )
+
+    assert len(refined) == 1
+    # 起点：回拉到语义句头并加 -0.2s 缓冲后截断到 0
+    assert abs(refined[0][0] - 0.0) < 1e-6
+    # 终点：语义结束 2.0s -> MSE 跳变 2.5s -> +0.3s 缓冲 = 2.8s
+    assert abs(refined[0][1] - 2.8) < 1e-6

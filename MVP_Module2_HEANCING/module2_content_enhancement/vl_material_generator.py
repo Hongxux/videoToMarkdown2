@@ -87,6 +87,19 @@ class VLMaterialGenerator:
         self.pre_vl_min_removed_ratio = float(self.pre_vl_pruning_config.get("min_removed_ratio", 0.10))
         self.pre_vl_context_text_max_chars = int(self.pre_vl_pruning_config.get("context_text_max_chars", 800))
 
+        # Stable 剔除后，合并前做一次边界纠偏（语义句头 + MSE 终点 + 语流缓冲）
+        self.pre_vl_boundary_refine_config = config.get("pre_vl_boundary_refine", {})
+        self.pre_vl_boundary_refine_enabled = bool(self.pre_vl_boundary_refine_config.get("enabled", True))
+        self.pre_vl_pause_threshold_sec = float(self.pre_vl_boundary_refine_config.get("pause_threshold_sec", 0.3))
+        self.pre_vl_start_buffer_sec = float(self.pre_vl_boundary_refine_config.get("start_buffer_sec", 0.2))
+        self.pre_vl_end_buffer_sec = float(self.pre_vl_boundary_refine_config.get("end_buffer_sec", 0.3))
+        self.pre_vl_semantic_search_window_sec = float(self.pre_vl_boundary_refine_config.get("semantic_search_window_sec", 8.0))
+        self.pre_vl_mse_scan_after_end_sec = float(self.pre_vl_boundary_refine_config.get("mse_scan_after_end_sec", 3.0))
+        self.pre_vl_mse_sample_fps = float(self.pre_vl_boundary_refine_config.get("mse_sample_fps", 2.0))
+        self.pre_vl_mse_min_threshold = float(self.pre_vl_boundary_refine_config.get("mse_min_threshold", 64.0))
+
+        self._subtitle_cache: Dict[str, List[Dict[str, Any]]] = {}
+
         # 可选复用 gRPC 侧的 ProcessPool（避免额外 spawn 多套进程池）
         self._cv_executor = cv_executor
         
@@ -408,6 +421,335 @@ class VLMaterialGenerator:
 
         return self._normalize_intervals(removed_intervals)
 
+    def _load_subtitles_for_output_dir(self, output_dir: str) -> List[Dict[str, Any]]:
+        """
+        从 output_dir/intermediates/step2_correction_output.json 加载字幕。
+        为什么：VL 预处理位于 Phase2B，直接复用 Step2 的纠正字幕可避免重复解析与重复调用。
+        """
+        cache_key = str(Path(output_dir).resolve())
+        if cache_key in self._subtitle_cache:
+            return self._subtitle_cache[cache_key]
+
+        step2_path = Path(output_dir) / "intermediates" / "step2_correction_output.json"
+        if not step2_path.exists():
+            self._subtitle_cache[cache_key] = []
+            return []
+
+        try:
+            with open(step2_path, "r", encoding="utf-8") as file_obj:
+                data = json.load(file_obj)
+
+            payload = data.get("output", data) if isinstance(data, dict) else {}
+            raw_subtitles = payload.get("corrected_subtitles", []) if isinstance(payload, dict) else []
+
+            subtitles: List[Dict[str, Any]] = []
+            for item in raw_subtitles:
+                if not isinstance(item, dict):
+                    continue
+                start_sec = self._safe_float(item.get("start_sec", 0.0), 0.0)
+                end_sec = self._safe_float(item.get("end_sec", 0.0), 0.0)
+                if end_sec <= start_sec:
+                    continue
+                text = str(item.get("corrected_text", "") or item.get("text", "") or "").strip()
+                subtitles.append({
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "text": text,
+                })
+
+            subtitles.sort(key=lambda sub: (sub["start_sec"], sub["end_sec"]))
+            self._subtitle_cache[cache_key] = subtitles
+            return subtitles
+        except Exception as error:
+            logger.warning(f"[VL-PrePrune] 加载 step2 字幕失败: {step2_path}, error={error}")
+            self._subtitle_cache[cache_key] = []
+            return []
+
+    def _build_unit_relative_subtitles(
+        self,
+        subtitles: List[Dict[str, Any]],
+        unit_start_sec: float,
+        unit_end_sec: float,
+    ) -> List[Dict[str, Any]]:
+        """
+        将全局字幕裁剪到当前语义单元，并映射为相对时间轴。
+        为什么：kept_segments 在单元相对时间轴上，边界修正必须与其同轴。
+        """
+        if unit_end_sec <= unit_start_sec:
+            return []
+
+        unit_duration = unit_end_sec - unit_start_sec
+        result: List[Dict[str, Any]] = []
+        for sub in subtitles:
+            sub_start = self._safe_float(sub.get("start_sec", 0.0), 0.0)
+            sub_end = self._safe_float(sub.get("end_sec", 0.0), 0.0)
+            if sub_end <= unit_start_sec or sub_start >= unit_end_sec:
+                continue
+
+            rel_start = max(0.0, sub_start - unit_start_sec)
+            rel_end = min(unit_duration, sub_end - unit_start_sec)
+            if rel_end <= rel_start:
+                continue
+
+            result.append({
+                "start_sec": rel_start,
+                "end_sec": rel_end,
+                "text": str(sub.get("text", "") or ""),
+            })
+
+        result.sort(key=lambda sub: (sub["start_sec"], sub["end_sec"]))
+        return result
+
+    def _split_complete_sentences_by_pause(self, subtitles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        使用停顿阈值切分口语句。
+        为什么：ASR 常见无标点长流文本，需用停顿模拟“完整语义句”。
+        """
+        if not subtitles:
+            return []
+
+        pause_threshold = max(0.0, self.pre_vl_pause_threshold_sec)
+        sentences: List[Dict[str, Any]] = []
+        current_sentence: Optional[Dict[str, Any]] = None
+
+        for sub in subtitles:
+            start_sec = self._safe_float(sub.get("start_sec", 0.0), 0.0)
+            end_sec = self._safe_float(sub.get("end_sec", 0.0), 0.0)
+            text = str(sub.get("text", "") or "")
+
+            if current_sentence is None:
+                current_sentence = {
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "text": text,
+                }
+                continue
+
+            pause_gap = start_sec - self._safe_float(current_sentence.get("end_sec", start_sec), start_sec)
+            if pause_gap >= pause_threshold:
+                sentences.append(current_sentence)
+                current_sentence = {
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "text": text,
+                }
+            else:
+                current_sentence["end_sec"] = max(self._safe_float(current_sentence.get("end_sec", end_sec), end_sec), end_sec)
+                current_sentence["text"] = str(current_sentence.get("text", "") or "") + text
+
+        if current_sentence is not None:
+            sentences.append(current_sentence)
+
+        return sentences
+
+    def _pick_sentence_for_anchor(
+        self,
+        sentences: List[Dict[str, Any]],
+        anchor_sec: float,
+        is_start: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        在语义句列表中为边界锚点挑选最优句。
+        为什么：优先使用“引导词/确认词”可减少截断句首句尾的概率。
+        """
+        if not sentences:
+            return None
+
+        search_window = max(0.0, self.pre_vl_semantic_search_window_sec)
+        if is_start:
+            keyword_set = {
+                "下面", "接下来", "我们来看", "首先", "然后", "先看", "先讲", "next", "first",
+            }
+        else:
+            keyword_set = {
+                "好了", "这就是", "总结", "也就是说", "结果是", "完成", "最后", "done", "finally",
+            }
+
+        near_sentences: List[Dict[str, Any]] = []
+        for sentence in sentences:
+            sentence_anchor = self._safe_float(sentence.get("start_sec" if is_start else "end_sec", anchor_sec), anchor_sec)
+            if abs(sentence_anchor - anchor_sec) <= search_window:
+                near_sentences.append(sentence)
+
+        if not near_sentences:
+            return None
+
+        keyword_sentences = [
+            sentence
+            for sentence in near_sentences
+            if any(keyword in str(sentence.get("text", "") or "") for keyword in keyword_set)
+        ]
+        candidate_sentences = keyword_sentences if keyword_sentences else near_sentences
+
+        containing_sentences = [
+            sentence for sentence in candidate_sentences
+            if self._safe_float(sentence.get("start_sec", 0.0), 0.0) <= anchor_sec <= self._safe_float(sentence.get("end_sec", 0.0), 0.0)
+        ]
+        if containing_sentences:
+            candidate_sentences = containing_sentences
+
+        candidate_sentences.sort(
+            key=lambda sentence: abs(
+                self._safe_float(sentence.get("start_sec" if is_start else "end_sec", anchor_sec), anchor_sec) - anchor_sec
+            )
+        )
+        return candidate_sentences[0]
+
+    def _get_complete_semantic_baseline_for_segment(
+        self,
+        seg_start_sec: float,
+        seg_end_sec: float,
+        sentences: List[Dict[str, Any]],
+    ) -> Tuple[float, float]:
+        """
+        给单个待拼接片段计算“完整语义单元基线”。
+        为什么：在稳定段剔除后，原始 kept 区间常落在句中，直接拼接会造成语义断裂。
+        """
+        if not sentences:
+            return seg_start_sec, seg_end_sec
+
+        start_sentence = self._pick_sentence_for_anchor(sentences, seg_start_sec, is_start=True)
+        end_sentence = self._pick_sentence_for_anchor(sentences, seg_end_sec, is_start=False)
+
+        final_start = self._safe_float(start_sentence.get("start_sec", seg_start_sec), seg_start_sec) if start_sentence else seg_start_sec
+        final_end = self._safe_float(end_sentence.get("end_sec", seg_end_sec), seg_end_sec) if end_sentence else seg_end_sec
+        if final_end < final_start:
+            final_start, final_end = seg_start_sec, seg_end_sec
+        return final_start, final_end
+
+    async def _detect_segment_mse_jump_end(
+        self,
+        clip_path: str,
+        semantic_end_sec: float,
+        clip_duration_sec: float,
+    ) -> float:
+        """
+        使用 MSE 检测片段结束后的物理跳变点。
+        为什么：口语句可能先结束、画面后翻页；结束点应覆盖物理动作的完成。
+        """
+        scan_after_end_sec = max(0.0, self.pre_vl_mse_scan_after_end_sec)
+        scan_start = max(0.0, semantic_end_sec)
+        scan_end = min(max(0.0, clip_duration_sec), semantic_end_sec + scan_after_end_sec)
+        if scan_end - scan_start <= 0.2:
+            return semantic_end_sec
+
+        try:
+            from .visual_feature_extractor import VisualFeatureExtractor
+
+            extractor = VisualFeatureExtractor(clip_path)
+            try:
+                source_fps = float(getattr(extractor, "fps", 30.0) or 30.0)
+                sample_fps = max(0.1, self.pre_vl_mse_sample_fps)
+                sample_rate = max(1, int(round(source_fps / sample_fps)))
+                frames, timestamps = extractor.extract_frames_fast(
+                    scan_start,
+                    scan_end,
+                    sample_rate=sample_rate,
+                    target_height=360,
+                    register_to_shm=False,
+                )
+                if len(frames) < 2 or len(timestamps) < 2:
+                    return semantic_end_sec
+
+                mse_list, _ = extractor.calculate_all_diffs(frames)
+                if not mse_list:
+                    return semantic_end_sec
+
+                mse_threshold = max(1.0, self.pre_vl_mse_min_threshold)
+                best_end = semantic_end_sec
+                best_mse = mse_threshold
+                for index, mse_value in enumerate(mse_list):
+                    if mse_value < best_mse:
+                        continue
+                    timestamp_idx = min(index + 1, len(timestamps) - 1)
+                    best_end = max(best_end, self._safe_float(timestamps[timestamp_idx], semantic_end_sec))
+                    best_mse = mse_value
+
+                return min(scan_end, best_end)
+            finally:
+                try:
+                    extractor.cap.release()
+                except Exception:
+                    pass
+        except Exception as error:
+            logger.debug(f"[VL-PrePrune] MSE jump detect skipped: {error}")
+            return semantic_end_sec
+
+    async def _refine_kept_segments_before_concat(
+        self,
+        *,
+        clips_dir: str,
+        semantic_unit: Dict[str, Any],
+        original_clip_path: str,
+        kept_segments: List[Tuple[float, float]],
+    ) -> List[Tuple[float, float]]:
+        """
+        对 stable 剔除后的 kept_segments 做“语义+物理+语流”三段式边界修正。
+        为什么：该阶段正处于“剔除后、合并前”的最优切入点，可最大限度避免拼接后半句话问题。
+        """
+        if not self.pre_vl_boundary_refine_enabled:
+            return kept_segments
+        if not kept_segments:
+            return kept_segments
+
+        unit_start_sec = self._safe_float(semantic_unit.get("start_sec", 0.0), 0.0)
+        unit_end_sec = self._safe_float(semantic_unit.get("end_sec", unit_start_sec), unit_start_sec)
+        unit_duration_sec = max(0.0, unit_end_sec - unit_start_sec)
+        if unit_duration_sec <= 0.0:
+            return kept_segments
+
+        output_dir = str(Path(clips_dir).parent)
+        all_subtitles = self._load_subtitles_for_output_dir(output_dir)
+        unit_subtitles = self._build_unit_relative_subtitles(all_subtitles, unit_start_sec, unit_end_sec)
+        sentences = self._split_complete_sentences_by_pause(unit_subtitles)
+
+        refined_segments: List[Tuple[float, float]] = []
+        ordered_segments = sorted(kept_segments, key=lambda seg: float(seg[0]))
+        for raw_start_sec, raw_end_sec in ordered_segments:
+            seg_start_sec = max(0.0, min(unit_duration_sec, self._safe_float(raw_start_sec, 0.0)))
+            seg_end_sec = max(0.0, min(unit_duration_sec, self._safe_float(raw_end_sec, seg_start_sec)))
+            if seg_end_sec <= seg_start_sec:
+                continue
+
+            # 1) 语义完整性基线：优先锚定完整口语句边界
+            sem_start_sec, sem_end_sec = self._get_complete_semantic_baseline_for_segment(
+                seg_start_sec,
+                seg_end_sec,
+                sentences,
+            )
+
+            # 2) 物理锚点重标定：起点严守语义句头，终点取 max(语义结束, MSE跳变)
+            vis_end_sec = await self._detect_segment_mse_jump_end(
+                clip_path=original_clip_path,
+                semantic_end_sec=sem_end_sec,
+                clip_duration_sec=unit_duration_sec,
+            )
+            recalibrated_start_sec = sem_start_sec
+            recalibrated_end_sec = max(sem_end_sec, vis_end_sec)
+
+            # 3) 口语语流缓冲：起点 -0.2s，终点 +0.3s
+            final_start_sec = max(0.0, recalibrated_start_sec - max(0.0, self.pre_vl_start_buffer_sec))
+            final_end_sec = min(unit_duration_sec, recalibrated_end_sec + max(0.0, self.pre_vl_end_buffer_sec))
+
+            if refined_segments and final_start_sec < refined_segments[-1][1]:
+                final_start_sec = refined_segments[-1][1]
+
+            if final_end_sec - final_start_sec >= self.pre_vl_min_keep_segment_sec:
+                refined_segments.append((final_start_sec, final_end_sec))
+
+        normalized_segments = self._normalize_intervals(
+            refined_segments,
+            min_duration_sec=self.pre_vl_min_keep_segment_sec,
+        )
+        if not normalized_segments:
+            return kept_segments
+
+        logger.info(
+            f"[VL-PrePrune] boundary refine: unit={semantic_unit.get('unit_id', '')}, "
+            f"segments {len(kept_segments)} -> {len(normalized_segments)}"
+        )
+        return normalized_segments
+
     async def _detect_stable_islands_for_unit(
         self,
         clip_path: str,
@@ -635,6 +977,7 @@ class VLMaterialGenerator:
         clips_dir: str,
         semantic_unit: Dict[str, Any],
         original_clip_path: str,
+        force_preprocess: bool = False,
     ) -> Dict[str, Any]:
         """
         为单个语义单元生成“VL前静态段剔除”结果。
@@ -663,7 +1006,7 @@ class VLMaterialGenerator:
             return default_result
         if self.pre_vl_only_process and knowledge_type != "process":
             return default_result
-        if duration_sec < self.pre_vl_min_unit_duration_sec:
+        if (not force_preprocess) and duration_sec < self.pre_vl_min_unit_duration_sec:
             return default_result
 
         try:
@@ -680,6 +1023,15 @@ class VLMaterialGenerator:
                 base_interval=(0.0, duration_sec),
                 removed_intervals=removed_intervals,
                 min_keep_segment_sec=self.pre_vl_min_keep_segment_sec,
+            )
+            if not kept_segments:
+                return default_result
+
+            kept_segments = await self._refine_kept_segments_before_concat(
+                clips_dir=clips_dir,
+                semantic_unit=semantic_unit,
+                original_clip_path=original_clip_path,
+                kept_segments=kept_segments,
             )
             if not kept_segments:
                 return default_result
@@ -723,7 +1075,67 @@ class VLMaterialGenerator:
         except Exception as error:
             logger.warning(f"[VL-PrePrune] failed for unit={unit_id}: {error}")
             return default_result
-    
+
+    async def preprocess_process_units_for_routing(
+        self,
+        video_path: str,
+        process_units: List[Dict[str, Any]],
+        output_dir: str = None,
+        force_preprocess: bool = True,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        在路由层为 process 单元执行预处理并返回“有效时长”。
+        为什么：需要先基于 stable 剔除+边界修正后的真实片段长度，再做短/长分流。
+        """
+        route_map: Dict[str, Dict[str, Any]] = {}
+        if not process_units:
+            return route_map
+
+        clips_dir = await self._split_video_by_semantic_units(video_path, process_units, output_dir)
+        if not clips_dir:
+            return route_map
+
+        for unit in process_units:
+            unit_id = str(unit.get("unit_id", "") or "")
+            start_sec = self._safe_float(unit.get("start_sec", 0.0), 0.0)
+            end_sec = self._safe_float(unit.get("end_sec", start_sec), start_sec)
+            if end_sec < start_sec:
+                end_sec = start_sec
+            raw_duration_sec = max(0.0, end_sec - start_sec)
+
+            entry: Dict[str, Any] = {
+                "unit_id": unit_id,
+                "raw_duration_sec": raw_duration_sec,
+                "effective_duration_sec": raw_duration_sec,
+                "preprocess_applied": False,
+                "clip_path": "",
+                "pre_prune_info": {},
+            }
+
+            clip_path = self._find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec)
+            if not clip_path:
+                route_map[unit_id] = entry
+                continue
+
+            entry["clip_path"] = clip_path
+            pre_prune_info = await self._prepare_pruned_clip_for_vl(
+                clips_dir=clips_dir,
+                semantic_unit=unit,
+                original_clip_path=clip_path,
+                force_preprocess=force_preprocess,
+            )
+            kept_segments = pre_prune_info.get("kept_segments") or []
+            kept_duration = sum(max(0.0, float(e) - float(s)) for s, e in kept_segments)
+
+            entry["preprocess_applied"] = bool(pre_prune_info.get("applied", False))
+            entry["pre_prune_info"] = pre_prune_info
+            if kept_duration > 0.0:
+                entry["effective_duration_sec"] = kept_duration
+
+            route_map[unit_id] = entry
+
+        return route_map
+
     async def generate(
         self,
         video_path: str,

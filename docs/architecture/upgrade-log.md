@@ -23,6 +23,29 @@
 - 验证方式与结果：新增单元测试覆盖“区间剔除边界、时间映射、上下文提示关键字段”；已有 VL/CV 主流程不改接口。
 - 可复用经验：在高成本模型前增加“可逆的结构化压缩层（区间剔除 + 时间映射 + 上下文补偿）”，通常比单纯调 prompt 更稳定地降低成本。
 
+### 2026-02-07 补充：stable 剔除后、合并前的片段边界纠偏
+- 触发背景：`pre_vl_static_pruning` 在剔除 stable 核心段后，`kept_segments` 直接拼接会出现口语句被截断（句首/句尾被切掉）的问题，影响 VL 理解与后续素材定位质量。
+- 改动点：在 `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py` 新增“合并前边界修正”链路，并在 `_prepare_pruned_clip_for_vl` 中对每个 `kept_segment` 执行修正后再进入 ffmpeg 拼接。
+- 复用策略（对齐既有 VideoClipExtractor 思路）：
+  - 语义完整性基线：基于 `0.3s` 停顿阈值分割口语句；起点优先匹配引导词（如“下面/接下来/首先”），终点优先匹配确认词（如“好了/这就是/总结”）。
+  - 物理锚点重标定：起点严格使用语义句头（不向后追物理点）；终点取 `max(语义结束, MSE 跳变点)`，覆盖“先讲完后翻页”的真实教学节奏。
+  - 口语语流缓冲：起点向前 `0.2s`、终点向后 `0.3s`，并与相邻片段做重叠保护。
+- 数据来源与调用链：
+  - 字幕来源复用 `output_dir/intermediates/step2_correction_output.json`（优先 `corrected_text`），避免新增上游接口依赖。
+  - 调用时机固定在“stable 剔除完成后、`_concat_segments_with_ffmpeg` 前”，保证对 VL 输入片段生效，同时不影响 Java 侧最终拼接协议。
+- 配置与默认值：新增 `vl_material_generation.pre_vl_boundary_refine`（默认启用），关键参数包括 `pause_threshold_sec=0.3`、`start_buffer_sec=0.2`、`end_buffer_sec=0.3`、`mse_scan_after_end_sec=3.0`、`mse_sample_fps=2.0`。
+- 验证结果：`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py` 新增边界纠偏相关测试，`python -m pytest MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py -q` 通过（9 passed）。
+
+### 2026-02-07 补充：AnalyzeWithVL 路由先做 process 预处理，再按有效时长分流
+- 触发背景：原路由先按原始语义单元时长（10s）决定 `process_short/process_long`，导致 stable 剔除与边界修正对路由决策无影响。
+- 改动点：
+  - `python_grpc_server.py`：`AnalyzeWithVL` 中对所有 `knowledge_type=process` 单元，先执行与 `process_long` 一致的 VL 前预处理（stable 剔除 + 合并前边界修正），再按“预处理后有效时长”分流。
+  - 分流阈值由 `10s` 调整为 `20s`。
+  - 路由日志新增 `process_preprocessed` 和 `threshold` 字段，便于追踪路由行为变化。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`：`_prepare_pruned_clip_for_vl` 新增 `force_preprocess`；新增 `preprocess_process_units_for_routing` 供路由层批量预处理并返回有效时长。
+- 决策链变化：`process` 单元由“原始时长分流”升级为“预处理后有效时长分流”，与 VL 输入片段定义保持一致。
+- 兼容性与回滚：若需回滚，仅需恢复路由分流逻辑为原始 `duration` + `10s` 阈值，或在路由调用中关闭 `force_preprocess`。
+
 ### 2026-02-07 补充：按任务 token 节省率可观测性
 - 新增能力：在 `VLVideoAnalyzer` 捕获每次调用 `usage.prompt_tokens/completion_tokens/total_tokens`，并在 `VLMaterialGenerator` 汇总到任务级 `token_stats`。
 - 节省率定义（估算）：

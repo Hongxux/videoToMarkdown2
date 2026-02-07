@@ -3408,11 +3408,27 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 "concrete": 0,
                 "process_short": 0,
                 "process_long": 0,
+                "process_preprocessed": 0,
                 "unknown": 0
             }
             vl_units = []
             cv_screenshot_units = []
             cv_clip_units = []
+            duration_threshold_sec = 20.0
+
+            process_units = []
+            for unit in semantic_units:
+                raw_kt = unit.get("knowledge_type", "")
+                if _normalize_knowledge_type(raw_kt) == "process":
+                    process_units.append(unit)
+
+            routing_generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
+            process_route_map = await routing_generator.preprocess_process_units_for_routing(
+                video_path=video_path,
+                process_units=process_units,
+                output_dir=output_dir,
+                force_preprocess=True,
+            )
 
             for unit in semantic_units:
                 raw_kt = unit.get("knowledge_type", "")
@@ -3432,7 +3448,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     continue
 
                 # process: 按时长分流
-                if duration <= 10.0:
+                route_info = process_route_map.get(str(unit.get("unit_id", "") or ""), {})
+                effective_duration = _safe_float(route_info.get("effective_duration_sec", duration), duration)
+                if bool(route_info.get("preprocess_applied", False)):
+                    routing_stats["process_preprocessed"] += 1
+                unit["_routing_pre_prune"] = route_info.get("pre_prune_info", {})
+                unit["_routing_effective_duration_sec"] = effective_duration
+
+                if effective_duration <= duration_threshold_sec:
                     routing_stats["process_short"] += 1
                     cv_screenshot_units.append(unit)
                     if unit.get("mult_steps", False):
@@ -3445,6 +3468,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 f"[{task_id}] VL 路由统计: total={routing_stats['total']}, "
                 f"abstract={routing_stats['abstract']}, concrete={routing_stats['concrete']}, "
                 f"process_short={routing_stats['process_short']}, process_long={routing_stats['process_long']}, "
+                f"process_preprocessed={routing_stats['process_preprocessed']}, "
+                f"threshold={duration_threshold_sec:.1f}s, "
                 f"unknown={routing_stats['unknown']}"
             )
 
@@ -3460,7 +3485,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
 
             # ==================================================================
-            # 路由侧：截图选择（concrete + process<=10s）
+            # 路由侧：截图选择（concrete + process<=20s）
             # ==================================================================
             vl_screenshot_requests = []
             vl_clip_requests = []

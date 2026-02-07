@@ -259,6 +259,18 @@ vl_material_generation:
     min_keep_segment_sec: 0.5
     min_removed_ratio: 0.10
     context_text_max_chars: 800
+
+  # Stable 剔除后、合并前的片段边界纠偏
+  # 目标：避免拼接片段截断口语句，提升 VL 输入语义完整性
+  pre_vl_boundary_refine:
+    enabled: true
+    pause_threshold_sec: 0.3
+    start_buffer_sec: 0.2
+    end_buffer_sec: 0.3
+    semantic_search_window_sec: 8.0
+    mse_scan_after_end_sec: 3.0
+    mse_sample_fps: 2.0
+    mse_min_threshold: 64.0
   
   
   # 截图优化配置

@@ -341,3 +341,34 @@
   - 发生异常可通过 `pre_vl_static_pruning.enabled=false` 一键回退。
 - 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`MVP_Module2_HEANCING/config/module2_config.yaml`
 - 复盘要点：任何“前置压缩输入”的策略都必须保证时间轴可逆映射，否则后续素材定位会系统性漂移。
+
+## 2026-02-07 VL 多个视频片段截取结果相同（并触发 Java Concat DTS 非单调）
+- 日期：2026-02-07
+- 现象与影响范围：
+  - 多个 `vl_clip_SUxxx_merged.mp4` 视觉上几乎是同一段内容，语义单元间区分度消失。
+  - Java 侧出现大量 `No frame at timestamp ...`（超过原视频时长）与 `non monotonically increasing dts` / `av_interleaved_write_frame() error -22`。
+- 触发条件：启用 VL 前置裁剪（stable 剔除）后，进入“时间回映射 + Java 侧多段拼接”链路时更容易触发。
+- 根因定位（第一性拆解）：
+  - **单元映射错误**：`_find_clip_for_unit` 使用 `if unit_id in filename` 子串匹配，`SU01` 可能误命中 `SU010`，导致多个单元复用同一源片段。
+  - **时间基准污染**：预裁剪回映射阶段使用了循环外变量 `start_sec`，而不是当前任务元数据中的 `meta.start_sec`，导致多数请求被整体偏移到同一时间区间。
+  - **分段回写过宽**：每个 clip 都回写整单元 `kept_segments`，而非 clip 自身命中的子区间，Java concat 收到重复/重叠片段后更易产出非单调 DTS。
+  - **缺少边界收敛**：回映射后的 clip/screenshot 时间未统一 clamp 到 `[unit_start, unit_end]`，越界时间戳进入下游后直接触发抽帧失败。
+- 修复措施：
+  - **精确匹配 clip**：`manifest.json` 精确 `unit_id` 优先；文件名回退改为 token 边界匹配（正则），彻底规避子串误匹配。
+  - **修正时间基准**：回映射统一使用 `unit_start_sec/unit_end_sec`（来自 `task_metadata`），消除跨单元变量串用。
+  - **新增区间级映射**：增加 `_map_pruned_interval_to_original_segments(...)`，把 pruned 区间映射回原时间轴的“实际命中子段”，支持跨 gap 的多段返回。
+  - **收紧 segments 回写**：`clip_item["segments"]` 改为当前 clip 的 `abs_segments`（命中子段），不再写整单元保留段。
+  - **统一边界兜底**：对 clip/screenshot 时间戳执行区间约束（clamp 到单元边界），防止越界进入 Java 侧。
+- 验证方式：
+  - 单元测试：`test_vl_pre_prune.py` 新增/更新以下用例并通过。
+    - `test_find_clip_for_unit_avoids_substring_collision`（防 SU01/SU010 冲突）
+    - `test_map_pruned_interval_to_original_segments_cross_gap`（跨剔除 gap 的区间映射）
+    - `test_removed_intervals_require_stable_longer_than_3s`（阈值改为 >3s）
+  - 语法检查：`py_compile` 通过。
+- 预防方案（监控/测试/校验/回滚）：
+  - 监控：增加“素材请求时间戳越界计数”“单元到 clip 命中冲突计数”“concat 失败计数”作为告警维度。
+  - 测试：保留并扩展“unit_id 冲突命名”“跨 gap 映射”“越界 clamp”回归测试。
+  - 校验：在进入 Java 提取前增加轻量校验（`segments` 去重、排序、重叠合并后再下发）。
+  - 回滚：可临时关闭 `pre_vl_static_pruning.enabled` 回到未裁剪路径，保证主流程可用性。
+- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`docs/architecture/upgrade-log.md`
+- 复盘要点：任何“先裁剪再理解”的链路，本质是“坐标系变换问题”；若 unit 绑定、时间基准、区间语义三者任一失真，下游必然表现为“片段重复 + 越界 + 拼接异常”。
