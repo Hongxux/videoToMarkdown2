@@ -1,0 +1,267 @@
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+2026-02-08 01:58:39,584 - python_grpc_server - INFO - \u2705 Global resources config saved (lazy loading enabled)
+2026-02-08 01:58:39,585 - MVP_Module2_HEANCING.module2_content_enhancement.llm_client - INFO - AdaptiveConcurrencyLimiter initialized: limit=10, range=[2, 300]
+2026-02-08 01:58:39,585 - python_grpc_server - INFO - \U0001f680 CV ProcessPool Config: 6 workers (Limit by RAM: 7, CPU: 16, HardCap: 6)
+2026-02-08 01:58:39,588 - python_grpc_server - INFO - \U0001f680 CV ProcessPool created: 6 workers + SharedMemory
+2026-02-08 01:58:39,588 - python_grpc_server - INFO - VideoProcessingServicer initialized (Java controls concurrency)
+2026-02-08 01:58:39,588 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] AnalyzeWithVL 开始: video=D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\video.mp4, units_json=D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_units_phase2a.json
+2026-02-08 01:58:39,609 - MVP_Module2_HEANCING.module2_content_enhancement.config_loader - INFO - Loaded module2 config from D:\videoToMarkdownTest2\MVP_Module2_HEANCING\config\module2_config.yaml
+2026-02-08 01:58:39,625 - MVP_Module2_HEANCING.module2_content_enhancement.config_loader - INFO - Merged external dictionaries into config
+2026-02-08 01:58:39,630 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - VLMaterialGenerator 初始化完成: enabled=True
+2026-02-08 01:58:39,637 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - 复用已存在的 VL 目标视频片段: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl
+2026-02-08 01:58:39,638 - MVP_Module2_HEANCING.module2_content_enhancement.resource_manager - INFO - ResourceManager initialized (singleton)
+2026-02-08 01:58:41,647 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU002: stable_islands=9
+2026-02-08 01:58:41,666 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f4e1 Loading CLIP model (Global Singleton)...
+2026-02-08 01:58:41,669 - sentence_transformers.SentenceTransformer - INFO - Load pretrained SentenceTransformer: clip-ViT-B-32
+Using a slow image processor as `use_fast` is unset and a slow processor was saved with this model. `use_fast=True` will be the default behavior in v4.52, even if the model was saved with a slow processor. This will result in minor differences in outputs. You'll still be able to use a slow processor with `use_fast=False`.
+2026-02-08 01:58:45,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u2705 V5: CLIP model loaded successfully.
+2026-02-08 01:58:45,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 250 (Waterline: 1.0x)
+2026-02-08 01:58:45,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\001_SU002_部署环境选择与推荐_104.00-136.00.mp4
+2026-02-08 01:58:45,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:45,640 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU002, segments 2 -> 1
+2026-02-08 01:58:46,936 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU003: stable_islands=7
+2026-02-08 01:58:46,947 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 249 (Waterline: 1.0x)
+2026-02-08 01:58:46,948 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\002_SU003_NodeJS安装步骤_135.00-156.00.mp4
+2026-02-08 01:58:46,948 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:47,444 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU003, segments 2 -> 2
+2026-02-08 01:58:49,011 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU003, removed_ratio=16.19%, stable=7, removed=1, kept=2
+2026-02-08 01:58:54,452 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU004: stable_islands=18
+2026-02-08 01:58:54,469 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 246 (Waterline: 1.0x)
+2026-02-08 01:58:54,469 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\003_SU004_CloudBot安装与初始化_156.00-246.00.mp4
+2026-02-08 01:58:54,469 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:55,135 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 246 (Waterline: 1.0x)
+2026-02-08 01:58:55,136 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\003_SU004_CloudBot安装与初始化_156.00-246.00.mp4
+2026-02-08 01:58:55,136 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:55,543 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 246 (Waterline: 1.0x)
+2026-02-08 01:58:55,543 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\003_SU004_CloudBot安装与初始化_156.00-246.00.mp4
+2026-02-08 01:58:55,543 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:56,163 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 246 (Waterline: 1.0x)
+2026-02-08 01:58:56,163 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\003_SU004_CloudBot安装与初始化_156.00-246.00.mp4
+2026-02-08 01:58:56,163 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:56,563 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 246 (Waterline: 1.0x)
+2026-02-08 01:58:56,563 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\003_SU004_CloudBot安装与初始化_156.00-246.00.mp4
+2026-02-08 01:58:56,563 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:58:57,043 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU004, segments 6 -> 5
+2026-02-08 01:59:02,901 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU004, removed_ratio=50.22%, stable=18, removed=5, kept=5
+2026-02-08 01:59:05,519 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU005: stable_islands=13
+2026-02-08 01:59:05,530 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 245 (Waterline: 1.0x)
+2026-02-08 01:59:05,530 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\004_SU005_基础命令使用介绍_248.00-288.00.mp4
+2026-02-08 01:59:05,530 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:06,103 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 244 (Waterline: 1.0x)
+2026-02-08 01:59:06,104 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\004_SU005_基础命令使用介绍_248.00-288.00.mp4
+2026-02-08 01:59:06,104 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:06,781 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU005, segments 3 -> 3
+2026-02-08 01:59:10,060 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU005, removed_ratio=32.50%, stable=13, removed=2, kept=3
+2026-02-08 01:59:11,801 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU006: stable_islands=5
+2026-02-08 01:59:11,826 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 242 (Waterline: 1.0x)
+2026-02-08 01:59:11,826 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\005_SU006_定时任务功能演示_289.00-318.00.mp4
+2026-02-08 01:59:11,826 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:12,346 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU006, segments 3 -> 2
+2026-02-08 01:59:14,274 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU006, removed_ratio=55.86%, stable=5, removed=2, kept=2
+2026-02-08 01:59:16,947 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU007: stable_islands=11
+2026-02-08 01:59:16,960 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 241 (Waterline: 1.0x)
+2026-02-08 01:59:16,960 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\006_SU007_浏览器自动化案例_318.00-359.00.mp4
+2026-02-08 01:59:16,960 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:17,251 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 241 (Waterline: 1.0x)
+2026-02-08 01:59:17,251 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\006_SU007_浏览器自动化案例_318.00-359.00.mp4
+2026-02-08 01:59:17,252 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:17,720 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 241 (Waterline: 1.0x)
+2026-02-08 01:59:17,720 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\006_SU007_浏览器自动化案例_318.00-359.00.mp4
+2026-02-08 01:59:17,720 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:18,224 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU007, segments 4 -> 3
+2026-02-08 01:59:21,876 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU007, removed_ratio=22.44%, stable=11, removed=3, kept=3
+2026-02-08 01:59:23,766 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU008: stable_islands=7
+2026-02-08 01:59:23,783 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 239 (Waterline: 1.0x)
+2026-02-08 01:59:23,783 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\007_SU008_定时任务与浏览器组合案例_359.00-391.00.mp4
+2026-02-08 01:59:23,783 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:24,246 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU008, segments 3 -> 2
+2026-02-08 01:59:26,796 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU008, removed_ratio=31.87%, stable=7, removed=2, kept=2
+2026-02-08 01:59:28,386 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU009: stable_islands=8
+2026-02-08 01:59:28,386 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU009, segments 2 -> 1
+2026-02-08 01:59:30,666 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU009, removed_ratio=16.80%, stable=8, removed=1, kept=1
+2026-02-08 01:59:36,617 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU010: stable_islands=30
+2026-02-08 01:59:36,630 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 235 (Waterline: 1.0x)
+2026-02-08 01:59:36,630 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:36,630 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:36,980 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:36,981 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:36,981 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:37,426 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 235 (Waterline: 1.0x)
+2026-02-08 01:59:37,426 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:37,427 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:37,718 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:37,718 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:37,718 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:38,224 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 235 (Waterline: 1.0x)
+2026-02-08 01:59:38,224 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:38,224 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:39,100 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:39,100 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:39,100 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:39,560 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:39,560 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\009_SU010_接入飞书国内聊天工具_416.00-517.00.mp4
+2026-02-08 01:59:39,560 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:39,962 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU010, segments 9 -> 4
+2026-02-08 01:59:48,339 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU010, removed_ratio=24.36%, stable=30, removed=8, kept=4
+2026-02-08 01:59:50,600 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU011: stable_islands=7
+2026-02-08 01:59:50,612 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:50,612 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\010_SU011_切换国产AI模型_517.00-554.00.mp4
+2026-02-08 01:59:50,612 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:50,930 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:50,930 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\010_SU011_切换国产AI模型_517.00-554.00.mp4
+2026-02-08 01:59:50,930 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:51,529 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:51,529 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\010_SU011_切换国产AI模型_517.00-554.00.mp4
+2026-02-08 01:59:51,529 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:52,095 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 234 (Waterline: 1.0x)
+2026-02-08 01:59:52,096 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\010_SU011_切换国产AI模型_517.00-554.00.mp4
+2026-02-08 01:59:52,096 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 01:59:52,646 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU011, segments 5 -> 4
+2026-02-08 01:59:55,638 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU011, removed_ratio=55.68%, stable=7, removed=4, kept=4
+2026-02-08 02:00:00,444 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU012: stable_islands=17
+2026-02-08 02:00:00,456 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 232 (Waterline: 1.0x)
+2026-02-08 02:00:00,456 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\011_SU012_接入谷歌生态Skills_555.00-633.00.mp4
+2026-02-08 02:00:00,456 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:00,834 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 232 (Waterline: 1.0x)
+2026-02-08 02:00:00,834 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\011_SU012_接入谷歌生态Skills_555.00-633.00.mp4
+2026-02-08 02:00:00,834 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:01,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 231 (Waterline: 1.0x)
+2026-02-08 02:00:01,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\011_SU012_接入谷歌生态Skills_555.00-633.00.mp4
+2026-02-08 02:00:01,186 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:01,738 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 232 (Waterline: 1.0x)
+2026-02-08 02:00:01,739 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\011_SU012_接入谷歌生态Skills_555.00-633.00.mp4
+2026-02-08 02:00:01,739 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:02,475 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU012, segments 6 -> 5
+2026-02-08 02:00:07,770 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU012, removed_ratio=45.64%, stable=17, removed=5, kept=5
+2026-02-08 02:00:10,275 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU013: stable_islands=3
+2026-02-08 02:00:10,288 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 231 (Waterline: 1.0x)
+2026-02-08 02:00:10,288 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\012_SU013_配置MCP对接百度地图_633.00-674.00.mp4
+2026-02-08 02:00:10,288 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:10,657 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 230 (Waterline: 1.0x)
+2026-02-08 02:00:10,657 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\012_SU013_配置MCP对接百度地图_633.00-674.00.mp4
+2026-02-08 02:00:10,657 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:11,237 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU013, segments 4 -> 3
+2026-02-08 02:00:13,518 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU013, removed_ratio=77.07%, stable=3, removed=3, kept=3
+2026-02-08 02:00:15,056 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] unit=SU014: stable_islands=6
+2026-02-08 02:00:15,069 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 231 (Waterline: 1.0x)
+2026-02-08 02:00:15,069 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\013_SU014_使用coding agent编程案例_674.00-700.00.mp4
+2026-02-08 02:00:15,069 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:15,486 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 230 (Waterline: 1.0x)
+2026-02-08 02:00:15,487 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_unit_clips_vl\013_SU014_使用coding agent编程案例_674.00-700.00.mp4
+2026-02-08 02:00:15,487 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \u26a1 [Strategy] Clip duration 3.00s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.
+2026-02-08 02:00:15,908 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] boundary refine: unit=SU014, segments 3 -> 3
+2026-02-08 02:00:17,913 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - [VL-PrePrune] applied: unit=SU014, removed_ratio=50.00%, stable=6, removed=2, kept=3
+2026-02-08 02:00:17,913 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] VL 路由统计: total=14, abstract=1, concrete=0, process_short=10, process_long=3, process_preprocessed=12, threshold=40.0s, unknown=0
+2026-02-08 02:00:17,913 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - VLMaterialGenerator 初始化完成: enabled=True
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \u2705 从缓存加载VL分析结果: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\vl_analysis_cache.json
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO -    - 缓存版本: 1.0
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO -    - 总单元数: 3
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO -    - 成功单元: 3
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO -    - 截图请求: 24
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO -    - 视频片段: 17
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f680 使用缓存的VL分析结果,跳过VL API调用
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - 从缓存加载: screenshots=24, clips=17
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - 开始批量 CV 优化 24 个截图请求...
+2026-02-08 02:00:17,916 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f680 使用流式处理模式 (streaming_pipeline=true)
+2026-02-08 02:00:17,918 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f680 [Streaming Pipeline] 启动流式处理: 24 个请求
+2026-02-08 02:00:18,068 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - \U0001f680 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size 229 (Waterline: 1.0x)
+2026-02-08 02:00:18,069 - MVP_Module2_HEANCING.module2_content_enhancement.visual_feature_extractor - INFO - VisualFeatureExtractor initialized for: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\video.mp4
+2026-02-08 02:00:18,069 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4e6 [Streaming Pipeline] Config: workers=6, inflight=12, overlap_buffers=2, chunks=18, max_span=10.00s, max_req/chunk=1000
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+\U0001f680 PYTHON GRPC SERVER IS STARTING - VERSION V3.1 (PARALLEL CV) \U0001f680
+2026-02-08 02:00:19,761 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 1/18: reqs=1, span=2.00s, prefetch=1661.9ms, register=19.7ms, submitted=1, inflight=1, total=1691.9ms
+2026-02-08 02:00:22,098 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 2/18: reqs=1, span=2.00s, prefetch=2071.8ms, register=22.8ms, submitted=1, inflight=2, total=2106.7ms
+2026-02-08 02:00:32,082 - cv_worker - INFO - \u2705 Nested parallelism disabled: cv2 threads=1
+2026-02-08 02:00:32,082 - cv_worker - INFO - \U0001f680 CV Worker initialized with SharedMemory support (PID=18676)
+2026-02-08 02:00:32,083 - cv_worker - INFO - \u26a0\ufe0f 'resource' check skipped (Windows). Manual limit active: 4.7GB
+2026-02-08 02:00:32,100 - cv_worker - INFO - \u2705 Nested parallelism disabled: cv2 threads=1
+2026-02-08 02:00:32,100 - cv_worker - INFO - \U0001f680 CV Worker initialized with SharedMemory support (PID=45128)
+2026-02-08 02:00:32,102 - cv_worker - INFO - \u26a0\ufe0f 'resource' check skipped (Windows). Manual limit active: 4.7GB
+2026-02-08 02:00:32,122 - cv_worker - INFO - \u2705 Nested parallelism disabled: cv2 threads=1
+2026-02-08 02:00:32,122 - cv_worker - INFO - \u2705 Nested parallelism disabled: cv2 threads=1
+2026-02-08 02:00:32,122 - cv_worker - INFO - \U0001f680 CV Worker initialized with SharedMemory support (PID=49180)
+2026-02-08 02:00:32,122 - cv_worker - INFO - \U0001f680 CV Worker initialized with SharedMemory support (PID=25572)
+2026-02-08 02:00:32,123 - cv_worker - INFO - \u26a0\ufe0f 'resource' check skipped (Windows). Manual limit active: 4.7GB
+2026-02-08 02:00:32,123 - cv_worker - INFO - \u26a0\ufe0f 'resource' check skipped (Windows). Manual limit active: 4.7GB
+2026-02-08 02:00:32,208 - cv_worker - INFO - \u2705 Nested parallelism disabled: cv2 threads=1
+2026-02-08 02:00:32,208 - cv_worker - INFO - \U0001f680 CV Worker initialized with SharedMemory support (PID=44608)
+2026-02-08 02:00:32,209 - cv_worker - INFO - \u26a0\ufe0f 'resource' check skipped (Windows). Manual limit active: 4.7GB
+2026-02-08 02:00:32,210 - cv_worker - INFO - \u2705 Nested parallelism disabled: cv2 threads=1
+2026-02-08 02:00:32,210 - cv_worker - INFO - \U0001f680 CV Worker initialized with SharedMemory support (PID=42928)
+2026-02-08 02:00:32,211 - cv_worker - INFO - \u26a0\ufe0f 'resource' check skipped (Windows). Manual limit active: 4.7GB
+2026-02-08 02:01:48,553 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [135.0s-156.0s]: 6 screenshots in 76.45s (pid=45128)
+2026-02-08 02:01:49,048 - cv_worker - INFO - \u2705 Screenshot selected for SU004_island0 (PID=45128): t=183.53s, score=54425.959 (islands=0, frames=30)
+2026-02-08 02:01:50,182 - cv_worker - INFO - \u2705 Screenshot selected for SU004_island1 (PID=45128): t=205.30s, score=7351.283 (islands=0, frames=30)
+2026-02-08 02:01:53,159 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 3/18: reqs=1, span=2.00s, prefetch=3388.6ms, register=34.2ms, submitted=1, inflight=2, total=3449.8ms
+2026-02-08 02:01:57,750 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 4/18: reqs=1, span=2.00s, prefetch=3890.6ms, register=31.4ms, submitted=1, inflight=2, total=3939.0ms
+2026-02-08 02:02:28,753 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [289.0s-318.0s]: 11 screenshots in 116.63s (pid=49180)
+2026-02-08 02:02:28,784 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] 路由截图流式进度: 2/10, queue=8, active_pids=2
+2026-02-08 02:02:29,271 - cv_worker - INFO - \u2705 Screenshot selected for SU004_island2 (PID=49180): t=215.10s, score=1303.856 (islands=1, frames=30)
+2026-02-08 02:02:30,356 - cv_worker - INFO - \u2705 Screenshot selected for SU004_island3 (PID=49180): t=225.47s, score=14666.367 (islands=0, frames=30)
+2026-02-08 02:02:38,056 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [359.0s-391.0s]: 9 screenshots in 125.84s (pid=42928)
+2026-02-08 02:02:40,022 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 5/18: reqs=2, span=8.50s, prefetch=9867.7ms, register=189.7ms, submitted=2, inflight=3, total=10105.2ms
+2026-02-08 02:02:45,102 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 6/18: reqs=1, span=2.00s, prefetch=4386.3ms, register=44.8ms, submitted=1, inflight=3, total=4515.1ms
+2026-02-08 02:03:07,373 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [318.0s-359.0s]: 11 screenshots in 155.16s (pid=44608)
+2026-02-08 02:03:07,418 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] 路由截图流式进度: 4/10, queue=6, active_pids=4
+2026-02-08 02:03:07,880 - cv_worker - INFO - \u2705 Screenshot selected for SU004_island4 (PID=44608): t=239.63s, score=21200.743 (islands=0, frames=30)
+2026-02-08 02:03:09,016 - cv_worker - INFO - \u2705 Screenshot selected for SU004_island5 (PID=44608): t=246.13s, score=13590.900 (islands=0, frames=31)
+2026-02-08 02:03:09,941 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island6 (PID=44608): t=430.80s, score=17472.140 (islands=0, frames=30)
+2026-02-08 02:03:15,896 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 7/18: reqs=2, span=7.80s, prefetch=6188.9ms, register=132.3ms, submitted=2, inflight=3, total=6355.8ms
+2026-02-08 02:03:20,052 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 8/18: reqs=1, span=2.00s, prefetch=3454.3ms, register=30.0ms, submitted=1, inflight=3, total=3535.0ms
+2026-02-08 02:03:21,241 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [248.0s-288.0s]: 18 screenshots in 169.12s (pid=25572)
+2026-02-08 02:03:21,888 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island7 (PID=25572): t=438.20s, score=469.808 (islands=1, frames=30)
+2026-02-08 02:03:23,292 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island8 (PID=25572): t=444.80s, score=14743.870 (islands=0, frames=30)
+2026-02-08 02:03:24,526 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island9 (PID=25572): t=456.70s, score=26968.441 (islands=0, frames=30)
+2026-02-08 02:03:30,161 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 9/18: reqs=2, span=8.47s, prefetch=5907.5ms, register=126.3ms, submitted=2, inflight=3, total=6152.8ms
+2026-02-08 02:03:31,416 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island10 (PID=25572): t=467.57s, score=1179.022 (islands=1, frames=30)
+2026-02-08 02:03:32,794 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island11 (PID=25572): t=475.03s, score=1277.211 (islands=1, frames=30)
+2026-02-08 02:03:33,979 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 10/18: reqs=1, span=2.00s, prefetch=3061.8ms, register=29.1ms, submitted=1, inflight=3, total=3110.5ms
+2026-02-08 02:03:34,931 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island12 (PID=25572): t=489.27s, score=13225.935 (islands=0, frames=30)
+2026-02-08 02:03:36,400 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 11/18: reqs=1, span=2.00s, prefetch=1843.1ms, register=29.9ms, submitted=1, inflight=2, total=1886.8ms
+2026-02-08 02:03:36,451 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [391.0s-416.0s]: 9 screenshots in 105.77s (pid=45128)
+2026-02-08 02:03:36,761 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] 路由截图流式进度: 6/10, queue=4, active_pids=5
+2026-02-08 02:03:37,100 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island13 (PID=25572): t=502.63s, score=6463.809 (islands=0, frames=30)
+2026-02-08 02:03:39,786 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 12/18: reqs=1, span=2.00s, prefetch=2984.8ms, register=29.1ms, submitted=1, inflight=2, total=3027.7ms
+2026-02-08 02:03:40,653 - cv_worker - INFO - \u2705 Screenshot selected for SU010_island14 (PID=45128): t=516.00s, score=1503.449 (islands=1, frames=30)
+2026-02-08 02:03:42,897 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [104.0s-136.0s]: 9 screenshots in 190.81s (pid=18676)
+2026-02-08 02:03:43,076 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 13/18: reqs=1, span=2.00s, prefetch=2806.5ms, register=28.6ms, submitted=1, inflight=2, total=2850.7ms
+2026-02-08 02:03:43,781 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island15 (PID=25572): t=575.50s, score=14684.731 (islands=0, frames=30)
+2026-02-08 02:03:49,326 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 14/18: reqs=2, span=9.00s, prefetch=5791.2ms, register=110.7ms, submitted=2, inflight=3, total=5917.9ms
+2026-02-08 02:03:50,051 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island16 (PID=45128): t=586.00s, score=28181.230 (islands=0, frames=30)
+2026-02-08 02:03:50,103 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island17 (PID=18676): t=591.67s, score=1509.263 (islands=1, frames=30)
+2026-02-08 02:03:51,500 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 15/18: reqs=1, span=2.00s, prefetch=1788.7ms, register=28.6ms, submitted=1, inflight=3, total=1832.3ms
+2026-02-08 02:03:52,178 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island18 (PID=25572): t=597.07s, score=545.883 (islands=1, frames=30)
+2026-02-08 02:03:55,706 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 16/18: reqs=2, span=6.50s, prefetch=3763.2ms, register=83.0ms, submitted=2, inflight=3, total=3872.1ms
+2026-02-08 02:03:56,529 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island20 (PID=18676): t=612.33s, score=770.285 (islands=1, frames=31)
+2026-02-08 02:03:56,551 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island19 (PID=45128): t=608.33s, score=1074.892 (islands=1, frames=30)
+2026-02-08 02:03:57,746 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 17/18: reqs=1, span=2.00s, prefetch=1626.9ms, register=26.5ms, submitted=1, inflight=3, total=1667.2ms
+2026-02-08 02:03:58,494 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island21 (PID=25572): t=617.90s, score=22397.416 (islands=0, frames=30)
+2026-02-08 02:04:01,655 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \U0001f4cc [Streaming Pipeline] Feed chunk 18/18: reqs=2, span=4.00s, prefetch=3459.7ms, register=55.0ms, submitted=2, inflight=3, total=3527.7ms
+2026-02-08 02:04:02,318 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island23 (PID=45128): t=632.57s, score=31782.844 (islands=0, frames=30)
+2026-02-08 02:04:02,352 - cv_worker - INFO - \u2705 Screenshot selected for SU012_island22 (PID=18676): t=629.63s, score=2126.164 (islands=1, frames=30)
+2026-02-08 02:04:02,705 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - \u2705 [Streaming Pipeline] Completed: submitted_tasks=24, completed_tasks=24
+2026-02-08 02:04:02,705 - MVP_Module2_HEANCING.module2_content_enhancement.vl_material_generator - INFO - VL 素材生成完成: clips=17, screenshots=24
+2026-02-08 02:04:40,561 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [517.0s-554.0s]: 14 screenshots in 129.73s (pid=49180)
+2026-02-08 02:04:40,591 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] 路由截图流式进度: 8/10, queue=2, active_pids=6
+2026-02-08 02:04:42,206 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [674.0s-700.0s]: 11 screenshots in 91.77s (pid=44608)
+2026-02-08 02:04:53,920 - MVP_Module2_HEANCING.module2_content_enhancement.screenshot_selector - INFO - Coarse-Fine selection [633.0s-674.0s]: 15 screenshots in 135.82s (pid=42928)
+2026-02-08 02:04:53,949 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] 路由截图流式进度: 10/10, queue=0, active_pids=6
+2026-02-08 02:04:53,949 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] 路由截图完成: units=10, screenshots=113, ms=276035.9, mode=process_streaming, workers=6, queue_maxsize=16, pids=[18676, 25572, 42928, 44608, 45128, 49180]
+2026-02-08 02:04:53,950 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] VL 处理完成: units=3, screenshots=24, clips=17, ms=276036.3
+2026-02-08 02:04:53,950 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] AnalyzeWithVL 混合结果: total_units=14, vl_units=3, screenshots=137, clips=25
+2026-02-08 02:04:53,955 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] \u2705 Persisted instructional_steps to D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\semantic_units_phase2a.json
+2026-02-08 02:04:53,957 - python_grpc_server - INFO - [BENCH_AFTER_FILE_1770487119588] VL token报表已落盘: D:\videoToMarkdownTest2\storage\99efb7c15a9121f4e29113821d5c9c73\intermediates\vl_token_report_BENCH_AFTER_FILE_1770487119588.json
+===BENCH_RESULT===
+success=True
+vl_enabled=True
+used_fallback=False
+units_analyzed=3
+vl_screenshots_generated=24
+vl_clips_generated=17
+elapsed_ms=374369.1
+2026-02-08 02:04:55,855 - MVP_Module2_HEANCING.module2_content_enhancement.resource_manager - INFO - Shutting down ResourceManager...
+2026-02-08 02:04:56,260 - MVP_Module2_HEANCING.module2_content_enhancement.resource_manager - INFO - ResourceManager shutdown complete

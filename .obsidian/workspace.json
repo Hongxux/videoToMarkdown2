@@ -186,6 +186,11 @@
   },
   "active": "86cbe3145f483d79",
   "lastOpenFiles": [
+    "MVP_Module2_HEANCING/module2_content_enhancement/tests/__pycache__/test_concrete_knowledge_validator_cleanup.cpython-312-pytest-7.4.4.pyc",
+    "MVP_Module2_HEANCING/module2_content_enhancement/tests/test_concrete_knowledge_validator_cleanup.py",
+    "docs/architecture/perf-benchmarks.md",
+    "storage/bench_compare_summary.json",
+    "storage/99efb7c15a9121f4e29113821d5c9c73/intermediates/vl_token_report_BENCH_AFTER_FILE_1770487119588.json",
     "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/013_SU014_使用coding agent编程案例_674.00-700.00_pruned_parts/concat_list.txt",
     "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/013_SU014_使用coding agent编程案例_674.00-700.00_pruned_parts/part_002.mp4",
     "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/013_SU014_使用coding agent编程案例_674.00-700.00_pruned_parts/part_001.mp4",
@@ -193,10 +198,6 @@
     "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/013_SU014_使用coding agent编程案例_674.00-700.00_pruned_parts",
     "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/012_SU013_配置MCP对接百度地图_633.00-674.00_pruned_parts/concat_list.txt",
     "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/012_SU013_配置MCP对接百度地图_633.00-674.00_pruned_parts/part_002.mp4",
-    "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/012_SU013_配置MCP对接百度地图_633.00-674.00_pruned_parts/part_001.mp4",
-    "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/012_SU013_配置MCP对接百度地图_633.00-674.00_pruned_parts/part_000.mp4",
-    "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/012_SU013_配置MCP对接百度地图_633.00-674.00_pruned_parts",
-    "storage/99efb7c15a9121f4e29113821d5c9c73/semantic_unit_clips_vl/vl_pruned_clips/011_SU012_接入谷歌生态Skills_555.00-633.00_pruned_parts/concat_list.txt",
     "storage/99efb7c15a9121f4e29113821d5c9c73/enhanced_output.md",
     "storage/99efb7c15a9121f4e29113821d5c9c73/assets/SU014/SU014_使用coding_agent编程案例_img_11_routed_ss_su014_9.png",
     "storage/99efb7c15a9121f4e29113821d5c9c73/assets/SU014/SU014_使用coding_agent编程案例_img_10_routed_ss_su014_8.png",
@@ -230,7 +231,6 @@
     "java-backend/README.md",
     "QUICKSTART.md",
     "videoToMarkdown/stage_test_outputs/video_stage1_20260113_003909.md",
-    "videoToMarkdown/stage_test_outputs/video_stage1_20260113_000941.md",
-    "videoToMarkdown/stage_test_outputs/video_stage1_20260112_235908.md"
+    "videoToMarkdown/stage_test_outputs/video_stage1_20260113_000941.md"
   ]
 }

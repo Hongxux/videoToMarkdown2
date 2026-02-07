@@ -610,6 +610,11 @@
   - 对长耗时“段处理”任务，优先采用“流式喂料 + 背压队列 + worker PID 观测”三件套定位并发真实性与瓶颈。
   - 对 CV/LLM 热路径优先做“对象复用”而非“阈值调参”，可在不改正确率口径下获得稳定时延收益。
 
+### 2026-02-08 性能归档
+- 已归档本次改造前后耗时对比（同输入、同语义单元）：`docs/architecture/perf-benchmarks.md`
+- 结构化结果文件：`storage/bench_compare_summary.json`
+- 复测日志：`storage/bench_after_vl_clean.log`
+
 ## 2026-02-07 Phase2B 素材直写与 no-copy 收敛
 - 日期：2026-02-07
 - 触发背景与问题：
@@ -686,4 +691,32 @@
     - DeepSeek 高置信度直替换；
     - 低置信度触发 existing screenshot 视觉补全；
     - 预校验结果在 `_apply_external_materials` 中命中复用。
+
+## 2026-02-07 ConcreteKnowledgeValidator 阴性截图即时删除收敛
+- 日期：2026-02-07
+- 触发背景与问题：
+  - 用户要求：在所有 `concrete_knowledge_validator` 判定后，凡 `Has Concrete Knowledge=False` 的截图必须直接删除，避免后续链路误引用。
+  - 现状问题：历史实现中存在“逻辑过滤但不物理删除”的路径，且 Vision 低置信度场景会保留 `has_concrete=False` 样本，导致行为与规则不一致。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py`
+    - 新增 `_finalize_validation_result(...)` 作为 `validate(...)` 单一出口：统一执行缓存写入与删除策略。
+    - 在 `validate(...)` 的所有返回分支（包含重复帧缓存命中）统一走 `_finalize_validation_result(...)`，确保行为一致。
+    - 删除规则收敛为：`not has_concrete and not has_formula` 时立即 `os.unlink(image_path)`。
+    - 调整 Vision 判定保留条件：`should_include=has_concrete`（移除“低置信度但非具象也保留”的历史逻辑）。
+    - 公式分支语义对齐：`has_formula=True` 时同时置 `has_concrete=True`，与“公式属于具象性知识阳性”规则一致。
+- 关键决策与理由：
+  - 决策1：删除动作下沉到验证器内部，而非分散在上游 pipeline。
+    - 为什么：保证所有调用链（常规筛选、预校验复用、重复帧命中）统一执行同一规则，避免遗漏。
+  - 决策2：保留“公式不删除”的例外由结构化字段表达（`has_formula=True`）。
+    - 为什么：满足业务定义中“公式为阳性”，同时让删除条件可解释、可追踪。
+- 兼容性影响：
+  - 不改变 gRPC/proto 与外部接口签名。
+  - 行为变化：阴性截图会在验证后被物理删除；依赖“阴性样本留盘”的离线调试流程需改为读取缓存日志。
+- 风险与回滚方案：
+  - 风险：若上游仍尝试访问已判阴性的原图，将遇到文件不存在。
+  - 预防：上游已以 `should_include` 过滤；同时保留删除失败告警日志便于排查。
+  - 回滚：如需临时回退，可将删除逻辑改为仅记录日志（保留 `_finalize_validation_result` 出口不变）。
+- 验证方式与结果：
+  - `python -m py_compile MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py MVP_Module2_HEANCING/module2_content_enhancement/coreference_resolver.py` 通过。
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_coreference_resolver.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过（9 passed）。
 

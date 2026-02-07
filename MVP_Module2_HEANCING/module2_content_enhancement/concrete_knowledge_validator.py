@@ -62,8 +62,9 @@ CONCRETE_KNOWLEDGE_PROMPT = """# 角色
  - 如果是公式，则输出公式本身。
  - 如果是在进行配置，则输出配置的项、值和选项。
 2. **视觉元素**：显著的UI组件（按钮、图标、图表）、布局结构、所在是什么软件、命令行、终端、IDE、浏览器还是什么。
-禁止输出该图片无关焦点的背景信息。
+
 3. **动作/状态**：正在发生的操作（如“鼠标悬停在XX”，“终端显示报错”）。
+4. **核心焦点**：输出该截图的操作中目前正在进行的操作和其关注的焦点。
 
 # 输出要求（严格JSON格式）
 {
@@ -71,7 +72,10 @@ CONCRETE_KNOWLEDGE_PROMPT = """# 角色
     "confidence": 0.0-1.0,
     "img_description": "详细的中文图像描述，包含可见文字、视觉元素与动作状态"
 }
-
+如果has_concrete_knowledge为False，则禁止输出img_description，使用""替代
+img_description禁止输出该图片中无关焦点的背景信息。（如背景为蓝天和海边的风景图。）
+img_description禁止输出判定has_concrete_knowledge的理由
+img_description禁止输出非核心焦点相关的可见文字
 请只输出JSON，不要有其他内容。"""
 
 
@@ -423,7 +427,7 @@ class ConcreteKnowledgeValidator:
                 logger.info(f"Duplicate frame skipped (pHash): {Path(image_path).name}")
                 # 将缓存的字典转换为 ConcreteKnowledgeResult
                 if isinstance(cached_result, dict):
-                    return ConcreteKnowledgeResult(
+                    result = ConcreteKnowledgeResult(
                         has_concrete=cached_result.get("has_concrete", True),
                         has_formula=cached_result.get("has_formula", False),
                         confidence=cached_result.get("confidence", 0.9),
@@ -434,15 +438,16 @@ class ConcreteKnowledgeValidator:
                         should_include=cached_result.get("should_include", True),
                         img_description=cached_result.get("img_description", cached_result.get("img_desription", ""))
                     )
+                    return self._finalize_validation_result(image_path, result, cache_result=False)
                 elif isinstance(cached_result, ConcreteKnowledgeResult):
-                    return cached_result
+                    return self._finalize_validation_result(image_path, cached_result, cache_result=False)
         
         # Step 1: 检测数学公式 (需要 conda whisper_env 中的 PaddleOCR)
         has_formula = self._detect_math_formula(ocr_text)
         if has_formula:
             logger.info(f"Formula detected in {Path(image_path).name}, including screenshot")
             result = ConcreteKnowledgeResult(
-                has_concrete=False,
+                has_concrete=True,
                 has_formula=True,
                 confidence=0.9,
                 concrete_type="公式",
@@ -451,8 +456,7 @@ class ConcreteKnowledgeValidator:
                 non_text_ratio=0.0,
                 should_include=True
             )
-            self._cache_result(image_path, result)
-            return result
+            return self._finalize_validation_result(image_path, result, cache_result=True)
         
         # Step 2: CV 分析 - 提取图形区域
         graphic_region = self._extract_graphic_region(image_path)
@@ -470,14 +474,12 @@ class ConcreteKnowledgeValidator:
                 non_text_ratio=0.0,
                 should_include=False
             )
-            self._cache_result(image_path, result)
-            return result
+            return self._finalize_validation_result(image_path, result, cache_result=True)
         
         # Step 3: ERNIE Vision AI 验证 (只发送裁剪后的图形区域)
         if self._vision_enabled and self._vision_client:
             result = self._vision_validate_v3(image_path, graphic_region)
-            self._cache_result(image_path, result)
-            return result
+            return self._finalize_validation_result(image_path, result, cache_result=True)
         
         # Fallback: 无 Vision API 时，有图形区域则保留
         logger.info(f"Vision API disabled, including {Path(image_path).name} with graphic region")
@@ -491,7 +493,44 @@ class ConcreteKnowledgeValidator:
             non_text_ratio=0.0,
             should_include=True
         )
-        self._cache_result(image_path, result)
+        return self._finalize_validation_result(image_path, result, cache_result=True)
+
+    def _finalize_validation_result(
+        self,
+        image_path: str,
+        result: ConcreteKnowledgeResult,
+        cache_result: bool = True,
+    ) -> ConcreteKnowledgeResult:
+        """
+        执行逻辑：
+        1) 按需写入具象判定缓存，保证重复帧复用稳定。
+        2) 对 has_concrete=False 且非公式截图执行物理删除，避免后续链路误引用。
+        3) 返回原始判定结果给调用方。
+        实现方式：复用 _cache_result + 文件系统删除。
+        核心价值：把“判定+清理”收敛到单一出口，确保所有调用路径行为一致。
+        决策逻辑：
+        - 条件：cache_result
+        - 条件：not result.has_concrete and not result.has_formula
+        依据来源（证据链）：
+        - 输入参数：image_path、result。
+        - 业务规则：Has Concrete Knowledge=False 的截图直接删去。
+        输入参数：
+        - image_path: 文件路径（类型：str）。
+        - result: 判定结果（类型：ConcreteKnowledgeResult）。
+        - cache_result: 是否写入缓存（类型：bool）。
+        输出参数：
+        - ConcreteKnowledgeResult：原判定结果。"""
+        if cache_result:
+            self._cache_result(image_path, result)
+
+        if not result.has_concrete and not result.has_formula:
+            try:
+                if os.path.exists(image_path):
+                    os.unlink(image_path)
+                    logger.info(f"Deleted non-concrete screenshot: {Path(image_path).name}")
+            except Exception as e:
+                logger.warning(f"Failed to delete non-concrete screenshot {image_path}: {e}")
+
         return result
     
     def _cache_result(self, image_path: str, result: ConcreteKnowledgeResult):
@@ -536,7 +575,7 @@ class ConcreteKnowledgeValidator:
         核心价值：仅上传图形区域，提高判定效率与准确度。
         决策逻辑：
         - 条件：loop.is_running()
-        - 条件：has_concrete or confidence < 0.5（低置信度时保留）
+        - 条件：has_concrete（仅具象截图保留）
         依据来源（证据链）：
         - 运行状态：asyncio 事件循环是否在运行。
         - API 字段：has_concrete_knowledge、confidence、concrete_type、reason。
@@ -584,7 +623,7 @@ class ConcreteKnowledgeValidator:
                 reason=reason,
                 is_mixed=False,
                 non_text_ratio=0.0,
-                should_include=has_concrete or confidence < 0.5,  # keep low-confidence samples
+                should_include=has_concrete,
                 img_description=img_description
             )
             
