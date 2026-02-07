@@ -3414,7 +3414,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             vl_units = []
             cv_screenshot_units = []
             cv_clip_units = []
-            duration_threshold_sec = 20.0
+            routing_cfg = vl_config.get("routing", {}) if isinstance(vl_config.get("routing", {}), dict) else {}
+            duration_threshold_sec = max(
+                0.0,
+                _safe_float(routing_cfg.get("process_duration_threshold_sec", 20.0), 20.0)
+            )
+            force_process_preprocess = bool(routing_cfg.get("process_force_preprocess_before_routing", True))
 
             process_units = []
             for unit in semantic_units:
@@ -3422,13 +3427,15 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 if _normalize_knowledge_type(raw_kt) == "process":
                     process_units.append(unit)
 
-            routing_generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
-            process_route_map = await routing_generator.preprocess_process_units_for_routing(
-                video_path=video_path,
-                process_units=process_units,
-                output_dir=output_dir,
-                force_preprocess=True,
-            )
+            process_route_map = {}
+            if process_units:
+                routing_generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
+                process_route_map = await routing_generator.preprocess_process_units_for_routing(
+                    video_path=video_path,
+                    process_units=process_units,
+                    output_dir=output_dir,
+                    force_preprocess=force_process_preprocess,
+                )
 
             for unit in semantic_units:
                 raw_kt = unit.get("knowledge_type", "")

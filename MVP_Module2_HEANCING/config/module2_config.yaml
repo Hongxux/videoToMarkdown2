@@ -220,6 +220,18 @@ global_params:
 vl_material_generation:
   # 总开关: true = 使用 VL 分析, false = 使用原有 GenerateMaterialRequests 流程
   enabled: true
+
+  # AnalyzeWithVL 路由分流配置
+  routing:
+    # 是否在路由分流前对所有 process 单元执行预处理
+    # true: 统一先做 stable 剔除 + 边界修正, 再按有效时长分流（推荐）
+    # false: 仅在预处理器自身命中条件时才执行（保留旧行为）
+    process_force_preprocess_before_routing: true
+
+    # process 分流阈值（单位: 秒）
+    # 有效时长 <= 阈值: 归入 process_short（CV 路由）
+    # 有效时长 >  阈值: 归入 process_long（VL 路由）
+    process_duration_threshold_sec: 20.0
   
   # Qwen3-VL-Plus API 配置
   api:
@@ -254,7 +266,7 @@ vl_material_generation:
     only_process: true
     min_unit_duration_sec: 10.0
     keep_edge_sec: 1.0
-    min_stable_interval_sec: 3.0
+    min_stable_interval_sec: 4.0
     min_cut_span_sec: 0.8
     min_keep_segment_sec: 0.5
     min_removed_ratio: 0.10
@@ -265,8 +277,8 @@ vl_material_generation:
   pre_vl_boundary_refine:
     enabled: true
     pause_threshold_sec: 0.3
-    start_buffer_sec: 0.2
-    end_buffer_sec: 0.3
+    start_buffer_sec: 0.5
+    end_buffer_sec: 0.5
     semantic_search_window_sec: 8.0
     mse_scan_after_end_sec: 3.0
     mse_sample_fps: 2.0
