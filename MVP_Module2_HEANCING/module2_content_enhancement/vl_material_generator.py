@@ -19,6 +19,7 @@ import logging
 import asyncio
 import subprocess
 import time
+import re
 import functools
 from collections import deque
 from pathlib import Path
@@ -79,6 +80,8 @@ class VLMaterialGenerator:
         self.pre_vl_only_process = bool(self.pre_vl_pruning_config.get("only_process", True))
         self.pre_vl_min_unit_duration_sec = float(self.pre_vl_pruning_config.get("min_unit_duration_sec", 10.0))
         self.pre_vl_keep_edge_sec = float(self.pre_vl_pruning_config.get("keep_edge_sec", 1.0))
+        # stable 片段长度必须严格大于该阈值才允许进入剔除流程
+        self.pre_vl_min_stable_interval_sec = float(self.pre_vl_pruning_config.get("min_stable_interval_sec", 3.0))
         self.pre_vl_min_cut_span_sec = float(self.pre_vl_pruning_config.get("min_cut_span_sec", 0.8))
         self.pre_vl_min_keep_segment_sec = float(self.pre_vl_pruning_config.get("min_keep_segment_sec", 0.5))
         self.pre_vl_min_removed_ratio = float(self.pre_vl_pruning_config.get("min_removed_ratio", 0.10))
@@ -383,6 +386,28 @@ class VLMaterialGenerator:
         )
         return prompt
 
+    def _build_removed_intervals_from_stable(self, stable_intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+        """
+        根据 stable 区间构建可剔除的核心区间。
+
+        规则：
+        1) stable 原始时长必须严格大于 `min_stable_interval_sec`（默认 3s）；
+        2) 两侧各保留 `keep_edge_sec`，仅剔除中间核心段；
+        3) 核心段时长至少 `min_cut_span_sec`。
+        """
+        removed_intervals: List[Tuple[float, float]] = []
+        for stable_start, stable_end in stable_intervals:
+            stable_duration = max(0.0, stable_end - stable_start)
+            if stable_duration <= self.pre_vl_min_stable_interval_sec:
+                continue
+
+            core_start = stable_start + self.pre_vl_keep_edge_sec
+            core_end = stable_end - self.pre_vl_keep_edge_sec
+            if core_end - core_start >= self.pre_vl_min_cut_span_sec:
+                removed_intervals.append((core_start, core_end))
+
+        return self._normalize_intervals(removed_intervals)
+
     async def _detect_stable_islands_for_unit(
         self,
         clip_path: str,
@@ -559,6 +584,52 @@ class VLMaterialGenerator:
             return kept_segments[-1][1]
         return float(rel_value)
 
+    def _map_pruned_interval_to_original_segments(
+        self,
+        rel_start: float,
+        rel_end: float,
+        kept_segments: List[Tuple[float, float]],
+    ) -> List[Tuple[float, float]]:
+        """
+        将“裁剪后片段的相对时间区间”映射回“原始单元相对时间轴”的分段区间。
+
+        为什么：当 clip 区间跨过被剔除的 stable 核心段时，映射后会是多段；
+        若只回写 start/end 会把中间被剔除段重新纳入，导致 Java 侧拼接结果与 VL 观测不一致。
+        """
+        if not kept_segments:
+            return []
+
+        start_rel = self._safe_float(rel_start, 0.0)
+        end_rel = self._safe_float(rel_end, 0.0)
+        if end_rel < start_rel:
+            start_rel, end_rel = end_rel, start_rel
+
+        mapped_segments: List[Tuple[float, float]] = []
+        cursor = 0.0
+
+        for seg_start, seg_end in kept_segments:
+            seg_start_f = self._safe_float(seg_start, 0.0)
+            seg_end_f = self._safe_float(seg_end, seg_start_f)
+            seg_len = max(0.0, seg_end_f - seg_start_f)
+            if seg_len <= 1e-6:
+                continue
+
+            pruned_seg_start = cursor
+            pruned_seg_end = cursor + seg_len
+
+            overlap_start = max(start_rel, pruned_seg_start)
+            overlap_end = min(end_rel, pruned_seg_end)
+            if overlap_end - overlap_start > 1e-6:
+                mapped_start = seg_start_f + (overlap_start - pruned_seg_start)
+                mapped_end = seg_start_f + (overlap_end - pruned_seg_start)
+                mapped_segments.append((mapped_start, mapped_end))
+
+            cursor = pruned_seg_end
+            if cursor >= end_rel + 1e-6 and mapped_segments:
+                break
+
+        return self._normalize_intervals(mapped_segments)
+
     async def _prepare_pruned_clip_for_vl(
         self,
         clips_dir: str,
@@ -600,15 +671,8 @@ class VLMaterialGenerator:
             if not stable_intervals:
                 return default_result
 
-            # 仅剔除稳定区间的“核心段”，边缘保留 keep_edge_sec
-            removed_intervals: List[Tuple[float, float]] = []
-            for stable_start, stable_end in stable_intervals:
-                core_start = stable_start + self.pre_vl_keep_edge_sec
-                core_end = stable_end - self.pre_vl_keep_edge_sec
-                if core_end - core_start >= self.pre_vl_min_cut_span_sec:
-                    removed_intervals.append((core_start, core_end))
-
-            removed_intervals = self._normalize_intervals(removed_intervals)
+            # 仅剔除满足时长阈值的 stable 核心段（两侧边缘保留）
+            removed_intervals = self._build_removed_intervals_from_stable(stable_intervals)
             if not removed_intervals:
                 return default_result
 
@@ -842,6 +906,10 @@ class VLMaterialGenerator:
                     pre_prune_info = meta.get("pre_prune") or {}
                     kept_segments = pre_prune_info.get("kept_segments") or []
                     unit_duration = self._safe_float(meta.get("unit_duration", 0.0), 0.0)
+                    unit_start_sec = self._safe_float(meta.get("start_sec", 0.0), 0.0)
+                    unit_end_sec = self._safe_float(meta.get("end_sec", unit_start_sec), unit_start_sec)
+                    if unit_end_sec < unit_start_sec:
+                        unit_end_sec = unit_start_sec
 
                     # 估算基线：对 pruned 单元做秒级线性回推（第一性近似），非 pruned 单元基线=实际
                     if pre_prune_info.get("applied") and kept_segments:
@@ -869,33 +937,70 @@ class VLMaterialGenerator:
                     if pre_prune_info.get("applied") and kept_segments:
                         for clip_item in analysis_result.clip_requests:
                             # clip 请求本身就是绝对时间：先转回单元相对时间，再映射回原始单元相对时间，再加单元起点
-                            rel_start = self._safe_float(clip_item.get("start_sec", start_sec), start_sec) - start_sec
-                            rel_end = self._safe_float(clip_item.get("end_sec", start_sec), start_sec) - start_sec
-                            mapped_rel_start = self._map_pruned_relative_to_original(rel_start, kept_segments)
-                            mapped_rel_end = self._map_pruned_relative_to_original(rel_end, kept_segments)
-                            abs_start = start_sec + mapped_rel_start
-                            abs_end = start_sec + mapped_rel_end
+                            rel_start = self._safe_float(clip_item.get("start_sec", unit_start_sec), unit_start_sec) - unit_start_sec
+                            rel_end = self._safe_float(clip_item.get("end_sec", unit_start_sec), unit_start_sec) - unit_start_sec
+
+                            mapped_rel_segments = self._map_pruned_interval_to_original_segments(
+                                rel_start=rel_start,
+                                rel_end=rel_end,
+                                kept_segments=kept_segments,
+                            )
+                            abs_segments: List[Dict[str, float]] = []
+                            for seg_rel_start, seg_rel_end in mapped_rel_segments:
+                                abs_seg_start = unit_start_sec + seg_rel_start
+                                abs_seg_end = unit_start_sec + seg_rel_end
+                                abs_seg_start = max(unit_start_sec, min(abs_seg_start, unit_end_sec))
+                                abs_seg_end = max(unit_start_sec, min(abs_seg_end, unit_end_sec))
+                                if abs_seg_end - abs_seg_start > 1e-6:
+                                    abs_segments.append({
+                                        "start_sec": abs_seg_start,
+                                        "end_sec": abs_seg_end,
+                                    })
+
+                            if abs_segments:
+                                abs_start = min(seg["start_sec"] for seg in abs_segments)
+                                abs_end = max(seg["end_sec"] for seg in abs_segments)
+                            else:
+                                mapped_rel_start = self._map_pruned_relative_to_original(rel_start, kept_segments)
+                                mapped_rel_end = self._map_pruned_relative_to_original(rel_end, kept_segments)
+                                abs_start = unit_start_sec + mapped_rel_start
+                                abs_end = unit_start_sec + mapped_rel_end
+                                abs_start = max(unit_start_sec, min(abs_start, unit_end_sec))
+                                abs_end = max(unit_start_sec, min(abs_end, unit_end_sec))
+
                             if abs_end < abs_start:
                                 abs_start, abs_end = abs_end, abs_start
                             clip_item["start_sec"] = abs_start
                             clip_item["end_sec"] = abs_end
-                            # 同时给出 segments，复用 Java 侧拼接逻辑，避免中间被剔除段重新纳入
-                            clip_item["segments"] = [
-                                {
-                                    "start_sec": start_sec + seg_start,
-                                    "end_sec": start_sec + seg_end,
-                                }
-                                for seg_start, seg_end in kept_segments
-                            ]
+                            # 同时给出 segments，复用 Java 侧拼接逻辑，且仅保留当前 clip 对应的有效子段
+                            clip_item["segments"] = abs_segments
 
                         for ss_item in analysis_result.screenshot_requests:
                             rel_ts = self._safe_float(ss_item.get("_relative_timestamp", 0.0), 0.0)
                             mapped_rel_ts = self._map_pruned_relative_to_original(rel_ts, kept_segments)
-                            ss_item["timestamp_sec"] = start_sec + mapped_rel_ts
+                            mapped_abs_ts = unit_start_sec + mapped_rel_ts
+                            mapped_abs_ts = max(unit_start_sec, min(mapped_abs_ts, unit_end_sec))
+                            ss_item["timestamp_sec"] = mapped_abs_ts
                             ss_item["_relative_timestamp"] = mapped_rel_ts
                             ss_item["_pre_pruned"] = True
                     elif pre_prune_info.get("applied"):
                         logger.warning(f"[VL-PrePrune] unit={unit_id} applied but no kept_segments, skip remap")
+
+                    # 统一兜底：无论是否预裁剪，都将时间戳约束在当前语义单元区间内。
+                    for clip_item in analysis_result.clip_requests:
+                        clip_start = self._safe_float(clip_item.get("start_sec", unit_start_sec), unit_start_sec)
+                        clip_end = self._safe_float(clip_item.get("end_sec", unit_start_sec), unit_start_sec)
+                        clip_start = max(unit_start_sec, min(clip_start, unit_end_sec))
+                        clip_end = max(unit_start_sec, min(clip_end, unit_end_sec))
+                        if clip_end < clip_start:
+                            clip_start, clip_end = clip_end, clip_start
+                        clip_item["start_sec"] = clip_start
+                        clip_item["end_sec"] = clip_end
+
+                    for ss_item in analysis_result.screenshot_requests:
+                        abs_ts = self._safe_float(ss_item.get("timestamp_sec", unit_start_sec), unit_start_sec)
+                        abs_ts = max(unit_start_sec, min(abs_ts, unit_end_sec))
+                        ss_item["timestamp_sec"] = abs_ts
                     
                     # 收集结果 (暂不优化截图时间点，后续批量处理)
                     all_clip_requests.extend(analysis_result.clip_requests)
@@ -1040,10 +1145,12 @@ class VLMaterialGenerator:
                 if summary.get("success", 0) > 0 and summary.get("failed", 0) == 0:
                     # 只要当前所需 unit 都存在即可复用，不要求目录中仅包含当前子集。
                     existing_clips = list(clips_dir.glob("*.mp4"))
+                    existing_names = [f.name for f in existing_clips]
                     missing_units = []
                     for su in valid_units:
                         unit_id = su.get("unit_id", "")
-                        if not any(unit_id in f.name for f in existing_clips):
+                        unit_pattern = re.compile(rf"(?:^|_){re.escape(str(unit_id))}(?:_|$)", re.IGNORECASE)
+                        if not any(unit_pattern.search(name) for name in existing_names):
                             missing_units.append(unit_id)
                     if not missing_units:
                         logger.info(f"复用已存在的 VL 目标视频片段: {clips_dir}")
@@ -1060,11 +1167,12 @@ class VLMaterialGenerator:
                 existing_clips = list(clips_dir.glob("*.mp4"))
                 if len(existing_clips) > 0:
                     # 检查是否所有 unit_id 都有对应的片段
+                    existing_names = [f.name for f in existing_clips]
                     missing_units = []
                     for su in valid_units:
                         unit_id = su.get("unit_id", "")
-                        # 检查是否有包含 unit_id 的文件名
-                        if not any(unit_id in f.name for f in existing_clips):
+                        unit_pattern = re.compile(rf"(?:^|_){re.escape(str(unit_id))}(?:_|$)", re.IGNORECASE)
+                        if not any(unit_pattern.search(name) for name in existing_names):
                             missing_units.append(unit_id)
                     
                     if not missing_units:
@@ -1128,32 +1236,72 @@ class VLMaterialGenerator:
             str: 视频片段路径，未找到则返回 None
         """
         clips_path = Path(clips_dir)
-        
-        # 尝试按 unit_id 匹配
-        for clip_file in clips_path.glob("*.mp4"):
-            filename = clip_file.name
-            # 文件名格式: 001_SU001_topic_0.00-10.00.mp4
-            if unit_id in filename:
-                return str(clip_file)
-        
-        # 尝试按时间范围匹配
-        time_pattern = f"{start_sec:.2f}-{end_sec:.2f}"
-        for clip_file in clips_path.glob("*.mp4"):
-            if time_pattern in clip_file.name:
-                return str(clip_file)
-        
-        # 从 manifest.json 查找
+
+        def _is_valid_file(path_value: Any) -> Optional[str]:
+            if not path_value:
+                return None
+            candidate = Path(str(path_value))
+            if not candidate.is_absolute():
+                candidate = (clips_path / candidate).resolve()
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+            return None
+
+        def _filename_matches_unit(clip_name: str, target_unit_id: str) -> bool:
+            # 文件名典型格式：001_SU001_topic_0.00-10.00.mp4
+            # 这里要求 unit_id token 边界匹配，避免 SU01 误匹配 SU010。
+            pattern = re.compile(rf"(?:^|_){re.escape(target_unit_id)}(?:_|$)", re.IGNORECASE)
+            return bool(pattern.search(Path(clip_name).stem))
+
+        def _close_to_expected(item: Dict[str, Any]) -> float:
+            s = self._safe_float(item.get("start_sec", start_sec), start_sec)
+            e = self._safe_float(item.get("end_sec", end_sec), end_sec)
+            return abs(s - start_sec) + abs(e - end_sec)
+
+        # 1) 优先通过 manifest 做精确匹配（最可靠）
         manifest_path = clips_path / "manifest.json"
         if manifest_path.exists():
             try:
                 with open(manifest_path, "r", encoding="utf-8") as f:
                     manifest = json.load(f)
-                for item in manifest.get("items", []):
-                    if item.get("unit_id") == unit_id and item.get("status") == "success":
-                        return item.get("out_path")
+                items = [
+                    item for item in (manifest.get("items", []) or [])
+                    if isinstance(item, dict)
+                    and str(item.get("unit_id", "")) == str(unit_id)
+                    and str(item.get("status", "")) == "success"
+                ]
+                items.sort(key=_close_to_expected)
+                for item in items:
+                    manifest_out = _is_valid_file(item.get("out_path"))
+                    if manifest_out:
+                        return manifest_out
             except Exception:
                 pass
-        
+
+        # 2) 文件名精确 token 匹配
+        matched_files: List[Path] = []
+        for clip_file in clips_path.glob("*.mp4"):
+            if _filename_matches_unit(clip_file.name, str(unit_id)):
+                matched_files.append(clip_file)
+
+        if matched_files:
+            if len(matched_files) == 1:
+                return str(matched_files[0])
+
+            time_pattern = f"{start_sec:.2f}-{end_sec:.2f}"
+            for clip_file in matched_files:
+                if time_pattern in clip_file.name:
+                    return str(clip_file)
+
+            matched_files.sort(key=lambda f: f.name)
+            return str(matched_files[0])
+
+        # 3) 时间范围回退匹配
+        time_pattern = f"{start_sec:.2f}-{end_sec:.2f}"
+        for clip_file in clips_path.glob("*.mp4"):
+            if time_pattern in clip_file.name:
+                return str(clip_file)
+
         return None
     
     async def _optimize_screenshot_timestamps(

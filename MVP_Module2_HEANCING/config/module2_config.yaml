@@ -254,6 +254,7 @@ vl_material_generation:
     only_process: true
     min_unit_duration_sec: 10.0
     keep_edge_sec: 1.0
+    min_stable_interval_sec: 3.0
     min_cut_span_sec: 0.8
     min_keep_segment_sec: 0.5
     min_removed_ratio: 0.10

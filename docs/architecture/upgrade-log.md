@@ -52,6 +52,14 @@
   - 复用检查改为“当前 VL 目标单元是否齐全”，不再依赖全量 `semantic_units_phase2a.json`。
 - 收益：减少无效切片、降低前置耗时与磁盘占用，且与“只对 process_long 走 VL”路由策略严格对齐。
 
+### 2026-02-07 补充：stable 剔除新增时长门槛（>3s）
+- 规则变更：VL 前置静态段剔除时，stable 区间必须“原始长度严格大于 3 秒”才允许进入剔除。
+- 细节：
+  - `stable_duration <= 3.0s`：不剔除。
+  - `stable_duration > 3.0s`：保留两侧 `keep_edge_sec`，剔除核心段。
+- 配置项：`vl_material_generation.pre_vl_static_pruning.min_stable_interval_sec`（默认 `3.0`）。
+- 原因：避免对短稳定段过度裁剪，降低语义丢失风险，同时保持对长静态冗余段的成本优化收益。
+
 ## 2026-02-06 VL 素材生成模块（Qwen3-VL-Plus）
 - 日期：2026-02-06
 - 版本/分支/提交：未记录

@@ -22,6 +22,7 @@ def _build_generator():
                 "enabled": True,
                 "only_process": True,
                 "min_unit_duration_sec": 10.0,
+                "min_stable_interval_sec": 3.0,
                 "keep_edge_sec": 1.0,
                 "min_cut_span_sec": 0.8,
                 "min_keep_segment_sec": 0.5,
@@ -118,3 +119,62 @@ def test_token_saving_estimation_linear_seconds():
 
     assert total_base == 300
     assert saved == 180
+
+
+def test_removed_intervals_require_stable_longer_than_3s():
+    """
+    新约束：stable 原始长度必须 >3s 才可剔除。
+    - 3.0s（如 1-4）不剔除
+    - 3.1s（如 1-4.1）可剔除核心区
+    """
+    generator = _build_generator()
+
+    # 边界：正好 3.0s，不应剔除
+    removed_a = generator._build_removed_intervals_from_stable([(1.0, 4.0)])
+    assert removed_a == []
+
+    # 超过 3.0s，应剔除 [2.0, 3.1]
+    removed_b = generator._build_removed_intervals_from_stable([(1.0, 4.1)])
+    assert len(removed_b) == 1
+    assert abs(removed_b[0][0] - 2.0) < 1e-6
+    assert abs(removed_b[0][1] - 3.1) < 1e-6
+
+
+def test_map_pruned_interval_to_original_segments_cross_gap():
+    """
+    当 pruned 区间跨越被剔除间隙时，应映射为原时间轴上的多段区间。
+    kept=[0,2]+[4,6]，pruned 中 [1,3] -> 原始 [1,2] + [4,5]
+    """
+    generator = _build_generator()
+    kept = [(0.0, 2.0), (4.0, 6.0)]
+
+    mapped = generator._map_pruned_interval_to_original_segments(1.0, 3.0, kept)
+    assert len(mapped) == 2
+    assert abs(mapped[0][0] - 1.0) < 1e-6
+    assert abs(mapped[0][1] - 2.0) < 1e-6
+    assert abs(mapped[1][0] - 4.0) < 1e-6
+    assert abs(mapped[1][1] - 5.0) < 1e-6
+
+
+def test_find_clip_for_unit_avoids_substring_collision(tmp_path):
+    """
+    SU01 与 SU010 并存时，不能用子串匹配导致误选。
+    """
+    generator = _build_generator()
+    clips_dir = tmp_path / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    file_su01 = clips_dir / "001_SU01_topic_10.00-20.00.mp4"
+    file_su010 = clips_dir / "002_SU010_topic_30.00-40.00.mp4"
+    file_su01.write_bytes(b"x")
+    file_su010.write_bytes(b"x")
+
+    selected = generator._find_clip_for_unit(
+        clips_dir=str(clips_dir),
+        unit_id="SU01",
+        start_sec=10.0,
+        end_sec=20.0,
+    )
+
+    assert selected is not None
+    assert selected.endswith(file_su01.name)
