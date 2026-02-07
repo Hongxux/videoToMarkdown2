@@ -153,11 +153,10 @@ class VLVideoAnalyzer:
             "【输出硬性约束】\n"
             "1) 只输出一个标准的 JSON，不要任何 Markdown 代码块标签、不要解释、不要前后缀文字。\n"
             "2) 顶层必须是一个平铺的 JSON 数组：[{...}, {...}]。\n"
-            "3) 每个对象必须包含字段：id, knowledge_type, confidence, reasoning, key_evidence, "
+            "3) 每个对象必须包含字段：id, knowledge_type, confidence, "
             "clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。\n"
-            "4) key_evidence 必须是字符串数组，例如：[\"证据1\", \"证据2\"]。\n"
-            "5) reasoning 请尽量简练（建议 150 字以内），直接给出判断核心逻辑。\n"
-            "6) 时间边界判断规则：\n"
+            "4) 严禁输出 reasoning / key_evidence 字段，避免无关文本增加 token。\n"
+            "5) 时间边界判断规则：\n"
             "   - 对于非【讲解型】内容，**禁止**随意输出 -1。请根据视觉变化（如：菜单出现/消失、鼠标点击、窗口切换、公式书写开始/结束）尽力估算起止时间。\n"
             "   - 如果该知识类型贯穿整个视频片段，起始可设为 0.0，结束可设为片段总时长（或最后一个显著变化的时间戳）。\n"
             "   - 只有在视觉信息完全无法支撑任何时间判断时，才允许对该项输出 -1。\n"
@@ -194,11 +193,9 @@ class VLVideoAnalyzer:
    - "过程性知识" - 过程性知识展示
    - "讲解型" - 纯讲解无视觉操作
 3. confidence: 置信度（0-1）
-4. reasoning: 判断理由
-5. key_evidence: 关键证据描述
-6. clip_start_sec: 片段起始时间（秒，相对于视频开头）
-7. clip_end_sec: 片段结束时间（秒）
-8. suggested_screenshoot_timestamps: 建议的截图时间点数组（秒）
+4. clip_start_sec: 片段起始时间（秒，相对于视频开头）
+5. clip_end_sec: 片段结束时间（秒）
+6. suggested_screenshoot_timestamps: 建议的截图时间点数组（秒）
 
 请以 JSON 数组格式输出，格式如下：
 ```json
@@ -207,8 +204,6 @@ class VLVideoAnalyzer:
     "id": 0,
     "knowledge_type": "实操",
     "confidence": 0.9,
-    "reasoning": "...",
-    "key_evidence": "...",
     "clip_start_sec": 0.0,
     "clip_end_sec": 10.0,
     "suggested_screenshoot_timestamps": [2.0, 5.0, 8.0]
@@ -370,7 +365,7 @@ class VLVideoAnalyzer:
                             extra_prompt=extra_prompt,
                             override_prompt=(
                                 "你必须只输出 JSON 数组，不要任何解释。"
-                                "reasoning 尽量短，key_evidence 用字符串数组。"
+                                "不要输出 reasoning 或 key_evidence。"
                             ),
                         )
                     await asyncio.sleep(wait_time)
@@ -392,7 +387,11 @@ class VLVideoAnalyzer:
         - 仍不可用：降级为抽取关键帧（image_url），并把每帧的时间戳作为文本标注提供给模型
         """
         # 基础提示词由系统角色承担，便于服务端缓存 (Prefix Caching)
-        system_content = self.prompt_template + self._output_constraints
+        system_content = (
+            self.prompt_template
+            + self._output_constraints
+            + "\n\n【任务】请根据输入的视频或关键帧进行分析，并按输出格式返回。"
+        )
         
         user_text = ""
         if extra_prompt:
@@ -418,7 +417,7 @@ class VLVideoAnalyzer:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": [
                         {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_base64}"}},
-                        {"type": "text", "text": user_text + "请分析这段视频。"},
+                        {"type": "text", "text": user_text},
                     ]}
                 ]
 
@@ -430,7 +429,7 @@ class VLVideoAnalyzer:
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": [
                         {"type": "video_url", "video_url": {"url": temp_url}},
-                        {"type": "text", "text": user_text + "请分析这段视频。"},
+                        {"type": "text", "text": user_text},
                     ]}
                 ]
 
@@ -439,13 +438,14 @@ class VLVideoAnalyzer:
         if not frames:
             raise ValueError(f"无法读取视频文件或抽帧失败: {video_path}")
 
+        system_content += (
+            "\n\n【关键帧输入说明】\n"
+            "当输入为关键帧与时间戳时，请根据帧变化估算 clip_start_sec 与 clip_end_sec。\n"
+            "若连续多帧属于同一知识类型，以这些帧的时间跨度为估算依据。\n"
+        )
         content_items: List[Dict[str, Any]] = [{
             "type": "text",
-            "text": (
-                "注意：本次输入为从视频中抽取的关键帧及对应时间戳。\n"
-                "时间边界判断规则：请根据这些关键帧的变化，尽力估算 clip_start_sec 和 clip_end_sec。\n"
-                "如果连续几帧都属于同一知识类型，请以这几帧的时间跨度作为估算依据。"
-            ),
+            "text": "关键帧如下（含时间戳）："
         }]
         for idx, frame in enumerate(frames):
             content_items.append({"type": "text", "text": f"Frame {idx+1} @ {frame['timestamp_sec']:.2f}s"})

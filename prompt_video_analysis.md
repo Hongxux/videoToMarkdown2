@@ -57,5 +57,5 @@
 
 ## 五、输出格式 (JSON Array)
 
-只输出 JSON 数组，包含：id, knowledge_type, confidence, reasoning, key_evidence, clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。
-reasoning 必须简练（<150字），直接揭示语义本质。
+只输出 JSON 数组，包含：id, knowledge_type, confidence, clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。
+严禁输出 reasoning、key_evidence。
