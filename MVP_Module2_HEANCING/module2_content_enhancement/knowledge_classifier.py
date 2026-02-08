@@ -174,12 +174,9 @@ class KnowledgeClassifier:
             self.fast_model = "deepseek-chat"
             try:
                 import yaml
-                # Resolve path to config.yaml relative to this file
-                # d:\videoToMarkdownTest2\MVP_Module2_HEANCING\module2_content_enhancement\knowledge_classifier.py
-                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-                config_path = os.path.join(base_dir, "config.yaml")
+                config_path = self._resolve_config_path()
 
-                if os.path.exists(config_path):
+                if config_path and os.path.exists(config_path):
                     with open(config_path, "r", encoding="utf-8") as f:
                         config = yaml.safe_load(f)
                         ai_config = config.get("ai", {}).get("analysis", {})
@@ -187,7 +184,7 @@ class KnowledgeClassifier:
                         self.fast_model = ai_config.get("fast_model") or "deepseek-chat"
                     logger.info(f"Loaded knowledge models from config: Smart='{self.smart_model}', Fast='{self.fast_model}'")
                 else:
-                    logger.warning(f"Config not found at {config_path}, using defaults")
+                    logger.warning("Config not found (checked root and videoToMarkdown subdir), using defaults")
             except Exception as e:
                 logger.warning(f"Failed to load config.yaml: {e}")
 
@@ -207,6 +204,24 @@ class KnowledgeClassifier:
                 base_url=self.base_url + "/v1",
                 model=self.fast_model
             )
+
+    @staticmethod
+    def _resolve_config_path() -> str:
+        env_path = str(os.getenv("MODULE2_CONFIG_PATH", "") or "").strip()
+        if env_path:
+            if os.path.exists(env_path):
+                return env_path
+            logger.warning(f"MODULE2_CONFIG_PATH not found: {env_path}")
+
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        candidates = [
+            os.path.join(base_dir, "config.yaml"),
+            os.path.join(base_dir, "videoToMarkdown", "config.yaml"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return ""
     
     @property
     def enabled(self) -> bool:

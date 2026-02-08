@@ -72,33 +72,11 @@ CONCRETE_KNOWLEDGE_PROMPT = """# 角色
     "confidence": 0.0-1.0,
     "img_description": "详细的中文图像描述，包含可见文字、视觉元素与动作状态"
 }
-如果has_concrete_knowledge为False，则禁止输出img_description，使用""替代
+
 img_description禁止输出该图片中无关焦点的背景信息。（如背景为蓝天和海边的风景图。）
 img_description禁止输出判定has_concrete_knowledge的理由
 img_description禁止输出非核心焦点相关的可见文字
 请只输出JSON，不要有其他内容。"""
-
-
-COREFERENCE_REPLACEMENT_PROMPT_TEMPLATE = """# 角色
-你是教学视频中的指代消解专家。你的任务是结合图片内容，把句子中的“这个/它/该步骤/那个界面”等指代补全为具体对象。
-
-# 输入信息
-- 原句（只允许改写这句话）：{sentence_text}
-- 上下文（可为空）：{context_text}
-
-# 规则
-1. 仅改写原句，不要补充句外新事实。
-2. 改写结果必须可直接替换原句。
-3. 如果图片不足以提供信息，可保留原句但降低置信度。
-4. 输出严格 JSON，不要输出其他内容。
-
-# 输出格式
-{
-  "replaced_text": "可直接替换原句的文本",
-  "confidence": 0.0,
-  "reason": "简要说明为何这样补全"
-}
-"""
 
 
 # ==============================================================================
@@ -695,105 +673,31 @@ class ConcreteKnowledgeValidator:
         """
         执行逻辑：
         1) 先执行常规具象校验，复用现有缓存与保留判断。
-        2) Vision 可用时追加“指代补全”请求，输出 replaced_text 与置信度。
-        3) 汇总返回，供上游先替换句子并复用具象校验结果。
-        实现方式：validate + VisionAIClient.validate_image_sync。
-        核心价值：在不破坏现有截图校验链路前提下，增加句级指代修复能力。
+        2) 输出可复用的具象信息（尤其是 img_description），供上游 DeepSeek 二次自然化修复。
+        3) 汇总返回，供上游缓存 concrete_result 并在后续截图验证复用。
+        实现方式：validate。
+        核心价值：将“视觉理解”和“文本自然化修复”解耦，减少重复 Vision 调用。
         决策逻辑：
-        - 条件：not sentence_text
-        - 条件：self._vision_enabled and self._vision_client
+        - 条件：sentence_text/context_text 仅用于上游日志上下文，本方法不做句子改写。
         依据来源（证据链）：
-        - 输入参数：sentence_text、context_text。
-        - 对象内部状态：self._vision_enabled、self._vision_client。
+        - validate(...) 输出：should_include/confidence/img_description。
         输入参数：
         - image_path: 文件路径（类型：str）。
         - sentence_text: 文本内容（类型：str）。
         - context_text: 文本内容（类型：str）。
         输出参数：
-        - 结构化结果字典（包含 should_include/replaced_text/replace_confidence/concrete_result）。"""
+        - 结构化结果字典（包含 should_include/confidence/img_description/concrete_result）。"""
         base_result = self.validate(image_path=image_path, ocr_text="")
-        original_sentence = str(sentence_text or "").strip()
-
-        if not original_sentence:
-            return {
-                "should_include": base_result.should_include,
-                "confidence": float(base_result.confidence),
-                "reason": base_result.reason,
-                "img_description": base_result.img_description,
-                "replaced_text": "",
-                "replace_confidence": 0.0,
-                "replace_reason": "empty_sentence",
-                "mode": "coreference",
-                "concrete_result": base_result,
-            }
-
-        if not (self._vision_enabled and self._vision_client):
-            return {
-                "should_include": base_result.should_include,
-                "confidence": float(base_result.confidence),
-                "reason": base_result.reason,
-                "img_description": base_result.img_description,
-                "replaced_text": original_sentence,
-                "replace_confidence": 0.0,
-                "replace_reason": "vision_disabled",
-                "mode": "coreference",
-                "concrete_result": base_result,
-            }
-
-        prompt = COREFERENCE_REPLACEMENT_PROMPT_TEMPLATE.format(
-            sentence_text=original_sentence,
-            context_text=str(context_text or "").strip() or "(无)"
-        )
-
-        try:
-            api_result = self._vision_client.validate_image_sync(
-                image_path,
-                prompt,
-                skip_duplicate_check=True,
-                timeout=60,
-            )
-
-            if "raw_response" in api_result and "replaced_text" not in api_result:
-                raw = str(api_result.get("raw_response", "") or "")
-                clean_raw = raw.replace("```json", "").replace("```", "").strip()
-                try:
-                    parsed = json.loads(clean_raw)
-                    if isinstance(parsed, dict):
-                        api_result.update(parsed)
-                except Exception:
-                    pass
-
-            replaced_text = str(api_result.get("replaced_text") or "").strip()
-            replace_confidence = float(api_result.get("confidence", 0.0) or 0.0)
-            replace_reason = str(api_result.get("reason") or "").strip() or "vision_coreference"
-
-            if not replaced_text:
-                replaced_text = original_sentence
-
-            return {
-                "should_include": base_result.should_include,
-                "confidence": float(base_result.confidence),
-                "reason": base_result.reason,
-                "img_description": base_result.img_description,
-                "replaced_text": replaced_text,
-                "replace_confidence": replace_confidence,
-                "replace_reason": replace_reason,
-                "mode": "coreference",
-                "concrete_result": base_result,
-            }
-        except Exception as e:
-            logger.warning(f"validate_for_coreference failed: {e}")
-            return {
-                "should_include": base_result.should_include,
-                "confidence": float(base_result.confidence),
-                "reason": base_result.reason,
-                "img_description": base_result.img_description,
-                "replaced_text": original_sentence,
-                "replace_confidence": 0.0,
-                "replace_reason": f"vision_fallback: {e}",
-                "mode": "coreference",
-                "concrete_result": base_result,
-            }
+        return {
+            "should_include": base_result.should_include,
+            "confidence": float(base_result.confidence),
+            "reason": base_result.reason,
+            "img_description": base_result.img_description,
+            "mode": "coreference_concrete",
+            "concrete_result": base_result,
+            "sentence_text": str(sentence_text or "").strip(),
+            "context_text": str(context_text or "").strip(),
+        }
     
     def _detect_math_formula(self, text: str = "", image: Optional[np.ndarray] = None) -> bool:
         """

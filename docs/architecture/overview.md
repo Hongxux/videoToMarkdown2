@@ -1,6 +1,6 @@
 ﻿# 系统架构概览
 
-更新日期：2026-02-06
+更新日期：2026-02-08
 范围：d:/videoToMarkdownTest2
 
 ## 系统目标与边界
@@ -109,6 +109,23 @@ flowchart TB
   - `intermediates/`：CV/分类缓存与中间 JSON
   - `screenshots/`、`clips/`：素材输出
   - `*.md`、`*.json`：最终文档
+
+## 断点重续（文件复用）
+- 控制方式：配置文件手动开启（默认关闭），不新增 gRPC 协议字段。
+- 配置位置：
+  - `videoToMarkdown/config.yaml`（主链路）
+  - `MVP_Module2_HEANCING/config/module2_config.yaml`（Module2 同构配置）
+- 复用语义：仅文件复用（`mode=file_reuse`），不依赖内存态/SQLite 跳步。
+- 分组开关：`transcribe`、`stage1_text`、`stage1_semantic`、`stage1_visual`、`stage1_document`、`phase2a`、`assets`、`phase2b`。
+- 校验强度：`moderate`（文件存在/非空 + `schema_version` + `input_fingerprint` + 依赖签名一致性）。
+- 失效策略：`recompute`（复用失效自动回退重算）。
+
+## 资源保留策略（2026-02-08）
+- 优先长期保留：仅 `Phase2A` 语义单元与素材请求结果（`semantic_units_phase2a.json` 及其 meta）。
+- 非优先资源：TTL 7 天自动清理。
+- 审计文件：
+  - `intermediates/resume_report.json`：记录复用命中/失效/回退原因。
+  - `intermediates/cache_metrics.json`：缓存命中率快照。
 - `outputDir/`：主链路输出目录（统一规则后应等同 `storage/{url_hash}`）
 - `worker_output/{task_id}/`：RabbitMQ 旁路产物
 - `config.yaml` / `.env`：运行配置与密钥

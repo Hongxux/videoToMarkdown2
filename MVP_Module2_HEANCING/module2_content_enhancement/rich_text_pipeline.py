@@ -16,6 +16,7 @@ import cv2
 import json
 import logging
 import asyncio
+import yaml
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
@@ -27,8 +28,6 @@ from .cv_knowledge_validator import CVKnowledgeValidator
 from .concrete_knowledge_validator import ConcreteKnowledgeValidator
 from .screenshot_selector import ScreenshotSelector
 from .knowledge_classifier import KnowledgeClassifier
-from .llm_client import LLMClient
-from .coreference_resolver import CoreferenceResolver
 from .resource_manager import get_resource_manager, get_io_executor
 from .rich_text_document import (
     RichTextDocument, 
@@ -172,27 +171,44 @@ class RichTextPipeline:
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
-        self.step2_path = step2_path
-        self.step6_path = step6_path
         self.output_dir = output_dir
         self.config = config or PipelineConfig()
-        self.sentence_timestamps_path = sentence_timestamps_path
+
+        # 先解析可用的中间产物路径：显式传参优先，其次自动回退到 output_dir/intermediates
+        self.step2_path = self._resolve_intermediate_path(
+            provided_path=step2_path,
+            candidate_names=[
+                "step2_correction_output.json",
+                "step2_output.json",
+            ],
+        )
+        self.step6_path = self._resolve_intermediate_path(
+            provided_path=step6_path,
+            candidate_names=[
+                "step6_merge_cross_output.json",
+                "step6_output.json",
+            ],
+        )
+        self.sentence_timestamps_path = self._resolve_intermediate_path(
+            provided_path=sentence_timestamps_path,
+            candidate_names=["sentence_timestamps.json"],
+        )
         
         # 创建输出目录
         self.assets_dir = os.path.join(output_dir, self.config.assets_subdir)
         Path(self.assets_dir).mkdir(parents=True, exist_ok=True)
         
         # 加载数据 (Phase 2B 组装模式下可能为空)
-        if step2_path:
-            logger.info(f"Loading step2: {step2_path}")
-            self.subtitles = load_corrected_subtitles(step2_path)
+        if self.step2_path:
+            logger.info(f"Loading step2: {self.step2_path}")
+            self.subtitles = load_corrected_subtitles(self.step2_path)
         else:
             logger.info("Skip loading step2 (empty path)")
             self.subtitles = []
-        
-        if step6_path:
-            logger.info(f"Loading step6: {step6_path}")
-            self.paragraphs = self._load_paragraphs(step6_path)
+
+        if self.step6_path:
+            logger.info(f"Loading step6: {self.step6_path}")
+            self.paragraphs = self._load_paragraphs(self.step6_path)
         else:
             logger.info("Skip loading step6 (empty path)")
             self.paragraphs = []
@@ -228,23 +244,136 @@ class RichTextPipeline:
         # 指代断层预补全阶段复用缓存（image_abs_path -> ConcreteKnowledgeResult）
         self._prevalidated_concrete_results: Dict[str, Any] = {}
 
-        # DeepSeek 客户端：用于指代断层识别与补全
-        self._coref_llm_client: Optional[LLMClient] = None
-        try:
-            if os.getenv("DEEPSEEK_API_KEY"):
-                self._coref_llm_client = LLMClient()
-        except Exception as e:
-            logger.warning(f"Coreference LLM client init failed: {e}")
-
-        # 指代断层预补全器
-        self._coreference_resolver = CoreferenceResolver(
-            llm_client=self._coref_llm_client,
-            concrete_validator=self._concrete_validator,
-            screenshot_selector=ScreenshotSelector.create_lightweight(),
-            confidence_threshold=0.8,
-        )
+        # 图片匹配审计：默认关闭，可通过 config.yaml / 环境变量开启
+        self._image_match_audit_enabled = self._load_image_match_audit_switch(default_value=False)
+        self._image_match_audit_records: List[Dict[str, Any]] = []
         
         logger.info(f"Pipeline initialized: {len(self.subtitles)} subtitles, {len(self.paragraphs)} paragraphs")
+
+    def _resolve_config_path(self) -> Optional[Path]:
+        env_path = str(os.getenv("MODULE2_CONFIG_PATH", "") or "").strip()
+        if env_path:
+            candidate = Path(env_path)
+            if candidate.exists():
+                return candidate
+            logger.warning(f"MODULE2_CONFIG_PATH not found: {candidate}")
+
+        project_root = Path(__file__).parent.parent.parent
+        candidates = [
+            project_root / "config.yaml",
+            project_root / "videoToMarkdown" / "config.yaml",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _parse_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            raw = value.strip().lower()
+            if raw in ("1", "true", "yes", "y", "on"):
+                return True
+            if raw in ("0", "false", "no", "n", "off"):
+                return False
+        return bool(default)
+
+    def _load_image_match_audit_switch(self, default_value: bool = False) -> bool:
+        enabled = bool(default_value)
+
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                module2_cfg = config.get("module2", {}) if isinstance(config, dict) else {}
+                observability_cfg = module2_cfg.get("observability", {}) if isinstance(module2_cfg, dict) else {}
+                image_cfg = observability_cfg.get("image_match_audit", {}) if isinstance(observability_cfg, dict) else {}
+                enabled = self._parse_bool(image_cfg.get("enabled", enabled), enabled)
+            except Exception as exc:
+                logger.warning(f"Failed to load image-match-audit switch from config: {exc}")
+
+        env_raw = os.getenv("MODULE2_IMAGE_MATCH_AUDIT_ENABLED")
+        if env_raw is not None and str(env_raw).strip() != "":
+            enabled = self._parse_bool(env_raw, enabled)
+
+        return enabled
+
+    def _record_image_match_audit(
+        self,
+        *,
+        unit_id: str,
+        img_id: str,
+        source_id: str,
+        timestamp_sec: Optional[float],
+        sentence_id: str,
+        sentence_text: str,
+        img_description: str,
+        mapping_status: str,
+    ) -> None:
+        if not self._image_match_audit_enabled:
+            return
+
+        self._image_match_audit_records.append(
+            {
+                "unit_id": str(unit_id or ""),
+                "img_id": str(img_id or ""),
+                "source_id": str(source_id or ""),
+                "timestamp_sec": float(timestamp_sec) if timestamp_sec is not None else None,
+                "sentence_id": str(sentence_id or ""),
+                "sentence_text": str(sentence_text or ""),
+                "img_description": str(img_description or ""),
+                "mapping_status": str(mapping_status or ""),
+            }
+        )
+
+    def _flush_image_match_audit(self) -> str:
+        if not self._image_match_audit_enabled:
+            return ""
+
+        output_path = Path(self.output_dir) / "intermediates" / "phase2b_image_match_audit.json"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_path, "w", encoding="utf-8") as file_obj:
+            json.dump(
+                {
+                    "timestamp": datetime.now().isoformat(timespec="seconds"),
+                    "total_records": len(self._image_match_audit_records),
+                    "records": self._image_match_audit_records,
+                },
+                file_obj,
+                ensure_ascii=False,
+                indent=2,
+            )
+        return str(output_path)
+
+    def _resolve_intermediate_path(self, provided_path: Optional[str], candidate_names: List[str]) -> str:
+        """解析中间产物路径：显式路径优先，其次 output_dir/intermediates 回退。"""
+        raw = str(provided_path or "").strip()
+        if raw:
+            if os.path.exists(raw):
+                return raw
+            logger.warning(f"Provided intermediate path not found: {raw}")
+
+        candidates: List[Path] = []
+        base_dir = Path(self.output_dir)
+        intermediates_dir = base_dir / "intermediates"
+        for name in candidate_names:
+            if not name:
+                continue
+            candidates.append(intermediates_dir / name)
+            candidates.append(base_dir / name)
+
+        for candidate in candidates:
+            if candidate.exists():
+                logger.info(f"Auto-discovered intermediate file: {candidate}")
+                return str(candidate)
+
+        return ""
     
     def set_visual_extractor(self, visual_extractor):
         """
@@ -701,6 +830,8 @@ class RichTextPipeline:
         logger.info("="*60)
         logger.info("RichTextPipeline.assemble_only() - Phase2B Start")
         logger.info("="*60)
+        if self._image_match_audit_enabled:
+            self._image_match_audit_records.clear()
         
         # Stage 1: 加载Phase2A保存的语义单元
         logger.info("[Phase2B-1] Load Semantic Units")
@@ -717,29 +848,6 @@ class RichTextPipeline:
         
         # Stage 2: 应用外部素材
         logger.info("[Phase2B-2] Apply External Materials")
-
-        # Stage 1.7: 指代断层预补全（低置信度触发视觉补全，并复用 concrete 验证结果）
-        logger.info("[Phase2B-1.7] Coreference Gap Pre-Resolution")
-        sentence_timestamps = self._build_sentence_timestamps()
-        for unit in units:
-            requests = material_requests_map.get(unit.unit_id)
-            if not requests:
-                requests = MaterialRequests([], [], [])
-            try:
-                coref_result = await self._coreference_resolver.resolve_unit_coreference(
-                    unit=unit,
-                    material_requests=requests,
-                    screenshots_dir=screenshots_dir,
-                    sentence_timestamps=sentence_timestamps,
-                    subtitles=self.subtitles,
-                    video_path=self.video_path,
-                )
-                if coref_result and coref_result.updated_text:
-                    unit.full_text = coref_result.updated_text
-                if coref_result and coref_result.prevalidated_results:
-                    self._prevalidated_concrete_results.update(coref_result.prevalidated_results)
-            except Exception as e:
-                logger.warning(f"{unit.unit_id}: coreference pre-resolution failed: {e}")
 
         for unit in units:
             requests = material_requests_map.get(unit.unit_id)
@@ -782,8 +890,12 @@ class RichTextPipeline:
         logger.info(f"Phase2B completed: {len(document.sections)} sections")
         logger.info(f"  → Markdown: {markdown_path}")
         logger.info(f"  → JSON: {json_path}")
+        if self._image_match_audit_enabled:
+            audit_path = self._flush_image_match_audit()
+            if audit_path:
+                logger.info(f"  → Image match audit: {audit_path}")
         logger.info("="*60)
-        
+
         return markdown_path, json_path
     
     def _assemble_document(self, units, title: str):
@@ -1356,6 +1468,74 @@ class RichTextPipeline:
             }
         logger.info(f"Built sentence timestamps via index mapping: {len(timestamps)} mappings")
         return timestamps
+
+    def _map_timestamp_to_sentence_id(
+        self,
+        timestamp_sec: float,
+        sentence_timestamps: Dict[str, Dict[str, float]],
+    ) -> str:
+        """根据时间戳映射最匹配的字幕句子 ID。"""
+        try:
+            target = float(timestamp_sec)
+        except Exception:
+            return ""
+
+        if not isinstance(sentence_timestamps, dict) or not sentence_timestamps:
+            return ""
+
+        in_range_hits: List[Tuple[float, str]] = []
+        nearest_hit: Optional[Tuple[float, str]] = None
+
+        for sid, meta in sentence_timestamps.items():
+            if not isinstance(meta, dict):
+                continue
+
+            try:
+                start_sec = float(meta.get("start_sec", 0.0))
+                end_sec = float(meta.get("end_sec", start_sec))
+            except Exception:
+                continue
+
+            if end_sec < start_sec:
+                start_sec, end_sec = end_sec, start_sec
+
+            if start_sec <= target <= end_sec:
+                in_range_hits.append((end_sec - start_sec, str(sid)))
+                continue
+
+            center = (start_sec + end_sec) / 2.0
+            distance = abs(center - target)
+            if nearest_hit is None or distance < nearest_hit[0]:
+                nearest_hit = (distance, str(sid))
+
+        if in_range_hits:
+            in_range_hits.sort(key=lambda item: item[0])
+            return in_range_hits[0][1]
+
+        if nearest_hit:
+            return nearest_hit[1]
+
+        return ""
+
+    def _get_sentence_text_by_id(self, sentence_id: str) -> str:
+        """按 sentence_id 获取字幕文本，支持 S001 索引与 subtitle_id。"""
+        sid = str(sentence_id or "").strip()
+        if not sid:
+            return ""
+
+        by_subtitle_id: Dict[str, Any] = {}
+        for idx, sub in enumerate(self.subtitles or [], start=1):
+            if sid == f"S{idx:03d}":
+                return str(getattr(sub, "text", "") or getattr(sub, "corrected_text", "") or "").strip()
+            subtitle_id = str(getattr(sub, "subtitle_id", "") or "").strip()
+            if subtitle_id:
+                by_subtitle_id[subtitle_id] = sub
+
+        matched = by_subtitle_id.get(sid)
+        if matched is None:
+            return ""
+
+        return str(getattr(matched, "text", "") or getattr(matched, "corrected_text", "") or "").strip()
     
     async def _apply_modality_classification(
         self, 
@@ -1934,6 +2114,7 @@ class RichTextPipeline:
             }
             for idx, path in enumerate(screenshot_paths)
         ]
+        materials.clip_paths = clip_paths
         materials.clip_path = clip_paths[0] if clip_paths else ""
         
         # 💥 V7.4: 提取动作单元分类结果
@@ -2196,12 +2377,11 @@ class RichTextPipeline:
         - ???????????????????/???
         - ???????????? unit ????????????????
         """
-        import glob
-
         materials = MaterialSet()
         screenshot_paths: List[str] = []
         screenshot_labels: List[str] = []
         screenshot_items: List[Dict[str, Any]] = []
+        sentence_timestamps = self._build_sentence_timestamps()
 
         def _normalize_knowledge_type(raw_type: str) -> str:
             lowered = (raw_type or "").strip().lower()
@@ -2225,23 +2405,6 @@ class RichTextPipeline:
         should_validate_screenshot = normalized_kt in {"abstract", "concrete"}
         allow_clip = normalized_kt == "process"
 
-        unit_title_slug = self._slugify_text(
-            str(getattr(unit, "knowledge_topic", "") or getattr(unit, "title", "")),
-            40,
-        )
-
-        def infer_label(name: str) -> str:
-            name_lower = name.lower()
-            if "head" in name_lower:
-                return "head"
-            if "tail" in name_lower:
-                return "tail"
-            if "island" in name_lower or "stable" in name_lower:
-                return "stable"
-            if "fallback" in name_lower:
-                return "fallback"
-            return "unknown"
-
         def _deduplicate_paths(paths: List[str]) -> List[str]:
             ordered: List[str] = []
             seen: set[str] = set()
@@ -2263,51 +2426,28 @@ class RichTextPipeline:
                 return candidates
 
             raw_id = raw_id.strip("/")
+            if "/" not in raw_id:
+                logger.warning(
+                    "Skip legacy material request id without unit folder: unit=%s id=%s",
+                    unit.unit_id,
+                    req_id,
+                )
+                return candidates
+
             raw_path = Path(raw_id)
             base_name = raw_path.name
             stem_name = raw_path.stem if raw_path.suffix else base_name
-            unit_prefixed_id = f"{unit.unit_id}/{raw_id}"
 
-            checks: List[Path] = []
+            checks: List[Path] = [Path(base_dir) / raw_id]
             if raw_path.suffix:
-                checks.extend([
-                    Path(base_dir) / raw_id,
-                    Path(base_dir) / unit_prefixed_id,
-                    Path(base_dir) / str(unit.unit_id) / base_name,
-                    Path(base_dir) / base_name,
-                ])
-
+                checks.append(Path(base_dir) / raw_path.parent / base_name)
             for ext in exts:
-                checks.extend([
-                    Path(base_dir) / f"{raw_id}{ext}",
-                    Path(base_dir) / f"{unit_prefixed_id}{ext}",
-                    Path(base_dir) / str(unit.unit_id) / f"{base_name}{ext}",
-                    Path(base_dir) / str(unit.unit_id) / f"{stem_name}{ext}",
-                    Path(base_dir) / f"{base_name}{ext}",
-                    Path(base_dir) / f"{stem_name}{ext}",
-                ])
+                checks.append(Path(base_dir) / raw_path.parent / f"{stem_name}{ext}")
 
             for check in checks:
                 if check.exists():
                     candidates.append(str(check))
             return _deduplicate_paths(candidates)
-
-        def _collect_fallback_candidates(base_dir: str, exts: List[str]) -> List[str]:
-            exts_lower = {ext.lower() for ext in exts}
-            patterns = [
-                str(Path(base_dir) / str(unit.unit_id) / "**" / "*"),
-                str(Path(base_dir) / f"*{unit.unit_id}*"),
-            ]
-            if unit_title_slug and unit_title_slug != "item":
-                patterns.append(str(Path(base_dir) / f"*{unit_title_slug}*"))
-
-            found: List[str] = []
-            for pattern in patterns:
-                for file_path in glob.glob(pattern, recursive=True):
-                    suffix = Path(file_path).suffix.lower()
-                    if suffix in exts_lower:
-                        found.append(file_path)
-            return _deduplicate_paths(found)
 
         assets_root = Path(self.assets_dir)
 
@@ -2335,22 +2475,26 @@ class RichTextPipeline:
 
             return str(resolved)
 
-        screenshot_candidates: List[Tuple[str, str, str]] = []
+        screenshot_candidates: List[Tuple[str, str, str, Optional[float]]] = []
+        request_meta_by_id: Dict[str, ScreenshotRequest] = {}
         if material_requests.screenshot_requests:
             for req in material_requests.screenshot_requests:
                 if req.semantic_unit_id != unit.unit_id:
                     continue
+                req_id = str(req.screenshot_id or "").strip()
+                if req_id:
+                    request_meta_by_id[req_id] = req
                 req_paths = _collect_candidates_by_id(
                     screenshots_dir,
                     req.screenshot_id,
                     [".png", ".jpg", ".jpeg"],
                 )
                 for path_item in req_paths:
-                    screenshot_candidates.append((path_item, req.label, req.screenshot_id))
+                    screenshot_candidates.append((path_item, req.label, req.screenshot_id, float(req.timestamp_sec)))
 
-        deduped_screenshot_candidates: List[Tuple[str, str, str]] = []
+        deduped_screenshot_candidates: List[Tuple[str, str, str, Optional[float]]] = []
         seen_screenshot_paths: set[str] = set()
-        for raw_path, label, sid in screenshot_candidates:
+        for raw_path, label, sid, request_ts in screenshot_candidates:
             try:
                 candidate_key = str(Path(raw_path).resolve())
             except Exception:
@@ -2358,18 +2502,27 @@ class RichTextPipeline:
             if candidate_key in seen_screenshot_paths:
                 continue
             seen_screenshot_paths.add(candidate_key)
-            deduped_screenshot_candidates.append((raw_path, label, sid))
+            deduped_screenshot_candidates.append((raw_path, label, sid, request_ts))
         screenshot_candidates = deduped_screenshot_candidates
 
-        if not screenshot_candidates:
-            for path_item in _collect_fallback_candidates(screenshots_dir, [".png", ".jpg", ".jpeg"]):
-                stem = Path(path_item).stem
-                screenshot_candidates.append((path_item, infer_label(stem), stem))
-
         rejected_screenshot_count = 0
-        for _idx, (raw_path, label, sid) in enumerate(screenshot_candidates, start=1):
+        for _idx, (raw_path, label, sid, request_ts) in enumerate(screenshot_candidates, start=1):
             is_valid = True
             img_description = ""
+
+            req_meta = request_meta_by_id.get(str(sid or "").strip())
+            if request_ts is None and req_meta is not None:
+                try:
+                    request_ts = float(req_meta.timestamp_sec)
+                except Exception:
+                    request_ts = None
+
+            sentence_id = ""
+            sentence_text = ""
+            if request_ts is not None:
+                sentence_id = self._map_timestamp_to_sentence_id(float(request_ts), sentence_timestamps)
+                if sentence_id:
+                    sentence_text = self._get_sentence_text_by_id(sentence_id)
 
             if should_validate_screenshot and self._concrete_validator:
                 try:
@@ -2398,14 +2551,35 @@ class RichTextPipeline:
             screenshot_labels.append(label or sid)
             resolved_desc = img_description or label or sid
             img_index = len(screenshot_items) + 1
+            img_id = f"{unit.unit_id}_img_{img_index:02d}"
+            mapping_status = "mapped"
+            if request_ts is None:
+                mapping_status = "no_timestamp"
+            elif not sentence_id:
+                mapping_status = "unmapped"
+
             screenshot_items.append({
-                "img_id": f"{unit.unit_id}_img_{img_index:02d}",
+                "img_id": img_id,
                 "img_path": normalized_path,
                 "img_description": resolved_desc,
                 "img_desription": resolved_desc,
                 "label": label,
                 "source_id": sid,
+                "timestamp_sec": float(request_ts) if request_ts is not None else None,
+                "sentence_id": sentence_id,
+                "sentence_text": sentence_text,
             })
+
+            self._record_image_match_audit(
+                unit_id=unit.unit_id,
+                img_id=img_id,
+                source_id=sid,
+                timestamp_sec=float(request_ts) if request_ts is not None else None,
+                sentence_id=sentence_id,
+                sentence_text=sentence_text,
+                img_description=resolved_desc,
+                mapping_status=mapping_status,
+            )
 
         if should_validate_screenshot:
             logger.info(
@@ -2413,7 +2587,7 @@ class RichTextPipeline:
                 f"rejected={rejected_screenshot_count}"
             )
 
-        clip_path = ""
+        clip_paths: List[str] = []
         if allow_clip:
             clip_candidates: List[Tuple[str, str]] = []
             if material_requests.clip_requests:
@@ -2422,10 +2596,6 @@ class RichTextPipeline:
                         continue
                     for path_item in _collect_candidates_by_id(clips_dir, req.clip_id, [".mp4", ".webm", ".mkv"]):
                         clip_candidates.append((path_item, req.clip_id))
-
-            if not clip_candidates:
-                for path_item in _collect_fallback_candidates(clips_dir, [".mp4", ".webm", ".mkv"]):
-                    clip_candidates.append((path_item, Path(path_item).stem))
 
             deduped_clip_candidates: List[Tuple[str, str]] = []
             seen_clip_paths: set[str] = set()
@@ -2439,25 +2609,27 @@ class RichTextPipeline:
                 seen_clip_paths.add(candidate_key)
                 deduped_clip_candidates.append((clip_candidate_path, clip_candidate_label))
             clip_candidates = deduped_clip_candidates
-            if clip_candidates:
-                selected, selected_label = clip_candidates[0]
-                clip_path = _normalize_existing_asset_path(selected, "clip", selected_label)
+            for selected, selected_label in clip_candidates:
+                normalized_clip_path = _normalize_existing_asset_path(selected, "clip", selected_label)
+                if normalized_clip_path:
+                    clip_paths.append(normalized_clip_path)
         else:
             logger.info(f"Skip clip for non-process unit: {unit.unit_id} ({normalized_kt})")
 
         materials.screenshot_paths = screenshot_paths
         materials.screenshot_labels = screenshot_labels
         materials.screenshot_items = screenshot_items
-        materials.clip_path = clip_path
+        materials.clip_paths = clip_paths
+        materials.clip_path = clip_paths[0] if clip_paths else ""
         materials.action_classifications = material_requests.action_classifications
 
         unit.materials = materials
 
         logger.debug(
             f"{unit.unit_id}: applied {len(screenshot_paths)} external screenshots, "
-            f"clip={'Yes' if clip_path else 'No'}"
+            f"clips={len(clip_paths)}"
         )
-        if not screenshot_paths and not clip_path:
+        if not screenshot_paths and not clip_paths:
             logger.warning(f"{unit.unit_id}: no external materials matched in Phase2B")
 
     async def _select_screenshot(

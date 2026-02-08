@@ -14,6 +14,8 @@ import os
 import json
 import logging
 import re
+import yaml
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, field
@@ -172,6 +174,9 @@ STRUCTURED_TEXT_SYSTEM_PROMPT = """你是教学内容结构化助手。
 1) 仅基于给定文本改写，不补充外部事实。
 2) 直接输出 Markdown，不输出 JSON 或代码块。
 3) 如果给出图片候选，请在对应句子的句末插入占位符，格式必须为【imgneeded_{{img_id}}】。
+ - 匹配的方式是根据提供的图片描述与句子描述的匹配程度。
+ - 如果图片描述与句子描述不匹配，则不使用。
+ - 如果多张图片匹配一句话可以在句子的句末插入多张图片的占位符。
 4) 禁止使用其他占位符格式（例如 [IMG:img_id]、{IMG=img_id} 等）。
 """
 
@@ -187,6 +192,26 @@ STRUCTURED_TEXT_USER_PROMPT = """## 语义单元
 
 请输出结构化 Markdown；若有图片候选，请根据图片描述把对应图片插入到匹配句子的末尾，
 占位符必须使用【imgneeded_{{img_id}}】。"""
+
+
+IMG_DESC_AUGMENT_SYSTEM_PROMPT = """你是教学文本补全助手。
+请根据图片描述中可见的代码、命令、配置项、参数名、按钮文案等信息，对原始语义单元文本做“增量补全”。
+
+要求：
+1) 仅补全原文已提及但表达不完整的信息，不得添加图片和原文都没有的新事实。
+2) 不删除原文关键步骤与语义，仅在必要处补充细节。
+3) 优先补全实操关键信息（代码、命令、配置路径、参数、关键术语）。
+4) 若图片信息与文本无明显关联，保持原文不变。
+5) 输出仅为“补全后的完整文本”，不要输出解释或 JSON。"""
+
+
+IMG_DESC_AUGMENT_USER_PROMPT = """## 原始语义单元文本
+{body_text}
+
+## 图片证据（按时间/句子对齐）
+{image_evidence}
+
+请输出补全后的完整文本。"""
 # ==============================================================================
 # Data Classes
 # ==============================================================================
@@ -216,6 +241,7 @@ class EnhancedSection:
     screenshot_items: List[Dict[str, Any]] = field(default_factory=list)
     validated_screenshots: List[str] = field(default_factory=list)  # V2: 验证后的截图
     video_clip: str = ""                    # V2: 视频片段路径
+    video_clips: List[str] = field(default_factory=list)
     action_classifications: List[Dict] = field(default_factory=list)
     mult_steps: bool = False
     tutorial_steps: List[Dict[str, Any]] = field(default_factory=list)
@@ -279,6 +305,202 @@ class MarkdownEnhancer:
         # 🚀 调用合并开关：默认开启，失败时自动回退到两次调用
         raw = (os.getenv("MODULE2_MARKDOWN_ENHANCER_COMBINE_CALLS", "1") or "").strip().lower()
         self._combine_llm_calls = raw in ("1", "true", "yes", "y", "on")
+
+        # 实验开关：在结构化前，基于图片描述对正文做一次增量补全。
+        # 优先读取 config.yaml；若环境变量显式设置则覆盖配置。
+        self._enable_img_desc_text_augment = self._load_img_desc_augment_switch(default_value=True)
+
+        # 可观测性：LLM 调用明细追踪（可配置 full/summary）
+        trace_cfg = self._load_llm_trace_config(default_enabled=False)
+        self._llm_trace_enabled = bool(trace_cfg.get("enabled", False))
+        self._llm_trace_level = str(trace_cfg.get("level", "summary") or "summary").strip().lower()
+        if self._llm_trace_level not in ("full", "summary"):
+            self._llm_trace_level = "summary"
+        self._llm_trace_output_path_cfg = str(trace_cfg.get("output_path", "") or "").strip()
+        self._llm_trace_file_path = ""
+        self._llm_trace_lock = asyncio.Lock()
+
+    @staticmethod
+    def _parse_bool(value: Any, default: bool) -> bool:
+        """统一解析布尔开关，兼容 bool/int/str。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            raw = value.strip().lower()
+            if raw in ("1", "true", "yes", "y", "on"):
+                return True
+            if raw in ("0", "false", "no", "n", "off"):
+                return False
+        return bool(default)
+
+    def _resolve_config_path(self) -> Optional[Path]:
+        """解析 config.yaml 路径：环境变量优先，其次项目默认路径。"""
+        env_path = str(os.getenv("MODULE2_CONFIG_PATH", "") or "").strip()
+        if env_path:
+            candidate = Path(env_path)
+            if candidate.exists():
+                return candidate
+            logger.warning(f"MODULE2_CONFIG_PATH not found: {candidate}")
+
+        project_root = Path(__file__).parent.parent.parent
+        candidates = [
+            project_root / "config.yaml",
+            project_root / "videoToMarkdown" / "config.yaml",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _load_img_desc_augment_switch(self, default_value: bool = True) -> bool:
+        """加载“图片描述增量补全”开关：config.yaml 默认开启，环境变量可覆盖。"""
+        enabled = bool(default_value)
+
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                module2_cfg = config.get("module2", {}) if isinstance(config, dict) else {}
+                enhancer_cfg = module2_cfg.get("markdown_enhancer", {}) if isinstance(module2_cfg, dict) else {}
+                cfg_value = enhancer_cfg.get("enable_img_desc_text_augment", enabled)
+                enabled = self._parse_bool(cfg_value, enabled)
+            except Exception as exc:
+                logger.warning(f"Failed to load img-desc augment switch from config: {exc}")
+
+        env_raw = os.getenv("MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT")
+        if env_raw is not None and str(env_raw).strip() != "":
+            enabled = self._parse_bool(env_raw, enabled)
+
+        return enabled
+
+    def _load_llm_trace_config(self, default_enabled: bool = False) -> Dict[str, Any]:
+        """加载 LLM trace 配置：config.yaml 为主，环境变量覆盖。"""
+        config_value: Dict[str, Any] = {
+            "enabled": bool(default_enabled),
+            "level": "summary",
+            "output_path": "",
+        }
+
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                module2_cfg = config.get("module2", {}) if isinstance(config, dict) else {}
+                observability_cfg = module2_cfg.get("observability", {}) if isinstance(module2_cfg, dict) else {}
+                llm_cfg = observability_cfg.get("llm_trace", {}) if isinstance(observability_cfg, dict) else {}
+                config_value["enabled"] = self._parse_bool(llm_cfg.get("enabled", config_value["enabled"]), config_value["enabled"])
+                config_value["level"] = str(llm_cfg.get("level", config_value["level"]) or config_value["level"]).strip().lower()
+                config_value["output_path"] = str(llm_cfg.get("output_path", config_value["output_path"]) or "").strip()
+            except Exception as exc:
+                logger.warning(f"Failed to load llm-trace config: {exc}")
+
+        env_enabled = os.getenv("MODULE2_LLM_TRACE_ENABLED")
+        if env_enabled is not None and str(env_enabled).strip() != "":
+            config_value["enabled"] = self._parse_bool(env_enabled, bool(config_value["enabled"]))
+
+        env_level = str(os.getenv("MODULE2_LLM_TRACE_LEVEL", "") or "").strip().lower()
+        if env_level:
+            config_value["level"] = env_level
+
+        env_output = str(os.getenv("MODULE2_LLM_TRACE_OUTPUT_PATH", "") or "").strip()
+        if env_output:
+            config_value["output_path"] = env_output
+
+        return config_value
+
+    def _prepare_llm_trace_output(self) -> None:
+        """初始化 LLM trace 输出文件。"""
+        if not self._llm_trace_enabled:
+            self._llm_trace_file_path = ""
+            return
+
+        result_dir = Path(self._result_dir or "").resolve() if self._result_dir else Path.cwd()
+        if self._llm_trace_output_path_cfg:
+            configured = Path(self._llm_trace_output_path_cfg)
+            if configured.is_absolute():
+                trace_path = configured
+            else:
+                trace_path = result_dir / configured
+        else:
+            trace_path = result_dir / "intermediates" / "phase2b_llm_trace.jsonl"
+
+        trace_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(trace_path, "w", encoding="utf-8") as file_obj:
+            file_obj.write("")
+        self._llm_trace_file_path = str(trace_path)
+        logger.info(f"LLM trace enabled: {self._llm_trace_file_path} (level={self._llm_trace_level})")
+
+    @staticmethod
+    def _build_text_preview(text: str, max_chars: int = 500) -> str:
+        value = str(text or "")
+        if len(value) <= max_chars:
+            return value
+        return value[:max_chars] + "...<truncated>"
+
+    async def _write_llm_trace_record(
+        self,
+        *,
+        step_name: str,
+        unit_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        response_text: str,
+        duration_ms: float,
+        success: bool,
+        error_msg: str = "",
+        metadata: Optional[Any] = None,
+    ) -> None:
+        """落盘单条 LLM 调用记录。"""
+        if not self._llm_trace_enabled or not self._llm_trace_file_path:
+            return
+
+        model_name = ""
+        prompt_tokens = None
+        completion_tokens = None
+        total_tokens = None
+        if metadata is not None:
+            model_name = str(getattr(metadata, "model", "") or "")
+            prompt_tokens = getattr(metadata, "prompt_tokens", None)
+            completion_tokens = getattr(metadata, "completion_tokens", None)
+            total_tokens = getattr(metadata, "total_tokens", None)
+
+        if not model_name and self._llm_client is not None:
+            model_name = str(getattr(self._llm_client, "model", "") or "")
+
+        prompt_for_dump = str(user_prompt or "")
+        system_for_dump = str(system_prompt or "")
+        response_for_dump = str(response_text or "")
+
+        if self._llm_trace_level != "full":
+            prompt_for_dump = self._build_text_preview(prompt_for_dump)
+            system_for_dump = self._build_text_preview(system_for_dump)
+            response_for_dump = self._build_text_preview(response_for_dump)
+
+        record = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "step_name": step_name,
+            "unit_id": unit_id,
+            "model": model_name,
+            "duration_ms": float(duration_ms),
+            "success": bool(success),
+            "error": str(error_msg or ""),
+            "system_prompt": system_for_dump,
+            "user_prompt": prompt_for_dump,
+            "response_text": response_for_dump,
+            "prompt_chars": len(str(user_prompt or "")),
+            "response_chars": len(str(response_text or "")),
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+        async with self._llm_trace_lock:
+            with open(self._llm_trace_file_path, "a", encoding="utf-8") as file_obj:
+                file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
     
     @property
     def enabled(self) -> bool:
@@ -321,6 +543,7 @@ class MarkdownEnhancer:
         # 记录 Markdown 目录，便于计算 Obsidian 相对路径
         self._markdown_dir = os.path.abspath(markdown_dir) if markdown_dir else None
         self._result_dir = str(Path(result_json_path).resolve().parent)
+        self._prepare_llm_trace_output()
         
         sections = data.get("sections", [])
         title = data.get("title", "知识文档")
@@ -351,9 +574,13 @@ class MarkdownEnhancer:
                 screenshots=materials.get("screenshots", []),
                 screenshot_items=materials.get("screenshot_items", []),
                 video_clip=materials.get("clip", ""),
+                video_clips=materials.get("clips", []),
                 action_classifications=materials.get("action_classifications", []),
                 mult_steps=bool(section.get("mult_steps", False)),
             )
+
+            if enhanced.video_clip and enhanced.video_clip not in enhanced.video_clips:
+                enhanced.video_clips.insert(0, enhanced.video_clip)
             
             # V2: 截图验证由上游完成，这里直接使用过滤后的截图。
             # enhanced.validated_screenshots = self._validate_screenshots(enhanced.screenshots)
@@ -459,10 +686,22 @@ class MarkdownEnhancer:
         ])
         
         prompt = HIERARCHY_PROMPT.format(subject=subject, titles=titles)
+        start_ts = time.perf_counter()
         try:
             # 🚀 使用 LLMClient 进行异步调用
-            content, _, _ = await self._llm_client.complete_text(
+            content, meta, _ = await self._llm_client.complete_text(
                 prompt=prompt
+            )
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="hierarchy_classification",
+                unit_id="GLOBAL",
+                system_prompt="",
+                user_prompt=prompt,
+                response_text=content,
+                duration_ms=duration_ms,
+                success=True,
+                metadata=meta,
             )
 
             # 兼容代码块/前后缀的 JSON 输出
@@ -480,6 +719,17 @@ class MarkdownEnhancer:
             return hierarchy
             
         except Exception as e:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="hierarchy_classification",
+                unit_id="GLOBAL",
+                system_prompt="",
+                user_prompt=prompt,
+                response_text="",
+                duration_ms=duration_ms,
+                success=False,
+                error_msg=str(e),
+            )
             logger.error(f"Hierarchy classification failed: {e}")
             return {s.get("unit_id", f"SU{i}"): {"level": 2, "parent_id": None} 
                     for i, s in enumerate(sections)}
@@ -754,9 +1004,120 @@ class MarkdownEnhancer:
                     "img_id": img_id,
                     "img_path": img_path,
                     "img_description": img_description,
+                    "timestamp_sec": raw.get("timestamp_sec"),
+                    "sentence_id": str(raw.get("sentence_id") or "").strip(),
+                    "sentence_text": str(raw.get("sentence_text") or "").strip(),
                 }
             )
         return normalized
+
+    async def _augment_body_with_image_descriptions(
+        self,
+        section: EnhancedSection,
+        base_text: str,
+        image_items: List[Dict[str, Any]],
+    ) -> str:
+        """在结构化前基于图片描述做一次增量补全（实验开关）。"""
+        if not self._enable_img_desc_text_augment:
+            logger.info(f"[{section.unit_id}] img-desc augment skipped: switch_off")
+            return base_text
+        if not self._enabled or not self._llm_client:
+            logger.info(f"[{section.unit_id}] img-desc augment skipped: llm_unavailable")
+            return base_text
+
+        text = str(base_text or "").strip()
+        if not text or not image_items:
+            reason = "empty_text" if not text else "no_image_items"
+            logger.info(f"[{section.unit_id}] img-desc augment skipped: {reason}")
+            return text
+
+        evidence_lines: List[str] = []
+        used_sentence_ids: set[str] = set()
+        for item in image_items:
+            if not isinstance(item, dict):
+                continue
+            img_desc = str(item.get("img_description") or "").strip()
+            if not img_desc:
+                continue
+
+            img_id = str(item.get("img_id") or "").strip()
+            sentence_id = str(item.get("sentence_id") or "").strip()
+            sentence_text = str(item.get("sentence_text") or "").strip()
+            timestamp = item.get("timestamp_sec")
+
+            time_text = ""
+            try:
+                if timestamp is not None:
+                    time_text = f"{float(timestamp):.2f}s"
+            except Exception:
+                time_text = ""
+
+            # 仅在存在“图-句对齐证据”时触发增量补全，避免把纯图片描述误当作正文事实扩写。
+            if not sentence_id and not sentence_text and not time_text:
+                continue
+
+            if sentence_id:
+                used_sentence_ids.add(sentence_id)
+
+            evidence_lines.append(
+                f"- img_id={img_id or '(unknown)'} | timestamp={time_text or '(none)'} | "
+                f"sentence_id={sentence_id or '(none)'} | sentence_text={sentence_text or '(none)'} | "
+                f"img_description={img_desc}"
+            )
+
+        if not evidence_lines:
+            logger.info(f"[{section.unit_id}] img-desc augment skipped: no_alignment_evidence")
+            return text
+
+        sentence_ids_text = ",".join(sorted(used_sentence_ids)) if used_sentence_ids else "(none)"
+        logger.info(
+            f"[{section.unit_id}] img-desc augment triggered: evidence={len(evidence_lines)}, "
+            f"sentence_ids={sentence_ids_text}"
+        )
+
+        prompt = IMG_DESC_AUGMENT_USER_PROMPT.format(
+            body_text=text,
+            image_evidence="\n".join(evidence_lines),
+        )
+
+        start_ts = time.perf_counter()
+        try:
+            content, meta, _ = await self._llm_client.complete_text(
+                prompt=prompt,
+                system_message=IMG_DESC_AUGMENT_SYSTEM_PROMPT,
+            )
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="img_desc_augment",
+                unit_id=str(section.unit_id),
+                system_prompt=IMG_DESC_AUGMENT_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response_text=content,
+                duration_ms=duration_ms,
+                success=True,
+                metadata=meta,
+            )
+            candidate = str(content or "").strip()
+            if not candidate:
+                logger.info(f"[{section.unit_id}] img-desc augment result: empty_response_fallback")
+                return text
+            changed = candidate != text
+            logger.info(f"[{section.unit_id}] img-desc augment result: changed={str(changed).lower()}")
+            return candidate
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="img_desc_augment",
+                unit_id=str(section.unit_id),
+                system_prompt=IMG_DESC_AUGMENT_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response_text="",
+                duration_ms=duration_ms,
+                success=False,
+                error_msg=str(exc),
+            )
+            logger.warning(f"Image-description augmentation failed for {section.unit_id}: {exc}")
+            return text
 
     def _replace_image_placeholders(self, content: str, screenshot_items: List[Dict[str, Any]]) -> str:
         if not content or not screenshot_items:
@@ -824,6 +1185,9 @@ class MarkdownEnhancer:
         base_text = (section.original_body or "").strip()
         image_items = self._build_concept_image_items(section)
 
+        # 先做图片描述驱动的增量补全，再进入结构化步骤
+        base_text = await self._augment_body_with_image_descriptions(section, base_text, image_items)
+
         image_context = "(none)"
         if image_items:
             image_context = "\n".join(
@@ -840,13 +1204,36 @@ class MarkdownEnhancer:
             image_context=image_context,
         )
 
+        start_ts = time.perf_counter()
         try:
-            content, _, _ = await self._llm_client.complete_text(
+            content, meta, _ = await self._llm_client.complete_text(
                 prompt=prompt,
                 system_message=STRUCTURED_TEXT_SYSTEM_PROMPT,
             )
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="structured_text",
+                unit_id=str(section.unit_id),
+                system_prompt=STRUCTURED_TEXT_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response_text=content,
+                duration_ms=duration_ms,
+                success=True,
+                metadata=meta,
+            )
             structured = (content or "").strip() or base_text
         except Exception as exc:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="structured_text",
+                unit_id=str(section.unit_id),
+                system_prompt=STRUCTURED_TEXT_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                response_text="",
+                duration_ms=duration_ms,
+                success=False,
+                error_msg=str(exc),
+            )
             logger.warning(f"Structured text generation failed for {section.unit_id}: {exc}")
             structured = base_text
 
@@ -1084,6 +1471,17 @@ class MarkdownEnhancer:
         if not file_path:
             return ""
 
+        def _preserve_assets_hierarchy(path_text: str) -> str:
+            normalized = str(path_text).replace("\\", "/")
+            marker = f"/{self._assets_dir}/"
+            if marker in normalized:
+                suffix = normalized.split(marker, 1)[1].strip("/")
+                return f"{self._assets_dir}/{suffix}"
+            rel_prefix = f"{self._assets_dir}/"
+            if normalized.startswith(rel_prefix):
+                return normalized
+            return f"{self._assets_dir}/{Path(path_text).name}"
+
         if os.path.isabs(file_path):
             rel_path = ""
             if self._markdown_dir:
@@ -1092,9 +1490,9 @@ class MarkdownEnhancer:
                 except Exception:
                     rel_path = ""
             if not rel_path:
-                rel_path = f"{self._assets_dir}/{Path(file_path).name}"
+                rel_path = _preserve_assets_hierarchy(file_path)
         else:
-            rel_path = file_path
+            rel_path = _preserve_assets_hierarchy(file_path)
 
         rel_path = rel_path.replace("\\", "/")
         return f"![[{rel_path}]]"
@@ -1122,11 +1520,12 @@ class MarkdownEnhancer:
         if normalized_kt in {"abstract", "concrete"}:
             return lines
 
-        if section.video_clip:
+        if section.video_clips:
             lines.append(f"> Video **{self._build_video_title(section)}**")
             lines.append("")
-            lines.append(self._format_obsidian_embed(section.video_clip))
-            lines.append("")
+            for clip_item in section.video_clips:
+                lines.append(self._format_obsidian_embed(clip_item))
+                lines.append("")
 
         # process（非 tutorial）正文已完成图片占位替换，不再重复追加末尾图片块。
         if section.validated_screenshots and normalized_kt != "process":

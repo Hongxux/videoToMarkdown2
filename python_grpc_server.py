@@ -127,8 +127,12 @@ def _prepend_sys_path(path_value: str) -> None:
     输出参数：无（仅修改 sys.path）。"""
     if not path_value:
         return
+    # 强制置顶：若已存在则先移除再插入，避免“存在但不在首位”导致同名包抢占
     if path_value in sys.path:
-        return
+        try:
+            sys.path.remove(path_value)
+        except ValueError:
+            pass
     sys.path.insert(0, path_value)
 
 
@@ -203,6 +207,8 @@ _prepend_sys_path(current_dir)
 _prepend_sys_path(os.path.dirname(current_dir))
 _prepend_sys_path(os.path.join(current_dir, "MVP_Module2_HEANCING"))
 _prepend_sys_path(os.path.join(current_dir, "proto"))
+# 关键修复：再次把当前仓库根路径置顶，避免命名空间包 videoToMarkdown 被上级目录同名仓库抢占
+_prepend_sys_path(current_dir)
 
 if _CHECK_DEPS:
     raise SystemExit(_run_dependency_preflight())
@@ -216,11 +222,16 @@ import traceback
 import time
 import hashlib
 import shutil
+import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 from concurrent import futures
 from typing import Optional, List, Dict, Any
+from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
+import yaml
 
 _boot("[BOOT] import grpc")
 import grpc
@@ -242,6 +253,11 @@ _boot("[BOOT] import videoToMarkdown (VideoProcessor)")
 from videoToMarkdown.knowledge_engine.core.video import VideoProcessor
 _boot("[BOOT] import videoToMarkdown (Transcriber)")
 from videoToMarkdown.knowledge_engine.core.transcription import Transcriber
+try:
+    import videoToMarkdown as _vtm_pkg
+    _safe_print(f"[BOOT] videoToMarkdown package search path: {list(getattr(_vtm_pkg, '__path__', []))}")
+except Exception as _vtm_e:
+    _safe_print(f"[BOOT] Failed to inspect videoToMarkdown package path: {_vtm_e}")
 _boot("[BOOT] import MVP_Module2_HEANCING.module2_content_enhancement")
 from MVP_Module2_HEANCING.module2_content_enhancement import (
     RichTextPipeline,
@@ -262,6 +278,228 @@ from MVP_Module2_HEANCING.module2_content_enhancement.video_clip_extractor impor
 from MVP_Module2_HEANCING.module2_content_enhancement.llm_client import AdaptiveConcurrencyLimiter
 
 logger = logging.getLogger(__name__)
+
+
+RESUME_META_SCHEMA_VERSION = "resume_meta_v1"
+RESUME_GROUPS = (
+    "transcribe",
+    "stage1_text",
+    "stage1_semantic",
+    "stage1_visual",
+    "stage1_document",
+    "phase2a",
+    "assets",
+    "phase2b",
+)
+
+
+@dataclass(frozen=True)
+class ResumeControl:
+    """断点重续控制配置。"""
+
+    enabled: bool
+    mode: str
+    validation: str
+    on_invalid_reuse: str
+    non_priority_retention_days: int
+    priority_keep_only_phase2a: bool
+    groups: Dict[str, bool]
+
+
+def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """递归合并字典，override 优先级更高。"""
+    result = dict(base or {})
+    for key, value in (override or {}).items():
+        if isinstance(result.get(key), dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    """将配置值转为布尔值。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def _to_int(value: Any, default: int) -> int:
+    """将配置值转为整数。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_yaml_file(path: Path) -> Dict[str, Any]:
+    """加载 YAML 文件，失败时返回空字典。"""
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            data = yaml.safe_load(file)
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:
+        logger.warning(f"Failed to load yaml {path}: {exc}")
+        return {}
+
+
+def _load_resume_control_from_configs() -> ResumeControl:
+    """从双配置源加载断点重续配置并归一化。"""
+    repo_root = Path(__file__).resolve().parent
+    video_config = _load_yaml_file(repo_root / "videoToMarkdown" / "config.yaml")
+    module2_config = _load_yaml_file(repo_root / "MVP_Module2_HEANCING" / "config" / "module2_config.yaml")
+
+    module2_resume = module2_config.get("resume_control", {}) if isinstance(module2_config, dict) else {}
+    video_resume = video_config.get("resume_control", {}) if isinstance(video_config, dict) else {}
+    merged = _deep_merge_dict(module2_resume, video_resume)
+
+    merged_groups = merged.get("groups", {}) if isinstance(merged.get("groups", {}), dict) else {}
+    groups = {group: _to_bool(merged_groups.get(group, False), False) for group in RESUME_GROUPS}
+
+    return ResumeControl(
+        enabled=_to_bool(merged.get("enabled", False), False),
+        mode=str(merged.get("mode", "file_reuse") or "file_reuse"),
+        validation=str(merged.get("validation", "moderate") or "moderate"),
+        on_invalid_reuse=str(merged.get("on_invalid_reuse", "recompute") or "recompute"),
+        non_priority_retention_days=max(0, _to_int(merged.get("non_priority_retention_days", 7), 7)),
+        priority_keep_only_phase2a=_to_bool(merged.get("priority_keep_only_phase2a", True), True),
+        groups=groups,
+    )
+
+
+def _utc_now_iso() -> str:
+    """获取 UTC ISO 时间字符串。"""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_parse_iso_datetime(value: str) -> Optional[datetime]:
+    """安全解析 ISO 时间。"""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _file_signature(path: str) -> Dict[str, Any]:
+    """生成文件签名（存在性、大小、修改时间）。"""
+    try:
+        abs_path = os.path.abspath(path)
+        if not os.path.exists(abs_path):
+            return {"exists": False, "path": abs_path}
+        stat = os.stat(abs_path)
+        return {
+            "exists": True,
+            "path": abs_path,
+            "size": stat.st_size,
+            "mtime": int(stat.st_mtime),
+        }
+    except Exception:
+        return {"exists": False, "path": os.path.abspath(path)}
+
+
+def _build_input_fingerprint(video_path: str, subtitle_path: str = "", extra: Optional[Dict[str, Any]] = None) -> str:
+    """构建输入指纹。"""
+    payload = {
+        "video": _file_signature(video_path),
+        "subtitle": _file_signature(subtitle_path) if subtitle_path else None,
+        "extra": extra or {},
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def _resource_meta_path(resource_path: str) -> str:
+    """返回资源元数据文件路径。"""
+    return f"{resource_path}.meta.json"
+
+
+def _read_resource_meta(resource_path: str) -> Dict[str, Any]:
+    """读取资源元数据。"""
+    meta_path = _resource_meta_path(resource_path)
+    if not os.path.exists(meta_path):
+        return {}
+    try:
+        with open(meta_path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_resource_meta(
+    resource_path: str,
+    *,
+    group: str,
+    input_fingerprint: str,
+    dependencies: Optional[Dict[str, Any]] = None,
+    priority: bool = False,
+) -> None:
+    """写入资源元数据。"""
+    meta_path = _resource_meta_path(resource_path)
+    payload = {
+        "schema_version": RESUME_META_SCHEMA_VERSION,
+        "created_at": _utc_now_iso(),
+        "resource_path": os.path.abspath(resource_path),
+        "group": group,
+        "input_fingerprint": input_fingerprint,
+        "dependencies": dependencies or {},
+        "priority": priority,
+    }
+    with open(meta_path, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+
+
+def _validate_resource_reuse(
+    resource_path: str,
+    *,
+    group: str,
+    expected_input_fingerprint: str,
+) -> (bool, str):
+    """执行中等强度资源复用校验。"""
+    if not os.path.exists(resource_path):
+        return False, "missing_resource"
+    if os.path.getsize(resource_path) <= 0:
+        return False, "empty_resource"
+
+    meta = _read_resource_meta(resource_path)
+    if not meta:
+        return False, "missing_meta"
+    if meta.get("schema_version") != RESUME_META_SCHEMA_VERSION:
+        return False, "schema_mismatch"
+    if meta.get("group") != group:
+        return False, "group_mismatch"
+    if meta.get("input_fingerprint") != expected_input_fingerprint:
+        return False, "fingerprint_mismatch"
+
+    dependencies = meta.get("dependencies", {})
+    if isinstance(dependencies, dict):
+        for dep_name, dep_sig in dependencies.items():
+            if not isinstance(dep_sig, dict):
+                return False, f"dependency_invalid_{dep_name}"
+            dep_path = dep_sig.get("path", "")
+            if not dep_path:
+                return False, f"dependency_missing_path_{dep_name}"
+            current = _file_signature(dep_path)
+            if bool(dep_sig.get("exists", False)) != bool(current.get("exists", False)):
+                return False, f"dependency_exists_mismatch_{dep_name}"
+            if dep_sig.get("exists", False):
+                if dep_sig.get("size") != current.get("size"):
+                    return False, f"dependency_size_mismatch_{dep_name}"
+                if dep_sig.get("mtime") != current.get("mtime"):
+                    return False, f"dependency_mtime_mismatch_{dep_name}"
+    return True, "ok"
 
 # 配置日志级别和格式
 logging.basicConfig(
@@ -688,26 +926,46 @@ class GlobalResourceManager:
     @property
     def transcriber(self):
         """
-        执行逻辑：
+        执行逻辑:
         1) 懒加载 Transcriber 实例。
         2) 返回已缓存的转写器。
-        实现方式：双重检查锁 + 延迟导入。
-        核心价值：减少冷启动时间并复用昂贵资源。
-        决策逻辑：
-        - 条件：self._transcriber is None
-        依据来源（证据链）：
-        - 对象内部状态：self._transcriber。
-        输入参数：
+        实现方式:双重检查锁 + 延迟导入。
+        核心价值:减少冷启动时间并复用昂贵资源。
+        决策逻辑:
+        - 条件:self._transcriber is None
+        依据来源(证据链):
+        - 对象内部状态:self._transcriber。
+        输入参数:
         - 无。
-        输出参数：
+        输出参数:
         - Transcriber 实例或 None。"""
         if self._transcriber is None:
             with self._lock:
                 if self._transcriber is None:
                     try:
                         from videoToMarkdown.knowledge_engine.core.transcription import Transcriber
-                        self._transcriber = Transcriber()
-                        logger.info("  → Transcriber loaded lazily")
+                        
+                        # Get whisper config
+                        w_config = self.config.get("whisper", {})
+                        
+                        # Check parallel config
+                        parallel_config = w_config.get("parallel", {})
+                        is_parallel = parallel_config.get("enabled", False)
+                        num_workers = parallel_config.get("num_workers", 3)
+                        segment_duration = parallel_config.get("segment_duration", 600)
+                        
+                        logger.info(f"  → Initializing Transcriber with config: parallel={is_parallel}, workers={num_workers}")
+                        
+                        self._transcriber = Transcriber(
+                            model_size=w_config.get("model_size", "medium"),
+                            device=w_config.get("device", "cpu"),
+                            compute_type=w_config.get("compute_type", "int8"),
+                            parallel=is_parallel,
+                            num_workers=num_workers,
+                            segment_duration=segment_duration,
+                            config=self.config
+                        )
+                        logger.info(f"  → Transcriber loaded lazily (Parallel={is_parallel}, Workers={num_workers})")
                     except Exception as e:
                         logger.error(f"Transcriber init failed: {e}")
         return self._transcriber
@@ -715,25 +973,25 @@ class GlobalResourceManager:
     @property
     def knowledge_classifier(self):
         """
-        执行逻辑：
+        执行逻辑:
         1) 懒加载 KnowledgeClassifier。
         2) 返回已缓存的分类器实例。
-        实现方式：双重检查锁 + 延迟导入。
-        核心价值：避免重复初始化 LLM 相关资源。
-        决策逻辑：
-        - 条件：self._knowledge_classifier is None
-        依据来源（证据链）：
-        - 对象内部状态：self._knowledge_classifier。
-        输入参数：
+        实现方式:双重检查锁 + 延迟导入。
+        核心价值:避免重复初始化 LLM 相关资源。
+        决策逻辑:
+        - 条件:self._knowledge_classifier is None
+        依据来源(证据链):
+        - 对象内部状态:self._knowledge_classifier。
+        输入参数:
         - 无。
-        输出参数：
+        输出参数:
         - KnowledgeClassifier 实例或 None。"""
         if self._knowledge_classifier is None:
             with self._lock:
                 if self._knowledge_classifier is None:
                     try:
                         from MVP_Module2_HEANCING.module2_content_enhancement.knowledge_classifier import KnowledgeClassifier
-                        # LLMClient 内部现在也是延迟加载 httpx 客户端的，所以这里初始化是安全的
+                        # LLMClient 内部现在也是延迟加载 httpx 客户端的,所以这里初始化是安全的
                         self._knowledge_classifier = KnowledgeClassifier()
                         logger.info("  → KnowledgeClassifier loaded lazily")
                     except Exception as e:
@@ -1004,6 +1262,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - 无（仅更新内部状态与进程池）。"""
         self.config = config or {}
+        self.resume_control = _load_resume_control_from_configs()
         
         # 🔑 使用全局资源管理器
         self.resources = GlobalResourceManager()
@@ -1013,6 +1272,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         self._active_tasks = 0
         self._task_lock = threading.Lock()
         self._cache_metrics_task_id = None
+        self._resume_report_lock = threading.Lock()
 
         # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
         self._classify_concurrency_limiter = AdaptiveConcurrencyLimiter(
@@ -1059,6 +1319,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         logger.info(f"🚀 CV ProcessPool created: {self.cv_worker_count} workers + SharedMemory")
         logger.info("VideoProcessingServicer initialized (Java controls concurrency)")
+        logger.info(
+            "Resume control: enabled=%s mode=%s validation=%s retention_days=%s groups=%s",
+            self.resume_control.enabled,
+            self.resume_control.mode,
+            self.resume_control.validation,
+            self.resume_control.non_priority_retention_days,
+            self.resume_control.groups,
+        )
 
 
 
@@ -1204,12 +1472,52 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 🔑 检查是否已存在字幕文件（缓存复用）
             subtitle_path = os.path.join(output_dir, "subtitles.txt")
             
-            if os.path.exists(subtitle_path):
-                # 复用已有字幕
+            reuse_fingerprint = _build_input_fingerprint(
+                video_path,
+                extra={"language": language, "stage": "transcribe"},
+            )
+            should_try_reuse = self._is_group_reuse_enabled("transcribe")
+            reused = False
+
+            if should_try_reuse:
+                is_valid, reason = _validate_resource_reuse(
+                    subtitle_path,
+                    group="transcribe",
+                    expected_input_fingerprint=reuse_fingerprint,
+                )
+                if is_valid:
+                    with open(subtitle_path, "r", encoding="utf-8") as f:
+                        subtitle_text = f.read()
+                    reused = True
+                    logger.info(f"[{task_id}] ✅ Reusing existing subtitles: {subtitle_path}")
+                    self._append_resume_report(
+                        output_dir=output_dir,
+                        task_id=task_id,
+                        stage="TranscribeVideo",
+                        group="transcribe",
+                        resource_path=subtitle_path,
+                        action="reuse",
+                        reason=reason,
+                        priority=False,
+                    )
+                else:
+                    self._append_resume_report(
+                        output_dir=output_dir,
+                        task_id=task_id,
+                        stage="TranscribeVideo",
+                        group="transcribe",
+                        resource_path=subtitle_path,
+                        action="recompute",
+                        reason=reason,
+                        priority=False,
+                    )
+
+            if not reused and os.path.exists(subtitle_path) and not should_try_reuse:
+                # 兼容旧行为：未开启复用控制时沿用文件存在即复用
                 with open(subtitle_path, "r", encoding="utf-8") as f:
                     subtitle_text = f.read()
                 logger.info(f"[{task_id}] ✅ Reusing existing subtitles: {subtitle_path}")
-            else:
+            elif not reused:
                 # 🔑 使用全局单例 Transcriber
                 transcriber = self.resources.transcriber
                 if not transcriber:
@@ -1221,7 +1529,15 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 # 🔑 保存字幕文件为 subtitles.txt
                 with open(subtitle_path, "w", encoding="utf-8") as f:
                     f.write(subtitle_text)
-                
+
+                _write_resource_meta(
+                    subtitle_path,
+                    group="transcribe",
+                    input_fingerprint=reuse_fingerprint,
+                    dependencies={},
+                    priority=False,
+                )
+
                 logger.info(f"[{task_id}] Subtitles saved to: {subtitle_path}")
             
             return video_processing_pb2.TranscribeResponse(
@@ -1287,7 +1603,65 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 🔑 检查是否已存在输出文件（缓存复用）
             local_sentence_ts = os.path.join(output_dir, "local_storage", "sentence_timestamps.json")
             need_sentence_ts = not os.path.exists(local_sentence_ts)
-            if os.path.exists(step2_path) and os.path.exists(step6_path) and not need_sentence_ts:
+
+            stage1_group_enabled = (
+                self._is_group_reuse_enabled("stage1_text")
+                or self._is_group_reuse_enabled("stage1_semantic")
+                or self._is_group_reuse_enabled("stage1_visual")
+                or self._is_group_reuse_enabled("stage1_document")
+            )
+
+            stage1_fp = _build_input_fingerprint(
+                video_path,
+                subtitle_path,
+                extra={"max_step": max_step, "stage": "stage1"},
+            )
+
+            reused_stage1 = False
+            if stage1_group_enabled:
+                checks = []
+                for resource in (step2_path, step6_path):
+                    valid, reason = _validate_resource_reuse(
+                        resource,
+                        group="stage1_text",
+                        expected_input_fingerprint=stage1_fp,
+                    )
+                    checks.append((resource, valid, reason))
+
+                if not need_sentence_ts:
+                    valid_ts, reason_ts = _validate_resource_reuse(
+                        local_sentence_ts,
+                        group="stage1_text",
+                        expected_input_fingerprint=stage1_fp,
+                    )
+                    checks.append((local_sentence_ts, valid_ts, reason_ts))
+
+                reused_stage1 = (not need_sentence_ts) and all(item[1] for item in checks)
+                for resource, valid, reason in checks:
+                    self._append_resume_report(
+                        output_dir=output_dir,
+                        task_id=task_id,
+                        stage="ProcessStage1",
+                        group="stage1_text",
+                        resource_path=resource,
+                        action="reuse" if valid and reused_stage1 else "recompute",
+                        reason=reason,
+                        priority=False,
+                    )
+
+                if need_sentence_ts:
+                    self._append_resume_report(
+                        output_dir=output_dir,
+                        task_id=task_id,
+                        stage="ProcessStage1",
+                        group="stage1_text",
+                        resource_path=local_sentence_ts,
+                        action="recompute",
+                        reason="missing_sentence_timestamps",
+                        priority=False,
+                    )
+
+            if reused_stage1:
                 logger.info(f"[{task_id}] ✅ Reusing existing Stage1 outputs")
             else:
                 if os.path.exists(step2_path) and os.path.exists(step6_path) and need_sentence_ts:
@@ -1301,6 +1675,16 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                    output_dir=output_dir,
                    max_step=effective_max_step
                 )
+
+                for resource in (step2_path, step6_path):
+                    if os.path.exists(resource):
+                        _write_resource_meta(
+                            resource,
+                            group="stage1_text",
+                            input_fingerprint=stage1_fp,
+                            dependencies={},
+                            priority=False,
+                        )
             
             # 补齐 sentence_timestamps.json（来自 Stage1 local_storage）
             intermediates_dir = os.path.join(output_dir, "intermediates")
@@ -1313,6 +1697,17 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     import shutil
                     shutil.copy2(local_sentence_ts, inter_sentence_ts)
                     sentence_timestamps_path = inter_sentence_ts
+
+                    _write_resource_meta(
+                        local_sentence_ts,
+                        group="stage1_text",
+                        input_fingerprint=stage1_fp,
+                        dependencies={
+                            "step2": _file_signature(step2_path),
+                            "step6": _file_signature(step6_path),
+                        },
+                        priority=False,
+                    )
                 except Exception as e:
                     logger.warning(f"[{task_id}] Copy sentence_timestamps.json failed: {e}")
                     sentence_timestamps_path = local_sentence_ts
@@ -1384,9 +1779,28 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         try:
             self._increment_tasks()
+
+            phase2a_fp = _build_input_fingerprint(
+                video_path,
+                extra={
+                    "step2": _file_signature(step2_json_path),
+                    "step6": _file_signature(step6_json_path),
+                    "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else None,
+                    "stage": "phase2a",
+                },
+            )
+            phase2a_reuse_enabled = self._is_group_reuse_enabled("phase2a")
+            can_reuse_phase2a = False
+            phase2a_reason = "disabled"
+            if phase2a_reuse_enabled:
+                can_reuse_phase2a, phase2a_reason = _validate_resource_reuse(
+                    semantic_units_path,
+                    group="phase2a",
+                    expected_input_fingerprint=phase2a_fp,
+                )
             
             # 🔑 检查是否已存在 Phase2A 输出（缓存复用）
-            if os.path.exists(semantic_units_path):
+            if os.path.exists(semantic_units_path) and (can_reuse_phase2a or not phase2a_reuse_enabled):
                 logger.warning(
                     f"[{task_id}] ✅ Reusing existing Phase2A output: {semantic_units_path} "
                     f"(cache hit -> 不会进入 _collect_material_requests；如需验证新策略请删除该文件后重跑)"
@@ -1396,6 +1810,17 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 import json
                 with open(semantic_units_path, "r", encoding="utf-8") as f:
                     cached_data = json.load(f)
+
+                self._append_resume_report(
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    stage="AnalyzeSemanticUnits",
+                    group="phase2a",
+                    resource_path=semantic_units_path,
+                    action="reuse",
+                    reason="ok" if phase2a_reuse_enabled else "legacy_exists",
+                    priority=True,
+                )
                 
                 pb_screenshots = []
                 pb_clips = []
@@ -1411,7 +1836,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     # 获取 screenshots
                     for ss in material_reqs.get("screenshot_requests", []):
                         pb_screenshots.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=ss.get("screenshot_id", f"ss_{unit_id}"),
+                            screenshot_id=ss.get("screenshot_id", f"{unit_id}/{unit_id}_ss_fallback_001"),
                             timestamp_sec=ss.get("timestamp_sec", 0.0),
                             label=ss.get("label", ""),
                             semantic_unit_id=ss.get("semantic_unit_id", unit_id)
@@ -1429,6 +1854,18 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     clip_requests=pb_clips,
                     semantic_units_json_path=semantic_units_path,
                     error_msg=""
+                )
+
+            if phase2a_reuse_enabled and not can_reuse_phase2a:
+                self._append_resume_report(
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    stage="AnalyzeSemanticUnits",
+                    group="phase2a",
+                    resource_path=semantic_units_path,
+                    action="recompute",
+                    reason=phase2a_reason,
+                    priority=True,
                 )
             
             
@@ -1474,6 +1911,19 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 self._build_clip_request_pb(r, getattr(r, "semantic_unit_id", ""))
                 for r in clip_requests
             ]
+
+            if os.path.exists(semantic_units_path):
+                _write_resource_meta(
+                    semantic_units_path,
+                    group="phase2a",
+                    input_fingerprint=phase2a_fp,
+                    dependencies={
+                        "step2": _file_signature(step2_json_path),
+                        "step6": _file_signature(step6_json_path),
+                        "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                    },
+                    priority=True,
+                )
             
             return video_processing_pb2.AnalyzeResponse(
                 success=True,
@@ -1939,7 +2389,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     )
                     
                     final_clips.append(self._build_clip_request_pb({
-                        "clip_id": f"clip_{unit_id}_action{i}",
+                        "clip_id": f"{unit_id}/{unit_id}_clip_action_{i + 1:03d}",
                         "start_sec": envelope_start,
                         "end_sec": envelope_end,
                         "knowledge_type": knowledge_type,
@@ -2023,7 +2473,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     if not task_shm_frames:
                         # 回退：如果没有读取到帧，使用中点时间戳
                         final_ss.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=f"{task['unit_id']}_island{task['island_index']}",
+                            screenshot_id=f"{task['unit_id']}/{task['unit_id']}_ss_island_{task['island_index'] + 1:03d}",
                             timestamp_sec=(task['expanded_start'] + task['expanded_end']) / 2,
                             label=f"稳定岛{task['island_index']}",
                             semantic_unit_id=task['unit_id']
@@ -2052,7 +2502,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     # Step 4: 构建 ScreenshotRequest
                     for result in results:
                         final_ss.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=f"{result['unit_id']}_island{result['island_index']}",
+                            screenshot_id=f"{result['unit_id']}/{result['unit_id']}_ss_island_{result['island_index'] + 1:03d}",
                             timestamp_sec=result['selected_timestamp'],
                             label=f"稳定岛{result['island_index']}",
                             semantic_unit_id=result['unit_id']
@@ -2069,7 +2519,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 for unit in units:
                     mid_ts = (float(unit.start_sec) + float(unit.end_sec)) / 2
                     final_ss.append(video_processing_pb2.ScreenshotRequest(
-                        screenshot_id=f"{unit.unit_id}_fallback",
+                        screenshot_id=f"{unit.unit_id}/{unit.unit_id}_ss_fallback_001",
                         timestamp_sec=mid_ts,
                         label="fallback",
                         semantic_unit_id=unit.unit_id
@@ -2167,6 +2617,27 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     with open(semantic_units_path, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
                     
+                    phase2a_fp = _build_input_fingerprint(
+                        video_path,
+                        extra={
+                            "step2": _file_signature(step2_path),
+                            "step6": _file_signature(step6_path),
+                            "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else None,
+                            "stage": "phase2a",
+                        },
+                    )
+                    _write_resource_meta(
+                        semantic_units_path,
+                        group="phase2a",
+                        input_fingerprint=phase2a_fp,
+                        dependencies={
+                            "step2": _file_signature(step2_path),
+                            "step6": _file_signature(step6_path),
+                            "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+                        },
+                        priority=True,
+                    )
+
                     logger.info(f"[{task_id}] Updated semantic_units_phase2a.json with {len(final_ss)} screenshots, {len(final_clips)} clips")
             except Exception as e:
                 logger.warning(f"[{task_id}] Failed to update semantic_units_phase2a.json: {e}")
@@ -2278,6 +2749,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             )
         finally:
             self._write_cache_metrics(output_dir, task_id, "AssembleRichText")
+            self._cleanup_non_priority_resources(output_dir, task_id)
             self._decrement_tasks()
     
     def _get_video_duration(self, video_path: str) -> float:
@@ -2353,13 +2825,20 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         取舍：segments 为空则保持 start/end 单段逻辑，兼容旧版链路。
         """
         if isinstance(clip, dict):
-            clip_id = clip.get("clip_id", f"clip_{default_unit_id}")
+            clip_id = clip.get(
+                "clip_id",
+                f"{default_unit_id}/{default_unit_id}_clip_fallback_001" if default_unit_id else "clip_fallback_001",
+            )
             start_sec = clip.get("start_sec", 0.0)
             end_sec = clip.get("end_sec", 0.0)
             knowledge_type = clip.get("knowledge_type", "")
             semantic_unit_id = clip.get("semantic_unit_id", default_unit_id)
         else:
-            clip_id = getattr(clip, "clip_id", f"clip_{default_unit_id}")
+            clip_id = getattr(
+                clip,
+                "clip_id",
+                f"{default_unit_id}/{default_unit_id}_clip_fallback_001" if default_unit_id else "clip_fallback_001",
+            )
             start_sec = getattr(clip, "start_sec", 0.0)
             end_sec = getattr(clip, "end_sec", 0.0)
             knowledge_type = getattr(clip, "knowledge_type", "")
@@ -2402,6 +2881,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         - 无（仅更新内部计数）。"""
         with self._task_lock:
             self._active_tasks -= 1
+
+    def _is_group_reuse_enabled(self, group: str) -> bool:
+        """判断指定分组是否启用文件复用。"""
+        if not self.resume_control.enabled:
+            return False
+        if self.resume_control.mode != "file_reuse":
+            return False
+        return bool(self.resume_control.groups.get(group, False))
 
     def _cache_metrics_begin(self, task_id: str, stage: str) -> None:
         """
@@ -2464,6 +2951,108 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 json.dump(records, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"Cache metrics write failed: {e}")
+
+    def _append_resume_report(
+        self,
+        output_dir: str,
+        task_id: str,
+        stage: str,
+        group: str,
+        resource_path: str,
+        action: str,
+        reason: str,
+        priority: bool,
+    ) -> None:
+        """追加写入断点重续报告。"""
+        try:
+            intermediates_dir = os.path.join(output_dir, "intermediates")
+            os.makedirs(intermediates_dir, exist_ok=True)
+            report_path = os.path.join(intermediates_dir, "resume_report.json")
+
+            record = {
+                "timestamp": _utc_now_iso(),
+                "task_id": task_id,
+                "stage": stage,
+                "group": group,
+                "resource_path": os.path.abspath(resource_path),
+                "action": action,
+                "reason": reason,
+                "priority": priority,
+            }
+
+            with self._resume_report_lock:
+                records: List[Dict[str, Any]] = []
+                if os.path.exists(report_path):
+                    try:
+                        with open(report_path, "r", encoding="utf-8") as file:
+                            raw = json.load(file)
+                            if isinstance(raw, list):
+                                records = raw
+                            elif isinstance(raw, dict):
+                                records = [raw]
+                    except Exception:
+                        records = []
+                records.append(record)
+                with open(report_path, "w", encoding="utf-8") as file:
+                    json.dump(records, file, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            logger.warning(f"Append resume report failed: {exc}")
+
+    def _cleanup_non_priority_resources(self, output_dir: str, task_id: str) -> None:
+        """按 TTL 清理非优先资源（优先资源仅限 Phase2A）。"""
+        retention_days = self.resume_control.non_priority_retention_days
+        if retention_days < 0:
+            return
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+        storage_root = Path(output_dir)
+        if not storage_root.exists():
+            return
+
+        removed_count = 0
+        removed_meta_count = 0
+
+        for meta_path in storage_root.rglob("*.meta.json"):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as file:
+                    meta = json.load(file)
+                if not isinstance(meta, dict):
+                    continue
+
+                created_at = _safe_parse_iso_datetime(str(meta.get("created_at", "")))
+                if not created_at:
+                    continue
+                if created_at > cutoff:
+                    continue
+
+                is_priority = bool(meta.get("priority", False))
+                if self.resume_control.priority_keep_only_phase2a and is_priority:
+                    continue
+
+                resource_path = str(meta.get("resource_path", "")).strip()
+                if resource_path and os.path.exists(resource_path):
+                    try:
+                        os.remove(resource_path)
+                        removed_count += 1
+                    except Exception:
+                        pass
+
+                try:
+                    os.remove(meta_path)
+                    removed_meta_count += 1
+                except Exception:
+                    pass
+            except Exception:
+                continue
+
+        if removed_count or removed_meta_count:
+            logger.info(
+                "[%s] cleanup non-priority resources done: removed_files=%s removed_meta=%s ttl_days=%s",
+                task_id,
+                removed_count,
+                removed_meta_count,
+                retention_days,
+            )
             
     def _batch_read_frames_to_shm(self, video_path: str, units_data: list) -> dict:
         """
@@ -3824,7 +4413,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         for idx, ss in enumerate(ss_list):
                             ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
                             cv_screenshot_requests.append({
-                                "screenshot_id": f"routed_ss_{unit_id}_{idx}",
+                                "screenshot_id": f"{unit_id}/{unit_id}_ss_route_{idx + 1:03d}",
                                 "timestamp_sec": ts,
                                 "label": f"routed_range_{idx}",
                                 "semantic_unit_id": unit_id,
@@ -3896,7 +4485,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             for idx, ss in enumerate(ss_list or []):
                                 ts = _safe_float(ss.get("timestamp_sec", (start_sec + end_sec) / 2))
                                 cv_screenshot_requests.append({
-                                    "screenshot_id": f"routed_ss_{unit_id}_{idx}",
+                                    "screenshot_id": f"{unit_id}/{unit_id}_ss_route_{idx + 1:03d}",
                                     "timestamp_sec": ts,
                                     "label": f"routed_range_{idx}",
                                     "semantic_unit_id": unit_id
@@ -3925,7 +4514,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 start_sec = _safe_float(unit.get("start_sec", 0.0))
                 end_sec = _safe_float(unit.get("end_sec", 0.0))
                 cv_clip_requests.append({
-                    "clip_id": f"routed_clip_{unit_id}",
+                    "clip_id": f"{unit_id}/{unit_id}_clip_route_001",
                     "start_sec": start_sec,
                     "end_sec": end_sec,
                     "knowledge_type": unit.get("knowledge_type", ""),
@@ -4211,7 +4800,14 @@ async def serve(host: str = "0.0.0.0", port: int = 50051):
     server = aio.server()
     logger.info("初始化 VideoProcessingServicer（首次 warmup 可能较慢）...")
     init_t0 = time.perf_counter()
-    servicer = VideoProcessingServicer()
+    
+    # Load config correctly
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    config_path = os.path.join(root_dir, "videoToMarkdown", "config.yaml")
+    config = _load_yaml_file(Path(config_path))
+    logger.info(f"Loaded config from {config_path}: {list(config.keys())}")
+    
+    servicer = VideoProcessingServicer(config)
     logger.info(f"VideoProcessingServicer initialized in {time.perf_counter() - init_t0:.2f}s")
     video_processing_pb2_grpc.add_VideoProcessingServiceServicer_to_server(servicer, server)
 

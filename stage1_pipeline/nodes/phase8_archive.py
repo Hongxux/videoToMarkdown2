@@ -85,21 +85,45 @@ async def step23_node(state: PipelineState) -> Dict[str, Any]:
             
             # 使用 FFmpeg 截取
             try:
-                cmd = [
+                duration = end - start
+                # 快速通道：流拷贝（快，关键帧精度）
+                fast_cmd = [
                     "ffmpeg", "-y",
-                    "-i", video_path,
                     "-ss", str(start),
-                    "-to", str(end),
+                    "-i", video_path,
+                    "-t", str(duration),
                     "-c", "copy",
+                    "-avoid_negative_ts", "make_zero",
                     str(clip_path)
                 ]
-                
+
                 result = subprocess.run(
-                    cmd,
+                    fast_cmd,
                     capture_output=True,
                     text=True,
                     timeout=60
                 )
+
+                # 回退通道：重编码（慢，但兼容性更高）
+                if result.returncode != 0 or not clip_path.exists() or clip_path.stat().st_size == 0:
+                    fallback_cmd = [
+                        "ffmpeg", "-y",
+                        "-ss", str(start),
+                        "-i", video_path,
+                        "-t", str(duration),
+                        "-c:v", "libx264",
+                        "-preset", "veryfast",
+                        "-crf", "23",
+                        "-c:a", "aac",
+                        "-b:a", "128k",
+                        str(clip_path)
+                    ]
+                    result = subprocess.run(
+                        fallback_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=120
+                    )
                 
                 if result.returncode == 0 and clip_path.exists():
                     named_clips.append({

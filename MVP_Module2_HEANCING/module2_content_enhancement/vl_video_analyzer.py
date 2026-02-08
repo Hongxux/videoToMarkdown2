@@ -323,8 +323,9 @@ class VLVideoAnalyzer:
 
                 if normalized_mode == "tutorial_stepwise":
                     # 教程模式仅关注步骤切分与关键帧，不依赖 VL 返回 knowledge_type。
+                    tutorial_clip_stem = f"{semantic_unit_id}_clip_step_{step_id:02d}_{action_brief}"
                     result.clip_requests.append({
-                        "clip_id": f"{semantic_unit_id}_step_{step_id:02d}_{action_brief}",
+                        "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, tutorial_clip_stem),
                         "start_sec": ar.absolute_clip_start_sec,
                         "end_sec": ar.absolute_clip_end_sec,
                         "knowledge_type": "process",
@@ -338,8 +339,9 @@ class VLVideoAnalyzer:
                     # 默认模式保留旧行为：讲解型不生成视频切片。
                     k_type = str(ar.knowledge_type or "").strip("[]() \"'").lower()
                     if k_type not in {"\u8bb2\u89e3\u578b", "explanation", "abstract_explanation"}:
+                        default_clip_stem = f"{semantic_unit_id}_clip_vl_{i + 1:03d}"
                         result.clip_requests.append({
-                            "clip_id": f"vl_clip_{semantic_unit_id}_{i}",
+                            "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, default_clip_stem),
                             "start_sec": ar.absolute_clip_start_sec,
                             "end_sec": ar.absolute_clip_end_sec,
                             "knowledge_type": ar.knowledge_type,
@@ -351,10 +353,16 @@ class VLVideoAnalyzer:
                         })
 
                 for j, ts in enumerate(ar.absolute_screenshot_timestamps):
-                    screenshot_id = f"vl_ss_{semantic_unit_id}_{i}_{j}"
+                    screenshot_id = self._build_unit_relative_asset_id(
+                        semantic_unit_id,
+                        f"{semantic_unit_id}_ss_vl_{i + 1:02d}_{j + 1:02d}",
+                    )
                     label = f"{ar.knowledge_type}_screenshot_{j+1}"
                     if normalized_mode == "tutorial_stepwise":
-                        screenshot_id = f"{semantic_unit_id}_step_{step_id:02d}_{action_brief}_key_{j+1:02d}"
+                        screenshot_id = self._build_unit_relative_asset_id(
+                            semantic_unit_id,
+                            f"{semantic_unit_id}_ss_step_{step_id:02d}_key_{j + 1:02d}_{action_brief}",
+                        )
                         label = f"step_{step_id:02d}:{ar.step_description or action_brief}_keyframe_{j+1}"
 
                     result.screenshot_requests.append({
@@ -773,6 +781,13 @@ class VLVideoAnalyzer:
         if len(raw) > max_len:
             return raw[:max_len].rstrip("_") or "action"
         return raw
+
+    def _build_unit_relative_asset_id(self, semantic_unit_id: str, file_stem: str) -> str:
+        """构建 assets/{unit_id}/ 下的相对请求 ID（不含扩展名）。"""
+        unit_id = str(semantic_unit_id or "").strip() or "SU000"
+        stem = str(file_stem or "").strip().replace("\\", "/").strip("/")
+        stem = stem.split("/")[-1] if stem else f"{unit_id}_asset_001"
+        return f"{unit_id}/{stem}"
 
     def _safe_int(self, value: Any, default: int = 0) -> int:
         try:

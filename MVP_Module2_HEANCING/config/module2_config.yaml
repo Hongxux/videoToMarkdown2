@@ -1,5 +1,23 @@
 # Module 2 Complete Configuration
 
+# 断点重续（文件复用）配置（与 videoToMarkdown/config.yaml 同构）
+resume_control:
+  enabled: false
+  mode: "file_reuse"
+  validation: "moderate"
+  on_invalid_reuse: "recompute"
+  non_priority_retention_days: 7
+  priority_keep_only_phase2a: true
+  groups:
+    transcribe: false
+    stage1_text: false
+    stage1_semantic: false
+    stage1_visual: false
+    stage1_document: false
+    phase2a: false
+    assets: false
+    phase2b: false
+
 # 模块2完整配置文件
 #
 # 包含所有可调参数,避免硬编码
@@ -290,7 +308,7 @@ vl_material_generation:
     only_process: true
     min_unit_duration_sec: 10.0
     keep_edge_sec: 1.0
-    min_stable_interval_sec: 4.0
+    min_stable_interval_sec: 6.0
     min_cut_span_sec: 0.8
     min_keep_segment_sec: 0.5
     min_removed_ratio: 0.10

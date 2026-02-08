@@ -326,8 +326,9 @@ class VLMaterialGenerator:
             segments.sort(key=lambda s: s["start_sec"])
             start_sec = min(seg["start_sec"] for seg in segments)
             end_sec = max(seg["end_sec"] for seg in segments)
+            merged_clip_stem = f"{unit_id}_clip_vl_merged"
             merged.append({
-                "clip_id": f"vl_clip_{unit_id}_merged",
+                "clip_id": f"{unit_id}/{merged_clip_stem}",
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "knowledge_type": knowledge_type,
@@ -537,7 +538,7 @@ class VLMaterialGenerator:
             if action_brief == "action" and step_description:
                 action_brief = self._slugify_action_brief(step_description)
 
-            clip_filename = f"{unit_id}_step_{step_index:02d}_{action_brief}.mp4"
+            clip_filename = f"{unit_id}_clip_step_{step_index:02d}_{action_brief}.mp4"
             clip_output_path = unit_dir / clip_filename
 
             start_sec = self._safe_float(clip.get("start_sec", 0.0), 0.0)
@@ -561,9 +562,9 @@ class VLMaterialGenerator:
                 key_ts = self._safe_float(step_ss.get("timestamp_sec", start_sec), start_sec)
                 ext = "jpg" if self.tutorial_keyframe_image_ext == "jpeg" else self.tutorial_keyframe_image_ext
                 if key_idx == 1:
-                    key_name = f"{unit_id}_step_{step_index:02d}_{action_brief}_key.{ext}"
+                    key_name = f"{unit_id}_ss_step_{step_index:02d}_key_01_{action_brief}.{ext}"
                 else:
-                    key_name = f"{unit_id}_step_{step_index:02d}_{action_brief}_key_{key_idx:02d}.{ext}"
+                    key_name = f"{unit_id}_ss_step_{step_index:02d}_key_{key_idx:02d}_{action_brief}.{ext}"
                 key_path = unit_dir / key_name
                 key_ok = await self._export_keyframe_with_ffmpeg(
                     video_path=video_path,

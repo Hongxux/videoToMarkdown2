@@ -2,6 +2,134 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-08 Assets 语义分层与命名规范统一（强制新规则）
+- 日期：2026-02-08
+- 触发背景与问题：
+  - `assets` 目录存在扁平堆叠，未按语义单元分目录落盘。
+  - 视频片段与截图命名风格不统一（`routed_*` / `vl_*` / `step_*` 混用），导致排查和复用困难。
+- 决策与范围：
+  - 决策1：统一资产目录为 `assets/{unit_id}/`。
+  - 决策2：统一请求 ID 规则为“相对 assets 路径（不含扩展名）”：`{unit_id}/{file_stem}`。
+  - 决策3：强制新规则，不做旧扁平命名兼容。
+  - 决策4：全链路统一（AnalyzeWithVL 路由分支 + VL 默认分支 + VL 教程分支 + Phase2B 匹配 + Markdown 路径）。
+- 改动范围：
+  - `python_grpc_server.py`
+    - 路由分支 `routed_ss_* / routed_clip_*` 改为新规则：`{unit_id}/{unit_id}_ss_route_xxx`、`{unit_id}/{unit_id}_clip_route_xxx`。
+    - Analyze 阶段兜底与 action 片段 ID 统一改为 `{unit_id}/...`。
+    - ClipRequest 默认兜底 ID 改为新规则路径格式。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`
+    - 新增 `_build_unit_relative_asset_id(...)`。
+    - VL 默认模式与教程模式的 `clip_id/screenshot_id` 统一为 `{unit_id}/{file_stem}`。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`
+    - 教程导出文件名统一为 `clip_step / ss_step_key` 风格。
+    - 多步骤合并 clip 的 `clip_id` 统一为新规则路径。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - `_collect_candidates_by_id` 收敛为“新规则严格匹配优先”。
+    - 去除旧扁平 fallback 扫描逻辑；当请求 ID 不含 `/` 时记录 warning 并跳过。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_document.py`
+    - `_relative_path` 改为保留 `assets` 子目录层级，不再仅使用 basename。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - `_format_obsidian_embed` 增强：保留 `assets/{unit_id}/...` 层级，避免 fallback 压平路径。
+- 兼容性影响：
+  - `semantic_units_phase2a.json` 中的 `clip_id/screenshot_id` 输出格式变化为 `{unit_id}/{file_stem}`。
+  - 旧任务若仍使用扁平 ID，将不再被 Phase2B 自动匹配（符合“强制新规则”决策）。
+- 风险与回滚：
+  - 风险：历史缓存任务的旧命名请求在新逻辑下匹配失败。
+  - 回滚方式：恢复 `rich_text_pipeline.py` 的旧 fallback 扫描逻辑，并恢复旧 ID 生成策略。
+- 验证方式：
+  - 单测：更新并新增 `test_rich_text_pipeline_asset_naming.py`、`test_vl_tutorial_flow.py`、`test_markdown_enhancer_rich_text.py`。
+  - 验证点：
+    - 资产写入路径均可落入 `assets/{unit_id}/`；
+    - 默认/VL/教程三类命名不再混杂；
+    - Markdown/Obsidian 引用保留 `assets` 子目录层级。
+
+## 2026-02-08 全链路文件复用型断点重续（分组开关 + Phase2A 优先保留）
+- 日期：2026-02-08
+- 触发背景与目标：
+  - 需要支持“手动开启断点重续”，且可按不同步骤（分组）独立启用。
+  - 复用语义要求为“仅文件复用”，失效时自动回退重算。
+  - 资源策略要求收敛为：仅保留 Phase2A 语义单元与素材请求结果为优先资产；其余资源保留 7 天。
+- 改动范围：
+  - `python_grpc_server.py`
+    - 新增 `resume_control` 双配置加载与归一化。
+    - 新增资源元数据机制：`*.meta.json`（schema/input_fingerprint/dependencies/group/priority）。
+    - 新增中等强度复用校验：文件存在 + schema + 输入指纹 + 依赖签名。
+    - 在 `TranscribeVideo`、`ProcessStage1`、`AnalyzeSemanticUnits` 接入复用判定与回退。
+    - 新增 `resume_report.json` 追踪复用命中/失效原因。
+    - 新增非优先资源 TTL 清理（7天）。
+  - `videoToMarkdown/config.yaml`
+    - 新增 `resume_control` 配置块（默认关闭、分组开关、TTL 7天）。
+  - `MVP_Module2_HEANCING/config/module2_config.yaml`
+    - 新增同构 `resume_control` 配置块，保证双配置同步。
+  - `docs/architecture/overview.md`
+    - 补充断点重续与资源保留策略。
+- 关键决策与理由：
+  - 决策1：不改 gRPC/proto，通过配置中心控制。
+    - 为什么：最小化跨语言改造成本，避免协议升级联动风险。
+  - 决策2：使用 meta + 指纹 + 依赖签名做 `moderate` 校验。
+    - 为什么：比“仅文件存在”可靠，且成本明显低于全量内容哈希。
+  - 决策3：仅 Phase2A 作为优先长期保留资产。
+    - 为什么：该资产复用收益最高，且最直接支撑素材请求复用。
+  - 决策4：非优先资源 TTL 7天。
+    - 为什么：平衡排障回放窗口与磁盘占用。
+- 兼容性影响：
+  - 对外 gRPC/REST 协议无变化。
+  - 未开启 `resume_control.enabled` 时，行为与现网基本一致。
+- 风险与回滚：
+  - 风险：历史资源无 meta 时会判定失效并重算（首次升级后预期行为）。
+  - 回滚：将 `resume_control.enabled` 置 `false` 即可回退到旧路径。
+- 验证方式：
+  - Python 语法检查：`python -m py_compile python_grpc_server.py`
+  - 复用行为验证：重复任务命中 `AnalyzeSemanticUnits` 缓存；篡改依赖后触发重算。
+  - 清理验证：调整 meta 时间到过期，触发 TTL 清理后检查非优先资源删除。
+- 性能记录口径（本次未做完整压测，仅定义统计口径）：
+  - 指标1：`AnalyzeSemanticUnits` 缓存命中率（来自 `resume_report.json` + `cache_metrics.json`）。
+  - 指标2：Phase2A 复用命中时的平均耗时下降比例（同任务同输入对比）。
+  - 指标3：7天窗口内磁盘占用变化（优先 vs 非优先）。
+
+## 2026-02-08 FFmpeg 素材提取链路提速（快速 seek / JPEG / copy 快速通道 / 自适应并发）
+- 日期：2026-02-08
+- 版本/分支/提交：未记录
+- 触发背景与问题：
+  - 截图与视频切片阶段成为主瓶颈，表现为随机 seek 开销高、PNG 编码写盘慢、切片重编码成本高、固定 worker 数在不同机器上不稳定。
+  - 用户要求分四项优化：`-ss` 前置、截图 PNG->JPEG、切片“copy 快速通道+回退通道”、worker 数按系统资源自适应。
+- 改动范围（模块/接口/数据）：
+  - `stage1_pipeline/nodes/phase8_archive.py`
+    - `ffmpeg` 切片参数调整为快速 seek：`-ss` 前置到 `-i` 之前，`-to` 改为 `-t`，并增加 `-avoid_negative_ts make_zero`。
+    - 增加切片“双通道”策略：先走 `-c copy` 快速通道，失败后回退到 `libx264+aac` 重编码通道。
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+    - 截图输出从 `.png` 改为 `.jpg`，并新增 `writeJpeg(...)`（含压缩质量控制）。
+    - clip 提取新增 `extractSingleClipFastCopy(...)`、`extractConcatClipFastCopy(...)`、`runFastCopyProcess(...)`：优先 ffmpeg stream copy，失败回退原 JavaCV 重编码链路。
+    - `resolveClipWorkerCount(...)` 从固定 `min(cpu/2,6)` 升级为“CPU+空闲内存+当前负载”联合自适应策略，并保留硬上限保护。
+  - `MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/FFmpegService.java`
+    - 旧服务截图输出后缀同步改为 `.jpg`，避免运行路径切换时的素材扩展名不一致。
+- 关键决策与理由：
+  - 决策1：`-ss` 前置（输入侧 seek）优先。
+    - 为什么：短片段批量切片场景下可显著减少解码前滚时间。
+    - 权衡：关键帧级精度可能略低于输出侧 seek，但在主链路“先快后稳”策略中可接受。
+  - 决策2：保留重编码回退，不只做 copy。
+    - 为什么：部分片源在 copy 下可能出现首尾时间不理想或容器兼容问题，回退可保障成功率。
+    - 权衡：回退路径耗时更高，但仅在快速通道失败时触发。
+  - 决策3：截图默认 JPEG。
+    - 为什么：JPEG 写盘与编码成本更低，吞吐更高，且下游素材匹配已支持 `.jpg/.jpeg/.png`。
+    - 权衡：有损压缩带来轻微画质损失，但对教程类截图可接受。
+  - 决策4：worker 自适应而非固定值。
+    - 为什么：不同机器 CPU/内存/负载差异大，固定并发容易导致抖动。
+    - 权衡：策略复杂度上升，但通过日志输出各约束值提升可观测性。
+- 兼容性影响：
+  - 素材文件后缀从 `.png` 切换到 `.jpg`（截图），但 Phase2B 素材匹配已支持多后缀，协议字段未变。
+  - clip 输出仍为 `.mp4`，接口与 DTO 不变。
+- 风险与回滚方案：
+  - 若出现截图质量不满足预期，可将 `JavaCVFFmpegService` 截图写回 PNG（回滚 `writeJpeg` 调用）。
+  - 若 copy 快速通道在特定片源兼容性差，可在 `extractClipWithWorkerGrabber(...)` 中临时禁用 fast-copy 分支，直接走重编码。
+  - 若自适应并发在高峰期不稳定，可将 `resolveClipWorkerCount(...)` 回退到固定策略。
+- 验证方式与结果：
+  - Python 语法检查通过：`python -m py_compile stage1_pipeline/nodes/phase8_archive.py`
+  - Java 编译检查通过：`mvn -DskipTests compile`（`java_orchestrator` 模块）
+- 可复用经验：
+  - 对视频素材链路，优先采用“快速通道（copy/输入侧 seek）+ 回退通道（重编码）”的双路策略，可在不牺牲稳定性的前提下拿到主要性能收益。
+  - 对并发数配置，建议由“静态阈值”演进为“资源感知阈值”，并将决策过程写入日志，便于线上调优。
+
 ## 2026-02-07 Phase2A/Assets 性能优化（仅并发与复用，不改正确率策略）
 - 日期：2026-02-07
 - 版本/分支/提交：未记录
@@ -648,6 +776,38 @@
   - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过（6 passed）。
   - `mvn -q -DskipTests compile`（`enterprise_services/java_orchestrator`）通过。
 
+## 2026-02-08 Phase2B 多视频片段支持（语义单元级）
+- 日期：2026-02-08
+- 触发背景与问题：
+  - 现有链路对每个语义单元仅保留一个视频片段（`materials.clip_path`），导致多动作/多步骤 process 语义单元在非 tutorial 渲染中丢失后续片段。
+  - 用户期望：语义单元应支持多视频片段，并在输出中可见全部片段。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_document.py`
+    - `MaterialSet` 新增 `clip_paths: List[str]`。
+    - `to_dict()` 的 `materials` 增加 `clips` 字段，同时保留 `clip` 兼容旧消费者。
+    - markdown 导出在非 steps 模式下支持顺序渲染多段视频；steps 模式支持读取 `materials.clip_paths`（回退到 `clip_path`）。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - `_apply_external_materials(...)` 从“仅选首个 clip”改为“收集全部匹配 clip 并写入 `materials.clip_paths`”。
+    - 为向后兼容，继续写 `materials.clip_path = clip_paths[0]`。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - `EnhancedSection` 新增 `video_clips`。
+    - 读取 `materials.clips` 并回填 `video_clip` 到首位，保持旧字段兼容。
+    - 非 tutorial process 渲染阶段，`> Video` 下输出全部视频嵌入，不再只输出一条。
+  - 测试更新：
+    - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+    - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py`
+- 关键决策与理由：
+  - 决策1：采用“双字段兼容”策略（`clip_paths` + `clip_path`）。
+    - 为什么：保证新链路支持多片段的同时，不破坏仍依赖旧字段的下游。
+  - 决策2：按请求顺序保留 clip 列表。
+    - 为什么：尽量保持语义动作顺序，便于阅读与回放。
+- 兼容性影响：
+  - `result.json` 的 `materials` 新增 `clips`，旧字段 `clip` 保留。
+  - 未改 proto/gRPC 字段，仅改 Python 文档组装语义。
+- 验证方式与结果：
+  - `python -m py_compile`（`rich_text_document.py`、`rich_text_pipeline.py`、`markdown_enhancer.py` 及相关测试）通过。
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py` 通过（15 passed）。
+
 ## 2026-02-08 Phase2B 指代断层预补全 + 低置信度视觉校验复用
 - 日期：2026-02-08
 - 触发背景与问题：
@@ -692,6 +852,22 @@
     - 低置信度触发 existing screenshot 视觉补全；
     - 预校验结果在 `_apply_external_materials` 中命中复用。
 
+### 2026-02-08 补充修订：Vision 先做 concrete 描述，DeepSeek 再自然化修复
+- 触发背景：
+  - 用户指出原实现中 `COREFERENCE_REPLACEMENT_PROMPT_TEMPLATE` 让 Vision 直接产出替换句，复用价值不足，且表达容易生硬。
+- 修订内容：
+  - `concrete_knowledge_validator.validate_for_coreference(...)` 调整为：
+    - 仅复用 `validate(...)` 产出 concrete 信息（`should_include/confidence/img_description/concrete_result`）；
+    - 不再让 Vision 直接输出 `replaced_text`。
+  - `coreference_resolver` 调整低置信度路径：
+    - 先拿 Vision 的 `img_description`（基于 `CONCRETE_KNOWLEDGE_PROMPT`）；
+    - 再调用 DeepSeek（新增 rewrite prompt）在“完整单元上下文 + 目标句上下文 + img_description”条件下生成自然表达修复句。
+  - 保留并强化复用：
+    - `concrete_result` 继续写入 `prevalidated_results`，后续 `_apply_external_materials` 直接复用，避免重复 concrete 校验。
+- 验证：
+  - `pytest`：`test_coreference_resolver.py` + `test_rich_text_pipeline_asset_naming.py` 全通过（9 passed）。
+  - 新模拟输出验证：低置信度样本从 `它会加载配置...` 自然修复为 `设置模块会加载配置...`，来源 `vision_existing`，且缓存命中数为 1。
+
 ## 2026-02-07 ConcreteKnowledgeValidator 阴性截图即时删除收敛
 - 日期：2026-02-07
 - 触发背景与问题：
@@ -717,6 +893,287 @@
   - 预防：上游已以 `should_include` 过滤；同时保留删除失败告警日志便于排查。
   - 回滚：如需临时回退，可将删除逻辑改为仅记录日志（保留 `_finalize_validation_result` 出口不变）。
 - 验证方式与结果：
-  - `python -m py_compile MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py MVP_Module2_HEANCING/module2_content_enhancement/coreference_resolver.py` 通过。
-  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_coreference_resolver.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过（9 passed）。
+- `python -m py_compile MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py MVP_Module2_HEANCING/module2_content_enhancement/coreference_resolver.py` 通过。
+- `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_coreference_resolver.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过（9 passed）。
+
+## 2026-02-08 Phase2B 先 Vision 判定并映射句子，再基于 img_description 增量补全后结构化（实验）
+- 日期：2026-02-08
+- 触发背景与目标：
+  - 用户希望取消“先做断层识别再做 Vision”的前置路径，改为：
+    1) 先完成 Vision 判断并拿到 `img_description`；
+    2) 记录图片对应字幕句子的 `sentence_id`（由图片时间戳映射 `sentence_timestamps`）；
+    3) 在 DeepSeek 结构化前，先基于 `img_description` 对语义单元正文做一次“增量补全”；
+    4) 使用补全后的文本进入结构化。
+  - 本次先落地为“可开关实验链路”，用于快速验证增量补全效果。
+- 现有杠杆（复用点）：
+  - `rich_text_pipeline._apply_external_materials(...)` 已集中组装 `materials.screenshot_items`，是写入图片-句子映射元数据的最佳位置。
+  - `MarkdownEnhancer._build_structured_text_for_concept(...)` 已是 abstract/concrete 单元结构化入口，适合插入“结构化前增量补全”。
+  - 现有 `screenshot_items` 已有 `img_id/img_path/img_description`，可最小增量扩展为时序对齐证据。
+- 改动范围（模块/接口/数据）：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - 新增 `_map_timestamp_to_sentence_id(timestamp_sec, sentence_timestamps)`：按区间优先、中心点兜底映射句子 ID。
+    - 新增 `_get_sentence_text_by_id(sentence_id)`：支持 `S001` 索引与 `subtitle_id` 双路径取句子文本。
+    - 在 `_apply_external_materials(...)` 中为每个截图项新增元数据：
+      - `timestamp_sec`
+      - `sentence_id`
+      - `sentence_text`
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - 新增环境开关：`MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT`（默认关闭）。
+    - 新增增量补全提示词：`IMG_DESC_AUGMENT_SYSTEM_PROMPT` / `IMG_DESC_AUGMENT_USER_PROMPT`。
+    - 新增 `_augment_body_with_image_descriptions(...)`：在结构化前，把 `img_description + sentence_id + sentence_text + timestamp` 作为证据让 LLM补全正文。
+    - 在 `_build_structured_text_for_concept(...)` 中接入顺序：
+      - `base_text` ->（可选增量补全）-> 结构化 -> 图片占位符替换。
+    - `_build_concept_image_items(...)` 支持透传 `timestamp_sec/sentence_id/sentence_text`。
+- 关键决策与理由：
+  - 决策1：采用“实验开关”方式接入，而非直接替换旧链路。
+    - 为什么：先验证效果和稳定性，避免一次性改动影响所有生产路径。
+  - 决策2：补全入口放在 `MarkdownEnhancer` 而非 `CoreferenceResolver`。
+    - 为什么：用户目标是“结构化前补全”，且该入口对 abstract/concrete 结构化最直接、改动最小。
+  - 决策3：图片-句子映射写入 `screenshot_items`，不扩 proto。
+    - 为什么：当前需求只在 Python 侧实验，不需要跨服务协议改造。
+- 兼容性影响：
+  - 默认关闭，不影响现有输出。
+  - 开启后仅增强 abstract/concrete 的结构化输入文本；process tutorial 渲染逻辑不变。
+  - `result.json` 中 `materials.screenshot_items` 新增可选字段（向后兼容）。
+- 测试与验证：
+  - 新增/扩展测试：
+    - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py`
+      - `test_concrete_section_uses_image_desc_augment_before_structuring_when_enabled`
+      - `test_concrete_section_skips_image_desc_augment_when_disabled`
+    - `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+      - `test_apply_external_materials_records_sentence_mapping_for_screenshot_item`
+  - 执行命令：
+    - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py::test_concrete_section_uses_image_desc_augment_before_structuring_when_enabled MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py::test_concrete_section_skips_image_desc_augment_when_disabled MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py::test_apply_external_materials_records_sentence_mapping_for_screenshot_item`
+    - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py`
+  - 结果：
+    - 定向测试：3 passed。
+    - 回归测试：18 passed。
+- 性能对比（本轮实验范围内）：
+  - 测试方式：同机、同 Python 解释器、同两组测试文件；对比“定向3条测试”与“两文件全量回归”。
+  - 数据：
+    - 定向3条：约 1.57s（pytest 报告）。
+    - 两文件全量：约 8.25s（pytest 报告）。
+  - 结论：
+    - 开关关闭时无新增调用；
+    - 开关开启时每个 abstract/concrete 单元最多新增 1 次 LLM 文本调用，需后续在真实任务上进一步测量端到端耗时增量。
+
+### 2026-02-08 补充修订：增量补全改为 config.yaml 开关（默认开启）+ 删除指代断层预补全
+- 触发背景：
+  - 用户要求：
+    1) 增量补全能力改为 `config.yaml` 开关控制，且默认打开；
+    2) 删除“指代断层预补全”步骤，只保留后续“基于图片描述的增量补全 -> 结构化”。
+- 改动范围：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - 新增 `yaml` 配置读取与布尔解析：
+      - `_parse_bool(...)`
+      - `_resolve_config_path(...)`
+      - `_load_img_desc_augment_switch(...)`
+    - 开关来源调整：
+      - 主来源：`config.yaml` 的 `module2.markdown_enhancer.enable_img_desc_text_augment`
+      - 默认值：`true`
+      - 覆盖机制：环境变量 `MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT` 可覆盖配置值。
+    - 增量补全触发条件收敛：仅当截图项存在对齐证据（`timestamp_sec/sentence_id/sentence_text` 任一）时才触发补全调用。
+  - `videoToMarkdown/config.yaml`
+    - 新增：
+      - `module2.markdown_enhancer.enable_img_desc_text_augment: true`
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - 删除 Phase2B 的指代断层预补全阶段调用（原 `Phase2B-1.7`）。
+    - 移除对应 `CoreferenceResolver` / `LLMClient` 初始化与依赖导入。
+- 关键决策与理由：
+  - 决策1：配置中心前移到 `config.yaml`，环境变量只作覆盖。
+    - 为什么：便于发布稳定默认行为（默认开启）并减少运行环境差异。
+  - 决策2：彻底移除 coreference 预补全调用链。
+    - 为什么：严格对齐“先 Vision 对齐证据，再做文本增量补全”的目标流程，避免重复改写文本。
+  - 决策3：无对齐证据时不触发增量补全。
+    - 为什么：降低把“纯图片描述”误注入正文事实的风险。
+- 验证与结果：
+  - `python -m py_compile MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py` 通过。
+  - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_markdown_enhancer_rich_text.py MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py` 通过（21 passed）。
+  - 定向新增测试：
+    - config 默认开启：`test_markdown_enhancer_img_desc_switch_defaults_true_from_config`
+    - env 覆盖配置：`test_markdown_enhancer_img_desc_switch_env_overrides_config`
+    - 无对齐证据不触发补全：`test_concrete_section_skips_img_desc_augment_without_alignment_evidence`
+- 性能记录：
+  - 测试方式：本地同环境 `pytest` 对两文件回归。
+  - 数据：21 条用例总耗时约 9.17s。
+  - 分析：删除 `Phase2B-1.7` 后，主链路去掉了指代断层额外调用阶段；端到端真实任务时延预计下降，需在真实视频任务上补充 A/B 采样数据。
+
+### 2026-02-08 补充修订：增量补全可观测性日志（unit级）
+- 触发背景：
+  - 用户要求在真实运行中直观看到：
+    - 每个语义单元是否触发“图片描述增量补全”；
+    - 触发时用了哪些 `sentence_id`。
+- 改动内容：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - 在 `_augment_body_with_image_descriptions(...)` 增加 unit 级 INFO 日志：
+      - skipped 原因：`switch_off / llm_unavailable / empty_text / no_image_items / no_alignment_evidence`
+      - triggered 信息：`evidence=<N>, sentence_ids=<...>`
+      - result 信息：`changed=true/false` 或 `empty_response_fallback`
+- 验证：
+  - 新增测试：
+    - `test_concrete_section_logs_augment_triggered_with_sentence_ids`
+  - 执行结果：
+    - 定向 3 条测试：3 passed
+    - 两文件回归：22 passed
+
+### 2026-02-08 补充修订：KnowledgeClassifier 配置路径回退到 `videoToMarkdown/config.yaml`
+- 触发背景：
+  - 运行日志出现：`Config not found at D:\videoToMarkdownTest2\config.yaml, using defaults`。
+  - 实际配置位于 `D:\videoToMarkdownTest2\videoToMarkdown\config.yaml`，但 `KnowledgeClassifier` 只检查了根目录路径。
+- 根因：
+  - `KnowledgeClassifier.__init__` 中配置文件解析逻辑硬编码为单路径 `base_dir/config.yaml`，缺少回退候选。
+- 修复措施：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/knowledge_classifier.py`
+    - 新增 `_resolve_config_path()`：
+      - 优先 `MODULE2_CONFIG_PATH`（若设置且存在）；
+      - 其次 `项目根/config.yaml`；
+      - 再回退 `项目根/videoToMarkdown/config.yaml`。
+    - `__init__` 改为统一调用 `_resolve_config_path()`，修复“配置存在但误报不存在”。
+- 预防与验证：
+  - 新增测试：`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_knowledge_classifier_config_path.py`
+    - 覆盖“根目录无配置、子目录有配置”的回退命中场景。
+  - 回归结果：
+    - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_knowledge_classifier_config_path.py` → 1 passed
+    - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_knowledge_classifier_parse.py` → 9 passed
+
+### 2026-02-08 补充修订：Phase2B 自动发现 `intermediates` JSON（step2/step6/sentence_timestamps）
+- 触发背景：
+  - 运行日志显示 `step2_path/step6_path` 为空，导致初始化时 `Skip loading step2/step6`。
+  - 但真实 JSON 已存在于 `storage/<task_id>/intermediates/`，未被自动利用。
+- 根因：
+  - `RichTextPipeline` 初始化仅依赖显式 `step2_path/step6_path`，为空即跳过，缺少 `output_dir/intermediates` 回退发现机制。
+- 修复措施：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - 新增 `_resolve_intermediate_path(provided_path, candidate_names)`：
+      - 显式路径优先；
+      - 回退扫描 `output_dir/intermediates/<name>`，再尝试 `output_dir/<name>`。
+    - 初始化阶段接入自动发现：
+      - `step2`: `step2_correction_output.json` / `step2_output.json`
+      - `step6`: `step6_merge_cross_output.json` / `step6_output.json`
+      - `sentence_timestamps`: `sentence_timestamps.json`
+    - 当命中回退文件时记录 `Auto-discovered intermediate file` 日志。
+- 验证与预防：
+  - 新增测试：
+    - `test_pipeline_auto_discovers_intermediate_step2_step6_and_sentence_timestamps`
+  - 回归结果：
+    - `python -m pytest -q MVP_Module2_HEANCING/module2_content_enhancement/tests/test_rich_text_pipeline_asset_naming.py::test_pipeline_auto_discovers_intermediate_step2_step6_and_sentence_timestamps` → 1 passed
+    - 组合回归：`test_rich_text_pipeline_asset_naming.py + test_markdown_enhancer_rich_text.py + test_knowledge_classifier_config_path.py` → 24 passed
+
+### 2026-02-08 补充修订：Phase2B 全链路可观测性（LLM调用明细 + 图片匹配审计 + 重放/报告工具）
+- 触发背景：
+  - 用户要求对 Phase2B 全链路做可验证测试，明确观测：
+    - 每一步 LLM 调用结果；
+    - 图片匹配 ID（timestamp -> sentence_id）逻辑。
+  - 同时指定使用 `storage/99ef...` 既有片段与中间产物。
+- 改动范围：
+  - `MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py`
+    - 新增 LLM trace 配置读取：`module2.observability.llm_trace`（支持环境变量覆盖）。
+    - 新增 trace 落盘：`intermediates/phase2b_llm_trace.jsonl`（可配置路径）。
+    - 覆盖步骤：
+      - `hierarchy_classification`
+      - `img_desc_augment`
+      - `structured_text`
+    - 记录字段：step_name/unit_id/model/duration/success/error/prompt/response/tokens。
+  - `MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py`
+    - 新增图片匹配审计开关：`module2.observability.image_match_audit.enabled`。
+    - 在 `_apply_external_materials` 每张图写入审计记录（mapped/unmapped/no_timestamp）。
+    - Phase2B 结束时落盘：`intermediates/phase2b_image_match_audit.json`。
+  - 新增工具：
+    - `tools/phase2b_replay_prepare.py`
+      - 从 `vl_analysis_cache.json` 提取 `screenshot_requests`，回填 `semantic_units_phase2a.replay.json`。
+    - `tools/phase2b_trace_report.py`
+      - 汇总 trace + audit，输出：
+        - `intermediates/phase2b_test_report.json`
+        - `intermediates/phase2b_test_report.md`
+  - `videoToMarkdown/config.yaml`
+    - 新增可观测配置：
+      - `module2.observability.llm_trace.enabled: true`
+      - `module2.observability.llm_trace.level: full`
+      - `module2.observability.llm_trace.output_path`
+      - `module2.observability.image_match_audit.enabled: true`
+- 验证：
+  - 新增测试：
+    - `test_markdown_enhancer_writes_llm_trace_jsonl`
+    - `test_apply_external_materials_writes_image_match_audit`
+  - 回归结果：
+    - 定向：2 passed
+    - 组合：`test_markdown_enhancer_rich_text.py + test_rich_text_pipeline_asset_naming.py + test_knowledge_classifier_config_path.py` → 27 passed
+  - 工具演示：
+    - `python tools/phase2b_replay_prepare.py --storage-dir D:\videoToMarkdownTest2\storage\99ef...`
+      - 输出 `intermediates/semantic_units_phase2a.replay.json`，并显示合并到 3 个 unit。
+    - `python tools/phase2b_trace_report.py --storage-dir D:\videoToMarkdownTest2\storage\99ef...`
+      - 输出初始报告（若未重跑 Phase2B，则 trace/audit 为空，属于预期）。
+- 性能记录：
+  - 测试方式：本地 `pytest` 组合回归。
+  - 数据：27 条用例总耗时约 9.77s。
+  - 结论：新增可观测能力不影响既有测试通过性；trace/audit 成本主要来自 I/O 落盘，建议仅在排障/验收阶段开启 `full`。
+
+### 2026-02-08 转录链路修订：分段阈值配置化 + 资源感知线程池调度
+- 触发现象：
+  - 并行转录日志出现“短视频不分段”判定，但阈值不可在配置中显式调整。
+  - 并行执行按固定 `num_workers` 启动，缺少对 CPU/内存资源余量的动态约束，在高负载场景存在资源争抢风险。
+- 根因分析：
+  - `parallel_transcription.py` 中分段阈值为代码内常量，未暴露到 `config.yaml`。
+  - 线程池/进程池并发度主要依赖外部传入 worker 数，未统一进行“任务数 + CPU预算 + 内存预算”三重裁剪。
+- 修复措施：
+  - `videoToMarkdown/knowledge_engine/core/parallel_transcription.py`
+    - 新增 `segment_split_threshold_sec` 接入，默认 `300` 秒（5 分钟），并支持从 `whisper.parallel` 读取。
+    - 分段策略升级为“阈值判定 + `segment_duration` 切任务”，不再仅按 worker 数均分。
+    - 新增 `build_parallel_plan(...)`，基于以下约束计算 `effective_workers`：
+      - 任务段数上限（不超过 `segment_count`）
+      - CPU 预算（`reserve_cpu_cores` + `reserve_cpu_ratio`）
+      - 内存预算（`reserve_memory_gb` + `memory_per_worker_gb`）
+      - GPU 保护上限（`gpu_max_workers`）
+    - 线程池/进程池执行统一使用 `effective_workers`，并输出资源规划日志（请求并发、实际并发、CPU预算、可用内存、每Worker线程）。
+  - `videoToMarkdown/config.yaml`
+    - 新增并行调度参数：
+      - `segment_split_threshold_sec: 300`
+      - `auto_resource_scheduling: true`
+      - `reserve_cpu_cores: 1`
+      - `reserve_cpu_ratio: 0.1`
+      - `reserve_memory_gb: 2.0`
+      - `memory_per_worker_gb: 1.5`
+      - `gpu_max_workers: 1`
+- 预防方案：
+  - 通过配置项将“阈值/资源预算”外显，避免硬编码回归。
+  - 保留资源规划日志，支持线上回放“为何本次并发被降级/提升”。
+  - 对所有配置值采用 `_safe_int/_safe_float` 兜底，避免脏配置直接触发运行异常。
+- 验证记录：
+  - 语法校验：
+    - `python -m py_compile videoToMarkdown/knowledge_engine/core/parallel_transcription.py videoToMarkdown/knowledge_engine/core/transcription.py python_grpc_server.py` 通过。
+  - 资源调度最小验证：
+    - 运行 `build_parallel_plan(6, 12, cpu/cuda)`，确认 CPU 模式根据预算给出多worker，GPU 模式默认收敛到 `gpu_max_workers=1`。
+- 性能与资源对比数据（本机 16 核，空闲内存约 15.2GB）：
+  - 测试方式：
+    - 使用 `build_parallel_plan` 对固定输入（请求6并发、12任务段）进行策略演算。
+  - 对比结果：
+    - 旧策略：并发固定为 `num_workers=6`，不考虑内存与GPU限制。
+    - 新策略（CPU）：`effective_workers=6`，`cpu_threads_per_worker=2`（保持吞吐并控制线程争抢）。
+    - 新策略（GPU）：`effective_workers=1`，`cpu_threads_per_worker=14`（显存保护优先，避免多进程抢占）。
+  - 结论：
+    - 在 CPU 场景保持原有吞吐上限能力；在 GPU 场景提供安全并发上限，降低 OOM 与抖动概率。
+
+### 2026-02-08 补充修订：修复同名包抢占导致并行转录改动未生效
+- 触发现象：
+  - 服务端日志仍输出旧文案：`[分段策略] 视频 ... <= 20 分钟，不分段处理`。
+  - 新增的“桥接校验/模块校验/参数校验”日志未出现，显示运行时未命中新代码。
+- 根因分析：
+  - `videoToMarkdown` 顶层目录缺少 `__init__.py`，被 Python 识别为命名空间包。
+  - 运行环境中存在另一个同名目录 `D:\videoToMarkdown`，与当前仓库 `D:\videoToMarkdownTest2\videoToMarkdown` 被合并到同一包搜索路径。
+  - `python_grpc_server.py` 的 `_prepend_sys_path` 在“路径已存在”时直接返回，未确保当前仓库路径被移动到首位，导致导入优先落到旧仓库。
+- 修复措施：
+  - `python_grpc_server.py`
+    - `_prepend_sys_path(...)` 改为“存在则先 remove，再 insert(0)”的强制置顶语义。
+    - 启动阶段输出 `videoToMarkdown` 包搜索路径，便于运行时核对导入来源。
+  - `videoToMarkdown/__init__.py`
+    - 新增顶层包初始化文件，将 `videoToMarkdown` 固化为常规包，阻断跨目录命名空间自动合并。
+- 预防方案：
+  - 启动日志保留包路径输出，作为排障第一证据。
+  - 对关键内部包统一提供 `__init__.py`，避免命名空间包带来的路径不确定性。
+- 验证记录：
+  - 语法校验：`python -m py_compile python_grpc_server.py videoToMarkdown/__init__.py ...` 通过。
+  - 导入验证：
+    - `videoToMarkdown.__file__ = D:\videoToMarkdownTest2\videoToMarkdown\__init__.py`
+    - `videoToMarkdown.__path__ = ['D:\\videoToMarkdownTest2\\videoToMarkdown']`
+    - `parallel_transcription.__file__ = D:\videoToMarkdownTest2\videoToMarkdown\knowledge_engine\core\parallel_transcription.py`
 

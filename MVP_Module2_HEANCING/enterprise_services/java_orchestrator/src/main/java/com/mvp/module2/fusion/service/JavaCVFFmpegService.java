@@ -7,18 +7,31 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import com.sun.management.OperatingSystemMXBean;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStreamReader;
+import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 
 /**
  * JavaCV FFmpeg 服务 (常驻进程版本)
@@ -39,6 +52,9 @@ import javax.imageio.ImageIO;
 public class JavaCVFFmpegService {
     
     private static final Logger logger = LoggerFactory.getLogger(JavaCVFFmpegService.class);
+    private static final String SCREENSHOT_EXT = ".jpg";
+    private static final float SCREENSHOT_JPEG_QUALITY = 0.90f;
+    private static final long MIN_FAST_COPY_FILE_BYTES = 1_024L;
     
     // 线程池：处理并发请求
     private ExecutorService executorService;
@@ -362,13 +378,15 @@ public class JavaCVFFmpegService {
                         // 转换为 BufferedImage
                         BufferedImage image = converter.convert(frame);
                         
-                        // 保存为 PNG
-                        Path outputPath = Paths.get(outputDir, req.screenshotId + ".png");
+                        // 保存为 JPEG（降低编码与写盘开销）
+                        Path outputPath = Paths.get(outputDir, req.screenshotId + SCREENSHOT_EXT);
                         Path parentDir = outputPath.getParent();
                         if (parentDir != null) {
                             Files.createDirectories(parentDir);
                         }
-                        ImageIO.write(image, "PNG", outputPath.toFile());
+                        if (!writeJpeg(outputPath, image, SCREENSHOT_JPEG_QUALITY)) {
+                            throw new RuntimeException("Failed to write JPEG: " + outputPath);
+                        }
                         
                         success++;
                         totalScreenshots.incrementAndGet();
@@ -452,7 +470,7 @@ public class JavaCVFFmpegService {
                     if (parentDir != null) {
                         Files.createDirectories(parentDir);
                     }
-                    boolean extracted = extractClipWithWorkerGrabber(workerGrabber, outputPath.toString(), req);
+                    boolean extracted = extractClipWithWorkerGrabber(videoPath, workerGrabber, outputPath.toString(), req);
                     if (extracted) {
                         success++;
                         totalClips.incrementAndGet();
@@ -474,9 +492,46 @@ public class JavaCVFFmpegService {
     private int resolveClipWorkerCount(int clipCount) {
         if (clipCount <= 0) return 1;
         int cpu = Runtime.getRuntime().availableProcessors();
-        // 权衡：clip 编码较重，worker 不宜过多；采用 CPU 一半并上限 6。
-        int candidate = Math.max(1, Math.min(cpu / 2, 6));
-        return Math.max(1, Math.min(candidate, clipCount));
+
+        // 基线：编码任务按 CPU 一半分配，避免过度争抢。
+        int limitByCpu = Math.max(1, cpu / 2);
+
+        // 内存约束：按空闲物理内存估算 worker 容量（每 worker 预留约 768MB）。
+        int limitByMemory = limitByCpu;
+        // 负载约束：高负载时主动收敛并发，避免任务雪崩。
+        int limitByLoad = limitByCpu;
+
+        try {
+            java.lang.management.OperatingSystemMXBean baseBean = ManagementFactory.getOperatingSystemMXBean();
+            if (baseBean instanceof OperatingSystemMXBean osBean) {
+                long freeMemBytes = osBean.getFreeMemorySize();
+                if (freeMemBytes > 0) {
+                    long perWorkerBytes = 768L * 1024L * 1024L;
+                    limitByMemory = Math.max(1, (int) (freeMemBytes / perWorkerBytes));
+                }
+
+                double cpuLoad = osBean.getCpuLoad();
+                if (cpuLoad >= 0.90) {
+                    limitByLoad = 1;
+                } else if (cpuLoad >= 0.75) {
+                    limitByLoad = Math.max(1, cpu / 4);
+                } else if (cpuLoad >= 0.60) {
+                    limitByLoad = Math.max(1, cpu / 3);
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Clip worker auto-tuning fallback to CPU-only: {}", e.getMessage());
+        }
+
+        int hardCap = Math.max(2, Math.min(cpu, 8));
+        int candidate = Math.max(1, Math.min(limitByCpu, Math.min(limitByMemory, limitByLoad)));
+        int finalWorkers = Math.max(1, Math.min(candidate, Math.min(clipCount, hardCap)));
+
+        logger.info(
+            "Adaptive clip workers: clips={}, cpu={}, byCpu={}, byMem={}, byLoad={}, final={}",
+            clipCount, cpu, limitByCpu, limitByMemory, limitByLoad, finalWorkers
+        );
+        return finalWorkers;
     }
 
     private boolean isPoisonPill(ClipRequest request) {
@@ -501,11 +556,35 @@ public class JavaCVFFmpegService {
     }
 
     private boolean extractClipWithWorkerGrabber(
+            String videoPath,
             FFmpegFrameGrabber workerGrabber,
             String outputPath,
             ClipRequest request
     ) {
         if (request == null) return false;
+
+        // 快速通道：优先走 ffmpeg stream copy，失败再回退到 JavaCV 重编码。
+        boolean fastCopied = false;
+        try {
+            if (request.segments != null && !request.segments.isEmpty()) {
+                fastCopied = extractConcatClipFastCopy(videoPath, outputPath, request.segments);
+            } else {
+                fastCopied = extractSingleClipFastCopy(
+                    videoPath,
+                    outputPath,
+                    request.startSec,
+                    request.endSec
+                );
+            }
+            if (fastCopied) {
+                logger.debug("Clip fast-copy path hit: {}", outputPath);
+                return true;
+            }
+            logger.debug("Clip fast-copy fallback to re-encode: {}", outputPath);
+        } catch (Exception e) {
+            logger.debug("Clip fast-copy unavailable, fallback re-encode: {}", e.getMessage());
+        }
+
         if (request.segments != null && !request.segments.isEmpty()) {
             boolean concatOk = extractConcatClipWithGrabber(workerGrabber, outputPath, request.segments);
             if (concatOk) return true;
@@ -675,6 +754,182 @@ public class JavaCVFFmpegService {
                 logger.warn("Error closing recorder: {}", e.getMessage());
             }
         }
+    }
+
+    private boolean writeJpeg(Path outputPath, BufferedImage image, float quality) {
+        if (image == null || outputPath == null) {
+            return false;
+        }
+
+        BufferedImage rgbImage = image;
+        if (image.getType() != BufferedImage.TYPE_INT_RGB) {
+            rgbImage = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = rgbImage.createGraphics();
+            try {
+                g.drawImage(image, 0, 0, null);
+            } finally {
+                g.dispose();
+            }
+        }
+
+        Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpg");
+        if (!writers.hasNext()) {
+            return false;
+        }
+
+        ImageWriter writer = writers.next();
+        try (ImageOutputStream ios = ImageIO.createImageOutputStream(outputPath.toFile())) {
+            writer.setOutput(ios);
+            ImageWriteParam param = writer.getDefaultWriteParam();
+            if (param.canWriteCompressed()) {
+                param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                param.setCompressionQuality(Math.max(0.1f, Math.min(quality, 1.0f)));
+            }
+            writer.write(null, new IIOImage(rgbImage, null, null), param);
+            return Files.exists(outputPath) && Files.size(outputPath) > 0;
+        } catch (Exception e) {
+            logger.error("JPEG write failed: {}", e.getMessage());
+            return false;
+        } finally {
+            writer.dispose();
+        }
+    }
+
+    private boolean extractSingleClipFastCopy(String videoPath, String outputPath, double startSec, double endSec) {
+        if (videoPath == null || videoPath.isBlank() || outputPath == null || outputPath.isBlank()) {
+            return false;
+        }
+
+        double duration = endSec - startSec;
+        if (duration <= 0) {
+            return false;
+        }
+
+        ProcessBuilder pb = new ProcessBuilder(
+            "ffmpeg",
+            "-y",
+            "-ss", formatSec(startSec),
+            "-i", videoPath,
+            "-t", formatSec(duration),
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            outputPath
+        );
+        return runFastCopyProcess(pb, outputPath, "single");
+    }
+
+    private boolean extractConcatClipFastCopy(String videoPath, String outputPath, List<ClipSegment> segments) {
+        if (videoPath == null || videoPath.isBlank() || outputPath == null || outputPath.isBlank() || segments == null || segments.isEmpty()) {
+            return false;
+        }
+
+        List<ClipSegment> valid = new ArrayList<>();
+        for (ClipSegment seg : segments) {
+            if (seg != null && seg.endSec > seg.startSec) {
+                valid.add(seg);
+            }
+        }
+        if (valid.isEmpty()) {
+            return false;
+        }
+        valid.sort(Comparator.comparingDouble(s -> s.startSec));
+
+        Path concatDir = null;
+        Path listFile = null;
+        List<Path> parts = new ArrayList<>();
+        try {
+            concatDir = Files.createTempDirectory("clip-fastcopy-");
+
+            int index = 0;
+            for (ClipSegment seg : valid) {
+                Path part = concatDir.resolve(String.format(Locale.ROOT, "part_%03d.mp4", index++));
+                boolean ok = extractSingleClipFastCopy(videoPath, part.toString(), seg.startSec, seg.endSec);
+                if (!ok) {
+                    return false;
+                }
+                parts.add(part);
+            }
+
+            listFile = concatDir.resolve("concat-list.txt");
+            List<String> lines = new ArrayList<>();
+            for (Path part : parts) {
+                String normalized = part.toAbsolutePath().toString().replace("\\", "/").replace("'", "''");
+                lines.add("file '" + normalized + "'");
+            }
+            Files.write(listFile, lines, StandardCharsets.UTF_8);
+
+            ProcessBuilder pb = new ProcessBuilder(
+                "ffmpeg",
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", listFile.toString(),
+                "-c", "copy",
+                outputPath
+            );
+            return runFastCopyProcess(pb, outputPath, "concat");
+        } catch (Exception e) {
+            logger.debug("Concat fast-copy failed: {}", e.getMessage());
+            return false;
+        } finally {
+            if (concatDir != null) {
+                try {
+                    try (var pathStream = Files.walk(concatDir)) {
+                        pathStream.sorted(Comparator.reverseOrder()).forEach(path -> {
+                            try {
+                                Files.deleteIfExists(path);
+                            } catch (Exception ignored) {
+                            }
+                        });
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private boolean runFastCopyProcess(ProcessBuilder pb, String outputPath, String mode) {
+        Process process = null;
+        try {
+            pb.redirectErrorStream(true);
+            process = pb.start();
+
+            StringBuilder output = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    if (output.length() < 1200) {
+                        output.append(line).append('\n');
+                    }
+                }
+            }
+
+            boolean finished = process.waitFor(120, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+
+            Path target = Paths.get(outputPath);
+            boolean ok = process.exitValue() == 0
+                && Files.exists(target)
+                && Files.size(target) >= MIN_FAST_COPY_FILE_BYTES;
+            if (!ok) {
+                logger.debug("Fast-copy {} failed: rc={}, out={}", mode, process.exitValue(), output.toString());
+            }
+            return ok;
+        } catch (Exception e) {
+            logger.debug("Fast-copy {} exception: {}", mode, e.getMessage());
+            return false;
+        } finally {
+            if (process != null) {
+                process.destroy();
+            }
+        }
+    }
+
+    private String formatSec(double seconds) {
+        return String.format(Locale.ROOT, "%.3f", Math.max(0.0, seconds));
     }
     
     /**

@@ -34,6 +34,7 @@ class MaterialSet:
     输出：
     - 方法返回结果或内部状态更新。"""
     clip_path: Optional[str] = None           # 视频片段路径
+    clip_paths: List[str] = field(default_factory=list)
     screenshot_paths: List[str] = field(default_factory=list)  # 截图路径列表
     
     # 元信息
@@ -163,6 +164,7 @@ class RichTextDocument:
                     "time_range": [s.start_sec, s.end_sec],
                     "materials": {
                         "clip": s.materials.clip_path,
+                        "clips": s.materials.clip_paths,
                         "screenshots": s.materials.screenshot_paths,
                         "labels": s.materials.screenshot_labels,
                         "screenshot_items": s.materials.screenshot_items,
@@ -292,23 +294,34 @@ class RichTextDocument:
                         ss_path = self._relative_path(ss, assets_dir)
                         lines.append(f"![Step Snapshot]({ss_path})")
                  # 步骤 Clip
-                 clip_p = mats.get('clip_path')
-                 if clip_p:
+                 step_clip_paths = mats.get('clip_paths', [])
+                 if not step_clip_paths:
+                     clip_p = mats.get('clip_path')
+                     if clip_p:
+                         step_clip_paths = [clip_p]
+                 for clip_p in step_clip_paths:
                      clip_path = self._relative_path(clip_p, assets_dir)
                      lines.append(f"![Step Clip]({clip_path})")
                  lines.append("")
 
         # 素材渲染 (Fallback / Top-level)
         materials = section.materials
+        section_clip_paths = list(getattr(materials, 'clip_paths', []) or [])
+        if materials.clip_path and materials.clip_path not in section_clip_paths:
+            section_clip_paths.insert(0, materials.clip_path)
         
         if not section.instructional_steps:
-            if materials.clip_path:
+            if section_clip_paths:
                 # 视频优先
-                clip_path = self._relative_path(materials.clip_path, assets_dir)
+                clip_path = self._relative_path(section_clip_paths[0], assets_dir)
                 lines.append("**视频演示**")
                 lines.append("")
                 lines.append(f"![[{clip_path}]]")
                 lines.append("")
+                for extra_clip in section_clip_paths[1:]:
+                    extra_clip_path = self._relative_path(extra_clip, assets_dir)
+                    lines.append(f"![[{extra_clip_path}]]")
+                    lines.append("")
                 
                 # 辅助关键帧
                 if materials.screenshot_paths:
@@ -352,6 +365,11 @@ class RichTextDocument:
         - 字符串结果。"""
         if not abs_path:
             return ""
+        normalized = str(abs_path).replace("\\", "/")
+        marker = f"/{assets_dir}/"
+        if marker in normalized:
+            suffix = normalized.split(marker, 1)[1].strip("/")
+            return f"{assets_dir}/{suffix}"
         filename = Path(abs_path).name
         return f"{assets_dir}/{filename}"
 

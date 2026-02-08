@@ -107,6 +107,79 @@ def test_tutorial_schema_parse_and_normalize():
     }
 
 
+def test_analyze_clip_uses_unit_relative_ids_for_default_mode(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+
+    async def _fake_call_vl_api(clip_path, extra_prompt=None, analysis_mode="default"):
+        return (
+            [
+                VLAnalysisResult(
+                    id=1,
+                    knowledge_type="process",
+                    clip_start_sec=2.0,
+                    clip_end_sec=8.0,
+                    suggested_screenshoot_timestamps=[3.0, 6.0],
+                    step_id=1,
+                    step_description="open dashboard",
+                )
+            ],
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    monkeypatch.setattr(analyzer, "_call_vl_api", _fake_call_vl_api)
+
+    result = asyncio.run(
+        analyzer.analyze_clip(
+            clip_path="dummy.mp4",
+            semantic_unit_start_sec=100.0,
+            semantic_unit_id="SU100",
+            analysis_mode="default",
+        )
+    )
+
+    assert result.success is True
+    assert result.clip_requests[0]["clip_id"] == "SU100/SU100_clip_vl_001"
+    assert result.screenshot_requests[0]["screenshot_id"] == "SU100/SU100_ss_vl_01_01"
+    assert result.screenshot_requests[1]["screenshot_id"] == "SU100/SU100_ss_vl_01_02"
+
+
+def test_analyze_clip_uses_unit_relative_ids_for_tutorial_mode(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+
+    async def _fake_call_vl_api(clip_path, extra_prompt=None, analysis_mode="default"):
+        return (
+            [
+                VLAnalysisResult(
+                    id=1,
+                    knowledge_type="process",
+                    clip_start_sec=1.0,
+                    clip_end_sec=9.0,
+                    suggested_screenshoot_timestamps=[7.5],
+                    step_id=2,
+                    step_description="change port",
+                )
+            ],
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    monkeypatch.setattr(analyzer, "_call_vl_api", _fake_call_vl_api)
+
+    result = asyncio.run(
+        analyzer.analyze_clip(
+            clip_path="dummy.mp4",
+            semantic_unit_start_sec=200.0,
+            semantic_unit_id="SU200",
+            analysis_mode="tutorial_stepwise",
+        )
+    )
+
+    assert result.success is True
+    assert result.clip_requests[0]["clip_id"] == "SU200/SU200_clip_step_02_change_port"
+    assert result.screenshot_requests[0]["screenshot_id"] == "SU200/SU200_ss_step_02_key_01_change_port"
+
+
 class _FakeAnalyzer:
     async def analyze_clip(
         self,
@@ -145,7 +218,7 @@ class _FakeAnalyzer:
         ]
         result.clip_requests = [
             {
-                "clip_id": f"{semantic_unit_id}_step_01_open_settings",
+                "clip_id": f"{semantic_unit_id}/{semantic_unit_id}_clip_step_01_open_settings",
                 "start_sec": semantic_unit_start_sec + 0.0,
                 "end_sec": semantic_unit_start_sec + 8.0,
                 "knowledge_type": "process",
@@ -156,7 +229,7 @@ class _FakeAnalyzer:
                 "analysis_mode": "tutorial_stepwise",
             },
             {
-                "clip_id": f"{semantic_unit_id}_step_02_change_port",
+                "clip_id": f"{semantic_unit_id}/{semantic_unit_id}_clip_step_02_change_port",
                 "start_sec": semantic_unit_start_sec + 8.0,
                 "end_sec": semantic_unit_start_sec + 17.0,
                 "knowledge_type": "process",
@@ -169,7 +242,7 @@ class _FakeAnalyzer:
         ]
         result.screenshot_requests = [
             {
-                "screenshot_id": f"{semantic_unit_id}_step_01_open_settings_key_01",
+                "screenshot_id": f"{semantic_unit_id}/{semantic_unit_id}_ss_step_01_key_01_open_settings",
                 "timestamp_sec": semantic_unit_start_sec + 7.2,
                 "label": "step_01 keyframe",
                 "semantic_unit_id": semantic_unit_id,
@@ -179,7 +252,7 @@ class _FakeAnalyzer:
                 "analysis_mode": "tutorial_stepwise",
             },
             {
-                "screenshot_id": f"{semantic_unit_id}_step_02_change_port_key_01",
+                "screenshot_id": f"{semantic_unit_id}/{semantic_unit_id}_ss_step_02_key_01_change_port",
                 "timestamp_sec": semantic_unit_start_sec + 16.5,
                 "label": "step_02 keyframe",
                 "semantic_unit_id": semantic_unit_id,
@@ -261,10 +334,10 @@ def test_generate_tutorial_assets_per_unit_full_flow_before_phase2b(tmp_path, mo
     unit_dir = output_dir / "vl_tutorial_units" / "SU001"
     assert unit_dir.exists()
 
-    assert (unit_dir / "SU001_step_01_open_settings.mp4").exists()
-    assert (unit_dir / "SU001_step_01_open_settings_key.png").exists()
-    assert (unit_dir / "SU001_step_02_change_port.mp4").exists()
-    assert (unit_dir / "SU001_step_02_change_port_key.png").exists()
+    assert (unit_dir / "SU001_clip_step_01_open_settings.mp4").exists()
+    assert (unit_dir / "SU001_ss_step_01_key_01_open_settings.png").exists()
+    assert (unit_dir / "SU001_clip_step_02_change_port.mp4").exists()
+    assert (unit_dir / "SU001_ss_step_02_key_01_change_port.png").exists()
 
     json_path = unit_dir / "SU001_steps.json"
     assert json_path.exists()

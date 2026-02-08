@@ -250,7 +250,7 @@ public class FFmpegService {
             String videoPath, String outputDir, ScreenshotRequest request) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                Path outputPath = Paths.get(outputDir, request.screenshotId + ".png");
+                Path outputPath = Paths.get(outputDir, request.screenshotId + ".jpg");
                 Path parentDir = outputPath.getParent();
                 if (parentDir != null) {
                     Files.createDirectories(parentDir);
