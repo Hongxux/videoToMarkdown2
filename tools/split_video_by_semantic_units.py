@@ -22,17 +22,17 @@ import argparse
 import json
 import math
 import os
-import re
 import subprocess
 import sys
 import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
-
-ILLEGAL_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\\\|?*]+')
-WHITESPACE_RE = re.compile(r"\s+")
+from services.python_grpc.src.common.utils.numbers import to_float
+from services.python_grpc.src.common.utils.path import (
+    sanitize_filename_component as _sanitize_filename_component,
+)
+from services.python_grpc.src.common.utils.video import probe_video_duration_ffprobe
 
 
 @dataclass
@@ -65,15 +65,6 @@ class SegmentItem:
     elapsed_sec: Optional[float] = None
 
 
-def _to_float(value: Any) -> Optional[float]:
-    try:
-        if value is None:
-            return None
-        return float(value)
-    except Exception:
-        return None
-
-
 def resolve_default_semantic_units(video_path: str) -> str:
     """
     做什么：为给定 video_path 推导默认的语义单元 JSON 路径（同目录 semantic_units_phase2a.json）。
@@ -85,21 +76,14 @@ def resolve_default_semantic_units(video_path: str) -> str:
     return str(Path(video_dir) / "semantic_units_phase2a.json")
 
 
-def sanitize_filename_component(text: str, max_len: int = 40) -> str:
+def _sanitize_filename_component(text: str, max_len: int = 40) -> str:
     """
     做什么：将任意文本清洗为 Windows 安全的文件名片段。
     为什么：避免非法字符导致写盘失败，同时控制长度降低路径过长风险。
     权衡：清洗会损失原始字符串的部分可读性，但能换取跨环境稳定性。
     """
 
-    if not text:
-        return ""
-    cleaned = ILLEGAL_FILENAME_CHARS_RE.sub("_", text)
-    cleaned = WHITESPACE_RE.sub(" ", cleaned).strip()
-    cleaned = cleaned.strip("._- ")
-    if len(cleaned) > max_len:
-        cleaned = cleaned[:max_len].rstrip("._- ")
-    return cleaned
+    return __sanitize_filename_component(text, max_len=max_len)
 
 
 def ffprobe_duration(video_path: str) -> float:
@@ -109,29 +93,7 @@ def ffprobe_duration(video_path: str) -> float:
     权衡：依赖 ffprobe 可用；若不可用，脚本会直接失败并提示安装/配置。
     """
 
-    cmd = [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-print_format",
-        "json",
-        "-show_format",
-        "-i",
-        video_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed (code={result.returncode}): {result.stderr.strip()[:500]}")
-
-    try:
-        data = json.loads(result.stdout)
-        duration_str = (data.get("format") or {}).get("duration")
-        duration = _to_float(duration_str)
-        if duration is None or duration <= 0:
-            raise ValueError(f"Invalid duration: {duration_str!r}")
-        return float(duration)
-    except Exception as e:
-        raise RuntimeError(f"Failed to parse ffprobe output: {e}")
+    return probe_video_duration_ffprobe(video_path)
 
 
 def _format_time_range(start_sec: float, end_sec: float) -> str:
@@ -146,8 +108,8 @@ def _build_output_name(
     start_sec: float,
     end_sec: float,
 ) -> str:
-    safe_unit_id = sanitize_filename_component(unit_id, max_len=32) or "UNKNOWN"
-    safe_topic = sanitize_filename_component(knowledge_topic, max_len=40)
+    safe_unit_id = _sanitize_filename_component(unit_id, max_len=32) or "UNKNOWN"
+    safe_topic = _sanitize_filename_component(knowledge_topic, max_len=40)
     tr = _format_time_range(start_sec, end_sec)
     parts = [f"{index:0{index_width}d}", safe_unit_id]
     if safe_topic:
@@ -186,8 +148,8 @@ def _normalize_segments(
             warnings.append(f"unit[{idx}] is not an object, skipped")
             continue
         unit_id = str(u.get("unit_id") or f"SU_{idx+1:03d}")
-        start_raw = _to_float(u.get("start_sec"))
-        end_raw = _to_float(u.get("end_sec"))
+        start_raw = to_float(u.get("start_sec"))
+        end_raw = to_float(u.get("end_sec"))
         if start_raw is None or end_raw is None:
             warnings.append(f"{unit_id}: missing start_sec/end_sec, skipped")
             continue

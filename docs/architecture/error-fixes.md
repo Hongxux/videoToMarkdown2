@@ -24,7 +24,7 @@
 - 修复措施：Java 编排为 action_units 统一补齐/去重 id，并确保分类输入与 CV 结果共用同一 id。
 - 验证方式：跑一条本地视频主链路，检查 semantic_units 中 action_units 的 id 非零且分类字段已回写。
 - 预防方案（测试/监控/校验/回滚）：增加 action_id 非零与唯一性校验；缓存签名纳入 action_id；必要时记录告警并回退到仅保留 unit 级分类。
-- 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java、python_grpc_server.py
+- 相关文件/接口：services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java、apps/grpc-server/main.py
 - 复盘要点：action_id 是跨阶段关联键，必须在编排层统一治理。
 
 ## 2026-02-04 Phase2A 初始素材请求被忽略
@@ -35,7 +35,7 @@
 - 修复措施：在 FFmpeg 提取前合并 Phase2A 与生成请求并去重。
 - 验证方式：跑含 Phase2A 初始请求的视频，检查输出素材数量与请求一致。
 - 预防方案（测试/监控/校验/回滚）：增加素材请求合并的回归用例；日志记录合并前后数量；必要时增加开关快速回退。
-- 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
+- 相关文件/接口：services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
 - 复盘要点：上游召回与下游策略要统一合并，避免覆盖。
 
 ## 2026-02-04 screenshot_selector 缩进错误
@@ -44,9 +44,9 @@
 - 触发条件：加载 screenshot_selector.py 时遇到异常缩进的三引号文本。
 - 根因定位：遗留的占位文档块缩进不合法，破坏了函数缩进结构。
 - 修复措施：移除异常三引号块，改为规范的中文注释与方法实现。
-- 验证方式：重新导入 python_grpc_server.py 通过；运行服务启动不再报错。
+- 验证方式：重新导入 apps/grpc-server/main.py 通过；运行服务启动不再报错。
 - 预防方案（测试/监控/校验/回滚）：引入 lint/格式化检查；合并前运行 py_compile 级别语法检查。
-- 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/screenshot_selector.py
+- 相关文件/接口：services/python_grpc/src/content_pipeline/screenshot_selector.py
 - 复盘要点：文档占位不应影响语法结构，注释必须使用合法格式。
 
 ## 2026-02-04 Java 编译缺少 Comparator/LinkedHashMap 导入
@@ -57,7 +57,7 @@
 - 修复措施：补充 java.util.Comparator 与 java.util.LinkedHashMap 导入。
 - 验证方式：重新执行 mvn 编译通过。
 - 预防方案（测试/监控/校验/回滚）：合并前运行编译检查；IDE 启用缺失导入提示。
-- 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java
+- 相关文件/接口：services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java
 - 复盘要点：签名与排序改动要同步检查 import。
 
 ## 2026-02-04 material_requests 未写回 semantic_units_phase2a.json
@@ -68,7 +68,7 @@
 - 修复措施：写回时兼容列表/字典结构，统一更新 semantic_units 列表。
 - 验证方式：重新生成素材请求后检查 material_requests 中截图/切片条目。
 - 预防方案（测试/监控/校验/回滚）：为语义单元文件增加结构校验；写回后记录条目数量。
-- 相关文件/接口：python_grpc_server.py
+- 相关文件/接口：apps/grpc-server/main.py
 - 复盘要点：跨阶段文件格式必须显式兼容或统一规范。
 
 ## 2026-02-04 素材生成复用 action_units 知识类型
@@ -79,7 +79,7 @@
 - 修复措施：优先使用 semantic_units 的 action_units 构建素材生成输入，缺失时回退到 CV 动作段。
 - 验证方式：对比同一单元 action_units 的 knowledge_type 与 clip 生成结果是否一致。
 - 预防方案（测试/监控/校验/回滚）：在素材生成前校验 action_units 知识类型是否为空；必要时记录告警。
-- 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
+- 相关文件/接口：services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java
 - 复盘要点：跨阶段知识类型应单点来源，避免 CV 动作类型被误当作知识类型。
 
 ## 2026-02-04 enhanced_output.md ??/??/????
@@ -90,7 +90,7 @@
 - ?????assemble_only ?????????? Markdown ????? Markdown ?? Obsidian ????????????????????????????
 - ??????? Phase2B assemble_only??? enhanced_output.md ????????????????????????????????????
 - ???????/??/??/?????? Markdown ?????????????? material_requests ?????????????????????
-- ????/???MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py?MVP_Module2_HEANCING/module2_content_enhancement/rich_text_document.py
+- ????/???services/python_grpc/src/content_pipeline/rich_text_pipeline.py?services/python_grpc/src/content_pipeline/rich_text_document.py
 - ??????????????????Obsidian ?????????????
 
 ## 2026-02-04 ??????
@@ -101,7 +101,7 @@
 - ????????????? knowledge_type ?????????????????
 - ???????? process/concrete/abstract ????????????????????/????/??????
 - ???????/??/??/?????????????????????
-- ????/???MVP_Module2_HEANCING/module2_content_enhancement/markdown_enhancer.py
+- ????/???services/python_grpc/src/content_pipeline/markdown_enhancer.py
 - ?????????????????????????
 
 ## 2026-02-05 Vision AI ?? Event loop is closed
@@ -112,7 +112,7 @@
 - ?????VisionAIClient ?????? event loop?? loop ?????????? AsyncClient???????????
 - ????????? Vision AI ? Phase2B ????????? Event loop is closed?Vision API timing ?????
 - ???????/??/??/?????? loop ???????????????????? loop/??????????????
-- ????/???MVP_Module2_HEANCING/module2_content_enhancement/vision_ai_client.py?MVP_Module2_HEANCING/module2_content_enhancement/concrete_knowledge_validator.py
+- ????/???services/python_grpc/src/content_pipeline/vision_ai_client.py?services/python_grpc/src/content_pipeline/concrete_knowledge_validator.py
 - ???????????????????????? loop ???????
 
 ## 2026-02-04 讲解型仍生成 clip / 截图缺失
@@ -127,14 +127,14 @@
 - 修复措施：保存时写入 mult_steps；加载时回填到 SemanticUnit。
 - 验证方式：重新生成 semantic_units_phase2a.json，确认每个单元包含 mult_steps；VL 路由短过程单元按 mult_steps 分流。
 - 预防方案（测试/监控/校验/回滚）：新增语义单元字段完整性校验；阶段输出 JSON schema 校验；必要时回退到默认 mult_steps=false。
-- 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py
+- 相关文件/接口：services/python_grpc/src/content_pipeline/rich_text_pipeline.py
 - 复盘要点：手工序列化要同步新增字段，避免链路静默丢失。
 - 触发条件：action_units knowledge_type 为空或被“knowledge”占位；截图任务异常时无兜底。
 - 根因定位：Java 侧将 action_type 作为 knowledge_type 兜底，导致过滤失效；Python 未对占位类型归一。
 - 修复措施：Java 侧仅使用 knowledge_type 或 unit 级兜底；Python 对占位类型回退到 unit 级；追加截图请求兜底。
 - 验证方式：运行主链路，确认讲解型动作不生成 clip，且每个 unit 至少有 1 个截图请求。
 - 预防方案（测试/监控/校验/回滚）：在素材生成前校验 knowledge_type；记录 clip/screenshot 计数告警；必要时恢复旧逻辑。
-- 相关文件/接口：MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java、python_grpc_server.py
+- 相关文件/接口：services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java、apps/grpc-server/main.py
 - 复盘要点：知识类型占位值会破坏过滤逻辑，需在编排层统一规范。
 
 ## 2026-02-05 LLM 批量分类 JSON 解析失败
@@ -148,7 +148,7 @@
   - 批量 id 归一：兼容 `"0"`/`0`/`"ID:0"` 等格式，稳定映射回原序号。
 - 验证方式：运行 `python -m pytest -q`；在真实任务中观察 Batch JSON parse failed/Batch Miss 明显下降，分类结果不再大量回退默认值。
 - 预防方案（测试/监控/校验/回滚）：保留解析回归用例；统计 Batch Miss 比例并告警；通过 `MODULE2_KC_BATCH_SPLIT_MAX_DEPTH` 限制拆分重试深度，必要时可回退旧策略。
-- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/knowledge_classifier.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_knowledge_classifier_parse.py`
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/knowledge_classifier.py`、`services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_parse.py`
 - 复盘要点：LLM 输出必须做容错解析，避免批量结果全量回退。
 
 ## 2026-02-05 VisionAI 关闭时 Event loop is closed
@@ -159,18 +159,18 @@
 - 修复措施：增加 _safe_close_client；若 loop 已关闭则跳过 aclose 并清理引用，其他异常继续记录告警但不中断流程。
 - 验证方式：运行包含 VisionAI 校验的流程，观察关闭阶段不再出现该告警。
 - 预防方案（测试/监控/校验/回滚）：增加 loop 状态判断日志；必要时在调用侧确保在同一 loop 内关闭；保留告警用于回归监控。
-- 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/vision_ai_client.py
+- 相关文件/接口：services/python_grpc/src/content_pipeline/vision_ai_client.py
 - 复盘要点：异步客户端生命周期必须绑定创建时的 loop，跨 loop 关闭需保护。
 
 ## 2026-02-05 gRPC Server 启动卡在启动行/编码异常
 - 日期：2026-02-05
-- 现象与影响范围：运行 `python python_grpc_server.py` 只看到启动行后无后续日志；或在被管道捕获时抛 `UnicodeEncodeError: 'gbk' codec can't encode character`（emoji）。
+- 现象与影响范围：运行 `python apps/grpc-server/main.py` 只看到启动行后无后续日志；或在被管道捕获时抛 `UnicodeEncodeError: 'gbk' codec can't encode character`（emoji）。
 - 触发条件：stdout/stderr 被重定向到非 UTF-8 编码的管道（常见于 Java 子进程、某些 IDE 终端）；启动/日志包含 emoji；或依赖缺失/导入耗时导致无可观测日志。
 - 根因定位：启动阶段在 logging 配置之前输出包含 emoji 的日志；在 GBK 管道下严格编码触发 UnicodeEncodeError；同时缺乏 import/初始化阶段打点，导入慢/阻塞时容易被误判为“卡住”。
 - 修复措施：启动时对 stdout/stderr 做 `errors=backslashreplace` 的 best-effort reconfigure；增加 `--check-deps` 依赖预检与 `--debug-imports` 启动 import 进度日志；在 `serve()` 中增加 Servicer 初始化耗时日志；补充统一依赖入口 `requirements.grpc_server.txt`。
-- 验证方式：在依赖缺失环境运行 `python python_grpc_server.py --check-deps` 能输出缺失清单；在 GBK/pipe 环境运行不再因 emoji 报 UnicodeEncodeError；启用 `--debug-imports` 能定位卡在哪个 import/初始化步骤。
+- 验证方式：在依赖缺失环境运行 `python apps/grpc-server/main.py --check-deps` 能输出缺失清单；在 GBK/pipe 环境运行不再因 emoji 报 UnicodeEncodeError；启用 `--debug-imports` 能定位卡在哪个 import/初始化步骤。
 - 预防方案（测试/监控/校验/回滚）：关键启动阶段分段打点；部署前跑 `--check-deps`；若需保证输出可读性，可在调用侧设置 `PYTHONIOENCODING=utf-8` 或关闭 emoji 输出。
-- 相关文件/接口：python_grpc_server.py、requirements.grpc_server.txt、docs/architecture/error-fixes.md
+- 相关文件/接口：apps/grpc-server/main.py、requirements.grpc_server.txt、docs/architecture/error-fixes.md
 - 复盘要点：启动可观测性要覆盖 logging 配置前阶段；Windows 管道编码与 emoji 是常见坑，需在 bootstrap 阶段处理。
 ## 2026-02-05 enhanced_output.md 未嵌入视频
 - 日期：2026-02-05
@@ -180,7 +180,7 @@
 - 修复措施：assemble_only 对每个 unit 都调用 _apply_external_materials；缺失 requests 时使用空 MaterialRequests 进入兜底匹配。
 - 验证方式：重新运行 Phase2B，确认 result.json materials.clip 填充，enhanced_output.md 出现 ![[clips/xxx.mp4]]。
 - 预防方案（测试/监控/校验/回滚）：增加 material_requests 为空的回归用例；记录每个 unit 的 clip/screenshot 应用数量；必要时回退到只用显式 requests。
-- 相关文件/接口：MVP_Module2_HEANCING/module2_content_enhancement/rich_text_pipeline.py
+- 相关文件/接口：services/python_grpc/src/content_pipeline/rich_text_pipeline.py
 - 复盘要点：素材匹配必须有兜底路径，即使请求缺失也要尝试文件前缀匹配。
 ## 2026-02-05 Coarse batch read ThreadPoolExecutor 未定义
 - 日期：2026-02-05
@@ -190,7 +190,7 @@
 - 修复措施：改为使用已导入的 futures.ThreadPoolExecutor，避免 NameError。
 - 验证方式：跑含 coarse-fine 的 CVBatch，观察日志不再出现该告警，且有 Coarse batch read timing 输出。
 - 预防方案（测试/监控/校验/回滚）：增加单元测试覆盖 worker_count>1 分支；启动时增加关键依赖符号自检。
-- 相关文件/接口：python_grpc_server.py
+- 相关文件/接口：apps/grpc-server/main.py
 - 复盘要点：并行分支应避免未导入符号的隐式依赖。
 ## 2026-02-05 Batch read futures 变量遮蔽
 - 日期：2026-02-05
@@ -200,7 +200,7 @@
 - 修复措施：将列表变量改名为 future_list，避免遮蔽模块名称；统一使用 futures.ThreadPoolExecutor。
 - 验证方式：再次运行批量读帧，确认不再出现上述告警，且 Batch read frames timing 正常输出。
 - 预防方案（测试/监控/校验/回滚）：增加分支覆盖测试（worker_count>1）；避免使用与模块同名的局部变量。
-- 相关文件/接口：python_grpc_server.py
+- 相关文件/接口：apps/grpc-server/main.py
 - 复盘要点：局部变量命名应避免与导入模块同名，尤其在异常分支不易暴露。
 ## 2026-02-05 更新 semantic_units_phase2a.json 时 confidence 字段缺失
 - 日期：2026-02-05
@@ -210,7 +210,7 @@
 - 修复措施：新增安全字段读取，兼容 protobuf 对象与 dict，缺失字段使用默认值。
 - 验证方式：再次执行 GenerateMaterialRequests，确认 semantic_units_phase2a.json 可更新且无告警。
 - 预防方案（测试/监控/校验/回滚）：为不同 action_unit 类型增加回写回归用例；在回写前记录字段缺失统计。
-- 相关文件/接口：python_grpc_server.py
+- 相关文件/接口：apps/grpc-server/main.py
 - 复盘要点：跨消息类型回写需做字段兼容，避免直接访问可选字段。
 ## 2026-02-05 Phase2A 缓存 clipRequests 覆盖生成 clipRequests（包络不生效/片段错位）
 - 日期：2026-02-05
@@ -220,7 +220,7 @@
 - 修复措施：合并时调整优先级为“generatedRequests 优先，Phase2A 仅补缺”；并在 merge 阶段对同 ID 但时间段/语义单元不一致的情况打印 WARNING，直接暴露断链点。
 - 验证方式：连续跑同一任务两次（第二次必然缓存命中），检查第二次仍能使用最新包络范围；观察日志存在 `[ClipMerge]` 冲突告警时，最终提取的切片仍以 generated 为准。
 - 预防方案（测试/监控/校验/回滚）：增加“缓存命中 + 生成覆盖”的回归用例；对同 `clip_id` 范围冲突计数监控；必要时提供开关禁用 Phase2A 复用或禁用合并。
-- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 相关文件/接口：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
 - 复盘要点：新增功能不仅要“产出正确副作用”，还要保证下游合并/去重策略不会把新副作用吞掉。
 
 ## 2026-02-05 上游 action_units.knowledge_type 断链/疑似 CV actionType 污染
@@ -245,18 +245,18 @@
   - 输入侧：新增“自动输入策略”以满足 data-uri 10MB 限制：小文件走 data-uri；大文件优先尝试 DashScope `File.upload` 获取临时 URL（可选依赖）；不可用/失败则降级为抽取少量关键帧（`image_url`），并对图片做尺寸/质量压缩确保单项不超限。
   - 输出侧：在提示词尾追加 JSON 硬性约束；解析侧增加括号配对提取、去尾随逗号、修复 `key_evidence` 多字符串模式、兼容字段名漂移（`suggested_screenshot_timestamps`），并在解析失败时用更严格约束重试。
 - 验证方式：
-  - 运行 `MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_analyzer.py` 的 `test_json_parsing()`，覆盖 `key_evidence` 典型坏格式与“自然语言包裹 JSON”提取。
+  - 运行 `services/python_grpc/src/content_pipeline/tests/test_vl_analyzer.py` 的 `test_json_parsing()`，覆盖 `key_evidence` 典型坏格式与“自然语言包裹 JSON”提取。
   - 通过 `python -m py_compile` 校验模块语法；在真实任务中观察不再出现 data-uri 超限 400，且 JSON 解析失败显著减少。
 - 预防方案（测试/监控/校验/回滚）：
   - 测试：持续补充 VL 响应解析的坏格式用例（截断/字段漂移/尾随逗号）。
   - 监控：对“输入降级路径（upload/keyframes）”计数与告警；对解析失败重试次数/失败率埋点。
   - 校验：在发送前统一做 data-uri 单项大小检查；必要时强制 keyframes 模式快速止血。
   - 回滚：将 `vl_material_generation.enabled` 置为 `false` 回退到原有生成链路。
-- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_video_analyzer.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_analyzer.py`
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/vl_video_analyzer.py`、`services/python_grpc/src/content_pipeline/tests/test_vl_analyzer.py`
 - 复盘要点：多模态输入必须显式考虑网关/供应商的 payload 限制；LLM 输出解析应按“非结构化输入”设计，配套约束、容错与重试闭环。
 - 验证方式：跑包含多动作单元的视频，检查日志出现“上游 knowledge_type 缺失/疑似 CV actionType”时能定位具体 unit/action；同时 semantic_units_phase2a.json 的 action_units 中 knowledge_type 不再缺失。
 - 预防方案（测试/监控/校验/回滚）：对 gRPC 入参做 schema 校验（action_units[*].knowledge_type 为空比例阈值告警）；为“无分类结果”提供显式标记而非静默默认；必要时回退到不依赖 knowledge_type 的保守裁剪策略。
-- 相关文件/接口：`python_grpc_server.py`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 相关文件/接口：`apps/grpc-server/main.py`、`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`、`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
 - 复盘要点：数据链断裂要“可观测”，默认值只能兜底不能掩盖断链。
 
 ## 2026-02-05 LLM 分类缓存字段命名不兼容导致 action_units.knowledge_type 为空
@@ -267,7 +267,7 @@
 - 修复措施：loadFromCache 同时兼容 camelCase/snake_case，并在解析后对关键字段做有效性检查（无有效项则视为缓存失效并回退重算）。
 - 验证方式：复用旧缓存运行一条任务，确认仍能正确解析并回写 knowledge_type；若缓存结构不兼容，日志提示忽略缓存并重新分类。
 - 预防方案（测试/监控/校验/回滚）：缓存增加 schema_version；落盘时固定字段命名规范；增加缓存读写一致性的单测。
-- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java`
+- 相关文件/接口：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java`
 - 复盘要点：缓存属于“上游返回值”，必须定义稳定 schema，并对解析结果做完整性校验。
 
 ## 2026-02-06 Java 编译缺失 CV/知识分类结果类型与 TimeoutConfig 类型
@@ -278,7 +278,7 @@
 - 修复措施：移除错误导入，使用已存在的 `PythonGrpcClient.*` 内部类型；将方法签名统一为 `DynamicTimeoutCalculator.TimeoutConfig`。
 - 验证方式：在 `java_orchestrator` 目录执行 `mvn -DskipTests compile`，确认编译通过。
 - 预防方案（测试/监控/校验/回滚）：统一 DTO/结果类的归属与命名，避免跨类重复定义；CI 中保留编译检查；IDE 开启“错误导入提示”并在重构后跑一次编译验证。
-- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 相关文件/接口：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
 - 复盘要点：结果类型应集中定义，编排层只消费，不应误导向不存在的内部类。
 
 ## 2026-02-06 AnalyzeWithVL 截图优化“看起来没开多进程/Worker 空转”
@@ -296,7 +296,7 @@
   - 可观测性增强：支持 `CV_POOL_WARMUP=1` 输出 Worker PID 集合；Worker 日志包含 PID，并在“读不到帧”时输出 shm_name 样本。
 - 验证方式：跑 `AnalyzeWithVL`（截图请求 > 100），确认日志输出 workers/inflight/chunks/prefetch_ms/register_ms/submitted/completed；Worker 日志出现多个 PID 且有任务执行；`SharedMemory not found` 告警显著减少或消失。
 - 预防方案（测试/监控/校验/回滚）：新增单元测试覆盖 chunk 切分；运行时日志记录 submitted/completed；可通过 `streaming_pipeline=false` 或 `streaming_overlap_buffers=1` 回退到更稳的顺序 chunk。
-- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/visual_feature_extractor.py`、`cv_worker.py`、`python_grpc_server.py`、`MVP_Module2_HEANCING/config/module2_config.yaml`
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/vl_material_generator.py`、`services/python_grpc/src/content_pipeline/visual_feature_extractor.py`、`services/python_grpc/src/vision_validation/worker.py`、`apps/grpc-server/main.py`、`config/module2_config.yaml`
 - 复盘要点：SharedMemory 必须配套生命周期边界；“预读+全局缓存”在高并发下易触发淘汰与时序问题，需用 chunk/背压/可观测性闭环约束。
 
 ## 2026-02-06 JavaCV FFmpeg 素材提取超时（TimeoutException）
@@ -309,7 +309,7 @@
   - 在 `JavaCVFFmpegService` 输出提取开始日志时附带 timeout；超时时抛出更明确的错误信息（包含 timeout 秒数），便于排查。
 - 验证方式：对同一视频/同一 material_requests 重新执行，确认不再在约 292s（旧估算）处超时；日志中能看到 “FFmpeg timeout computed: ...” 且提取阶段可以完成或在更合理的阈值上超时。
 - 预防方案（测试/监控/校验/回滚）：将 “提取请求数量/总切片时长/计算出的 timeout” 纳入关键日志；当请求数量异常飙升时可增加告警与策略降采样（例如上限 clips/screenshots 或按单位合并去重）。
-- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+- 相关文件/接口：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
 - 复盘要点：timeout 必须依赖“真实工作量”（请求数、切片总时长），而不是仅按视频时长做静态估算；错误信息要包含关键上下文，便于线上快速定位。
 
 ## 2026-02-06 本地视频时长未探测导致超时偏低
@@ -322,7 +322,7 @@
   - 增加 `ffmpeg_extraction` 配置（timeout_multiplier/min/max），在计算超时后进行可配置缩放。
 - 验证方式：用本地视频跑一条主链路，日志出现 “Probed video duration” 与 “FFmpeg timeout computed: X -> Y”；超时不再过早触发。
 - 预防方案（测试/监控/校验/回滚）：保留时长探测日志；在配置中按硬件性能调整 `timeout_multiplier`；必要时将 `max_timeout_sec` 设为 0 以避免误裁剪。
-- 相关文件/接口：`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`、`MVP_Module2_HEANCING/config/module2_config.yaml`
+- 相关文件/接口：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`、`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`、`config/module2_config.yaml`
 - 复盘要点：动态超时必须依赖真实输入特征（时长/请求规模），并允许按环境做缩放以避免“同样逻辑不同机器超时”的漂移。
 
 ## 2026-02-07 VL 前置裁剪后时间轴偏移风险
@@ -339,7 +339,7 @@
   - 预处理默认保守阈值（`min_removed_ratio`、`min_keep_segment_sec`）防止过度裁剪。
   - 记录预处理日志（`removed_ratio/stable_count/kept_count`）用于线上回归比对。
   - 发生异常可通过 `pre_vl_static_pruning.enabled=false` 一键回退。
-- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`MVP_Module2_HEANCING/config/module2_config.yaml`
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/vl_material_generator.py`、`services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`、`config/module2_config.yaml`
 - 复盘要点：任何“前置压缩输入”的策略都必须保证时间轴可逆映射，否则后续素材定位会系统性漂移。
 
 ## 2026-02-07 VL 多个视频片段截取结果相同（并触发 Java Concat DTS 非单调）
@@ -373,5 +373,118 @@
   - 校验：在进入 Java 提取前增加轻量校验（`segments` 去重、排序、重叠合并后再下发）。
   - 兜底：Java 侧输出时间戳强制单调递增，降低异常数据对 concat 的致命影响。
   - 回滚：可临时关闭 `pre_vl_static_pruning.enabled` 回到未裁剪路径，保证主流程可用性。
-- 相关文件/接口：`MVP_Module2_HEANCING/module2_content_enhancement/vl_material_generator.py`、`MVP_Module2_HEANCING/module2_content_enhancement/tests/test_vl_pre_prune.py`、`MVP_Module2_HEANCING/enterprise_services/java_orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`docs/architecture/upgrade-log.md`
+- 相关文件/接口：`services/python_grpc/src/content_pipeline/vl_material_generator.py`、`services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`、`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`、`docs/architecture/upgrade-log.md`
 - 复盘要点：任何“先裁剪再理解”的链路，本质是“坐标系变换问题”；若 unit 绑定、时间基准、区间语义三者任一失真，下游必然表现为“片段重复 + 越界 + 拼接异常”。
+
+## 2026-02-10 Python 侧 HTTP 请求日志刷屏
+- 日期：2026-02-10
+- 现象与影响范围：控制台持续出现 `HTTP Request: POST https://api.deepseek.com/chat/completions "HTTP/1.1 200 OK"`，关键信息被淹没，定位业务告警困难。
+- 触发条件：根日志级别为 `INFO`，且 `httpx/httpcore/openai` 继承根 logger 配置时，会输出每次请求的 info 日志。
+- 根因定位：日志初始化只配置了 root handler/formatter，未对第三方 HTTP 客户端 logger 做噪声分级控制。
+- 修复措施：在 `configure_pipeline_logging(...)` 中默认下调 `httpx`、`httpcore`、`openai`、`openai._base_client` 到 `WARNING` 级别，保留 warning/error 可见性。
+- 验证方式：执行最小复现脚本，确认 `httpx.info(...)` 不再输出、`httpx.warning(...)` 仍正常输出；同时验证 `py_compile` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 通过环境变量 `PIPELINE_ENABLE_HTTP_INFO_LOGS=1` 可临时恢复 HTTP info 日志，便于联调。
+  - 通过环境变量 `PIPELINE_HTTP_LOG_LEVEL` 可按需覆盖（默认 `WARNING`）。
+  - 保持默认静默策略，避免高并发场景日志 IO 反向影响吞吐。
+- 相关文件/接口：`services/python_grpc/src/common/logging/pipeline_logging.py`
+- 复盘要点：全局 `INFO` 在接入通用 SDK 后通常会引入“高频无业务价值日志”，应在日志入口统一做第三方噪声治理。
+
+## 2026-02-10 Stage1 中间产物路径不稳定（step2/step6/sentence_timestamps）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - `transcript_pipeline` 执行后，`step2`、`step6` 与 `sentence_timestamps` 可能无法稳定在 `output_dir/intermediates/` 同路径获取。
+  - 影响 Phase2A/Phase2B 对中间文件的统一消费，增加回退判断与补拷贝复杂度。
+- 触发条件：
+  - `StepOutputConfig` 被外部参数关闭关键步骤输出；或 `sentence_timestamps` 仅写入 `local_storage` 且服务层复制链路未命中。
+- 根因定位：
+  - `step2/step6` 落盘依赖可变开关，缺少“关键产物不可关闭”约束。
+  - `sentence_timestamps` 的标准消费路径依赖服务层后置复制，不在 Stage1 pipeline 内直接保证。
+- 修复措施：
+  - 在 `StepOutputConfig` 中新增 `REQUIRED_ENABLED_STEPS`，强制包含 `step2_correction` 与 `step6_merge_cross`。
+  - 在 `step4_clean_local` 保存 `local_storage` 后，直接同步落盘 `output_dir/intermediates/sentence_timestamps.json`。
+  - 对 `intermediates` 写入异常采用 warning，不中断主流程。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+  - 运行最小脚本验证 `StepOutputConfig`：`disable_all/custom` 场景下仍包含 `step2/step6`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/补充单测覆盖 `StepOutputConfig` 必选步骤与 `step4` intermediates 落盘行为。
+  - 监控：在 Stage1 完成时增加文件存在性日志（`step2/step6/sentence_timestamps`）。
+  - 校验：服务层返回 `Stage1Response` 前统一校验三文件并记录缺失原因。
+  - 回滚：若需紧急回退，可仅保留服务层复制逻辑并恢复 `StepOutputConfig` 可关闭策略。
+- 相关文件/接口：
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+- 复盘要点：
+  - 下游强依赖的关键中间产物应在最靠近生产点处“原子保证”，而非依赖跨层补偿。
+
+## 2026-02-10 AnalyzeSemanticUnits 读取 Stage1 产物失败（字段缺失 + get_video_duration 未定义）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - 日志出现：
+    - `Missing required fields: ['subtitle_id', 'start_sec', 'end_sec']`
+    - `Missing required fields: ['paragraph_id', 'text', 'source_sentence_ids']`
+    - `AnalyzeSemanticUnits failed: name 'get_video_duration' is not defined`
+  - 直接影响 `AnalyzeSemanticUnits`，并导致后续素材生成链路中断。
+- 触发条件：
+  - Stage1 输出文件较大时，`step2/step6` 被写成 `count/sample` 摘要结构；
+  - Phase2A 初始化 `RichTextPipeline` 时命中未导入函数调用。
+- 根因定位：
+  - `StepOutputConfig` 的通用摘要化策略破坏了 `step2/step6` 的消费者契约（消费者要求完整数组）。
+  - `rich_text_pipeline.py` 内直接使用 `get_video_duration(...)` 但缺少 import。
+  - Stage1 复用校验缺少“坏结构识别”，会重复复用已损坏产物。
+- 修复措施：
+  - `transcript_pipeline/graph.py`：对 `step2_correction`、`step6_merge_cross` 强制全量落盘，不再摘要化。
+  - `server/grpc_service_impl.py`：复用校验新增 `compacted_output` 检测，命中即拒绝复用并触发重算。
+  - `content_pipeline/phase2b/assembly/rich_text_pipeline.py`：补充 `get_video_duration` 导入。
+  - 增加测试：
+    - `test_step_output_config.py`（验证 step2/step6 全量落盘）
+    - `test_data_loader_compacted_output.py`（验证摘要结构会被识别为非法输入）
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py services/python_grpc/src/content_pipeline/tests/test_data_loader_compacted_output.py`
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py services/python_grpc/src/content_pipeline/tests/test_data_loader_compacted_output.py`（`4 passed`）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：为所有“被下游直接消费”的中间文件新增结构契约测试，禁止摘要化。
+  - 监控：Stage1 复用日志新增 `compacted_output` 原因统计，便于观察坏缓存发生率。
+  - 校验：在 Stage1 结束时增加关键文件结构快检（数组/必填字段）。
+  - 回滚：如需紧急回滚，仅保留“禁摘要 + 导入修复”，关闭冲突日志扫描逻辑。
+- 相关文件/接口：
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_data_loader_compacted_output.py`
+- 复盘要点：
+  - “日志摘要友好”与“中间产物契约稳定”是两条不同目标，必须分层实现，不能共用同一输出格式。
+
+## 2026-02-10 并行转录子任务异常导致字幕未落盘
+- 日期：2026-02-10
+- 现象与影响范围：
+  - 开启并行转录后，部分任务出现“字幕没有被保存”或 `subtitle_path` 为空。
+  - 影响 `TranscribeVideo -> ProcessStage1` 链路，Stage1 因缺少稳定字幕输入而中断或失败。
+- 触发条件：
+  - `ProcessPoolExecutor` 某个分段子任务异常（如子进程崩溃、模型加载异常、ffmpeg 子段提取失败抛异常）。
+- 根因定位：
+  - `parallel_transcription.transcribe_parallel(...)` 在聚合阶段直接调用 `future.result()`，任一 `future` 抛异常会中断整个并行转录流程。
+  - 中断后 gRPC `TranscribeVideo` 无法进入“写 `subtitles.txt`”分支，最终表现为字幕未落盘。
+- 修复措施：
+  - 在并行聚合层对 `future.result()` 增加异常隔离，单段失败不再直接打断整批。
+  - 记录失败分段并执行串行补偿重试（复用现有 `transcribe_segment`），最大化保留可恢复结果。
+  - 并行+补偿后仍有失败时，显式抛出包含失败段数量的错误，避免“静默空结果”误导下游。
+- 验证方式：
+  - 新增 `test_parallel_transcription_fallback.py`：
+    - 用例1：并行子任务失败后串行补偿成功，最终仍返回完整字幕。
+    - 用例2：并行与串行补偿均失败时，抛出明确错误（包含失败段比例）。
+  - 本地执行：`python -m pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`，结果 `2 passed`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“并行失败 -> 串行补偿”回归测试，防止后续改动退化为全局失败。
+  - 监控：关注日志关键字“进入串行补偿”“并行转录失败：仍有 x/y 个分段失败”。
+  - 校验：在 gRPC 层保留失败快速返回，避免写入误导性空字幕文件。
+  - 回滚：如需紧急回退，可临时关闭 `whisper.parallel.enabled` 退回单路转录。
+- 相关文件/接口：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+- 复盘要点：
+  - 并行链路的稳定性关键在“失败隔离 + 可控补偿”，而不是假设每个 worker 必然成功。

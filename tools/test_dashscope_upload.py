@@ -119,8 +119,8 @@ async def test_with_vl_analyzer(video_path: str):
     print(f"测试 VL Analyzer 的 DashScope 上传集成")
     print(f"{'='*80}\n")
     
-    from MVP_Module2_HEANCING.module2_content_enhancement.vl_video_analyzer import VLVideoAnalyzer
-    from MVP_Module2_HEANCING.module2_content_enhancement.config_loader import load_module2_config
+    from services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer import VLVideoAnalyzer
+    from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
     
     # 加载配置
     config = load_module2_config()
@@ -173,7 +173,7 @@ async def main():
     """主函数"""
     
     # 获取配置
-    from MVP_Module2_HEANCING.module2_content_enhancement.config_loader import load_module2_config
+    from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
     config = load_module2_config()
     vl_config = config.get("vl_material_generation", {})
     api_key = vl_config.get("api", {}).get("api_key", "")

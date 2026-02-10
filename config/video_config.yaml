@@ -1,0 +1,239 @@
+# 配置文件 - Knowledge Engine Pipeline
+# 所有路径均相对于项目根目录
+#
+# 配置文件使用说明（重要）：
+# 1) 本文件是 Python gRPC 主链路唯一主配置，推荐路径：config/video_config.yaml。
+# 2) 历史副本路径已下线并删除；修改配置请只改本文件。
+# 3) 安全项（API Key / Token）建议使用环境变量覆盖，不要将真实密钥提交到仓库。
+# 4) 配置优先级：显式传参 > 环境变量 > 本文件 > 代码默认值。
+
+# 1. 视频下载配置
+# -----------------------------------------------------------------------------
+video:
+  output_dir: "output"
+  download_subdir: "downloads"
+  # 视频下载代理 (可选，如: "http://127.0.0.1:7890")
+  download_proxy: ""
+  # 是否禁用 SSL 证书验证 (仅在遇到证书问题时启用)
+  disable_ssl_verify: false
+
+# 2. AI 服务配置
+# -----------------------------------------------------------------------------
+ai:
+  # DeepSeek API 配置
+  # ⚠️ 安全提示：请勿在此处填写 API Key！
+  # 推荐方式：设置环境变量 DEEPSEEK_API_KEY
+  # Windows: setx DEEPSEEK_API_KEY "sk-your-key-here"
+  # Linux/Mac: export DEEPSEEK_API_KEY="sk-your-key-here"
+  api_key: ""  # 留空，从环境变量读取（生产环境强烈建议）
+  base_url: "https://api.deepseek.com"
+  
+  # 字幕整理模型
+  refinement:
+    model: "deepseek-chat"
+    temperature: 0.1
+    chunk_size: 2000      # 每个精修批次的字符数 (可调: 1500-4000)
+    max_concurrency: 0    # 最大并发数 (0 = 不限制，适用于 DeepSeek)
+  
+  # 内容分析模型
+  analysis:
+    model: "deepseek-chat"
+    temperature: 0.2
+    fast_model: ""        # 用于简单任务的快速模型；为空时回退 model
+  
+  # 主题识别模型
+  topic:
+    model: "deepseek-chat"
+    temperature: 0.1
+
+# 3. Whisper 转录配置
+# -----------------------------------------------------------------------------
+whisper:
+  # 转录策略 (Model Layer Optimization)
+  # - dynamic: 自动根据视频时长选择模型 (推荐: <10m=medium, 10-60m=large-v2, >60m=large-v3)
+  # - fastest: 极速模式 (强制 base 模型 + CPU INT8，耗时最小)
+  # - custom:  自定义模式 (完全遵循下方 model_size 配置)
+  strategy: "fastest"  # 建议：CPU 环境用 fastest，GPU/精度优先可改 dynamic
+
+  # 模型大小: tiny, base, small, medium, large-v2, large-v3
+  # 仅在 strategy 为 "custom" 时生效，或作为 dynamic 的兜底
+  model_size: "medium"  # 仅 strategy=custom 时生效
+  
+  # 设备: cuda, cpu
+  device: "cpu"  # cpu/cuda；若机器无 CUDA 请保持 cpu
+  
+  # 是否使用 HF 镜像加速 (默认 true)
+  use_mirror: false
+  
+  # HuggingFace 下载镜像 (仅在 use_mirror 为 true 时生效)
+  # 留空则默认使用 https://hf-mirror.com
+  hf_endpoint: "https://hf-mirror.com"
+  
+  # 下载代理 (可选，例如 "http://127.0.0.1:7890")
+  # 如果镜像站 404，建议通过代理连接官方 Hub
+  download_proxy: ""
+  
+  # 计算类型 (仅 CPU): int8, int16, float32
+  # 计算类型 (GPU): float16, int8_float16
+  compute_type: "int8"
+  
+  # 转录语言 (支持 99 种语言)
+  # 常用: zh(中文), en(英语), ja(日语), ko(韩语), auto(自动检测)
+  # 完整列表: https://github.com/openai/whisper#available-models-and-languages
+  language: "auto"
+  
+  # 并行转录配置
+  parallel:
+    enabled: true          # 是否启用并行转录
+    num_workers: 3         # 并行进程数（建议 2-4）
+    segment_duration: 600  # 分段时长（秒），600 = 10分钟
+    segment_split_threshold_sec: 300  # 分段阈值（秒），<=该值不分段，默认5分钟
+    auto_resource_scheduling: true    # 是否按CPU/内存自动调整并发
+    reserve_cpu_cores: 1              # 给系统预留的CPU核心数
+    reserve_cpu_ratio: 0.1            # 给系统预留的CPU比例（0~0.8）
+    reserve_memory_gb: 2.0            # 给系统预留的可用内存（GB）
+    memory_per_worker_gb: 1.5         # 单个并行Worker估算占用内存（GB）
+    gpu_max_workers: 1                # GPU模式下并行上限（避免显存争抢）
+    segments_per_worker: 2            # 长视频模式下每个worker目标段数（提高CPU利用率）
+    min_segment_duration_sec: 90      # 单段最小时长，防止分段过细导致调度开销过高
+    max_segment_count: 0              # 分段上限（0=不限制）
+
+# 4. 处理流程配置
+# -----------------------------------------------------------------------------
+processing:
+  # 是否启用断点续传
+  resume: true  # true=启用阶段复用；false=每次全量重跑
+  
+  # 分析时的并发数
+  analysis_concurrency: 8  # 值越大吞吐越高，但会增加内存/CPU压力
+
+# 断点重续（文件复用）配置
+resume_control:
+  # 🔑 主开关：启用断点重续
+  enabled: true  # false 时将忽略本节其余参数
+  # 当前仅支持 file_reuse
+  mode: "file_reuse"
+  # 复用校验强度：light / moderate / strict
+  validation: "moderate"
+  # 复用失效策略：recompute / fail_fast
+  on_invalid_reuse: "recompute"
+  # 非优先资源保留天数（TTL）
+  non_priority_retention_days: 7  # 建议范围：3~30；越大磁盘占用越高
+  # 仅 Phase2A 作为优先长期保留资源
+  priority_keep_only_phase2a: true
+  # 分组开关（全部启用）
+  groups:
+    transcribe: true
+    stage1_text: true
+    stage1_semantic: true
+    stage1_visual: true
+    stage1_document: true
+    phase2a: true
+    assets: true
+    phase2b: true
+
+# Module2 文档增强配置
+# -----------------------------------------------------------------------------
+content_pipeline:
+  markdown_enhancer:
+    # 是否在结构化前，基于图片描述做正文增量补全
+    # 默认开启；可被环境变量 MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT 覆盖
+    enable_img_desc_text_augment: true  # false 可降低 LLM 调用成本，但描述补全能力下降
+  observability:
+    llm_trace:
+      # 是否启用 Phase2B LLM 调用追踪（逐次落盘 JSONL）
+      enabled: true  # 生产建议默认 false，问题排查时再打开
+      # 追踪粒度：full=完整 prompt/response；summary=截断摘要
+      level: "full"  # full=完整请求/响应，summary=摘要（更省磁盘）
+      # 输出路径（相对 result.json 所在目录）；留空走默认 intermediates/phase2b_llm_trace.jsonl
+      output_path: "intermediates/phase2b_llm_trace.jsonl"
+    image_match_audit:
+      # 是否落盘图片匹配审计（timestamp->sentence_id）
+      enabled: true  # 生产建议默认 false，开启后便于对齐错误追查
+
+# 5. 提示词路径配置
+# -----------------------------------------------------------------------------
+prompts:
+  analysis: "knowledge_engine/resources/default_prompt.md"
+  topic:    "knowledge_engine/resources/topic_identification.md"
+  refine:   "knowledge_engine/resources/subtitle_refinement.md"
+
+# 6. 视觉素材提取配置
+# -----------------------------------------------------------------------------
+visual:
+  # 并行提取的最大线程数
+  # 建议值: CPU 核心数的 1-2 倍
+  max_workers: 8
+  
+  # 是否跳过已存在的图片（断点重续）
+  skip_existing: true
+  
+  # 每个素材提取的候选帧数 (AI 将从中选择最佳帧)
+  candidate_frames: 10
+
+# 6.1 视觉 AI 配置 (智能选帧 - ERNIE 4.5 Turbo)
+# -----------------------------------------------------------------------------
+vision_ai:
+  # 是否启用视觉 AI 选帧
+  enabled: true  # false 时退化为纯 CV 路径
+  
+  # 服务商: ernie
+  provider: "ernie"
+  
+  # 认证方式: Bearer Token (千帆平台)
+  # 格式: bce-v3/ALTAK-xxxxx/yyyyyyy
+  bearer_token: ""  # 建议留空并使用环境变量注入，避免密钥泄漏
+  
+  # API 端点 (千帆平台 ERNIE 4.5 Turbo)
+  base_url: "https://qianfan.baidubce.com/v2/chat/completions"
+  
+  # 模型名称
+  model: "ernie-4.5-turbo-vl-32k"  # 与服务商可用模型保持一致
+  
+  # 温度参数 (越低越稳定)
+  temperature: 0.1  # 建议 0.0~0.3；越低越稳定，越高越发散
+  
+  # 每次分析的最大帧数 (建议 5-8 张)
+  max_frames_per_call: 8  # 建议 4~10；过大可能增加时延与 token 成本
+
+# 7. 视频下载配置
+# -----------------------------------------------------------------------------
+download:
+  # 并行下载配置
+  parallel:
+    enabled: true     # 是否启用并行下载
+    max_workers: 3     # 最大并发线程数（建议 2-4）
+
+# 8. 缓存配置
+# -----------------------------------------------------------------------------
+cache:
+  # 是否启用 SQLite 缓存层
+  enabled: true  # false 可避免缓存脏读，但会增加重复计算
+  # 缓存数据库路径 (相对于输出目录)
+  db_path: ".cache/pipeline_cache.db"
+  # 缓存过期时间 (天，0 = 永不过期)
+  expire_days: 30  # 0=永不过期；生产建议设置 7~30 平衡磁盘占用
+
+# 9. 流水线配置 (V9 新增)
+# -----------------------------------------------------------------------------
+pipeline:
+  # 是否启用流水线重叠 (转录完一段立即精修)
+  overlap_enabled: true  # true=阶段重叠执行，提高吞吐
+  # 阶段间队列大小
+  queue_size: 10  # 建议 5~50；过小会阻塞，过大会占用更多内存
+  # 多集视频最大并发处理数
+  max_concurrent_episodes: 2
+  
+  # 多视频并行处理 (V10 - 生产者-消费者模型)
+  parallel_videos: true             # 启用多视频并行处理
+  download_workers: 5               # 下载并发数
+  transcription_concurrency: 1      # GPU 建议 1；CPU 可按机器资源增大
+  postprocess_workers: 8            # 后处理并发数 (精修+分析+合成)
+  transcription_queue_size: 3       # 待转录队列容量
+
+# 9. 内容分类配置（已下线）
+# -----------------------------------------------------------------------------
+# 说明：`content_classification` 当前无任何生产代码读取。
+# 为避免误导使用者，本配置节已移除。
+# 若后续恢复该能力，请先在 docs/architecture/upgrade-log.md 记录设计与影响，
+# 再新增清晰的“开关/默认值/影响范围/回退方案”。

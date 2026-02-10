@@ -18,11 +18,11 @@ from datetime import datetime
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, project_root)
 
-from MVP_Module2_HEANCING.module2_content_enhancement.semantic_unit_segmenter import (
+from services.python_grpc.src.content_pipeline.phase2a.segmentation.semantic_unit_segmenter import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE
 )
-from MVP_Module2_HEANCING.module2_content_enhancement.llm_client import LLMClient
+from services.python_grpc.src.content_pipeline.infra.llm.llm_client import LLMClient
 
 
 async def test_prompt():

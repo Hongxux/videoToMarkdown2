@@ -15,8 +15,8 @@ from pathlib import Path
 project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(project_root))
 
-from MVP_Module2_HEANCING.module2_content_enhancement.vl_video_analyzer import VLVideoAnalyzer
-from MVP_Module2_HEANCING.module2_content_enhancement.config_loader import load_module2_config
+from services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer import VLVideoAnalyzer
+from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
 
 
 async def test_video_upload(video_path: str):
