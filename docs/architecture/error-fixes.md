@@ -13,6 +13,152 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-17 根入口存在“壳层重定向页”导致体验割裂与视觉 Token 不一致
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 访问 `/` 先进入“Redirecting...”中间页，再跳转到 `mobile-markdown.html`，引入额外等待与注意力切换。
+  - 中间页与主应用页的视觉参数不一致（圆角、字体族等），造成产品感知割裂。
+- 触发条件：
+  - `index.html` 被设计为壳层重定向页，主页面托管在 `mobile-markdown.html`。
+  - 视觉 Token 未在入口页与主页面之间单源复用。
+- 根因定位：
+  - 这是“入口职责定义错误”与“设计 Token 分散定义”的组合问题，而非业务数据链路问题。
+  - 根入口未直接承载内容，导致结构上天然存在 UI 分叉风险。
+- 修复措施：
+  - 将 `index.html` 调整为主页面本体，移除壳层重定向体验。
+  - 将 `mobile-markdown.html` 与 `index.html` 收敛为同构页面内容，去掉入口层中间跳转。
+  - 新增 `css/design-tokens.css`，集中定义字体与圆角 Token，并由 `index.html` 引用。
+  - 将主页面中的圆角声明收敛为 Token 变量引用，避免固定像素值散落。
+- 验证方式：
+  - 行为验证：访问 `/` 与 `/mobile-markdown.html` 均直接进入同构应用页面。
+  - 静态校验：确认 `index.html` 已引入 `design-tokens.css` 且圆角改为 Token 变量。
+  - 脚本检查：`node --check` 校验 `index.html` 内联脚本块与 `mobile-markdown.html` 跳转脚本。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增前端 smoke case，断言根入口不出现“重定向提示页”文本。
+  - 监控：在页面初始化埋点中区分“主入口加载”与“历史别名跳转”，观察别名流量收敛趋势。
+  - 校验：视觉评审要求“字体/圆角”必须来源于共享 Token 文件，不接受页面内临时硬编码。
+  - 回滚：如双入口同构维护出现风险，可临时回退为单入口页面并保留 `index.html` 主页面直达策略。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `services/java-orchestrator/src/main/resources/static/css/design-tokens.css`
+  - `GET /`
+  - `GET /mobile-markdown.html`
+- 复盘要点：
+  - 入口页不应承担“先提示再跳转”的装饰职责，应该直接承载目标内容。
+  - 设计语言必须单源配置，否则会在跨页面演进中持续引入隐性不一致。
+
+## 2026-02-17 移动端 ZIP 导出缺少进度、不可复用且误包含原视频（已修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 导出接口原先为流式实时打包，前端只能基于下载字节估算，无法稳定展示“后端打包进度百分比”。
+  - 同一任务重复导出会重复打包，后端无法复用历史 ZIP，导出成本高。
+  - ZIP 内容会包含任务根目录中的原始视频（如 `video.mp4`），导致导出包体积偏大且不符合移动端阅读素材诉求。
+- 触发条件：
+  - 使用 `GET /api/mobile/tasks/{taskId}/export` 触发流式导出时，后端每次重新扫描并实时压缩输出。
+  - 任务根目录包含原始视频文件（常见为根目录 `video.*` 或上传源视频）。
+- 根因定位：
+  - 导出链路将“打包”和“下载”耦合在单请求里，缺少可查询的中间状态与缓存产物。
+  - 过滤规则只排除临时文件和隐藏路径，未对“原始源视频”建立排除策略。
+- 修复措施：
+  - 导出架构改为三段式：
+    - `POST /api/mobile/tasks/{taskId}/export/prepare`：准备或复用 ZIP；
+    - `GET /api/mobile/tasks/{taskId}/export/status`：返回打包状态与百分比；
+    - `GET /api/mobile/tasks/{taskId}/export`：下载已准备好的 ZIP。
+  - 后端新增 `.mobile-export-cache` 缓存目录，按导出内容哈希命中复用 ZIP，避免重复打包。
+  - 打包过程新增状态机（`idle/running/success/error`）与进度字段（`percent/processedFiles/totalFiles/processedBytes/totalBytes`）。
+  - 导出文件收集新增原视频过滤：
+    - 优先读取 `intermediates/task_metrics_latest.json` 的 `video_path` 并在任务目录内排除；
+    - 同时排除任务根目录中命名形态为 `video.* / uploaded_video.* / source_video.*` 的源视频文件。
+  - 前端导出流程改为“先 prepare + 轮询 status 百分比，再下载 ZIP”。
+- 验证方式：
+  - 前端行为验证：导出过程中可见百分比递增，状态从“准备中”切换到“下载中”再到“完成”。
+  - 复用验证：同任务二次导出命中缓存，准备阶段快速返回 `downloadReady=true`。
+  - 内容验证：检查 ZIP 条目，不再包含任务根目录原始 `video.*`，但保留素材片段（如 `assets/**`、`semantic_unit_clips_vl/**`）。
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充导出接口集成用例，覆盖“首次打包/缓存命中/源视频过滤/异常失败状态”。
+  - 监控：记录导出状态流转与缓存命中率，重点关注 `running -> error` 比例。
+  - 校验：新增导出规则评审项，要求明确“必须包含/必须排除”文件集合。
+  - 回滚：若缓存路径出现兼容问题，可临时关闭缓存复用，仅保留进度轮询与过滤规则。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `POST /api/mobile/tasks/{taskId}/export/prepare`
+  - `GET /api/mobile/tasks/{taskId}/export/status`
+  - `GET /api/mobile/tasks/{taskId}/export`
+- 复盘要点：
+  - 导出类长耗时任务应拆分为“准备-查询-下载”三阶段，才能同时兼顾进度可视化与后端复用。
+  - 文件过滤策略必须显式区分“原始输入”和“可复用产物”，避免包体无界增长。
+
+## 2026-02-17 移动端视频预览失败（`ResourceRegion` 响应缺少可写转换器）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 移动端请求 `GET /api/mobile/tasks/{taskId}/asset?path=...` 预览 MP4 时，服务端出现：
+    - `HttpMessageNotWritableException: No converter for [class org.springframework.core.io.support.ResourceRegion] with preset Content-Type 'video/mp4'`
+  - 影响所有依赖 Range 分片返回的视频在线播放能力，前端表现为视频无法播放或卡在加载状态。
+- 触发条件：
+  - 请求头携带 `Range`（浏览器视频组件默认会发起），控制器返回 `ResponseEntity<ResourceRegion>` 且 `Content-Type` 为 `video/mp4`。
+  - MVC 消息转换器链中缺少 `ResourceRegionHttpMessageConverter` 时会触发该错误。
+- 根因定位：
+  - 问题不在业务逻辑（路径解析、Range 计算）本身，而在 Web 配置链路：`ResourceRegion` 未被可写转换器接管。
+  - 属于“控制器返回类型与 MVC converter 注册链不闭环”的基础设施配置缺口。
+- 修复措施：
+  - 在 `WebConfig` 新增 `extendMessageConverters(...)`，显式保证 `ResourceRegionHttpMessageConverter` 存在：
+    - 若已存在则不重复添加；
+    - 若缺失则补充注册。
+  - 保持控制器既有 Range 响应逻辑不变，避免改动调用链与前端协议契约。
+- 验证方式：
+  - 代码级校验：`WebConfig` 已包含 `extendMessageConverters` 与 `ResourceRegionHttpMessageConverter`。
+  - 构建验证尝试：`mvn -q -DskipTests -s tmp_maven_settings.xml compile -f services/java-orchestrator/pom.xml`。
+  - 受限说明：当前环境网络受限，无法访问 Maven Central 拉取父 POM，未完成完整编译。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：增加 `MobileMarkdownController` 的 Range 请求回归用例，断言 206 响应、`Content-Range` 头和分片长度。
+  - 监控：新增日志检索规则，关注 `HttpMessageNotWritableException` + `ResourceRegion` 关键字。
+  - 校验：代码评审清单加入“返回 `ResourceRegion` 的接口必须确认 converter 已注册”。
+  - 回滚：若 converter 变更引入副作用，可临时回退为非分片 `InputStreamResource` 全量返回（可用性优先）。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/WebConfig.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `GET /api/mobile/tasks/{taskId}/asset`
+- 复盘要点：
+  - 视频/大文件下载链路属于“控制器 + HTTP 语义 + converter”三段式协作，任一段缺失都会表现为业务故障。
+  - 新增协议型返回类型（如 `ResourceRegion`）时，必须把 converter 配置纳入发布前检查项。
+
+## 2026-02-17 `/api/mobile/tasks/{taskId}/export` 异步导出在负载下告警（MVC 未绑定 TaskExecutor）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 请求 `GET /api/mobile/tasks/{taskId}/export` 时，`WebAsyncManager` 报错：
+    - `An Executor is required to handle java.util.concurrent.Callable return values.`
+    - `The SimpleAsyncTaskExecutor currently in use is not suitable under load.`
+  - 影响移动端任务导出链路，导出高峰期存在线程调度不可控风险。
+- 触发条件：
+  - 控制器使用 `StreamingResponseBody` 进行流式导出，MVC 异步流程会进入异步请求处理通道。
+  - 应用未在 `WebMvcConfigurer#configureAsyncSupport` 中显式绑定线程池时，框架回退到默认执行器。
+- 根因定位：
+  - 系统已有 `taskExecutor`（用于 `@Async`），但未接入 MVC 异步支持，导致导出接口仍走默认 `SimpleAsyncTaskExecutor`。
+  - 根因属于“线程池已存在但未连到正确调用链”的配置链路缺口，而非导出业务逻辑错误。
+- 修复措施：
+  - 在 `WebConfig` 中注入并复用 `taskExecutor`，新增 `configureAsyncSupport` 显式绑定 MVC 异步执行器。
+  - 将 `FusionOrchestratorApplication#taskExecutor` 返回类型收敛为 `ThreadPoolTaskExecutor`，保证类型注入清晰且可被 MVC 直接复用。
+  - 清理并重建 `WebConfig` 文件中的历史乱码注释，避免注释污染影响可维护性。
+- 验证方式：
+  - 代码级校验：确认 `WebConfig#configureAsyncSupport` 存在且 `setTaskExecutor(...)` 指向 `taskExecutor`。
+  - 编译验证尝试：`mvn -q -DskipTests -s tmp_maven_settings.xml compile -f services/java-orchestrator/pom.xml`。
+  - 受限说明：当前沙箱网络受限，Maven 无法访问 `https://repo.maven.apache.org/maven2`，未能完成依赖解析式编译。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充 `MobileMarkdownController` 导出接口的异步链路集成测试，覆盖并发导出场景。
+  - 监控：新增日志检索规则，持续监控 `WebAsyncManager` 与 `SimpleAsyncTaskExecutor` 关键告警关键字。
+  - 校验：新增配置评审项，凡返回 `StreamingResponseBody/Callable/DeferredResult` 的接口必须确认 MVC 异步执行器已绑定。
+  - 回滚：如出现线程池竞争，可临时将 MVC 异步执行器切回独立 Bean（与 `@Async` 解耦）后再逐步压测调优。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/WebConfig.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/FusionOrchestratorApplication.java`
+  - `GET /api/mobile/tasks/{taskId}/export`
+- 复盘要点：
+  - 异步能力不仅要“有线程池”，还要“在线程池绑定到正确框架入口”。
+  - 导出/流式下载等长时请求属于高风险路径，应优先检查 MVC 异步配置闭环。
+
 ## 2026-02-17 手机端上传视频失败（移动端路由前缀不一致）
 - 日期：2026-02-17
 - 现象与影响范围：
@@ -2415,3 +2561,4 @@
   - 监控：记录导出接口 `2xx/4xx/5xx` 比例与失败 taskId，区分“构建失败”与“流写失败”。
   - 校验：新增流式下载接口时强制使用显式泛型返回类型（如 `ResponseEntity<StreamingResponseBody>`）。
   - 回滚：若流式导出仍存在兼容性问题，可临时回退为“先落盘临时 ZIP 再下载”的保守实现。
+

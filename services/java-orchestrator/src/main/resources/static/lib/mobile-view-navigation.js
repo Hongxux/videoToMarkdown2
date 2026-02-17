@@ -110,7 +110,11 @@
         }
 
         function resolveEdgeBackTarget(fromView) {
-            if (fromView !== 'reading' && fromView !== 'outline') {
+            if (fromView === 'reading') {
+                // 阅读态右滑返回固定回任务列表，避免被历史栈中的临时页面干扰。
+                return 'tasks';
+            }
+            if (fromView !== 'outline') {
                 return '';
             }
             return peekViewHistoryTarget(fromView);

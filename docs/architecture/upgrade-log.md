@@ -2,6 +2,127 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-17 统一入口去壳层跳转 + 设计 Token 单源化
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `index.html` 作为“重定向壳层”跳转到 `mobile-markdown.html`，引入了不必要的中间页心智负担。
+  - 壳层页与应用页存在视觉参数分叉（例如圆角与字体族定义不一致），破坏界面一致性。
+- 第一性原理与复用杠杆：
+  - 第一性原理：入口页应直接交付目标内容，避免“先跳转再使用”的额外等待与注意力切换。
+  - 复用杠杆1：复用现有 `mobile-markdown.html` 完整应用能力，直接作为 `index.html` 主页面内容。
+  - 复用杠杆2：复用现有静态资源发布能力（`/css`），新增轻量 Token 样式文件，不引入前端构建链。
+  - 复用杠杆3：复用已有 URL 参数透传逻辑，在历史别名页继续保留 query/hash。
+- 架构决策：
+  - 决策1：`index.html` 直接承载应用，不再作为“提示+跳转”壳层。
+  - 决策2：`mobile-markdown.html` 与 `index.html` 统一为同构页面内容，不再通过壳层跳转串联。
+  - 决策3：抽取共享设计 Token 文件 `css/design-tokens.css`，统一字体族与圆角等级，并在主页面消费。
+- 调用链与决策链变化：
+  - 改造前：`/` -> `index.html`（壳层） -> `mobile-markdown.html`（主页面）
+  - 改造后：`/` 与 `/mobile-markdown.html` 均直达同构主页面内容。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - 新增：`services/java-orchestrator/src/main/resources/static/css/design-tokens.css`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 行为验证：
+    - 访问 `/` 时直接进入应用视图，不再出现“Redirecting…”中间页。
+    - 访问 `/mobile-markdown.html` 时与 `/` 呈现同构页面，不出现中间跳转提示。
+  - 静态检查：
+    - 检查 `index.html` 已引用 `design-tokens.css`。
+    - 检查主页面圆角声明已改为 Token 变量引用（不再散落固定像素值）。
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据：
+  - 测试方式：对比“根入口达到可交互页面”的前端导航链路层级与额外等待。
+  - 测试数据：
+    - 改造前：两跳链路（`index` 壳层 -> `mobile-markdown`），存在额外中间页渲染与跳转开销。
+    - 改造后：单跳链路（`index` 直接主页面），中间页等待为 `0`。
+  - 对比结论：
+    - 用户首屏路径从“先被告知要跳转”变为“直接进入内容”，减少认知噪音与无效等待。
+
+## 2026-02-17 移动端导出链路升级：后端可复用 ZIP + 百分比进度 + 原视频过滤
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 现有导出为单次流式打包下载，前端只能看到下载字节，无法稳定反映后端打包阶段百分比。
+  - 同任务重复导出会重复压缩，无法复用后端历史 ZIP。
+  - 导出包包含任务根目录原始视频（如 `video.mp4`），与“轻量知识包”目标不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：导出是长耗时任务，应拆分为“准备 -> 查询 -> 下载”三段，才能兼顾可观察性和复用性。
+  - 复用杠杆1：复用现有 `MobileMarkdownController` 任务解析与目录边界校验，不引入新服务。
+  - 复用杠杆2：复用现有 `taskExecutor` 线程池处理导出后台打包任务，不新增调度组件。
+  - 复用杠杆3：复用现有前端导出按钮与进度 UI，仅替换请求编排。
+- 架构决策：
+  - 决策1：导出接口拆分为三段式：
+    - `POST /api/mobile/tasks/{taskId}/export/prepare`
+    - `GET /api/mobile/tasks/{taskId}/export/status`
+    - `GET /api/mobile/tasks/{taskId}/export`
+  - 决策2：后端在任务目录下维护 `.mobile-export-cache`，按导出内容哈希命中复用 ZIP。
+  - 决策3：导出规则显式过滤原视频，仅保留 markdown 与素材产物；其中素材视频片段（如 `assets/**`）保留。
+  - 决策4：前端导出流程改为“先轮询后端进度（百分比），完成后下载成品 ZIP”。
+- 调用链与决策链变化：
+  - 改造前：`点击导出` -> `GET /export`（实时流式压缩）-> 浏览器下载。
+  - 改造后：`点击导出` -> `POST /export/prepare` -> `GET /export/status` 轮询 -> `GET /export` 下载缓存 ZIP。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 更新：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - 更新：`docs/architecture/error-fixes.md`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 行为验证：
+    - 首次导出可见打包百分比递增；
+    - 二次导出命中后端缓存并快速进入可下载状态；
+    - ZIP 不再包含任务根目录原始 `video.*`。
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据：
+  - 测试方式：同一任务连续执行两次导出，比较“准备阶段”路径与是否重复压缩。
+  - 测试数据：
+    - 改造前：每次导出都执行实时压缩，无缓存复用路径。
+    - 改造后：第一次导出执行打包；第二次导出直接命中 `.mobile-export-cache`（`downloadReady=true`），不再重复压缩。
+    - 进度粒度：状态接口返回 `percent/processedFiles/totalFiles/processedBytes/totalBytes`，前端可持续展示百分比。
+  - 对比结论：
+    - 导出可观察性从“仅下载字节”升级为“后端打包进度 + 下载进度”双阶段可视化。
+    - 重复导出成本从“重复压缩”降为“缓存命中下载”路径，显著降低后端重复计算。
+- 影响与权衡：
+  - 收益：导出体验更可预期，后端资源复用率提升，导出包体积可控。
+  - 成本：新增状态管理与缓存目录清理逻辑，后续需补充更系统的缓存淘汰策略（按时间/大小上限）。
+
+## 2026-02-17 MVC 异步导出链路接入受控线程池
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 移动端导出接口 `GET /api/mobile/tasks/{taskId}/export` 在运行时触发 `WebAsyncManager` 告警，提示默认 `SimpleAsyncTaskExecutor` 不适合负载场景。
+  - 当前系统虽已存在 `taskExecutor`，但仅用于 `@Async` 任务，MVC 异步请求路径未绑定该执行器。
+- 第一性原理与复用杠杆：
+  - 第一性原理：异步接口稳定性由“线程调度策略”决定，关键是让请求进入受控线程池，而不是临时扩线程。
+  - 复用杠杆1：复用现有 `FusionOrchestratorApplication#taskExecutor`，不引入第二套线程池配置。
+  - 复用杠杆2：复用现有 `MobileMarkdownController` 的 `StreamingResponseBody` 导出实现，不改业务导出逻辑。
+  - 复用杠杆3：复用既有 `spring.mvc.async.request-timeout` 策略，保持超时治理口径一致。
+- 架构决策：
+  - 决策1：在 `WebConfig` 中显式实现 `configureAsyncSupport`，将 MVC 异步执行器绑定到 `taskExecutor`。
+  - 决策2：将 `taskExecutor` Bean 返回类型明确为 `ThreadPoolTaskExecutor`，降低注入歧义并提升配置可读性。
+  - 决策3：不新增独立 MVC 线程池，优先复用现有执行器，先消除配置断链再评估隔离优化。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/WebConfig.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/FusionOrchestratorApplication.java`
+  - 更新：`docs/architecture/error-fixes.md`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 配置校验：确认 MVC 配置中存在 `configureAsyncSupport` 且执行 `setTaskExecutor(...)`。
+  - 编译验证尝试：`mvn -q -DskipTests -s tmp_maven_settings.xml compile -f services/java-orchestrator/pom.xml`。
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`。
+- 性能对比数据：
+  - 测试方式：对比“改造前默认执行器”与“改造后受控线程池”在线程模型与承载边界上的配置差异。
+  - 测试数据：
+    - 改造前：MVC 异步回退 `SimpleAsyncTaskExecutor`，线程为按需创建模式，缺少统一队列和容量边界。
+    - 改造后：MVC 异步绑定 `ThreadPoolTaskExecutor`（`corePoolSize=5`，`maxPoolSize=10`，`queueCapacity=25`）。
+    - 并发承载口径：单实例可受控挂起任务上限约 `35`（运行线程 + 队列），超限后进入拒绝/回压路径而非无限扩线程。
+  - 对比结论：
+    - 从“默认执行器不可控扩张”升级为“有边界的线程池调度”，在导出高峰场景下更可预测、更易监控。
+    - 本次以配置链路修复为主，后续仍建议做压力测试评估是否需要把 MVC 与 `@Async` 执行器进一步隔离。
+- 影响与权衡：
+  - 收益：消除导出链路告警，异步调度进入受控资源模型。
+  - 成本：MVC 异步与 `@Async` 共享线程池，极端并发下可能出现资源竞争，需要压测后再决定是否拆分。
+
 ## 2026-02-17 移动端页面补齐任务提交能力（URL/BV + 本地视频上传）
 - 日期：2026-02-17
 - 触发背景与问题：
@@ -5045,3 +5166,4 @@
 - 验证方式：
   - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js`
   - 提取 `mobile-markdown.html` 最后一个主脚本块后执行 `node --check`
+

@@ -80,6 +80,7 @@
         const {
             state,
             config,
+            edgeBackHotZonePx,
             isParagraphActionAllowed,
             isParagraphGestureTargetBlocked,
             resolveGestureParagraphIndex,
@@ -95,6 +96,22 @@
             deleteLineAtIndex,
         } = deps;
 
+        function activateParagraphEditing(index) {
+            if (!state.editMode) {
+                return false;
+            }
+            if (!Number.isFinite(index) || index < 0) {
+                return false;
+            }
+            if (state.paragraphEditingIndex === index) {
+                return true;
+            }
+            if (state.paragraphEditingIndex >= 0) {
+                commitParagraphEditing(state.paragraphEditingIndex, { leaveEditing: true });
+            }
+            return !!startParagraphEditing(index);
+        }
+
         // 统一段落手势：双击复制、长按收藏/编辑、横滑批注/删除。
         markdownBody.addEventListener('dblclick', async (event) => {
             if (!isParagraphActionAllowed('copy')) return;
@@ -108,10 +125,14 @@
             if (!isParagraphActionAllowed('copy') && !isParagraphActionAllowed('favorite') && !state.editMode) return;
             if (!event.touches || event.touches.length !== 1) return;
             if (isParagraphGestureTargetBlocked(event.target)) return;
+            const touch = event.touches[0];
+            if (!touch) return;
+            const edgeHotZone = Math.max(0, Number(edgeBackHotZonePx) || 24);
+            const annotationEdgeGuard = edgeHotZone + 6;
+            // 阅读态在左边缘优先让路给系统返回手势，避免右滑批注与返回冲突。
+            if (state.currentView === 'reading' && touch.clientX <= annotationEdgeGuard) return;
             const index = resolveGestureParagraphIndex(event.target);
             if (!Number.isFinite(index) || index < 0) return;
-            const touch = event.touches && event.touches[0];
-            if (!touch) return;
 
             if (state.touchGesture && state.touchGesture.longPressTimer) {
                 clearTimeout(state.touchGesture.longPressTimer);
@@ -139,14 +160,7 @@
                 gesture.longPressTriggered = true;
                 triggerParagraphHoldActivated(gesture.holdCard);
                 if (state.editMode) {
-                    if (state.paragraphEditingIndex === index) {
-                        commitParagraphEditing(index, { leaveEditing: true });
-                        return;
-                    }
-                    if (state.paragraphEditingIndex >= 0) {
-                        commitParagraphEditing(state.paragraphEditingIndex, { leaveEditing: true });
-                    }
-                    startParagraphEditing(index);
+                    activateParagraphEditing(index);
                     return;
                 }
                 if (isParagraphActionAllowed('favorite')) {
@@ -235,13 +249,22 @@
             if (canHandleParagraphSwipeGesture(absX, absY)) {
                 if (dx > 0) {
                     openCommentModal(gesture.index);
-                } else {
+                    return;
+                }
+                if (state.editMode) {
                     await deleteLineAtIndex(gesture.index, { confirmDelete: false, withUndo: true });
                 }
                 return;
             }
 
-            if (absX < config.tapTolerancePx && absY < config.tapTolerancePx && isParagraphActionAllowed('copy')) {
+            if (absX < config.tapTolerancePx && absY < config.tapTolerancePx) {
+                if (state.editMode) {
+                    activateParagraphEditing(gesture.index);
+                    return;
+                }
+            }
+
+            if (!state.editMode && absX < config.tapTolerancePx && absY < config.tapTolerancePx && isParagraphActionAllowed('copy')) {
                 const now = Date.now();
                 if (state.lastTapIndex === gesture.index && now - state.lastTapAt <= config.doubleTapWindowMs) {
                     await copyParagraphText(gesture.index);
@@ -253,6 +276,23 @@
                 }
             }
         }, { passive: true });
+
+        markdownBody.addEventListener('click', (event) => {
+            if (!state.editMode) {
+                return;
+            }
+            if (event.detail && event.detail > 1) {
+                return;
+            }
+            if (isParagraphGestureTargetBlocked(event.target)) {
+                return;
+            }
+            const index = resolveGestureParagraphIndex(event.target);
+            if (!Number.isFinite(index) || index < 0) {
+                return;
+            }
+            activateParagraphEditing(index);
+        });
     }
 
     function bindParagraphDraftSync(markdownBody, deps) {

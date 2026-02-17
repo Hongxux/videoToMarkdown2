@@ -39,8 +39,8 @@ flowchart LR
   - 可靠性：`resilience/`（熔断、重试）
   - 通信：`grpc/PythonGrpcClient`、`websocket/TaskWebSocketHandler`
   - 素材工程化：`service/JavaCVFFmpegService`
-  - 移动端 Markdown 展示与任务提交：`controller/MobileMarkdownController` + `static/mobile-markdown.html`
-    - 统一静态入口：`static/index.html` 仅作为壳层，自动重定向到 `mobile-markdown.html`（保留 query/hash）
+- 移动端 Markdown 展示与任务提交：`controller/MobileMarkdownController` + `static/index.html`
+  - 统一静态入口：`static/index.html` 直接承载主页面；`static/mobile-markdown.html` 与 `index.html` 保持同构内容，避免跳转中间页
     - 聚合运行中任务与 `var/storage/storage` 历史任务（历史任务以 `storage:{目录名}` 作为外部任务ID）
     - 提供任务列表与 Markdown 正文读取/写回（支持段落级编辑后的整文保存）
     - 提供任务目录内图片/视频等资源文件预览
@@ -72,7 +72,7 @@ flowchart LR
 5. Java 侧执行截图/切片等素材抽取，再调用 `AssembleRichText` 生成最终 Markdown/JSON。
 6. 任务状态通过 REST 可查询，并通过 WebSocket 持续推送进度。
 7. 企业微信消息链路中，`wecom_bot` 复用 Java REST 接口提交任务并轮询状态，按 `QUEUED/RUNNING/RETRYING/SUCCEEDED/FAILED_FINAL` 回传个人聊天。
-8. 静态页面入口统一为 `/` -> `index.html`（壳层跳转）-> `mobile-markdown.html`，再通过 `/api/mobile/tasks` 罗列任务（含内存任务与磁盘历史任务），按任务维度读取 markdown 与资源文件进行渲染。
+8. 静态页面入口统一为 `/` -> `index.html`（主页面本体），并与 `/mobile-markdown.html` 保持同构内容；页面通过 `/api/mobile/tasks` 罗列任务（含内存任务与磁盘历史任务），按任务维度读取 markdown 与资源文件进行渲染。
 
 ## 6. 接口清单（2026-02-17）
 - REST（Java）
@@ -156,3 +156,4 @@ flowchart LR
 - 语义分割 fallback 提示词与主提示词保持同一协议：`knowledge_groups -> units[]`，避免 prompt 文件不可用时协议回退。
 - RPC 物化路径（`semantic_units_from_rpc_*.json`）统一落盘 grouped 结构，确保“展示形态”与主链路一致。
 - 回写兜底分支在索引缺失时也重建 grouped，不再退化为扁平 `semantic_units`。
+
