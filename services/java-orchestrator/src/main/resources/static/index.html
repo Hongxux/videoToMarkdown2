@@ -1880,7 +1880,17 @@
         if (!resp.ok) {
             throw new Error(`获取内容列表失败: HTTP ${resp.status}`);
         }
-        state.tasks = await resp.json();
+        const data = await resp.json();
+        if (Array.isArray(data)) {
+            state.tasks = data;
+        } else if (data && Array.isArray(data.tasks)) {
+            state.tasks = data.tasks;
+        } else if (data && Array.isArray(data.data)) {
+            state.tasks = data.data;
+        } else {
+            console.warn('获取任务列表格式异常', data);
+            state.tasks = [];
+        }
         return state.tasks;
     }
 

@@ -557,3 +557,48 @@
         color: #9fb0c6;
     }
 }
+
+/* [COMP-COPY-FEEDBACK] 复制交互反馈
+ * 做什么：极简的“已复制”提示与卡片微动效。
+ * 为什么：替代原生 alert，提供更优雅、不打断心流的确认感 (Steve Jobs style)。 */
+.copy-tooltip {
+    position: fixed;
+    z-index: 9999;
+    background: rgba(0, 0, 0, 0.75);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 20px;
+    pointer-events: none;
+    opacity: 0;
+    transform: translate(-50%, -100%);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    animation: copyTooltipFloat 1.2s cubic-bezier(0.19, 1, 0.22, 1) forwards;
+}
+
+@keyframes copyTooltipFloat {
+    0% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.9);
+    }
+    15% {
+        opacity: 1;
+        transform: translate(-50%, -120%) scale(1);
+    }
+    75% {
+        opacity: 1;
+        transform: translate(-50%, -120%) scale(1);
+    }
+    100% {
+        opacity: 0;
+        transform: translate(-50%, -140%) scale(0.95);
+    }
+}
+
+.paragraph-card.copy-active {
+    transition: transform 0.1s cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform: scale(0.98);
+}

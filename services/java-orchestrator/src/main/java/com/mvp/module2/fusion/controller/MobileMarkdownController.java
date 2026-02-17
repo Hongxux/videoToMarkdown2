@@ -12,7 +12,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
-import org.springframework.core.io.support.ResourceRegion;
+
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpRange;
 import org.springframework.http.HttpStatus;
@@ -88,32 +88,57 @@ public class MobileMarkdownController {
     @Autowired
     private TaskQueueManager taskQueueManager;
 
+    @Autowired
+    private com.mvp.module2.fusion.service.StorageTaskCacheService storageTaskCacheService;
+
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @GetMapping("/tasks")
-    public ResponseEntity<List<Map<String, Object>>> listTasks() {
-        Map<String, TaskView> merged = new LinkedHashMap<>();
+    public ResponseEntity<Map<String, Object>> listTasks(
+            @RequestParam(value = "page", defaultValue = "0") int page,
+            @RequestParam(value = "pageSize", defaultValue = "20") int pageSize
+    ) {
+        // 1. 获取运行时任务 (通常数量很少，直接全部获取)
+        List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
+        // 2. 获取存储任务 (分页)
+        com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult = 
+                storageTaskCacheService.getTasks(page, pageSize);
 
-        for (TaskEntry runtimeTask : taskQueueManager.getAllTasks()) {
-            TaskView runtimeView = fromRuntimeTask(runtimeTask);
-            merged.put(runtimeView.taskId, runtimeView);
+        // 3. 聚合逻辑
+        // 策略：运行时任务总是显示在最前面（因为通常是最新的），然后再追加存储任务的分页结果。
+        // 注意：这种简单的聚合在翻页时可能会有轻微的不一致（如果运行时任务正好在翻页期间完成并归档），
+        // 但对于移动端简单的列表浏览来说是可以接受的，且避免了复杂的全量排序开销。
+        
+        List<TaskView> finalViewList = new ArrayList<>();
+        
+        // 只有第一页才插入运行时任务
+        if (page == 0) {
+            for (TaskEntry runtimeTask : runtimeTasks) {
+                finalViewList.add(fromRuntimeTask(runtimeTask));
+            }
+        }
+        
+        for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
+            finalViewList.add(fromCachedTask(cached));
         }
 
-        for (TaskView storageTask : loadStorageTasks()) {
-            merged.putIfAbsent(storageTask.taskId, storageTask);
+        List<Map<String, Object>> taskList = new ArrayList<>(finalViewList.size());
+        for (TaskView task : finalViewList) {
+            taskList.add(toListItem(task));
         }
 
-        List<TaskView> ordered = new ArrayList<>(merged.values());
-        ordered.sort((a, b) -> Long.compare(bestTimestamp(b), bestTimestamp(a)));
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("tasks", taskList);
+        // 总数 = 运行时任务 + 存储任务总数
+        response.put("totalCount", runtimeTasks.size() + storageResult.totalCount);
+        response.put("page", page);
+        response.put("pageSize", pageSize);
+        response.put("hasMore", storageResult.hasMore);
 
-        List<Map<String, Object>> payload = new ArrayList<>(ordered.size());
-        for (TaskView task : ordered) {
-            payload.add(toListItem(task));
-        }
-        return ResponseEntity.ok(payload);
+        return ResponseEntity.ok(response);
     }
 
     @PostMapping("/tasks/submit")
@@ -464,19 +489,36 @@ public class MobileMarkdownController {
 
             if (rangeHeader != null && !rangeHeader.isBlank()) {
                 try {
-                    Resource fileResource = new org.springframework.core.io.FileSystemResource(target.toFile());
                     List<HttpRange> ranges = HttpRange.parseRanges(rangeHeader);
                     if (!ranges.isEmpty()) {
-                        ResourceRegion region = ranges.get(0).toResourceRegion(fileResource);
-                        long regionLength = region.getCount();
-                        long start = region.getPosition();
-                        long end = start + regionLength - 1;
+                        HttpRange range = ranges.get(0);
+                        long start = range.getRangeStart(length);
+                        long end = range.getRangeEnd(length);
+                        long regionLength = end - start + 1;
+                        InputStream fileStream = Files.newInputStream(target);
+                        fileStream.skip(start);
+                        InputStream bounded = new java.io.FilterInputStream(fileStream) {
+                            long remaining = regionLength;
+                            @Override public int read() throws IOException {
+                                if (remaining <= 0) return -1;
+                                int b = super.read();
+                                if (b >= 0) remaining--;
+                                return b;
+                            }
+                            @Override public int read(byte[] b, int off, int len) throws IOException {
+                                if (remaining <= 0) return -1;
+                                int n = super.read(b, off, (int) Math.min(len, remaining));
+                                if (n > 0) remaining -= n;
+                                return n;
+                            }
+                        };
+                        Resource rangeResource = new InputStreamResource(bounded);
                         return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
                                 .contentType(mediaType)
                                 .header(HttpHeaders.ACCEPT_RANGES, "bytes")
                                 .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
                                 .contentLength(regionLength)
-                                .body(region);
+                                .body(rangeResource);
                     }
                 } catch (Exception ex) {
                     logger.warn("处理 Range 请求失败，回退全量响应: taskId={} path={} range={} err={}",
@@ -596,7 +638,11 @@ public class MobileMarkdownController {
         if (storageKey == null || storageKey.isBlank()) {
             return null;
         }
-        return fromStorageKey(storageKey).orElse(null);
+        
+        // 使用缓存服务查找
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> cachedOpt = 
+                storageTaskCacheService.getTask(storageKey);
+        return cachedOpt.map(this::fromCachedTask).orElse(null);
     }
 
     private TaskView fromRuntimeTask(TaskEntry task) {
@@ -642,96 +688,26 @@ public class MobileMarkdownController {
         return view;
     }
 
-    private List<TaskView> loadStorageTasks() {
-        List<TaskView> tasks = new ArrayList<>();
-        Path storageRoot = resolveStorageRoot();
-        if (!Files.exists(storageRoot) || !Files.isDirectory(storageRoot)) {
-            return tasks;
-        }
-
-        try (Stream<Path> stream = Files.list(storageRoot)) {
-            stream.filter(Files::isDirectory)
-                    .filter(path -> !path.getFileName().toString().startsWith("."))
-                    .forEach(path -> fromStorageKey(path.getFileName().toString()).ifPresent(tasks::add));
-        } catch (IOException ex) {
-            logger.warn("扫描存储任务目录失败: {} err={}", storageRoot, ex.getMessage());
-        }
-        return tasks;
-    }
-
-    private Optional<TaskView> fromStorageKey(String storageKey) {
-        if (!isSafeStorageKey(storageKey)) {
-            return Optional.empty();
-        }
-        Path storageRoot = resolveStorageRoot();
-        Path taskDir = storageRoot.resolve(storageKey).normalize();
-        if (!taskDir.startsWith(storageRoot) || !Files.isDirectory(taskDir)) {
-            return Optional.empty();
-        }
-
-        StorageMetadata metadata = readStorageMetadata(taskDir);
-        ResolvedMarkdown resolved = null;
-        try {
-            resolved = resolveMarkdownInDirectory(taskDir, metadata.resultMarkdownPath);
-        } catch (Exception ignored) {
-            // 历史目录允许无 markdown；列表接口不因单条数据失败。
-        }
-
+    private TaskView fromCachedTask(com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached) {
         TaskView view = new TaskView();
-        view.taskId = STORAGE_TASK_PREFIX + storageKey;
-        view.storageKey = storageKey;
+        view.taskId = STORAGE_TASK_PREFIX + cached.storageKey;
+        view.storageKey = cached.storageKey;
         view.storageTask = true;
-        view.taskRootDir = taskDir;
-        view.title = deriveStorageTitle(taskDir, metadata);
-        view.videoUrl = metadata.videoPath != null ? metadata.videoPath : "";
-        view.createdAt = metadata.generatedAt != null ? metadata.generatedAt : readLastModifiedAsInstant(taskDir);
-        view.completedAt = metadata.generatedAt;
-        view.progress = resolved != null ? 1.0 : 0.0;
-
-        if (metadata.hasSuccessFlag) {
-            view.status = metadata.success ? TaskStatus.COMPLETED.name() : TaskStatus.FAILED.name();
-            view.statusMessage = metadata.success ? "历史任务完成" : UserFacingErrorMapper.busyMessage();
-        } else {
-            view.status = resolved != null ? TaskStatus.COMPLETED.name() : "UNKNOWN";
-            view.statusMessage = resolved != null ? "历史任务可查看" : "未检测到 markdown";
-        }
-
-        if (resolved != null) {
-            view.markdownAvailable = true;
-            view.markdownPath = resolved.markdownPath;
-            view.baseDir = resolved.baseDir;
-            view.resultPath = resolved.markdownPath.toString();
-        } else if (metadata.resultMarkdownPath != null && !metadata.resultMarkdownPath.isBlank()) {
-            view.resultPath = metadata.resultMarkdownPath;
-        }
-
+        view.title = cached.title;
+        view.videoUrl = cached.videoUrl;
+        view.status = cached.status;
+        view.statusMessage = cached.statusMessage;
+        view.createdAt = cached.createdAt;
+        view.completedAt = cached.completedAt;
+        view.resultPath = cached.resultPath;
+        view.markdownAvailable = cached.markdownAvailable;
+        view.markdownPath = cached.markdownPath;
+        view.baseDir = cached.baseDir;
+        view.taskRootDir = cached.taskRootDir;
+        view.progress = cached.progress;
+        
         applyTaskTitleFromMeta(view);
-
-        return Optional.of(view);
-    }
-
-    private StorageMetadata readStorageMetadata(Path taskDir) {
-        StorageMetadata metadata = new StorageMetadata();
-        Path metricsPath = taskDir.resolve("intermediates").resolve("task_metrics_latest.json");
-        if (!Files.exists(metricsPath) || !Files.isRegularFile(metricsPath)) {
-            return metadata;
-        }
-
-        try {
-            JsonNode root = objectMapper.readTree(metricsPath.toFile());
-            JsonNode successNode = root.get("success");
-            if (successNode != null && !successNode.isNull()) {
-                metadata.hasSuccessFlag = true;
-                metadata.success = successNode.asBoolean(false);
-            }
-            metadata.generatedAt = parseInstant(root.path("generated_at").asText(""));
-            metadata.errorMessage = trimToNull(root.path("error_message").asText(""));
-            metadata.videoPath = trimToNull(root.path("video_path").asText(""));
-            metadata.resultMarkdownPath = trimToNull(root.path("result_markdown_path").asText(""));
-        } catch (Exception ex) {
-            logger.warn("读取任务指标失败: {} err={}", metricsPath, ex.getMessage());
-        }
-        return metadata;
+        return view;
     }
 
     private ResolvedMarkdown resolveMarkdown(TaskView task) throws IOException {
@@ -1253,32 +1229,8 @@ public class MobileMarkdownController {
         return instant == null ? "" : instant.toString();
     }
 
-    private Instant readLastModifiedAsInstant(Path path) {
-        try {
-            return Files.getLastModifiedTime(path).toInstant();
-        } catch (Exception ex) {
-            return null;
-        }
-    }
 
-    private Instant parseInstant(String value) {
-        if (value == null || value.isBlank()) {
-            return null;
-        }
-        try {
-            return Instant.parse(value);
-        } catch (Exception ex) {
-            return null;
-        }
-    }
 
-    private String trimToNull(String value) {
-        if (value == null) {
-            return null;
-        }
-        String trimmed = value.trim();
-        return trimmed.isEmpty() ? null : trimmed;
-    }
 
     private String normalizeVideoInput(String rawVideoInput) {
         if (rawVideoInput == null) {

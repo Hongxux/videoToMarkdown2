@@ -601,7 +601,7 @@
         currentMarkdownRaw: '',
         currentView: 'tasks',
         mdEngine: null,
-        editMode: false,
+        editMode: true,
         paragraphBlocks: [],
         paragraphEditingIndex: -1,
         paragraphDraftText: '',
@@ -1880,7 +1880,17 @@
         if (!resp.ok) {
             throw new Error(`获取内容列表失败: HTTP ${resp.status}`);
         }
-        state.tasks = await resp.json();
+        const data = await resp.json();
+        if (Array.isArray(data)) {
+            state.tasks = data;
+        } else if (data && Array.isArray(data.tasks)) {
+            state.tasks = data.tasks;
+        } else if (data && Array.isArray(data.data)) {
+            state.tasks = data.data;
+        } else {
+            console.warn('获取任务列表格式异常', data);
+            state.tasks = [];
+        }
         return state.tasks;
     }
 
@@ -2585,7 +2595,7 @@
         if (!taskList) return;
         pruneTaskFxState();
 
-        const tasks = state.tasks || [];
+        const tasks = Array.isArray(state.tasks) ? state.tasks : [];
         const markdownTasks = tasks.filter(t => t.markdownAvailable);
         setTaskHeaderMeta(tasks.length, markdownTasks.length);
         if (!state.taskListReloading) {
@@ -2669,7 +2679,11 @@
         pushView('reading');
         setReadingNeedsReload(false);
         setReadingToolsAdvancedReveal(false);
-        resetReadingTransientState({ resetEditMode: true });
+        resetReadingTransientState({ resetEditMode: false }); // 默认保持编辑模式状态，或由视图切换逻辑控制
+        if (!state.editMode) {
+             // 强制进入编辑模式（如果业务要求每次打开都是编辑模式）
+             state.editMode = true;
+        }
         renderTaskList();
         const viewerTitle = document.getElementById('viewerTitle');
         const markdownBody = document.getElementById('markdownBody');
@@ -2686,10 +2700,19 @@
         syncTaskTitleFromState(state.currentTaskTitle);
         refreshViewerTitle();
 
+        // 确保进入时 paragraphBlocks 已初始化（如果是编辑模式）
+        if (state.editMode && (!state.paragraphBlocks || !state.paragraphBlocks.length)) {
+             state.paragraphBlocks = splitMarkdownIntoParagraphBlocks(state.currentMarkdownRaw || '');
+        }
+
         const btn = document.getElementById('toggleEditModeBtn');
         if (btn) {
-            setControlLabel(btn, UI_COPY.actionLineEdit);
-            btn.classList.remove('btn-primary');
+            setControlLabel(btn, state.editMode ? UI_COPY.actionExitAdjust : UI_COPY.actionLineEdit);
+            if (state.editMode) {
+                btn.classList.add('btn-primary');
+            } else {
+                btn.classList.remove('btn-primary');
+            }
         }
         refreshQuickActionLabels();
         renderCurrentView();
@@ -3920,6 +3943,46 @@
     function playFavoriteFeedback(index, added, options = {}) {
         const target = resolveFavoriteFeedbackTarget(index);
         playFavoriteInlineFeedback(target, added);
+
+        // [STEVE-JOBS-STYLE] 收藏交互增强
+        // 1. 卡片微动效 (Scale Bounce)
+        const card = getParagraphCardByIndex(index);
+        if (card) {
+            card.classList.remove('copy-active');
+            void card.offsetWidth; // 强制重绘
+            card.classList.add('copy-active');
+            setTimeout(() => card.classList.remove('copy-active'), 200);
+        }
+
+        // 2. 灵动 Tooltip 提示
+        const vw = Math.max(0, window.innerWidth || 0);
+        const vh = Math.max(0, window.innerHeight || 0);
+        
+        let x = Number(options.anchorX);
+        let y = Number(options.anchorY);
+        
+        // 坐标兜底逻辑：手指 -> 元素中心 -> 屏幕中心
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            if (target && target.getBoundingClientRect) {
+                const rect = target.getBoundingClientRect();
+                x = rect.left + rect.width / 2;
+                y = rect.top + rect.height / 2;
+            } else {
+                x = vw / 2;
+                y = vh / 2;
+            }
+        }
+
+        const tooltip = document.createElement('div');
+        tooltip.className = 'copy-tooltip'; // 复用已有的胶囊样式
+        tooltip.textContent = added ? '已收藏' : '已取消';
+        tooltip.style.left = `${x}px`;
+        tooltip.style.top = `${y - 20}px`; // 默认上浮避免遮挡手指
+        document.body.appendChild(tooltip);
+        
+        tooltip.addEventListener('animationend', () => tooltip.remove());
+
+        // 3. Heart Spark 粒子 (保持原有逻辑，位置跟随 options 或自动定位到左侧 Icon)
         spawnFavoriteSpark(added, { ...options, index, target });
     }
 
@@ -3983,9 +4046,40 @@
         const block = state.paragraphBlocks[index];
         if (!block) return;
         const text = String(block.text || '');
+        const card = getParagraphCardByIndex(index);
+
         try {
             await writeClipboardWithFallback(text);
-            alert('本行已复制');
+            
+            // [STEVE-JOBS-STYLE] 移除 alert，改用灵动提示与卡片微动效
+            if (card) {
+                card.classList.remove('copy-active');
+                void card.offsetWidth; // 强制重绘触发重播
+                card.classList.add('copy-active');
+                setTimeout(() => card.classList.remove('copy-active'), 200);
+            }
+
+            const touch = state.touchGesture || {};
+            const anchorX = Number.isFinite(touch.lastX) ? touch.lastX : (window.innerWidth / 2);
+            const anchorY = Number.isFinite(touch.lastY) ? touch.lastY : (window.innerHeight / 2);
+            
+            // 如果没有触摸坐标（如双击），优先用元素中心
+            let finalX = anchorX;
+            let finalY = anchorY;
+            if (!state.touchGesture && card) {
+                const rect = card.getBoundingClientRect();
+                finalX = rect.left + rect.width / 2;
+                finalY = rect.top + rect.height / 2;
+            }
+
+            const tooltip = document.createElement('div');
+            tooltip.className = 'copy-tooltip';
+            tooltip.textContent = '已复制';
+            tooltip.style.left = `${finalX}px`;
+            tooltip.style.top = `${finalY - 20}px`; // 默认上浮一点点，避免手指遮挡
+            document.body.appendChild(tooltip);
+
+            tooltip.addEventListener('animationend', () => tooltip.remove());
         } catch (error) {
             alert(`复制失败：${normalizeErrorMessage(error, { fallback: '请稍后重试' })}`);
         }
@@ -4390,6 +4484,7 @@
             markdownBody,
             config: PARAGRAPH_GESTURE_CONFIG,
             state,
+            edgeBackHotZonePx: EDGE_BACK_MOTION.hotZonePx,
             touchDistance,
             switchTab: pushView,
             closeTransientUi: () => setReadingToolsOpen(false),

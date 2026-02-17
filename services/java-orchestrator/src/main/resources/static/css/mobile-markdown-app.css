@@ -1085,22 +1085,111 @@ button:active:not(:disabled),
     border: 0;
     border-radius: 0;
     background: transparent;
-    padding: 10px 0;
+    padding: 0;
+    margin-bottom: var(--reading-paragraph-gap);
     display: block;
     content-visibility: auto;
     contain-intrinsic-size: 92px;
+    overflow: hidden;
     transition: transform var(--motion-duration-fast) var(--motion-ease-snappy), box-shadow var(--motion-duration-fast) ease, background-color var(--motion-duration-fast) ease, border-radius var(--motion-duration-fast) ease;
 }
 
 .paragraph-card:last-child {
     border-bottom: 0;
+    margin-bottom: 0;
+}
+
+/* [SWIPE-CELL] 滑动操作底层：被内容遮盖，滑动时逐渐露出 */
+.swipe-backdrop {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    pointer-events: none;
+    z-index: 0;
+    opacity: 0;
+    transition: opacity 80ms ease;
+    overflow: hidden;
+    border-radius: inherit;
+}
+
+.swipe-backdrop.active {
+    opacity: 1;
+}
+
+/* 删除（左滑）底色 */
+.swipe-backdrop.swipe-delete {
+    justify-content: flex-end;
+    padding-right: 24px;
+    background: linear-gradient(105deg, #fca5a5 0%, #ef4444 48%, #dc2626 100%);
+}
+
+/* 批注（右滑）底色 */
+.swipe-backdrop.swipe-annotate {
+    justify-content: flex-start;
+    padding-left: 24px;
+    background: linear-gradient(255deg, #fde68a 0%, #f59e0b 48%, #d97706 100%);
+}
+
+.swipe-backdrop-icon {
+    width: 28px;
+    height: 28px;
+    color: #fff;
+    opacity: 0.7;
+    transform: scale(0.6);
+    transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease;
+    flex-shrink: 0;
+}
+
+.swipe-backdrop.committed .swipe-backdrop-icon {
+    opacity: 1;
+    transform: scale(1.1);
+}
+
+/* 内容层：相对定位，覆盖在 backdrop 之上 */
+.swipe-content {
+    position: relative;
+    z-index: 1;
+    background: inherit;
+    will-change: transform;
+}
+
+/* 滑动过程中禁止 transition（手指 1:1 跟随） */
+.swipe-content.swiping {
+    transition: none !important;
+}
+
+/* 滑动释放后弹簧回弹 */
+.swipe-content.spring-back {
+    transition: transform 380ms cubic-bezier(0.2, 0.92, 0.12, 1.18) !important;
+}
+
+/* 确认删除：滑出屏幕 */
+.swipe-content.slide-out-left {
+    transition: transform 280ms cubic-bezier(0.32, 0, 0.67, 0) !important;
+}
+
+/* 确认批注：滑出或回弹 */
+.swipe-content.slide-out-right {
+    transition: transform 280ms cubic-bezier(0.32, 0, 0.67, 0) !important;
+}
+
+/* 删除后段落折叠消失 */
+.paragraph-card.swipe-collapse {
+    overflow: hidden;
+    transition: max-height 320ms cubic-bezier(0.22, 1, 0.36, 1),
+                margin-bottom 320ms cubic-bezier(0.22, 1, 0.36, 1),
+                opacity 200ms ease !important;
+    max-height: 0 !important;
+    margin-bottom: 0 !important;
+    opacity: 0 !important;
 }
 
 .paragraph-card.editing {
     background: transparent;
-    padding: 10px 0;
+    padding: 0;
     border-radius: 0;
-    margin-bottom: 0;
+    margin-bottom: var(--reading-paragraph-gap);
 }
 
 .paragraph-card.touch-hold-cue {
@@ -1655,5 +1744,18 @@ button:active:not(:disabled),
 
     .empty-state-desc {
         color: #a9b8cf;
+    }
+
+    /* [SWIPE-CELL] Dark mode overrides */
+    .swipe-backdrop.swipe-delete {
+        background: linear-gradient(105deg, #991b1b 0%, #b91c1c 48%, #dc2626 100%);
+    }
+
+    .swipe-backdrop.swipe-annotate {
+        background: linear-gradient(255deg, #92400e 0%, #b45309 48%, #d97706 100%);
+    }
+
+    .swipe-content {
+        background: var(--card);
     }
 }
