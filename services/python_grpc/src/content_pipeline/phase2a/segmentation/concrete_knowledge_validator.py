@@ -1,16 +1,4 @@
-"""
-模块说明：具象性知识验证器，负责判断截图是否包含可插入的教学内容。
-执行逻辑：
-1) 加载 Vision AI 与 pHash 缓存配置，建立可复用的检测基础。
-2) 对截图执行公式检测、图形区域提取与视觉验证。
-3) 输出具象知识判定结果供上游筛选与组装。
-实现方式：OpenCV + NumPy 做图像特征分析，Vision AI 做语义判定，pHash 做重复帧过滤。
-核心价值：在不牺牲召回的前提下，减少纯文字截图与重复截图的进入。
-输入：
-- 截图路径与 OCR 文本（可选）。
-- config.yaml 中 vision_ai 配置（可选）。
-输出：
-- ConcreteKnowledgeResult（是否具象、置信度、类型、理由、是否应保留）。"""
+﻿"""Concrete knowledge validator used by content_pipeline segmentation stage."""
 
 import os
 import cv2
@@ -21,129 +9,52 @@ import httpx
 import numpy as np
 import hashlib
 import time
+import re
+import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Any
 from dataclasses import dataclass
 
 from services.python_grpc.src.config_paths import load_yaml_dict, resolve_video_config_path
-# 统一 LLM 调用入口
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 
 logger = logging.getLogger(__name__)
 
+VISION_DESCRIPTION_ONLY_SYSTEM_PROMPT = """You are an educational image description assistant. Return JSON only. Single image: {\"img_description\":\"...\"}. Multi image: [{\"img_description\":\"...\"}]. Describe only visible facts."""
 
-# ==============================================================================
-# Vision AI Prompt (V2 - 简化版，仅图片输入)
-# ==============================================================================
+CONCRETE_KNOWLEDGE_PROMPT = """You are an educational image analysis assistant. Return strict JSON with fields: has_concrete_knowledge, confidence, img_description."""
 
-CONCRETE_KNOWLEDGE_PROMPT = """# 角色
-你是专业的教育多媒体分析专家，精通教学知识分类，严格按照「具象性知识」的学术定义判定。
-
-# 核心判定规则
-判定当前截图是否包含**具象性知识**：
-
-**阳性（存在具象性知识）** - 满足任一条件：
-- 截图中存在和教学知识点强相关的：实物照片、标本图、实验装置、解剖图、结构图、地图、实操界面、具体事物示意图，抽象框图、逻辑流程图、思维导图等
-- 截图中存在**数学公式**（包括方程式、推导过程、符号表达式等）
-- 该图形是用于讲解知识点的功能性元素，非装饰、水印、花边、无关插画
-- 图形能明确对应现实中的具体事物、现象、操作步骤、数学关系
-- 截图是否存在图表显示数据或者变化
-- 截图是否能帮助初学者直观认知某个事物的视觉形式
-- 截图是否能作为记忆点，用于学习者后续回顾和复习
-**阴性（不存在具象性知识）**：
-- 纯文字、无功能性图形
-- 仅有装饰图片，无教学用具象图形或数学公式
-- 仅仅是讲解者的人物图片
-
-**混合型**：同时包含具象知识和抽象知识，仍标记为「存在具象性知识」
-
-# 图像描述要求 (Image Description)
-1. **可见文字**：如果文字很多（超过100字）则不需要全部列出，只需要输出概括性几句话的文字描述。
- - 如果是命令行，必须输出正在执行的命令以及上一个执行的命令（如果能看到）
- - 如果是代码，则必须输出光标对应的上下两行代码和光标对应的代码，如果没有光标则输出最新的三行代码
- - 如果是文档，则输出光标对应的几行代码，以及可见的标题、粗体、斜体、高亮。
- - 如果是公式，则输出公式本身。
- - 如果是在进行配置，则输出配置的项、值和选项。
-2. **视觉元素**：显著的UI组件（按钮、图标、图表）、布局结构、所在是什么软件、命令行、终端、IDE、浏览器还是什么。
-
-3. **动作/状态**：正在发生的操作（如“鼠标悬停在XX”，“终端显示报错”）。
-4. **核心焦点**：输出该截图的操作中目前正在进行的操作和其关注的焦点。
-
-# 输出要求（严格JSON格式）
-{
-    "has_concrete_knowledge": "是/否",
-    "confidence": 0.0-1.0,
-    "img_description": "详细的中文图像描述，包含可见文字、视觉元素与动作状态"
-}
-
-img_description禁止输出该图片中无关焦点的背景信息。（如背景为蓝天和海边的风景图。）
-img_description禁止输出判定has_concrete_knowledge的理由
-img_description禁止输出非核心焦点相关的可见文字
-请只输出JSON，不要有其他内容。"""
-
-
-# ==============================================================================
-# Data Classes
-# ==============================================================================
 
 @dataclass
 class ConcreteKnowledgeResult:
-    """类说明：ConcreteKnowledgeResult 负责封装本模块相关能力。
-    执行步骤：
-    1) 步骤1：接收调用请求并组织上下文数据。
-    2) 步骤2：协调类内方法完成业务处理。
-    3) 步骤3：输出处理结果并提供可复用能力。"""
-    has_concrete: bool              # 是否包含具象性知识
-    has_formula: bool               # 是否包含数学公式
-    confidence: float               # 置信度 (0-1)
-    concrete_type: str              # 具象类型
-    reason: str                     # 判定依据
-    is_mixed: bool                  # 是否混合型
-    non_text_ratio: float           # 非文本区域占比
-    should_include: bool            # 是否应该插入截图
-    img_description: str = ""      # 图像描述，用于后续富文本插图占位
+    has_concrete: bool
+    has_formula: bool
+    confidence: float
+    concrete_type: str
+    reason: str
+    is_mixed: bool
+    non_text_ratio: float
+    should_include: bool
+    img_description: str = ""
 
-
-# ==============================================================================
-# Main Class
-# ==============================================================================
 
 class ConcreteKnowledgeValidator:
-    """类说明：ConcreteKnowledgeValidator 负责封装本模块相关能力。
-    执行步骤：
-    1) 步骤1：接收调用请求并组织上下文数据。
-    2) 步骤2：协调类内方法完成业务处理。
-    3) 步骤3：输出处理结果并提供可复用能力。"""
-    
+    """Docstring omitted."""
     def __init__(self, config_path: Optional[str] = None, output_dir: Optional[str] = None):
-        """
-        执行逻辑：
-        1) 读取 vision_ai 配置并按需初始化 VisionAIClient。
-        2) 基于 similarity_threshold 初始化 pHash 缓存与签名。
-        3) 如提供 output_dir，则建立持久化缓存并加载历史结果。
-        4) 初始化 ThreadSafeMathOCR 作为公式检测首选方案。
-        实现方式：VisionAIClient/HashCacheManager/PerceptualHasher + 本地 JSON 缓存。
-        核心价值：减少重复调用与误判，降低外部 API 成本。
-        决策逻辑：
-        - 条件：vision_config 存在时才初始化 VisionAIClient。
-        - 条件：output_dir 提供时才开启持久化缓存。
-        - 条件：ThreadSafeMathOCR 加载失败则降级到文本规则检测。
-        依据来源（证据链）：
-        - 配置字段：vision_ai.enabled、vision_ai.bearer_token、vision_ai.similarity_threshold。
-        - 输入参数：output_dir。
-        - 运行状态：OCR 初始化异常。
-        输入参数：
-        - config_path: 配置文件路径（Optional[str]）。
-        - output_dir: 中间产物目录（Optional[str]）。
-        输出参数：
-        - 无（仅更新内部状态与缓存）。"""
-        # V3: 使用模块化 VisionAIClient (带感知哈希缓存)
-        self._concrete_knowledge_prompt = get_prompt(
-            PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_USER,
+        """Docstring omitted."""
+        self._concrete_knowledge_system_prompt = get_prompt(
+            PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM,
             fallback=CONCRETE_KNOWLEDGE_PROMPT,
         )
+        self._concrete_knowledge_legacy_user_prompt = get_prompt(
+            PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_USER,
+            fallback=self._concrete_knowledge_system_prompt,
+        )
+        if not str(self._concrete_knowledge_system_prompt or "").strip():
+            self._concrete_knowledge_system_prompt = self._concrete_knowledge_legacy_user_prompt
+        self._concrete_knowledge_system_prompt = VISION_DESCRIPTION_ONLY_SYSTEM_PROMPT
 
         from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import VisionAIClient, VisionAIConfig, PerceptualHasher, HashCacheManager
         
@@ -152,19 +63,27 @@ class ConcreteKnowledgeValidator:
         self._cache_signature = ""
         self._persistent_cache_path: Optional[Path] = None
         
-        # 加载配置并初始化 VisionAIClient
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鍨鹃幇浣圭稁缂傚倷鐒﹁摫闁告瑥绻橀弻鐔碱敍閿濆洣姹楅悷婊呭鐢帡鎮欐繝鍐︿簻闁瑰搫绉烽崗宀勬煕濡濮嶉柟顔筋殜閻涱噣宕归鐓庮潛婵犵數鍋涢惇浼村礉閹存繍鍤曢柟闂寸绾惧吋绻涢幋锝夊摵妞ゆ梹妫冨铏圭磼濡搫顫戦梺绯曟櫆閻楁粌鈽夐崹顐犲亝闁告劏鏅濋崢閬嶆⒑闂堟侗鐒鹃柛搴ゆ珪缁傛帒鈽夐姀锛勫幍婵炴挻鑹鹃悘婵囦繆閸ф鐓冪憸婊堝礈閵娧呯闁糕剝顭囬々鍙夌節婵犲倻澧遍柡?VisionAIClient
         vision_config = self._load_vision_config(config_path)
         if vision_config:
+            try:
+                vision_config.person_subject_filter_enabled = False
+            except Exception:
+                pass
             self._vision_client = VisionAIClient(vision_config)
+            try:
+                self._vision_client.config.person_subject_filter_enabled = False
+            except Exception:
+                pass
             self._vision_enabled = vision_config.enabled
             self._cache_signature = self._build_cache_signature(vision_config)
         
-        # 独立的感知哈希缓存 (用于非 Vision API 场景)
+        # 闂傚倸鍊搁崐鐑芥嚄閸撲礁鍨濇い鏍仦閸嬧剝銇勯弽顐粶缂佲偓閸喓绠鹃柟瀛樼懃閻忣亪鏌涚€ｎ剙鏋戠紒缁樼洴楠炲鈻庤箛鏇氱棯闂備胶顭堟鍝ョ矓瑜版帒钃熸繛鎴欏灩閸楁娊鏌曟繛鍨姎妞ゎ偀鏅滅换婵堝枈濡搫鈷夋繝鐢靛仜閿曨亜顕ｆ繝姘櫜濠㈣埖蓱閺咃絽鈹戦悩璇у伐闁哥噥鍋呴幈銊︽償閵婏腹鎷虹紒缁㈠幖閹冲酣藟瀹ュ悿鐟邦煥鎼粹€斥拫閻庢鍣崑濠囥€佸▎鎾村殐闁冲搫鍊归悾鐑芥⒒娓氣偓閳ь剛鍋涢懟顖涙櫠閻楀牅绻嗛柛娆忣槸婵秹鏌℃担绋库偓鍧楀蓟閵娾晩鏁嶆慨姗嗗亜椤?(闂傚倸鍊搁崐鐑芥倿閿曗偓椤啴宕归鍛姺闂佺鍕垫當缂佲偓婢舵劖鍊甸柨婵嗛婢ф彃鈹戦鎸庣彧闁靛洤瀚伴獮鎺楀箣濠垫劒鐥俊?Vision API 闂傚倸鍊搁崐椋庢濮橆剦鐒界紓浣姑肩换鍡涙煕閵夘喖澧痪鎯ф健閺屾洟宕煎┑鍥ф珴闂?
         similarity_threshold = vision_config.similarity_threshold if vision_config else 0.95
         self._hash_cache = HashCacheManager(similarity_threshold=similarity_threshold)
         self._hasher = PerceptualHasher
 
-        # 持久化缓存：按 url_hash + 关键配置 复用 VisionAI 结果
+        # 闂傚倸鍊搁崐椋庣矆娴ｈ櫣绀婂┑鐘叉搐閻ら箖鏌熺紒妯轰刊婵炴挸顭烽弻鐔兼倻濡儵鎷绘繛鎴炴尭缁夌數鎹㈠☉銏犲耿婵☆垵顕х喊宥囩磽娴ｆ彃浜鹃悗鍏夊亾闁告洦鍓涢崢鎼佹倵楠炲灝鍔氬Δ鐘叉啞缁傚秹鎮欏顔惧數闁荤姴鎼幖顐︻敂椤撱垺鐓欐い鏃傜摂濞堟棃鏌嶉挊澶樻Ц闁宠楠搁埢搴ょ疀閹惧磭绋荤紓鍌氬€搁崐椋庣矆娴ｅ浜瑰鑸靛姇绾偓闂佺懓澧庨弲顐㈢暤?url_hash + 闂傚倸鍊搁崐鐑芥嚄閸洍鈧箓宕奸姀鈥冲簥闂佺懓顕崑鐔虹不閹€鏀介柣妯哄级閹兼劙鏌＄€ｂ晝鍔嶉柕鍥у楠炴﹢宕￠悙鍏哥棯闂備胶绮幐鎾磻閹剧粯鐓熼幖杈剧磿閻ｎ參鏌涙惔鈥宠埞閻撱倝鏌曟繛鐐珔闁?婵犵數濮烽弫鍛婃叏娴兼潙鍨傞柣鎾崇岸閺嬫牗绻涢幋鐐寸殤闁活厽鎹囬弻娑㈩敃閿濆棛顦ラ梺?VisionAI 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸婂潡鏌ㄩ弴鐐测偓鍝ョ不閺夊簱鏀介柣妯虹－椤ｆ煡鏌?
         if output_dir:
             intermediates_dir = Path(output_dir) / "intermediates"
             intermediates_dir.mkdir(parents=True, exist_ok=True)
@@ -172,7 +91,7 @@ class ConcreteKnowledgeValidator:
             self._persistent_cache_path = intermediates_dir / f"vision_ai_cache_{suffix}.json"
             self._load_persistent_cache()
         
-        # V2: 集成 ThreadSafeMathOCR 进行精准公式检测 (用户建议)
+        # V2: 闂傚倸鍊搁崐鎼佸磹閹间礁纾圭紒瀣嚦濞戞鏃堝焵椤掑啰浜辨繝鐢靛仜濡瑩骞愰幖浣稿瀭?ThreadSafeMathOCR 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌涘櫧闁活厽鐟╅弻鈥愁吋鎼粹€崇闂侀€炲苯鍘哥紒鑸靛哺閻涱喚鈧綆鍠楅崑鎰版煙缂佹ê绗уù婊€鍗冲缁樻媴缁涘娈愰梺鎼炲妼闁帮絽鐣峰鈧崺锟犲礃閵婎煈鍞归梻鍌氬€搁崐鐑芥嚄閸洍鈧箓宕煎婵堟嚀椤繄鎹勯搹璇℃Ф婵犵數鍋涘Λ娆撳垂閸洩缍栭柡鍥ュ灪閻撳啴鏌曟径娑橆洭缂佹劗鍋炵换娑㈠箣濞嗗繒浠奸梺缁樺笒閻忔岸濡甸崟顖氱闁糕剝銇炴竟鏇㈡⒒?(闂傚倸鍊搁崐鐑芥倿閿曗偓椤啴宕归鍛姺闂佺鍕垫當缂佲偓婢跺备鍋撻獮鍨姎妞わ富鍨跺浼村Ψ閿斿墽顔曢梺鐟邦嚟閸庢垶绗熷☉銏＄厱闁靛牆鎳愭晶鏇㈡懚閺嶎厽鐓ラ柡鍐ㄥ€婚幗鍌炴煕鎼存稑鍔﹂柡?
         self._math_ocr = None
         try:
             from services.python_grpc.src.content_pipeline.infra.runtime.ocr_utils import ThreadSafeMathOCR
@@ -180,30 +99,73 @@ class ConcreteKnowledgeValidator:
             logger.info("ThreadSafeMathOCR initialized for formula detection")
         except Exception as e:
             logger.warning(f"ThreadSafeMathOCR not available, using fallback formula detection: {e}")
+        self._ocr_extractor = None
+        self._ocr_extractor_init_error: Optional[str] = None
+
+        # PP-StructureV3 婵犵數濮烽弫鎼佸磻濞戙垺鍋ら柕濞у啫鐏婇悗鍏夊亾闁告洦鍓欏▓锝咁渻閵堝棛澧遍柛瀣仱瀹曟洟骞嬮敂鐣屽幗濠德板€愰崑鎾绘煟濡ゅ啫浠ф俊鍙夊姍閺佹劖寰勭€ｎ剙骞堥梻浣告惈濞层垽宕濈仦鍓ь洸闁兼亽鍎扮换鍡涙煛鐏炶鍔欓柟鏌ョ畺閺屸€崇暆鐎ｎ剛袦闂佽鍠楅悷鈺佺暦閿濆棗绶炴俊顖欑串缁辨姊婚崒娆戭槮闁圭寽銈呯稑闂備胶顭堥敃銉┿€冮崼婢綁骞囬弶璺ㄧ潉闂佸壊鍋掗崑鍛村疾椤忓牊鈷戠紒顖涙礀婢ф煡鏌ｉ悢婵嗘硽閸ヮ剙鐓涢柛娑卞枓閹峰搫鈹戦悙璺虹毢缂侇噮鍨辩换娑㈠炊椤掍胶鍘遍梺鍝勫€归娆撳磿閹达附鐓犳繛宸簷閹茬偓銇勯姀鈽嗘疁鐎规洜鍠栭、鏇㈠Χ鎼粹剝鍊涙繝纰夌磿閸嬫垿宕愰弴鐘冲床闁归偊鍠掗崑鎾愁潩閻撳骸绠荤紓渚囧枛椤戝鐣锋總绋课ㄩ柨鏃€鍎抽獮宥夋煟鎼达絾鍤€閻庢凹鍠楅弲璺何旈崥钘夘槸椤劑宕奸悢鍝勫箞闂備線娼ч…鍫ュ磿閻㈢鐭楅柛鏇ㄥ灡閻?
+        structure_cfg = self._load_structure_preprocess_config(
+            config_path=config_path,
+            default_similarity_threshold=similarity_threshold,
+        )
+        self._structure_preprocess_enabled = bool(structure_cfg.get("enabled", True))
+        self._structure_disable_after_backend_error = bool(
+            structure_cfg.get("disable_ppstructure_after_backend_error", True)
+        )
+        self._structure_dedup_similarity_threshold = float(
+            structure_cfg.get("dedup_similarity_threshold", similarity_threshold)
+        )
+        self._structure_bbox_overlap_merge_threshold = max(
+            0.0,
+            min(1.0, float(structure_cfg.get("bbox_overlap_merge_threshold", 0.9) or 0.9)),
+        )
+        self._structure_skip_split_bbox_coverage_threshold = max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    structure_cfg.get("skip_split_bbox_coverage_threshold", 0.0) or 0.0
+                ),
+            ),
+        )
+        self._structure_crop_margin_px = max(0, int(structure_cfg.get("crop_margin_px", 4) or 4))
+        self._structure_context_nearby_px = max(
+            0, int(structure_cfg.get("context_nearby_px", 18) or 0)
+        )
+        self._structure_target_types = {
+            str(item or "").strip()
+            for item in structure_cfg.get(
+                "target_types",
+                [
+                    "algorithm",
+                    "formula",
+                    "image",
+                    "figure",
+                    "figure caption",
+                    "figure title",
+                    "table",
+                    "table caption",
+                ],
+            )
+            if str(item or "").strip()
+        }
+        self._structure_context_types = {
+            str(item or "").strip()
+            for item in structure_cfg.get(
+                "context_types",
+                ["text", "code"],
+            )
+            if str(item or "").strip()
+        }
+        self._structure_engine = None
+        self._structure_engine_init_error: Optional[str] = None
+        self._structure_paddlex_layout_model = None
+        self._structure_paddlex_model_init_error: Optional[str] = None
     
     def _load_vision_config(self, config_path: Optional[str] = None):
-        """
-        执行逻辑：
-        1) 确定 config.yaml 路径并读取配置。
-        2) 校验 vision_ai 是否启用与 bearer_token 是否存在。
-        3) 组装 VisionAIConfig 返回给初始化流程。
-        实现方式：YAML 解析 + 基本字段校验。
-        核心价值：集中管理 Vision AI 的开关与参数来源。
-        决策逻辑：
-        - 条件：config_path is None（回退到项目根目录 config.yaml）
-        - 条件：not config_path.exists()（找不到配置则关闭 Vision AI）
-        - 条件：not vision_config.get('enabled', False)
-        - 条件：not vision_config.get('bearer_token')
-        依据来源（证据链）：
-        - 输入参数：config_path。
-        - 配置字段：vision_ai.enabled、vision_ai.bearer_token、vision_ai.base_url、vision_ai.vision_model。
-        输入参数：
-        - config_path: 配置文件路径（Optional[str]）。
-        输出参数：
-        - VisionAIConfig 或 None（表示使用纯 CV 路径）。"""
+        """Load VisionAIConfig from YAML/environment."""
         from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import VisionAIConfig
         
-        # 查找统一配置路径
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍡椾粡濡炪倖鍔х粻鎴犲閸ф鐓曟繛鍡楁禋濡叉椽鏌ｅ┑濠傜厫濞ｅ洤锕、娑樷攽閸℃洘鐫忕紓浣哄亾閸庢娊濡堕幖浣歌摕闁挎繂顦Λ姗€鏌涢…鎴濇珮闁哄棎鍨归—鍐Χ閸涱垳顔掓繛瀛樼矎濞夋盯锝炶箛鎾佹椽顢旈崟顓㈢崜闂佽崵濮垫禍浠嬪礈闁秴围濠㈣泛顑囬崢浠嬫⒑闂堟稓澧曢柟鍐茬箻钘熼柣妯肩帛閻撴瑩鏌ｉ悢鍛婄凡妞ゅ浚鍘介妵鍕閿涘嫧妲堝銈庡亝缁诲啫顭囪箛娑樼厸闁告劑鍔庨妶?
         if config_path is None:
             config_path = resolve_video_config_path(anchor_file=__file__)
         else:
@@ -222,21 +184,56 @@ class ConcreteKnowledgeValidator:
                 logger.info("Vision AI disabled in config, using CV-only mode")
                 return None
             
-            bearer_token = vision_config.get("bearer_token", "")
+            bearer_token = str(vision_config.get("bearer_token", "") or "").strip()
             if not bearer_token:
-                logger.warning("vision_ai.bearer_token not set in config.yaml, using CV-only mode")
+                bearer_token = str(os.getenv("VISION_AI_BEARER_TOKEN", "") or "").strip()
+            if not bearer_token:
+                logger.warning("vision_ai.bearer_token and VISION_AI_BEARER_TOKEN are both empty, using CV-only mode")
                 return None
-            
-            # 构建 VisionAIConfig
+
+            batch_cfg = vision_config.get("batch", {}) if isinstance(vision_config.get("batch"), dict) else {}
+            person_cfg = (
+                vision_config.get("person_subject_filter", {})
+                if isinstance(vision_config.get("person_subject_filter"), dict)
+                else {}
+            )
+            force_include_raw = person_cfg.get("force_include_patterns", []) or []
+            if isinstance(force_include_raw, str):
+                force_include_raw = [force_include_raw]
+              
+            # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敂缁樻櫈闂佸憡渚楅崹顏堝磻閹炬剚娼╅柣鎾抽椤偆绱?VisionAIConfig
             ai_config = VisionAIConfig(
                 enabled=True,
                 bearer_token=bearer_token,
                 base_url=vision_config.get("base_url", "https://qianfan.baidubce.com/v2/chat/completions"),
-                model=vision_config.get("vision_model", "ernie-4.5-turbo-vl-32k"),
+                model=vision_config.get("model", vision_config.get("vision_model", "ernie-4.5-turbo-vl-32k")),
                 temperature=vision_config.get("temperature", 0.3),
                 rate_limit_per_minute=vision_config.get("rate_limit_per_minute", 60),
                 duplicate_detection_enabled=vision_config.get("duplicate_detection", True),
-                similarity_threshold=vision_config.get("similarity_threshold", 0.95)
+                similarity_threshold=vision_config.get("similarity_threshold", 0.95),
+                batch_enabled=bool(batch_cfg.get("enabled", False)),
+                batch_max_size=max(1, int(batch_cfg.get("max_size", 4) or 4)),
+                batch_flush_ms=max(0, int(batch_cfg.get("flush_ms", 20) or 20)),
+                batch_max_inflight_batches=max(1, int(batch_cfg.get("max_inflight_batches", 2) or 2)),
+                person_subject_filter_enabled=bool(person_cfg.get("enabled", True)),
+                person_mask_area_threshold=max(
+                    0.0, min(1.0, float(person_cfg.get("area_threshold", 0.3) or 0.3))
+                ),
+                person_mask_binary_threshold=max(
+                    0.0, min(1.0, float(person_cfg.get("mask_threshold", 0.5) or 0.5))
+                ),
+                person_mask_high_conf_threshold=max(
+                    0.0, min(1.0, float(person_cfg.get("high_conf_threshold", 0.8) or 0.8))
+                ),
+                person_mask_high_conf_min_area=max(
+                    0.0, min(1.0, float(person_cfg.get("high_conf_min_area", 0.08) or 0.08))
+                ),
+                person_prefilter_force_include_patterns=[
+                    str(item).strip()
+                    for item in force_include_raw
+                    if str(item).strip()
+                ],
+                person_model_selection=0 if int(person_cfg.get("model_selection", 1) or 1) <= 0 else 1,
             )
             
             logger.info(f"ERNIE Vision API enabled: model={ai_config.model}, duplicate_detection={ai_config.duplicate_detection_enabled}")
@@ -246,23 +243,939 @@ class ConcreteKnowledgeValidator:
             logger.error(f"Failed to load vision config: {e}")
             return None
 
+    def _load_structure_preprocess_config(
+        self,
+        config_path: Optional[str] = None,
+        default_similarity_threshold: float = 0.95,
+    ) -> Dict[str, Any]:
+        """Docstring omitted."""
+        try:
+            normalized_default_threshold = float(default_similarity_threshold)
+        except Exception:
+            normalized_default_threshold = 0.95
+        normalized_default_threshold = max(0.0, min(1.0, normalized_default_threshold))
+        # 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸婂潡鏌ㄩ弴鐐测偓鍝ョ不閺夊簱鏀介柣妯虹－椤ｆ煡鏌涙繝鍌滀粵闁靛洤瀚板浠嬵敃椤厾鎹曠紓鍌欒閸嬫挾鈧厜鍋撻柛鏇ㄥ墰閸樻悂鎮楅獮鍨姎闁哥噥鍋呮穱濠囧礂缁楄桨绨婚柟鍏肩暘閸ㄨ櫣绮堢€ｎ喗鐓涢悘鐐插⒔濞叉潙鈹戦敍鍕幋闁轰礁鍟撮崺鈧い鎺戝缁€澶愭煏閸繃锛嶆繛鍫滅矙閺岋綁骞囬鍌涙喖閻庤娲栭惌鍌炲蓟閿涘嫪娌柛濠勫枎椤忣厼顪冮妶鍡樺碍闁告艾顑呴銉╁礋椤撴繃鍕冮梺浼欑到閻牓宕戣濮婄粯鎷呴挊澶婃優婵犳鍠楁繛濠傤潖閽樺鍚嬪璺猴功閿涙瑩姊洪崫鍕枆闁告ü绮欏畷鏇熺節閸愶缚绨婚梺鍝勬处椤ㄥ懏绂嶆ィ鍐╁€甸悷娆忓缁€鍐┿亜閵娿儻鏀诲ǎ鍥э躬楠炴牗鎷呴懖婵勫妿閹插憡鎯旈妸銉ь唵闂備緡鍓欑粔鐢稿煕閹达附鐓曟繛鎴炃氭慨鍥ㄣ亜韫囨挾澧愰柍褜鍓ㄧ粻鎾诲箖濠婂牊瀵犲鑸靛姈閿涙姊绘担鍝ョШ婵☆偉娉曠划鍫熺瑹閳ь剙鐣烽敓鐘茬闁兼亽鍎抽崢鍛婄節閵忥絾纭炬い鎴濇嚇閹偞銈ｉ崘鈺冨幈闂佺粯妫冮ˉ鎾存櫏闂備礁鎼径鍥礈濠靛棭鍤楅柛鏇ㄥ幐閸嬫捇鏁愭惔鈥茬盎闂佺粯绻嶆禍鐐垫閹惧瓨濯村ù鐘差儏閹界數绱撴担绛嬪殭闁哥喍鍗抽崺鈧い鎺戝€归弳鈺呮煕濡姴妫涙禍浠嬫⒒娴ｅ憡鍟炵紒璇插€婚埀顒佸嚬閸撴瑩顢氶敐鍛傛棃宕ㄩ瑙勫闂備礁鎲＄粙鎴︽晝閵婏妇鐝舵慨妞诲亾闁哄矉绲借灃闁逞屽墮铻炴繝闈涱儏缁犵娀鏌ｉ弬鍨倯闁稿瀚伴弻娑滅疀閺囩偛浠橀梺鍛婃惄閸犳牠鍩為幋锔绘晩闁伙絽鐬奸悾鐢告⒑濞茶澧查柛瀣姉閸掓帗绻濆鍏兼櫔闂侀€炲苯澧寸€殿喛顕ч埥澶愬閻樻牓鍔戦弻鏇熷緞閸繂濮夐梺鍦焾閸燁垳鎹㈠┑瀣厱闁逞屽墴瀹曠喖顢橀悜鍡樻缂傚倸鍊风粈渚€宕愰崷顓熸殰闁斥晛鍟╃换鍡涙煟閹达絾顥夐崬顖炴⒑闂堟侗妾ч悗闈涙湰缁傛帡顢橀姀鈾€鎷洪柣鐘叉穿鐏忔瑧绮婚幍顔剧＜缂備焦锚閻忓鈧娲栫紞濠囧箖閻ｅ瞼鐭欓悹鎭掑妽閻掗箖姊绘担鐑樺殌妞ゆ洦鍙冨畷鎴︽倷閺夋垵鐏侀柣搴㈢⊕椤洨绮绘ィ鍐╃厱闁斥晛鍘鹃鍡欑當鐟滃海鎹㈠☉銏犻唶婵犻潧鐗嗛悡鐔兼⒑閸濆嫮鐒跨紓宥勭窔閺佹劙鎮欐笟顖涙櫌闂侀€炲苯澧ǎ鍥э躬楠炴牗鎷呴崷顓炲笚?
+        structure_default_dedup_threshold = min(0.88, normalized_default_threshold)
+
+        defaults: Dict[str, Any] = {
+            "enabled": True,
+            "disable_ppstructure_after_backend_error": True,
+            "dedup_similarity_threshold": float(structure_default_dedup_threshold),
+            "bbox_overlap_merge_threshold": 0.9,
+            "skip_split_bbox_coverage_threshold": 0.0,
+            "crop_margin_px": 4,
+            "context_nearby_px": 18,
+            "target_types": [
+                "algorithm",
+                "formula",
+                "image",
+                "figure",
+                "figure caption",
+                "figure title",
+                "table",
+                "table caption",
+            ],
+            "context_types": [
+                "text",
+                "code",
+            ],
+        }
+        try:
+            if config_path is None:
+                config_file = resolve_video_config_path(anchor_file=__file__)
+            else:
+                config_file = resolve_video_config_path(str(config_path), anchor_file=__file__)
+            if not config_file or not config_file.exists():
+                return defaults
+            config = load_yaml_dict(config_file)
+            vision_cfg = config.get("vision_ai", {}) if isinstance(config, dict) else {}
+            structure_cfg = (
+                vision_cfg.get("structure_preprocess", {})
+                if isinstance(vision_cfg, dict)
+                else {}
+            )
+            if not isinstance(structure_cfg, dict):
+                return defaults
+
+            merged = dict(defaults)
+            merged["enabled"] = bool(structure_cfg.get("enabled", defaults["enabled"]))
+            merged["disable_ppstructure_after_backend_error"] = bool(
+                structure_cfg.get(
+                    "disable_ppstructure_after_backend_error",
+                    defaults["disable_ppstructure_after_backend_error"],
+                )
+            )
+            merged["dedup_similarity_threshold"] = float(
+                structure_cfg.get(
+                    "dedup_similarity_threshold",
+                    defaults["dedup_similarity_threshold"],
+                )
+            )
+            merged["dedup_similarity_threshold"] = max(
+                0.0,
+                min(1.0, merged["dedup_similarity_threshold"]),
+            )
+            merged["bbox_overlap_merge_threshold"] = float(
+                structure_cfg.get(
+                    "bbox_overlap_merge_threshold",
+                    defaults["bbox_overlap_merge_threshold"],
+                )
+            )
+            merged["bbox_overlap_merge_threshold"] = max(
+                0.0,
+                min(1.0, merged["bbox_overlap_merge_threshold"]),
+            )
+            merged["skip_split_bbox_coverage_threshold"] = float(
+                structure_cfg.get(
+                    "skip_split_bbox_coverage_threshold",
+                    defaults["skip_split_bbox_coverage_threshold"],
+                )
+            )
+            merged["skip_split_bbox_coverage_threshold"] = max(
+                0.0,
+                min(1.0, merged["skip_split_bbox_coverage_threshold"]),
+            )
+            merged["crop_margin_px"] = max(
+                0, int(structure_cfg.get("crop_margin_px", defaults["crop_margin_px"]) or 0)
+            )
+            merged["context_nearby_px"] = max(
+                0, int(structure_cfg.get("context_nearby_px", defaults["context_nearby_px"]) or 0)
+            )
+            raw_types = structure_cfg.get("target_types", defaults["target_types"])
+            if isinstance(raw_types, str):
+                raw_types = [part.strip() for part in raw_types.split(",")]
+            if isinstance(raw_types, list):
+                normalized_types = [
+                    str(item or "").strip()
+                    for item in raw_types
+                    if str(item or "").strip()
+                ]
+                if normalized_types:
+                    merged["target_types"] = normalized_types
+            raw_context_types = structure_cfg.get("context_types", defaults["context_types"])
+            if isinstance(raw_context_types, str):
+                raw_context_types = [part.strip() for part in raw_context_types.split(",")]
+            if isinstance(raw_context_types, list):
+                normalized_context_types = [
+                    str(item or "").strip()
+                    for item in raw_context_types
+                    if str(item or "").strip()
+                ]
+                if normalized_context_types:
+                    merged["context_types"] = normalized_context_types
+            return merged
+        except Exception as exc:
+            logger.warning(f"Failed to load structure preprocess config, using defaults: {exc}")
+            return defaults
+
+    @staticmethod
+    def _normalize_structure_type(raw_type: Any) -> str:
+        token = str(raw_type or "").strip().lower()
+        if not token:
+            return ""
+        token = token.replace("-", " ").replace("_", " ")
+        token = re.sub(r"\s+", " ", token).strip()
+        alias_map = {
+            "algorithm": "algorithm",
+            "formula": "formula",
+            "display formula": "formula",
+            "inline formula": "formula",
+            "formula number": "formula",
+            "image": "image",
+            "chart": "figure",
+            "figure": "figure",
+            "figure caption": "figure_caption",
+            "figure title": "figure_title",
+            "figure table chart title": "figure_title",
+            "table": "table",
+            "table caption": "table_caption",
+            "table title": "table_caption",
+            "text": "text",
+            "paragraph": "text",
+            "plain text": "text",
+            "reference": "text",
+            "code": "code",
+            "code block": "code",
+            "program code": "code",
+        }
+        return alias_map.get(token, token.replace(" ", "_"))
+
+    @staticmethod
+    def _is_structure_backend_runtime_error(exc: Exception) -> bool:
+        message = str(exc or "").lower()
+        if not message:
+            return False
+        keywords = (
+            "onednncontext does not have the input filter",
+            "operator < fused_conv2d > error",
+            "fused_conv2d",
+            "onednn",
+            "mkldnn",
+        )
+        return any(token in message for token in keywords)
+
+    def _get_paddlex_layout_model(self):
+        if self._structure_paddlex_layout_model is not None:
+            return self._structure_paddlex_layout_model
+        if self._structure_paddlex_model_init_error:
+            return None
+        try:
+            import sys
+            import types
+            os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+            # paddleocr 2.x 婵犵數濮烽弫鎼佸磻閻愬樊鐒芥繛鍡樻尭鐟欙箓鎮楅敐搴℃灍闁搞倕鐭傞弻鐔碱敍閸℃啸闁逞屽墯鐎笛囧Φ閸曨喚鐤€闁圭偓娼欏▍銈嗙箾鐎涙ê娈犻柛濠冪箞瀵鎮㈤崗鑲╁姺闂佹寧娲嶉崑鎾绘煟韫囨稐鎲鹃柡宀嬬節閸┾偓妞ゆ帊鑳堕々鐑芥倵閿濆骸浜為柛妯绘倐濮婃椽宕ㄦ繝鍌毿曢梺鍛婎焽閺咁偄鈽夐崹顐犲亝闁告劏鏅濋崢?sys.path 濠电姷鏁告慨鐑藉极閹间礁纾绘繛鎴旀嚍閸ヮ剦鏁囬柕蹇曞Х椤︻噣鎮楅崗澶婁壕闂佸憡娲﹂崑鍡涙偂閹达附鈷戠紒顖涙礀婢ф煡鏌ㄥ杈╃＜闁告挷绀佹禒锕傛煙娓氬灝濡兼い顐ｇ矒瀹曞崬顪冮幆褎鐎抽梻鍌欑劍閹爼宕愰弴銏╂晞濠㈣埖鍔曠粻鏍ㄤ繆閵堝倸浜鹃梺瀹犳椤︻垶鍩㈡惔銈囩杸闁瑰灝鍟紞鎴︽⒒閸屾瑧鍔嶆俊鐐叉健瀹曘垺绂掔€ｎ亞锛熼梺鐟板閻℃棃寮€ｎ喗鐓忓璺烘濞呭懐绱掗埀顒傗偓锝庡枟閻撴洟鏌熼幑鎰敿闁稿繐鏈妵鍕晜鐠囧弶鐝濆┑顔硷攻濡炶棄鐣烽妸锔剧瘈闁告洦鍓欏▍褔姊绘担瑙勫仩闁告柨閰ｅ顐ゆ嫚閼碱剚娈惧┑掳鍊愰崑鎾淬亜椤愶絿鐭掗柛鈹惧亾濡炪倖甯掔€氼參宕戝Ο姹囦簻闁哄洦顨呮禍楣冩倵鐟欏嫭绌跨紒鍙夊劤椤曘儵宕熼鍌滅槇闁瑰吋鐣崺鍕?paddlex 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁斥晛鍟伴幊鍛存煟椤撶儐妯€闁哄本鐩崺鍕礃椤忓懎娅楅梻浣告憸婵潙螞濠靛钃熼柕濞垮劗閺€浠嬫煕閳╁喛渚涙俊顐犲€濆娲焻閻愯尪瀚伴柛妯烘憸缁辨帡顢欓悾灞惧櫗婵?
+            # 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁稿绻濋弻宥夊传閸曨剙娅ｉ梻鍌氬亞閸ㄥ爼寮婚敐澶婄闁挎繂妫Λ鍕⒑閸︻厽鍤€闁绘牕銈稿濠氬即閻旇櫣顔曢梺鍓茬厛閸犳牗鎱ㄩ崼鏇熲拺闁硅偐鍋涢埀顒佸灴瀹曟劕鈹戠€ｎ亣鎽?paddlex 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼唶闂佸憡绺块崕鎶芥儗閹剧粯鐓ｉ煫鍥风到娴滄粎绱掗崜浣镐户闁逞屽墮缁犲秹宕曢柆宓ュ洭顢涘鍛殫閻庡箍鍎遍ˇ浼存偂閺囥垺鐓欓柟瑙勫姇閻ㄦ椽鏌熼绗哄仮闁哄苯绉瑰畷顐﹀礋椤掆偓濞呫倝姊洪幎鑺ユ暠婵☆偄鍟村濠氬即閵忕娀鍞跺┑鐘绘涧閻楀棝鍩呮潏鈺冪＝濞达絽鎼暩闂佺娅曢幑鍥э耿娴ｇ硶鏀介柣妯款嚋瀹搞儵鎮楀鐓庢珝闁糕晛锕鎾閿涘嫬骞愬┑鐐舵彧缁蹭粙骞栭锝囶浄閺夊牃鏂侀崑鎾舵喆閸曨剛顦ㄥ銈冨妼閿曘儲绌辨繝鍥ㄥ€婚柦妯猴級閳哄啯鍠愰煫鍥ㄧ☉閼稿綊鏌熺紒銏犳灍闁稿﹦鏁婚弻娑⑩€﹂幋婵呯凹缂備浇鍩栭悡锟犲箖濡も偓椤繈顢楁担鐟版瀾婵犵鈧啿绾ч柛鏃€娲熼崺鐐哄箣閿曗偓闁卞洦鎱ㄥ鍡楀幐濠㈣娲熷鍝勑ч崶褏浼堝┑鐐板尃閸涱喗娈伴梺鍓插亝濞叉﹢鎮￠弴鐔虹闁糕剝顨堢粻鍙夈亜閵夛絽鐏柍褜鍓濋～澶娒鸿箛娑樼？闁哄被鍎辩粻姘舵煛閸愩劎澧曢柣蹇斿▕閺屟嗙疀閿濆懍绨奸梺缁樼箖鐢€愁潖缂佹ɑ濯寸紒娑橆儏濞堟劙姊洪崨濞掝亞绱炴繝鍌滄殾缁绢厼鎳屾禍褰掓煙楠炲灝鈧洖煤椤撶儐鍤曞┑鐘宠壘鍞梺?
+            original_sys_path = list(sys.path)
+            filtered_sys_path = [
+                p
+                for p in original_sys_path
+                if "site-packages\\paddleocr" not in str(p).lower().replace("/", "\\")
+            ]
+            sys.path[:] = filtered_sys_path
+            injected_modelscope_stub = False
+            if "modelscope" not in sys.modules:
+                modelscope_stub = types.ModuleType("modelscope")
+
+                def _snapshot_download(*args, **kwargs):
+                    raise RuntimeError("modelscope snapshot_download is unavailable in offline mode")
+
+                modelscope_stub.snapshot_download = _snapshot_download  # type: ignore[attr-defined]
+                modelscope_stub.__version__ = "0.0.0-stub"
+                sys.modules["modelscope"] = modelscope_stub
+                injected_modelscope_stub = True
+            try:
+                import paddlex as pdx  # type: ignore
+            finally:
+                sys.path[:] = original_sys_path
+                if injected_modelscope_stub:
+                    sys.modules.pop("modelscope", None)
+
+            self._structure_paddlex_layout_model = pdx.create_model("PP-DocLayoutV3")
+            logger.info("PP-Structure preprocess paddlex fallback enabled: model=PP-DocLayoutV3")
+            return self._structure_paddlex_layout_model
+        except Exception as exc:
+            self._structure_paddlex_model_init_error = str(exc)
+            logger.warning(f"PP-Structure preprocess paddlex fallback disabled: {exc}")
+            return None
+
+    def _collect_structure_blocks_via_paddlex(self, image_path: str) -> Optional[List[Dict[str, Any]]]:
+        model = self._get_paddlex_layout_model()
+        if model is None:
+            return None
+
+        image = cv2.imread(image_path)
+        if image is None or image.size == 0:
+            return []
+        image_h, image_w = image.shape[:2]
+
+        try:
+            results = list(model.predict(image_path))
+        except Exception as exc:
+            logger.warning(f"PaddleX layout inference failed for {Path(image_path).name}: {exc}")
+            return None
+
+        blocks: List[Dict[str, Any]] = []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            boxes = item.get("boxes", [])
+            if not isinstance(boxes, list):
+                continue
+            for box in boxes:
+                if not isinstance(box, dict):
+                    continue
+                block_type = self._normalize_structure_type(box.get("label"))
+                bbox = self._normalize_bbox(
+                    box.get("coordinate") or box.get("bbox") or box.get("box"),
+                    image_w=image_w,
+                    image_h=image_h,
+                )
+                if block_type and bbox:
+                    blocks.append({"type": block_type, "bbox": bbox})
+        return blocks
+
+    def _get_structure_engine(self):
+        if not bool(getattr(self, "_structure_preprocess_enabled", False)):
+            return None
+        if self._structure_engine is not None:
+            return self._structure_engine
+        if self._structure_engine_init_error:
+            return None
+        try:
+            from paddleocr import PPStructure  # type: ignore
+            try:
+                from paddleocr import PPStructureV3  # type: ignore
+            except Exception:
+                PPStructureV3 = None  # type: ignore
+
+            engine_cls = PPStructureV3 or PPStructure
+            if engine_cls is None:
+                self._structure_engine_init_error = "ppstructure_class_not_found"
+                logger.warning("PP-Structure preprocessor disabled: class not found")
+                return None
+            try:
+                self._structure_engine = engine_cls(show_log=False)
+            except TypeError:
+                self._structure_engine = engine_cls()
+            logger.info(
+                "PP-Structure preprocessor enabled: engine=%s",
+                getattr(engine_cls, "__name__", "unknown"),
+            )
+            return self._structure_engine
+        except Exception as exc:
+            self._structure_engine_init_error = str(exc)
+            logger.warning(f"PP-Structure preprocessor disabled: {exc}")
+            return None
+
+    @staticmethod
+    def _normalize_bbox(raw_bbox: Any, image_w: int, image_h: int) -> Optional[Tuple[int, int, int, int]]:
+        if raw_bbox is None:
+            return None
+
+        x1 = y1 = x2 = y2 = None
+        if isinstance(raw_bbox, dict):
+            keys = {str(k).lower(): v for k, v in raw_bbox.items()}
+            if all(key in keys for key in ("x1", "y1", "x2", "y2")):
+                x1, y1, x2, y2 = keys["x1"], keys["y1"], keys["x2"], keys["y2"]
+        elif isinstance(raw_bbox, (list, tuple)):
+            if len(raw_bbox) == 4 and all(isinstance(v, (int, float)) for v in raw_bbox):
+                x1, y1, x2, y2 = raw_bbox
+            elif len(raw_bbox) >= 4 and all(
+                isinstance(v, (list, tuple)) and len(v) >= 2 for v in raw_bbox[:4]
+            ):
+                xs = [float(v[0]) for v in raw_bbox[:4]]
+                ys = [float(v[1]) for v in raw_bbox[:4]]
+                x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+
+        if x1 is None or y1 is None or x2 is None or y2 is None:
+            return None
+
+        x1 = max(0, min(int(round(float(x1))), max(0, image_w - 1)))
+        y1 = max(0, min(int(round(float(y1))), max(0, image_h - 1)))
+        x2 = max(0, min(int(round(float(x2))), image_w))
+        y2 = max(0, min(int(round(float(y2))), image_h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _union_bboxes(
+        bboxes: List[Tuple[int, int, int, int]],
+        image_w: int,
+        image_h: int,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if not bboxes:
+            return None
+        x1 = min(item[0] for item in bboxes)
+        y1 = min(item[1] for item in bboxes)
+        x2 = max(item[2] for item in bboxes)
+        y2 = max(item[3] for item in bboxes)
+        x1 = max(0, min(x1, max(0, image_w - 1)))
+        y1 = max(0, min(y1, max(0, image_h - 1)))
+        x2 = max(0, min(x2, image_w))
+        y2 = max(0, min(y2, image_h))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return x1, y1, x2, y2
+
+    @staticmethod
+    def _bbox_overlap_ratio_by_smaller_area(
+        bbox_a: Tuple[int, int, int, int],
+        bbox_b: Tuple[int, int, int, int],
+    ) -> float:
+        """Docstring omitted."""
+        ax1, ay1, ax2, ay2 = bbox_a
+        bx1, by1, bx2, by2 = bbox_b
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+        inter_w = max(0, inter_x2 - inter_x1)
+        inter_h = max(0, inter_y2 - inter_y1)
+        inter_area = inter_w * inter_h
+        if inter_area <= 0:
+            return 0.0
+        area_a = max(0, (ax2 - ax1) * (ay2 - ay1))
+        area_b = max(0, (bx2 - bx1) * (by2 - by1))
+        smaller_area = min(area_a, area_b)
+        if smaller_area <= 0:
+            return 0.0
+        return float(inter_area) / float(smaller_area)
+
+    @staticmethod
+    def _bbox_area(bbox: Tuple[int, int, int, int]) -> int:
+        x1, y1, x2, y2 = bbox
+        return max(0, x2 - x1) * max(0, y2 - y1)
+
+    @staticmethod
+    def _bbox_union_area(bboxes: List[Tuple[int, int, int, int]]) -> int:
+        if not bboxes:
+            return 0
+        xs = sorted({coord for x1, _, x2, _ in bboxes for coord in (x1, x2)})
+        if len(xs) <= 1:
+            return 0
+
+        total_area = 0
+        for idx in range(len(xs) - 1):
+            left = xs[idx]
+            right = xs[idx + 1]
+            if right <= left:
+                continue
+
+            y_intervals: List[Tuple[int, int]] = []
+            for x1, y1, x2, y2 in bboxes:
+                if x1 < right and x2 > left:
+                    y_intervals.append((y1, y2))
+            if not y_intervals:
+                continue
+
+            y_intervals.sort(key=lambda item: (item[0], item[1]))
+            merged_y_length = 0
+            current_start, current_end = y_intervals[0]
+            for start, end in y_intervals[1:]:
+                if start <= current_end:
+                    current_end = max(current_end, end)
+                else:
+                    merged_y_length += max(0, current_end - current_start)
+                    current_start, current_end = start, end
+            merged_y_length += max(0, current_end - current_start)
+            total_area += (right - left) * merged_y_length
+        return int(max(0, total_area))
+
+    @staticmethod
+    def _bbox_edge_gap(
+        bbox_a: Tuple[int, int, int, int],
+        bbox_b: Tuple[int, int, int, int],
+    ) -> Tuple[int, int]:
+        ax1, ay1, ax2, ay2 = bbox_a
+        bx1, by1, bx2, by2 = bbox_b
+        gap_x = max(0, max(bx1 - ax2, ax1 - bx2))
+        gap_y = max(0, max(by1 - ay2, ay1 - by2))
+        return int(gap_x), int(gap_y)
+
+    def _should_attach_context_bbox(
+        self,
+        target_bbox: Tuple[int, int, int, int],
+        context_bbox: Tuple[int, int, int, int],
+        nearby_px: int,
+    ) -> bool:
+        if self._bbox_overlap_ratio_by_smaller_area(target_bbox, context_bbox) > 0.0:
+            return True
+        if nearby_px <= 0:
+            return False
+        gap_x, gap_y = self._bbox_edge_gap(target_bbox, context_bbox)
+        if gap_x == 0 and gap_y <= nearby_px:
+            return True
+        if gap_y == 0 and gap_x <= nearby_px:
+            return True
+        return (gap_x * gap_x + gap_y * gap_y) <= (nearby_px * nearby_px)
+
+    def _expand_bbox_with_context(
+        self,
+        seed_bbox: Tuple[int, int, int, int],
+        context_bboxes: List[Tuple[int, int, int, int]],
+        nearby_px: int,
+        image_w: int,
+        image_h: int,
+    ) -> Tuple[int, int, int, int]:
+        if not context_bboxes:
+            return seed_bbox
+        current = seed_bbox
+        changed = True
+        while changed:
+            changed = False
+            for context_bbox in context_bboxes:
+                if not self._should_attach_context_bbox(current, context_bbox, nearby_px=nearby_px):
+                    continue
+                union_bbox = self._union_bboxes([current, context_bbox], image_w=image_w, image_h=image_h)
+                if union_bbox is None or union_bbox == current:
+                    continue
+                current = union_bbox
+                changed = True
+        return current
+
+    @staticmethod
+    def _crop_group_priority(group_type: str) -> int:
+        mapping = {
+            "figure_bundle": 0,
+            "table_bundle": 1,
+            "algorithm": 2,
+            "formula": 3,
+            "image": 4,
+        }
+        token = str(group_type or "").strip().lower()
+        if token in mapping:
+            return mapping[token]
+        if token.endswith("_bundle"):
+            return 5
+        return 50
+
+    def _merge_group_type(self, kept_group: str, incoming_group: str) -> str:
+        kept_token = str(kept_group or "").strip().lower()
+        incoming_token = str(incoming_group or "").strip().lower()
+        if kept_token.endswith("_bundle"):
+            return kept_group
+        if incoming_token.endswith("_bundle"):
+            return incoming_group
+        if self._crop_group_priority(incoming_token) < self._crop_group_priority(kept_token):
+            return incoming_group
+        return kept_group
+
+    def _merge_crop_plan_by_overlap(
+        self,
+        crop_plan: List[Tuple[str, Tuple[int, int, int, int]]],
+        image_w: int,
+        image_h: int,
+        overlap_threshold: float,
+    ) -> List[Tuple[str, Tuple[int, int, int, int]]]:
+        if len(crop_plan) <= 1:
+            return list(crop_plan)
+
+        threshold = max(0.0, min(1.0, float(overlap_threshold or 0.0)))
+        ordered = sorted(
+            crop_plan,
+            key=lambda item: (
+                self._crop_group_priority(item[0]),
+                -self._bbox_area(item[1]),
+            ),
+        )
+        kept: List[Tuple[str, Tuple[int, int, int, int]]] = []
+        for incoming_group, incoming_bbox in ordered:
+            merged = False
+            for idx, (kept_group, kept_bbox) in enumerate(kept):
+                overlap_ratio = self._bbox_overlap_ratio_by_smaller_area(incoming_bbox, kept_bbox)
+                if overlap_ratio < threshold:
+                    continue
+                union_bbox = self._union_bboxes([incoming_bbox, kept_bbox], image_w=image_w, image_h=image_h)
+                if union_bbox is None:
+                    continue
+                merged_group = self._merge_group_type(kept_group, incoming_group)
+                kept[idx] = (merged_group, union_bbox)
+                merged = True
+                break
+            if not merged:
+                kept.append((incoming_group, incoming_bbox))
+        return kept
+
+    def _merge_bboxes_by_overlap(
+        self,
+        bboxes: List[Tuple[int, int, int, int]],
+        image_w: int,
+        image_h: int,
+        overlap_threshold: float,
+    ) -> List[Tuple[int, int, int, int]]:
+        """Docstring omitted."""
+        if len(bboxes) <= 1:
+            return list(bboxes)
+        threshold = max(0.0, min(1.0, float(overlap_threshold or 0.0)))
+        merged: List[Tuple[int, int, int, int]] = []
+        for bbox in bboxes:
+            current = bbox
+            merged_changed = True
+            while merged_changed:
+                merged_changed = False
+                next_merged: List[Tuple[int, int, int, int]] = []
+                for existing in merged:
+                    overlap_ratio = self._bbox_overlap_ratio_by_smaller_area(current, existing)
+                    if overlap_ratio >= threshold:
+                        union_bbox = self._union_bboxes([current, existing], image_w=image_w, image_h=image_h)
+                        if union_bbox is None:
+                            next_merged.append(existing)
+                            continue
+                        current = union_bbox
+                        merged_changed = True
+                    else:
+                        next_merged.append(existing)
+                merged = next_merged
+            merged.append(current)
+        return merged
+
+    def _collect_structure_blocks(self, image_path: str) -> Optional[List[Dict[str, Any]]]:
+        engine = self._get_structure_engine()
+        if engine is None:
+            return self._collect_structure_blocks_via_paddlex(image_path)
+
+        image = cv2.imread(image_path)
+        if image is None or image.size == 0:
+            return []
+        image_h, image_w = image.shape[:2]
+
+        try:
+            raw_result = engine(image)
+        except Exception as exc:
+            if bool(getattr(self, "_structure_disable_after_backend_error", True)) and self._is_structure_backend_runtime_error(exc):
+                self._structure_engine = None
+                self._structure_engine_init_error = f"runtime_backend_error:{type(exc).__name__}"
+                logger.warning(
+                    "PP-Structure disabled after backend runtime error; subsequent images use paddlex fallback."
+                )
+            logger.warning(
+                "PP-Structure inference failed for %s, trying paddlex fallback: %s",
+                Path(image_path).name,
+                exc,
+            )
+            return self._collect_structure_blocks_via_paddlex(image_path)
+
+        blocks: List[Dict[str, Any]] = []
+        queue: List[Any] = [raw_result]
+        while queue:
+            node = queue.pop(0)
+            if isinstance(node, list):
+                queue.extend(node)
+                continue
+            if not isinstance(node, dict):
+                continue
+
+            block_type = self._normalize_structure_type(
+                node.get("type") or node.get("label") or node.get("layout")
+            )
+            bbox = self._normalize_bbox(
+                node.get("bbox") or node.get("box") or node.get("points"),
+                image_w=image_w,
+                image_h=image_h,
+            )
+            if block_type and bbox:
+                blocks.append({"type": block_type, "bbox": bbox})
+
+            for key in ("res", "result", "layout_result", "children", "items"):
+                value = node.get(key)
+                if isinstance(value, (list, dict)):
+                    queue.append(value)
+        return blocks
+
+    def extract_structured_screenshots(
+        self,
+        image_path: str,
+        source_id: str = "",
+        timestamp_sec: Optional[float] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐鐑芥嚄閸撲焦鍏滈柛顐ｆ礀閻ら箖鏌ｉ幇顒佲枙婵炲瓨鐗犻弻鏇熺箾瑜嶅Λ妤€鐨?PP-StructureV3 闂傚倸鍊搁崐鐑芥嚄閸洖绠犻柟鎹愵嚙鎼村﹪鏌熺紒妯哄瀭婵炴垶顭傞弮鍫濆窛妞ゆ挾鍋熼埀顒夊弮閺岀喖宕楅懖鈺傛闂佸憡鏌ㄩ惉鑲╁垝婵犳碍鏅查柛鈩冨姃缁ㄥ妫呴銏″闁瑰憡鎮傞、鏃堫敂閸℃瑧锛滈梺绋挎湰濮樸劍鏅堕敃鍌涚厸?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡樺暗闁稿鍠栭弫宥呪枎閹剧补鎷洪梺缁樻尭濞撮绮斿ú顏呯厱閻庯綆浜烽煬顒傗偓瑙勬礈閺佽顕ｉ浣瑰劅闁圭偓鎯屽鏃堟⒒娴ｅ憡鎯堥柛濠傜秺椤㈡牕鈻庤箛锝団偓鍓佹喐韫囨洘顫?
+        # - None: 婵犵數濮烽。钘壩ｉ崨鏉戠；闁告侗鍙庨悢鍡樹繆椤栨氨姣為柛瀣尭椤繈鎮℃惔鈾€鎷梺鑺ド戠换鍫ュ蓟瀹ュ浼犻柛鏇ㄥ墮濞呫倝姊虹粙娆惧剳濠电偐鍋撻梺鍝勬湰閻╊垶宕洪崟顖氱闁冲搫鍠氬Σ鍫曟⒒娴ｈ棄鍚归柛鐘冲姉閹广垽宕奸妷銉ㄦ憰濠电偞鍨惰彜闁哄瀛╂穱濠囶敍濠靛浂浠╂繛瀵稿閸ㄨ泛顫忛悜妯诲濞寸厧鐡ㄩ鏍⒑缁嬪尅鏀荤紒璇茬墕椤曪綁顢曢姀鈺佹倯闂佸憡渚楅崹鍗炩枔閺囥垺鈷戦柛娑橈工婵箑霉濠婂嫮绠炴い銏＄懃椤撳吋寰勭€Ｑ勫婵犵數鍋犵亸娆戝垝椤栨稓绠鹃柛銉墯閻撴洟鏌￠崒婵囩《閺佸牓鎮楀▓鍨灈妞ゎ厾鍏橀獮鍐閵堝棗浜楅柟鑹版彧缂嶅棝宕捄琛℃斀闁绘﹩鍠栭悘杈ㄧ箾婢跺娲存い銏＄墵瀹曞崬鈽夊▎鎰彨闂佽鍑界紞鍡涘窗濡ゅ懎鐓曢柟瀵稿亼娴滄粓鏌熼弶鍨暢缂佸绮妵鍕敃閿濆孩鐣肩紓浣介哺鐢鏁嶉幇顑芥斀闁糕剝娲滈弫鏍⒒娴ｅ憡璐℃い顐㈩儔瀹曟儼顦村Δ鐘叉喘濮婃椽宕滈懠顒€甯ラ梺鍝ュУ椤ㄥ﹤顕ｉ崨濞垮亝闁告劏鏂侀幏娲⒑绾懎浜归柛瀣洴瀹曟繂鈻庨幘瀵稿幈闂佸搫娲ㄩ崳锕傛嚀閸ф鐓曢柍瑙勫劤娴?
+        # - []: 婵犵數濮烽。钘壩ｉ崨鏉戠；闁告侗鍙庨悢鍡樹繆椤栨氨姣為柛瀣尭椤繈鎮℃惔鈾€鎷梺鑺ド戠换鍫ュ蓟瀹ュ浼犻柛鏇ㄥ墮濞呫倝姊虹粙娆惧剳濠电偐鍋撻梺鍝勬湰閻╊垶宕洪崟顖氱闁绘劦鍓涢弳銉╂⒑閼姐倕小闁绘帪绠撻幃锟犳晸閻樿尪鎽曢梺鎸庣箓椤︻垶锝為崨瀛樼厓闁告繂瀚弳娆撴偨椤栨ê濡跨紒杈ㄦ尰閹峰懏绂掔€ｎ亝鎳欑紓鍌欐祰椤曆囧疮閹绢喚宓侀煫鍥ㄧ☉瀹告繈鏌℃径瀣仴闁兼澘鐏濋埞鎴﹀煡閸℃浠村銈嗘肠閸涱噮娼熼梺鎸庢礀閸婂綊鎮￠悢鍏肩厽婵☆垰鎼痪褔鏌熼崗鐓庡濞ｅ洤锕、鏇㈡晲鎼淬垻鏉归柣搴ゎ潐濞叉ê顪冮挊澶屾殾闁告鍋愬Σ鍫熶繆椤栨壕鎷℃俊鍙夋尦濮婄粯鎷呯粵瀣秷濡炪倖姊归悧鐘茬暦閺夎鏃堝礃椤忓棗绠垫繝寰锋澘鈧洟骞婅箛娑欏亗婵炴垶鍩冮崑鎾荤嵁閸喖濮庨梺鐟板暱缁绘劙顢欒箛鎾斀閻庯綆鍋勬禒鈺佲攽椤旂瓔鐒介柛妯犲嫮顩查柟娈垮枓閸嬫挾鎲撮崟顒傤槬濠电姭鍋撻梺顒€绉撮悞鍨亜閹烘埊鍔熼柛鎺撴緲椤儻顦叉繛鎾棑閸掓帡宕奸悢椋庣獮闂佸綊鍋婇崢鍏肩椤栫偞鐓熼幖鎼灣缁夐潧霉濠婂嫮鐭掔€殿喗濞婇幃銏ゅ礂閼测晛骞愬┑鐐舵彧缂嶄礁顭囪閸┾偓妞ゆ帊鑳剁粻鎾淬亜閺囶亞绉い銏☆殜瀹曠喖顢楅崒姘ュ┑鐘垫暩閸嬬偤宕圭捄渚僵闁靛ň鏅涚粻鐔烘喐閻楀牆绗氶柣鎾寸☉椤法鎹勯悜姗嗘！濠电偛鎳庡Λ娑氭閹烘柡鍋撻敐搴′簻闁诲繐顕埀?Vision闂?
+        # - List: 闂傚倸鍊搁崐鐑芥嚄閸洖绠犻柟鎹愵嚙鎼村﹪鏌熺紒妯哄瀭婵炴垶顭傞弮鍫濆窛妞ゆ挾鍋熼埀顒夊弮閺岀喖宕楅懖鈺傛闂佸憡鏌ㄩ惉濂稿箟閹绢喗鏅濋柛灞炬皑椤旀劙鏌℃径濠勫濠⒀呮櫕缁瑦绻濆顓犲幗闂佹寧绻傞ˇ顕€骞夋ィ鍐╃厸鐎光偓閳ь剟宕伴弽顓犲祦闁哄稁鍙庨弫鍥ㄧ節闂堟稓澧㈡繛澶嬪缁绘繈鎮介棃娑楃捕闂佸鏉垮闁轰礁鍟存慨鈧柣妯虹仛濞堟儳鈹戦鏂や緵闁稿海鏁诲顕€宕煎┑鍫Ч闂備礁鐤囬～澶愬磿閾忣偆顩插Δ锝呭暞閻撴洟鏌熸导瀛樻锭闁哄绋掑?
+        """Docstring omitted."""
+        if not bool(getattr(self, "_structure_preprocess_enabled", False)):
+            return None
+        if self._get_structure_engine() is None and self._get_paddlex_layout_model() is None:
+            return None
+        if not image_path or not os.path.exists(image_path):
+            return []
+
+        image = cv2.imread(image_path)
+        if image is None or image.size == 0:
+            return []
+        image_h, image_w = image.shape[:2]
+        blocks = self._collect_structure_blocks(image_path)
+        if blocks is None:
+            # 闂傚倸鍊搁崐宄懊归崶顒婄稏濠㈣泛顑囬々鎻捗归悩宸剰缂佲偓婢舵劕绠规繛锝庡墮婵¤偐绱掗悩宕囧ⅹ闁宠鍨块幃鈺呭矗婢跺妲遍梻浣瑰▕閺€閬嶅箲閸ヮ剙钃熼柕鍫濐槸瀹告繂鈹戦悩鏌ヮ€楅柡鍛翠憾濮婃椽宕妷銉ゆ埛闂佸搫鎷嬮崑濠囧春閳ь剚銇勯幒宥囪窗闁哥喎绻橀弻娑㈡偐瀹曞洤鈷岄悗瑙勬礃閸旀瑩鐛弽銊﹀闁荤喖顣﹂崙浠嬫⒒娴ｇ顥忛柛瀣噹鐓ゆ慨妞诲亾鐎殿喗鐓￠、妤佹媴閻熸澘浼庢繝娈垮枟椤ㄥ懎螞濡ゅ懐宓侀柡宥庡幗閻撶喖鏌ㄩ弴妤€浜惧銈庡幘閸忔ê顕ｇ拠宸悑濠㈣泛谩閵娾晜鐓ラ柡鍌氱仢閳锋棃鏌ｉ幘鎰佹Ц妞ゎ亜鍟存俊鎯扮疀閺囩偟鐓楅梻浣告惈閹冲繒鍒掑畝鍕垫晪闁靛鏅涚粈瀣亜閺嶃劍鐨戞い锔芥緲椤啴濡堕崱妯烘殫闂佸摜濮撮柊锝夊春閳ь剚銇勯幒鎴濃偓鍛婄濠婂牊鐓冮柦妯侯樈濡偓濡ょ姷鍋為敋闁伙絿鍏樺畷鍫曞幢閹邦剛浼勯梺鐟板级閹倿骞冭瀹曞ジ濮€閻樿尙鍝楅梻鍌欐祰椤曟牠宕伴弴鐘插灊婵炲棙鍔掔换鍡涙煙闂傚顦﹂柣鎾村灴閺屽秵娼悧鍫▊婵犮垼顫夊ú鏍煘閹达附鍋愮紓浣股戦柨顓炩攽閳藉棗浜濋柣鐔濆懎鍨濋柛顐犲劚閻掑灚銇勯幒鎴濐仾闁抽攱甯掗妴鎺戭潩椤掍焦鎮欐繛瀛樼矋閸旀瑩寮诲☉姘ｅ亾閿濆骸浜濈€规洖鐭傞弻锛勪沪鐠囨彃顬堥梺瀹犳椤︻垵鐏掓繛鎾村嚬閸ㄩ亶顢欓崟顓犵＝闁稿本鐟ч崝宥嗐亜閵娿儲鍤囬挊婵嬫⒒閸喓銆掗柡鍡畵閺岀喓鈧稒顭囩粻銉︾箾鐏忔牗娅婇柡灞诲妼閳规垿宕卞璇蹭壕闁告稑锕﹂々鏌ユ煟閹伴潧澧扮紒鈾€鍋撳┑鐘垫暩婵挳宕愰幖渚囨晜妞ゅ繐鐗婇悡銉╂煟閺冣偓濞兼瑩宕濋敃鍌涚厸鐎光偓鐎ｎ剛袦闂佺硶鏂侀崜婵堟崲濠靛纾兼繛鎴炵煯閹查箖姊婚崒娆掑厡缂侇噮鍨堕幃褔顢橀悩鑼瓘闂佺鍕垫畷闁稿鐗犻弻娑㈠箻濡も偓鐎氼剟鎮垫导瀛樷拺闁兼祴鏂侀幏锟犳煕韫囨棑鑰跨€规洘鍨块獮妯肩磼濡　鍋撴繝姘參婵☆垯璀﹀Σ鍝劽归悡搴剰闁宠鍨块幃鈺冪磼濡鏁繝鐢靛仜閻即宕濋幋锕€绠栭柡澶婄氨閺€浠嬫煕閵夛絽濡肩€殿喛娉曠槐鎺旂磼閵忕姴绠归梺鐟板暱闁帮綁骞冮悙瀵割浄閻庯綆鍋嗛崢?
+            return None
+        if not blocks:
+            return []
+
+        target_types = {
+            self._normalize_structure_type(item)
+            for item in getattr(self, "_structure_target_types", set())
+            if self._normalize_structure_type(item)
+        }
+        if not target_types:
+            target_types = {
+                "algorithm",
+                "formula",
+                "image",
+                "figure",
+                "figure_caption",
+                "figure_title",
+                "table",
+                "table_caption",
+            }
+        context_types = {
+            self._normalize_structure_type(item)
+            for item in getattr(self, "_structure_context_types", set())
+            if self._normalize_structure_type(item)
+        }
+        if not context_types:
+            context_types = {"text", "code"}
+        candidate_types = set(target_types) | set(context_types)
+
+        grouped_bboxes: Dict[str, List[Tuple[int, int, int, int]]] = {}
+        all_recognized_bboxes: List[Tuple[int, int, int, int]] = []
+        for block in blocks:
+            block_type = self._normalize_structure_type(block.get("type"))
+            bbox = block.get("bbox")
+            if not isinstance(bbox, tuple):
+                continue
+            if block_type:
+                all_recognized_bboxes.append(bbox)
+            if block_type not in candidate_types:
+                continue
+            grouped_bboxes.setdefault(block_type, []).append(bbox)
+
+        if not grouped_bboxes:
+            return []
+
+        overlap_threshold = float(
+            getattr(self, "_structure_bbox_overlap_merge_threshold", 0.9) or 0.9
+        )
+        for type_name, type_bboxes in list(grouped_bboxes.items()):
+            grouped_bboxes[type_name] = self._merge_bboxes_by_overlap(
+                type_bboxes,
+                image_w=image_w,
+                image_h=image_h,
+                overlap_threshold=overlap_threshold,
+            )
+
+        figure_types = {"figure", "figure_caption", "figure_title"}
+        table_types = {"table", "table_caption"}
+
+        crop_plan: List[Tuple[str, Tuple[int, int, int, int]]] = []
+        figure_boxes: List[Tuple[int, int, int, int]] = []
+        for type_name in figure_types:
+            figure_boxes.extend(grouped_bboxes.get(type_name, []))
+        figure_bbox = self._union_bboxes(figure_boxes, image_w=image_w, image_h=image_h)
+        if figure_bbox:
+            crop_plan.append(("figure_bundle", figure_bbox))
+
+        table_boxes: List[Tuple[int, int, int, int]] = []
+        for type_name in table_types:
+            table_boxes.extend(grouped_bboxes.get(type_name, []))
+        table_bbox = self._union_bboxes(table_boxes, image_w=image_w, image_h=image_h)
+        if table_bbox:
+            crop_plan.append(("table_bundle", table_bbox))
+
+        for type_name in ("algorithm", "formula", "image"):
+            for bbox in grouped_bboxes.get(type_name, []):
+                crop_plan.append((type_name, bbox))
+
+        if not crop_plan:
+            return []
+
+        context_bboxes: List[Tuple[int, int, int, int]] = []
+        for context_type in context_types:
+            context_bboxes.extend(grouped_bboxes.get(context_type, []))
+        if context_bboxes:
+            nearby_px = int(getattr(self, "_structure_context_nearby_px", 18) or 0)
+            crop_plan = [
+                (
+                    group_type,
+                    self._expand_bbox_with_context(
+                        seed_bbox=bbox,
+                        context_bboxes=context_bboxes,
+                        nearby_px=nearby_px,
+                        image_w=image_w,
+                        image_h=image_h,
+                    ),
+                )
+                for group_type, bbox in crop_plan
+            ]
+
+        pre_merge_count = len(crop_plan)
+        crop_plan = self._merge_crop_plan_by_overlap(
+            crop_plan=crop_plan,
+            image_w=image_w,
+            image_h=image_h,
+            overlap_threshold=overlap_threshold,
+        )
+        if len(crop_plan) < pre_merge_count:
+            logger.info(
+                "Structure preprocess merged %d overlapping crop(s) into bundle/primary crop: source=%s",
+                pre_merge_count - len(crop_plan),
+                source_id or Path(image_path).name,
+            )
+
+        skip_split_threshold = float(
+            getattr(self, "_structure_skip_split_bbox_coverage_threshold", 0.0) or 0.0
+        )
+        if skip_split_threshold > 0.0:
+            planned_bboxes = [bbox for _, bbox in crop_plan]
+            required_type_bbox_area_sum = sum(
+                self._bbox_area(item_bbox) for item_bbox in planned_bboxes
+            )
+            recognized_enclosing_bbox = self._union_bboxes(
+                all_recognized_bboxes,
+                image_w=image_w,
+                image_h=image_h,
+            )
+            if recognized_enclosing_bbox is not None:
+                denominator_area = max(1, self._bbox_area(recognized_enclosing_bbox))
+            else:
+                denominator_area = max(1, int(image_w) * int(image_h))
+            coverage_ratio = float(required_type_bbox_area_sum) / float(denominator_area)
+            if coverage_ratio >= skip_split_threshold:
+                logger.info(
+                    "Structure preprocess fallback to raw screenshot: required_area_sum=%d, recognized_enclosing_area=%d, coverage=%.4f >= threshold=%.4f, source=%s",
+                    int(required_type_bbox_area_sum),
+                    int(denominator_area),
+                    coverage_ratio,
+                    skip_split_threshold,
+                    source_id or Path(image_path).name,
+                )
+                return None
+
+        margin = int(getattr(self, "_structure_crop_margin_px", 4) or 0)
+        src_path = Path(image_path)
+        output_items: List[Dict[str, Any]] = []
+        for index, (group_type, bbox) in enumerate(crop_plan, start=1):
+            x1, y1, x2, y2 = bbox
+            x1 = max(0, x1 - margin)
+            y1 = max(0, y1 - margin)
+            x2 = min(image_w, x2 + margin)
+            y2 = min(image_h, y2 + margin)
+            if x2 <= x1 or y2 <= y1:
+                continue
+            crop_img = image[y1:y2, x1:x2]
+            if crop_img is None or crop_img.size == 0:
+                continue
+
+            crop_name = (
+                f"{src_path.stem}__ppstructure_{group_type}_{index:02d}_{uuid.uuid4().hex[:8]}.png"
+            )
+            crop_path = src_path.parent / crop_name
+            try:
+                ok = cv2.imwrite(str(crop_path), crop_img)
+            except Exception:
+                ok = False
+            if not ok:
+                continue
+            output_items.append(
+                {
+                    "image_path": str(crop_path),
+                    "group_type": group_type,
+                    "source_id": source_id,
+                    "timestamp_sec": float(timestamp_sec) if timestamp_sec is not None else None,
+                    "parent_image_path": image_path,
+                    "parent_key": str(src_path.resolve()),
+                    "is_structured_crop": True,
+                    "crop_index": index,
+                    "bbox_xyxy": [int(x1), int(y1), int(x2), int(y2)],
+                    "bbox_normalized_xyxy": [
+                        float(x1) / float(max(1, image_w)),
+                        float(y1) / float(max(1, image_h)),
+                        float(x2) / float(max(1, image_w)),
+                        float(y2) / float(max(1, image_h)),
+                    ],
+                    "parent_image_size": [int(image_w), int(image_h)],
+                }
+            )
+        return output_items
+
+    def _compute_exact_image_signature(self, image_path: str) -> Optional[str]:
+        """Docstring omitted."""
+        if not image_path:
+            return None
+        try:
+            image = cv2.imread(image_path, cv2.IMREAD_UNCHANGED)
+            if image is None:
+                return None
+            hasher = hashlib.sha256()
+            hasher.update(str(image.shape).encode("utf-8"))
+            hasher.update(str(image.dtype).encode("utf-8"))
+            hasher.update(image.tobytes())
+            return hasher.hexdigest()
+        except Exception:
+            return None
+
+    def dedupe_structured_candidates_keep_latest(
+        self,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        # 闂傚倷娴囧畷鐢稿窗閹邦喖鍨濋幖娣灪濞呯姵淇婇妶鍛櫣缂佺姳鍗抽弻娑樷槈濮楀牊鏁惧┑鐐叉噽婵炩偓闁哄矉绲借灒闁稿繐鍚嬪В鍕繆閻愰娼愬┑鐐诧躬瀵鍨鹃幇浣告倯闁硅偐琛ラ埀顒冨皺閸戣绻濋悽闈涗粶闁绘鍋熺槐鐐寸瑹閳ь剙顕ｆ繝姘╅柕澶堝灪椤秴鈹戦悙鍙夘棡閻㈩垱甯¤棢婵犻潧顑嗛埛鎴︽煙閼测晛浠滃┑陇鍋愮槐鎾愁吋閸滃啫浼愬銈庡亜缁绘垹绮嬮幒鏂哄亾閿濆簶鍋撻濠傛处閻撴洟鎮橀悙浣冩婵炲牊鏌ㄩ湁婵犲﹤鎳庢禍鍓х磼缂佹绠栫紒缁樼箞瀹曟帒顫濋鐕佸敼闂傚倷鑳堕…鍫ユ晝閿曞倸鏋佸┑鐘宠壘閽冪喐绻涢幋娆忕仼缂佺媴缍侀弻銊モ攽閸℃﹫绱炴繛瀵稿Л閺呮稖鐏冮梺缁橈耿濞佳勭濠婂嫮绠鹃悹鍥囧喚娲紓渚囧枟閻燂箑顕ラ崟顖氱疀妞ゆ帊绶″Λ鐔兼⒑閼姐倕校濞存粈绮欏畷婵嗩吋閸涱亝鐏佸銈嗘磵閸嬫挻鎱ㄦ繝鍛仩缂侇喗鐟ч幑鍕Ω瑜忛弶浠嬫⒒娴ｅ憡鍟為柡灞诲姂椤㈡牠宕堕埡浣哥亰闂佸啿鎼幊搴ｇ不缂佹ǜ浜滈柡鍐ㄦ处椤ュ绻涢崼鐔虹煂缂佽鲸鎸荤粭鐔煎炊瑜庨悘鍫ユ⒑閸涘鎴犲垝閹惧磭鏆﹂柟杈剧畱缁犲鏌￠崒妯哄姕闁哄倵鍋撻梻鍌欑婢瑰﹪宕戦崱娑樼獥闁规崘顕уЧ鏌ユ煟濡偐甯涢柣鎾跺枛閺岋絽螣閸濆嫬绗梺鐓庡娴滎亪寮诲☉銏犳闁秆勵殔瀵即鎮楃憴鍕闁圭⒈鍋夐悘鍐⒑閸涘﹣绶遍柛姗€绠栭、姗€宕崟鍨瘜闂侀潧鐗嗛幊鎰不娴煎瓨鍊垫慨妯煎帶楠炴绱掗纰卞剶鐎规洖銈告俊鐑芥晜鐟欏嫬顏归梻鍌欑濠€杈╁垝椤栨粍鏆滈柣鎰皺閹姐儱鈹戦敍鍕杭闁稿ě鍥ㄢ挃闁告洦鍨遍崑鍌炴煃閵夈儳锛嶉柡鍡畵閺屾盯顢曢敐鍡欘槬缂備胶濮撮…鐑藉蓟濞戞ǚ妲堥柛妤冨仧娴狀垰顪冮妶蹇氬悅闁哄懐濮撮～蹇撁洪鍕獩婵犵數濮撮幊搴ㄋ夊┑瀣拺闁告繂瀚晶閬嶆煕閹惧鎳囬柍銉︽瀹曟﹢顢欓懖鈺嬬床闂備胶绮崝妯间焊濞嗘拲鍥敃閿旇В鎷虹紓鍌欑劍閿曗晠鎮為悾宀€纾兼い鏇炴噹閻忥箓鏌熼鐐毈闁诡喓鍨藉畷妤呮偂鎼存ê浜鹃柣銏犳啞閻撶喖鏌曡箛鏇炐ュù鐘崇洴閺屾盯濡堕崒姘缂傚倸鍊搁崐鐑芥⒔瀹ュ绀夌€广儱顦伴崑鍌炴煃閵夛箑澧柛銈嗘礃閵囧嫰骞掗幋婵愪患闂佺粯鍔曢敃顏堝蓟閵娾晛绫嶉柛灞剧矋閹叉﹢姊虹粙娆惧剭闁告梹鍨甸～蹇撁洪鍕唶闁硅壈鎻徊鍝勎ｉ崼婵愭富闁靛牆绻愰惁婊堟煕濞嗗繐鏆ｇ€规洘妞介崺鈧?
+        if not candidates:
+            return []
+
+        indexed = list(enumerate(candidates))
+
+        def _sort_key(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, float, int]:
+            idx, payload = item
+            ts = payload.get("timestamp_sec")
+            try:
+                if ts is None:
+                    return (0, float(idx), idx)
+                return (1, float(ts), idx)
+            except Exception:
+                return (0, float(idx), idx)
+
+        ordered = [payload for _, payload in sorted(indexed, key=_sort_key)]
+        kept: List[Dict[str, Any]] = []
+        accepted_signatures: List[Tuple[str, str]] = []
+        duplicate_count = 0
+        deleted_count = 0
+
+        for payload in ordered:
+            if not bool(payload.get("is_structured_crop", False)):
+                kept.append(payload)
+                continue
+
+            image_path = str(payload.get("image_path", "") or "")
+            parent_key = str(payload.get("parent_key", "") or "")
+            current_signature = self._compute_exact_image_signature(image_path)
+            if not current_signature:
+                kept.append(payload)
+                continue
+
+            is_duplicate = False
+            for accepted_signature, accepted_parent_key in accepted_signatures:
+                if not accepted_signature:
+                    continue
+                if accepted_parent_key == parent_key:
+                    continue
+                if current_signature == accepted_signature:
+                    is_duplicate = True
+                    duplicate_count += 1
+                    break
+
+            if is_duplicate:
+                try:
+                    if os.path.exists(image_path):
+                        os.remove(image_path)
+                        deleted_count += 1
+                except Exception as delete_error:
+                    logger.warning(
+                        "Structured screenshot dedupe failed to delete duplicate file: path=%s, err=%s",
+                        image_path,
+                        delete_error,
+                    )
+                continue
+
+            kept.append(payload)
+            accepted_signatures.append((current_signature, parent_key))
+        if duplicate_count > 0:
+            logger.info(
+                "Structured screenshot dedupe removed %d candidate(s), deleted=%d, kept=%d",
+                duplicate_count,
+                deleted_count,
+                len(kept),
+            )
+        return kept
+
     def _build_cache_signature(self, vision_config) -> str:
-        """
-        执行逻辑：
-        1) 抽取关键配置字段形成稳定字典。
-        2) 计算 SHA256 签名用于缓存隔离。
-        实现方式：json.dumps + hashlib.sha256。
-        核心价值：让缓存与模型/阈值绑定，避免跨配置污染。
-        输入参数：
-        - vision_config: VisionAIConfig 或同结构对象。
-        输出参数：
-        - 配置签名字符串（sha256 十六进制）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊搁崐宄懊归崶顒婄稏濠㈣埖鍔曠壕鍧楁煟閹惧啿顔傛繛鎴欏灩缁€瀣亜閺冨洦銆冩慨瑙勵殜濮婃椽骞栭悙鎻掑Ф闂佸憡鎸婚悷褏鍒掗崼銉ョ＜闁绘劕顕崢鐢告⒑鐠団€崇仭婵犮垺顭堥。鍧楁⒒娴ｅ憡鎯堟俊顐ｇ懇閹嫰顢涘鍏肩稁濠电偛妯婃禍婊呯棯瑜旈幃褰掑箒閹烘垵顥庨梺闈涚墕椤︿即鎮￠悢鍏肩厪闁割偅绻冮崳鐑樸亜閵壯冣枅闁哄苯绉烽¨渚€鏌涢幘瀛樼殤缂侇喗鐟╅獮鎺戭渻鐏忔牕浜鹃柛鎰靛枛楠炪垺绻涢幋锝夊摵闁哄應鏅犻幃妤呭礂婢跺﹣澹曢梻浣告啞閸斞呯磽濮橆儷褍螖閸涱喒鎷洪梻鍌氱墛缁嬫挾绮诲鑸电厓鐟滄粓宕滃▎鎴濐棜妞ゆ挾鍠撻々鏌ユ煥濠靛棙宸濈痪鎹愭闇夐柨婵嗘噹椤ュ繘鏌涙惔锛勭闁哄本鐩幃銏ゆ煥鐎ｎ亙娣梻浣筋嚃閸ｏ絿绮婚弽褏鏆︽繝濠傛－濡茬兘姊虹粙娆惧剱闁瑰憡鎮傞崺銉﹀緞婵炵偓鐎诲┑鈽嗗灥瀹曠敻寮抽妷鈺傗拻濞达絽鎲￠崯鐐烘煕閳轰礁鏆ｇ€规洘鍨块獮妯肩磼濡攱瀚?
+        # 2) 闂傚倸鍊峰ù鍥х暦閸偅鍙忕€规洖娲﹂浠嬫煏閸繃澶勬い顐ｆ礋閺岋繝宕堕妷銉т痪闂?SHA256 缂傚倸鍊搁崐鎼佸磹閻戣姤鍊块柨鏂垮⒔閻瑩鏌熼悜姗嗘當缁炬儳娼￠弻鐔煎箚閻楀牜妫勭紓浣哄У閻楃娀寮婚敓鐘茬倞闁靛鍎虫禒楣冩⒑缁嬫鍎嶉柛鏃€鍨垮濠氬即閻旇櫣顔曢梺鍓茬厛閸犳帡宕戦幘婢勬棃宕ㄩ鍏肩杽闂備礁鎲￠幐鍡涘川椤栥倗闂梻鍌欒兌椤牓寮甸鍌滅煓闁圭儤鏌ч悞濠冦亜閹惧崬鐏柣鎾跺枛楠炴帡骞庨挊澶岊槷闂佺懓鐡ㄧ换宥咁焽閺嶎灛鏃堟晲閸涱厽娈紓渚囧亜缁夊綊寮诲☉姘勃閻犲洦绁撮崑鎾澄旈崨顓犲姦濡炪倖甯婇懗鍫曞矗閳ь剟姊?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓浣肝旈崥钘夋搐椤﹪寮?dumps + hashlib.sha256闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堟偂閻斿吋鐓熸俊顖濇硶缁ㄦ寧銇勯弬娆炬█闁哄矉绻濆畷銊╊敊閸撗呮毉婵犵鈧啿绾ч柛鏃€鐟╁顐﹀磼閻愬鍙嗗銈嗙墬閻喗绔熼弴鐐╂斀闁绘劖娼欓悘锔姐亜韫囷絼閭柟铏墵閸╋繝宕橀鍡樻闂備浇顕х换鎺楀磻閻樺磭绠鹃柛銉墯閸嬪嫰鏌ｉ幘铏崳濞寸厧顑夐幃妤冩喆閸曨剛顦ュ┑鐐跺皺婵炩偓鐎?闂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸閻ゎ喗銇勯幇鍫曟闁稿顑夐弻娑㈠焺閸愵亖妲堥梺缁樺笒閻忔岸濡甸崟顖氱闁瑰瓨绻冨▓顓熺箾鐎涙鐭婃繝鈧潏鈺傤潟闁圭儤顨忛弫瀣煕閳╁喚娈㈡繛宸弮濮婃椽鏌呴悙鑼跺濠⒀冨级閵囧嫰顢曢姀鈺傗枅闂佽鍠撻崹浠嬨€佸Δ鍛＜婵炴垼椴哥紞妤佺節閻㈤潧鈻堟繛浣冲浂鏁勯柛鈩冪⊕閸婂灝鈹戦崒姘暈闁绘挻娲橀妵鍕敇閻旈浠撮梺鍝勵儐閻╊垶骞冩禒瀣垫晬婵炴垶菤閺嬫瑩姊虹拠鈥虫灈缂傚秴锕悰顔界瑹閳ь剟鐛幒妤€绠ｆ繝鍨姈缂嶅棝姊婚崒娆戭槮闁圭寽銈呯稑闂備胶顭堥敃銉┿€冮崼婢綁骞囬弶璺ㄧ潉闂佸壊鍋掗崑鍛村疾閳哄懏鈷戠紒瀣皡閸旂喖鏌涢悩鍐插妞ゎ厼娼″浠嬵敇閻斿弶瀚奸梻浣告啞缁诲倻鈧凹鍘奸敃銏″鐎涙鍘电紓浣割儓濞夋洟宕洪敐澶嬬厱闁宠鍎虫禍?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - vision_config: VisionAIConfig 闂傚倸鍊搁崐鐑芥嚄閸洖绠犻柟鍓х帛閸嬨倝鏌曟繛鐐珕闁稿顑夐弻锟犲炊閵夈儳浠肩紓浣哄У閻楃娀寮婚悢鐓庣畾鐟滃秹銆傚畷鍥╂／闁诡垎浣镐划闂佸搫鐬奸崰鏍嵁閸℃凹妾ㄩ梺鎼炲€楅崰鏍蓟瀹ュ牜妾ㄩ梺鍛婃惈缁犳挸鐣疯ぐ鎺戠闁芥ê顦遍崝锕€顪冮妶鍡楃瑨闁稿﹤缍婂鎶藉煛閸屾ü绨婚梺闈涚箳婵挳鐓鍕厵缂佸瀵ч崵鍥┾偓瑙勬礈閸犳牠銆佸☉妯?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐鎼佸磹閻戣姤鍊块柨鏇楀亾妞ゎ厼鐏濊灒闁兼祴鏅濋悡瀣⒑閸撴彃浜濇繛鍙夛耿瀹曟垿顢旈崼鐔哄幈闂佹枼鏅涢崯浼村箠閸涱収娓婚悷娆忓閳绘洟鏌″畝鈧崰鏍€佸☉銏犲耿婵°倐鍋撴い蹇婃櫊閺屽秷顧侀柛鎾寸缁绘稒绻濋崶褏鐣哄┑掳鍊愰崑鎾绘煃閽樺妲搁柍璇查铻ｉ柤濮愬€栧В澶娾攽閿涘嫬浜奸柛濠冪墵瀹曞綊骞庨懞銉モ偓鍧楁煥閺傚灝鈷旈柣顓熺懃椤法鎹勯悜妯绘嫳闁诲孩纰嶅銊╁箟濮濆瞼鐤€闁哄洨濮烽悞濂告⒑閸涘﹥灏柡鈧—?56 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鍙傦箓鏌ｉ幇顔芥毄闁活厼妫楅妴鎺戭潩閿濆懍澹曢柣搴ゎ潐濞测晝寰婃禒瀣剁稏婵犻潧顑愰弫鍥煟閺冨洤鐓愰柛鐐差槹缁绘繈鎮介棃娑楁勃闂佹悶鍔岄悥濂稿极鐎ｎ喗鈷戠紓浣股戠亸浼存煕閵娿儲鍋ョ€殿喖顭锋俊鎼佸Ψ閵忊槅娼旀繝娈垮枟椤ㄥ懎螞濞嗘帒鈧挳姊?""
         try:
             payload = {
                 "model": getattr(vision_config, "model", ""),
                 "temperature": getattr(vision_config, "temperature", 0.0),
+                "vision_mode": "description_only_v1",
                 "duplicate_detection": getattr(vision_config, "duplicate_detection_enabled", True),
-                "similarity_threshold": getattr(vision_config, "similarity_threshold", 0.95)
+                "similarity_threshold": getattr(vision_config, "similarity_threshold", 0.95),
+                "person_subject_filter_enabled": getattr(vision_config, "person_subject_filter_enabled", True),
+                "person_mask_area_threshold": getattr(vision_config, "person_mask_area_threshold", 0.3),
+                "person_mask_binary_threshold": getattr(vision_config, "person_mask_binary_threshold", 0.5),
+                "person_mask_high_conf_threshold": getattr(vision_config, "person_mask_high_conf_threshold", 0.8),
+                "person_mask_high_conf_min_area": getattr(vision_config, "person_mask_high_conf_min_area", 0.08),
+                "person_prefilter_force_include_patterns": getattr(
+                    vision_config, "person_prefilter_force_include_patterns", []
+                ),
+                "person_model_selection": getattr(vision_config, "person_model_selection", 1),
             }
             raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
             return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -271,23 +1184,23 @@ class ConcreteKnowledgeValidator:
             return ""
 
     def _load_persistent_cache(self):
-        """
-        执行逻辑：
-        1) 读取本地持久化缓存文件。
-        2) 校验签名一致后加载到 hash_cache。
-        实现方式：JSON 解析 + HashCacheManager.load_results。
-        核心价值：跨任务复用 Vision AI 结果，减少重复调用。
-        决策逻辑：
-        - 条件：not self._persistent_cache_path or not self._persistent_cache_path.exists()
-        - 条件：self._cache_signature and meta.get('signature') != self._cache_signature
-        - 条件：self._hash_cache and items
-        依据来源（证据链）：
-        - 缓存文件：meta.signature。
-        - 内部状态：self._cache_signature、self._hash_cache、self._persistent_cache_path。
-        输入参数：
-        - 无。
-        输出参数：
-        - 无（仅更新内部缓存）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊峰ù鍥х暦閸偅鍙忛柡澶嬪殮濞差亜鐓涢柛婊€鐒﹂弲顏堟偡濠婂嫬鐏村┑锛勬暬楠炲洭寮剁捄銊モ偓鐐差渻閵堝棗鍧婇柛瀣崌閹顫濋澶嬓ч梺闈涙搐鐎氫即鐛幒妤€骞㈡俊鐐村劤椤ユ艾鈹戦悩鍨毄濠殿噮鍙冨畷鎴﹀箻缂佹鍘电紓鍌欓檷閸ㄥ綊寮稿☉姘辩＜闁绘娅曠欢鏌ユ婢舵劖鐓ユ繝闈涙－濡牊淇婇锝呯伌闁哄矉缍侀弫鎰板礋椤撶姷鍘梻浣告惈閺堫剟鎯勯姘煎殨濞寸姴顑呮儫閻熸粌绉归崺娑㈠醇閵忋垻锛濇繛杈剧悼閹虫捇寮幆褉鏀介柍銉ㄦ珪閸犳﹢鏌涢埞鎯т壕婵＄偑鍊栫敮濠囨嚄閸洖鐓€闁哄洢鍨虹€氬懘姊洪鈧粔鐢告偂濞戙垺鍊甸柨婵嗙凹缁ㄥ鏌￠崱娆忎户缂佽鲸甯″畷鎺戔槈濡槒鐧侀梻浣虹帛閹尖晠宕滃▎鎾寸畳闂佽鍑界紞鍡樼濞嗘劗鐝?
+        # 2) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厯闂佸憡娲﹂崢钘夌暦閸欏绡€闂傚牊渚楅崕鎰版煕鐎ｎ倖鎴犳崲濞戙垹骞㈡俊顖濇娴犲吋淇婇悙棰濇綈濠电偛锕濠氭偄绾拌鲸鏅梺绯曞墲椤ㄥ懘顢旈埡鍛厓鐟滄粓宕滃▎鎾崇柈闁秆勵殔閻撯€愁熆閼搁潧濮囩紒鐘电帛閵囧嫰寮介妸褏鍙濇繝銏ｎ潐濞茬喎顫忕紒妯诲闁硅偐鍋涙禒顕€姊虹悰鈥充壕闂佸憡顨堥崕鎰版倿閼恒儳绠鹃柛鈩兩戠亸顓犵磼閻樺磭澧ǎ鍥э躬婵″爼宕ㄩ鍏碱仩缂傚倷璁查崑鎾愁熆閼搁潧濮堥柣鎾跺枑娣囧﹪顢涘鍐ㄤ粯闂佸憡鏌ㄩ鍥╂閹烘挻濯寸€瑰嫭婢樼粊顕€姊?hash_cache闂?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓渚€寮介‖顒佹⒒瀵板﹪宕?闂傚倸鍊峰ù鍥х暦閻㈢绐楅柟鎵閸嬶繝寮堕崼姘珔缂佽翰鍊曡灃闁挎繂鎳庨弳鐐烘煕?+ HashCacheManager.load_results闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堟偂閻斿吋鐓熸俊顖氭惈鐢娀鏌ら崜韫偗闁哄本鐩顒€鈻庨幆褍澹庢俊銈囧Х閸嬬偤宕归幐搴㈠弿闁逞屽墴閺屾洟宕煎┑鍥ф濡炪倧瀵岄崳锝咁潖濞差亝鍊烽柦妯侯槸婵洟姊洪崨濠冨鞍闁艰鍎冲畵鍕節閻㈤潧校缁炬澘绉归幃?Vision AI 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸婂潡鏌ㄩ弴鐐测偓鍝ョ不閺夊簱鏀介柣妯虹－椤ｆ煡鏌涙繝鍛【妞ゎ厼娼￠幊婊堟濞戞﹩娼旈梻浣告惈閹峰宕滈悢鐓庣畺婵せ鍋撻柟顔界懇閹虫粌鈻撻幐搴濠电姷鏁搁崑娑㈠箠瀹€鍕９婵犻潧顑呯粻鏍ㄤ繆椤栨繃纭堕柣銈傚亾闂備礁鎼崐钘夆枖閺囩喎顕辩€光偓閸曨兘鎷洪梻鍌氱墐閺呮繈宕氭导瀛樼厵婵炴潙顑傞崑鎾诲箛娴ｅ憡顔傞梻浣告啞濞诧箓宕戦幒妤€瑙﹂悗锝庡枟閻撴洘銇勯幇顔夹㈤柣蹇ｄ簼閵囧嫰寮捄銊愌勬叏婵犲倹鎯堥悡銈囩磽娴ｅ顏堝煝韫囨稒鈷戦柛娑橈攻閻撱儵鏌ㄩ弴銊ら偗鐎规洘妞介崺鈧?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞锝団偓?self._persistent_cache_path or not self._persistent_cache_path.exists()
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝鍫曞礆閻?_cache_signature and meta.get('signature') != self._cache_signature
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝鍫曞礆閻?_hash_cache and items
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸绾惧湱鎲搁悧鍫濈瑨缂佺姳鍗抽弻鐔兼⒒鐎电濡介梺绋款儍閸婃繈寮婚弴鐔虹闁绘劦鍓氶悵鏂库攽閳藉棗浜濋柨鏇樺灲瀵鈽夐姀鐘栥劍銇勯弽顐沪妞ゅ骸绉撮—鍐Χ閸℃顫堢紓渚囧枟閻熲晛顕ｆ繝姘╅柕澶堝灪椤秴鈹戦悙鍙夘棡闁挎艾鈹戦敍鍕儓ta.signature闂?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲㈤崹鍦不閻樿櫕鍙忔俊鐐额嚙娴滈箖鎮楃憴鍕婵炶尙鍠栭悰顔碱潨閳ь剟銆佸▎鎾村癄濠㈣泛顦伴惈蹇涙⒒閸屾瑨鍏岄柛妯犲洤绠烘繝濠傜墑閳ь剙鍊圭粋鎺斺偓锝庝簽閿涙盯姊虹憴鍕姢妞ゆ洦鍙冮幃鐑芥偡閹佃櫕鏂€闂佺粯蓱瑜板啴顢旈锔界厽婵炴垼椴搁鐖€lf._cache_signature闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟犻崑鎾垛偓鍨緲鐎氫即骞冮悙鍝勭疅闁逞呮儗._hash_cache闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟犻崑鎾垛偓鍨緲鐎氫即骞冮悙鍝勭疅闁逞呮儗._persistent_cache_path闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌ｅΔ鈧悧濠囧矗韫囨拋褰掑礂閸忚偐绋囬梺?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌ｅΔ鈧悧鍡涘垂閺冨牊鍊甸梻鍫熺⊕閸熺偞銇勯锝嗙缂佺粯鐩畷鍗炍熼崫鍕垫綍婵＄偑鍊愰弲婵嬪礂濮椻偓瀵鈽夊Ο閿嬵潔闂佸憡顨堥崑鐐烘倶瀹ュ洨纾藉ù锝夌細濡炬悂鏌涢妸銉у煟鐎殿喖顭烽弫鎾绘偐閼碱剨绱叉繝鐢靛仦閸ㄥ爼鎮疯瀹曟瑩鏁撻悩鏂ユ嫼闂佸憡绺块崕杈ㄧ閿曞倹鐓欓柛娑橈工閳绘洜鈧鍠栭…宄扮暦婵傜唯闁靛绨堕弲婵嬪箟濮濆瞼鐤€闁哄倽娉曠粣鐐烘⒑閸涘﹥澶勯柛銊╀憾瀹曟劙宕归銈囶啎闂佺懓顕崑鐔煎箠閺囥垺鐓曢煫鍥风到婢ф壆绱掓潏銊ョ瑲婵炵厧绻樻俊鎼佸Ψ閵夛附鍤堟繝?""
         if not self._persistent_cache_path or not self._persistent_cache_path.exists():
             return
         try:
@@ -305,20 +1218,20 @@ class ConcreteKnowledgeValidator:
             logger.warning(f"Failed to load persistent cache: {e}")
 
     def _save_persistent_cache(self):
-        """
-        执行逻辑：
-        1) 从 hash_cache 导出结果。
-        2) 写入本地 JSON 文件并附加签名与更新时间。
-        实现方式：JSON 序列化 + 文件系统写入。
-        核心价值：让缓存可跨进程/跨任务复用。
-        决策逻辑：
-        - 条件：not self._persistent_cache_path or not self._hash_cache
-        依据来源（证据链）：
-        - 对象内部状态：self._hash_cache, self._persistent_cache_path。
-        输入参数：
-        - 无。
-        输出参数：
-        - 无（仅更新本地缓存文件）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 婵?hash_cache 闂傚倸鍊峰ù鍥敋瑜嶉湁闁绘垼妫勯弸渚€鏌熼梻瀵割槮闁稿被鍔庨幉鎼佸棘鐠恒劍娈鹃梺姹囧灩婢瑰﹪寮崶顒佺厽婵☆垰鍚嬮弳鈺呮煥濞戞瑧鐭掓慨濠呮閹叉挳宕熼銏犘戞俊鐐€栧ú锕傚储閻ｅ瞼鐭夌€广儱顦介弫宥夋煟閹邦剦鍤熼柛?
+        # 2) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫绋侀崢浠嬪磻閿熺姵鐓忓璺烘濞呭懘鏌ｉ鐕佹疁闁哄本鐩崺鍕礃椤忎焦顫嶉梺璇插閼归箖藝娴兼潙桅闁告洦鍨扮粻鎶芥煕閳╁啨浠﹀瑙勬礃缁绘繈鎮介棃娴舵盯鏌?JSON 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺绋匡攻椤ㄥ懘鎮鹃崹顐ょ懝闁逞屽墴瀵鈽夐姀鈺傛櫇闂佹寧绻傚Λ娑⑺囬妸銉富闁靛牆鎳橀妤冪磼婢跺﹦绉虹€殿喛顕ч埥澶愬閻樼數娼夐梻浣侯焾閺堫剟顢氶幘顔嘉ㄩ柨鏃囨〃缁ㄥ姊洪崷顓炲妺闁哄被鍔戝畷銏⑩偓鐢电《閸嬫挾鎲撮崟顒傦紭闂佺閰ｆ禍鍫曘€佸Ο鑽ら檮缂佸娉曢ˇ鏉款渻閵堝棙灏靛┑顔炬暬瀹曟澘鈽夐姀鈾€鎷绘繛杈剧到閹诧繝骞嗛崼鐔虹閻忕偛鍊搁埀顒佺箞楠炲啫煤椤忓嫀鈺呮煃鏉炵増绁伴柟鑺ユ礃缁绘繈鎮介棃娴躲垺绻涚仦鍌氣偓妤呮偖閹屽悑濠㈣泛顑囬崢鍗烆渻閵堝棗濮х紒鎻掑⒔缁牓宕橀鐣屽弳濠电偞鍨堕懝楣冨几濞戙垺鐓?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓渚€寮介‖顒佹⒒瀵板﹪宕?闂傚倸鍊烽懗鍫曞箠閹捐瑙﹂悗锝庝憾閻掕姤绻涢崱妯虹仸鐎规洘鐓￠弻鐔兼偋閸喓鍑￠梺鎼炲妼閸婂綊濡甸崟顔剧杸闁规崘娉涢。铏圭磽娴ｆ彃浜?+ 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼濠€閬嶅焵椤掆偓閻忔岸鎮￠敓鐘茶摕闁靛牆妫欓崣蹇涙煙闁箑鍘撮柛瀣尭铻栭柛娑卞幗濡差剟姊虹紒姗嗙劷缂侇噮鍨堕幃锟犲即閵忥紕鍘甸梻渚囧弿缁犳垿鐛鈧弻鐔煎礃閹绘帗娈婚梺鍝勬湰缁嬫垿鍩㈡惔銈囩杸闁哄啯鍨堕敍鍡椻攽?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堟偂閻斿吋鐓熸俊顖濇硶缁ㄦ寧銇勯弬娆炬█闁哄矉绻濆畷銊╊敊閸撗呮毉婵犵鈧啿绾ч柛鏃€鐟╁顐﹀磼閻愬鍙嗗銈嗙墬閻喗绔熼弴鐐╂斀闁绘劖娼欓悘锔姐亜韫囷絼閭い銏℃瀹曞爼濡烽妶鍡欐綎闂傚倷娴囬崑鎰板煕閸儱绀堟慨姗嗗墰閺嗭箑顭块懜闈涘闁绘挸绻愰埞鎴︽倷閼碱兛铏庢繝寰枫倖纭剁紒杈ㄥ浮閹晠宕崟顐ｅ劒缂?闂傚倸鍊峰ù鍥х暦閸偅鍙忛柛顭戝亞椤╂彃霉閻樺樊鍎忕紒鈧径鎰€甸柨婵嗛閺嬫稓绱掗悩宕囧弨闁哄本娲濈粻娑氣偓锝庝簴閸嬫捇寮撮悩鐢电劶婵犮垼鍩栭崝鏍偂閸愵喗鐓忓鑸电〒閻ｅ崬顭胯閸ㄨ鲸绌辨繝鍥х闁圭儤绻勯崥瀣⒑閸濆嫮鐒跨紓宥勭窔閺佹劙鎮欐笟顖涙櫌闂侀€炲苯澧ǎ鍥э躬楠炴牗鎷呴崷顓炲笚?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞锝団偓?self._persistent_cache_path or not self._hash_cache
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊峰ù鍥敋瑜嶉湁闁绘垼妫勯弸渚€鏌熼梻鎾闁逞屽厸閻掞妇鎹㈠┑瀣倞闁靛鍎冲Ο渚€姊绘担鍛婂暈婵炶绠撳畷褰掑箥椤斿墽鐒奸梺鍛婂姦閸犳鎮￠弴鐔虹闁瑰鍋熼幊鍕磽瀹ュ棗鐏撮柡灞剧洴瀵剛鎷犻幓鎺懶曢梻浣告惈閻寰婇崐鐔轰航闂備礁澹婇悡鍫ュ窗濮樿泛鍌ㄦい鎰堕檮閳锋垿姊洪銈呬粶闁兼椿鍨跺畷銏ゅ传閵壯咃紲闂傚鍓氳ぐ鍐焵椤掍緡娈旈崡閬嶆煙閹殿喖顣奸柛搴＄Т閳规垿宕掑鍛唹f._hash_cache, self._persistent_cache_path闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌ｅΔ鈧悧濠囧矗韫囨拋褰掑礂閸忚偐绋囬梺?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌ｅΔ鈧悧鍡涘垂閺冨牊鍊甸梻鍫熺⊕閸熺偞銇勯锝嗙缂佺粯鐩畷鍗炍熼崫鍕垫綍婵＄偑鍊愰弲婵嬪礂濮椻偓瀵鈽夊Ο閿嬵潔闂佸憡顨堥崑鐐烘倶瀹ュ洨纾藉ù锝夌細濡炬悂鏌涢妸銉у煟鐎殿喖顭烽弫鎾绘偐閼碱剨绱叉繝鐢靛Т閿曘倝宕板璺烘辈妞ゆ挾鍋愰弨浠嬫煟濮楀棗浜滃ù婊呭亾缁绘盯寮堕幋婵囧€┑鐐插悑閻熲晠鐛幋锕€閱囬柡鍥╁枔閸橀潧鈹戦悙鑼闁诲繑绻堝鎼佸Χ閸滀胶鍞甸柣鐘叉惈閹碱偊顢旈銏＄厵妞ゆ梻鐡斿▓鏃堟煃閽樺妲搁柍璇茬Ч閹煎綊顢曢姀顫礉闁诲孩顔栭崰妤呭箖閸屾氨鏆︽慨妞诲亾闁糕晪绻濆畷姗€鎮欓鍌樺亽闂傚倷娴囧畷鍨叏瀹曞洨鐭嗗ù锝夋交閼板潡寮堕崼姘珖闁活厼妫濋弻娑㈠焺閸愵亖濮囬梺?""
         if not self._persistent_cache_path or not self._hash_cache:
             return
         try:
@@ -343,61 +1256,66 @@ class ConcreteKnowledgeValidator:
     
     @property
     def enabled(self) -> bool:
-        """
-        执行逻辑：
-        1) 返回当前验证器的启用状态。
-        2) 保持接口一致性（当前实现固定为 True）。
-        实现方式：直接返回固定值。
-        核心价值：为上层提供统一的开关语义。
-        输入参数：
-        - 无。
-        输出参数：
-        - bool：是否启用验证器。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡楃仴鐟滄壆鍋涙晥婵°倕鎳忛埛鎴︽偡濞嗗繐顏╅柛鏂诲€濋弻娑㈡偄闁垮浠撮悹渚灦閺屾稑鈽夐崡鐐茬闂佸搫鍟悧濠囧磻閹扮増鐓犵痪鏉垮船婢т即鏌涢弮鎴濇珝婵﹦鍎ょ€电厧鈻庨幋鐘虫婵＄偑鍊х粻鎾愁焽瑜旈幃楣冩倻閽樺顔呴梺鑺ッ敍澶愬煛閸愨晛鏋戦柟鍏肩暘閸斿秹宕戦埡鍛拺妞ゆ巻鍋撶紒澶屾暬閹繝寮撮悢绋垮伎濠碘槅鍨抽崢褏鏁崼鏇熺厽闊洢鍎崇粔顕€鏌＄仦绋垮⒉闁瑰嘲鎳樺Λ鍐ㄢ槈閹烘垳澹曞┑鐘绘涧椤戝懐绮婚弽顓熺厓闁告繂瀚崳娲煕閵堝拋鍎戦柣銉邯閹囧春椤愵偂绨肩紒鍌氱Ч楠炲棝鈥栭垾宕囩Ш闁轰焦鍔欏畷鍫曟嚋閸偆妲ｉ梻?
+        # 2) 婵犵數濮烽弫鎼佸磿閹寸姴绶ら柦妯侯棦濞差亝鏅滈柣鎰靛墮鎼村﹪姊洪崨濠傚Е濞存粍鐗犲畷鎴﹀箻鐠囨彃鐎銈嗗姧缂嶅棗螞閸愩剮鏃堟偐闂堟稐娌柣銏╁灙閸撴繃绌辨繝鍥ㄥ€婚柦妯猴級閵娾晜鐓忓璇″灠閹冲寮搁弽銊х瘈闁汇垽娼ф禒锕傛煕閵娿儳鍩ｆ鐐村姍楠炴﹢顢欓懖鈺嬬幢闂備胶鎳撴晶鐣屽垝椤栫偞鍋傞柣妯碱暯閸嬫捇鎮烽弶娆句痪婵犮垻鎳撳Λ婵嬬嵁濡ゅ懏鍋愮紓浣诡焽閸樻捇鎮峰鍕煉鐎规洘娲滅划娆忊枎閹勫€梻浣规偠閸庮噣寮查埡浣勶綁鏌嗗鍡欏幗闂佺粯鏌ㄩ幗婊堟儗鐏炵瓔鐔嗙憸搴ㄣ€冩繝鍥╁祦闁圭増婢樺婵嗏攽閻樻彃鏆為柣婵堝厴濮婅櫣绱掑鍡欏姺濡炪倧绲肩划娆忕暦閹达箑绠婚悹鍥у级瀹撳秴顪冮妶鍡樺暗闁稿锕㈤獮瀣暋閹锋梹妫冮幃鈺呮濞戞鎹曟繝鐢靛仜濡﹪宕㈡總鍛婂仼闁绘垼妫勯柋鍥煛閸モ晛浠掔紒鍗炵埣濮婃椽宕ㄦ繝鍐槱闂佸憡顭堝Λ鍕暰闁瑰吋鐣崹鑽ょ不?True闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁幒妤嬬稏婵犻潧顑呮儫闂侀潧顦崯顖氼渻閽樺鏆︾紒瀣嚦閺冨牆鐒垫い鎺戝€绘稉宥夋煙閹澘袚闁绘挸绻愰…璺ㄦ崉閾忕懓顣烘繝寰枫倖纭剁紒杈ㄥ浮閹晛鐣烽崶褍缁╅梻浣告惈閺堫剟鎯勯娑楃箚闁汇値鍨煎Σ缁樼箾鐎电校缂侇喖绉堕幑銏犫槈濮橈絽浜炬繛鎴烆仾椤忓懏鍙忓鑸靛姈閻撳啰鎲稿鍫濈婵犻潧顑戠紞鏍ь熆閼搁潧濮堥柛銈呰嫰铻栭柨婵嗘噹閺嗘瑩鏌ｉ幒鎴犱粵闁靛洤瀚伴獮鎺楀箣濠靛懐鏁栭梻浣侯焾濞撮攱绻涢埀顒勬煛?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顧€婵″洨绮绘ィ鍐╃厵閻庣數顭堟禒锔锯偓瑙勬礀鐎氼厽绌辨繝鍌ゆ富闁绘挸楠搁‖瀣磽娓氬洤娅橀柛娆忓暙閻ｇ兘骞掗幋顓犲弳闂侀€炲苯澧柍璁崇矙椤㈡棃宕奸悢鍝勫箞闂佽绻掗崑娑欐櫠娴犲鐓″璺虹灱绾惧ジ鏌ょ喊鍗炲闁搞倐鍋撻梻渚€娼уΛ娆戞暜閹烘缍栨繝闈涱儛閺佸洭鏌ｅ鍡楁灀闁稿鎹囬獮鎺楀籍閸屾粣绱叉俊鐐€栧褰掑磿閹惰棄绀夐悗锝庡墰绾惧ジ鎮楅敐搴濇喚婵☆垪鍋撻梻浣虹《閺備線宕戦幘鎰佹富闁靛牆妫楃粭鎺楁倵濮樼厧寮€规洘娲栭鍏煎緞鐎ｎ剙骞堥梻浣告惈濞层垽宕濈仦鍓ь洸闁绘劗鏁稿Λ顖炴煙椤栧棗鐬奸崥瀣⒑閸濆嫭婀扮紒瀣墱缁鈽夐姀鐘殿啋闂佺厧鎽滈弫鎼佸焵椤掑鏋涙い顏勫暣婵″爼宕卞Ο纭风喘闂備焦鎮堕崝蹇撯枍閿濆洤鍨濇繛鍡樺姉缁♀偓闂佸憡鍔戦崝搴ｇ玻閻愮儤鈷戦柛鎾村絻娴滄繈鏌ら崷顓炰壕缂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌ｅΔ鈧悧濠囧矗韫囨拋褰掑礂閸忚偐绋囬梺?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - bool闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熼悜妯荤叆闁哄鐗忛埀顒€绠嶉崕閬嶅箟濮椻偓閺佹劖寰勬繝鍕靛晣濠电偠鎻徊楣冩偤閺団槅鏉洪梻鍌氬€烽悞锔锯偓绗涘厾鍝勵吋婢跺﹦锛涢梺鐟板⒔缁垶鎮″▎鎰╀簻闁哄秲鍔岄崫娲煕濞嗗繐顏柡宀€鍠栭、娆撴嚒閵堝洨鍘┑鐘殿暯閸撴繈骞冮崒鐐叉槬闁跨喓濮寸粈鍐煏婵炑冩噹楠炩偓闂傚倸鍊峰ù鍥х暦閸偅鍙忛柡澶嬪殮濞差亝鏅查柛銉㈡櫇閻掑吋绻涙潏鍓ф偧缁绢厼鐖煎绋款吋婢跺鍘甸梺缁樺灦閿曗晛鈻撻弮鈧?""
         return True
     
-    def validate(self, image_path: str, ocr_text: str = "") -> ConcreteKnowledgeResult:
-        """
-        执行逻辑：
-        1) 校验图片存在性，缺失则直接返回默认结果。
-        2) 通过 pHash 检测重复帧，命中则复用缓存结果。
-        3) 进行公式检测，命中则直接保留截图。
-        4) 提取图形区域，失败则判为纯文字页并剔除。
-        5) Vision AI 可用时调用 _vision_validate_v3，否则走 CV-only 保守保留。
-        实现方式：HashCacheManager + OCR/文本规则 + OpenCV 图形区域提取 + VisionAIClient。
-        核心价值：减少重复调用并提高具象知识筛选准确度。
-        决策逻辑：
-        - 条件：not os.path.exists(image_path)
-        - 条件：self._hash_cache 命中重复帧
-        - 条件：has_formula
-        - 条件：graphic_region is None
-        - 条件：self._vision_enabled and self._vision_client
-        依据来源（证据链）：
-        - 文件系统状态：image_path 是否存在。
-        - 缓存阈值：self._hash_cache.threshold（相似度阈值）。
-        - OCR/文本：ocr_text 与 _detect_math_formula 结果。
-        - 配置状态：vision_ai.enabled 与 bearer_token 是否生效。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        - ocr_text: 文本内容（类型：str）。
-        输出参数：
-        - ConcreteKnowledgeResult（包含具象判定、置信度、类型、理由与保留建议）。"""
+    def validate(
+        self,
+        image_path: str,
+        ocr_text: str = "",
+        skip_duplicate_check: bool = False,
+    ) -> ConcreteKnowledgeResult:
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厯闂佸憡娲﹂崢钘夌暦閸欏绡€闂傚牊渚楅崕鎰版煕鐎ｎ倖鎴犳崲濞戙垹骞㈡俊顖濐嚙绾板秹姊虹紒妯哄闁挎洦浜璇测槈閵忕姷顔掑┑掳鍊愰崑鎾绘煕閻樺啿鍝虹€殿喗濞婇、妤呭礋椤掑倸骞楅梺鐟板悑閻ｎ亪宕规繝姘厐闁哄洢鍨洪悡銉︽叏濮楀棗骞樼紒鈾€鍋撻梻渚€鈧偛鑻晶瀛樸亜閵忊剝顥堢€规洜鍘ч埞鎴﹀醇閵忊剝顔忛梻浣藉吹閸犳劗鍒掑鍥ㄥ床闁告洦鍊犻敐澶婄疀妞ゆ垼濮ら弬鈧梻浣稿閸嬩線宕规繝姘櫖婵犻潧顑嗛埛鎴︽煕濞戞﹫鍔熺紒鐘虫崌閹顫濋妷銉ヮ瀴缂備礁鍊哥粔鐢电紦娴犲宸濆┑鐘插楠炲牓姊绘担鍛婅础闁稿簺鍊濋獮鎰偅閸愩劎鐤囬梺鍛婁緱閸犳氨绮绘ィ鍐╃厵缂備焦锚缁楁岸鏌涚€ｃ劌鍔滄い銊ｅ劦閹瑩寮堕幋鐐剁檨濠电姷顣槐鏇㈠礂濡绻嗘慨婵嗙焾濡叉儳顪冮妶鍡樼叆妞わ箓娼ч～蹇撁洪鍕啇闂佺粯鍔栬ぐ鍐╂叏閵忋倖鈷戠紒瀣儥閸庡秹鏌涙繝鍐炬疁鐎规洘宀搁獮鎺懳旀繝鍐╂珫婵犵數濮撮敃銈団偓姘煎墴椤㈡挸鈽夐姀鈾€鎷洪梻鍌氱墛缁嬫挻鏅堕弴鐔虹閻忕偛鍊告俊濂告煃缂佹ɑ顥堝┑顔瑰亾闂侀潧鐗嗗Λ娑㈠储閹间焦鐓熼幖鎼灣缁夌敻鏌涚€ｎ亜顏╅柍缁樻崌閹晝绱掑Ο鐓庡笚?
+        # 2) 闂傚倸鍊搁崐鎼佸磹妞嬪孩顐介柨鐔哄Т绾惧鏌涘☉鍗炴灓闁崇懓绉归弻褑绠涘鍏肩秷閻?pHash 濠电姷鏁告慨鐑姐€傞挊澹╋綁宕ㄩ弶鎴狅紱闂侀€炲苯澧撮柡灞剧〒閳ь剨缍嗛崑鍛焊閹殿喚纾肩紓浣诡焽濞插鈧鍠栭悥濂哥嵁鐎ｎ噮鏁囬柣鎰絻椤ユ捇姊婚崒娆戠獢婵炶壈宕靛濠冪鐎ｎ亞鐤呴梺鐐藉劜閸撴岸宕靛Δ鍛厱闁哄洢鍔屾禍浠嬫煕濮橆剦鍎旈柡灞剧☉閳藉宕￠悙瀵镐邯婵＄偑鍊ら崑鍛村箲閸パ屾綎婵炲樊浜滅粻浼村箹鏉堝墽宀涙俊鎻掔墦濮婃椽宕楅崗绗轰户闂佹悶鍔岄悥濂告偘椤旂晫绡€闁搞儜鍛Ф闂備礁鎲￠崝锔界閺嶎厼鍑犻柡宓本瀵岄梺闈涚墕濡瑧浜搁悽鍛婄厱閻庯綆鍋嗗ú鎾煙椤旀枻鑰块柟顔哄灪缁鸿姤寰勭仦鑺ユ毄闂備浇宕垫繛鈧紓鍌涜壘閳诲秹鏁愰崼婵冨亾閹绢喗鈷掑ù锝堝Г閵嗗啴姊婚崟顐ばх€规洘鍔曡灃闁告劏鏅╁鐔兼⒑鐟欏嫬绀冩い鏇嗗懐涓嶉柤濮愬€愰崑鎾舵喆閸曨剛顦ュ┑鐐额嚋缁犳捇鐛径鎰殐闁冲搫鍟伴敍婵嬫⒑缁嬫寧婀伴柣鐔濆洤绀夌€广儱顦伴悡娆戠磼鐎ｎ偒鍎ラ柣鎾炽偢閺岀喖顢欑紓瀛樺灥椤曘儵宕熼姘辩杸濡?
+        # 3) 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌涘櫧闁活厽鐟╅弻鈥愁吋鎼粹€崇闂侀€炲苯鍘哥紒鑸靛哺閻涱喚鈧綆鍠楅弲婵嬫煃瑜滈崜娑氬垝閸儱纾兼繛鎴炵墧缁ㄥ姊洪悷鐗堟儓婵☆偅顨嗙粋宥夊礈瑜忕壕钘壝归敐鍥ㄥ殌妞わ絾濞婇弻宥堫檨闁告挻姘ㄥ▎銏ゆ倷濞村顫嶉梺闈涚箳婵兘宕濋敃鈧—鍐Χ閸℃娼戦梺绋款儐閹瑰洤螞娴ｇ懓绶為柟閭﹀幖閳ь剛鏁婚弻銊モ攽閸℃ê娅ｅ銈忕到绾绢厾妲愰幒妤€鐒垫い鎺嶇缁剁偤鏌熼柇锕€骞橀柛妯哄船閳规垿鎮欓弶鎴犱桓闂佽崵鍠嗛崕鐢稿箖濡崵绡€闁搞儯鍔庨崢楣冩⒑閸撹尙鍘涢柛瀣閹鈧數纭堕崑鎾舵喆閸曨剛顦ㄩ梺鐓庣秺缁犳牠宕洪姀鈩冨劅闁靛鍎抽娲⒑缂佹ê濮嶆繛浣冲洤鍚归梺顒€绉甸埛鎺懨归敐鍥╂憘婵炲吋鍔曢湁婵犲ň鍋撶紒顔界懃閻ｇ兘寮撮姀鐘殿吋濡炪倖妫佸Λ鍕償婵犲倵鏀芥い鏃傜摂閻掗箖鏌涢埡鍌滃⒌鐎规洘鍨块崺锟犲磼濠婂拋鍟庨梻浣虹《閸撴繈鏁嬫繝娈垮枛濞差參寮婚敐澶婄闁规惌鍘鹃崥瀣⒑閸濆嫭婀伴柣鈺婂灡娣囧﹪鎮滈挊澹┭囨煕濞戝崬骞樼憸鐗堝灴濮?
+        # 4) 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块弶鍫氭櫅閸ㄦ繃銇勯弽顐粶缂佲偓婢舵劖鐓涢柛銈呯埣椤ｏ箑效濡ゅ懏鈷戦柟鑲╁仜閸旀挳鏌涢幘瀵告噰闁诡喗鐟︾换婵嬪炊閵娧冨箥婵＄偑鍊栭悧鏇炍涘Δ鈧灋婵°倕鎳忛崑鍌炴煕瀹€鈧崑鐐哄煕閹达附鐓曟繛鎴烇公閸旂喎顭胯娴滎亪寮婚悢鍝勬瀳闁告鍋橀崰濠囨⒑鐠団€虫灀闁逞屽墯閺嬪ジ寮告惔銊︾厵闁诡垎鍛喖濠电偛鎳忛悧鐘诲蓟閿濆牏鐤€闁哄洨鍋樼划璺侯渻閵堝骸浜濇繛鍙夘焽缁顓奸崱娆撴闂佸憡绋戦敃銈嗙椤栫偞鈷戦悷娆忓椤ユ劙鏌￠崨顔炬创鐎规洘绻傞～婵嬫嚋閻㈤潧骞堟俊鐐€ら崢浠嬪垂閻㈠憡鍊堕柨鏃堟暜閸嬫挾鎲撮崟顒傤槰閻庡厜鍋撻柛娑橈梗缁诲棝鏌涢锝嗙缂佲偓鐎ｎ偁浜滈柡鍐ㄥ€藉鍛婁繆閹绘帗璐＄紒杈ㄦ崌瀹曟帒鈻庨幒鎴濆腐闂備焦鍎崇换鎰版煀閿濆懐鏆︾憸鐗堝笚閻掕偐鈧箍鍎遍幊搴ㄥ吹閹达附鈷戦柛娑橈工婵箑霉濠婂嫮澧电€规洘鍨块獮姗€寮妷锔绘綌婵犵數鍋涘Λ娆掓懌闂佹眹鍊撶欢姘潖濞差亝顥堟繛鎴炵懐濡偛顪冮妶蹇擃洭闁轰礁顭烽獮鍐╁閹碱厽鏅╅梺缁樺姦閸撴瑧澹曢鐐粹拺闁告稑锕︾粻鎾绘倵濮樷偓閸パ呯厬婵°倧绲介崯顖炲煕閹烘鐓曢悘鐐村礃婢规ɑ銇勮箛瀣姦闁哄本绋掔换婵嬪礃閵娧傜礉闂備胶纭堕弬渚€宕?
+        # 5) Vision AI 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鍐蹭画濡炪倖鐗滈崑娑㈠垂閸岀偞鐓欓柟顖滃椤ュ鏌＄€ｂ晝绐旈柡灞炬礋瀹曠厧鈹戦幇顓夛妇绱撴笟鍥т簻缂佸缍婂濠氭偄绾拌鲸鏅┑鐐村灦閿曗晛螞閸℃せ鏀介柣鎰皺婢ф洟鏌ｉ弽褋鍋㈢€?_vision_validate_v3闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁搞倖鍔栭妵鍕冀椤愵澀绮剁紓浣哄У閼归箖濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬値娼愭繛鍙夛耿閹虫繃銈ｉ崘銊у幒闁瑰吋鐣崝宀€绮婚幎鑺ョ厸闁搞儮鏅涢弸搴ㄦ煕?CV-only 婵犵數濮烽弫鎼佸磿閹寸姴绶ら柦妯侯棦濞差亝鏅滈柣鎰靛墮鎼村﹪姊虹粙璺ㄧ伇闁稿鍋ゅ畷鎴﹀煛閸愨晛鏋戦柟鑹版彧缁插潡鎯屽鑸电厱婵°倕鍟禍褰掓煛閳ь剚绂掔€ｎ偆鍘卞銈嗗姂閸婃洟寮搁幋锔界厽闁挎繂楠告晶瀛樻叏?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓渚€寮介鐐茬彉缂備礁宕崺鍖攁cheManager + OCR/闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁靛牆鎳愰鐓庮渻閵堝棙顥嗘俊顐㈠瀵悂宕掗悙绮规嫼闂佸憡绋戦敃銉﹀緞閸曨垱鐓曢悗锝庝簻椤忣參鏌?+ OpenCV 闂傚倸鍊搁崐鐑芥倿閿曞倸绠栭柛顐ｆ礀绾惧潡鏌＄仦璇插姎缁炬儳娼￠弻鐔煎箚閺夊晝鎾绘煕閵堝拋鍎忛棁澶愭煕韫囨挸鎮戠紓宥嗗灩缁辨帡鍩€椤掆偓閻ｆ繈宕熼鍌氬箞婵犵數濞€濞佳兾涘Δ鍜佹晜妞ゆ劧闄勯悡鏇熶繆椤栨艾鎮戦柡鍡╁墴閺屸€崇暆閳ь剟宕伴幘鑸殿潟闁圭儤鍤﹂悢鐓庝紶闁告洖鐏氱紞瀣⒑?+ VisionAIClient闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堝煕閹达附鐓曟繛鎴烇公瀹搞儵鏌ｈ箛瀣姢缂佽鲸甯炵槐鎺懳熼崫鍕垫綒闂備浇顕栭崹浼村疮閹绢喓鈧礁鈽夐姀鈥斥偓鐑芥倵閻㈡鐒鹃悽顖涙崌閺岋絾鎯旈敍鍕殯闂佺閰ｆ禍鍫曠嵁韫囨洍鍋撻敐搴樺亾椤撱劎绋荤紒缁樼箓椤繈顢橀悙鏉垮闂備浇顕ч崙鐣岀礊閸℃顩叉繝濠傜墕濮规煡鏌ｉ弬鍨倯闁绘挻绋戦湁闁挎繂顦板☉褔鏌嶈閸撴氨鎹㈤崼銉ョ畺濞村吋鎯岄弫瀣煃瑜滈崜鐔肩嵁婵犲偆鐓ラ柛顐ゅ櫏濡啫鈹戦悙鏉戠仸闁煎綊绠栭崺鈧い鎺嶇缁楁艾菐閸パ嶈含濠碘€崇埣瀹曘劑顢樺☉妯瑰閻熸粎澧楃敮妤呭疾椤忓牊鈷掑ù锝呮啞閸熺偤鏌ｉ悢鏉戝闁崇粯妫冨鎾閻樻鍞堕梻浣告贡閸庛倝銆冮崱娑樼柧妞ゆ帒瀚悡鏇㈡煛閸ャ儱濡兼鐐寸墱閳ь剚顔栭崰鎾诲礉閹达箑钃熼柨婵嗩槹閸嬫劙鏌涘▎蹇ｆЧ闁诡喗鐟ラ埞鎴﹀煡閸℃ぞ绨奸梺鐑╂櫓閸ㄥ爼鐛崘顭嬫椽顢斿鍡樻珖闂備焦瀵у濠氬疾椤愶箑绀夐柛顭戝亞缁♀偓闂侀潧楠忕徊鍓ф兜妤ｅ啯鐓ラ柡鍥埀顒佹礋閸┿垹顓奸崨顏呯€婚梺鐟邦嚟婵敻鏁嶈箛鎿冩富闁靛牆妫欑€垫瑩鏌涢幇銊︽珖濞存粠浜铏规嫚閸欏鏀銈庡亜椤︽壆鎹㈠☉娆戠瘈闁告剬鍛暰?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞锝団偓?os.path.exists(image_path)
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝鍫曞礆閻?_hash_cache 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁嶉崟顓犵厯闂佸湱鍎ら〃鍛村垂閸屾稓绡€闂傚牊渚楅崕鎰版煕閵堝懐澧﹂柡宀€鍠愬蹇斻偅閸愨晩鈧秹姊虹紒妯诲碍闁稿﹤顭烽崺鈧い鎺嗗亾缂佺姴绉瑰畷鏇㈡焼瀹ュ懐顔嗛柣搴秵閳ь剦鍙忕徊鍓ф崲濠靛棭娼╂い鎾跺仒缂?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝畷鑼姳婵傜棞ormula
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绮庡Σ鎰板磽椤＄ic_region is None
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝鍫曞礆閻?_vision_enabled and self._vision_client
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼濠€閬嶅焵椤掆偓閻忔岸鎮￠敓鐘茶摕闁靛牆妫欓崣蹇涙煙闁箑鍘撮柛瀣尭铻栭柛娑卞幗濡差剟姊虹紒姗嗙劷缂侇噮鍨堕幃锟犳偄闂€鎰畾濡炪倖鐗楀銊︾閵忋倖鐓熼柟鐐綑婵秹鏌＄仦鐣屝ユい褌绶氶弻娑滅疀閺冨倶鈧帗绻涢崱鎰伈濠碘€崇埣瀹曞爼鈥﹂幋鐐电◥闂傚倷娴囬惃顐﹀川椤愮喎浜鹃柛銏㈩嚢e_path 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍌氫壕婵ê宕崢瀵糕偓瑙勬礉椤鈧潧銈稿鍫曞箣閻樺灚姣庢繝鐢靛仩閹活亞绱為埀顒勬煏閸″繐浜鹃梻浣侯焾椤戝棝骞愰幖浣哥叀濠㈣泛艌閺嬪秵銇勯幘妤€鍊婚惄搴ㄦ⒑閹稿孩纾搁柛銊ょ矙閵嗕線寮崼婵嬪敹濠?
+        # - 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸绾惧湱鎲搁悧鍫濈瑨缂佺姳鍗抽弻鐔兼⒒鐎电濡介梺绋款儍閸婃繈寮婚弴鐔虹闁绘劦鍓氶悵鏇㈡⒑閹惰姤鏁遍柟鐟版喘瀵鈽夐姀鈺傛櫇闂佹寧绻傚ú銈夈€呴鍕拺缂佸顑欓崕鎰版煙閸涘﹤鍔ら柍钘夘樀瀹曞綊顢曢锛把囨煙閼圭増褰х紒鎻掔仢閻ｉ绮斿鍧檉._hash_cache.threshold闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐悡顐﹀炊閵婏箑顎涢柣鐔哥懃鐎氼剛娆㈤悙鐑樺€甸柨婵嗙凹閹查箖鏌涢妶鍐ㄢ偓婵嗩潖閾忓湱纾兼俊顖濐嚙绾板秵淇婇妶鍥ｉ柟顔煎€块妴浣糕枎閹邦喚鐦堥梺鎼炲劘閸斿骞忔繝姘拺闁告稑锕ゆ慨鍌炴煕閺傚灝顒㈤柡鍛埣瀵挳濮€閿涘嫬甯楅柣鐔哥矋缁挸鐣峰鍐ｆ闁靛繒濮堥妷鈺傚€甸柨婵嗛婢ь垱銇勯锝嗙闁逛究鍔岃灒闁圭娴烽妴鎰板级?
+        # - OCR/闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁炽儲鍓氶崵銈夋煟鎼淬垻鈯曢拑杈ㄧ箾閸涱喚澧柍瑙勫灴椤㈡瑩鎮惧畝鈧悾鐓庘攽閻愬弶鍣虹痪顓熸埧text 婵?_detect_math_formula 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸婂潡鏌ㄩ弴鐐测偓鍝ョ不閺夊簱鏀介柣妯虹－椤ｆ煡鏌涙繝鍛【妞ゎ厼娼￠幊婊堟濞戞﹩娼撻柡?
+        # - 闂傚倸鍊搁崐鎼佸磹閻戣姤鍊块柨鏇楀亾妞ゎ厼鐏濊灒闁兼祴鏅濋悡瀣⒑閸撴彃浜濇繛鍙夛耿瀹曟垿顢旈崼鐔哄幈闂佹枼鏅涢崯浼村煀閺囥垺鐓曢悗锝庡亜婵秹鏌＄仦璇测偓婵嗙暦椤愶箑唯妞ゆ棁濮ら惁婊堟⒒娴ｄ警鐒炬い鎴濇楠炴劙鎳￠妶鍥╃暥闂佺粯鏌ㄩ幗婊呭姬閳ь剟姊洪崨濠冨闁告ɑ鍎抽悾椋庣矓濞撳獱ion_ai.enabled 婵?bearer_token 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍌氫壕婵ê宕崢瀵糕偓瑙勬礉椤鈧潧銈稿鍫曞箣閻樺灚姣庢繝鐢靛仦閹稿宕洪崘顔肩；闁瑰墽绮悡娆愩亜閺冨洤鍚归柣顓熺懇閺岀喖顢欓崫鍕紙閻庤娲忛崝宥囨崲濠靛绀冩い蹇撳缁嬪洭姊?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - image_path: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼閹碱偊鎮鹃柨瀣窞閻庯絻鍔嬬花濠氭⒑閸濆嫮袪闁告柨绉归幆鍐箣閻樼數锛滈梺褰掑亰閸犳牗绂掗柆宥嗙厸閻忕偠顕ф俊濂告煃閽樺妲搁摶锝夋煟閹惧磭宀搁柛娆欑節濮婃椽鎳￠妶鍛勃闂佸憡鍨电紞濠傜暦閹寸偟绡€闁稿本绮嶅▓楣冩⒑闂堚晛鐦滈柛妯绘倐瀹曟垿骞樼紒妯绘珳闂佸憡渚楅崣搴ㄥ汲閵忋垻纾藉ù锝囨嚀婵牓鏌嶉鍡╂r闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - ocr_text: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁炽儲鍓氶崵銈夋⒑閸濆嫷妲归柛銊ョ秺钘濋柕濞炬櫆閳锋垿鏌涘☉姗堟缂佸爼浜堕弻娑樷枎韫囨稑寮伴悗瑙勬处閸ㄨ泛鐣烽崼鏇ㄦ晢濞达絽鎼铏節閻㈤潧浠﹂柛銊ョ埣閳ワ箓宕堕妸锔界彿闂侀潧绻堥崐鏍磻閻樿櫕鍙忔俊顖滃帶鐢泛霉濠婂嫬顥嬮柍褜鍓濋～澶娒洪弽褝鑰块梺顒€绉撮悞鍨亜閹烘埊鍔熼柛鎺撴緲椤儻顦叉繛鎾棑閸掓帡鏁愰崪浣圭稁濡炪伇鍛闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - ConcreteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐弻娑㈠焺閸愵亝鍠涢梺绋款儐閹瑰洤鐣疯ぐ鎺濇晝妞ゆ帒鍟犻崑鎾舵崉閵娿垹浜鹃悷娆忓绾炬悂鏌涙惔锝嗘毈闁靛棔绶氬鎾閻欌偓濞煎﹪姊虹紒姗嗙劸閻忓繑鐟ヨ灒濠电姴娲﹂埛鎴︽煠婵劕鈧洖鏆╅梻浣侯焾椤戝棝宕濆▎鎾虫槬闁逞屽墯閵囧嫰骞掗崱妞惧闂備礁鎽滈崰搴☆焽閿熺姴绠栨慨妞诲亾鐎殿喖顭锋俊鐑芥晝閳ь剟鍩€椤掑倹鏆柟顔煎槻閳诲氦绠涢幙鍐ф偅闂備胶鎳撻崥瀣箖閸岀偛钃熺€广儱鐗滃銊╂⒑缁嬭法绠查柣鈺婂灦楠炲﹤螖閸涱參鍞堕梺鍝勬川閸犲孩绂掓ィ鍐┾拺缂侇垱娲栨晶鍙夈亜椤撶偞鍠橀柛鈺冨仜椤撳吋寰勭€ｎ剙甯楅梻渚€娼чˇ顓㈠磿闁秴姹查弶鍫涘妸娴滄粓鏌￠崒姘殹闂婎剦鍓熼弻锛勪沪閻愵剛顦伴悗瑙勬礋娴滆泛顕ｉ幘顔肩伋闁告劖褰冮懙鎰版⒒娴ｈ棄鍚归柛瀣仱瀹曟瑨銇愰幒鎴狅紱婵犵數濮撮崐濠氬汲閿曞倹鐓曢柨鏃囶嚙楠炴劙鏌涚€ｎ偅宕岄柡浣瑰姍瀹曟﹢濡搁妷搴涘姂濮婅櫣绮欏▎鎯у壉闂佸湱顭堥…鐑界嵁韫囨稑宸濋悗娑櫭埀顒傜帛娣囧﹪顢涘┑鍕ㄥ亾閳ь剟鏌涚€ｎ偅宕岄柟顔界懇閹粌螣閻撳骸绠洪梻鍌欑窔濞佳呮崲閹烘挻鍙忛悗闈涙憸缁€濠偯归敐鍫燁仩缁炬儳鍚嬫穱濠囧Χ閸屾矮澹曢梻浣告惈閻楁粓宕滃☉姘灊婵娉涚涵鈧梺缁樺姀閺呮粓寮埀顒勬⒒娴ｇ顥忛柛瀣瀹曚即骞囬悧鍫濅患濡炪倖甯掔€氼參宕愰悽鍛婄厽闁归偊鍠楅崵鈧梺閫炲苯澧紒璇插濡叉劙骞橀幇浣瑰兊婵☆偆澧楃换鍐疾閳哄懏鈷戦柛娑橈功閳藉鏌ｆ幊閸旀垵顕ｉ弻銉晢闁逞屽墴閳ワ妇鎹勯妸锕€纾梺鎯х箳閹虫捇銆傞悽鍛娾拺?""
         if not os.path.exists(image_path):
             logger.warning(f"Image not found: {image_path}")
             return self._default_result(False)
         
-        # 🚀 Step 0: 感知哈希重复帧检测 (快速跳过相似帧)
-        if self._hash_cache:
+        # 濠电姷顣藉Σ鍛村磻閹捐泛绶ゅù鐘差儏閻ゎ喗銇勯弽顐沪闁?Step 0: 闂傚倸鍊搁崐宄懊归崶顒婄稏濠㈣泛顑囬悵鍫曟煕閳╁啰鈽夌紒鎰殜閺岀喖宕滆鐢盯鏌涚€ｎ亜鈧潡寮婚妸鈺傚亜闁告繂瀚呴姀鐘嗗綊鎳栭埡浣叉瀰闂佸搫鏈惄顖炪€侀弴銏℃櫜闁搞儮鏅濋弳顓㈡⒒娴ｈ棄鍚归柛鐘冲姍閹囨偐瀹割喗缍庡┑鐐叉▕娴滄粎绮婚悽鍛婄厵闁绘垶蓱閻忔盯鏌曞娑㈩暒缁ㄥ姊洪幐搴㈢；缂佲偓娓氣偓閹啫煤椤忓懐鍘告繛鎾磋壘濞层倝寮搁敂濮愪簻闁挎洑鐒﹂悵顏堟煏閸パ冾伃濠碉紕鍏樻俊鐑芥晝閳ь剙鈻嶉敐澶嬧拻?(闂傚倸鍊搁崐鎼佲€﹂鍕；闁告洦鍊嬭ぐ鎺戠＜闁绘劘灏欓敍娑欑節閻㈤潧孝婵炲眰鍊濋幃鐐哄垂椤愮姳绨婚梺鍦劋閸ㄧ敻鍩€椤掍焦鍊愮€殿喚顭堥埢搴ㄥ箻鐎电骞楅梻浣筋潐閹矂宕圭捄渚€舵い鏃傛櫕缁犻箖鏌ｉ幘鍐茬槰闁绘捁鍋愰埀顒冾潐濞叉牠鎮ユ總绋挎槬闁跨喓濮寸壕鍏肩節瑜嶉悘婵囩濠婂嫮绡€闁汇垽娼ф禒褎銇勯妷锕€濮嶇€规洘鍨块獮鍥级閸喖浜堕柣鐔哥矋濡啴鎮?
+        if self._hash_cache and not skip_duplicate_check:
             is_duplicate, cached_result = self._hash_cache.check_duplicate(image_path)
             if is_duplicate and cached_result:
                 logger.info(f"Duplicate frame skipped (pHash): {Path(image_path).name}")
-                # 将缓存的字典转换为 ConcreteKnowledgeResult
+                # 闂傚倸鍊峰ù鍥敋瑜忛幑銏ゅ箛椤旇棄搴婇梺褰掑亰閸庨潧鈽夊Ο閿嬵潔濠殿喗锕╅崣搴☆焽閻斿吋鈷戦柟绋垮椤ュ牓鏌℃笟鍥ф珝鐎规洘鍨块獮姗€寮妷锔绘綌婵犵數鍋涘Λ娆撯€﹂崶顒€绀夌€瑰嫭澹嬮弨浠嬫煟閹邦垰鐨哄褎鐩弻娑㈠Ω閵壯呅ㄩ梺绯曟杹閸嬫挸顪冮妶鍡楃瑐闁煎啿鐖奸崺濠囧即閻旂繝绨婚梺闈涱焾閸庢煡宕甸崶鈹惧亾鐟欏嫭纾搁柛搴ｆ暬瀹曟椽鍩€椤掍降浜滈柟鐑樺灥椤忊晝绱掗悪娆忔处閻撶喖鏌熺€涙绠栨い銉︾矊椤儻顧侀柛銊﹀▕閸┾偓妞ゆ帒鍠氬鎰箾閸欏澧い鏇秮瀹曟粍鎷呴搹鍦幆?ConcreteKnowledgeResult
                 if isinstance(cached_result, dict):
                     result = ConcreteKnowledgeResult(
                         has_concrete=cached_result.get("has_concrete", True),
                         has_formula=cached_result.get("has_formula", False),
                         confidence=cached_result.get("confidence", 0.9),
-                        concrete_type=cached_result.get("concrete_type", "缓存结果"),
-                        reason=f"重复帧 (pHash相似度>{self._hash_cache.threshold:.0%})",
+                        concrete_type=cached_result.get("concrete_type", "cached_result"),
+                        reason=f"闂傚倸鍊搁崐鎼佸磹閻戣姤鍊块柨鏇氶檷娴滃綊鏌涢幇鍏哥敖闁活厽鎹囬弻鐔虹磼閵忕姵娈欓梺鎼炲労閸撴岸宕甸幋鐐簻闁瑰搫绉堕崝宥嗙箾?(pHash闂傚倸鍊搁崐鐑芥嚄閸洖纾块柣銏㈩焾閻ら箖鏌ｅΟ娆惧殭闁汇倝绠栭弻锛勪沪鐠囨彃濮庣紓浣哄閸ｏ綁寮诲鍫闂佸憡鎸鹃崰鏍偘?{self._hash_cache.threshold:.0%})",
                         is_mixed=cached_result.get("is_mixed", False),
                         non_text_ratio=cached_result.get("non_text_ratio", 0.0),
                         should_include=cached_result.get("should_include", True),
@@ -407,7 +1325,7 @@ class ConcreteKnowledgeValidator:
                 elif isinstance(cached_result, ConcreteKnowledgeResult):
                     return self._finalize_validation_result(image_path, cached_result, cache_result=False)
         
-        # Step 1: 检测数学公式 (需要 conda whisper_env 中的 PaddleOCR)
+        # Step 1: 濠电姷鏁告慨鐑姐€傞挊澹╋綁宕ㄩ弶鎴狅紱闂侀€炲苯澧撮柡灞剧〒閳ь剨缍嗛崑鍛焊閹殿喚纾肩紓浣诡焽濞插鈧鍠栭悥濂哥嵁鐎ｎ噮鏁囬柣鎰絻椤ュ酣姊婚崒娆戭槮闁圭⒈鍋勮灋婵炴垯鍨圭粣妤呮煙閹规劦鍤欓柣鎺戠仛閵囧嫰骞掑鍥舵М闂佸摜濮靛ú婊呮閹烘鍋愰柛鎰皺娴煎矂鎮楃憴鍕┛缂傚秳绀侀锝夊箻椤旇棄鈧鏌涢埄鍐炬畷妞?(闂傚倸鍊搁崐鎼佸磹閹间礁纾圭紒瀣紩濞差亝鍋愰悹鍥皺閿涙盯姊洪悷鏉库挃缂侇噮鍨跺畷?conda whisper_env 婵犵數濮烽弫鎼佸磻閻愬搫鍨傞柛顐ｆ礀缁犲綊鏌嶉崫鍕櫣闁稿被鍔戦弻鐔碱敍閸″繐浜鹃梺?PaddleOCR)
         has_formula = self._detect_math_formula(ocr_text)
         if has_formula:
             logger.info(f"Formula detected in {Path(image_path).name}, including screenshot")
@@ -415,48 +1333,30 @@ class ConcreteKnowledgeValidator:
                 has_concrete=True,
                 has_formula=True,
                 confidence=0.9,
-                concrete_type="公式",
-                reason="检测到数学公式，保留截图",
+                concrete_type="formula",
+                reason="detected formula, include screenshot",
                 is_mixed=False,
                 non_text_ratio=0.0,
                 should_include=True
             )
             return self._finalize_validation_result(image_path, result, cache_result=True)
         
-        # Step 2: CV 分析 - 提取图形区域
-        graphic_region = self._extract_graphic_region(image_path)
-        
-        if graphic_region is None:
-            # 无法提取图形区域，判定为纯文字页
-            logger.info(f"No graphic region in {Path(image_path).name}, skipping screenshot")
-            result = ConcreteKnowledgeResult(
-                has_concrete=False,
-                has_formula=False,
-                confidence=0.9,
-                concrete_type="无",
-                reason="未检测到图形区域，判定为纯文字页",
-                is_mixed=False,
-                non_text_ratio=0.0,
-                should_include=False
-            )
+        # Step 2: Vision 婵犵數濮撮惀澶愬级鎼存挸浜炬俊銈勭劍閸欏繘鏌熺紒銏犳灍闁稿孩顨呴妴鎺戭潩閿濆懍澹曢梻浣筋嚃閸垶鎮為敃鈧銉╁礋椤栨氨鐤€濡炪倖鎸鹃崰鎰版偟椤愶附鈷掑ù锝囶焾椤ュ繘鏌涚€ｎ亝鍣介柛鎺撳笚閹棃濡搁敃鈧禒顓炩攽閻樼粯娑фい鎴濇閹繝寮撮姀锛勫幍闂備緡鍙忕粻鎴炴櫠娴兼潙鍐€闁斥晛鍟扮弧鈧梺鍐茬殱閸嬫捇鏌涘☉鍗炴灍闁绘繍浜?_extract_graphic_region 婵犵數濮烽。钘壩ｉ崨鏉戠；闁告侗鍙庨悢鍡樹繆椤栨氨姣為柛瀣尭椤繈鎮℃惔锝勫寲闂備胶鎳撶粻宥夊垂閽樺鏆︽慨妞诲亾闁炽儻绠撻獮瀣偐閹绘帗杈堥梻鍌氬€风欢姘焽瑜旈幃褔宕卞▎鎰簥闂佸湱鍎ゅ濠氭儗?        if self._vision_enabled and self._vision_client:
+            result = self._vision_validate_v3(image_path=image_path, graphic_region=None)
             return self._finalize_validation_result(image_path, result, cache_result=True)
-        
-        # Step 3: ERNIE Vision AI 验证 (只发送裁剪后的图形区域)
-        if self._vision_enabled and self._vision_client:
-            result = self._vision_validate_v3(image_path, graphic_region)
-            return self._finalize_validation_result(image_path, result, cache_result=True)
-        
-        # Fallback: 无 Vision API 时，有图形区域则保留
-        logger.info(f"Vision API disabled, including {Path(image_path).name} with graphic region")
+
+        # Fallback: 闂?Vision API 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顔姐亜閹板爼妾柛瀣樀閺屻倕霉鐎ｎ偅鐝旈梺鎼炲妽缁诲啴濡甸崟顖氬唨闁靛ě鍛帒濠电姵顔栭崹浼村Χ閹间礁钃熼柡鍥ュ灩闁卞洦绻濋棃娑欙紞濞村皷鍋撶紓鍌氬€烽懗鑸垫叏瀹曞洤鍨濇繛鍡樻尭閽冪喖鏌ㄥ┑鍡╂Ч闁哄懏鐓￠弻娑㈠焺閸愵亝鍣梺闈╂€ラ崶銊у幗闂侀潧绻嗛弲娑㈡倶闁秵鐓曢悗锝庝悍瀹搞儵鏌?        logger.info(f"Vision API disabled, including raw screenshot {Path(image_path).name}")
+        text_page_desc = self._extract_text_page_description(image_path=image_path, ocr_text=ocr_text)
         result = ConcreteKnowledgeResult(
             has_concrete=True,
             has_formula=False,
             confidence=0.6,
-            concrete_type="未知图形",
-            reason="检测到图形区域，Vision API 不可用，默认保留",
+            concrete_type="formula",
+            reason="detected formula, include screenshot",
             is_mixed=False,
             non_text_ratio=0.0,
-            should_include=True
+            should_include=True,
+            img_description=text_page_desc or "raw screenshot kept",
         )
         return self._finalize_validation_result(image_path, result, cache_result=True)
 
@@ -466,54 +1366,43 @@ class ConcreteKnowledgeValidator:
         result: ConcreteKnowledgeResult,
         cache_result: bool = True,
     ) -> ConcreteKnowledgeResult:
-        """
-        执行逻辑：
-        1) 按需写入具象判定缓存，保证重复帧复用稳定。
-        2) 对 has_concrete=False 且非公式截图执行物理删除，避免后续链路误引用。
-        3) 返回原始判定结果给调用方。
-        实现方式：复用 _cache_result + 文件系统删除。
-        核心价值：把“判定+清理”收敛到单一出口，确保所有调用路径行为一致。
-        决策逻辑：
-        - 条件：cache_result
-        - 条件：not result.has_concrete and not result.has_formula
-        依据来源（证据链）：
-        - 输入参数：image_path、result。
-        - 业务规则：Has Concrete Knowledge=False 的截图直接删去。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        - result: 判定结果（类型：ConcreteKnowledgeResult）。
-        - cache_result: 是否写入缓存（类型：bool）。
-        输出参数：
-        - ConcreteKnowledgeResult：原判定结果。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉埀顒婄畵瀹曞ジ濡风€ｎ亝鍠樻俊顐㈠暙閳藉寮介妶鍛闂佸湱鍎ら〃鍛存煁閸ヮ剚鐓涢柛銉㈡櫅娴犙勩亜閿斿搫濡奸柍瑙勫灴閹瑩宕ｆ径妯活棧缂傚倷鑳剁划顖炲礉閺囥埄鏁嬮柨婵嗩槸缁狀噣鏌ら幁鎺戝姢闁告﹢浜跺Λ鍛搭敃閵忊€愁槱濠电偛寮堕敃銏ゅ箖閻愬搫閿ゆ俊銈勮兌閸欏啴姊洪崫鍕檨闁告劕褰炵槐鏃堟煟鎼淬値娼愭繛鍙壝悾婵嬪川婵犱胶绠氶梺鍓插亝濞叉牕顔忓┑鍥ヤ簻闁哄秲鍔庨埊鏇㈡煟閿旀儳浠х紒杈ㄦ崌瀹曟帒顫濋钘変壕闁归棿绀佺壕鍦喐閻楀牆绗掔紒鐘卞嵆閺岀喖姊荤€电濡介梺绋款儍閸婃繈寮婚弴鐔虹闁绘劦鍓氶悵鏇㈡⒑閸濆嫭濯奸柛鎾跺枛楠炲啫顫滈埀顒勫箖濞嗘垶宕夐弶鐐靛閻繒绱撻崒娆掑厡濠殿喖纾崚鎺戔枎閹惧磭鐣洪悷婊呭鐢帡鎮欐繝鍥ㄧ叆闁哄倸鐏濋埛鏃堟煟濞戞牕鐏叉慨濠冩そ濡啴鍩￠崘銊ョ厒闂備浇顫夌粊鎾焵椤掍礁澧柛銈嗩殜閺屾盯寮撮妸銉よ埅闂佸憡鑹鹃澶愬蓟濞戞ǚ妲堥柛妤冨仦閻忓牆顪冮妶搴′簼闁规瓕宕甸幑銏犫攽鐎ｎ亶娼婇梺鎸庣箓濡盯濡撮幇顔剧＝濞达絽澹婂Σ鎼佹煟閺嶎偄甯舵い鏇秮椤㈡洟鏁冮埀顒€娲块梻浣规偠閸庮噣寮插┑瀣亗闁瑰墽绮埛鎴︽煕濞戞﹫宸ュ┑顔肩焸閹绠涢弮鍌涘櫚閻庢鍠涘▍鏇犫偓浣冨亹閳ь剚绋掗…鍥储?
+        # 2) 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡樺暗闁稿鐩畷鎴濐吋婢跺鎷虹紓鍌欑劍钃遍柣鎾卞劜閵囧嫰濡搁妷鈺娾偓妤併亜椤撶偞鎼愰摶鏍煕濞戝崬鏋ら柛姗€浜跺娲偡閻楀牊鍎撳銈嗗灥閹虫﹢宕洪埀顒併亜閹哄秶鍔嶇紒鈧€ｎ喗鐓欐い鏇楀亾缂佺姵鐗曢悾宄邦煥閸♀晜鞋缂備胶鍋撻崕鎶藉Χ閹间礁钃熼柣鏃傚帶缁犳氨鎲稿鍫濆惞闁绘棁顔栭悷閭︾叆閹艰揪绱曟禒顖滅磽娴ｄ粙鍝洪柟绋款煼楠炲繘宕ㄩ弶鎴炲祶濡炪倖鎸鹃崰搴♀枍濞嗘挻鈷掑ù锝呮贡濠€浠嬫煕閺傚潡鍙勭€规洑鍗冲浠嬵敇閻愮數鏆┑鐐差嚟婵挳顢栭崨顔煎姅闂傚倷鐒︾€笛冾潖婵犳艾鐤炬い鎰剁畱閸屻劑鏌ｉ姀鐘冲暈闁抽攱鍨块弻鐔虹矙閹稿孩宕抽梺瀹犳椤︻垶鍩為幋锕€纾兼繛鎴炵憿閹疯崵绱撴笟鍥ф珮闁告妫勯銉╁礋椤栨氨鐤€濡炪倖甯掗崑鍡涘触鐎ｎ喗鐓熼柣鏂挎憸閻鏌涢妸銉﹀仴濠碘€崇摠缁楃喖鍩€椤掑嫮宓侀悗锝庡枟閸婇攱绻涢崼鐔奉嚋缂佷緡鍋婂娲嚒閵堝憛锛勭磼閳ь剚鎷呴崫鍕垫濡炪倖鎸炬慨鐑芥儗閹剧粯鐓曠憸搴ㄣ€冮崱娑欏亗闁绘棃鏅茬换鍡涙煟閹邦喗鏆╅悽顖涚⊕缁绘盯宕ㄩ鐔锋灎闂佸搫鐬奸崰鏍€佸▎鎴炲厹闁汇値鍨伴幆鍫ユ煟鎼淬値娼愭繛鍙壝悾婵嬪箹娴ｅ摜鐣洪梺鍐叉惈閸熸壆澹曢崗闂寸箚妞ゆ牗绮岀敮鍓佺磽瀹ュ拋妯€婵?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘茬疇婵犻潧娲㈤崑鍛存煕韫囷絽鐏犳繛宸幖椤曪絾绻濆顑┿劑鏌ㄩ弴妤€浜炬繛?_cache_result闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堝煕閹寸姷妫い鎾跺仦閸ｈ櫣鐥銏㈢暫闁硅櫕绻傞悾婵嬪礋椤掑倸甯楅柣鐔哥矋缁挸鐣峰鍐炬僵闁告鍋涢悘濠囨倵閸忓浜鹃梺鍛婃处閸嬪嫰鎮楅銏♀拺濞村吋鐟ч崚鏉款熆鐠虹儤鍠樼€规洘鍨块獮姗€鎳滈棃娑欑€梻浣告啞濞诧箓宕滃☉妯锋灁闁靛牆娲ㄧ壕钘夈€掑顒佹悙闁哄妫冮弻娑㈠籍閳ь剟宕归悽鍓叉晪闁挎繂娲ㄩ惌娆撳箹鐎涙ɑ灏伴柡浣哄█濮婄粯鎷呯拠鈥冲妼闂佹悶鍔庢晶妤冪矉瀹ュ鍊锋い鎺戝€婚惁鍫ユ⒒閸屾氨澧涚紒瀣浮瀹曡櫕绂掔€ｎ偆鍘介梺缁樻⒐濞兼瑩鎮橀弻銉︾厸閻忕偟鏅晥婵犵绱曢崗姗€寮崒鐐茬鐟滃繘宕㈤幋锔解拻濞达絽鎲￠幆鍫熴亜閹存繃鍤囩€规洦鍨堕、娑橆煥閸涱垳鍔归梻浣告贡閸庛倝銆冮崨顖滅焼闁割偅绶疯ぐ鎺撴櫜闁割偒鍋呯紞鍫濃攽閻愬弶鍣烽柛銊ㄦ椤繐煤椤忓嫬绐涙繝鐢靛Т鐎氱兘鎮橀崡鐐╂斀闁宠棄妫楁禍婊堟倵濮橆偄宓嗛柣娑卞枟缁绘繈宕惰閼板灝鈹戦悙鏉戠仸闁挎岸鏌ｅ┑鍥疯€挎慨濠呮缁辨帒螣閻戔晜瀚荤紓鍌欐閻掞箓骞愰崘鑼殾闁硅揪绠戠粻濠氭煛閸屾ê鍔滈柡鍌楀亾婵犵數濮烽弫鎼佸磿閹达附鈷旈柛鏇ㄥ幗閺嗘粓鏌ㄩ悢鍝勑㈢紒鐘靛█閺岀喖宕滆鐢盯鏌￠崨顔剧煉闁哄被鍊曢湁閻庯綆鍋呴悵鏍ь渻閵堝繐鐦滈柛锝忕到椤繒绱掑Ο鑲╂嚌闂佹悶鍎滈崘鐐氦闂傚倷娴囬褏鎹㈤幋鐘冲床闁割偅绻勯弳锕傛煏韫囧鈧洖娲垮┑鐘灱濞夋盯鏁冮敃鍋瑰洭顢橀悜鍡樺瘜闂侀潧鐗嗗Λ娑欐櫠椤掑嫭鐓熼柣鏃€绻傞幊鎰版儗濞嗗繆鏀介柣妯哄级婢跺嫰鏌ｉ幘璺烘瀾闁靛洤瀚伴、鏇㈩敃閵忕媭娼诲┑鐘殿暜缁辨洟宕㈣閸╃偤骞嬮敃鈧壕鍏肩箾閹寸偠澹橀柍宄扮焸閹鎲撮崟顒€顦╅梺绋款儏鐎氫即銆佸Ο鑽ら檮缂佸娉曢ˇ鏉款渻閵堝棙灏靛┑顔炬暬瀹曨垳鈧稒顭囩弧鈧梺姹囧灲濞佳勭閿曞倹鐓欓柟闂磋兌閻ｆ椽鏌嶉妷顖滅暤鐎规洖銈告俊鐑藉Ψ閵夈儰鎲鹃梻浣藉吹閸犳劙鎮烽妷褉鍋撳鐓庡籍鐎规洘娲熼幃銏ゅ礂閼测晛骞愰梻浣规偠閸庮垶宕曢柆宥嗗€舵い蹇撶墛閻撴瑧鈧娲栧ú銈夊煝閸儲鐓欐い鏃€顑欏鎰磼濡ゅ啫鏋涙い銏＄☉椤繈宕ｅΟ鍏煎礋闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悢婵嗘搐缁犵儤銇勮濠€鐞眅_result
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕ｆ繝姘╅柕澶堝灪椤秴鈹戦悙鍙夘棡闁挎艾鈹戦敍鍕┾偓鍢篻e_path闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟崐鍦偓姘煼閺岋綁鎮╅崹顐㈢５ult闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - image_path: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼閹碱偊鎮鹃柨瀣窞閻庯絻鍔嬬花濠氭⒑閸濆嫮袪闁告柨绉归幆鍐箣閻樼數锛滈梺褰掑亰閸犳牗绂掗柆宥嗙厸閻忕偠顕ф俊濂告煃閽樺妲搁摶锝夋煟閹惧磭宀搁柛娆欑節濮婃椽鎳￠妶鍛勃闂佸憡鍨电紞濠傜暦閹寸偟绡€闁稿本绮嶅▓楣冩⒑闂堚晛鐦滈柛妯绘倐瀹曟垿骞樼紒妯绘珳闂佸憡渚楅崣搴ㄥ汲閵忋垻纾藉ù锝囨嚀婵牓鏌嶉鍡╂r闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - result: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁嶉崟顒佹闂佹悶鍎洪崜娆戝瑜版帗鐓涢柛銉ｅ劚閻忣亪鏌涚€Ｑ勬珚闁哄本鐩獮妯何旈埀顒勫箠閹扮増鏅繝濠傜墛閳锋垿鎮峰▎蹇擃仼闁告柣鍊栭妵鍕即閵娿儱绠虹紓浣稿€哥粔褰掋€佸☉銏″€烽悗鐢殿焾瀵櫕绻濋悽闈涗沪闁搞劌鐖奸垾锕傚炊閵婏附鐝烽梺闈涚箞閸婃牠宕戦悩铏弿婵☆垳鍘х敮璺好瑰鍕棆闁逞屽墲椤煤閺嵮嶈€块梺顒€绉撮悞鍨亜閹烘埊鍔熼柛鎺撴緲椤儻顦叉繛鎾棑閸掓帡鏁愰崪浣圭闂佺粯甯╅幗鐥梤eteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - cache_result: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍌氫壕婵ê宕崢瀵糕偓瑙勬礉椤鈧潧銈稿鍫曞箣閻樺灚姣庢繝鐢靛仦閹稿宕洪崘顔肩；闁规儳鐏堥崑鎾舵喆閸曨剛顦ㄩ梺鎸庡哺閺屽秶鎷犻崣澶婃敪缂備胶濮甸惄顖炵嵁濮椻偓閹煎綊顢曢妷褍褰傜紓鍌氬€搁崐鎼佸磹閹间礁纾归柟闂寸绾惧湱鎲搁悧鍫濈瑨缂佺姳鍗抽弻鐔兼⒒鐎电濡介梺绋款儍閸婃繈寮婚弴鐔虹闁绘劦鍓氶悵鏇㈡⒑閸濆嫭濯奸柛鎾跺枛瀵鈽夐姀鈺傛櫇闂佺粯顭堢亸娆愬閸パ屾富闁靛牆楠告禍鍓х磼閻樿櫕宕岀€殿喛顕ч埥澶愬閻樻牑鏅犻弻鏇熷緞濡儤鐏堥梺鍛婃煛閸嬫挾绱撻崒姘偓宄懊归崶銊ь洸妞ゆ巻鍋撻柍璇茬Т椤垽鎯冩稊鎾⒒閸屾艾鈧兘鎮為敂閿亾缁楁稑鎳愰惌娆撴煙濞喡ゎ嚙濞差參銆佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - ConcreteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熼悜姗嗘畷闁搞倕鐭傞弻娑㈠箻濡も偓鐎氼厼鈻撻弶娆炬富闁靛牆妫楁慨褏绱掗悩鍐茬仼缂侇喖鐗撳畷鍗炩槈濞嗘垵甯鹃梻浣稿閸嬪懐鎹㈤崘顔奸棷濞寸姴顑嗛悡娑㈡煕閳╁厾顏埶夌€ｎ剛纾奸弶鍫涘妽鐏忎即鏌熷畡鐗堝櫧闁瑰弶鎸冲畷鐔碱敃閿旈敮鍋撳ú顏呪拻濞达絿鐡旈崵娆戠磼缂佹ê濮嶉挊婵嬫煕椤垵浜楃紒?""
         if cache_result:
             self._cache_result(image_path, result)
-
-        if not result.has_concrete and not result.has_formula:
-            try:
-                if os.path.exists(image_path):
-                    os.unlink(image_path)
-                    logger.info(f"Deleted non-concrete screenshot: {Path(image_path).name}")
-            except Exception as e:
-                logger.warning(f"Failed to delete non-concrete screenshot {image_path}: {e}")
 
         return result
     
     def _cache_result(self, image_path: str, result: ConcreteKnowledgeResult):
-        """
-        执行逻辑：
-        1) 将结果转换为可序列化字典。
-        2) 写入 hash_cache 并同步到持久化缓存。
-        实现方式：HashCacheManager.store_result + 本地 JSON。
-        核心价值：跨帧复用具象判定，减少重复调用。
-        决策逻辑：
-        - 条件：self._hash_cache
-        依据来源（证据链）：
-        - 对象内部状态：self._hash_cache。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        - result: 函数入参（类型：ConcreteKnowledgeResult）。
-        输出参数：
-        - 无（仅更新缓存）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊峰ù鍥敋瑜忛幑銏ゅ箛椤旇棄搴婇梺褰掑亰閸庨潧鈽夊Ο閿嬵潔濠殿喗锕╅崜娆撴倶婵犲洦鈷戦梻鍫熷崟閸儱鐤炬繛鎴欏灩缁€鍕煟濡櫣锛嶇紒鈾€鍋撳┑鐘垫暩婵挳宕愯ぐ鎹ゅ鎮欓悽鐢碉紲婵炴挻鑹惧ú銈呪枍瀹ュ鐓涚€光偓閳ь剟宕伴幘璇茬闁绘顕ч悞娲煕閹板吀绨介柣娑栧灲濮婃椽鎳￠妶鍛咃綁鏌涢弮鈧〃濠傜暦娴兼潙鍐€鐟滃繘寮抽敃鍌涚叆婵犻潧妫Ο鍫ユ煛娴ｅ摜校闁逛究鍔岃灒濠㈠墎顭堥幆鍫濐渻閵堝繒绋婚柣鎾偓鎰佹綎婵炲樊浜滃婵嗏攽閻樻彃鈧鎮烽幓鎺濇富闁靛牆鍟俊濂告煙閾忣偄濮嶉柛鈹惧亾濡炪倖鍨煎▔鏇犵矈閻戣姤鍊堕煫鍥ㄦ⒒閹冲洭鏌涢埞鎯т壕婵＄偑鍊栫敮濠囨嚄閸洖鐓€闁哄洨鍠嗘禍婊堟煏婵炲灝鍔滈柛銈呮川閳ь剝顫夊ú蹇涘磿閻㈢鏄ラ柍褜鍓氶妵鍕箳閹存繍浠鹃梺?
+        # 2) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫绋侀崢浠嬪磻閿熺姵鐓忓璺烘濞呭懘鏌?hash_cache 濠电姴鐥夐弶搴撳亾濡や焦鍙忛柣鎴ｆ绾惧鏌ｅΟ鑽ゃ偞闁哄鐗楃换娑㈠箣濞嗗繒浠肩紓浣哄У閻楃娀寮婚悢鍏煎€锋い鎺嗗亾濠⒀屽灡缁绘盯姊婚弶鎴濈ギ闂佸搫鏈ú妯侯嚗閸曨垰閱囨繝闈涙椤捇姊绘担铏瑰笡闁瑰憡鎮傚畷鎰板锤濡も偓閽冪喖鏌ｉ弬鍨倯闁抽攱鍔欓弻鐔兼焽閿曗偓瀵偓淇婇姘偓鑽ゆ閹惧瓨濯撮柛婵嗗珔閿濆鐓熼柣鏂垮级濞呭懘鏌ｉ敐鍥у幋闁诡喒鏅濋幏鐘诲箵閹烘垶鏆忓┑锛勫亼閸婃牠宕濋幋锕€纾归柡鍥ｆ嚍閸ヮ剙鐓涢柛娑卞枤閸樹粙鏌熼崗鑲╂殬闁搞劌顭烽崺濠囧即閵忊€虫閻熸粍妫冨?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓渚€寮介鐐茬彉缂備礁宕崺鍖攁cheManager.store_result + 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敂钘変罕濠电姴锕ら悧鍡欑矆閸喓绠鹃柛鈩冾殜閻涙粓鏌?JSON闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堟偂閻斿吋鐓熸俊顖氭惈鐢娀鏌ら崜韫偗闁哄本鐩顒傛崉閵娧冨П婵°倗濮烽崑娑欘殽閹间緤缍栨繝闈涱儛閺佸洭鏌ｉ幇顔芥毄闁绘侗鍣ｉ弻锝嗘償閿涘嫮鏆涢梺绋块瀹曨剛鍙呴梺鎸庢礀閸婄效閺屻儳鍙撻柛銉ｅ妿閳洟鏌ｉ幘瀛樼闁绘搩鍋婂畷鍫曞Ω閿旂虎妲伴梻浣虹帛鐢帒顭囬敓鐘茶摕闁挎洖鍊搁崘鈧悷婊冪Ч椤㈡棃顢橀悩顐壕閻熸瑥瀚粈鍐偓鍏夊亾闁告稑锕ｇ换鍡涙煕椤愶絾绀€鐎瑰憡绻冮妵鍕冀閵娧€濮囬梺浼欏閸嬨倕顫忕紒妯诲闁荤喖鍋婇崵瀣磽娴ｅ壊鍎愰柛銊ユ健楠炲﹪鎮㈢喊杈ㄦ櫖闂佺粯鍔栭悡鈥澄涢悜鑺モ拺闁诡垎鍛啋闂侀€炲苯澧紒瀣崌瀹曟粓濡搁埡鍌楁嫼缂佺虎鍘奸幊蹇氥亹瑜忕槐鎺楁偐閸愯尙浠撮梺瀹狀嚙缁夎鎱ㄩ埀顒勬煟濞嗗苯浜鹃梺缁樻煥濡繈骞冪憴鍕╁亰闁圭瀵掓禒鈺呮煕閻斿憡鍊愭慨濠傛惈鏁堥柛銉戝喚鐎烽梻浣告憸婵敻鎮ч悩鑽ゅ祦闁告劏鏅濋々鐑芥倵閿濆簶鍋撻娑欐珚闁哄被鍔岄埞鎴﹀幢濡炶浜鹃柛娑橈功椤?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝鍫曞礆閻?_hash_cache
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊峰ù鍥敋瑜嶉湁闁绘垼妫勯弸渚€鏌熼梻鎾闁逞屽厸閻掞妇鎹㈠┑瀣倞闁靛鍎冲Ο渚€姊绘担鍛婂暈婵炶绠撳畷褰掑箥椤斿墽鐒奸梺鍛婂姦閸犳鎮￠弴鐔虹闁瑰鍋熼幊鍕磽瀹ュ棗鐏撮柡灞剧洴瀵剛鎷犻幓鎺懶曢梻浣告惈閻寰婇崐鐔轰航闂備礁澹婇悡鍫ュ窗濮樿泛鍌ㄦい鎰堕檮閳锋垿姊洪銈呬粶闁兼椿鍨跺畷銏ゅ传閵壯咃紲闂傚鍓氳ぐ鍐焵椤掍緡娈旈崡閬嶆煙閹殿喖顣奸柛搴＄Т閳规垿宕掑鍛唹f._hash_cache闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - image_path: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼閹碱偊鎮鹃柨瀣窞閻庯絻鍔嬬花濠氭⒑閸濆嫮袪闁告柨绉归幆鍐箣閻樼數锛滈梺褰掑亰閸犳牗绂掗柆宥嗙厸閻忕偠顕ф俊濂告煃閽樺妲搁摶锝夋煟閹惧磭宀搁柛娆欑節濮婃椽鎳￠妶鍛勃闂佸憡鍨电紞濠傜暦閹寸偟绡€闁稿本绮嶅▓楣冩⒑闂堚晛鐦滈柛妯绘倐瀹曟垿骞樼紒妯绘珳闂佸憡渚楅崣搴ㄥ汲閵忋垻纾藉ù锝囨嚀婵牓鏌嶉鍡╂r闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - result: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鎻掔€梺绋跨箰閸氬宕ｈ箛娑欑厪闁割偅绻嶅Σ鍛婃叏鐟欏嫮鍙€闁哄矉缍佸顕€宕掑顑跨帛缂傚倷璁查崑鎾绘煕瀹€鈧崑鐐烘偂韫囨搩鐔嗛悹楦挎婢ф洟鏌涢弮鈧喊宥嗙┍婵犲浂鏁冮柨婵嗙箺閳ь剙娼￠弻锛勪沪鐠囨彃顬堥梺瀹犳椤︻垵鐏掗梺缁樻尭缁ㄥ爼宕ｉ敓鐘斥拺闁煎鍊曟禒锕傛煕閹存繄绉虹€规洘鍨剁换婵嬪磼濠婂嫭顔曢梻渚€娼荤€靛矂宕㈤幖浣哥；闁瑰墽绮弲鏌ユ煕濞戝崬寮鹃柡鍡愬灮缁辨挻鎷呴悷鏉款潔濡炪們鍩勫Σ妾攃reteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌ｅΔ鈧悧鍡涘垂閺冨牊鍊甸梻鍫熺⊕閸熺偞銇勯锝嗙缂佺粯鐩畷鍗炍熼崫鍕垫綍婵＄偑鍊愰弲婵嬪礂濮椻偓瀵鈽夊Ο閿嬵潔闂佸憡顨堥崑鐐烘倶瀹ュ洨纾藉ù锝夌細濡炬悂鏌涢妸銉у煟鐎殿喖顭烽弫鎾绘偐閼碱剨绱叉繝鐢靛仦閸ㄥ爼鏁冮埡浣勬盯宕卞▎鎴狅紳婵炶揪绲块幊鎾诲极閹€鏀介柍銉ㄦ珪閸犳﹢鏌涢埞鎯т壕婵＄偑鍊栫敮濠囨嚄閸洖鐓€闁哄洢鍨洪悡銉╂煛閸ャ儱濡煎ù婊呭仦娣囧﹪宕ｆ径濠傤潓濡炪値鍋呯换鍕箲閸曨剚濯?""
         if self._hash_cache:
             result_dict = {
                 "has_concrete": result.has_concrete,
@@ -528,70 +1417,339 @@ class ConcreteKnowledgeValidator:
             }
             self._hash_cache.store_result(image_path, result_dict)
             self._save_persistent_cache()
-    
-    def _vision_validate_v3(self, image_path: str, graphic_region: np.ndarray) -> ConcreteKnowledgeResult:
-        """
-        执行逻辑：
-        1) 将裁剪图形区域写入临时文件。
-        2) 以异步方式调用 VisionAIClient.validate_image。
-        3) 解析 has_concrete_knowledge/confidence/concrete_type/reason 并生成结果。
-        4) 清理临时文件，异常时返回保守结果。
-        实现方式：OpenCV 写临时图像 + asyncio/线程池封装异步调用。
-        核心价值：仅上传图形区域，提高判定效率与准确度。
-        决策逻辑：
-        - 条件：loop.is_running()
-        - 条件：has_concrete（仅具象截图保留）
-        依据来源（证据链）：
-        - 运行状态：asyncio 事件循环是否在运行。
-        - API 字段：has_concrete_knowledge、confidence、concrete_type、reason。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        - graphic_region: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - ConcreteKnowledgeResult（基于 Vision AI 判定的具象结论）。"""
-        # 保存裁剪区域为临时文件
-        import tempfile
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            cv2.imwrite(tmp.name, graphic_region)
-            temp_path = tmp.name
-        
+
+    def _vision_flag_to_bool(self, value: Any) -> bool:
+        """Docstring omitted."""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value > 0
+        token = str(value or "").strip().lower()
+        return token in {"true", "1", "yes", "y"}
+
+    def _build_result_from_vision_payload(self, api_result: Dict[str, Any]) -> ConcreteKnowledgeResult:
+        """Docstring omitted."""
+        payload = dict(api_result or {})
+        if "raw_response" in payload and "has_concrete_knowledge" not in payload:
+            raw = str(payload.get("raw_response") or "")
+            clean_raw = raw.replace("```json", "").replace("```", "").strip()
+            try:
+                parsed = json.loads(clean_raw)
+                if isinstance(parsed, dict):
+                    payload.update(parsed)
+            except Exception:
+                pass
+
         try:
-            # 使用单一后台事件循环同步调用，复用连接池与并发限制
+            confidence = float(payload.get("confidence", 1.0))
+        except Exception:
+            confidence = 1.0
+        concrete_type = str(payload.get("concrete_type", "visual_description") or "visual_description")
+        reason = str(payload.get("reason", "Vision AI description") or "Vision AI description")
+        img_description = str(
+            payload.get("img_description")
+            or payload.get("img_desription")
+            or payload.get("description")
+            or payload.get("caption")
+            or payload.get("raw_response")
+            or reason
+            or ""
+        ).strip()
+        if not img_description:
+            img_description = "description unavailable"
+        return ConcreteKnowledgeResult(
+            has_concrete=True,
+            has_formula=False,
+            confidence=confidence,
+            concrete_type=concrete_type,
+            reason=reason,
+            is_mixed=False,
+            non_text_ratio=0.0,
+            should_include=True,
+            img_description=img_description,
+        )
+
+    def _build_structured_group_prompt(
+        self,
+        *,
+        parent_image_path: str,
+        parent_image_size: Optional[Tuple[int, int]],
+        normalized_items: List[Dict[str, Any]],
+        ocr_text: str = "",
+    ) -> str:
+        """Build layout-aware prompt for multi-crop images from one parent screenshot."""
+        prompt_lines: List[str] = [
+            "You are analyzing multiple cropped images extracted from the SAME original screenshot.",
+            "Use bbox layout metadata to understand each crop's relative position in the original screenshot.",
+            "Coordinate origin is top-left; bbox format is [x1, y1, x2, y2].",
+        ]
+        if parent_image_path:
+            prompt_lines.append(f"parent_image_path={parent_image_path}")
+        if parent_image_size:
+            prompt_lines.append(f"parent_image_size=[{int(parent_image_size[0])}, {int(parent_image_size[1])}]")
+
+        prompt_lines.append("inputs_in_order:")
+        for idx, item in enumerate(normalized_items, start=1):
+            group_type = str(item.get("group_type", "") or "unknown")
+            bbox_xyxy = item.get("bbox_xyxy")
+            bbox_norm = item.get("bbox_normalized_xyxy")
+
+            bbox_text = "[]"
+            if isinstance(bbox_xyxy, (list, tuple)) and len(bbox_xyxy) == 4:
+                try:
+                    bbox_text = f"[{int(bbox_xyxy[0])}, {int(bbox_xyxy[1])}, {int(bbox_xyxy[2])}, {int(bbox_xyxy[3])}]"
+                except Exception:
+                    bbox_text = str(list(bbox_xyxy))
+
+            bbox_norm_text = "[]"
+            if isinstance(bbox_norm, (list, tuple)) and len(bbox_norm) == 4:
+                try:
+                    bbox_norm_text = (
+                        f"[{float(bbox_norm[0]):.4f}, {float(bbox_norm[1]):.4f}, "
+                        f"{float(bbox_norm[2]):.4f}, {float(bbox_norm[3]):.4f}]"
+                    )
+                except Exception:
+                    bbox_norm_text = str(list(bbox_norm))
+
+            prompt_lines.append(
+                f"{idx}. group_type={group_type}; bbox_xyxy={bbox_text}; bbox_normalized_xyxy={bbox_norm_text}"
+            )
+
+        ocr_hint = str(ocr_text or "").strip()
+        if ocr_hint:
+            prompt_lines.append(f"ocr_hint={ocr_hint[:600]}")
+
+        prompt_lines.extend(
+            [
+                f"Return ONLY JSON array with exactly {len(normalized_items)} objects in the same order.",
+                "Each object must contain: {\"img_description\":\"...\"}",
+                "Do not output markdown.",
+            ]
+        )
+        return "\n".join(prompt_lines)
+
+    def validate_structured_group(
+        self,
+        *,
+        parent_image_path: str,
+        items: List[Dict[str, Any]],
+        ocr_text: str = "",
+    ) -> List[ConcreteKnowledgeResult]:
+        """Validate multiple structured crops from one parent screenshot in a single Vision call."""
+        if not items:
+            return []
+        if not (self._vision_enabled and self._vision_client):
+            return [self._default_result(True) for _ in items]
+
+        indexed_payloads: List[Tuple[int, Dict[str, Any], str]] = []
+        final_results: List[ConcreteKnowledgeResult] = [self._default_result(True) for _ in items]
+        for idx, payload in enumerate(items):
+            image_path = str(payload.get("image_path", "") or "").strip()
+            if not image_path or not os.path.exists(image_path):
+                continue
+            indexed_payloads.append((idx, payload, image_path))
+
+        if not indexed_payloads:
+            return final_results
+
+        parent_image_size: Optional[Tuple[int, int]] = None
+        first_payload = indexed_payloads[0][1]
+        raw_parent_size = first_payload.get("parent_image_size")
+        if isinstance(raw_parent_size, (list, tuple)) and len(raw_parent_size) == 2:
+            try:
+                parent_image_size = (int(raw_parent_size[0]), int(raw_parent_size[1]))
+            except Exception:
+                parent_image_size = None
+        if parent_image_size is None and parent_image_path and os.path.exists(parent_image_path):
+            try:
+                parent_img = cv2.imread(parent_image_path)
+                if parent_img is not None and parent_img.size > 0:
+                    parent_h, parent_w = parent_img.shape[:2]
+                    parent_image_size = (int(parent_w), int(parent_h))
+            except Exception:
+                parent_image_size = None
+
+        normalized_items: List[Dict[str, Any]] = [payload for _, payload, _ in indexed_payloads]
+        prompt = self._build_structured_group_prompt(
+            parent_image_path=parent_image_path,
+            parent_image_size=parent_image_size,
+            normalized_items=normalized_items,
+            ocr_text=ocr_text,
+        )
+
+        image_paths = [image_path for _, _payload, image_path in indexed_payloads]
+        batch_size = max(1, len(image_paths))
+        config_obj = getattr(self._vision_client, "config", None)
+        prev_batch_enabled = getattr(config_obj, "batch_enabled", None) if config_obj is not None else None
+        prev_batch_max_size = getattr(config_obj, "batch_max_size", None) if config_obj is not None else None
+
+        try:
+            if config_obj is not None and prev_batch_enabled is not None:
+                config_obj.batch_enabled = True
+            if config_obj is not None and prev_batch_max_size is not None:
+                config_obj.batch_max_size = max(int(prev_batch_max_size or 1), batch_size)
+
+            api_results = llm_gateway.vision_validate_images_sync(
+                image_paths=image_paths,
+                prompt=prompt,
+                system_prompt=self._concrete_knowledge_system_prompt,
+                client=self._vision_client,
+                max_batch_size=batch_size,
+                timeout=120,
+            )
+        finally:
+            if config_obj is not None and prev_batch_enabled is not None:
+                config_obj.batch_enabled = prev_batch_enabled
+            if config_obj is not None and prev_batch_max_size is not None:
+                config_obj.batch_max_size = prev_batch_max_size
+
+        if not isinstance(api_results, list):
+            raise RuntimeError("Vision grouped validation returned non-list payload")
+        if len(api_results) < len(indexed_payloads):
+            api_results = list(api_results) + [{} for _ in range(len(indexed_payloads) - len(api_results))]
+        elif len(api_results) > len(indexed_payloads):
+            api_results = list(api_results)[: len(indexed_payloads)]
+
+        for (origin_idx, _payload, image_path), api_result in zip(indexed_payloads, api_results):
+            parsed_payload = api_result if isinstance(api_result, dict) else {"raw_response": str(api_result)}
+            concrete_result = self._build_result_from_vision_payload(parsed_payload)
+            final_results[origin_idx] = self._finalize_validation_result(
+                image_path,
+                concrete_result,
+                cache_result=True,
+            )
+        return final_results
+
+    def _validate_batch_with_vision_api(self, tasks: List[Dict]) -> Optional[List[ConcreteKnowledgeResult]]:
+        """Docstring omitted."""
+        # 闂?Vision 闂傚倸鍊搁崐椋庣矆娴ｈ櫣绀婂┑鐘插亞閻掔晫鎲歌箛鏇燁潟闁绘劕顕弧鈧梺鎼炲劀閸ヮ煉绱┑鐘垫暩閸嬫稑螣婵犲啰顩叉繝闈涱儐閸嬪倿鏌ㄥ┑鍡╂Ч闁绘挻鐟╅幃宄扳枎韫囨搩浠兼繝娈垮枛椤︾敻寮婚敐澶婃闁圭楠稿▓妤呮⒑閸濆嫮鐏遍柛鐘虫尵閸掓帡顢橀悙鈺傤潔濠碘槅鍨槐顔炬閻愮儤鈷戦悶娑掆偓鍏呭濠电偛顕慨鎾敄閸℃稒鍋傛繛鍡樻尰閻撶喖鏌曡箛鏇炐ュù鐘崇洴閺屾盯濡堕崒姘婵犵绱曢崑鎴﹀磹瑜旈幊娆掋亹閹烘垹鏌ч梺缁橆焾椤曆呯不閺嶎厽鐓曟い鎰剁稻缁€鈧Δ鐘靛亼閸ㄤ粙寮婚悢鍏煎殝妞ゆ巻鍋撳┑锛勫帶闇?
+        # 婵犵數濮烽弫鍛婃叏娴兼潙鍨傛繛宸簻绾惧潡鏌ゅù瀣珔闁搞劍绻堥弻娑㈠箻濡も偓鐎氼剟寮搁崒鐐粹拺闁圭瀛╃粈鈧梺绋匡工閹芥粓鎮幆褜鍚嬪璺侯儑閸橀潧顪冮妶鍡欏缂佸鍨胯棢閻庯綆鍓涚壕濂告煟濡櫣锛嶉柛娆屽亾闂?None闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿孩鏌ㄩ埞鎴﹀磼濠婂海鍔搁梺鍝勵儎缁舵艾顕ｉ崼鏇為唶婵﹩鍘介悵鏇㈡煟鎼淬垹鍤柛鎾跺枛瀵鈽夐姀鐘电杸闂佺绻愰幗婊堝礄瑜版帗鈷戦柛婵嗗椤ユ粎绱掔紒姗堣€跨€殿喖顭烽弫鎾绘偐閼碱剨绱叉繝鐢靛Т閿曘倗鈧凹鍓欓埢鎾朵沪鐟欙絾鏂€闂佺粯鍔栬ぐ鍐棯瑜旈弻锝呂旈崘銊㈡瀰閻庢鍠栭…宄扮暦閵娾晛绾ч柟瀵稿Т婵附淇婇悙顏勨偓鏍暜閹烘柡鍋撳鐓庡缂侇喖鐗撳畷鍗炩槈濞嗘垵骞楁繝寰锋澘鈧劙宕戦幘缁樼厽婵°倐鍋撻柨鏇ㄤ邯瀵偄顓奸崶锝呬壕闁挎繂楠告晶鎵棯閹佸仮闁哄瞼鍠撻幉鎾礋椤愩埄娼旂紓浣鸿檸閸樺ジ鎮ユ總绋胯摕鐎广儱顦伴崵鎺楁煏閸繃鍣瑰ù鐘筹耿閺屸剝鎷呴崫銉モ叺闂佸搫鐭夌徊鍊熺亽闂佸壊鐓堥崰姘掗姀銈嗏拺闁告繂瀚峰Σ椋庣磼椤旂晫鎳囩€殿喖顭烽弫鎰板椽娴ｅ搫寮抽梻浣虹《閸撴繈銆冮崼銉ョ闁绘垼濮ら埛?
+        """Docstring omitted."""
+        if not tasks:
+            return []
+        if not (self._vision_enabled and self._vision_client):
+            return None
+        if not getattr(self._vision_client.config, "batch_enabled", False):
+            return None
+
+        results: List[Optional[ConcreteKnowledgeResult]] = [None] * len(tasks)
+        pending_for_vision: List[Tuple[int, str, str]] = []
+        try:
+            for idx, task in enumerate(tasks):
+                image_path = str(task.get("image_path", "") or "")
+                ocr_text = str(task.get("ocr_text", "") or "")
+                if not image_path or not os.path.exists(image_path):
+                    results[idx] = self._default_result(False)
+                    continue
+
+                if self._hash_cache:
+                    is_duplicate, cached_result = self._hash_cache.check_duplicate(image_path)
+                    if is_duplicate and cached_result:
+                        if isinstance(cached_result, dict):
+                            cached_obj = ConcreteKnowledgeResult(
+                                has_concrete=bool(cached_result.get("has_concrete", True)),
+                                has_formula=bool(cached_result.get("has_formula", False)),
+                                confidence=float(cached_result.get("confidence", 0.9)),
+                                concrete_type="formula",
+                                reason="detected formula, include screenshot",
+                                is_mixed=bool(cached_result.get("is_mixed", False)),
+                                non_text_ratio=float(cached_result.get("non_text_ratio", 0.0)),
+                                should_include=bool(cached_result.get("should_include", True)),
+                                img_description=str(
+                                    cached_result.get("img_description", cached_result.get("img_desription", ""))
+                                ),
+                            )
+                            results[idx] = self._finalize_validation_result(
+                                image_path, cached_obj, cache_result=False
+                            )
+                        elif isinstance(cached_result, ConcreteKnowledgeResult):
+                            results[idx] = self._finalize_validation_result(
+                                image_path, cached_result, cache_result=False
+                            )
+                        else:
+                            results[idx] = self._default_result(True)
+                        continue
+
+                has_formula = self._detect_math_formula(ocr_text)
+                if has_formula:
+                    results[idx] = self._finalize_validation_result(
+                        image_path,
+                        ConcreteKnowledgeResult(
+                            has_concrete=True,
+                            has_formula=True,
+                            confidence=0.9,
+                            concrete_type="formula",
+                            reason="detected formula, include screenshot",
+                            is_mixed=False,
+                            non_text_ratio=0.0,
+                            should_include=True,
+                        ),
+                        cache_result=True,
+                    )
+                    continue
+
+                pending_for_vision.append((idx, image_path, image_path))
+
+            if pending_for_vision:
+                api_results = llm_gateway.vision_validate_images_sync(
+                    image_paths=[item[2] for item in pending_for_vision],
+                    prompt="",
+                    system_prompt=self._concrete_knowledge_system_prompt,
+                    client=self._vision_client,
+                    max_batch_size=getattr(self._vision_client.config, "batch_max_size", None),
+                    timeout=120,
+                )
+                if len(api_results) != len(pending_for_vision):
+                    raise RuntimeError(
+                        f"Vision batch response size mismatch: expected={len(pending_for_vision)}, got={len(api_results)}"
+                    )
+
+                for (idx, cache_image_path, _request_path), api_result in zip(pending_for_vision, api_results):
+                    concrete_result = self._build_result_from_vision_payload(
+                        api_result if isinstance(api_result, dict) else {"raw_response": str(api_result)}
+                    )
+                    results[idx] = self._finalize_validation_result(cache_image_path, concrete_result, cache_result=True)
+
+            finalized: List[ConcreteKnowledgeResult] = []
+            for idx, value in enumerate(results):
+                if isinstance(value, ConcreteKnowledgeResult):
+                    finalized.append(value)
+                else:
+                    fallback_path = str(tasks[idx].get("image_path", "") or "")
+                    fallback_result = self._default_result(True)
+                    if fallback_path:
+                        fallback_result = self._finalize_validation_result(
+                            fallback_path,
+                            fallback_result,
+                            cache_result=False,
+                        )
+                    finalized.append(fallback_result)
+            return finalized
+
+        except Exception as e:
+            logger.warning(f"Vision batch validation failed, fallback to thread pool path: {e}")
+            return None
+    
+    def _vision_validate_v3(
+        self, image_path: str, graphic_region: Optional[np.ndarray] = None
+    ) -> ConcreteKnowledgeResult:
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?        1) 闂傚倸鍊搁崐鐑芥嚄閸洖纾块柣銏㈩焾閻ょ偓绻涢幋娆忕仾闁稿鍊濋弻鏇熺箾瑜嶇€氼厼鈻撴导瀛樼厽閹兼番鍨婚埊鏇㈡嫅閸楃偐鏀芥い鏍ㄧ⊕鐏忥箓鏌熼鑲╃Ш妤犵偘绶氶獮鎺楀箣濠垫劗鈧挳姊绘担鍛婃儓婵☆偅顨堥幑銏狀潨閳ь剙顕ｇ拠娴嬫婵☆垱绮庨崰鏍箖閳╁啯鍎熼柕蹇婃噰閸嬫挾鎷犲ù瀣杸闂佺粯鍔樼亸娆撳箺閻樼偨浜滄い鎾跺仦閸犳ɑ顨ラ悙鑼妞ゃ垺娲熼弫鍐焵椤掑倻鐭嗛柛鎰ㄦ杺娴滄粓鐓崶銊﹀鞍闁革絿鍎ょ换?VisionAIClient.validate_image闂?        2) 闂傚倸鍊峰ù鍥х暦閻㈢绐楅柟鎵閸嬶繝寮堕崼姘珔缂佽翰鍊曡灃闁挎繂鎳庨弳鐐烘煕?has_concrete_knowledge/confidence/concrete_type/reason 濠电姴鐥夐弶搴撳亾濡や焦鍙忛柣鎴ｆ绾剧粯绻涢幋鐐垫噭婵炲懐濞€楠炴牕菐椤掆偓婵″ジ鏌＄€ｂ晝绐旈柡宀€鍠栭獮鎴﹀箛闂堟稒顔勭紓鍌欒兌婵绱炴笟鈧濠氭偄閸忚偐鍔烽梺鎸庢磵閸嬫捇鏌＄€ｃ劌鈧牜鎹㈠☉娆忕窞闁割偅绻勬导鍫ユ⒑閸濆嫮鐒跨紒杈ㄦ礋閸┾偓妞ゆ帒锕︾粔鐢告煕鐎ｎ亜顏╅柍缁樻崌閹晝绱掑Ο鐓庡笚?        3) 闂傚倷娴囬褏鈧稈鏅犻、娆撳冀椤撶偟鐛ラ梺鍝勭▉閸樿偐澹曡ぐ鎺撶厵闂傚倸顕崝宥夋煕鐎ｎ亶妯€闁哄本鐩、鏇㈡晲閸℃瑯妲紓鍌欑贰閸嬪嫮绮旇ぐ鎺戣摕闁绘梻鈷堥弫宥嗙箾閹寸儑渚涙俊顐㈡缁辨挻鎷呴崫鍕戯綁鏌ｉ幙鍕瘈鐎殿喛顕ч埥澶愬閻樻牓鍔庨幉绋款吋閸℃瑯娴勯梺鍦劋濮婅崵澹曢懖鈺冪＝濞达綀鍋傞幋锔藉剭闁硅揪闄勯悡鍐喐濠婂牆绀堟繛鎴欏灩缁犵娀鏌熼崜褏甯涢柛瀣儔閻擃偊宕堕妸锔绢槬闂佹悶鍔嶇换鍫ュ蓟閺囩喓绠鹃柣鎰靛墯閻濇棃姊洪崨濠傜仼濠殿喚鏁搁幑銏犫攽婵犲孩些缂傚倷闄嶉崝鎴炵鐠鸿櫣鏆?        闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓浣肝旈崨顐熷亾閸涙潙绠い鈺佸储ateway.vision_validate_image_sync闂?        闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧锛忛崨顖ょ闯濠电偠鎻徊鑺ョ珶婵犲伣锝夊川婵炲じ绨诲銈嗘尵閸嬫稑危婵犳碍鐓?CV 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槱閻熸粎澧楃敮鎺楀垂閸岀偞鐓欑€瑰嫭濯介～锕€霉濠婂啰绉洪柡灞剧〒娴狅箓骞嗚濮ｅ牓姊洪幖鐐测偓鏍洪悢鍏煎亗妞ゆ劧绠戦悙濠囨煏婵炲灝鈧鎹㈡笟鈧娲传閸曨剦妫″┑鐐跺皺閸犲酣顢氶敐澶婇唶闁哄洨鍋熼崢鍛婄箾鏉堝墽鎮奸柟铏崌钘濋柍鍝勬噺閳锋垹鐥鐐村櫧闁割偒浜弻娑欑節閸愵亞鐤勯悗娈垮櫘閸嬪嫰顢樻總绋垮窛妞ゆ牗绋掗悾鐑芥⒒娴ｅ憡鍟炴繛璇ч檮缁傚秹鎮欓崹顐綗濠殿喗顭堥崺鏍煕閹寸姷纾奸悗锝庡幗绾墎绱掗悩鍐差棆缂佽鲸甯楀鍕沪閽樺绠ｆ俊鐐€戦崹鍝勭暆閸涘﹣绻嗛柤鎼佹涧缁剁偛鈹戦悩鎻掝伌婵″弶鎸冲缁樼瑹閳ь剙顭囪閹囧幢濞嗗苯浜炬慨妯煎帶楠炴绱掔€ｎ亶妯€濠殿喒鍋撻梺闈涚墕濡盯宕㈤柆宥嗏拺闂傚牊渚楀Σ鍫曟煕婵犲啯绀堥柍褜鍓氶懝楣冩煀閿濆钃?        闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?        - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞悾锟犳儉閻?is_running()
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝畷鑼姳婵傜棗oncrete闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐弻娑樷槈閸楃偟浠╅梺鎼炲妽缁诲牓鐛弽顬ュ酣顢楅埀顒佷繆閼测晝纾奸柍褜鍓熷畷鎺楁倷鐎电骞楅梻渚€娼ч悧鍡橆殽閹间焦鍊堕柕澶嗘櫆閻撴稑顭跨捄渚Ш闁活厽鐟╅弻鈥崇暆閳ь剟宕伴弽顓犲祦闁哄稁鍙庨弫鍥ㄧ節闂堟稓澧㈡繛澶嬪缁绘繈鎮介棃娑楃捕闂佸鏉垮闁圭瓔鍋嗙槐鎾存媴濮濆苯顏悗瑙勬处閸撶喖宕洪悙鍝勭闁挎洍鍋撻梺鍗炴喘閺岋綁寮幐搴㈠枑闂佸搫妫欏畝绋款潖?        婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃缂佲偓婢跺鍙忔俊鐐额嚙娴滈箖姊洪棃娑欘棛缂佽埖宀搁悰顔锯偓锝庡枟閺呮粓鏌﹀Ο渚Х婵顨婂缁樻媴閸濆嫬浠橀梺纭呭Г缁捇濡撮崒娑氼浄閻庯綆浜為敍娑㈡⒑鐟欏嫬鍔ゆい鏇ㄥ弮閹兘鎮烽幍铏杸闂佺粯蓱瑜板啴顢旈锔界厽婵炴垼椴搁悵顤箉ncio 婵犵數濮烽弫鎼佸磻濞戙垺鍋ら柕濞у啫鐏婇悗鍏夊亾闁告洖鐏氶弲鐐烘⒑閸涘﹥澶勯柛瀣у亾闂佸搫顑呴柊锝夊蓟閺囷紕鐤€闁哄洨鍎愰埀顒€鐭傞弻娑㈠Χ閸♀晜鐣烽梺闈涙搐鐎氼垳绮诲☉銏犵闁圭⒈鍘介ˉ锝囩磽閸屾瑨鍏屽┑顕€娼ч悾婵嬪箹娴ｆ瓕鎽曢梺璺ㄥ枔婵绮堢€ｎ喗鈷掗柛顐ゅ枔閵嗘帒霉閻橆偅娅婃慨濠呮閹风娀鍨惧畷鍥︽埛缂傚倷娴囬崺鏍嚌妤ｅ啯鍋╅柣鎴ｅГ閸婂鏌﹀Ο鐚寸礆闁冲搫鎳忛悡蹇撯攽閻愭垵鍟刊濂告煕濮橆剦鍎旀慨濠冩そ閹筹繝濡堕崨顒佸媰缂傚倷绀侀鍡涘垂瑜版帒绠栨い鏇楀亾妞ゃ垺娲熼弫鍐焵椤掑嫭鍊?
+        # - API 闂傚倸鍊峰ù鍥敋瑜忛埀顒佺▓閺呮繄鍒掑▎鎾崇婵＄偛鐨烽崑鎾诲礃椤旂厧鑰垮┑鐐村灱妞存悂寮查埡鍛€甸柛蹇擃槸娴滈箖姊洪崨濠冨闁告挻鑹鹃埢宥夊冀瑜夐弨鑺ャ亜閺冨倹娅曞┑鈥虫喘閺岋繝宕卞Δ浣规珗_concrete_knowledge闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟悧鍡欑不閹烘鐓熼柣妯活問閻撶idence闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟悧鍡欑不閹烘鐓熼柣妯活問閻撶rete_type闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟崐鍦偓姘煼閺岋綁鎮╅崹顐㈢毆son闂?        闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?        - image_path: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼閹碱偊鎮鹃柨瀣窞閻庯絻鍔嬬花濠氭⒑閸濆嫮袪闁告柨绉归幆鍐箣閻樼數锛滈梺褰掑亰閸犳牗绂掗柆宥嗙厸閻忕偠顕ф俊濂告煃閽樺妲搁摶锝夋煟閹惧磭宀搁柛娆欑節濮婃椽鎳￠妶鍛勃闂佸憡鍨电紞濠傜暦閹寸偟绡€闁稿本绮嶅▓楣冩⒑闂堚晛鐦滈柛妯绘倐瀹曟垿骞樼紒妯绘珳闂佸憡渚楅崣搴ㄥ汲閵忋垻纾藉ù锝囨嚀婵牓鏌嶉鍡╂r闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?        - graphic_region: 闂傚倸鍊搁崐鐑芥嚄閸洍鈧箓宕奸姀鈥冲簥闂佸湱鍎ら〃鍛村磼閵娧勫枑闁哄啫鐗勯埀顑跨閳诲酣骞樺畷鍥╂澑闂備礁鎼ˇ鍐测枖閺囥垺鍋傞柟杈鹃檮閳锋垹绱掔€ｎ偄顕滄繝鈧幍顔剧＜閻庯綆鍋勭粭鎺楁煃缂佹ɑ宕岀€规洖銈稿鎾偄閸濆嫬姹插┑鐘垫暩閸嬬偤宕归崼鏇椻偓锕傚醇閳垛晛浜炬慨姗嗗亜瀹撳棝鏌＄仦鍓ф创妤犵偛顑夊顒勫垂椤旇瀚熺紓鍌氬€风粈渚€顢栭崨姝ゅ洭顢涢悜鍡樻櫍婵犻潧鍊婚…鍫濐啅濠靛洢浜滈柟鎹愭硾濞呭繑淇婇銈呮瀻闁宠鍨块幃娆撳级閹寸姳妗撻梻浣烘嚀閹芥粓鈥﹂崼銉稏婵犻潧顑嗛弲婵嬫煕鐏炶鈧牠寮查鍕垫富闁靛牆妫楅崸濠囨煕鐎ｎ偅宕岀€殿噮鍋婂畷濂稿Ψ閿旀儳骞堥梺璇茬箳閸嬫稒鏅舵禒瀣ラ柟鐑橆殕閻撳啰鎲稿鍫濈闁挎洖鍊搁崹鍌炴煕椤愶絾绀€闁藉啰鍠栭弻娑樷槈濡吋鎲奸梺绋款儐閸旀牠濡甸崟顖氱睄闁稿本绋戝▓灞剧箾?        闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?        - ConcreteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐弻娑㈠焺閸愵亖濮囬梺绋款儏鐎氫即寮诲鍫闂佸憡鎸婚悷鈺侊耿?Vision AI 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁嶉崟顒佹闂佹悶鍎洪崜娆戝瑜版帗鐓涢柛銉ｅ劚閻忣亪鏌涚€Ｑ勬珔閾绘牠鏌ㄥ┑鍡樺櫣闁哄棛鍋ら弻娑欐償閿涘嫅褔鏌＄仦鍓ф创鐎殿喗鎸虫俊鎼佸Ψ閵堝洨娉块梺璇叉捣閺佸憡鏅跺Δ鈧灋闁告劦鍠栫粻鏍喐閻楀牆绗氶柛濠傤煼閺屾盯濡烽姀鈩冪彇闂佹寧绋撻崰鎾舵閹惧鐟归柛銉戝嫮浜栭梻浣告啞閺屻劑鏌婇敐澶屽祦闊洦娲嶉崑鎾绘晲鎼粹剝鐏嶉梺绋款儐閻楃娀骞冨Δ鍛棃婵炴垶鐟﹂崰鎰渻閵堝繐鐦滈柛瀣工椤?""
+        if graphic_region is not None:
+            logger.debug("graphic_region input ignored; validation uses raw image: %s", Path(image_path).name)
+
+        try:
             api_result = llm_gateway.vision_validate_image_sync(
-                image_path=temp_path,
-                prompt=self._concrete_knowledge_prompt,
+                image_path=image_path,
+                prompt="",
+                system_prompt=self._concrete_knowledge_system_prompt,
                 client=self._vision_client,
                 timeout=60,
             )
-
-            # 尝试修复被 Markdown 包裹的 JSON
-            if "raw_response" in api_result and "has_concrete_knowledge" not in api_result:
-                raw = api_result["raw_response"]
-                clean_raw = raw.replace("```json", "").replace("```", "").strip()
-                try:
-                    parsed = json.loads(clean_raw)
-                    if isinstance(parsed, dict):
-                        api_result.update(parsed)
-                except Exception:
-                    pass
-
-            has_concrete = api_result.get("has_concrete_knowledge", "否") == "是"
-            confidence = float(api_result.get("confidence", 0.5))
-            concrete_type = api_result.get("concrete_type", "未知")
-            reason = api_result.get("reason", "Vision AI 判定")
-            img_description = str(api_result.get("img_description") or api_result.get("img_desription") or reason or "").strip()
-            
-            return ConcreteKnowledgeResult(
-                has_concrete=has_concrete,
-                has_formula=False,
-                confidence=confidence,
-                concrete_type=concrete_type,
-                reason=reason,
-                is_mixed=False,
-                non_text_ratio=0.0,
-                should_include=has_concrete,
-                img_description=img_description
-            )
+            return self._build_result_from_vision_payload(api_result if isinstance(api_result, dict) else {})
             
         except Exception as e:
             logger.error(f"VisionAIClient validation failed: {e}")
@@ -599,39 +1757,40 @@ class ConcreteKnowledgeValidator:
                 has_concrete=True,
                 has_formula=False,
                 confidence=0.5,
-                concrete_type="未知",
-                reason=f"Vision AI 调用失败: {e}",
+                concrete_type="formula",
+                reason=f"Vision AI 闂傚倸鍊峰ù鍥х暦閸偅鍙忛柟缁㈠櫘閺佸嫰鏌涘☉娆愮稇闁汇値鍠栭湁闁稿繐鍚嬬紞鎴︽煛鐎ｂ晝绐旈柡灞炬礋瀹曠厧鈹戦崶鑸殿棧缂傚倷绀佹晶搴ㄥ磻閵堝拋鍤曢柛顐ｆ礀闁卞洦銇勯幇鍨窔闁告垳绮欓幃? {e}",
                 is_mixed=False,
                 non_text_ratio=0.0,
                 should_include=True,  # fallback keep
                 img_description="description unavailable"
             )
-        finally:
-            # 清理临时文件
-            try:
-                os.unlink(temp_path)
-            except:
-                pass
     
     def validate_batch(self, tasks: List[Dict]) -> List[ConcreteKnowledgeResult]:
-        """
-        执行逻辑：
-        1) 将任务列表映射到线程池并发执行。
-        2) 保持结果顺序与输入一致。
-        3) 单个任务异常时返回默认结果。
-        实现方式：ThreadPoolExecutor + validate。
-        核心价值：批量验证提升吞吐，同时保持失败可控。
-        决策逻辑：
-        - 条件：任务执行异常时回退到 _default_result(True)。
-        依据来源（证据链）：
-        - 运行状态：future.result() 抛出的异常。
-        输入参数：
-        - tasks: 数据列表/集合（类型：List[Dict]）。
-        输出参数：
-        - ConcreteKnowledgeResult 列表（顺序与输入 tasks 对齐）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊峰ù鍥敋瑜忛幑銏ゅ箛椤旇棄搴婇梺褰掑亰閸庨潧鈽夐姀鐘电潉闂佸壊鍋呯换鍕敊婢舵劖鈷戦梻鍫熺〒缁犵偤鏌涙繝鍐╃缂侇喖鐗婂鍕箛椤撶姴甯楅梻渚€娼чˇ顓㈠磿闁秴姹查梺顒€绉甸悡鐔肩叓閸ャ劍鈷掗柟鍐叉喘閺岀喖顢欓幐搴ｃ€愰梺瀹犳椤﹂潧顕ｉ崐鐕佹Щ濡炪値鍓欓ˇ顖炲煘閹达箑鐒洪柛鎰╁妼婵煡姊洪崨濠佺繁闁告挻鐩畷婊堝Ω閳哄倵鎷洪梺鍛婄☉閿曘儲寰勯崟顖涚厱閻庯綆浜滈顓㈡煙椤曞棛绡€鐎规洘甯掗…銊╁川椤栥倗搴婇梻鍌欒兌椤㈠﹪锝炴径鎰闁哄稁鍋呴崗婊堟煕椤愶絾绀冮柣鎾冲暣閺屻倖鎱ㄩ幇顑藉亾閺囩姵鏆滈柛顐ｆ礀閺嬩線鏌涢鐘插姕闁绘挾鍠愭穱濠囶敍濮樺彉铏庨梺钘夊閵堟悂骞冨Δ鈧～婵嬵敇閻樺啿娅氶梻浣告惈閺堫剛绮欓幋锕€鐓濋幖娣妼缁犳稒銇勯幒鎴濃偓宄邦浖閹炬枼鏀介柣姗嗗亝婵即鏌涘☉鍗炴灍闁绘繍浜铏规嫚閳ヨ櫕鐏嶆繝銏㈡嚀濡瑧绮嬮幒妤佹櫇闁稿本绋戦埀顒€顭烽弻宥嗘姜閻楀牜妯傛繝?
+        # 2) 婵犵數濮烽弫鎼佸磿閹寸姴绶ら柦妯侯棦濞差亝鏅滈柣鎰靛墮鎼村﹪姊洪崨濠傚Е濞存粍鐗犲畷鎴﹀箻鐠囨彃鐎銈嗗姧缁叉椽骞忛懡銈囩＝濞达絼绮欓崫娲偨椤栥倗绡€闁绘侗鍠栬灒閻忓繑鐗曟禍楣冩煟閵忕姵鍟炴繛鍛矒閺屾盯骞嬮敐鍛呮挸菐閸パ嶈含闁诡喗鐟╅、鏃堝礋閵娿儰澹曢梺鍝勬储閸ㄥ湱绮荤憴鍕╀簻闁规壋鏅涢埀顒佺⊕閹便劑鎼归鐘辩盎闂佽宕樺▔娑㈠几閺冨牊鐓冪紓浣股戦ˉ鍫燁殽閻愬澧懣鎰亜閹哄棗浜鹃梺閫炲苯澧い銊ョ墢濡叉劕鈻庨幇顔剧槇濠殿喗锕╅崢楣冨储闁秵顥婃い鎰╁灪閹兼劖銇勯幋婵囧殗鐎规洘绻傞埢搴ㄥ箣閻樼绱查梻浣告惈閸熺娀宕戦幘缁樼厵闁告稑锕ら埢鏇燁殽閻愯宸ラ柍钘夘槸铻ｉ柟鐐▕閸欏嫭銇勯姀锛勫⒌闁圭锕ュ鍕緞婵犲孩顥?
+        # 3) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩顔瑰亾閸愵喖骞㈡俊鐐存礃濡炰粙鐛€ｎ喗鏅滈柣锝呰嫰鐢挻绻濋悽闈浶㈤柨鏇樺€楅埀顒佸嚬閸ｏ綁濡撮崨瀛樺€婚柤鎭掑劚娴狀垶姊洪幖鐐插姌闁告柨鐬煎濠勭磼濡晲绨诲銈嗗姉婵挳鍩€椤掍緡娈滈柛鈹惧亾濡炪倖甯婄欢锟犲疮韫囨稒鐓曢柣妯虹－婢х數鈧娲橀崝娆撶嵁閺嶃劍濯撮柣鐔碱暒閸戜粙姊绘担绋款棌闁稿鎳庣叅闁哄稁鍋嗙亸鐢碘偓骞垮劚椤︿即鎮″▎鎰╀簻闁哄秲鍔庨埥澶嬨亜閵夈儺鍎戠紒杈ㄥ浮閹晛鐣烽崶褍缁╅梻浣告惈閺堫剟鎯勯娑楃箚闁汇値鍨煎Σ缁樼箾鐎电鞋濞存粠鍓涘Σ鎰板箳濡ゅ﹥鏅梺鍛婁緱閸樼偓绂掗鐐粹拺闁荤喐婢樺Σ缁樸亜閹存繍妲瑰ǎ鍥э躬瀹曞ジ寮撮悙闈涒偓鐐烘⒑閸愬弶鎯堥柛濠冩倐閹啯銈ｉ崘鈹炬嫽婵炶揪绲介幉锟犲箚閸喆浜滈柟瀛樼箖椤ャ垻鈧娲栭悘姘跺箚閺冨牆惟闁靛／鍐ㄐ?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘茬畺婵炲樊浜滅痪褍鈹戦埄鍐ㄦ倕adPoolExecutor + validate闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堝煕閹寸姵鍠愰柣妤€鐗嗙粭姘箾閹冲嘲鎳愮壕鐣屸偓骞垮劚閹锋垿鐓鍌楀亾鐟欏嫭绀冨┑鐐诧躬楠炲啫顭ㄩ崘鐐缓闂佺硶鍓濋敃鈺呭疮瀹ュ鐓熼幖绮光偓鍐茶緟闂佺顑嗛幑鍥蓟濞戙垹绠涢柛蹇撴憸閸戠懓顪冮妶搴′簻缂佸鎳撻～蹇撁洪鍕祶濡炪倖鎸炬慨瀵哥箔閿熺姵鈷戦柛娑橈攻閳锋劖绻涢崣澶屽⒌闁诡喗鍎抽悾锟犲箥椤旇姤鐣烽梻浣告啞濞诧箓宕戞径搴澓闂傚倸鍊烽懗鍓佸垝椤栫偛绀夐柡鍥╁剱閸ゆ洟鏌涢锝嗙缁炬儳缍婇弻锝夊箣閿濆憛鎾绘煟閹惧崬鍔滅紒缁樼洴楠炲鎮滈崱娆忓Ъ闂佽瀛╅惌顕€宕￠幎钘夎摕闁绘梻鈷堥弫濠囨煠閹帒鍔氱痪鐐▕閹鈻撻崹顔界彯闂侀潻缍囩徊浠嬵敋閿濆鍋ㄩ柛娑橈工娴犳椽姊哄Ч鍥х仾妞ゆ梹鐗犲畷顖氼吋婢跺鎷绘繛杈剧到閹芥粎绮斿ú顏呯厸闁告稒婢橀惃铏圭磼椤旇偐澧涚紒妤冨枛閸┾偓妞ゆ帊妞掔换鍡涙煟閵忋埄鐒剧紒鐙呯秮閺岋絽螣閸濆嫭姣愬銈呯箲閹倸顫忓ú顏咁棃婵炴垼椴歌倴闂備胶顭堝锔界椤掑嫬绠悗锝庡枛閽冪喖鏌曟径娑橆洭闁告鏁婚弻锝夋偐椤旂厧顬堝銈忓瘜閸犳岸骞忕€ｎ喖钃熼柕澶堝劤閿?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悢婵嗘处閸嬪倹銇勯弽顐沪闁绘挻鐟﹂〃銉╂倷閼碱兛铏庨梺璇茬箺鐏忔瑩鍩€椤掑喚娼愭繛鍙夘焽閹广垽宕奸妷銉︽К闂佸憡娲﹂崹鎵矆閸愵喗鐓忓┑鐐茬仢閻忣亪鎮楅崹顐ゅ⒌婵﹥妞介幊锟犲Χ閸涱剚鍕冪紓鍌欑椤戝棝宕归崸妤€绠犻柣鏃傗拡閺佸秵绻濇繝鍌氼伌婵炶偐鍠栧铏规喆閸曨偆顦ㄩ梺绯曟櫆閻楃姴顕ｉ崘宸叆闁割偆鍠撻崢鍗炩攽閻愭潙鐏﹂柨鏇ㄥ亰瀵劎绱掑Ο闀愮盎闁挎粌顭峰畷鍫曞Ω瑜嶉獮鍫ユ⒒娓氣偓濞佳囨晬韫囨稑绀冪憸搴綖閺囥垺鈷掑〒姘ｅ亾闁逞屽墰閸嬫盯鎳熼鐐插偍闁圭虎鍠楅悡鏇㈡倵閿濆骸浜濈€规洖鐭傞弻?_default_result(True)闂?
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃缂佲偓婢跺鍙忔俊鐐额嚙娴滈箖姊洪棃娑欘棛缂佽埖宀搁悰顔锯偓锝庡枟閺呮粓鏌﹀Ο渚Х婵顨婂缁樻媴閸濆嫬浠橀梺纭呭Г缁捇濡撮崒娑氼浄閻庯綆浜為敍娑㈡⒑鐟欏嫬鍔ゆい鏇ㄥ弮閹兘鎮烽幍铏杸闂佺粯蓱瑜板啴顢旈锔界厽婵炴垼椴搁悵鐜紅ure.result() 闂傚倸鍊搁崐鐑芥嚄閸洏鈧焦绻濋崶褎妲梺鍝勭▉閸嬪棝鎯屽▎鎾寸厵閺夊牆澧介悾閬嶆煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏哥棯闂備胶顭堟鍝ョ矓瑜版帒钃熸繛鎴欏灩閸楁娊鏌曟繛鍨姍缂併劎鏅槐鎺楀箚瑜嶇紞鏍磼椤旂晫鎳囨鐐插暞缁傛帞鈧絽鐏氶弲顒€鈹戦悙鏉戠仸闁荤喆鍎茬粋鎺楀煛閸涱喒鎷?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - tasks: 闂傚倸鍊搁崐宄懊归崶褜娴栭柕濞炬櫆閸ゅ嫰鏌ょ粙璺ㄤ粵婵炲懐濮垫穱濠囧Χ閸屾矮澹曢梻浣风串缁蹭粙鎮樺杈╃當闁绘梻鍘ч悞鍨亜閹哄棗浜鹃梺浼欑到閸㈡煡锝炲┑瀣垫晞闁冲搫鍊归ˉ鍫⑩偓瑙勬礈閸犳牠宕洪悙鍝勭畾鐟滃本绔?闂傚倸鍊搁崐鎼佸磹閹间礁纾圭紒瀣嚦濞戞鏃堝焵椤掑啰浜辨繝寰锋澘鈧洟骞婃惔锝囦笉闁哄稁鍘肩粻瑙勭箾閿濆骸澧┑鈥茬矙閺岋繝宕担绋库拫闂佸搫鏈惄顖炪€侀弴銏″亹闁肩⒈鍏涚槐妯讳繆閻愵亜鈧倝宕戦幘鍓佷笉闁规崘顕ч拑鐔哥箾閹存瑥鐏╅幆鐔兼⒑闂堟侗妯堥柛鐘崇墵瀹曟繈鍩€椤掑倻纾介柛灞剧懄缁佹澘霉濠婂骸澧い顒€锕﹀濠囨偉瀵摵Dict]闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - ConcreteKnowledgeResult 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁嶉崟顒佹濠德板€曢幊宀勫焵椤掆偓閸燁垰顕ラ崟顖氱疀妞ゆ垟鏂傞崕鐢稿蓟濞戙垹绠涢梻鍫熺⊕閻忓秹姊洪崫鍕闁告挾鍠栧璇测槈閵忊晜鏅濋梺缁樕戣ぐ鍐╂叏瀹€鍕拺闂侇偆鍋涢懟顖涙櫠椤曗偓閹鈽夐幒鎾寸彋濡ょ姷鍋涘Λ婵嗩嚕椤曗偓瀹曞爼鍩￠崘鈺傜帆闂備胶顢婃竟鍫ュ箵椤忓棗绶ら柛褎顨呯粻鐔兼煕瑜庨〃鍡涙偂濞戞﹩鐔嗛悹铏瑰皑閸旂喎顭胯閻╊垶寮婚悢鐓庡窛濠电姴鍟埀顒佸姉閳?tasks 闂傚倸鍊峰ù鍥敋瑜旈弻濠囨晲閸滀胶鍔烽悷婊冪箳濡叉劙鎮欑€靛摜鐦堥梺鍛婃处閸橀箖藝椤栫偞鈷戦柛鎾村絻娴滄牠鏌涙惔銏㈠弨鐎殿喗鐓￠、妤呭焵椤掑嫧鈧妇鎹勯妸锕€纾梺鎯х箳閹虫捇銆傞悽鍛娾拺?""
+        if not tasks:
+            return []
+
+        batch_results = self._validate_batch_with_vision_api(tasks)
+        if batch_results is not None:
+            return batch_results
+
         import concurrent.futures
-        results = [None] * len(tasks)
-        
+
+        results: List[Optional[ConcreteKnowledgeResult]] = [None] * len(tasks)
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             future_to_idx = {}
             for i, task in enumerate(tasks):
@@ -641,7 +1800,7 @@ class ConcreteKnowledgeValidator:
                     ocr_text=task.get("ocr_text", "")
                 )
                 future_to_idx[future] = i
-                
+
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
@@ -649,8 +1808,8 @@ class ConcreteKnowledgeValidator:
                 except Exception as e:
                     logger.error(f"Batch validation failed for item {idx}: {e}")
                     results[idx] = self._default_result(True)
-        
-        return results
+
+        return [item if item is not None else self._default_result(True) for item in results]
 
     def validate_for_coreference(
         self,
@@ -658,23 +1817,23 @@ class ConcreteKnowledgeValidator:
         sentence_text: str,
         context_text: str = ""
     ) -> Dict[str, Any]:
-        """
-        执行逻辑：
-        1) 先执行常规具象校验，复用现有缓存与保留判断。
-        2) 输出可复用的具象信息（尤其是 img_description），供上游 DeepSeek 二次自然化修复。
-        3) 汇总返回，供上游缓存 concrete_result 并在后续截图验证复用。
-        实现方式：validate。
-        核心价值：将“视觉理解”和“文本自然化修复”解耦，减少重复 Vision 调用。
-        决策逻辑：
-        - 条件：sentence_text/context_text 仅用于上游日志上下文，本方法不做句子改写。
-        依据来源（证据链）：
-        - validate(...) 输出：should_include/confidence/img_description。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        - sentence_text: 文本内容（类型：str）。
-        - context_text: 文本内容（类型：str）。
-        输出参数：
-        - 结构化结果字典（包含 should_include/confidence/img_description/concrete_result）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊搁崐鐑芥嚄閸洍鈧箓宕奸姀鈥冲簥闂佽澹嗘晶妤呭磻鐎ｎ亖鏀介柣妯诲絻閺嗙偞绻涢崨顖氣枅闁哄矉缍侀弫鎰板川椤旇姤瀚抽梻浣侯焾椤戝棝鏁冮姀銈呯畺婵せ鍋撻柟顔界懇瀹曞綊顢曢敐鍥ф锭闂傚倷鑳剁涵鍫曞疾濠婂牄鈧啯绻濋崶褏鐣洪悗鐟板婢瑰寮告惔銊у彄闁搞儯鍔嶉幆鍕归悩灞傚仮婵﹥妞藉畷銊︾節閸曨剙娅欐繝鐢靛仜椤︽澘煤閻旇偐宓侀柟鐗堟緲缁犺櫕淇婇妶鍌氫壕闂佺粯甯楀浠嬪蓟濞戙垹绠涢柛蹇撴憸閻╁酣姊洪幇浣风敖濠⒀勵殕缁岃鲸绻濋崶顬囨煕閵夘喚浠㈤柕蹇嬪€栭悡鐔搞亜閹捐泛鍓辨俊鑼劋娣囧﹪宕ｆ径濠傤潓闂佸疇顫夐崹鍨暦閹偊妲剧紓浣瑰姉閸嬨倝骞冨Δ鍛祦闁割煈鍠栨慨搴♀攽閻愰鍤嬬紒鐘虫尭椤曪絿鈧湱濮烽悿鈧┑鐐村灦閻熝囧储閽樺鏀介柣妯款嚋瀹搞儵鏌熼崘鏌ュ弰闁靛棗鍊垮畷妤呮嚃閳哄啰妲囬梻渚€鈧偛鑻晶顖炴煙瀹勭増鍤囬柟鐓庣秺瀹曠兘顢橀妸褔妫烽梻鍌氬€峰ù鍥綖婢舵劕纾跨€规洖娲らˉ姘亜閹惧崬鐏╃紒鐘虫そ閺岋絽螣閼姐們鍋炲┑鈩冨絻閻楁捇寮婚悢鐓庣畾鐟滃繘鏁嶅澶嬬厱闁瑰瓨绻冪拹锛勭磼鏉堛劌绗х紒杈ㄥ笒铻ｉ柛婵嗗閹虫瑩姊绘担绛嬪殐闁哥姵顨婂畷鏇㈠箮閽樺鍘洪柟鍏肩暘閸婃鎮块埀顒勬⒑閸︻厼浜炬繝鈧崷顓燁潟婵炲棙鎸婚埛鎺懨归敐鍛暈闁诡垰鐗撻弻娑氣偓锝庝簼椤ャ垻鈧娲忛崹濂稿Φ閹版澘绠抽柟瀵稿Т婵?
+        # 2) 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冮崱娑樜﹂柛鏇ㄥ灠閸愨偓闂侀潧顭堥崕鍗炐掗崼婵冩斀闁斥晛鍟徊缁樸亜椤撶姴鍘寸€殿喖顭烽弫鎰緞濞戞氨鈼ゆ俊鐐€栧濠氬磻閹炬枼鏀介柍鈺佸暙椤曟粎绱掔紒妯兼创鐎规洖銈搁幃銏☆槹鎼存繄绀夐梺璇叉唉椤煤濮椻偓閵嗗啯绻濋崶褏鐣洪梺绉嗗嫷娈㈤柡浣哥У缁绘繈妫冨☉娆忣槱缂備浇鍩栧姗€鍩為幋锔藉€婚柛銉㈡櫅閸╁苯鈹戦悙璺虹毢濠电偐鍋撻悗瑙勬礃缁矂鍩為幋锕€鐐婄憸婊堝吹閵堝鈷戦柛娑橈功閳藉鏌ｆ幊閸旀垵顕ｉ弻銉晢闁告洦鍓涢崢鍗烆渻閵堝棗濮х紒鑼舵硶缁寮介鐔封偓鍫曠叓閸ャ劍鐓ュ┑顔肩Ч閺岋紕浠﹂崜褜鐏辩紓浣哄У缁嬫垿锝炲┑瀣垫晢闁稿本鑹剧紓姘攽?img_description闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎鈥崇湴閸旀垿宕洪埀顒併亜閹烘垵鈧崵澹曟總绋跨骇闁割偅绋戞俊璺ㄧ磼閻樺磭澧辩紒杈ㄥ笒铻栭柛鎰╁妽閻庡姊虹€圭姵顥夋い锔诲灥閻忓啴姊洪崨濠傚Е濞存粍绻堝畷顖炴偋閸垻鐦?DeepSeek 婵犵數濮烽弫鎼佸磻濞戙垺鍋ら柕濞у啫鐏婇悗鍏夊亾闁告洦鍋勯悵妯侯渻閵堝棗绗掗悗姘卞厴瀵偊宕橀妸銏℃杸闂佺鏈喊宥夊疮閻愮儤鐓曢柕鍫濇嫅閺€濠氭煏閸パ冾伂缂佺姵鐩獮姗€骞栭鐕佹＇婵犵數濮甸鏍疮椤愶箑鐐婇柕濞у啫绠為梻鍌欑閹碱偆绮旈弻銉ョ閹兼番鍨哄▍鐘垫喐閺冨牆钃熼柣鏂挎憸閻熷綊鏌涢…鎴濇灈妞ゎ剙顦甸幃妤呭垂椤愶絿鍑￠柣搴㈠嚬閸撶喖銆佸Ο鑽ら檮缂佸娉曢ˇ銊╂⒑閹稿海绠撻柟鍐茬У缁?
+        # 3) 濠电姷鏁告慨鐢割敊閺嶎厼绐楁慨妯挎硾缁犵娀鏌熼幑鎰滄繛宸簼閺呮繈鏌涚仦鐐殤闁告棑绠戦—鍐Χ閸℃鐟愰梺缁樺釜缁犳捇鏁愰悙鍙傛棃宕橀鍡床缂傚倸鍊烽悞锕傛晪闂佽绻愰顓㈠焵椤掑喚娼愭繛鍙夌墵閹儲绺界粙璺ㄧ暫濠电姴锕ら悧鍡涙倷婵犲洦鐓冮柛婵嗗閺嬨倖淇婇幓鎺戞Щ闁宠鍨块幃娆戔偓娑櫭棄宥囩磼閻愵剚绶茬紒澶婂閸掓帒鈻庨幘宕囩杸濡炪倖鏌ㄦ晶浠嬫偩閸洘鈷戠紒瀣濠€浼存煕濠靛棝鍙勯柛鈹惧亾濡炪倖甯婄粈浣该归閿亾鐟欏嫭澶勯柛瀣攻娣囧﹪鎮块锝喰╂俊鐐€ч懙褰掑疾閻樿钃?concrete_result 濠电姴鐥夐弶搴撳亾濡や焦鍙忛柣鎴ｆ绾惧鏌ｅΟ鑽ゃ偞闁哄鐗楃换娑㈠箣閻戝洤鍙曢梺鑲╁鐎笛囧Φ閸曨喚鐤€闁规崘娉涢。娲煟閻斿摜鎳曠紒鐘虫崌閻涱噣寮介妸锔剧Ф闂佸憡鎸嗛崟顐¤繕闂傚倷娴囧銊ф濮樿京涓嶉柡宥庡幖閽冪喖鏌ｉ弮鍌氬付缂佺姾顫夐妵鍕箻鐎靛摜鐣奸梺鐑╂櫅妤犳悂鍩為幋锔藉€烽柤纰卞墯閹插ジ鏌﹂崘顓㈠摵闁靛洤瀚版俊鎼佹晲閸涱厼顫撻梻浣风串缁插墽鎹㈤崼婵堟殾婵せ鍋撴い銏℃瀹曨亝鎷呴崷顓犘繝鐢靛Х閺佸憡鎱ㄦ导鏉戝瀭闁绘挸绨堕弸鏍ㄧ箾閹寸偞鐨戦柣顓熸崌閺屾盯顢曢敐鍡欘槬闂佸搫顑勭欢姘跺蓟閺囥垹閱囨繝鍨姈绗戦柡?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓浣肝旈崨顔煎壃闂佹眹鍨荤粋鎶巃te闂?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堟偂閻旇偐鍙撻柛銉ｅ妽鐏忕數绱掗悩闈涱暭濞ｅ洤锕、鏇㈠閵忋垹濮遍梻浣虹《閺備線宕戦幘鎰佹富闁靛牆妫楃粭鍌炴煠閸愯尙鍩ｉ柟顖氭湰閹棃锝為璺ㄧ泿婵＄偑鍊栭崝鎴﹀春閸曨垰纾块柟杈鹃檮閻撴瑩鏌熺紒妯虹闁圭晫濮烽埀顒€鐏氬妯尖偓姘煎枟缁傛帡鏁冮崒姘辩暰閻熸粌顦靛畷鎴﹀箻缂佹ê鈧兘鏌ｉ幋鐏活亝绂掗鐐╂斀闁绘劕寮堕ˉ鐐烘煟閻旀繂鍟伴弳鍡樼箾閹存瑥鐏柣鎾冲暟閹茬顭ㄩ崼婵堫槶濠殿喗顭堟ご绋跨暦閺屻儲鐓曠€光偓閳ь剟宕戝☉姘变笉妞ゆ牗顕㈣ぐ鎺戠闁稿繗鍋愮粙鍥⒑鐠囪尙绠烘繛鍛礈閹广垹鈹戦崶鈺冪槇闂佺鏈崙瑙勭妤ｅ啯鈷戦悹鍥ㄥ絻閻︺劑鏌涢敐蹇曠М鐎殿喖顭烽弫鎾绘偐閺屻儱鏁规俊鐐€栭崝鎴﹀垂瑜版帒鐓曞鑸靛姈閳锋垿鏌熼懖鈺佷粶闁逞屽墯閻楁粓宕氶幒妤€绠婚悹鍥皺閻ｆ椽姊虹紒妯哄闁诲繑鑹鹃悾閿嬪緞閹邦厾鍘卞┑鐘绘涧濡顢旈幘顔界厱闁靛牆妫涢幊鍕磼缂佹娲撮柡浣瑰姍瀹曘劑顢欐穱鍗炰汗闂傚倷绀侀幗婊勬叏閻㈠憡鍋嬮柣妯煎劋椤ャ倝姊绘担鍛婃儓閻炴凹鍋婂畷鏇㈡焼瀹ュ棗鈧爼鏌ц箛锝呬簽缂佲檧鍋撻梻鍌氬€搁悧濠囨嚀娴犲鐓涢柛娑卞幘椤斿﹤鈹戞幊閸婃挾绮堟担绯曟灁鐎光偓閸曨兘鎷洪梺鍦焾鐎涒晠藟閸℃稒鐓曢悗锝庡亜婵绱掗鑲╁鐎垫澘瀚伴獮鍥敇閻樻彃绠為梻鍌欒兌閹虫捇鎮洪妸褎宕查柛鏇ㄥ幘娑撳秴霉閻撳海鎽犻柣鎾跺枑閵囧嫰顢橀悢椋庝淮闂佽楠忕粻鎾诲蓟閿涘嫪娌柛濠勫枎椤忣厼顪冮妶鍡樺碍闁靛牏顭堥悾鐑筋敂閸涱喖顎撻梺?Vision 闂傚倸鍊峰ù鍥х暦閸偅鍙忛柟缁㈠櫘閺佸嫰鏌涘☉娆愮稇闁汇値鍠栭湁闁稿繐鍚嬬紞鎴︽煛鐎ｂ晝绐旈柡灞炬礋瀹曠厧鈹戦幇顓夛箓寮?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝鍫曞礆缁佸穲nce_text/context_text 婵犵數濮烽弫鎼佸磻濞戙埄鏁嬫い鎾跺枑閸欏繘鏌熺紒銏犳灈缂佺姷濞€閺岀喖鎮ч崼鐔哄嚒闂佸搫顑勭欢姘跺蓟閺囥垹閱囨繝闈涙祩濡倕顪冮妶鍌涙珕闁绘搫绻濋悰顕€寮介鐔蜂壕婵炴垶鐟悞鐣岀磼閻樼鑰块柡宀嬬秮閹垻绮欓崹顕呮綌缂傚倷鑳剁划顖炴儎椤栫偟宓佹慨妞诲亾闁圭厧缍婇、鏇㈠閳╁啰鏆繝鐢靛Х椤ｈ棄危閸涙潙纾婚柍褜鍓熼弻锟犲川椤栨矮鎴风紓渚囧枦椤曆囧煡婢跺娼ㄩ柛鈩兠惁婊堟⒒娴ｅ憡鍟為柟绋挎瀹曘劑顢欓崗鍏碱啀婵犵數濮烽弫鎼佸磻閻愬搫鍨傞柛顐ｆ礀缁犱即鏌熼梻瀵歌窗闁轰礁瀚伴弻娑㈠焺閸愵亖妲堥梺鍛婂灩婵炩偓闁哄本鐩獮鍥濞戞瑧浜堕梻浣告惈閹峰宕滈悢鐓庣畺婵せ鍋撻柟顔界懇濡啫鈽夊Δ鈧ˉ姘舵⒒娴ｅ憡璐￠柛蹇斏戠粋宥夊醇閺囩偠鎽曢梺璺ㄥ枔婵澹曢崗鑲╃瘈闁割煈鍋勬慨鍫㈢磽瀹ュ懐澧㈢紒杈ㄥ笧缁辨帡濮€閻樿尙鍝楅梻浣虹《閺呮粓鎮у鍛灊婵炲棙鍔曠欢鐐测攽閻樻煡顎楅柟顔藉灴濮婃椽宕ㄦ繝浣虹箒闂佸憡鎸荤粙鎺楀Φ濞嗘挸绠柤鎭掑劗閹锋椽姊洪崨濠勨槈闁挎洩绠撻獮濠囧焵椤掑嫭鈷戠紒瀣健閸欏嫬霉濠婂啰鍩ｆ鐐插暣瀹曨偊宕熼妸锔锯偓濠氭⒑鐟欏嫬鍔ょ痪缁㈠弮瀹曨偄螖閸涱喒鎷洪梺鐓庮潟閸婃洟寮搁幋鐐电瘈闁靛繆妲勯懓璺ㄢ偓娈垮枟閻擄繝鐛弽銊﹀闁革富鍘肩敮?
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - validate(...) 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏哥棯闂備礁鎼幏瀣礈濮樿泛绠為柕濞垮劗閺€浠嬫煕椤愵偄浜濇い銉ョ崻uld_include/confidence/img_description闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - image_path: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼閹碱偊鎮鹃柨瀣窞閻庯絻鍔嬬花濠氭⒑閸濆嫮袪闁告柨绉归幆鍐箣閻樼數锛滈梺褰掑亰閸犳牗绂掗柆宥嗙厸閻忕偠顕ф俊濂告煃閽樺妲搁摶锝夋煟閹惧磭宀搁柛娆欑節濮婃椽鎳￠妶鍛勃闂佸憡鍨电紞濠傜暦閹寸偟绡€闁稿本绮嶅▓楣冩⒑闂堚晛鐦滈柛妯绘倐瀹曟垿骞樼紒妯绘珳闂佸憡渚楅崣搴ㄥ汲閵忋垻纾藉ù锝囨嚀婵牓鏌嶉鍡╂r闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - sentence_text: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁炽儲鍓氶崵銈夋⒑閸濆嫷妲归柛銊ョ秺钘濋柕濞炬櫆閳锋垿鏌涘☉姗堟缂佸爼浜堕弻娑樷枎韫囨稑寮伴悗瑙勬处閸ㄨ泛鐣烽崼鏇ㄦ晢濞达絽鎼铏節閻㈤潧浠﹂柛銊ョ埣閳ワ箓宕堕妸锔界彿闂侀潧绻堥崐鏍磻閻樿櫕鍙忔俊顖滃帶鐢泛霉濠婂嫬顥嬮柍褜鍓濋～澶娒洪弽褝鑰块梺顒€绉撮悞鍨亜閹烘埊鍔熼柛鎺撴緲椤儻顦叉繛鎾棑閸掓帡鏁愰崪浣圭稁濡炪伇鍛闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - context_text: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁炽儲鍓氶崵銈夋⒑閸濆嫷妲归柛銊ョ秺钘濋柕濞炬櫆閳锋垿鏌涘☉姗堟缂佸爼浜堕弻娑樷枎韫囨稑寮伴悗瑙勬处閸ㄨ泛鐣烽崼鏇ㄦ晢濞达絽鎼铏節閻㈤潧浠﹂柛銊ョ埣閳ワ箓宕堕妸锔界彿闂侀潧绻堥崐鏍磻閻樿櫕鍙忔俊顖滃帶鐢泛霉濠婂嫬顥嬮柍褜鍓濋～澶娒洪弽褝鑰块梺顒€绉撮悞鍨亜閹烘埊鍔熼柛鎺撴緲椤儻顦叉繛鎾棑閸掓帡鏁愰崪浣圭稁濡炪伇鍛闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸婂潡鏌ㄩ弴鐐测偓鍝ョ不閺夊簱鏀介柣妯虹－椤ｆ煡鏌涙繝鍌滀粵闁靛洤瀚板浠嬵敃椤厾鎹曠紓鍌欒閸嬫挾鈧厜鍋撻柛鏇ㄥ墰閸樻悂鎮楅獮鍨姎濡ょ姴鎲＄粋宥夋倷鐎靛摜顔曟繝銏ｆ硾閻楀棝鎮橀弻銉︾厸鐎光偓鐎ｎ剛锛熼梺閫炲苯澧剧紓宥呮瀹曟垿宕卞☉娆忓壒婵犵數濮村ú锕傛偂閻斿吋鐓冩い鏍ㄧ〒閹冲啯绻涚仦鍌氣偓妤冨垝閸儱纾奸柣鎰ˉ閹峰姊洪崜鎻掍簼缁炬澘绉撮埢宥夊炊閳哄啰锛滈梺閫炲苯澧寸€规洜鍠栭、娑樷槈濮橆剙绠為梻鍌欑閹碱偆鎷犻悙鍝勭妞ゆ劧缍嗘禒鈺呮⒒?should_include/confidence/img_description/concrete_result闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?""
         base_result = self.validate(image_path=image_path, ocr_text="")
         return {
             "should_include": base_result.should_include,
@@ -688,101 +1847,120 @@ class ConcreteKnowledgeValidator:
         }
     
     def _detect_math_formula(self, text: str = "", image: Optional[np.ndarray] = None) -> bool:
-        """
-        执行逻辑：
-        1) 若 ThreadSafeMathOCR 可用且提供图像，则优先使用 OCR 检测公式。
-        2) 若无 OCR 结果，则使用文本规则匹配公式特征。
-        3) 满足阈值条件即认为存在数学公式。
-        实现方式：OCR 结果阈值 + 文本特征计数。
-        核心价值：在无 OCR 或失败时仍能保证公式召回。
-        决策逻辑：
-        - 条件：self._math_ocr and image is not None
-        - 条件：not text
-        - 条件：OCR score >= 0.7
-        - 条件：formula_count >= 2 or math_char_count >= 3
-        依据来源（证据链）：
-        - OCR 结果：res.score 字段。
-        - 文本特征：公式模式命中数与数学字符数。
-        - 输入参数：image、text。
-        输入参数：
-        - text: 文本内容（类型：str）。
-        - image: 函数入参（类型：Optional[np.ndarray]）。
-        输出参数：
-        - bool：是否检测到数学公式。"""
-        # 策略1: 使用 ThreadSafeMathOCR 进行图像级检测 (高精度)
+        """Detect whether OCR text/image likely contains formula-like content."""
         if self._math_ocr and image is not None:
             try:
                 math_results = self._math_ocr.recognize_math(image)
                 if math_results:
                     for res in math_results:
-                        if res.get("score", 0) >= 0.7:
-                            logger.debug(f"MathOCR detected: {res.get('text', '')[:50]}")
+                        if float(res.get("score", 0) or 0.0) >= 0.7:
+                            logger.debug(f"MathOCR detected: {str(res.get('text', ''))[:50]}")
                             return True
             except Exception as e:
                 logger.debug(f"MathOCR detection failed: {e}")
-        
-        # 策略2: 文本特征检测 (fallback)
-        if not text:
+
+        normalized_text = str(text or "")
+        if not normalized_text:
             return False
-        
-        # 数学符号和结构 (来自 ocr_utils.py ThreadSafeMathOCR 的字符集)
-        math_chars = set(r"√∫∑∏+-×÷=<>≤≥≠()[]{}^_/\\")
-        formula_patterns = [
-            "=",           # 等式
-            "∑", "∫", "∏", # 求和、积分、连乘
-            "√", "∛",      # 根号
-            "∞", "≈", "≠", "≤", "≥",  # 数学符号
-            "α", "β", "γ", "δ", "θ", "λ", "μ", "π", "σ",  # 希腊字母
-            "²", "³", "⁴", "ⁿ",  # 上标
-            "÷", "×",      # 运算符
-            "lim", "log", "ln", "sin", "cos", "tan",  # 函数
-            "d/dx", "dy/dx",  # 微分
-            "n+1", "n-1", "2n",  # 变量表达式
-            "ASL", "O(n)",  # 算法复杂度
+        text_lower = normalized_text.lower()
+
+        formula_tokens = [
+            "=",
+            "==",
+            ">=",
+            "<=",
+            "!=",
+            "->",
+            "<-",
+            "=>",
+            "lim",
+            "log",
+            "ln",
+            "sin",
+            "cos",
+            "tan",
+            "sqrt",
+            "sum",
+            "int(",
+            "d/dx",
+            "dy/dx",
+            "o(n)",
+            "asl",
         ]
-        
-        # 分数表达式模式
-        fraction_patterns = ["/", "分之", "比"]
-        
-        # 检查公式模式
-        text_lower = text.lower()
-        formula_count = sum(1 for p in formula_patterns if p in text or p.lower() in text_lower)
-        
-        # 检查数学字符
-        math_char_count = sum(1 for c in text if c in math_chars)
-        
-        # 如果有2个以上公式特征，或者有足够多的数学字符
-        if formula_count >= 2 or math_char_count >= 3:
+        token_hits = sum(1 for token in formula_tokens if token in text_lower)
+        math_chars = set("=+-*/^()[]{}<>_|\\")
+        math_char_count = sum(1 for c in normalized_text if c in math_chars)
+        if token_hits >= 2 or math_char_count >= 3:
             return True
-        
-        # 检查分数表达式
-        import re
-        for p in fraction_patterns:
-            if p in text:
-                if re.search(r'\d+[/÷]\d+', text) or re.search(r'\d+分之\d+', text):
-                    return True
-        
+
+        if re.search(r"\d+\s*/\s*\d+", normalized_text):
+            return True
+        if re.search(r"\b[a-zA-Z]\s*=\s*[-+]?\d+(\.\d+)?\b", normalized_text):
+            return True
         return False
-    
+
+    def _get_ocr_extractor(self):
+        """Docstring omitted."""
+        if self._ocr_extractor is not None:
+            return self._ocr_extractor
+        if self._ocr_extractor_init_error:
+            return None
+        try:
+            from services.python_grpc.src.content_pipeline.infra.runtime.ocr_utils import OCRExtractor
+
+            self._ocr_extractor = OCRExtractor()
+            return self._ocr_extractor
+        except Exception as exc:
+            self._ocr_extractor_init_error = str(exc)
+            logger.warning(f"OCR extractor unavailable for text-only description: {exc}")
+            return None
+
+    def _extract_text_page_description(self, image_path: str, ocr_text: str = "") -> str:
+        """Docstring omitted."""
+        text = str(ocr_text or "").strip()
+        if not text:
+            extractor = self._get_ocr_extractor()
+            if extractor is not None:
+                try:
+                    text = str(
+                        extractor.extract_text_from_image(
+                            image_path=image_path,
+                            preprocess=True,
+                        )
+                        or ""
+                    ).strip()
+                except Exception as exc:
+                    logger.debug(f"Extract OCR text for text-only page failed: {exc}")
+                    text = ""
+
+        if not text:
+            return ""
+
+        compact_text = re.sub(r"\s+", " ", text).strip()
+        max_chars = 1600
+        if len(compact_text) > max_chars:
+            compact_text = compact_text[:max_chars].rstrip() + " ..."
+        return compact_text
+
     def _analyze_cv_features(self, image_path: str) -> Tuple[float, str, Optional[np.ndarray]]:
-        """
-        执行逻辑：
-        1) 读取图像并计算边缘与形态学区域。
-        2) 估算非文本区域占比并判定页面类型。
-        3) 返回非文本区域掩膜以供后续使用。
-        实现方式：OpenCV Canny/形态学操作 + NumPy 统计。
-        核心价值：以轻量 CV 特征评估图文结构。
-        决策逻辑：
-        - 条件：img is None
-        - 条件：total_area > 0
-        - 条件：non_text_ratio < 0.1 / 0.3 / 0.6（页面类型划分）
-        依据来源（证据链）：
-        - 计算指标：non_text_ratio、total_area。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        输出参数：
-        - (non_text_ratio, page_type, non_text_region)：
-          非文本占比、页面类型、非文本区域图像。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊峰ù鍥х暦閸偅鍙忛柡澶嬪殮濞差亜鐓涢柛婊€鐒﹂弲顏堟偡濠婂嫬鐏村┑锛勬暬楠炲洭寮剁捄銊モ偓鐐差渻閵堝棗鍧婇柛瀣崌閺岋綁骞囬濠呭惈闂佸搫鐬奸崰鏍€佸☉銏犲耿婵°倐鍋撻柡鍡樼懃椤法鎲撮崟顓炩吂闁剧粯鐗犻弻锝咁潨閳ь剙顭囪缁傛帡鏁冮崒娑氬幈闁硅偐璇濋弶澶稿垝婵＄偑鍊戦崹娲晝閵忕姷鏆︽い鎰剁畱鍞悷婊冪灱缁厽寰勬繛鐐杸闁圭儤濞婂畷鎰板即閻橆偄浜炬慨妯煎帶濞呭秹鏌熼鐐毈鐎规洘绮嶉幏鍛存惞閻у摜闂梻鍌欒兌椤牓寮甸鍕殌濞寸姴顑嗛崵鍐煃閸濆嫬鏆熼柣锝呯埣閹宕楁径濠佸闂備礁鎲￠崝褏绱撳顑兾旈崨顔规嫼闂傚倸鐗婄粙鎾剁不濮橆厺绻嗛柣娆愮懃濞层倗澹曟繝姘厵闁诡垎鍛喖婵犳鍨遍幐鎶藉蓟濞戙垹绠婚柡澶嬪灩缁侀攱绻濈喊妯哄⒉濠电偛锕ら～蹇撁洪鍕獩婵犵數濮寸€氼剟鍩呰ぐ鎺撯拺闁革富鍘搁幏锟犳煕鐎ｎ亷韬鐐插暣閸ㄩ箖寮妷锔锯偓濠氭⒑閸︻厼浜剧紒?
+        # 2) 婵犵數濮烽弫鎼佸磻閻愬樊鐒芥繛鍡樻尭鐟欙箓鎮楅敐搴′簽闁绘繂鐖奸弻娑㈠焺閸愵亖濮囬梺绋款儌閺呮盯鍩為幋锔藉亹鐎规洖娴傞弳鈥愁渻閵堝啫鍔氶柣妤佹崌瀵鏁愭径濠勭杸濡炪倖甯掗崐褰掑箟婵傚憡鈷戦悹鍥ㄥ絻閻︺劑鏌涢敐蹇曠М鐎殿喖顭烽弫鎾绘偐閺屻儱鏁规俊鐐€栭崝鎴﹀垂瑜版帪缍栭柍鍝勬噺閻撶喖鐓崶銊﹀鞍缂佸倸顑夐弻娑㈠Ω閵婏妇銆愰梺浼欑到閸㈣尙鍙呭銈呯箰閹冲孩绂嶅鍫熷€甸柣鐔告緲椤忣亜顭块悷鐗堫棦闁诡喕鍗虫俊鐑藉Ψ閵忊剝鏉告俊鐐€栧ú鏍涘☉姘辩煓濠电姵纰嶉悡娑㈡倶閻愰鍤欏┑顔煎€块弻鐔风暦閸パ勭亪闂佽鍠撻崹浠嬪箖閳╁啯鍎熼柨婵嗗瀛濋梻鍌氬€风欢姘焽瑜旈幃褔宕卞☉妯肩枃闂佸湱澧楀妯盒ч弻銉︾厸濠㈣泛顑愰崕銉︾箾閹炬剚鐓奸柡灞炬礋瀹曠厧鈹戦崶褜妲遍梻浣告惈濡參宕滃杈ㄥ床婵炴垯鍨圭粈鍌炴煟閹惧啿鐦ㄦ俊顐㈡濮婅櫣绱掑Ο鍨棟婵犫拃鍌滅煓妤犵偛绻橀幃鈺冪磼濡儤顓绘俊鐐€栭崹鐓幬涢崟顒傤洸濡わ絽鍟悡鐔兼煙鏉堝墽绋绘い銉ヮ槹濞?
+        # 3) 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌滃闁藉啰鍠栭弻鏇熺箾閸喖澹勫┑鐐叉▕娴滄粓宕橀埀顒€顪冮妶鍡樺暗闁革絻鍎辫灋闁告劦鍠楅埛鎴犵磽娴ｅ顏呮叏閸ヮ剚鐓熼幒鎶藉礉閹达箑绠栨俊銈呮媼閺佸鏌嶈閸撶喎顕ｆ繝姘櫢闁绘ɑ鐓￠崬璺侯渻閵堝棗濮傞柛銊ョ秺閿濈偤鍩￠崨顔惧幗闂婎偄娲﹂幐鑽ょ矉鐎ｎ喗鐓曢柕濞垮妽绾箖鏌ｉ敐鍛Щ閻撱倖銇勮箛鎾村櫣濞存粍绮庣槐鎾存媴閸撴彃鍓甸梺绋挎唉瀹曠數鍒掗崼鈶╁亾閿濆骸鏋熼柍閿嬪灴閺屻倗鎲撮崟顒傚嚒闂佺粯鎸婚崝妤冩閹烘鏁婇柤娴嬫櫅椤も偓缂傚倷绀侀崐鍝ョ矓瑜版帞宓侀柟鐑橆殔缁犲鏌涢幘鑼妽闁搞倕鏈换婵嬫偨闂堟稐娌梺鎼炲妽閸庡ジ骞楅锔解拺缂佸灏呴崝鐔兼煛娴ｅ憡鎲告俊鍙夊姍楠炴鈧潧鎽滈幊婵嬫⒑閹肩偛鍔€闁告劦浜堕崬鐑樼節閻㈤潧啸闁轰焦鎮傚畷鎴濃槈濡繑妞介、姗€濮€閻樼數鏆┑鐐差嚟婵挳顢栭崨顔煎姅闂傚倷鐒︾€笛呮崲閸岀偛纾归柛娑橈功椤?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘茬畺闁惧繐鍘滈崑鎾诲捶椤撶姳绨穘CV Canny/闂傚倷娴囧畷鐢稿窗閹邦喖鍨濋煫鍥ㄧ☉閺勩儵鏌涢妷顔煎闁搞劌鍊圭换娑橆啅椤旇崵鐩庨梺缁樺笒閻忔岸濡甸崟顖氱闁挎繂妫涢妴濠傤渻閵堝繗顓洪梻鍕婵＄敻宕熼姘鳖唺闂佸搫鍊圭€笛囨倶閸惊鏃堟偐闂堟稐娌梺鑽ゅ枂閸庣敻銆佸Ο鑽ら檮缂佸娉曢ˇ鏉款渻閵堝棙灏靛┑顕呭弮瀵?+ NumPy 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸ゅ嫰鏌涢锝嗙缂佹劖顨婇弻锟犲炊閵夈儳鍔撮梺杞扮濞差參寮婚悢鍏尖拻閻庨潧澹婂Σ顕€寮?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顧€婵″洨绮绘ィ鍐╁€甸柣銏☆問閻掑墽鎮妸鈺傗拺缂佸娼￠妤呮煟鎺抽崝搴ｅ垝鐎ｎ亶鍚嬪璺好¤椤法鎹勬笟顖氬壋闂?CV 闂傚倸鍊搁崐鐑芥嚄閸撲礁鍨濇い鏍亼閳ь剙鍟村畷濂稿Ψ閵壯呮瀮闂備浇顫夊畷姗€宕洪弽顓ф晝闁兼亽鍎崇粻楣冩煙鐎电浠фい锝嗙叀閹顫濋鐐叉懙闂佸搫鏈惄顖氼嚕閹绢喖惟闁靛牆娲ㄥ▔鍧楁煟鎼淬埄鍟忛柛鐘冲哺瀹曟顫滈埀顒€顕ｇ拠娴嬫闁靛繒濮堥妸褎鍠愮€广儱妫涢々鎻捨旈敐鍛殲闁绘挻鐩幃妤呮晲鎼存繄鐩庨梺鍝勬閸犳挾妲愰幒鎾寸秶闁靛鍎茬拠鐐参旈悩闈涗沪妞ゎ厼娲崺鈧い鎺戝€归弳鈺冪棯椤撶偟鍩ｇ€规洘鍨块獮妯好虹紒妯绘珫闂備胶绮崝鏇烆嚕?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻冪换鍛矆?is None
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞～蹇涙偉閹攱_area > 0
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞锝団偓鍦text_ratio < 0.1 / 0.3 / 0.6闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐弻鐔煎箲閹伴潧娈弶鈺傜箖缁绘繈濮€閿濆懐鍘梺鍛婃⒐閻楃姾妫㈤梺鍓插亖閸庢煡鎮¤箛娑氬彄闁搞儜灞藉壈闂佽绻楁ご鎼佸Φ閸曨垼鏁冩い鎺戝€婚弳銈夋⒑閸濆嫭婀伴柣鈺婂灡娣囧﹪骞栨担鑲濄劍銇勯弮鍌氬付濠㈢懓鐗撳缁樻媴鐟欏嫬浠╅梺鍛婃煥缁夊爼骞戦姀銈呴唶婵犻潧鐗婂▓鎯р攽椤旂瓔鐒炬繛澶嬬洴閻涱噣濮€鎺虫禍婊堟煙閹规劖纭鹃崯绋款渻?
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - 闂傚倸鍊峰ù鍥х暦閸偅鍙忕€规洖娲﹂浠嬫煏閸繃澶勬い顐ｆ礋閺岋繝宕堕妷銉т痪闂佺顑傞弲娑㈠煘閹达附鍋愰悗鍦Т椤ユ繄绱撴担鍝勑￠柛妤佸▕瀵鈽夐姀鐘栥劑鏌ㄥ┑鍡樺櫣妞ゎ剙顑夊娲箹閻愭彃顬堥梺闈涚墛閹倸顕ｆ繝姘╅柕澶堝灪椤秴鈹戦悙鍙夘棡闁挎艾鈹戦鐟颁壕on_text_ratio闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟犻崑鎾寸箾閻撳海绠伴柕鍡樺笒椤﹤鈻藉顤rea闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - image_path: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮煡鏌涘☉鍙樼凹闁诲骸顭峰娲濞戞氨鐤勯梺鎼炲妼閹碱偊鎮鹃柨瀣窞閻庯絻鍔嬬花濠氭⒑閸濆嫮袪闁告柨绉归幆鍐箣閻樼數锛滈梺褰掑亰閸犳牗绂掗柆宥嗙厸閻忕偠顕ф俊濂告煃閽樺妲搁摶锝夋煟閹惧磭宀搁柛娆欑節濮婃椽鎳￠妶鍛勃闂佸憡鍨电紞濠傜暦閹寸偟绡€闁稿本绮嶅▓楣冩⒑闂堚晛鐦滈柛妯绘倐瀹曟垿骞樼紒妯绘珳闂佸憡渚楅崣搴ㄥ汲閵忋垻纾藉ù锝囨嚀婵牓鏌嶉鍡╂r闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - (non_text_ratio, page_type, non_text_region)闂?
+          # 闂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸劍閸嬪鐓崶銊р槈缁炬儳顭烽弻锝夊箛椤掍焦鍎撻梺鍛婂灩婵炩偓闁哄本鐩獮鍥濞戞瑧浜梺璇插閼归箖藝娴兼潙桅闁告洦鍨扮粻鎶芥煕閳╁啨浠﹀瑙勬礋閺岋絾鎯旈妶搴㈢秷濠电偛寮堕敋妞ゎ厼鐏濊灒婵炲棛鍋撳В搴ㄦ⒒閸屾瑧顦﹂柟纰卞亰瀹曟劖绻濆顒傦紵闂佹眹鍨婚…鍫㈠婵犳碍鐓欓柟顖嗗苯娈堕梺鑽ゅ枎缂嶅﹪寮诲鍫闂佸憡鎸鹃崰鎰┍婵犲嫧鍋撳☉娅亞娆㈤悙鐑樼厵闂侇叏绠戝鐐繆椤愩垹鏆ｆ慨濠冩そ濡啫鈽夊杈╂澖闂備焦鎮堕崝宀勫Χ閹间焦鏅查柣鎰劋閺呮繈鏌涚仦鍓с€掗柛姗€浜跺娲濞戣京鍔搁梺绋垮濡炶棄鐣烽弴鐑嗗悑濠㈣泛顑囬崢鎾绘偡濠婂嫮鐭掔€规洘顨呴埥澶婎潩椤撗冧缓婵犳鍠楅敃鈺呭礈閿曞倹鍊块柤鎭掑劘娴滄粓鐓崶銊﹀暗濠⒀勬礃娣囧﹪顢曢敐蹇氣偓鍧楁煛鐏炲墽娲村┑锛勫厴閺佹劙宕ㄩ褏鈧挳姊绘担鍛婅础闁稿繑蓱缁傚秹宕奸弴鐐舵憰濠电偞鍨崹褰掑礃閳ь剟鎮峰鍐弰妤犵偛妫濆畷濂稿Ψ閿旀儳骞楅梻浣筋潐閸庢娊顢氶銏犵疇闁搞儮鏂侀崑鎾舵喆閸曨剛顦ラ梺缁樼墪閵堟悂鎮伴鈧畷鍗烆潩閸忓す鈺呮⒒娴ｅ憡鍟為柟鍛婃倐婵″爼骞栨担姝屾憰?""
         try:
             img = cv2.imread(image_path)
             if img is None:
@@ -791,28 +1969,28 @@ class ConcreteKnowledgeValidator:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
             
-            # 边缘检测
+            # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜遍梺绯曞墲椤ㄦ劙鎳撻崸妤€绾ч柛顐ｇ濞呭棙銇勯锝嗙闁靛洤瀚伴獮妯兼崉鐞涒€充壕闁挎繂鎳夊Σ鍫ユ煏韫囨洖啸闁告棑绠戦—鍐Χ閸℃娼戦梺绋款儐閹瑰洤螞?
             edges = cv2.Canny(gray, 50, 150)
             
-            # 文本区域检测 (使用形态学操作)
-            # 文字通常是密集的小边缘
+            # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁炽儲鍓氶崵銈夋⒑閸濆嫷妲归柛銊ョ秺钘濋梺顒€绉甸埛鎴︽煕濞戞﹫鍔熺紒鐘虫崌閹顫濋悡搴㈢彎閻庤娲忛崹钘夌暦瑜版帩鏁冮柨娑樺閻ｇ偓淇婇悙顏勨偓鏍礉濡ゅ懎绐楅幖娣灮椤╂煡鏌熼鍡忓亾闁衡偓?(婵犵數濮烽弫鎼佸磻閻樿绠垫い蹇撴缁€濠囨煃瑜滈崜姘辨崲濞戞瑥绶為悗锝庡亞椤︿即鎮楀▓鍨珮闁稿锕ユ穱濠囧醇閺囩偤鍞跺┑鐐村灦椤ㄥ棝鎯堣箛娑欌拻濞撴埃鍋撴繛浣冲懏宕查柛鈩冾殢閻庡墎鎲搁弬璺ㄦ殾闁硅揪绠戠粻濠氭倵濞戞顏堫敁閹剧粯鈷戦柛娑橈攻鐏忔壆鎲搁弶鍨殲濞ｅ洤锕獮搴ㄦ嚍閵夈垺瀚奸梻浣藉吹閸犳劖绔熼崱妯碱浄闁靛繈鍨荤壕鐓庮熆鐠虹尨鍔熼柨娑樼Ф缁?
+            # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簻鍥存繝銏ｆ硾椤戝懏绂掗柆宥嗗仭婵犲﹤瀚ˉ鍫⑩偓娈垮枛椤嘲鐣烽妸鈺婃晣鐟滃酣宕撻棃娑辨富闁靛牆妫楃粭鎺楁煕婵犲啯鍊愰柟顕嗙節楠炲鏁傜憴锝嗗闂備礁鎲＄换鍌溾偓姘煎墴椤㈡棃骞橀鐣屽幈闂侀潧顭堥崐鏇炵暤閸℃稒鐓欐い鏍ㄧ懅缁愭梹顨ラ悙宸剶闁轰礁鍊婚幉鎾晲閸℃妯侀梻鍌氬€烽懗鍓佹兜閸洖绀堟繝闈涱儐閸嬶繝鏌ㄩ弴鐐测偓褰掑磻閳哄懏鈷戞い鎺嗗亾缂佸鏁诲畷鎰板醇閺囩姴褰勯梺鎼炲劘閸斿秶浜搁悽鐢电＜闁绘鍎ら鐘电磼鏉堛劌娴€殿噮鍣ｅ畷鎺戭潩椤撶姳绨寸紓?
             kernel_text = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
             text_regions = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_text)
             
-            # 图形区域检测 (使用较大的结构元素)
+            # 闂傚倸鍊搁崐鐑芥倿閿曞倸绠栭柛顐ｆ礀绾惧潡鏌＄仦璇插姎缁炬儳娼￠弻鐔煎箚閺夊晝鎾绘煕閵堝拋鍎忛棁澶愭煕韫囨挸鎮戠紓宥嗗灩缁辨帡鍩€椤掆偓閻ｆ繈宕熼鍌氬箞婵犵數濞€濞佳兾涘Δ鍜佹晜妞ゆ劧闄勯悡鏇熶繆椤栨繃顏犲ù鐘崇☉鑿愰柛銉戝秷鍚銈冨灪濞茬喖骞冮姀銈嗘啣闁稿本鍑瑰Λ婊勭節?(婵犵數濮烽弫鎼佸磻閻樿绠垫い蹇撴缁€濠囨煃瑜滈崜姘辨崲濞戞瑥绶為悗锝庡亞椤︿即鎮楀▓鍨珮闁稿锕ユ穱濠囧醇閺囩偛鑰垮┑鈽嗗灥閸嬫劘鍊撮梻鍌氬€风粈渚€骞夐敓鐘茬闁硅揪绠戠粈澶娾攽閻樻彃鏆熸い鈺傜叀閺屻劌鈹戦崱鈺傂ч梺缁樻尵閸犳牠寮婚弴鐔虹闁割煈鍠栨慨搴☆渻閵堝懏绂嬮柛瀣濡叉劙骞掑Δ濠冩櫓闂佸憡绻傜€氼剟锝為崶顒佸€垫繛鍫濈仢閺嬬喖鏌熼鐓庘偓鎼佹偩閻戣姤鍋勭痪鎷岄哺閺呮繈姊洪棃娑氱濠殿喚鍏橀幃鐑芥嚑椤掑倻锛?
             kernel_graphic = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
             graphic_regions = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel_graphic)
             
-            # 计算非文本区域占比
+            # 闂傚倸鍊峰ù鍥х暦閸偅鍙忕€规洖娲﹂浠嬫煏閸繃澶勬い顐ｆ礋閺岋繝宕堕妷銉т痪闂佺顑傞弲娑㈠煘閹达附鍋愮€规洖娴傞弳鈥愁渻閵堝啫鍔氶柣妤佹崌瀵鏁愭径濠勭杸濡炪倖甯掗崐褰掑箟婵傚憡鈷戦悹鍥ㄥ絻閻︺劑鏌涢敐蹇曠М鐎殿喖顭烽弫鎾绘偐閺屻儱鏁规俊鐐€栭崝鎴﹀垂瑜版帪缍栭柍鍝勬噺閻撶喖鐓崶銊﹀鞍缂佸倸顑夐弻娑㈠Ω閵婏妇銆愰梺浼欑到閸㈣尙鍙呭銈呯箰閹冲孩绂嶅鍫熷€甸柣鐔告緲椤忣亜顭块悷鐗堫棦闁诡喕鍗虫俊鐑藉Ψ閵忊剝鏉?
             text_area = np.sum(text_regions > 0)
             graphic_area = np.sum(graphic_regions > 0)
             total_area = height * width
             
-            # 非文本占比 = (图形区域 - 文本区域) / 总面积
+            # 闂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸劍閸嬪鐓崶銊р槈缁炬儳顭烽弻锝夊箛椤掍焦鍎撻梺鍛婂灩婵炩偓闁哄本鐩獮鍥濞戞瑧浜梺璇插閼归箖藝娴兼潙桅闁告洦鍨扮粻鎶芥煕閳╁啨浠﹀瑙勬礋閺岋絾鎯旈妶搴㈢秷濠电偛寮堕敋妞ゎ厼鐏濊灒婵炲棛鍋撳В?= (闂傚倸鍊搁崐鐑芥倿閿曞倸绠栭柛顐ｆ礀绾惧潡鏌＄仦璇插姎缁炬儳娼￠弻鐔煎箚閺夊晝鎾绘煕閵堝拋鍎忛棁澶愭煕韫囨挸鎮戠紓宥嗗灩缁辨帡鍩€椤掆偓閻ｆ繈宕熼鍌氬箞婵犵數濞€濞佳兾涘Δ鍜佹晜妞ゆ劧闄勯悡?- 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧壕鍦磼鐎ｎ偓绱╂繛宸簼閺呮繈鏌嶈閸撶喖寮崘顔碱潊闁炽儲鍓氶崵銈夋⒑閸濆嫷妲归柛銊ョ秺钘濋梺顒€绉甸埛鎴︽煕濞戞﹫鍔熺紒鐘虫崌閹顫濋悡搴㈢彎閻? / 闂傚倸鍊搁崐宄懊归崶顒夋晪闁哄稁鍘肩粈鍫熺箾閸℃ɑ灏ㄩ柍褜鍓ㄧ粻鎴︽偩閿熺姵鐒介柨鏃€鍎虫慨娲⒒娴ｇ瓔娼愭い鏃€鐗犲畷鏉款潩閼搁潧鍓?
             non_text_area = max(0, graphic_area - text_area * 0.5)
             non_text_ratio = non_text_area / total_area if total_area > 0 else 0.0
             
-            # 页面类型判断
+            # 婵犵數濮烽。顔炬閺囥垹纾婚柟杈剧畱绾捐淇婇妶鍛櫣闁哄绶氶幃褰掑炊瑜庨埢鏇㈡煟閹哄秶鐭欓柡宀€鍠庨埢鎾诲垂椤旂晫浜鹃梺璇茬箰缁绘帡寮繝姘畺鐟滅増甯掗悙濠冦亜韫囨挸顏慨锝冨灲濮婃椽鏌呴悙鑼跺濠⒀傚嵆閺屾稖绠涢弬鍡╀邯閹儳鐣￠柇锔藉兊闁荤姾妗ㄧ紞宥堫樄闁哄本鐩崺鍕礃閸撗冨Ш闂?
             edge_density = np.sum(edges > 0) / total_area
             
             if non_text_ratio < 0.1:
@@ -824,7 +2002,7 @@ class ConcreteKnowledgeValidator:
             else:
                 page_type = "graphic_heavy"
             
-            # 提取非文本区域
+            # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块弶鍫氭櫅閸ㄦ繃銇勯弽顐粶缂佲偓婢舵劖鐓涢柛銈呯埣椤ｏ箑效濡ゅ懏鈷戦柟鑲╁仜閸旀挳鏌涢幘鏉戝摵閽樼喖鏌涢鐘插姕闁绘挾鍠栭弻鐔兼焽閿曗偓婢т即鏌熼悾灞解枅闁哄矉绲鹃幆鏃堫敊閸忚偐褰庨梻浣告惈閻鎹㈠┑鍡欐殾濠靛倸澹婇弫鍐煏韫囨洖顎屾繛鐓庮煼濮婅櫣鎷犻懠顒傤唶濠电偛鐡ㄥ畝绋跨暦閸︻厽宕夐柧蹇氼潐濞?
             non_text_mask = cv2.subtract(graphic_regions, text_regions)
             non_text_region = cv2.bitwise_and(img, img, mask=non_text_mask)
             
@@ -834,128 +2012,49 @@ class ConcreteKnowledgeValidator:
             logger.error(f"CV analysis failed: {e}")
             return 0.0, "unknown", None
     
-    def _extract_graphic_region(self, image_path: str) -> Optional[np.ndarray]:
-        """
-        执行逻辑：
-        1) 读取图像并检测边缘与连通区域。
-        2) 过滤过小/过大的轮廓并合并边界框。
-        3) 扩展边界并裁剪图形区域返回。
-        实现方式：OpenCV 轮廓检测 + 简单面积阈值过滤。
-        核心价值：提取可能承载具象知识的图形区域。
-        决策逻辑：
-        - 条件：img is None
-        - 条件：not contours
-        - 条件：not valid_contours
-        - 条件：裁剪区域尺寸 < 50px
-        依据来源（证据链）：
-        - 轮廓面积阈值：1% ~ 95% 总面积。
-        - 裁剪区域尺寸阈值：50px。
-        输入参数：
-        - image_path: 文件路径（类型：str）。
-        输出参数：
-        - np.ndarray 图形区域或 None（无有效图形）。"""
-        try:
-            img = cv2.imread(image_path)
-            if img is None:
-                return None
-            
-            height, width = img.shape[:2]
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # 边缘检测
-            edges = cv2.Canny(gray, 50, 150)
-            
-            # 膨胀边缘找到连通区域
-            kernel = np.ones((5, 5), np.uint8)
-            dilated = cv2.dilate(edges, kernel, iterations=3)
-            
-            # 查找轮廓
-            contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
-            if not contours:
-                return None
-            
-            # 找最大轮廓区域
-            total_area = height * width
-            valid_contours = []
-            
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                # 过滤太小或太大的区域
-                if area > total_area * 0.01 and area < total_area * 0.95:
-                    valid_contours.append(cnt)
-            
-            if not valid_contours:
-                # 无有效图形区域
-                return None
-            
-            # 合并所有有效轮廓的边界框
-            all_points = np.vstack(valid_contours)
-            x, y, w, h = cv2.boundingRect(all_points)
-            
-            # 扩展边界 10%
-            margin_x = int(w * 0.1)
-            margin_y = int(h * 0.1)
-            x = max(0, x - margin_x)
-            y = max(0, y - margin_y)
-            w = min(width - x, w + 2 * margin_x)
-            h = min(height - y, h + 2 * margin_y)
-            
-            # 裁剪图形区域
-            graphic_region = img[y:y+h, x:x+w]
-            
-            # 检查裁剪区域是否足够大
-            if graphic_region.shape[0] < 50 or graphic_region.shape[1] < 50:
-                return None
-            
-            logger.debug(f"Extracted graphic region: {w}x{h} from {width}x{height}")
-            return graphic_region
-            
-        except Exception as e:
-            logger.error(f"Failed to extract graphic region: {e}")
-            return None
-    
     def _vision_validate(self, image: np.ndarray) -> ConcreteKnowledgeResult:
-        """
-        执行逻辑：
-        1) 将图像编码为 base64 并调用 ERNIE Vision API。
-        2) 从响应中提取 JSON 结果并解析字段。
-        3) 根据置信度与具象标记生成结果。
-        实现方式：HTTP 调用 + JSON 解析 + 置信度阈值判断。
-        核心价值：提供 Vision AI 的直接判定路径（旧版兼容）。
-        决策逻辑：
-        - 条件：'```json' in content
-        - 条件：'```' in content
-        - 条件：has_concrete_knowledge == "是"
-        - 条件：confidence >= 0.5
-        依据来源（证据链）：
-        - API 字段：choices[0].message.content。
-        - 解析字段：has_concrete_knowledge、confidence、concrete_type、reason。
-        输入参数：
-        - image: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - ConcreteKnowledgeResult（基于 Vision API 的具象判定）。"""
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊峰ù鍥敋瑜忛幑銏ゅ箛椤旇棄搴婇梺褰掑亰閸庨潧鈽夊Ο婊勬閸┾偓妞ゆ帒瀚粻鎺撶節濞堝灝鏋熼柕鍥ㄧ洴瀹曟垿骞橀崹娑樹壕閻熸瑥瀚粈鍐煙闁稖鍏岀紒顔款嚙閳藉濮€閻樻彃绁梻浣虹帛椤洭宕戦妸锔绢浄闁靛繈鍊栭埛鎺懨归敐鍫綈闁靛洨鍠栭弻娑㈡偐閾忣偆顦ュ銈庝簻閸熸挳鐛幒妤€绫嶉柍褜鍓涢埀?base64 濠电姴鐥夐弶搴撳亾濡や焦鍙忛柣鎴ｆ绾惧鏌ｉ幇顒佹儓缁炬儳鐏濋埞鎴﹀磼濮橆厼鏆堥梺绋块缁夊綊寮婚敐澶婃闁割煈鍠楅崐顖炴⒑?ERNIE Vision API闂?
+        # 2) 婵犵數濮烽弫鎼佸磻濞戙埄鏁嬫い鎾跺枑閸欏繘鎮楀☉娆欎緵婵炲牅绮欓弻鐔兼⒒鐎靛壊妲紓浣哄Т缂嶅﹤顫忓ú顏勫瀭妞ゆ洖鎳庨崜閬嶆⒑缁嬫寧鎹ｉ柛鐘崇墵瀵鏁撻悩鑼紲濠电偞鍨堕…鍥囬妸鈺傗拺闁告稑顭笟娑㈡煕閹捐泛鏋涚€殿喖顭烽幃銏ゆ惞閸︻叏绱叉繝纰樻閸ㄤ即骞栭锔肩稏鐎光偓閸曨剙浠?JSON 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柣鎴ｅГ閸婂潡鏌ㄩ弴鐐测偓鍝ョ不閺夊簱鏀介柣妯虹－椤ｆ煡鏌涙繝鍛【妞ゎ厼娼￠幊婊堟濞戞﹩娼曢柣搴ゎ潐閹搁娆㈠璺鸿摕闁绘梻鈷堥弫宥夋煟閹邦剦鍤熼柣婵囧姍濮婃椽宕烽鐐插濡炪們鍔岄幊妯虹暦濞嗘挻鍋愮紓浣诡焽閸樼敻姊绘笟鍥у伎缂佺姵鍨堕弲鑸靛鐎涙鍘甸梺浼欑到閼活垶寮搁幋鐘电＜缂備焦顭囧ú瀵糕偓瑙勬礀閵堝憡鎱ㄩ埀顒勬煟濡搫鑸归悗鍨叀濮?
+        # 3) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佺粯鍨堕弸鑽ょ礊閺嵮岀唵閻犺櫣灏ㄩ崝鐔兼煛閸℃劕鈧洟婀侀梺鎸庣箓閻楀﹪顢旈悩鐢垫／闁告挆鍐у闂侀潧娲ょ€氭澘顕ｉ鈧畷鍓佹崉閻戞ɑ姣岀紓鍌氬€峰ù鍥敋瑜嶈灋婵犻潧顑囧畵渚€鏌″鍐ㄥ缂傚秴娲弻娑㈠箻濡も偓閹虫劙鎮伴妷褏纾介柛灞剧懅閸斿秵銇勯妸銉﹀殗闁诡垰鐭傚畷鎺戭潩鏉堛劍顔曟繝寰锋澘鈧洟骞婅箛娑樼；妞ゅ繐鎳屾禍婊堟煛瀹ュ啫濡跨紒鐘崇墬缁绘繈濮€閿涘嫬鈷屽┑顔硷攻濡炶棄鐣烽锕€绀嬫い鎾愁槶閸ㄨ櫣鎹㈠☉妯忓湱鈧綆鍋呴悵姘渻閵堝啫鐏柣鐔叉櫅閻ｇ兘宕奸弴銊︽櫌婵炶揪缍侀弲鑼磽閹剧粯鈷掑ù锝堟鐢稒鎱ㄦ繝鍌ょ吋闁炽儻绠撳畷濂稿Ψ閿曗偓閳ь剙鐖奸弻娑㈠Ψ閵忊剝鐝栫紒鐐礃濡嫰婀侀梺鎸庣箓閻楁粌顭囬幇鐗堝€堕煫鍥ч瀹撳棝鏌″畝瀣К缂佺姵鐩獮娆撳礃閳圭偓鐎版繝?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁敓鐘偓渚€寮介鐐茬彉濡炪們鍎抽惁?闂傚倸鍊峰ù鍥х暦閸偅鍙忛柟缁㈠櫘閺佸嫰鏌涘☉娆愮稇闁汇値鍠栭湁闁稿繐鍚嬬紞鎴︽煛?+ JSON 闂傚倸鍊峰ù鍥х暦閻㈢绐楅柟鎵閸嬶繝寮堕崼姘珔缂佽翰鍊曡灃闁挎繂鎳庨弳鐐烘煕?+ 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸缁愭鎱ㄥΟ鎸庣【缂佹劖顨婇弻锟犲炊閳轰焦鐏侀梺宕囨嚀缁夋挳鍩為幋锔藉亹闁圭粯甯楀▓鏌ユ⒑缁嬫寧鎹ｉ柛鐘崇墵瀵濡搁埡浣稿祮闂佺粯鍔栫粊鎾磻閹惧箍浜归柟铏瑰仧缁嬪繘鎮楅崗澶婁壕闂佸憡娲﹂崜娑㈠储鏉堛劎绡€闁汇垽娼у瓭闁诲孩鍑归崜娑㈠极椤曗偓瀹曞ジ寮撮悢鍝勫箞闂備線娼ч…鍫ュ磹濡ゅ懏鍎楁繛鍡樺灍閸嬫挸鈻撻崹顔界彯闂佸憡鎸鹃崰鏍Υ娴ｈ倽鐔烘偘閳╁啯鏆婇梻浣筋嚃閸ㄥ酣宕掑鍏碱棥?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堝煕閹达附鐓曢柨鏃囶嚙楠炴﹢鎮介娑氭创闁哄本鐩顕€鍩€椤掑倹鏆滈柣鎰ゴ閺?Vision AI 闂傚倸鍊搁崐鐑芥倿閿曞倹鍎戠憸鐗堝笒缁€澶屸偓鍏夊亾闁逞屽墴閸┾偓妞ゆ帊绀侀崵顒勬煕閻樺磭澧遍柛娆忔嚇濮婅櫣绮旈崱妤€顏存繛鍫熸⒒缁辨帡鎮╅崘娴嬫灆闂佸搫鏈ú妯侯嚗閸曨垰閱囨繝闈涙椤捇姊绘担绛嬪殭缂佺粯鍨块幃锟犳晸閻樿尙鐣哄┑掳鍊曢崯顖炲窗閸℃稒鐓曢柡鍥ュ妺缁ㄧ兘鎮楀☉鎺撴珚婵﹤鎼叅閻犲洦褰冪粻娲⒑缁嬪灝顒㈠┑鐐诧躬閵嗕礁顫濈捄浣曘劑鏌嶆潪鎷屽厡妞わ缚鍗冲娲川婵犲啫鐭梺鐓庡暱閻栬壈妫熼梺鍐叉惈閹冲繘鍩涢幋锔界厱婵犻潧妫楅鈺呮煛娴ｇ懓鈻曢柡灞剧☉閳藉宕￠悙鎻掝劀闂備礁鎼Λ顓㈠矗閸愵煈娼栭柧蹇撴贡閻瑩鎮归幁鎺戝妞ゆ柨锕娲川婵犲海鍔堕梺鎼炲劥閸╂牠寮查埡鍛拺閻熸瑥瀚ˉ瀣熆瑜庨〃濠傤嚕閺屻儺鏁嗛柍褜鍓熼垾锔炬崉閵婏箑纾梺鎯х箳閹虫捇銆傞悽鍛娾拺?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗?```json' in content
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗?```' in content
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻堝畷鑼姳婵傜棗oncrete_knowledge == "闂?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悢婵嗘搐缁犵儤銇勮椤ㄥセidence >= 0.5
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - API 闂傚倸鍊峰ù鍥敋瑜忛埀顒佺▓閺呮繄鍒掑▎鎾崇婵＄偛鐨烽崑鎾诲礃椤旂厧鑰垮┑鐐村灱妞存悂寮查埡鍛€甸柛蹇擃槸娴滈箖姊洪崨濠冨闁告挻鑹鹃埢宥夊冀瑜夐弨鑺ャ亜閺冨倹娅曠紒鐘崇墪铻栨俊銈咃攻閻濈ces[0].message.content闂?
+        # - 闂傚倸鍊峰ù鍥х暦閻㈢绐楅柟鎵閸嬶繝寮堕崼姘珔缂佽翰鍊曡灃闁挎繂鎳庨弳鐐烘煕婵犲嫭鏆柡宀嬬秮閺佹劙宕ㄩ褎校闂備胶顭堥鍡涘箰閹间礁鐓″璺号堥弸搴繆椤栨繂鍚归柡鍡檮娣囧﹪鎮欓鍕ㄥ亾閺嶎厼钃熼柕濞炬櫆閸庢鏌涘畝鈧崑娑㈠几娴ｈ　鍋撻獮鍨姎闁瑰嘲顑呴…鍥ㄥ鐎涙鍘撻梺缁樺灦閿氶柣婵囶浂concrete_knowledge闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟悧鍡欑不閹烘鐓熼柣妯活問閻撶idence闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟悧鍡欑不閹烘鐓熼柣妯活問閻撶rete_type闂傚倸鍊搁崐椋庢濮橆剦鐒界憸宥堢亱闂佸搫鍟崐鍦偓姘煼閺岋綁鎮╅崹顐㈢毆son闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - image: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鎻掔€梺绋跨箰閸氬宕ｈ箛娑欑厪闁割偅绻嶅Σ鍛婃叏鐟欏嫮鍙€闁哄矉缍佸顕€宕掑顑跨帛缂傚倷璁查崑鎾绘煕瀹€鈧崑鐐烘偂韫囨搩鐔嗛悹楦挎婢ф洟鏌涢弮鈧喊宥嗙┍婵犲浂鏁冮柨婵嗙箺閳ь剙娼￠弻锛勪沪鐠囨彃顬堥梺瀹犳椤︻垵鐏掗梺缁樻尭缁ㄥ爼宕ｉ敓鐘斥拺闁煎鍊曟禒锕傛煕閹存繄绉虹€规洘鍨剁换婵嬪磼濠婂嫭顔曢梻渚€娼荤€靛矂宕㈤幖浣哥；闁瑰墽绮弲鏌ユ煕濞戝崬寮鹃柡鍡愬灮缁辨挻鎷呴悷鏉款潔濡炪們鍊曢崺?ndarray闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - ConcreteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐弻娑㈠焺閸愵亖濮囬梺绋款儏鐎氫即寮诲鍫闂佸憡鎸婚悷鈺侊耿?Vision API 闂傚倸鍊搁崐鐑芥倿閿曞倹鍎戠憸鐗堝笒缁€澶屸偓鍏夊亾闁逞屽墴閸┾偓妞ゆ帊绀侀崵顒勬煕閹捐泛鏋庨柣锝囧厴閺佹劙宕堕妸銉э紡闂備線娼ч…顓犵不閹达富鏁嬮柨鐔哄У閳锋垿鏌ｉ幇顖涱棄闁告梹宀搁弻娑㈡偄闁垮浠撮梺璇″枟閿曘垹顕ｆ繝姘ㄩ柨鏇楀亾闁逞屽墰閺佸骞冨畡鎵虫瀻闊洦鎼╂导鈧梻浣告憸閸犳洜浜稿▎鎴烆潟闁圭儤鎸荤紞鍥煏婵炲灝鍔氶柟钘夌仛缁?""
         try:
-            # 编码图片为 base64
+            # 缂傚倸鍊搁崐鎼佸磹閹间礁纾归柟闂寸绾惧湱鎲搁悧鍫濈瑲闁稿顑嗙换婵囩節閸屾粌顤€闂佺顑呴ˇ鎵崲濠靛洨绡€闁稿本绮岄。娲⒑缂佹ê濮囬柨鏇ㄤ邯瀵鈽夐姀鐘殿啋濠德板€愰崑鎾绘煕閻樺啿鍝虹€殿喗濞婇、妤佹媴閾忚鍟?base64
             _, buffer = cv2.imencode('.png', image)
             image_base64 = base64.b64encode(buffer).decode("utf-8")
             
-            # ERNIE Vision 消息格式 (只发送图片和简化 prompt)
-            messages = [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{image_base64}"
+            # ERNIE Vision 濠电姷鏁告慨鐑藉极閹间礁纾婚柣鎰惈閸ㄥ倿鏌ｉ姀鐘冲暈闁稿顑呴埞鎴︽偐閹绘帗娈銈嗘礋娴滃爼寮诲☉妯锋婵炲棙鍔楃粙鍥⒑閸涘﹤濮€闁稿鎹囧缁樻媴閾忕懓绗￠梺鐟版憸椤牓婀佹俊鐐差儏鐎涒晠宕楀鍫熺厓鐟滄粓宕滈悢濂夋綎婵炲樊浜滅粻浼村箹鏉堝墽宀涘┑顔兼搐閳规垿顢欑憴鎺撶矒瀹曟繈骞嬮敃鈧拑鐔兼煕椤愮喐鍣伴柛瀣崌濡啫鈽夊▎鎰瀾缂備胶鍋撻崕鎶藉Χ閹间礁钃熼柨婵嗩槸缁秹鏌涚仦璇测偓妤呭礉閸濄儳纾藉ù锝囨嚀缁茬粯绻濋埀顒佹綇閳哄偆娼熼梺鍦劋椤ㄥ懘鎮為崹顐犱簻闁瑰搫绉瑰鐑芥煕鐎ｎ亷韬柟顔肩秺楠炰線骞掗幋婵愮€撮柣?+ 闂傚倸鍊搁崐鐑芥倿閿曗偓椤啴宕归鍛姺闂佺鍕垫當缂佲偓婢跺备鍋撻獮鍨姎妞わ富鍨跺浼村Ψ閿斿墽顔曢梺鐟邦嚟閸嬬喖骞婇崨顔轰簻闁冲搫鍟崢鎾煛鐏炲墽鈽夐柍钘夘樀瀹曪繝鎮欏顔介獎闂傚倷鑳剁划顖炲礉閺囥垺鏅濇い蹇撶墕閽冪喐绻涢幋娆忕仼閸烆垶姊洪棃娑辨Ф闁稿寒鍣ｉ獮鎰板礃閳哄啰鐦堥梺鍐茬殱閸嬫捇鏌涢弴銊ュ箹闁冲嘲鐭傚鐑樻姜閹殿噮妲紓浣割槹閹告娊骞冮幆褉鏀介悗锝庝簽椤︽澘顪冮妶鍛婵☆偅绋撶划鍫ュ幢濞戞瑢鎷绘繛杈剧导鐠€锕傛倿閸撗呯＜缂備焦锚婵绱掗鑺ヮ棃闁诡喚鏅崰濠偽熸潪鏉款棜闂備礁澹婇悡鍫ュ磻閸℃稏鈧倿鎳犻鍌滐紲闂佺鏈粙鎴澝归灏栨斀闂勫洭宕洪弽褜鍤楅柛鏇ㄥ墰缁♀偓闂佸憡鍔曡ぐ鐐哄箣闁垮绡€闁汇垽娼цⅷ闂佹悶鍔庨崢褔鍩㈤弬搴撴婵浜悡瀣倵鐟欏嫭绀€婵炶绠撻敐鐐哄即閵忥紕鍘卞銈嗗姧缁插墽绮堥崘顔界厽?
+            messages = [
+                {
+                    "role": "system",
+                    "content": self._concrete_knowledge_system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{image_base64}"
+                            }
                         }
-                    },
-                    {
-                        "type": "text",
-                        "text": self._concrete_knowledge_prompt
-                    }
-                ]
-            }]
+                    ]
+                },
+            ]
             
             payload = {
                 "model": self._vision_model,
@@ -963,7 +2062,7 @@ class ConcreteKnowledgeValidator:
                 "temperature": self._temperature,
             }
             
-            # 调用 ERNIE Vision API
+            # 闂傚倸鍊峰ù鍥х暦閸偅鍙忛柟缁㈠櫘閺佸嫰鏌涘☉娆愮稇闁汇値鍠栭湁闁稿繐鍚嬬紞鎴︽煛?ERNIE Vision API
             with httpx.Client(timeout=60.0) as client:
                 response = client.post(
                     self._base_url,
@@ -978,7 +2077,7 @@ class ConcreteKnowledgeValidator:
             
             content = data["choices"][0]["message"]["content"].strip()
             
-            # 解析 JSON
+            # 闂傚倸鍊峰ù鍥х暦閻㈢绐楅柟鎵閸嬶繝寮堕崼姘珔缂佽翰鍊曡灃闁挎繂鎳庨弳鐐烘煕?JSON
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "```" in content:
@@ -986,33 +2085,36 @@ class ConcreteKnowledgeValidator:
             
             result = json.loads(content)
             
-            has_concrete = result.get("has_concrete_knowledge") == "是"
-            confidence = float(result.get("confidence", 0.5))
-            
-            # 置信度阈值判定
-            should_include = has_concrete and confidence >= 0.5
+            confidence = float(result.get("confidence", 1.0))
+            img_description = str(
+                result.get("img_description")
+                or result.get("img_desription")
+                or result.get("description")
+                or result.get("caption")
+                or result.get("reason", "")
+            ).strip() or "description unavailable"
             
             return ConcreteKnowledgeResult(
-                has_concrete=has_concrete,
+                has_concrete=True,
                 has_formula=False,
                 confidence=confidence,
-                concrete_type=result.get("concrete_type", "无"),
-                reason=result.get("reason", ""),
+                concrete_type=str(result.get("concrete_type", "visual_description") or "visual_description"),
+                reason=str(result.get("reason", "Vision AI description") or "Vision AI description"),
                 is_mixed=False,
                 non_text_ratio=0.0,
-                should_include=should_include,
-                img_description=str(result.get("img_description") or result.get("img_desription") or result.get("reason", ""))
+                should_include=True,
+                img_description=img_description,
             )
             
         except Exception as e:
             logger.error(f"ERNIE Vision validation failed: {e}")
-            # Fallback: 默认保留
+            # Fallback: 婵犵數濮甸鏍窗濡ゅ啯鏆滄俊銈呭暟閻瑩鏌熼悜妯镐粶闁逞屽墾缁犳挸鐣锋總绋课ㄦい鏃囧Г濞呭秶绱撻崒姘偓鐑芥倿閿曞倵鈧箓宕堕鈧悡妯尖偓骞垮劚濡稓寮ч埀顒勬⒒閸屾氨澧涚紒瀣尰閺呰泛鈽夊▎鎴狀啎?
             return ConcreteKnowledgeResult(
                 has_concrete=True,
                 has_formula=False,
                 confidence=0.5,
-                concrete_type="未知",
-                reason=f"Vision API 调用失败: {e}，默认保留",
+                concrete_type="formula",
+                reason="detected formula, include screenshot",
                 is_mixed=False,
                 non_text_ratio=0.0,
                 should_include=True,
@@ -1020,30 +2122,30 @@ class ConcreteKnowledgeValidator:
             )
     
     def _cv_only_validate(self, non_text_ratio: float, cv_page_type: str) -> ConcreteKnowledgeResult:
-        """
-        执行逻辑：
-        1) 根据 non_text_ratio 粗分页面类型。
-        2) 按阈值给出保留/剔除建议。
-        实现方式：简单阈值规则。
-        核心价值：在无 Vision AI 时提供可解释的回退策略。
-        决策逻辑：
-        - 条件：non_text_ratio >= 0.4
-        - 条件：non_text_ratio >= 0.2
-        依据来源（证据链）：
-        - CV 指标：non_text_ratio。
-        输入参数：
-        - non_text_ratio: 函数入参（类型：float）。
-        - cv_page_type: 函数入参（类型：str）。
-        输出参数：
-        - ConcreteKnowledgeResult（基于非文本占比的判定）。"""
-        # 基于非文本区域比例判断
+        """Docstring omitted."""
+        # 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉甸崑锟犳煙閹増顥夋鐐灲閺屽秹宕崟顐熷亾瑜版帒绾ч柟闂寸劍閳锋帡鏌涚仦鍓ф噮閻犳劒鍗抽弻娑氣偓锝庝簼閸ｅ綊宕￠柆宥嗙厵闁绘垶蓱閳锋劖銇勯幇顖毿撻柕鍥у楠炲洭宕奸弴鐕佲偓宥夋⒑?
+        # 1) 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佺粯鍨堕弸鑽ょ礊閺嵮岀唵閻犺櫣灏ㄩ崝鐔兼煛?non_text_ratio 缂傚倸鍊搁崐鎼佸磹妞嬪孩顐介柨鐔哄Т缁愭淇婇妶鍛櫡闁逞屽墮閸熸潙鐣烽妸鈺佺骇闁瑰瓨绻勯埀顒夊弮閺岀喖宕楅崗鐓庡壒濠电偛鍚嬬€笛呯矉瀹ュ拋鐓ラ柛顐ゅ枔閸樹粙姊洪棃娑氱濠殿喚鏁诲畷顖炴倷缂堢姷绠氬┑锛勫仧閸樠勪繆鐠恒劎纾奸弶鍫涘妼濞搭喗銇勯姀鈩冪濠碉紕鍏橀、娆撳礂绾板崬鏁抽梻鍌氬€峰ù鍥敋瑜嶉湁闁绘垼妫勭粈鍌涗繆椤栨繍鍞虹紒?
+        # 2) 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉埀顒婄畵瀹曞ジ濡风€ｎ亝鍠樻俊顐㈠暙闇夌紒娑樻贡缁夘喚鈧娲栭悥濂搞€佸Δ鍛劦妞ゆ帒鍊搁ˉ姘辨喐閻楀牆绗氶柣鎾跺У缁绘盯寮堕幋顓炲壉濠电偛鎳庡ú顓㈠蓟閵堝洨鐭欓悹鎭掑妼閻撶喖姊洪崫鍕拱闁烩晩鍨堕悰顔锯偓锝庡枟閺呮煡鏌涢埄鍐ㄥ闁稿鎹囧畷姗€顢旈崱娆欑床缂傚倸鍊烽悞锕傛晪闂佸憡绻冨浠嬪蓟?闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼唶闁荤姴娲ゅ顒€鈽夐姀鐘殿槰闂侀潧顭堥崹娲倵濞差亝鐓欓柤娴嬫櫈钘熷┑鈩冨絻閹虫ê鐣烽悽绋块唶婵犮埄浜濆Λ鍐极閸屾粎椹抽悗锝庝簻婵″ジ姊绘担鍛婃喐闁稿鍋ら獮鎰板箮閽樺鎽?
+        # 闂傚倸鍊峰ù鍥敋瑜庨〃銉х矙閸柭も偓鍧楁⒑椤掆偓缁夊澹曟繝姘厽闁哄啫娲ゆ禍鍦偓瑙勬尫缁舵岸寮诲☉銏犖ㄦい鏃傚帶椤晛鈹戦埥鍡椾簼闁挎洏鍨藉濠氭晲婢跺浜滅紓浣割儐椤戞瑥螞閸℃瑧纾肩紓浣靛灩楠炴劙鏌涚€ｎ偅宕屾慨濠勭帛閹峰懘鎮烽柇锕€娈濈紓鍌欑椤戝棛鏁幒妤嬬稏婵犻潧顑呮儫闂佸啿鎼崐鍛婄閻撳簶鏀介柣妯肩帛濞懷勩亜閹存繃鍣芥繛鎴犳暬閸┾偓妞ゆ帒瀚埛鎴︽煕濠靛棗顏柛灞诲姂閺屾盯濡搁敂濮愪虎闂佹寧绻勯崑娑㈡偩濠靛绀嬫い鎺戝€搁獮鍫濃攽閻樺灚鏆╁┑顔芥尦楠炲﹥鎯旈妸瀣槸椤撳ジ宕遍幇顏嗙泿婵＄偑鍊栭崝鎴﹀春閸曨倠鐔煎焵椤掑嫭鍊甸悷娆忓缁€鍐煠瑜版帞鐣洪柛鈹垮灪閹棃鍩ラ崱妤佸€┑鐐舵彧缂嶄線寮查崣澶岀彾?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢妶鍥╃厠闂佸壊鍋呭ú宥夊焵椤掑﹦鐣电€规洖銈告慨鈧柕蹇嬪灩椤︹晠姊绘担铏瑰笡闁告棑绠撳畷婊冣槈椤兘鍋撻崨顕呮Ч閹煎瓨锚娴滈箖鏌ｉ悢鍛婄凡妞ゅ浚浜滈…鍧楁偡闁箑鍓堕悗瑙勬礃閸ㄥ潡鐛鈧幊婊堟濞戞ê绠叉繝纰夌磿閸嬫盯顢栭崨顒煎綊鎮滈懞銉ヤ粧闂侀潧顦弲婊堝煕閹达附鈷掗柛顐ｇ濞呭牏绱掗埀顒傗偓锝庡枟閻撴洟鏌￠崒婵囩《鐎涙繈鏌?Vision AI 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敃鈧悿顕€鏌熼幆鐗堫棄闁哄嫨鍎甸弻鈥愁吋鎼粹€冲箥婵炲瓨绮庨幊鎾绘箒闂佹寧绻傞幊蹇曟嫻閿熺姵鐓熼柣鏃€妞垮鎰磼缂佹娲存鐐差儔閹ê煤鐠佸磭鏁栭梺鐟板槻椤戝顕ｆ繝姘ㄩ柨鏇楀亾濞寸媭鍘奸埞鎴︽倷閸欏妫￠梺鑽ゅ暀閸涱垳鐓嬪銈嗘磵閸嬫捇鏌＄仦鍓ф创闁轰焦鍔欏畷鍗炍熼崫鍕暘闂傚倷娴囬鏍垂娴兼潙鐤柡澶嬪灩閺嗭箓鏌ｉ弮鍌楁嫛闁轰礁鍟撮弻銊モ攽閸℃銈╁┑鈥虫▕閸撶喎顫忔繝姘＜婵炲棙鍨肩粣妤呮⒑缁嬫鍎岄柛瀣崌濮婅櫣绮欏▎鎯у壉闂佸湱顭堟晶钘壩ｉ幇鏉跨闁瑰瓨姊归～宥呪攽閻愬弶顥為柛銊ф暬閸╂盯宕奸妷锔规嫼闂佸憡绻傜€氼參藟閻愮儤鐓曢柡鍐ｅ亾闁荤噦闄勭粚?
+        # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鑼槷闂佸搫娲ㄦ慨鎾夊顓滀簻闁规儳宕悘顏堟煕鐎ｃ劌鈧繈寮婚弴鐔风窞闁糕剝蓱閻濇洟姊虹紒妯虹瑨妞ゎ厾鍏樺濠氭晸閻樿尙顦板銈嗗姂閸婃顢欐繝鍥ㄧ厽闁靛繆鏅涢悘鐘充繆椤愶絿绠炵€?
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞锝団偓鍦text_ratio >= 0.4
+        # - 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曚綅閸ヮ剦鏁冮柨鏇楀亾闁绘帒鐏氶妵鍕箳閸℃ぞ澹曢柣搴㈩問閸犳牠鎮ユ總鎼炩偓渚€寮撮悢渚祫闁诲函缍嗛崑鍡涘矗閸℃せ鏀介柣鎰綑閻忥箓鏌ｉ悤浣哥仸鐎规洘绻傞锝団偓鍦text_ratio >= 0.2
+        # 婵犵數濮烽弫鎼佸磻閻愬搫绠伴柤濮愬€曢弸鍫⑩偓骞垮劚濞诧箑鐣烽弻銉︾厱闁规壋鏅涙俊鍧楁煛閸℃劕鈧洟濡撮幒鎴僵闁挎繂鎳嶆竟鏇㈡煟鎼淬埄鍟忛柛鐘崇墵閹儵宕楅梻瀵哥畾闂佺粯鍨兼慨銈夊疾濠婂牊鐓曢柟鐐殔閸熶即宕㈤幘缁樷拻闁稿本鐟ч崝宥夋倵缁楁稑鎳愰惌娆撴煙鏉堥箖妾柛瀣儔閺岀喖骞嶉纰辨毉闂佺楠搁敃銈夆€﹂崸妤佸殝闂傚牊绋戦～宀€绱撴担鍝勑㈢€殿喖鐖兼俊鐢稿礋椤栨艾宓嗗┑掳鍊愰崑鎾趁瑰鍫㈢暫婵﹨娅ｅ☉鐢稿川椤曞懏顥夐梻渚€娼ч悧濠囧箖閸屾凹鍤曟い鎰╁焺閸氬鏌涢埄鍐炬畼缂佹劗鍋涢埞鎴︽倷閺夋垹浠稿┑顔角滈崝鎴﹀箖?
+        # - CV 闂傚倸鍊搁崐椋庣矆娴ｉ潻鑰块梺顒€绉埀顒婄畵瀹曠厧顭垮┑鍥ㄣ仢闁轰礁鍟村畷鎺戔槈濡懓鍤遍梻鍌欑劍鐎笛呮崲閸岀倛鍥ㄥ閺夋垹鏌у銈嗗笂閻掞箓宕ｈ箛鏃傜瘈闂傚牊绋撴晶娑㈡煥濞戞瑦鍋text_ratio闂?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煟椤撶噥娈滈柡灞剧洴閸╁嫰宕橀浣诡潔闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - non_text_ratio: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鎻掔€梺绋跨箰閸氬宕ｈ箛娑欑厪闁割偅绻嶅Σ鍛婃叏鐟欏嫮鍙€闁哄矉缍佸顕€宕掑顑跨帛缂傚倷璁查崑鎾绘煕瀹€鈧崑鐐烘偂韫囨搩鐔嗛悹楦挎婢ф洟鏌涢弮鈧喊宥嗙┍婵犲浂鏁冮柨婵嗙箺閳ь剙娼￠弻锛勪沪鐠囨彃顬堥梺瀹犳椤︻垵鐏掗梺缁樻尭缁ㄥ爼宕ｉ敓鐘斥拺闁煎鍊曟禒锕傛煕閹存繄绉虹€规洘鍨剁换婵嬪磼濠婂嫭顔曢梻渚€娼荤€靛矂宕㈤幖浣哥；闁瑰墽绮弲鏌ユ煕濞戝崬寮鹃柡鍡愬灮缁辨挻鎷呴悷鏉款潔濡炪倧绲块崡鎲僡t闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # - cv_page_type: 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鏁撻悩鎻掔€梺绋跨箰閸氬宕ｈ箛娑欑厪闁割偅绻嶅Σ鍛婃叏鐟欏嫮鍙€闁哄矉缍佸顕€宕掑顑跨帛缂傚倷璁查崑鎾绘煕瀹€鈧崑鐐烘偂韫囨搩鐔嗛悹楦挎婢ф洟鏌涢弮鈧喊宥嗙┍婵犲浂鏁冮柨婵嗙箺閳ь剙娼￠弻锛勪沪鐠囨彃顬堥梺瀹犳椤︻垵鐏掗梺缁樻尭缁ㄥ爼宕ｉ敓鐘斥拺闁煎鍊曟禒锕傛煕閹存繄绉虹€规洘鍨剁换婵嬪磼濠婂嫭顔曢梻渚€娼荤€靛矂宕㈤幖浣哥；闁瑰墽绮弲鏌ユ煕濞戝崬寮鹃柡鍡愬灮缁辨挻鎷呴悷鏉款潔闂佹剚浜為ˉ婕撮梻鍌氬€搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熷▎陇顕уú顓€佸鈧慨鈧柣姗€娼ф慨?
+        # 闂傚倸鍊风粈渚€骞栭位鍥敍閻愭潙浜辨繝鐢靛Т濞层倗绮绘导瀛樼厵闂傚倸顕ˇ锕傛煕濮樻剚娼愰柕鍥у楠炴﹢宕￠悙鍏告偅闂備焦妞块崢浠嬨€冩繝鍥ц摕婵炴垶鐭▽顏堟煕閹炬せ鍋撳┑顔兼搐閳规垿鎮欓懠顒€顣洪梺缁樼墪閵堢顕?
+        # - ConcreteKnowledgeResult闂傚倸鍊搁崐鐑芥倿閿旈敮鍋撶粭娑樻噽閻瑩鏌熸潏楣冩闁稿顑夐弻娑㈠焺閸愵亖濮囬梺绋款儏鐎氫即寮诲鍫闂佸憡鎸婚悷鈺侊耿娴ｇ硶鏀介柣妯款嚋瀹搞儵鏌涢悢鍛婂唉鐎规洩缍佸畷鐔碱敆閸屾粠鍟庣紓浣哄亾濠㈡銇愭径鎰劷妞ゆ牗澹曢崑鎾斥枔閸喗鐝梺鍛婃尵閸犲酣鎮鹃悜钘夐唶闁哄洨鍊ｉ埡鍛叆闁哄啫娲﹂ˉ澶嬨亜韫囧骸宓嗘慨濠勭帛閹峰懘宕ㄦ繝鍌涙畼婵＄偑鍊戦崝宀勬偋婵犲洤绠為柕濞炬櫆閸嬨劑鏌涘☉姗堝伐闁告挶鍔岄—鍐Χ閸℃锛曢梺绋款儐閹瑰洭寮婚悢纰辨晬婵﹩鍓氬▓濠氭倵鐟欏嫭绀堥柛鐘崇墵閵嗕線寮撮姀鐙€娼婂銈庡亽閸樺墽绮堥崟顖涒拻濞达絿鐡旈崵娆愭叏濮楀牏鐣甸柨婵堝仦瀵板嫰骞囬鐐扮盎婵＄偑鍊栫敮鎺楀磹瑜版帪缍栭柡鍥╁枑閸欏繑淇婇娑橆嚋缁绢厾鍋撳?""
+        # 闂傚倸鍊搁崐鐑芥嚄閸撲焦鍏滈柛顐ｆ礀閻ら箖鏌ｉ幇顒佲枙婵炲瓨鐗犻弻鏇熺箾瑜嶅Λ妤€鐨┑锛勫亼閸婃牜鏁幒鏂哄亾濮樼厧寮挊鐔兼煕椤愮姴鍔滈柣鎾跺枛閺岀喖鏌囬敃鈧晶浼存煙閻ｅ苯鈻堥柡宀嬬稻閹棃顢欓崗鑲╁綆闂備礁鎼惌澶屾崲濠靛棛鏆﹀┑鍌氬閺佸啴鏌曡箛鏇烆€屾繛鐓庮煼濮婅櫣鎷犻懠顒傤唶濠电偛鐡ㄥ畝绋跨暦閸︻厽宕夐柧蹇氼潐濞堟儳鈹戦悙鍙夆枙濞存粍绻堝畷鎴﹀礋椤栨稓鍘卞┑鐘绘涧鐎氼剟宕濆鍫濈柈缂佸绨遍弨浠嬫煟閹邦剛鎽犻悘蹇庡嵆閺屻倛銇愰幒鏃傛毇濡炪們鍨洪悧鐘茬暦閵娾晛绾ч柟瀛樼箘閳ь剦鍘界换娑氣偓鐢殿焾瀛濆銈嗗灥閹冲氦鐏?
         if non_text_ratio >= 0.4:
             return ConcreteKnowledgeResult(
                 has_concrete=True,
                 has_formula=False,
                 confidence=0.6,
-                concrete_type="图形",
-                reason=f"CV检测: 非文本区域占比 {non_text_ratio:.1%}，可能包含图形",
+                concrete_type="formula",
+                reason="detected formula, include screenshot",
                 is_mixed=True,
                 non_text_ratio=non_text_ratio,
                 should_include=True
@@ -1053,47 +2155,40 @@ class ConcreteKnowledgeValidator:
                 has_concrete=False,
                 has_formula=False,
                 confidence=0.5,
-                concrete_type="不确定",
-                reason=f"CV检测: 非文本区域占比 {non_text_ratio:.1%}，建议保留",
+                concrete_type="formula",
+                reason="detected formula, include screenshot",
                 is_mixed=True,
                 non_text_ratio=non_text_ratio,
-                should_include=True  # 模糊时保留
+                should_include=True  # 濠电姷鏁告慨鐑姐€傞挊澹╋綁宕ㄩ弶鎴濈€梺浼欑到閺堫剟锝為弴銏＄厸闁搞儮鏅涙牎闂佺绻戠划鎾诲蓟閵娾晛鍗抽柣鎰ゴ閸嬫捇宕妷褍鏆楅悗骞垮劚椤︿即鎮″☉銏＄厱妞ゆ劗濮撮悘顏堟煛閸″繑娅囩紒杈ㄥ浮閹晜娼忛埡鍐幆闂?
             )
         else:
             return ConcreteKnowledgeResult(
                 has_concrete=False,
                 has_formula=False,
                 confidence=0.7,
-                concrete_type="无",
-                reason=f"CV检测: 非文本区域占比仅 {non_text_ratio:.1%}，判定为纯文字",
+                concrete_type="formula",
+                reason="detected formula, include screenshot",
                 is_mixed=False,
                 non_text_ratio=non_text_ratio,
                 should_include=False
             )
     
     def _default_result(self, should_include: bool) -> ConcreteKnowledgeResult:
-        """
-        执行逻辑：
-        1) 使用默认字段构造兜底结果。
-        2) 由 should_include 决定是否保留。
-        实现方式：直接实例化 ConcreteKnowledgeResult。
-        核心价值：异常/缺失场景下保持可控输出。
-        输入参数：
-        - should_include: 函数入参（类型：bool）。
-        输出参数：
-        - ConcreteKnowledgeResult（默认判定结果）。"""
+        """Build a safe fallback result."""
         return ConcreteKnowledgeResult(
             has_concrete=False,
             has_formula=False,
             confidence=0.0,
-            concrete_type="无",
-            reason="默认判定",
+            concrete_type="formula",
+            reason="detected formula, include screenshot",
             is_mixed=False,
             non_text_ratio=0.0,
-            should_include=should_include
+            should_include=should_include,
         )
-
 
 # ==============================================================================
 # Test Entry
 # ==============================================================================
+
+
+

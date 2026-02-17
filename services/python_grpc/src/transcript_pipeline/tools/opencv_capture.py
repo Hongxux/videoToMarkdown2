@@ -15,6 +15,12 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
+from services.python_grpc.src.common.utils.opencv_decode import (
+    ensure_opencv_readable_video_path,
+    get_video_basic_metadata,
+    transcode_video_segment,
+    build_decode_fallback_path
+)
 
 
 @dataclass
@@ -70,6 +76,11 @@ class FrameCapture:
         self._last_frame_hash: Optional[int] = None # 用于检测重复帧
         self._last_frame_path: Optional[str] = None # 用于复用截图文件
         
+        # Virtual mode for AV1 fallback (segment-based transcoding)
+        self._virtual_mode: bool = False
+        self._video_width: int = 0
+        self._video_height: int = 0
+        
     def open(self) -> bool:
         """
         执行逻辑：
@@ -86,15 +97,36 @@ class FrameCapture:
         - 无。
         输出参数：
         - 布尔判断结果。"""
+        # Try opening directly first
         self._cap = cv2.VideoCapture(self.video_path)
-        if not self._cap.isOpened():
-            return False
+        if self._cap.isOpened():
+            self._fps = self._cap.get(cv2.CAP_PROP_FPS)
+            self._frame_count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self._duration = self._frame_count / self._fps if self._fps > 0 else 0
+            self._virtual_mode = False
+            return True
             
-        self._fps = self._cap.get(cv2.CAP_PROP_FPS)
-        self._frame_count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self._duration = self._frame_count / self._fps if self._fps > 0 else 0
-        
-        return True
+        # If failed, try loading basic metadata for virtual mode
+        print(f"[FrameCapture] Direct open failed for {self.video_path}, trying virtual mode (segment transcoding)...")
+        fps, duration, width, height = get_video_basic_metadata(self.video_path)
+        if duration > 0 and width > 0:
+            self._fps = fps
+            self._duration = duration
+            self._video_width = width
+            self._video_height = height
+            # Approximate frame count
+            self._frame_count = int(duration * fps) if fps > 0 else 0
+            self._virtual_mode = True
+            
+            # Close the failed cap handle just in case
+            if self._cap:
+                self._cap.release()
+                self._cap = None
+                
+            print(f"[FrameCapture] Entered virtual mode. FPS={fps}, Dur={duration}, Size={width}x{height}")
+            return True
+            
+        return False
     
     def close(self):
         """
@@ -204,8 +236,9 @@ class FrameCapture:
         frame_time_ms = 1000 / self._fps if self._fps > 0 else 33
         
         # 情况A：正向小跨度（30帧以内，约1秒）
-        # 使用 grab() 推进，避免 seek 导致的解码器刷新延迟或报错
-        if 2 <= diff_ms < (frame_time_ms * 30):
+        # 1. 优先使用 grab() 推进（对于正向微调，速度快且稳）
+        #    注意：虚拟模式下不支持 grab/seek，由 capture_frame 内部处理
+        if not self._virtual_mode and 2 <= diff_ms < (frame_time_ms * 30):
             # 扣除最后一帧交给后面的 read()
             grab_count = int(diff_ms / frame_time_ms)
             for _ in range(max(0, grab_count - 1)):
@@ -214,14 +247,15 @@ class FrameCapture:
             return True
         
         # 情况B：大跨度、反向或静止
-        self._cap.set(cv2.CAP_PROP_POS_MSEC, target_ms)
-        
-        # 校验：部分后端 seek 后立刻 get 会得到旧值，这里做个简单的宽容校验
-        actual_ms = self._cap.get(cv2.CAP_PROP_POS_MSEC)
-        if abs(actual_ms - target_ms) > 1000: # 偏差 > 1s
-            # 备选方案：尝试按帧定位
-            frame_num = int(target_time * self._fps)
-            self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+        if not self._virtual_mode:
+            self._cap.set(cv2.CAP_PROP_POS_MSEC, target_ms)
+            
+            # 校验：部分后端 seek 后立刻 get 会得到旧值，这里做个简单的宽容校验
+            actual_ms = self._cap.get(cv2.CAP_PROP_POS_MSEC)
+            if abs(actual_ms - target_ms) > 1000: # 偏差 > 1s
+                # 备选方案：尝试按帧定位
+                frame_num = int(target_time * self._fps)
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
         
         return True
     
@@ -250,7 +284,7 @@ class FrameCapture:
         - enhance_params: 函数入参（类型：Optional[Dict[str, Any]]）。
         输出参数：
         - FrameResult 对象（包含字段：frame_id, timestamp, frame_path, width, height, brightness, sharpness, is_valid, invalid_reason, metadata）。"""
-        if not self._cap:
+        if not self._cap and not self._virtual_mode:
             self.open()
         
         # 执行智能定位与重复帧自适应偏移
@@ -260,41 +294,99 @@ class FrameCapture:
         actual_timestamp = timestamp
         is_duplicate = False
         
-        while current_ts <= timestamp + max_drift:
-            self._seek_to_time(current_ts)
-            ret, frame = self._cap.read()
-            
-            if not ret or frame is None:
-                return FrameResult(
-                    frame_id=frame_id,
-                    timestamp=timestamp,
-                    frame_path="",
-                    width=0,
-                    height=0,
-                    brightness=0,
-                    sharpness=0,
-                    is_valid=False,
-                    invalid_reason="Failed to read frame from video",
-                    metadata={}
-                )
+        # Virtual Mode Handling
+        virtual_cap = None
+        virtual_segment_path = None
+        
+        try:
+            if self._virtual_mode:
+                # Transcode a small segment around the timestamp
+                # Range: [timestamp, timestamp + max_drift + 0.2] to cover drift check
+                seg_start = max(0, timestamp - 0.5) # Start a bit earlier for keyframe safety
+                seg_duration = max_drift + 2.0 # Enough buffer
                 
-            curr_hash = hash(frame.tobytes()[::1000])
-            if curr_hash != self._last_frame_hash:
-                # 找到新帧，记录哈希并更新结果时间戳
-                if current_ts > timestamp:
-                    print(f"      [DRIFT] Found new frame at {current_ts:.2f}s (offset +{current_ts - timestamp:.2f}s)")
-                self._last_frame_hash = curr_hash
-                actual_timestamp = current_ts
-                is_duplicate = False
-                break
-            
-            # 如果是重复帧，且还没超过最大漂移量，尝试往后推
-            current_ts += drift_step
-            # 如果已经到了最大漂移，只能接受当前帧
-            if current_ts > timestamp + max_drift:
-                actual_timestamp = current_ts - drift_step
-                is_duplicate = True
-                break
+                # Use a unique temp name
+                import uuid
+                virtual_segment_path = self.output_dir / f"vseg_{uuid.uuid4().hex[:8]}.mp4"
+                
+                if transcode_video_segment(
+                    self.video_path, 
+                    str(virtual_segment_path), 
+                    seg_start, 
+                    seg_duration
+                ):
+                    virtual_cap = cv2.VideoCapture(str(virtual_segment_path))
+                
+                if not virtual_cap or not virtual_cap.isOpened():
+                     return FrameResult(
+                        frame_id=frame_id,
+                        timestamp=timestamp,
+                        frame_path="",
+                        width=0, height=0, brightness=0, sharpness=0,
+                        is_valid=False,
+                        invalid_reason="Virtual transcoding failed",
+                        metadata={}
+                    )
+
+            # Main capture loop
+            while current_ts <= timestamp + max_drift:
+                frame = None
+                ret = False
+                
+                if self._virtual_mode and virtual_cap:
+                    # Map global timestamp to segment local timestamp
+                    # segment starts at seg_start
+                    local_ts = current_ts - seg_start
+                    # Seek in virtual clip
+                    virtual_cap.set(cv2.CAP_PROP_POS_MSEC, local_ts * 1000)
+                    ret, frame = virtual_cap.read()
+                else:
+                    self._seek_to_time(current_ts)
+                    ret, frame = self._cap.read()
+                
+                if not ret or frame is None:
+                    # In virtual mode, maybe we hit end of segment
+                    if self._virtual_mode:
+                        break # Try next drift step? No, segment is small.
+                    
+                    return FrameResult(
+                        frame_id=frame_id,
+                        timestamp=timestamp,
+                        frame_path="",
+                        width=0,
+                        height=0,
+                        brightness=0,
+                        sharpness=0,
+                        is_valid=False,
+                        invalid_reason="Failed to read frame from video",
+                        metadata={}
+                    )
+                
+                curr_hash = hash(frame.tobytes()[::1000])
+                if curr_hash != self._last_frame_hash:
+                    # 找到新帧，记录哈希并更新结果时间戳
+                    if current_ts > timestamp:
+                        print(f"      [DRIFT] Found new frame at {current_ts:.2f}s (offset +{current_ts - timestamp:.2f}s)")
+                    self._last_frame_hash = curr_hash
+                    actual_timestamp = current_ts
+                    is_duplicate = False
+                    break
+                
+                # 如果是重复帧，且还没超过最大漂移量，尝试往后推
+                current_ts += drift_step
+                # 如果已经到了最大漂移，只能接受当前帧
+                if current_ts > timestamp + max_drift:
+                    actual_timestamp = current_ts - drift_step
+                    is_duplicate = True
+                    break
+        finally:
+            if virtual_cap:
+                virtual_cap.release()
+            if virtual_segment_path and Path(virtual_segment_path).exists():
+                try:
+                    os.remove(virtual_segment_path)
+                except Exception:
+                    pass
 
         # 如果是重复帧且已经有之前的路径，直接复用，不写硬盘
         if is_duplicate and self._last_frame_path and Path(self._last_frame_path).exists():
@@ -303,8 +395,8 @@ class FrameCapture:
                 frame_id=frame_id,
                 timestamp=actual_timestamp,
                 frame_path=self._last_frame_path,
-                width=int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                height=int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                width=int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)) if not self._virtual_mode else self._video_width,
+                height=int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) if not self._virtual_mode else self._video_height,
                 brightness=0, # 复用时不再重新计算
                 sharpness=0,
                 is_valid=True,
@@ -367,7 +459,7 @@ class FrameCapture:
         - step: 函数入参（类型：float）。
         输出参数：
         - FrameResult 对象（包含字段：frame_id, timestamp, frame_path, width, height, brightness, sharpness, is_valid, invalid_reason, metadata）。"""
-        if not self._cap:
+        if not self._cap and not self._virtual_mode:
             self.open()
             
         start_time = max(0, target_time - search_window / 2)
@@ -385,93 +477,138 @@ class FrameCapture:
         prev_frame_gray = None
         current_frame_num = -1
         
-        for t in candidates_times:
-            # 读取帧
-            self._seek_to_time(t)
-            
-            ret, frame = self._cap.read()
-            current_frame_num = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES))
-            
-            if not ret or frame is None:
-                continue
-                
-            # 计算质量
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-            
-            # 计算稳定性（与上一帧的差异）
-            stability_score = 1.0
-            if prev_frame_gray is not None:
-                # 简单的像素差检查
-                # 使用极小尺寸快速对比
-                curr_small = cv2.resize(gray, (32, 32))
-                prev_small = cv2.resize(prev_frame_gray, (32, 32))
-                diff = cv2.absdiff(curr_small, prev_small)
-                mean_diff = np.mean(diff)
-                # mean_diff 越小越稳定
-                stability_score = max(0, 1 - (mean_diff / 50.0))
-            
-            prev_frame_gray = gray
-            
-            # 综合评分：清晰度权重0.6，稳定性权重0.4
-            norm_sharpness = min(1.0, laplacian_var / 500.0)
-            
-            if np.mean(gray) < 10: 
-                total_score = 0
-            else:
-                total_score = norm_sharpness * 0.6 + stability_score * 0.4
-            
-            if total_score > best_score:
-                best_score = total_score
-                best_frame = frame.copy()
-                best_timestamp = float(t)
-                
-        # 如果没找到任何帧，回退到原始点
-        if best_frame is None:
-            return self.capture_frame(target_time, frame_id, enhance_params)
-            
-        # 对最佳帧进行后续处理
-        if enhance_params:
-            best_frame = self._apply_enhancement(best_frame, enhance_params)
-            
-        brightness, sharpness = self._calculate_quality(best_frame)
+        # Prepare virtual capture if needed
+        virtual_cap = None
+        virtual_segment_path = None
+        seg_start = 0.0
         
-        # 物理复用逻辑：如果最佳帧和上一次抓取完全一样，直接复用文件
-        curr_hash = hash(best_frame.tobytes()[::1000])
-        if curr_hash == self._last_frame_hash and self._last_frame_path and Path(self._last_frame_path).exists():
-            print(f"      [REUSE] Best frame for '{frame_id}' matches previous, skipping write.")
+        try:
+            if self._virtual_mode:
+                 # Transcode range covering all candidates
+                 # Range: [start_time - 0.5, end_time + 0.5]
+                 seg_start = max(0, start_time - 0.5)
+                 seg_end = end_time + 0.5
+                 seg_duration = seg_end - seg_start
+                 
+                 import uuid
+                 virtual_segment_path = self.output_dir / f"vseg_best_{uuid.uuid4().hex[:8]}.mp4"
+                 
+                 if transcode_video_segment(
+                    self.video_path,
+                    str(virtual_segment_path),
+                    seg_start,
+                    seg_duration
+                 ):
+                     virtual_cap = cv2.VideoCapture(str(virtual_segment_path))
+        
+            for t in candidates_times:
+                # 读取帧
+                frame = None
+                ret = False
+                
+                if self._virtual_mode and virtual_cap and virtual_cap.isOpened():
+                    local_ts = t - seg_start
+                    virtual_cap.set(cv2.CAP_PROP_POS_MSEC, local_ts * 1000)
+                    ret, frame = virtual_cap.read()
+                elif not self._virtual_mode and self._cap:
+                    self._seek_to_time(t)
+                    ret, frame = self._cap.read()
+                
+                # Update frame num for virtual mode? 
+                # Not strictly needed for logic, but for correctness
+                current_frame_num = -1
+                if not self._virtual_mode and self._cap:
+                    current_frame_num = int(self._cap.get(cv2.CAP_PROP_POS_FRAMES))
+
+                if not ret or frame is None:
+                    continue
+                
+                # 计算质量
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+                
+                # 计算稳定性（与上一帧的差异）
+                stability_score = 1.0
+                if prev_frame_gray is not None:
+                    # 简单的像素差检查
+                    # 使用极小尺寸快速对比
+                    curr_small = cv2.resize(gray, (32, 32))
+                    prev_small = cv2.resize(prev_frame_gray, (32, 32))
+                    diff = cv2.absdiff(curr_small, prev_small)
+                    mean_diff = np.mean(diff)
+                    # mean_diff 越小越稳定
+                    stability_score = max(0, 1 - (mean_diff / 50.0))
+                
+                prev_frame_gray = gray
+                
+                # 综合评分：清晰度权重0.6，稳定性权重0.4
+                norm_sharpness = min(1.0, laplacian_var / 500.0)
+                
+                if np.mean(gray) < 10: 
+                    total_score = 0
+                else:
+                    total_score = norm_sharpness * 0.6 + stability_score * 0.4
+                
+                if total_score > best_score:
+                    best_score = total_score
+                    best_frame = frame.copy()
+                    best_timestamp = float(t)
+                    
+            # 如果没找到任何帧，回退到原始点
+            if best_frame is None:
+                return self.capture_frame(target_time, frame_id, enhance_params)
+                
+            # 对最佳帧进行后续处理
+            if enhance_params:
+                best_frame = self._apply_enhancement(best_frame, enhance_params)
+                
+            brightness, sharpness = self._calculate_quality(best_frame)
+            
+            # 物理复用逻辑：如果最佳帧和上一次抓取完全一样，直接复用文件
+            curr_hash = hash(best_frame.tobytes()[::1000])
+            if curr_hash == self._last_frame_hash and self._last_frame_path and Path(self._last_frame_path).exists():
+                print(f"      [REUSE] Best frame for '{frame_id}' matches previous, skipping write.")
+                return FrameResult(
+                    frame_id=frame_id,
+                    timestamp=best_timestamp,
+                    frame_path=self._last_frame_path,
+                    width=self._video_width if self._virtual_mode else int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                    height=self._video_height if self._virtual_mode else int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                    brightness=brightness,
+                    sharpness=sharpness,
+                    is_valid=True,
+                    metadata={"from_cache": True, "score": best_score}
+                )
+
+            # 保存
+            frame_path = self.output_dir / f"{frame_id}.png"
+            cv2.imwrite(str(frame_path), best_frame)
+            
+            # 记录哈希和路径供下次复用
+            self._last_frame_hash = curr_hash
+            self._last_frame_path = str(frame_path)
+            
+            height, width = best_frame.shape[:2]
+            
             return FrameResult(
                 frame_id=frame_id,
                 timestamp=best_timestamp,
-                frame_path=self._last_frame_path,
-                width=int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
-                height=int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+                frame_path=str(frame_path),
+                width=width,
+                height=height,
                 brightness=brightness,
                 sharpness=sharpness,
-                is_valid=True,
-                metadata={"from_cache": True, "score": best_score}
+                is_valid=True
             )
-
-        # 保存
-        frame_path = self.output_dir / f"{frame_id}.png"
-        cv2.imwrite(str(frame_path), best_frame)
-        
-        # 记录哈希和路径供下次复用
-        self._last_frame_hash = curr_hash
-        self._last_frame_path = str(frame_path)
-        
-        height, width = best_frame.shape[:2]
-        
-        return FrameResult(
-            frame_id=frame_id,
-            timestamp=best_timestamp,
-            frame_path=str(frame_path),
-            width=width,
-            height=height,
-            brightness=brightness,
-            sharpness=sharpness,
-            is_valid=True
-        )
+            
+        finally:
+            if virtual_cap:
+                virtual_cap.release()
+            if virtual_segment_path and Path(virtual_segment_path).exists():
+                try:
+                    os.remove(virtual_segment_path)
+                except Exception:
+                    pass
 
     def capture_multiple(
         self,

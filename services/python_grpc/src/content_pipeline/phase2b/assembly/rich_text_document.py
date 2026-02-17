@@ -1,4 +1,4 @@
-"""
+﻿"""
 模块说明：Module2 内容增强中的 rich_text_document 模块。
 执行逻辑：
 1) 聚合本模块的类/函数，对外提供核心能力。
@@ -65,6 +65,8 @@ class RichTextSection:
     instructional_steps: List[Dict[str, Any]] = field(default_factory=list)
     mult_steps: bool = False
     layout_hint: str = "default"
+    group_id: int = 0
+    group_name: str = ""
 
     def duration_str(self) -> str:
         """
@@ -94,6 +96,15 @@ class RichTextSection:
 
 
 @dataclass
+class KnowledgeGroup:
+    """类说明：KnowledgeGroup 表示同一核心论点下的单元聚合。"""
+    group_id: int
+    group_name: str
+    reason: str = ""
+    units: List[RichTextSection] = field(default_factory=list)
+
+
+@dataclass
 class RichTextDocument:
     """类说明：RichTextDocument 负责封装本模块相关能力。
     执行步骤：
@@ -101,14 +112,14 @@ class RichTextDocument:
     2) 步骤2：协调类内方法完成业务处理。
     3) 步骤3：输出处理结果并提供可复用能力。"""
     title: str = ""
-    sections: List[RichTextSection] = field(default_factory=list)
+    knowledge_groups: List[KnowledgeGroup] = field(default_factory=list)
     
     # 元信息
     source_video: str = ""
     total_duration_sec: float = 0.0
     generated_at: str = ""
     
-    def add_section(self, section: RichTextSection):
+    def add_group(self, group: KnowledgeGroup):
         """
         执行逻辑：
         1) 准备必要上下文与参数。
@@ -116,10 +127,10 @@ class RichTextDocument:
         实现方式：通过内部方法调用/状态更新实现。
         核心价值：封装逻辑单元，提升复用与可维护性。
         输入参数：
-        - section: 函数入参（类型：RichTextSection）。
+        - group: 函数入参（类型：KnowledgeGroup）。
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        self.sections.append(section)
+        self.knowledge_groups.append(group)
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -137,26 +148,34 @@ class RichTextDocument:
             "source_video": self.source_video,
             "total_duration_sec": self.total_duration_sec,
             "generated_at": self.generated_at,
-            "sections": [
+            "knowledge_groups": [
                 {
-                    "unit_id": s.unit_id,
-                    "title": s.title,
-                    "body_text": s.body_text,
-                    "knowledge_type": s.knowledge_type,
-                    "time_range": [s.start_sec, s.end_sec],
-                    "materials": {
-                        "clip": s.materials.clip_path,
-                        "clips": s.materials.clip_paths,
-                        "screenshots": s.materials.screenshot_paths,
-                        "labels": s.materials.screenshot_labels,
-                        "screenshot_items": s.materials.screenshot_items,
-                        "action_classifications": s.materials.action_classifications
-                    },
-                    "instructional_steps": s.instructional_steps,
-                    "mult_steps": s.mult_steps,
-                    "layout_hint": s.layout_hint
+                    "group_id": group.group_id,
+                    "group_name": group.group_name,
+                    "reason": group.reason,
+                    "units": [
+                        {
+                            "unit_id": s.unit_id,
+                            "title": s.title,
+                            "body_text": s.body_text,
+                            "knowledge_type": s.knowledge_type,
+                            "time_range": [s.start_sec, s.end_sec],
+                            "materials": {
+                                "clip": s.materials.clip_path,
+                                "clips": s.materials.clip_paths,
+                                "screenshots": s.materials.screenshot_paths,
+                                "labels": s.materials.screenshot_labels,
+                                "screenshot_items": s.materials.screenshot_items,
+                                "action_classifications": s.materials.action_classifications
+                            },
+                            "instructional_steps": s.instructional_steps,
+                            "mult_steps": s.mult_steps,
+                            "layout_hint": s.layout_hint
+                        }
+                        for s in group.units
+                    ],
                 }
-                for s in self.sections
+                for group in self.knowledge_groups
             ]
         }
     
@@ -209,9 +228,16 @@ class RichTextDocument:
         lines.append("---")
         lines.append("")
         
-        # 各段落
-        for i, section in enumerate(self.sections, 1):
-            lines.extend(self._render_section_markdown(section, i, assets_relative_dir))
+        # 按组输出
+        for group in self.knowledge_groups:
+            lines.append(f"## {group.group_name}")
+            lines.append("")
+            if str(group.reason or "").strip():
+                lines.append(f"> 分组依据：{group.reason}")
+                lines.append("")
+            for section in group.units:
+                lines.extend(self._render_section_markdown(section, assets_relative_dir))
+                lines.append("")
             lines.append("")
             lines.append("---")
             lines.append("")
@@ -221,13 +247,15 @@ class RichTextDocument:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
-        logger.info(f"Exported Markdown: {output_path} ({len(self.sections)} sections)")
+        total_units = sum(len(group.units) for group in self.knowledge_groups)
+        logger.info(
+            f"Exported Markdown: {output_path} (groups={len(self.knowledge_groups)}, units={total_units})"
+        )
         return output_path
     
     def _render_section_markdown(
         self, 
-        section: RichTextSection, 
-        idx: int,
+        section: RichTextSection,
         assets_dir: str
     ) -> List[str]:
         """
@@ -244,14 +272,13 @@ class RichTextDocument:
         - 输入参数：section。
         输入参数：
         - section: 函数入参（类型：RichTextSection）。
-        - idx: 函数入参（类型：int）。
         - assets_dir: 目录路径（类型：str）。
         输出参数：
         - str 列表（与输入或处理结果一一对应）。"""
         lines = []
         
         # 标题
-        lines.append(f"## {idx}. {section.title}")
+        lines.append(f"### {section.title}")
         lines.append("")
         
         # 元信息块
@@ -268,6 +295,33 @@ class RichTextDocument:
              for step in section.instructional_steps:
                  step_desc = step.get('step_description') or step.get('description') or ""
                  lines.append(f"### Step {step.get('step_id')}: {step_desc}")
+                 main_action = str(step.get("main_action") or "").strip()
+                 main_operation = self._normalize_step_text_list(
+                     step.get("main_operation")
+                     if step.get("main_operation") is not None
+                     else step.get("main_operations")
+                 )
+                 precautions = self._normalize_step_text_list(
+                     step.get("precautions")
+                     if step.get("precautions") is not None
+                     else step.get("notes")
+                 )
+                 step_summary = str(step.get("step_summary") or step.get("summary") or "").strip()
+                 operation_guidance = self._normalize_step_text_list(
+                     step.get("operation_guidance")
+                     if step.get("operation_guidance") is not None
+                     else step.get("guidance")
+                 )
+                 if main_action:
+                     lines.append(f"- 主要动作：{main_action}")
+                 if main_operation:
+                     lines.append(f"- 主要操作：{'；'.join(main_operation)}")
+                 if precautions:
+                     lines.append(f"- 注意事项：{'；'.join(precautions)}")
+                 if step_summary:
+                     lines.append(f"- 步骤小结：{step_summary}")
+                 if operation_guidance:
+                     lines.append(f"- 操作指导：{'；'.join(operation_guidance)}")
                  mats = step.get('materials', {})
                  # 步骤截图
                  ss_paths = mats.get('screenshot_paths', [])
@@ -328,6 +382,21 @@ class RichTextDocument:
                     lines.append("")
         
         return lines
+
+    def _normalize_step_text_list(self, value: Any) -> List[str]:
+        """Normalize step list-like text fields into clean string list."""
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            normalized = text.replace("；", ";").replace("\n", ";")
+            return [segment.strip() for segment in normalized.split(";") if segment.strip()]
+        text = str(value).strip()
+        return [text] if text else []
     
     def _relative_path(self, abs_path: str, assets_dir: str) -> str:
         """
@@ -386,5 +455,8 @@ def create_section_from_semantic_unit(
         materials=materials,
         instructional_steps=getattr(unit, "instructional_steps", []) or [],
         mult_steps=bool(getattr(unit, "mult_steps", False)),
-        layout_hint="default"
+        layout_hint="default",
+        group_id=int(getattr(unit, "group_id", 0) or 0),
+        group_name=str(getattr(unit, "group_name", "") or ""),
     )
+

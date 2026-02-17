@@ -1,0 +1,11 @@
+﻿{
+  "storage_root": "var/storage/storage",
+  "mode": "all",
+  "task_ids": [],
+  "task_dirs": [],
+  "output_name": "phase2b_img_desc_augment_review.json",
+  "indent": 2,
+  "include_user_prompt": false,
+  "max_user_prompt_chars": 300,
+  "strict": false
+}

@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import OrderedDict
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
 import numpy as np
+
+from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
 
 class CVConfig:
     """类说明：CVConfig 负责封装本模块相关能力。

@@ -1,245 +1,551 @@
-"""
-模块说明：阶段 LLM 适配 deepseek 的实现。
-执行逻辑：
-1) 聚合本模块的类/函数，对外提供核心能力。
-2) 通过内部调用与外部依赖完成具体处理。
-实现方式：通过模块内函数组合与外部依赖调用实现。
-核心价值：统一模块职责边界，降低跨文件耦合成本。
-输入：
-- 调用方传入的参数与数据路径。
-输出：
-- 各函数/类返回的结构化结果或副作用。"""
+"""DeepSeek 客户端实现（含重试、缓存、并发与去重优化）。"""
 
-import json
-import httpx
+from __future__ import annotations
+
 import asyncio
-from typing import Dict, Any, Optional, Tuple
+import hashlib
+import importlib.util
+import json
+import logging
+import os
+import random
+import re
+import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
+
+import httpx
 
 from .client import LLMClient, LLMConfig, LLMResponse
 
+logger = logging.getLogger(__name__)
+_T = TypeVar("_T")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    value = str(raw).strip().lower()
+    if value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if value in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
+def _supports_http2_transport() -> bool:
+    """优先走自动探测；也允许通过环境变量强制开关。"""
+    if os.getenv("TRANSCRIPT_LLM_HTTP2_ENABLED") is not None:
+        return _env_bool("TRANSCRIPT_LLM_HTTP2_ENABLED", True)
+    return importlib.util.find_spec("h2") is not None
+
+
+_CACHE_ENABLED = _env_bool("TRANSCRIPT_LLM_CACHE_ENABLED", True)
+_CACHE_MAX_ITEMS = max(1, _env_int("TRANSCRIPT_LLM_CACHE_MAX_ITEMS", 512))
+_CACHE_TTL_SECONDS = max(1, _env_int("TRANSCRIPT_LLM_CACHE_TTL_SECONDS", 1800))
+_CACHE_MAX_PROMPT_CHARS = max(0, _env_int("TRANSCRIPT_LLM_CACHE_MAX_PROMPT_CHARS", 20000))
+_CACHE_MAX_RESPONSE_CHARS = max(0, _env_int("TRANSCRIPT_LLM_CACHE_MAX_RESPONSE_CHARS", 20000))
+
+_INFLIGHT_DEDUP_ENABLED = _env_bool("TRANSCRIPT_LLM_INFLIGHT_DEDUP_ENABLED", True)
+_MAX_CONCURRENCY = max(1, _env_int("TRANSCRIPT_LLM_MAX_CONCURRENCY", 10))
+
+_RETRY_ATTEMPTS = max(1, _env_int("TRANSCRIPT_LLM_RETRY_ATTEMPTS", 3))
+_RETRY_BACKOFF_MIN_MS = max(50, _env_int("TRANSCRIPT_LLM_RETRY_BACKOFF_MIN_MS", 300))
+_RETRY_BACKOFF_MAX_MS = max(
+    _RETRY_BACKOFF_MIN_MS,
+    _env_int("TRANSCRIPT_LLM_RETRY_BACKOFF_MAX_MS", 3000),
+)
+
+
+@dataclass
+class _CacheEntry:
+    content: str
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    model: str
+    raw_response: Optional[Dict[str, Any]]
+    expires_at: float
+
+
+class _AsyncLRUTTLCache:
+    """轻量异步 LRU+TTL 缓存，仅用于单进程内复用。"""
+
+    def __init__(self, max_items: int, ttl_seconds: int):
+        self._max_items = max(1, int(max_items))
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._items: "OrderedDict[str, _CacheEntry]" = OrderedDict()
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> Optional[_CacheEntry]:
+        now = time.time()
+        async with self._lock:
+            entry = self._items.get(key)
+            if entry is None:
+                return None
+            if entry.expires_at <= now:
+                self._items.pop(key, None)
+                return None
+            self._items.move_to_end(key, last=True)
+            return entry
+
+    async def set(self, key: str, entry: _CacheEntry) -> None:
+        async with self._lock:
+            self._items[key] = entry
+            self._items.move_to_end(key, last=True)
+            while len(self._items) > self._max_items:
+                self._items.popitem(last=False)
+
+    def ttl_seconds(self) -> int:
+        return self._ttl_seconds
+
+
+class _AsyncInFlightDeduper:
+    """对相同 key 的并发请求做 singleflight 合并。"""
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._inflight: Dict[str, asyncio.Future] = {}
+
+    async def run(self, key: str, fn: Callable[[], Awaitable[_T]]) -> _T:
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            fut = self._inflight.get(key)
+            if fut is None:
+                fut = loop.create_future()
+                self._inflight[key] = fut
+                leader = True
+            else:
+                leader = False
+
+        if not leader:
+            return await fut
+
+        try:
+            result = await fn()
+            fut.set_result(result)
+            return result
+        except Exception as error:
+            fut.set_exception(error)
+            raise
+        finally:
+            async with self._lock:
+                self._inflight.pop(key, None)
+
 
 class DeepSeekClient(LLMClient):
-    """类说明：DeepSeekClient 负责封装本模块相关能力。
-    执行步骤：
-    1) 步骤1：接收调用请求并组织上下文数据。
-    2) 步骤2：协调类内方法完成业务处理。
-    3) 步骤3：输出处理结果并提供可复用能力。"""
-    
     def __init__(self, config: LLMConfig):
-        """
-        执行逻辑：
-        1) 解析配置或依赖，准备运行环境。
-        2) 初始化对象状态、缓存与依赖客户端。
-        实现方式：通过内部方法调用/状态更新、HTTP 调用实现。
-        核心价值：在初始化阶段固化依赖，保证运行稳定性。
-        输入参数：
-        - config: 配置对象/字典（类型：LLMConfig）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         super().__init__(config)
         self._client: Optional[httpx.AsyncClient] = None
-        
+        self._client_lock = asyncio.Lock()
+        self._client_loop_id: Optional[int] = None
+        self._http2_enabled = _supports_http2_transport()
+
+        self._request_semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
+        self._cache = _AsyncLRUTTLCache(_CACHE_MAX_ITEMS, _CACHE_TTL_SECONDS)
+        self._deduper = _AsyncInFlightDeduper()
+
     async def _get_client(self) -> httpx.AsyncClient:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：self._client is None
-        依据来源（证据链）：
-        - 对象内部状态：self._client。
-        输入参数：
-        - 无。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
-        if self._client is None:
-            self._client = httpx.AsyncClient(
-                base_url=self.config.base_url,
-                headers={
+        loop_id = id(asyncio.get_running_loop())
+        if self._client is not None and self._client_loop_id == loop_id:
+            return self._client
+
+        async with self._client_lock:
+            if self._client is not None and self._client_loop_id == loop_id:
+                return self._client
+
+            # 同一 client 若跨 event loop 复用，会导致底层连接对象异常；这里直接重建。
+            if self._client is not None and self._client_loop_id != loop_id:
+                self._client = None
+                self._client_loop_id = None
+
+            max_connections = max(20, _MAX_CONCURRENCY * 2)
+            max_keepalive = max(10, _MAX_CONCURRENCY)
+            timeout = max(1.0, float(self.config.timeout))
+            connect_timeout = min(10.0, timeout)
+
+            client_kwargs = {
+                "base_url": self.config.base_url,
+                "headers": {
                     "Authorization": f"Bearer {self.config.api_key}",
-                    "Content-Type": "application/json"
+                    "Content-Type": "application/json",
+                    "Accept-Encoding": "gzip, br",
                 },
-                timeout=self.config.timeout
-            )
-        return self._client
-    
+                "timeout": httpx.Timeout(timeout, connect=connect_timeout),
+                "limits": httpx.Limits(
+                    max_connections=max_connections,
+                    max_keepalive_connections=max_keepalive,
+                    keepalive_expiry=30.0,
+                ),
+                "http2": self._http2_enabled,
+            }
+
+            try:
+                self._client = httpx.AsyncClient(**client_kwargs)
+            except Exception as error:
+                error_text = str(error).lower()
+                if self._http2_enabled and "h2" in error_text:
+                    logger.warning("DeepSeek HTTP/2 unavailable, fallback to HTTP/1.1")
+                    self._http2_enabled = False
+                    client_kwargs["http2"] = False
+                    self._client = httpx.AsyncClient(**client_kwargs)
+                else:
+                    raise
+
+            self._client_loop_id = loop_id
+            return self._client
+
     async def close(self):
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：self._client
-        依据来源（证据链）：
-        - 对象内部状态：self._client。
-        输入参数：
-        - 无。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        if self._client:
+        if self._client is not None:
             await self._client.aclose()
             self._client = None
-    
+            self._client_loop_id = None
+
+    def _is_retryable_http_status(self, status_code: int) -> bool:
+        return int(status_code) in {408, 409, 425, 429, 500, 502, 503, 504}
+
+    def _retry_delay_seconds(self, attempt_index: int) -> float:
+        base_ms = min(_RETRY_BACKOFF_MAX_MS, _RETRY_BACKOFF_MIN_MS * (2 ** attempt_index))
+        jitter_ms = int(base_ms * 0.2)
+        if jitter_ms > 0:
+            base_ms += random.randint(0, jitter_ms)
+        return max(0.05, float(base_ms) / 1000.0)
+
+    async def _post_with_retry(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        last_error: Optional[Exception] = None
+        for attempt in range(_RETRY_ATTEMPTS):
+            try:
+                client = await self._get_client()
+                response = await client.post("/chat/completions", json=payload)
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("DeepSeek response JSON root must be an object")
+                return data
+            except httpx.HTTPStatusError as error:
+                status_code = int(getattr(error.response, "status_code", 0))
+                retryable = self._is_retryable_http_status(status_code)
+                last_error = error
+                if (not retryable) or attempt >= _RETRY_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(self._retry_delay_seconds(attempt))
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as error:
+                last_error = error
+                if attempt >= _RETRY_ATTEMPTS - 1:
+                    raise
+                await asyncio.sleep(self._retry_delay_seconds(attempt))
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("DeepSeek request failed with unknown error")
+
+    def _cacheable(self, prompt: str, system_prompt: Optional[str]) -> bool:
+        if not _CACHE_ENABLED:
+            return False
+        total_chars = len(prompt or "") + len(system_prompt or "")
+        return total_chars <= _CACHE_MAX_PROMPT_CHARS
+
+    def _response_cacheable(self, content: str) -> bool:
+        return isinstance(content, str) and len(content) <= _CACHE_MAX_RESPONSE_CHARS
+
+    def _kwargs_signature(self, kwargs: Dict[str, Any]) -> str:
+        try:
+            return json.dumps(kwargs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return repr(kwargs)
+
+    def _build_cache_key(
+        self,
+        *,
+        kind: str,
+        prompt: str,
+        system_prompt: Optional[str],
+        temperature: float,
+        kwargs: Dict[str, Any],
+    ) -> str:
+        hasher = hashlib.sha256()
+        hasher.update(str(kind).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(str(self.config.base_url).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(str(self.config.model).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(str(float(temperature)).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(self._kwargs_signature(kwargs).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update((system_prompt or "").encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update((prompt or "").encode("utf-8"))
+        return hasher.hexdigest()
+
+    def _cache_entry_to_response(self, entry: _CacheEntry) -> LLMResponse:
+        return LLMResponse(
+            content=entry.content,
+            prompt_tokens=int(entry.prompt_tokens),
+            completion_tokens=int(entry.completion_tokens),
+            total_tokens=int(entry.total_tokens),
+            model=str(entry.model or self.config.model),
+            latency_ms=0.0,
+            raw_response=dict(entry.raw_response) if isinstance(entry.raw_response, dict) else entry.raw_response,
+        )
+
     async def complete(
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
         temperature: Optional[float] = None,
-        **kwargs
+        **kwargs,
     ) -> LLMResponse:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化、HTTP 调用实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：system_prompt
-        - 条件：temperature is not None
-        依据来源（证据链）：
-        - 输入参数：system_prompt, temperature。
-        输入参数：
-        - prompt: 文本内容（类型：str）。
-        - system_prompt: 函数入参（类型：Optional[str]）。
-        - temperature: 函数入参（类型：Optional[float]）。
-        - **kwargs: 可变参数，含义由调用方决定。
-        输出参数：
-        - LLMResponse 响应对象。"""
-        client = await self._get_client()
-        
+        effective_temperature = (
+            float(temperature) if temperature is not None else float(self.config.temperature)
+        )
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
-        
+
         payload = {
             "model": self.config.model,
             "messages": messages,
-            "temperature": temperature if temperature is not None else self.config.temperature,
+            "temperature": effective_temperature,
             "max_tokens": self.config.max_tokens,
-            **kwargs
+            **kwargs,
         }
-        
-        start_time = datetime.now()
-        
-        try:
-            response = await client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            data = response.json()
-            
-            latency_ms = (datetime.now() - start_time).total_seconds() * 1000
-            
-            content = data["choices"][0]["message"]["content"]
-            usage = data.get("usage", {})
-            
-            # 记录最后一次调用
-            self._last_prompt = prompt
-            self._last_response = content
-            self._last_token_count = usage.get("total_tokens", 0)
-            
-            return LLMResponse(
-                content=content,
-                prompt_tokens=usage.get("prompt_tokens", 0),
-                completion_tokens=usage.get("completion_tokens", 0),
-                total_tokens=usage.get("total_tokens", 0),
-                model=self.config.model,
-                latency_ms=latency_ms,
-                raw_response=data
+
+        cache_key: Optional[str] = None
+        if self._cacheable(prompt, system_prompt):
+            cache_key = self._build_cache_key(
+                kind="text",
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=effective_temperature,
+                kwargs={k: v for k, v in kwargs.items()},
             )
-            
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"DeepSeek API error: {e.response.status_code} - {e.response.text}")
-        except Exception as e:
-            raise RuntimeError(f"DeepSeek API error: {str(e)}")
-    
+            cached = await self._cache.get(cache_key)
+            if cached is not None:
+                return self._cache_entry_to_response(cached)
+
+        async def _do_request() -> LLMResponse:
+            async with self._request_semaphore:
+                start_time = datetime.now()
+                try:
+                    data = await self._post_with_retry(payload)
+                except httpx.HTTPStatusError as error:
+                    raise RuntimeError(
+                        f"DeepSeek API error: {error.response.status_code} - {error.response.text}"
+                    ) from error
+                except Exception as error:
+                    raise RuntimeError(f"DeepSeek API error: {error}") from error
+
+                try:
+                    content = str(data["choices"][0]["message"]["content"])
+                except Exception as error:
+                    raise RuntimeError(f"DeepSeek API error: invalid response schema: {error}") from error
+
+                usage = data.get("usage", {}) if isinstance(data, dict) else {}
+                prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+                completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+                total_tokens = int(
+                    usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+                )
+                model = str(data.get("model") or self.config.model)
+
+                latency_ms = (datetime.now() - start_time).total_seconds() * 1000
+
+                self._last_prompt = prompt
+                self._last_response = content
+                self._last_token_count = total_tokens
+
+                response_obj = LLMResponse(
+                    content=content,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=total_tokens,
+                    model=model,
+                    latency_ms=latency_ms,
+                    raw_response=data,
+                )
+
+                if cache_key and self._response_cacheable(content):
+                    now = time.time()
+                    await self._cache.set(
+                        cache_key,
+                        _CacheEntry(
+                            content=content,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            total_tokens=total_tokens,
+                            model=model,
+                            raw_response=data,
+                            expires_at=now + float(self._cache.ttl_seconds()),
+                        ),
+                    )
+                return response_obj
+
+        if cache_key and _INFLIGHT_DEDUP_ENABLED:
+            return await self._deduper.run(cache_key, _do_request)
+        return await _do_request()
+
     async def complete_json(
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
-        **kwargs
+        **kwargs,
     ) -> Tuple[Dict, LLMResponse]:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、JSON 解析/序列化实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：'```json' in content
-        - 条件：'```' in content
-        依据来源（证据链）：
-        输入参数：
-        - prompt: 文本内容（类型：str）。
-        - system_prompt: 函数入参（类型：Optional[str]）。
-        - **kwargs: 可变参数，含义由调用方决定。
-        输出参数：
-        - 结构化结果字典（包含关键字段信息）。"""
-        # 添加 JSON 模式提示
         json_system = (system_prompt or "") + "\n\n请确保输出为有效的 JSON 格式。"
-        
-        response = await self.complete(
-            prompt=prompt,
-            system_prompt=json_system,
-            **kwargs
-        )
-        
-        # 解析 JSON
-        content = response.content.strip()
-        
-        # 尝试提取 JSON 块
-        if "```json" in content:
-            start = content.find("```json") + 7
-            end = content.find("```", start)
-            content = content[start:end].strip()
-        elif "```" in content:
-            start = content.find("```") + 3
-            end = content.find("```", start)
-            content = content[start:end].strip()
-            
+        call_kwargs = dict(kwargs)
+        call_kwargs.setdefault("response_format", {"type": "json_object"})
+
+        prompt_to_send = prompt
+        last_decode_error: Optional[json.JSONDecodeError] = None
+        last_content = ""
+
+        for attempt in range(2):
+            response = await self._complete_for_json(
+                prompt=prompt_to_send,
+                system_prompt=json_system,
+                kwargs=call_kwargs,
+            )
+            content = self._extract_json_content(response.content)
+            last_content = content
+
+            try:
+                parsed = self._load_json_with_repair(content)
+                if not isinstance(parsed, dict):
+                    raise ValueError("JSON root must be an object")
+                return parsed, response
+            except json.JSONDecodeError as error:
+                last_decode_error = error
+                if attempt == 0:
+                    prompt_to_send = (
+                        f"{prompt}\n\n"
+                        "上一轮输出不是有效 JSON，请重新输出完整且可解析的 JSON。"
+                        "不要输出解释文本，也不要使用 Markdown code block。"
+                    )
+
+        error_text = str(last_decode_error) if last_decode_error else "unknown parse error"
+        raise ValueError(f"Failed to parse JSON response: {error_text}\nContent: {last_content[:500]}")
+
+    async def _complete_for_json(
+        self,
+        prompt: str,
+        system_prompt: str,
+        kwargs: Dict[str, Any],
+    ) -> LLMResponse:
         try:
-            parsed = json.loads(content)
-            return parsed, response
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse JSON response: {e}\nContent: {content[:500]}")
-    
+            return await self.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                **kwargs,
+            )
+        except RuntimeError as error:
+            error_text = str(error).lower()
+            if "response_format" in error_text and ("400" in error_text or "invalid" in error_text):
+                fallback_kwargs = dict(kwargs)
+                fallback_kwargs.pop("response_format", None)
+                return await self.complete(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    **fallback_kwargs,
+                )
+            raise
+
+    def _extract_json_content(self, content: str) -> str:
+        text = content.strip()
+        if "```json" in text:
+            start = text.find("```json") + 7
+            end = text.find("```", start)
+            if end != -1:
+                text = text[start:end].strip()
+        elif "```" in text:
+            start = text.find("```") + 3
+            end = text.find("```", start)
+            if end != -1:
+                text = text[start:end].strip()
+
+        object_start = text.find("{")
+        array_start = text.find("[")
+        starts = [position for position in [object_start, array_start] if position != -1]
+        if not starts:
+            return text
+
+        start = min(starts)
+        end = max(text.rfind("}"), text.rfind("]"))
+        if end > start:
+            return text[start : end + 1].strip()
+        return text[start:].strip()
+
+    def _load_json_with_repair(self, content: str) -> Any:
+        candidate = content
+        last_error: Optional[json.JSONDecodeError] = None
+
+        for _ in range(3):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as error:
+                last_error = error
+                repaired = self._repair_json(candidate, error)
+                if not repaired or repaired == candidate:
+                    break
+                candidate = repaired
+
+        if last_error is not None:
+            raise last_error
+        raise json.JSONDecodeError("Invalid JSON", content, 0)
+
+    def _repair_json(self, content: str, error: json.JSONDecodeError) -> str:
+        repaired = content.strip()
+
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        repaired = re.sub(r"}\s*{", "},{", repaired)
+        repaired = re.sub(r"]\s*\[", "],[", repaired)
+
+        if "Expecting ',' delimiter" in error.msg and 0 <= error.pos < len(repaired):
+            token = repaired[error.pos]
+            if token in {'"', "{", "["}:
+                repaired = repaired[: error.pos] + "," + repaired[error.pos :]
+
+        open_braces = repaired.count("{")
+        close_braces = repaired.count("}")
+        if open_braces > close_braces:
+            repaired += "}" * (open_braces - close_braces)
+
+        open_brackets = repaired.count("[")
+        close_brackets = repaired.count("]")
+        if open_brackets > close_brackets:
+            repaired += "]" * (open_brackets - close_brackets)
+
+        quote_count = len(re.findall(r'(?<!\\)"', repaired))
+        if quote_count % 2 != 0:
+            repaired += '"'
+
+        return repaired
+
     async def complete_batch(
         self,
         prompts: list[str],
         system_prompt: Optional[str] = None,
-        max_concurrency: int = 5
+        max_concurrency: int = 5,
     ) -> list[LLMResponse]:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、asyncio 异步调度实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - prompts: 函数入参（类型：list[str]）。
-        - system_prompt: 函数入参（类型：Optional[str]）。
-        - max_concurrency: 函数入参（类型：int）。
-        输出参数：
-        - LLMResponse 列表（与输入或处理结果一一对应）。"""
-        semaphore = asyncio.Semaphore(max_concurrency)
-        
-        async def limited_complete(prompt: str) -> LLMResponse:
-            """
-            执行逻辑：
-            1) 准备必要上下文与参数。
-            2) 执行核心处理并返回结果。
-            实现方式：通过内部方法调用/状态更新实现。
-            核心价值：封装逻辑单元，提升复用与可维护性。
-            输入参数：
-            - prompt: 文本内容（类型：str）。
-            输出参数：
-            - LLMResponse 响应对象。"""
+        semaphore = asyncio.Semaphore(max(1, int(max_concurrency)))
+
+        async def limited_complete(single_prompt: str) -> LLMResponse:
             async with semaphore:
-                return await self.complete(prompt, system_prompt)
-        
-        tasks = [limited_complete(p) for p in prompts]
+                return await self.complete(single_prompt, system_prompt)
+
+        tasks = [limited_complete(single_prompt) for single_prompt in prompts]
         return await asyncio.gather(*tasks)

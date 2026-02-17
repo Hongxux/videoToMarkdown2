@@ -461,13 +461,23 @@ class ThreadSafeMathOCR:
         # 1. 尝试初始化 PaddleOCR
         try:
             from paddleocr import PaddleOCR
-            self.paddle = PaddleOCR(
-                use_angle_cls=True,
-                lang="ch",
-                det_db_score_mode="slow",
-                use_space_char=True,
-                show_log=False
-            )
+            paddle_kwargs = {
+                "use_angle_cls": True,
+                "lang": "ch",
+                "det_db_score_mode": "slow",
+                "use_space_char": True,
+                "show_log": False,
+            }
+            try:
+                self.paddle = PaddleOCR(**paddle_kwargs)
+            except TypeError as type_err:
+                # 兼容不同版本 PaddleOCR：部分版本不支持 show_log 参数
+                if "show_log" in str(type_err):
+                    paddle_kwargs.pop("show_log", None)
+                    self.paddle = PaddleOCR(**paddle_kwargs)
+                    logger.info("PaddleOCR 当前版本不支持 show_log，已自动降级兼容初始化。")
+                else:
+                    raise
             logger.info("PaddleOCR engine initialized successfully for Math detection.")
         except Exception as e:
             logger.warning(f"PaddleOCR not available, math detection may be degraded: {e}")

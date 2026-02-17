@@ -12,7 +12,10 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -25,28 +28,31 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.Locale;
+import java.time.Instant;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
 
 /**
- * 视频处理编排器 (V3 Parallel)
+ * ??????? (V3 Parallel)
  * 
- * 🔑 核心流程编排 (并行架构 V3)：
- * 1. 资源准备: 下载视频 (Download) 并执行 Whisper 语音转录 (Transcribe)，生成基础字幕与音频。
- * 2. 文本处理 (Stage1): 对字幕进行文本清洗、初级分割与结构化，生成候选分段。
- * 3. 语义分析 (Phase2A): 利用 LLM 对文本进行深层语义分析，划分精确的语义单元 (Semantic Units)，但不生成素材请求。
- * 4. 🚀 串行分析 (Serial Analysis):
- *    - 第一步: 视觉验证 (CV Validation)。通过 Python Workers 并行检查关键帧稳定性与动作类型，提取“动作单元”。
- *    - 第二步: 知识分类 (Knowledge Classification)。依赖 CV 提取的动作单元，调用 LLM 批量判断每个动作的知识类型 (原理/流程/事实)。
- * 5. 结果聚合 (Merge): 将 CV 视觉结果与基于动作的知识分类结果合并回语义单元，构建完整的上下文信息。
- * 6. 策略生成 (Material Policy): 基于合并后的信息，执行智能素材生成策略 (GenerateMaterialRequests)，决定每个单元最佳的展示形式 (截图 vs 视频片段)。
- * 7. 素材提取 (Excution): Java 端通过 FFmpeg JNI 高效并行提取所需的截图与切片，无需跨进程开销。
- * 8. 最终组装 (Phase2B): 将所有文本、视觉素材、布局信息发送至 Python 端，组装成最终的图文富文本 (Markdown/Docx)。
+ * ?????????
+ * 1. ?????????????
+ * 2. Stage1??????????
+ * 3. Phase2A???????????
+ * 4. ??????? VL????? Legacy(CV + LLM)?
+ * 5. ???????????????
+ * 6. Phase2B??????????
+ * 
+ * ????????????????????????????
+ * 
+ * 
  */
 @Service
 public class VideoProcessingOrchestrator {
     
     private static final Logger logger = LoggerFactory.getLogger(VideoProcessingOrchestrator.class);
 
-    // 内部类：统一素材请求结果
+    // ????????????
     private static class ExtractionRequests {
         List<JavaCVFFmpegService.ScreenshotRequest> screenshotRequests;
         List<JavaCVFFmpegService.ClipRequest> clipRequests;
@@ -69,7 +75,7 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    // 内部类：CV与知识分类分析结果
+    // ????CV ?????????
     private static class AnalysisResults {
         Map<String, CVValidationUnitResult> cvResults;
         List<KnowledgeResultItem> classResults;
@@ -84,7 +90,7 @@ public class VideoProcessingOrchestrator {
     private PythonGrpcClient grpcClient;
     
     @Autowired
-    private JavaCVFFmpegService ffmpegService;  // 🚀 使用 JNI 绑定，无进程开销
+    private JavaCVFFmpegService ffmpegService;  // ?? JNI ??????????
     
     @Autowired
     private DynamicTimeoutCalculator timeoutCalculator;
@@ -98,12 +104,23 @@ public class VideoProcessingOrchestrator {
     @Autowired
     private ModuleConfigService configService;
     
-    // 任务管理
+    // ????
     private final ConcurrentHashMap<String, TaskContext> activeTasks = new ConcurrentHashMap<>();
     private final AtomicInteger taskCounter = new AtomicInteger(0);
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    // LLM pricing (USD / 1M tokens)
+    private static final double QWEN3_VL_PLUS_INPUT_PER_M = 1.50d;
+    private static final double QWEN3_VL_PLUS_OUTPUT_PER_M = 4.50d;
+    private static final double ERNIE_45_TURBO_VL_INPUT_MIN_PER_M = 0.80d;
+    private static final double ERNIE_45_TURBO_VL_INPUT_MAX_PER_M = 1.50d;
+    private static final double ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M = 3.20d;
+    private static final double ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M = 4.50d;
+    private static final double DEEPSEEK_CHAT_INPUT_UNCACHED_PER_M = 2.00d;
+    private static final double DEEPSEEK_CHAT_INPUT_CACHED_PER_M = 0.50d;
+    private static final double DEEPSEEK_CHAT_OUTPUT_PER_M = 8.00d;
     
-    // 进度回调 (Functional Interface)
+    // ???? (Functional Interface)
     @FunctionalInterface
     public interface ProgressCallback {
         void onProgress(String taskId, double progress, String message);
@@ -122,7 +139,7 @@ public class VideoProcessingOrchestrator {
     }
     
     /**
-     * 任务上下文
+     * ?????
      */
     public static class TaskContext {
         public String taskId;
@@ -133,92 +150,127 @@ public class VideoProcessingOrchestrator {
     }
 
     /**
-     * 同步处理视频 - 主入口
+     * ?????????
      */
     public ProcessingResult processVideo(String taskId, String videoUrl, String outputDir) {
         ProcessingResult result = new ProcessingResult();
         result.taskId = taskId;
         long startTime = System.currentTimeMillis();
-        
+        String metricsOutputDir = outputDir;
+        String metricsVideoPath = videoUrl;
+        Map<String, Long> stageTimingsMs = new LinkedHashMap<>();
+        Map<String, Object> flowFlags = new LinkedHashMap<>();
+
         try {
             String videoPath = videoUrl;
-            double videoDuration = 60; 
-            
-            // 统一本地任务输出目录：做什么是将本地路径映射到 storage/{hash}；为什么是保证中间产物集中；权衡是会新增一次文件复制/硬链接成本
+            double videoDuration = 60;
+            boolean downloadedFromUrl = false;
+            boolean usedVLFlow = false;
+            boolean usedLegacyFlow = false;
+
+            long localPrepareStart = System.currentTimeMillis();
             if (!isHttpUrl(videoUrl)) {
                 videoPath = normalizeLocalVideoPath(videoUrl);
                 outputDir = resolveOutputDirForLocalVideo(videoPath);
                 new File(outputDir).mkdirs();
                 logger.info("[{}] 统一本地任务输出目录 -> {}", taskId, outputDir);
-                
-                // 将本地视频复制/硬链接到 storage/{hash}：做什么是让视频与产物同域；为什么是便于回放与清理；权衡是增加一次磁盘写入或链接操作
+
                 videoPath = ensureLocalVideoInStorage(videoPath, outputDir);
                 videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
             }
+            stageTimingsMs.put("prepare_local_video", System.currentTimeMillis() - localPrepareStart);
+            metricsVideoPath = videoPath;
+            metricsOutputDir = outputDir;
 
-            // ========== Step 1: 下载视频 (Python) ==========（做什么：拉取视频；为什么：统一产物目录；权衡：依赖网络与 I/O）
+            long downloadStart = System.currentTimeMillis();
             if (isHttpUrl(videoUrl)) {
-                updateProgress(taskId, 0.05, "下载视频中..");
+                updateProgress(taskId, 0.05, "下载视频中...");
                 DownloadResult dl = grpcClient.downloadVideoAsync(taskId, videoUrl, outputDir, 300).get(5, TimeUnit.MINUTES);
-                if (!dl.success) throw new RuntimeException("Download failed: " + dl.errorMsg);
+                if (!dl.success) {
+                    throw new RuntimeException("Download failed: " + dl.errorMsg);
+                }
+                downloadedFromUrl = true;
                 videoPath = dl.videoPath;
                 videoDuration = dl.durationSec;
-                outputDir = new File(videoPath).getParentFile().getAbsolutePath(); 
+                outputDir = new File(videoPath).getParentFile().getAbsolutePath();
                 new File(outputDir).mkdirs();
+                metricsVideoPath = videoPath;
+                metricsOutputDir = outputDir;
             }
+            stageTimingsMs.put("download_video", System.currentTimeMillis() - downloadStart);
+
             if (videoDuration <= 0) {
                 videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
             }
-            
+
             DynamicTimeoutCalculator.TimeoutConfig timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
 
-            // 2. Transcribe
             updateProgress(taskId, 0.15, "语音转录中...");
+            long transcribeStart = System.currentTimeMillis();
             TranscribeResult tr = grpcClient.transcribeVideoAsync(taskId, videoPath, "auto", timeouts.getTranscribeTimeoutSec())
                 .get(timeouts.getTranscribeTimeoutSec() + 60, TimeUnit.SECONDS);
-            if (!tr.success) throw new RuntimeException("Transcribe failed: " + tr.errorMsg);
-            
-            // 3. Stage1
+            if (!tr.success) {
+                throw new RuntimeException("Transcribe failed: " + tr.errorMsg);
+            }
+            stageTimingsMs.put("transcribe", System.currentTimeMillis() - transcribeStart);
+
             updateProgress(taskId, 0.25, "Stage1 文本结构化...");
+            long stage1Start = System.currentTimeMillis();
             Stage1Result s1 = grpcClient.processStage1Async(taskId, videoPath, tr.subtitlePath, outputDir, 6, timeouts.getStage1TimeoutSec())
                 .get(timeouts.getStage1TimeoutSec() + 60, TimeUnit.SECONDS);
-            if (!s1.success) throw new RuntimeException("Stage1 failed: " + s1.errorMsg);
-            
-            // 4. Phase2A (Segmentation)
-            updateProgress(taskId, 0.35, "语义分割...");
-            AnalyzeResult ar = grpcClient.analyzeSemanticUnitsAsync(taskId, videoPath, s1.step2JsonPath, s1.step6JsonPath, 
-                s1.sentenceTimestampsPath, outputDir, timeouts.getPhase2aTimeoutSec())
-                .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
-            if (!ar.success) throw new RuntimeException("Phase2A failed: " + ar.errorMsg);
-            
+            if (!s1.success) {
+                throw new RuntimeException("Stage1 failed: " + s1.errorMsg);
+            }
+            stageTimingsMs.put("stage1", System.currentTimeMillis() - stage1Start);
 
-            
-            // =====================================================================
-            // Phase 2: Hybrid Analysis (VL or Legacy CV/LLM)
-            // =====================================================================
+            updateProgress(taskId, 0.35, "语义分割...");
+            long phase2aStart = System.currentTimeMillis();
+            AnalyzeResult ar = grpcClient.analyzeSemanticUnitsAsync(
+                    taskId,
+                    videoPath,
+                    s1.step2JsonPath,
+                    s1.step6JsonPath,
+                    s1.sentenceTimestampsPath,
+                    outputDir,
+                    timeouts.getPhase2aTimeoutSec())
+                .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
+            if (!ar.success) {
+                throw new RuntimeException("Phase2A failed: " + ar.errorMsg);
+            }
+            stageTimingsMs.put("phase2a_segmentation", System.currentTimeMillis() - phase2aStart);
+
+            updateProgress(taskId, 0.40, "语义分割LLM调用完成...");
+
             ExtractionRequests materialRequests = null;
             JavaCVFFmpegService.ExtractionResult extractRes;
+            long analysisTotalStart = System.currentTimeMillis();
 
-            // 1. 尝试 VL 分析 (如果开启)
-            // 配置检查防止不必要的 RPC 调用和逻辑执行
-            if (configService.isVLEnabled()) {
+            boolean vlEnabled = configService.isVLEnabled();
+            flowFlags.put("vl_enabled", vlEnabled);
+            long vlAnalysisStart = System.currentTimeMillis();
+            if (vlEnabled) {
                 materialRequests = tryVLAnalysis(taskId, videoPath, ar, outputDir, timeouts);
-            } else {
-                logger.info("[{}] VL disabled in config.", taskId);
-            // 2. 回退/默认 Legacy 流程 (CV + LLM Analysis -> Material Generation)
-            // 如果 VL 成功，则 materialRequests 不为空，跳过此步骤
-                if (configService.isVLEnabled()) {
+                if (materialRequests == null) {
                     logger.warn("[{}] Proceeding to Legacy Flow (Fallback or VL failed).", taskId);
                 } else {
-                    updateProgress(taskId, 0.45, "执行级联并行分析 (CV/LLM Legacy)...");
+                    usedVLFlow = true;
                 }
-                materialRequests = runLegacyAnalysis(taskId, videoPath, ar, s1, outputDir, timeouts);
+            } else {
+                logger.info("[{}] VL disabled in config.", taskId);
             }
-            
-            // 8. FFmpeg Extraction
-            updateProgress(taskId, 0.80, "执行素材提取...");
+            stageTimingsMs.put("analysis_vl", System.currentTimeMillis() - vlAnalysisStart);
 
-            
+            long legacyAnalysisStart = System.currentTimeMillis();
+            if (materialRequests == null) {
+                updateProgress(taskId, 0.45, "执行级联并行分析 (CV/LLM Legacy)...");
+                materialRequests = runLegacyAnalysis(taskId, videoPath, ar, s1, outputDir, timeouts);
+                usedLegacyFlow = true;
+            }
+            stageTimingsMs.put("analysis_legacy", System.currentTimeMillis() - legacyAnalysisStart);
+            stageTimingsMs.put("analysis_total", System.currentTimeMillis() - analysisTotalStart);
+
+            updateProgress(taskId, 0.80, "执行素材提取...");
+            long extractionStart = System.currentTimeMillis();
             int ffmpegTimeoutSec = calculateFfmpegTimeoutSec(taskId, videoDuration, materialRequests, timeouts);
             if (materialRequests.extractionFuture == null) {
                 materialRequests = startExtractionPipeline(
@@ -244,33 +296,371 @@ public class VideoProcessingOrchestrator {
                     ffmpegTimeoutSec
                 );
             }
-            
-            // 9. Phase2B Assembly
+            stageTimingsMs.put("extract_assets", System.currentTimeMillis() - extractionStart);
+
             updateProgress(taskId, 0.90, "生成最终文档...");
-            
+            long assembleStart = System.currentTimeMillis();
             String title = new File(videoPath).getName().replace(".mp4", "");
-            AssembleResult assembleRes = grpcClient.assembleRichTextAsync(taskId, videoPath, ar.semanticUnitsJsonPath,
-                outputDir + "/assets", outputDir + "/assets", outputDir, title, timeouts.getPhase2bTimeoutSec())
+            AssembleResult assembleRes = grpcClient.assembleRichTextAsync(
+                    taskId,
+                    videoPath,
+                    ar,
+                    outputDir + "/assets",
+                    outputDir + "/assets",
+                    outputDir,
+                    title,
+                    timeouts.getPhase2bTimeoutSec())
                 .get(timeouts.getPhase2bTimeoutSec() + 60, TimeUnit.SECONDS);
-                
-            if (!assembleRes.success) throw new RuntimeException("Assemble failed: " + assembleRes.errorMsg);
+
+            if (!assembleRes.success) {
+                throw new RuntimeException("Assemble failed: " + assembleRes.errorMsg);
+            }
+            stageTimingsMs.put("phase2b_assemble", System.currentTimeMillis() - assembleStart);
 
             result.success = true;
             result.markdownPath = assembleRes.markdownPath;
             result.jsonPath = assembleRes.jsonPath;
             logger.info("✅ Pipeline Complete: {}", taskId);
-            
+
+            flowFlags.put("downloaded_from_url", downloadedFromUrl);
+            flowFlags.put("used_vl_flow", usedVLFlow);
+            flowFlags.put("used_legacy_flow", usedLegacyFlow);
+
         } catch (Exception e) {
             logger.error("❌ Pipeline Failed: {} - {}", taskId, e.getMessage());
             result.success = false;
             result.errorMessage = e.getMessage();
+
+            flowFlags.putIfAbsent("downloaded_from_url", false);
+            flowFlags.putIfAbsent("used_vl_flow", false);
+            flowFlags.putIfAbsent("used_legacy_flow", false);
         } finally {
             result.processingTimeMs = System.currentTimeMillis() - startTime;
+            stageTimingsMs.put("total_pipeline", result.processingTimeMs);
+            writeTaskMetricsReport(taskId, metricsOutputDir, metricsVideoPath, result, stageTimingsMs, flowFlags);
         }
         return result;
     }
+    private static class VLTokenUsage {
+        long inputTokens;
+        long outputTokens;
+        long totalTokens;
+        String sourcePath = "";
+    }
 
-    // --- OutputDir 统一规则 ---
+    private static class DeepSeekUsage {
+        long inputTokensUncached;
+        long inputTokensCached;
+        long outputTokens;
+        long totalCalls;
+        long cachedCalls;
+        String sourcePath = "";
+        boolean hasData() {
+            return inputTokensUncached > 0 || inputTokensCached > 0 || outputTokens > 0 || totalCalls > 0;
+        }
+    }
+
+    private void writeTaskMetricsReport(
+            String taskId,
+            String outputDir,
+            String videoPath,
+            ProcessingResult result,
+            Map<String, Long> stageTimingsMs,
+            Map<String, Object> flowFlags
+    ) {
+        if (outputDir == null || outputDir.isBlank()) {
+            logger.warn("[{}] Skip task metrics report: outputDir is empty", taskId);
+            return;
+        }
+        try {
+            Path reportDir = Paths.get(outputDir, "intermediates");
+            Files.createDirectories(reportDir);
+
+            String vlModel = configService != null ? configService.getVLModelName() : "";
+            VLTokenUsage vlUsage = loadVLTokenUsage(outputDir);
+            DeepSeekUsage deepSeekUsage = loadDeepSeekUsage(outputDir);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("version", "1.0");
+            payload.put("generated_at", Instant.now().toString());
+            payload.put("task_id", taskId);
+            payload.put("success", result != null && result.success);
+            payload.put("error_message", result != null ? (result.errorMessage != null ? result.errorMessage : "") : "");
+            payload.put("video_path", videoPath != null ? videoPath : "");
+            payload.put("output_dir", outputDir);
+            payload.put("result_markdown_path", result != null ? (result.markdownPath != null ? result.markdownPath : "") : "");
+            payload.put("result_json_path", result != null ? (result.jsonPath != null ? result.jsonPath : "") : "");
+            payload.put("stage_timings_ms", new LinkedHashMap<>(stageTimingsMs));
+            payload.put("flow_flags", new LinkedHashMap<>(flowFlags));
+            payload.put("llm_cost", buildLLMCostPayload(vlModel, vlUsage, deepSeekUsage));
+
+            String reportFileName = (taskId != null && !taskId.isBlank())
+                    ? ("task_metrics_" + taskId + ".json")
+                    : "task_metrics_unknown.json";
+            Path reportPath = reportDir.resolve(reportFileName);
+            Path latestPath = reportDir.resolve("task_metrics_latest.json");
+
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(reportPath.toFile(), payload);
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(latestPath.toFile(), payload);
+            logger.info("[{}] Task metrics report saved: {}", taskId, reportPath.toAbsolutePath());
+        } catch (Exception e) {
+            logger.warn("[{}] Failed to write task metrics report: {}", taskId, e.getMessage());
+        }
+    }
+
+    private Map<String, Object> buildLLMCostPayload(String vlModel, VLTokenUsage vlUsage, DeepSeekUsage deepSeekUsage) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("currency", "USD");
+        payload.put("pricing_basis", "per_1m_tokens");
+
+        long vlInput = Math.max(0L, vlUsage.inputTokens);
+        long vlOutput = Math.max(0L, vlUsage.outputTokens);
+        long vlTotal = Math.max(0L, vlUsage.totalTokens > 0 ? vlUsage.totalTokens : (vlInput + vlOutput));
+
+        double qwenInputCost = tokenCostUsd(vlInput, QWEN3_VL_PLUS_INPUT_PER_M);
+        double qwenOutputCost = tokenCostUsd(vlOutput, QWEN3_VL_PLUS_OUTPUT_PER_M);
+        double qwenTotalCost = qwenInputCost + qwenOutputCost;
+
+        double ernieMinInputCost = tokenCostUsd(vlInput, ERNIE_45_TURBO_VL_INPUT_MIN_PER_M);
+        double ernieMaxInputCost = tokenCostUsd(vlInput, ERNIE_45_TURBO_VL_INPUT_MAX_PER_M);
+        double ernieMinOutputCost = tokenCostUsd(vlOutput, ERNIE_45_TURBO_VL_OUTPUT_MIN_PER_M);
+        double ernieMaxOutputCost = tokenCostUsd(vlOutput, ERNIE_45_TURBO_VL_OUTPUT_MAX_PER_M);
+        double ernieMinTotalCost = ernieMinInputCost + ernieMinOutputCost;
+        double ernieMaxTotalCost = ernieMaxInputCost + ernieMaxOutputCost;
+
+        Map<String, Object> vlSection = new LinkedHashMap<>();
+        vlSection.put("model", vlModel != null ? vlModel : "");
+        vlSection.put("input_tokens", vlInput);
+        vlSection.put("output_tokens", vlOutput);
+        vlSection.put("total_tokens", vlTotal);
+        vlSection.put("token_source", vlUsage.sourcePath);
+
+        Map<String, Object> qwenCost = new LinkedHashMap<>();
+        qwenCost.put("input_cost_usd", roundCost(qwenInputCost));
+        qwenCost.put("output_cost_usd", roundCost(qwenOutputCost));
+        qwenCost.put("total_cost_usd", roundCost(qwenTotalCost));
+        vlSection.put("qwen3_vl_plus_cost", qwenCost);
+
+        Map<String, Object> ernieCostRange = new LinkedHashMap<>();
+        ernieCostRange.put("input_cost_usd_min", roundCost(ernieMinInputCost));
+        ernieCostRange.put("input_cost_usd_max", roundCost(ernieMaxInputCost));
+        ernieCostRange.put("output_cost_usd_min", roundCost(ernieMinOutputCost));
+        ernieCostRange.put("output_cost_usd_max", roundCost(ernieMaxOutputCost));
+        ernieCostRange.put("total_cost_usd_min", roundCost(ernieMinTotalCost));
+        ernieCostRange.put("total_cost_usd_max", roundCost(ernieMaxTotalCost));
+        vlSection.put("ernie_4_5_turbo_vl_cost_range", ernieCostRange);
+
+        double vlSelectedMin;
+        double vlSelectedMax;
+        String normalizedVLModel = (vlModel != null ? vlModel : "").toLowerCase(Locale.ROOT);
+        if (normalizedVLModel.contains("qwen3-vl-plus")) {
+            vlSelectedMin = qwenTotalCost;
+            vlSelectedMax = qwenTotalCost;
+            vlSection.put("selected_pricing_model", "qwen3-vl-plus");
+        } else if (normalizedVLModel.contains("ernie-4.5-turbo-vl") || normalizedVLModel.contains("ernie")) {
+            vlSelectedMin = ernieMinTotalCost;
+            vlSelectedMax = ernieMaxTotalCost;
+            vlSection.put("selected_pricing_model", "ernie-4.5-turbo-vl");
+        } else {
+            vlSelectedMin = Math.min(qwenTotalCost, ernieMinTotalCost);
+            vlSelectedMax = Math.max(qwenTotalCost, ernieMaxTotalCost);
+            vlSection.put("selected_pricing_model", "unknown");
+        }
+        vlSection.put("selected_cost_usd_min", roundCost(vlSelectedMin));
+        vlSection.put("selected_cost_usd_max", roundCost(vlSelectedMax));
+        payload.put("vl", vlSection);
+
+        long deepInputUncached = Math.max(0L, deepSeekUsage.inputTokensUncached);
+        long deepInputCached = Math.max(0L, deepSeekUsage.inputTokensCached);
+        long deepOutput = Math.max(0L, deepSeekUsage.outputTokens);
+        double deepInputUncachedCost = tokenCostUsd(deepInputUncached, DEEPSEEK_CHAT_INPUT_UNCACHED_PER_M);
+        double deepInputCachedCost = tokenCostUsd(deepInputCached, DEEPSEEK_CHAT_INPUT_CACHED_PER_M);
+        double deepOutputCost = tokenCostUsd(deepOutput, DEEPSEEK_CHAT_OUTPUT_PER_M);
+        double deepTotalCost = deepInputUncachedCost + deepInputCachedCost + deepOutputCost;
+
+        Map<String, Object> deepSection = new LinkedHashMap<>();
+        deepSection.put("model", "deepseek-chat");
+        deepSection.put("input_tokens_uncached", deepInputUncached);
+        deepSection.put("input_tokens_cached", deepInputCached);
+        deepSection.put("output_tokens", deepOutput);
+        deepSection.put("total_calls", deepSeekUsage.totalCalls);
+        deepSection.put("cached_calls", deepSeekUsage.cachedCalls);
+        deepSection.put("token_source", deepSeekUsage.sourcePath);
+        deepSection.put("input_uncached_cost_usd", roundCost(deepInputUncachedCost));
+        deepSection.put("input_cached_cost_usd", roundCost(deepInputCachedCost));
+        deepSection.put("output_cost_usd", roundCost(deepOutputCost));
+        deepSection.put("total_cost_usd", roundCost(deepTotalCost));
+        payload.put("deepseek_chat", deepSection);
+
+        double totalMin = vlSelectedMin + deepTotalCost;
+        double totalMax = vlSelectedMax + deepTotalCost;
+        payload.put("total_cost_usd_min", roundCost(totalMin));
+        payload.put("total_cost_usd_max", roundCost(totalMax));
+        if (Math.abs(totalMax - totalMin) < 1e-12) {
+            payload.put("total_cost_usd", roundCost(totalMin));
+        }
+        payload.put(
+                "coverage_note",
+                "DeepSeek cost is computed from persisted traces (phase2b_llm_trace/deepseek_audit) only."
+        );
+        return payload;
+    }
+
+    private VLTokenUsage loadVLTokenUsage(String outputDir) {
+        VLTokenUsage usage = new VLTokenUsage();
+        Path reportPath = Paths.get(outputDir, "intermediates", "vl_token_report_latest.json");
+        if (!Files.exists(reportPath)) {
+            return usage;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(reportPath.toFile());
+            JsonNode tokenStats = root.path("token_stats");
+            usage.inputTokens = firstLong(tokenStats, "prompt_tokens_actual", "prompt_tokens");
+            usage.outputTokens = firstLong(tokenStats, "completion_tokens_actual", "completion_tokens");
+            usage.totalTokens = firstLong(tokenStats, "total_tokens_actual", "total_tokens");
+            if (usage.totalTokens <= 0L) {
+                usage.totalTokens = usage.inputTokens + usage.outputTokens;
+            }
+            usage.sourcePath = reportPath.toAbsolutePath().toString();
+        } catch (Exception e) {
+            logger.warn("Failed to parse VL token report: {}", e.getMessage());
+        }
+        return usage;
+    }
+
+    private DeepSeekUsage loadDeepSeekUsage(String outputDir) {
+        Path tracePath = Paths.get(outputDir, "intermediates", "phase2b_llm_trace.jsonl");
+        DeepSeekUsage traceUsage = loadDeepSeekUsageFromTrace(tracePath);
+        if (traceUsage.hasData()) {
+            return traceUsage;
+        }
+        Path auditPath = Paths.get(outputDir, "intermediates", "phase2b_deepseek_call_audit.json");
+        return loadDeepSeekUsageFromAudit(auditPath);
+    }
+
+    private DeepSeekUsage loadDeepSeekUsageFromTrace(Path tracePath) {
+        DeepSeekUsage usage = new DeepSeekUsage();
+        if (tracePath == null || !Files.exists(tracePath)) {
+            return usage;
+        }
+        usage.sourcePath = tracePath.toAbsolutePath().toString();
+        try (BufferedReader reader = Files.newBufferedReader(tracePath, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                if (line == null) continue;
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) continue;
+                JsonNode node;
+                try {
+                    node = objectMapper.readTree(trimmed);
+                } catch (Exception ignored) {
+                    continue;
+                }
+                if (!node.path("success").asBoolean(true)) {
+                    continue;
+                }
+                String model = node.path("model").asText("");
+                if (!model.toLowerCase(Locale.ROOT).contains("deepseek")) {
+                    continue;
+                }
+                long promptTokens = Math.max(0L, node.path("prompt_tokens").asLong(0L));
+                long completionTokens = Math.max(0L, node.path("completion_tokens").asLong(0L));
+                boolean cacheHit = node.path("cache_hit").asBoolean(false);
+                if (cacheHit) {
+                    usage.inputTokensCached += promptTokens;
+                    usage.cachedCalls += 1L;
+                } else {
+                    usage.inputTokensUncached += promptTokens;
+                }
+                usage.outputTokens += completionTokens;
+                usage.totalCalls += 1L;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to read phase2b_llm_trace: {}", e.getMessage());
+        }
+        return usage;
+    }
+
+    private DeepSeekUsage loadDeepSeekUsageFromAudit(Path auditPath) {
+        DeepSeekUsage usage = new DeepSeekUsage();
+        if (auditPath == null || !Files.exists(auditPath)) {
+            return usage;
+        }
+        usage.sourcePath = auditPath.toAbsolutePath().toString();
+        try {
+            JsonNode root = objectMapper.readTree(auditPath.toFile());
+            JsonNode records = root.path("records");
+            if (!records.isArray()) {
+                return usage;
+            }
+            for (JsonNode record : records) {
+                JsonNode outputNode = record.path("output");
+                if (!outputNode.path("success").asBoolean(true)) {
+                    continue;
+                }
+                JsonNode meta = outputNode.path("metadata");
+                String model = meta.path("model").asText(record.path("input").path("model").asText(""));
+                if (!model.toLowerCase(Locale.ROOT).contains("deepseek")) {
+                    continue;
+                }
+                long promptTokens = Math.max(0L, meta.path("prompt_tokens").asLong(0L));
+                long completionTokens = Math.max(0L, meta.path("completion_tokens").asLong(0L));
+                boolean cacheHit = meta.path("cache_hit").asBoolean(false);
+                if (cacheHit) {
+                    usage.inputTokensCached += promptTokens;
+                    usage.cachedCalls += 1L;
+                } else {
+                    usage.inputTokensUncached += promptTokens;
+                }
+                usage.outputTokens += completionTokens;
+                usage.totalCalls += 1L;
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to parse deepseek audit report: {}", e.getMessage());
+        }
+        return usage;
+    }
+
+    private long firstLong(JsonNode node, String... fieldNames) {
+        if (node == null || fieldNames == null) {
+            return 0L;
+        }
+        for (String fieldName : fieldNames) {
+            if (fieldName == null || fieldName.isBlank()) {
+                continue;
+            }
+            JsonNode valueNode = node.get(fieldName);
+            if (valueNode == null || valueNode.isMissingNode() || valueNode.isNull()) {
+                continue;
+            }
+            if (valueNode.isIntegralNumber() || valueNode.isFloatingPointNumber()) {
+                return Math.max(0L, valueNode.asLong(0L));
+            }
+            String text = valueNode.asText("").trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            try {
+                return Math.max(0L, Long.parseLong(text));
+            } catch (Exception ignored) {
+                // Ignore parse errors and try next field
+            }
+        }
+        return 0L;
+    }
+
+    private double tokenCostUsd(long tokens, double ratePerMillion) {
+        if (tokens <= 0L || ratePerMillion <= 0d) {
+            return 0d;
+        }
+        return ((double) tokens / 1_000_000d) * ratePerMillion;
+    }
+
+    private double roundCost(double cost) {
+        return Math.round(cost * 1_000_000d) / 1_000_000d;
+    }
+
+    // --- OutputDir ???? ---
     private int calculateFfmpegTimeoutSec(
             String taskId,
             double videoDurationSec,
@@ -290,7 +680,7 @@ public class VideoProcessingOrchestrator {
             }
         }
 
-        // 经验估算：截图主要成本在 seek + 解码 + 写盘；切片主要成本在重复初始化 + 编码，且通常慢于实时。
+        // ????????????? seek/??/??????????????????
         double seekAndImageCostSec = screenshotCount * 0.8;
         double clipInitCostSec = clipCount * 2.0;
         double clipEncodeCostSec = totalClipDurationSec * 1.6;
@@ -346,7 +736,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private String normalizeLocalVideoPath(String videoUrl) {
-        // 统一处理 file:// 和相对路径，避免 hash 因路径格式不同而漂移
+        // ???? file:// ???????????????? hash ??
         try {
             if (videoUrl != null && videoUrl.toLowerCase(Locale.ROOT).startsWith("file://")) {
                 return Paths.get(URI.create(videoUrl)).toAbsolutePath().normalize().toString();
@@ -365,7 +755,7 @@ public class VideoProcessingOrchestrator {
                 return absVideoPath.getParent().toString();
             }
         } catch (Exception e) {
-            // 解析失败时走 hash 路径，避免阻断主流程
+            // ??????? hash ??????????
         }
 
         String normalized = normalizePathForHash(videoPath);
@@ -374,7 +764,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private String ensureLocalVideoInStorage(String videoPath, String outputDir) {
-        // 将本地视频复制/硬链接到 storage/{hash}：做什么是让视频与产物同域；为什么是便于回放与清理；权衡是增加一次 I/O
+        // ???????/???? storage/{hash}????????????
         try {
             Path source = Paths.get(videoPath).toAbsolutePath().normalize();
             Path storageRoot = resolveStorageRoot();
@@ -396,7 +786,7 @@ public class VideoProcessingOrchestrator {
                 logger.info("Linked local video into storage: {}", target);
                 return target.toString();
             } catch (Exception linkError) {
-                // 硬链接失败就复制：做什么是降级保证；为什么是跨盘/权限限制常见；权衡是多一次磁盘写入
+                // ????????????????????????
             }
 
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
@@ -409,7 +799,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private Path resolveStorageRoot() {
-        // 通过仓库根目录定位 storage：做什么是让 Java/Python 产物同域；为什么是便于整理与回放；权衡是依赖工作目录结构
+        // ????????? storage??? Java/Python ??????
         Path repoRoot = resolveRepoRoot();
         Path storageRoot = repoRoot.resolve("storage").toAbsolutePath().normalize();
         try {
@@ -421,7 +811,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private Path resolveRepoRoot() {
-        // 逐层向上寻找仓库根标记，找不到则退回当前工作目录
+        // ????????????????????????
 
         Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
         for (int i = 0; i < 6; i++) {
@@ -445,7 +835,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private String normalizePathForHash(String path) {
-        // 统一 hash 输入：做什么是归一化路径；为什么是保证 Java/Python 结果一致；权衡是忽略符号链接真实路径
+        // ?? hash ??????????? Java/Python ??????
         String abs = new File(path).getAbsolutePath();
         String normalized = abs.replace('/', File.separatorChar);
         if (File.separatorChar == '\\') {
@@ -468,13 +858,13 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    // --- 素材请求合并 ---
+    // --- 绱犳潗璇锋眰鍚堝苟 ---
     private List<JavaCVFFmpegService.ScreenshotRequest> mergeScreenshotRequests(
             List<PythonGrpcClient.ScreenshotRequest> phase2aRequests,
             List<PythonGrpcClient.ScreenshotRequestDTO> generatedRequests) {
-        // 合并两路截图请求：做什么是保留 Phase2A 与生成结果；为什么是避免上游召回被忽略；
-        // 关键修复：generatedRequests 优先（Phase2A 可能复用旧缓存导致时间戳/ID 与最新策略不一致）；
-        // 权衡：若两路同 ID 冲突将以 generated 覆盖 Phase2A，可能丢失 Phase2A 的旧请求，但确保“最新策略生效”。
+        // ??????????? Phase2A ??????????????
+        // ?????generatedRequests ?????????????/ID ?????????
+        // ???? ID ???? generated ???????????
         Map<String, JavaCVFFmpegService.ScreenshotRequest> merged = new LinkedHashMap<>();
         appendScreenshotRequestsFromDtoPreferNew(merged, generatedRequests);
         appendScreenshotRequestsIfAbsent(merged, phase2aRequests);
@@ -542,9 +932,9 @@ public class VideoProcessingOrchestrator {
     private List<JavaCVFFmpegService.ClipRequest> mergeClipRequests(
             List<PythonGrpcClient.ClipRequest> phase2aRequests,
             List<PythonGrpcClient.ClipRequestDTO> generatedRequests) {
-        // 合并两路切片请求：做什么是保留 Phase2A 与生成结果；为什么是避免素材断链；
-        // 关键修复：generatedRequests 优先（Phase2A 可能复用旧 semantic_units_phase2a.json，导致 clipId 相同但时间段不同）；
-        // 权衡：同 clipId 冲突时以 generated 覆盖 Phase2A，确保“自适应动作包络”等新策略真正进入 FFmpeg 提取阶段。
+        // ??????????? Phase2A ????????????
+        // ?????generatedRequests ????????????????????
+        // ???? clipId ???? generated ?????????? FFmpeg ??
         Map<String, JavaCVFFmpegService.ClipRequest> merged = new LinkedHashMap<>();
         appendClipRequestsFromDtoPreferNew(merged, generatedRequests);
         appendClipRequestsIfAbsent(merged, phase2aRequests);
@@ -650,7 +1040,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private void ensureActionIds(List<ActionSegmentResult> actions) {
-        // 统一 action_id：做什么是补齐/去重编号；为什么是保证分类结果可回写；权衡是编号可能随排序变化
+        // ?? action_id???/??????????????
         if (actions == null || actions.isEmpty()) return;
         Set<Integer> used = new HashSet<>();
         int nextId = 1;
@@ -699,7 +1089,7 @@ public class VideoProcessingOrchestrator {
             in.title = (String) u.get("title");
             in.text = (String) u.get("text");
             
-            // 🚀 First, load action units from Stage 1/Phase 2A (if any)
+            // First, load action units from Stage 1/Phase 2A (if any)
             List<Map<String, Object>> aus = (List<Map<String, Object>>) u.get("action_units");
             if (aus != null) {
                 for (Map<String, Object> au : aus) {
@@ -710,7 +1100,7 @@ public class VideoProcessingOrchestrator {
                 }
             }
             
-            // 🚀 SECOND, merge results from Parallel CV (which may have updated or added actions)
+            // SECOND, merge results from Parallel CV (which may have updated or added actions)
             if (cvResults.containsKey(uid)) {
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {
@@ -727,9 +1117,9 @@ public class VideoProcessingOrchestrator {
                 }
             }
             
-            // 统一 action_id：做什么是为每个 action 分配稳定编号；为什么是保证分类结果能回写；权衡是编号依赖当前排序
+            // ?? action_id???? action ???????????????
             ensureActionIds(in.actionUnits);
-            // ❌ Removed: Subtitle mapping - Classifier reads directly from Step 2
+            // Removed: Subtitle mapping - Classifier reads directly from Step 2
             
             return in;
         }).collect(Collectors.toList());
@@ -745,10 +1135,10 @@ public class VideoProcessingOrchestrator {
             in.knowledgeType = (String) u.getOrDefault("knowledge_type", "");
             in.fullText = (String) u.getOrDefault("full_text", u.getOrDefault("text", ""));
             
-            // 优先使用 action_units 的知识类型：做什么是避免二次分类；为什么是与语义回写一致；权衡是依赖上游回写完整性
+            // ???? action_units ??????????????????????
             List<Map<String, Object>> unitActions = (List<Map<String, Object>>) u.get("action_units");
             if (unitActions != null && !unitActions.isEmpty()) {
-                // 短日志：定位 JSON -> Java 是否拿到 action_units.knowledge_type
+                // 鐭棩蹇楋細瀹氫綅 JSON -> Java 鏄惁鎷垮埌 action_units.knowledge_type
                 Object firstKt = unitActions.get(0).get("knowledge_type");
                 logger.info("[{}] MatInputs from semantic_units: unit={}, actions={}, first_kt={}",
                     "MaterialGen", uid, unitActions.size(), firstKt);
@@ -759,14 +1149,14 @@ public class VideoProcessingOrchestrator {
                     as.endSec = parseDouble(au.get("end_sec"), 0.0);
                     String kt = au.get("knowledge_type") != null ? au.get("knowledge_type").toString() : "";
                     String fallback = in.knowledgeType != null ? in.knowledgeType : "";
-                    // 不再使用 action_type 兜底：做什么是避免“knowledge”误当知识类型；为什么是保证讲解型过滤生效；权衡是依赖 unit 级兜底
+                    // ???? action_type ???????knowledge????????
                     as.actionType = !kt.isEmpty() ? kt : fallback;
                     in.actionUnits.add(as);
                 }
             } else if (cvResults.containsKey(uid)) {
                 logger.info("[{}] MatInputs fallback to CV actionSegments: unit={}, actions=0",
                     "MaterialGen", uid);
-                // 兜底：没有 action_units 时，仍使用 CV 动作段，避免素材生成断链
+                // ????? action_units ?????? CV ????????????
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {
                     for (ActionSegmentResult as : cvRes.actionSegments) {
@@ -778,14 +1168,14 @@ public class VideoProcessingOrchestrator {
                 }
             }
 
-            // 关键修复: 传递稳定岛数据（用于截图范围）
+            // ????????????????????
             if (cvResults.containsKey(uid)) {
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.stableIslands != null) {
                     in.stableIslands.addAll(cvRes.stableIslands);
                 }
             }
-            // 统一 action_id：做什么是保证下游一致性；为什么是便于跨阶段追踪；权衡是编号依赖当前排序
+            // ?? action_id????????????????
             ensureActionIds(in.actionUnits);
             return in;
         }).collect(Collectors.toList());
@@ -802,10 +1192,10 @@ public class VideoProcessingOrchestrator {
         for (Map<String, Object> unit : units) {
             String uid = (String) unit.get("unit_id");
             
-            // 🚀 V7.6: Always update top-level knowledge_type first
+            // V7.6: Always update top-level knowledge_type first
             // This ensures Phase 2B Python pipeline sees the correct classification 
             // even if CV modality is screenshot (no actions) or other edge cases.
-            // 🚀 V7.8: Do NOT overwrite Unit-Level knowledge_type with Action-Level classification.
+            // V7.8: Do NOT overwrite Unit-Level knowledge_type with Action-Level classification.
             // The LLM results are specific to individual actions (e.g. "Explainer" action within "Process" unit).
             // We should trust the Unit Type from Stage 1 (Segmentation) or explicit Unit classification (if added later).
             // if (classMap.containsKey(uid)) { ... } // REMOVED
@@ -826,7 +1216,7 @@ public class VideoProcessingOrchestrator {
                         actionMap.put("id", as.id);
                         
                         // 2. Apply Knowledge Type to this specific action
-                        // 始终写入 knowledge_type 字段：做什么是保证下游解析稳定；为什么是避免字段缺失导致默认值/策略误判；权衡是可能写入 unit 级兜底类型
+                        // ???? knowledge_type ???????????????
                         String unitKt = unit.get("knowledge_type") != null ? unit.get("knowledge_type").toString() : "";
                         actionMap.put("knowledge_type", unitKt);
 
@@ -871,14 +1261,99 @@ public class VideoProcessingOrchestrator {
 
     private void saveUpdatedSemantics(File file, Object root) {
         try {
-            // 🚀 Pretty Print for better readability
+            // Pretty Print for better readability
             objectMapper.writerWithDefaultPrettyPrinter().writeValue(file, root);
         } catch(IOException e) {
             logger.error("Failed to save updated semantics", e);
         }
     }
+
+    private JsonNode loadSemanticUnitsRoot(AnalyzeResult analyzeResult) throws IOException {
+        if (analyzeResult != null && analyzeResult.semanticUnitsInline != null) {
+            SemanticUnitsInlineDTO inline = analyzeResult.semanticUnitsInline;
+            if (inline.payload != null && inline.payload.length > 0) {
+                byte[] decoded = decodeSemanticUnitsInlinePayload(inline);
+                return objectMapper.readTree(decoded);
+            }
+        }
+        throw new IOException("semantic units source missing: inline payload unavailable");
+    }
+
+    private byte[] decodeSemanticUnitsInlinePayload(SemanticUnitsInlineDTO inline) throws IOException {
+        String codec = inline.codec != null ? inline.codec.trim().toLowerCase(Locale.ROOT) : "";
+        if ("json-utf8-gzip".equals(codec) || "gzip".equals(codec)) {
+            try (ByteArrayInputStream bais = new ByteArrayInputStream(inline.payload);
+                 GZIPInputStream gis = new GZIPInputStream(bais);
+                 ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+                gis.transferTo(baos);
+                return baos.toByteArray();
+            }
+        }
+        return inline.payload;
+    }
+
+    private SemanticUnitsInlineDTO buildSemanticUnitsInlineDTO(Object root, int unitCount) {
+        try {
+            byte[] raw = objectMapper.writeValueAsBytes(root);
+            byte[] compressed = gzip(raw);
+            byte[] payload;
+            String codec;
+            if (compressed.length < raw.length) {
+                payload = compressed;
+                codec = "json-utf8-gzip";
+            } else {
+                payload = raw;
+                codec = "json-utf8";
+            }
+            SemanticUnitsInlineDTO inline = new SemanticUnitsInlineDTO();
+            inline.payload = payload;
+            inline.codec = codec;
+            inline.unitCount = Math.max(unitCount, 0);
+            inline.sha256 = sha256Hex(payload);
+            return inline;
+        } catch (IOException error) {
+            logger.warn("Failed to build semantic_units_inline payload", error);
+            return null;
+        }
+    }
+
+    private byte[] gzip(byte[] raw) throws IOException {
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             GZIPOutputStream gos = new GZIPOutputStream(baos)) {
+            gos.write(raw);
+            gos.finish();
+            return baos.toByteArray();
+        }
+    }
+
+    private String sha256Hex(byte[] payload) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] hash = digest.digest(payload);
+            StringBuilder sb = new StringBuilder(hash.length * 2);
+            for (byte b : hash) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (Exception error) {
+            logger.warn("Failed to calculate SHA-256", error);
+            return "";
+        }
+    }
+
+    private void updateAnalyzeResultInlinePayload(AnalyzeResult analyzeResult, Object updatedRoot, int unitCount) {
+        if (analyzeResult == null) {
+            return;
+        }
+        SemanticUnitsInlineDTO inline = buildSemanticUnitsInlineDTO(updatedRoot, unitCount);
+        if (inline != null) {
+            analyzeResult.semanticUnitsInline = inline;
+        }
+        // 语义内容已被 Java 侧更新，旧 ref 指向的是旧版本缓存，需主动失效避免误用。
+        analyzeResult.semanticUnitsRef = null;
+    }
     
-    // ❌ Removed: enrichUnitsWithSubtitles method
+    // Removed: enrichUnitsWithSubtitles method
     // Classifier now reads subtitles directly from step2_path
     
     private void updateProgress(String taskId, double progress, String message) {
@@ -925,13 +1400,13 @@ public class VideoProcessingOrchestrator {
     // --- Extracted Methods ---
 
     /**
-     * 尝试使用 VL 模型进行分析。如果成功，返回素材请求列表；否则返回 null 指示回退。
+     * ???? VL ??????????????????? null ????
      */
     private ExtractionRequests tryVLAnalysis(String taskId, String videoPath, AnalyzeResult ar, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) {
         updateProgress(taskId, 0.40, "执行 VL 视觉语言模型分析...");
         try {
             VLAnalysisResult vlResult = grpcClient.analyzeWithVLAsync(
-                taskId, videoPath, ar.semanticUnitsJsonPath, outputDir, 
+                taskId, videoPath, ar, outputDir, 
                 timeouts.getPhase2aTimeoutSec())
                 .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
 
@@ -950,12 +1425,11 @@ public class VideoProcessingOrchestrator {
     }
 
     /**
-     * 执行传统的分析流程：CV/LLM 分析 -> 结果合并 -> 策略生成素材请求
+     * ?????????CV/LLM ?? -> ???? -> ??????
      */
     private ExtractionRequests runLegacyAnalysis(String taskId, String videoPath, AnalyzeResult ar, Stage1Result s1, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) throws Exception {
-        // 🔑 Load Semantic Units
-        File semanticFile = new File(ar.semanticUnitsJsonPath);
-        JsonNode rootNode = objectMapper.readTree(semanticFile);
+        // Load Semantic Units：仅使用 AnalyzeResponse 内联载荷（协议已移除路径字段）
+        JsonNode rootNode = loadSemanticUnitsRoot(ar);
         
         final boolean originallyArray = rootNode.isArray();
         final Map<String, Object> unitsMap;
@@ -971,12 +1445,13 @@ public class VideoProcessingOrchestrator {
         }
 
         // 1. Execute Core Analysis (CV Validation + Knowledge Classification)
-        // 封装了复杂的并行调度和缓存复用逻辑
+        // ?????????????
         AnalysisResults analysisResults = executeHybridAnalysis(taskId, videoPath, unitsList, s1.step2JsonPath, outputDir);
 
         // 2. Merge & Update
         updateSemanticUnits(unitsList, analysisResults.cvResults, analysisResults.classResults);
-        saveUpdatedSemantics(semanticFile, originallyArray ? unitsList : unitsMap);
+        Object updatedRoot = originallyArray ? unitsList : unitsMap;
+        updateAnalyzeResultInlinePayload(ar, updatedRoot, unitsList.size());
 
         // 3. Generate Material Requests
         updateProgress(taskId, 0.70, "生成素材清单...");
@@ -1018,7 +1493,7 @@ public class VideoProcessingOrchestrator {
     }
 
     /**
-     * 核心分析逻辑：包含权重调度、缓存复用、并行执行
+     * ???????????????????????
      */
     private AnalysisResults executeHybridAnalysis(String taskId, String videoPath, List<Map<String, Object>> unitsList, String step2JsonPath, String outputDir) {
         updateProgress(taskId, 0.45, "执行级联并行分析 (CV/CF 混合调度)...");
@@ -1114,3 +1589,4 @@ public class VideoProcessingOrchestrator {
         return new AnalysisResults(cvResults, classResults);
     }
 }
+

@@ -76,6 +76,11 @@ def _patch_common(monkeypatch, futures):
         "format_subtitles",
         lambda subtitles: "|".join(sorted(item["text"] for item in subtitles)),
     )
+    monkeypatch.setattr(
+        pt,
+        "_extract_full_audio",
+        lambda _video_path, full_audio_path: open(full_audio_path, "wb").close(),
+    )
 
     model_downloader_module = (
         "services.python_grpc.src.media_engine.knowledge_engine.core.model_downloader"
@@ -154,7 +159,7 @@ def test_parallel_and_fallback_partial_failure_raises(monkeypatch):
         },
     )
 
-    with pytest.raises(RuntimeError, match=r"仍有 1/2 个分段失败"):
+    with pytest.raises(RuntimeError, match=r"1/2"):
         pt.transcribe_parallel(
             video_path="demo.mp4",
             model_size="small",
@@ -166,3 +171,4 @@ def test_parallel_and_fallback_partial_failure_raises(monkeypatch):
             hf_endpoint=None,
             config={"whisper": {"parallel": {"enabled": True}}},
         )
+

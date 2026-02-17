@@ -122,6 +122,7 @@ def _metadata_to_dict(metadata: Any) -> Dict[str, Any]:
         "completion_tokens": int(getattr(metadata, "completion_tokens", 0) or 0),
         "total_tokens": int(getattr(metadata, "total_tokens", 0) or 0),
         "latency_ms": float(getattr(metadata, "latency_ms", 0.0) or 0.0),
+        "cache_hit": bool(getattr(metadata, "cache_hit", False)),
     }
 
 
@@ -302,4 +303,3 @@ def append_deepseek_call_record(
             json.dump(payload, file_obj, ensure_ascii=False, indent=2)
 
     logger.debug("DeepSeek audit appended: %s", output_path)
-

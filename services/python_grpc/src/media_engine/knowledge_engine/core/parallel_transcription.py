@@ -12,6 +12,7 @@
 import os
 import subprocess
 import math
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from faster_whisper import WhisperModel
 import json
@@ -20,10 +21,99 @@ import sys
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
 from services.python_grpc.src.common.utils.time import format_hhmmss
 from services.python_grpc.src.common.utils.video import get_video_duration as _get_video_duration
+from .language_normalizer import normalize_whisper_language
 
 # 启用 HuggingFace 下载进度条
 os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '0'
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
+
+
+def _extract_full_audio(video_path, full_audio_path):
+    """一次性提取整段音频，避免后续分段重复解码视频。"""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        video_path,
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        full_audio_path,
+    ]
+    subprocess.run(cmd, check=True)
+    if (not os.path.exists(full_audio_path)) or os.path.getsize(full_audio_path) <= 0:
+        raise RuntimeError(f"整段音频提取失败: {full_audio_path}")
+
+
+def _extract_audio_slice(source_audio_path, start_sec, duration_sec, output_audio_path):
+    """从整段音频按时间切片，使用 -ss 在 -i 之前提高 seek 性能。"""
+    safe_start = max(0.0, safe_float(start_sec, 0.0))
+    safe_duration = max(0.1, safe_float(duration_sec, 0.1))
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        f"{safe_start:.3f}",
+        "-i",
+        source_audio_path,
+        "-t",
+        f"{safe_duration:.3f}",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        output_audio_path,
+    ]
+    subprocess.run(cmd, check=True)
+    if (not os.path.exists(output_audio_path)) or os.path.getsize(output_audio_path) <= 0:
+        raise RuntimeError(
+            f"音频切片失败: source={source_audio_path}, start={safe_start:.3f}, duration={safe_duration:.3f}"
+        )
+
+
+def _detect_language_by_probe(full_audio_path, model_path, device, compute_type, cpu_threads, probe_sec=120):
+    """
+    从前2分钟（可配置）探测语种，仅在 zh/en 间固定语言，其他场景保留自动检测。
+    """
+    probe_sec = max(30, safe_int(probe_sec, 120))
+    probe_audio = f"{full_audio_path}.probe_{probe_sec}s.wav"
+    try:
+        _extract_audio_slice(full_audio_path, 0, probe_sec, probe_audio)
+        model = WhisperModel(
+            model_path,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=max(1, safe_int(cpu_threads, 1)),
+        )
+        _, info = model.transcribe(
+            probe_audio,
+            language=None,
+            beam_size=1,
+            vad_filter=False,
+        )
+        detected = (getattr(info, "language", None) or "").strip().lower()
+        if detected in {"zh", "en"}:
+            return detected
+        return None
+    except Exception as e:
+        print(f"[语种探测] 失败，回退自动检测: {e}", flush=True)
+        return None
+    finally:
+        if os.path.exists(probe_audio):
+            os.remove(probe_audio)
 
 
 def get_video_duration(video_path):
@@ -221,11 +311,22 @@ def transcribe_segment(args):
     单段转录函数，在子进程中执行。
     每个 Worker 进程通过 _get_or_load_model 缓存模型实例，
     同一 Worker 处理多段时只加载一次模型。
-    输入：args 元组 (video_path, segment, model_path, device, compute_type, language, cpu_threads)
+    输入：args 元组
+      (source_audio_path, segment, model_path, device, compute_type, language, cpu_threads, beam_size, vad_filter)
     输出：dict { segment_id, subtitles, success }
     """
     # Unpack args
-    video_path, segment, model_path, device, compute_type, language, cpu_threads = args
+    (
+        source_audio_path,
+        segment,
+        model_path,
+        device,
+        compute_type,
+        language,
+        cpu_threads,
+        beam_size,
+        vad_filter,
+    ) = args
     
     try:
         # 显示进度
@@ -241,31 +342,21 @@ def transcribe_segment(args):
         temp_audio = f"temp_segment_{os.getpid()}_{segment['id']}.wav"
         
         print(f"[进程 {os.getpid()}] 提取音频片段...", flush=True)
-        # 使用 ffmpeg 提取音频片段
-        cmd = [
-            'ffmpeg',
-            '-i', video_path,
-            '-ss', str(segment['start']),
-            '-t', str(segment['duration']),
-            '-vn',  # 不要视频
-            '-acodec', 'pcm_s16le',
-            '-ar', '16000',
-            '-ac', '1',
-            '-y',
-            '-loglevel', 'error',  # 减少 ffmpeg 输出
-            temp_audio
-        ]
-        
-        subprocess.run(cmd, capture_output=True, check=True)
+        # 使用 ffmpeg 提取音频片段        _extract_audio_slice(
+            source_audio_path=source_audio_path,
+            start_sec=segment["start"],
+            duration_sec=segment["duration"],
+            output_audio_path=temp_audio,
+        )
         print(f"[进程 {os.getpid()}] ✓ 音频提取完成", flush=True)
         
-        # ת¼
+        # 转录
         print(f"[进程 {os.getpid()}] 开始转录...", flush=True)
         segments_result, info = model.transcribe(
             temp_audio,
             language=language,
-            beam_size=5,
-            vad_filter=True
+            beam_size=max(1, safe_int(beam_size, 4)),
+            vad_filter=bool(vad_filter),
         )
         
         # 收集结果并调整时间戳
@@ -306,8 +397,8 @@ def transcribe_segment(args):
         }
 
 
-def transcribe_parallel(video_path, model_size="small", device="cpu", 
-                       compute_type="int8", language="zh",
+def transcribe_parallel(video_path, model_size="small", device="cpu",
+                       compute_type="int8", language="auto",
                        segment_duration=600, num_workers=3, hf_endpoint=None, config=None):
     """
     执行逻辑：
@@ -342,21 +433,30 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     
     use_mirror = True
     proxy = None
+    skip_integrity_check_on_failure = True
+    skip_reverify_after_success = True
+    w_cfg = {}
     if config:
         w_cfg = config.get("whisper", {})
         use_mirror = w_cfg.get("use_mirror", True)
         proxy = w_cfg.get("download_proxy")
+        skip_integrity_check_on_failure = bool(
+            w_cfg.get("skip_integrity_check_on_failure", True)
+        )
+        skip_reverify_after_success = bool(
+            w_cfg.get("skip_reverify_after_success", True)
+        )
         
     model_path = download_whisper_model(
         model_size, 
         hf_endpoint=hf_endpoint,
         use_mirror=use_mirror,
-        proxy=proxy
+        proxy=proxy,
+        skip_integrity_check_on_failure=skip_integrity_check_on_failure,
+        skip_reverify_after_success=skip_reverify_after_success,
     )
     
-    parallel_cfg = {}
-    if config:
-        parallel_cfg = config.get("whisper", {}).get("parallel", {})
+    parallel_cfg = w_cfg.get("parallel", {})
 
     # 若 config 中声明，则配置优先（保证统一入口可控）
     if "num_workers" in parallel_cfg:
@@ -364,9 +464,14 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     if "segment_duration" in parallel_cfg:
         segment_duration = safe_int(parallel_cfg.get("segment_duration"), segment_duration)
     split_threshold_sec = safe_int(parallel_cfg.get("segment_split_threshold_sec", 300), 300)
+    beam_size = max(1, safe_int(w_cfg.get("beam_size", 4), 4))
+    vad_filter = bool(w_cfg.get("vad_filter", False))
+    probe_sec = max(30, safe_int(w_cfg.get("language_detect_probe_sec", 120), 120))
     print(
         f"[并行转录] 参数校验: threshold={split_threshold_sec}s, "
-        f"segment_duration={segment_duration}s, requested_workers={num_workers}, auto_schedule={parallel_cfg.get('auto_resource_scheduling', True)}",
+        f"segment_duration={segment_duration}s, requested_workers={num_workers}, "
+        f"beam_size={beam_size}, vad_filter={vad_filter}, "
+        f"auto_schedule={parallel_cfg.get('auto_resource_scheduling', True)}",
         flush=True,
     )
 
@@ -394,6 +499,30 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     plan = build_parallel_plan(num_workers, len(segments), device=device, config=config)
     effective_workers = plan["effective_workers"]
     cpu_threads_per_worker = plan["cpu_threads_per_worker"]
+
+    # 3.5 一次性提取整段音频，供所有分段复用。
+    fd, full_audio_path = tempfile.mkstemp(prefix="whisper_full_audio_", suffix=".wav")
+    os.close(fd)
+    print(f"[并行转录] 开始一次性提取整段音频: {full_audio_path}", flush=True)
+    _extract_full_audio(video_path, full_audio_path)
+    print("[并行转录] ✓ 整段音频提取完成", flush=True)
+
+    # 3.6 自动语种时，从前2分钟探测，仅在 zh/en 间固定语种。
+    normalized_language = normalize_whisper_language(language)
+    if normalized_language is None:
+        detected_lang = _detect_language_by_probe(
+            full_audio_path=full_audio_path,
+            model_path=model_path,
+            device=device,
+            compute_type=compute_type,
+            cpu_threads=cpu_threads_per_worker,
+            probe_sec=probe_sec,
+        )
+        if detected_lang in {"zh", "en"}:
+            normalized_language = detected_lang
+            print(f"[并行转录] 语种探测结果: {detected_lang}（固定语种）", flush=True)
+        else:
+            print("[并行转录] 语种探测无法稳定判定 zh/en，继续自动检测", flush=True)
     
     if len(segments) == 1:
         print(f"[并行转录] 短视频模式，不分段处理")
@@ -427,46 +556,63 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
 
     # 所有模式统一：传递 model_path (字符串，可序列化)，每个子进程独立加载模型
     tasks_args = [
-        (video_path, seg, model_path, device, compute_type, language, cpu_threads_per_worker)
+        (
+            full_audio_path,
+            seg,
+            model_path,
+            device,
+            compute_type,
+            normalized_language,
+            cpu_threads_per_worker,
+            beam_size,
+            vad_filter,
+        )
         for seg in segments
     ]
 
     failed_tasks_args = []
-    with ProcessPoolExecutor(max_workers=effective_workers) as executor:
-        futures = {executor.submit(transcribe_segment, args): args for args in tasks_args}
-        for future in as_completed(futures):
-            task_args = futures[future]
-            segment = task_args[1]
+    try:
+        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {executor.submit(transcribe_segment, args): args for args in tasks_args}
+            for future in as_completed(futures):
+                task_args = futures[future]
+                segment = task_args[1]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {
+                        'segment_id': segment['id'],
+                        'error': str(exc),
+                        'success': False
+                    }
+
+                if result['success']:
+                    all_subtitles.extend(result['subtitles'])
+                    completed += 1
+                    print(f"[并行转录] ✓ 段 {result['segment_id']+1}/{len(segments)} 完成 "
+                          f"({completed}/{len(segments)})")
+                else:
+                    failed_tasks_args.append(task_args)
+                    print(f"[并行转录] ✗ 段 {result['segment_id']+1} 失败: {result['error']}")
+
+        if failed_tasks_args:
+            print(f"[并行转录] 进入串行补偿: {len(failed_tasks_args)} 段")
+            for task_args in failed_tasks_args:
+                segment = task_args[1]
+                fallback_result = transcribe_segment(task_args)
+                if fallback_result['success']:
+                    all_subtitles.extend(fallback_result['subtitles'])
+                    completed += 1
+                    print(f"[并行转录] ✓ 段 {segment['id']+1}/{len(segments)} 串行补偿完成 "
+                          f"({completed}/{len(segments)})")
+                else:
+                    print(f"[并行转录] ✗ 段 {segment['id']+1}/{len(segments)} 串行补偿失败: {fallback_result['error']}")
+    finally:
+        if os.path.exists(full_audio_path):
             try:
-                result = future.result()
-            except Exception as exc:
-                result = {
-                    'segment_id': segment['id'],
-                    'error': str(exc),
-                    'success': False
-                }
-
-            if result['success']:
-                all_subtitles.extend(result['subtitles'])
-                completed += 1
-                print(f"[并行转录] ✓ 段 {result['segment_id']+1}/{len(segments)} 完成 "
-                      f"({completed}/{len(segments)})")
-            else:
-                failed_tasks_args.append(task_args)
-                print(f"[并行转录] ✗ 段 {result['segment_id']+1} 失败: {result['error']}")
-
-    if failed_tasks_args:
-        print(f"[并行转录] 进入串行补偿: {len(failed_tasks_args)} 段")
-        for task_args in failed_tasks_args:
-            segment = task_args[1]
-            fallback_result = transcribe_segment(task_args)
-            if fallback_result['success']:
-                all_subtitles.extend(fallback_result['subtitles'])
-                completed += 1
-                print(f"[并行转录] ✓ 段 {segment['id']+1}/{len(segments)} 串行补偿完成 "
-                      f"({completed}/{len(segments)})")
-            else:
-                print(f"[并行转录] ✗ 段 {segment['id']+1}/{len(segments)} 串行补偿失败: {fallback_result['error']}")
+                os.remove(full_audio_path)
+            except Exception:
+                pass
 
     if completed == 0:
         raise RuntimeError("并行转录失败：所有分段均未成功")
@@ -502,5 +648,7 @@ def format_subtitles(subtitles):
         start_time = format_hhmmss(sub['start'])
         lines.append(f"[{start_time}] {sub['text']}")
     return "\n".join(lines)
+
+
 
 

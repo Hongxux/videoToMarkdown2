@@ -126,3 +126,25 @@ def test_parse_items_wrapper():
     assert len(res) == 1
     assert res[0]["id"] == "0"
 
+
+def test_parse_truncated_single_object_unclosed_string():
+    kc = _parser()
+    content = """[
+  {"id":"SU023","knowledge_type":"deduction","confidence":0.98,"reasoning":"core idea
+"""
+    res = kc._parse_batch_content(content)
+    assert len(res) == 1
+    assert res[0]["id"] == "SU023"
+    assert res[0]["knowledge_type"] == "deduction"
+
+
+def test_parse_truncated_with_leading_prose():
+    kc = _parser()
+    content = """Result:
+[
+  {"id":"SU024","knowledge_type":"process","confidence":0.91,"reasoning":"step by step
+"""
+    res = kc._parse_batch_content(content)
+    assert len(res) == 1
+    assert res[0]["id"] == "SU024"
+

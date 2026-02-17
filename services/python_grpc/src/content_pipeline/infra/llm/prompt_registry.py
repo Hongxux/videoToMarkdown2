@@ -46,6 +46,7 @@ class PromptKeys:
     DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM = "deepseek.markdown.img_desc_augment.system"
     DEEPSEEK_MD_IMG_DESC_AUG_USER = "deepseek.markdown.img_desc_augment.user"
 
+    VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM = "vision_ai.concrete_knowledge.system"
     VISION_AI_CONCRETE_KNOWLEDGE_USER = "vision_ai.concrete_knowledge.user"
 
     VL_VIDEO_ANALYSIS_DEFAULT_USER = "vl.video_analysis.default.user"
@@ -151,10 +152,18 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         description="图像描述增补 User Prompt",
     ),
 
+    # 兼容旧 key：历史命名为 user，但语义已迁移为 system。
     PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_USER: PromptRegistryEntry(
         key=PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_USER,
         relative_path="vision_ai/concrete_knowledge/user.md",
         description="Vision AI 具象知识判断 Prompt",
+    ),
+
+    # 新 key：用于表达该提示词在调用时应作为 system 角色。
+    PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM: PromptRegistryEntry(
+        key=PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM,
+        relative_path="vision_ai/concrete_knowledge/user.md",
+        description="Vision AI concrete knowledge system prompt",
     ),
 
     PromptKeys.VL_VIDEO_ANALYSIS_DEFAULT_USER: PromptRegistryEntry(
@@ -197,4 +206,3 @@ def get_prompt_entry(key: str) -> PromptRegistryEntry:
     if key not in PROMPT_REGISTRY:
         raise KeyError(f"Unknown prompt key: {key}")
     return PROMPT_REGISTRY[key]
-

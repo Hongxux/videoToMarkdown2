@@ -17,6 +17,7 @@ import math
 import hashlib
 import asyncio
 import logging
+import importlib.util
 from collections import OrderedDict
 from typing import Tuple, Dict, Any, List, Optional, Callable, Awaitable, TypeVar
 from dataclasses import dataclass
@@ -70,6 +71,17 @@ def _env_int(name: str, default: int) -> int:
         return int(str(raw).strip())
     except Exception:
         return int(default)
+
+
+def _supports_http2_transport() -> bool:
+    """
+    做什么：判断当前运行环境是否可安全启用 HTTP/2。
+    为什么：在未安装 `h2` 时传入 `http2=True` 会导致 LLM 请求失败。
+    权衡：优先自动探测；也允许通过环境变量 `MODULE2_HTTP2_ENABLED` 强制开关。
+    """
+    if os.getenv("MODULE2_HTTP2_ENABLED") is not None:
+        return _env_bool("MODULE2_HTTP2_ENABLED", True)
+    return importlib.util.find_spec("h2") is not None
 
 
 @dataclass
@@ -526,22 +538,34 @@ class AdaptiveConnectionPoolManager:
             max_connections = target_pool_size
             max_keepalive = max(current_limit, 10)
             
-            self._client = httpx.AsyncClient(
-                limits=httpx.Limits(
+            http2_enabled = _supports_http2_transport()
+            client_kwargs = {
+                "limits": httpx.Limits(
                     max_connections=max_connections,
                     max_keepalive_connections=max_keepalive,
                     keepalive_expiry=30.0
                 ),
-                headers={
+                "headers": {
                     "Accept-Encoding": "gzip, br",  # 启用压缩
                 },
-                timeout=httpx.Timeout(120.0, connect=10.0),
-                http2=True  # 启用 HTTP/2
-            )
+                "timeout": httpx.Timeout(120.0, connect=10.0),
+                "http2": http2_enabled,
+            }
+            try:
+                self._client = httpx.AsyncClient(**client_kwargs)
+            except Exception as e:
+                error_text = str(e)
+                if http2_enabled and "h2" in error_text:
+                    logger.warning("HTTP/2 unavailable (missing h2), fallback to HTTP/1.1")
+                    client_kwargs["http2"] = False
+                    self._client = httpx.AsyncClient(**client_kwargs)
+                    http2_enabled = False
+                else:
+                    raise
             self._last_pool_size = target_pool_size
             
             logger.info(f"🚀 Connection pool rebuilt: max_connections={max_connections}, "
-                       f"max_keepalive={max_keepalive}, http2=True, compression=gzip+br")
+                       f"max_keepalive={max_keepalive}, http2={http2_enabled}, compression=gzip+br")
             
             return self._client
     
@@ -601,10 +625,17 @@ def get_concurrency_limiter() -> AdaptiveConcurrencyLimiter:
     - 函数计算/封装后的结果对象。"""
     global _global_concurrency_limiter
     if _global_concurrency_limiter is None:
+        initial_limit = max(1, _env_int("MODULE2_DEEPSEEK_CONCURRENCY_INITIAL", 56))
+        min_limit = max(1, _env_int("MODULE2_DEEPSEEK_CONCURRENCY_MIN", 8))
+        max_limit = max(min_limit, _env_int("MODULE2_DEEPSEEK_CONCURRENCY_MAX", 64))
+        increase_step = max(1, _env_int("MODULE2_DEEPSEEK_CONCURRENCY_INCREASE_STEP", 1))
+        window_size = max(1, _env_int("MODULE2_DEEPSEEK_CONCURRENCY_WINDOW_SIZE", 30))
         _global_concurrency_limiter = AdaptiveConcurrencyLimiter(
-            initial_limit=20,
-            min_limit=2,
-            max_limit=300
+            initial_limit=initial_limit,
+            min_limit=min_limit,
+            max_limit=max_limit,
+            increase_step=increase_step,
+            window_size=window_size,
         )
     return _global_concurrency_limiter
 
@@ -621,6 +652,7 @@ class LLMResponse:
     completion_tokens: int
     total_tokens: int
     latency_ms: float
+    cache_hit: bool = False
 
 
 class LLMClient:
@@ -761,6 +793,7 @@ class LLMClient:
         response_format: str = "",
         enable_logprobs: bool = False,
         max_tokens: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> str:
         """
         做什么：生成缓存键（SHA256）。
@@ -772,7 +805,7 @@ class LLMClient:
         h.update(b"\0")
         h.update(str(self.base_url).encode("utf-8"))
         h.update(b"\0")
-        h.update(str(self.model).encode("utf-8"))
+        h.update(str(model or self.model).encode("utf-8"))
         h.update(b"\0")
         h.update(repr(float(self.temperature)).encode("utf-8"))
         h.update(b"\0")
@@ -812,6 +845,7 @@ class LLMClient:
             completion_tokens=int(entry.completion_tokens),
             total_tokens=int(entry.total_tokens),
             latency_ms=0.0,
+            cache_hit=True,
         )
 
     def _compute_resource_cap(self, base_limit: int) -> int:
@@ -892,6 +926,8 @@ class LLMClient:
         system_message: str = None,
         need_logprobs: bool = False,
         max_tokens: Optional[int] = None,
+        disable_inflight_dedup: bool = False,
+        model: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], LLMResponse, Any]:
         """
         执行逻辑：
@@ -920,6 +956,7 @@ class LLMClient:
                 response_format="json_object",
                 enable_logprobs=enable_logprobs,
                 max_tokens=max_tokens,
+                model=model,
             )
             cached = await _GLOBAL_CACHE.get(cache_key)
             if cached is not None:
@@ -952,7 +989,7 @@ class LLMClient:
 
             try:
                 kwargs = {
-                    "model": self.model,
+                    "model": model or self.model,
                     "messages": messages,
                     "temperature": self.temperature,
                     "response_format": {"type": "json_object"},
@@ -1016,6 +1053,8 @@ class LLMClient:
                 await self.concurrency_limiter.record_failure(is_rate_limit=False)
                 raise ValueError(f"LLM returned invalid JSON: {e}")
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 error_msg = str(e)
 
@@ -1042,7 +1081,7 @@ class LLMClient:
                 if acquired_permits:
                     await self.concurrency_limiter.release(acquired_permits)
 
-        if cache_key and self._inflight_dedup_enabled:
+        if cache_key and self._inflight_dedup_enabled and not disable_inflight_dedup:
             return await _GLOBAL_DEDUPER.run(cache_key, _do_request)
         return await _do_request()
     
@@ -1057,24 +1096,13 @@ class LLMClient:
         self,
         prompt: str,
         system_message: str = None,
-        need_logprobs: bool = False
+        need_logprobs: bool = False,
+        disable_inflight_dedup: bool = False,
+        model: Optional[str] = None,
     ) -> Tuple[str, LLMResponse, Any]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：system_message
-        - 条件：'402' in error_msg or 'Insufficient Balance' in error_msg
-        依据来源（证据链）：
-        - 输入参数：system_message。
-        输入参数：
-        - prompt: 文本内容（类型：str）。
-        - system_message: 函数入参（类型：str）。
-        输出参数：
-        - 多值结果元组（各元素含义见实现）。"""
+        完成文本生成请求。支持通过 model 参数临时覆盖默认模型。
+        """
         enable_logprobs = bool(need_logprobs or self._enable_logprobs)
 
         cache_key: Optional[str] = None
@@ -1085,6 +1113,7 @@ class LLMClient:
                 system_message,
                 response_format="",
                 enable_logprobs=enable_logprobs,
+                model=model,
             )
             cached = await _GLOBAL_CACHE.get(cache_key)
             if cached is not None:
@@ -1111,7 +1140,7 @@ class LLMClient:
             acquired_permits = await self.concurrency_limiter.acquire(permits)
             try:
                 kwargs = {
-                    "model": self.model,
+                    "model": model or self.model,
                     "messages": messages,
                     "temperature": self.temperature,
                 }
@@ -1133,7 +1162,6 @@ class LLMClient:
                     total_tokens=response.usage.total_tokens,
                     latency_ms=latency_ms,
                 )
-
 
                 # 🚀 记录成功
                 await self.concurrency_limiter.record_success()
@@ -1162,6 +1190,8 @@ class LLMClient:
 
                 return content, metadata, lprobs
 
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 error_msg = str(e)
 
@@ -1188,7 +1218,7 @@ class LLMClient:
                 if acquired_permits:
                     await self.concurrency_limiter.release(acquired_permits)
 
-        if cache_key and self._inflight_dedup_enabled:
+        if cache_key and self._inflight_dedup_enabled and not disable_inflight_dedup:
             return await _GLOBAL_DEDUPER.run(cache_key, _do_request)
         return await _do_request()
 

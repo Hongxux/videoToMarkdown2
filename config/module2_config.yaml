@@ -281,27 +281,42 @@ vl_material_generation:
     process_duration_threshold_sec: 40.0
 
     # 路由截图流水线模式
-    # process_streaming: 使用进程池 + 生产者/消费者队列（推荐）
-    # legacy_batch: 保留历史线程池批处理模式（兼容回退）
-    screenshot_pipeline_mode: process_streaming
+    # process_streaming: 使用进程池 + 生产者/消费者队列
+    # legacy_batch: 保留历史线程池批处理模式（当前样本压测更优）
+    screenshot_pipeline_mode: legacy_batch
 
     # 路由截图 worker 数
     # auto: 跟随 gRPC CV 进程池能力自动确定
     # int:  手动指定，最终会被限制在 [1, cv_worker_count]
-    screenshot_worker_count: auto
+    screenshot_worker_count: 4
 
     # 路由截图生产者-消费者队列大小（背压阈值）
-    screenshot_queue_maxsize: 16
+    screenshot_queue_maxsize: 8
 
     # 路由截图 coarse/fine 采样率（与旧逻辑一致，作为显式可调参数）
     screenshot_coarse_fps: 2.0
     screenshot_fine_fps: 10.0
+
+    # 路由截图分析分辨率上限（仅用于评分阶段，最终截图时间戳不变）
+    # 0 表示关闭缩放；推荐 640，可显著降低长窗口内存峰值
+    screenshot_analysis_max_width: 640
+
+    # 长稳定岛细采样分块秒数（先粗后细复用）
+    # 当 island 时长超过该值时，按该秒数切块执行 fine 选择，再汇总每岛最优
+    # 0 表示关闭分块
+    screenshot_long_window_fine_chunk_sec: 20.0
+
+    # 路由截图解码打开策略（在线热路径）
+    # 说明：默认禁用“同步整段转码”，避免 AV1 在热路径触发分钟级阻塞。
+    screenshot_decode_open_timeout_sec: 30.0
+    screenshot_decode_allow_inline_transcode: false
+    screenshot_decode_enable_async_transcode: true
   
   # Qwen3-VL-Plus API 配置
   api:
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: "qwen3-vl-plus"
-    api_key: ""  # 建议留空并通过环境变量注入
+    api_key: "sk-bee8fc770460451da1cb9d8d0ab5f7a6"  # 建议留空并通过环境变量注入
     max_retries: 2
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
@@ -327,6 +342,16 @@ vl_material_generation:
   # true: merge into one clip with segments (legacy behavior)
   merge_multistep_clip_requests: false
 
+  # 语义单元预切片参数（仅供 VL 预分析使用，不影响最终 assets 回源截取）
+  semantic_split_pre_cut:
+    enabled: true
+    # 仅对超长片段启用降分辨率/码率；<=0 表示关闭该策略
+    large_segment_threshold_sec: 120.0
+    # 与 FFmpeg 参数 `-vf scale=-1:480` 对齐
+    downscale_height: 480
+    # 与 FFmpeg 参数 `-b:v 500k` 对齐
+    video_bitrate: "500k"
+
 
   # VL 前静态段剔除预处理（仅 process 单元）
   # 目的：先用 CV 识别 stable 区间，再剔除 stable 核心段，减少 VL 输入冗余与 token 成本。
@@ -334,11 +359,25 @@ vl_material_generation:
   pre_vl_static_pruning:
     enabled: true
     only_process: true
+    # 并行模式：
+    # - auto: 有全局 CV 进程池时走多进程；否则走 async 并发
+    # - process: 强制走多进程
+    # - async/off: 仅事件循环并发
+    parallel_mode: off
+    # 预处理并发度（VL 分析前）
+    # auto: 优先复用 gRPC CV 进程池 worker 数；否则使用 (CPU核数-1)
+    # int: 手动指定，最终会受 parallel_hard_cap 与任务数限制,经过测试得到的数据
+    parallel_workers: 6
+    # 预处理并发硬上限（仅在未复用外部 CV 池时生效）
+    parallel_hard_cap: 8
     min_unit_duration_sec: 10.0
     keep_edge_sec: 1.0
     min_stable_interval_sec: 6.0
     min_cut_span_sec: 0.8
     min_keep_segment_sec: 0.5
+    # legacy_action 分支里，动作“动态净时长”阈值（动作总时长-内部稳定岛重叠时长）
+    # 小于该阈值的动作会被剔除，并仅保留 tail 截图作为兜底参考。
+    legacy_action_min_dynamic_sec: 0.5
     min_removed_ratio: 0.10
     context_text_max_chars: 800
 
@@ -353,6 +392,15 @@ vl_material_generation:
     mse_scan_after_end_sec: 3.0
     mse_sample_fps: 2.0
     mse_min_threshold: 64.0
+
+  # VL 主分析并行配置（语义单元级）
+  # 语义单元级策略：每个 unit 仅发起一次 analyze_clip（一次主 VL API 调用）
+  vl_analysis:
+    # auto: 默认按 unit 数并发，受 parallel_hard_cap 限制
+    # int:  手动指定并发度
+    parallel_workers: auto
+    # 并发硬上限，防止 unit 数很大时瞬时请求过载
+    parallel_hard_cap: 32
   
   
   # Tutorial mode for long, multi-step process units
@@ -373,6 +421,14 @@ vl_material_generation:
     # Save per-unit step JSON (including raw model step output)
     save_step_json: true
 
+    # 教程资产导出并发度（step clip/keyframe）
+    # auto: 自动并发（默认最多 4），受 asset_export_parallel_hard_cap 限制
+    # int:  手动指定并发度
+    asset_export_parallel_workers: 4
+
+    # 教程资产导出并发硬上限，防止 ffmpeg 子进程瞬时过多
+    asset_export_parallel_hard_cap: 8
+
     # Keyframe image extension: png / jpg / jpeg
     keyframe_image_ext: "png"
 
@@ -386,12 +442,13 @@ vl_material_generation:
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
     streaming_overlap_buffers: 2          # 重叠缓冲 chunk 数: 2=double-buffer overlap, 1=顺序chunk(更稳)
-    max_workers: auto                     # Worker数: 'auto'=CPU核心数, 或手动指定如 8
+    max_workers: 1                        # 当前样本压测最优: 1
     max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
     
     # 预读配置 (与批量模式共享)
     prefetch_sample_rate: 2               # 采样率
     prefetch_target_height: 360           # 目标高度
+    prefetch_max_frames_per_chunk: 240    # 单 chunk 预读帧数上限；超出时自动放大采样步长，抑制内存峰值
     prefetch_union_min_requests: 20       # Union预读最小请求数
     prefetch_union_max_span_seconds: 10.0 # Union预读最大时间跨度
     prefetch_chunk_max_requests: 1000     # 单 chunk 最大请求数(防御性上限)，主要由 max_span 控制切分

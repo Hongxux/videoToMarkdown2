@@ -167,6 +167,22 @@ class SubtitleRepository:
         if clear_sentence_timestamps:
             self._sentence_timestamps = None
 
+    def set_raw_paragraphs(self, paragraphs: Optional[List[Dict[str, Any]]]) -> None:
+        """直接注入内存段落列表，供非文件场景复用统一段落检索逻辑。"""
+        normalized: List[Dict[str, Any]] = []
+        for item in list(paragraphs or []):
+            if not isinstance(item, dict):
+                continue
+            normalized.append(
+                {
+                    "paragraph_id": str(item.get("paragraph_id", "") or ""),
+                    "text": str(item.get("text", "") or ""),
+                    "source_sentence_ids": list(item.get("source_sentence_ids", []) or []),
+                    "merge_type": str(item.get("merge_type", "") or ""),
+                }
+            )
+        self._paragraphs = normalized
+
     def load_step2_subtitles(self, *, strict: bool = False) -> List[Any]:
         """方法说明：SubtitleRepository.load_step2_subtitles 核心方法。
         执行步骤：

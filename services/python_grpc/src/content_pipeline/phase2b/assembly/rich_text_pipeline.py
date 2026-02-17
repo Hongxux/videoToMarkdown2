@@ -1,4 +1,4 @@
-"""
+﻿"""
 模块说明：Module2 内容增强中的 rich_text_pipeline 模块。
 执行逻辑：
 1) 聚合本模块的类/函数，对外提供核心能力。
@@ -26,6 +26,10 @@ from services.python_grpc.src.content_pipeline.phase2a.segmentation.concrete_kno
 from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
 from services.python_grpc.src.content_pipeline.phase2a.segmentation.knowledge_classifier import KnowledgeClassifier
 from services.python_grpc.src.content_pipeline.shared.subtitle.subtitle_repository import SubtitleRepository
+from services.python_grpc.src.content_pipeline.shared.semantic_payload import (
+    build_grouped_semantic_units_payload,
+    normalize_semantic_units_payload,
+)
 from services.python_grpc.src.content_pipeline.infra.runtime.resource_manager import get_io_executor
 from services.python_grpc.src.content_pipeline.phase2b.assembly.pipeline_asset_utils import (
     slugify_text,
@@ -45,6 +49,7 @@ from services.python_grpc.src.content_pipeline.phase2b.assembly.pipeline_materia
 )
 from services.python_grpc.src.content_pipeline.phase2b.assembly.rich_text_document import (
     RichTextDocument,
+    KnowledgeGroup,
     MaterialSet,
     create_section_from_semantic_unit,
 )
@@ -83,6 +88,8 @@ class RichTextPipeline:
         config: PipelineConfig = None,
         sentence_timestamps_path: str = None,
         segmenter: SemanticUnitSegmenter = None,
+        step2_subtitles: Optional[List[Any]] = None,
+        step6_paragraphs: Optional[List[Dict[str, Any]]] = None,
     ):
         """
         执行逻辑：
@@ -117,6 +124,12 @@ class RichTextPipeline:
             step6_path=step6_path,
             sentence_timestamps_path=sentence_timestamps_path or "",
         )
+        # 非复用链路优先使用内存态产物，避免刚入队的异步 JSON 读写时序依赖。
+        if step2_subtitles is not None:
+            self.subtitle_repo.set_raw_subtitles(step2_subtitles, clear_sentence_timestamps=False)
+        if step6_paragraphs is not None:
+            self.subtitle_repo.set_raw_paragraphs(step6_paragraphs)
+
         self.step2_path = self.subtitle_repo.step2_path
         self.step6_path = self.subtitle_repo.step6_path
         self.sentence_timestamps_path = self.subtitle_repo.sentence_timestamps_path
@@ -126,17 +139,23 @@ class RichTextPipeline:
         Path(self.assets_dir).mkdir(parents=True, exist_ok=True)
         
         # 加载数据 (Phase 2B 组装模式下可能为空)
-        if self.step2_path:
+        if step2_subtitles is not None:
+            logger.info(f"Loading step2 from memory payload: items={len(step2_subtitles)}")
+        elif self.step2_path:
             logger.info(f"Loading step2: {self.step2_path}")
         else:
             logger.info("Skip loading step2 (empty path)")
         self.subtitles = self.subtitle_repo.load_step2_subtitles()
 
-        if self.step6_path:
+        if step6_paragraphs is not None:
+            logger.info(f"Loading step6 from memory payload: paragraphs={len(step6_paragraphs)}")
+        elif self.step6_path:
             logger.info(f"Loading step6: {self.step6_path}")
         else:
             logger.info("Skip loading step6 (empty path)")
         self.paragraphs = self.subtitle_repo.load_step6_paragraphs()
+        # 记录最近一次 Phase2A 语义单元序列化结果，供上层服务在同进程内做内存直传。
+        self.latest_phase2a_semantic_units_payload: List[Dict[str, Any]] = []
         
         # 初始化组件（优先注入单例，避免热路径重复构建）
         self.segmenter = segmenter if segmenter is not None else SemanticUnitSegmenter()
@@ -168,6 +187,8 @@ class RichTextPipeline:
 
         # 指代断层预补全阶段复用缓存（image_abs_path -> ConcreteKnowledgeResult）
         self._prevalidated_concrete_results: Dict[str, Any] = {}
+        # PP-Structure 提取前全局去重：跨语义单元复用原图签名，避免重复提取。
+        self._prestructure_seen_raw_signatures: Dict[str, str] = {}
 
         # 图片匹配审计：默认关闭，可通过 config.yaml / 环境变量开启
         self._image_match_audit_enabled = self._load_image_match_audit_switch(default_value=False)
@@ -511,22 +532,182 @@ class RichTextPipeline:
         doc = RichTextDocument(
             title=title,
             source_video=self.video_path,
-            total_duration_sec=self.video_duration
+            total_duration_sec=self.video_duration,
         )
-        
-        for unit in units:
-            # 使用 unit.materials 或创建空的 MaterialSet
-            materials = getattr(unit, 'materials', None)
-            if materials is None:
-                materials = MaterialSet()
-            
-            # 创建 section，确保 title 使用 knowledge_topic
-            section = create_section_from_semantic_unit(unit, materials)
-            doc.add_section(section)
-        
+
+        group_name_to_fallback_id: Dict[str, int] = {}
+        next_fallback_group_id = 1
+        grouped_units: Dict[int, Dict[str, Any]] = {}
+        ordered_units = sorted(
+            list(units or []),
+            key=lambda unit_item: (
+                float(getattr(unit_item, "start_sec", 0.0) or 0.0),
+                str(getattr(unit_item, "unit_id", "") or ""),
+            ),
+        )
+
+        for unit in ordered_units:
+            group_name = str(getattr(unit, "group_name", "") or "").strip()
+            if not group_name:
+                group_name = str(getattr(unit, "knowledge_topic", "") or "").strip() or "未命名知识点"
+            unit.group_name = group_name
+
+            group_id = int(getattr(unit, "group_id", 0) or 0)
+            if group_id <= 0:
+                normalized_group_key = group_name.lower()
+                if normalized_group_key not in group_name_to_fallback_id:
+                    group_name_to_fallback_id[normalized_group_key] = next_fallback_group_id
+                    next_fallback_group_id += 1
+                group_id = group_name_to_fallback_id[normalized_group_key]
+                unit.group_id = group_id
+
+            group_bucket = grouped_units.setdefault(
+                group_id,
+                {
+                    "group_name": group_name,
+                    "reason": "",
+                    "units": [],
+                },
+            )
+            if not str(group_bucket.get("group_name", "") or "").strip():
+                group_bucket["group_name"] = group_name
+            group_reason = str(getattr(unit, "group_reason", "") or "").strip()
+            if group_reason and not str(group_bucket.get("reason", "") or "").strip():
+                group_bucket["reason"] = group_reason
+            group_bucket["units"].append(unit)
+
+        for group_id in sorted(grouped_units.keys()):
+            group_bucket = grouped_units[group_id]
+            group_units = sorted(
+                list(group_bucket.get("units", [])),
+                key=lambda unit_item: (
+                    float(getattr(unit_item, "start_sec", 0.0) or 0.0),
+                    str(getattr(unit_item, "unit_id", "") or ""),
+                ),
+            )
+            section_items = []
+            for unit in group_units:
+                materials = getattr(unit, "materials", None)
+                if materials is None:
+                    materials = MaterialSet()
+                section_items.append(create_section_from_semantic_unit(unit, materials))
+
+            group_name = str(group_bucket.get("group_name", "") or "").strip() or f"知识点分组{group_id}"
+            group_reason = str(group_bucket.get("reason", "") or "").strip() or "同一核心论点聚合"
+            doc.add_group(
+                KnowledgeGroup(
+                    group_id=group_id,
+                    group_name=group_name,
+                    reason=group_reason,
+                    units=section_items,
+                )
+            )
+
         return doc
-    
-    def _save_semantic_units(self, units: List[SemanticUnit], output_path: str):
+
+    def _serialize_semantic_units(self, units: List[SemanticUnit]) -> Dict[str, Any]:
+        """将语义单元按 knowledge_groups 结构序列化，避免在 unit 层重复 group 元信息。"""
+        group_name_to_fallback_id: Dict[str, int] = {}
+        next_fallback_group_id = 1
+        ordered_units = sorted(
+            list(units or []),
+            key=lambda unit_item: (
+                float(getattr(unit_item, "start_sec", 0.0) or 0.0),
+                str(getattr(unit_item, "unit_id", "") or ""),
+            ),
+        )
+        flat_units_with_group_meta: List[Dict[str, Any]] = []
+
+        for unit in ordered_units:
+            group_name = str(getattr(unit, "group_name", "") or "").strip()
+            if not group_name:
+                group_name = str(getattr(unit, "knowledge_topic", "") or "").strip() or "未命名知识点"
+            unit.group_name = group_name
+
+            group_id = int(getattr(unit, "group_id", 0) or 0)
+            if group_id <= 0:
+                normalized_group_key = group_name.lower()
+                if normalized_group_key not in group_name_to_fallback_id:
+                    group_name_to_fallback_id[normalized_group_key] = next_fallback_group_id
+                    next_fallback_group_id += 1
+                group_id = group_name_to_fallback_id[normalized_group_key]
+                unit.group_id = group_id
+
+            group_reason = str(getattr(unit, "group_reason", "") or "").strip() or "同一核心论点聚合"
+            material_requests = (
+                getattr(unit, "_material_requests", MaterialRequests([], [], []))
+                if hasattr(unit, "_material_requests")
+                else MaterialRequests([], [], [])
+            )
+            unit_payload = {
+                "unit_id": unit.unit_id,
+                "start_sec": unit.start_sec,
+                "end_sec": unit.end_sec,
+                "full_text": getattr(unit, "full_text", ""),
+                "text": getattr(unit, "full_text", ""),
+                "stable_islands": getattr(unit, "stable_islands", []),
+                "action_segments": getattr(unit, "action_segments", []),
+                "material_requests": {
+                    "screenshot_requests": [
+                        {
+                            "screenshot_id": request_item.screenshot_id,
+                            "timestamp_sec": request_item.timestamp_sec,
+                            "label": request_item.label,
+                            "semantic_unit_id": request_item.semantic_unit_id,
+                        }
+                        for request_item in list(material_requests.screenshot_requests or [])
+                    ],
+                    "clip_requests": [
+                        {
+                            **{
+                                "clip_id": request_item.clip_id,
+                                "start_sec": request_item.start_sec,
+                                "end_sec": request_item.end_sec,
+                                "knowledge_type": request_item.knowledge_type,
+                                "semantic_unit_id": request_item.semantic_unit_id,
+                            },
+                            **({"segments": request_item.segments} if getattr(request_item, "segments", None) else {}),
+                        }
+                        for request_item in list(material_requests.clip_requests or [])
+                    ],
+                },
+                "knowledge_type": getattr(unit, "knowledge_type", ""),
+                "knowledge_topic": getattr(unit, "knowledge_topic", ""),
+                "mult_steps": getattr(unit, "mult_steps", False),
+                "cv_validated": getattr(unit, "cv_validated", False),
+                "instructional_steps": getattr(unit, "instructional_steps", []),
+                "action_units": getattr(unit, "action_units", []),
+                "crossed_stable_islands": getattr(
+                    unit,
+                    "crossed_stable_islands",
+                    {
+                        "stage1": [],
+                        "stage2": [],
+                    },
+                ),
+                "group_id": group_id,
+                "group_name": group_name,
+                "group_reason": group_reason,
+            }
+            flat_units_with_group_meta.append(unit_payload)
+
+        return build_grouped_semantic_units_payload(
+            flat_units_with_group_meta,
+            schema_version="phase2a.grouped.v1",
+            default_group_reason="同一核心论点聚合",
+            strip_unit_group_fields=True,
+        )
+
+    def _extract_semantic_units_from_payload(self, payload: Any) -> List[Dict[str, Any]]:
+        """统一拉平语义单元 payload，兼容 grouped 与 legacy 两种结构。"""
+        return normalize_semantic_units_payload(payload)
+
+    def _save_semantic_units(
+        self,
+        units: List[SemanticUnit],
+        output_path: str,
+        mirror_output_path: Optional[str] = None,
+    ):
         """
         执行逻辑：
         1) 准备必要上下文与参数。
@@ -541,58 +722,43 @@ class RichTextPipeline:
         - output_path: 文件路径（类型：str）。
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        data = []
-        for unit in units:
-            # 基础字段
-            unit_data = {
-                "unit_id": unit.unit_id,
-                "start_sec": unit.start_sec,
-                "end_sec": unit.end_sec,
-                "full_text": getattr(unit, 'full_text', ''),
-                "text": getattr(unit, 'full_text', ''),  # 兼容性字段
-                "stable_islands": getattr(unit, 'stable_islands', []),
-                "action_segments": getattr(unit, 'action_segments', []),
-                # 保存素材需求 (用于Phase2B匹配外部素材)
-                "material_requests": {
-                    "screenshot_requests": [
-                        {"screenshot_id": r.screenshot_id, "timestamp_sec": r.timestamp_sec, 
-                         "label": r.label, "semantic_unit_id": r.semantic_unit_id}
-                        for r in getattr(unit, '_material_requests', MaterialRequests([], [], [])).screenshot_requests
-                    ] if hasattr(unit, '_material_requests') else [],
-                    "clip_requests": [
-                        {
-                            **{
-                                "clip_id": r.clip_id,
-                                "start_sec": r.start_sec,
-                                "end_sec": r.end_sec,
-                                "knowledge_type": r.knowledge_type,
-                                "semantic_unit_id": r.semantic_unit_id
-                            },
-                            **({"segments": r.segments} if getattr(r, "segments", None) else {})
-                        }
-                        for r in getattr(unit, '_material_requests', MaterialRequests([], [], [])).clip_requests
-                    ] if hasattr(unit, '_material_requests') else [],
-                },
-                # V9.0 新增字段
-                "knowledge_type": getattr(unit, 'knowledge_type', ''),
-                "knowledge_topic": getattr(unit, 'knowledge_topic', ''),
-                "mult_steps": getattr(unit, 'mult_steps', False),
-                "cv_validated": getattr(unit, 'cv_validated', False),
-                "instructional_steps": getattr(unit, 'instructional_steps', []),
-                # V9.0: 带有 LLM 分类结果的动作单元列表
-                "action_units": getattr(unit, 'action_units', []),
-                # V9.0: 两阶段合并过程中被跨越的稳定岛
-                "crossed_stable_islands": getattr(unit, 'crossed_stable_islands', {
-                    "stage1": [],
-                    "stage2": []
-                }),
-            }
-            data.append(unit_data)
+        data = self._serialize_semantic_units(units)
+        self.latest_phase2a_semantic_units_payload = self._extract_semantic_units_from_payload(data)
         
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"Saved {len(units)} semantic units to {output_path}")
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        async_write_enabled = str(os.getenv("PHASE2_ASYNC_PERSIST_WRITES", "1")).strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+
+        if async_write_enabled:
+            from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
+
+            enqueue_json_write(str(output_file), data, ensure_ascii=False, indent=2)
+            logger.info(f"Queued {len(units)} semantic units to async writer: {output_file}")
+        else:
+            with open(output_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"Saved {len(units)} semantic units to {output_file}")
+
+        if mirror_output_path:
+            try:
+                mirror_file = Path(mirror_output_path)
+                mirror_file.parent.mkdir(parents=True, exist_ok=True)
+                if async_write_enabled:
+                    from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
+
+                    enqueue_json_write(str(mirror_file), data, ensure_ascii=False, indent=2)
+                    logger.info(f"Queued mirrored semantic units to async writer: {mirror_file}")
+                else:
+                    with open(mirror_file, 'w', encoding='utf-8') as f:
+                        json.dump(data, f, ensure_ascii=False, indent=2)
+                    logger.info(f"Mirrored semantic units to {mirror_file}")
+            except Exception as error:
+                logger.warning(f"Mirror semantic units failed: {error}")
     
     def _load_semantic_units(
         self, 
@@ -609,12 +775,27 @@ class RichTextPipeline:
         输出参数：
         - List[SemanticUnit], Dict[str, MaterialRequests] 列表（与输入或处理结果一一对应）。"""
         with open(json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+            raw_payload = json.load(f)
+
+        data = self._extract_semantic_units_from_payload(raw_payload)
         
         units = []
         material_requests_map: Dict[str, MaterialRequests] = {}
+        group_name_to_id: Dict[str, int] = {}
+        next_group_id = 1
         
         for item in data:
+            group_name = str(item.get("group_name", "") or "").strip()
+            if not group_name:
+                group_name = str(item.get("knowledge_topic", "") or "").strip() or "未命名知识点"
+            group_id = int(item.get("group_id", 0) or 0)
+            if group_id <= 0:
+                normalized_group_name = group_name.lower()
+                if normalized_group_name not in group_name_to_id:
+                    group_name_to_id[normalized_group_name] = next_group_id
+                    next_group_id += 1
+                group_id = group_name_to_id[normalized_group_name]
+
             unit = SemanticUnit(
                 unit_id=item["unit_id"],
                 knowledge_type=item.get("knowledge_type", "abstract"),
@@ -622,6 +803,8 @@ class RichTextPipeline:
                 full_text=item.get("full_text", item.get("text", "")),
                 source_paragraph_ids=item.get("source_paragraph_ids", []),
                 source_sentence_ids=item.get("source_sentence_ids", []),
+                group_id=group_id,
+                group_name=group_name,
                 start_sec=item["start_sec"],
                 end_sec=item["end_sec"],
                 mult_steps=item.get("mult_steps", False)
@@ -637,6 +820,7 @@ class RichTextPipeline:
                 "stage1": [],
                 "stage2": []
             })
+            unit.group_reason = str(item.get("group_reason", "") or "").strip()
             
             # 恢复素材需求
             mr_data = item.get("material_requests", {})
@@ -653,8 +837,475 @@ class RichTextPipeline:
             )
             
             units.append(unit)
-        
+
+        self._merge_material_requests_from_vl_cache(
+            semantic_units_json_path=json_path,
+            material_requests_map=material_requests_map,
+        )
+
         return units, material_requests_map
+
+    def _merge_material_requests_from_vl_cache(
+        self,
+        semantic_units_json_path: str,
+        material_requests_map: Dict[str, MaterialRequests],
+    ) -> None:
+        """
+        做什么：当 semantic_units 中 material_requests 为空时，尝试从 vl_analysis_cache 回填。
+        为什么：恢复“请求驱动匹配”，避免 assemble_only 主要依赖目录扫描兜底。
+        权衡：仅补空，不覆盖已存在请求；缓存损坏时静默降级，不阻断主流程。
+        """
+        if not material_requests_map:
+            return
+
+        semantic_dir = Path(semantic_units_json_path).resolve().parent
+        candidate_paths: List[Path] = [semantic_dir / "vl_analysis_cache.json"]
+        if semantic_dir.name.lower() == "intermediates":
+            candidate_paths.append(semantic_dir.parent / "vl_analysis_cache.json")
+
+        cache_path: Optional[Path] = None
+        for candidate in candidate_paths:
+            if candidate.exists() and candidate.is_file():
+                cache_path = candidate
+                break
+        if cache_path is None:
+            return
+
+        try:
+            with open(cache_path, "r", encoding="utf-8") as file_obj:
+                cache_data = json.load(file_obj)
+        except Exception as error:
+            logger.warning(f"[Phase2B] failed to read vl cache for material backfill: {error}")
+            return
+
+        if not isinstance(cache_data, dict):
+            return
+
+        def _is_actual_vl_cache_item(payload: Dict[str, Any]) -> bool:
+            mode = str(payload.get("analysis_mode", "") or "").strip().lower()
+            if mode in {"legacy_action_units", "tutorial_stepwise", "tutorial_vl", "vl"}:
+                return True
+            if mode.startswith("vl_"):
+                return True
+            id_token = str(
+                payload.get("screenshot_id", "")
+                or payload.get("clip_id", "")
+                or ""
+            ).strip().lower()
+            return "_vl_" in id_token
+
+        by_unit_screenshots: Dict[str, List[ScreenshotRequest]] = {}
+        seen_ss_ids: Dict[str, set] = {}
+        for item in list(cache_data.get("aggregated_screenshots", []) or []):
+            if not isinstance(item, dict):
+                continue
+            if _is_actual_vl_cache_item(item):
+                continue
+            unit_id = str(item.get("semantic_unit_id", "") or "").strip()
+            screenshot_id = str(item.get("screenshot_id", "") or "").strip()
+            if not unit_id or not screenshot_id:
+                continue
+            if unit_id not in material_requests_map:
+                continue
+            try:
+                timestamp_sec = float(item.get("timestamp_sec", 0.0) or 0.0)
+            except Exception:
+                timestamp_sec = 0.0
+            label = str(item.get("label", "") or Path(screenshot_id).name).strip()
+            if not label:
+                label = Path(screenshot_id).name
+
+            unit_seen = seen_ss_ids.setdefault(unit_id, set())
+            if screenshot_id in unit_seen:
+                continue
+            unit_seen.add(screenshot_id)
+            by_unit_screenshots.setdefault(unit_id, []).append(
+                ScreenshotRequest(
+                    screenshot_id=screenshot_id,
+                    timestamp_sec=timestamp_sec,
+                    label=label,
+                    semantic_unit_id=unit_id,
+                )
+            )
+
+        by_unit_clips: Dict[str, List[ClipRequest]] = {}
+        seen_clip_ids: Dict[str, set] = {}
+        for item in list(cache_data.get("aggregated_clips", []) or []):
+            if not isinstance(item, dict):
+                continue
+            if _is_actual_vl_cache_item(item):
+                continue
+            unit_id = str(item.get("semantic_unit_id", "") or "").strip()
+            clip_id = str(item.get("clip_id", "") or "").strip()
+            if not unit_id or not clip_id:
+                continue
+            if unit_id not in material_requests_map:
+                continue
+            try:
+                start_sec = float(item.get("start_sec", 0.0) or 0.0)
+                end_sec = float(item.get("end_sec", start_sec) or start_sec)
+            except Exception:
+                continue
+            if end_sec < start_sec:
+                start_sec, end_sec = end_sec, start_sec
+
+            raw_segments = item.get("segments", None)
+            segments: Optional[List[Dict[str, float]]] = None
+            if isinstance(raw_segments, list):
+                normalized_segments: List[Dict[str, float]] = []
+                for seg in raw_segments:
+                    if not isinstance(seg, dict):
+                        continue
+                    try:
+                        seg_start = float(seg.get("start_sec", 0.0) or 0.0)
+                        seg_end = float(seg.get("end_sec", seg_start) or seg_start)
+                    except Exception:
+                        continue
+                    if seg_end < seg_start:
+                        seg_start, seg_end = seg_end, seg_start
+                    normalized_segments.append(
+                        {
+                            "start_sec": seg_start,
+                            "end_sec": seg_end,
+                        }
+                    )
+                if normalized_segments:
+                    segments = normalized_segments
+
+            knowledge_type = str(item.get("knowledge_type", "process") or "process").strip() or "process"
+
+            unit_seen = seen_clip_ids.setdefault(unit_id, set())
+            if clip_id in unit_seen:
+                continue
+            unit_seen.add(clip_id)
+            by_unit_clips.setdefault(unit_id, []).append(
+                ClipRequest(
+                    clip_id=clip_id,
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                    knowledge_type=knowledge_type,
+                    semantic_unit_id=unit_id,
+                    segments=segments,
+                    source_action_ids=item.get("source_action_ids"),
+                    merged_from_count=item.get("merged_from_count"),
+                )
+            )
+
+        merged_units = 0
+        merged_screenshot_count = 0
+        merged_clip_count = 0
+        for unit_id, requests in list(material_requests_map.items()):
+            if requests is None:
+                continue
+
+            filled_ss = False
+            filled_clip = False
+            if not list(requests.screenshot_requests or []):
+                cached_ss = by_unit_screenshots.get(unit_id, [])
+                if cached_ss:
+                    requests.screenshot_requests = list(cached_ss)
+                    merged_screenshot_count += len(cached_ss)
+                    filled_ss = True
+
+            if not list(requests.clip_requests or []):
+                cached_clips = by_unit_clips.get(unit_id, [])
+                if cached_clips:
+                    requests.clip_requests = list(cached_clips)
+                    merged_clip_count += len(cached_clips)
+                    filled_clip = True
+
+            if filled_ss or filled_clip:
+                merged_units += 1
+
+        if merged_units > 0:
+            logger.info(
+                "[Phase2B] backfilled material requests from vl cache: units=%s, screenshots=%s, clips=%s, cache=%s",
+                merged_units,
+                merged_screenshot_count,
+                merged_clip_count,
+                cache_path,
+            )
+
+    async def analyze_only(self) -> Tuple[List[ScreenshotRequest], List[ClipRequest], str]:
+        """仅执行 Phase2A：语义切分 + 模态分析 + 素材请求生成。"""
+        logger.info("[Phase2A] analyze_only start")
+        semantic_units_path = os.path.join(self.output_dir, "semantic_units_phase2a.json")
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        semantic_units_intermediate_path = os.path.join(
+            self.output_dir,
+            "intermediates",
+            "semantic_units_phase2a.json",
+        )
+
+        if not self.paragraphs:
+            logger.warning("[Phase2A] step6 paragraphs is empty, saving empty semantic units")
+            self._save_semantic_units(
+                [],
+                semantic_units_path,
+                mirror_output_path=semantic_units_intermediate_path,
+            )
+            return [], [], semantic_units_path
+
+        sentence_timestamps = self._build_sentence_timestamps()
+        segmentation_result = await self.segmenter.segment(
+            paragraphs=self.paragraphs,
+            sentence_timestamps=sentence_timestamps,
+        )
+        units = list(getattr(segmentation_result, "semantic_units", []) or [])
+
+        if not units:
+            logger.warning("[Phase2A] semantic segmentation produced no units")
+            self._save_semantic_units(
+                [],
+                semantic_units_path,
+                mirror_output_path=semantic_units_intermediate_path,
+            )
+            return [], [], semantic_units_path
+
+        self._save_semantic_units(
+            units,
+            semantic_units_path,
+            mirror_output_path=semantic_units_intermediate_path,
+        )
+        logger.info(
+            "[Phase2A] checkpoint saved after segmentation: "
+            f"units={len(units)}, path={semantic_units_path}"
+        )
+
+        units = await self._apply_modality_classification(units)
+
+        screenshot_requests: List[ScreenshotRequest] = []
+        clip_requests: List[ClipRequest] = []
+
+        for unit in units:
+            try:
+                normalized_actions: List[Dict[str, Any]] = []
+                for action in list(getattr(unit, "action_segments", []) or []):
+                    if not isinstance(action, dict):
+                        continue
+                    item = dict(action)
+                    item["start_sec"] = item.get("start_sec", item.get("start", unit.start_sec))
+                    item["end_sec"] = item.get("end_sec", item.get("end", unit.end_sec))
+
+                    internal_islands = []
+                    for island in list(item.get("internal_stable_islands", []) or []):
+                        if not isinstance(island, dict):
+                            continue
+                        island_item = dict(island)
+                        if "start" not in island_item:
+                            island_item["start"] = island_item.get("start_sec", item["start_sec"])
+                        if "end" not in island_item:
+                            island_item["end"] = island_item.get("end_sec", item["end_sec"])
+                        internal_islands.append(island_item)
+                    if internal_islands:
+                        item["internal_stable_islands"] = internal_islands
+                    normalized_actions.append(item)
+                if normalized_actions:
+                    unit.action_segments = normalized_actions
+
+                normalized_islands: List[Dict[str, Any]] = []
+                for island in list(getattr(unit, "stable_islands", []) or []):
+                    if not isinstance(island, dict):
+                        continue
+                    island_item = dict(island)
+                    island_item["start_sec"] = island_item.get("start_sec", island_item.get("start", unit.start_sec))
+                    island_item["end_sec"] = island_item.get("end_sec", island_item.get("end", unit.end_sec))
+                    if "start" not in island_item:
+                        island_item["start"] = island_item["start_sec"]
+                    if "end" not in island_item:
+                        island_item["end"] = island_item["end_sec"]
+                    normalized_islands.append(island_item)
+                if normalized_islands:
+                    unit.stable_islands = normalized_islands
+
+                material_requests = await self._collect_material_requests(unit)
+                unit._material_requests = material_requests
+                screenshot_requests.extend(material_requests.screenshot_requests)
+                clip_requests.extend(material_requests.clip_requests)
+            except Exception as error:
+                logger.exception(
+                    f"[Phase2A] unit processing failed: unit_id={getattr(unit, 'unit_id', '')}, error={error}"
+                )
+                unit._material_requests = MaterialRequests([], [], [])
+            finally:
+                self._save_semantic_units(
+                    units,
+                    semantic_units_path,
+                    mirror_output_path=semantic_units_intermediate_path,
+                )
+
+        self._save_semantic_units(
+            units,
+            semantic_units_path,
+            mirror_output_path=semantic_units_intermediate_path,
+        )
+        logger.info(
+            f"[Phase2A] analyze_only done: units={len(units)}, screenshots={len(screenshot_requests)}, clips={len(clip_requests)}"
+        )
+        return screenshot_requests, clip_requests, semantic_units_path
+
+    async def analyze_segmentation_only(self) -> str:
+        """仅执行 Phase2A 语义切分并落盘，不生成任何素材请求。"""
+        logger.info("[Phase2A] analyze_segmentation_only start")
+        semantic_units_path = os.path.join(self.output_dir, "semantic_units_phase2a.json")
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        semantic_units_intermediate_path = os.path.join(
+            self.output_dir,
+            "intermediates",
+            "semantic_units_phase2a.json",
+        )
+
+        if not self.paragraphs:
+            logger.warning("[Phase2A] step6 paragraphs is empty, saving empty semantic units")
+            self._save_semantic_units(
+                [],
+                semantic_units_path,
+                mirror_output_path=semantic_units_intermediate_path,
+            )
+            return semantic_units_path
+
+        sentence_timestamps = self._build_sentence_timestamps()
+        segmentation_result = await self.segmenter.segment(
+            paragraphs=self.paragraphs,
+            sentence_timestamps=sentence_timestamps,
+        )
+        units = list(getattr(segmentation_result, "semantic_units", []) or [])
+
+        if not units:
+            logger.warning("[Phase2A] semantic segmentation produced no units")
+            self._save_semantic_units(
+                [],
+                semantic_units_path,
+                mirror_output_path=semantic_units_intermediate_path,
+            )
+            return semantic_units_path
+
+        self._save_semantic_units(
+            units,
+            semantic_units_path,
+            mirror_output_path=semantic_units_intermediate_path,
+        )
+        logger.info(
+            "[Phase2A] checkpoint saved after segmentation: "
+            f"units={len(units)}, path={semantic_units_path}"
+        )
+        logger.info(f"[Phase2A] analyze_segmentation_only done: units={len(units)}")
+        return semantic_units_path
+
+    async def assemble_only(
+        self,
+        semantic_units_json_path: str,
+        screenshots_dir: str,
+        clips_dir: str,
+        title: str,
+    ) -> Tuple[str, str]:
+        """仅执行 Phase2B：外部素材映射 + 富文本文档组装。"""
+        from services.python_grpc.src.content_pipeline.markdown_enhancer import MarkdownEnhancer
+
+        logger.info("[Phase2B] assemble_only start")
+
+        if not semantic_units_json_path or not os.path.exists(semantic_units_json_path):
+            raise FileNotFoundError(f"semantic_units_json not found: {semantic_units_json_path}")
+
+        self._refresh_subtitle_context_from_semantic_units(semantic_units_json_path)
+        units, material_requests_map = self._load_semantic_units(semantic_units_json_path)
+
+        for unit in units:
+            material_requests = material_requests_map.get(
+                unit.unit_id,
+                MaterialRequests([], [], []),
+            )
+            self._apply_external_materials(
+                unit=unit,
+                screenshots_dir=screenshots_dir,
+                clips_dir=clips_dir,
+                material_requests=material_requests,
+            )
+
+        self._flush_image_match_audit()
+
+        document_title = str(title or "视频内容").strip() or "视频内容"
+        document = self._assemble_document(units, document_title)
+
+        Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+        markdown_path = os.path.join(self.output_dir, "enhanced_output.md")
+        json_path = os.path.join(self.output_dir, "result.json")
+
+        document.to_json(json_path)
+        enhancer = MarkdownEnhancer()
+        if not enhancer.enabled:
+            logger.warning("[Phase2B] MarkdownEnhancer disabled (DEEPSEEK_API_KEY not set), using rule-based flow")
+        try:
+            enhanced_markdown = await enhancer.enhance(
+                json_path,
+                subject="数据结构与算法",
+                markdown_dir=self.output_dir,
+            )
+            with open(markdown_path, "w", encoding="utf-8") as file_obj:
+                file_obj.write(str(enhanced_markdown or ""))
+        except Exception as error:
+            logger.error(f"[Phase2B] Markdown enhancement failed, fallback to base markdown: {error}")
+            document.to_markdown(markdown_path, assets_relative_dir=self.config.assets_subdir)
+
+        logger.info(
+            f"[Phase2B] assemble_only done: sections={len(document.sections)}, markdown={markdown_path}, json={json_path}"
+        )
+        return markdown_path, json_path
+
+    def _refresh_subtitle_context_from_semantic_units(self, semantic_units_json_path: str) -> None:
+        """
+        做什么：在 Phase2B 组装前，按 semantic_units 所在目录刷新 step2/step6/句子时间戳上下文。
+        为什么：Assemble 入口可能与 Phase2A 输出目录不一致，导致句子映射出现“字幕找不到”。
+        权衡：仅在能发现真实文件时覆盖当前路径，避免破坏已有可用上下文。
+        """
+        semantic_path = str(semantic_units_json_path or "").strip()
+        if not semantic_path:
+            return
+
+        semantic_base_dir = str(Path(semantic_path).resolve().parent)
+        resolved_step2 = SubtitleRepository.resolve_intermediate_path(
+            provided_path=self.step2_path,
+            output_dir=semantic_base_dir,
+            candidate_names=SubtitleRepository.DEFAULT_STEP2_CANDIDATES,
+        )
+        resolved_step6 = SubtitleRepository.resolve_intermediate_path(
+            provided_path=self.step6_path,
+            output_dir=semantic_base_dir,
+            candidate_names=SubtitleRepository.DEFAULT_STEP6_CANDIDATES,
+        )
+        resolved_sentence_ts = SubtitleRepository.resolve_intermediate_path(
+            provided_path=self.sentence_timestamps_path,
+            output_dir=semantic_base_dir,
+            candidate_names=SubtitleRepository.DEFAULT_SENTENCE_TS_CANDIDATES,
+        )
+
+        current_step2 = str(self.step2_path or "").strip()
+        current_step6 = str(self.step6_path or "").strip()
+        current_sentence_ts = str(self.sentence_timestamps_path or "").strip()
+
+        if (
+            resolved_step2 == current_step2
+            and resolved_step6 == current_step6
+            and resolved_sentence_ts == current_sentence_ts
+        ):
+            return
+
+        self.subtitle_repo.set_paths(
+            step2_path=resolved_step2,
+            step6_path=resolved_step6,
+            sentence_timestamps_path=resolved_sentence_ts,
+            clear_cache=True,
+        )
+        self.step2_path = self.subtitle_repo.step2_path
+        self.step6_path = self.subtitle_repo.step6_path
+        self.sentence_timestamps_path = self.subtitle_repo.sentence_timestamps_path
+        self.subtitles = self.subtitle_repo.load_step2_subtitles()
+        self.paragraphs = self.subtitle_repo.load_step6_paragraphs()
+        logger.info(
+            "[Phase2B] subtitle context refreshed from semantic_units dir: "
+            f"step2={bool(self.step2_path)}, step6={bool(self.step6_path)}, "
+            f"sentence_ts={bool(self.sentence_timestamps_path)}"
+        )
 
     def _merge_cv_results(self, units: List[SemanticUnit], cv_results_path: str):
         """
@@ -1088,7 +1739,7 @@ class RichTextPipeline:
                 logger.info(f"Loaded cached modality classification result from {cache_path}")
                 # 简单验证: 数量一致
                 if len(cached_units) == len(units):
-                    # 还需要验证 unit_id 是否匹配?
+                    # 历史乱码注释已清理。
                     # 假设 paragraphs 没变，segment 结果也没变，则匹配。
                     # 如果 segment 变了，limit 可能会不同。
                     # 严格来说应该 match unit_ids. 但这里作为 user 要求的复用，先假设一致.

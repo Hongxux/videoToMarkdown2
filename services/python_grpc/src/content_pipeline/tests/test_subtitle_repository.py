@@ -165,3 +165,22 @@ def test_set_raw_subtitles_supports_in_memory_range_queries():
     )
     assert text == "first second third"
 
+
+def test_set_raw_paragraphs_supports_in_memory_paragraph_loading():
+    repository = SubtitleRepository()
+    repository.set_raw_paragraphs(
+        [
+            {
+                "paragraph_id": "P001",
+                "text": "alpha",
+                "source_sentence_ids": ["S001", "S002"],
+                "merge_type": "normal",
+            }
+        ]
+    )
+
+    paragraphs = repository.load_step6_paragraphs()
+    assert len(paragraphs) == 1
+    assert paragraphs[0]["paragraph_id"] == "P001"
+    assert paragraphs[0]["text"] == "alpha"
+

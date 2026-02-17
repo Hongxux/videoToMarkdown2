@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import re
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -130,6 +132,36 @@ async def split_video_by_semantic_units(
         "--out-dir", str(clips_dir),
         "--overwrite"  # 覆盖已存在的文件
     ]
+
+    # 超长片段预切降码率/分辨率：仅用于 VL 预分析输入，最终 assets 仍从原视频按时间戳截取。
+    split_pre_cut_config = {}
+    if isinstance(getattr(generator, "config", None), dict):
+        raw_cfg = generator.config.get("semantic_split_pre_cut", {})
+        if isinstance(raw_cfg, dict):
+            split_pre_cut_config = raw_cfg
+    pre_cut_enabled = bool(split_pre_cut_config.get("enabled", True))
+    if pre_cut_enabled:
+        large_segment_threshold_sec = max(
+            0.0,
+            safe_float(split_pre_cut_config.get("large_segment_threshold_sec", 120.0), 120.0),
+        )
+        large_segment_scale_height = max(
+            0,
+            int(safe_float(split_pre_cut_config.get("downscale_height", 480.0), 480.0)),
+        )
+        large_segment_video_bitrate = (
+            str(split_pre_cut_config.get("video_bitrate", "500k") or "").strip() or "500k"
+        )
+        cmd.extend(
+            [
+                "--large-segment-threshold-sec",
+                f"{large_segment_threshold_sec:.3f}",
+                "--large-segment-scale-height",
+                str(large_segment_scale_height),
+                "--large-segment-video-bitrate",
+                large_segment_video_bitrate,
+            ]
+        )
     
     logger.info(f"执行视频切割: {' '.join(cmd)}")
     
@@ -293,6 +325,7 @@ async def optimize_screenshots_batch_mode(
         max_inflight = max(1, max_workers * max_inflight_multiplier)
         sample_rate = int(generator.screenshot_config.get("prefetch_sample_rate", 2))
         target_height = int(generator.screenshot_config.get("prefetch_target_height", 360))
+        max_prefetch_frames = int(generator.screenshot_config.get("prefetch_max_frames_per_chunk", 240))
         chunk_max_span_sec = float(generator.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
         chunk_max_requests = int(generator.screenshot_config.get("prefetch_chunk_max_requests", 1000))
 
@@ -305,7 +338,8 @@ async def optimize_screenshots_batch_mode(
 
         logger.info(
             f"📦 [Batch Mode] Config: workers={max_workers}, inflight={max_inflight}, "
-            f"chunks={len(chunks)}, max_span={chunk_max_span_sec:.2f}s, max_req/chunk={chunk_max_requests}"
+            f"chunks={len(chunks)}, max_span={chunk_max_span_sec:.2f}s, max_req/chunk={chunk_max_requests}, "
+            f"max_prefetch_frames={max_prefetch_frames}"
         )
 
         executor = generator._cv_executor
@@ -407,7 +441,7 @@ async def optimize_screenshots_batch_mode(
                 executor.shutdown(wait=True)
         
     except ImportError as e:
-        error_msg = f"❌ cv_worker 导入失败: {e} (sys.path={sys.path[:3]}...)"
+        error_msg = f"[CV PARALLEL] cv_worker import failed: {e} (sys.path={sys.path[:3]}...)"
         logger.warning(error_msg)
         print(f"\n{'='*80}", flush=True)
         print(f"[CV PARALLEL] {error_msg}", flush=True)
@@ -416,7 +450,7 @@ async def optimize_screenshots_batch_mode(
         traceback.print_exc()
         return await generator._optimize_screenshot_timestamps(video_path, screenshot_requests)
     except Exception as e:
-        error_msg = f"❌ 并行 CV 优化失败: {e}"
+        error_msg = f"[CV PARALLEL] optimize failed: {e}"
         logger.error(error_msg)
         print(f"\n{'='*80}", flush=True)
         print(f"[CV PARALLEL] {error_msg}", flush=True)
@@ -487,6 +521,7 @@ async def optimize_screenshots_streaming_pipeline(
 
         sample_rate = int(generator.screenshot_config.get("prefetch_sample_rate", 2))
         target_height = int(generator.screenshot_config.get("prefetch_target_height", 360))
+        max_prefetch_frames = int(generator.screenshot_config.get("prefetch_max_frames_per_chunk", 240))
         chunk_max_span_sec = float(generator.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
         chunk_max_requests = int(generator.screenshot_config.get("prefetch_chunk_max_requests", 1000))
 
@@ -500,7 +535,8 @@ async def optimize_screenshots_streaming_pipeline(
         logger.info(
             f"📦 [Streaming Pipeline] Config: workers={max_workers}, inflight={max_inflight}, "
             f"overlap_buffers={overlap_buffers}, chunks={len(chunks)}, "
-            f"max_span={chunk_max_span_sec:.2f}s, max_req/chunk={chunk_max_requests}"
+            f"max_span={chunk_max_span_sec:.2f}s, max_req/chunk={chunk_max_requests}, "
+            f"max_prefetch_frames={max_prefetch_frames}"
         )
 
         executor = generator._cv_executor
@@ -697,7 +733,7 @@ async def optimize_screenshots_streaming_pipeline(
                 executor.shutdown(wait=True)
         
     except ImportError as e:
-        error_msg = f"❌ cv_worker 导入失败 (流式模式): {e}"
+        error_msg = f"[CV STREAMING] cv_worker import failed: {e}"
         logger.warning(error_msg)
         print(f"\n{'='*80}", flush=True)
         print(f"[CV STREAMING] {error_msg}", flush=True)
@@ -706,7 +742,7 @@ async def optimize_screenshots_streaming_pipeline(
         traceback.print_exc()
         return await generator._optimize_screenshot_timestamps(video_path, screenshot_requests)
     except Exception as e:
-        error_msg = f"❌ 流式处理失败: {e}"
+        error_msg = f"[CV STREAMING] pipeline failed: {e}"
         logger.error(error_msg)
         print(f"\n{'='*80}", flush=True)
         print(f"[CV STREAMING] {error_msg}", flush=True)
@@ -715,4 +751,3 @@ async def optimize_screenshots_streaming_pipeline(
         logger.error(traceback.format_exc())
         traceback.print_exc()
         return await generator._optimize_screenshot_timestamps(video_path, screenshot_requests)
-

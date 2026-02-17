@@ -168,6 +168,14 @@ class KnowledgeClassifier:
         self.base_url = base_url or "https://api.deepseek.com"
         self.step2_path = str(step2_path or "")
         self.subtitle_repo = subtitle_repo or SubtitleRepository(step2_path=self.step2_path)
+        self._single_system_prompt = get_prompt(
+            PromptKeys.DEEPSEEK_KC_SYSTEM,
+            fallback=SYSTEM_PROMPT,
+        )
+        self._single_user_template = get_prompt(
+            PromptKeys.DEEPSEEK_KC_USER,
+            fallback=USER_PROMPT_TEMPLATE,
+        )
         self._batch_system_prompt = get_prompt(
             PromptKeys.DEEPSEEK_KC_BATCH_SYSTEM,
             fallback=self.BATCH_SYSTEM_PROMPT,
@@ -625,6 +633,16 @@ ID: {item['id']}
         if cur:
             chunks.append(cur)
 
+        raw_chunk_inflight = str(
+            os.getenv("MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT", "48") or "48"
+        ).strip()
+        try:
+            chunk_max_inflight = max(1, int(raw_chunk_inflight))
+        except Exception:
+            chunk_max_inflight = 48
+        chunk_worker_count = max(1, min(chunk_max_inflight, len(chunks) or 1))
+        chunk_sem = asyncio.Semaphore(chunk_worker_count)
+
         # 3) Model Routing（沿用单 unit 的快慢模型策略）
         selected_client = self._llm_client
         model_name = self.smart_model
@@ -637,7 +655,8 @@ ID: {item['id']}
 
         logger.info(
             f"[MultiUnit] {len(units)} units / {total_actions} actions -> {len(chunks)} chunks "
-            f"(token_budget={token_budget}, max_units_per_chunk={max_units_per_chunk})"
+            f"(token_budget={token_budget}, max_units_per_chunk={max_units_per_chunk}, "
+            f"chunk_max_inflight={chunk_worker_count})"
         )
 
         async def _process_chunk(chunk_units: List[dict]) -> list:
@@ -681,8 +700,12 @@ ID: {item['id']}
                 if external_limiter is not None and acquired:
                     await external_limiter.release(acquired)
 
+        async def _process_chunk_with_cap(chunk_units: List[dict]) -> list:
+            async with chunk_sem:
+                return await _process_chunk(chunk_units)
+
         # 并行处理 chunks（chunk 数量通常远小于 unit 数，能显著减少 API 调用次数）
-        all_chunk_res = await asyncio.gather(*[_process_chunk(c) for c in chunks])
+        all_chunk_res = await asyncio.gather(*[_process_chunk_with_cap(c) for c in chunks])
 
         # 4) 归并：key -> classification
         
@@ -898,8 +921,22 @@ ID: {item['id']}
             except Exception:
                 pass
 
-        # 3) 再尝试 Python literal（兼容单引号/尾随逗号/True/False/None）
+        # 3) 尝试修复“输出被截断”的场景（缺少结尾引号/括号）
+        repair_candidates: List[str] = []
         for candidate in (raw, normalized):
+            if not candidate:
+                continue
+            repaired = self._repair_unclosed_json(candidate)
+            if not repaired or repaired == candidate or repaired in repair_candidates:
+                continue
+            repair_candidates.append(repaired)
+            try:
+                return json.loads(repaired)
+            except Exception:
+                pass
+
+        # 4) 再尝试 Python literal（兼容单引号/尾随逗号/True/False/None）
+        for candidate in (raw, normalized, *repair_candidates):
             if not candidate:
                 continue
             try:
@@ -1002,6 +1039,74 @@ ID: {item['id']}
         s = KnowledgeClassifier._remove_trailing_commas(s)
 
         return s
+
+    @staticmethod
+    def _repair_unclosed_json(text: str) -> str:
+        """
+        做什么：尽量修复被截断的 JSON 文本（未闭合字符串/括号）。
+        为什么：LLM 批量输出偶发截断时，整批结果会因语法不完整而丢失。
+        权衡：只做最小闭合修复，不猜测缺失字段语义。
+        """
+        if not text:
+            return ""
+
+        # 仅保留首个 JSON 起点之后的内容，避免前缀说明文本干扰解析
+        start_idx = -1
+        for i, ch in enumerate(text):
+            if ch in {"[", "{"}:
+                start_idx = i
+                break
+        if start_idx < 0:
+            return text
+
+        src = text[start_idx:].strip()
+        if not src:
+            return ""
+
+        out: List[str] = []
+        stack: List[str] = []
+        in_str = False
+        quote = ""
+        escape = False
+
+        for ch in src:
+            out.append(ch)
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == quote:
+                    in_str = False
+                    quote = ""
+                continue
+
+            if ch in {"\"", "'"}:
+                in_str = True
+                quote = ch
+                continue
+
+            if ch in {"[", "{"}:
+                stack.append(ch)
+                continue
+
+            if ch in {"]", "}"} and stack:
+                top = stack[-1]
+                if (top == "[" and ch == "]") or (top == "{" and ch == "}"):
+                    stack.pop()
+
+        # 若字符串以反斜杠结尾，先补一个反斜杠再闭合引号，避免形成非法转义
+        if in_str and quote:
+            if escape:
+                out.append("\\")
+            out.append(quote)
+
+        while stack:
+            top = stack.pop()
+            out.append("]" if top == "[" else "}")
+
+        repaired = "".join(out)
+        return KnowledgeClassifier._remove_trailing_commas(repaired)
 
     @staticmethod
     def _replace_outside_strings(text: str, mapping: Dict[str, str]) -> str:

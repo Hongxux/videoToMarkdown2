@@ -10,8 +10,10 @@
 输出：
 - 各函数/类返回的结构化结果或副作用。"""
 
+import os
 import time
-from typing import Dict, Any
+from collections import Counter
+from typing import Dict, Any, List
 
 from ..state import PipelineState
 from ..tools.file_validator import (
@@ -22,6 +24,7 @@ from ..tools.file_validator import (
 )
 from ..llm.client import create_llm_client
 from ..monitoring.logger import get_logger
+from .step_contracts import parse_step1_topic_payload
 
 
 # Step 1 主题推断 Prompt
@@ -39,6 +42,118 @@ TOPIC_INFERENCE_PROMPT = """请根据以下视频字幕样本，推断视频的�
 
 【输出格式】
 {{"domain": "string", "main_topic": "string"}}"""
+
+TOPIC_INFERENCE_SYSTEM_PROMPT = (
+    "你是视频内容理解助手。"
+    "根据字幕样本和标题判断视频 domain 与 main_topic。"
+    "必须严格输出 JSON 对象，不要输出任何额外说明。"
+)
+
+TOPIC_SAMPLE_BASE_COUNT = 20
+TOPIC_SAMPLE_MAX_COUNT = 120
+TOPIC_SAMPLE_EXTRA_INTERVAL_MINUTES = 15
+TOPIC_SAMPLE_EXTRA_PER_INTERVAL = 5
+TOPIC_SAMPLE_MAX_CHARS = 6000
+
+
+def _read_int_env(name: str, default: int) -> int:
+    """读取整数环境变量，异常时返回默认值。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    """读取布尔环境变量。"""
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    value = str(raw).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _estimate_subtitle_duration_sec(subtitles: List[Dict[str, Any]]) -> float:
+    """根据字幕估算视频时长（秒）。"""
+    if not subtitles:
+        return 0.0
+    return max(float(item.get("end_sec", 0.0) or 0.0) for item in subtitles)
+
+
+def _resolve_topic_sample_count(video_duration_sec: float, subtitle_count: int) -> int:
+    """按视频时长动态计算主题推断样本数量。"""
+    if subtitle_count <= 0:
+        return 0
+
+    duration_minutes = max(0.0, float(video_duration_sec) / 60.0)
+    extra_intervals = int(duration_minutes // TOPIC_SAMPLE_EXTRA_INTERVAL_MINUTES)
+    target = TOPIC_SAMPLE_BASE_COUNT + extra_intervals * TOPIC_SAMPLE_EXTRA_PER_INTERVAL
+    target = min(TOPIC_SAMPLE_MAX_COUNT, target)
+    return max(1, min(subtitle_count, target))
+
+
+def _pick_uniform_subtitle_samples(
+    subtitles: List[Dict[str, Any]],
+    target_count: int,
+) -> List[Dict[str, Any]]:
+    """从全量字幕中均匀抽样，覆盖开头/中段/结尾。"""
+    if target_count <= 0 or not subtitles:
+        return []
+    if len(subtitles) <= target_count:
+        return list(subtitles)
+
+    total = len(subtitles)
+    if target_count == 1:
+        return [subtitles[0]]
+
+    step = (total - 1) / float(target_count - 1)
+    ordered_indices: List[int] = []
+    seen = set()
+    for idx in range(target_count):
+        picked = max(0, min(total - 1, int(round(idx * step))))
+        if picked in seen:
+            continue
+        ordered_indices.append(picked)
+        seen.add(picked)
+
+    # In rare rounding-collision cases, backfill nearest untouched indices.
+    if len(ordered_indices) < target_count:
+        for candidate in range(total):
+            if candidate in seen:
+                continue
+            ordered_indices.append(candidate)
+            seen.add(candidate)
+            if len(ordered_indices) >= target_count:
+                break
+
+    ordered_indices.sort()
+    return [subtitles[idx] for idx in ordered_indices]
+
+
+def _build_topic_sample_text(
+    sample_subtitles: List[Dict[str, Any]],
+    max_chars: int = TOPIC_SAMPLE_MAX_CHARS,
+) -> str:
+    """构建主题推断字幕样本，限制总字符数以避免输入过长。"""
+    lines: List[str] = []
+    used = 0
+    budget = max(200, int(max_chars))
+
+    for subtitle in sample_subtitles:
+        line = f"[{subtitle['start_sec']:.1f}s] {subtitle['text']}"
+        line_len = len(line) + 1
+        if used + line_len > budget:
+            remaining = budget - used
+            if remaining > 16:
+                lines.append(line[: remaining - 3] + "...")
+            break
+        lines.append(line)
+        used += line_len
+
+    return "\n".join(lines)
 
 
 async def step1_node(state: PipelineState) -> Dict[str, Any]:
@@ -68,6 +183,7 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
         "video_path": state["video_path"],
         "subtitle_path": state["subtitle_path"]
     })
+    observability = Counter()
     
     errors = []
     
@@ -80,6 +196,7 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
         if not video_valid:
             errors.append({"step": "step1", "type": "video_validation", "error": video_error})
             logger.log_warning(f"Video validation failed: {video_error}")
+            observability["video_validation_failed"] += 1
         
         # 2. [Tool] 校验字幕文件
         logger.info("Validating subtitle file...")
@@ -89,6 +206,7 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
         if not subtitle_valid:
             errors.append({"step": "step1", "type": "subtitle_validation", "error": subtitle_error})
             logger.log_warning(f"Subtitle validation failed: {subtitle_error}")
+            observability["subtitle_validation_failed"] += 1
         
         # 如果文件校验失败，返回错误
         if not video_valid or not subtitle_valid:
@@ -99,7 +217,8 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
                 "video_title": "",
                 "errors": errors,
                 "current_step": "step1_validate",
-                "current_step_status": "failed"
+                "current_step_status": "failed",
+                "step_observability": {"step1_validate": dict(observability)},
             }
             logger.log_output(output, summary_only=True)
             logger.end(success=False)
@@ -108,22 +227,63 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
         # 3. [Tool] 提取视频标题
         video_title = extract_video_title(state["video_path"])
         logger.info(f"Extracted video title: {video_title}")
+
+        # 3.5 [Fast path] 若已有稳定主题信息，跳过字幕采样与 LLM 推断
+        reuse_inferred_topic = _read_bool_env("TRANSCRIPT_STEP1_REUSE_INFERRED_TOPIC", True)
+        cached_domain = str(state.get("domain", "") or "").strip()
+        cached_main_topic = str(state.get("main_topic", "") or "").strip()
+        if reuse_inferred_topic and cached_domain and cached_main_topic:
+            logger.info("Reusing existing domain/main_topic from state, skip topic inference")
+            observability["topic_reuse_hit"] += 1
+            output = {
+                "is_valid": True,
+                "domain": cached_domain,
+                "main_topic": cached_main_topic,
+                "video_title": video_title,
+                "current_step": "step1_validate",
+                "current_step_status": "completed",
+                "execution_trace": [{
+                    "step_name": "step1_validate",
+                    "status": "success",
+                    "duration_ms": 0
+                }],
+                "llm_calls": [],
+                "token_usage": {
+                    "step1_validate": 0
+                },
+                "step_observability": {"step1_validate": dict(observability)},
+            }
+            logger.log_output(output, summary_only=True)
+            timing = logger.end(success=True)
+            output["step_timings"] = {"step1_validate": timing["duration_ms"]}
+            return output
         
         # 4. [Tool] 读取字幕样本
-        logger.info("Reading subtitle sample...")
-        sample_subtitles = read_subtitle_sample(state["subtitle_path"], count=20)
+        logger.info("Reading subtitles for dynamic topic sampling...")
+        all_subtitles = read_subtitle_sample(state["subtitle_path"], count=None)
+        subtitle_count = len(all_subtitles)
+        video_duration_sec = _estimate_subtitle_duration_sec(all_subtitles)
+        sample_count = _resolve_topic_sample_count(video_duration_sec, subtitle_count)
+        sample_subtitles = _pick_uniform_subtitle_samples(all_subtitles, sample_count)
+        sample_budget_chars = max(200, _read_int_env("TRANSCRIPT_STEP1_SAMPLE_MAX_CHARS", TOPIC_SAMPLE_MAX_CHARS))
+        sample_text = _build_topic_sample_text(sample_subtitles, max_chars=sample_budget_chars)
+        observability["subtitle_count"] += subtitle_count
+        observability["sample_count"] += len(sample_subtitles)
+        observability["sample_budget_chars"] += sample_budget_chars
+
         logger.log_tool_call(
-            "read_subtitle_sample", 
-            {"path": state["subtitle_path"], "count": 20}, 
-            f"{len(sample_subtitles)} subtitles"
+            "read_subtitle_sample",
+            {
+                "path": state["subtitle_path"],
+                "count": None,
+                "subtitle_count": subtitle_count,
+                "video_duration_sec": round(video_duration_sec, 2),
+                "sample_count": sample_count,
+                "sample_budget_chars": sample_budget_chars,
+            },
+            f"{len(sample_subtitles)} sampled subtitles"
         )
-        
-        # 格式化字幕样本
-        sample_text = "\n".join([
-            f"[{s['start_sec']:.1f}s] {s['text']}" 
-            for s in sample_subtitles
-        ])
-        
+
         # 5. [LLM] 推断领域和主题
         logger.info("Inferring domain and topic with LLM...")
         llm = create_llm_client(purpose="topic")
@@ -133,7 +293,10 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
             video_title=video_title or "(无)"
         )
         
-        result, response = await llm.complete_json(prompt)
+        result, response = await llm.complete_json(
+            prompt,
+            system_prompt=TOPIC_INFERENCE_SYSTEM_PROMPT,
+        )
         
         logger.log_llm_call(
             prompt=prompt,
@@ -144,8 +307,10 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
             latency_ms=response.latency_ms
         )
         
-        domain = result.get("domain", "未知")
-        main_topic = result.get("main_topic", "")
+        domain, main_topic, payload_metrics = parse_step1_topic_payload(result)
+        observability.update(payload_metrics)
+        if not domain:
+            domain = "未知"
         
         logger.info(f"Inferred domain: {domain}, topic: {main_topic}")
         
@@ -172,7 +337,8 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
             }],
             "token_usage": {
                 "step1_validate": response.total_tokens
-            }
+            },
+            "step_observability": {"step1_validate": dict(observability)},
         }
         
         logger.log_output(output, summary_only=True)
@@ -192,5 +358,7 @@ async def step1_node(state: PipelineState) -> Dict[str, Any]:
             "video_title": "",
             "errors": [{"step": "step1", "type": "exception", "error": str(e)}],
             "current_step": "step1_validate",
-            "current_step_status": "error"
+            "current_step_status": "error",
+            "step_observability": {"step1_validate": dict(observability)},
         }
+

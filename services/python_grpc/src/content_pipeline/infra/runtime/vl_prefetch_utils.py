@@ -10,6 +10,7 @@
 """
 
 import os
+import math
 from typing import Any, Dict, List, Optional
 
 
@@ -54,8 +55,28 @@ def build_screenshot_prefetch_chunks(
     windows = []
     for index, request in enumerate(screenshot_requests):
         original_ts = float(request.get("timestamp_sec", 0) or 0.0)
-        search_start = max(0.0, original_ts - time_window)
-        search_end = original_ts + time_window
+        default_start = max(0.0, original_ts - time_window)
+        default_end = original_ts + time_window
+
+        # 允许请求级窗口覆盖全局 time_window（用于动作头尾定向截图）。
+        raw_window_start = request.get("_window_start_sec")
+        raw_window_end = request.get("_window_end_sec")
+        if raw_window_start is None and raw_window_end is None:
+            search_start = default_start
+            search_end = default_end
+        else:
+            try:
+                search_start = float(raw_window_start) if raw_window_start is not None else default_start
+            except (TypeError, ValueError):
+                search_start = default_start
+            try:
+                search_end = float(raw_window_end) if raw_window_end is not None else default_end
+            except (TypeError, ValueError):
+                search_end = default_end
+            search_start = max(0.0, search_start)
+            if search_end < search_start:
+                search_end = search_start
+
         unit_id = (
             request.get("semantic_unit_id")
             or request.get("unit_id")
@@ -156,3 +177,32 @@ def build_task_params_from_ts_map(
         )
     return task_params
 
+
+def resolve_adaptive_prefetch_step(
+    *,
+    start_frame: int,
+    end_frame: int,
+    sample_rate: int,
+    max_frames_per_chunk: int,
+) -> int:
+    """
+    解析预读采样步长：在基础采样率之上，按单 chunk 帧数上限自适应放大步长。
+
+    设计目标：
+    - 保持原有 `sample_rate` 作为“质量优先”的基础步长；
+    - 当跨度过大时自动增大步长，避免单 chunk 预读过多帧导致内存峰值上升；
+    - 保证最小步长为 1，并保持可预测的整数行为。
+    """
+    safe_sample_rate = max(1, int(sample_rate))
+    safe_max_frames = max(1, int(max_frames_per_chunk))
+
+    if end_frame < start_frame:
+        return safe_sample_rate
+
+    span_frames = int(end_frame - start_frame + 1)
+    if span_frames <= safe_max_frames:
+        return safe_sample_rate
+
+    # 先按帧数上限推导“至少需要多大的步长”，再与基础采样率取 max。
+    cap_step = int(math.ceil(span_frames / float(safe_max_frames)))
+    return max(safe_sample_rate, cap_step)

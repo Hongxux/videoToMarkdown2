@@ -1,14 +1,14 @@
 """
-模块说明：Module2 内容增强中的 visual_feature_extractor 模块。
-执行逻辑：
-1) 聚合本模块的类/函数，对外提供核心能力。
-2) 通过内部调用与外部依赖完成具体处理。
-实现方式：通过模块内函数组合与外部依赖调用实现。
-核心价值：统一模块职责边界，降低跨文件耦合成本。
-输入：
-- 调用方传入的参数与数据路径。
-输出：
-- 各函数/类返回的结构化结果或副作用。"""
+模块说明：Module2 内增强业 visual_feature_extractor 模块?
+执逻辑?
+1) 聚合木块的?函数，外提供核心能力?
+2) 通过内部调用与部依赖完成具体理?
+实现方式：过模块内函数组合与外部依赖调用实现?
+核心价：统一模块职责边界，降低跨文件耦合成本?
+输入?
+- 调用方传入的参数与数捷径?
+输出?
+- 各函?类返回的结构化结果或剽用?"""
 
 import cv2
 import numpy as np
@@ -24,14 +24,16 @@ from pathlib import Path
 from collections import OrderedDict
 from multiprocessing import shared_memory
 import threading
+from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
 from services.python_grpc.src.content_pipeline.infra.runtime.resource_utils import ResourceOrchestrator
 from services.python_grpc.src.content_pipeline.infra.runtime.dynamic_decision_engine import DynamicDecisionEngine, GlobalAnalysisCache
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
 
-# 💥 性能优化: 尝试引入 Numba JIT 加速
+# 💥 性能优化: 尝试引入 Numba JIT 加?
 # V5: CLIP Support
 try:
     from PIL import Image
+    import transformers
     from sentence_transformers import SentenceTransformer, util
     HAS_CLIP = True
 except ImportError:
@@ -47,16 +49,16 @@ try:
     @jit(nopython=True, fastmath=True, parallel=True)
     def _numba_mse(arr1, arr2):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部函数组合与条件判断实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - arr1: 函数入参（类型：未标注）。
-        - arr2: 函数入参（类型：未标注）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部函数组合与条件判斮现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - arr1: 函数入参（类型：朠泼?
+        - arr2: 函数入参（类型：朠泼?
+        输出参数?
+        - 函数计算/封后的结果对象?"""
         s = 0.0
         h, w = arr1.shape
         # Use prange for automatic multi-threading on large image segments
@@ -75,16 +77,16 @@ except Exception as e:
     
     def _numba_mse(arr1, arr2):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部函数组合与条件判断实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - arr1: 函数入参（类型：未标注）。
-        - arr2: 函数入参（类型：未标注）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部函数组合与条件判斮现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - arr1: 函数入参（类型：朠泼?
+        - arr2: 函数入参（类型：朠泼?
+        输出参数?
+        - 函数计算/封后的结果对象?"""
         return 0.0 # Placeholder
 
 from services.python_grpc.src.content_pipeline.phase2a.vision.visual_element_detection_helpers import VisualElementDetector
@@ -93,11 +95,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VisualFeatures:
-    """类说明：VisualFeatures 负责封装本模块相关能力。
-    执行步骤：
-    1) 步骤1：接收调用请求并组织上下文数据。
-    2) 步骤2：协调类内方法完成业务处理。
-    3) 步骤3：输出处理结果并提供可复用能力。"""
+    """类明：VisualFeatures 负责封木块相关能力?
+    执步?
+    1) 步1：接收调用求并组织上下文数?
+    2) 步2：协调类内方法完成业务理?
+    3) 步3：输出理结果并提供用能力?"""
     visual_type: str  # "static" | "dynamic" | "mixed"
     avg_mse: float
     avg_diff_rate: float # 💥 Added for Phase 4.5 diagnostics
@@ -115,28 +117,28 @@ class VisualFeatures:
     avg_edge_flux: float = 0.0 # V6.9.8: Transition Detection
     action_density: float = 0.0 # V7.0: For Noise Filtering
 
-# 💥 全局共享模型与限流器: 避免并行加载导致的 OOM 与 Meta Tensor 错误
+# 💥 全局共享模型与限流器: 避免并加载导致?OOM ?Meta Tensor 错
 _VISUAL_PROCESS_POOL = None
 _CLIP_MODEL = None
 _CLIP_LOCK = threading.Lock()
 
 def _get_clip_model():
     """
-    执行逻辑：
-    1) 准备必要上下文与参数。
-    2) 执行核心处理并返回结果。
-    实现方式：通过内部函数组合与条件判断实现。
-    核心价值：封装逻辑单元，提升复用与可维护性。
-    决策逻辑：
+    执逻辑?
+    1) 准必上下文与参数?
+    2) 执核心处理并返回结果?
+    实现方式：过内部函数组合与条件判斮现?
+    核心价：封逻辑单元，提升用与叻护?
+    决策逻辑?
     - 条件：not HAS_CLIP
     - 条件：_CLIP_MODEL is None
     - 条件：_CLIP_MODEL != 'FAILED'
-    依据来源（证据链）：
-    - 阈值常量：HAS_CLIP, _CLIP_MODEL。
-    输入参数：
-    - 无。
-    输出参数：
-    - 函数计算/封装后的结果对象。"""
+    依据来源（证捓）：
+    - 阈常量：HAS_CLIP, _CLIP_MODEL?
+    输入参数?
+    - 无?
+    输出参数?
+    - 函数计算/封后的结果对象?"""
     global _CLIP_MODEL
     if not HAS_CLIP: return None
     
@@ -146,12 +148,22 @@ def _get_clip_model():
                 # 🚀 V5: Using lightweight CLIP. Explicit device='cpu' to avoid meta-tensor issues in parallel envs.
                 # If you have GPU, SentenceTransformer usually handles it, but 'cpu' is safest for sidecar stability.
                 logger.info("📡 Loading CLIP model (Global Singleton)...")
-                _CLIP_MODEL = SentenceTransformer('clip-ViT-B-32', device='cpu')
-                logger.info("✅ V5: CLIP model loaded successfully.")
+                _original_clip_processor_loader = transformers.CLIPProcessor.from_pretrained
+
+                def _slow_clip_processor_loader(*args, **kwargs):
+                    kwargs.setdefault("use_fast", False)
+                    return _original_clip_processor_loader(*args, **kwargs)
+
+                try:
+                    transformers.CLIPProcessor.from_pretrained = _slow_clip_processor_loader
+                    _CLIP_MODEL = SentenceTransformer('clip-ViT-B-32', device='cpu')
+                finally:
+                    transformers.CLIPProcessor.from_pretrained = _original_clip_processor_loader
+                logger.info("?V5: CLIP model loaded successfully.")
             except Exception as e:
-                logger.warning(f"❌ V5: Failed to load CLIP model: {e}")
+                logger.warning(f"[V5] Failed to load CLIP model: {e}")
                 # Don't try again if it fails once to avoid flooding logs
-                return "FAILED"
+                _CLIP_MODEL = "FAILED"
     
     return _CLIP_MODEL if _CLIP_MODEL != "FAILED" else None
 
@@ -159,27 +171,27 @@ _VISUAL_PROCESS_POOL = None
 
 def get_visual_process_pool():
     """
-    执行逻辑：
-    1) 读取内部状态或外部资源。
-    2) 返回读取结果。
-    实现方式：通过线程池并发、HTTP 调用实现。
-    核心价值：提供一致读取接口，降低调用耦合。
-    决策逻辑：
+    执逻辑?
+    1) 读取内部状或外部资源?
+    2) 返回读取结果?
+    实现方式：过线程池并发HTTP 调用实现?
+    核心价：提供致取接口，降低调用耦合?
+    决策逻辑?
     - 条件：_VISUAL_PROCESS_POOL is not None
     - 条件：_VISUAL_PROCESS_POOL is None
     - 条件：getattr(_VISUAL_PROCESS_POOL, '_broken', False)
-    依据来源（证据链）：
-    - 阈值常量：_VISUAL_PROCESS_POOL。
-    输入参数：
-    - 无。
-    输出参数：
-    - 函数计算/封装后的结果对象。"""
+    依据来源（证捓）：
+    - 阈常量：_VISUAL_PROCESS_POOL?
+    输入参数?
+    - 无?
+    输出参数?
+    - 函数计算/封后的结果对象?"""
     global _VISUAL_PROCESS_POOL
     
     # Check if pool exists and is healthy
     if _VISUAL_PROCESS_POOL is not None:
-        # 💥 容错处理: 如果进程池由于 OOM 等原因损坏，底层会抛出 BrokenProcessPool
-        # 尝试检查内部状态 (私有 API, 但在 concurrent.futures 中比较通用)
+        # 💥 容错处理: 如果进程池由?OOM 等原因损坏，底层会抛?BrokenProcessPool
+        # 尝试查内部状?(私有 API, 但在 concurrent.futures 丯较用)
         if getattr(_VISUAL_PROCESS_POOL, '_broken', False):
             logger.warning("Process Pool is broken (likely due to OOM in child processes). Re-initializing...")
             _VISUAL_PROCESS_POOL.shutdown(wait=False)
@@ -204,19 +216,19 @@ def get_visual_process_pool():
 
 def shutdown_visual_process_pool():
     """
-    执行逻辑：
-    1) 准备必要上下文与参数。
-    2) 执行核心处理并返回结果。
-    实现方式：通过内部函数组合与条件判断实现。
-    核心价值：封装逻辑单元，提升复用与可维护性。
-    决策逻辑：
+    执逻辑?
+    1) 准必上下文与参数?
+    2) 执核心处理并返回结果?
+    实现方式：过内部函数组合与条件判斮现?
+    核心价：封逻辑单元，提升用与叻护?
+    决策逻辑?
     - 条件：_VISUAL_PROCESS_POOL is not None
-    依据来源（证据链）：
-    - 阈值常量：_VISUAL_PROCESS_POOL。
-    输入参数：
-    - 无。
-    输出参数：
-    - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+    依据来源（证捓）：
+    - 阈常量：_VISUAL_PROCESS_POOL?
+    输入参数?
+    - 无?
+    输出参数?
+    - 无（仅产生副作用，日志/写盘/状更新）?"""
     global _VISUAL_PROCESS_POOL
     if _VISUAL_PROCESS_POOL is not None:
         logger.info("Shutting down global Visual Process Pool...")
@@ -224,26 +236,26 @@ def shutdown_visual_process_pool():
         _VISUAL_PROCESS_POOL = None
 
 class SharedFrameRegistry:
-    """类说明：SharedFrameRegistry 负责封装本模块相关能力。
-    执行步骤：
-    1) 步骤1：接收调用请求并组织上下文数据。
-    2) 步骤2：协调类内方法完成业务处理。
-    3) 步骤3：输出处理结果并提供可复用能力。"""
+    """类明：SharedFrameRegistry 负责封木块相关能力?
+    执步?
+    1) 步1：接收调用求并组织上下文数?
+    2) 步2：协调类内方法完成业务理?
+    3) 步3：输出理结果并提供用能力?"""
     def __init__(self, max_frames=None):
         """
-        执行逻辑：
-        1) 解析配置或依赖，准备运行环境。
-        2) 初始化对象状态、缓存与依赖客户端。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：在初始化阶段固化依赖，保证运行稳定性。
-        决策逻辑：
+        执逻辑?
+        1) 解析配置或依赖，准运?
+        2) 初化象状态缓存与依赖客户?
+        实现方式：过内部方法调用/状更新实现?
+        核心价：在初始化阶固化依赖，保证运行稳定?
+        决策逻辑?
         - 条件：max_frames is None
-        依据来源（证据链）：
-        - 输入参数：max_frames。
-        输入参数：
-        - max_frames: 函数入参（类型：未标注）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        依据来源（证捓）：
+        - 输入参数：max_frames?
+        输入参数?
+        - max_frames: 函数入参（类型：朠泼?
+        输出参数?
+        - 无（仅产生副作用，日志/写盘/状更新）?"""
         if max_frames is None:
             max_frames = ResourceOrchestrator.get_adaptive_cache_size(base_size=50, per_gb_increment=25)
         self.max_frames = max_frames
@@ -255,23 +267,23 @@ class SharedFrameRegistry:
 
     def register_frame(self, frame_idx: int, frame: np.ndarray):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：frame_idx in self._registry
         - 条件：len(self._registry) >= self.max_frames
         - 条件：self._shape is None
-        依据来源（证据链）：
-        - 输入参数：frame_idx。
-        - 对象内部状态：self._registry, self._shape, self.max_frames。
-        输入参数：
-        - frame_idx: 函数入参（类型：int）。
-        - frame: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        依据来源（证捓）：
+        - 输入参数：frame_idx?
+        - 对象内部状：self._registry, self._shape, self.max_frames?
+        输入参数?
+        - frame_idx: 函数入参（类型：int）?
+        - frame: 函数入参（类型：np.ndarray）?
+        输出参数?
+        - 无（仅产生副作用，日志/写盘/状更新）?"""
         with self._lock:
             if frame_idx in self._registry:
                 return
@@ -303,27 +315,27 @@ class SharedFrameRegistry:
 
     def get_frame(self, frame_idx: int) -> Optional[np.ndarray]:
         """
-        执行逻辑：
-        1) 读取内部状态或外部资源。
-        2) 返回读取结果。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
-        核心价值：提供一致读取接口，降低调用耦合。
-        决策逻辑：
+        执逻辑?
+        1) 读取内部状或外部资源?
+        2) 返回读取结果?
+        实现方式：过内部方法调用/状更新NumPy 数算实现?
+        核心价：提供致取接口，降低调用耦合?
+        决策逻辑?
         - 条件：not shm_name
         - 条件：not shm
-        依据来源（证据链）：
-        输入参数：
-        - frame_idx: 函数入参（类型：int）。
-        输出参数：
-        - ndarray 对象或调用结果。"""
+        依据来源（证捓）：
+        输入参数?
+        - frame_idx: 函数入参（类型：int）?
+        输出参数?
+        - ndarray 对象或调用结果?"""
         with self._lock:
             shm_name = self._registry.get(frame_idx)
             if not shm_name:
                 cache_metrics.miss("module2.shared_frame_registry.get_frame")
                 return None
             
-            # 注意: 这里返回的 ndarray 保持了对 shm.buf 的引用
-            # 调用者必须在进程结束前保持 shm 打开状态
+            # 注意: 这里返回?ndarray 保持了 shm.buf 的引?
+            # 调用者必须在进程结束前保?shm 打开状?
             shm = self._shms.get(shm_name)
             if not shm:
                 cache_metrics.miss("module2.shared_frame_registry.get_frame")
@@ -333,15 +345,15 @@ class SharedFrameRegistry:
 
     def cleanup(self):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - 无。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新实现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - 无?
+        输出参数?
+        - 无（仅产生副作用，日志/写盘/状更新）?"""
         with self._lock:
             for shm_name, shm in list(self._shms.items()):
                 try:
@@ -354,18 +366,18 @@ class SharedFrameRegistry:
 
     def get_shm_ref(self, frame_idx: int) -> Optional[Dict[str, Any]]:
         """
-        执行逻辑：
-        1) 读取内部状态或外部资源。
-        2) 返回读取结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：提供一致读取接口，降低调用耦合。
-        决策逻辑：
+        执逻辑?
+        1) 读取内部状或外部资源?
+        2) 返回读取结果?
+        实现方式：过内部方法调用/状更新实现?
+        核心价：提供致取接口，降低调用耦合?
+        决策逻辑?
         - 条件：not shm_name
-        依据来源（证据链）：
-        输入参数：
-        - frame_idx: 函数入参（类型：int）。
-        输出参数：
-        - 结构化结果字典（包含关键字段信息）。"""
+        依据来源（证捓）：
+        输入参数?
+        - frame_idx: 函数入参（类型：int）?
+        输出参数?
+        - 结构化结果字典（包含关键字信息）?"""
         with self._lock:
             shm_name = self._registry.get(frame_idx)
             if not shm_name:
@@ -379,25 +391,25 @@ class SharedFrameRegistry:
                 "frame_idx": frame_idx
             }
 
-# 全局注册表单例
+# 全局注册表单?
 _GLOBAL_FRAME_REGISTRY = None
 import atexit
 
 def get_shared_frame_registry():
     """
-    执行逻辑：
-    1) 读取内部状态或外部资源。
-    2) 返回读取结果。
-    实现方式：通过内部函数组合与条件判断实现。
-    核心价值：提供一致读取接口，降低调用耦合。
-    决策逻辑：
+    执逻辑?
+    1) 读取内部状或外部资源?
+    2) 返回读取结果?
+    实现方式：过内部函数组合与条件判斮现?
+    核心价：提供致取接口，降低调用耦合?
+    决策逻辑?
     - 条件：_GLOBAL_FRAME_REGISTRY is None
-    依据来源（证据链）：
-    - 阈值常量：_GLOBAL_FRAME_REGISTRY。
-    输入参数：
-    - 无。
-    输出参数：
-    - 函数计算/封装后的结果对象。"""
+    依据来源（证捓）：
+    - 阈常量：_GLOBAL_FRAME_REGISTRY?
+    输入参数?
+    - 无?
+    输出参数?
+    - 函数计算/封后的结果对象?"""
     global _GLOBAL_FRAME_REGISTRY
     if _GLOBAL_FRAME_REGISTRY is None:
         _GLOBAL_FRAME_REGISTRY = SharedFrameRegistry()
@@ -405,43 +417,56 @@ def get_shared_frame_registry():
     return _GLOBAL_FRAME_REGISTRY
 
 class VisualFeatureExtractor:
-    """类说明：VisualFeatureExtractor 负责封装本模块相关能力。
-    执行步骤：
-    1) 步骤1：接收调用请求并组织上下文数据。
-    2) 步骤2：协调类内方法完成业务处理。
-    3) 步骤3：输出处理结果并提供可复用能力。"""
+    """类明：VisualFeatureExtractor 负责封木块相关能力?
+    执步?
+    1) 步1：接收调用求并组织上下文数?
+    2) 步2：协调类内方法完成业务理?
+    3) 步3：输出理结果并提供用能力?"""
     
     def __init__(self, video_path: str):
         """
-        执行逻辑：
-        1) 解析配置或依赖，准备运行环境。
-        2) 初始化对象状态、缓存与依赖客户端。
-        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、文件系统读写实现。
-        核心价值：在初始化阶段固化依赖，保证运行稳定性。
-        决策逻辑：
+        执逻辑?
+        1) 解析配置或依赖，准运?
+        2) 初化象状态缓存与依赖客户?
+        实现方式：过内部方法调用/状更新OpenCV 图像处理、文件系统写实现?
+        核心价：在初始化阶固化依赖，保证运行稳定?
+        决策逻辑?
         - 条件：not Path(video_path).exists()
         - 条件：not self.cap.isOpened()
         - 条件：mem.percent > 80
-        依据来源（证据链）：
-        - 输入参数：video_path。
-        - 对象内部状态：self.cap, self.fps。
-        输入参数：
-        - video_path: 文件路径（类型：str）。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
+        依据来源（证捓）：
+        - 输入参数：video_path?
+        - 对象内部状：self.cap, self.fps?
+        输入参数?
+        - video_path: 文件跾（类型：str）?
+        输出参数?
+        - 无（仅产生副作用，日志/写盘/状更新）?"""
+        self.source_video_path = video_path
         self.video_path = video_path
         if not Path(video_path).exists():
              logger.warning(f"Video path does not exist: {video_path}")
-        
-        self.cap = cv2.VideoCapture(video_path)
+
+        cap, effective_video_path, used_decode_fallback = open_video_capture_with_fallback(
+            video_path,
+            logger=logger,
+        )
+        self.video_path = effective_video_path or video_path
+        self.cap = cap if cap is not None else cv2.VideoCapture()
+        if used_decode_fallback:
+            logger.warning(
+                "VisualFeatureExtractor decode fallback applied: source=%s, effective=%s",
+                self.source_video_path,
+                self.video_path,
+            )
+
         if not self.cap.isOpened():
-             logger.error(f"Failed to open video: {video_path}")
-             # If video cannot be opened, set default values to avoid errors later
-             self.fps = 30.0
-             self.frame_count = 0
-             self.width = 0
-             self.height = 0
-             self.duration = 0
+            logger.error(f"Failed to open video: {video_path}")
+            # If video cannot be opened, set default values to avoid errors later
+            self.fps = 30.0
+            self.frame_count = 0
+            self.width = 0
+            self.height = 0
+            self.duration = 0
         else:
             self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
             self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -475,54 +500,58 @@ class VisualFeatureExtractor:
         self._analysis_hits = 0
         
         logger.info(f"🚀 [PERF] VisualFeatureExtractor V6: Adaptive Cache Size {self._max_cache_size} (Waterline: {waterline_multiplier}x)")
-        logger.info(f"VisualFeatureExtractor initialized for: {video_path}")
+        logger.info(
+            "VisualFeatureExtractor initialized for: source=%s, effective=%s",
+            self.source_video_path,
+            self.video_path,
+        )
 
     def __del__(self):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：hasattr(self, 'cap') and self.cap.isOpened()
-        依据来源（证据链）：
-        - 对象内部状态：self.cap。
-        输入参数：
-        - 无。
-        输出参数：
-        - 无（仅产生副作用，如日志/写盘/状态更新）。"""
-        if hasattr(self, 'cap') and self.cap.isOpened():
+        依据来源（证捓）：
+        - 对象内部状：self.cap?
+        输入参数?
+        - 无?
+        输出参数?
+        - 无（仅产生副作用，日志/写盘/状更新）?"""
+        if hasattr(self, 'cap') and self.cap is not None and self.cap.isOpened():
             self.cap.release()
 
     async def extract_frames_async(self, start_sec: float, end_sec: float, sample_rate: int = 1) -> Tuple[List[np.ndarray], List[float]]:
-        # 这里主要是为了让接口异步，内部目前仍用同步解码 (OpenCV 限制)
+        # 这里主昸了接口异，内部目前仍用同步解?(OpenCV 限制)
         """
-        执行逻辑：
-        1) 扫描输入内容。
-        2) 过滤并提取目标子集。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
-        核心价值：聚焦关键信息，减少后续处理成本。
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - sample_rate: 函数入参（类型：int）。
-        输出参数：
-        - List[np.ndarray], List[float] 列表（与输入或处理结果一一对应）。"""
+        执逻辑?
+        1) 扏输入内?
+        2) 过滤并提取目标子集?
+        实现方式：过内部方法调用/状更新NumPy 数算实现?
+        核心价：聚焦关键信息，减少后理成?
+        输入参数?
+        - start_sec: 起时间/区间边界（类型：float）?
+        - end_sec: 起时间/区间边界（类型：float）?
+        - sample_rate: 函数入参（类型：int）?
+        输出参数?
+        - List[np.ndarray], List[float] 列表（与输入或理结果一对应）?"""
         return self.extract_frames(start_sec, end_sec, sample_rate)
 
     def _get_ffmpeg_hwaccel_args(self) -> List[str]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过子进程调用实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - 无。
-        输出参数：
-        - str 列表（与输入或处理结果一一对应）。"""
-        # 简单检查是否有 nvidia-smi 或可用 cuda
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过子进程调用实现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - 无?
+        输出参数?
+        - str 列表（与输入或理结果一对应）?"""
+        # 单查是否有 nvidia-smi 或可?cuda
         try:
             import subprocess
             subprocess.run(['nvidia-smi'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
@@ -539,44 +568,44 @@ class VisualFeatureExtractor:
         register_to_shm: bool = True,
     ) -> Tuple[List[np.ndarray], List[float]]:
         """
-        执行逻辑：
-        1) 扫描输入内容。
-        2) 过滤并提取目标子集。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算、子进程调用、文件系统读写实现。
-        核心价值：聚焦关键信息，减少后续处理成本。
-        决策逻辑：
+        执逻辑?
+        1) 扏输入内?
+        2) 过滤并提取目标子集?
+        实现方式：过内部方法调用/状更新NumPy 数算子进程调用、文件系统写实现?
+        核心价：聚焦关键信息，减少后理成?
+        决策逻辑?
         - 条件：duration < 5.0
         - 条件：len(frames) > 1
         - 条件：not raw_frame
-        依据来源（证据链）：
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - sample_rate: 函数入参（类型：int）。
-        - target_height: 函数入参（类型：int）。
-        输出参数：
-        - List[np.ndarray], List[float] 列表（与输入或处理结果一一对应）。"""
+        依据来源（证捓）：
+        输入参数?
+        - start_sec: 起时间/区间边界（类型：float）?
+        - end_sec: 起时间/区间边界（类型：float）?
+        - sample_rate: 函数入参（类型：int）?
+        - target_height: 函数入参（类型：int）?
+        输出参数?
+        - List[np.ndarray], List[float] 列表（与输入或理结果一对应）?"""
         import subprocess
         
-        # 计算总帧数和时间点
+        # 计算总帧数和时间?
         duration = end_sec - start_sec
         
         # 🚀 V6.5 Optimization: Precise Capture for Short Clips
         # If duration is short (<5s), use Frame-by-Frame decoding (Slow Mode)
         # to ensure micro-movements (mouse, cursor) are captured and prevent duplicate frames.
         if duration < 5.0:
-            logger.info(f"⚡ [Strategy] Clip duration {duration:.2f}s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.")
+            logger.info(f"?[Strategy] Clip duration {duration:.2f}s (<5s). Using Random Access Mode (OpenCV) for speed & accuracy.")
             return self.extract_frames(start_sec, end_sec, sample_rate, register_to_shm=register_to_shm)
 
         expected_count = int(duration * (self.fps / sample_rate))
         
-        # 构造 FFmpeg 管道 (包含 hwaccel 逻辑)
+        # 构?FFmpeg 管道 (包含 hwaccel 逻辑)
         hw_args = self._get_ffmpeg_hwaccel_args()
         
-        # 缩放至低分辨率 (480P 代理)
+        # 缩放至低分辨?(480P 代理)
         scale_filter = f"scale=-1:{target_height}"
         
-        # 计算采样率 (FFmpeg fps filter)
+        # 计算采样?(FFmpeg fps filter)
         target_fps = self.fps / sample_rate
         
         cmd = [
@@ -594,7 +623,7 @@ class VisualFeatureExtractor:
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             
-            # 手动计算输出分辨率 (维持比例)
+            # 手动计算输出分辨?(维持比例)
             # 💥 Fix: Use cached dimensions to be thread-safe (avoid self.cap.get call)
             orig_h = self.height
             orig_w = self.width
@@ -616,7 +645,7 @@ class VisualFeatureExtractor:
             # For `extract_visual_features`, we need all frames to calculate global stats.
             # So optimization strategy: Ensure we don't hold 'raw_frame' buffer too long.
             
-            for i in range(expected_count + 5): # 宽限几帧防止结尾截断
+            for i in range(expected_count + 5): # 宽限几帧防结尾或
                 raw_frame = process.stdout.read(frame_size)
                 if not raw_frame: break
                 
@@ -673,23 +702,23 @@ class VisualFeatureExtractor:
         register_to_shm: bool = True,
     ) -> Tuple[List[np.ndarray], List[float]]:
         """
-        执行逻辑：
-        1) 扫描输入内容。
-        2) 过滤并提取目标子集。
-        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：聚焦关键信息，减少后续处理成本。
-        决策逻辑：
+        执逻辑?
+        1) 扏输入内?
+        2) 过滤并提取目标子集?
+        实现方式：过内部方法调用/状更新OpenCV 图像处理、NumPy 数算实现?
+        核心价：聚焦关键信息，减少后理成?
+        决策逻辑?
         - 条件：not local_cap.isOpened()
         - 条件：frame_idx >= self.frame_count
         - 条件：frame_idx in self._frame_cache
-        依据来源（证据链）：
-        - 对象内部状态：self._frame_cache, self._max_cache_size, self.frame_count。
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - sample_rate: 函数入参（类型：int）。
-        输出参数：
-        - List[np.ndarray], List[float] 列表（与输入或处理结果一一对应）。"""
+        依据来源（证捓）：
+        - 对象内部状：self._frame_cache, self._max_cache_size, self.frame_count?
+        输入参数?
+        - start_sec: 起时间/区间边界（类型：float）?
+        - end_sec: 起时间/区间边界（类型：float）?
+        - sample_rate: 函数入参（类型：int）?
+        输出参数?
+        - List[np.ndarray], List[float] 列表（与输入或理结果一对应）?"""
         start_frame = int(start_sec * self.fps)
         end_frame = int(end_sec * self.fps)
         start_frame = max(0, min(start_frame, self.frame_count - 1))
@@ -701,8 +730,8 @@ class VisualFeatureExtractor:
         # 🚀 Thread Safety Fix: Use local VideoCapture for concurrent extraction
         # Since this method is called in threads (via extract_visual_features -> run_in_executor),
         # we cannot use the shared self.cap.
-        local_cap = cv2.VideoCapture(self.video_path)
-        if not local_cap.isOpened():
+        local_cap, _, _ = open_video_capture_with_fallback(self.video_path, logger=logger)
+        if local_cap is None or not local_cap.isOpened():
             logger.error(f"Failed to open local capture for {self.video_path}")
             return [], []
             
@@ -718,7 +747,7 @@ class VisualFeatureExtractor:
                 # Check bounds
                 if frame_idx >= self.frame_count: break
 
-                # 💥 性能优化: 缓存命中检查
+                # 💥 性能优化: 缓存命中?
                 if frame_idx in self._frame_cache:
                     cache_metrics.hit("module2.visual_feature.frame_cache")
                     frame = self._frame_cache[frame_idx]
@@ -730,7 +759,7 @@ class VisualFeatureExtractor:
                     continue
                 cache_metrics.miss("module2.visual_feature.frame_cache")
 
-                # 💥 性能优化: 仅在不连续时调用 set()。如果连续，顺序 read() 效率更高
+                # 💥 性能优化: 仅在不连绗调用 set()。果连综顺序 read() 效率更高
                 current_pos = int(local_cap.get(cv2.CAP_PROP_POS_FRAMES))
                 if frame_idx != current_pos:
                     local_cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
@@ -783,16 +812,16 @@ class VisualFeatureExtractor:
 
     def calculate_mse_diff(self, frame1, frame2):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - frame1: 函数入参（类型：未标注）。
-        - frame2: 函数入参（类型：未标注）。
-        输出参数：
-        - float 对象或调用结果。"""
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - frame1: 函数入参（类型：朠泼?
+        - frame2: 函数入参（类型：朠泼?
+        输出参数?
+        - float 对象或调用结果?"""
         # 💥 Fix: Cast to float32 to avoid uint8 overflow during squaring
         # diff = cv2.absdiff(frame1, frame2) -> uint8, still overflows on square
         f1 = frame1.astype(np.float32)
@@ -802,21 +831,21 @@ class VisualFeatureExtractor:
 
     def calculate_ssim(self, frame1: np.ndarray, frame2: np.ndarray) -> float:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：len(frame1.shape) == 3
         - 条件：len(frame2.shape) == 3
-        依据来源（证据链）：
-        - 输入参数：frame1, frame2。
-        输入参数：
-        - frame1: 函数入参（类型：np.ndarray）。
-        - frame2: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 输入参数：frame1, frame2?
+        输入参数?
+        - frame1: 函数入参（类型：np.ndarray）?
+        - frame2: 函数入参（类型：np.ndarray）?
+        输出参数?
+        - 数型计算结果?"""
         # 1. Convert to Gray
         if len(frame1.shape) == 3: g1 = cv2.cvtColor(frame1, cv2.COLOR_BGR2GRAY)
         else: g1 = frame1
@@ -850,19 +879,19 @@ class VisualFeatureExtractor:
 
     def calculate_content_increment(self, start_frame: np.ndarray, end_frame: np.ndarray) -> float:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：s_count < 100
-        依据来源（证据链）：
-        输入参数：
-        - start_frame: 起止时间/区间边界（类型：np.ndarray）。
-        - end_frame: 起止时间/区间边界（类型：np.ndarray）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        输入参数?
+        - start_frame: 起时间/区间边界（类型：np.ndarray）?
+        - end_frame: 起时间/区间边界（类型：np.ndarray）?
+        输出参数?
+        - 数型计算结果?"""
         try:
             # Analyze increment in Cr/Cb channel (human written content often has color)
             # OR just luminance. Let's use Gray for generality.
@@ -889,15 +918,15 @@ class VisualFeatureExtractor:
 
     def enhance_low_quality_frame(self, frame: np.ndarray) -> np.ndarray:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - frame: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - frame: 函数入参（类型：np.ndarray）?
+        输出参数?
+        - 函数计算/封后的结果对象?"""
         try:
             # 1. Denoise (Fast NLM) - Only if frame is small to save time, or use Gaussian for speed
             # h=3 for moderate denoising
@@ -922,22 +951,22 @@ class VisualFeatureExtractor:
 
     def match_handwritten_feature(self, frame: np.ndarray, feature_type: str) -> bool:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：not contours
         - 条件：feature_type == 'math_formula'
         - 条件：w < 10 or h < 10
-        依据来源（证据链）：
-        - 输入参数：feature_type。
-        输入参数：
-        - frame: 函数入参（类型：np.ndarray）。
-        - feature_type: 函数入参（类型：str）。
-        输出参数：
-        - 布尔判断结果。"""
+        依据来源（证捓）：
+        - 输入参数：feature_type?
+        输入参数?
+        - frame: 函数入参（类型：np.ndarray）?
+        - feature_type: 函数入参（类型：str）?
+        输出参数?
+        - 布尔判断结果?"""
         try:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             # 1. Edge Detection + Morphology
@@ -974,22 +1003,22 @@ class VisualFeatureExtractor:
 
     def validate_visual_feature_semantic(self, frame: np.ndarray, feature_type: str, fault_text: str) -> float:
         """
-        执行逻辑：
-        1) 整理待校验数据。
-        2) 按规则逐项校验并返回结果。
-        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：提前发现数据/状态问题，降低运行风险。
-        决策逻辑：
+        执逻辑?
+        1) 整理待校验数?
+        2) 按则项校验并返回结果?
+        实现方式：过内部方法调用/状更新OpenCV 图像处理、NumPy 数算实现?
+        核心价：提前发现数据/状问题，降低运风险?
+        决策逻辑?
         - 条件：not self.clip_model or not HAS_CLIP
-        依据来源（证据链）：
-        - 阈值常量：HAS_CLIP。
-        - 对象内部状态：self.clip_model。
-        输入参数：
-        - frame: 函数入参（类型：np.ndarray）。
-        - feature_type: 函数入参（类型：str）。
-        - fault_text: 函数入参（类型：str）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 阈常量：HAS_CLIP?
+        - 对象内部状：self.clip_model?
+        输入参数?
+        - frame: 函数入参（类型：np.ndarray）?
+        - feature_type: 函数入参（类型：str）?
+        - fault_text: 函数入参（类型：str）?
+        输出参数?
+        - 数型计算结果?"""
         if not self.clip_model or not HAS_CLIP:
              return 0.8 # Fallback if CLIP not loaded
 
@@ -1023,21 +1052,21 @@ class VisualFeatureExtractor:
 
     def calculate_clip_score(self, frame: np.ndarray, text: str) -> float:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：not self.clip_model or not HAS_CLIP
-        依据来源（证据链）：
-        - 阈值常量：HAS_CLIP。
-        - 对象内部状态：self.clip_model。
-        输入参数：
-        - frame: 函数入参（类型：np.ndarray）。
-        - text: 文本内容（类型：str）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 阈常量：HAS_CLIP?
+        - 对象内部状：self.clip_model?
+        输入参数?
+        - frame: 函数入参（类型：np.ndarray）?
+        - text: 文本内（类型：str）?
+        输出参数?
+        - 数型计算结果?"""
         if not self.clip_model or not HAS_CLIP: return 0.5
         try:
              rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1053,21 +1082,21 @@ class VisualFeatureExtractor:
 
     def calculate_all_diffs(self, frames: List[np.ndarray]) -> Tuple[List[float], List[float]]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：len(frames) < 2
         - 条件：not mse_list
         - 条件：max(mse_list) > 0
-        依据来源（证据链）：
-        - 输入参数：frames。
-        输入参数：
-        - frames: 数据列表/集合（类型：List[np.ndarray]）。
-        输出参数：
-        - List[float], List[float] 列表（与输入或处理结果一一对应）。"""
+        依据来源（证捓）：
+        - 输入参数：frames?
+        输入参数?
+        - frames: 数据列表/集合（类型：List[np.ndarray]）?
+        输出参数?
+        - List[float], List[float] 列表（与输入或理结果一对应）?"""
         if len(frames) < 2: return [], []
         mse_list = []
         for i in range(len(frames) - 1):
@@ -1081,19 +1110,19 @@ class VisualFeatureExtractor:
 
     def calculate_ssim_sequence(self, frames: List[np.ndarray]) -> List[float]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：len(frames) < 2
-        依据来源（证据链）：
-        - 输入参数：frames。
-        输入参数：
-        - frames: 数据列表/集合（类型：List[np.ndarray]）。
-        输出参数：
-        - float 列表（与输入或处理结果一一对应）。"""
+        依据来源（证捓）：
+        - 输入参数：frames?
+        输入参数?
+        - frames: 数据列表/集合（类型：List[np.ndarray]）?
+        输出参数?
+        - float 列表（与输入或理结果一对应）?"""
         if len(frames) < 2: return []
         ssim_list = []
         for i in range(len(frames) - 1):
@@ -1103,21 +1132,21 @@ class VisualFeatureExtractor:
 
     def calculate_edge_flux_sequence(self, frames: List[np.ndarray]) -> List[float]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：len(frames) < 2
         - 条件：frames
         - 条件：i > 0
-        依据来源（证据链）：
-        - 输入参数：frames。
-        输入参数：
-        - frames: 数据列表/集合（类型：List[np.ndarray]）。
-        输出参数：
-        - float 列表（与输入或处理结果一一对应）。"""
+        依据来源（证捓）：
+        - 输入参数：frames?
+        输入参数?
+        - frames: 数据列表/集合（类型：List[np.ndarray]）?
+        输出参数?
+        - float 列表（与输入或理结果一对应）?"""
         if len(frames) < 2: return []
         
         flux_list = []
@@ -1150,35 +1179,35 @@ class VisualFeatureExtractor:
     
     def _get_resolution_factor(self, frame):
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部函数组合与条件判断实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        输入参数：
-        - frame: 函数入参（类型：未标注）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部函数组合与条件判斮现?
+        核心价：封逻辑单元，提升用与叻护?
+        输入参数?
+        - frame: 函数入参（类型：朠泼?
+        输出参数?
+        - 函数计算/封后的结果对象?"""
         return frame.shape[1] / 1920.0
 
     def classify_static_dynamic(self, mse_list: List[float], timestamps: List[float]) -> Dict[str, Any]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：not mse_list
         - 条件：max(mse_list) > 0
         - 条件：m < 100
-        依据来源（证据链）：
-        - 输入参数：mse_list, timestamps。
-        输入参数：
-        - mse_list: 数据列表/集合（类型：List[float]）。
-        - timestamps: 函数入参（类型：List[float]）。
-        输出参数：
-        - 结构化结果字典（包含关键字段信息）。"""
+        依据来源（证捓）：
+        - 输入参数：mse_list, timestamps?
+        输入参数?
+        - mse_list: 数据列表/集合（类型：List[float]）?
+        - timestamps: 函数入参（类型：List[float]）?
+        输出参数?
+        - 结构化结果字典（包含关键字信息）?"""
         if not mse_list: return {"type": "unknown", "is_static": False, "is_dynamic": False, "avg_mse": 0.0, "avg_diff_rate": 0.0, "stable_duration": 0.0, "mse_list": []}
         
         avg_mse = np.mean(mse_list)
@@ -1189,65 +1218,66 @@ class VisualFeatureExtractor:
         stable_duration = 0.0
         start_t = timestamps[0]
         for i, m in enumerate(mse_list):
-            if m < 100: # 阈值
+            if m < 100: # 阈?
                 if i + 1 < len(timestamps):
                     stable_duration = max(stable_duration, timestamps[i+1] - start_t)
             else:
                 if i + 1 < len(timestamps): start_t = timestamps[i+1]
         
-        # 🚀 V6.9 Optimization: 改进短片段的静止判定
-        # 原逻辑要求 stable_duration > 3.0，导致 2s 的纯静止片段判定为 non-static
-        # 修改为：要么时长 > 3s，要么静止时长覆盖了 90% 以上的片段长度
+        # 🚀 V6.9 Optimization: 改进矉段的静判定
+        # 原辑要求 stable_duration > 3.0，?2s 的纯静片判定?non-static
+        # 俔为：要么时长 > 3s，么静止时长盖了 90% 以上的片段长?
         clip_duration = timestamps[-1] - timestamps[0]
         is_static = avg_mse < 100 and (stable_duration > 3.0 or stable_duration >= clip_duration * 0.9) and avg_diff_rate < 5.0
         
-        # ⚖️ 平衡点: 设定为 250 / 12% 以灵敏捕捉教学动画，依靠 Fusion 层的语义覆盖来过滤鼠标干扰
+        # ⚖️ 平衡? 设定?250 / 12% 以灵敏捕捉教学动画，依靠 Fusion 层的诹覆盖来过滤鼠标干?
         is_dynamic = avg_mse > 250 or avg_diff_rate > 12.0
         visual_type = "static" if is_static else ("dynamic" if is_dynamic else "mixed")
         
         return {
             "type": visual_type, "is_static": is_static, "is_dynamic": is_dynamic,
             "avg_mse": avg_mse, "avg_diff_rate": avg_diff_rate, "stable_duration": stable_duration,
-            "mse_list": mse_list  # 🚀 V6.9: 包含原始列表以供后续分析
+            "mse_list": mse_list  # 🚀 V6.9: 包含原列表以供后续分析
         }
 
     def detect_visual_elements(self, frame: np.ndarray) -> Dict[str, Any]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：self.visual_detector
-        依据来源（证据链）：
-        - 对象内部状态：self.visual_detector。
-        输入参数：
-        - frame: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - 结构化结果字典（包含关键字段信息）。"""
+        依据来源（证捓）：
+        - 对象内部状：self.visual_detector?
+        输入参数?
+        - frame: 函数入参（类型：np.ndarray）?
+        输出参数?
+        - 结构化结果字典（包含关键字信息）?"""
         if self.visual_detector:
             return self.visual_detector.analyze_frame(frame)
         return {"total": 0}
 
     def _probe_one_frame(self, timestamp: float) -> Optional[np.ndarray]:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部方法调用/状态更新、OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部方法调用/状更新OpenCV 图像处理、NumPy 数算实现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：not temp_cap.isOpened()
         - 条件：not ret
-        依据来源（证据链）：
-        输入参数：
-        - timestamp: 函数入参（类型：float）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
+        依据来源（证捓）：
+        输入参数?
+        - timestamp: 函数入参（类型：float）?
+        输出参数?
+        - 函数计算/封后的结果对象?"""
         try:
-            temp_cap = cv2.VideoCapture(self.video_path)
-            if not temp_cap.isOpened(): return None
+            temp_cap, _, _ = open_video_capture_with_fallback(self.video_path, logger=logger)
+            if temp_cap is None or not temp_cap.isOpened():
+                return None
             
             temp_cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
             ret, frame = temp_cap.read()
@@ -1266,17 +1296,17 @@ class VisualFeatureExtractor:
 
     def get_cached_content(self, start_sec: float, end_sec: float, sample_rate: int = 1) -> Optional[GlobalAnalysisCache]:
         """
-        执行逻辑：
-        1) 读取内部状态或外部资源。
-        2) 返回读取结果。
-        实现方式：通过内部方法调用/状态更新实现。
-        核心价值：提供一致读取接口，降低调用耦合。
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - sample_rate: 函数入参（类型：int）。
-        输出参数：
-        - get 对象或调用结果。"""
+        执逻辑?
+        1) 读取内部状或外部资源?
+        2) 返回读取结果?
+        实现方式：过内部方法调用/状更新实现?
+        核心价：提供致取接口，降低调用耦合?
+        输入参数?
+        - start_sec: 起时间/区间边界（类型：float）?
+        - end_sec: 起时间/区间边界（类型：float）?
+        - sample_rate: 函数入参（类型：int）?
+        输出参数?
+        - get 对象或调用结果?"""
         start_sec = float(start_sec)
         end_sec = float(end_sec)
         segment_id = f"{start_sec:.2f}_{end_sec:.2f}_sr{sample_rate}"
@@ -1287,28 +1317,28 @@ class VisualFeatureExtractor:
 
     async def extract_visual_features(self, start_sec: float, end_sec: float, sample_rate: int = 1) -> VisualFeatures:
         """
-        执行逻辑：
-        1) 扫描输入内容。
-        2) 过滤并提取目标子集。
-        实现方式：通过内部方法调用/状态更新、NumPy 数值计算、asyncio 异步调度实现。
-        核心价值：聚焦关键信息，减少后续处理成本。
-        决策逻辑：
+        执逻辑?
+        1) 扏输入内?
+        2) 过滤并提取目标子集?
+        实现方式：过内部方法调用/状更新NumPy 数算asyncio 异调度实现?
+        核心价：聚焦关键信息，减少后理成?
+        决策逻辑?
         - 条件：segment_id not in self._clip_caches
         - 条件：not cache.is_analyzed
         - 条件：decision['is_dynamic']
-        依据来源（证据链）：
-        - 输入参数：end_sec, start_sec。
-        - 配置字段：avg_mse, is_dynamic, is_static。
-        - 对象内部状态：self._analysis_cache, self._clip_caches, self._max_analysis_cache_size。
-        输入参数：
-        - start_sec: 起止时间/区间边界（类型：float）。
-        - end_sec: 起止时间/区间边界（类型：float）。
-        - sample_rate: 函数入参（类型：int）。
-        输出参数：
-        - VisualFeatures 对象（包含字段：visual_type, avg_mse, avg_diff_rate, mse_list, is_static, is_dynamic, stable_duration, has_architecture_elements, has_math_formula, element_count, confidence, has_table, has_static_visual_structure, action_windows, avg_edge_flux, action_density）。"""
+        依据来源（证捓）：
+        - 输入参数：end_sec, start_sec?
+        - 配置字：avg_mse, is_dynamic, is_static?
+        - 对象内部状：self._analysis_cache, self._clip_caches, self._max_analysis_cache_size?
+        输入参数?
+        - start_sec: 起时间/区间边界（类型：float）?
+        - end_sec: 起时间/区间边界（类型：float）?
+        - sample_rate: 函数入参（类型：int）?
+        输出参数?
+        - VisualFeatures 对象（包吭段：visual_type, avg_mse, avg_diff_rate, mse_list, is_static, is_dynamic, stable_duration, has_architecture_elements, has_math_formula, element_count, confidence, has_table, has_static_visual_structure, action_windows, avg_edge_flux, action_density）?"""
         start_sec = float(start_sec)
         end_sec = float(end_sec)
-        # 1. 检查并获取缓存 (GlobalAnalysisCache)
+        # 1. 查并获取缓存 (GlobalAnalysisCache)
         segment_id = f"{start_sec:.2f}_{end_sec:.2f}_sr{sample_rate}"
         if segment_id not in self._clip_caches:
             self._clip_caches[segment_id] = GlobalAnalysisCache(segment_id)
@@ -1317,10 +1347,10 @@ class VisualFeatureExtractor:
         loop = asyncio.get_running_loop()
         executor = get_visual_process_pool()
         
-        # 2. 如果未分析，执行主提取与预处理
+        # 2. 如果月析，执主提取与预?
         if not cache.is_analyzed:
             cache_metrics.miss("module2.visual_feature.clip_cache")
-            # 2.1 基础提取
+            # 2.1 基提取
             # 💥 Fix: Use the custom executor (Visual Pool) instead of default (None)
             frames, timestamps = await loop.run_in_executor(
                 executor, self.extract_frames_fast, start_sec, end_sec, sample_rate, 360
@@ -1328,12 +1358,12 @@ class VisualFeatureExtractor:
             if not frames:
                 return VisualFeatures("unknown", 0.0, 0.0, [], False, False, 0.0, False, False, 0, 0.0)
                 
-            # 2.2 [第一性原理：感官增强] 自适应预处理 (CLAHE + 去噪)
+            # 2.2 [笸性原理：感官增强] 臂应预?(CLAHE + 去噪)
             enhanced_frames = await loop.run_in_executor(
                 executor, self.decision_engine.preprocess_frames_adaptive, frames
             )
             
-            # 2.3 提取基础特征
+            # 2.3 提取基特征
             feat = self.decision_engine.compute_base_features(enhanced_frames, timestamps)
             
             # 🚀 V5 Upgrade: Compute Advanced Metrics for Math Logic
@@ -1353,18 +1383,18 @@ class VisualFeatureExtractor:
         else:
             cache_metrics.hit("module2.visual_feature.clip_cache")
             
-            # 释放原始帧内存 (保留增强帧在缓存中直到本次方法结束)
+            # 释放原帧内?(保留增强帧在缓存丛到本次方法结?
             del frames
             gc.collect()
 
-        # 3. 执行初步动静判定 (基础统计)
+        # 3. 执初动静判定 (基统)
         classification = self.classify_static_dynamic(cache.mse_list, cache.timestamps)
         
-        # 4. 🚀 V6.9+: 集成自适应决策引擎进行深度判定 (核心修正)
-        # 获取当前场景的 Profile
+        # 4. 🚀 V6.9+: 集成臂应决策引擎进深度判定 (核心)
+        # 获取当前场景?Profile
         profile_name = "ppt_slide" if classification["avg_mse"] < 50 else "generic"
         
-        # 寻找动作窗
+        # 寻找动作?
         windows = self.decision_engine.detect_action_windows(
             cache.mse_list, cache.timestamps, cache.mse_base, profile_name
         )
@@ -1385,36 +1415,36 @@ class VisualFeatureExtractor:
 
         classification["action_density"] = decision.get("action_density", 0.0)
         
-        # 如果引擎判定为动态，强制修正分类结果
+        # 如果引擎判定为动态，强制分类结果
         if decision["is_dynamic"]:
-            logger.info(f"✨ [V6.9 Decision] Segment confirmed as DYNAMIC via Engine ({decision['reason']})")
+            logger.info(f"?[V6.9 Decision] Segment confirmed as DYNAMIC via Engine ({decision['reason']})")
             classification["is_dynamic"] = True
             classification["is_static"] = False
             classification["type"] = "dynamic"
-        # 🚀 V6.9.3 Fix: 允许引擎将伪阳性修正为 Static (双向修正)
-        # 例如 P011 Case: 旧逻辑认为是 Dynamic，但 Engine 基于密度判断为 Static
+        # 🚀 V6.9.3 Fix: 允引擎将伪阳修正为 Static (双向)
+        # 例 P011 Case: 旧辑认为?Dynamic，但 Engine 基于密度判断?Static
         elif not decision["is_dynamic"] and classification["is_dynamic"]:
-             logger.info(f"🛡️ [V6.9 Decision] Segment corrected to STATIC via Engine ({decision['reason']})")
+             logger.info(f"🛡?[V6.9 Decision] Segment corrected to STATIC via Engine ({decision['reason']})")
              classification["is_dynamic"] = False
              classification["is_static"] = True
              classification["type"] = "static"
             
-        # 5. [Dynamic Recovery] 时序回溯纠偏 (仅针对极短静态片段的动作补偿)
-        # 🚀 V6.9.4 Upgrade: 加入平滑动画 (Edge Flux) 检测
+        # 5. [Dynamic Recovery] 时序回溯纠偏 (仅针对极矝态片段的动作补偿)
+        # 🚀 V6.9.4 Upgrade: 加入平滑动画 (Edge Flux) ?
         elif classification["is_static"]:
-            # A. 短片段微动回溯 (原有逻辑)
+            # A. 矉段微动回?(原有逻辑)
             if (end_sec - start_sec) < 4.0:
                # ... (Keep existing lookback logic, simplified for brevity in this tool call, but ensuring we don't delete it if not showing all)
                pass 
 
-            # B. 平滑动画检测 (Edge Flux) - 针对长/短片段的“死区”
-            # 条件: MSE 低(没波峰), SSIM 极高(结构没崩), 但可能在平移
+            # B. 平滑动画?(Edge Flux) - 针?矉段的“区?
+            # 条件: MSE ?没波?, SSIM 极高(结构没崩), 但可能在平移
             if classification["avg_mse"] < 10.0 and cache.ssim_drop < 0.05:
-                # 只有在高度静止的嫌疑区才启用昂贵的 Edge Flux 计算
+                # 叜在高度静止的嫌疑区才吔昂贵?Edge Flux 计算
                 logger.info("🔍 [Edge Flux] Deadzone DETECTED. Triggering Edge Flux calculation...")
                 
-                # 获取全量增强帧 (可能需要从 cache 读取或重新提取，这里假设 cache.enhanced_frames 可用)
-                # 注意：cache.enhanced_frames 可能被 GC，需防御性检查
+                # 获取全量增强?(參要从 cache 读取或重新提取，这里假 cache.enhanced_frames 叔)
+                # 注意：cache.enhanced_frames 參?GC，需防御性?
                 frames_for_flux = cache.enhanced_frames
                 if not frames_for_flux:
                      frames_for_flux, _ = await loop.run_in_executor(
@@ -1427,7 +1457,7 @@ class VisualFeatureExtractor:
                     )
                     classification["avg_edge_flux"] = flux_score # 💥 Fix: Save back to classification
                     
-                    # 🚀 V6.9.7 Unified: 将 Flux 数据传回引擎进行统一裁决
+                    # 🚀 V6.9.7 Unified: ?Flux 数据传回引擎进统一裁决
                     # Re-evaluate via Engine with Flux data
                     flux_decision = self.decision_engine.judge_is_dynamic(
                         windows, classification["avg_mse"], total_duration=end_sec-start_sec,
@@ -1436,21 +1466,21 @@ class VisualFeatureExtractor:
                     )
                     
                     if flux_decision["is_dynamic"]:
-                        logger.info(f"✨ [Edge Flux] SMOOTH MOTION CONFIRMED via Unified Engine ({flux_decision['reason']})")
+                        logger.info(f"?[Edge Flux] SMOOTH MOTION CONFIRMED via Unified Engine ({flux_decision['reason']})")
                         classification["is_dynamic"] = True
                         classification["is_static"] = False
                         classification["type"] = "smooth_flow"
                         decision["reason"] = flux_decision["reason"]
 
-        # 5. 采样执行语义/元素检测 (使用 SHARED MEMORY)
-        # 此时 cache.enhanced_frames 已就绪
+        # 5. 采样执诹/元素?(使用 SHARED MEMORY)
+        # 此时 cache.enhanced_frames 已就?
         frames = cache.enhanced_frames
         timestamps = cache.timestamps
         mse_list = cache.mse_list
         sample_size = min(10, len(frames))
         sample_indices = np.linspace(0, len(frames) - 1, sample_size, dtype=int)
 
-        # 获取采样帧的实际索引和 Hash
+        # 获取采样帧的实际索引?Hash
         tasks_to_run = [] # List of (hash, shm_info_dict)
         results_indices = [] # Map sample_idx -> results index
         all_sampled_hashes = []
@@ -1465,10 +1495,10 @@ class VisualFeatureExtractor:
             
             if h not in self._analysis_cache:
                 cache_metrics.miss("module2.visual_feature.analysis_cache")
-                # 构造 SHM 任务 (使用 Zero-Copy 引用)
+                # 构?SHM 任务 (使用 Zero-Copy 引用)
                 shm_ref = self.shm_registry.get_shm_ref(frame_idx)
                 
-                # 如果由于某种原因不在 SHM 中，退化为传数组
+                # 如果由于某原因不在 SHM 丼化为传数?
                 if not shm_ref:
                     tasks_to_run.append((h, frame))
                 else:
@@ -1478,10 +1508,10 @@ class VisualFeatureExtractor:
                 self._analysis_hits += 1
                 self._analysis_cache.move_to_end(h)
 
-        # 并行运行唯一任务
+        # 并运唸任务
         unique_tasks_in_batch = {}
         if tasks_to_run:
-            # 去重任务列表 (同一个采样集中可能有重复内容)
+            # 去重任务列表 (同一万样集丏能有重内)
             for h, task_data in tasks_to_run:
                 unique_tasks_in_batch[h] = task_data
 
@@ -1494,15 +1524,15 @@ class VisualFeatureExtractor:
 
             async def sem_task(data):
                 """
-                执行逻辑：
-                1) 准备必要上下文与参数。
-                2) 执行核心处理并返回结果。
-                实现方式：通过内部函数组合与条件判断实现。
-                核心价值：封装逻辑单元，提升复用与可维护性。
-                输入参数：
-                - data: 数据列表/集合（类型：未标注）。
-                输出参数：
-                - 函数计算/封装后的结果对象。"""
+                执逻辑?
+                1) 准必上下文与参数?
+                2) 执核心处理并返回结果?
+                实现方式：过内部函数组合与条件判斮现?
+                核心价：封逻辑单元，提升用与叻护?
+                输入参数?
+                - data: 数据列表/集合（类型：朠泼?
+                输出参数?
+                - 函数计算/封后的结果对象?"""
                 async with semaphore:
                     return await loop.run_in_executor(executor, VisualElementDetector.analyze_frame, data)
 
@@ -1519,12 +1549,12 @@ class VisualFeatureExtractor:
         # 还原结果列表
         results = [self._analysis_cache[h] for h in all_sampled_hashes]
         
-        # 统计并行情况 (验证 PID 分布)
+        # 统并情况 (验证 PID 分布)
         valid_results = [r for r in results if "error" not in r]
         pids = set(r.get("process_id") for r in valid_results)
         logger.info(f"[PERF] Parallel analysis: {len(results)} frames ({len(unique_tasks_in_batch)} unique) on {len(pids)} processes, hits: {self._analysis_hits}")
         
-        # 💥 内存回收: 完成特征提取后，立即清理帧缓存
+        # 💥 内存回收: 完成特征提取后，立即清理帧缓?
         self._frame_cache.clear()
         
         # OOM Avoidance
@@ -1555,24 +1585,24 @@ class VisualFeatureExtractor:
 
     def _calculate_visual_confidence(self, classification: Dict, elements: Dict, frame_count: int) -> float:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部函数组合与条件判断实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部函数组合与条件判斮现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：frame_count >= 30
         - 条件：classification['is_static'] or classification['is_dynamic']
         - 条件：elements.get('has_architecture_elements', False)
-        依据来源（证据链）：
-        - 输入参数：classification, elements, frame_count。
-        - 配置字段：has_architecture_elements, is_dynamic, is_static。
-        输入参数：
-        - classification: 函数入参（类型：Dict）。
-        - elements: 函数入参（类型：Dict）。
-        - frame_count: 函数入参（类型：int）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 输入参数：classification, elements, frame_count?
+        - 配置字：has_architecture_elements, is_dynamic, is_static?
+        输入参数?
+        - classification: 函数入参（类型：Dict）?
+        - elements: 函数入参（类型：Dict）?
+        - frame_count: 函数入参（类型：int）?
+        输出参数?
+        - 数型计算结果?"""
         score = 0.5
         if frame_count >= 30: score += 0.2
         if classification["is_static"] or classification["is_dynamic"]: score += 0.2
@@ -1581,26 +1611,26 @@ class VisualFeatureExtractor:
 
     def judge_visual_voice_timing(self, action_start: float, action_end: float, voice_start: float) -> str:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部函数组合与条件判断实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部函数组合与条件判斮现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：action_end <= voice_start - 0.5
         - 条件：action_start >= voice_start + 0.5
-        依据来源（证据链）：
-        - 输入参数：action_end, action_start, voice_start。
-        输入参数：
-        - action_start: 起止时间/区间边界（类型：float）。
-        - action_end: 起止时间/区间边界（类型：float）。
-        - voice_start: 起止时间/区间边界（类型：float）。
-        输出参数：
-        - 字符串结果。"""
-        # 动作超前：动作完成时间 ≤ 语音起始时间 - 0.5s（停顿阈值）
+        依据来源（证捓）：
+        - 输入参数：action_end, action_start, voice_start?
+        输入参数?
+        - action_start: 起时间/区间边界（类型：float）?
+        - action_end: 起时间/区间边界（类型：float）?
+        - voice_start: 起时间/区间边界（类型：float）?
+        输出参数?
+        - 字串结果?"""
+        # 动作超前：动作完成时??诟起时间 - 0.5s（停顿阈值）
         if action_end <= voice_start - 0.5:
             return "ahead"
-        # 动作滞后：动作起始时间 ≥ 语音起始时间 + 0.5s
+        # 动作滞后：动作起始时??诟起时间 + 0.5s
         elif action_start >= voice_start + 0.5:
             return "lag"
         else:
@@ -1608,35 +1638,35 @@ class VisualFeatureExtractor:
 
     def extract_action_start_time(self, frames: list, timestamps: list) -> float:
         """
-        执行逻辑：
-        1) 扫描输入内容。
-        2) 过滤并提取目标子集。
-        实现方式：通过NumPy 数值计算实现。
-        核心价值：聚焦关键信息，减少后续处理成本。
-        决策逻辑：
+        执逻辑?
+        1) 扏输入内?
+        2) 过滤并提取目标子集?
+        实现方式：过NumPy 数算实现?
+        核心价：聚焦关键信息，减少后理成?
+        决策逻辑?
         - 条件：len(frames) < 2
         - 条件：curr_mse >= base_mse * 5
-        依据来源（证据链）：
-        - 输入参数：frames。
-        输入参数：
-        - frames: 数据列表/集合（类型：list）。
-        - timestamps: 函数入参（类型：list）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 输入参数：frames?
+        输入参数?
+        - frames: 数据列表/集合（类型：list）?
+        - timestamps: 函数入参（类型：list）?
+        输出参数?
+        - 数型计算结果?"""
         if len(frames) < 2: return timestamps[0]
         
-        # 计算基准 MSE (前两帧变化) 作为噪音底
+        # 计算基准 MSE (前两帧变? 作为噟?
         f0 = frames[0].astype(np.float32)
         f1 = frames[1].astype(np.float32)
         base_mse = np.mean((f0 - f1) ** 2)
-        base_mse = max(base_mse, 1.0) # 最小噪音底
+        base_mse = max(base_mse, 1.0) # 小噪音底
         
         for i in range(1, len(frames)-1):
             fi = frames[i].astype(np.float32)
             fi_next = frames[i+1].astype(np.float32)
             curr_mse = np.mean((fi - fi_next) ** 2)
             
-            # MSE突变阈值：当前MSE ≥ 基础MSE的5倍（判定为动作开始）
+            # MSE突变阈：当前MSE ?基MSE?倍（判定为动作开始）
             if curr_mse >= base_mse * 5:
                 return timestamps[i]
                 
@@ -1644,54 +1674,58 @@ class VisualFeatureExtractor:
 
     def extract_action_end_time(self, frames: list, timestamps: list) -> float:
         """
-        执行逻辑：
-        1) 扫描输入内容。
-        2) 过滤并提取目标子集。
-        实现方式：通过NumPy 数值计算实现。
-        核心价值：聚焦关键信息，减少后续处理成本。
-        决策逻辑：
+        执逻辑?
+        1) 扏输入内?
+        2) 过滤并提取目标子集?
+        实现方式：过NumPy 数算实现?
+        核心价：聚焦关键信息，减少后理成?
+        决策逻辑?
         - 条件：len(frames) < 2
         - 条件：mse > 1.0
-        依据来源（证据链）：
-        - 输入参数：frames。
-        输入参数：
-        - frames: 数据列表/集合（类型：list）。
-        - timestamps: 函数入参（类型：list）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 输入参数：frames?
+        输入参数?
+        - frames: 数据列表/集合（类型：list）?
+        - timestamps: 函数入参（类型：list）?
+        输出参数?
+        - 数型计算结果?"""
         if len(frames) < 2: return timestamps[-1]
         
-        # 从后向前扫描，找到第一个进入稳定态（MSE < 1.0）的点
+        # 从后向前扏，找到丿入稳定（MSE < 1.0）的?
         for i in range(len(frames)-2, 0, -1):
             fi = frames[i].astype(np.float32)
             fi_next = frames[i+1].astype(np.float32)
             mse = np.mean((fi - fi_next) ** 2)
             if mse > 1.0: # 还在变化
-                return timestamps[i+1] # 下一帧开始稳定
+                return timestamps[i+1] # 下一帧开始稳?
         return timestamps[0]
 
     def limit_forward_extension(self, action_start: float, voice_start: float, max_forward: float = 3.0) -> float:
         """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过内部函数组合与条件判断实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
+        执逻辑?
+        1) 准必上下文与参数?
+        2) 执核心处理并返回结果?
+        实现方式：过内部函数组合与条件判斮现?
+        核心价：封逻辑单元，提升用与叻护?
+        决策逻辑?
         - 条件：extension_duration > max_forward
         - 条件：extension_duration < 0
-        依据来源（证据链）：
-        - 输入参数：max_forward。
-        输入参数：
-        - action_start: 起止时间/区间边界（类型：float）。
-        - voice_start: 起止时间/区间边界（类型：float）。
-        - max_forward: 函数入参（类型：float）。
-        输出参数：
-        - 数值型计算结果。"""
+        依据来源（证捓）：
+        - 输入参数：max_forward?
+        输入参数?
+        - action_start: 起时间/区间边界（类型：float）?
+        - voice_start: 起时间/区间边界（类型：float）?
+        - max_forward: 函数入参（类型：float）?
+        输出参数?
+        - 数型计算结果?"""
         extension_duration = voice_start - action_start
         if extension_duration > max_forward:
             return voice_start - max_forward
-        elif extension_duration < 0: # 动作在语音后
+        elif extension_duration < 0: # 动作在音后
             return voice_start
         else:
             return action_start
+
+
+
+

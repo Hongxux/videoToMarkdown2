@@ -48,5 +48,5 @@ class MaterialRequests:
 
     screenshot_requests: List[ScreenshotRequest]
     clip_requests: List[ClipRequest]
+    action_classifications: List[Dict[str, Any]]
     metadata: Optional[Dict[str, Any]] = None
-

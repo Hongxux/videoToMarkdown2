@@ -15,10 +15,11 @@ public class WebConfig implements WebMvcConfigurer {
 
     @Override
     public void addCorsMappings(CorsRegistry registry) {
-        // 允许前端跨域访问
-        // 注意：当allowCredentials=true时，不能使用"*"，需要用allowedOriginPatterns
+        // 允许前端跨域访问。
+        // 使用 allowedOriginPatterns("*") 兼容 cpolar/ngrok 等动态隧道域名，
+        // 避免移动端通过隧道访问时因 Origin 不在白名单而返回 403。
         registry.addMapping("/**")
-                .allowedOriginPatterns("http://localhost:*", "file://*", "http://127.0.0.1:*")
+                .allowedOriginPatterns("*")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")
                 .allowCredentials(true)

@@ -1,0 +1,210 @@
+/* [COMP-PULL-REFRESH] 任务页下拉刷新提示层
+ * 做什么：仅保留低存在感箭头动画，不用文字提示。
+ * 为什么：让反馈依赖手势与回弹本身，避免“读提示词”打断体验。 */
+.task-pull-indicator {
+    height: 0;
+    display: flex;
+    justify-content: center;
+    align-items: flex-end;
+    overflow: hidden;
+    pointer-events: none;
+    color: rgba(37, 99, 235, 0.72);
+    transition: height 140ms var(--motion-ease-snappy);
+}
+
+.task-pull-indicator.dragging {
+    transition: none;
+}
+
+.task-pull-indicator-arrow {
+    margin: 0 0 8px;
+    width: 12px;
+    height: 12px;
+    display: block;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    opacity: 0;
+    transform: translateY(-6px) scale(0.86);
+    transition: opacity 120ms linear, transform 140ms var(--motion-ease-snappy);
+}
+
+.task-pull-indicator.visible .task-pull-indicator-arrow {
+    opacity: 0.3;
+    transform: translateY(-1px) scale(0.94);
+}
+
+.task-pull-indicator.ready .task-pull-indicator-arrow {
+    opacity: 0.46;
+    transform: translateY(0) rotate(180deg) scale(1);
+}
+
+.task-pull-indicator.refreshing .task-pull-indicator-arrow {
+    opacity: 0.5;
+    transform: translateY(0) scale(1);
+    animation: statusSpin 0.72s linear infinite;
+}
+
+/* [COMP-SUBMIT-SURFACE] 输入壳层
+ * 做什么：默认融入背景，聚焦和拖拽时才显性。
+ * 为什么：减少视觉噪声，让输入区像系统搜索栏一样“安静待机”。
+ * 权衡：保留最小可见边界，避免纯透明导致可发现性过低。 */
+.submit-card {
+    margin: 10px 12px 8px;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    display: grid;
+    gap: 0;
+}
+
+.submit-source-shell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 48px;
+    border: 0;
+    border-radius: 14px;
+    background: rgba(15, 23, 42, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.34);
+    padding: 4px 4px 4px 10px;
+    transition:
+        background-color 140ms var(--motion-ease-out),
+        box-shadow 140ms var(--motion-ease-out);
+}
+
+.submit-source-shell:hover {
+    background: rgba(15, 23, 42, 0.06);
+    box-shadow: inset 0 0 0 1px rgba(100, 116, 139, 0.38), 0 8px 16px rgba(15, 23, 42, 0.1);
+}
+
+.submit-source-shell.drag-active {
+    background: var(--surface-drop-bg-active);
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.46), 0 0 0 2px var(--surface-ring-soft);
+}
+
+.submit-source-shell:focus-within {
+    background: var(--surface-bg);
+    box-shadow: inset 0 0 0 1px var(--primary), 0 0 0 2px var(--surface-ring-soft);
+}
+
+.submit-input {
+    flex: 1;
+    min-width: 0;
+    min-height: 38px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--text);
+    padding: 6px 0 6px 2px;
+    font-size: 14px;
+}
+
+.submit-input::placeholder {
+    color: #64748b;
+}
+
+.submit-source-shell .submit-input:focus {
+    box-shadow: none;
+}
+
+.submit-submit-trigger {
+    width: 38px;
+    min-width: 38px;
+    height: 38px;
+    min-height: 38px;
+    padding: 0;
+    border-radius: 11px;
+    box-shadow: none;
+    transition: transform 120ms var(--motion-ease-snappy), box-shadow 120ms var(--motion-ease-out);
+}
+
+.submit-submit-trigger:hover,
+.submit-submit-trigger:focus-visible {
+    box-shadow: 0 4px 10px rgba(37, 99, 235, 0.22);
+    transform: translateY(-1px);
+}
+
+.submit-submit-trigger .icon-glyph {
+    width: 18px;
+    height: 18px;
+    stroke-width: 2.2;
+}
+
+.submit-file-input {
+    display: none;
+}
+
+.submit-tip {
+    display: none;
+    min-height: 0;
+    font-size: 11px;
+    color: var(--muted);
+    margin: 4px 2px 0;
+}
+
+.submit-tip:not(:empty) {
+    display: block;
+}
+
+.submit-tip.success {
+    color: var(--success);
+}
+
+.submit-tip.error {
+    color: var(--danger);
+}
+
+.submit-card.empty-guide-pulse {
+    animation: emptyGuidePulse 640ms ease-out 1;
+}
+
+@keyframes emptyGuidePulse {
+    0% { box-shadow: 0 0 0 0 rgba(79, 70, 229, 0.28); }
+    100% { box-shadow: 0 0 0 14px rgba(79, 70, 229, 0); }
+}
+
+@media (prefers-color-scheme: dark) {
+    .task-pull-indicator {
+        color: rgba(147, 197, 253, 0.56);
+    }
+
+    .submit-input {
+        background: #12161d;
+        color: var(--text);
+        box-shadow: inset 0 0 0 1px #2f3948;
+    }
+
+    .submit-source-shell {
+        background: rgba(148, 163, 184, 0.08);
+        color: var(--text);
+        box-shadow: inset 0 0 0 1px #2f3948;
+    }
+
+    .submit-source-shell:hover {
+        background: rgba(148, 163, 184, 0.12);
+    }
+
+    .submit-source-shell:focus-within {
+        background: #12161d;
+        box-shadow: inset 0 0 0 1px #5b8df5, 0 0 0 2px rgba(91, 141, 245, 0.22);
+    }
+
+    .submit-source-shell.drag-active {
+        background: #1d2634;
+        box-shadow: inset 0 0 0 1px #6ea8ff, 0 0 0 2px rgba(110, 168, 255, 0.2);
+    }
+
+    .submit-card {
+        background: transparent;
+        box-shadow: none;
+    }
+
+    .submit-source-shell .submit-input {
+        background: transparent;
+    }
+}

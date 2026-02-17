@@ -17,17 +17,52 @@ from enum import Enum
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt, render_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
+from services.python_grpc.src.content_pipeline.shared.semantic_payload import (
+    build_grouped_semantic_units_payload,
+    normalize_semantic_units_payload,
+)
 
 logger = logging.getLogger(__name__)
 
 
+def _read_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except Exception:
+        return int(default)
+
+
 SEGMENTATION_MAX_OUTPUT_TOKENS = 8192
+SEGMENTATION_PREV_TAIL_TEXT_CHARS = 400
+SEGMENTATION_MAX_INPUT_TOKENS = 128000
+SEGMENTATION_INPUT_TOKEN_BUDGET_RATIO = 0.75
+SEGMENTATION_INPUT_TOKEN_BUDGET = int(
+    SEGMENTATION_MAX_INPUT_TOKENS * SEGMENTATION_INPUT_TOKEN_BUDGET_RATIO
+)
+SEGMENTATION_PROMPT_TOKEN_BUFFER = 1500
+SEGMENTATION_EST_CHARS_PER_TOKEN = 1.0
+SEGMENTATION_BATCH_MAX_CONCURRENCY_DEFAULT = 48
+SEGMENTATION_BOUNDARY_MAX_OUTPUT_TOKENS = 256
+SEGMENTATION_BOUNDARY_RULE_REFERENCE_CHARS = 1800
 KNOWLEDGE_TYPE_CODE_MAP = {
     0: "abstract",
     1: "concrete",
     2: "process",
 }
 DEFAULT_UNIT_CONFIDENCE = 0.8
+
+
+def _segment_batch_max_concurrency() -> int:
+    return max(
+        1,
+        _read_int_env(
+            "MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY",
+            SEGMENTATION_BATCH_MAX_CONCURRENCY_DEFAULT,
+        ),
+    )
 
 
 # =============================================================================
@@ -43,35 +78,28 @@ class SemanticUnit:
     3) 步骤3：输出处理结果并提供可复用能力。"""
     unit_id: str                          # SU001, SU002, ...
     knowledge_type: str                   # abstract | concrete | process
-    knowledge_topic: str                  # 鏍稿績鐭ヨ瘑鐐规爣绛?
-    full_text: str                        # 瀹屾暣鏂囨湰
-    source_paragraph_ids: List[str]       # 鏉ユ簮娈佃惤ID (P001, P002, ...)
-    source_sentence_ids: List[str]        # 鏉ユ簮鍙ュ瓙ID (S001, S002, ...)
-    start_sec: float = 0.0                # 璧峰鏃堕棿
-    end_sec: float = 0.0                  # 缁撴潫鏃堕棿
-    confidence: float = 0.0               # LLM鍒ゅ畾缃俊搴?
-    mult_steps: bool = False              # 鏄惁涓哄姝ラ鍗曞厓锛堟帹鐞?閰嶇疆/瀹炴搷锛?
-    action_segments: List[Dict] = None    # V7.x: 鍔ㄤ綔鍖洪棿璇︽儏 [{start, end, type}]
-    stable_islands: List[Dict] = None     # V7.x: 绋冲畾宀涘尯闂?[{start, end, mid, duration}]
-    materials: Any = None                 # V7.x: 鐢熸垚鐨勭礌鏉愰泦鍚?(MaterialSet)
-    instructional_steps: List[Dict] = None # V8.0: 璇︾粏鐨勬搷浣滄楠?(for tutorial_stepwise)
+    knowledge_topic: str                  # 核心知识点标签
+    full_text: str                        # 完整文本
+    source_paragraph_ids: List[str]       # 来源段落ID (P001, P002, ...)
+    source_sentence_ids: List[str]        # 来源句子ID (S001, S002, ...)
+    group_id: int = 0                     # 同一核心论点的分组ID（从1开始）
+    group_name: str = ""                  # 同一核心论点名称
+    group_reason: str = ""                # 分组依据（同论点聚合理由）
+    start_sec: float = 0.0                # 起始时间
+    end_sec: float = 0.0                  # 结束时间
+    confidence: float = 0.0               # LLM判定置信度
+    mult_steps: bool = False              # 是否为多步骤单元（推理/配置/实操）
+    action_segments: List[Dict] = None    # V7.x: 动作区间详情 [{start, end, type}]
+    stable_islands: List[Dict] = None     # V7.x: 稳定岛区间 [{start, end, mid, duration}]
+    materials: Any = None                 # V7.x: 生成的素材集合 (MaterialSet)
+    instructional_steps: List[Dict] = None # V8.0: 详细的操作步骤 (for tutorial_stepwise)
 
     def __post_init__(self):
         """
-        鎵ц閫昏緫锛?
-        1) 鍑嗗蹇呰涓婁笅鏂囦笌鍙傛暟銆?
-        2) 鎵ц鏍稿績澶勭悊骞惰繑鍥炵粨鏋溿€?
-        瀹炵幇鏂瑰紡锛氶€氳繃鍐呴儴鏂规硶璋冪敤/鐘舵€佹洿鏂板疄鐜般€?
-        鏍稿績浠峰€硷細灏佽閫昏緫鍗曞厓锛屾彁鍗囧鐢ㄤ笌鍙淮鎶ゆ€с€?
-        鍐崇瓥閫昏緫锛?
-        - 鏉′欢锛歴elf.action_segments is None
-        - 鏉′欢锛歴elf.stable_islands is None
-        渚濇嵁鏉ユ簮锛堣瘉鎹摼锛夛細
-        - 瀵硅薄鍐呴儴鐘舵€侊細self.action_segments, self.stable_islands銆?
-        杈撳叆鍙傛暟锛?
-        - 鏃犮€?
-        杈撳嚭鍙傛暟锛?
-        - 鏃狅紙浠呬骇鐢熷壇浣滅敤锛屽鏃ュ織/鍐欑洏/鐘舵€佹洿鏂帮級銆?"""
+        方法说明：初始化可变字段，避免后续流程访问空值。
+        设计原因：统一在对象构造后做兜底，减少调用方重复判空。
+        权衡：仅对缺失字段填默认值，不覆盖上游已明确提供的数据。
+        """
         if self.action_segments is None:
             self.action_segments = []
         if self.stable_islands is None:
@@ -96,28 +124,63 @@ class SegmentationResult:
 # LLM Prompts - v1.3: Knowledge Type Based Segmentation
 # =============================================================================
 
-SYSTEM_PROMPT = """浣犳槸璇箟鍗曞厓鍒掑垎鍔╂墜銆?
-鍙緭鍑轰弗鏍?JSON锛屼笖鍙厑璁告渶灏忓瓧娈甸泦鍚堬細
-- 椤跺眰锛歴emantic_units
-- 鍗曞厓瀛楁锛歱ids, k, m
+SYSTEM_PROMPT = """你是一名教学视频语义单元划分专家。目标是将输入文本划分为语义闭环、知识类型唯一、时间连续的单元。
 
-瀛楁瀹氫箟锛?- pids: 娈佃惤ID鏁扮粍锛屼緥濡?[\"P001\", \"P002\"]
-- k: 鐭ヨ瘑绫诲瀷缂栫爜锛?=abstract, 1=concrete, 2=process
-- m: 鏄惁澶氭楠わ紝0=false, 1=true
+## Unit 与 Group 定义
+- Unit: 由知识类型(k)和时间连续性决定，必须保持类型纯净。
+- Group: 由核心论点(Core Argument)决定，一个 Group 内可包含多个 Unit。
+- 同一核心论点下的 Abstract / Process / Concrete 必须拆成不同 Unit，但放在同一个 Group 中。
 
-绂佹杈撳嚭浠讳綍鍏朵粬瀛楁锛屽挨鍏舵槸 reasoning / confidence / action / text / full_text銆?"""
+## 知识类型判定顺序（必须按顺序）
+1) Concrete(k=1): 重点在当前屏幕可见对象/代码/界面/图表的观察与指代。
+2) Process(k=2): 重点在可执行、可跟随的演示或详细步骤指导。
+3) Abstract(k=0): 不满足以上两者时默认归类。
 
-USER_PROMPT_TEMPLATE = """璇峰杈撳叆娈佃惤杩涜璇箟鍗曞厓鍒掑垎銆?
-杈撳嚭瑕佹眰锛?1) 鍙緭鍑?JSON
-2) 姣忎釜鍗曞厓浠呬繚鐣?pids + k + m 涓変釜瀛楁
-3) k 鍙兘鏄?0/1/2锛?=abstract,1=concrete,2=process锛?4) m 鍙兘鏄?0/1
-5) 涓嶅緱杈撳嚭 reasoning / confidence / action / text / full_text
+## 合并与拆分规则
+1) 同一视觉对象的连续讲解必须合并为同一 Unit。
+2) 同一连贯操作任务的多步骤必须合并为同一 Process Unit。
+3) 同一核心论点下的举例、佐证、反例应保持在同一 Group。
+4) 当知识类型变化（abstract/concrete/process切换）时必须拆分 Unit。
+5) Abstract 与 Process/Concrete 即便服务同一核心论点，也严禁合并为同一 Unit；必须拆分并共享同一 Group。
 
-杈撳叆娈佃惤锛?{paragraphs_json}
+## 多步骤判定（字段 m）
+- m=1: 至少两个有顺序依赖的步骤。
+- m=0: 单步动作、单点说明、叙述或概念讲解。
 
-杈撳嚭妯℃澘锛?{{
-  "semantic_units": [
-    {{"pids": ["P001", "P002"], "k": 2, "m": 1}}
+## 输出约束（严格）
+1. 只输出 JSON，不输出解释文字。
+2. 顶层只允许字段：knowledge_groups。
+3. Group 只允许字段：group_name, reason, units。
+4. Unit 只允许字段：pids, k, m, title。
+5. k 只能是 0/1/2，m 只能是 0/1（整数）。
+6. 禁止输出额外字段：semantic_units, group_id, confidence, reasoning, text, full_text 等。"""
+
+USER_PROMPT_TEMPLATE = """请基于“语义闭环 + 知识类型纯净 + 时间连续性”进行语义分割，并按 Group 输出。
+
+输出要求（严格）：
+1. 只输出 JSON，不输出解释文本。
+2. 顶层字段只能是 `knowledge_groups`。
+3. 每个 Group 只能有字段：`group_name`, `reason`, `units`。
+4. 每个 Unit 只能有字段：`pids`, `k`, `m`, `title`。
+5. `k` 只能是 `0/1/2`；`m` 只能是 `0/1`（整数）。
+6. 同一核心论点下，Abstract 与 Process/Concrete 必须拆分为不同 Unit，但放在同一 Group。
+7. 仅当核心论点变化时，才允许新建 Group。
+8. 严禁输出 `semantic_units`、`group_id`、`reasoning`、`confidence`、`text`、`full_text` 等字段。
+
+输入段落：
+{paragraphs_json}
+
+输出模板：
+{{
+  "knowledge_groups": [
+    {{
+      "group_name": "CloudBot 环境配置",
+      "reason": "围绕 CloudBot 从准备、配置到验证的同一核心论点",
+      "units": [
+        {{"pids": ["P001", "P002"], "k": 0, "m": 0, "title": "CloudBot 配置前置说明"}},
+        {{"pids": ["P003", "P004"], "k": 2, "m": 1, "title": "配置 CloudBot 运行环境"}}
+      ]
+    }}
   ]
 }}
 """
@@ -127,58 +190,56 @@ USER_PROMPT_TEMPLATE = """璇峰杈撳叆娈佃惤杩涜璇箟鍗曞厓
 # LLM Prompts - Phase 3: Cross-modal Conflict Resolution
 # =============================================================================
 
-RESEGMENT_SYSTEM_PROMPT = """浣犳槸璇箟鍗曞厓鍒囧垎涓撳锛屾搮闀垮鐞嗚法妯℃€佸啿绐併€?
-CV妯″潡妫€娴嬪埌鏌愪簺璇箟鍗曞厓瀛樺湪瑙嗚涓庢枃鏈殑涓嶄竴鑷达紝浣犻渶瑕佸喅瀹氬浣曞鐞嗚繖浜涘啿绐併€?
+RESEGMENT_SYSTEM_PROMPT = """你是语义单元切分专家，擅长处理跨模态冲突。
+CV 模块检测到某些语义单元存在视觉与文本不一致，你需要决定如何处理这些冲突。
 
-鍐崇瓥鍘熷垯锛?
-1. 濡傛灉鏂囨湰璇箟纭疄璺ㄨ秺浜嗕笉鍚岀煡璇嗙被鍨嬭竟鐣?鈫?鎷嗗垎
-2. 濡傛灉鍙槸棣栧熬鍖呭惈鍐椾綑鐢婚潰浣嗘牳蹇冭涔夊畬鏁?鈫?寰皟杈圭晫
-3. 濡傛灉瑙嗚鍙樺寲鍙槸鍔ㄧ敾鏁堟灉鎴栨棤鍏冲共鎵?鈫?淇濇寔鍘熷垽"""
+决策原则：
+1. 如果文本语义确实跨越了不同知识类型边界 -> 拆分（split）。
+2. 如果只是首尾包含冗余画面但核心语义完整 -> 微调边界（adjust）。
+3. 如果视觉变化只是动画效果或无关干扰 -> 保持原判（keep）。"""
 
-RESEGMENT_USER_PROMPT = """CV妯″潡妫€娴嬪埌浠ヤ笅璇箟鍗曞厓瀛樺湪"璺ㄦā鎬佸啿绐?锛岃缁撳悎瑙嗚閿氱偣淇℃伅閲嶆柊瀹¤銆?
+RESEGMENT_USER_PROMPT = """CV 模块检测到以下语义单元存在“跨模态冲突”，请结合视觉锚点信息重新审视。
 
 ## 冲突单元信息
 - **Unit ID**: {unit_id}
-- **褰撳墠鏂囨湰**: "{text}"
-- **褰撳墠鏃跺簭**: {start_sec:.1f}s - {end_sec:.1f}s
-- **棰勫垽绫诲瀷**: {llm_type}
-- **瑙嗚缁熻**: 绋冲畾宀?{s_stable:.0%}, 鍔ㄤ綔={s_action:.0%}, 鍐椾綑={s_redundant:.0%}
-- **瑙嗚閿氱偣**: {anchors} (杩欎簺鏃堕棿鐐瑰彂鐢熶簡鏄捐憲鐨勮瑙夌姸鎬佸垏鎹?
-- **鍐茬獊鍘熷洜**: {reason}
+- **当前文本**: "{text}"
+- **当前时序**: {start_sec:.1f}s - {end_sec:.1f}s
+- **预判类型**: {llm_type}
+- **视觉统计**: 稳定岛={s_stable:.0%}, 动作={s_action:.0%}, 冗余={s_redundant:.0%}
+- **视觉锚点**: {anchors}（这些时间点发生了显著视觉状态切换）
+- **冲突原因**: {reason}
 
 ## 决策选项
 
-### 1. Split (强制拆分)
-- 鍦烘櫙: 鏂囧瓧鏄庢樉瀵瑰簲浜嗕笉鍚岀殑瑙嗚鐘舵€?濡傚墠鍗婃槸姒傚康璁茶В锛屽悗鍗婃槸鎿嶄綔婕旂ず)
-- 瑙嗚閿氱偣纭疄鏄煡璇嗙偣鐨勮嚜鐒跺垎鐣岀嚎
-- 杩斿洖鎷嗗垎鐐规椂闂存埑(蹇呴』鎺ヨ繎鏌愪釜瑙嗚閿氱偣)
+### 1. Split（强制拆分）
+- 场景：文本明显对应不同视觉状态（如前半是概念讲解，后半是操作演示）。
+- 视觉锚点可以作为自然分界线。
+- 返回 `split_point`（必须接近某个视觉锚点）。
 
-### 2. Adjust (边界微调)
-- 鍦烘櫙: 鍗曞厓鏍稿績璇箟瀹屾暣锛屼絾棣栧熬鍖呭惈浜嗘棤鍏崇殑杞満/鍐椾綑鐢婚潰
-- 鏀剁缉鎴栨墿灞?start_sec/end_sec 浠ラ伩寮€鍐椾綑
+### 2. Adjust（边界微调）
+- 场景：单元核心语义完整，但首尾混入了无关转场/冗余画面。
+- 返回 `new_timeline=[start_sec, end_sec]` 收缩或扩展边界。
 
-### 3. Keep (保持原判)
-- 鍦烘櫙: 瑙嗚鍙樺寲浠呮槸PPT鍔ㄧ敾鎴栨棤鍏冲共鎵帮紝鏂囨湰璇箟鏄笉鍙垎鍓茬殑鏁翠綋
-- 缁存寔鍘熸椂搴忥紝鏍囪涓?璺ㄦā鎬佸瓨鐤?
+### 3. Keep（保持原判）
+- 场景：视觉变化仅是 PPT 动画或无关干扰，文本语义不可拆分。
+- 保持原时间范围，并说明理由。
 
-## 输出格式 (JSON)
+## 输出格式（JSON）
 ```json
 {{
     "decision": "split" | "adjust" | "keep",
-    "rationale": "鍐崇瓥鐞嗙敱(20瀛椾互鍐?",
+    "rationale": "决策理由（20字以内）",
     "split_point": 12.5,
     "new_timeline": [10.0, 25.0]
 }}
 ```
 
-娉ㄦ剰锛?
-- split鏃跺繀椤绘彁渚泂plit_point(绉?
-- adjust鏃跺繀椤绘彁渚沶ew_timeline([start, end])
-- keep鏃朵袱鑰呴兘涓嶉渶瑕?
+注意：
+- `split` 时必须提供 `split_point`（秒）。
+- `adjust` 时必须提供 `new_timeline`（[start, end]）。
+- `keep` 时两者都不需要。
 
-璇疯緭鍑篔SON鍐崇瓥:"""
-
-
+请输出 JSON 决策:"""
 
 
 # =============================================================================
@@ -194,15 +255,10 @@ class SemanticUnitSegmenter:
     
     def __init__(self, llm_client=None):
         """
-        鎵ц閫昏緫锛?
-        1) 瑙ｆ瀽閰嶇疆鎴栦緷璧栵紝鍑嗗杩愯鐜銆?
-        2) 鍒濆鍖栧璞＄姸鎬併€佺紦瀛樹笌渚濊禆瀹㈡埛绔€?
-        瀹炵幇鏂瑰紡锛氶€氳繃鍐呴儴鏂规硶璋冪敤/鐘舵€佹洿鏂板疄鐜般€?
-        鏍稿績浠峰€硷細鍦ㄥ垵濮嬪寲闃舵鍥哄寲渚濊禆锛屼繚璇佽繍琛岀ǔ瀹氭€с€?
-        杈撳叆鍙傛暟锛?
-        - llm_client: 瀹㈡埛绔疄渚嬶紙绫诲瀷锛氭湭鏍囨敞锛夈€?
-        杈撳嚭鍙傛暟锛?
-        - 鏃狅紙浠呬骇鐢熷壇浣滅敤锛屽鏃ュ織/鍐欑洏/鐘舵€佹洿鏂帮級銆?"""
+        方法说明：执行当前方法的核心处理流程并返回结果。
+        设计原因：封装步骤与依赖，降低调用链复杂度。
+        权衡：注释保持精简，具体细节以实现与测试为准。
+        """
         self.llm_client = llm_client
         self._ensure_llm_client()
         self._segment_system_prompt = get_prompt(
@@ -272,69 +328,33 @@ class SemanticUnitSegmenter:
             }
             for idx, p in enumerate(paragraphs)
         ]
-
-        prompt = render_prompt(
-            PromptKeys.DEEPSEEK_SEMANTIC_SEGMENT_USER,
-            context={
-                "paragraphs_json": json.dumps(paragraphs_for_llm, ensure_ascii=False, indent=2)
-            },
-            fallback=self._segment_user_template,
+        effective_batch_size = max(1, int(batch_size or 1))
+        paragraph_batches = self._chunk_paragraphs(paragraphs_for_llm, effective_batch_size)
+        logger.info(
+            "Sending batched LLM requests for %s paragraphs "
+            "(batch_size_ignored=%s, batches=%s, input_budget_tokens=%s)",
+            len(paragraphs_for_llm),
+            effective_batch_size,
+            len(paragraph_batches),
+            SEGMENTATION_INPUT_TOKEN_BUDGET,
         )
-        logger.info(f"Sending single LLM request for {len(paragraphs)} paragraphs")
 
         all_units: List[SemanticUnit] = []
         total_tokens = 0
         unit_counter = 1
 
         try:
-            try:
-                result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
-                    prompt=prompt,
-                    system_message=self._segment_system_prompt,
-                    max_tokens=SEGMENTATION_MAX_OUTPUT_TOKENS,
-                    client=self.llm_client,
-                )
-            except TypeError:
-                result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
-                    prompt=prompt,
-                    system_message=self._segment_system_prompt,
-                    client=self.llm_client,
-                )
+            batch_results = await self._segment_batches_concurrently(
+                paragraph_batches=paragraph_batches,
+                paragraphs=paragraphs,
+                sentence_timestamps=sentence_timestamps,
+            )
+            total_tokens += sum(item["token_usage"] for item in batch_results)
+            all_units = await self._merge_batches_with_boundary_judgement(batch_results)
+            total_tokens += sum(item.get("boundary_token_usage", 0) for item in batch_results[1:])
 
-            total_tokens = getattr(metadata, "total_tokens", 0)
-            units_data = result_json.get("semantic_units", []) if isinstance(result_json, dict) else []
-            logger.debug(f"LLM returned {len(units_data)} semantic units")
-
-            for raw_unit in units_data:
-                parsed = self._parse_min_schema_unit(raw_unit, paragraphs)
-                if parsed is None:
-                    raise ValueError("Invalid unit schema under strict mode")
-
-                paragraph_ids = parsed["pids"]
-                knowledge_type = self._decode_knowledge_type(parsed["k"])
-                mult_steps = parsed["m"] == 1
-                full_text = self._collect_text_by_paragraph_ids(paragraph_ids, paragraphs)
-                source_sentence_ids = self._collect_sentence_ids(paragraph_ids, paragraphs)
-                start_sec, end_sec = self._calculate_timestamps(
-                    paragraph_ids,
-                    paragraphs,
-                    sentence_timestamps,
-                )
-
-                unit = SemanticUnit(
-                    unit_id=f"SU{unit_counter:03d}",
-                    knowledge_type=knowledge_type,
-                    knowledge_topic=self._build_topic_from_text(full_text),
-                    full_text=full_text,
-                    source_paragraph_ids=paragraph_ids,
-                    source_sentence_ids=source_sentence_ids,
-                    start_sec=start_sec,
-                    end_sec=end_sec,
-                    confidence=DEFAULT_UNIT_CONFIDENCE,
-                    mult_steps=mult_steps,
-                )
-                all_units.append(unit)
-                unit_counter += 1
+            for idx, unit in enumerate(all_units, start=1):
+                unit.unit_id = f"SU{idx:03d}"
 
         except Exception as e:
             logger.error(f"LLM call failed or strict parse failed: {e}")
@@ -346,6 +366,7 @@ class SemanticUnitSegmenter:
                 paragraph_id = p.get("paragraph_id", f"P{unit_counter:03d}")
                 text = p.get("text", "")
                 source_sentence_ids = p.get("source_sentence_ids", [])
+                fallback_group_name = self._build_topic_from_text(text)
                 start_sec, end_sec = self._calculate_timestamps(
                     [paragraph_id],
                     paragraphs,
@@ -356,6 +377,7 @@ class SemanticUnitSegmenter:
                     unit_id=f"SU{unit_counter:03d}",
                     knowledge_type="abstract",
                     knowledge_topic=self._build_topic_from_text(text),
+                    group_name=fallback_group_name,
                     full_text=text,
                     source_paragraph_ids=[paragraph_id],
                     source_sentence_ids=source_sentence_ids,
@@ -366,6 +388,8 @@ class SemanticUnitSegmenter:
                 )
                 all_units.append(unit)
                 unit_counter += 1
+
+        self._assign_group_ids(all_units, start_id=1)
 
         elapsed_ms = (time.time() - start_time) * 1000
 
@@ -390,6 +414,599 @@ class SemanticUnitSegmenter:
                 logger.warning(f"Failed to save cache to {cache_path}: {e}")
 
         return result
+
+    async def _segment_batches_concurrently(
+        self,
+        paragraph_batches: List[List[Dict[str, Any]]],
+        paragraphs: List[Dict[str, Any]],
+        sentence_timestamps: Dict[str, Dict[str, float]] = None,
+    ) -> List[Dict[str, Any]]:
+        semaphore = asyncio.Semaphore(_segment_batch_max_concurrency())
+
+        async def _run_one(
+            batch_index: int,
+            batch_paragraphs: List[Dict[str, Any]],
+        ) -> Dict[str, Any]:
+            async with semaphore:
+                batch_units, token_usage = await self._segment_single_batch(
+                    batch_index=batch_index,
+                    batch_paragraphs=batch_paragraphs,
+                    paragraphs=paragraphs,
+                    sentence_timestamps=sentence_timestamps,
+                )
+                return {
+                    "batch_index": batch_index,
+                    "batch_paragraphs": batch_paragraphs,
+                    "batch_units": batch_units,
+                    "token_usage": token_usage,
+                    "boundary_token_usage": 0,
+                }
+
+        tasks = [
+            asyncio.create_task(_run_one(idx, batch_paragraphs))
+            for idx, batch_paragraphs in enumerate(paragraph_batches, start=1)
+        ]
+        if not tasks:
+            return []
+
+        results = await asyncio.gather(*tasks)
+        results.sort(key=lambda item: item["batch_index"])
+        return results
+
+    async def _segment_single_batch(
+        self,
+        batch_index: int,
+        batch_paragraphs: List[Dict[str, Any]],
+        paragraphs: List[Dict[str, Any]],
+        sentence_timestamps: Dict[str, Dict[str, float]] = None,
+    ) -> Tuple[List[SemanticUnit], int]:
+        prompt = self._build_segment_prompt(
+            batch_paragraphs=batch_paragraphs,
+            prev_tail_unit=None,
+        )
+
+        try:
+            result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
+                prompt=prompt,
+                system_message=self._segment_system_prompt,
+                max_tokens=SEGMENTATION_MAX_OUTPUT_TOKENS,
+                client=self.llm_client,
+            )
+        except TypeError:
+            result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
+                prompt=prompt,
+                system_message=self._segment_system_prompt,
+                client=self.llm_client,
+            )
+
+        batch_tokens = int(getattr(metadata, "total_tokens", 0) or 0)
+        batch_units: List[SemanticUnit] = []
+        grouped_units_count = 0
+        legacy_units_count = 0
+
+        # 新格式（推荐）: knowledge_groups -> units[]。
+        if isinstance(result_json, dict) and isinstance(result_json.get("knowledge_groups"), list):
+            for raw_group in result_json.get("knowledge_groups", []):
+                parsed_group = self._parse_group_schema(raw_group, batch_paragraphs)
+                if parsed_group is None:
+                    raise ValueError("Invalid group schema under strict mode")
+                group_name = parsed_group["group_name"]
+                group_reason = parsed_group["reason"]
+                for parsed_unit in parsed_group["units"]:
+                    paragraph_ids = parsed_unit["pids"]
+                    knowledge_type = self._decode_knowledge_type(parsed_unit["k"])
+                    mult_steps = parsed_unit["m"] == 1
+                    full_text = self._collect_text_by_paragraph_ids(paragraph_ids, paragraphs)
+                    source_sentence_ids = self._collect_sentence_ids(paragraph_ids, paragraphs)
+                    start_sec, end_sec = self._calculate_timestamps(
+                        paragraph_ids,
+                        paragraphs,
+                        sentence_timestamps,
+                    )
+                    unit_title = parsed_unit.get("title") or self._build_topic_from_text(full_text)
+
+                    batch_units.append(
+                        SemanticUnit(
+                            unit_id=f"SU_TMP_{batch_index}_{len(batch_units) + 1}",
+                            knowledge_type=knowledge_type,
+                            knowledge_topic=unit_title,
+                            group_name=group_name,
+                            group_reason=group_reason,
+                            full_text=full_text,
+                            source_paragraph_ids=paragraph_ids,
+                            source_sentence_ids=source_sentence_ids,
+                            start_sec=start_sec,
+                            end_sec=end_sec,
+                            confidence=DEFAULT_UNIT_CONFIDENCE,
+                            mult_steps=mult_steps,
+                        )
+                    )
+                    grouped_units_count += 1
+        # 旧格式（兼容）: semantic_units[] + unit.group_name。
+        elif isinstance(result_json, dict) and isinstance(result_json.get("semantic_units"), list):
+            units_data = result_json.get("semantic_units", [])
+            for raw_unit in units_data:
+                parsed = self._parse_min_schema_unit(raw_unit, batch_paragraphs, require_group_name=True)
+                if parsed is None:
+                    raise ValueError("Invalid unit schema under strict mode")
+
+                paragraph_ids = parsed["pids"]
+                knowledge_type = self._decode_knowledge_type(parsed["k"])
+                mult_steps = parsed["m"] == 1
+                full_text = self._collect_text_by_paragraph_ids(paragraph_ids, paragraphs)
+                source_sentence_ids = self._collect_sentence_ids(paragraph_ids, paragraphs)
+                start_sec, end_sec = self._calculate_timestamps(
+                    paragraph_ids,
+                    paragraphs,
+                    sentence_timestamps,
+                )
+                unit_title = parsed.get("title") or self._build_topic_from_text(full_text)
+                group_name = parsed.get("group_name") or unit_title
+
+                batch_units.append(
+                    SemanticUnit(
+                        unit_id=f"SU_TMP_{batch_index}_{len(batch_units) + 1}",
+                        knowledge_type=knowledge_type,
+                        knowledge_topic=unit_title,
+                        group_name=group_name,
+                        full_text=full_text,
+                        source_paragraph_ids=paragraph_ids,
+                        source_sentence_ids=source_sentence_ids,
+                        start_sec=start_sec,
+                        end_sec=end_sec,
+                        confidence=DEFAULT_UNIT_CONFIDENCE,
+                        mult_steps=mult_steps,
+                    )
+                )
+                legacy_units_count += 1
+        else:
+            raise ValueError("Invalid segmentation output: require knowledge_groups or semantic_units")
+
+        logger.debug(
+            "Batch %s parsed semantic units=%s (grouped=%s, legacy=%s, tokens=%s)",
+            batch_index,
+            len(batch_units),
+            grouped_units_count,
+            legacy_units_count,
+            batch_tokens,
+        )
+
+        return batch_units, batch_tokens
+
+    async def _merge_batches_with_boundary_judgement(
+        self,
+        batch_results: List[Dict[str, Any]],
+    ) -> List[SemanticUnit]:
+        if not batch_results:
+            return []
+
+        merged_units: List[SemanticUnit] = list(batch_results[0]["batch_units"])
+        for batch_result in batch_results[1:]:
+            batch_units = list(batch_result["batch_units"])
+            if merged_units and batch_units:
+                prev_tail = merged_units[-1]
+                next_head = batch_units[0]
+                if not self._can_merge_boundary_units(prev_tail, next_head):
+                    should_merge = False
+                    boundary_tokens = 0
+                    merged_update = {}
+                else:
+                    should_merge, boundary_tokens, merged_update = await self._judge_boundary_merge_with_llm(
+                        prev_tail=prev_tail,
+                        next_head=next_head,
+                    )
+                batch_result["boundary_token_usage"] = boundary_tokens
+                if should_merge and self._can_merge_boundary_units(prev_tail, next_head, merged_update):
+                    self._merge_unit_into_prev_tail(
+                        prev_tail,
+                        next_head,
+                        merged_update=merged_update,
+                    )
+                    batch_units = batch_units[1:]
+                elif should_merge:
+                    logger.info(
+                        "Boundary merge rejected by purity guard: prev=%s(%s,%s), next=%s(%s,%s)",
+                        prev_tail.unit_id,
+                        prev_tail.knowledge_type,
+                        prev_tail.group_name,
+                        next_head.unit_id,
+                        next_head.knowledge_type,
+                        next_head.group_name,
+                    )
+
+            merged_units.extend(batch_units)
+
+        return merged_units
+
+    async def _judge_boundary_merge_with_llm(
+        self,
+        prev_tail: SemanticUnit,
+        next_head: SemanticUnit,
+    ) -> Tuple[bool, int, Dict[str, Any]]:
+        system_prompt = (
+            "You judge whether two adjacent semantic units should be merged. "
+            "Follow the same segmentation merge/split rules and return JSON only."
+        )
+        prompt = self._build_boundary_merge_prompt(prev_tail, next_head)
+
+        try:
+            try:
+                result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
+                    prompt=prompt,
+                    system_message=system_prompt,
+                    max_tokens=SEGMENTATION_BOUNDARY_MAX_OUTPUT_TOKENS,
+                    client=self.llm_client,
+                )
+            except TypeError:
+                result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
+                    prompt=prompt,
+                    system_message=system_prompt,
+                    client=self.llm_client,
+                )
+
+            merge_flag = self._normalize_boundary_merge_flag(result_json)
+            merged_update = self._extract_boundary_merge_update(result_json)
+            token_usage = int(getattr(metadata, "total_tokens", 0) or 0)
+            return merge_flag, token_usage, merged_update
+        except Exception as exc:
+            logger.warning(
+                "Boundary merge judgement failed, fallback to heuristic: %s",
+                exc,
+            )
+            return self._should_merge_boundary_with_heuristic(prev_tail, next_head), 0, {}
+
+    def _build_boundary_merge_prompt(
+        self,
+        prev_tail: SemanticUnit,
+        next_head: SemanticUnit,
+    ) -> str:
+        rule_reference = (self._segment_system_prompt or "")[:SEGMENTATION_BOUNDARY_RULE_REFERENCE_CHARS]
+        prev_payload = {
+            "unit_id": prev_tail.unit_id,
+            "knowledge_type": prev_tail.knowledge_type,
+            "knowledge_topic": prev_tail.knowledge_topic,
+            "group_name": prev_tail.group_name,
+            "mult_steps": 1 if prev_tail.mult_steps else 0,
+            "source_paragraph_ids": prev_tail.source_paragraph_ids,
+            "text_tail": (prev_tail.full_text or "")[-SEGMENTATION_PREV_TAIL_TEXT_CHARS:],
+        }
+        next_payload = {
+            "unit_id": next_head.unit_id,
+            "knowledge_type": next_head.knowledge_type,
+            "knowledge_topic": next_head.knowledge_topic,
+            "group_name": next_head.group_name,
+            "mult_steps": 1 if next_head.mult_steps else 0,
+            "source_paragraph_ids": next_head.source_paragraph_ids,
+            "text_head": (next_head.full_text or "")[:SEGMENTATION_PREV_TAIL_TEXT_CHARS],
+        }
+        return (
+            "[Boundary Merge Decision]\n"
+            "Reference segmentation rules (must follow):\n"
+            f"{rule_reference}\n\n"
+            "Decide whether these two adjacent units belong to one continuous semantic unit.\n"
+            "Never merge if knowledge_type differs. Keep knowledge type purity.\n"
+            "Output JSON only:\n"
+            "{\"merge\": 0 or 1, \"reason\": \"...\", "
+            "\"merged_unit\": {\"k\": 0|1|2, \"m\": 0|1, \"title\": \"...\", \"group_name\": \"...\"}}\n"
+            "When merge=0, set merged_unit to {}.\n\n"
+            f"previous_tail={json.dumps(prev_payload, ensure_ascii=False)}\n"
+            f"next_head={json.dumps(next_payload, ensure_ascii=False)}\n"
+        )
+
+    def _normalize_boundary_merge_flag(self, result_json: Any) -> bool:
+        if not isinstance(result_json, dict):
+            return False
+
+        value = result_json.get("merge", 0)
+        if isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, (int, float)):
+            return int(value) == 1
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "merge"}
+        return False
+
+    def _extract_boundary_merge_update(self, result_json: Any) -> Dict[str, Any]:
+        if not isinstance(result_json, dict):
+            return {}
+
+        merged_unit = result_json.get("merged_unit")
+        if not isinstance(merged_unit, dict):
+            merged_unit = {}
+
+        update: Dict[str, Any] = {}
+        k_value = merged_unit.get("k")
+        if isinstance(k_value, int) and k_value in KNOWLEDGE_TYPE_CODE_MAP:
+            update["knowledge_type"] = self._decode_knowledge_type(k_value)
+
+        title = merged_unit.get("title")
+        if isinstance(title, str) and title.strip():
+            update["knowledge_topic"] = title.strip()
+
+        group_name = merged_unit.get("group_name")
+        if isinstance(group_name, str) and group_name.strip():
+            update["group_name"] = group_name.strip()
+
+        m_value = merged_unit.get("m")
+        if isinstance(m_value, int) and m_value in (0, 1):
+            update["mult_steps"] = bool(m_value)
+
+        return update
+
+    def _should_merge_boundary_with_heuristic(
+        self,
+        prev_tail: SemanticUnit,
+        next_head: SemanticUnit,
+    ) -> bool:
+        if prev_tail.knowledge_type != next_head.knowledge_type:
+            return False
+        if not self._are_group_names_compatible(prev_tail.group_name, next_head.group_name):
+            return False
+        if bool(prev_tail.mult_steps) != bool(next_head.mult_steps):
+            return False
+        return self._are_titles_compatible(prev_tail.knowledge_topic, next_head.knowledge_topic)
+
+    def _chunk_paragraphs(
+        self,
+        paragraphs_for_llm: List[Dict[str, Any]],
+        batch_size: int,
+    ) -> List[List[Dict[str, Any]]]:
+        # Keep `batch_size` in signature for backward compatibility; chunking is token-budget only.
+        _ = batch_size
+        if not paragraphs_for_llm:
+            return []
+
+        batches: List[List[Dict[str, Any]]] = []
+        current_batch: List[Dict[str, Any]] = []
+
+        for paragraph in paragraphs_for_llm:
+            single_estimated_tokens = self._estimate_segment_input_tokens([paragraph])
+            if single_estimated_tokens > SEGMENTATION_INPUT_TOKEN_BUDGET:
+                logger.warning(
+                    "Single paragraph estimated input tokens exceed budget: pid=%s, estimated=%s, budget=%s",
+                    paragraph.get("paragraph_id"),
+                    single_estimated_tokens,
+                    SEGMENTATION_INPUT_TOKEN_BUDGET,
+                )
+
+            candidate_batch = current_batch + [paragraph]
+            candidate_tokens = self._estimate_segment_input_tokens(candidate_batch)
+            exceed_token_budget = candidate_tokens > SEGMENTATION_INPUT_TOKEN_BUDGET
+
+            if current_batch and exceed_token_budget:
+                batches.append(current_batch)
+                current_batch = [paragraph]
+                continue
+
+            current_batch = candidate_batch
+
+        if current_batch:
+            batches.append(current_batch)
+
+        return batches
+
+    def _estimate_segment_input_tokens(
+        self,
+        batch_paragraphs: List[Dict[str, Any]],
+    ) -> int:
+        paragraphs_json = json.dumps(batch_paragraphs, ensure_ascii=False, indent=2)
+        approx_chars = (
+            len(self._segment_system_prompt)
+            + len(self._segment_user_template)
+            + len(paragraphs_json)
+            + SEGMENTATION_PREV_TAIL_TEXT_CHARS
+        )
+        chars_per_token = max(0.1, float(SEGMENTATION_EST_CHARS_PER_TOKEN))
+        estimated_tokens = int(approx_chars / chars_per_token)
+        return estimated_tokens + SEGMENTATION_PROMPT_TOKEN_BUFFER
+
+    def _build_segment_prompt(
+        self,
+        batch_paragraphs: List[Dict[str, Any]],
+        prev_tail_unit: Optional[SemanticUnit],
+    ) -> str:
+        paragraphs_json = json.dumps(batch_paragraphs, ensure_ascii=False, indent=2)
+        prev_tail_unit_json = self._serialize_prev_tail_unit(prev_tail_unit)
+        prompt = render_prompt(
+            PromptKeys.DEEPSEEK_SEMANTIC_SEGMENT_USER,
+            context={
+                "paragraphs_json": paragraphs_json,
+                "prev_tail_unit_json": prev_tail_unit_json,
+            },
+            fallback=self._segment_user_template,
+        )
+        if prev_tail_unit is None:
+            return prompt
+
+        continuation_hint = (
+            "\n\n[Cross-batch continuation rules]\n"
+            "You are processing one batch from a long sequence.\n"
+            "If this batch starts with content that continues the previous batch tail unit, "
+            "you may append these paragraphs into that previous unit.\n"
+            "When doing so, do NOT repeat the previous tail unit as a new semantic unit in this batch output.\n"
+            "Previous batch tail unit (empty JSON means first batch):\n"
+            f"{prev_tail_unit_json}\n"
+        )
+        return f"{prompt}{continuation_hint}"
+
+    def _serialize_prev_tail_unit(self, prev_tail_unit: Optional[SemanticUnit]) -> str:
+        if prev_tail_unit is None:
+            return "{}"
+
+        tail_text = (prev_tail_unit.full_text or "").strip()
+        if len(tail_text) > SEGMENTATION_PREV_TAIL_TEXT_CHARS:
+            tail_text = tail_text[-SEGMENTATION_PREV_TAIL_TEXT_CHARS:]
+
+        payload = {
+            "unit_id": prev_tail_unit.unit_id,
+            "knowledge_type": prev_tail_unit.knowledge_type,
+            "knowledge_topic": prev_tail_unit.knowledge_topic,
+            "group_name": prev_tail_unit.group_name,
+            "mult_steps": 1 if prev_tail_unit.mult_steps else 0,
+            "source_paragraph_ids": prev_tail_unit.source_paragraph_ids[-6:],
+            "tail_text": tail_text,
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _should_merge_batch_head_with_prev_tail(
+        self,
+        prev_tail: SemanticUnit,
+        batch_head: SemanticUnit,
+        batch_paragraphs: List[Dict[str, Any]],
+    ) -> bool:
+        if not batch_paragraphs or not batch_head.source_paragraph_ids:
+            return False
+        first_batch_pid = batch_paragraphs[0].get("paragraph_id")
+        first_head_pid = batch_head.source_paragraph_ids[0]
+        if first_batch_pid != first_head_pid:
+            return False
+        if prev_tail.knowledge_type != batch_head.knowledge_type:
+            return False
+        if not self._are_group_names_compatible(prev_tail.group_name, batch_head.group_name):
+            return False
+        if bool(prev_tail.mult_steps) != bool(batch_head.mult_steps):
+            return False
+        return self._are_titles_compatible(prev_tail.knowledge_topic, batch_head.knowledge_topic)
+
+    def _are_titles_compatible(self, left: str, right: str) -> bool:
+        left_norm = "".join(ch.lower() for ch in (left or "") if ch.isalnum())
+        right_norm = "".join(ch.lower() for ch in (right or "") if ch.isalnum())
+        if not left_norm or not right_norm:
+            return False
+        if left_norm == right_norm:
+            return True
+        if left_norm in right_norm or right_norm in left_norm:
+            return True
+        left_set = set(left_norm)
+        right_set = set(right_norm)
+        overlap = len(left_set & right_set)
+        baseline = max(1, min(len(left_set), len(right_set)))
+        return (overlap / baseline) >= 0.6
+
+    def _normalize_group_name(self, group_name: str) -> str:
+        normalized = "".join(ch.lower() for ch in (group_name or "").strip() if ch.isalnum())
+        if normalized:
+            return normalized
+        return (group_name or "").strip().lower()
+
+    def _build_group_name_fallback(self, unit: SemanticUnit) -> str:
+        if isinstance(unit.group_name, str) and unit.group_name.strip():
+            return unit.group_name.strip()
+        if isinstance(unit.knowledge_topic, str) and unit.knowledge_topic.strip():
+            return unit.knowledge_topic.strip()
+        return self._build_topic_from_text(getattr(unit, "full_text", ""))
+
+    def _are_group_names_compatible(self, left: str, right: str) -> bool:
+        left_fallback = (left or "").strip()
+        right_fallback = (right or "").strip()
+        if not left_fallback or not right_fallback:
+            return False
+        left_norm = self._normalize_group_name(left_fallback)
+        right_norm = self._normalize_group_name(right_fallback)
+        if left_norm and right_norm:
+            if left_norm == right_norm:
+                return True
+            if left_norm in right_norm or right_norm in left_norm:
+                return True
+        return self._are_titles_compatible(left_fallback, right_fallback)
+
+    def _can_merge_boundary_units(
+        self,
+        prev_tail: SemanticUnit,
+        next_head: SemanticUnit,
+        merged_update: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if prev_tail.knowledge_type != next_head.knowledge_type:
+            return False
+
+        merged_knowledge_type = ""
+        merged_group_name = ""
+        if isinstance(merged_update, dict):
+            merged_knowledge_type = str(merged_update.get("knowledge_type", "") or "").strip()
+            merged_group_name = str(merged_update.get("group_name", "") or "").strip()
+        if merged_knowledge_type and merged_knowledge_type != prev_tail.knowledge_type:
+            return False
+
+        prev_group_name = self._build_group_name_fallback(prev_tail)
+        next_group_name = self._build_group_name_fallback(next_head)
+        target_group_name = merged_group_name or prev_group_name
+
+        if not self._are_group_names_compatible(prev_group_name, next_group_name):
+            return False
+        if not self._are_group_names_compatible(prev_group_name, target_group_name):
+            return False
+        if not self._are_group_names_compatible(next_group_name, target_group_name):
+            return False
+        return True
+
+    def _assign_group_ids(self, units: List[SemanticUnit], start_id: int = 1) -> None:
+        group_name_to_id: Dict[str, int] = {}
+        next_group_id = max(1, int(start_id or 1))
+
+        for index, unit in enumerate(units):
+            group_name = self._build_group_name_fallback(unit)
+            unit.group_name = group_name
+            normalized_group_name = self._normalize_group_name(group_name)
+            if not normalized_group_name:
+                normalized_group_name = f"unknown_group_{index + 1}"
+            if normalized_group_name not in group_name_to_id:
+                group_name_to_id[normalized_group_name] = next_group_id
+                next_group_id += 1
+            unit.group_id = group_name_to_id[normalized_group_name]
+
+    def _merge_unit_into_prev_tail(
+        self,
+        prev_tail: SemanticUnit,
+        continuation: SemanticUnit,
+        merged_update: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        combined_paragraph_ids = list(prev_tail.source_paragraph_ids)
+        for pid in continuation.source_paragraph_ids:
+            if pid not in combined_paragraph_ids:
+                combined_paragraph_ids.append(pid)
+        prev_tail.source_paragraph_ids = combined_paragraph_ids
+
+        combined_sentence_ids = list(prev_tail.source_sentence_ids)
+        for sid in continuation.source_sentence_ids:
+            if sid not in combined_sentence_ids:
+                combined_sentence_ids.append(sid)
+        prev_tail.source_sentence_ids = combined_sentence_ids
+
+        continuation_text = (continuation.full_text or "").strip()
+        prev_text = (prev_tail.full_text or "").strip()
+        if continuation_text:
+            if not prev_text:
+                prev_tail.full_text = continuation_text
+            elif continuation_text not in prev_text:
+                prev_tail.full_text = f"{prev_text}\n{continuation_text}"
+
+        if prev_tail.start_sec <= 0.0:
+            prev_tail.start_sec = continuation.start_sec
+        elif continuation.start_sec > 0.0:
+            prev_tail.start_sec = min(prev_tail.start_sec, continuation.start_sec)
+        prev_tail.end_sec = max(prev_tail.end_sec, continuation.end_sec)
+        prev_tail.confidence = min(prev_tail.confidence, continuation.confidence)
+        prev_tail.mult_steps = bool(prev_tail.mult_steps or continuation.mult_steps)
+        if (not prev_tail.group_name) and continuation.group_name:
+            prev_tail.group_name = continuation.group_name
+        if (not prev_tail.group_reason) and continuation.group_reason:
+            prev_tail.group_reason = continuation.group_reason
+
+        if isinstance(merged_update, dict):
+            knowledge_type = merged_update.get("knowledge_type")
+            if isinstance(knowledge_type, str) and knowledge_type in {"abstract", "concrete", "process"}:
+                prev_tail.knowledge_type = knowledge_type
+
+            knowledge_topic = merged_update.get("knowledge_topic")
+            if isinstance(knowledge_topic, str) and knowledge_topic.strip():
+                prev_tail.knowledge_topic = knowledge_topic.strip()
+
+            group_name = merged_update.get("group_name")
+            if isinstance(group_name, str) and group_name.strip():
+                prev_tail.group_name = group_name.strip()
+
+            if "mult_steps" in merged_update:
+                prev_tail.mult_steps = bool(merged_update.get("mult_steps"))
     
     def _save_to_cache(self, result: SegmentationResult, path: str):
         """方法说明：SemanticUnitSegmenter._save_to_cache 工具方法。
@@ -397,12 +1014,18 @@ class SemanticUnitSegmenter:
         1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
         2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
         3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
+        grouped_payload = build_grouped_semantic_units_payload(
+            [asdict(u) for u in result.semantic_units],
+            schema_version="phase2a.grouped.v1",
+            default_group_reason="同一核心论点聚合",
+            strip_unit_group_fields=True,
+        )
         data = {
-            "semantic_units": [asdict(u) for u in result.semantic_units],
+            **grouped_payload,
             "total_paragraphs_input": result.total_paragraphs_input,
             "total_units_output": result.total_units_output,
             "llm_token_usage": result.llm_token_usage,
-            "processing_time_ms": result.processing_time_ms
+            "processing_time_ms": result.processing_time_ms,
         }
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -415,21 +1038,32 @@ class SemanticUnitSegmenter:
         3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        
+
+        flat_units = normalize_semantic_units_payload(data)
         units = []
-        for u_data in data.get("semantic_units", []):
+        for u_data in flat_units:
             # 重建 SemanticUnit 对象
             # 处理 dataclass 字段差异 (向后兼容)
             valid_keys = SemanticUnit.__dataclass_fields__.keys()
             filtered_data = {k: v for k, v in u_data.items() if k in valid_keys}
             units.append(SemanticUnit(**filtered_data))
-            
+
+        total_paragraphs_input = 0
+        total_units_output = len(units)
+        llm_token_usage = 0
+        processing_time_ms = 0.0
+        if isinstance(data, dict):
+            total_paragraphs_input = int(data.get("total_paragraphs_input", 0) or 0)
+            total_units_output = int(data.get("total_units_output", len(units)) or len(units))
+            llm_token_usage = int(data.get("llm_token_usage", 0) or 0)
+            processing_time_ms = float(data.get("processing_time_ms", 0.0) or 0.0)
+
         return SegmentationResult(
             semantic_units=units,
-            total_paragraphs_input=data.get("total_paragraphs_input", 0),
-            total_units_output=data.get("total_units_output", 0),
-            llm_token_usage=data.get("llm_token_usage", 0),
-            processing_time_ms=data.get("processing_time_ms", 0.0)
+            total_paragraphs_input=total_paragraphs_input,
+            total_units_output=total_units_output,
+            llm_token_usage=llm_token_usage,
+            processing_time_ms=processing_time_ms,
         )
     
     def _calculate_timestamps(
@@ -446,7 +1080,7 @@ class SemanticUnitSegmenter:
         if not sentence_timestamps:
             return 0.0, 0.0
         
-        # 鏀堕泦鎵€鏈夌浉鍏冲彞瀛怚D
+        # 历史乱码注释已清理。
         sentence_ids = self._collect_sentence_ids(paragraph_ids, paragraphs)
         
         if not sentence_ids:
@@ -489,6 +1123,7 @@ class SemanticUnitSegmenter:
         self,
         raw_unit: Any,
         paragraphs: List[Dict[str, Any]],
+        require_group_name: bool = True,
     ) -> Optional[Dict[str, Any]]:
         """方法说明：SemanticUnitSegmenter._parse_min_schema_unit 工具方法。
         执行步骤：
@@ -498,7 +1133,9 @@ class SemanticUnitSegmenter:
         if not isinstance(raw_unit, dict):
             return None
 
-        allowed_keys = {"pids", "k", "m"}
+        allowed_keys = {"pids", "k", "m", "title"}
+        if require_group_name:
+            allowed_keys.add("group_name")
         if set(raw_unit.keys()) != allowed_keys:
             return None
 
@@ -514,10 +1151,74 @@ class SemanticUnitSegmenter:
         if not isinstance(m_value, int) or m_value not in (0, 1):
             return None
 
-        return {
+        title_value = raw_unit.get("title")
+        if not isinstance(title_value, str):
+            return None
+        normalized_title = title_value.strip()
+        if not normalized_title:
+            return None
+
+        parsed: Dict[str, Any] = {
             "pids": normalized_pids,
             "k": k_value,
             "m": m_value,
+            "title": normalized_title,
+        }
+        if require_group_name:
+            group_name_value = raw_unit.get("group_name")
+            if not isinstance(group_name_value, str):
+                return None
+            normalized_group_name = group_name_value.strip()
+            if not normalized_group_name:
+                return None
+            parsed["group_name"] = normalized_group_name
+        return parsed
+
+    def _parse_group_schema(
+        self,
+        raw_group: Any,
+        paragraphs: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw_group, dict):
+            return None
+
+        allowed_group_keys = {"group_name", "reason", "units"}
+        if set(raw_group.keys()) != allowed_group_keys:
+            return None
+
+        group_name_value = raw_group.get("group_name")
+        if not isinstance(group_name_value, str):
+            return None
+        group_name = group_name_value.strip()
+        if not group_name:
+            return None
+
+        reason_value = raw_group.get("reason")
+        if not isinstance(reason_value, str):
+            return None
+        reason = reason_value.strip()
+        if not reason:
+            return None
+
+        units_value = raw_group.get("units")
+        if not isinstance(units_value, list) or not units_value:
+            return None
+
+        parsed_units: List[Dict[str, Any]] = []
+        for raw_unit in units_value:
+            parsed_unit = self._parse_min_schema_unit(
+                raw_unit,
+                paragraphs,
+                require_group_name=False,
+            )
+            if parsed_unit is None:
+                return None
+            parsed_units.append(parsed_unit)
+
+        return {
+            "group_name": group_name,
+            "reason": reason,
+            "units": parsed_units,
         }
 
     def _normalize_paragraph_ids(
@@ -635,7 +1336,7 @@ class SemanticUnitSegmenter:
             if unit.unit_id not in processed_ids:
                 updated_units.append(unit)
         
-        # 鎸夋椂闂存帓搴?
+        
         updated_units.sort(key=lambda u: u.start_sec)
         
         return updated_units
@@ -733,12 +1434,12 @@ class SemanticUnitSegmenter:
             else:
                 after_ids.append(sid)
         
-        # 濡傛灉鍒嗗壊鏃犳晥(涓€杈逛负绌?
+        
         if not before_ids or not after_ids:
             unit.__dict__['cross_modal_suspected'] = True
             return [unit]
         
-        # 鍒涘缓涓や釜瀛愬崟鍏?
+        
         unit1 = SemanticUnit(
             unit_id=f"{unit.unit_id}_1",
             knowledge_type=unit.knowledge_type,
@@ -785,7 +1486,7 @@ class SemanticUnitSegmenter:
         
         new_start, new_end = new_timeline
         
-        # 楠岃瘉鍚堢悊鎬?
+        
         if new_start >= new_end:
             unit.__dict__['cross_modal_suspected'] = True
             return [unit]
@@ -808,10 +1509,8 @@ class SemanticUnitSegmenter:
         1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
         2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
         3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-        # 绠€鍖栧疄鐜? 杩斿洖ID鍒楄〃鍗犱綅
-        # 瀹屾暣瀹炵幇闇€瑕佷粠step2_correction_output鑾峰彇text
+        
+        # 历史乱码注释已清理。
         return f"[Sentences: {', '.join(sentence_ids)}]"
 
     
-
-

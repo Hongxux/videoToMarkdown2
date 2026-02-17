@@ -3,571 +3,71 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>视频处理任务管理</title>
+    <title>Redirecting to Workspace...</title>
+    <meta http-equiv="refresh" content="0;url=mobile-markdown.html">
     <style>
         :root {
-            --primary: #6366f1;
-            --primary-dark: #4f46e5;
-            --success: #10b981;
-            --warning: #f59e0b;
-            --error: #ef4444;
-            --bg-dark: #0f172a;
-            --bg-card: #1e293b;
-            --text-primary: #f1f5f9;
-            --text-secondary: #94a3b8;
-            --border: #334155;
+            color-scheme: light dark;
         }
-        
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
+
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1a2e 100%);
-            color: var(--text-primary);
+            margin: 0;
             min-height: 100vh;
-            padding: 2rem;
-        }
-        
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-        
-        header {
-            text-align: center;
-            margin-bottom: 2rem;
-        }
-        
-        h1 {
-            font-size: 2.5rem;
-            background: linear-gradient(135deg, var(--primary) 0%, #a855f7 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 0.5rem;
-        }
-        
-        .subtitle {
-            color: var(--text-secondary);
-            font-size: 1.1rem;
-        }
-        
-        /* 任务提交表单 */
-        .submit-form {
-            background: var(--bg-card);
-            border-radius: 16px;
-            padding: 2rem;
-            margin-bottom: 2rem;
-            border: 1px solid var(--border);
-            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
-        }
-        
-        .form-row {
-            display: flex;
-            gap: 1rem;
-            margin-bottom: 1rem;
-        }
-        
-        .form-group {
-            flex: 1;
-        }
-        
-        label {
-            display: block;
-            color: var(--text-secondary);
-            margin-bottom: 0.5rem;
-            font-size: 0.9rem;
-        }
-        
-        input, select {
-            width: 100%;
-            padding: 0.75rem 1rem;
-            background: var(--bg-dark);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            color: var(--text-primary);
-            font-size: 1rem;
-            transition: border-color 0.2s;
-        }
-        
-        input:focus, select:focus {
-            outline: none;
-            border-color: var(--primary);
-        }
-        
-        .btn {
-            padding: 0.75rem 2rem;
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-        
-        .btn-primary {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-dark) 100%);
-            color: white;
-        }
-        
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
-        }
-        
-        /* 状态面板 */
-        .stats-panel {
+            min-height: 100dvh;
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 2rem;
+            place-items: center;
+            font-family: "Segoe UI", "PingFang SC", sans-serif;
+            background: radial-gradient(circle at top, rgba(79, 70, 229, 0.14), transparent 52%), #f1f5f9;
+            color: #0f172a;
         }
-        
-        .stat-card {
-            background: var(--bg-card);
+
+        .redirect-tip {
+            padding: 16px 18px;
             border-radius: 12px;
-            padding: 1.5rem;
-            border: 1px solid var(--border);
+            border: 1px solid rgba(148, 163, 184, 0.4);
+            background: rgba(255, 255, 255, 0.82);
+            box-shadow: 0 10px 26px rgba(37, 99, 235, 0.12);
+            font-size: 14px;
+            line-height: 1.5;
         }
-        
-        .stat-value {
-            font-size: 2rem;
-            font-weight: 700;
-            color: var(--primary);
-        }
-        
-        .stat-label {
-            color: var(--text-secondary);
-            font-size: 0.9rem;
-            margin-top: 0.25rem;
-        }
-        
-        /* 任务列表 */
-        .task-list {
-            background: var(--bg-card);
-            border-radius: 16px;
-            border: 1px solid var(--border);
-            overflow: hidden;
-        }
-        
-        .task-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 1.5rem;
-            border-bottom: 1px solid var(--border);
-        }
-        
-        .task-header h2 {
-            font-size: 1.25rem;
-        }
-        
-        .task-item {
-            display: flex;
-            align-items: center;
-            padding: 1.25rem 1.5rem;
-            border-bottom: 1px solid var(--border);
-            transition: background 0.2s;
-        }
-        
-        .task-item:hover {
-            background: rgba(99, 102, 241, 0.05);
-        }
-        
-        .task-item:last-child {
-            border-bottom: none;
-        }
-        
-        .task-status {
-            width: 12px;
-            height: 12px;
-            border-radius: 50%;
-            margin-right: 1rem;
-            flex-shrink: 0;
-        }
-        
-        .status-queued { background: var(--warning); }
-        .status-processing { background: var(--primary); animation: pulse 1.5s infinite; }
-        .status-completed { background: var(--success); }
-        .status-failed { background: var(--error); }
-        .status-cancelled { background: var(--text-secondary); }
-        
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.5; }
-        }
-        
-        .task-info {
-            flex: 1;
-            min-width: 0;
-        }
-        
-        .task-title {
-            font-weight: 500;
-            margin-bottom: 0.25rem;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-        }
-        
-        .task-meta {
-            font-size: 0.85rem;
-            color: var(--text-secondary);
-        }
-        
-        .task-progress {
-            width: 150px;
-            margin: 0 1rem;
-        }
-        
-        .progress-bar {
-            height: 6px;
-            background: var(--border);
-            border-radius: 3px;
-            overflow: hidden;
-        }
-        
-        .progress-fill {
-            height: 100%;
-            background: linear-gradient(90deg, var(--primary), #a855f7);
-            transition: width 0.3s ease;
-        }
-        
-        .progress-text {
-            font-size: 0.8rem;
-            color: var(--text-secondary);
-            margin-top: 0.25rem;
-            text-align: right;
-        }
-        
-        .task-actions {
-            display: flex;
-            gap: 0.5rem;
-        }
-        
-        .btn-sm {
-            padding: 0.5rem 1rem;
-            font-size: 0.85rem;
-            border-radius: 6px;
-        }
-        
-        .btn-danger {
-            background: var(--error);
-            color: white;
-        }
-        
-        .btn-secondary {
-            background: var(--border);
-            color: var(--text-primary);
-        }
-        
-        /* 连接状态 */
-        .connection-status {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-size: 0.9rem;
-            color: var(--text-secondary);
-        }
-        
-        .connection-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-        }
-        
-        .connected { background: var(--success); }
-        .disconnected { background: var(--error); }
-        
-        /* 空状态 */
-        .empty-state {
-            text-align: center;
-            padding: 3rem;
-            color: var(--text-secondary);
-        }
-        
-        .empty-state svg {
-            width: 64px;
-            height: 64px;
-            margin-bottom: 1rem;
-            opacity: 0.5;
+
+        @media (prefers-color-scheme: dark) {
+            body {
+                background: radial-gradient(circle at top, #232a37 0%, #000000 52%), #000000;
+                color: #dce2ed;
+            }
+
+            .redirect-tip {
+                border-color: #232730;
+                background: #111111;
+                box-shadow: 0 12px 28px rgba(0, 0, 0, 0.56);
+            }
         }
     </style>
+    <script>
+        (function redirectToUnifiedExperience() {
+            const pathname = window.location.pathname || "/";
+            const suffix = "/index.html";
+            let basePath = "/";
+            if (pathname.endsWith(suffix)) {
+                basePath = pathname.slice(0, -suffix.length) || "/";
+            } else if (pathname.endsWith("/")) {
+                basePath = pathname;
+            } else {
+                basePath = `${pathname}/`;
+            }
+
+            const target = `${basePath}mobile-markdown.html${window.location.search || ""}${window.location.hash || ""}`;
+            if (window.location.href !== new URL(target, window.location.origin).href) {
+                window.location.replace(target);
+            }
+        })();
+    </script>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🎬 视频处理中心</h1>
-            <p class="subtitle">V2 Java-Python 分布式架构</p>
-        </header>
-        
-        <!-- 任务提交表单 -->
-        <div class="submit-form">
-            <h3 style="margin-bottom: 1rem;">📤 提交新任务</h3>
-            <div class="form-row">
-                <div class="form-group">
-                    <label>视频URL</label>
-                    <input type="text" id="videoUrl" placeholder="https://example.com/video.mp4">
-                </div>
-                <div class="form-group" style="max-width: 200px;">
-                    <label>优先级</label>
-                    <select id="priority">
-                        <option value="normal">普通</option>
-                        <option value="high">高</option>
-                        <option value="vip">VIP</option>
-                    </select>
-                </div>
-                <div class="form-group" style="max-width: 150px; align-self: flex-end;">
-                    <button class="btn btn-primary" onclick="submitTask()">
-                        提交任务
-                    </button>
-                </div>
-            </div>
-        </div>
-        
-        <!-- 统计面板 -->
-        <div class="stats-panel">
-            <div class="stat-card">
-                <div class="stat-value" id="statQueue">0</div>
-                <div class="stat-label">排队中</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="statProcessing">0</div>
-                <div class="stat-label">处理中</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="statCompleted">0</div>
-                <div class="stat-label">已完成</div>
-            </div>
-            <div class="stat-card">
-                <div class="stat-value" id="statCircuitBreaker">CLOSED</div>
-                <div class="stat-label">熔断器状态</div>
-            </div>
-        </div>
-        
-        <!-- 任务列表 -->
-        <div class="task-list">
-            <div class="task-header">
-                <h2>📋 任务列表</h2>
-                <div class="connection-status">
-                    <span class="connection-dot" id="wsStatus"></span>
-                    <span id="wsStatusText">连接中...</span>
-                </div>
-            </div>
-            <div id="taskListContainer">
-                <div class="empty-state">
-                    <svg fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" 
-                              d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <p>暂无任务，提交新任务开始处理</p>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <script>
-        // ============ 配置区 (用户可修改) ============
-        // 如果前端和后端不在同一台机器，请修改以下地址
-        const CONFIG = {
-            // Java Spring Boot 服务地址
-            API_HOST: 'localhost',
-            API_PORT: 8080,
-            
-            // 获取完整URL
-            get API_BASE() { return `http://${this.API_HOST}:${this.API_PORT}/api`; },
-            get WS_URL() { return `ws://${this.API_HOST}:${this.API_PORT}/ws/tasks`; }
-        };
-        // ============================================
-        
-        const USER_ID = 'user_' + Date.now();
-        
-        let ws = null;
-        let tasks = {};
-        
-        // WebSocket 连接
-        function connectWebSocket() {
-            ws = new WebSocket(`${CONFIG.WS_URL}?userId=${USER_ID}`);
-            
-            ws.onopen = () => {
-                updateConnectionStatus(true);
-                console.log('WebSocket connected');
-            };
-            
-            ws.onclose = () => {
-                updateConnectionStatus(false);
-                console.log('WebSocket disconnected, reconnecting...');
-                setTimeout(connectWebSocket, 3000);
-            };
-            
-            ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                handleWebSocketMessage(data);
-            };
-            
-            ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-            };
-        }
-        
-        function updateConnectionStatus(connected) {
-            const dot = document.getElementById('wsStatus');
-            const text = document.getElementById('wsStatusText');
-            
-            if (connected) {
-                dot.className = 'connection-dot connected';
-                text.textContent = '已连接';
-            } else {
-                dot.className = 'connection-dot disconnected';
-                text.textContent = '已断开';
-            }
-        }
-        
-        function handleWebSocketMessage(data) {
-            if (data.type === 'taskUpdate') {
-                updateTask(data);
-            }
-        }
-        
-        // 提交任务
-        async function submitTask() {
-            const videoUrl = document.getElementById('videoUrl').value;
-            const priority = document.getElementById('priority').value;
-            
-            if (!videoUrl) {
-                alert('请输入视频URL');
-                return;
-            }
-            
-            try {
-                const response = await fetch(`${CONFIG.API_BASE}/tasks`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        userId: USER_ID,
-                        videoUrl: videoUrl,
-                        outputDir: './output',
-                        priority: priority
-                    })
-                });
-                
-                const result = await response.json();
-                if (result.success) {
-                    document.getElementById('videoUrl').value = '';
-                    
-                    // 订阅任务更新
-                    if (ws && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            action: 'subscribe',
-                            taskId: result.taskId
-                        }));
-                    }
-                    
-                    // 添加到列表
-                    addTaskToList({
-                        taskId: result.taskId,
-                        status: 'QUEUED',
-                        progress: 0,
-                        message: '排队中',
-                        videoUrl: videoUrl
-                    });
-                    
-                    refreshStats();
-                }
-            } catch (error) {
-                console.error('Submit error:', error);
-                alert('提交失败，请检查服务是否运行');
-            }
-        }
-        
-        // 取消任务
-        async function cancelTask(taskId) {
-            try {
-                await fetch(`${CONFIG.API_BASE}/tasks/${taskId}`, {
-                    method: 'DELETE'
-                });
-                refreshStats();
-            } catch (error) {
-                console.error('Cancel error:', error);
-            }
-        }
-        
-        // 更新任务
-        function updateTask(data) {
-            tasks[data.taskId] = data;
-            renderTaskList();
-            refreshStats();
-        }
-        
-        // 添加任务到列表
-        function addTaskToList(task) {
-            tasks[task.taskId] = task;
-            renderTaskList();
-        }
-        
-        // 渲染任务列表
-        function renderTaskList() {
-            const container = document.getElementById('taskListContainer');
-            const taskArray = Object.values(tasks);
-            
-            if (taskArray.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <p>暂无任务</p>
-                    </div>
-                `;
-                return;
-            }
-            
-            container.innerHTML = taskArray.map(task => `
-                <div class="task-item">
-                    <div class="task-status status-${task.status.toLowerCase()}"></div>
-                    <div class="task-info">
-                        <div class="task-title">${task.taskId}</div>
-                        <div class="task-meta">${task.message || task.status}</div>
-                    </div>
-                    <div class="task-progress">
-                        <div class="progress-bar">
-                            <div class="progress-fill" style="width: ${(task.progress || 0) * 100}%"></div>
-                        </div>
-                        <div class="progress-text">${Math.round((task.progress || 0) * 100)}%</div>
-                    </div>
-                    <div class="task-actions">
-                        ${task.status === 'COMPLETED' && task.resultPath ? 
-                            `<a href="${task.resultPath}" class="btn btn-sm btn-primary" target="_blank">查看结果</a>` : ''}
-                        ${['QUEUED', 'PROCESSING'].includes(task.status) ?
-                            `<button class="btn btn-sm btn-danger" onclick="cancelTask('${task.taskId}')">取消</button>` : ''}
-                    </div>
-                </div>
-            `).join('');
-        }
-        
-        // 刷新统计
-        async function refreshStats() {
-            try {
-                const response = await fetch(`${CONFIG.API_BASE}/stats`);
-                const stats = await response.json();
-                
-                document.getElementById('statQueue').textContent = stats.queueSize || 0;
-                document.getElementById('statProcessing').textContent = stats.processingCount || 0;
-                document.getElementById('statCompleted').textContent = 
-                    (stats.statusDistribution?.COMPLETED || 0);
-                document.getElementById('statCircuitBreaker').textContent = 
-                    stats.circuitBreakerState || 'CLOSED';
-            } catch (error) {
-                console.log('Stats fetch failed');
-            }
-        }
-        
-        // 初始化
-        document.addEventListener('DOMContentLoaded', () => {
-            connectWebSocket();
-            refreshStats();
-            setInterval(refreshStats, 5000);
-        });
-    </script>
+<div class="redirect-tip">Redirecting to the unified reading workspace...</div>
+<noscript>
+    <div class="redirect-tip">JavaScript is disabled. Please open <a href="mobile-markdown.html">mobile-markdown.html</a> manually.</div>
+</noscript>
 </body>
 </html>

@@ -28,9 +28,21 @@ import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _bootstrap_repo_root() -> None:
+    """确保脚本独立执行时，仓库根目录位于 `sys.path` 首位。"""
+    repo_root = str(Path(__file__).resolve().parents[1])
+    if repo_root in sys.path:
+        sys.path.remove(repo_root)
+    sys.path.insert(0, repo_root)
+
+
+_bootstrap_repo_root()
+
 from services.python_grpc.src.common.utils.numbers import to_float
 from services.python_grpc.src.common.utils.path import (
-    sanitize_filename_component as _sanitize_filename_component,
+    sanitize_filename_component as _sanitize_filename_component_impl,
 )
 from services.python_grpc.src.common.utils.video import probe_video_duration_ffprobe
 
@@ -83,7 +95,7 @@ def _sanitize_filename_component(text: str, max_len: int = 40) -> str:
     权衡：清洗会损失原始字符串的部分可读性，但能换取跨环境稳定性。
     """
 
-    return __sanitize_filename_component(text, max_len=max_len)
+    return _sanitize_filename_component_impl(text, max_len=max_len)
 
 
 def ffprobe_duration(video_path: str) -> float:
@@ -98,6 +110,28 @@ def ffprobe_duration(video_path: str) -> float:
 
 def _format_time_range(start_sec: float, end_sec: float) -> str:
     return f"{start_sec:.2f}-{end_sec:.2f}"
+
+
+def _normalize_even_scale_height(scale_height: Optional[int]) -> Optional[int]:
+    """
+    做什么：将目标缩放高度规范为偶数。
+    为什么：libx264 在 yuv420 下要求宽高可被 2 整除；奇数高度会放大触发“宽度非偶数”的概率。
+    取舍：当传入 1 这类极小值时，自动抬到 2 保持参数可用。
+    """
+
+    if scale_height is None:
+        return None
+    try:
+        normalized = int(scale_height)
+    except (TypeError, ValueError):
+        return None
+    if normalized <= 0:
+        return None
+    if normalized % 2 != 0:
+        normalized -= 1
+    if normalized < 2:
+        normalized = 2
+    return normalized
 
 
 def _build_output_name(
@@ -196,6 +230,8 @@ def _run_ffmpeg_cut(
     out_path: str,
     overwrite: bool,
     timeout_sec: float,
+    low_res_scale_height: Optional[int] = None,
+    low_res_video_bitrate: Optional[str] = None,
 ) -> Tuple[int, str, List[str], float]:
     """
     做什么：执行一次 ffmpeg 切割（重新编码）。
@@ -225,14 +261,27 @@ def _run_ffmpeg_cut(
         "veryfast",
         "-crf",
         "20",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "128k",
-        "-movflags",
-        "+faststart",
-        out_path,
     ]
+
+    # 超长片段预切：仅用于 VL 预分析输入降本，最终 assets 仍由原视频按绝对时间再切。
+    # 使用 -2 强制宽度按偶数对齐，规避 libx264 对偶数宽高的约束。
+    normalized_scale_height = _normalize_even_scale_height(low_res_scale_height)
+    if normalized_scale_height is not None:
+        cmd.extend(["-vf", f"scale=-2:{normalized_scale_height}"])
+    if low_res_video_bitrate:
+        cmd.extend(["-b:v", str(low_res_video_bitrate)])
+
+    cmd.extend(
+        [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            out_path,
+        ]
+    )
 
     start_ts = time.time()
     try:
@@ -262,6 +311,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg executable path (default: ffmpeg).")
     parser.add_argument("--min-duration", type=float, default=0.8, help="Min duration seconds to keep (default: 0.8).")
+    parser.add_argument(
+        "--large-segment-threshold-sec",
+        type=float,
+        default=120.0,
+        help="For segments >= this duration, pre-cut with lower resolution/bitrate. <=0 disables. (default: 120s).",
+    )
+    parser.add_argument(
+        "--large-segment-scale-height",
+        type=int,
+        default=480,
+        help="Target height for large-segment low-res pre-cut (default: 480).",
+    )
+    parser.add_argument(
+        "--large-segment-video-bitrate",
+        default="500k",
+        help="Target video bitrate for large-segment low-res pre-cut (default: 500k).",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files.")
     parser.add_argument("--fail-fast", action="store_true", help="Fail immediately on first ffmpeg error.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned segments and ffmpeg commands, no execution.")
@@ -307,6 +373,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"WARNING: {w}", file=sys.stderr)
 
     planned_items: List[SegmentItem] = []
+    large_segment_threshold_sec = max(0.0, float(args.large_segment_threshold_sec))
+    raw_large_segment_scale_height = max(0, int(args.large_segment_scale_height))
+    large_segment_scale_height = _normalize_even_scale_height(raw_large_segment_scale_height) or 0
+    if raw_large_segment_scale_height > 0 and large_segment_scale_height != raw_large_segment_scale_height:
+        global_warnings.append(
+            "large_segment_scale_height adjusted to even value for libx264 compatibility: "
+            f"{raw_large_segment_scale_height} -> {large_segment_scale_height}"
+        )
+    large_segment_video_bitrate = str(args.large_segment_video_bitrate or "").strip() or "500k"
     for i, u in enumerate(units_norm, start=1):
         start_sec = float(u["start_sec"])
         end_sec = float(u["end_sec"])
@@ -328,6 +403,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # 先构造命令用于 dry-run 打印/manifest
         timeout_sec = max(120.0, duration_sec * 6.0)
+        use_low_res_precut = (
+            large_segment_threshold_sec > 0.0
+            and duration_sec >= large_segment_threshold_sec
+            and large_segment_scale_height > 0
+        )
         cmd_preview = [
             str(args.ffmpeg),
             "-hide_banner",
@@ -350,16 +430,33 @@ def main(argv: Optional[List[str]] = None) -> int:
             "veryfast",
             "-crf",
             "20",
-            "-c:a",
-            "aac",
-            "-b:a",
-            "128k",
-            "-movflags",
-            "+faststart",
-            out_path,
         ]
+        if use_low_res_precut:
+            cmd_preview.extend(
+                [
+                    "-vf",
+                    f"scale=-2:{large_segment_scale_height}",
+                    "-b:v",
+                    large_segment_video_bitrate,
+                ]
+            )
+        cmd_preview.extend(
+            [
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-movflags",
+                "+faststart",
+                out_path,
+            ]
+        )
         if status in ("planned", "pending"):
             warnings.append(f"timeout_sec={timeout_sec:.1f}")
+        if use_low_res_precut:
+            warnings.append(
+                f"low_res_precut=scale=-2:{large_segment_scale_height},b:v={large_segment_video_bitrate}"
+            )
 
         planned_items.append(
             SegmentItem(
@@ -415,6 +512,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # pending -> run
         _ensure_parent_dir(Path(item.out_path))
         timeout_sec = max(120.0, item.duration_sec * 6.0)
+        use_low_res_precut = (
+            large_segment_threshold_sec > 0.0
+            and item.duration_sec >= large_segment_threshold_sec
+            and large_segment_scale_height > 0
+        )
         rc, stderr, cmd, elapsed = _run_ffmpeg_cut(
             ffmpeg_path=str(args.ffmpeg),
             video_path=video_path,
@@ -423,6 +525,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             out_path=item.out_path,
             overwrite=bool(args.overwrite),
             timeout_sec=timeout_sec,
+            low_res_scale_height=large_segment_scale_height if use_low_res_precut else None,
+            low_res_video_bitrate=large_segment_video_bitrate if use_low_res_precut else None,
         )
         item.ffmpeg_cmd = cmd
         item.ffmpeg_returncode = rc
@@ -458,6 +562,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "out_dir": out_dir,
         "video_duration_sec": video_duration,
         "min_duration_sec": float(args.min_duration),
+        "large_segment_threshold_sec": large_segment_threshold_sec,
+        "large_segment_scale_height": large_segment_scale_height,
+        "large_segment_video_bitrate": large_segment_video_bitrate,
         "overwrite": bool(args.overwrite),
         "ffmpeg": str(args.ffmpeg),
         "global_warnings": global_warnings,

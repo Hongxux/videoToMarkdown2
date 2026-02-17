@@ -361,9 +361,11 @@ STEP_INDEX_MAP = {
     "step1_validate": 1,
     "step2_correction": 2,
     "step3_merge": 3,
-    "step4_clean_local": 4,
+    "step3_5_translate": 4,
+    "step4_clean_local": 5,
     "step5_clean_cross": 5,
     "step6_merge_cross": 6,
+    "step5_6_dedup_merge": 6,
 }
 
 

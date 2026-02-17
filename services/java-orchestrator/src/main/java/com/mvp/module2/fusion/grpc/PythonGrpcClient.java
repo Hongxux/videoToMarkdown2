@@ -1,6 +1,7 @@
 package com.mvp.module2.fusion.grpc;
 
 import com.mvp.videoprocessing.grpc.*;
+import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
@@ -234,12 +235,29 @@ public class PythonGrpcClient {
         public String semanticUnitId;
         public List<ClipSegment> segments = new ArrayList<>();
     }
+
+    public static class SemanticUnitsRefDTO {
+        public String refId;
+        public String taskId;
+        public String outputDir;
+        public int unitCount;
+        public String schemaVersion;
+        public String fingerprint;
+    }
+
+    public static class SemanticUnitsInlineDTO {
+        public byte[] payload;
+        public String codec;
+        public int unitCount;
+        public String sha256;
+    }
     
     public static class AnalyzeResult {
         public boolean success;
         public List<ScreenshotRequest> screenshotRequests = new ArrayList<>();
         public List<ClipRequest> clipRequests = new ArrayList<>();
-        public String semanticUnitsJsonPath;
+        public SemanticUnitsRefDTO semanticUnitsRef;
+        public SemanticUnitsInlineDTO semanticUnitsInline;
         public String errorMsg;
     }
     
@@ -266,7 +284,26 @@ public class PythonGrpcClient {
                 
                 AnalyzeResult result = new AnalyzeResult();
                 result.success = response.getSuccess();
-                result.semanticUnitsJsonPath = response.getSemanticUnitsJsonPath();
+                if (response.hasSemanticUnitsRef()) {
+                    com.mvp.videoprocessing.grpc.SemanticUnitsRef ref = response.getSemanticUnitsRef();
+                    SemanticUnitsRefDTO dto = new SemanticUnitsRefDTO();
+                    dto.refId = ref.getRefId();
+                    dto.taskId = ref.getTaskId();
+                    dto.outputDir = ref.getOutputDir();
+                    dto.unitCount = ref.getUnitCount();
+                    dto.schemaVersion = ref.getSchemaVersion();
+                    dto.fingerprint = ref.getFingerprint();
+                    result.semanticUnitsRef = dto;
+                }
+                if (response.hasSemanticUnitsInline()) {
+                    com.mvp.videoprocessing.grpc.SemanticUnitsInline inline = response.getSemanticUnitsInline();
+                    SemanticUnitsInlineDTO dto = new SemanticUnitsInlineDTO();
+                    dto.payload = inline.getPayload().toByteArray();
+                    dto.codec = inline.getCodec();
+                    dto.unitCount = inline.getUnitCount();
+                    dto.sha256 = inline.getSha256();
+                    result.semanticUnitsInline = dto;
+                }
                 result.errorMsg = response.getErrorMsg();
                 
                 // 转换列表
@@ -315,7 +352,28 @@ public class PythonGrpcClient {
     }
     
     public CompletableFuture<AssembleResult> assembleRichTextAsync(
-            String taskId, String videoPath, String semanticUnitsJsonPath,
+            String taskId, String videoPath, AnalyzeResult analyzeResult,
+            String screenshotsDir, String clipsDir, String outputDir,
+            String title, int timeoutSec) {
+        SemanticUnitsRefDTO ref = analyzeResult != null ? analyzeResult.semanticUnitsRef : null;
+        SemanticUnitsInlineDTO inline = analyzeResult != null ? analyzeResult.semanticUnitsInline : null;
+        return assembleRichTextAsync(
+            taskId,
+            videoPath,
+            ref,
+            inline,
+            screenshotsDir,
+            clipsDir,
+            outputDir,
+            title,
+            timeoutSec
+        );
+    }
+
+    private CompletableFuture<AssembleResult> assembleRichTextAsync(
+            String taskId, String videoPath,
+            SemanticUnitsRefDTO semanticUnitsRef,
+            SemanticUnitsInlineDTO semanticUnitsInline,
             String screenshotsDir, String clipsDir, String outputDir,
             String title, int timeoutSec) {
         return CompletableFuture.supplyAsync(() -> {
@@ -325,16 +383,41 @@ public class PythonGrpcClient {
                 AssembleRequest request = AssembleRequest.newBuilder()
                     .setTaskId(taskId)
                     .setVideoPath(videoPath)
-                    .setSemanticUnitsJsonPath(semanticUnitsJsonPath)
                     .setScreenshotsDir(screenshotsDir)
                     .setClipsDir(clipsDir)
                     .setOutputDir(outputDir)
                     .setTitle(title)
                     .build();
+                AssembleRequest.Builder requestBuilder = request.toBuilder();
+                if (semanticUnitsInline != null
+                    && semanticUnitsInline.payload != null
+                    && semanticUnitsInline.payload.length > 0) {
+                    requestBuilder.setSemanticUnitsInline(
+                        com.mvp.videoprocessing.grpc.SemanticUnitsInline.newBuilder()
+                            .setPayload(ByteString.copyFrom(semanticUnitsInline.payload))
+                            .setCodec(semanticUnitsInline.codec != null ? semanticUnitsInline.codec : "")
+                            .setUnitCount(semanticUnitsInline.unitCount)
+                            .setSha256(semanticUnitsInline.sha256 != null ? semanticUnitsInline.sha256 : "")
+                            .build()
+                    );
+                } else if (semanticUnitsRef != null
+                    && semanticUnitsRef.refId != null
+                    && !semanticUnitsRef.refId.isBlank()) {
+                    requestBuilder.setSemanticUnitsRef(
+                        com.mvp.videoprocessing.grpc.SemanticUnitsRef.newBuilder()
+                            .setRefId(semanticUnitsRef.refId)
+                            .setTaskId(semanticUnitsRef.taskId != null ? semanticUnitsRef.taskId : "")
+                            .setOutputDir(semanticUnitsRef.outputDir != null ? semanticUnitsRef.outputDir : "")
+                            .setUnitCount(semanticUnitsRef.unitCount)
+                            .setSchemaVersion(semanticUnitsRef.schemaVersion != null ? semanticUnitsRef.schemaVersion : "")
+                            .setFingerprint(semanticUnitsRef.fingerprint != null ? semanticUnitsRef.fingerprint : "")
+                            .build()
+                    );
+                }
                 
                 AssembleResponse response = blockingStub
                     .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .assembleRichText(request);
+                    .assembleRichText(requestBuilder.build());
                 
                 AssembleResult result = new AssembleResult();
                 result.success = response.getSuccess();
@@ -811,28 +894,56 @@ public class PythonGrpcClient {
      * 
      * @param taskId 任务ID
      * @param videoPath 视频路径
-     * @param semanticUnitsJsonPath 语义单元 JSON 路径
+     * @param analyzeResult AnalyzeSemanticUnits 的返回结果（含 ref/inline）
      * @param outputDir 输出目录
      * @param timeoutSec 超时秒数
      * @return CompletableFuture<VLAnalysisResult>
      */
     public CompletableFuture<VLAnalysisResult> analyzeWithVLAsync(
-            String taskId, String videoPath, String semanticUnitsJsonPath,
+            String taskId, String videoPath, AnalyzeResult analyzeResult,
             String outputDir, int timeoutSec) {
         return CompletableFuture.supplyAsync(() -> {
             try {
                 logger.info("[{}] Calling AnalyzeWithVL: {}", taskId, videoPath);
-                
-                VLAnalysisRequest request = VLAnalysisRequest.newBuilder()
+
+                VLAnalysisRequest.Builder requestBuilder = VLAnalysisRequest.newBuilder()
                     .setTaskId(taskId)
                     .setVideoPath(videoPath)
-                    .setSemanticUnitsJsonPath(semanticUnitsJsonPath)
                     .setOutputDir(outputDir)
-                    .build();
+                    ;
+                if (analyzeResult != null
+                    && analyzeResult.semanticUnitsInline != null
+                    && analyzeResult.semanticUnitsInline.payload != null
+                    && analyzeResult.semanticUnitsInline.payload.length > 0) {
+                    SemanticUnitsInlineDTO inline = analyzeResult.semanticUnitsInline;
+                    requestBuilder.setSemanticUnitsInline(
+                        com.mvp.videoprocessing.grpc.SemanticUnitsInline.newBuilder()
+                            .setPayload(ByteString.copyFrom(inline.payload))
+                            .setCodec(inline.codec != null ? inline.codec : "")
+                            .setUnitCount(inline.unitCount)
+                            .setSha256(inline.sha256 != null ? inline.sha256 : "")
+                            .build()
+                    );
+                } else if (analyzeResult != null
+                    && analyzeResult.semanticUnitsRef != null
+                    && analyzeResult.semanticUnitsRef.refId != null
+                    && !analyzeResult.semanticUnitsRef.refId.isBlank()) {
+                    SemanticUnitsRefDTO ref = analyzeResult.semanticUnitsRef;
+                    requestBuilder.setSemanticUnitsRef(
+                        com.mvp.videoprocessing.grpc.SemanticUnitsRef.newBuilder()
+                            .setRefId(ref.refId)
+                            .setTaskId(ref.taskId != null ? ref.taskId : "")
+                            .setOutputDir(ref.outputDir != null ? ref.outputDir : "")
+                            .setUnitCount(ref.unitCount)
+                            .setSchemaVersion(ref.schemaVersion != null ? ref.schemaVersion : "")
+                            .setFingerprint(ref.fingerprint != null ? ref.fingerprint : "")
+                            .build()
+                    );
+                }
                 
                 VLAnalysisResponse response = blockingStub
                     .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .analyzeWithVL(request);
+                    .analyzeWithVL(requestBuilder.build());
                 
                 VLAnalysisResult result = new VLAnalysisResult();
                 result.success = response.getSuccess();

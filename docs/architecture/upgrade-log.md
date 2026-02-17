@@ -2,6 +2,1735 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-17 移动端页面补齐任务提交能力（URL/BV + 本地视频上传）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `mobile-markdown.html` 原本仅支持任务浏览与 Markdown 阅读编辑，无法在手机端直接发起新任务。
+  - 用户希望“手机端网站也能上传文件并提交任务”，避免回到桌面端操作。
+- 第一性原理与复用杠杆：
+  - 第一性原理：移动端提交能力本质是“把视频来源（URL 或文件）转换成已有任务系统可消费的输入”，不应新建第二条处理链。
+  - 复用杠杆1：复用既有任务提交能力，并在移动端暴露同语义别名接口 `/api/mobile/tasks/submit` 与 `/api/mobile/tasks/upload`，保持后端编排入口单一。
+  - 复用杠杆2：复用 `TaskQueueManager` 与既有任务列表接口 `/api/mobile/tasks`，提交后直接刷新同一任务视图。
+  - 复用杠杆3：复用现有 URL/BV 归一化规则（前端同形处理 + 后端兜底归一）。
+- 架构决策：
+  - 决策1：在 `mobile-markdown.html` 的“任务列表”视图内新增轻量提交卡片，不新增独立移动端提交页。
+  - 决策2：提交策略与桌面端保持一致：URL 与文件二选一，若同时存在则文件优先。
+  - 决策3：移动端提交成功后只触发任务列表刷新，不强制跳转到阅读页，避免误打开未产出 Markdown 的任务。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/repository-map.md`
+- 验证方式：
+  - 前端脚本语法检查：对 `mobile-markdown.html` 内联脚本执行 `node --check`
+  - 架构文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据：
+  - 测试方式：对比改造前后移动端“提交路径数量”和“服务端处理阶段数”变化。
+  - 测试数据：
+    - 改造前：移动端提交入口 `0`，仅可查看任务。
+    - 改造后：移动端提交入口 `2`（`/api/mobile/tasks/submit` + `/api/mobile/tasks/upload`），可直接发起任务。
+    - 服务端处理阶段：与桌面端一致，仍复用同一流水线（无新增推理阶段）。
+  - 对比结论：
+    - 端到端能力从“仅查看”升级为“提交 + 查看一体化”。
+    - 后端计算路径未增加，新增成本集中在上传传输阶段与前端交互层。
+- 影响与权衡：
+  - 收益：手机端形成“提交 -> 等待 -> 查看”闭环，降低跨端切换成本。
+  - 成本：移动网络环境下大文件上传耗时更明显，建议后续补充断点续传或分片上传能力评估。
+
+## 2026-02-17 Web 端新增视频直传入口（与 URL 提交并行）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 当前 Web 入口仅支持提交 `videoUrl/BV`，用户在本地已有视频文件时，需要先手工落盘再填写路径，操作摩擦较高。
+  - 后端主链路已支持“本地路径视频”，但前端缺失“浏览器文件 -> 后端落盘”的桥接能力。
+- 第一性原理与复用杠杆：
+  - 第一性原理：任务系统真正需要的是“可访问的视频路径”，无论来源是 URL 下载还是用户上传。
+  - 复用杠杆1：复用 `VideoProcessingOrchestrator.processVideo` 现有本地路径分支（`isHttpUrl=false`），不改转写/语义/素材流水线。
+  - 复用杠杆2：复用 `TaskQueueManager` 任务状态机与 WebSocket 进度推送，不新增第二套任务模型。
+  - 复用杠杆3：复用前端现有任务提交函数 `submitTask()`，仅增加“文件分支 -> multipart 接口”。
+- 架构决策：
+  - 决策1：新增 REST 端点 `POST /api/tasks/upload`（`multipart/form-data`），用于接收 `videoFile` 并直接入队。
+  - 决策2：上传文件统一落盘到 `var/uploads/`，由现有编排链在后续阶段决定是否复制/链接到任务目录。
+  - 决策3：保持 `/api/tasks` 原行为不变，实现 URL/BV 与文件上传双入口并行，兼容旧调用方。
+  - 决策4：增加上传边界约束：文件非空、扩展名白名单（`mp4/mov/mkv/avi/webm/m4v`）、默认大小上限 `2048MB`。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - 更新：`services/java-orchestrator/src/main/resources/application.properties`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/repository-map.md`
+- 验证方式：
+  - 编译验证：`mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+  - 架构文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据：
+  - 测试方式：对比改造前后“可接受上传体积上限”和“主流水线是否新增处理阶段”。
+  - 测试数据：
+    - 改造前：仅 URL/BV 提交；`multipart` 默认上限未显式配置（Spring 默认约 `1MB`）。
+    - 改造后：新增 `POST /api/tasks/upload`；`spring.servlet.multipart.max-file-size=2048MB`，`max-request-size=2048MB`。
+    - 流水线阶段：仍为 `下载/本地准备 -> 转写 -> Stage1 -> Phase2A -> VL/Legacy -> 抽取 -> 组装`，未新增推理阶段。
+  - 对比结论：
+    - 上传能力从“不可用（仅 URL）”提升为“URL + 本地文件直传双入口”。
+    - 主处理链路无额外推理开销，新增成本仅在上传请求的网络传输阶段。
+- 影响与权衡：
+  - 收益：降低用户提交门槛，避免“先手工复制到服务器再填路径”的额外步骤。
+  - 成本：大文件上传会占用网关带宽与磁盘，需要后续补充上传目录清理策略（例如按天/按任务回收）。
+
+## 2026-02-17 移动端 Markdown 展示链路（任务列表 + Obsidian 兼容渲染 + 本地图片/视频预览）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 用户希望手机端直接查看任务产出的 Markdown，并支持本地图片、视频片段预览。
+  - 旧链路中 `index.html` 仅展示任务状态，完成后通过 `resultPath` 直接打开本地路径；在手机端不可访问。
+- 第一性原理与复用杠杆：
+  - 第一性原理：移动展示只需要“任务发现 + 文档读取 + 资源访问”三类能力，不应改动现有处理流水线。
+  - 复用杠杆1：复用 `TaskQueueManager` 作为任务真源，直接输出移动端任务列表。
+  - 复用杠杆2：复用 `resultPath(markdownPath)` 作为文档入口，不新增索引数据库。
+  - 复用杠杆3：复用 Java 静态资源服务能力，新增独立 `mobile-markdown.html`，避免引入前端构建链。
+- 架构决策：
+  - 决策1：新增 `MobileMarkdownController`，提供移动端专用 API：
+    - `GET /api/mobile/tasks`
+    - `GET /api/mobile/tasks/{taskId}/markdown`
+    - `GET /api/mobile/tasks/{taskId}/markdown/by-path`
+    - `GET /api/mobile/tasks/{taskId}/asset?path=...`
+  - 决策2：新增任务目录边界校验（`resolve + normalize + startsWith`），防止资源读取路径穿越。
+  - 决策3：新增 `mobile-markdown.html`，默认同源访问 API，渲染层支持 Obsidian 常见语法：
+    - `[[wikilink]]` / `![[embed]]`
+    - Callout（降级为可读 blockquote）
+    - Mermaid 代码块渲染
+    - KaTeX 数学公式（CDN 可用时）
+  - 决策4：`index.html` 已完成任务的“查看结果”统一跳转到 `mobile-markdown.html?taskId=...`，避免直接暴露本地文件路径。
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - 新增：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/repository-map.md`
+- 验证方式：
+  - 代码检视：确认 API 与静态页路由可由同源域名直接访问。
+  - 文档校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 编译验证尝试：
+    - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+    - 受当前沙箱网络限制（无法访问 Maven Central）未完成依赖解析，需在可联网环境补跑。
+- 性能对比数据：
+  - 测试方式：对比“旧方案（直接 resultPath 打开本地路径）”与“新方案（移动端 API + 同源渲染）”在手机可用性和前端首屏复杂度上的差异。
+  - 测试数据：
+    - 任务列表接口：单次返回字段数约 10 个（taskId/title/status/时间等），不含大体积二进制。
+    - Markdown 正文接口：按需单任务拉取，不在列表阶段传输正文。
+    - 资源接口：按需文件访问（图片/视频），避免一次性全量下载。
+  - 对比结论：
+    - 旧方案：移动端几乎不可用（本地路径无法直接访问）。
+    - 新方案：移动端可直接按任务浏览文档与素材；数据传输从“路径不可达”转为“按需获取”，网络开销更可控。
+- 影响与权衡：
+  - 收益：手机端形成完整闭环（任务发现 -> 文档查看 -> 素材预览），且不改变核心编排与处理链路。
+  - 成本：前端渲染依赖 CDN 组件（mermaid/katex 等），离线场景会降级为基础 Markdown 展示。
+
+## 2026-02-17 企业微信内部应用消息驱动任务入口（串行执行 + 自动重试 + 个人回执）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 需求新增“手机发送 URL 后自动触发本地任务并回执状态到手机”，且必须跨网络可用。
+  - 既有链路仅覆盖 Web 前端/REST 提交，不具备企业微信消息回调入口、回调验签解密与消息侧状态回传。
+- 第一性原理与复用杠杆：
+  - 第一性原理：消息驱动能力的本质是“命令输入 -> 任务状态机 -> 通知回执”闭环，不应重写既有处理流水线。
+  - 复用杠杆1：复用 Java 编排既有 API（`POST /api/tasks`、`GET /api/tasks/{taskId}`）承载任务执行与进度来源。
+  - 复用杠杆2：复用 Python 侧现有 bot 目录结构，新增企业微信适配器，不侵入主 gRPC/编排调用链。
+  - 复用杠杆3：复用既有任务状态字段（`status/progress/resultPath/errorMessage`）作为回执内容，避免新增协议。
+- 架构决策：
+  - 决策1：新增 `apps/wecom-bot/main.py` 作为薄入口，独立监听 `5000` 端口 `GET/POST /wechat/callback`。
+  - 决策2：新增 `services/python_grpc/src/apps/bot/wecom_bot.py`，实现企业微信回调签名校验与 AES 解密。
+  - 决策3：采用单线程串行执行器（严格串行），失败自动重试 2 次（总尝试 3 次），并带指数退避。
+  - 决策4：任务执行层不新增业务逻辑，统一通过 Orchestrator REST API 复用现有调用链。
+  - 决策5：状态回传定向到发起人的个人会话（`touser=FromUserName`），并支持 `/status <job_id>` 查询。
+- 已落地改动：
+  - 新增：`apps/wecom-bot/main.py`
+  - 新增：`services/python_grpc/src/apps/bot/wecom_bot.py`
+  - 更新：`.env.example`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/repository-map.md`
+- 验证方式：
+  - `python -m py_compile apps/wecom-bot/main.py services/python_grpc/src/apps/bot/wecom_bot.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据：
+  - 测试方式：以“同一批 URL 连续提交”对比改造前后任务入口可用性与单位时间并发策略差异。
+  - 测试数据：2 条 URL 顺序提交，观察队列执行顺序与状态回执事件流。
+  - 对比结论：
+    - 改造前：无企业微信入口，消息侧自动触发能力为 `0`。
+    - 改造后：具备企业微信入口，任务执行策略固定为严格串行（并发度 `1`），确保顺序可控与回执一致性。
+- 影响与权衡：
+  - 收益：在不改主处理链路的前提下，补齐“手机命令驱动 + 状态回执”闭环。
+  - 成本：串行策略会降低吞吐上限，但符合当前需求“严格串行”的确定性约束。
+
+## 2026-02-17 架构文档编码治理重构（UTF-8 BOM 规范 + 自动校验）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `docs/architecture` 下部分文档在 UTF-8 无 BOM 时，被 PowerShell 默认编码误读，显示为乱码（例如典型错码片段）。
+  - 编码约束只停留在“人工约定”，缺少“编辑期规范 + 校验期护栏”，同类问题容易反复出现。
+- 第一性原理与复用杠杆：
+  - 第一性原理：乱码本质是“字节编码正确但解码策略不一致”的协议问题，应通过统一编码协议与自动校验来治理，而非依赖人工记忆。
+  - 复用杠杆1：复用现有 `docs/architecture` 目录作为治理边界，先从高价值核心文档收敛，不扩大变更面。
+  - 复用杠杆2：复用仓库现有 `tools/architecture/` 工具目录，新增轻量校验脚本，避免引入新依赖链。
+- 架构决策：
+  - 决策1：`docs/architecture/*.md` 统一规范为 `UTF-8 with BOM`。
+  - 决策2：新增根目录 `.editorconfig`，在编辑期强制 `docs/architecture/*.md` 使用 `utf-8-bom`。
+  - 决策3：新增 `tools/architecture/check_docs_encoding.py`，在校验期默认检查 BOM，并支持 `--check-mojibake` 扩展检查常见乱码特征；`--fix` 可自动修复缺 BOM 文件。
+- 已落地改动：
+  - 新增：`.editorconfig`
+  - 新增：`tools/architecture/check_docs_encoding.py`
+  - 编码修复：`docs/architecture/perf-benchmarks.md`
+  - 编码修复：`docs/architecture/python-module-responsibilities.md`
+  - 编码修复：`docs/architecture/repository-map.md`
+  - 编码修复：`docs/architecture/overview.md`
+  - 编码修复：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 默认读取抽样检查：`Get-Content docs/architecture/*.md | Select-Object -First 1`
+- 影响与权衡：
+  - 收益：同一文档在常见 Windows 终端/编辑器默认读取下可稳定显示中文，降低协作中的隐性认知成本。
+  - 成本：BOM 头会导致首次 diff 首行出现不可见字符变更；通过一次性规范化后即可稳定。
+
+## 2026-02-16 VL 路由规则收敛重构（fallback 文案 + 解析优先级）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 在 tutorial 模式补齐 `no_needed_video/should_type` 后，fallback prompt 中路由规则文案存在重复拼接，后续演进有漂移风险。
+  - 解析链路里 `no_needed_video + should_type` 的归一/优先级逻辑分散在多个分支，维护成本偏高。
+- 第一性原理与复用杠杆：
+  - 第一性原理：路由规则属于跨模式公共契约，应由单一构造函数与单一归一函数维护。
+  - 复用杠杆：沿用 `VLVideoAnalyzer` 既有 default/tutorial 调用链，不新增新节点，仅内聚公共逻辑。
+- 架构决策：
+  - 决策1：新增 `_build_route_rules_zh/_build_route_rules_en`，由 fallback prompt 统一复用路由规则文案。
+  - 决策2：新增 `_normalize_route_controls`，统一处理 `no_needed_video` 与 `should_type` 归一及优先级（`no_needed_video` 最高）。
+  - 决策3：`_parse_response_with_payload` 与 `analyze_clip` 统一走上述 helper，避免分支重复判断。
+  - 决策4：补充 helper 级别单测，防止后续回归破坏优先级语义。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据：
+  - 测试方式：对比重构前后同一测试集执行时间与通过率，观察是否引入额外远端调用或解析开销。
+  - 测试数据：`test_vl_tutorial_flow.py` 全量（新增 1 条 helper 测试）。
+  - 对比结论：本次为纯本地重构，VL 调用次数不变；测试耗时在抖动范围内，无可观测性能回退。
+- 影响与权衡：
+  - 收益：路由规则文本与优先级逻辑实现单点维护，减少后续 default/tutorial 漂移概率。
+  - 成本：新增少量 helper 抽象，阅读入口从“直写逻辑”转为“辅助函数 + 调用点”。
+
+## 2026-02-16 Tutorial 模式补齐 no_needed_video / should_type 路由契约
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求在 `tutorial_system.md` 中落实 `no_needed_video` 判定和 `should_type` 路由覆盖，并与默认模式保持一致处理语义。
+  - 现状中 tutorial 解析分支会将 `no_needed_video/should_type` 清空，导致即使模型返回该字段也无法触发下游路由覆盖。
+- 第一性原理与复用杠杆：
+  - 第一性原理：路由决策字段应作为跨模式的稳定契约，不应在 tutorial 分支被抹除。
+  - 复用杠杆：默认模式已验证 `no_needed_video -> abstract` 与 `should_type` 覆盖链路（`VLVideoAnalyzer` + `VLMaterialGenerator`），tutorial 仅需对齐契约即可复用既有决策链。
+- 架构决策：
+  - 决策1：更新教程模式系统提示词与约束提示词，允许并规范 `no_needed_video/should_type` 输出。
+  - 决策2：在 tutorial 解析分支保留 `no_needed_video/should_type`，取消强制清空逻辑。
+  - 决策3：统一优先级规则：`no_needed_video=true` 时强制视为 `should_type=abstract`。
+  - 决策4：tutorial 规范化 payload 同步输出上述字段，保证下游路由聚合函数可复用。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/tutorial_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/output_constraints_tutorial.md`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "tutorial_schema"`
+- 性能对比数据：
+  - 测试方式：对比改造前后 tutorial schema 解析路径的单测执行时长和通过率，确认新增字段不会引入额外远端调用。
+  - 测试数据：`tutorial_schema` 相关测试用例（新增 1 条，存量 1 条）。
+  - 对比结论：本次变更仅涉及本地提示词与解析逻辑，VL 远端调用次数不变；单测耗时在抖动范围内，无可观测性能回退。
+- 影响与权衡：
+  - 收益：tutorial 与 default 在路由字段语义上统一，避免“提示词已要求但下游无效”的契约断层。
+  - 成本：tutorial 输出字段变多，提示词约束更严格，需要维持相应测试覆盖避免回退。
+
+## 2026-02-16 共享补丁协议层抽取（normalize/collect/fallback）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 在完成共享文本定位引擎后，`step_contracts` 与 `markdown_enhancer` 仍各自维护补丁协议细节（字段别名规范化、补丁列表收集、整段回退字段优先级）。
+  - 协议演进点分散会放大维护成本，且容易造成 Transcript 与 Phase2B 的兼容口径漂移。
+- 第一性原理与复用杠杆：
+  - 第一性原理：协议解析属于“结构化输入规范化”问题，应沉淀为公共纯函数，再由业务层叠加指标与策略。
+  - 复用杠杆：上一阶段已抽取 `common.utils.text_patch`，本次可在其上继续抽取“协议层”，形成“协议解析 + 文本回放”双层共享。
+- 架构决策：
+  - 决策1：新增 `services/python_grpc/src/common/utils/patch_protocol.py`，统一提供：
+    - `normalize_replace_add_patch_item`
+    - `collect_patch_ops`
+    - `pick_full_text_fallback`
+    - `normalize_removal_patch_item`
+  - 决策2：`markdown_enhancer` 改为直接复用以上协议函数，删除类内重复协议实现。
+  - 决策3：`step_contracts.normalize_step4_removals` 改为复用 `normalize_removal_patch_item`，保留原有 metrics 统计口径（兼容观测面板）。
+  - 决策4：补齐公共层测试 `test_patch_protocol.py`，将协议兼容行为沉淀为底层回归资产。
+- 已落地改动：
+  - `services/python_grpc/src/common/utils/patch_protocol.py`
+  - `services/python_grpc/src/common/utils/__init__.py`
+  - `services/python_grpc/src/common/utils/tests/test_patch_protocol.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/common/utils/tests/test_patch_protocol.py services/python_grpc/src/common/utils/tests/test_text_patch.py services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py services/python_grpc/src/transcript_pipeline/tests/test_step2_correction_consistency.py services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_uses_excluded_screenshot_items_as_evidence services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_supports_replace_and_add_patch_modes services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_ambiguous_patch_keeps_base_text services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py::test_markdown_enhancer_loads_all_md_prompts_from_loader`
+- 性能对比数据：
+  - 测试方式：对比改造前后相同回归集的执行耗时与通过率，观察是否出现协议转换额外开销。
+  - 测试数据：新增 common 协议单测 4 条，叠加既有关键回归 39 条（总 43 条）。
+  - 对比结论：本次为纯本地协议解析重构，LLM 调用次数和 payload 规模不变；测试耗时在抖动范围内，无性能回退。
+- 影响与权衡：
+  - 收益：协议演进与兼容策略集中管理，后续新增字段别名或回退键只需改公共层。
+  - 成本：`common` 层进一步承载跨链路契约，需持续保持高质量单测覆盖。
+
+## 2026-02-16 共享补丁引擎抽取（Transcript + Phase2B）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `transcript_pipeline.step_contracts` 与 `content_pipeline.markdown_enhancer` 各自维护一套文本补丁定位逻辑（匹配、上下文约束、替换、JSON 提取），存在重复实现与演进分叉风险。
+  - 用户要求继续推进“LLM 最小输出 + 本地确定性回放”范式，需把通用补丁能力沉淀为共享杠杆。
+- 第一性原理与复用杠杆：
+  - 第一性原理：补丁回放属于确定性基础能力，应抽象成纯函数并由多链路复用，而不是散落在业务节点中。
+  - 复用杠杆1：`step_contracts` 已验证上下文唯一定位 + 保守回退策略在高噪声输入下稳定可用。
+  - 复用杠杆2：Phase2B 已验证 patch 协议（`replace/add`）可显著降低回包体积，适合复用同一底层定位器。
+- 架构决策：
+  - 决策1：新增 `services/python_grpc/src/common/utils/text_patch.py`，统一沉淀：
+    - `find_all_occurrences`
+    - `find_contextual_match_positions`
+    - `replace_by_index`
+    - `find_add_insert_positions`
+    - `extract_first_json_dict`
+  - 决策2：`step_contracts` 改为直接 import 共享函数，删除本地重复实现。
+  - 决策3：`markdown_enhancer` 改为直接复用共享函数，删除类内重复实现，保持业务协议与兼容路径不变。
+  - 决策4：补齐 `common/utils` 单测，保证后续两条链路共享演进时有统一回归锚点。
+- 已落地改动：
+  - `services/python_grpc/src/common/utils/text_patch.py`
+  - `services/python_grpc/src/common/utils/__init__.py`
+  - `services/python_grpc/src/common/utils/tests/test_text_patch.py`
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/common/utils/tests/test_text_patch.py`
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py services/python_grpc/src/transcript_pipeline/tests/test_step2_correction_consistency.py services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_uses_excluded_screenshot_items_as_evidence services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_supports_replace_and_add_patch_modes services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_ambiguous_patch_keeps_base_text services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py::test_markdown_enhancer_loads_all_md_prompts_from_loader`
+- 性能对比数据：
+  - 测试方式：同一批回归用例对比改造前后的 LLM 调用路径与输出契约，确认未增加额外远端调用与 I/O。
+  - 测试数据：Transcript 31 条关键用例 + Phase2B 4 条关键用例 + common 新增 4 条纯函数用例。
+  - 对比结论：本次为纯本地重构，未改变提示词协议与调用次数；端到端耗时在测试抖动范围内，无可观测性能回退。
+- 影响与权衡：
+  - 收益：补丁能力形成统一杠杆，后续 Step2/Step4/Phase2B 规则演进只需改一处基础模块。
+  - 成本：`common` 层责任增加，需要维持跨链路兼容性回归。
+
+## 2026-02-16 Transcript Step3 合并契约短键化（mg/t/sids）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求 `step2/step3/step3.5/step4` 统一“LLM 最小输出 + 本地确定性补全”，并压缩字段名。
+  - `step3` 合约层已兼容短键（`mg/t/sids`），但 Prompt 仍以长键示例（`merged_groups/text/source_subtitle_ids`）为主，存在不必要 token 开销。
+- 第一性原理与复用杠杆：
+  - 第一性原理：LLM 只输出“需要跨字幕合并的语义意图”，本地负责时间轴与未覆盖字幕直通装配。
+  - 复用杠杆1：复用 `step_contracts.parse_step3_merged_sentences` 的双协议解析能力（长键/短键并存）。
+  - 复用杠杆2：复用 `assemble_step3_merged_sentences` 的本地时序回填与冲突裁决，不引入新执行路径。
+- 架构决策：
+  - 决策1：`MERGE_PROMPT` 输出示例改为短键协议：`mg[].{t,sids}`。
+  - 决策2：Prompt 明确“仅返回合并语义字段，不返回时间字段”，继续由本地从 `subtitle_by_id` 确定 `start_sec/end_sec`。
+  - 决策3：保持解析层向后兼容，灰度期间仍可接受历史长键响应。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - `MERGE_PROMPT` 字段约束和 JSON 示例更新为 `mg/t/sids`。
+- 验证方式：
+  - 回归命令：
+    - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py services/python_grpc/src/transcript_pipeline/tests/test_step2_correction_consistency.py services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_uses_excluded_screenshot_items_as_evidence services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_supports_replace_and_add_patch_modes services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_ambiguous_patch_keeps_base_text services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py::test_markdown_enhancer_loads_all_md_prompts_from_loader`
+    - 结果：`35 passed`
+- 性能对比数据（字段压缩收益）：
+  - 测试方式：对等价 Step3 响应 JSON 样例进行字符长度对比（近似 token）。
+  - 测试数据：
+    - 长键：`{"merged_groups":[{"text":"合并后的完整句子","source_subtitle_ids":["SUB001","SUB002"]}]}`
+    - 短键：`{"mg":[{"t":"合并后的完整句子","sids":["SUB001","SUB002"]}]}`
+  - 对比结果：`81 -> 52` chars，下降 `35.80%`。
+- 影响与权衡：
+  - 收益：Step3 与 Step2/Step3.5/Step4 在协议层完全对齐，进一步压缩回包体积。
+  - 成本：新增一层“Prompt 与解析器双契约同步”的维护责任，需要继续靠测试防回退。
+
+## 2026-02-16 Phase2B 增量补全补丁化（replace/add 双模式 + 短键协议）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Phase2B 的图片描述增量补全原先采用“LLM 返回完整改写文本”的模式，容易出现非必要重写与输出膨胀。
+  - 当只需补几处命令/参数时，整段回写会带来额外 token 开销，也增加语义漂移风险。
+- 第一性原理与复用杠杆：
+  - 第一性原理：LLM 负责“增量编辑意图”，本地负责“确定性文本回放”。
+  - 复用杠杆1：`transcript_pipeline` 已验证“最小补丁 + 本地定位回放”模式可行（Step2/Step4）。
+  - 复用杠杆2：Phase2B 已有图片证据与句子对齐链路（`img_id/timestamp/sentence_id/sentence_text`），可直接作为补丁定位证据。
+- 架构决策：
+  - 决策1：将 `img_desc_augment` 输出契约升级为补丁协议，支持两种模式：
+    - `replace`（`m="r"`）：替换已有片段。
+    - `add`（`m="a"`）：在锚点附近新增片段。
+  - 决策2：输出字段短键化：`p/m/o/n/l/r/p`，减少回包体积与解析成本。
+  - 决策3：本地回放支持上下文唯一定位；定位歧义时跳过补丁并保持原文，避免误改。
+  - 决策4：保持向后兼容：若模型仍返回纯文本完整改写，继续按旧路径接入，不中断线上链路。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `IMG_DESC_AUGMENT_SYSTEM_PROMPT`、`IMG_DESC_AUGMENT_USER_PROMPT` 改为补丁协议（短键）。
+    - 新增补丁解析与回放函数：
+      - `_extract_first_json_dict`
+      - `_normalize_img_desc_patch_item`
+      - `_apply_img_desc_incremental_ops`
+      - 以及 replace/add 所需定位工具函数。
+    - `_augment_body_with_image_descriptions` 改为“先尝试补丁回放，再兼容旧整段回写”。
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/img_desc_augment_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/img_desc_augment_user.md`
+    - 同步为补丁协议与短键说明。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 新增 replace+add 双模式回放用例。
+    - 新增歧义定位时保持原文的保护用例。
+- 验证方式：
+  - 定向回归（通过）：
+    - `pytest -q services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_uses_excluded_screenshot_items_as_evidence services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_supports_replace_and_add_patch_modes services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_img_desc_augment_ambiguous_patch_keeps_base_text services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py::test_markdown_enhancer_loads_all_md_prompts_from_loader`
+    - 结果：4 passed
+  - 受环境限制：
+    - 运行整文件测试时受 `pytest-of-HongXU` 临时目录权限影响（`PermissionError`），非本次逻辑回归导致。
+- 性能对比数据（字符量近似 token）：
+  - 测试方式：对“完整改写 JSON”与“补丁 JSON”做 `json.dumps(..., separators=(',', ':'))` 字符量对比。
+  - 测试数据：1 段约 1500 字符正文，包含 2 处增量补全点（1 replace + 1 add）。
+  - 对比结果：
+    - 完整改写：`1571` chars
+    - 补丁协议：`160` chars
+    - 下降：`89.82%`
+- 影响与权衡：
+  - 收益：Phase2B 增量补全与 Step2/Step4 形成统一“补丁化”范式，稳定性与可控性更高。
+  - 成本：本地回放逻辑复杂度增加，需要持续维持补丁定位相关测试覆盖。
+
+## 2026-02-16 Transcript Step3.5/Step4 短键契约收敛（LLM 最小回包 + 本地确定性回填）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 目标是继续收敛 token 成本与远端不确定性：Step3.5 不应由 LLM 回传 `start_sec/end_sec/source_subtitle_ids`，Step4 不应回传整句 `cleaned_text`。
+  - 旧契约仍保留较长字段名与整句回包路径，存在不必要的输出膨胀与语义漂移风险。
+- 第一性原理与复用杠杆：
+  - 原理1：时间轴与来源 ID 属于本地确定性状态，应该由本地 `merged_sentences` 回填，而不是远端重复生成。
+  - 原理2：Step4 的本质是“删除补丁”，LLM 只负责给出可定位删除片段，本地负责执行与保护回退。
+  - 可复用杠杆：
+    - `step_contracts` 已有 Step2 上下文定位/回放范式（`_find_contextual_match_positions`、`_replace_by_index`）。
+    - `step3_5_node` 既有本地回填流程已稳定（由 `merged_sentences` 回填时间轴和 `source_subtitle_ids`）。
+    - `step_observability` 计数链路可直接承接新增解析与回放指标。
+- 架构决策：
+  - 决策1：Step3.5 Prompt 输出改为短键 `t[].{sid,tt}`，明确禁止返回 `start_sec/end_sec/source_subtitle_ids`。
+  - 决策2：Step4 Prompt 输出改为短键删除补丁 `d[].{sid,o,l,r}`，不再要求整句 `cleaned_text`。
+  - 决策3：Step4 合约层新增“删除补丁标准化 + 本地回放 + 兼容旧 cleaned_text”的统一装配路径；优先补丁路径，旧字段仅作兼容兜底。
+  - 决策4：解析层保留双向兼容（新短键与旧长键并存），保证灰度期间不阻断既有缓存与旧响应形态。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step3.5 Prompt 改为短键回包，并增加“仅返回句子标识与译文”约束。
+    - Step4 Prompt 改为短键删除补丁 `d/sid/o/l/r`。
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+    - 新增 `normalize_step4_removals`、`apply_step4_removals_to_text`、`reconcile_step4_item`。
+    - `parse_step4_cleaned_sentences` 升级为“删除补丁 + 旧 cleaned_text”双协议解析与聚合。
+    - `assemble_step4_cleaned_sentences` 改为优先执行本地删除补丁，并保留中英术语 guard 回退。
+  - `services/python_grpc/src/transcript_pipeline/tests/`
+    - `test_step_contracts.py`：新增/更新 Step4 删除补丁解析、本地回放、跨批次合并、guard 回退断言。
+    - `test_phase2_env_tuning.py`：Step4 端到端测试改为短键补丁回包。
+    - `test_step3_5_translation.py`：新增“忽略 LLM 回传时序/来源字段并本地回填”断言。
+- 验证方式：
+  - 功能回归：
+    - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py`
+    - 结果：22 passed
+  - 关键链路回归：
+    - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step2_correction_consistency.py services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py`
+    - 结果：9 passed
+- 性能对比数据（字段压缩收益）：
+  - 测试方式：
+    - 使用本地 Python 脚本对等价 JSON（`separators=(',', ':')`）做字符长度对比，作为 token 变化近似指标。
+  - 测试数据：
+    - Step3.5：50 条译文样本（`sentence_id + translated_text` 等价内容）。
+    - Step4：20 条删除补丁样本（等价删除语义，长键 vs 短键）。
+  - 对比结果：
+    - Step3.5 回包字符数：`2717 -> 1648`，下降 `39.34%`。
+    - Step4 回包字符数：`1714 -> 947`，下降 `44.75%`。
+  - 结论：短键契约显著降低回包体积，叠加“只回最小补丁”的策略，可进一步降低 Step4 输出 token。
+- 影响与权衡：
+  - 收益：Step3.5/Step4 与 Step2/Step3 形成统一模式（LLM 最小语义输出 + 本地确定性回填），成本与稳定性更可控。
+  - 成本：Step4 本地回放规则复杂度上升，需依赖持续单测覆盖定位歧义与兼容路径。
+
+## 2026-02-16 Transcript Step56 日志契约修复与 Step4 续跑文档化
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 在 `step5_6_dedup_merge` 启动阶段出现 `StepLogger.info` 参数个数不匹配，导致节点在 0 次 LLM 调用时直接失败。
+  - 问题触发于 Step56 日志语句，不属于核心业务算法，但会硬中断整条 `step4_clean_local -> step5_6_dedup_merge` 链路。
+  - 现网需要明确“从 Step4 继续重跑”的操作决策链，降低同类故障恢复时间。
+- 第一性原理与复用杠杆：
+  - 第一性原理：日志系统属于观测层，不能因签名偏差阻断业务主链。
+  - 杠杆1：复用现有 `StepLogger` 与 `graph.resume_state/resume_from_step` 机制，无需引入新恢复入口。
+  - 杠杆2：复用 `step3_5_translate_output.json`、`step4_clean_local_output.json` 既有中间产物，避免重复上游 LLM 成本。
+- 架构决策：
+  - 决策1：Step56 日志调用统一改为单 message 参数写法，显式对齐 `StepLogger.info(message, **kwargs)` 契约。
+  - 决策2：在 Step56 回归测试中加入“严格 `info` 签名 logger”用例，防止 `%s` 多位置参数风格回流。
+  - 决策3：文档化 Step4 续跑决策链：
+    - 仅重跑 Step56：`resume_from_step=step4_clean_local` + 注入 `cleaned_sentences/main_topic`；
+    - 重跑 Step4+Step56：`resume_from_step=step3_5_translate` + 注入 `translated_sentences/main_topic`。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - 修正 Step56 启动日志调用方式，移除多位置参数调用。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - 新增 `test_step56_compatible_with_strict_info_logger_signature`。
+  - `docs/architecture/error-fixes.md`
+    - 追加本次故障记录、根因、修复与 Step4 续跑操作说明。
+- 验证方式：
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py -k "step56 and strict_info_logger_signature" -q`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py -k "step56_respects_window_overlap_env" -q`
+- 性能对比数据：
+  - 测试方式：对 Step56 相关回归用例执行前后行为一致性验证（窗口数、产物计数、是否进入 LLM 调用）。
+  - 测试数据：`cleaned_sentences` 分别为 9 条与 23 条的样本集（单测内构造）。
+  - 对比结论：本次仅修复日志调用签名，不改变窗口切分、并发参数与 LLM 请求路径；LLM 调用次数与输出规模保持不变（无性能回退）。
+- 影响与权衡：
+  - 收益：消除 Step56“秒级失败”单点，恢复从 Step4 断点续跑能力，减少人工干预。
+  - 成本：新增一条签名防回归测试，几乎无维护负担。
+
+## 2026-02-16 Transcript Step4 合约层再收敛（批次合并与全局装配下沉）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Step4 在上次改造后已支持“LLM 子集输出 + 本地补齐”，但“跨批次去重 + 全局排序装配”仍在 `step4_node` 内联实现。
+  - 节点同时承担编排与装配细节，影响可读性，也不利于后续在其他步骤复用同类模式。
+- 第一性原理与复用杠杆：
+  - 节点只应负责流程编排；确定性装配逻辑应沉淀到 contract 层，形成统一可测能力。
+  - 复用既有 `step_contracts` 模块与 `step_observability` 统计链，避免新增分叉实现。
+- 架构决策：
+  - 决策1：新增 `merge_step4_cleaned_maps(...)`，统一处理多批次返回的 sentence_id 去重与首条保留策略。
+  - 决策2：新增 `assemble_step4_cleaned_sentences(...)`，统一处理排序、未覆盖直通、空文本回退、术语保护回退。
+  - 决策3：`step4_node` 改为“LLM 调用 + 指标汇总 + helper 装配”的薄编排实现。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+    - 新增 `merge_step4_cleaned_maps`、`assemble_step4_cleaned_sentences`。
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step4 装配逻辑改为调用 contract helper，保留 `_drops_cjk_en_glossary_pair` 作为注入式 guard。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py`
+    - 新增 Step4 helper 回归测试，覆盖重复 sentence_id、直通补齐、guard 回退与空文本回退。
+- 验证方式：
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py -q`
+  - 结果：24 passed
+- 性能对比数据：
+  - 本次为结构重构，未引入额外 I/O 或模型调用，理论时间复杂度与改造前一致（仍为 O(n) 装配 + O(k) 批次合并）。
+  - 未单独执行性能压测；后续若将 Step4/Step3 helper 通用于高并发场景，再统一做基准对比。
+- 影响与权衡：
+  - 收益：Step4 节点复杂度下降，装配逻辑可复用且可单测，后续维护成本更低。
+  - 成本：contract 层职责增加，需持续保持 helper 级测试防止跨步骤回归。
+## 2026-02-16 Transcript Step3 合约层再收敛（窗口候选构建/全局装配下沉）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Step3 在上次改造后已实现“LLM 仅输出合并组 + 本地补齐”，但候选过滤、去重与装配逻辑仍堆积在 `step3_node` 内。
+  - 节点职责偏重实现细节，不利于后续在 Step4/Step56 复用“LLM 子集输出 + 本地确定性装配”模式。
+- 第一性原理与复用杠杆：
+  - 节点应聚焦编排；数据契约清洗与确定性装配应下沉到合约层。
+  - 可复用现有 `step_contracts` 模块与 `step_observability` 指标框架，无需改图结构。
+- 架构决策：
+  - 决策1：新增 `build_step3_window_candidates(...)`，统一处理 Step3 合并组合法化（至少2条、连续性、时间边界计算）。
+  - 决策2：新增 `assemble_step3_merged_sentences(...)`，统一处理跨窗口去重、冲突裁决、未覆盖字幕直通补齐。
+  - 决策3：`step3_node` 仅保留“调用 LLM + 聚合窗口 + 调用合约层 helper + 输出观测”编排逻辑。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+    - 新增 `build_step3_window_candidates` 与 `assemble_step3_merged_sentences`。
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step3 由内联装配改为调用合约层 helper。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py`
+    - 新增 helper 级回归用例，覆盖“过滤单条非合并组 + 直通补齐装配”。
+- 影响与权衡：
+  - 收益：Step3 节点复杂度下降，contract 层复用度提高，后续同类步骤更容易套用一致范式。
+  - 成本：合约层职责继续增厚，需保持测试覆盖，避免 helper 演进时影响多节点。
+## 2026-02-16 Transcript Step3 改为“LLM 仅输出合并组 + 本地全局装配”
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Step3 目标调整为“LLM 仅输出需要合并的组”，但旧实现仍把窗口返回直接拼接成最终结果。
+  - 未被窗口合并结果覆盖的 subtitle 可能丢失；overlap 场景下还会出现重复组与冲突组。
+- 第一性原理与复用杠杆：
+  - LLM 负责语义判断（哪些需要合并）；本地负责确定性装配（覆盖完整性、顺序稳定性、ID 重编）。
+  - 复用现有 `step_contracts.parse_step3_merged_sentences`、窗口并发调度器、`step_observability`，不改变图结构与下游接口。
+- 架构决策：
+  - 决策1：Step3 采用两阶段管线：
+    - 阶段A：收集窗口级“合并候选组”；
+    - 阶段B：按原始 subtitle 顺序做全局装配，未覆盖自动直通。
+  - 决策2：仅接受 `source_subtitle_ids` 长度 >= 2 且连续的组，避免跨越拼接造成时序错位。
+  - 决策3：对 overlap 产生的重复组按 `source_subtitle_ids` 去重，冲突时优先更长组并保持稳定顺序。
+  - 决策4：Step3 合约解析器兼容新形态 `merged_groups`（并保留旧键兼容）。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step3 prompt 改为仅要求输出 `merged_groups`。
+    - Step3 节点改为“候选收集 -> 本地覆盖补齐 -> 顺序装配”。
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+    - `parse_step3_merged_sentences` 新增 `merged_groups/mg` 解析兼容。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py`
+    - 新增“未覆盖字幕自动直通”用例并修复 overlap 断言。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py`
+    - 新增 Step3 `merged_groups` 形态契约测试。
+- 影响与权衡：
+  - 收益：Step3 输出覆盖完整、顺序稳定，职责边界清晰，便于后续提示词演进。
+  - 成本：本地装配逻辑复杂度上升，需要额外维护候选去重与冲突规则。
+## 2026-02-16 Transcript Step4 清理契约收敛（禁删中英对照 + 本地直通重组）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Step4 旧契约要求 LLM 额外返回 `removed_items`，增加 token 成本且对下游无消费价值。
+  - 模型在局部清理中可能误删“中文（English）”术语对照（如 `智能体（agent）`），导致关键名词可追溯性下降。
+  - 当 LLM 返回子集结果时，现有逻辑按 batch 内兜底，缺少“全局覆盖后按时间顺序重组”的明确语义。
+- 第一性原理与复用杠杆：
+  - Step4 的最小必要产物只有 `sentence_id + cleaned_text`；删除清单不应成为主链契约。
+  - 术语对照是知识锚点，应由本地规则做硬保护，而非完全依赖模型遵循。
+  - 现有 `step_contracts.parse_step4_cleaned_sentences` 与 `step_observability` 已可复用，适合在不改图编排的前提下完成契约收敛。
+- 架构决策：
+  - 决策1：Step4 提示词输出收敛为 `cleaned_sentences[].text`，明确不再要求 `removed_items`。
+  - 决策2：在本地增加“中英对照保护”校验，若发现清理后丢失对照对，整句回退原文。
+  - 决策3：Step4 汇总阶段改为“先合并 LLM 覆盖结果，再按 `start_sec/end_sec` 全局排序重组”；未覆盖句子自动构建直通句。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step4 prompt 增加“中英对照术语不可删”约束并移除 `removed_items` 输出要求；
+    - 新增 `_drops_cjk_en_glossary_pair(...)` 本地保护；
+    - Step4 结果组装改为全局覆盖回填 + 按时间排序重建。
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+    - Step4 解析兼容旧字段但忽略 `removed_items`，统一输出 `cleaned_text`。
+  - `services/python_grpc/src/transcript_pipeline/tests/`
+    - 新增 Step4 双语保护与全局直通重组回归测试；
+    - 更新 Step4 合约测试断言（`removed_items` 退役）。
+- 影响与权衡：
+  - 收益：Step4 契约更轻、输出更稳定，且关键中英术语不再被误删。
+  - 成本：新增一层本地术语保护，极少数句子在保护命中时会回退为原句，牺牲部分可清理空间以换取语义安全。
+
+## 2026-02-16 Transcript CleanedSentence 移除 `removed_items` 字段
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Step4 已完成契约收敛，仅输出 `sentence_id + cleaned_text`。
+  - `CleanedSentence` 模型仍保留 `removed_items`，与当前契约不一致，容易造成“代码已废弃但模型仍暴露”的结构债。
+- 第一性原理与复用杠杆：
+  - 领域模型应表达“当前有效事实”，不应长期承载已退役字段。
+  - 复用已上线的兼容层（`step_contracts.parse_step4_cleaned_sentences` 忽略 legacy `removed_items`）即可平滑过渡。
+- 架构决策：
+  - 决策1：从 `CleanedSentence` 模型中最终移除 `removed_items` 字段，模型契约与 Step4 输出保持一致。
+  - 决策2：保留 Step4 解析兼容路径，对历史 payload 中的 `removed_items/ri` 继续“可读但忽略”。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/state.py`
+    - `CleanedSentence` 删除 `removed_items` 字段定义。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py`
+    - 新增模型回归：断言 `CleanedSentence` 不再暴露 `removed_items`；
+    - 验证历史输入携带该字段时会被忽略，不影响反序列化。
+- 影响与权衡：
+  - 收益：模型语义与运行时契约对齐，减少误用与维护成本。
+  - 成本：若有外部逻辑直接依赖 `CleanedSentence.removed_items`，需改为读取 Step4 观测指标或自定义审计链路。
+
+## 2026-02-16 Transcript Step1-Step5_6 合约层重构与观测统一
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `phase1_preparation.py` 与 `phase2_preprocessing.py` 同时承载“业务编排 + payload 解析 + 本地重建”职责，节点文件体量大、字段演进改动面广。
+  - Step2 之前存在 `subtitle_id.replace("SUB", "")` 的排序假设，对非标准 ID 风险高。
+  - 缺少统一的“兼容层收敛”抓手与窗口级解析观测，不利于后续协议退役。
+- 第一性原理与复用杠杆：
+  - 节点应聚焦流程编排；解析/重建应下沉为可复用的“合约层”。
+  - 顺序应以“上游输入事实顺序”而非“ID 命名约定”作为唯一真相。
+  - 协议演进需要“兼容解析 + 可观测 + 可切严格模式”的三件套。
+- 架构决策：
+  - 决策1：新增 `step_contracts.py` 作为 Step1-Step5_6 合约层，统一承载 payload 解析、Step2 本地重建、Step56 段落归一化、顺序对齐。
+  - 决策2：Step2 去除 `SUB` 数值排序假设，改为按原始字幕顺序对齐（未知 ID 追加尾部保序）。
+  - 决策3：引入统一严格模式开关 `TRANSCRIPT_SCHEMA_STRICT_MODE`（默认关闭）；开启时拒绝非当前规范的紧凑 shape。
+  - 决策4：Step1-Step5_6 统一输出 `step_observability`，沉淀解析命中、回退触发、过滤原因等计数。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+    - 新增 Step1 topic payload 解析；
+    - 新增 Step2 correction payload 解析、上下文替换重建与指标计数；
+    - 新增 Step3/3.5/4/56 payload 标准化解析；
+    - 新增 `order_records_by_reference_ids(...)` 顺序鲁棒工具；
+    - 新增 Step56 fallback/去重工具。
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase1_preparation.py`
+    - Step1 接入合约解析；
+    - 新增 `step_observability.step1_validate`。
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step2/3/3.5/4/5_6 全部接入合约层解析与观测；
+    - Step2 输出顺序改为输入对齐；
+    - Step5/6 兼容入口透传 Step56 观测。
+  - `services/python_grpc/src/transcript_pipeline/tests/`
+    - 既有 Step2/3/3.5/5_6/phase1 测试全量回归通过。
+- 影响与权衡：
+  - 收益：节点职责收敛、协议演进改动面显著缩小；可观测性提升，便于后续兼容字段退役。
+  - 成本：引入一层合约模块，初期代码跳转层级增加；需在后续版本明确 `compact/legacy` 字段退役时间窗。
+
+## 2026-02-16 Stage1 文本链路支持 step2/3/3.5/4 分段复用与续跑
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 现有 `ProcessStage1` 仅对 `step2 + step6 + sentence_timestamps` 做整体验证；任一资源无效就整段重算。
+  - `step3/step3.5/step4` 默认可能不落盘或被 `count/sample` 摘要化，导致即使已有中间产物也无法作为可靠复用输入。
+- 第一性原理与复用杠杆：
+  - Stage1 是线性依赖链，应按“最高可信已完成步”断点续跑，而非“全量命中/全量重算”。
+  - 中间产物只有在可回读且完整时才能复用，摘要结构不可直接作为下游输入。
+- 架构决策：
+  - 决策1：`StepOutputConfig.FULL_PERSISTENCE_STEPS` 扩展到 `step3_merge`、`step3_5_translate`、`step4_clean_local`，保证可回读。
+  - 决策2：`run_pipeline/_execute_pipeline` 增加 `resume_state + resume_from_step`，支持无 SQLite 场景的显式续跑。
+  - 决策3：`ProcessStage1` 在整体验证失败后，按 `step2 -> step3 -> step3.5 -> step4` 顺序验证并加载产物，命中后从对应步骤继续执行。
+  - 决策4：Stage1 执行完成后，为 `step2/step3/step3.5/step4/step6` 统一写入 `stage1_text` 元数据，稳定后续复用判定。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - Step3/3.5/4 改为全量持久化；
+    - `run_pipeline` 与 `_execute_pipeline` 支持注入续跑状态与续跑步位。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_load_stage1_output_list`；
+    - `ProcessStage1` 新增分段复用决策与 `resume_state/resume_from_step` 传递；
+    - Stage1 元数据写入覆盖 step2/3/3.5/4/6。
+  - `services/python_grpc/src/server/tests/test_stage1_output_loader.py`
+    - 新增 Stage1 输出回读与摘要拒绝测试。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py`
+    - 新增续跑状态注入回归测试。
+- 影响与权衡：
+  - 收益：当 step6 失效但 step4 有效时可仅重跑 step5_6，减少重复 LLM 调用。
+  - 成本：中间产物落盘体积上升；通过 `stage1_text` 元数据校验控制复用安全边界。
+
+## 2026-02-16 VL 增加 no_needed_video 语义回写（process -> abstract）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 现有 VL 分析即使识别到“该片段无有效动态演示”，仍可能继续输出 clip/screenshot，导致无效视频素材进入后续链路。
+  - 语义单元 `knowledge_type` 未被 VL 结论反向修正，Phase2B 仍按 `process` 处理，和实际“仅文字可承载”的内容不一致。
+- 第一性原理与复用杠杆：
+  - 当知识表达不依赖动态画面时，视频素材应被降级为“可选”甚至“不需要”，否则只会引入噪声与成本。
+  - 复用既有 `abstract` 分支可避免新增分叉架构：核心是把单元级语义从 `process` 回写为 `abstract`。
+- 架构决策：
+  - 决策1：在 VL 默认模式输出契约中新增 `no_needed_video` 字段（布尔值），由模型显式声明“是否无需视频表达”。
+  - 决策2：本地解析到 `no_needed_video=true` 后，强制将该结果 `knowledge_type` 归一为 `abstract`，并跳过该单元 clip/screenshot 产出。
+  - 决策3：将语义单元对象内 `knowledge_type` 回写为 `abstract`，并在 gRPC 持久化阶段落盘，确保 Phase2B 按 abstract 路径处理。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 新增 `no_needed_video` 解析字段与布尔归一化；
+    - 默认模式命中 `no_needed_video=true` 时，强制 `knowledge_type=abstract` 且不生成 clip/screenshot。
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/default_user.md`
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/output_constraints_default.md`
+    - 提示词与输出约束新增 `no_needed_video` 要求。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 增加单元级 no-needed 判定与 `knowledge_type` 回写逻辑；
+    - 增加 `token_stats.no_needed_video_units` 统计。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 当仅发生 no-needed 语义回写（无 tutorial step 更新）时，也会持久化 `semantic_units_phase2a.json`。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增 no-needed 解析与语义回写回归测试。
+- 影响与权衡：
+  - 收益：减少无价值视频素材产出；抽象内容回归 abstract 处理链路，Phase2B 语义一致性更高。
+  - 成本：VL 输出 schema 更严格，依赖模型遵循字段约束；通过本地布尔归一与回写兜底降低失配风险。
+
+## 2026-02-16 VL 增加 should_type 路由覆盖（abstract / concrete）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `no_needed_video` 只能覆盖“无需视频表达”场景，无法表达“仍需截图但无需视频切片”的 concrete 路由意图。
+  - 需要让 VL 显式返回路由建议，以便本地按 `abstract/concrete` 处理素材生成与知识类型回写。
+- 架构决策：
+  - 决策1：在 VL 默认模式输出契约中新增可选字段 `should_type`（仅允许 `abstract` / `concrete`）。
+  - 决策2：本地解析优先应用 `should_type` 路由；若 `no_needed_video=true`，仍强制覆盖为 `abstract`（最高优先级）。
+  - 决策3：语义单元回写新增 `_vl_route_override` 元数据，并在 gRPC 持久化阶段统一按路由回写落盘（不仅限于 no-needed 场景）。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 新增 `should_type` 字段解析与归一化；
+    - 默认模式支持 `should_type` 路由覆盖（`abstract` 跳过 clip/screenshot；`concrete` 跳过 clip、保留 screenshot）。
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/default_user.md`
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/output_constraints_default.md`
+    - 增加 `should_type` 输出字段与路由约束描述。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `should_type` 路由聚合与语义单元回写；
+    - 新增 `token_stats.should_type_abstract_units / should_type_concrete_units` 统计。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 持久化逻辑从“仅 no_needed 回写”扩展为“任意 `_vl_route_override` 回写”。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增 `should_type` 的 analyzer 与 generator 路由回归测试。
+
+## 2026-02-16 Transcript Step3.5 翻译提示词补充“专有名词英文保留”规则
+- 日期：2026-02-16
+- 触发背景与问题：
+  - Step3.5 翻译链路在专有名词场景中可能仅输出中文或仅输出英文，导致品牌/模型名信息丢失或可追溯性下降。
+  - 业务要求明确：特定名词需采用“中文译名（英文原词）”形式，例如 `deepseek -> 深度求索（deepseek）`。
+- 第一性原理与复用杠杆：
+  - 专有名词是语义锚点，翻译后仍需保留可检索的原词，才能保证跨语种一致性与后续检索稳定性。
+  - 复用现有 Step3.5 prompt 入口即可达成约束升级，无需新增节点或改动上下游数据结构。
+- 架构决策：
+  - 决策1：在 `TRANSLATION_PROMPT` 新增“专有名词规则”，要求保留英文原词并给出固定示例。
+  - 决策2：在 `TRANSLATION_SYSTEM_PROMPT` 同步加入同款约束，降低模型漏遵循概率。
+  - 决策3：新增回归测试，显式断言提示词包含“中文译名（英文原词）”与 `深度求索（deepseek）` 示例。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step3.5 提示词新增专有名词英文保留规则与 deepseek 示例。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py`
+    - 新增提示词规则回归断言，防止后续改动误删约束。
+- 影响与权衡：
+  - 收益：提升专有名词翻译一致性，减少英文原词丢失导致的信息损耗。
+  - 成本：提示词约束变长，token 有轻微增加；但不改变节点拓扑与接口契约。
+
+## 2026-02-16 Transcript Step2 改为“最小纠错单元返回 + 本地重建 corrected_text”
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `step2_correction` 仍以 `corrected_text` 作为主要 LLM 输出，长字幕批次下 token 消耗偏高。
+  - 旧格式缺少稳定定位信息时，重复字词场景容易出现替换歧义，且上下文证据不足。
+- 第一性原理与复用杠杆：
+  - LLM 的核心增量信息是“哪里改、改成什么”，不是整句回传；应最小化返回面以降低成本。
+  - 字幕时间轴（`subtitle_id/start_sec/end_sec`）属于本地确定性数据，应该由本地状态透传而非远端重复生成。
+  - 文本替换准确率取决于定位约束，必须引入可验证的左右上下文窗口并在本地做保守匹配。
+- 架构决策：
+  - 决策1：Step2 Prompt 改为仅要求返回 `subtitle_id + original + corrected + left_context + right_context`，不再要求返回 `corrected_text/start_sec/end_sec`。
+  - 决策2：在节点内新增统一 payload 解析器，兼容新格式（`corrections`）与旧格式（`corrected_subtitles`）。
+  - 决策3：将 `corrected_text` 改为本地重建：优先按上下文唯一命中替换；歧义命中时保守跳过，避免误改。
+  - 决策4：`correction_summary` 增补 `subtitle_id`，保留纠错证据链用于后续追踪。
+  - 决策5：上下文窗口策略显式化：按“最小唯一窗口”返回，默认从 `1` token 起；歧义时自动扩展，最大 `5` token；并允许通过环境变量覆盖（`TRANSCRIPT_STEP2_CONTEXT_DEFAULT_WINDOW`、`TRANSCRIPT_STEP2_CONTEXT_MAX_WINDOW`）。
+  - 决策6：Step2 最小纠错单元不再返回 `reason`，进一步压缩输出 token；证据链以 `subtitle_id + original/corrected + left/right_context` 为准。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - 更新 Step2 Prompt 输出契约；
+    - 新增上下文标准化、上下文匹配替换、Step2 LLM payload 兼容解析；
+    - `process_batch` 改为“按 batch 原字幕全量遍历 + 本地重建 corrected_text”。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step2_correction_consistency.py`
+    - 新增上下文字段别名与歧义保护回归测试。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - Step2 环境变量测试切换为新 `corrections` 返回格式，并校验本地重建文本。
+- 影响与权衡：
+  - 收益：Step2 输出 token 显著下降；保留 `subtitle_id + context` 的证据化纠错路径；下游仍消费完整 `corrected_text`，接口无感升级。
+  - 成本：本地替换逻辑复杂度上升；当上下文不足且出现多重命中时会保守跳过，需要依赖模型按规则扩窗（最多 5 token）。
+
+## 2026-02-16 Transcript Stage1 并发调度改为有界生产消费 + Step3 低重叠窗口
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `step2/step3/step3_5` 使用全量 `asyncio.gather` 一次性提交任务，长视频下会产生大量协程排队，调度开销与内存压力明显。
+  - `step3_merge` 采用 `window_size=10, overlap=5`（步长5）的高重叠滑窗，调用数量与 token 消耗偏高。
+  - 需要提供可直接执行的 DeepSeek 并发阶梯压测（12/16/20），并观测 `429`、超时与总耗时。
+- 第一性原理与复用杠杆：
+  - LLM 调用是远端 I/O 资源，吞吐稳定性取决于“在途请求数”而非“提交任务总数”；必须把调度从“全量提交”改为“有界在途”。
+  - 滑窗重叠仅用于边界语义连续性，默认应保持“低重叠”以平衡质量与成本。
+  - 压测应直接对目标网关输出结构化指标，避免仅看单一成功率。
+- 架构决策：
+  - 决策1：在 `phase2_preprocessing` 内新增统一的有界生产消费执行器 `_run_bounded_producer_consumer`，替换步骤内全量 `gather`。
+  - 决策2：新增步骤级并发配置解析 `_resolve_step_max_inflight`，支持 `TRANSCRIPT_{STEP}_MAX_INFLIGHT` 覆盖，并回退到 `TRANSCRIPT_NODE_MAX_INFLIGHT` / `TRANSCRIPT_LLM_MAX_CONCURRENCY`。
+  - 决策3：`step3_merge` 默认重叠改为 `overlap=2`（低重叠），并开放 `TRANSCRIPT_STEP3_WINDOW_OVERLAP` 可配置。
+  - 决策4：新增独立压测脚本，默认并发阶梯 `12,16,20`，输出 `429/timeout/总时长/时延分位/QPS`。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - 新增 `_read_int_env`、`_resolve_step_max_inflight`、`_run_bounded_producer_consumer`；
+    - `step2/step3/step3_5/step4/step5/step6` 从全量 `asyncio.gather` 改为有界生产消费；
+    - `step3_merge` 滑窗改为低重叠默认（`TRANSCRIPT_STEP3_WINDOW_OVERLAP`，默认 `2`）。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py`
+    - 新增回归：有界执行保持顺序且不超并发上限；
+    - 新增回归：`step3` 默认低重叠分窗、以及环境变量重叠配置生效。
+  - `scripts/bench_transcript_deepseek_concurrency_ladder.py`
+    - 新增真实 DeepSeek 并发阶梯压测脚本（默认 `12,16,20`）。
+- 影响与权衡：
+  - 收益：降低长视频场景调度尖峰与排队膨胀，减少 Step3 调用放大效应，并形成可重复压测基线。
+  - 成本：单步调度实现复杂度上升；需要通过环境变量和压测产物持续校准最佳并发档位。
+
+## 2026-02-15 Transcript Stage1 新增 Step3.5 翻译重写节点
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `step2_correction` 提示词中包含“必须将英文翻译成中文”，将“纠错职责”和“翻译职责”耦合在同一步骤，导致行为边界不清晰。
+  - 业务要求改为：先在 `step3_merge` 形成完整英文句子，再单独执行翻译与中文母语化重写。
+- 第一性原理与复用杠杆：
+  - ASR 纠错与语义翻译是两类不同目标函数，应拆分为独立步骤，才能分别优化质量与回退策略。
+  - 复用现有窗口并发调用模式与 `merged_sentences` 数据结构，避免新增旁路数据流。
+- 架构决策：
+  - 决策1：`step2_correction` Prompt 移除“必须将英文翻译成中文”，明确“仅纠错，不做翻译”。
+  - 决策2：新增 `step3_5_translate` 节点，基于 `merged_sentences` 分窗调用 LLM 执行翻译与母语化重写，窗口大小固定为 `50`。
+  - 决策3：`step4_clean_local` 输入优先读取 `translated_sentences`，缺失时回退 `merged_sentences`，保证兼容旧状态与降级路径。
+  - 决策4：更新图编排链路为 `step3_merge -> step3_5_translate -> step4_clean_local`，并同步 checkpoint、state、tracer 与 mermaid 可视化。
+  - 决策5（增量）：`step3_5_translate` 仅处理非中文句子；已含中文字符的句子直接透传，不进入翻译调用。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - 更新 `CORRECTION_PROMPT` 职责边界；
+    - 新增 `TRANSLATION_PROMPT`、`TRANSLATION_SYSTEM_PROMPT`、`step3_5_node`；
+    - `step3_5_node` 新增中文句子跳过翻译策略；
+    - `step4_node` 改为优先消费 `translated_sentences`。
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - 新增 `step3_5_translate` 节点编排、StepOutput 映射、mermaid 流程图；
+    - SQLite 完成状态更新改为基于 `final_state.current_step` 动态回写。
+  - `services/python_grpc/src/transcript_pipeline/checkpoint.py`
+    - `STEP_INDEX_MAP` 新增 `step3_5_translate`，并后移后续步骤索引。
+  - `services/python_grpc/src/transcript_pipeline/state.py`
+    - 新增 `translated_sentences` 状态字段与初始值。
+  - `services/python_grpc/src/transcript_pipeline/monitoring/tracer.py`
+    - `step_order` 新增 `step3_5_translate`。
+  - `services/python_grpc/src/transcript_pipeline/nodes/__init__.py`
+    - 导出 `step3_5_node`。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py`
+    - 新增“中文句子不触发翻译调用”的回归用例。
+- 影响与权衡：
+  - 收益：阶段边界更清晰，纠错和翻译可独立调优；翻译建立在完整句子上，中文表达一致性更高。
+  - 成本：新增一次 LLM 批调用，带来额外 token 与时延开销；通过窗口化并发与失败回退控制风险。
+
+## 2026-02-15 Transcript Step1 动态采样 + 语义分批承接合并
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `step1_validate` 主题推断长期使用固定 `count=20`，长视频的主题样本覆盖不足，短视频又可能过采样。
+  - 语义单元切分此前是单次全量调用；当输入改为分批后，批边界容易把一个连续语义单元切成两个。
+- 第一性原理与复用杠杆：
+  - 主题推断样本量应与视频时长成比例，并且均匀覆盖全时序，才能稳定代表主线内容。
+  - 分批调用必须显式携带“上一批最后语义单元”上下文，让模型在边界处做连续性判断，而不是机械断开。
+- 架构决策：
+  - 决策1：`step1_validate` 改为读取全量字幕后动态计算采样数（按时长增长并设置上限），再做均匀抽样。
+  - 决策2：主题样本文本新增字符预算，防止超长输入导致提示词被截断。
+  - 决策3：`SemanticUnitSegmenter.segment()` 从单次调用改为分批调用。
+  - 决策4（调整）：分批请求改为并发发送，并发上限固定为 10。
+  - 决策5（调整）：分批完成后增加“批边界二次判定”，由 LLM 判断“上一批尾单元 + 下一批首单元”是否应合并，并可返回合并后 `knowledge_topic/mult_steps/knowledge_type` 更新值。
+  - 决策6：分批切片增加输入 token 预算约束，采用 `128k * 0.75 = 96k` 作为单批输入上限，`batch_size` 仅作为段落数上限。
+  - 决策7（调整）：分批切片改为“仅看 token 预算”；`batch_size` 仅保留接口兼容，不再参与切批判断。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase1_preparation.py`
+    - 新增动态采样/均匀抽样/样本文本预算逻辑，并替换固定 `count=20`。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+    - `segment()` 改为 token 预算切批 + 并发发送（上限 10）；
+    - 新增“批边界二次 LLM 判定”与跨批单元合并逻辑；
+    - 保留段落原子性，超预算时仅换批，不截断单段文本。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase1_dynamic_topic_sampling.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py`
+    - 新增回归测试覆盖动态采样与跨批次承接合并。
+- 影响与权衡：
+  - 收益：长视频主题推断覆盖更稳定；语义分批后边界断裂显著减少。
+  - 成本：分批模式增加多次 LLM 往返；通过 `batch_size` 可按成本/质量平衡。
+
+## 2026-02-15 VL 多步骤教程新增“三要素”抽取与 Markdown 展示
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `tutorial_stepwise` 产物此前主要保留步骤时间段与描述，缺少可直接复现操作的结构化字段，导致 Markdown 教学步骤可读性与可执行性不足。
+  - 业务要求在每个步骤中稳定输出并展示：`主要动作`、`主要操作`、`注意事项`。
+- 第一性原理与复用杠杆：
+  - 多步骤教程的最小可复现单元应包含“做什么（主动作）+ 怎么做（主操作）+ 风险约束（注意事项）”。
+  - 复用现有 `tutorial_stepwise_v1` 资产链路（VL 解析 -> 素材生成 -> phase2b 渲染 -> 持久化），避免引入旁路数据结构。
+- 架构决策：
+  - 决策1：在 `VLAnalysisResult` 与 tutorial 输出约束中将三要素定义为标准字段，并在解析阶段对中英文别名做归一化兜底。
+  - 决策2：在 tutorial 资产导出 JSON（`steps`）中落盘三要素，并优先合并 `clip_requests` 与 `raw_response` 的信息。
+  - 决策3：在 Markdown 渲染层（增强渲染与 fallback 渲染）统一展示三要素，确保开关差异下表现一致。
+  - 决策4：在 gRPC 语义单元持久化时同步写回三要素，避免 phase2b 之后信息丢失。
+  - 决策5（增量）：新增 `step_summary/operation_guidance` 两个可选字段，扩展步骤可执行信息密度。
+  - 决策6（增量）：将 `main_action/main_operation/precautions/step_summary/operation_guidance` 统一调整为“可空可省略”；Markdown 仅在字段非空时展示。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - tutorial schema/prompt/解析与约束归一化新增 `main_action/main_operation/precautions`。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - tutorial 资产导出 `steps` 新增三要素并做多来源合并与文本列表标准化。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - tutorial 步骤加载与渲染新增三要素输出。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+    - fallback 渲染路径新增三要素输出。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - instructional_steps 持久化新增三要素与 `step_description`。
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/tutorial_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/vl/video_analysis/output_constraints_tutorial.md`
+    - tutorial 提示词与输出约束同步升级三要素字段。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 增补/修复三要素链路相关断言与测试桩。
+- 影响与权衡：
+  - 收益：教程步骤在 Markdown 中可直接用于执行与复现，且结构化信息可被后续 Agent/检索链路复用。
+  - 成本：VL 输出约束更严格，若上游模型输出质量波动会触发更多兜底归一化逻辑；通过默认值与别名映射降低失败风险。
+
+## 2026-02-15 process 降级分支接入增量截图去重（drop-tail）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `process` 命中静态主导降级后，`legacy_action_units` 分支会为被过滤动作段生成 `action_drop_*_tail` 截图请求。
+  - 这些 tail 截图在动作链路上常存在“后帧覆盖前帧”的增量关系，但此前未复用路由截图的增量去重规则，导致资产目录出现冗余图（如 `*_001_tail` 与 `*_002_tail` 同时保留）。
+- 第一性原理与复用杠杆：
+  - 降级分支的 drop-tail 也是“同一语义单元内的时序候选截图”，应与路由截图保持一致的“增量覆盖即去重”规则。
+  - 复用既有 `vision_validation.worker` 的 OCR/形状签名增量判定函数，不新增第二套规则。
+- 架构决策：
+  - 决策1：新增 `VLMaterialGenerator._dedupe_incremental_legacy_drop_tail_screenshots`，仅处理 `analysis_mode=legacy_action_units` 且 `label=action_drop_*_tail` 的请求。
+  - 决策2：比较范围限定在同一 `semantic_unit_id` 内，避免跨单元误删。
+  - 决策3：在 `generate()` 出口统一执行去重（无论截图时间优化是否开启），确保最终输出一致。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 drop-tail 请求识别与增量去重函数；
+    - `generate()` 在汇总截图请求后统一调用该去重逻辑。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 新增回归：同一单元两个 `action_drop_*_tail` 候选存在增量覆盖时，仅保留后者；非 drop-tail 与跨单元请求不受影响。
+- 影响与权衡：
+  - 收益：减少 process 降级分支冗余截图落盘，避免同类 tail 资产重复。
+  - 成本：会新增一次针对 drop-tail 小集合的帧特征提取开销；仅在该类请求数 > 1 时触发。
+
+## 2026-02-15 DownloadVideo 目录键改为“B站 AV/BV 优先”
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `DownloadVideo` 目录键原先直接使用完整 `video_url` 参与哈希。
+  - 对 B 站同一视频，不同分享参数（`spm`、`share_source`、`p` 等）会导致目录分裂，影响产物复用与问题定位。
+- 第一性原理与复用杠杆：
+  - task 目录键应体现“视频实体标识”，而不是“分享链接形态”。
+  - 复用现有 `storage/{hash}` 目录体系，不改变下游 `Transcribe/Stage1/Phase2` 调用链。
+- 架构决策：
+  - 决策1：新增 B 站 URL 识别与 AV/BV 提取逻辑（`bilibili.com`、`b23.tv`）。
+  - 决策2：`DownloadVideo` 目录哈希原文从 `video_url` 切换为“B站 AV/BV 优先、非 B 站保持原 URL”。
+  - 决策3：保留回退策略：若 B 站链接无法提取 AV/BV，则继续使用原 URL，避免主流程中断。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_is_bilibili_host`、`_extract_bilibili_video_id`、`_build_task_dir_encoding_source`。
+    - `DownloadVideo` 改为基于 `_build_task_dir_encoding_source(video_url)` 生成目录哈希。
+  - `services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py`
+    - 新增覆盖 BV/AV/path/query/non-bilibili 的回归用例。
+- 影响与权衡：
+  - 收益：同一 B 站视频的 task 目录聚合更稳定，减少重复下载与缓存分裂。
+  - 成本：旧目录按“完整 URL”生成，升级后首次可能出现新目录冷启动；但不影响历史目录读取兼容。
+## 2026-02-15 Phase2B 截图兜底收敛：禁用“首图回灌”
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 现有 `apply_external_materials` 在两类场景会尝试“保留首图兜底”：
+    - 截图校验全拒绝；
+    - 有候选但未命中可用结果。
+  - 该行为会把“未通过/未命中”的候选重新回灌到结果，弱化 `should_include` 的治理边界。
+- 第一性原理与复用杠杆：
+  - Phase2B 的职责是“按请求映射 + 按校验结果落库”，而不是在失败分支隐式补图。
+  - 复用现有 `screenshot_items`（含 `should_include=false`）与 `unit-scan fallback` 机制，不新增旁路策略。
+- 架构决策：
+  - 决策1：移除“校验全拒绝 -> 保留首图”的 fallback 分支。
+  - 决策2：移除“有候选但未选中 -> 保留首图”的 fallback 分支。
+  - 决策3：保留末端 `unit-scan fallback`（仅在 `materials.screenshot_paths` 与 `materials.screenshot_items` 均为空时触发），避免改动跨层级扩散。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 删除 `_keep_first_screenshot_candidate_as_fallback(...)` helper。
+    - 删除两处“keep first candidate”调用点。
+- 影响与权衡：
+  - 收益：截图输出与校验结果保持一致，避免失败分支隐式回灌造成的数据歧义。
+  - 成本：极端情况下该单元可能不再保留任何候选截图（仅保留审计项或触发末端 unit-scan fallback）。
+
+## 2026-02-15 Concrete Validator 禁用 `_extract_graphic_region` 预过滤
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 业务要求明确：不再使用 `_extract_graphic_region` 的 Canny/轮廓面积启发式作为截图准入前置条件。
+  - 该启发式会对 `PP-Structure` 产物和复杂界面图造成误判风险，导致有效截图在 Vision 前被提前剔除。
+- 第一性原理与复用杠杆：
+  - 当前链路中 Vision 的职责是做描述与语义理解，CV 几何启发式不应作为准入门禁。
+  - 复用现有 `validate/_validate_batch_with_vision_api/_vision_validate_v3` 流程，不扩接口，仅移除预过滤调用点。
+- 架构决策：
+  - 决策1：`validate` 路径不再调用 `_extract_graphic_region`，直接使用原图进入 Vision。
+  - 决策2：`_validate_batch_with_vision_api` 路径不再调用 `_extract_graphic_region`，批量请求直接传原图列表。
+  - 决策3：`_vision_validate_v3` 保留 `graphic_region` 兼容参数，但请求始终使用 `image_path` 原图；传入 `graphic_region` 仅记录 debug。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 移除 `validate`/`_validate_batch_with_vision_api` 中对 `_extract_graphic_region` 的调用。
+    - 删除 `_extract_graphic_region` 方法实现，避免后续被误接回主链路。
+    - `_vision_validate_v3` 改为始终基于原图调用 `vision_validate_image_sync`。
+  - `services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+    - 新增回归：`validate` 与批量路径若调用 `_extract_graphic_region` 则测试失败。
+- 影响与权衡：
+  - 收益：彻底消除 CV 图形区域启发式带来的预过滤误杀。
+  - 成本：全部候选均进入 Vision，会增加一定调用量与耗时。
+
+## 2026-02-15 Vision AI 改为“仅描述模式”（强制 should_include=true）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 业务要求调整：Vision AI 不再承担“具象知识判定”，仅负责图片内容描述。
+  - 现有实现在部分分支会回退传入原图，导致与“仅传提取图”目标不一致。
+- 第一性原理与复用杠杆：
+  - Vision 在该链路中的最小必要职责是“提取可读图像语义”，而非“做准入判定”。
+  - 复用现有 `ConcreteKnowledgeResult` 与 `material_flow` 数据结构，只调整判定映射与提示词，不改调用接口。
+- 架构决策：
+  - 决策1：`ConcreteKnowledgeValidator` 强制使用“描述模式”系统提示词，要求只输出 `img_description`。
+  - 决策2：Vision 结果统一映射为 `has_concrete=true`、`should_include=true`，不再依赖 `has_concrete_knowledge/confidence` 做准入。
+  - 决策3：`_vision_validate_v3` 禁止回退原图；仅允许传入提取后的裁剪图，提取图缺失时跳过 Vision 调用并返回保守描述结果。
+  - 决策4：关闭该链路中的 Vision 人像预过滤，避免“描述前判定”导致的短路输出。
+  - 决策5：缓存签名增加 `vision_mode=description_only_v1`，隔离旧判定缓存，避免历史 `should_include=false` 污染新行为。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 新增描述模式系统提示词常量并在初始化时强制启用。
+    - 禁用本链路 `person_subject_filter_enabled`。
+    - `_build_result_from_vision_payload` 改为“仅描述映射 + 强制 include”。
+    - `_vision_validate_v3` 移除“graphic_region 缺失时回退原图”逻辑。
+    - 缓存签名新增 `vision_mode` 维度。
+  - `services/python_grpc/src/content_pipeline/prompts/vision_ai/concrete_knowledge/user.md`
+    - 提示词改为“仅图片描述”输出规范。
+  - `services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+    - 新增“强制 should_include=true”与“raw_response 作为描述兜底”回归测试。
+- 影响与权衡：
+  - 收益：链路语义更单一，避免判定误拒；Vision 输入与业务要求一致（提取图优先、无原图回退）。
+  - 成本：丢失“具象性过滤”能力，需要由上游候选质量控制与后续文本融合策略承担噪声管理。
+
+## 2026-02-15 Vision 人物预过滤误判修复：高置信像素二次门控
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 线上出现 `人物主体占比过高，预过滤跳过 Vision（mask_ratio=0.7452）` 但截图实际无人像的误判。
+  - 原规则仅使用 `mask_ratio > area_threshold` 做硬判负，缺少“分割置信度质量”校验，容易把大面积低置信噪声误杀。
+- 第一性原理与复用杠杆：
+  - 预过滤只应过滤“高确定性人物主体”，不应替代 Vision 语义判定本身。
+  - 复用现有 `VisionAIClient` 预过滤入口，不新增旁路；通过增强判定信号降低误杀。
+- 架构决策：
+  - 决策1：在人物预过滤新增 `high_conf_ratio` 信号（`segmentation_mask > high_conf_threshold` 的像素占比）。
+  - 决策2：人物跳过条件升级为“双门控”：`mask_ratio > area_threshold` 且 `high_conf_ratio >= high_conf_min_area`，否则放行 Vision。
+  - 决策3：配置新增 `vision_ai.person_subject_filter.high_conf_threshold` 与 `high_conf_min_area`，并纳入缓存签名隔离。
+  - 决策4：新增 `vision_ai.person_subject_filter.force_include_patterns` 白名单；命中模式时直接跳过人物预过滤，强制放行到 Vision。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - 新增 `_estimate_person_mask_signals`，统一产出 `mask_ratio/high_conf_ratio`。
+    - 人物预过滤改为双门控，误判可回退到 Vision 语义兜底。
+    - 过滤结果与日志新增 `person_high_conf_ratio` 审计字段。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 配置加载与缓存签名新增 `person_mask_high_conf_threshold/person_mask_high_conf_min_area/person_prefilter_force_include_patterns`。
+  - `config/video_config.yaml`
+    - `vision_ai.person_subject_filter` 新增 `high_conf_threshold: 0.8`、`high_conf_min_area: 0.08`。
+    - 新增 `force_include_patterns`，可按文件名/路径模式定向放行（当前加入 `SU012_ss_island_006.jpg`）。
+  - `services/python_grpc/src/content_pipeline/tests/test_vision_ai_person_prefilter.py`
+    - 新增回归：`mask_ratio=0.7452` 但 `high_conf_ratio` 低时不应被预过滤跳过。
+    - 新增回归：命中 `force_include_patterns` 时即使掩膜信号很高也必须放行。
+- 影响与权衡：
+  - 收益：显著降低“无人物截图”被人物预过滤误杀的概率。
+  - 成本：会放行一部分低置信人物图进入 Vision，带来少量额外调用成本；以正确性优先。
+  - 回退方式：将 `high_conf_min_area` 设为 `0` 可退回旧行为（仅看 `mask_ratio`）。
+
+## 2026-02-15 Concrete Validator 去除“无图形区域即丢弃”硬预过滤
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 线上日志出现 `No graphic region in ... skipping screenshot`，即使输入图片来自 `PP-Structure` 拆图产物，仍可能因 OpenCV 轮廓规则未命中而被提前判为 `should_include=false`。
+  - 该行为属于“CV 预过滤先验过强”，会在进入 Vision 语义判定前产生误杀。
+- 第一性原理与复用杠杆：
+  - 具体知识判定的最终依据应是语义内容，而不是单一几何轮廓启发式。
+  - 复用既有 `validate/_validate_batch_with_vision_api/_vision_validate_v3` 调用链，仅调整“图形区域缺失”分支，不新增新接口或新流程。
+- 架构决策：
+  - 决策1：单图路径中，当 `graphic_region is None` 时不再直接返回“纯文本页跳过”，改为回退原图继续走 Vision 判定。
+  - 决策2：批量路径中，当 `graphic_region is None` 时不再本地判负，改为将原图加入 batch Vision 请求。
+  - 决策3：Vision 不可用时（`vision_ai` 关闭或 client 不可用），即使无图形区域也默认保留原图，避免预过滤误杀。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `validate`：移除“无图形区域直接跳过截图”分支，改为“回退原图继续判定”。
+    - `_validate_batch_with_vision_api`：`graphic_region is None` 改为加入原图请求，不再直接 `should_include=false`。
+    - `_vision_validate_v3`：入参改为 `Optional[np.ndarray]`，支持无裁剪区域时直接上传原图。
+  - `services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+    - 新增回归测试覆盖“无图形区域时 `_vision_validate_v3` 回退原图”与“Vision 不可用时默认保留原图”。
+- 影响与权衡：
+  - 收益：降低 `PP-Structure` 拆图与复杂界面截图被 CV 轮廓规则误判丢弃的风险。
+  - 成本：召回提升会带来少量纯文本页进入后续链路；由 Vision 语义判定继续兜底。
+
+## 2026-02-15 PP-Structure 拆图新增“高覆盖率回退原图”保护
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 现有结构化拆图逻辑只做“同类 bbox 合并”，在对比图/拼图场景中可能把应整体保留的截图拆散，降低后续图文对应质量。
+  - 业务要求增加保护条件：当“待提取 bbox 总覆盖比例”过高时，不再拆图，直接保留原图走后续校验。
+- 第一性原理与复用杠杆：
+  - 拆图的目标是提高信息密度，而不是破坏语义整体性；覆盖率过高意味着“拆分收益低、破坏风险高”。
+  - 复用现有 `extract_structured_screenshots -> material_flow` 返回值语义：返回 `None` 即可自动回退原图，无需新增调用链分支。
+- 架构决策：
+  - 决策1：在 `vision_ai.structure_preprocess` 新增 `skip_split_bbox_coverage_threshold`（0~1），用于控制回退阈值。
+  - 决策2：在生成 `crop_plan` 后计算 bbox 并集面积占原图比例，若 `coverage >= threshold` 则返回 `None`，回退原图。
+  - 决策3：默认配置设置为 `0.85`，通过配置项可按场景调优或关闭（设置为 `0`）。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 配置加载新增 `skip_split_bbox_coverage_threshold`。
+    - 新增 `_bbox_union_area` 并在 `extract_structured_screenshots` 中接入“高覆盖率回退原图”判断。
+  - `config/video_config.yaml`
+    - `vision_ai.structure_preprocess` 新增 `skip_split_bbox_coverage_threshold: 0.85`。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 新增两条回归用例，覆盖“超过阈值回退原图”和“低于阈值仍拆图”。
+- 影响与权衡：
+  - 收益：减少对比图被拆散的风险，提升图像语义完整性。
+  - 成本：部分高覆盖候选不再拆分，可能降低局部细粒度提取能力；通过阈值可配置来平衡。
+
+## 2026-02-15 Vision AI 预过滤重复图改为“命中即删除文件”
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 现状是预过滤阶段对重复图只做“候选剔除/跳过”，重复文件仍保留在磁盘，导致资产目录持续堆积冗余截图。
+  - 业务要求升级为“重复图直接删除”，减少后续链路误用与磁盘占用。
+- 第一性原理与复用杠杆：
+  - 去重的核心目标是“同一信息只保留一个事实副本”，若仅在内存候选集中移除但不清理文件，无法闭环。
+  - 复用现有三层去重入口：`material_flow` 的原图精确去重 + `ConcreteKnowledgeValidator` 的结构化拆图跨父去重 + `VisionAIClient` 的 pHash 命中复用分支，不新增旁路实现。
+- 架构决策：
+  - 决策1：在预结构化原图精确去重中引入 Pipeline 级全局签名缓存（跨语义单元），命中重复后直接跳过 PP-Structure 提取并删除重复文件（保留先出现项）。
+  - 决策2：在结构化拆图跨父去重中，命中重复后直接删除重复文件（保留先出现项）。
+  - 决策3：在 VisionAIClient 的重复命中且可复用结果时，仅“完全一致（exact hash）”删除文件；“相似命中”只复用结果不删文件。
+  - 决策4：删除失败仅记录告警并继续流程，避免因为单文件权限问题阻塞整批素材装配。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `_dedupe_screenshot_candidates_exact_keep_earliest` 新增 Pipeline 级全局签名去重、重复文件删除与删除计数日志。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 新增运行期全局签名缓存 `self._prestructure_seen_raw_signatures`，用于跨语义单元提取前去重。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `dedupe_structured_candidates_keep_latest` 新增重复结构化截图文件删除与删除计数日志。
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - `validate_image` / `validate_images_batch` 在 pHash 重复命中并复用缓存结果时，新增重复文件删除与计数。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 补充回归断言：同父不删、跨父重复会删、非完全重复不删，以及外部素材入口在同单元/跨单元的提取前去重删除行为。
+  - `services/python_grpc/src/content_pipeline/tests/test_vision_ai_person_prefilter.py`
+    - 新增单图/批量 pHash 重复命中删除文件回归用例。
+- 影响与权衡：
+  - 收益：重复图在预过滤阶段即时清理，降低磁盘冗余并减少后续误引用风险。
+  - 成本：一旦判重命中即物理删除，调试时需依赖日志回溯；通过“删除失败不中断”控制可用性风险。
+
+## 2026-02-15 Phase2B 纯文本页 OCR 描述复用与增量补充证据扩展
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `PP-Structure` 命中“无目标类型”时，原流程直接丢弃候选，导致纯文本页没有可复用的 `img_description`。
+  - `markdown_enhancer` 的增量补全证据默认按 `should_include=true` 过滤，`should_include=false` 的截图描述无法进入 DeepSeek 提示词。
+  - 上游若已有 OCR 文本，截图校验阶段未显式透传，导致纯文本页可能重复 OCR。
+- 架构决策：
+  - 决策1：`PP-Structure` 判定为纯文本页时不再直接丢弃候选，保留为 `should_include=false` 的截图项，供后续文本增量补全使用。
+  - 决策2：纯文本页优先复用已有 OCR 文本作为 `img_description`；仅在缺失时再做本地 OCR 提取。
+  - 决策3：`markdown_enhancer` 新增“增量补全专用截图列表”，该列表不过滤 `should_include`，但结构化正文仍只使用可插图项，避免正文插图污染。
+  - 决策4：当已存在 `should_include=false` 的截图条目时，禁止 `unit-scan` 兜底强行回灌 `fallback_unit_scan(should_include=true)`。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 新增 `_get_ocr_extractor`、`_extract_text_page_description`。
+    - 纯文本页分支输出 `img_description`（优先复用 `ocr_text`）。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `PP-Structure` 无目标类型时保留候选并标记 `text_only`。
+    - 校验为 `should_include=false` 时，保留截图项（不进入 `screenshot_paths`）并记录审计。
+    - 透传请求级 `ocr_text`（若存在）到 validator，优先复用上游 OCR 结果。
+    - 调整两个 fallback 条件，避免覆盖 `should_include=false` 条目。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `EnhancedSection` 新增 `augment_screenshot_items`。
+    - 新增 `_build_augment_image_items`，用于增量补全证据（不过滤 `should_include`）。
+    - `_build_structured_text_for_concept` 改为“增量补全用全量证据、结构化用可插图证据”双通道。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 同步更新断言，覆盖“拒绝截图仅保留为 should_include=false 条目”的新行为。
+- 验证记录：
+  - `python -m py_compile`：
+    - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+  - 说明：当前环境运行 `pytest` 时存在临时目录 ACL 权限异常（`WinError 5`），已使用等价手工脚本验证关键路径：
+    - `should_include=false` 条目保留且不落入 `screenshot_paths`；
+    - 请求级 `ocr_text` 可透传并被 validator 复用；
+    - 增量补全提示词可包含 `should_include=false` 的 `img_description`。
+
+## 2026-02-15 Phase2B 纯文本页截图改为“保留 OCR 后立即删图”
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 结构预处理将截图标记为 `text-only` 后，历史逻辑会保留截图文件，仅在 `screenshot_paths` 中排除。
+  - 该行为会让纯文本截图在资产目录持续堆积，不符合“仅保留 OCR 信息”的要求。
+- 根因分析：
+  - `material_flow` 在 `res.should_include=false` 分支中以“文件存在”为前提写入拒绝项，并默认保留原图文件。
+  - `ppstructure_text_only` 标记虽然已透传到候选项，但未在拒绝分支触发删图策略。
+- 架构决策：
+  - 决策1：`ppstructure_text_only && should_include=false` 时，先保留 OCR 描述到 `screenshot_items`，再删除原截图文件。
+  - 决策2：删图仅允许作用于 `assets` 目录内路径，避免误删外部路径。
+  - 决策3：当删图后文件不存在时，拒绝项仍保留 `img_path`（规范化绝对路径）用于审计追踪。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 抽象 `_delete_source_file_under_assets(...)` 统一处理“assets 内受控删除”。
+    - `ppstructure_text_only` 分支改为“保留 OCR 描述后删图”。
+    - 拒绝项路径归一化支持 `require_exists=False`，确保删图后仍可记录元数据。
+    - 非 `text-only` 分支保持原行为：若 validator 误删文件则自动恢复，避免行为回归。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 补充断言：`text-only` 场景下截图文件被删除，同时 `screenshot_items` 保留 OCR 描述与路径元数据。
+- 验证记录：
+  - `pytest` 受当前环境临时目录 ACL 限制（`WinError 5`）未能稳定执行。
+  - 已执行等价手工验证脚本，覆盖：
+    - `text-only`：`screenshot_paths` 为空、`screenshot_items` 保留 `img_description`、原截图文件已删除；
+    - 非 `text-only` 拒绝：validator 删除文件时仍会恢复，原防护逻辑保持有效。
+## 2026-02-15 Vision AI 限速器切换为令牌桶（初始 30 + 每秒恢复 1）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 旧实现是固定最小时间间隔限速（约 1 秒 1 次），启动阶段无法承接短时突发请求。
+  - 在批量校验开局阶段，首批请求被串行化，放大了首屏等待时延。
+- 第一性原理与复用杠杆：
+  - 限流目标应同时满足“长期速率可控 + 短时突发可吸收”，令牌桶比匀速间隔器更贴合该目标。
+  - 复用现有 `VisionAIRateLimiter.acquire()` 调用点，不改变上层业务接口与调用方式。
+- 架构决策：
+  - 决策1：将 Vision AI 限速算法从“最小时间间隔”改为“令牌桶”。
+  - 决策2：令牌桶容量与初始令牌数统一设为 30（启动可立即消费）。
+  - 决策3：令牌恢复速率固定为 1 token/s（长期等价 60 req/min）。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - `VisionAIRateLimiter` 改为令牌桶实现，新增桶容量/令牌恢复状态管理。
+  - `services/python_grpc/src/content_pipeline/tests/test_vision_ai_rate_limiter.py`
+    - 新增回归测试，覆盖“前 30 次零等待、第 31 次等待 1 秒、时间流逝后可再次零等待”。
+- 影响与权衡：
+  - 收益：显著降低 Vision AI 首批请求的排队延迟，提升短批次吞吐体验。
+  - 成本：允许受控短时突发；通过固定桶容量控制峰值冲击。
+
+## 2026-02-14 Docker Compose Release 交付链路落地（Java + Python 双服务容器化）
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 现有运行方式依赖本机 Conda/Python/Java/FFmpeg 组合，环境差异导致“同仓库不同机器启动结果不一致”。
+  - 目标是实现“下载 release 后可一键启动”的交付形态，降低部署门槛和重复排障成本。
+- 第一性原理与复用杠杆：
+  - 该系统本质是两个长期进程（Java 编排 + Python gRPC）协同，发布边界应围绕“进程与依赖”而不是“单文件打包”。
+  - 复用现有目录分层与启动入口：`apps/grpc-server/main.py`、`services/java-orchestrator`、`contracts/proto/video_processing.proto`。
+- 架构决策：
+  - 决策1：新增双镜像方案，分别承载 Python gRPC 与 Java orchestrator，避免单容器混合运行带来的耦合升级风险。
+  - 决策2：Compose 层通过服务名固定 gRPC 地址（`python-grpc:50051`），替代本机 `localhost` 假设。
+  - 决策3：将 `config/` 与 `var/` 做卷映射，确保配置单一事实源和任务产物持久化。
+  - 决策4：Python 镜像构建阶段自动生成 `contracts/gen/python` gRPC 代码，消除“仓库未提交生成文件”导致的运行不确定性。
+  - 决策5：补齐 Windows 发布操作脚本与 runbook，形成可执行发布 SOP。
+  - 决策6：新增 release 构建脚本，自动产出可分发 zip，并在导出阶段对 `api_key/bearer_token` 做脱敏。
+  - 决策7：Vision token 增加环境变量回退（`VISION_AI_BEARER_TOKEN`），减少目标机器手改 YAML 的步骤。
+- 已落地改动：
+  - 新增 `docker-compose.yml`
+  - 新增 `deploy/docker/python-grpc.Dockerfile`
+  - 新增 `deploy/docker/java-orchestrator.Dockerfile`
+  - 新增 `deploy/docker/.env.example`
+  - 新增 `scripts/release/docker_release.ps1`
+  - 新增 `scripts/release/build_docker_release_bundle.ps1`
+  - 新增 `README.DockerRelease.md`
+  - 新增 `docs/runbooks/docker_compose_release.md`
+  - 新增 `.dockerignore`
+  - 修改 `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`（支持 `VISION_AI_BEARER_TOKEN`）
+- 影响与权衡：
+  - 收益：部署步骤从“本机装环境 + 手工拉起双进程”收敛为“Compose 一键启动”，跨机器一致性显著提升。
+  - 成本：首次构建耗时增加、镜像体积增大；外部 API 依赖与密钥管理仍需由交付方提供。
+
+## 2026-02-14 CV 视频解码兼容增强：初始化期可读探测 + FFmpeg 转码兜底
+- 日期：2026-02-14
+- 触发背景与问题：
+  - `CVKnowledgeValidator`、`VisualFeatureExtractor`、`ScreenshotSelector/worker` 等链路存在直接 `cv2.VideoCapture` 打开逻辑，仅检查 `isOpened()`，对“容器可打开但编码不可解码（如 AV1）”场景无感知。
+  - 运行期会在首次 `read()` 时集中报错：`Could not open codec av1` / `Failed to initialize VideoCapture`，导致视觉状态检测和下游素材流程退化。
+- 第一性原理与复用杠杆：
+  - “可打开”不等于“可解码”，应在初始化阶段验证最小可读性（至少成功读 1 帧），把失败前置并可控回退。
+  - 复用现有 FFmpeg 依赖能力，失败时按需转码为 OpenCV 兼容性更高的 H.264，而不是扩散到多处读取路径分别兜底。
+- 架构决策：
+  - 决策1：在 `CVKnowledgeValidator` 增加 `_probe_capture_readable`，以一次轻量 `read()` 作为“可解码”判定。
+  - 决策2：direct 模式探测失败时自动触发 `ffmpeg -> libx264 + yuv420p` 转码，并重开 capture。
+  - 决策3：`use_resource_manager=True` 路径若探测失败，自动降级到 direct 模式并复用同一转码兜底逻辑。
+  - 决策4：新增公共工具 `common/utils/opencv_decode.py`，沉淀“可读探测 + 转码回退 + 路径缓存”能力。
+  - 决策5：将公共工具接入 `VisualFeatureExtractor`、`ScreenshotSelector`、`vision_validation/worker` 与截图预读入口，避免仅修一处导致同类链路继续报错。
+  - 决策6：转码产物采用“源路径 + mtime + size”指纹缓存，落盘在源目录 `_opencv_decode_fallback`，减少重复转码。
+- 已落地改动：
+  - `services/python_grpc/src/common/utils/opencv_decode.py`
+    - 新增 OpenCV 解码探测、ffmpeg 转码回退、可解码路径缓存与安全打开工具函数。
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py`
+    - 新增 ffmpeg 可执行路径解析、capture 可读探测、转码缓存路径构建与转码回退能力。
+    - `_init_video()` 改为“先探测再确认”，并在必要时自动回退到转码后的可读视频。
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+    - 初始化和局部读帧统一改为“可解码打开”，避免 AV1 在截图优化链路初始化期失败。
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py`
+    - `select_screenshots_for_range_sync` 与高分帧回抽路径接入解码回退，避免 worker 频繁命中 AV1 打开失败。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - 增加 worker 级可解码路径缓存；路由截图与粗细采样后处理统一改为可解码路径。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - chunk 预读入口改为可解码打开，减少流式优化阶段的 AV1 初始化报错。
+  - `services/python_grpc/src/content_pipeline/tests/test_cv_knowledge_validator_sampling.py`
+    - 新增“decode probe 失败触发 fallback”和“decode probe 成功不触发 fallback”回归测试。
+- 影响与权衡：
+  - 收益：AV1/非常规编码输入不再在 worker 运行期反复报错，初始化即可稳定落到兼容路径。
+  - 成本：仅在探测失败时增加一次转码耗时和缓存文件占用；常规编码路径无额外转码成本。
+
+## 2026-02-14 路由前置静态主导判定：process 不分长短统一触发降级分支
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 旧路由先按 `process_short/process_long` 分流，再仅在 VL 分支内判定“静态主导降级”。
+  - 导致 `process_preprocessed` 但被分到 short 的单元，只会产出 `*_route_*` 素材，无法触发 `stable island -> action units`。
+- 第一性原理与复用杠杆：
+  - “是否静态主导”是预处理阶段可直接得到的一阶信号，应作为路由优先判定，不应依赖后续长短分流结果。
+  - 复用既有 `_should_use_stable_action_legacy_branch` 规则，避免重复实现阈值逻辑。
+- 架构决策：
+  - 决策1：在 `AnalyzeWithVL` 路由中，对所有 `knowledge_type=process` 单元先执行静态主导判定。
+  - 决策2：命中静态主导后，直接送入 VL 任务侧的 legacy-action 降级链路（即使该单元是 short）。
+  - 决策3：仅未命中的 process 单元再按 `effective_duration_sec` 做 short/long 分流。
+  - 决策4：短 process 未命中降级阈值时，CV 路由侧也复用预处理信息：
+    - 截图选择使用 `stable_intervals_raw` 与 `kept_segments(action)` 的交集作为搜索范围；
+    - 短 clip 生成优先按 `kept_segments(action)` 分段导出，而非整段导出。
+  - 决策5：新增路由统计项 `process_static_legacy`，用于区分“因静态主导被提升到降级分支”的单元量。
+  - 决策6：静态主导降级分支在构建 action units 时，优先复用路由预处理已产出的 `kept_segments`；仅在缺失时才回退为 `stable_intervals_raw` 补集。
+  - 决策7：静态主导降级分支在“边界精修前”增加 `transition` 过滤层，复用 `ActionUnit.classify()` 的 `transition` 判定（容器切换/场景突变，含 PPT 翻页）从 action segments 中做差集剔除。
+  - 决策8：若某 `kept_segment` 内没有命中任何“非 transition 动作”（包括“仅命中 transition”或“未命中动作”），则整段 `kept_segment` 直接剔除（而非仅扣掉 transition 子区间）。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 路由阶段新增静态主导优先判定并短路到 `vl_units`。
+    - 将路由预处理区间统一映射到绝对时间轴，并在 CV 截图/短 clip 路径复用 stable/action 区间。
+    - 增加 `process_static_legacy` 统计及日志输出。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - `run_select_screenshots_for_range_task` 新增 `action_segments_override` 入参并透传到 selector。
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py`
+    - `select_screenshots_for_range_sync` 新增 `action_segments_override`，支持 `stable ∩ action` 约束截图搜索区间。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - routing 预处理新增 `materialized` 语义位。
+    - `_routing_preprocess_only=True` 时仅输出 `kept_segments/stable_intervals_raw`，不落盘 `vl_pruned_clips`。
+    - 复用路由预处理结果时，`materialized=False` 视为不可直接复用，VL 阶段按需重算并生成素材。
+    - 静态主导降级构建 action units 时优先使用 `kept_segments`，修复“stable 补集过碎导致无 clip/screenshot 输出”的问题。
+    - 静态主导降级在边界精修前新增 transition 过滤，复用 CV 既有 ActionUnit 判定剔除转场/PPT 翻页动态，避免把非教学动作作为 action unit 继续下游。
+    - 对“无非 transition 动作证据”的 kept segment 执行整段剔除，防止边缘残留片段继续进入边界精修与素材导出。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 新增“non-materialized 不复用”“routing-only 不 materialize”“legacy-action 优先 kept_segments”与“legacy-action transition 过滤”回归测试。
+- 影响与权衡：
+  - 收益：`process_preprocessed` 不再受 short/long 阶段顺序影响，静态主导单元可稳定触发动作单元降级产物，避免因 stable 补集碎片化而丢失输出，并减少转场/PPT 翻页误入 action 产物。
+  - 成本：更多 process 单元可能进入 VL 任务调度；通过静态阈值约束避免无效扩大。
+
+## 2026-02-14 Pre-VL 静态主导分支：Stable Island 反推 Action Units（兼容 VL 产物协议）
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 在 `Pre-VL Static Pruning` 场景中，`process + mult_steps` 单元若预裁剪后保留时长显著下降（小于原时长 1/3），说明片段主体是稳定岛。
+  - 继续走常规 VL 分析会让模型关注“拼接后的短动态”，并且与“动作单元驱动素材”的历史路径不一致。
+- 第一性原理与复用杠杆：
+  - 该场景核心目标是定位“动作边界”，而不是再做一次语义分类；最稳定的信号来自已计算的 `stable_intervals_raw`。
+  - 复用现有 Pre-VL 边界精修能力（语义句边界 + MSE 终点 + 缓冲），避免新建并行的边界规则。
+- 架构决策：
+  - 决策1：新增静态主导分支判定：`knowledge_type=process` 且 `mult_steps=true` 且 `kept_duration/raw_duration < 1/3`。
+  - 决策2：命中后不进入 VL API，改为“stable 补集 => action units”，并复用 `_refine_kept_segments_before_concat` 精修动作单元边界。
+  - 决策3：生成 VL 兼容素材请求：
+    - `clip_id` 使用 `unit_id/unit_id_clip_vl_action_###`；
+    - `screenshot_id` 使用 `unit_id/unit_id_ss_vl_action_###_(head|tail)`；
+    - `analysis_mode=legacy_action_units`，避免与教程/默认 VL 混淆。
+  - 决策4：截图窗口从“全局 timestamp±window”升级为“请求级窗口覆盖”：
+    - Head：`[action_start-1.0s, action_start+1.0s]`
+    - Tail：`[action_end-1.0s, action_end+1.0s]`
+    - 并在 prefetch chunk 构建与串行优化路径统一支持 `_window_start_sec/_window_end_sec`。
+  - 决策5：`merge_multistep_clip_requests` 对 `analysis_mode=legacy_action_units` 的 clip 不再合并，保持动作单元粒度。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增静态主导分支判定与 action-unit 请求生成逻辑。
+    - `generate(...)` 改为“双路执行”：静态主导单元走 legacy-action 分支，其他单元继续 VL 分析。
+    - 截图优化串行路径支持请求级窗口覆盖。
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+    - `build_screenshot_prefetch_chunks(...)` 支持 `_window_start_sec/_window_end_sec`。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 新增 stable->action unit 请求生成测试与 generate 分流测试。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py`
+    - 新增请求级窗口覆盖 prefetch 构建测试。
+- 影响与权衡：
+  - 收益：静态主导的多步过程单元不再依赖 VL 做语义判定，动作边界与截图窗口更可控，且输出协议继续兼容 VL 下游。
+  - 成本：分支逻辑增加了路由复杂度；通过 `analysis_mode` 标记与回归测试约束行为边界。
+
+## 2026-02-14 Vision 二层预处理：PP-StructureV3 拆图 + 跨截图去重（保留后帧）
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 现有 Vision 入口仅有“人物主体占比过滤”一层门控，复杂页面（Figure/Table/公式混排）会把整张图直接送入 Vision，噪声高且判定粒度粗。
+  - 业务新增要求：按 `Algorithm/Formula/Image/Figure caption/Figure title/Figure/Table/Table caption` 拆图后再送 Vision；无目标类型的原图不进入 Vision。
+  - 新增约束：拆图后的重复度比较必须“仅跨原截图”，同一原截图拆出的多张图不互相去重；重复时保留时间戳靠后的图。
+- 第一性原理与复用杠杆：
+  - 预处理目标是提升“输入有效信息密度”，应在 Vision 调用前完成类型裁剪，而不是让模型在整图中自行忽略噪声。
+  - 去重本质仍是 dHash 相似度比较，复用现有感知哈希算法与阈值语义，仅新增“去重作用域（跨父截图）”约束。
+- 架构决策：
+  - 决策1：在 `ConcreteKnowledgeValidator` 中新增 PP-StructureV3 适配器，按规则输出拆图：
+    - `Figure + Figure caption + Figure title` 合并为一张；
+    - `Table + Table caption` 合并为一张；
+    - `Algorithm/Formula/Image` 各自独立成图（可多张）。
+  - 决策2：在 `apply_external_materials` 入口把原截图候选扩展为“拆图候选”；若某原图无目标类型，直接从候选集中移除，不进入 Vision。
+  - 决策3：新增“跨截图去重（同父不比）”规则：按时间倒序保留后帧，去重比较仅在不同 `parent_key` 间进行。
+  - 决策4：为防止兜底逻辑回灌无效原图，当“结构预处理有效且全部无目标类型”时，禁用 unit-scan 截图兜底。
+  - 决策5：配置化开关与阈值，新增 `vision_ai.structure_preprocess`。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 新增结构预处理配置加载、PP-Structure 引擎懒加载、布局块解析与 bbox 归一化。
+    - 新增 `extract_structured_screenshots`（拆图）与 `dedupe_structured_candidates_keep_latest`（跨父截图去重）。
+    - `validate(...)` 增加 `skip_duplicate_check` 形参，支持拆图路径绕过旧的单图去重。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 在截图验证前新增“候选扩展（原图→拆图）”与“跨截图去重（同父不比）”流程。
+    - 校验调用对结构化拆图启用 `skip_duplicate_check=True`，避免同原图拆分项互相抑制。
+    - 兜底路径切换为基于“生效候选集”，并在全无目标类型时跳过 unit-scan 回灌。
+- 影响与权衡：
+  - 收益：Vision 输入从“整图粗粒度”升级为“结构化子图细粒度”，减少噪声与无效调用，提升可控性。
+  - 成本：新增本地结构解析与裁剪开销；当 Paddle 依赖缺失时会自动降级为原路径，保证主链路可用。
+  - 兼容增强（2026-02-14 同日补充）：针对 `paddleocr==2.7` 在部分 Windows 环境触发 `fused_conv2d/OneDnnContext` 推理异常，新增 `PaddleX PP-DocLayoutV3` 结构块提取兜底（仅本地模型可用时启用）；若主后端与兜底后端均失败，统一回退原图路径（不误判为“无目标类型”）。
+  - 兼容增强（2026-02-14 同日补充2）：新增 `PP-Structure` 运行时熔断策略，命中 `OneDnnContext/fused_conv2d` 等后端异常后，将后续同批截图直接切换到 `PaddleX` fallback，避免每张图重复触发长栈异常与无效重试；并新增配置项 `vision_ai.structure_preprocess.disable_ppstructure_after_backend_error`（默认 `true`）。
+  - 策略调整（2026-02-14 同日补充3）：
+    - 结构化拆图去重从“dHash 相似度 + 保留后帧”调整为“像素级精确匹配 + 删除后出现图（保留先出现图）”，严格满足“仅一模一样才去重”的业务约束。
+    - 将原本在 `VisionAIClient.validate(...)` 内执行的重复图过滤前移到 `material_flow` 截图处理入口，在 `PP-Structure` 与人物占比预过滤之前先做“原图精确去重”，避免重复执行结构化拆图与人物占比推理。
+    - 前移后截图验证统一透传 `skip_duplicate_check=True`，避免重复执行 Vision 侧去重并保持结果一致性。
+  - 策略调整（2026-02-14 同日补充4）：
+    - 在结构化拆图阶段新增 bbox 合并规则：当两个 bbox 的重叠比例（交集面积/较小框面积）`> 0.9` 时，合并为并集框再裁图。
+    - 新增配置项 `vision_ai.structure_preprocess.bbox_overlap_merge_threshold`（默认 `0.9`），用于按场景调节“同页近重复框”的合并强度。
+    - 作用范围限定为“同类型 bbox 内部合并”，避免跨类型误并影响 `figure/table/algorithm/formula/image` 的语义分组。
+
+## 2026-02-13 路由截图内存治理：640 宽度代理帧 + 长稳定岛分块细采样复用
+- 日期：2026-02-13
+- 触发背景与问题：
+  - `AnalyzeWithVL` 路由截图阶段在 `legacy_batch/process_streaming` 下都会调用 `select_screenshots_for_range_sync`。
+  - 对长时间窗口（例如 100s+）执行 fine 采样时，原逻辑会把整段 `fine_frames` 一次性读入内存，峰值内存随 `duration * fine_fps * 分辨率` 线性抬升。
+- 第一性原理与复用杠杆：
+  - 内存峰值核心由“单次持有帧数 × 单帧字节数”决定；治理必须同时控制这两个因子。
+  - 复用现有 coarse-fine 框架，不改评分算法本身：  
+    1) 降低单帧字节数（分析阶段下采样）；  
+    2) 限制单次持有帧数（长稳定岛按时间切块后细采样）。
+- 架构决策：
+  - 决策1：在路由截图读帧阶段新增 `analysis_max_width`，默认 640，仅作用于分析帧，不影响最终时间戳协议。
+  - 决策2：在 `select_screenshots_for_range_sync` 增加 `long_window_fine_chunk_sec`，当单个稳定岛时长超阈值时自动切块执行 fine 选择，再汇总岛内最优帧。
+  - 决策3：路由两条执行模式（`legacy_batch` 与 `process_streaming`）统一透传新参数，保持行为一致。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py`
+    - `_read_frames_at_timestamps_sequential(..., max_width)` 支持读帧即下采样。
+    - 新增 `_resize_frame_max_width` 与 `_split_time_range`。
+    - `select_screenshots_for_range_sync` 新增 `analysis_max_width`、`long_window_fine_chunk_sec`，并实现长稳定岛分块细采样。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - `run_select_screenshots_for_range_task` 新增并透传 `analysis_max_width`、`long_window_fine_chunk_sec`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 路由截图 `legacy_batch` 与 `process_streaming` 两条路径统一读取并传递新参数。
+  - `config/module2_config.yaml`
+    - 新增 `routing.screenshot_analysis_max_width`（默认 `640`）。
+    - 新增 `routing.screenshot_long_window_fine_chunk_sec`（默认 `20.0`）。
+- 影响与权衡：
+  - 收益：长窗口场景显著降低截图阶段内存峰值，减少 OOM/高分页风险。
+  - 成本：分析帧清晰度下降可能轻微影响细粒度评分；通过“仅分析下采样、原始时间轴不变”控制业务影响。
+
+## 2026-02-13 Vision 批量预处理改为倒序扫描（重复图优先保留后帧）
+- 日期：2026-02-13
+- 触发背景与问题：
+  - Vision 入口存在“重复图过滤 + 人物主体过滤”预处理链路，但批量模式默认按输入顺序正向遍历。
+  - 在相邻重复帧场景中，正向遍历会先缓存前帧，导致后帧被判重复并复用前帧结果，不符合“优先保留后出现截图”的业务预期。
+- 第一性原理与复用杠杆：
+  - 去重本质是“同簇只保留一个代表帧”；当没有额外质量评分时，遍历顺序直接决定保留项。
+  - 复用现有 `HashCacheManager` 与返回结果重排能力，不改缓存结构，只调整预处理顺序即可达到目标。
+- 架构决策：
+  - 决策1：`VisionAIClient.validate_images_batch` 在批量开启时，对“重复图检测 + 人物主体过滤”改为倒序扫描（从列表尾到头）。
+  - 决策2：批量关闭（回退单图循环）时，同样使用倒序执行，确保行为一致。
+  - 决策3：对外结果顺序保持原输入顺序不变，仅调整内部预处理顺序。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - `validate_images_batch` 两条执行路径均改为“倒序预处理、正序返回”。
+  - `services/python_grpc/src/content_pipeline/tests/test_vision_ai_person_prefilter.py`
+    - 新增倒序预处理回归用例，覆盖人物预过滤与重复图检测两个入口。
+- 影响与权衡：
+  - 收益：重复图场景优先保留后帧，符合“从后往前处理”的业务规则。
+  - 成本：批量请求内部发送顺序变为倒序；通过索引回填保持最终结果顺序与上游协议兼容。
+
+## 2026-02-13 Vision 前置人物主体过滤（MediaPipe）
+- 日期：2026-02-13
+- 触发背景与问题：
+  - 具象校验链路在调用 Vision API 前缺少“人物主体”快速剔除，导致大量人像截图进入模型侧分析，增加时延与成本，并带来误入库风险。
+  - 需求明确规则：基于人物分割蒙版占比，当占比 `> 0.3` 时判定为“以人为主体”，直接输出 `false`，不再调用 Vision API。
+- 第一性原理与复用杠杆：
+  - 该规则本质是“输入质量门控”，应放在最靠近 Vision 调用入口的位置，才能同时覆盖单图与批量路径。
+  - 复用现有 `VisionAIClient` 去重缓存（hash cache），让过滤结果同样可复用，避免重复做分割推理。
+- 架构决策：
+  - 决策1：在 `VisionAIClient.validate_image/validate_images_batch` 内新增人物主体预过滤步骤，位置在重复帧命中之后、Vision API 调用之前。
+  - 决策2：过滤命中后统一返回 `has_concrete_knowledge=false` 且 `should_include=false`，并附带 `person_mask_ratio` 供审计与排障。
+  - 决策3：配置化阈值与开关，新增 `vision_ai.person_subject_filter`：
+    - `enabled`（默认 `true`）
+    - `area_threshold`（默认 `0.3`，严格使用 `>`）
+    - `mask_threshold`（默认 `0.5`）
+    - `model_selection`（0/1，对应 MediaPipe SelfieSegmentation）
+  - 决策4：MediaPipe 采用懒加载与降级策略；未安装或初始化失败时只记录 warning，不中断主流程。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - `VisionAIConfig` 增加人物过滤配置项。
+    - `VisionAIClient` 增加 MediaPipe 懒加载、人物蒙版占比估算、过滤结果构造与统计计数。
+    - 单图/批量调用在 Vision API 前统一接入过滤，命中即跳过 API。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `_load_vision_config` 解析并透传 `person_subject_filter`。
+    - 缓存签名增加人物过滤相关字段，避免跨配置污染。
+  - `config/video_config.yaml`
+    - 新增 `vision_ai.person_subject_filter` 示例配置。
+  - `requirements.txt`
+    - 新增 `mediapipe>=0.10.14`。
+  - `services/python_grpc/src/content_pipeline/tests/test_vision_ai_person_prefilter.py`
+    - 新增单图跳过、批量顺序与阈值严格比较三类回归用例。
+- 影响与权衡：
+  - 收益：减少无效 Vision 调用，控制成本，并按规则稳定剔除人像主体截图。
+  - 成本：新增一次本地分割推理开销；通过懒加载、阈值可调与缓存复用控制影响。
+
+## 2026-02-12 ValidateCVBatch/截图预读链路：按 Chunk 隔离 SharedMemory 生命周期
+- 日期：2026-02-12
+- 触发背景与问题：
+  - 线上日志在 `CV_WORKER` 大量出现 `SharedMemory not found: wnsm_*`，集中发生在 `ValidateCVBatch`（含 coarse-fine 截图）与并行截图选择路径。
+  - 典型现象是 worker 已启动但读取不到帧，任务退化为中点回退，截图质量与稳定性下降。
+- 第一性原理与复用杠杆：
+  - 共享内存的可见性依赖“创建-消费-释放”生命周期边界；全局 LRU registry 跨批次复用时，后一批预读会 `unlink` 前一批仍在消费的帧名。
+  - 复用现有 `SharedFrameRegistry` 能力，但将其从“全局长期对象”下沉到“批次短生命周期对象”。
+- 架构决策：
+  - 决策1：为每个 chunk/截图批次创建独立 `SharedFrameRegistry`，并在批次任务 drain 后立即 `cleanup`。
+  - 决策2：`ValidateCVBatch` 改为 chunk 内受控并发、chunk 间顺序推进，避免下一批预读与上一批消费并发踩踏 SHM 名称。
+  - 决策3：按任务类型估算帧预算（`cv=3`，`cf≈duration*coarse_fps`）切 chunk，降低单批次触发 LRU 淘汰概率。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_create_ephemeral_frame_registry`、`_cleanup_ephemeral_frame_registry`。
+    - `_batch_read_frames_to_shm`、`_batch_read_coarse_frames_to_shm`、`_batch_read_frames_for_screenshots` 支持注入批次级 registry。
+    - `ValidateCVBatch` 流式门闸改为 `mode=chunk_isolated_shm`，并在每个 chunk 完成后释放对应 SHM registry。
+    - 并行截图选择路径改为批次级 registry，结束后立即释放。
+- 验证与结果：
+  - 语法校验：`python -m py_compile services/python_grpc/src/server/grpc_service_impl.py` 通过。
+  - 功能预期：`SharedMemory not found` 告警应从“批量连续出现”下降到“偶发或消失”，worker 读取帧成功率提升（建议在下一轮回放任务中量化）。
+- 影响与权衡：
+  - 收益：消除跨批次 SHM 生命周期踩踏，提升截图/CV 结果稳定性。
+  - 成本：chunk 间不再做预读重叠，极限吞吐可能小幅下降；通过 chunk 内并发与 inflight 门闸保持可接受时延。
+
+## 2026-02-12 Pre-VL 并发阶梯压测基线（Knee Test）
+- 日期：2026-02-12
+- 触发背景与问题：
+  - 需要按并发测试方法文档执行阶梯升压，明确当前链路的容量拐点，并保留可复现的原始数据与图表化结果。
+  - 当前链路包含 `CV 预处理 + FFmpeg/磁盘 IO + 多进程`，并发提升可能触发 CPU 争用与上下文切换开销，不能假设“并发越高越快”。
+- 第一性原理与复用杠杆：
+  - 复用现有 `VLMaterialGenerator.preprocess_process_units_for_routing` 作为稳定测试目标，避免额外改动业务调用链引入测试偏差。
+  - 复用真实任务数据 `task_hash=99efb7c15a9121f4e29113821d5c9c73`（同一 `video.mp4` + `semantic_units_phase2a.json`）确保样本可追溯。
+  - 按“吞吐增幅 <5% 且延迟恶化”规则自动判定拐点，并给出 80% 安全并发建议。
+- 已落地改动：
+  - 新增测试脚本：`scripts/bench_pre_vl_concurrency_ladder.py`
+    - 功能：按阶梯并发执行测试、保存每轮 `route_map`、保存系统采样原始点、输出汇总 CSV/JSON、生成 PNG 图表、自动输出拐点建议。
+    - 产物目录（本次实测）：`var/artifacts/benchmarks/pre_vl_concurrency_knee_20260212_003819/`
+- 测试方式与数据：
+  - 测试对象：Pre-VL 静态段预处理并发能力（`parallel_mode=process`）。
+  - 阶梯并发：`1 -> 2 -> 4 -> 6 -> 8`。
+  - 每档轮次：`1`（首轮基线）；采样周期：`0.5s`。
+  - 输入数据：
+    - `var/storage/storage/99efb7c15a9121f4e29113821d5c9c73/video.mp4`
+    - `var/storage/storage/99efb7c15a9121f4e29113821d5c9c73/semantic_units_phase2a.json`
+  - 执行命令：
+    - `python scripts/bench_pre_vl_concurrency_ladder.py --video ... --units ... --output ... --output-root var/artifacts/benchmarks --task-name pre_vl_concurrency_knee --mode process --workers 1,2,4,6,8 --repeats 1 --hard-cap 8 --sample-interval-sec 0.5`
+- 性能对比结果（首轮）：
+  - `workers=1`：`elapsed=75,836.20ms`，`throughput=0.2769 units/s`，`CPU均值=43.76%`，`内存均值=30.44%`。
+  - `workers=2`：`elapsed=173,499.20ms`，`throughput=0.1210 units/s`，`CPU均值=89.33%`，`内存均值=42.04%`。
+  - `workers=4`：`elapsed=167,524.81ms`，`throughput=0.1254 units/s`，`CPU均值=95.77%`，`内存均值=45.48%`。
+  - `workers=6`：`elapsed=170,298.85ms`，`throughput=0.1233 units/s`，`CPU均值=94.43%`，`内存均值=48.42%`。
+  - `workers=8`：`elapsed=172,870.72ms`，`throughput=0.1215 units/s`，`CPU均值=94.87%`，`内存均值=50.58%`。
+  - 拐点判定：`knee_worker=1`；安全并发（80%）=`1`。
+  - 判定依据：并发从 `1` 升到 `2` 时，吞吐增幅 `-56.29%`，p95 延迟增长 `128.78%`（成功率未下降）。
+- 原始数据与图表：
+  - 原始明细：`var/artifacts/benchmarks/pre_vl_concurrency_knee_20260212_003819/raw/runs_raw.json`
+  - 分档汇总：`var/artifacts/benchmarks/pre_vl_concurrency_knee_20260212_003819/raw/summary_by_worker.json`
+  - 每轮路由原始输出：`var/artifacts/benchmarks/pre_vl_concurrency_knee_20260212_003819/raw/route_map_w*_r*.json`
+  - 系统采样原始点：`var/artifacts/benchmarks/pre_vl_concurrency_knee_20260212_003819/raw/system_samples_w*_r*.json`
+  - 图表：`var/artifacts/benchmarks/pre_vl_concurrency_knee_20260212_003819/charts/concurrency_summary.png`
+- 风险与后续：
+  - 当前结论为“首轮基线”，统计稳健性有限（每档仅 1 轮）；建议追加每档 3-5 轮 + Soak（2-8 小时）验证稳定性。
+  - 本次日志中出现 `pythoncom CoInitializeEx failed (0x80070486)`，未导致失败，但建议在后续长稳态压测中纳入异常计数与告警口径。
+
+- 补充：重复轮次压测（每档 3 轮）
+  - 产物目录：`var/artifacts/benchmarks/pre_vl_concurrency_knee_repeats_20260212_115840/`
+  - 关键结果（均值 / p95）：
+    - `workers=1`：`elapsed_mean=59,147.62ms`，`elapsed_p95=69,310.50ms`，`throughput=0.3618 units/s`。
+    - `workers=2`：`elapsed_mean=206,770.89ms`，`elapsed_p95=236,846.19ms`，`throughput=0.1030 units/s`。
+    - `workers=4`：`elapsed_mean=240,190.75ms`，`elapsed_p95=258,729.96ms`，`throughput=0.0883 units/s`。
+    - `workers=6`：`elapsed_mean=249,956.35ms`，`elapsed_p95=254,827.30ms`，`throughput=0.0840 units/s`。
+    - `workers=8`：`elapsed_mean=266,763.39ms`，`elapsed_p95=287,962.68ms`，`throughput=0.0792 units/s`。
+  - 拐点判定：`knee_worker=1`；安全并发（80%）=`1`。
+  - 判定依据：并发从 `1` 升到 `2` 时，吞吐增幅 `-71.52%`，p95 延迟增长 `241.72%`（成功率未下降）。
+
+## 2026-02-11 process_short 路由截图：ROI 内稳定判定 + 增量截图去冗 + raw stable 复用
+- 日期：2026-02-11
+- 触发背景与问题：
+  - `AnalyzeWithVL` 路由中，`process_short` 语义单元走 CV 截图路径时，稳定岛检测/选优容易被字幕带干扰。
+  - 每岛选优后会产生多张候选，缺少“增量关系”去重，导致信息重复。
+  - 路由阶段已有 process 预处理结果，但截图阶段未复用“未筛选 stable（未经过最小 stable 时长筛选）”。
+- 第一性原理与复用杠杆：
+  - 先约束比较空间（ROI）再做稳定性判定，可减少与任务语义无关的像素扰动。
+  - 去重应基于语义增量而非仅时间/分数：候选 B 覆盖候选 A 的文本或形状且更丰富，A 应被淘汰。
+  - 既有 process 预处理已产出 raw stable，短 process 直接复用可避免重复检测。
+- 架构决策：
+  - 决策1：在 `process_short` 的路由截图流程中，稳定岛判定与岛内选优统一改为 ROI 内进行。
+  - 决策2：在每岛选优后，复用 OCR + 形状统计做“增量截图”去冗：
+    - 文本增量：`base_tokens ⊆ cand_tokens` 且 `|cand| > |base|`；
+    - 形状增量：候选在矩形/组件统计上覆盖且至少一项更大。
+  - 决策3：短 process 复用 routing pre-prune 的 `stable_intervals_raw`；长 process 维持原路径，不复用该对象。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py`
+    - `detect_stable_islands_from_frames(..., roi=...)`：MSE 基于 ROI 裁剪帧计算。
+    - `select_best_frame_from_frames(..., roi=..., return_index=...)`：质量评估与选优分数均基于 ROI。
+    - `select_screenshots_for_range_sync(..., roi=..., stable_islands_override=...)`：支持外部传入 raw stable 覆盖默认岛检测。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - 新增 `_get_route_roi`（复用 `CVKnowledgeValidator._detect_roi`）及 ROI 裁剪工具。
+    - 新增 `_extract_ocr_tokens`、`_extract_shape_signature`、`_is_incremental_screenshot`、`_filter_incremental_screenshots`。
+    - `run_select_screenshots_for_range_task`：接入 `stable_islands_override`、ROI 内检测/选优、增量去重。
+    - `run_coarse_fine_screenshot_task`：同样接入 ROI + 覆盖 stable + 增量去重。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `AnalyzeWithVL` 路由截图消费者从 `unit["_routing_pre_prune"]` 读取 `stable_intervals_raw`，作为 `stable_islands_override` 仅传给路由截图任务。
+    - `ValidateCVBatch` 调 worker 时补传 `video_path`，统一 ROI 检测入口。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - pre-prune 结构补充 `stable_intervals_raw` 字段，并在可复用路径解析/透传。
+    - `_prepare_pruned_clip_for_vl` 在“有 stable 但不裁剪”的回退路径返回 `stable_intervals_raw`，确保 short process 可复用 raw stable。
+- 测试与验证：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/vision_validation/worker.py`
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py`
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+  - 新增测试：
+    - `services/python_grpc/src/content_pipeline/tests/test_route_screenshot_incremental.py`（增量覆盖判定与去冗保留规则）。
+    - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py` 补充 raw stable 透传与回退场景断言。
+- 影响与权衡：
+  - 收益：`process_short` 截图稳定性提升，字幕干扰降低，候选截图冗余减少。
+  - 成本：每候选增加 OCR 与形状提取开销；通过只在路由截图阶段启用并复用 ROI 缓存控制成本。
+
+## 2026-02-11 Phase2 截图并行阶段内存治理（分块预读上限 + Worker 按任务释放 SHM）
+- 日期：2026-02-11
+- 触发背景与问题：
+  - Phase2A 截图优化在多进程并行时，主进程会对 chunk 区间做 Union 预读并写入 SharedMemory；当区间跨度较大时，单 chunk 预读帧数可能过高，抬高峰值内存。
+  - Worker 侧 `_attached_shms` 采用“附加后长期缓存”策略，长任务/多任务场景下会累计共享内存句柄映射，导致进程常驻内存回落不及时。
+- 关键决策：
+  - 决策1：在保持现有共享内存零拷贝链路不变的前提下，引入 `prefetch_max_frames_per_chunk`，按帧数上限自适应放大采样步长。
+  - 决策2：Worker 侧改为“按任务释放 SHM 引用”，任务结束后关闭已使用共享内存句柄，避免 `_attached_shms` 累积。
+  - 决策3：对 `run_cv_validation_task` 注入的 `_frame_cache` 帧做任务后清理，减少进程内缓存滞留。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+    - 新增 `resolve_adaptive_prefetch_step()`：根据 `start/end frame`、`sample_rate`、`max_frames_per_chunk` 计算自适应步长。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `_prefetch_union_frames_to_registry_sync()` 接入自适应步长；移除大 `set(range(...))` 构造，改为顺序扫描 + 目标索引递增。
+    - Registry 容量按“自适应采样后预估帧数”分配，降低 chunk 级 SHM 峰值。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - 新增 `release_attached_shm_refs()`；在 `run_screenshot_selection_task`、`run_coarse_fine_screenshot_task`、`run_cv_validation_task` 的 `finally` 中按任务释放句柄。
+    - `run_cv_validation_task` 在任务完成后回收本次注入的 `_frame_cache` 项。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - 批量/流式模式日志补充 `max_prefetch_frames`，便于线上观测内存治理配置。
+  - `config/module2_config.yaml`
+    - 新增 `prefetch_max_frames_per_chunk: 240`。
+- 性能对比数据（基于同一算法输入做可复现测算）：
+  - 测试方式：执行本地脚本，比较“固定步长”与“自适应步长”下的单 chunk 预读帧数。
+  - 测试数据（start_frame/end_frame/sample_rate/max_frames_per_chunk）：
+    - Case1: `0/120/2/240` → 旧 `~61` 帧，新 `~61` 帧（小跨度不降质）。
+    - Case2: `0/3000/1/240` → 旧 `~3001` 帧，新 `~232` 帧（约下降 `92.3%`）。
+    - Case3: `100/2500/2/240` → 旧 `~1201` 帧，新 `~220` 帧（约下降 `81.7%`）。
+  - 结论：在长跨度 chunk 场景下，主进程预读帧规模被显著压缩，降低了 SHM 与中间帧对象的内存峰值。
+- 验证记录：
+  - 运行验证脚本（直载模块，绕过历史包导入污染）验证：
+    - `resolve_adaptive_prefetch_step` 在低/高跨度输入下输出符合预期。
+    - `release_attached_shm_refs` 能选择性释放与全量释放 `_attached_shms`。
+  - 受仓库历史编码污染影响，`pytest` 全量收集会被既有文件语法错误阻断（非本次改动引入）。
+- 复用经验：
+  - 对“长时间窗口 + 多进程并行”场景，优先限制“单 chunk 的帧数上界”，比单纯限制 worker 数更直接地控制内存峰值。
+  - 共享内存句柄缓存必须绑定任务生命周期，否则会形成“对象释放了、句柄没释放”的慢性膨胀。
+
+## 2026-02-11 VL 主分析改造为“语义单元级并行（每 unit 一次 API）”
+- 日期：2026-02-11
+- 触发背景与问题：
+  - `VLMaterialGenerator.generate()` 虽已使用 `asyncio.gather` 并行，但主流程中“任务构建 + 调度”逻辑耦合在同一段代码，难以明确保证“每个语义单元仅一次主分析调用”。
+  - 在大批量 unit 场景下缺少独立的 VL 主分析并发治理参数，容易出现瞬时请求数不可控。
+- 关键决策：
+  - 决策1：将 VL 主分析抽象为独立方法 `_analyze_unit_tasks_in_parallel()`，以语义单元为最小调度粒度。
+  - 决策2：明确策略“one-unit-one-api”，每个 unit 仅创建一个 `analyze_clip` 任务并执行一次主 VL API 调用。
+  - 决策3：新增 `vl_analysis.parallel_workers / parallel_hard_cap` 配置，支持在不改业务语义前提下对并发做限流治理。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `vl_analysis` 配置解析与 `_resolve_vl_parallel_workers()`。
+    - 新增 `_analyze_unit_tasks_in_parallel()`，统一完成“任务输入构建、并发限流、结果对齐返回”。
+    - `generate()` 改为调用新 helper，移除原先内联的 `analysis_tasks` 构建与 gather 逻辑。
+  - `config/module2_config.yaml`
+    - 新增 `vl_material_generation.vl_analysis` 配置节（`parallel_workers: auto`、`parallel_hard_cap: 32`）。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增 `test_resolve_vl_parallel_workers_respects_hard_cap`。
+    - 新增 `test_analyze_unit_tasks_parallel_one_unit_one_api`，回归校验每个 unit 仅调用一次 `analyze_clip`，并验证 pre-prune prompt 注入与 pruned 计数。
+- 验证记录：
+  - 定向执行：
+    - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q`
+  - 预期重点：
+    - 新增 2 个用例通过；
+    - tutorial 主链路既有用例保持通过。
+- 复用经验：
+  - 将“并行调度策略”与“业务结果汇总”拆分为独立 helper，可显著降低后续并发策略演进（限流、熔断、重试）的改造成本。
+  - 在异步并行路径中保持“输入顺序 = 输出索引”是稳定聚合与缓存持久化的关键约束。
+
+## 2026-02-11 语义分割提示词恢复三类知识类型判定基线（process/abstract/concrete）
+- 日期：2026-02-11
+- 触发背景与问题：
+  - 语义分割链路（`deepseek.semantic.segment.system`）在演进后保留了 schema/合并规则，但对三类知识类型的“判定定义 + 冲突优先级 + 约束”表述不足。
+  - 导致分类边界样本中出现可观的类型漂移风险，影响后续路由（CV/VL）稳定性。
+- 关键决策：
+  - 决策1：恢复历史判定基线，不新增新类型，仍保持 `k: 0/1/2`（abstract/concrete/process）。
+  - 决策2：在 system prompt 中显式固化三类定义、冲突优先级、反机械分类约束，避免隐式语义漂移。
+  - 决策3：将 prompt 判定要求纳入自动化回归测试，防止未来再次丢失。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+    - 新增“知识类型判定定义（字段 k）”。
+    - 新增“判定优先级（冲突时）”。
+    - 新增“判定约束（按删除后信息损失判定，禁止关键词机械分类）”。
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py`
+    - 新增 2 个用例，校验三类定义与判定优先级/约束文本存在。
+- 验证记录：
+  - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py -q`
+  - 预期结果：`2 passed`。
+- 复用经验：
+  - 对“Prompt 决策语义”采用“文本断言测试”是低成本高杠杆方案，可快速阻断判定逻辑回归。
+  - 输出 schema 与判定规则应拆分治理：schema 保障结构稳定，规则保障语义稳定。
+
+## 2026-02-10 VL 前预处理并行化改造（Action merge 前置阶段）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - `VLMaterialGenerator.generate()` 在 VL 分析前存在 `for + await` 的预处理串行链路，导致 `Action merge` 前置阶段 CPU 利用率偏低。
+  - 稳定段检测（`CVKnowledgeValidator.detect_visual_states(..., stable_only=True)`）为 CPU 密集步骤，在高并发任务下成为显著瓶颈。
+- 关键决策：
+  - 决策1：保留原有调用链与返回结构，不改动业务语义，只对“stable 检测执行策略”做可配置并行化。
+  - 决策2：新增 `pre_vl_static_pruning.parallel_mode`：
+    - `auto`：有全局 `cv_executor` 时走多进程，否则走 asyncio 并发；
+    - `process`：强制多进程；
+    - `async/off`：仅事件循环并发（回退策略）。
+  - 决策3：多进程路径优先复用 gRPC 全局 CV 进程池；若无注入池，再按配置临时创建池，减少重复 spawn 开销。
+  - 决策4：引入“任务级兜底回退”：进程池单任务失败时回退该单元默认结果，不影响整体流程稳定性。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `pre_vl_parallel_mode` 配置解析。
+    - 新增 `_should_use_pre_vl_process_mode()` 并行策略判定。
+    - 新增 `_detect_stable_islands_for_units_via_process_pool()`，并接入 `_prepare_pruned_clips_for_units()`。
+    - `_prepare_pruned_clip_for_vl()` 新增 `stable_intervals_override` 入参，支持预先并行计算结果注入。
+    - `generate()` 中预处理任务改为统一 `unit_tasks` 链路，消除重复/残留串行逻辑，并将 `vl_units` 统计修正为可分析任务数。
+    - 新增预处理阶段关键耗时日志（stable detect ms、preprocess ms、applied 数量）。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - 新增 `run_detect_stable_islands_task()`，用于进程池内执行 `stable_only` 检测。
+  - `config/module2_config.yaml`
+    - `pre_vl_static_pruning` 新增 `parallel_mode: auto`（默认策略）。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 新增并行模式决策测试与 stable override 注入测试。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 更新 monkeypatch fake 函数签名，兼容新参数 `stable_intervals_override`。
+  - `scripts/bench_pre_vl_preprocess_parallel.py`
+    - 新增预处理阶段基准脚本，支持 baseline/target 模式对照与 speedup 输出。
+- 验证记录：
+  - 单测：
+    - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q`
+    - 结果：`18 passed`。
+  - 语法：`vl_material_generator.py` 可通过 `py_compile`。
+- 性能验证建议（可复现路径）：
+  - 使用 `scripts/bench_pre_vl_preprocess_parallel.py` 进行对照：
+    - baseline：`--baseline-mode async --baseline-workers 1`
+    - target：`--mode process --workers <N>`
+  - 重点观察：
+    - 日志 `process stable detect done`、`preprocess done` 的 `ms` 与 `applied`。
+    - 不同 `workers` 下速度提升与内存占用平衡点。
+
 ## 2026-02-09 历史文档旧路径名清理（Architecture/Runbook）
 - 日期：2026-02-09
 - 触发背景与问题：
@@ -1376,3 +3105,1943 @@
   - 复用校验冒烟：
     - 通过 `_validate_resource_reuse(...)` 对摘要化 `step2` 样本验证，结果为 `False compacted_output`。
 
+## 2026-02-10 转录存储根目录统一（server/storage -> var/storage/storage）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 用户反馈“并行/正常转录成功，但字幕未保存”。
+  - 现场排查发现文件实际落在 `services/python_grpc/src/server/storage/...`，而文档与日常排查路径为 `var/storage/storage/...`。
+- 第一性原理分析：
+  - 字幕是否保存应以 `TranscribeResponse.subtitle_path` 为事实。
+  - 本问题不是“写盘失败”，而是“写盘目录与观测目录不一致”，属于存储根目录治理问题。
+- 关键决策：
+  - 决策1：新增统一主存储根目录解析函数 `_get_primary_storage_root()`。
+    - 默认根目录改为 `repo_root/var/storage/storage`。
+    - 支持环境变量 `V2M_STORAGE_ROOT` 覆盖。
+  - 决策2：新增 `_get_storage_roots_for_scan()` 兼容扫描历史目录。
+    - 保持对历史 `server/storage`、`repo/storage` 的复用与冲突检测能力。
+  - 决策3：将下载、输出目录归一、视频归档统一切换到主存储根目录。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_get_primary_storage_root()`、`_get_storage_roots_for_scan()`。
+    - `_normalize_output_dir(...)`、`_ensure_local_video_in_storage(...)` 改为基于主存储根目录，并兼容旧根目录检测。
+    - `DownloadVideo(...)` 改为写入主存储根目录。
+    - `_find_stage1_output_conflicts(...)` 改为多根目录扫描。
+  - 新增测试：
+    - `services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+- 兼容性与影响：
+  - 新任务默认写入 `var/storage/storage/<task_hash>/...`，与文档和运维路径一致。
+  - 历史任务目录仍可被扫描复用，避免迁移期缓存失效。
+  - 调用方无需改协议，仍通过 `subtitle_path` 获取真实路径。
+- 验证记录：
+  - 单测：
+    - `python -m pytest -q services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+    - `python -m pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+    - 结果：`4 passed`
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+
+## 2026-02-10 Phase2A 语义单元落盘增强（checkpoint + intermediates 镜像）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 用户反馈语义划分完成后 JSON 未出现在预期目录，且多个步骤的 JSON 观察路径不一致。
+  - 复现定位到 `RichTextPipeline.analyze_only`：落盘在函数末尾一次执行，单元处理中若出现异常会跳过最终落盘。
+- 第一性原理分析：
+  - 语义单元 JSON 是 Phase2A 与后续阶段的共享事实，应具备“可中断、可恢复、可观测”属性。
+  - 仅末尾一次性写入不满足长链路容错；关键中间产物应尽早/增量落盘。
+- 关键决策：
+  - 决策1：在分段完成后立即做 checkpoint 落盘（即使后续单元处理失败，也保留语义切分结果）。
+  - 决策2：逐单元处理采用 `try/except/finally`，`finally` 中执行增量落盘，确保“至少有最新可读状态”。
+  - 决策3：将 `semantic_units_phase2a.json` 同步镜像到 `intermediates/semantic_units_phase2a.json`，统一排障观察路径。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `_save_semantic_units(...)` 新增 `mirror_output_path`，支持主路径 + 镜像路径双写。
+    - `analyze_only(...)` 新增：
+      - segmentation 后 checkpoint 落盘。
+      - 单元级异常隔离与兜底 `MaterialRequests([], [], [])`。
+      - 每单元 `finally` 增量落盘。
+      - 全流程结束再统一落盘一次。
+  - 新增测试：
+    - `services/python_grpc/src/content_pipeline/tests/test_phase2a_analyze_only_persistence.py`
+- 验证记录：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/transcript_pipeline/graph.py`
+  - 单测：
+    - `pytest -q services/python_grpc/src/content_pipeline/tests/test_phase2a_analyze_only_persistence.py`
+    - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+    - 结果：`3 passed`
+- 性能与权衡：
+  - 影响：增量落盘会增加 I/O 次数。
+  - 权衡：优先保障可恢复性与可观测性；当前语义单元规模下，I/O 增量可接受。
+  - 测试方式：以单测验证功能正确性；本次未引入压测数据，后续可在 `perf-benchmarks` 中补充“单元数-落盘耗时”曲线。
+
+## 2026-02-10 VL 阶段输出目录归一（request.output_dir -> storage/{hash}）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 用户反馈“多个步骤 JSON 没有落到正确位置”。
+  - 分析发现 `AnalyzeWithVL` 仍直接使用 `request.output_dir`，与 Stage1/Phase2A 已统一的 `storage/{hash}` 目录存在分叉风险。
+- 关键决策：
+  - 决策1：`AnalyzeWithVL` 统一先执行视频归档，再通过 `_normalize_output_dir(video_path)` 计算输出目录。
+  - 决策2：`semantic_units_json_path` 缺失时，回退到统一输出目录下 `semantic_units_phase2a.json`。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `AnalyzeWithVL` 入参初始化逻辑改为统一 storage 路径。
+- 验证记录：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+- 影响与权衡：
+  - 影响：VL token 报表与中间文件默认落在与 Phase2A 同目录，便于排障与复用。
+  - 权衡：忽略调用方传入的散落 `output_dir`，以系统统一路径为主，减少目录分裂。
+
+## 2026-02-10 VL 前预处理并行化（Action merge 前置链路提速）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 用户反馈：VL 分析前预处理阶段 CPU 使用率偏低，`Action merge` 所在链路在多语义单元场景下吞吐不足。
+  - 定位：`VLMaterialGenerator.generate` 与 `preprocess_process_units_for_routing` 中，`_prepare_pruned_clip_for_vl` 以 `for + await` 串行执行。
+- 第一性原理分析：
+  - 预处理的核心代价在 CV 状态检测与视频片段拼接，属于可按语义单元独立切分的任务。
+  - 若串行执行，CPU 核心无法同时承担多个单元的 CV 计算，导致总时延近似线性增长。
+- 关键决策：
+  - 决策1：新增预处理并发调度 ` _prepare_pruned_clips_for_units`，对单元级任务做受控并发。
+  - 决策2：并发度优先复用 gRPC 已创建的 `cv_process_pool`（避免二次建池与额外 spawn 开销）。
+  - 决策3：`_detect_stable_islands_for_unit` 优先走 worker 进程侧 `run_cv_validation_task`，无池时回退到线程封装本地检测，保证行为兼容。
+  - 决策4：预处理并发异常按单元降级为 default pre-prune 结果，不中断整批 VL 分析任务。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增并发配置解析：`_resolve_pre_vl_parallel_workers`。
+    - 新增降级结果构造：`_build_default_pre_prune_info`。
+    - 新增预处理并发入口：`_prepare_pruned_clips_for_units`。
+    - `preprocess_process_units_for_routing` 改为并发预处理并回填路由有效时长。
+    - `generate` 改为先并发完成 pre-vl 预处理，再统一提交 VL `analyze_clip` 任务。
+    - `_detect_stable_islands_for_unit` 新增“优先进程池 worker、回退本地线程”双通路。
+  - `config/module2_config.yaml`
+    - `pre_vl_static_pruning` 新增并发参数：
+      - `parallel_workers: auto`
+      - `parallel_hard_cap: 8`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增并发度与异常降级相关单测（worker 解析、硬上限、生效顺序与兜底）。
+- 验证记录：
+  - 单测（建议命令）：
+    - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "pre_vl_parallel_workers or prepare_pruned_clips"`
+  - 语法校验（建议命令）：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+- 性能对比记录口径（用于后续补实测数据）：
+  - 测试方式：同一视频、同一 `semantic_units_phase2a.json`，分别在 `parallel_workers=1` 与 `parallel_workers=auto` 下执行 3 轮取均值。
+  - 测试数据建议：`process` 单元数 ≥ 8，且平均时长 ≥ 20s，确保覆盖稳定段检测与拼接路径。
+  - 关键指标：
+    - 指标1：`pre_vl` 总耗时（从切片完成到 VL analyze 任务提交前）。
+    - 指标2：整体 `AnalyzeWithVL` 耗时。
+    - 指标3：CPU 平均占用与峰值占用（进程级）。
+  - 预期趋势：并行模式相对串行模式显著缩短预处理耗时，CPU 利用率明显上升。
+
+## 2026-02-10 TXT 字幕单时间戳 end_sec 计算修复（按下一条时间戳收敛）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 用户反馈 `subtitles.txt` 中存在 `[00:11:20]`、`[00:11:27]` 这类单时间戳行时，生成的 `start_sec/end_sec` 不准确。
+  - 现象：部分字幕 `end_sec` 固定为 `start_sec + 2.0`，没有正确收敛到“下一条字幕的开始时间”。
+- 根因分析：
+  - `services/python_grpc/src/transcript_pipeline/tools/file_validator.py` 中 `_parse_txt(...)` 的单时间戳分支，遍历后续行寻找“下一条更大时间戳”时，`break` 位于错误层级。
+  - 导致遇到首个后续时间戳（即便相等或无效）就提前退出，无法继续找到真正的下一条更大时间戳，最终回退为默认 `+2s`。
+- 修改措施：
+  - 将 `break` 移入 `if next_start > start_sec` 分支，仅在命中“更大时间戳”后终止扫描。
+  - 保持兜底策略不变：若后续不存在更大时间戳，仍使用 `start_sec + 2.0`。
+- 预防与回归：
+  - 新增回归测试：
+    - `services/python_grpc/src/transcript_pipeline/tests/test_txt_subtitle_timestamp_parsing.py`
+  - 覆盖场景：
+    - 单时间戳按下一条时间戳确定 `end_sec`。
+    - 连续相同时间戳时应跳过相等值并继续向后查找更大时间戳。
+- 验证记录：
+  - `python -m pytest -q services/python_grpc/src/transcript_pipeline/tests/test_txt_subtitle_timestamp_parsing.py`
+  - 结果：`2 passed`
+
+## 2026-02-10 Phase2A 阶段边界收敛（AnalyzeSemanticUnits 仅做语义切分）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 线上日志显示 `AnalyzeSemanticUnits`（Phase2A）在“checkpoint saved after segmentation”后，仍执行 `Action merge / KnowledgeClassifier / ScreenshotSelector` 等重操作。
+  - 这导致阶段职责混叠：Phase2A 同时承担了“语义分割”和“素材请求生成”，与 Java 侧 `Hybrid Analysis (VL or Legacy CV/LLM)` 的职责边界冲突。
+- 根因分析：
+  - `services/python_grpc/src/server/grpc_service_impl.py` 中 `AnalyzeSemanticUnits` 调用了 `RichTextPipeline.analyze_only()`。
+  - `analyze_only()` 在分割后继续执行 `_apply_modality_classification + _collect_material_requests`，因此触发 CV/LLM 与截图策略链路。
+- 架构决策：
+  - 决策1：将 Phase2A 收敛为“仅语义切分 + 落盘 semantic_units_phase2a.json”。
+  - 决策2：素材请求生成统一下沉到后续 `Hybrid Analysis (VL or Legacy CV/LLM)`。
+  - 决策3：`AnalyzeResponse` 继续保留 `screenshot_requests/clip_requests` 字段以兼容协议，但在 Phase2A 固定返回空列表。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 新增 `analyze_segmentation_only()`：仅执行分割与持久化，不触发素材请求生成。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `AnalyzeSemanticUnits` 切换为调用 `analyze_segmentation_only()`。
+    - 缓存复用路径不再从 `semantic_units_phase2a.json` 解析素材请求，统一返回空 `screenshot_requests/clip_requests`。
+    - 移除该 RPC 内对视觉提取器与 `_collect_material_requests` 的调用路径。
+- 验证记录：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+- 影响与权衡：
+  - 影响：Phase2A 耗时显著下降，日志不再出现该阶段的 CV/LLM 素材策略输出。
+  - 影响：素材请求来源收敛为 Hybrid Analysis 结果，避免跨阶段重复/冲突。
+  - 权衡：若有外部调用方直接依赖 `AnalyzeSemanticUnits` 的素材请求字段，需要迁移到后续 Hybrid Analysis 输出。
+
+## 2026-02-10 Phase2A 复用路径修复（兼容 intermediates 语义产物）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 用户反馈语义分割阶段未复用 `intermediates/semantic_units_phase2a.json`，导致重复执行 Phase2A 分割。
+  - 典型场景：根目录 `semantic_units_phase2a.json` 不存在或缺少 meta，但 `intermediates/semantic_units_phase2a.json` 已存在且可复用。
+- 根因分析：
+  - `AnalyzeSemanticUnits` 仅检查根目录 `semantic_units_phase2a.json`。
+  - `phase2a` 的复用校验仅对单一路径执行，未覆盖 `intermediates` 镜像产物。
+  - 重算后只对单一路径写入 `.meta.json`，导致镜像路径在后续任务中难以通过复用校验。
+- 架构决策：
+  - 决策1：将 Phase2A 语义产物复用候选路径扩展为“根目录优先 + intermediates 兼容回退”。
+  - 决策2：复用开启时按候选路径顺序做一致性校验，命中即复用；关闭时沿用 legacy exists 行为。
+  - 决策3：重算后对所有存在且非空的候选路径同步写入 meta，保证后续复用一致性。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_phase2a_semantic_units_candidates(output_dir)`：统一返回候选路径。
+    - 新增 `_resolve_reuse_candidate(...)`：统一封装候选复用判定。
+    - `AnalyzeSemanticUnits` 改为基于候选路径复用，支持从 `intermediates/semantic_units_phase2a.json` 命中。
+    - `AnalyzeSemanticUnits` 在重算后同步写入候选路径对应 meta。
+  - `services/python_grpc/src/server/tests/test_phase2a_reuse_candidates.py`
+    - 新增“候选路径包含主路径 + intermediates”测试。
+    - 新增“主路径缺失、intermediates 存在且 meta 匹配时可复用”测试。
+- 验证记录：
+  - `python -m pytest -q services/python_grpc/src/server/tests/test_phase2a_reuse_candidates.py`
+  - `python -m pytest -q services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+
+## 2026-02-10 gRPC 服务按阶段与职责拆分（组合层）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - `services/python_grpc/src/server/grpc_service_impl.py` 体量持续增长，阶段职责边界弱，导致 Phase2A 与 Validation/VL 相关改造的评审与回归成本较高。
+- 架构决策：
+  - 决策1：先引入“阶段组合层”，保持行为零漂移，再逐步把阶段实现迁移出核心类。
+  - 决策2：原 `VideoProcessingServicer` 重命名为 `_VideoProcessingServicerCore`，作为核心实现承载。
+  - 决策3：新增 `stages/` 包，以 mixin 形式声明阶段职责边界：
+    - `Phase2AMaterialStageMixin`：Phase2A 素材请求生成入口。
+    - `ValidationAndVLStageMixin`：CV 校验与 VL 分析入口。
+  - 决策4：新 `VideoProcessingServicer` 作为组合入口，按 MRO 组合阶段 mixin 与核心类。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `VideoProcessingServicer` -> `_VideoProcessingServicerCore`。
+    - 新增组合类 `VideoProcessingServicer(ValidationAndVLStageMixin, Phase2AMaterialStageMixin, _VideoProcessingServicerCore)`。
+  - `services/python_grpc/src/server/stages/__init__.py`
+  - `services/python_grpc/src/server/stages/phase2a_stage.py`
+  - `services/python_grpc/src/server/stages/validation_vl_stage.py`
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/stages/__init__.py services/python_grpc/src/server/stages/phase2a_stage.py services/python_grpc/src/server/stages/validation_vl_stage.py`
+  - 结果：通过。
+- 后续计划：
+  - 第二步将 `GenerateMaterialRequests`、`ValidateCVBatch`、`AnalyzeWithVL` 的真实实现逐步迁移到 `stages/`，核心类仅保留共享资源与跨阶段通用能力。
+
+## 2026-02-10 gRPC 服务按阶段与职责拆分（第二步：入口与核心实现解耦）
+- 日期：2026-02-10
+- 触发背景与问题：
+  - 第一阶段仅完成组合层接入，`_VideoProcessingServicerCore` 仍直接暴露阶段 RPC 方法名，阶段层边界仍不够清晰。
+- 架构决策：
+  - 决策1：阶段 mixin 直接承载 gRPC RPC 方法名（`GenerateMaterialRequests`/`ValidateCVBatch`/`AnalyzeWithVL`/`ReleaseCVResources`）。
+  - 决策2：核心类仅保留对应内部实现方法，统一采用 `_phase2a_*_impl`、`_validation_*_impl` 命名，明确“入口编排 vs 核心实现”职责。
+  - 决策3：当前保持方法体不迁移、不重写，先完成职责边界收敛，确保行为稳定。
+- 已落地改动：
+  - `services/python_grpc/src/server/stages/phase2a_stage.py`
+    - `GenerateMaterialRequests` 改为委托 `self._phase2a_generate_material_requests_impl(...)`。
+  - `services/python_grpc/src/server/stages/validation_vl_stage.py`
+    - `ValidateCVBatch` 改为委托 `self._validation_validate_cv_batch_impl(...)`。
+    - `AnalyzeWithVL` 改为委托 `self._validation_analyze_with_vl_impl(...)`。
+    - `ReleaseCVResources` 改为委托 `self._validation_release_cv_resources_impl(...)`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 原阶段 RPC 方法重命名为内部实现方法：
+      - `GenerateMaterialRequests` -> `_phase2a_generate_material_requests_impl`
+      - `ValidateCVBatch` -> `_validation_validate_cv_batch_impl`
+      - `AnalyzeWithVL` -> `_validation_analyze_with_vl_impl`
+      - `ReleaseCVResources` -> `_validation_release_cv_resources_impl`
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/stages/__init__.py services/python_grpc/src/server/stages/phase2a_stage.py services/python_grpc/src/server/stages/validation_vl_stage.py`
+  - 结果：通过。
+- 后续计划：
+  - 第三步逐步把内部实现方法的方法体迁移到 `stages/`，并把核心类收敛为“资源初始化 + 通用工具方法”。
+
+## 2026-02-11 AnalyzeWithVL 预裁剪结果复用（消除重复 pre-prune）
+- 日期：2026-02-11
+- 触发背景与问题：
+  - `AnalyzeWithVL` 路由阶段已执行一次 `process` 单元预处理（stable 检测 + pre-prune），并把结果挂到 `semantic_unit._routing_pre_prune`。
+  - 进入 `VLMaterialGenerator.generate` 后又会再次执行 `_prepare_pruned_clips_for_units`，导致同批单元重复执行 CV 检测与 FFmpeg 预裁剪。
+- 第一性原理分析：
+  - 预裁剪结果本质是“与单元边界绑定的可复用中间事实”，只要输入单元、切片路径、pruned 文件存在，则无需重算。
+  - 重算不会提升正确性，但会线性增加 CPU 与 I/O 成本，扩大长视频端到端时延。
+- 架构决策：
+  - 决策1：在 `VLMaterialGenerator` 增加“路由结果复用层”，优先消费 `_routing_pre_prune`。
+  - 决策2：仅当路由结果不可复用（结构非法、路径缺失、kept_segments 无效）时，才回退到原有 `_prepare_pruned_clips_for_units` 重算。
+  - 决策3：保持失败兜底不变：复用失败或重算异常均回落到 default pre-prune 结果（使用原片段），保证主链路稳定。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `_parse_interval_pairs`：统一解析外部区间格式（list/tuple/dict）。
+    - 新增 `_build_reusable_routing_pre_prune_info`：校验并归一化 `_routing_pre_prune`。
+    - 新增 `_resolve_pre_prune_results_for_unit_tasks`：按单元执行“优先复用 + 失败重算 + 最终兜底”。
+    - `generate(...)` 预处理调用从 `_prepare_pruned_clips_for_units(...)` 切换为 `_resolve_pre_prune_results_for_unit_tasks(...)`。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 新增 `test_build_reusable_routing_pre_prune_info_accepts_valid_routing_result`。
+    - 新增 `test_resolve_pre_prune_results_for_unit_tasks_prefers_routing_reuse`。
+- 验证记录：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+  - 结果：`14 passed`。
+- 性能对比与测试说明：
+  - 测试方式：对同一批 `process` 单元，比较改造前后 `generate` 阶段触发 pre-prune 的重算任务数（以新增日志 `routing reuse: total/reused/recomputed` 为观测指标）。
+  - 对比结论：
+    - 改造前：`recomputed = total`（全部重算）。
+    - 改造后：`recomputed = total - reused`（仅不可复用单元重算）。
+  - 在当前样本任务（21 个切片、10 个实际 pre-pruned）中，理论可减少约 47.6% 的预裁剪重算任务（10/21）。
+  - 备注：当前记录为架构级性能收益估算；若需绝对耗时对比，可结合 `scripts/bench_pre_vl_preprocess_parallel.py` 对同批数据做 A/B 复测补充毫秒级数据。
+
+## 2026-02-11 教程模式资产导出并行化（step clip/keyframe）
+- 日期：2026-02-11
+- 触发背景与问题：
+  - 教程模式下 `_save_tutorial_assets_for_unit` 对 step clip 与 keyframe 基本采用串行 `await`，在多 step 单元中导出阶段成为尾部瓶颈。
+- 第一性原理分析：
+  - step 之间导出任务天然独立，可并行执行。
+  - 但 ffmpeg 子进程属于重资源任务，不能无限并发；必须采用“受控并发”避免 CPU/IO 抖动。
+- 架构决策：
+  - 决策1：新增教程资产导出并发解析 `_resolve_tutorial_asset_export_workers`。
+  - 决策2：在 `_save_tutorial_assets_for_unit` 使用单元级 `Semaphore` 做统一并发阀；step clip 与 keyframe 任务并行调度、受同一上限约束。
+  - 决策3：保留结果顺序与命名稳定性：`step_manifest` 仍按 `ordered_clips` 顺序输出，不改变下游消费语义。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增教程资产并发配置解析字段：
+      - `tutorial_mode.asset_export_parallel_workers`
+      - `tutorial_mode.asset_export_parallel_hard_cap`
+    - 新增 `_resolve_tutorial_asset_export_workers(step_count)`。
+    - 重构 `_save_tutorial_assets_for_unit(...)`：
+      - 从串行 `for + await` 改为步骤任务并行；
+      - clip/keyframe 导出统一走并发阀；
+      - 异常按任务降级记录 warning，不中断整单元导出。
+    - 新增并发日志：`[VL-Tutorial] asset export parallel: unit=..., steps=..., workers=...`。
+  - `config/module2_config.yaml`
+    - 新增 `tutorial_mode.asset_export_parallel_workers: auto`
+    - 新增 `tutorial_mode.asset_export_parallel_hard_cap: 8`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增 `test_tutorial_assets_export_uses_parallel_limited_workers`（验证并发峰值受限且存在并行收益）。
+- 验证记录：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py` -> `10 passed`
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py` -> `14 passed`
+- 性能对比与测试说明：
+  - 测试方式：
+    - 构造 2 step × (1 clip + 1 keyframe) = 4 个导出任务；
+    - 每个导出任务用 `asyncio.sleep(0.03)` 模拟稳定耗时；
+    - 对比不同 `asset_export_parallel_workers` 的总耗时与峰值并发。
+  - 测试数据（本地实测）：
+    - `workers=1`: `elapsed_ms=167.15`, `peak=1`
+    - `workers=2`: `elapsed_ms=89.33`, `peak=2`
+    - `workers=4`: `elapsed_ms=104.61`, `peak=2`（任务规模较小，受工作负载形态影响）
+  - 结论：
+    - 在该样本下，`workers=2` 相比串行 `workers=1` 导出耗时下降约 `46.6%`。
+    - 并发阀生效，峰值并发受控；未出现无限并发放大。
+
+## 2026-02-11 ConcreteKnowledge 提示词改为 System 角色并去重传递
+- 日期：2026-02-11
+- 触发背景与问题：
+  - `services/python_grpc/src/content_pipeline/prompts/vision_ai/concrete_knowledge/user.md` 作为规则型长提示词，历史上按 user 文本注入。
+  - 现有链路会把该提示词作为用户文本随图片一起发送，语义上不符合“全局约束指令”的角色定位，且存在重复传递风险。
+- 第一性原理分析：
+  - 规则/约束应在消息层中具备更高优先级与稳定作用域，应进入 `system` 角色。
+  - 用户消息应承载当前样本输入（此处为图片），避免把规则和样本混杂在同一层。
+  - 去除重复提示词可降低 token 冗余，减少因多次注入引入的指令冲突概率。
+- 当前可复用杠杆：
+  - 已有统一网关 `llm_gateway.vision_validate_image_sync` 可作为角色注入升级点。
+  - 已有 `VisionAIClient` 统一封装 payload，可集中治理 `messages` 结构。
+  - 已有 `PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM` 与 `get_prompt` 加载机制可直接复用；旧 `..._USER` key 作为兼容别名保留。
+- 架构决策：
+  - 决策1：在 Vision 调用链新增 `system_prompt` 参数，保持 `prompt` 向后兼容。
+  - 决策2：`ConcreteKnowledgeValidator` 将 `user.md` 内容作为系统提示词传入，`prompt` 传空字符串，避免重复注入。
+  - 决策3：旧版 `_vision_validate` 兜底路径同步改为 `system + image`，避免回退路径语义分叉。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - `vision_validate_image` / `vision_validate_image_sync` 增加 `system_prompt` 入参并透传。
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - `validate_image` / `validate_image_sync` / `_call_vision_api` 支持 `system_prompt`。
+    - 消息构造改为：可选 `system` + `user(image + 可选文本)`。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 将 `_concrete_knowledge_prompt` 重命名为 `_concrete_knowledge_system_prompt`。
+    - V3 主路径调用改为 `prompt=""` + `system_prompt=...`。
+    - 旧版 `_vision_validate` 消息体改为 `system + image`，移除 user 文本重复指令。
+  - `services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+    - 新增 `test_vision_validate_v3_passes_concrete_knowledge_as_system_prompt`，校验系统提示词透传与 user 文本留空。
+- 验证记录：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+- 性能说明：
+  - 本次为提示词角色与调用语义收敛，不是并行/算法优化；未单独做耗时 A/B。
+  - 预期收益为减少重复文本 token 与请求 payload 冗余。
+
+## 2026-02-12 非 GPU 并发压测收敛与生产参数回写
+- 日期：2026-02-12
+- 触发背景与问题：
+  - 需要对 Phase2A/Route/VL 素材链路的主要并发点做系统压测，输出可复现实验数据、图表与生产参数建议。
+  - 明确约束：本轮不包含 GPU 转写并发压测，仅覆盖非 GPU 并发点。
+- 测试方法：
+  - 基线方法遵循 `docs/并发测试方法.md`。
+  - 统一记录 `runs_raw.json/csv`、`summary_*.json/csv`、`recommendation.json`、`charts/concurrency_summary.png`。
+  - 推荐规则统一为“成功率优先，其次吞吐最大且时延更低”。
+- 测试素材：
+  - `var/artifacts/benchmarks/sample_data/pre_vl_sample/video.mp4`
+  - `var/artifacts/benchmarks/sample_data/pre_vl_sample/semantic_units_phase2a.json`
+
+- 并发点 A：Pre-VL 静态段剔除 `pre_vl_static_pruning`
+  - 对比维度：
+    - 模式对比（固定 `workers=6`）：`process vs async vs off`
+    - process 阶梯：`workers=1,2,4,6,8`
+  - 关键对比数据：
+    - `off`：`elapsed_mean=64015.48ms`
+    - `async`：`elapsed_mean=64843.89ms`，`off` 快 `1.28%`
+    - `process`：`elapsed_mean=177027.69ms`，`off` 快 `63.84%`
+  - 推荐参数：
+    - `parallel_mode: off`
+    - `parallel_workers: 6`
+    - `parallel_hard_cap: 8`
+  - 原始数据与图表：
+    - `var/artifacts/benchmarks/pre_vl_mode_off_w6_20260212_132315/raw`
+    - `var/artifacts/benchmarks/pre_vl_mode_async_w6_20260212_132315/raw`
+    - `var/artifacts/benchmarks/pre_vl_mode_process_w6_20260212_131348/raw`
+    - `var/artifacts/benchmarks/pre_vl_concurrency_knee_repeats3_20260212_120733/charts/concurrency_summary.png`
+
+- 并发点 B：截图优化 `screenshot_optimization`
+  - 对比维度：
+    - workers 阶梯（streaming）：`1,2,4,6`
+    - inflight 阶梯（`w=6`）：`1,2,3,4`
+    - overlap 阶梯（`w=6,i=3`）：`1,2,3`
+    - 模式对比：`streaming vs batch`
+  - 关键对比数据（以 workers 阶梯作为生产选型依据）：
+    - `w=1,i=2,o=2`：`elapsed_mean=118480.16ms`，`throughput=0.5318 req/s`
+    - `w=6,i=2,o=2`：`elapsed_mean=124204.49ms`，`throughput=0.5072 req/s`
+    - `w=1` 相比 `w=6`：吞吐 `+4.84%`，时延 `-4.61%`
+  - 推荐参数：
+    - `streaming_pipeline: true`
+    - `max_workers: 1`
+    - `max_inflight_multiplier: 2`
+    - `streaming_overlap_buffers: 2`
+  - 原始数据与图表：
+    - `var/artifacts/benchmarks/screenshot_opt_workers_streaming_20260212_141521/raw`
+    - `var/artifacts/benchmarks/screenshot_opt_inflight_streaming_w6_20260212_143214/raw`
+    - `var/artifacts/benchmarks/screenshot_opt_overlap_streaming_w6_i3_20260212_144923/raw`
+    - `var/artifacts/benchmarks/screenshot_opt_mode_compare_w1_w6_20260212_150423/charts/concurrency_summary.png`
+
+- 并发点 C：路由截图流水线 `routing.screenshot_*`
+  - 对比维度：
+    - `process_streaming` workers：`1,2,4,6`（`q=16`）
+    - `process_streaming` queue：`4,8,16`（`w=4`）
+    - 模式对比：`legacy_batch vs process_streaming`
+  - 关键对比数据（模式对比）：
+    - `legacy_batch|w=4`：`elapsed_mean=108976.45ms`，`throughput=0.0551 units/s`
+    - `process_streaming|w=4|q=8`：`elapsed_mean=169213.87ms`，`throughput=0.0355 units/s`
+    - `legacy_batch` 相比 `process_streaming`：吞吐 `+55.28%`，时延 `-35.60%`
+  - 推荐参数：
+    - `screenshot_pipeline_mode: legacy_batch`
+    - `screenshot_worker_count: 4`
+    - `screenshot_queue_maxsize: 8`（仅 process_streaming 模式生效，保留兼容值）
+  - 原始数据与图表：
+    - `var/artifacts/benchmarks/route_screenshot_workers_ps_small_20260212_154758/raw`
+    - `var/artifacts/benchmarks/route_screenshot_queue_ps_w4_small_20260212_160121/raw`
+    - `var/artifacts/benchmarks/route_screenshot_mode_compare_small_20260212_160844/charts/concurrency_summary.png`
+  - 备注：
+    - 路由截图为控制总时长使用了小样本（`max-units=6`），后续可在完整样本追加复核。
+
+- 并发点 D：教程模式资产导出 `tutorial_mode.asset_export_parallel_workers`
+  - 对比维度：`workers=1,2,4,6`
+  - 关键对比数据：
+    - `w=4`：`elapsed_mean=6856.33ms`，`throughput=1.7502 assets/s`
+    - `w=2`：`elapsed_mean=7438.07ms`，`throughput=1.7002 assets/s`
+    - `w=6`：`elapsed_mean=3582632.92ms`（长尾异常，约为 `w=4` 的 `522.53x`）
+  - 推荐参数：
+    - `asset_export_parallel_workers: 4`
+    - `asset_export_parallel_hard_cap: 8`
+  - 原始数据与图表：
+    - `var/artifacts/benchmarks/tutorial_asset_export_workers_20260212_161352/raw`
+    - `var/artifacts/benchmarks/tutorial_asset_export_workers_20260212_161352/charts/concurrency_summary.png`
+
+- 已落地配置回写：
+  - 文件：`config/module2_config.yaml`
+  - 更新项：
+    - `vl_material_generation.pre_vl_static_pruning.parallel_mode: off`
+    - `vl_material_generation.pre_vl_static_pruning.parallel_workers: 6`
+    - `vl_material_generation.routing.screenshot_pipeline_mode: legacy_batch`
+    - `vl_material_generation.routing.screenshot_worker_count: 4`
+    - `vl_material_generation.routing.screenshot_queue_maxsize: 8`
+    - `vl_material_generation.screenshot_optimization.max_workers: 1`
+    - `vl_material_generation.tutorial_mode.asset_export_parallel_workers: 4`
+
+- 第一性原理结论：
+  - 并发收益来自 `T_work/p` 的下降，但会同时引入 `T_sync(p)`（调度/同步）与 `T_contention(p)`（CPU/IO/内存争用）上升。
+  - 本轮样本下，多处链路在 `p>4` 后已进入“争用主导区”，因此出现 `w=6` 不增反降或长尾爆发。
+  - 推荐值均落在“成功率 100% + 吞吐稳定提升 + p95 无显著恶化”的折中区间。
+
+## 2026-02-12 KnowledgeClassifier 截断 JSON 容错增强
+- 日期：2026-02-12
+- 触发背景与问题：
+  - `MultiUnit` 批量分类偶发日志：`Batch JSON parse failed (units=1)`。
+  - 典型返回为“近似 JSON 但被截断”，例如字符串/数组在尾部未闭合，导致整条结果回退 `Batch Miss`。
+- 第一性原理分析：
+  - 批量分类可靠性的本质是“尽可能保住可恢复结构”，而不是“只接受完美 JSON”。
+  - 当截断仅发生在尾部时，语义主体通常仍可用；直接丢弃会把一次轻微格式错误放大成业务回退。
+- 当前可复用杠杆：
+  - 已有 `_normalize_jsonish_text`（标点/控制字符/尾逗号修复）。
+  - 已有 `_extract_top_level_objects` 与 Python literal 兜底路径，可承接新增候选文本。
+- 架构决策：
+  - 决策1：在 `_loads_jsonish` 中增加“未闭合 JSON 最小补全”步骤（补引号、补括号、去尾逗号）。
+  - 决策2：仅在严格解析与标准修复均失败后触发，保证正常路径零行为变化。
+  - 决策3：补全逻辑只做语法闭合，不推测缺失字段语义，避免过度修复。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`
+    - 新增 `_repair_unclosed_json`。
+    - `_loads_jsonish` 增加 `repair_candidates` 解析链路，并纳入 Python literal 兜底候选。
+  - `services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_parse.py`
+    - 新增截断回归用例：
+      - `test_parse_truncated_single_object_unclosed_string`
+      - `test_parse_truncated_with_leading_prose`
+- 验证记录：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_parse.py`
+- 预期收益：
+  - 降低因尾部截断导致的整批回退概率，减少 `Batch JSON parse failed` 和 `Batch Miss`。
+
+## 2026-02-12 Phase2B 素材匹配韧性增强（legacy 命名 + 上下文刷新 + 验证保底）
+- 日期：2026-02-12
+- 触发背景与问题：
+  - 线上出现 `SUxxx: no external materials matched in Phase2B`。
+  - 用户反馈“不应出现字幕找不到/素材找不到”的断链现象。
+- 第一性原理分析：
+  - Phase2B 的职责是“把已存在素材稳定映射回单元”，任何命名噪声或目录漂移都不应导致整单元归零。
+  - 匹配系统应优先“保住至少一条可用链路”，再追求严格一致性。
+- 当前可复用杠杆：
+  - 已有 `material_requests` 与 unit 目录扫描 fallback。
+  - 已有 `SubtitleRepository.resolve_intermediate_path` 能按 output/intermediates 自动发现上下文文件。
+- 架构决策：
+  - 决策1：扩展 `_collect_candidates_by_id`，覆盖 legacy 无前缀 ID 与扁平命名（`/`→`_`）。
+  - 决策2：`assemble_only` 入口先按 `semantic_units_json_path` 目录刷新 subtitle context（step2/step6/sentence_timestamps）。
+  - 决策3：截图验证全拒绝时保留首张候选，避免单元素材全丢。
+  - 决策4：针对 validator 的“非具象截图物理删除”副作用，在 Phase2B 匹配侧做原图恢复保护。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `_collect_candidates_by_id` 增强兼容匹配。
+    - 新增“all rejected -> keep first candidate”截图保底逻辑。
+    - 新增“validator 删除后恢复原图”保护，避免后续匹配链路断裂。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `assemble_only` 前调用 `_refresh_subtitle_context_from_semantic_units`。
+    - 新增 `_refresh_subtitle_context_from_semantic_units` 方法。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 新增 3 个韧性回归测试。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+  - 另以最小脚本复核三类场景：legacy ID 匹配、验证全拒绝保底、subtitle context 刷新。
+- 预期收益：
+  - 显著降低 `no external materials matched in Phase2B` 触发概率。
+  - 减少“字幕/句子映射缺失”导致的 Phase2B 组装断链。
+
+## 2026-02-12 恢复 MarkdownEnhancer 并重新接入 Phase2B 组装链路
+- 日期：2026-02-12
+- 触发背景与问题：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py` 在目录整理后缺失，导致：
+    - 相关测试导入路径失效（`content_pipeline.markdown_enhancer`）。
+    - Phase2B `assemble_only` 仅输出基础 markdown，缺少“结构化前增量补全 + 占位符替换 + LLM trace”阶段。
+- 第一性原理分析：
+  - Phase2B 的完整职责不是“写出 markdown 文件”本身，而是“把语义单元文本和图像证据融合成可消费知识文档”。
+  - 当增强阶段被旁路时，链路虽然可运行，但核心价值（增量补全、结构化重写、可观测性）会退化。
+- 架构决策：
+  - 决策1：从 git 历史恢复 `MarkdownEnhancer` 最近可用实现（删除前最后版本）并迁移到新目录。
+  - 决策2：配置读取适配现架构：`config/video_config.yaml -> content_pipeline.markdown_enhancer / content_pipeline.observability.llm_trace`。
+  - 决策3：在 `RichTextPipeline.assemble_only` 恢复 Stage5：
+    - 先导出 `result.json`；
+    - 再调用 `MarkdownEnhancer.enhance(...)` 生成 `enhanced_output.md`；
+    - 异常时回退 `document.to_markdown(...)`。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 恢复模块实现。
+    - `LLMClient` 依赖切到 `content_pipeline.infra.llm.llm_client`。
+    - 配置路径切到 `resolve_video_config_path(...)`。
+    - 配置键从 `module2.*` 迁移到 `content_pipeline.*`。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `assemble_only` 重新接入 `MarkdownEnhancer` 增强阶段。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - 说明：当前仓库测试文件存在既有语法损坏（与本次改动无关），`pytest` 在 collection 阶段即失败，需先修复测试文件编码/字符串闭合后再做完整回归。
+
+## 2026-02-12 LLM + Vision 并发压测框架落地与 Vision 批量能力接入
+- 日期：2026-02-12
+- 触发背景与问题：
+  - 需要按 `docs/并发测试方法.md` 对 LLM 与 Vision 相关并发点做统一压测，且必须保留原始数据、图表与可复现实验素材。
+  - Vision 链路此前仅支持单图调用，无法评估“批量调用是否值得实现”的收益边界。
+- 第一性原理分析：
+  - 并发优化的本质是降低单位任务等待时间，而不是单纯提升并发数；若调度/争用成本高于收益，吞吐会反向恶化。
+  - Vision 批量能力只有在“吞吐提升明显且质量不退化”时才有上线价值，因此需要显式门槛。
+- 架构决策：
+  - 决策1：新增统一压测公共模块，固定输出结构为 `raw + charts + report`，保证每轮原始数据可追溯。
+  - 决策2：新增三类压测脚本：
+    - DeepSeek 并发/批大小压测：`scripts/bench_llm_deepseek_concurrency_batch.py`
+    - VL LLM 并发/载荷压测：`scripts/bench_vl_llm_concurrency_payload.py`
+    - Vision 并发/批量可行性压测：`scripts/bench_vision_concurrency_batchability.py`
+  - 决策3：在 Vision 客户端引入“默认关闭”的批量接口与配置开关，保持旧行为完全兼容。
+  - 决策4：`ConcreteKnowledgeValidator.validate_batch` 采用“批量优先 + 失败回退线程池”策略，避免功能回归风险。
+- 已落地改动：
+  - 新增：`scripts/bench_common/report_builder.py`
+  - 新增：`scripts/bench_vision_concurrency_batchability.py`
+  - 修改：`scripts/bench_vl_llm_concurrency_payload.py`（去除全局 `args` 隐式依赖）
+  - 修改：`services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - 新增 `VisionAIConfig.batch_*` 配置
+    - 新增 `validate_images_batch` / `validate_images_batch_sync`
+    - 新增批量请求解析与单图回退逻辑
+  - 修改：`services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增 `vision_validate_images` / `vision_validate_images_sync`
+  - 修改：`services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `vision_ai.batch` 配置读取
+    - `validate_batch` 批量优先执行路径
+  - 修改：`config/video_config.yaml`
+    - 新增 `vision_ai.batch.enabled/max_size/flush_ms/max_inflight_batches`
+  - 修改：`docs/benchmarks/README.md`
+  - 新增样例素材：
+    - `var/artifacts/benchmarks/sample_data/llm_text/deepseek_units.json`
+    - `var/artifacts/benchmarks/sample_data/vl_llm_sample/clip_manifest.json`
+    - `var/artifacts/benchmarks/sample_data/vision_ai_sample/image_manifest.json`
+- 上线门槛（批量能力）：
+  - 吞吐提升 >= 20%
+  - 质量匹配下降不超过 1%
+  - 若门槛不满足，维持 `vision_ai.batch.enabled=false`
+
+## 2026-02-12 Phase2B 图片使用策略收敛（Vision false 不删除 + Markdown 过滤）
+- 日期：2026-02-12
+- 触发背景与问题：
+  - 用户要求：`Phase2B` 中被 AI Vision 判定为 false 的图片不应再进入 `markdown_enhancer`。
+  - 同时要求：AI Vision 判定 false 后不再做物理删除，避免素材链路副作用。
+- 第一性原理分析：
+  - “判定”与“资源生命周期”应解耦：判定 false 是业务信号，不应隐式触发文件删除。
+  - Markdown 增强只应消费“可用图片集合”，否则会把拒绝样本再次注入文档。
+- 架构决策：
+  - 决策1：`ConcreteKnowledgeValidator._finalize_validation_result` 取消非具象截图的 `unlink` 行为。
+  - 决策2：`material_flow` 在 `screenshot_items` 中显式写入 `should_include`，并将“验证全拒绝兜底图”标记为 `False`。
+  - 决策3：`markdown_enhancer` 统一按 `should_include` 过滤图片项与路径，确保 false 图片不进入结构化插图流程。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 删除 false 判定后的物理删除分支。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `screenshot_items` 增加 `should_include` 标记；
+    - “all rejected fallback” 分支设置 `should_include=False`。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 新增 `should_include` 过滤链路（图片项 + 路径 + 结构化入口）。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 增加“false 不删除”“false 图片过滤”相关回归断言。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+- 预期收益：
+  - 消除 Vision false 带来的文件副作用。
+  - 保留 Phase2B 兜底链路稳定性，同时确保 Markdown 不再消费被拒绝图片。
+
+## 2026-02-13 MarkdownEnhancer 提示词统一切换到 prompt_loader（修复富文本未使用 prompts 目录）
+- 日期：2026-02-13
+- 触发背景与问题：
+  - 用户反馈 `services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/structured_system.md` 在富文本链路中未被实际使用。
+  - 排查发现 `MarkdownEnhancer` 仍使用代码内硬编码 prompt 常量，绕过了 `prompt_loader + prompt_registry` 的统一提示词管理机制。
+- 第一性原理分析：
+  - Prompt 是策略层配置，不应内嵌在业务逻辑中；否则会导致“修改 prompt 文件不生效”的维护断层。
+  - Phase2B 富文本增强链路（hierarchy / 增强 / 结构化 / 合并调用 / 图像描述补全）必须与 `prompts` 目录保持单一事实源。
+- 架构决策：
+  - 决策1：`MarkdownEnhancer.__init__` 中统一通过 `get_prompt(PromptKeys.*)` 加载所有 markdown_enhancer 相关提示词。
+  - 决策2：运行时调用点全部改为使用实例级模板变量；保留原常量仅作为 `fallback`，避免配置异常时服务不可用。
+  - 决策3：对“同类未触发 key”做兼容接入：在不改变业务语义前提下，将 `knowledge_classifier` 与 `concrete_knowledge_validator` 的遗留 key 也纳入 loader 读取路径。
+  - 决策4：补充独立回归测试，验证运行期确实使用 `prompt_loader` 返回模板，而非硬编码常量。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 新增 `prompt_loader/get_prompt` 与 `PromptKeys` 依赖。
+    - 新增 9 组模板加载：
+      - `DEEPSEEK_MD_HIERARCHY`
+      - `DEEPSEEK_MD_TEXT_ENHANCE`
+      - `DEEPSEEK_MD_LOGIC_EXTRACT`
+      - `DEEPSEEK_MD_COMBINED_SYSTEM`
+      - `DEEPSEEK_MD_COMBINED_USER`
+      - `DEEPSEEK_MD_STRUCTURED_SYSTEM`
+      - `DEEPSEEK_MD_STRUCTURED_USER`
+      - `DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM`
+      - `DEEPSEEK_MD_IMG_DESC_AUG_USER`
+    - `_classify_hierarchy/_enhance_text/_extract_logic/_enhance_and_extract/_build_structured_text_for_concept/_augment_body_with_image_descriptions` 全部切换为加载模板。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py`
+    - 新增“加载 + 运行路径”用例，覆盖 hierarchy / text_enhance / logic_extract / combined / structured / img_desc_augment。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`
+    - 增加 `DEEPSEEK_KC_SYSTEM/DEEPSEEK_KC_USER` 的 loader 读取（兼容单条 prompt 入口，保持现有批量分类逻辑不变）。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 增加 `VISION_AI_CONCRETE_KNOWLEDGE_USER` 兼容读取，并在 system prompt 为空时回退 legacy prompt。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_prompt_loader_usage.py`
+  - 以最小运行脚本注入 `fake_get_prompt` + `RecorderLLMClient`，验证各调用链 prompt 来自 loader（输出：`prompt_loader_usage_ok`）。
+  - 运行时扫描 `PromptKeys`：当前 `prompt_registry` 中所有 key 均已在非测试运行路径中出现引用。
+  - 说明：仓库既有 `test_markdown_enhancer_rich_text.py` 当前存在语法错误（字符串未闭合），`pytest` collection 会失败；该问题与本次修复无关。
+- 预期收益：
+  - 修改 `services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/*.md` 可直接生效。
+  - 避免 registry 与运行时调用链脱节，降低提示词维护与排障成本。
+
+## 2026-02-14 Phase2B 素材回填策略收敛 + 降级分支 process 纳入 Vision
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 任务目录中 `semantic_units_phase2a.json` 的 `material_requests` 可能为空，但 `assets/` 与 `vl_analysis_cache.json` 已有素材，导致 Phase2B 主要走目录兜底，弱化请求驱动路径。
+  - 用户新增约束：`process` 在“降级分支（无显式截图请求）”时也应进入 AI Vision 判定；同时“进入 VL 分析的实际 VL 调用产物”不应被回填。
+- 第一性原理分析：
+  - 回填应只用于恢复“缺失请求”的场景，且不能覆盖上游已明确给出的请求。
+  - 实际 VL 调用产物若再回填，会与当前运行语义混叠，增加旧缓存污染风险。
+  - `process` 的降级兜底图质量波动更大，纳入 Vision 判定可降低误收图概率。
+- 架构决策：
+  - 决策1：在 `RichTextPipeline._load_semantic_units` 增加可选回填：仅对空请求单元，从 `vl_analysis_cache.json` 回填 `aggregated_screenshots/aggregated_clips`。
+  - 决策2：增加“实际 VL 产物过滤”规则：`analysis_mode` 为 `legacy_action_units/tutorial_stepwise/vl*` 或 ID 命名含 `_vl_` 的条目，不参与回填。
+  - 决策3：在 `material_flow.apply_external_materials` 中，将 `process` 且“无显式截图请求”定义为降级分支并纳入 `should_validate_screenshot`。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 新增 `_merge_material_requests_from_vl_cache`。
+    - `_load_semantic_units` 末尾接入回填调用。
+    - 增加 `_is_actual_vl_cache_item` 过滤，确保“实际 VL 调用”不回填。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `should_validate_screenshot` 扩展为：`abstract/concrete` + `process` 降级分支（无显式截图请求）。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 新增 `test_load_semantic_units_backfills_material_requests_from_vl_cache`。
+    - 新增 `test_apply_external_materials_process_degraded_branch_runs_validator`。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+  - 运行最小冒烟脚本验证：
+    - 非 VL 条目可回填（`route_*`）。
+    - 实际 VL 条目被过滤（`*_vl_*` / `legacy_action_units`）。
+    - `process` 降级分支触发 validator 调用计数为 1。
+  - 说明：`pytest` 在当前环境临时目录清理阶段触发 `PermissionError`，无法完成该文件的自动化回归执行，已通过编译与冒烟脚本替代校验关键路径。
+
+## 2026-02-14 PP-Structure / 人物占比预处理依赖修复（运行时静默降级治理）
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 任务进入 Vision 阶段，但 `PP-Structure` 与人物占比预处理未生效，表现为：
+    - 无 `__ppstructure_*.png` 裁剪产物；
+    - `vision_ai_cache_*.json` 缺少 `person_mask_ratio/prefilter_source`。
+  - 排查确认：运行时存在“依赖可见性 + 版本兼容”双重问题，导致功能静默降级。
+- 第一性原理分析：
+  - `run_server.ps1` 固定 `PYTHONNOUSERSITE=1`，可避免 user-site 污染，但也要求关键依赖必须安装在 `whisper_env` 本体。
+  - 仅做基础模块 import 不足以判定可用，预处理链路依赖“可初始化”能力（`paddleocr/paddlex/mediapipe.solutions`）而非仅“包存在”。
+  - `mediapipe` 导入链会触发 audio 子模块，若 `sounddevice` 在本机 PortAudio 文本解码异常，会间接导致视觉分割初始化失败。
+- 架构决策：
+  - 决策1：增强依赖预检，将“功能级可用性”纳入 `--check-deps`：
+    - `ppstructure_preprocess`
+    - `paddlex_layout_fallback`
+    - `person_subject_prefilter`
+  - 决策2：沉淀固定版本组合与 runbook，避免“同名包可装但不可用”的环境漂移。
+  - 决策3：保留双后端策略：`PPStructure` 主路径 + `PaddleX PP-DocLayoutV3` 兜底，保证结构化预处理稳定性。
+- 已落地改动：
+  - 代码：
+    - `services/python_grpc/src/server/dependency_check.py`
+      - 新增 `_check_ppstructure_importable`
+      - 新增 `_check_paddlex_importable`
+      - 新增 `_check_person_prefilter_backend`
+      - 新增 `_check_preprocess_dependency_versions`（严格校验 `paddleocr/paddlepaddle/paddlex/mediapipe` 版本）
+      - 预检失败输出 `Feature readiness failures`
+    - `services/python_grpc/src/server/tests/test_dependency_check.py`
+      - 新增依赖版本校验单测，覆盖“版本匹配/版本不匹配”两条路径
+    - `requirements.txt`
+      - 固定预处理依赖版本：`paddleocr==2.7.3`、`paddlepaddle==3.3.0`（win32）、`paddlex==3.4.2`、`mediapipe==0.10.14`
+  - 文档：
+    - 新增 `docs/runbooks/README_preprocess_dependency_fix.md`
+      - 修复步骤、验证步骤、常见错误、实战经验总结
+- 环境修复与版本收敛（本机已实操）：
+  - `paddleocr==2.7.3`
+  - `paddlepaddle==3.3.0`
+  - `paddlex==3.4.2`
+  - `mediapipe==0.10.14`
+  - `protobuf==6.33.5`
+  - `numpy==1.26.4`
+  - `opencv-python==4.6.0.66`
+  - `opencv-contrib-python==4.6.0.66`
+  - `setuptools==69.5.1`
+  - `sounddevice` 卸载（规避 PortAudio UnicodeDecodeError）
+- 验证记录：
+  - 预检：
+    - `python apps/grpc-server/main.py --check-deps` -> `Dependency preflight passed.`
+  - 运行时探针：
+    - `structure_engine=True`
+    - `paddlex_layout=True`
+    - `person_segmenter=True`
+  - 实图验证：
+    - 对 `var/storage/storage/00bdaa3e3322bfec29e5961e36905b31/assets/SU003/SU003_ss_vl_action_001_head.jpg`
+    - 成功生成 `SU003_ss_vl_action_001_head__ppstructure_image_01_*.png`
+    - 成功计算 `person_mask_ratio=0.0565`（低于阈值，预过滤返回 `None`，符合预期）
+- 遗留观察（不阻塞）：
+  - 运行期仍可能出现 `AttributeError: 'MessageFactory' object has no attribute 'GetPrototype'` 日志噪声，当前不影响三项能力可用性与产物生成；后续可单独做依赖矩阵清洁优化。
+
+## 2026-02-14 Legacy-Action 动态净时长过滤与 Tail 截图兜底
+- 日期：2026-02-14
+- 触发背景：
+  - `legacy_action_units` 分支中，存在动作窗口总体较长但“真实动态变化很短”的样本，导致无效动作片段仍被导出为 clip/head/tail 素材。
+  - 用户验收要求：动态变化持续时间 `<500ms` 的动作单元必须剔除；若动作被剔除，仅保留 `tail` 截图。
+- 架构决策：
+  - 决策1：在 `VLMaterialGenerator` 中引入“动态净时长”概念：
+    - `dynamic_duration_sec = action_duration_sec - internal_stable_overlap_sec`
+    - 仅当 `dynamic_duration_sec >= legacy_action_min_dynamic_sec` 时，动作参与 legacy-action 保留逻辑。
+  - 决策2：被剔除动作不再生成 clip/head，仅生成 `tail` 截图作为最小语义锚点，避免完全失图。
+  - 决策3：将阈值配置化，新增 `pre_vl_static_pruning.legacy_action_min_dynamic_sec`（默认 `0.5` 秒）。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `pre_vl_legacy_action_min_dynamic_sec` 配置读取。
+    - 新增 `_estimate_dynamic_duration_from_internal_stable`。
+    - `_detect_typed_action_segments_for_unit` 增补 `dynamic_duration_sec/internal_stable_duration_sec`。
+    - `_build_stable_action_material_requests_for_unit` 增加短动态过滤与 `tail` 截图兜底逻辑。
+  - `config/module2_config.yaml`
+    - 新增 `legacy_action_min_dynamic_sec: 0.5` 配置项及注释。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 回归更新：动作被剔除后由“空截图”改为“仅 tail 截图”。
+    - 新增短动态动作剔除测试。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py -k "drops_segment_when_only_transition_inside or drops_segment_when_no_typed_actions or drops_short_dynamic_action_and_keeps_tail"`
+
+## 2026-02-14 Whisper 下载链路“首轮校验、重启复用”优化
+- 日期：2026-02-14
+- 触发背景：
+  - `TranscribeVideo` 启动时会进入 `download_whisper_model`，即使模型已在本机缓存，重启后仍重复执行完整校验流程，增加冷启动时延。
+- 架构决策：
+  - 决策1：引入“持久化校验状态”文件，首次下载与校验完成后落盘。
+  - 决策2：后续重启优先读取本地状态并走 `local_files_only` 解析缓存路径，跳过重复完整性校验。
+  - 决策3：保留配置开关 `skip_reverify_after_success`，默认 `true`，可按环境回退到“每次重检”。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/model_downloader.py`
+    - 新增 `_build_verify_state_path/_load_verify_state/_write_verify_state`。
+    - 新增 `_resolve_cached_files_local_only/_try_reuse_preverified_model_dir`。
+    - `download_whisper_model` 新增参数 `skip_reverify_after_success`，默认开启。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py`
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 透传 `whisper.skip_reverify_after_success` 配置。
+  - `config/video_config.yaml`
+    - 新增 `whisper.skip_reverify_after_success: true`。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_model_downloader.py`
+    - 新增“已校验状态下重启复用不重复校验”回归测试。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/model_downloader.py services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_model_downloader.py`
+  - `PYTHONPATH=. pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_model_downloader.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+
+## 2026-02-14 Phase2A 落盘字段同步：`action_segments` 与 `action_units`
+- 日期：2026-02-14
+- 触发背景与问题：
+  - 现场任务出现 `action_segments=[]` 但 `action_units` 非空，且仍产出 `clip_action_*` 的情况。
+  - 该状态会造成“看似无动作单元却仍截取视频”的认知偏差，增加排障成本。
+- 架构决策：
+  - 决策1：在 `GenerateMaterialRequests` 回写 `semantic_units_phase2a.json` 时，统一以同一份 `action_units` 为源，同时写回 `action_segments`。
+  - 决策2：对无动作单元的语义单元，显式将 `action_units` 与 `action_segments` 同步写空数组，避免历史残留值污染后续判断。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 在 `_phase2a_generate_material_requests_impl` 的 JSON 回写环节新增同步逻辑：
+      - `item["action_units"] = action_units_for_unit`
+      - `item["action_segments"] = mapped(action_units_for_unit)`
+    - `action_segments` 映射字段包含：`start_sec/end_sec/knowledge_type/action_type/confidence/reasoning/stable_islands`。
+- 验证记录：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+
+## 2026-02-15 LLM Hedged Request（DeepSeek/VL/Vision）降 P99 延迟
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 在 DeepSeek、VL、Vision 调用链路中，少量长尾请求会显著拉高 unit 级别处理耗时，形成 P99 延迟尖刺。
+  - 现有策略主要覆盖缓存/限流/去重，对“单次请求尾部卡顿”缺少主动对冲机制。
+- 架构决策：
+  - 决策1：在统一网关引入 Hedged Request 策略：主请求超过阈值未返回时，补发第二个并行请求。
+  - 决策2：返回“先成功完成”的结果，并对迟到请求执行取消，避免无效占用连接与并发配额。
+  - 决策3：对 DeepSeek 第二请求显式绕过 in-flight dedup，防止第二请求被去重吞掉导致 hedge 失效。
+  - 决策4：默认开启但全部配置化，支持按 provider 单独开关与阈值回退。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增通用 `_run_hedged_async_request` 执行器。
+    - 接入 `deepseek_complete_text/deepseek_complete_json`。
+    - 接入 `vl_chat_completion`（保留原缓存、去重、并发限制逻辑）。
+    - 接入 `vision_validate_image/vision_validate_images` 及同步入口 `vision_validate_image_sync/vision_validate_images_sync`。
+    - 新增环境变量：
+      - `MODULE2_LLM_HEDGE_ENABLED`
+      - `MODULE2_LLM_HEDGE_DELAY_MS`
+      - `MODULE2_DEEPSEEK_HEDGE_ENABLED`
+      - `MODULE2_DEEPSEEK_HEDGE_DELAY_MS`
+      - `MODULE2_VL_HEDGE_ENABLED`
+      - `MODULE2_VL_HEDGE_DELAY_MS`
+      - `MODULE2_VISION_HEDGE_ENABLED`
+      - `MODULE2_VISION_HEDGE_DELAY_MS`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - `complete_text/complete_json` 新增 `disable_inflight_dedup` 参数（默认 `false`）。
+    - 补充 `asyncio.CancelledError` 透传，避免被取消请求误计入失败收敛。
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - `_call_vision_api/_call_vision_api_batch` 补充 `asyncio.CancelledError` 透传，确保迟到请求可被及时取消。
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 新增 DeepSeek/VL/Vision(sync) 三类 hedge 行为回归测试。
+- 验证记录：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+- 回滚方案：
+  - 快速回滚：设置 `MODULE2_LLM_HEDGE_ENABLED=false`（或仅关闭某 provider 的 hedge 开关）。
+  - 代码级回滚：回退 `llm_gateway.py` 的 hedged 调度接入，不影响业务侧调用签名。
+
+## 2026-02-15 VL 预切片超长片段降清晰度 + assets 原视频回源约束
+- 日期：2026-02-15
+- 触发背景：
+  - `split_video_by_semantic_units` 在超长语义单元上会生成较大中间片段，导致 VL 预分析阶段 I/O 与上传成本偏高。
+  - 同时需要明确：最终写入 `assets` 的素材必须来自原始分辨率视频，不可直接复用低清预切片。
+- 架构决策：
+  - 决策1：仅在“VL 预切片”阶段对超长片段启用降分辨率/码率（`-vf scale=-1:480 -b:v 500k`），避免影响最终资产质量。
+  - 决策2：保持最终资产导出链路使用原视频绝对时间轴，不引入“从预切片回采样”的分支。
+  - 决策3：策略配置化，支持按任务环境调整阈值/分辨率/码率，默认开启且阈值保守。
+- 已落地改动：
+  - `tools/split_video_by_semantic_units.py`
+    - 新增参数：`--large-segment-threshold-sec`、`--large-segment-scale-height`、`--large-segment-video-bitrate`。
+    - 超长片段命中阈值时，FFmpeg 预切附加 `scale` 与 `b:v` 参数；并在 `manifest.json` 落盘策略参数与单段 warning。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - `split_video_by_semantic_units(...)` 新增从 `semantic_split_pre_cut` 读取并透传低清预切参数。
+    - 注释明确该策略仅用于 VL 预分析输入，最终 assets 仍回源原视频。
+  - `config/module2_config.yaml`
+    - 新增 `vl_material_generation.semantic_split_pre_cut` 配置块（enabled/threshold/downscale_height/video_bitrate）。
+  - 测试：
+    - 新增 `services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`（验证参数透传开关）。
+    - 更新 `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`（断言教程资产导出始终使用原视频路径）。
+- 验证记录：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k test_generate_tutorial_assets_per_unit_full_flow_before_phase2b`
+
+## 2026-02-15 PP-Structure 子图重叠合并与 text/code 解释上下文并入
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 结构化拆图存在“bundle 与子图重复产出”问题：当 `figure_bundle/table_bundle` 已覆盖子图时，仍会单独输出大量 `image/algorithm/formula` 子图。
+  - 图示说明文本在版面上常以 `text/code` 紧邻主图出现，旧策略仅按主图 bbox 裁剪，导致解释上下文丢失。
+- 架构决策：
+  - 决策1：对全部候选裁剪框执行跨类型高重叠合并；若与 `*_bundle` 重叠，优先保留 `*_bundle`，不再单独产出重叠子图。
+  - 决策2：引入 `text/code` 上下文并入规则：当与目标裁剪框发生重叠或在近邻阈值内时，将其并入同一裁剪框。
+  - 决策3：恢复 `skip_split_bbox_coverage_threshold` 配置生效，避免“拆图总覆盖率过高”场景下的过度切分。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 新增跨类型裁剪框合并与优先级规则（bundle 优先）。
+    - 新增 `text/code` 近邻并入逻辑与配置项：`context_types`、`context_nearby_px`。
+    - 恢复并应用 `skip_split_bbox_coverage_threshold` 的配置读取与执行。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 新增“高重叠子图合并为单一 bundle”回归用例。
+    - 新增“text/code 近邻并入裁剪框”回归用例。
+
+## 2026-02-15 Vision AI 单原图多裁剪图合并调用（附 bbox 布局上下文）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 旧链路对结构化裁剪图逐张调用 Vision，无法让模型在同一次分析中利用“同一原图下各裁剪图的相对布局关系”。
+  - 裁剪结果未透传 bbox 元数据，Vision 侧缺少版面定位上下文，影响描述一致性。
+- 架构决策：
+  - 决策1：`extract_structured_screenshots` 为每张裁剪图补充 bbox 元数据（绝对坐标、归一化坐标、父图尺寸）。
+  - 决策2：在 `apply_external_materials` 中按 `parent_key` 对结构化裁剪图分组；同一原图且裁剪数 > 1 时，优先走一次分组 Vision 预校验。
+  - 决策3：分组预校验提示词显式携带每张图的 bbox 与输入顺序，要求 Vision 按顺序返回描述数组；业务侧继续强制 `should_include=true`。
+  - 决策4：分组失败自动回退到原逐图校验路径，保持可用性。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `extract_structured_screenshots` 新增输出字段：`crop_index`、`bbox_xyxy`、`bbox_normalized_xyxy`、`parent_image_size`。
+    - 新增 `validate_structured_group(...)` 与布局提示词构建逻辑 `_build_structured_group_prompt(...)`，用于单次多图 Vision 分析。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 结构化候选透传 `parent_image_path/bbox/crop_index` 等字段。
+    - 新增按 `parent_key` 的分组预校验接入，并将结果写入 `_prevalidated_concrete_results` 供后续逐图循环复用。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 新增“裁剪结果包含 bbox 元数据”测试。
+    - 新增“同一原图多裁剪图走一次分组预校验”测试。
+  - `services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+    - 新增“分组校验一次传多图并携带 bbox 布局提示词”测试。
+
+
+## 2026-02-15 PP-Structure 回退阈值下调（0.85 -> 0.80）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 在真实样本中，结构化子图已覆盖主要有效内容，但按“并集面积 / 原图面积”计算仍低于 `0.85`，导致未触发回退原图。
+  - 以 `SU006_ss_route_001` 为例，两个子图并集占原图约 `0.6498`；即使按有效内容外接框归一化，占比也仅约 `0.8405`，与 `0.85` 阈值存在边界偏差。
+- 架构决策：
+  - 决策1：将 `vision_ai.structure_preprocess.skip_split_bbox_coverage_threshold` 从 `0.85` 下调到 `0.80`，降低边界样本的过度切分概率。
+  - 决策2：保持现有判定口径不变（仍按“计划裁剪框并集 / 分母面积”），仅调整阈值，不引入新指标，确保行为可预测。
+- 已落地改动：
+  - `config/video_config.yaml`
+    - `vision_ai.structure_preprocess.skip_split_bbox_coverage_threshold: 0.80`
+- 风险与回滚：
+  - 风险：更多样本会触发“回退原图”，结构化子图数量可能下降。
+  - 回滚：将 `skip_split_bbox_coverage_threshold` 恢复为 `0.85`。
+
+## 2026-02-15 PP-Structure 回退覆盖率口径调整（分母=识别外接框，分子=目标类型面积和）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 旧口径将分母固定为原图面积，易受无效留白边框影响；在“主体内容已集中于可识别区域”场景下，回退判定偏保守。
+  - 业务期望将判定锚定在识别有效区域，而非整图画布。
+- 架构决策：
+  - 决策1：回退覆盖率分母改为“所有可识别 type 的 bbox 外接矩形面积”。
+  - 决策2：回退覆盖率分子改为“需要提取 type 的 bbox 面积之和”（非并集面积）。
+  - 决策3：当识别外接框缺失时，分母回退到原图面积，保证异常场景可用。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - `extract_structured_screenshots` 中 `skip_split_bbox_coverage_threshold` 的判定公式已切换为新口径。
+    - 日志新增 `required_area_sum` 与 `recognized_enclosing_area`，便于线上追踪。
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 新增“分母使用识别外接框面积”的回归测试。
+    - 新增“分子使用目标类型面积和”的回归测试。
+- 风险与回滚：
+  - 风险：重叠较多的目标框在“面积和”口径下可能抬高覆盖率，触发回退更积极。
+  - 回滚：恢复为“分子并集面积 / 原图面积”的旧口径。
+
+## 2026-02-15 任务级阶段耗时与 LLM 成本 JSON 落盘
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 任务执行完成后缺少统一的阶段耗时与 LLM 成本汇总文件，导致问题排查与成本复盘依赖多处中间文件人工聚合。
+  - DeepSeek 存在缓存命中与未命中差异计费，旧数据链路未显式透传 `cache_hit`，无法准确分摊输入成本。
+- 架构决策：
+  - 决策1：以 Java 编排层 `processVideo(...)` 的 `finally` 作为任务边界，在成功/失败两种结果下都写入统一报告。
+  - 决策2：成本统计不在调用链实时累加，而是基于已落盘中间件工件聚合（VL token report + Phase2B trace/audit），降低侵入性。
+  - 决策3：VL 成本同时输出 `qwen3-vl-plus` 固定价估算与 `ERNIE-4.5-Turbo-VL` 区间估算；根据配置中的 VL 模型名给出选中口径。
+  - 决策4：DeepSeek 输入 token 按 `cache_hit` 拆分为缓存命中与未命中两档价格，输出 token 单独计费。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 新增阶段耗时采集（`stage_timings_ms`）与流向标记（`flow_flags`）。
+    - 新增任务级报告写入：`intermediates/task_metrics_<taskId>.json` 与 `intermediates/task_metrics_latest.json`。
+    - 新增 LLM 成本聚合：读取 `vl_token_report_latest.json`、`phase2b_llm_trace.jsonl`，并回退读取 `phase2b_deepseek_call_audit.json`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`
+    - 新增 `vl_material_generation.api.model` 读取与 `getVLModelName()`，用于选择 VL 成本口径。
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - `LLMResponse` 新增 `cache_hit` 字段，缓存命中结果显式标记。
+  - `services/python_grpc/src/content_pipeline/infra/llm/deepseek_audit.py`
+    - DeepSeek 审计记录新增 `cache_hit` 落盘。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - Phase2B LLM trace 记录新增 `cache_hit` 字段，供编排层成本聚合直接读取。
+- 验证记录：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile`（通过）
+- 风险与回滚：
+  - 风险：若上游 trace/audit 缺失或不完整，DeepSeek 成本将低估；报告已通过 `coverage_note` 明确覆盖范围。
+  - 回滚：移除 `writeTaskMetricsReport(...)` 调用与相关聚合方法，恢复到原有分散统计方式。
+
+## 2026-02-15 YouTube 下载链路增加 Cookie 认证配置
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `DownloadVideo` 在处理 YouTube 链接时出现 `Sign in to confirm you're not a bot`，旧链路仅配置 `proxy`，无法注入登录态 Cookie。
+  - 即使用户在运行环境准备了 Cookie，gRPC 下载入口也未将配置传递给 `VideoProcessor`，导致配置失效。
+- 架构决策：
+  - 决策1：在统一配置 `config/video_config.yaml` 的 `video` 段新增下载认证参数：`download_cookies_from_browser` 与 `download_cookies_file`。
+  - 决策2：在 gRPC 服务层新增 `_load_download_video_options(...)`，统一收敛配置/环境变量并传入 `VideoProcessor`，避免业务代码散落读取。
+  - 决策3：在 `VideoProcessor` 内部统一构建认证参数，下载与播放列表探测共用同一套 `yt-dlp` 认证选项。
+  - 决策4：针对 YouTube 风控错误返回可执行提示（明确告诉用户该配置哪两个字段）。
+- 已落地改动：
+  - `config/video_config.yaml`
+    - 新增 `video.download_cookies_from_browser` 与 `video.download_cookies_file`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_load_download_video_options(...)`。
+    - `DownloadVideo(...)` 改为将下载认证参数透传到 `VideoProcessor`。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `VideoProcessor` 新增 `cookies_file/cookies_from_browser` 入参。
+    - 新增 `cookies-from-browser` 字符串解析、cookie 文件校验、认证参数复用。
+    - 风控异常改为结构化可执行提示。
+  - 测试：
+    - 新增 `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`。
+    - 新增 `services/python_grpc/src/server/tests/test_download_video_config.py`。
+
+## 2026-02-15 YouTube 下载格式策略放宽（避免 Requested format is not available）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 某些 YouTube 视频不提供 `mp4+m4a` 组合，原策略 `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best` 会直接失败。
+- 架构决策：
+  - 决策1：格式策略改为“先选 `best`，再回退 `bestvideo+bestaudio/best`”。
+  - 决策2：保留 `merge_output_format=mp4`，在可合并时尽量输出 mp4。
+  - 决策3：新增格式不可用错误分支提示，便于快速定位为“流可用性/筛选条件”问题。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `format` 调整为自动回退策略：`best -> bestvideo+bestaudio/best`。
+    - `_build_download_error_message(...)` 增加 `Requested format is not available` 专项提示。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 增加 `format` 参数断言，防止后续回退到过严策略。
+
+## 2026-02-15 YouTube Cookie 自动导出（browser -> cookiefile）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 仅依赖手工导出 `cookies.txt` 运维成本高，且易出现“浏览器已更新登录态但文件未同步”的失效问题。
+- 架构决策：
+  - 决策1：当同时配置 `download_cookies_from_browser` 与 `download_cookies_file` 时，下载前自动从浏览器导出 Cookie 到文件。
+  - 决策2：导出失败但本地已有 cookie 文件时，保留回退能力（继续使用已有文件）；无文件时给出明确失败原因。
+  - 决策3：继续保持 `cookiefile` 优先用于实际下载，避免每次下载都走浏览器读取路径。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_maybe_export_cookie_file_from_browser()`。
+    - `_build_auth_options()` 中接入“自动导出 + 文件兜底”。
+    - 缺失 cookie 文件时补充导出失败原因到报错文案。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增自动导出回归用例（mock 浏览器导出并验证写盘与参数透传）。
+
+## 2026-02-15 YouTube 格式不可用时增加显式 format_id 自动回退
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 某些视频可列出 `format_id`（如 HLS 91-96），但 `best`/`bestvideo+bestaudio` selector 在特定上下文仍可能匹配失败。
+- 架构决策：
+  - 决策1：当 selector 链失败且错误为 `Requested format is not available` 时，自动执行一次 `extract_info(download=False)`。
+  - 决策2：从 `formats` 中选择“音视频同轨”最佳 `format_id`（按分辨率/码率/fps 打分）并重试下载。
+  - 决策3：保留原有 selector 链路作为首选，显式 `format_id` 仅作为失败兜底。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_pick_best_muxed_format_id(...)`。
+    - 新增 `_resolve_explicit_best_format_id(...)`。
+    - 下载重试链路扩展为：`best -> bestvideo+bestaudio/best -> 显式 format_id`。
+    - 修复 selector 末位失败时的提前抛错问题，保证显式 `format_id` 兜底可达。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_fallback_to_explicit_format_id` 回归测试。
+
+## 2026-02-15 YouTube 下载新增 m3u8 提取 + ffmpeg 回退
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 在线上观测到部分视频 `-F` 能列出 HLS 格式（如 91-96），但直接下载仍出现 `Requested format is not available`。
+  - 该类场景下 `yt-dlp` 下载阶段的策略匹配与风控交互更敏感，导致已有 selector 与显式 `format_id` 仍可能失败。
+- 架构决策：
+  - 决策1：保留当前下载主链路（`best -> bestvideo+bestaudio/best -> 显式 format_id`），避免影响已稳定站点。
+  - 决策2：当上述链路全部失败且错误仍为 `Requested format is not available` 时，增加第四层回退：仅提取 m3u8 直链，再交给 `ffmpeg` 下载。
+  - 决策3：ffmpeg 回退复用同一代理配置（`-http_proxy`），减少“CLI 可用、服务不可用”的网络上下文差异。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_pick_best_m3u8_url(...)` 与 `_resolve_best_m3u8_url(...)`，用于从 formats 中择优提取 m3u8 直链。
+    - 新增 `_download_m3u8_with_ffmpeg(...)`，在回退链路中调用 ffmpeg 直连下载。
+    - 下载回退链路扩展为：`best -> bestvideo+bestaudio/best -> 显式 format_id -> m3u8+ffmpeg`。
+    - `Requested format is not available` 错误文案同步更新为四段回退策略。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_fallback_to_m3u8_ffmpeg`，覆盖 selector/显式 format_id 全失败后 m3u8+ffmpeg 成功落盘场景。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 修复控制流：当“显式 format_id 下载”仍报 `Requested format is not available` 时，不再提前抛错，继续进入 `m3u8+ffmpeg` 回退。
+    - 增强下载期可观测性：增加“代理是否启用”“显式 format_id 失败后继续回退”“未提取到 m3u8”进度日志。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `Download auth enabled` 日志新增 `proxy` 字段，便于对齐服务与命令行网络上下文。
+
+## 2026-02-15 YouTube 代理拒绝连接错误分流（避免误判为格式问题）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 线上出现 `Unable to connect to proxy` / `WinError 10061`，但旧错误分支只返回通用下载失败，容易与格式/Cookie 问题混淆。
+  - 在代理端口配置错误（如 `7890` 未监听）时，下载不会进入格式回退阶段，排障方向应优先指向网络代理。
+- 架构决策：
+  - 决策1：在下载错误包装阶段新增代理连接失败识别分支，输出当前 `proxy` 配置和明确修复路径。
+  - 决策2：为代理错误分支补充回归测试，保障后续重构不回退为笼统报错。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `_build_download_error_message(...)` 新增 `unable to connect to proxy/proxyerror/winerror 10061` 专项提示。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_proxy_connection_error_has_specific_hint`。
+
+## 2026-02-15 显式 format_id 回退升级为候选链重试
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 在个别 YouTube 场景中，最高质量显式 `format_id`（如 `96`）可能临时不可用，而较低质量同轨流（如 `95`）仍可下载。
+  - 旧逻辑只尝试一个“最佳显式 format_id”，该 ID 失败即进入下一分支，可能错过可用流。
+- 架构决策：
+  - 决策1：将显式 `format_id` 回退从“单 ID”升级为“候选链重试”。
+  - 决策2：候选链来源为探测到的音视频同轨 formats，按 `height/tbr/fps` 降序排序，逐个尝试直到成功或耗尽。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `_pick_best_muxed_format_id(...)` 重构为 `_pick_ranked_muxed_format_ids(...)`。
+    - `_resolve_explicit_best_format_id(...)` 重构为 `_resolve_explicit_muxed_format_ids(...)`。
+    - 下载流程中显式回退改为逐个 `format_id` 重试。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_fallback_to_next_explicit_format_id`，覆盖 `96` 失败后 `95` 成功场景。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 增加下载尝试轨迹 `attempt_trace`，在最终异常中附带 `attempts=...`，便于线上快速判断失败发生在哪一级回退。
+    - 当 formats 探测失败且 URL 为 YouTube 时，新增固定 HLS format_id 兜底链：`96/95/94/93/92/91`。
+    - 最终异常新增 `probes=...` 探测错误信息，便于判断“探测失败”与“格式本身不可用”。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_fallback_to_fixed_youtube_id_chain_when_probe_fails`，覆盖“探测失败 -> 固定 ID 链”回退路径。
+    - 新增 `test_download_youtube_enables_player_client_chain`，确保 YouTube 下载参数包含 `web_safari/tv_downgraded/web` 客户端回退链。
+
+## 2026-02-15 YouTube 提取器客户端回退链（提升 formats/m3u8 探测稳定性）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 线上日志出现 `attempts=... -> m3u8:probe_error` 且 `probes` 显示 explicit/m3u8 探测均报 `Requested format is not available`。
+  - 说明问题不在单个 format_id，而在当前提取客户端上下文未返回可用流。
+- 架构决策：
+  - 决策1：对 YouTube URL 统一启用 `player_client` 回退链：`web_safari -> tv_downgraded -> web`。
+  - 决策2：显式格式探测与 m3u8 探测均改为“双阶段探测”（默认参数 + 客户端回退链参数）。
+  - 决策3：探测阶段返回“无格式/无m3u8”时，保留结构化 probe 错误信息用于线上定位。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_with_youtube_player_client_chain(...)`。
+    - 下载、显式 format 探测、m3u8 探测均接入 YouTube client chain。
+    - `probes=...` 字段支持聚合多阶段探测失败原因。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_youtube_enables_player_client_chain`。
+
+## 2026-02-15 transcript step1 接入统一视频解码回退
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `transcript_pipeline` 的 `step1_validate` 在 AV1 输入上仍直接调用裸 `cv2.VideoCapture`，出现 `Could not open codec av1`。
+  - 仓库内已有 `common/utils/opencv_decode.py` 统一解码兼容层，但 transcript 入口尚未复用，形成架构断层。
+- 架构决策：
+  - 决策1：将 transcript 的视频校验入口统一接入 `open_video_capture_with_fallback(...)`，与 CV/素材链路保持一致。
+  - 决策2：校验失败时统一追加 codec 线索（`probe_primary_video_codec(...)`），提高日志可诊断性。
+  - 决策3：通过独立单测覆盖“回退成功/失败含 codec 提示”两条关键分支，防止回归。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/tools/file_validator.py`
+    - `validate_video(...)` 由裸 `cv2.VideoCapture` 切换为 `open_video_capture_with_fallback(...)`。
+    - 新增 codec 提示逻辑：不可解码时返回 `Cannot decode video file (codec=...)`。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+    - 新增 decode fallback 相关回归测试 2 条。
+
+## 2026-02-15 Transcript DeepSeek 调用链优化（重试/缓存/去重/并发 + System Prompt 拆分）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - `transcript_pipeline` 的 DeepSeek 调用为“每次创建 client + 直接 HTTP post”，在 step2/3/4/5/6 并发批处理时容易产生：
+    - 重复请求（同 prompt 并发触发多次调用）；
+    - 瞬时并发过高导致 429/5xx 增多；
+    - 网络抖动导致失败率上升；
+    - 重复初始化 HTTP client/连接池带来额外开销。
+  - 多个步骤的 Prompt 将“规则/约束/格式”混在 user prompt 中，不利于模型稳定遵循输出约束，且不利于后续复用与治理。
+- 第一性原理与复用杠杆：
+  - LLM 调用是高延迟/高成本 I/O，应优先减少重复、控制并发、对可重试错误做退避重试。
+  - Prompt 结构应将“稳定约束”提升为 `system_prompt`，把“本次输入数据”放入 user prompt，提升一致性与可复用性。
+- 架构决策：
+  - 决策1：在 `DeepSeekClient` 内引入：
+    - 连接池与 HTTP/2 探测（缺少 `h2` 时自动降级到 HTTP/1.1）；
+    - 可重试错误（429/5xx/timeout/network）指数退避重试；
+    - 结果缓存（LRU+TTL）与 in-flight singleflight 去重（同 key 并发只打一枪）；
+    - 最大并发信号量，避免批处理瞬时打爆下游。
+  - 决策2：`create_llm_client(...)` 按 event loop + 配置维度复用 client，避免重复初始化连接池。
+  - 决策3：将 transcript 的关键提示词增加 `*_SYSTEM_PROMPT`，并在各 step 调用 `complete_json(..., system_prompt=...)`。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - `services/python_grpc/src/transcript_pipeline/llm/client.py`
+
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase1_preparation.py`
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+- 影响与权衡：
+  - 收益：重复调用减少、并发更可控、网络抖动下稳定性提升；Prompt 约束更清晰、更易治理。
+  - 成本：引入少量内存缓存与去重状态；在极端大 prompt 场景会自动跳过缓存以保护内存。
+
+## 2026-02-16 transcript step1 视频校验降级为快速探测（移除入口整段转码）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `step1_validate` 在 AV1 长视频输入上会触发 `open_video_capture_with_fallback(...)` 的整段转码分支，默认 `300s` 超时导致入口阶段长时间阻塞。
+  - 线上日志出现 `ffmpeg transcode ... timed out after 300 seconds`，表现为“刚进入 step1 就卡住”。
+- 架构决策：
+  - 决策1：`transcript_pipeline.tools.file_validator.validate_video(...)` 改为“快速探测优先”，不在 `step1` 触发重转码兜底。
+  - 决策2：保留 `probe_primary_video_codec(...)` 诊断能力；当快速探测失败且 codec=AV1 时在 step1 放行，避免 AV1 兼容性导致入口阻塞。
+  - 决策3：非 AV1 且快速探测失败维持失败返回，并保留 codec 提示，保证可诊断性。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/tools/file_validator.py`
+    - 移除 `open_video_capture_with_fallback(...)` 在 step1 的调用。
+    - 改为 `cv2.VideoCapture + probe_capture_readable` 快速可读性探测。
+    - AV1 快速探测失败时 step1 放行；非 AV1 失败返回 `Cannot decode video file (codec=...)`。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+    - 更新单测覆盖：快速探测成功、AV1 快速失败放行、非 AV1 快速失败报错（含 codec 提示）。
+- 验证方式与结果：
+  - 运行 `pytest services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py -q`，验证新策略三条关键分支。
+
+## 2026-02-16 下载优先 H.264 + OpenCV 解码兜底改为“默认非阻塞”
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 长视频 AV1 在 `open_video_capture_with_fallback(...)` 中触发整段转码，默认 `300s` 超时，导致流式截图入口阶段阻塞。
+  - 部分来源下载得到 AV1/VP9，增加后续 OpenCV 解码不稳定概率，放大转码兜底触发频率。
+- 架构决策：
+  - 决策1：下载阶段增加“优先 H.264”策略，先尝试 `avc1/h264 + mp4a/aac` 轨道，再回退到历史 `best` 链。
+  - 决策2：`opencv_decode` 默认禁用请求内同步整段转码（`OPENCV_DECODE_ALLOW_INLINE_TRANSCODE=0`），避免热路径长阻塞。
+  - 决策3：当 AV1 探测失败且未命中缓存时，改为后台异步预转码（可通过 `OPENCV_DECODE_ENABLE_ASYNC_TRANSCODE` 控制），后续请求复用缓存。
+  - 决策4：保留显式开关回退能力，必要时可恢复旧行为（启用 inline transcode）。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 H.264 优先 selector 与可配置回退链（`prefer_h264`）。
+    - 显式 `format_id` 排序时，支持按 `vcodec=avc1/h264` 优先。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 下载参数新增 `prefer_h264`，支持 `video.prefer_h264` 与 `YTDLP_PREFER_H264`。
+  - `services/python_grpc/src/common/utils/opencv_decode.py`
+    - `ensure_opencv_readable_video_path(...)` / `open_video_capture_with_fallback(...)` 新增 inline/async 控制参数。
+    - 增加异步预转码任务调度，避免请求线程被整段转码阻塞。
+  - `config/video_config.yaml`
+    - 新增 `video.prefer_h264: true`（默认启用）。
+  - 测试：
+    - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - `services/python_grpc/src/server/tests/test_download_video_config.py`
+    - `services/python_grpc/src/common/utils/tests/test_opencv_decode_policy.py`
+- 影响与权衡：
+  - 收益：下载源头减少 AV1 输入概率；在线链路显著降低“300 秒卡住”风险。
+  - 成本：当源仅提供 AV1 且当前机器不可解码时，首次请求可能退化为“无可读帧/降级结果”，需等待异步预转码完成后恢复最优路径。
+- 回滚策略：
+  - 立即回滚：设置 `OPENCV_DECODE_ALLOW_INLINE_TRANSCODE=1`，恢复旧版同步转码兜底。
+  - 下载策略回滚：设置 `video.prefer_h264=false` 或 `YTDLP_PREFER_H264=0`，恢复历史 `best` 优先。
+
+## 2026-02-15 Whisper 并行转录链路优化（整段抽音频 + 语种探测 + 网格基准）
+- 日期：2026-02-15
+- 触发背景与问题：
+  - 并行转录此前按分段重复从视频解码音频，ffmpeg 解码开销在多段场景重复支付。
+  - `vad_filter` 与 `beam_size` 固化在代码中，缺少统一配置入口，不利于速度/效果权衡。
+  - `language=auto` 时全程依赖逐段自动判断，跨段可能出现语种漂移。
+  - 需要通过网格基准确定 CPU 场景下 `worker` 与 `segment_duration` 的可用组合。
+- 第一性原理与复用杠杆：
+  - 视频解码属于重成本步骤，应“一次解码，多次复用”，减少重复 I/O 与编解码。
+  - 语种判定应在早期以低成本样本先确定主语言，再在整段转录中复用，降低跨段不一致。
+  - 并发参数应通过可重复基准测试选择，而不是固定经验值。
+- 架构决策：
+  - 决策1：新增“整段抽音频 + 按时间切片”策略；并行任务只处理统一 WAV 源。
+  - 决策2：音频切片 ffmpeg 参数调整为 `-ss` 在 `-i` 之前，减少 seek 成本。
+  - 决策3：`whisper.vad_filter` 改为可配置，默认 `false`。
+  - 决策4：`whisper.beam_size` 改为可配置，默认 `4`。
+  - 决策5：新增 `whisper.language_detect_probe_sec`（默认 120），在 `language=auto` 时先探测前 N 秒，仅在 `zh/en` 内锁定语种，其余回退自动检测。
+  - 决策6：新增独立网格基准脚本，支持 `workers x segment_duration` 组合批量评估。
+- 已落地改动：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 新增 `_extract_full_audio(...)` 与 `_extract_audio_slice(...)`；
+    - `transcribe_parallel(...)` 改为先提取整段音频，再分段切片转录；
+    - `transcribe_segment(...)` 增加 `beam_size` 与 `vad_filter` 入参；
+    - 新增 `_detect_language_by_probe(...)` 进行前置语种探测与 `zh/en` 锁定逻辑。
+  - `config/video_config.yaml`
+    - 新增 `whisper.beam_size: 4`
+    - 新增 `whisper.vad_filter: false`
+    - 新增 `whisper.language_detect_probe_sec: 120`
+  - `tools/diagnostics/whisper_grid_bench.py`
+    - 新增网格基准脚本，支持前 N 秒裁剪、并发网格、段长网格、RTF 排序输出。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+    - 更新并行失败回退测试桩，补齐整段抽音频流程的 mock，保持回归可运行。
+- 基准结果（2026-02-15，本机 CPU，测试前 60 秒片段）：
+  - 命令：`python -X utf8 tools/diagnostics/whisper_grid_bench.py --video d:\\videoToMarkdownTest2\\var\\storage\\storage\\57018a9f0c5fe43f4622fb60ce8a9957\\video.mp4 --clip-seconds 60 --workers 2,3,4 --segment-durations 20,30,45 --model-size base --device cpu --compute-type int8 --language auto --beam-size 4 --split-threshold 30 --min-segment-duration 10`
+  - 最优组合：`workers=3, segment_duration=20`，耗时 `12.20s`，`RTF=0.203`。
+  - 结果解读：该 60 秒样本在当前分段下最终仅产生 2 段任务，`worker/segment_duration` 的差异较小；建议在更长视频上复测再固化生产默认值。
+- 基准结果（2026-02-15，本机 CPU，测试前 30 分钟片段）：
+  - 第一轮网格：`workers=2,3,4` × `segment_duration=180,300,600`，最优为 `4 x 180`，耗时 `69.23s`，`RTF=0.038`。
+  - 第二轮细化网格：`workers=3,4,5` × `segment_duration=120,150,180,240`，最优为 `5 x 150`，耗时 `66.80s`，`RTF=0.037`。
+  - 默认参数固化：将 `config/video_config.yaml` 中 `whisper.parallel.num_workers` 调整为 `5`，`whisper.parallel.segment_duration` 调整为 `150`。
+
+## 2026-02-16 transcript step1-step6 性能优化补齐（低重叠 + 参数化 + 有界调度）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 线上日志显示 `step3_5_translate`、`step5_clean_cross` 为长耗时主因，且窗口重叠与批大小存在硬编码，调优成本高。
+  - `step2/step3.5/step5/step6` 虽已接入有界执行器，但部分阶段仍使用固定窗口策略，难以按模型能力快速压测。
+  - `step1_validate` 在已具备 `domain/main_topic` 的重跑场景中仍会重复采样与 LLM 推断，造成不必要延迟。
+- 架构决策：
+  - 决策1：为 step2、step3.5、step5、step6 增加环境变量参数化，默认保持兼容并优先低重叠策略。
+  - 决策2：step5/step6 将窗口步长统一为 `stride = window_size - overlap`，默认 overlap 降低到 `1`。
+  - 决策3：step5 当 `keep_sentence_ids` 缺失时对当前窗口执行“保守全量保留”，避免结构化输出漂移导致误删。
+  - 决策4：step1 增加可控快路径；当状态已包含稳定 `domain/main_topic` 时可跳过采样与 LLM 推断。
+  - 决策5：step1 采样预算改为可配，便于按视频长度与成本目标快速收敛。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - step2：新增 `TRANSCRIPT_STEP2_BATCH_SIZE`（默认 `20`）。
+    - step3.5：新增 `TRANSCRIPT_STEP35_WINDOW_SIZE`（默认 `50`）。
+    - step5：新增 `TRANSCRIPT_STEP5_WINDOW_SIZE`（默认 `8`）、`TRANSCRIPT_STEP5_WINDOW_OVERLAP`（默认 `1`）。
+    - step6：新增 `TRANSCRIPT_STEP6_WINDOW_SIZE`（默认 `8`）、`TRANSCRIPT_STEP6_WINDOW_OVERLAP`（默认 `1`）。
+    - step5 增强输出稳健性：`keep_sentence_ids` 缺失/异常时窗口级回退保留。
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase1_preparation.py`
+    - step1 快路径开关：`TRANSCRIPT_STEP1_REUSE_INFERRED_TOPIC`（默认开启）。
+    - step1 采样预算开关：`TRANSCRIPT_STEP1_SAMPLE_MAX_CHARS`（默认 `6000`）。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - 新增 step2/3.5/5/6 参数化生效测试。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase1_dynamic_topic_sampling.py`
+    - 新增 step1 快路径与采样预算环境变量测试。
+
+## 2026-02-16 transcript step3/5/6 继续降重叠 + 默认并发参数落地
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求继续压缩 `step3/step5/step6` 的窗口重叠，并将压测得到的并发参数直接落地为默认值。
+  - 在前一阶段优化后，`step3/step5/step6` 仍保留少量默认重叠，且默认并发仍回退到 `10`，会限制吞吐上限。
+- 架构决策：
+  - 决策1：继续下调重叠，优先减少 LLM 调用次数（调用次数是端到端耗时的一阶项）。
+  - 决策2：将步骤级默认并发改为压测推荐值，但仍允许环境变量覆盖。
+  - 决策3：同步补充单测，确保“默认值变更 + 环境变量覆盖”都可验证。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - `step3`：`TRANSCRIPT_STEP3_WINDOW_OVERLAP` 默认值 `2 -> 0`；`STEP3` 默认 `max_inflight=48`。
+    - `step5`：`TRANSCRIPT_STEP5_WINDOW_OVERLAP` 默认值 `1 -> 0`；`STEP5` 默认 `max_inflight=24`。
+    - `step6`：`TRANSCRIPT_STEP6_WINDOW_OVERLAP` 默认值 `1 -> 0`；`STEP6` 默认 `max_inflight=24`。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py`
+    - 更新 step3 默认重叠测试样本规模，确保能区分默认重叠是否生效。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - 更新 step5/step6 环境变量覆盖测试（通过窗口数量差异验证覆盖生效）。
+- 本次压测结果与提升（已保留产物）：
+  - 全场景压测主产物：
+    - `var/artifacts/benchmarks/deepseek_workload_suite_full_20260216_094502`
+    - `var/artifacts/benchmarks/deepseek_workload_suite_recheck_20260216_095459`
+  - 稳态高样本重负载压测：
+    - `var/artifacts/benchmarks/deepseek_workload_suite_stable_kc_batch_20260216_100509`
+    - `var/artifacts/benchmarks/deepseek_workload_suite_stable_kc_multi_20260216_102202`
+  - 以复验数据（`requests_per_case=24`）对比 `c12 -> 推荐并发`：
+    - `cp_semantic_segment_json`：QPS `3.225 -> 5.759`（`+78.6%`），总时长 `7442ms -> 4167ms`（`-44.0%`）。
+    - `cp_semantic_resegment_json`：QPS `4.934 -> 8.037`（`+62.9%`），总时长 `4865ms -> 2986ms`（`-38.6%`）。
+    - `cp_markdown_combined_json`：QPS `1.655 -> 3.239`（`+95.7%`），总时长 `14499ms -> 7410ms`（`-48.9%`）。
+  - 窗口重叠继续下调带来的调用数下降（按线上样本量估算）：
+    - `step3`（`subtitle_count=2249`, `window_size=10`）：窗口数 `282 -> 225`，减少 `57`（`-20.2%`）。
+    - `step5`（`sentence_count=2841`, `window_size=8`）：窗口数 `406 -> 356`，减少 `50`（`-12.3%`）。
+    - `step6`：同 `window_size=8` 且同量级输入时，调用降幅同阶，约 `12%`。
+  - 备注：后续高样本压测阶段出现 `402 Insufficient Balance`，属于账户余额约束，不是 `429/timeout` 并发限流。
+
+## 2026-02-16 DeepSeek 30分钟快测（10元预算约束）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 需要在 `30` 分钟内完成可用并发复核，且总预算控制在 `10` 元以内。
+  - 历史压测中存在 `402 Insufficient Balance` 干扰样本，需先做小样本健康检查再放量。
+- 执行策略：
+  - 先执行 `smoke`（1 场景，`2` 请求）确认网络与账户状态；
+  - 再执行 `json` 核心三场景（`12/24/48`，每档 `6` 请求）；
+  - 最后执行 `kc` 核心两场景（`12/24`，每档 `4` 请求）；
+  - 全程观察 `429/timeout/other_http/network_error`，若出现异常立即停止放量。
+- 产物路径：
+  - `var/artifacts/benchmarks/deepseek_quick30_smoke_20260216_20260216_111849`
+  - `var/artifacts/benchmarks/deepseek_quick30_json_20260216_20260216_111903`
+  - `var/artifacts/benchmarks/deepseek_quick30_kc_20260216_20260216_112012`
+- 结果摘要：
+  - 总 token（成功请求）：`140946`（预算内）。
+  - 错误统计：`429=0`，`timeout=0`，`other_http=0`，`network_error=0`。
+  - 推荐并发（快测）：
+    - `cp_semantic_segment_json`：`48`（相对 `c12`，QPS `+3.1%`，总时长 `-3.0%`）。
+    - `cp_semantic_resegment_json`：`24`（相对 `c12`，QPS `+7.0%`，总时长 `-6.6%`）。
+    - `cp_markdown_combined_json`：`48`（相对 `c12`，QPS `+3.4%`，总时长 `-3.3%`）。
+    - `cp_kc_batch_text`：`24`（相对 `c12`，QPS `+1.4%`，总时长 `-1.3%`）。
+    - `cp_kc_multi_unit_text`：`24`（相对 `c12`，QPS `+2.3%`，总时长 `-2.2%`）。
+- 结论与限制：
+  - 在预算受限的小样本条件下，并发上探仍有稳定收益，但幅度显著低于高样本复验（更接近“方向确认”而非“最终定标”）。
+  - 本轮快测覆盖的是 `content_pipeline` 场景并发，不直接等价于 `transcript step3/5/6` 的端到端收益；后续需补同视频 A/B 复测。
+
+## 2026-02-16 DeepSeek 并发映射落地（配置层草案）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求将 30 分钟快测得到的推荐并发，映射到对应 DeepSeek 调用点。
+  - 约束条件是“先改可配置层，不把场景值硬编码进核心业务逻辑”。
+- 架构决策：
+  - 决策1：全局 DeepSeek 自适应并发 limiter 的初始值改为环境变量控制，默认从 `20 -> 24`。
+  - 决策2：语义分段批处理并发上限从固定常量改为运行时读取环境变量，默认 `48`。
+  - 决策3：Markdown 增强阶段与 KC multi-unit 阶段增加本地 in-flight 上限，分别默认 `48`、`24`。
+  - 决策4：将上述参数写入 `.env.example`，作为可回滚、可按环境覆盖的“映射草案”。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - `get_concurrency_limiter()` 新增环境变量：
+      - `MODULE2_DEEPSEEK_CONCURRENCY_INITIAL`（默认 `24`）
+      - `MODULE2_DEEPSEEK_CONCURRENCY_MIN`（默认 `2`）
+      - `MODULE2_DEEPSEEK_CONCURRENCY_MAX`（默认 `300`）
+      - `MODULE2_DEEPSEEK_CONCURRENCY_INCREASE_STEP`（默认 `1`）
+      - `MODULE2_DEEPSEEK_CONCURRENCY_WINDOW_SIZE`（默认 `20`）
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+    - `MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY`（默认 `48`）；
+    - 分段并发上限改为运行时读取 env（便于在线热调参/回滚）。
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 新增 `MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT`（默认 `48`）；
+    - LLM section 处理增加 semaphore 上限。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`
+    - 新增 `MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT`（默认 `24`）；
+    - multi-unit chunk 调度增加 semaphore 上限，避免全量并发提交。
+  - `.env.example`
+    - 新增上述并发参数示例值，作为默认映射草案。
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py`
+    - 更新分段并发上限测试为 env 驱动断言。
+  - `services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_concurrency_env.py`
+    - 新增 KC multi-unit chunk 并发上限 env 生效测试。
+
+## 2026-02-16 基于 core 双轮压测的生产并发配置落地（DeepSeek）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求基于最新实测结果给出生产并发建议并直接落地配置。
+  - 本次有效样本来自两轮同配置压测：
+    - `var/artifacts/benchmarks/deepseek_workload_suite_core_r1_20260216_20260216_115935`
+    - `var/artifacts/benchmarks/deepseek_workload_suite_core_r2_20260216_20260216_121835`
+  - 三类负载的并发峰值/平台区间：
+    - short（`cp_video_clip_motion_text`）峰值在 `c=64`
+    - medium（`cp_markdown_combined_json`）峰值在 `c=56`
+    - long（`cp_kc_multi_unit_text`）在 `c=48~64` 平台，`c=48` 与 `c=64` 吞吐近似
+- 架构决策：
+  - 决策1：全局自适应并发 limiter 采用“高效区间启动 + 峰值附近封顶”：`initial=56, min=8, max=64, step=1, window=30`。
+  - 决策2：场景级并发上限按实测映射：
+    - `MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT=56`
+    - `MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT=48`（取平台区更稳健点）
+  - 决策3：`MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY` 维持 `48`（本轮未覆盖语义分段场景，不做无证据上调）。
+  - 决策4：将变量透传到 docker compose，确保生产容器直接生效。
+- 已落地改动：
+  - `.env`
+  - `.env.example`
+  - `deploy/docker/.env.example`
+  - `docker-compose.yml`
+  - 备注：
+  - 配置建议来源报告：`var/artifacts/benchmarks/analysis_core_20260216_1230/report.md`
+  - 图表产物：`qps_vs_concurrency.png`、`p95_vs_concurrency.png`、`token_throughput_vs_concurrency.png`、`stability_r2_over_r1.png`
+
+## 2026-02-16 transcript step1 AV1 预探测短路（消除入口噪声报错）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - `step1_validate` 在 AV1 输入上虽然最终可放行，但仍会先执行 `cv2.VideoCapture(...)`，触发底层日志：
+    - `Could not open codec av1`
+    - `Failed to initialize VideoCapture`
+  - 该日志出现在输入校验入口，容易被误判为“流程失败”，且会污染告警信号。
+- 架构决策：
+  - 决策1：在 `validate_video(...)` 中调整判定顺序，先做 `probe_primary_video_codec(...)`。
+  - 决策2：当 codec 命中 `av1/av01` 时直接短路放行，不再触发 OpenCV 打开动作。
+  - 决策3：保留非 AV1 路径的快速可读性探测与 codec 错误提示，维持可诊断性。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/tools/file_validator.py`
+    - 新增 `_is_av1_codec(...)`，统一识别 `av1/av01`。
+    - `validate_video(...)` 在 AV1 命中时提前返回，避免 OpenCV 噪声日志。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+    - 新增/调整回归测试，覆盖 `av1`、`av01` 均不触发 `VideoCapture` 的行为。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+
+## 2026-02-16 transcript step2~step6 字符量异常下降排查与防静默丢失加固
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户反馈样本任务 `var/storage/storage/57018a9f0c5fe43f4622fb60ce8a9957` 中，`subtitles.txt` 到 `semantic_units_phase2a.json` 的字符量显著下降（约 `29.5%`），怀疑存在截断或 token 上限导致的隐式丢失。
+  - 需要固定保留 `step3/step4/step5` 中间产物，支持审计“哪一步发生了量级变化”。
+- 排查结论：
+  - `subtitles.txt` 未发生读取截断（时间轴覆盖完整）。
+  - `step2_correction_output.json` 与字幕正文字符量近似 1:1。
+  - 明显收缩发生在 `step3~step6`，尤其 `step6_merge_cross` 去重后文本集约化，`semantic_units_phase2a.json` 的 `full_text` 基本继承 step6 结果。
+  - 风险点不是“固定阈值截断”，而是 LLM 输出结构不完整/窗口异常时可能产生“静默漏句”。
+- 架构决策：
+  - 决策1：`StepOutputConfig` 将 `step3_merge`、`step4_clean_local`、`step5_clean_cross` 纳入 `REQUIRED_ENABLED_STEPS` 与 `FULL_PERSISTENCE_STEPS`，即使 `disable_all=True` 也强制输出完整 payload。
+  - 决策2：`step4` 增加 batch 级与全局级 sentence coverage 校验，发现缺失 ID 时回填原文，禁止“未声明删除”。
+  - 决策3：`step5` 增加 keep/delete 覆盖率校验，窗口异常时默认保留该窗口全部句子。
+  - 决策4：`step6` 增加 paragraph/source_sentence_ids 规范化与覆盖补偿，窗口异常和去重后缺失都回填单句段落。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - 强制持久化 `step3/step4/step5`，并禁止这三步大列表被 `{count, sample}` 压缩。
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - 新增 step4/5/6 的 coverage guard 与 fallback 补偿逻辑。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+    - 新增 required-step 与 full-payload 持久化回归测试（覆盖 step3/4/5）。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - 新增 step4 partial 输出补齐、step5 异常保留、step6 覆盖补回回归测试。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+
+## 2026-02-16 Stage1 Step5/Step6 合并为单轮 Step5_6（降 token）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户目标是降低 Stage1 跨句处理 token 消耗。
+  - 现状是 `step5_clean_cross` 与 `step6_merge_cross` 分别进行窗口化 LLM 调用，存在双轮推理开销。
+- 架构决策：
+  - 决策1：在 `transcript_pipeline` 引入新逻辑步骤 `step5_6_dedup_merge`，单轮输出 `keep_sentence_ids + paragraphs`。
+  - 决策2：图编排改为 `step4_clean_local -> step5_6_dedup_merge -> END`，不再串联旧 `step5/step6` 两个节点。
+  - 决策3：外部文件契约保持兼容，`StepOutputConfig` 对 `step5_6_dedup_merge` 继续写出 `step6_merge_cross_output.json`。
+  - 决策4：环境变量采用“新旧并存优先新”：
+    - 新变量：`TRANSCRIPT_STEP56_WINDOW_SIZE`、`TRANSCRIPT_STEP56_WINDOW_OVERLAP`、`TRANSCRIPT_STEP56_MAX_INFLIGHT`
+    - 回退顺序：优先读取 `STEP56`，缺失时回退 `STEP6`，再回退 `STEP5`。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - 新增 `step5_6_node`，单次调用同时生成 `non_redundant_sentences` 与 `pure_text_script`。
+    - 新增 Step56 环境变量解析与旧变量兼容读取。
+    - 保留 `step5_node`、`step6_node` 作为兼容包装（映射到 `step5_6_node`）。
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - 编排节点切换为 `step5_6_dedup_merge`。
+    - `StepOutputConfig` 增加步骤名 canonical/别名映射；`step5_6_dedup_merge` 写盘别名保持 `step6_merge_cross_output.json`。
+  - `services/python_grpc/src/transcript_pipeline/checkpoint.py`
+    - `STEP_INDEX_MAP` 新增 `step5_6_dedup_merge: 6`，并保留旧步骤索引别名兼容。
+  - `services/python_grpc/src/transcript_pipeline/monitoring/tracer.py`
+    - `step_order` 更新为包含 `step5_6_dedup_merge`。
+  - `services/python_grpc/src/transcript_pipeline/nodes/__init__.py`
+    - 导出 `step5_6_node`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - Stage1 flow 日志更新为 `...->step5_6_dedup_merge`。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - 新增 Step56 窗口重叠与新旧变量回退测试。
+    - 新增 keep ids 缺失与 paragraphs 缺失兜底测试。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+    - 更新为验证 `step5_6_dedup_merge` 写盘仍落到 `step6_merge_cross_output.json`。
+- 风险与处理：
+  - 风险1：单轮输出结构抖动导致误删。
+    - 处理：窗口级保守回退（失败时 keep all + 句级段落兜底）。
+  - 风险2：旧部署环境仍使用 `STEP5/STEP6` 参数。
+    - 处理：兼容读取并记录 legacy env 警告。
+## 2026-02-16 Stage1/Phase2A 写盘异步化与复用时序修正
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求将 `step2~step6`、`semantic_units`、`subtitles.txt` 的写盘统一改为独立进程异步执行，减少主流程 I/O 阻塞。
+  - 改为异步后，出现“下游紧邻读取时文件未就绪”与“资源 meta 未及时写入导致复用命中率下降”的风险。
+- 架构决策：
+  - 决策1：引入统一异步写盘进程 `async_disk_writer`，复用同一队列处理 JSON 与文本写盘。
+  - 决策2：`TranscribeVideo`、Stage1 中间产物、Phase2A 语义单元全部改为 enqueue，不在业务主链路同步写文件。
+  - 决策3：在 `ProcessStage1` 增加“仅在关键文件未就绪时触发”的有界等待屏障，保证返回前 `step2/step6` 可被下游立即读取。
+  - 决策4：Stage1 与 Phase2A 的资源元数据写入不再依赖“目标文件当下存在”，避免因异步落盘时差导致 `missing_meta` 影响复用。
+- 已落地改动：
+  - `services/python_grpc/src/common/utils/async_disk_writer.py`
+    - 新增统一异步写盘进程（JSON/Text）、flush 屏障、原子写盘实现。
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - `StepOutputConfig` 支持异步写盘开关（默认由环境变量开启）。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `TranscribeVideo` 改为异步写 `subtitles.txt`。
+    - `ProcessStage1` 增加关键文件就绪等待（按需触发），并修正资源 meta 写入时序。
+    - `AnalyzeSemanticUnits` 调整资源 meta 写入策略，兼容异步落盘。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `_save_semantic_units` 改为异步写盘（含镜像路径）。
+  - `services/python_grpc/src/common/utils/tests/test_async_disk_writer.py`
+    - 新增异步写盘回归测试（JSON/Text + flush）。
+- 影响与权衡：
+  - 收益：主流程不再被频繁磁盘 I/O 阻塞；写盘职责集中，便于统一限流与观测。
+  - 成本：当下游必须立刻读取文件时，需要在边界点做最小必要等待（而非每步同步写盘）。
+  - 风险控制：等待仅在“关键文件未就绪”条件下触发，并提供超时错误信息用于定位。
+## 2026-02-16 Stage1 -> Phase2A 内存直通（非复用不依赖 step2/step6 JSON 读取）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求“先存储在内存中，非复用不读取 JSON”，避免异步写盘时序导致的文件可见性依赖。
+  - 现状是 `AnalyzeSemanticUnits` 会初始化 `RichTextPipeline` 并默认从 `step2/step6` JSON 加载字幕与段落。
+- 架构决策：
+  - 决策1：在 gRPC 服务进程内引入 Stage1 运行态缓存（按 `output_dir` 键控），缓存 `corrected_subtitles/pure_text_script`，并保留到本次任务完成。
+  - 决策2：`ProcessStage1` 非复用实际执行 `run_pipeline` 后，把 Step2/Step6 关键产物写入内存缓存。
+  - 决策3：`AnalyzeSemanticUnits` 非复用路径优先读取内存缓存并注入 `RichTextPipeline`，仅缓存未命中时回退 JSON。
+  - 决策4：`SubtitleRepository` 扩展段落内存注入能力，统一复用现有查询/映射逻辑。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 Stage1 运行态缓存结构与清理逻辑。
+    - `ProcessStage1` 在非复用执行后缓存 step2/step6 结果。
+    - `AnalyzeSemanticUnits` 增加内存命中优先注入链路。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 构造函数支持注入 `step2_subtitles/step6_paragraphs` 内存 payload。
+  - `services/python_grpc/src/content_pipeline/shared/subtitle/subtitle_repository.py`
+    - 新增 `set_raw_paragraphs(...)`，支持段落内存直通。
+  - `services/python_grpc/src/content_pipeline/tests/test_subtitle_repository.py`
+    - 新增 `set_raw_paragraphs` 的单测覆盖。
+- 影响与权衡：
+  - 收益：非复用链路减少 step2/step6 JSON 读取依赖，降低异步写盘时序对 Phase2A 启动的影响。
+  - 成本：缓存在任务完成前持续占用内存，需要依赖任务收尾显式清理。
+  - 回退：缓存未命中时保持 JSON 路径兼容，不影响复用场景与重启后行为。
+
+## 2026-02-16 Transcript Step2/Step4 合并执行（Step4 兼容直通）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 需求调整为“Step2 与 Step4 功能一次完成，随后再执行原 Step3”。
+  - 现状链路中 Step4 仍在 Step3.5 之后独立调用 LLM，导致同类“单句清理”能力分散在两个阶段，维护和成本都偏高。
+- 第一性原理与架构判断：
+  - Step2 的本质是“单句纠错补丁回放”；Step4 的本质是“单句清理补丁回放”。二者都属于同一类型的“最小补丁 + 本地确定性应用”。
+  - 对下游真正重要的是稳定契约字段：`corrected_subtitles`（给 Step3）和 `cleaned_sentences`（给 Step5/6），而不是必须保留两个独立 LLM 阶段。
+- 复用杠杆：
+  - 杠杆1：复用 `step_contracts.reconcile_step2_item`，保持 Step2 纠错补丁装配逻辑不变。
+  - 杠杆2：复用 `step_contracts.parse_step4_cleaned_sentences` + `reconcile_step4_item`，直接在 Step2 内执行清理补丁回放，不新建清理引擎。
+  - 杠杆3：复用既有 `step4_node` 输出契约（`cleaned_sentences`），通过兼容直通保障下游接口不变。
+- 架构决策：
+  - 决策1：Step2 Prompt 追加清理补丁约束，单次 LLM 回包同时包含 `c`（纠错）与 `d`（清理删除补丁）。
+  - 决策2：Step2 每条字幕按“先纠错再清理”顺序本地回放，输出仍写入 `corrected_subtitles`，保证 Step3 输入契约不变。
+  - 决策3：新增状态标记 `step2_step4_merged_done`；当该标记为真时，Step4 改为兼容直通（不再调用 LLM，直接产出 `cleaned_sentences`）。
+  - 决策4：若 Step2 批次存在失败，标记为假，Step4 保留原有 LLM 路径兜底，确保稳态可回退。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - Step2 增加 Step4 清理补丁解析与回放。
+    - Step4 增加“合并模式兼容直通”分支。
+    - 新增常量 `STEP2_STEP4_MERGED_STATE_FLAG` 与补充提示词 `STEP2_MERGED_CLEANUP_APPEND_PROMPT`。
+  - `services/python_grpc/src/transcript_pipeline/state.py`
+    - PipelineState 增加 `step2_step4_merged_done` 字段并初始化。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+    - 新增 Step2 合并补丁应用测试。
+    - 新增 Step4 合并模式直通测试。
+- 兼容性说明：
+  - 保持 `corrected_subtitles`、`merged_sentences`、`translated_sentences`、`cleaned_sentences` 结构不变。
+  - 保持 `step4_clean_local` 节点与输出命名不变，避免下游或中间产物读取链路断裂。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py services/python_grpc/src/transcript_pipeline/tests/test_step2_correction_consistency.py services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+- 性能对比（单测仿真样本）：
+  - 测试方法：同一批样本对比“Step4 旧路径（需 LLM）”与“合并模式 Step4 兼容直通（无 LLM）”。
+  - 测试数据：`test_step4_uses_passthrough_when_step2_step4_merged_done`（2 句样本）。
+  - 指标结果：
+    - Step4 LLM 调用次数：`1 -> 0`
+    - Step4 token_usage：`15 -> 0`（测试桩固定 token）
+  - 结论：在合并模式下，Step4 计算开销被折叠到 Step2，Step4 节点仅承担契约兼容职责。
+
+## 2026-02-16 Phase2A -> AnalyzeWithVL 语义单元内存直传（消除异步写盘竞态）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 线上出现 `AnalyzeWithVL` 报错：`No such file or directory: semantic_units_phase2a.json`。
+  - 现有链路中，`semantic_units_phase2a.json` 默认走异步写盘；`AnalyzeWithVL` 紧接着强制 `open(...)` 读盘，存在时序竞态。
+- 第一性原理与复用杠杆：
+  - 第一性原理：同进程、同任务、同 output_dir 的阶段串联，优先传递“已序列化内存对象”，磁盘应作为持久化与跨进程恢复兜底。
+  - 复用杠杆：复用现有 Stage1 runtime cache 的设计模式（按 `output_dir` 持有到任务收尾），不引入新中间件和新协议。
+- 架构决策：
+  - 决策1：在 Python gRPC servicer 新增 Phase2A runtime cache，按 `output_dir` 缓存语义单元序列化结果。
+  - 决策2：`AnalyzeSemanticUnits` 完成后把 `RichTextPipeline` 的最新语义单元 payload 写入 runtime cache。
+  - 决策3：`AnalyzeWithVL` 加载语义单元时改为“内存优先、磁盘兜底”；兜底读盘前先 `flush_async_json_writes` 并扫描候选路径。
+  - 决策4：任务装配收尾时同步清理 Stage1/Phase2A runtime cache，避免内存滞留。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py`
+- 性能对比数据：
+  - 测试方式：对比“Phase2A 非复用 -> AnalyzeWithVL”链路中语义单元加载路径的 I/O 次数。
+  - 测试数据：同一 `output_dir` 下连续执行 Phase2A + AnalyzeWithVL，语义单元规模为单任务常规列表结构。
+  - 对比结论：
+    - 修复前：AnalyzeWithVL 固定 1 次 JSON 读盘（且受异步写盘时序影响）。
+    - 修复后：runtime cache 命中时 0 次 JSON 读盘；仅 cache miss 才回退磁盘读取。
+- 影响与权衡：
+  - 收益：去除“写盘尚未可见”导致的瞬时 FileNotFound；同进程串联时减少不必要 I/O。
+  - 成本：引入按任务生命周期持有的内存副本，需要在任务收尾显式清理（已纳入 finally）。
+
+## 2026-02-16 Java->Python 语义单元传输协议升级（ref/inline，去路径依赖）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 旧链路中 Java 通过 `semantic_units_json_path` 与 Python 交换语义单元，受异步写盘时序影响，存在 `FileNotFound` 与路径耦合。
+  - 目标是彻底移除 Java->Python 的路径依赖，同时兼容存量客户端。
+- 第一性原理与复用杠杆：
+  - 第一性原理：跨 RPC 的结构化数据应通过“引用或消息体”传递，文件路径仅用于持久化与调试，不应承载协议语义。
+  - 复用杠杆：复用已落地 `Phase2A runtime cache`（按 `output_dir` 生命周期管理），在此基础上增加 `ref_id` 索引与 inline 编解码。
+- 架构决策：
+  - 决策1：扩展 proto 新增 `SemanticUnitsRef`、`SemanticUnitsInline`。
+  - 决策2：`VLAnalysisRequest` 与 `AssembleRequest` 增加 `oneof semantic_units_source`（`ref/inline`）；保留 `semantic_units_json_path` 作为 deprecated 兼容字段。
+  - 决策3：`AnalyzeResponse` 同步返回 `semantic_units_ref` 与 `semantic_units_inline`，使 Java 不再依赖路径加载语义单元。
+  - 决策4：Python 端请求解析优先级统一为 `inline > ref > runtime_cache > legacy_path`。
+  - 决策5：Java 端在 Legacy 分支改为从 AnalyzeResult 的 inline payload 读取并回写，更新后再次以内联形式传回 Python Assemble。
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `contracts/gen/python/video_processing_pb2.py`
+  - `contracts/gen/python/video_processing_pb2_grpc.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 验证方式：
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+- 性能对比数据：
+  - 测试方式：对比同任务下 `AnalyzeSemanticUnits -> AnalyzeWithVL/AssembleRichText` 的语义单元传输路径。
+  - 测试数据：Phase2A 常规语义单元列表（通过 inline gzip 与 ref 两种通道验证）。
+  - 对比结论：
+    - 升级前：Java 侧依赖路径读写，存在文件可见性等待与失败重试。
+    - 升级后：优先走内存引用或 inline payload；路径仅保留兼容兜底，不再是主协议依赖。
+- 影响与权衡：
+  - 收益：消除 Java->Python 的路径耦合与时序脆弱点，跨阶段协议语义更清晰。
+  - 成本：AnalyzeResponse 体积可能增加（携带 inline）；通过 gzip 编码与 ref 优先策略控制开销。
+
+## 2026-02-16 Phase2A inline/ref 输出链路补强（避免极端场景回退路径）
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 在协议升级后，`AnalyzeSemanticUnits` 主要通过 `pipeline.latest_phase2a_semantic_units_payload` 回填 inline/ref。
+  - 极端情况下若该内存字段未就绪，响应会缺失 inline/ref，Java 侧仍可能退回 legacy path。
+- 架构决策：
+  - 决策1：在 `AnalyzeSemanticUnits` 分割完成后，若内存 payload 缺失，先执行一次 `flush_async_json_writes`，再尝试回读刚生成的 `semantic_units_path`。
+  - 决策2：回读成功即立即构建 runtime cache 与 `semantic_units_inline/ref`，保证主链路优先走内存语义通道。
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `AnalyzeSemanticUnits` 增加“内存 payload 缺失时的回读恢复”逻辑。
+    - 同步修正文档注释，明确 AnalyzeResponse 已包含 `semantic_units_ref/semantic_units_inline`。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+
+## 2026-02-16 Java->Python 协议硬切：移除 `semantic_units_json_path`
+- 日期：2026-02-16
+- 触发背景与问题：
+  - 用户要求彻底消除 Java->Python 的路径耦合，避免任何调用方继续通过 `semantic_units_json_path` 传输语义单元。
+  - 旧字段虽已 deprecated，但仍会让部分链路在异常场景回退到路径传递。
+- 第一性原理与复用杠杆：
+  - 第一性原理：跨 RPC 的业务数据必须结构化传输，路径字段属于持久化实现细节，不应作为协议输入。
+  - 复用杠杆：复用已落地 `SemanticUnitsRef/SemanticUnitsInline` 与 Phase2A runtime cache，不新增中间层。
+- 架构决策：
+  - 决策1：在 proto 中删除三个消息里的 `semantic_units_json_path` 字段，并使用 `reserved` 保留字段号与字段名，防止误复用。
+  - 决策2：Python 服务端删除对 `request.semantic_units_json_path` 的解析与分支逻辑，统一改为 `inline/ref/runtime`。
+  - 决策3：Java 客户端与编排层删除 `semanticUnitsJsonPath` DTO 字段与相关 API 重载，编译期禁止路径参数继续流入。
+  - 决策4：Assemble 阶段在服务端内部临时物化 JSON 仅用于兼容 Pipeline 输入契约，不对外暴露路径协议。
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/resilience/ResilientGrpcClient.java`
+- 验证方式：
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+- 性能/链路对比数据：
+  - 测试方式：对比删除前后 Java->Python 协议输入中“路径字段参与次数”与服务端路径回退分支触发条件。
+  - 测试数据：同一条 `AnalyzeSemanticUnits -> AnalyzeWithVL -> AssembleRichText` 主链路，使用 AnalyzeResult 内联/引用语义单元。
+  - 对比结论：
+    - 删除前：协议层允许 `semantic_units_json_path`，存在路径回退通道。
+    - 删除后：协议层路径字段参与次数 `1 -> 0`，编译期即禁止路径传参，主链路固定为 `inline/ref/runtime`。
+
+## 2026-02-17 Semantic Segmenter 缓存协议对齐 grouped（补齐复用读取闭环）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - Phase2A/Phase2B 主链路已切到 `knowledge_groups`，但 `SemanticUnitSegmenter` 的缓存读写仍保留旧 `semantic_units[]` 结构。
+  - 这会造成“展示结构是 grouped、缓存复用仍是旧结构”的协议分裂，增加后续复用和排障复杂度。
+- 第一性原理与复用杠杆：
+  - 第一性原理：同一业务实体（语义单元）的持久化协议应在不同入口一致，避免多套 schema 并存导致的隐性转换错误。
+  - 复用杠杆：复用已抽取的 `shared/semantic_payload.py`（`build_grouped_semantic_units_payload`、`normalize_semantic_units_payload`），不再重复实现 grouped/legacy 转换。
+- 架构决策：
+  - 决策1：`SemanticUnitSegmenter._save_to_cache` 改为写入 grouped 结构（`schema_version + knowledge_groups`），并保留统计字段。
+  - 决策2：`SemanticUnitSegmenter._load_from_cache` 改为统一走 `normalize_semantic_units_payload`，同时兼容读取 grouped 与 legacy 缓存。
+  - 决策3：修复 `rich_text_pipeline` 中 fallback 文案乱码（`未命名知识点`、`同一核心论点聚合`），避免分组展示降级时出现脏文本。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_cache_grouped.py`
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_cache_grouped.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_cache_grouped.py services/python_grpc/src/content_pipeline/tests/test_semantic_payload_utils.py services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py --basetemp var/tmp_pytest_grouped_regression_20260217`
+- 性能对比数据：
+  - 测试方式：比较缓存读写协议对齐前后的“结构转换次数”与“分支复杂度”。
+  - 测试数据：单任务 1 个 group、1 个 unit 的最小样本缓存（含 grouped 与 legacy 两种输入）。
+  - 对比结论：
+    - 对齐前：缓存读写与主链路 schema 不一致，读取端需要额外分支判断，潜在结构漂移风险更高。
+    - 对齐后：缓存与主链路同协议；读取统一走公共 normalize 逻辑，避免重复转换与协议分叉。
+
+## 2026-02-17 Stage1 终态校验收敛（失败状态统一上抛）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `step1_validate` 在 LLM 401 等异常场景下会返回结构化失败状态（`current_step_status=error`、`errors`），但图执行并未将其视为失败。
+  - 导致 Stage1 出口出现“日志成功、产物缺失、下游超时失败”的决策链断裂。
+- 第一性原理与复用杠杆：
+  - 第一性原理：流水线“完成”应同时满足控制流完成与业务状态成功；二者任一失败都必须在边界层统一失败。
+  - 复用杠杆：复用现有 `final_state` 中的 `current_step_status/is_valid/errors` 字段，不新增状态模型，不改节点契约。
+- 架构决策：
+  - 决策1：在 `_execute_pipeline` 出口集中校验最终状态，命中 `failed/error/is_valid=false/non-empty errors` 任一条件即抛异常。
+  - 决策2：仅当终态校验通过后，才写入“completed”运行状态和成功日志。
+- 已落地改动：
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - 新增 `_raise_if_final_state_failed`，并在 `graph.ainvoke` 后调用。
+  - `services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py`
+    - 增加“终态失败必须抛错”的参数化回归。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py -q`（受当前 `numpy/skimage` 二进制环境问题阻断）
+
+## 2026-02-17 移动端任务列表聚合落盘任务 + Bilibili BV号直提交流程
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 首页 `index.html` 仅渲染当前进程内任务，重启后无法看到 `var/storage/storage` 的历史任务，手机端“查看结果”链路不完整。
+  - 用户在手机侧常直接复制 Bilibili BV 号，原提交链路要求完整 URL，增加人工转换成本。
+- 第一性原理与复用杠杆：
+  - 第一性原理：任务可见性应来源于“运行态 + 持久化态”的并集，而不是单一内存结构。
+  - 复用杠杆：
+    - 复用 `TaskQueueManager.getAllTasks()` 作为运行态任务源；
+    - 复用 `var/storage/storage/{hash}` 目录事实作为历史任务源；
+    - 复用现有 `/api/tasks` 提交入口，只在控制器增加 BV 归一化，不改下游编排协议。
+- 架构决策：
+  - 决策1：`/api/mobile/tasks` 改为聚合两路任务源：
+    - 运行态任务（TaskQueueManager）
+    - 磁盘任务目录（`var/storage/storage`）
+  - 决策2：磁盘任务对外统一使用 `storage:{目录名}` 作为任务 ID，避免与运行态 `VT_*` ID 冲突。
+  - 决策3：`/api/mobile/tasks/{taskId}/markdown|asset` 同时支持运行态任务与 `storage:*` 历史任务。
+  - 决策4：首页前端任务列表改为轮询 `/api/mobile/tasks` 作为主数据源，WebSocket 仅做实时增量更新。
+  - 决策5：`POST /api/tasks` 增加 BV 号归一化（`BV...` -> `https://www.bilibili.com/video/BV...`），保持本地路径输入不被误改。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `docs/architecture/overview.md`
+- 验证方式：
+  - 手动验证：
+    - `GET /api/mobile/tasks` 返回运行态 + 历史任务，且历史任务含 `source=storage` 与 `storage:*` 任务ID。
+    - 访问 `mobile-markdown.html?taskId=storage:{目录名}` 可加载对应 markdown 与本地图片/视频资源。
+    - 首页输入 `BV1xx411c7mD` 可成功提交任务并进入排队。
+  - 编译验证（受环境限制，见说明）：
+    - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+
+## 2026-02-17 移动端 Obsidian 段落级编辑与大纲滚动高亮
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 手机端仅支持查看，无法按“段落”快速执行编辑、删除、收藏、复制与批注。
+  - 大纲虽可点击跳转，但阅读滚动过程中缺少当前章节定位，长文检索效率低。
+- 第一性原理与复用杠杆：
+  - 第一性原理：编辑单元应贴合阅读语义（段落）而非整文，减少移动端输入成本。
+  - 复用杠杆：
+    - 复用现有 `/api/mobile/tasks/{taskId}/markdown` 读取链路与路径边界校验；
+    - 在同一控制器新增写回接口，避免新建独立编辑服务；
+    - 复用现有 `buildOutline` 标题提取逻辑扩展 scroll spy，不新增额外解析器。
+- 架构决策：
+  - 决策1：新增 `PUT /api/mobile/tasks/{taskId}/markdown`，接收整文 markdown 内容写回目标文件。
+  - 决策2：前端编辑模式采用“段落分块 -> 段落操作 -> 合并写回整文”的实现，确保与 Obsidian Markdown 兼容。
+  - 决策3：收藏/批注采用本地存储（按 `taskId + markdownPath` 隔离），避免污染原始 markdown 内容。
+  - 决策4：大纲滚动高亮采用滚动监听 + 当前视口锚点定位，不引入额外第三方依赖。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `docs/architecture/overview.md`
+- 验证方式：
+  - 手动验证：
+    - 在 `mobile-markdown.html` 进入“段落编辑”模式，完成段落编辑/删除并保存后刷新仍可见。
+    - 收藏、批注、复制操作可在单段落快捷执行。
+    - 滚动正文时，大纲项会自动高亮当前章节；点击大纲可跳转并同步高亮。
+  - 编译验证（受环境限制，见说明）：
+    - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+
+## 2026-02-17 移动端编辑粒度下沉到“逐行”并统一悬浮操作入口
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 段落级编辑粒度过粗，用户需要按“每个换行”进行编辑与批注。
+  - 大纲、编辑、导出入口分散在不同位置，手机端单手操作路径长。
+- 第一性原理与复用杠杆：
+  - 第一性原理：移动端高频操作应减少手指位移，控制入口集中；编辑粒度应与“换行”这一最小阅读/写作节奏对齐。
+  - 复用杠杆：
+    - 复用现有 `PUT /api/mobile/tasks/{taskId}/markdown` 整文写回链路；
+    - 复用现有 `meta` 持久化接口承载批注历史；
+    - 复用既有大纲 scroll-spy 与跳转机制，不引入额外解析依赖。
+- 架构决策：
+  - 决策1：编辑分块策略由“段落分块”调整为“逐行分块（按换行）”，合并时按 `\n` 原位回写。
+  - 决策2：右下角统一为圆形 `+` 悬浮按钮，菜单包含“大纲/编辑/导出ZIP”三项高频动作。
+  - 决策3：批注结构升级为“每行多条历史批注”，并在 UI 中以气泡数量展示，弹窗支持新增/修改/删除。
+  - 决策4：移动端缩进压缩规则修正为“每 4 空格压 1 空格，余数保持不变”。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 验证方式：
+  - 手动验证：
+    - 进入逐行编辑后，单行可独立编辑/删除/收藏/样式化。
+    - 行右下角批注气泡显示数量；点击后可在弹窗对历史批注执行增删改，保存后重开任务仍保留。
+    - 点击右下角 `+` 可打开菜单，触发大纲弹窗、编辑模式切换、ZIP 导出。
+    - 缩进展示满足 `4->1、8->2`，并对非 4 的倍数保留余数。
+
+## 2026-02-17 移动端手势交互与媒体长按保存增强
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 手机端需要在阅读场景下用手势快速完成复制、批注、删除与编辑切换。
+  - 图片/视频片段缺少统一“保存到本地”路径，依赖浏览器默认行为不稳定。
+- 第一性原理与复用杠杆：
+  - 第一性原理：高频动作应尽量在内容面内完成，减少菜单跳转与输入中断。
+  - 复用杠杆：
+    - 复用现有逐行编辑卡片结构挂载手势事件；
+    - 复用 `saveParagraphMeta` 与 markdown 写回接口承接手势触发后的持久化；
+    - 复用已有资源 URL 映射，直接对图片/视频发起 Blob 下载。
+- 架构决策：
+  - 决策1：新增逐行手势协议：双击复制、右滑开批注、左滑删除（可撤回）、长按2秒进入编辑。
+  - 决策2：新增 pinch-in（缩小手势）直接打开大纲弹窗，作为快速导航入口。
+  - 决策3：新增删除撤回条（Undo Toast），提供时限内恢复能力。
+  - 决策4：图片/视频统一支持长按2秒触发“保存到本地”。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+- 验证方式：
+  - 手动验证：
+    - 编辑模式下双击行文本触发复制。
+    - 行卡片右滑打开批注弹窗，左滑删除后可通过撤回条恢复。
+    - 长按行卡片 2 秒进入该行编辑。
+    - 双指缩小触发大纲弹窗。
+    - 长按图片/视频 2 秒出现保存确认并下载到本地。
+
+## 2026-02-17 移动端视觉去廉价感收敛 + 刷新策略模块化 + 桌面入口统一
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 任务区局部仍存在虚线边框（上传拖拽区），与卡片体系的语义边界策略不一致，视觉语言割裂。
+  - 任务列表刷新触发散落在事件绑定中，策略（触发条件、节奏、失败退避、可见性）缺少单一控制点。
+  - `index.html` 与 `mobile-markdown.html` 双页面并行，桌面与移动体验分叉，维护成本高。
+- 第一性原理与复用杠杆：
+  - 第一性原理：同一业务界面应共享一致的视觉语法与导航入口；刷新行为应由“策略层”统一调度，而非由事件处理分散驱动。
+  - 复用杠杆：
+    - 复用现有语义变量：`--surface-border-subtle`、`--surface-shadow-soft`、`--surface-shadow-elevated`；
+    - 复用现有数据主链路：`reloadTaskList -> fetchTasks`；
+    - 复用现有静态资源入口能力：保留 `index.html` 作为壳层，仅执行跳转，不新增后端路由。
+- 架构决策：
+  - 决策1：上传拖拽区取消 `dashed`，统一改为语义边界 token（含暗黑模式对应 token）。
+  - 决策2：新增/启用 `createTaskListRefreshPolicy` 作为任务列表刷新策略模块，统一承接手动刷新、重试刷新、Tab 切换、页面可见性恢复。
+  - 决策3：`index.html` 收敛为“统一入口壳层”，自动重定向到 `mobile-markdown.html`，并保留 `query/hash` 以确保深链不丢参。
+- 调用链与决策链变化：
+  - 页面入口：`/`（`index.html`） -> 跳转 -> `/mobile-markdown.html`
+  - 刷新调度：`UI事件` -> `taskListRefreshPolicy` -> `reloadTaskList` -> `fetchTasks`
+  - 可见性策略：`document.hidden=true` 时仅重排定时器，不发请求；恢复可见后按最小间隔触发一次低干扰刷新。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 验证方式：
+  - 前端脚本语法检查：
+    - 对 `mobile-markdown.html` 内联脚本执行 `node --check`
+    - 对 `index.html` 内联脚本执行 `node --check`
+  - 交互点检：
+    - 任务页手动刷新、失败重试可正常触发策略入口；
+    - 切换到非任务 Tab 后不再发起任务列表请求；
+    - 页面从后台恢复时，按策略最小间隔触发一次刷新；
+    - 访问 `/` 时自动进入 `mobile-markdown.html`，并保留 URL 参数与 hash。
+- 性能对比数据：
+  - 测试方式：基于策略参数（`TASK_LIST_AUTO_REFRESH_MS=25000`）与手动点检场景统计请求次数。
+  - 测试数据：
+    - 场景A：停留任务页 5 分钟（可见）。
+    - 场景B：停留非任务页 5 分钟（可见）。
+    - 场景C：页面隐藏 2 分钟后恢复可见。
+  - 对比结论：
+    - 改造前（逻辑分散）：场景B/C 中存在刷新行为不可预测、排查路径长的问题。
+    - 改造后（策略模块）：场景A 按 25s 节奏刷新（约 12 次/5 分钟）；场景B 不发任务列表请求（0 次）；场景C 恢复可见后触发一次受最小间隔约束的刷新，避免抖动与瞬时重复请求。
+
+## 2026-02-17 导航状态机模块化（mobile-view-navigation）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `mobile-markdown.html` 内联脚本持续膨胀，`pushView/history/edgeBack` 与页面业务逻辑耦合过深，导致维护与回归范围过大。
+- 第一性原理与复用杠杆：
+  - 第一性原理：导航状态机属于“跨页面业务场景复用的基础能力”，应独立于具体页面业务。
+  - 复用杠杆：复用现有 `state.currentView/viewHistoryStack`、`EDGE_BACK_MOTION`、`taskListRefreshPolicy.onViewChange`，仅迁移编排层，不改业务输入输出。
+- 架构决策：
+  - 决策1：新增 `static/lib/mobile-view-navigation.js` 作为导航状态机模块工厂，承接 `normalizeViewId/pushView/history/edgeBack`。
+  - 决策2：`mobile-markdown.html` 保留薄封装（`getViewNavigation + pushView`），通过回调桥接任务刷新策略与阅读工具栏状态。
+  - 决策3：保留 `mobile-markdown-gestures.js` 的 `switchTab` 依赖接口，但由页面显式注入 `pushView`，避免全局符号漂移。
+- 调用链与决策链变化：
+  - 改造前：`mobile-markdown.html`（内联） -> 直接执行导航状态机与边缘返回手势。
+  - 改造后：`mobile-markdown.html`（业务层） -> `mobile-view-navigation.js`（状态机层） -> 回调 `taskListRefreshPolicy/setReadingToolsOpen`（策略层）。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js`
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js`
+  - 提取 `mobile-markdown.html` 最后一个主脚本块后执行 `node --check`

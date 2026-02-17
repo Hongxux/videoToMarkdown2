@@ -9,6 +9,7 @@ pyyaml>=6.0  # Configuration file loading
 # Will be needed later
 sentence-transformers>=2.2.0  # Sentence-BERT for semantic similarity
 openai>=1.0.0  # LLM API
+httpx[http2]>=0.27.0  # HTTP 客户端（含 HTTP/2 传输依赖 h2）
 opencv-python>=4.8.0  # CV processing
 pillow>=10.0.0  # Image processing
 openai-whisper>=1.0.0  # ASR

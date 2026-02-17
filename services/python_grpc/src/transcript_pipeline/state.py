@@ -66,7 +66,6 @@ class CleanedSentence(BaseModel):
     3) 步骤3：输出处理结果并提供可复用能力。"""
     sentence_id: str
     cleaned_text: str
-    removed_items: List[str] = Field(default_factory=list)
 
 
 class Paragraph(BaseModel):
@@ -339,9 +338,14 @@ class PipelineState(TypedDict):
     # ========== Step 2 输出 ==========
     corrected_subtitles: List[Dict]  # CorrectedSubtitle
     correction_summary: List[Dict]
+    cleanup_summary: List[Dict]
+    step2_step4_merged_done: bool
     
     # ========== Step 3 输出 ==========
     merged_sentences: List[Dict]  # MergedSentence
+
+    # ========== Step 3.5 输出 ==========
+    translated_sentences: List[Dict]  # TranslatedSentence
     
     # ========== Step 4 输出 ==========
     cleaned_sentences: List[Dict]  # CleanedSentence
@@ -440,9 +444,14 @@ def create_initial_state(
         # Step 2
         corrected_subtitles=[],
         correction_summary=[],
+        cleanup_summary=[],
+        step2_step4_merged_done=False,
         
         # Step 3
         merged_sentences=[],
+
+        # Step 3.5
+        translated_sentences=[],
         
         # Step 4
         cleaned_sentences=[],

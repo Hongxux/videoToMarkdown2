@@ -1,4 +1,5 @@
-import asyncio
+﻿import asyncio
+import types
 from pathlib import Path
 
 from services.python_grpc.src.content_pipeline.phase2b.assembly.request_models import (
@@ -442,6 +443,48 @@ def test_apply_external_materials_skips_non_assets_candidates_in_no_copy_mode(tm
     assert unit.materials.clip_paths == []
 
 
+def test_apply_external_materials_fallback_scans_unit_assets_when_requests_empty(tmp_path):
+    pipeline, output_dir = _build_pipeline(tmp_path)
+
+    assets_dir = output_dir / "assets"
+    unit_dir = assets_dir / "SU906"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    fallback_screenshot = unit_dir / "SU906_ss_route_001.jpg"
+    fallback_clip = unit_dir / "SU906_clip_route_001.mp4"
+    fallback_screenshot.write_bytes(b"img")
+    fallback_clip.write_bytes(b"clip")
+
+    unit = SemanticUnit(
+        unit_id="SU906",
+        knowledge_type="process",
+        knowledge_topic="Fallback Unit",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=8.0,
+    )
+
+    requests = MaterialRequests(
+        screenshot_requests=[],
+        clip_requests=[],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(assets_dir),
+        clips_dir=str(assets_dir),
+        material_requests=requests,
+    )
+
+    assert unit.materials is not None
+    assert unit.materials.screenshot_paths == [str(fallback_screenshot.resolve())]
+    assert unit.materials.clip_path == str(fallback_clip.resolve())
+    assert unit.materials.clip_paths == [str(fallback_clip.resolve())]
+
+
 def test_apply_external_materials_keeps_multiple_clip_paths(tmp_path):
     pipeline, output_dir = _build_pipeline(tmp_path)
 
@@ -597,8 +640,8 @@ def test_apply_external_materials_records_sentence_mapping_for_screenshot_item(t
             self.subtitle_id = subtitle_id
 
     pipeline.subtitles = [
-        _Subtitle("绗竴鍙?, 0.0, 3.0, "S001"),
-        _Subtitle("绗簩鍙?, 3.0, 8.0, "S002"),
+        _Subtitle("step one", 0.0, 3.0, "S001"),
+        _Subtitle("step two", 3.0, 8.0, "S002"),
     ]
 
     screenshots_dir = output_dir / "assets"
@@ -646,7 +689,7 @@ def test_apply_external_materials_records_sentence_mapping_for_screenshot_item(t
     item = unit.materials.screenshot_items[0]
     assert item["img_description"] == "vision_desc"
     assert item["sentence_id"] == "S002"
-    assert item["sentence_text"] == "绗簩鍙?
+    assert item["sentence_text"] == "step two"
     assert float(item["timestamp_sec"]) == 5.0
 
 
@@ -689,8 +732,8 @@ def test_apply_external_materials_writes_image_match_audit(tmp_path):
                 self.subtitle_id = subtitle_id
 
         pipeline.subtitles = [
-            _Subtitle("绗竴鍙?, 0.0, 3.0, "S001"),
-            _Subtitle("绗簩鍙?, 3.0, 8.0, "S002"),
+            _Subtitle("step one", 0.0, 3.0, "S001"),
+            _Subtitle("step two", 3.0, 8.0, "S002"),
         ]
 
         screenshots_dir = output_dir / "assets"
@@ -750,5 +793,179 @@ def test_apply_external_materials_writes_image_match_audit(tmp_path):
         assert first["mapping_status"] == "mapped"
     finally:
         os.environ.pop("MODULE2_CONFIG_PATH", None)
+
+
+def test_analyze_only_exposes_phase2a_contract(tmp_path):
+    output_dir = tmp_path / "out"
+    inter_dir = output_dir / "intermediates"
+    inter_dir.mkdir(parents=True, exist_ok=True)
+
+    (inter_dir / "step2_correction_output.json").write_text(
+        '{"corrected_subtitles":[{"subtitle_id":"S001","corrected_text":"hello","start_sec":0.0,"end_sec":1.0}]}',
+        encoding="utf-8",
+    )
+    (inter_dir / "step6_merge_cross_output.json").write_text(
+        '{"pure_text_script":[{"paragraph_id":"P001","text":"body","source_sentence_ids":["S001"]}]}',
+        encoding="utf-8",
+    )
+
+    pipeline = RichTextPipeline(
+        video_path="",
+        step2_path="",
+        step6_path="",
+        output_dir=str(output_dir),
+    )
+
+    unit = SemanticUnit(
+        unit_id="SUA01",
+        knowledge_type="process",
+        knowledge_topic="Topic",
+        full_text="unit text",
+        source_paragraph_ids=["P001"],
+        source_sentence_ids=["S001"],
+        start_sec=0.0,
+        end_sec=5.0,
+    )
+    unit.action_segments = []
+    unit.stable_islands = []
+
+    async def _fake_segment(**_kwargs):
+        return types.SimpleNamespace(semantic_units=[unit])
+
+    async def _fake_apply_modality(units):
+        return units
+
+    async def _fake_collect_requests(current_unit):
+        return MaterialRequests(
+            screenshot_requests=[
+                ScreenshotRequest(
+                    screenshot_id=f"{current_unit.unit_id}/{current_unit.unit_id}_head",
+                    timestamp_sec=1.0,
+                    label="head",
+                    semantic_unit_id=current_unit.unit_id,
+                )
+            ],
+            clip_requests=[
+                ClipRequest(
+                    clip_id=f"{current_unit.unit_id}/{current_unit.unit_id}_clip",
+                    start_sec=0.5,
+                    end_sec=2.5,
+                    knowledge_type="process",
+                    semantic_unit_id=current_unit.unit_id,
+                )
+            ],
+            action_classifications=[],
+        )
+
+    pipeline.segmenter = types.SimpleNamespace(segment=_fake_segment)
+    pipeline._apply_modality_classification = _fake_apply_modality
+    pipeline._collect_material_requests = _fake_collect_requests
+
+    screenshot_requests, clip_requests, semantic_units_path = asyncio.run(pipeline.analyze_only())
+
+    assert len(screenshot_requests) == 1
+    assert len(clip_requests) == 1
+    assert Path(semantic_units_path).exists()
+
+    import json
+
+    payload = json.loads(Path(semantic_units_path).read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    assert payload.get("knowledge_groups")
+    first_group = payload["knowledge_groups"][0]
+    assert first_group.get("units")
+    first_unit = first_group["units"][0]
+    assert first_unit["unit_id"] == "SUA01"
+    assert first_unit["material_requests"]["screenshot_requests"]
+    assert first_unit["material_requests"]["clip_requests"]
+
+
+def test_assemble_only_exposes_phase2b_contract(tmp_path):
+    output_dir = tmp_path / "out"
+    assets_dir = output_dir / "assets" / "SUB01"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+
+    screenshot_path = assets_dir / "SUB01_head.png"
+    clip_path = assets_dir / "SUB01_clip.mp4"
+    screenshot_path.write_bytes(b"img")
+    clip_path.write_bytes(b"video")
+
+    semantic_units_path = output_dir / "semantic_units_phase2a.json"
+    semantic_units_path.write_text(
+        """
+{
+  "schema_version": "phase2a.grouped.v1",
+  "knowledge_groups": [
+    {
+      "group_id": 1,
+      "group_name": "Assemble Topic",
+      "reason": "同一核心论点聚合",
+      "units": [
+        {
+          "unit_id": "SUB01",
+          "knowledge_type": "process",
+          "knowledge_topic": "Assemble Topic",
+          "full_text": "Assemble body",
+          "source_paragraph_ids": [],
+          "source_sentence_ids": [],
+          "start_sec": 0.0,
+          "end_sec": 8.0,
+          "stable_islands": [],
+          "action_segments": [],
+          "material_requests": {
+            "screenshot_requests": [
+              {
+                "screenshot_id": "SUB01/SUB01_head",
+                "timestamp_sec": 1.0,
+                "label": "head",
+                "semantic_unit_id": "SUB01"
+              }
+            ],
+            "clip_requests": [
+              {
+                "clip_id": "SUB01/SUB01_clip",
+                "start_sec": 0.2,
+                "end_sec": 2.4,
+                "knowledge_type": "process",
+                "semantic_unit_id": "SUB01"
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    pipeline = RichTextPipeline(
+        video_path="",
+        step2_path="",
+        step6_path="",
+        output_dir=str(output_dir),
+    )
+
+    markdown_path, json_path = asyncio.run(
+        pipeline.assemble_only(
+            semantic_units_json_path=str(semantic_units_path),
+            screenshots_dir=str(output_dir / "assets"),
+            clips_dir=str(output_dir / "assets"),
+            title="Assemble Title",
+        )
+    )
+
+    assert Path(markdown_path).exists()
+    assert Path(json_path).exists()
+
+    import json
+
+    doc_payload = json.loads(Path(json_path).read_text(encoding="utf-8"))
+    assert doc_payload.get("title") == "Assemble Title"
+    assert doc_payload.get("knowledge_groups")
+    first_group = doc_payload["knowledge_groups"][0]
+    assert first_group.get("units")
+    assert first_group["units"][0]["unit_id"] == "SUB01"
 
 

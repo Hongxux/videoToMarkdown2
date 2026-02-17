@@ -17,6 +17,7 @@ public class ModuleConfigService {
     private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
     
     private boolean vlEnabled = false;
+    private String vlModelName = "";
     private double ffmpegTimeoutMultiplier = 1.0;
     private int ffmpegTimeoutMinSec = 0;
     private int ffmpegTimeoutMaxSec = 0;
@@ -31,6 +32,11 @@ public class ModuleConfigService {
     public double getFfmpegTimeoutMultiplier() {
         refreshIfNeeded();
         return ffmpegTimeoutMultiplier;
+    }
+
+    public String getVLModelName() {
+        refreshIfNeeded();
+        return vlModelName != null ? vlModelName : "";
     }
 
     public int getFfmpegTimeoutMinSec() {
@@ -58,9 +64,12 @@ public class ModuleConfigService {
                 JsonNode vlNode = root.path("vl_material_generation");
                 if (!vlNode.isMissingNode()) {
                     this.vlEnabled = vlNode.path("enabled").asBoolean(false);
-                    logger.debug("Refreshed VL Config: enabled={}", this.vlEnabled);
+                    this.vlModelName = vlNode.path("api").path("model").asText("");
+                    logger.info("Refreshed VL Config: file={}, enabled={}", configFile.getAbsolutePath(), this.vlEnabled);
                 } else {
                     this.vlEnabled = false;
+                    this.vlModelName = "";
+                    logger.warn("vl_material_generation node missing in config: {}", configFile.getAbsolutePath());
                 }
 
                 JsonNode ffmpegNode = root.path("ffmpeg_extraction");
@@ -76,6 +85,7 @@ public class ModuleConfigService {
             } else {
                 logger.warn("module2_config.yaml not found, defaulting VL to false");
                 this.vlEnabled = false;
+                this.vlModelName = "";
                 this.ffmpegTimeoutMultiplier = 1.0;
                 this.ffmpegTimeoutMinSec = 0;
                 this.ffmpegTimeoutMaxSec = 0;
@@ -83,6 +93,7 @@ public class ModuleConfigService {
         } catch (IOException e) {
             logger.error("Failed to read module2_config.yaml: {}", e.getMessage());
             this.vlEnabled = false;
+            this.vlModelName = "";
             this.ffmpegTimeoutMultiplier = 1.0;
             this.ffmpegTimeoutMinSec = 0;
             this.ffmpegTimeoutMaxSec = 0;
@@ -92,13 +103,25 @@ public class ModuleConfigService {
     }
 
     private File locateConfigFile() {
-        // Try multiple possible paths relative to execution directory
-        // Single source of truth: config/module2_config.yaml
-        // Keep one local fallback only for java-orchestrator standalone working dir.
-        
+        String explicitPath = System.getenv("MODULE2_CONFIG_PATH");
+        if (explicitPath != null && !explicitPath.isBlank()) {
+            File explicit = Paths.get(explicitPath.trim()).toFile();
+            if (explicit.exists()) {
+                try {
+                    return explicit.getCanonicalFile();
+                } catch (IOException e) {
+                    return explicit;
+                }
+            }
+            logger.warn("MODULE2_CONFIG_PATH is set but file does not exist: {}", explicit.getAbsolutePath());
+        }
+
         String[] candidates = {
             "config/module2_config.yaml",
-            "../../config/module2_config.yaml"
+            "../config/module2_config.yaml",
+            "../../config/module2_config.yaml",
+            "../../../config/module2_config.yaml",
+            "../../../../config/module2_config.yaml"
         };
 
         String userDir = System.getProperty("user.dir");

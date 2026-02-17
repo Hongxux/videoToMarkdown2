@@ -8,6 +8,37 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 
+def test_resolve_adaptive_prefetch_step_keeps_base_rate_under_cap():
+    from services.python_grpc.src.content_pipeline.infra.runtime.vl_prefetch_utils import (
+        resolve_adaptive_prefetch_step,
+    )
+
+    step = resolve_adaptive_prefetch_step(
+        start_frame=0,
+        end_frame=120,
+        sample_rate=2,
+        max_frames_per_chunk=240,
+    )
+
+    assert step == 2
+
+
+def test_resolve_adaptive_prefetch_step_raises_rate_over_cap():
+    from services.python_grpc.src.content_pipeline.infra.runtime.vl_prefetch_utils import (
+        resolve_adaptive_prefetch_step,
+    )
+
+    # 跨度 3001 帧，若步长=1 会超出 cap=240，需自动放大步长。
+    step = resolve_adaptive_prefetch_step(
+        start_frame=0,
+        end_frame=3000,
+        sample_rate=1,
+        max_frames_per_chunk=240,
+    )
+
+    assert step >= 13
+
+
 def test_chunking_groups_requests_by_span():
     from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
 
@@ -66,5 +97,41 @@ def test_task_params_filter_ts_map():
     assert len(task_params) == 2
     assert all(not p.get("skip") for p in task_params)
     assert all(p.get("shm_frames") for p in task_params)
+
+
+def test_chunking_prefers_request_level_window_over_global_time_window():
+    from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
+
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "screenshot_optimization": {
+                "prefetch_union_max_span_seconds": 10.0,
+                "prefetch_chunk_max_requests": 1000,
+            },
+        }
+    )
+
+    requests: List[Dict[str, Any]] = [
+        {"unit_id": "u1", "timestamp_sec": 5.0, "_window_start_sec": 4.2, "_window_end_sec": 4.8},
+        {"unit_id": "u2", "timestamp_sec": 8.0},
+    ]
+
+    chunks = generator._build_screenshot_prefetch_chunks(
+        screenshot_requests=requests,
+        time_window=1.0,
+        max_span_seconds=20.0,
+        max_requests=1000,
+    )
+
+    assert len(chunks) == 1
+    windows = chunks[0]["windows"]
+    assert len(windows) == 2
+    win_u1 = next(item for item in windows if item["unit_id"] == "u1")
+    win_u2 = next(item for item in windows if item["unit_id"] == "u2")
+    assert abs(float(win_u1["expanded_start"]) - 4.2) < 1e-6
+    assert abs(float(win_u1["expanded_end"]) - 4.8) < 1e-6
+    assert abs(float(win_u2["expanded_start"]) - 7.0) < 1e-6
+    assert abs(float(win_u2["expanded_end"]) - 9.0) < 1e-6
 
 

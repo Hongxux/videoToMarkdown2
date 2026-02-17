@@ -1,6 +1,6 @@
-# 仓库职责地图
+﻿# 仓库职责地图
 
-更新日期：2026-02-09  
+更新日期：2026-02-17  
 范围：`D:/videoToMarkdownTest2`
 
 ## 一、为什么要做这份地图
@@ -32,14 +32,19 @@
 - `README.md`：仓库导航与快速上手入口。
 - `apps/grpc-server/main.py`：gRPC 标准启动入口。
 - `apps/worker/main.py`：Worker 标准启动入口。
+- `apps/wecom-bot/main.py`：企业微信回调机器人启动入口（监听 5000 端口）。
+- `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`：移动端任务列表、任务提交（URL/上传）与 Markdown 渲染页面。
 
 ## 四、核心调用链与目录映射
 - API/编排（Java）：`services/java-orchestrator/`
 - Python gRPC 入口：`apps/grpc-server/main.py`
+- 企业微信回调入口：`apps/wecom-bot/main.py`
 - Python 服务实现：`services/python_grpc/src/`
 - 合约真源：`contracts/proto/video_processing.proto`
 - Python 生成代码：`contracts/gen/python/`
 - 运行产物：`var/storage/{url_hash}/...`
+- 上传落盘缓冲目录：`var/uploads/`（`POST /api/tasks/upload`）
+- 移动端 Markdown API：`/api/mobile/tasks`、`/api/mobile/tasks/{taskId}/markdown`、`/api/mobile/tasks/{taskId}/asset`
 
 ## 五、已完成迁移与下线目录（2026-02-09）
 - 历史兼容壳目录已删除，目录层级仅保留新架构路径。

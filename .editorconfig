@@ -1,0 +1,11 @@
+root = true
+
+[*]
+charset = utf-8
+insert_final_newline = true
+
+[*.md]
+trim_trailing_whitespace = false
+
+[docs/architecture/*.md]
+charset = utf-8-bom

@@ -13,7 +13,27 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
+
+import cv2
+
+from services.python_grpc.src.common.utils.opencv_decode import (
+    probe_capture_readable,
+    probe_primary_video_codec,
+)
+
+
+def _apply_count_limit(items: List[Any], count: Optional[int]) -> List[Any]:
+    """根据 count 对列表限长；count 为空或 <=0 时返回全部。"""
+    if count is None or count <= 0:
+        return items
+    return items[:count]
+
+
+def _is_av1_codec(codec_name: Optional[str]) -> bool:
+    """判断 ffprobe 编码结果是否属于 AV1/AV01 变体。"""
+    normalized = str(codec_name or "").strip().lower()
+    return normalized in {"av1", "av01"} or normalized.startswith("av1.")
 
 
 def validate_video(video_path: str) -> Tuple[bool, Optional[str]]:
@@ -51,19 +71,22 @@ def validate_video(video_path: str) -> Tuple[bool, Optional[str]]:
     
     # 尝试用 OpenCV 打开
     try:
-        import cv2
+        codec_name = probe_primary_video_codec(str(path))
+
+        # step1 入口只做轻量校验：AV1/AV01 先短路放行，避免触发 OpenCV 底层噪声报错。
+        if _is_av1_codec(codec_name):
+            return True, None
+
         cap = cv2.VideoCapture(str(path))
-        if not cap.isOpened():
-            return False, f"Cannot open video file: {video_path}"
-        
-        # 检查帧数
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if frame_count == 0:
-            return False, f"Video has no frames: {video_path}"
-        
-        cap.release()
-        return True, None
-        
+        try:
+            if probe_capture_readable(cap):
+                return True, None
+        finally:
+            cap.release()
+
+        codec_suffix = f" (codec={codec_name})" if codec_name else ""
+        return False, f"Cannot decode video file{codec_suffix}: {video_path}"
+
     except Exception as e:
         return False, f"Error validating video: {str(e)}"
 
@@ -122,7 +145,7 @@ def validate_subtitle(subtitle_path: str) -> Tuple[bool, Optional[str]]:
 
 def read_subtitle_sample(
     subtitle_path: str, 
-    count: int = 20
+    count: Optional[int] = 20
 ) -> List[Dict[str, any]]:
     """
     执行逻辑：
@@ -156,7 +179,7 @@ def read_subtitle_sample(
         return _parse_txt(path, count)
 
 
-def _parse_srt(path: Path, count: int) -> List[Dict]:
+def _parse_srt(path: Path, count: Optional[int]) -> List[Dict]:
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -181,7 +204,7 @@ def _parse_srt(path: Path, count: int) -> List[Dict]:
     pattern = r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\n(.+?)(?=\n\n|\Z)'
     matches = re.findall(pattern, content, re.DOTALL)
     
-    for i, (idx, start, end, text) in enumerate(matches[:count]):
+    for i, (idx, start, end, text) in enumerate(_apply_count_limit(matches, count)):
         subtitles.append({
             "subtitle_id": f"SUB{int(idx):03d}",
             "text": text.strip().replace('\n', ' '),
@@ -192,7 +215,7 @@ def _parse_srt(path: Path, count: int) -> List[Dict]:
     return subtitles
 
 
-def _parse_vtt(path: Path, count: int) -> List[Dict]:
+def _parse_vtt(path: Path, count: Optional[int]) -> List[Dict]:
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -217,7 +240,7 @@ def _parse_vtt(path: Path, count: int) -> List[Dict]:
     pattern = r'(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})\n(.+?)(?=\n\n|\Z)'
     matches = re.findall(pattern, content, re.DOTALL)
     
-    for i, (start, end, text) in enumerate(matches[:count]):
+    for i, (start, end, text) in enumerate(_apply_count_limit(matches, count)):
         subtitles.append({
             "subtitle_id": f"SUB{i+1:03d}",
             "text": text.strip().replace('\n', ' '),
@@ -228,7 +251,7 @@ def _parse_vtt(path: Path, count: int) -> List[Dict]:
     return subtitles
 
 
-def _parse_txt(path: Path, count: int) -> List[Dict]:
+def _parse_txt(path: Path, count: Optional[int]) -> List[Dict]:
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -254,30 +277,91 @@ def _parse_txt(path: Path, count: int) -> List[Dict]:
             lines = f.readlines()
     
     # 匹配 [HH:MM:SS -> HH:MM:SS] 或者 [MM:SS -> MM:SS]
-    bracket_pattern = re.compile(r'\[([\d:.]+) -> ([\d:.]+)\]\s*(.*)')
-    
-    for i, line in enumerate(lines[:count]):
-        line = line.strip()
+    range_pattern = re.compile(r'^\[([\d:.]+) -> ([\d:.]+)\]\s*(.*)$')
+    # 匹配 [HH:MM:SS] 文本 或 [MM:SS] 文本
+    single_ts_pattern = re.compile(r'^\[([\d:.]+)\]\s*(.*)$')
+
+    parsed_rows: List[Dict] = []
+    for line_index, raw_line in enumerate(_apply_count_limit(lines, count)):
+        line = raw_line.strip()
         if not line:
             continue
-            
-        match = bracket_pattern.match(line)
-        if match:
-            start_str, end_str, text = match.groups()
-            subtitles.append({
-                "subtitle_id": f"SUB{len(subtitles)+1:03d}",
-                "text": text.strip(),
-                "start_sec": _hms_to_sec(start_str),
-                "end_sec": _hms_to_sec(end_str)
-            })
-        else:
-            # 兼容无时间戳格式：原有估算逻辑
-            subtitles.append({
-                "subtitle_id": f"SUB{len(subtitles)+1:03d}",
+
+        range_match = range_pattern.match(line)
+        if range_match:
+            start_str, end_str, text = range_match.groups()
+            start_sec = _hms_to_sec(start_str)
+            end_sec = _hms_to_sec(end_str)
+            if end_sec < start_sec:
+                start_sec, end_sec = end_sec, start_sec
+            parsed_rows.append(
+                {
+                    "mode": "range",
+                    "line_index": line_index,
+                    "text": text.strip(),
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                }
+            )
+            continue
+
+        single_match = single_ts_pattern.match(line)
+        if single_match:
+            start_str, text = single_match.groups()
+            parsed_rows.append(
+                {
+                    "mode": "single",
+                    "line_index": line_index,
+                    "text": text.strip(),
+                    "start_sec": _hms_to_sec(start_str),
+                }
+            )
+            continue
+
+        # 兼容无时间戳格式：保留原有估算逻辑
+        parsed_rows.append(
+            {
+                "mode": "plain",
+                "line_index": line_index,
                 "text": line,
-                "start_sec": i * 2.0,
-                "end_sec": (i + 1) * 2.0
-            })
+            }
+        )
+
+    for row_index, row in enumerate(parsed_rows):
+        mode = row.get("mode")
+        if mode == "range":
+            start_sec = row["start_sec"]
+            end_sec = row["end_sec"]
+        elif mode == "single":
+            start_sec = row["start_sec"]
+            end_sec = start_sec + 2.0
+
+            # 如果后续存在更大的时间戳，则以它作为当前字幕结束时间
+            for next_row in parsed_rows[row_index + 1:]:
+                next_mode = next_row.get("mode")
+                if next_mode == "range":
+                    next_start = float(next_row.get("start_sec", start_sec))
+                elif next_mode == "single":
+                    next_start = float(next_row.get("start_sec", start_sec))
+                else:
+                    continue
+
+                if next_start > start_sec:
+                    end_sec = next_start
+                    break
+        else:
+            source_index = int(row.get("line_index", row_index))
+            start_sec = source_index * 2.0
+            end_sec = (source_index + 1) * 2.0
+
+        subtitles.append(
+            {
+                "subtitle_id": f"SUB{len(subtitles)+1:03d}",
+                "text": str(row.get("text", "")).strip(),
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+            }
+        )
     
     return subtitles
 
@@ -309,7 +393,7 @@ def _hms_to_sec(time_str: str) -> float:
         return 0.0
 
 
-def _parse_json(path: Path, count: int) -> List[Dict]:
+def _parse_json(path: Path, count: Optional[int]) -> List[Dict]:
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -333,9 +417,10 @@ def _parse_json(path: Path, count: int) -> List[Dict]:
     
     # 支持多种 JSON 格式
     if isinstance(data, list):
-        items = data[:count]
+        items = _apply_count_limit(data, count)
     elif isinstance(data, dict):
-        items = data.get("subtitles", data.get("segments", data.get("items", [])))[:count]
+        raw_items = data.get("subtitles", data.get("segments", data.get("items", [])))
+        items = _apply_count_limit(raw_items, count)
     else:
         return []
     

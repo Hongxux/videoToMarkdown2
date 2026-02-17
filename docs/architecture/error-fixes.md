@@ -13,8 +13,506 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-17 手机端上传视频失败（移动端路由前缀不一致）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 手机端 `mobile-markdown.html` 已出现“上传视频”入口，但点击提交后仍失败，任务无法入队。
+  - 桌面端 `index.html` 上传同类文件可用，问题主要集中在移动端入口链路。
+- 触发条件：
+  - 移动端页面在受限路由/代理场景下，仅稳定开放 `/api/mobile/*` 前缀。
+  - 前端提交请求直接调用 `/api/tasks` 与 `/api/tasks/upload`，与移动端网关前缀不一致时可能被拦截或路由失败。
+- 根因定位：
+  - 这是“移动端页面 API 前缀”和“移动端实际可达路由”不一致导致的接口可达性问题。
+  - 现有后端已具备任务提交能力，但缺少移动端专用别名入口，导致前端必须跨前缀调用。
+- 修复措施：
+  - 后端新增移动端提交别名接口（复用同一任务队列与处理链）：
+    - `POST /api/mobile/tasks/submit`（URL/BV 提交）
+    - `POST /api/mobile/tasks/upload`（multipart 文件上传）
+  - 移动端前端提交逻辑改为优先调用上述 `/api/mobile/*` 接口，避免跨前缀依赖。
+  - 前端提交按钮增加“内联点击兜底”（`onclick` + `onchange`）：
+    - 即使 `bindEvents()` 因其他脚本异常中断，上传按钮仍可直接触发提交函数与文件选择提示。
+    - 目标是消除“点击按钮无任何提示”的静默失败体验。
+  - 保持桌面端 `/api/tasks` 与 `/api/tasks/upload` 不变，确保兼容既有调用方。
+- 验证方式：
+  - `node --check` 校验 `mobile-markdown.html` 内联脚本语法。
+  - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml` 校验 Java 编译通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 校验架构文档编码。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充移动端提交 API 的 Controller 级用例，覆盖 URL 提交和文件上传两个入口。
+  - 监控：前端保留提交失败提示文案（含 HTTP 状态/服务端 message），便于定位是网关路由问题还是业务校验失败。
+  - 校验：移动端页面评审时强制检查 API 前缀是否统一使用 `/api/mobile/*`。
+  - 回滚：若移动端别名接口出现异常，可临时回退前端到 `/api/tasks*` 直连模式。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `POST /api/mobile/tasks/submit`
+  - `POST /api/mobile/tasks/upload`
+- 复盘要点：
+  - 跨端页面（桌面/移动）应使用各自稳定路由域，不应假设所有环境都能跨前缀访问同一 API。
+  - “功能已实现但入口不可达”属于典型接口编排问题，需在架构层明确前缀契约。
+
+## 2026-02-17 cpolar 场景下 index.html 可访问但任务提交失败（前端地址硬编码 + CORS 来源受限）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 手机通过 cpolar/ngrok 可正常打开 `index.html`，但点击“提交任务”后立即失败。
+  - 任务无法进入 `POST /api/tasks`，WebSocket 状态也长期断连，导致移动端无法使用任务面板。
+- 触发条件：
+  - 页面经 `https://<tunnel-domain>/...` 访问，但前端脚本仍把 API/WS 目标固定为 `localhost:8080` 与 `ws://localhost:8080`。
+  - 移动端浏览器中 `localhost` 指向手机本机，不是服务端主机；且 HTTPS 页面发起 `ws://` 会触发混合内容限制。
+- 根因定位：
+  - 前端配置层将后端地址硬编码到本地开发环境，未遵循“同源优先”的部署策略。
+  - WebSocket 协议未根据页面协议自动切换（`https -> wss`），隧道访问下被浏览器安全策略阻断。
+  - Java 侧 CORS 白名单仅包含 `localhost/127.0.0.1/file`，当发生跨源请求（例如调试时注入外部 API_BASE）会直接返回 `HTTP 403`。
+- 修复措施：
+  - `index.html` 配置改为默认同源：
+    - API 默认 `window.location.origin + /api`
+    - WS 默认按 `window.location.protocol` 自动选择 `ws/wss`，并复用 `window.location.host`
+  - 保留手动覆盖能力：支持通过 `window.__API_BASE__` 与 `window.__WS_URL__` 注入目标地址。
+  - 提交任务时补充 `response.ok/result.success` 双重判断，并把服务端错误信息透传到弹窗，避免“只提示服务未运行”。
+  - Java CORS 改为 `allowedOriginPatterns("*")`，兼容动态隧道域名与调试场景，避免因 Origin 变化被 403 拦截。
+- 验证方式：
+  - 打开隧道域名页面，提交任务后观察浏览器网络请求目标是否为同源 `/api/tasks`。
+  - 观察页面 WebSocket 是否连接到 `wss://<tunnel-domain>/ws/tasks`（HTTPS 场景）。
+  - Java 编译校验：`mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：增加前端 smoke checklist，覆盖“同源 API + 协议自适应 WS”两项。
+  - 监控：前端日志保留 `Submit error` 与 `WebSocket error` 输出，便于快速定位是 API 失败还是 WS 失败。
+  - 校验：代码评审要求禁止将生产可见页面默认地址写死为 `localhost`。
+  - 回滚：若临时需要指向特定后端，可通过 `window.__API_BASE__/window.__WS_URL__` 注入，不必改源码回滚。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `POST /api/tasks`
+  - `GET /ws/tasks`
+- 复盘要点：
+  - 隧道访问与本地开发是两种网络语义，前端目标地址必须以“当前访问源”为默认真源。
+  - 任何跨设备访问场景下，`localhost` 硬编码都应视为高风险配置项。
+
+## 2026-02-17 docs/architecture 文档在 PowerShell 默认读取下出现乱码（已修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - `docs/architecture/overview.md`、`docs/architecture/upgrade-log.md` 等文件在 PowerShell 默认 `Get-Content` 读取下出现乱码（例如典型错码片段）。
+  - 影响架构文档的可读性与协作评审效率，容易误判为“正文损坏”。
+- 触发条件：
+  - 文档实际以 UTF-8 保存但缺少 BOM。
+  - 读取环境使用 ANSI/本地代码页作为默认解码策略（典型为 Windows PowerShell 默认行为）。
+- 根因定位：
+  - 根因不是“文本内容坏掉”，而是“写入编码与读取编码不一致”。
+  - 项目缺少对 `docs/architecture` 的显式编码规范与自动化校验，导致新文档可重复引入同类风险。
+- 修复措施：
+  - 将 `docs/architecture` 下缺少 BOM 的文档统一转为 `UTF-8 with BOM`：
+    - `docs/architecture/perf-benchmarks.md`
+    - `docs/architecture/python-module-responsibilities.md`
+    - `docs/architecture/repository-map.md`
+    - `docs/architecture/overview.md`
+    - `docs/architecture/upgrade-log.md`
+  - 新增 `.editorconfig`，强制 `docs/architecture/*.md` 使用 `utf-8-bom`。
+  - 新增 `tools/architecture/check_docs_encoding.py`，默认执行 BOM 校验；可通过 `--check-mojibake` 进行乱码特征检查，并提供 `--fix` 自动修复缺 BOM 文件。
+- 验证方式：
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py --check-mojibake`（用于增量巡检）
+  - `Get-Content docs/architecture/overview.md | Select-Object -First 5`
+  - `Get-Content docs/architecture/upgrade-log.md | Select-Object -First 5`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：在本地提交流程增加 `python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 监控：代码评审关注架构文档首行是否出现 BOM 变更；若新增文档，确认校验脚本通过。
+  - 校验：约定 `docs/architecture/*.md` 修改后必须跑一遍编码检查脚本。
+  - 回滚：若个别工具链不兼容 BOM，可仅对该文件使用脚本 `--fix` 之外的人工回退，但需同步更新 `.editorconfig` 匹配规则。
+- 相关文件/接口：
+  - `.editorconfig`
+  - `tools/architecture/check_docs_encoding.py`
+  - `docs/architecture/perf-benchmarks.md`
+  - `docs/architecture/python-module-responsibilities.md`
+  - `docs/architecture/repository-map.md`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+- 复盘要点：
+  - 编码问题优先从“协议一致性”治理：统一写入格式 + 自动化校验，比人工修文更稳。
+  - 对中文高密度文档，`UTF-8 with BOM` 在 Windows 终端生态中具有更好的开箱可读性。
+
 ## 2026-02-04 初始化
 - 本文件创建，等待首条错误修正记录。
+
+## 2026-02-16 Step56 日志参数签名不兼容导致节点秒级失败
+- 日期：2026-02-16
+- 现象与影响范围：
+  - 在视频主题 `AI编程助手OpenClaw的开发与使用体验` 的 Stage1 执行中，`step5_6_dedup_merge` 刚进入即失败。
+  - 日志报错：`TypeError: StepLogger.info() takes 2 positional arguments but 3 were given`，导致 Step56 未产生任何有效输出（0 次 LLM 调用）。
+  - 影响：当从 Step4 产物继续执行时，Step56 被异常短路，无法生成 `pure_text_script`。
+- 触发条件：
+  - `step5_6_node` 使用了标准 logging 的格式化调用风格：
+    - `logger.info("...%s...", value)`
+  - 但 `StepLogger.info` 的签名为 `info(self, message: str, **kwargs)`，不接收第二个位置参数。
+- 根因定位：
+  - 这是“日志门面接口（StepLogger）”与“标准 logging 调用习惯”的签名契约不一致问题。
+  - 本次故障发生在 `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py` 的 Step56 入口日志。
+- 修复措施：
+  - 将 Step56 对应日志改为单参数字符串（f-string），确保符合 `StepLogger.info` 签名。
+  - 新增回归测试：使用 `info(self, message, **kwargs)` 的严格 logger 替身执行 Step56，校验不会再触发签名异常。
+- 验证方式：
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py -k "step56 and strict_info_logger_signature" -q`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py -k "step56_respects_window_overlap_env" -q`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“严格 `info` 签名 logger”回归用例，防止再次引入 `%s` 多位置参数调用。
+  - 监控：在 Stage1 日志中关注 `step5_6_dedup_merge` 的 `0 LLM calls + 毫秒级失败` 模式，作为快速告警特征。
+  - 校验：代码评审时统一检查 `StepLogger` 调用只传单个 message 与显式 kwargs。
+  - 回滚：若线上需临时回退，仅回退 Step56 该条日志写法，不影响 Step4/Step56 主业务逻辑。
+- 从 Step4 重跑指引（用于该类故障后快速恢复）：
+  - 场景A：仅重跑 Step56（Step4 产物可复用）
+    - 载入 `step4_clean_local_output.json` 的 `cleaned_sentences`，并提供 `main_topic`。
+    - 运行时设置 `resume_state={"cleaned_sentences": ..., "main_topic": ...}`。
+    - 将 `resume_from_step` 设为 `step4_clean_local`，表示“Step4 已完成，从下一步继续”。
+  - 场景B：重跑 Step4 + Step56
+    - 载入 `step3_5_translate_output.json` 的 `translated_sentences`。
+    - 运行时设置 `resume_state={"translated_sentences": ..., "main_topic": ...}`。
+    - 将 `resume_from_step` 设为 `step3_5_translate`，表示“Step3.5 已完成，从 Step4 开始”。
+  - 说明：本项目中 `resume_from_step` 语义是“最后一个已完成步骤”，不是“要开始执行的步骤”。
+- 相关文件/接口：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+  - `services/python_grpc/src/transcript_pipeline/monitoring/logger.py`
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+- 复盘要点：
+  - 所有日志门面（wrapper）都应与标准 logging 调用习惯明确对齐或在接口层做兼容，避免“非业务逻辑异常”阻断主流程。
+  - 对关键步骤（Step56）应优先保证“日志异常不影响主逻辑”的健壮性策略。
+
+## 2026-02-16 Step3 仅返回合并组时未覆盖字幕丢失
+- 日期：2026-02-16
+- 现象与影响范围：
+  - 当 Step3 的 LLM 响应只返回“需要合并”的字幕组时，旧实现只拼接 LLM 返回项，未被任何合并组覆盖的字幕会被遗漏。
+  - 对下游 Step3.5/Step4 的句子序列造成缺口，影响翻译、清理和最终时序一致性。
+- 触发条件：
+  - LLM 按新约束只输出 `merged_groups`，不再回传每条直通句。
+  - 或窗口 overlap 场景下仅输出部分可合并分组。
+- 根因定位：
+  - Step3 旧逻辑把“窗口解析结果”直接当作“最终 merged_sentences”，缺少全局覆盖补齐流程。
+  - 对 overlap 的重复/冲突分组只做拼接，不做基于原始字幕序的统一装配。
+- 修复措施：
+  - Step3 改为两阶段：
+    - 先收集所有窗口的合并候选组；
+    - 再由本地按原始字幕顺序统一组装最终 `merged_sentences`。
+  - 本地显式提取已合并 `subtitle_id` 集合，未覆盖字幕自动构建直通句。
+  - 最终按原始字幕顺序输出并重编 `sentence_id`，确保时序稳定。
+  - Step3 prompt 更新为“LLM 仅返回需要合并的组”，Step3 解析器新增对 `merged_groups` 形态兼容。
+- 验证方式：
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py -q`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_step3_5_translation.py -q`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“LLM 仅返回部分合并组时本地直通补齐”的回归用例，防止再次丢句。
+  - 监控：持续观测 `step_observability` 中 `selected_merge_groups/passthrough_sentences/input_subtitle_count/output_sentence_count`。
+  - 校验：Step3 产物审计时增加“覆盖率检查”（所有输入 subtitle 至少被一个输出句覆盖一次）。
+  - 回滚：若新策略出现异常，可临时将 Step3 prompt 切回全量输出模式，同时保留本地补齐逻辑。
+- 相关文件/接口：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step3_merge_windowing.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py`
+- 复盘要点：
+  - Step3 的正确职责应是“LLM 提供候选语义合并，本地保证覆盖与时序”，二者不可混淆。
+  - 涉及滑窗并发的步骤必须在窗口后做一次全局确定化装配，不能直接拼窗口结果。
+
+## 2026-02-16 Step4 误删中英对照术语与未覆盖句缺失风险
+- 日期：2026-02-16
+- 现象与影响范围：
+  - Step4 局部清理在个别样本中会把 `智能体（agent）` 这类中英对照删成单语表达，关键术语可追溯性下降。
+  - 当 LLM 仅返回部分句子时，旧逻辑虽有 batch 内兜底，但缺少“全局覆盖后按时间重组”的强约束，审计上不直观。
+- 触发条件：
+  - LLM 输出偏离提示词，删除括号中的英文（或中文）对照。
+  - LLM 出于节省输出仅返回子集句子，或个别句子返回空文本。
+- 根因定位：
+  - Step4 合约冗余：强制输出 `removed_items`，让模型把注意力分散到无下游价值字段。
+  - 术语安全边界缺失：对“中英对照必须保留”仅有软提示，无本地硬保护。
+  - 结果组装语义不够显式：缺少“先全局覆盖再统一排序回填”的固定流程。
+- 修复措施：
+  - Prompt 收敛为 `cleaned_sentences[].text`，移除 `removed_items` 要求。
+  - 本地新增 `_drops_cjk_en_glossary_pair(...)`，命中误删对照时回退原句。
+  - Step4 汇总改为：
+    - 先合并所有 batch 的 LLM 覆盖结果；
+    - 未覆盖句自动构建直通句；
+    - 最终按 `start_sec/end_sec` 排序拼回 `sentence_id`。
+  - Step4 解析器兼容旧字段但忽略 `removed_items`，确保平滑过渡。
+- 验证方式：
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py -q`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py -q`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py -q`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“中英对照保护命中回退”“LLM 子集返回时本地直通补齐”回归用例。
+  - 监控：持续观察 `step_observability.step4_clean_local` 中
+    - `sentence_passthrough_used`
+    - `bilingual_pair_guard_fallback_used`
+    - `empty_cleaned_text_fallback_used`
+  - 校验：上线前抽样检查 Step4 输出是否仍包含关键术语对照。
+  - 回滚：如需紧急回退，可仅回退 Step4 术语保护函数与 prompt 收敛改动，不影响 Step5_6 合并链路。
+- 相关文件/接口：
+  - `services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+  - `services/python_grpc/src/transcript_pipeline/nodes/step_contracts.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_step_contracts.py`
+- 复盘要点：
+  - 清理类节点应坚持“最小必要输出契约”，避免让模型承担无业务价值的附加字段。
+  - 关键术语完整性需要本地硬规则兜底，而不是仅依赖提示词约束。
+
+## 2026-02-15 Python gRPC 启动失败（`google.protobuf.runtime_version` 缺失）
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 运行 `pytest` 或启动 `grpc_service_impl.py` 时，在导入 `video_processing_pb2` 阶段报错：
+    - `ImportError: cannot import name 'runtime_version' from 'google.protobuf'`
+  - 影响 Python gRPC 服务启动与 server 相关测试收集。
+- 触发条件：
+  - 代码仓库内 `contracts/gen/python/video_processing_pb2.py` 由 `Protobuf Python Version: 6.31.1` 生成。
+  - 本机环境实际安装 `protobuf==3.20.2`（不包含 `runtime_version`）。
+- 根因定位：
+  - 依赖清单 `requirements.txt` 对 protobuf 下限约束过低（`>=4.25.0`），无法约束到与当前生成代码一致的运行时版本。
+  - 同时安装的 `grpcio-tools==1.76.0` 依赖要求是 `protobuf>=6.31.1,<7.0.0`，与低版本 protobuf 形成隐性不一致。
+- 修复措施：
+  - 将 gRPC/protobuf 依赖约束统一升级为与生成代码一致：
+    - `grpcio>=1.76.0,<2.0.0`
+    - `grpcio-tools>=1.76.0,<2.0.0`
+    - `protobuf>=6.31.1,<7.0.0`
+- 验证方式：
+  - 环境信息核验：
+    - `python -m pip show protobuf`（定位旧版本 3.20.2）
+    - 读取 `contracts/gen/python/video_processing_pb2.py` 头部（确认生成版本 6.31.1）
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+    - `python -m py_compile services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：在 CI 增加一条“导入 `video_processing_pb2` smoke test”，提前暴露 protobuf 运行时不匹配。
+  - 校验：每次重新生成 `contracts/gen/python/*.py` 后，自动检查 `Protobuf Python Version` 与 `requirements.txt` 下限一致。
+  - 回滚：若升级后出现第三方兼容问题，可临时降级 `grpcio-tools` 并重新生成 pb2，但需保持“生成器版本 = 运行时版本”一致。
+- 相关文件/接口：
+  - `requirements.txt`
+  - `contracts/gen/python/video_processing_pb2.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+- 复盘要点：
+  - protobuf 代码生成器版本与运行时版本必须联动管理，不能只维护“可安装”下限。
+  - 关键契约代码（pb2）应以“导入即验证”的方式纳入最小健康检查。
+
+## 2026-02-16 流式截图 Worker 无效 route ROI 探测触发 AV1 解码噪声
+- 日期：2026-02-16
+- 现象与影响范围：
+  - `Streaming Pipeline` 的 `run_screenshot_selection_task` 执行期间，日志出现
+    `Could not open codec av1` / `Failed to initialize VideoCapture`。
+  - 任务通常仍可产出截图结果（使用 SharedMemory 预读帧），但日志噪声显著，且首帧阶段可能引入额外探测开销。
+- 触发条件：
+  - 输入视频为 AV1，且 `run_screenshot_selection_task` 进入 `Task start` 后执行 route ROI 计算路径。
+  - OpenCV/FFMPEG 运行时对 AV1 解码兼容性不足时，探测会打印底层错误。
+- 根因定位：
+  - `services/python_grpc/src/vision_validation/worker.py` 的 `run_screenshot_selection_task` 在该路径中调用了 `_get_route_roi(video_path, ...)`。
+  - 但该函数后续仅调用 `select_from_shared_frames(...)`，并不消费 ROI，属于“无业务价值的额外探测”。
+- 修复措施：
+  - 移除 `run_screenshot_selection_task` 中未被使用的 `_get_route_roi(...)` 调用。
+  - 新增回归测试，确保该任务后续改动不会重新引入 route ROI 视频探测。
+- 验证方式：
+  - `pytest services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py -q`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“`run_screenshot_selection_task` 不调用 `_get_route_roi`”单测，防止热路径回归。
+  - 监控：观察 `CV_WORKER` 日志中 AV1 解码错误在该路径的出现频次是否下降。
+  - 校验：代码评审时检查“读取 SharedMemory 的 worker 任务是否引入了不必要的二次视频 IO”。
+  - 回滚：如需回滚仅恢复单行调用，影响范围限于该 worker 任务，不影响主流程数据契约。
+- 相关文件/接口：
+  - `services/python_grpc/src/vision_validation/worker.py`
+  - `services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py`
+- 复盘要点：
+  - 共享内存已提供帧数据的热路径，应避免任何与业务无关的二次视频探测。
+  - AV1 兼容问题不仅要看“是否失败”，也要控制“可恢复路径中的日志噪声与冗余开销”。
+
+## 2026-02-14 OpenCV AV1 解码失败（`isOpened` 成功但 `read` 失败）
+- 日期：2026-02-14
+- 现象与影响范围：
+  - `CV_WORKER` 日志出现 `Could not open codec av1`、`Failed to initialize VideoCapture`。
+  - 影响 `CVKnowledgeValidator`、`VisualFeatureExtractor`、`ScreenshotSelector/worker` 读帧链路，导致视觉状态检测和截图优化失败或降级为空结果。
+- 触发条件：
+  - 输入片段编码为 AV1（或其他当前 OpenCV/FFmpeg 构建不支持的编码）。
+  - `VideoCapture` 能打开容器并返回基础元信息，但首次解码帧失败。
+- 根因定位：
+  - 多条链路在初始化阶段只校验 `cv2.VideoCapture.isOpened()`，缺少“实际可解码”探测。
+  - 编码兼容兜底未统一，导致某一链路修复后，其他截图优化链路仍持续报错。
+- 修复措施：
+  - 在 `CVKnowledgeValidator` 增加 `_probe_capture_readable`，初始化时执行一次轻量 `read` 探测。
+  - 新增公共工具 `common/utils/opencv_decode.py`，统一 ffmpeg 转码回退：探测失败时自动转为 `libx264 + yuv420p`，再重开 capture。
+  - `use_resource_manager=True` 路径同样接入探测；探测失败自动降级到 direct+转码回退。
+  - 将公共工具接入 `VisualFeatureExtractor`、`ScreenshotSelector`、`vision_validation/worker` 与 `VLMaterialGenerator` 预读入口。
+  - 转码产物按“源路径+mtime+size”生成稳定缓存，目录为源目录下 `_opencv_decode_fallback`。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_cv_knowledge_validator_sampling.py -q`（4 passed）。
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_screenshot_selector_route_sampling.py -q`（3 passed）。
+  - `python -m py_compile services/python_grpc/src/common/utils/opencv_decode.py services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py services/python_grpc/src/vision_validation/worker.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“decode probe 失败触发 fallback / 成功不触发 fallback”单测，防止后续改动回归。
+  - 监控：持续观测 `Decode fallback applied` 计数与 `Could not open codec av1` 告警趋势。
+  - 校验：对新引入视频样本做一次端到端读帧 smoke test，确认初始化期即可识别不可解码输入。
+  - 回滚：若特定环境 ffmpeg 不可用，可临时关闭兜底并保留初始化探测日志用于快速定位。
+- 相关文件/接口：
+  - `services/python_grpc/src/common/utils/opencv_decode.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/screenshot_selector.py`
+  - `services/python_grpc/src/vision_validation/worker.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_cv_knowledge_validator_sampling.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_screenshot_selector_route_sampling.py`
+- 复盘要点：
+  - 视频处理链路必须区分“容器可打开”和“帧可解码”两个不同健康度。
+  - 兼容性问题应在初始化阶段前置发现，避免在并发 worker 运行期放大错误与重试成本。
+
+## 2026-02-12 `SharedMemory not found` 高频告警（跨 chunk SHM 生命周期冲突）
+- 日期：2026-02-12
+- 现象与影响范围：
+  - `CV_WORKER` 日志短时间连续出现大量 `SharedMemory not found: wnsm_*`。
+  - 影响 `ValidateCVBatch`（含 coarse-fine 截图）与并行截图选择路径，任务会回退中点帧，导致截图质量下降。
+- 触发条件：
+  - 主进程使用全局 `SharedFrameRegistry` 预读下一批帧时，触发 LRU 淘汰并 `unlink` 前一批尚未被 worker attach 的 SHM 名称。
+  - `ValidateCVBatch` 采用 prefetch overlap（下一批 IO 与上一批计算重叠）时，冲突概率显著上升。
+- 根因定位：
+  - 共享内存生命周期边界定义错误：按“全局 registry”管理，而实际消费是“按 chunk 批次”。
+  - 批次间缺少隔离与释放顺序约束，导致名称可见性被后续批次破坏。
+- 修复措施：
+  - 在 `grpc_service_impl.py` 增加批次级 registry：`_create_ephemeral_frame_registry` / `_cleanup_ephemeral_frame_registry`。
+  - `_batch_read_frames_to_shm`、`_batch_read_coarse_frames_to_shm`、`_batch_read_frames_for_screenshots` 支持注入批次级 registry，避免复用全局 registry。
+  - `ValidateCVBatch` 改为 chunk 内受控并发、chunk 间顺序推进，并在每个 chunk drain 完成后释放对应 SHM registry。
+  - 并行截图选择路径改为批次级 registry，任务结束后立即 cleanup。
+- 验证方式：
+  - 语法验证：`python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`。
+  - 回放验证：重跑问题视频，确认 `SharedMemory not found` 从“连续批量”下降为“偶发或消失”，并观察 worker 侧 `No frames read` 告警同步下降。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充“跨 chunk 并发预读时 SHM 可见性”回归用例（模拟下一批预读与上一批消费并发）。
+  - 监控：保留 `mode=chunk_isolated_shm`、`chunk io/inflight/completed` 日志，增加 `SharedMemory not found` 计数告警阈值。
+  - 校验：上线前固定使用长视频 + 高截图密度样本做回放，对比修复前后告警数量。
+  - 回滚：若吞吐出现不可接受回退，可临时恢复旧流式重叠策略并降低 `BATCH_SIZE`，同时保留批次级 registry 方案。
+- 相关文件/接口：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/vision_validation/worker.py`
+- 复盘要点：
+  - SHM 优化的核心不是“能共享”，而是“生命周期边界正确”。
+  - LRU + `unlink` 在跨批次并发场景中非常敏感，必须与任务消费边界对齐。
+
+## 2026-02-11 CV 流式截图管线 NameError（functools 未导入）
+- 日期：2026-02-11
+- 现象与影响范围：
+  - 运行 `optimize_screenshots_streaming_pipeline` 时抛错：`NameError: name 'functools' is not defined`。
+  - 影响 `AnalyzeWithVL` 的截图优化流式路径，任务会降级/回退，增加时延并影响吞吐。
+- 触发条件：
+  - 流式或批量截图优化路径执行到 `loop.run_in_executor(..., functools.partial(...))`。
+- 根因定位：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py` 使用了 `functools.partial`，但文件导入区缺少 `import functools`。
+  - 同轮静态扫描发现同类漏导入：`services/python_grpc/src/content_pipeline/phase2a/vision/cv_models.py` 使用 `cache_metrics` 但未导入。
+- 修复措施：
+  - 在 `flow_ops.py` 补充 `import functools`。
+  - 在 `cv_models.py` 补充 `from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics`，并清理 `typing.Any` 无用导入。
+- 验证方式：
+  - `python -m pyflakes services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/vision/cv_models.py`
+  - `python -m pyflakes services/python_grpc/src/content_pipeline/phase2a | Select-String "undefined name"`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/vision/cv_models.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 将 `pyflakes` 的 `undefined name` 检查纳入 Phase2A 提交流水线前置门禁。
+  - 对 `run_in_executor + partial` 这类热路径新增“导入完整性”静态检查清单。
+  - 出现异常时继续保留当前回退逻辑（降级到非流式路径）以保证主流程可用。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_models.py`
+- 复盘要点：
+  - 并发/流式重构时，最容易遗漏的是“仅在特定执行分支被触发”的模块级导入。
+  - 对关键目录做一次 `undefined name` 扫描，性价比高于逐文件人工排查。
+
+## 2026-02-11 Phase2 并行截图阶段内存回落不及时（SHM 句柄累积 + 预读跨度过大）
+- 日期：2026-02-11
+- 现象与影响范围：
+  - Phase2A 截图优化在多进程并行持续运行时，内存占用回落不明显，长任务下 RSS 呈台阶式上升。
+  - 影响 `optimize_screenshots_batch_mode` 与 `optimize_screenshots_streaming_pipeline` 两条路径。
+- 触发条件：
+  - 单个 chunk 时间跨度较大，按固定采样率预读会产生大量帧写入 SharedMemory。
+  - Worker 进程内 `_attached_shms` 长期持有历史任务附加句柄，未按任务释放。
+- 根因定位：
+  - 主进程预读阶段缺少“单 chunk 帧数上限”，只能靠 `max_span_seconds` 间接控制，极端场景仍会放大峰值。
+  - Worker 侧共享内存句柄复用逻辑缺少生命周期收口，句柄映射会随任务增长。
+  - `run_cv_validation_task` 对 validator `_frame_cache` 注入帧后未做任务后清理。
+- 修复措施：
+  - 新增 `resolve_adaptive_prefetch_step()`，在跨度过大时自动增大采样步长，限制单 chunk 预读帧规模。
+  - 增加配置 `prefetch_max_frames_per_chunk`（默认 `240`），形成可观测、可调的内存上限阈值。
+  - 新增 `release_attached_shm_refs()`，在 `run_screenshot_selection_task`、`run_coarse_fine_screenshot_task`、`run_cv_validation_task` 的 `finally` 中按任务释放 SHM 句柄。
+  - `run_cv_validation_task` 回收本次注入 `_frame_cache` 的 frame 项，减少进程内缓存滞留。
+- 验证方式：
+  - 直载模块执行校验脚本：
+    - 验证自适应步长在大跨度 case 将 `3001` 帧级预读降至 `232` 帧级。
+    - 验证 `release_attached_shm_refs` 的“定向释放/全量释放”行为。
+  - 受历史语法污染文件影响，当前仓库无法执行完整 `pytest` 收集（非本次变更引入）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 `test_vl_material_prefetch.py` 与 `test_worker_shm_release.py` 的内存治理回归用例。
+  - 监控：在 batch/streaming 配置日志中输出 `max_prefetch_frames`，结合任务日志观测 chunk 规模。
+  - 校验：上线前固定抽样长跨度视频，确认 worker `_attached_shms` 不随任务持续增长。
+  - 回滚：若质量回归可先将 `prefetch_max_frames_per_chunk` 调大；必要时回退到固定采样率逻辑。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `services/python_grpc/src/vision_validation/worker.py`
+  - `config/module2_config.yaml`
+- 复盘要点：
+  - 内存治理应同时覆盖“数据面规模控制（预读帧数）”与“资源生命周期管理（句柄及时释放）”。
+  - 共享内存零拷贝能降 CPU copy，但若句柄不收口，同样会形成内存与句柄累积问题。
+
+## 2026-02-11 Phase2B 在 material_requests 为空时未识别 assets 目录素材
+- 日期：2026-02-11
+- 现象与影响范围：
+  - Phase2B 日志持续出现 `no external materials matched in Phase2B`。
+  - 即使 `assets/{unit_id}/` 下存在截图和视频，`result.json` 的该单元 `materials` 仍为空。
+  - 影响 `assemble_only` 场景（依赖已有 assets 直接组装），导致富文本素材丢失。
+- 触发条件：
+  - `semantic_units_phase2a.json` 中 `material_requests.screenshot_requests/clip_requests` 为空列表。
+  - 素材已落盘在 `assets/{unit_id}/`，但 Phase2B 仅按 request_id 精确匹配。
+- 根因定位：
+  - `apply_external_materials` 只在存在 request_id 时执行 `_collect_candidates_by_id`。
+  - 缺少“按语义单元目录扫描 assets”的兜底路径，导致无请求时直接匹配失败。
+- 修复措施：
+  - 在 `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py` 增加 `_collect_candidates_by_unit_dir`。
+  - 当 screenshot/clip 请求列表为空或未匹配到候选时，自动回退扫描 `assets/{unit_id}`（并兼容 `assets/{unit_id}*` 扁平命名）。
+  - 对回退匹配结果继续复用既有去重、路径归一化和素材边界校验逻辑，避免引入新分支副作用。
+- 验证方式：
+  - 新增回归用例：`test_apply_external_materials_fallback_scans_unit_assets_when_requests_empty`。
+  - 受历史遗留语法错误影响（同测试文件第 643 行字符串未闭合），该测试文件当前无法被 pytest 收集；已采用脚本直调验证。
+  - 在真实任务目录 `var/storage/storage/99efb7c15a9121f4e29113821d5c9c73` 运行 `assemble_only` 后，统计 `result.json`：`sections=34, with_clip=18, with_shot=21`；`SU006/SU007/SU008` 已匹配到 clips 与 screenshots。
+- 预防方案（测试/监控/校验/回滚）：
+  - 保留并启用新增回归用例，待清理测试文件历史语法错误后纳入 CI。
+  - 持续输出 `fallback matched ... by unit folder scan` 日志，作为请求缺失时的观测点。
+  - 若后续需要严格模式，可通过配置开关关闭该回退分支并回退到“仅 request_id 匹配”。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py`
+- 复盘要点：
+  - “请求驱动匹配”与“目录驱动回放”是两类不同运行模式，Phase2B 需要同时支持。
+  - 对可回放场景（assemble-only）必须保留目录级兜底，避免上游请求元数据缺失时全量失配。
+
+## 2026-02-11 多步骤单元（SU012）步骤素材未在 Markdown 按 Step 落位
+- 日期：2026-02-11
+- 现象与影响范围：
+  - `result.json` 中 `SU012` 已匹配到 7 组步骤素材，但 `enhanced_output.md` 在 Step 1~7 仅有标题，无截图/视频嵌入。
+  - 影响所有 `instructional_steps` 场景的最终可读性与可执行性（步骤缺图缺视频）。
+- 触发条件：
+  - 步骤数据中仅有 `materials.clip_id` 与 `materials.screenshot_ids`，未显式写入 `clip_paths/screenshot_paths`。
+  - Markdown 渲染器仅消费步骤级路径字段，不直接解析 ID。
+- 根因定位：
+  - `apply_external_materials` 只填充了 section 级 `materials`，未把已匹配结果回填到 `instructional_steps[].materials` 的路径字段。
+  - `rich_text_document._render_section_markdown` 在 `section.instructional_steps` 存在时，优先渲染步骤块且不走 section-level fallback，导致步骤块中无素材输出。
+- 修复措施：
+  - 在 `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py` 增加步骤级素材路径回填：
+    - 基于已匹配素材构建 `id -> path` 映射（含别名归一化）。
+    - 对每个步骤的 `clip_id/screenshot_ids` 解析并回填 `clip_path/clip_paths/screenshot_paths`。
+    - 若映射未命中，回退使用 `_collect_candidates_by_id` 二次解析，保持与主匹配链路一致。
+- 验证方式：
+  - 重新执行 `assemble_only`（目录：`var/storage/storage/99efb7c15a9121f4e29113821d5c9c73`）。
+  - `result.json` 中 `SU012` 的 7 个步骤均有 `clip_paths=1`、`screenshot_paths=1`。
+  - `enhanced_output.md` 中 `SU012` 的 Step 1~7 均出现对应嵌入路径（如 `assets/SU012/SU012_clip_step_01_step_01.mp4`、`assets/SU012/SU012_ss_step_01_key_01_step_01.jpg`）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 新增/扩展回归用例：校验 `instructional_steps.materials` 至少包含路径字段且 Markdown 有步骤级嵌入。
+  - 监控日志增加步骤级命中统计（每单元 `step_with_media/step_total`）。
+  - 保留 fallback 解析分支，避免历史数据仅有 ID 时再次丢失展示。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+- 复盘要点：
+  - 多步骤流水线必须保证“匹配层字段”与“渲染层字段”一致，避免结果写到了 section 但没落到 step。
+  - 对 tutorial-stepwise 场景，步骤级路径字段应作为强约束输出。
 
 ## 2026-02-04 知识分类 actionId 回写丢失
 - 日期：2026-02-04
@@ -488,3 +986,1432 @@
   - `services/python_grpc/src/server/grpc_service_impl.py`
 - 复盘要点：
   - 并行链路的稳定性关键在“失败隔离 + 可控补偿”，而不是假设每个 worker 必然成功。
+
+## 2026-02-10 转录成功但字幕“看起来未保存”（存储根目录漂移）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - gRPC `TranscribeVideo` 返回 `success=true`，且 `subtitle_text` 有内容。
+  - 但使用 `var/storage/...` 路径排查时找不到最新 `subtitles.txt`，用户感知为“没有保存”。
+- 触发条件：
+  - 代码中的默认存储根目录使用 `services/python_grpc/src/server/storage`，与文档/排查习惯中的 `var/storage/storage` 不一致。
+- 根因定位：
+  - `DownloadVideo`、`_normalize_output_dir`、`_ensure_local_video_in_storage` 都硬编码使用 `os.path.dirname(__file__)/storage`。
+  - 运行时确实落盘成功，但落在“旧根目录”，与外部预期目录不一致，造成“成功但看不到”。
+- 修复措施：
+  - 新增 `_get_primary_storage_root()`，默认统一到 `repo_root/var/storage/storage`，并支持 `V2M_STORAGE_ROOT` 环境变量覆盖。
+  - 新增 `_get_storage_roots_for_scan()`，复用扫描同时兼容历史目录（`server/storage`、`repo/storage`）。
+  - `DownloadVideo`、`_normalize_output_dir`、`_ensure_local_video_in_storage` 统一改用主存储根目录。
+  - `stage1` 冲突检测改为扫描多存储根目录，避免迁移期误判。
+- 验证方式：
+  - 新增单测 `test_storage_root_resolution.py` 覆盖默认根目录与环境变量覆盖行为。
+  - 执行：
+    - `python -m pytest -q services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留存储根目录解析测试，避免后续回退到隐式 `server/storage`。
+  - 监控：在转录成功日志中持续打印 `subtitle_path`（绝对路径），便于快速核对落盘位置。
+  - 校验：调用侧优先消费 `TranscribeResponse.subtitle_path`，避免硬编码目录推断。
+  - 回滚：可通过 `V2M_STORAGE_ROOT` 快速切回历史目录，降低迁移风险。
+- 相关文件/接口：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_storage_root_resolution.py`
+- 复盘要点：
+  - “保存失败”与“保存到非预期目录”是两类问题，必须先以 `subtitle_path` 作为唯一事实来源。
+
+## 2026-02-10 Step2 批处理偶发 JSON 解析失败（缺少逗号）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - Stage1 的 `step2_correction` 批处理日志出现 `[BATCH_FAILURE_REASONS] ValueError: Failed to parse JSON response: Expecting ',' delimiter ...`。
+  - 单批次 LLM 结果失败后会走原文回退，导致该批纠错收益丢失，影响后续 `step3` 文本质量。
+- 触发条件：
+  - LLM 返回近似 JSON 但含轻微语法缺陷（常见为对象字段间缺少逗号、尾随说明文本、代码块包裹）。
+  - 旧实现仅做一次 `json.loads`，没有修复与二次重试。
+- 根因定位：
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py` 的 `complete_json` 仅做“提取代码块 + 单次解析”。
+  - 无 `response_format` 约束、无结构修复、无解析失败重试，导致可恢复错误被直接放大为批次失败。
+- 修复措施：
+  - 重构 `DeepSeekClient.complete_json` 为“结构化输出约束 + 容错解析 + 一次重试”链路：
+    - 默认携带 `response_format={"type": "json_object"}` 约束模型输出。
+    - 当服务端不支持该参数（如 400 + `response_format`）时自动降级重试，不影响主流程可用性。
+    - 增加 `_extract_json_content`，兼容 code fence 与前后噪声文本。
+    - 增加 `_load_json_with_repair` 与 `_repair_json`，修复缺失逗号、尾随逗号、未闭合括号/引号等轻量错误。
+    - 若首次仍失败，自动补充“仅输出可解析 JSON”的二次提示并重试一次。
+  - 保持原接口签名与调用方式不变，避免影响 `step2/step3/step6` 调用侧。
+- 验证方式：
+  - 新增单测 `test_deepseek_json_parsing.py` 覆盖：
+    - 噪声文本与 code fence 的 JSON 提取。
+    - 缺失逗号场景的自动修复解析。
+    - 首次解析失败后二次重试成功。
+    - `response_format` 不支持时自动降级重试成功。
+  - 执行：
+    - `python -m pytest -q services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 JSON 容错回归用例，防止后续重构退化为单次 `json.loads`。
+  - 监控：持续关注 `step2_correction` 的 `[BATCH_FAILURE_REASONS]` 中 JSON 解析类异常占比。
+  - 校验：若下游步骤对结构有强约束，继续在节点层执行字段完整性校验，避免“语法合法但结构错误”。
+  - 回滚：如需快速回退，可仅回退 `deepseek.py` 的容错逻辑，调用层无需改动。
+- 相关文件/接口：
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+- 复盘要点：
+  - LLM 的“结构化输出”必须分为三层保障：输出约束、解析修复、失败重试，缺一不可。
+
+## 2026-02-10 CLIP 加载告警（fast image processor 行为变更）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - 视觉特征提取初始化时出现 `CLIPImageProcessor` fast/slow 行为变更告警。
+  - 日志噪声增大，且不同环境下可能因 `use_fast` 默认值变化导致轻微数值差异，影响结果可复现性判断。
+- 触发条件：
+  - `SentenceTransformer('clip-ViT-B-32')` 内部加载 `transformers.CLIPProcessor.from_pretrained`，未显式传 `use_fast`。
+- 根因定位：
+  - 上游 `transformers` 已将 image processor 默认策略向 fast 迁移，并在未显式声明时输出 breaking-change 警告。
+  - 当前项目调用链没有直接暴露 `CLIPProcessor` 参数入口。
+- 修复措施：
+  - 在 CLIP 单例加载窗口内临时 patch `transformers.CLIPProcessor.from_pretrained`，强制默认 `use_fast=False`。
+  - 加载完成后立即恢复原始函数，避免影响其他模型加载路径。
+  - 同时修复 `_get_clip_model` 异常路径：加载失败时写入 `_CLIP_MODEL="FAILED"`，避免重复尝试导致日志洪泛。
+- 验证方式：
+  - 执行最小化脚本调用 `_get_clip_model`，确认模型可正常初始化。
+  - 对比修复前后日志，确认不再出现 `CLIPImageProcessor ... loaded as a fast processor by default` / `Using a slow image processor as use_fast is unset` 告警。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留最小化加载验证，覆盖 CLIP 初始化主路径。
+  - 监控：关注视觉模块启动日志中的 CLIP 加载告警关键字。
+  - 校验：升级 `transformers` 后抽样对比关键视觉分数，确认行为一致性。
+  - 回滚：如后续需要启用 fast 路径，可去掉 patch 或改为 `use_fast=True` 并重新标定阈值。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+- 复盘要点：
+  - 对上游默认行为会漂移的依赖项，应在调用侧显式固定关键参数，优先保障可复现与日志可读性。
+
+## 2026-02-10 模态分类告警 `name 'logger' is not defined`
+- 日期：2026-02-10
+- 现象与影响范围：
+  - Phase2B 模态分类日志出现：`Modality classification failed for SU001: name 'logger' is not defined`。
+  - 单元级模态判定降级为 fallback，影响 `modality/knowledge_subtype/stable_islands/action_segments` 的准确性。
+- 触发条件：
+  - 调用 `CVKnowledgeValidator.detect_visual_states` 进入 `cv_state_analysis.py` 的动作合并/过滤分支，执行到 `logger.debug/info(...)`。
+- 根因定位：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_state_analysis.py` 使用了 `logger`，但模块内未定义 `logger`（缺少 `import logging` 与 `logger = logging.getLogger(__name__)`）。
+- 修复措施：
+  - 在 `cv_state_analysis.py` 顶部补充 `import logging`。
+  - 增加模块级 `logger = logging.getLogger(__name__)`，统一供该文件内日志调用使用。
+- 验证方式：
+  - 模块导入验证：`import services.python_grpc.src.content_pipeline.phase2a.vision.cv_state_analysis` 成功，且 `hasattr(module, 'logger') == True`。
+  - 最小链路验证：`CVKnowledgeValidator(video).detect_visual_states(...)` 可执行完成，不再抛出 `name 'logger' is not defined`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充 `cv_state_analysis` 导入与最小调用烟雾测试。
+  - 监控：关注 `Modality classification failed for` 告警量与异常类型分布。
+  - 校验：静态检查中加入未定义名称（F821）规则，阻断此类缺陷。
+  - 回滚：该修复为最小增量，不涉及行为逻辑改写，通常无需回滚。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_state_analysis.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+- 复盘要点：
+  - 被拆分到工具模块的日志调用必须自包含 logger 定义，不能隐式依赖调用方模块上下文。
+
+## 2026-02-10 Semantic 提示词文件乱码（编码/内容损坏）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - `deepseek/semantic` 下的分段提示词出现大量乱码字符，提示词可读性与可维护性下降。
+  - 可能导致模型理解偏差，影响 `segment/resegment` 输出稳定性。
+- 触发条件：
+  - 历史文件内容已被错误转码写入（典型 mojibake），并非单纯“声明编码不一致”。
+- 根因定位：
+  - 4 个提示词文件虽然可按 UTF-8 解码，但正文已是错误字符序列，属于内容层损坏。
+- 修复措施：
+  - 对以下 4 个文件执行整文件重写，统一为可读中文文案，并保存为 UTF-8（无 BOM）：
+    - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/resegment_system.md`
+    - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/resegment_user.md`
+    - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+    - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_user.md`
+- 验证方式：
+  - 逐文件字节校验：`utf-8` 严格解码通过，且无 BOM。
+  - 人工抽检内容：关键指令（仅 JSON 输出、字段约束、split/adjust/keep 规则）完整可读。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增提示词静态检查，拦截明显乱码特征（高比例异常字符）。
+  - 监控：在提示词加载阶段输出文件哈希，便于定位异常变更。
+  - 校验：提交前增加 UTF-8 + 可读性抽检（关键关键词存在性）。
+  - 回滚：必要时可按文件级回滚到上一个稳定版本。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/resegment_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/resegment_user.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_user.md`
+- 复盘要点：
+  - 提示词资产应纳入“编码 + 可读性”双重守护，避免“可解码但语义已损坏”的隐蔽故障。
+
+## 2026-02-10 语义分段提示词被简化且缺失 `title` 字段
+- 日期：2026-02-10
+- 现象与影响范围：
+  - `segment_system.md` 被简化为最小字段版，缺失“应合并/不应合并”的关键规则，分段边界稳定性下降。
+  - 输出 schema 缺失 `title`，导致后续富文本层级（1/2/3 级知识点）可用标题信息不足。
+- 触发条件：
+  - 使用简化后的 semantic prompt 执行切分时，模型仅按 `pids/k/m` 返回，不再显式生成标题。
+- 根因定位：
+  - 提示词在此前修复乱码过程中被过度收缩为“最小字段约束”，丢失业务规则与标题要求。
+  - `SemanticUnitSegmenter._parse_min_schema_unit` 仅接受 `pids/k/m`，无法承接 `title`。
+- 修复措施：
+  - 恢复并增强语义分段提示词：
+    - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+    - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_user.md`
+    - 明确加入“合并规则/不应合并规则/多步骤判定”与 `title` 必填约束。
+  - 同步代码解析链路：
+    - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+    - `allowed_keys` 从 `{"pids","k","m"}` 扩展为 `{"pids","k","m","title"}`。
+    - 严格校验 `title` 为非空字符串。
+    - 创建 `SemanticUnit` 时优先用 `parsed["title"]` 写入 `knowledge_topic`（保留后续层级与富文本用途）。
+  - 新增回归测试：
+    - `services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_title_schema.py`
+- 验证方式：
+  - 执行：
+    - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_title_schema.py services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py`
+  - 结果：`8 passed`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 `title` schema 回归测试，防止字段再次被收缩。
+  - 校验：在 prompt 评审清单中加入“业务规则完整性（合并/拆分）+ 字段完整性（title）”检查项。
+  - 监控：抽样检查 `semantic_units_phase2a.json` 的 `knowledge_topic` 非空率。
+  - 回滚：如需快速回退，优先回退 prompt 文件与 `_parse_min_schema_unit` 相关改动。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_user.md`
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_title_schema.py`
+- 复盘要点：
+  - 语义分段 prompt 既是“输出格式约束”，也是“业务规则载体”；仅保留最小 schema 会丢失核心行为约束。
+
+## 2026-02-10 Module2 分段与模态分类链路的 HTTP/2 依赖失败 + 枚举未导入
+- 日期：2026-02-10
+- 现象与影响范围：
+  - 日志出现 `LLM call failed or strict parse failed: Using http2=True, but the 'h2' package is not installed`，语义切分阶段 LLM 调用失败并走回退路径。
+  - 日志连续出现 `Modality classification failed for SUxxx: name 'RedundancyType' is not defined` / `name 'Modality' is not defined`，导致单元模态分类大面积回退为默认值。
+- 触发条件：
+  - 运行环境未安装 `h2`，但 HTTP 客户端初始化固定使用 `http2=True`。
+  - `cv_state_analysis.py` 使用 `RedundancyType` 与 `Modality` 枚举时，未从 `cv_models` 显式导入。
+- 根因定位：
+  - **传输层强依赖未做能力探测**：`llm_client.py` 与 `vision_ai_client.py` 在构建 `httpx.AsyncClient` 时硬编码启用 HTTP/2，缺少对 `h2` 可用性的运行时检测和降级分支。
+  - **模块边界导入遗漏**：`cv_state_analysis.py` 依赖 `cv_models` 中的枚举类型参与区间合并和模态判定，但 import 列表遗漏两个枚举。
+- 修复措施：
+  - **补齐枚举导入**：在 `cv_state_analysis.py` 的 `cv_models` 导入列表中新增 `Modality`、`RedundancyType`。
+  - **增加 HTTP/2 能力探测与自动降级**：
+    - `llm_client.py` 新增 `_supports_http2_transport()`，优先检测 `h2` 包；支持环境变量 `MODULE2_HTTP2_ENABLED` 强制开关。
+    - `vision_ai_client.py` 同步加入能力探测与降级策略。
+    - 两处客户端初始化均改为：优先按探测结果传入 `http2`；若仍遇到缺失 `h2` 异常，自动回退到 `http2=False` 重建客户端。
+    - 初始化日志改为输出真实 `http2` 状态，便于排障。
+  - **依赖声明补齐**：在 `requirements.txt` 与 `requirements/legacy/mvp-module2.txt` 增加 `httpx[http2]>=0.27.0`，降低新环境部署遗漏概率。
+- 验证方式：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/vision/cv_state_analysis.py services/python_grpc/src/content_pipeline/infra/llm/llm_client.py services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+  - 新增回归测试 `test_llm_http2_fallback.py` 覆盖：
+    - `h2` 缺失时探测返回 `False`。
+    - `MODULE2_HTTP2_ENABLED` 环境变量可强制开关。
+    - 客户端在 `http2=True` 且 `h2` 缺失时自动回退到 `http2=False` 并成功初始化。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 HTTP/2 能力探测与降级回归用例，避免后续重构再次硬编码 `http2=True`。
+  - 监控：观察 `HTTP/2 unavailable (missing h2), fallback to HTTP/1.1` 告警次数，作为环境依赖不完整的信号。
+  - 校验：部署阶段统一使用依赖入口安装（含 `httpx[http2]`），并在启动自检中打印 HTTP/2 探测结果。
+  - 回滚：若网络侧兼容性异常，可通过 `MODULE2_HTTP2_ENABLED=false` 强制回落 HTTP/1.1。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_state_analysis.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_http2_fallback.py`
+  - `requirements.txt`
+  - `requirements/legacy/mvp-module2.txt`
+- 复盘要点：
+  - “可选能力（HTTP/2）”必须做运行时能力探测与降级，不应把环境依赖缺失放大为业务失败。
+  - 多文件拆分后，类型依赖应由静态检查/单测覆盖，避免运行时才暴露导入遗漏。
+
+## 2026-02-10 Phase2A 语义划分 JSON 在异常路径未落盘且缺少 intermediates 镜像
+- 日期：2026-02-10
+- 现象与影响范围：
+  - 日志可见 `Segmentation complete: ...`，但任务目录下未出现或未及时更新 `semantic_units_phase2a.json`。
+  - 多阶段调试时，`intermediates` 目录缺少对应语义单元 JSON，导致“很多步骤的 JSON 不在预期位置”的观测问题。
+- 触发条件：
+  - `analyze_only` 在逐单元执行 `_collect_material_requests(...)` 时出现异常，导致最终统一落盘语句未执行。
+  - 语义单元 JSON 仅写到 `output_dir/semantic_units_phase2a.json`，未同步到 `output_dir/intermediates/semantic_units_phase2a.json`。
+- 根因定位：
+  - **落盘时机过晚且缺少容错**：`analyze_only` 仅在循环末尾一次性落盘，单元级异常会中断函数并跳过写文件。
+  - **目录契约未统一**：Stage1 关键中间产物主要在 `intermediates/`，但 Phase2A 语义结果仅在根目录，造成排障路径不一致。
+- 修复措施：
+  - 在 `analyze_only` 中新增“分段完成后 checkpoint 落盘”。
+  - 将逐单元处理包装为 `try/except/finally`，无论单元是否失败都执行增量落盘，确保文件始终可见。
+  - 扩展 `_save_semantic_units(...)` 支持 `mirror_output_path`，将 `semantic_units_phase2a.json` 同步镜像到 `intermediates/semantic_units_phase2a.json`。
+  - 单元失败时对该单元写入空 `MaterialRequests([], [], [])` 兜底，避免序列化缺口。
+- 验证方式：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - 新增回归测试：
+    - `services/python_grpc/src/content_pipeline/tests/test_phase2a_analyze_only_persistence.py`
+    - `pytest -q services/python_grpc/src/content_pipeline/tests/test_phase2a_analyze_only_persistence.py`
+    - 结果：`1 passed`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“单元异常也必须落盘 + intermediates 镜像存在”的回归测试。
+  - 监控：在日志中保留 `checkpoint saved after segmentation` 与 `Mirrored semantic units` 关键事件，便于快速判断落盘链路。
+  - 校验：后续阶段读取前优先检查两处路径（根目录与 intermediates）并记录缺失告警。
+  - 回滚：若镜像写入异常，不阻塞主流程，仍以主路径 `semantic_units_phase2a.json` 为事实来源。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2a_analyze_only_persistence.py`
+- 复盘要点：
+  - 关键中间产物应采用“尽早落盘 + 增量落盘 + 异常不中断落盘”的策略，避免长链路后置写入导致可观测性缺失。
+  - 跨阶段排障目录建议统一，减少“文件存在但不在你看的目录”的错觉成本。
+
+## 2026-02-10 VL 已配置启用但未进入 AnalyzeWithVL 调度
+- 日期：2026-02-10
+- 现象与影响范围：
+  - 运行日志持续出现 `Action merge`，但没有 `===== AnalyzeWithVL Request Received =====`。
+  - 虽然 `config/module2_config.yaml` 中 `vl_material_generation.enabled=true`，流程仍落到 Legacy `GenerateMaterialRequests`。
+  - 影响：VL 路由（含 pre-vl static pruning、多进程 stable 检测）不生效，预处理并行优化无法体现。
+- 触发条件：
+  - Java 编排入口 `VideoProcessingOrchestrator.processVideo(...)` 进入 Hybrid Analysis 阶段时。
+  - `ModuleConfigService` 在部分启动目录下未正确定位到 `module2_config.yaml`，或 VL 调用失败后应回退 Legacy。
+- 根因定位：
+  - 根因1（主因）：`VideoProcessingOrchestrator` 的 if/else 结构将 Legacy 流程绑定在 `else` 分支，导致“VL 已开启但失败时未按预期统一从 `materialRequests==null` 回退”的路径不清晰，调度可观测性差。
+  - 根因2（次因）：`ModuleConfigService.locateConfigFile()` 候选路径较少，运行目录变化时容易把“配置存在”误判为“配置缺失”，进而把 `vlEnabled` 置为 `false`。
+- 修复措施：
+  - 修复 Java 编排分支：
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 改为统一规则：先尝试 VL（若开启），然后用 `materialRequests == null` 作为唯一回退条件进入 Legacy。
+  - 加固配置定位与可观测性：
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`
+    - 新增 `MODULE2_CONFIG_PATH` 环境变量显式覆盖。
+    - 扩充相对路径候选（`config/` 到 `../../../../config/`）。
+    - 刷新配置时输出实际加载文件路径与 `enabled` 值。
+- 验证方式：
+  - 定向编译：
+    - `cd services/java-orchestrator && mvn -DskipTests compile`
+  - 运行期日志校验（同一任务至少出现其一）：
+    - 走 VL：`Calling AnalyzeWithVL`（Java） + `AnalyzeWithVL Request Received`（Python）
+    - 走回退：`Proceeding to Legacy Flow (Fallback or VL failed).`
+  - 配置校验日志：
+    - `Refreshed VL Config: file=..., enabled=...`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：后续补充 `ModuleConfigService` 路径解析单测（不同 `user.dir` + `MODULE2_CONFIG_PATH`）。
+  - 监控：将“VL 路由命中率”（AnalyzeWithVL 调用次数 / 总任务数）纳入任务级指标。
+  - 校验：任务启动时打印一次 `vlEnabled` 与配置路径，避免“以为开了、实际没读到”。
+  - 回滚：若 VL 不稳定，可临时将 `vl_material_generation.enabled=false`，系统自动走 Legacy。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/ModuleConfigService.java`
+  - `services/python_grpc/src/server/grpc_service_impl.py`（`AnalyzeWithVL` 入口日志用于联调校验）
+
+## 2026-02-10 视频语义切割脚本独立执行导入失败（ModuleNotFoundError: services）
+- 日期：2026-02-10
+- 现象与影响范围：
+  - `AnalyzeWithVL` 链路在调用 `tools/split_video_by_semantic_units.py` 时失败。
+  - 日志报错：`ModuleNotFoundError: No module named 'services'`，导致视频切割阶段直接返回 `code=1`。
+- 触发条件：
+  - 以脚本路径方式直接执行 `python tools/split_video_by_semantic_units.py ...`。
+  - 当前进程 `sys.path` 未包含仓库根目录，无法解析 `services.python_grpc...` 绝对导入。
+- 根因定位：
+  - 脚本缺少与主服务入口一致的启动引导（repo root bootstrap），对执行目录存在隐式依赖。
+  - 同文件内 `_sanitize_filename_component` 包装函数调用了不存在的 `__sanitize_filename_component` 名称，存在潜在 `NameError` 风险。
+- 修复措施：
+  - 在脚本顶部新增 `_bootstrap_repo_root()`：将仓库根目录（`Path(__file__).resolve().parents[1]`）插入 `sys.path` 首位，去重后再插入，保证导入优先级可控。
+  - 将 `sanitize_filename_component` 的导入别名改为 `_sanitize_filename_component_impl`，并修正包装函数调用目标，消除潜在名称错误。
+- 验证方式：
+  - `python tools/split_video_by_semantic_units.py --help`（验证脚本可独立启动且导入成功）。
+  - `python -m py_compile tools/split_video_by_semantic_units.py`（验证语法正确）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/保留“脚本可独立启动”的最小回归检查（至少覆盖 `--help` 路径）。
+  - 监控：在上层调用失败日志中保留脚本 stderr 前 500 字符，快速识别导入类错误。
+  - 校验：新增脚本时统一套用 repo root bootstrap 模板，避免对工作目录的隐式依赖。
+  - 回滚：若需临时回退，可在调用进程显式设置 `PYTHONPATH=<repo_root>`，但长期以脚本自举为准。
+- 相关文件/接口：
+  - `tools/split_video_by_semantic_units.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+- 复盘要点：
+  - 工具脚本属于“可独立执行入口”，必须显式完成导入路径自举，不能依赖偶然的运行目录。
+  - 跨模块导入包装时要避免别名和函数名冲突，优先使用语义明确的 `_impl` 命名。
+
+## 2026-02-11 CV 回退取帧在尾帧边界产生误告警（Failed to read frame at 12.999999999999986s）
+- 日期：2026-02-11
+- 现象与影响范围：
+  - 日志频繁出现 `Failed to read frame at 12.999999999999986s`、`14.999999999999979s` 等告警。
+  - 影响 `CV_WORKER` 可观测性，难以区分真实解码失败与尾帧边界噪声。
+- 触发条件：
+  - `CVKnowledgeValidator._sample_frames(...)` 走本地 `VideoCapture` 回退路径（`use_resource_manager=False` 或 RM 返回空）。
+  - 采样区间上界接近视频时长边界（如 `end_sec≈duration`），且时间步进使用浮点累加。
+- 根因定位：
+  - 根因1：循环条件使用 `while t <= sampling_end`，当 `sampling_end` 等于时长边界时，OpenCV 在尾帧附近 seek/read 可能返回失败（容器索引与关键帧对齐差异导致）。
+  - 根因2：`t += interval` 的浮点累积误差导致时间戳出现 `12.999999999999986` 这类非预期值，放大边界触发概率并污染日志。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py`
+  - 将采样点从“浮点递增”改为“索引推导”：`t = round(min(start + idx * interval, safe_end), 6)`，消除累积误差。
+  - 增加尾帧保护：当已知 `duration_sec` 时，将可读上界约束到 `duration - tail_guard`（约半帧），避免请求精确尾边界。
+  - 失败日志分级：尾段不可读帧改为 `debug` 并停止循环，非尾段读帧失败保留 `warning`。
+  - 日志时间统一保留 3 位小数，提高可读性与聚合稳定性。
+- 验证方式：
+  - 新增测试：`services/python_grpc/src/content_pipeline/tests/test_cv_knowledge_validator_sampling.py`
+    - `test_sample_frames_skip_unreadable_tail_warning`
+    - `test_sample_frames_use_indexed_timestamps_without_drift`
+  - 执行命令：`python -m pytest services/python_grpc/src/content_pipeline/tests/test_cv_knowledge_validator_sampling.py -q`
+  - 结果：`2 passed`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“尾帧不可读不告警”和“时间戳无漂移”的回归用例。
+  - 监控：区分 `warning`（真实读帧失败）与 `debug`（尾帧边界跳过）计数，避免误报放大。
+  - 校验：涉及时间采样的循环统一禁止 `t += interval` 形式，优先采用索引推导。
+  - 回滚：若遇到特殊编码格式需要读取最末点，可通过关闭尾帧保护逻辑（代码回退）恢复旧行为。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_cv_knowledge_validator_sampling.py`
+- 复盘要点：
+  - 视频时长边界与采样步进是高频误差源，必须在算法层面同时处理“尾帧容忍”和“浮点稳定性”。
+  - 日志分级要体现故障语义，避免把可预期的边界行为误报为异常。
+
+## 2026-02-11 语义分割三类知识类型定义漂移（process / abstract / concrete）
+- 日期：2026-02-11
+- 现象与影响范围：
+  - Phase2A 语义分割提示词仅保留了输出 schema 与合并规则，对 `process / abstract / concrete` 的判定定义不完整。
+  - 在“概念讲解 vs 静态具象展示 vs 连续流程步骤”边界样本中，模型更容易出现类型漂移（尤其是把含动作词但无流程闭环的片段误判为 process）。
+- 触发条件：
+  - 使用 `deepseek.semantic.segment.system` 进行语义单元切分。
+  - 输入文本含“点击/首先/然后”等动作词，但不具备流程复现价值时。
+- 根因定位：
+  - 语义分割 prompt 演进过程中，重点放在最小输出 schema（`pids/k/m/title`）与合并规则，历史版本中“按信息损失判定主类型”的约束没有显式保留。
+  - 缺少针对 prompt 内容的回归测试，导致定义缺失未被自动发现。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+  - 恢复并显式化三类定义与判定要求：
+    - `k=0 abstract`：解释“是什么/为什么”，语言逻辑主导；
+    - `k=1 concrete`：静态可观察对象呈现，“看见什么”为主；
+    - `k=2 process`：连续步骤/状态演进，“按顺序完成目标”为主。
+  - 新增“判定优先级（冲突时）”与“判定约束（严禁关键词机械分类，按删除后信息损失判定）”。
+  - 新增回归测试文件：`services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py`，校验上述关键定义与约束存在。
+- 验证方式：
+  - `python -m pytest services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py -q`
+  - 预期：`2 passed`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 prompt 结构化断言测试，覆盖“定义段+优先级+约束”三类关键文本。
+  - 监控：抽样统计 `knowledge_type` 分布漂移（尤其 process 占比异常抬升）。
+  - 校验：每次修改语义分割 prompt 时，同步检查 `segment_system.md` 是否保留三类定义段落。
+  - 回滚：若线上效果波动，可直接回退 `segment_system.md` 到该修复前一稳定版本并重跑 Phase2A。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/semantic/segment_system.md`
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py`
+- 复盘要点：
+  - Prompt 也是“可回归资产”，关键判定语义必须测试化，避免仅靠人工 review。
+  - 输出 schema 正确不代表判定逻辑正确，二者需分别约束。
+
+## 2026-02-11 流式截图优化管线运行时报 NameError: deque 未定义
+- 日期：2026-02-11
+- 现象与影响范围：
+  - Phase2A 流式截图优化阶段直接失败，日志显示 `流式处理失败: name 'deque' is not defined`。
+  - 影响 `optimize_screenshots_streaming_pipeline` 正常执行，导致后续 CV 选择任务无法继续提交。
+- 触发条件：
+  - 执行到 `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py` 中 `active_chunks: deque = deque()` 初始化逻辑。
+- 根因定位：
+  - 代码使用了 `deque` 维护活跃 chunk 队列，但文件导入区缺失 `from collections import deque`。
+  - 属于重构后导入遗漏问题，运行时才暴露为 `NameError`。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - 在导入区新增 `from collections import deque`，保持现有队列调度逻辑不变（最小修复）。
+- 验证方式：
+  - 执行命令：`python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - 结果：通过，无语法与名称解析错误。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：为流式管线增加最小启动冒烟用例，覆盖 `active_chunks` 初始化路径。
+  - 监控：保留 `Streaming Pipeline` 初始化与异常日志，便于快速定位运行时名称错误。
+  - 校验：在提交前增加静态检查（如 `ruff/flake8` 的未定义名称规则）与 `py_compile` 快速校验。
+  - 回滚：该修复为单行导入补齐，若出现意外可直接回退该提交恢复原状态。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `docs/architecture/error-fixes.md`
+- 复盘要点：
+  - 流式并发代码对容器类型依赖强，导入遗漏会在运行阶段放大为整段流程不可用。
+  - 对“新增类型注解 + 运行时实例化”的代码，应在合并前执行最小可执行路径校验。
+
+## 2026-02-12 AnalyzeWithVL / ValidateCVBatch 运行期三连故障（非法字符、流式返回、OCR 参数）
+- 日期：2026-02-12
+- 现象与影响范围：
+  - `AnalyzeWithVL` 调用链抛出 `SyntaxError: invalid non-printable character U+E511 (vl_material_generator.py, line 956)`，VL 路径直接失败。
+  - gRPC 日志出现 `Unexpected [TypeError] raised by servicer method [/videoprocessing.VideoProcessingService/ValidateCVBatch]`，批量 CV 校验流式接口异常。
+  - 启动阶段告警 `PaddleOCR not available ... Unknown argument: show_log`，数学检测能力退化为降级路径。
+- 触发条件：
+  - Python 解释器加载 `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py` 时命中文本中的私有区不可见字符（如 `U+E511`）。
+  - `ValidateCVBatch` 作为 `returns (stream CVValidationResponse)` 的 RPC，却在 stage mixin 中以“直接 return await”委托异步生成器。
+  - 部分 PaddleOCR 版本不接受 `show_log` 初始化参数。
+- 根因定位：
+  - 根因1（语法层）：`vl_material_generator.py` 内存在私有区字符污染，导致解释器词法/语法阶段失败。
+  - 根因2（接口契约层）：`ValidateCVBatch` 的 stage 包装未遵循 gRPC aio 的流式返回语义，触发运行时 `TypeError`。
+  - 根因3（依赖兼容层）：OCR 初始化参数集与运行环境中的 PaddleOCR 版本不兼容。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 清理导致编译失败的异常字符段，恢复可编译状态。
+  - 文件：`services/python_grpc/src/server/stages/validation_vl_stage.py`
+    - 将 `ValidateCVBatch` 从 `return await ...` 改为 `async for ...: yield ...`，与 proto 流式契约对齐。
+  - 文件：`services/python_grpc/src/content_pipeline/infra/runtime/ocr_utils.py`
+    - PaddleOCR 初始化增加参数兼容降级：先带 `show_log` 尝试，若 `TypeError` 且命中 `show_log`，自动移除后重试。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `python -m py_compile services/python_grpc/src/server/stages/validation_vl_stage.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/runtime/ocr_utils.py`
+  - 结果：三者均编译通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充 `ValidateCVBatch` 的流式 smoke test，至少覆盖首条 response 可迭代返回。
+  - 监控：对 `ValidateCVBatch` 增加“方法级 TypeError”计数与告警阈值。
+  - 校验：提交前加入关键模块 `py_compile` 检查，并对源码执行“私有区字符扫描”（PUA）预检。
+  - 回滚：
+    - 流式接口异常可先回退 `validation_vl_stage.py` 到上一个稳定提交；
+    - OCR 参数异常可临时强制关闭 `show_log` 传参（保留兼容分支）。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/server/stages/validation_vl_stage.py`
+  - `services/python_grpc/src/content_pipeline/infra/runtime/ocr_utils.py`
+  - `contracts/proto/video_processing.proto`（`ValidateCVBatch` streaming 定义）
+- 复盘要点：
+  - 流式 RPC 的 stage 包装层属于“高杠杆契约点”，必须与 proto 返回语义严格一致。
+  - 三方库参数应采用“乐观初始化 + 精准降级”策略，避免全量能力被单参数阻断。
+  - 源码编码/字符卫生应自动化守护，避免不可见字符在运行期才暴露。
+
+## 2026-02-12 MultiUnit 批量分类单元截断导致 JSON 解析失败
+- 日期：2026-02-12
+- 现象与影响范围：
+  - 日志出现 `[MultiUnit] Batch JSON parse failed (units=1)`。
+  - 该 chunk 的分类结果会回退默认值，带来 `Batch Miss`，影响知识类型准确性。
+- 触发条件：
+  - LLM 返回尾部截断（常见为 `reasoning` 字段字符串未闭合、数组 `]` 或对象 `}` 缺失）。
+  - 输入中可能夹带前缀说明文本（例如 `Result:`），进一步降低严格解析成功率。
+- 根因定位：
+  - 现有 `_loads_jsonish` 支持标点/尾逗号/控制字符修复，但对“未闭合字符串 + 未闭合括号”的截断场景缺少语法闭合步骤。
+  - 当只有单条单元（`units=1`）时，一次解析失败会直接导致该单元结果全量回退。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`
+  - 新增 `_repair_unclosed_json`：
+    - 从首个 JSON 起点截取候选文本；
+    - 对未闭合字符串补引号；
+    - 对未闭合数组/对象补 `]`/`}`；
+    - 对补全后文本执行尾逗号清理；
+  - 在 `_loads_jsonish` 中新增 `repair_candidates` 解析链路：仅在严格 `json.loads` 与标准 normalize 失败后触发，降低误伤风险。
+- 验证方式：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_parse.py`
+  - 结果：`11 passed`（新增 2 个截断回归用例）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留新增用例，覆盖“未闭合字符串截断”和“前缀说明 + 截断”场景。
+  - 监控：持续观察 `Batch JSON parse failed` 与 `Batch Miss` 比例，确认告警下降。
+  - 校验：未来若再扩展 JSON 容错，优先保持“最小修复”策略，避免引入语义猜测。
+  - 回滚：该修复集中在 `_loads_jsonish` 容错分支，可单文件回退恢复旧行为。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_parse.py`
+- 复盘要点：
+  - LLM 返回容错应优先保证“可恢复结构”而非“完美格式”。
+  - 尾部截断是高频异常，解析器必须具备低风险自愈能力，避免把格式噪声放大为业务回退。
+
+## 2026-02-12 Phase2B 外部素材匹配告警（SUxxx no external materials matched）
+- 日期：2026-02-12
+- 现象与影响范围：
+  - 日志出现 `SU009: no external materials matched in Phase2B`。
+  - 该单元在结果中缺少截图/clip，文档表现为“只有文本”。
+- 触发条件：
+  - 素材请求 ID 与实际落盘命名存在代际差异（例如历史请求 ID 不带 `unit_id/`、或扁平命名 `SU001_xxx`）。
+  - `AssembleRichText` 运行目录与 `semantic_units_phase2a.json` 所在目录不一致时，Phase2B 可能无法自动发现对应 `step2/step6/sentence_timestamps`。
+  - 概念/讲解单元启用截图验证时，若验证器短时全拒绝，会导致该单元截图清空。
+- 根因定位：
+  - `_collect_candidates_by_id` 对 legacy 请求 ID 兼容不足，原逻辑会漏掉“无 unit 文件夹”与“扁平化命名”文件。
+  - `assemble_only` 仅基于 pipeline 初始化目录加载字幕上下文，未优先参考 `semantic_units_json_path` 目录。
+  - `ConcreteKnowledgeValidator` 对非具象截图有“物理删除”副作用，导致匹配链路后续阶段无法再从磁盘回收该候选。
+  - 截图验证链路缺少“全拒绝后的最小保底”与“删除后恢复”保护。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - 扩展 `_collect_candidates_by_id`：兼容 legacy ID、`/`→`_` 扁平命名、unit 目录内模糊匹配。
+  - 当截图验证全拒绝但候选存在时，保留首张候选作为 fallback，避免单元素材断链。
+  - 在调用 validator 前缓存原图字节，若 validator 删除文件则立即恢复，保证后续 fallback 可用。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 在 `assemble_only` 前新增 `_refresh_subtitle_context_from_semantic_units`，
+      以 `semantic_units_phase2a.json` 所在目录重解析 `step2/step6/sentence_timestamps`。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 新增 3 个回归测试，覆盖 legacy ID 匹配、验证器全拒绝保底、subtitle context 刷新。
+- 验证方式：
+  - 代码编译：`python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+  - 场景脚本验证：
+    - legacy 请求 ID 能匹配到现有截图；
+    - 验证器全拒绝时保留首张候选；
+    - `assemble_only` 后 `step2/step6/sentence_timestamps` 成功刷新到 semantic_units 同目录。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 resilience 用例，覆盖跨目录组装与 legacy 命名。
+  - 监控：持续统计 `no external materials matched` 比例，按 unit_id 聚合告警。
+  - 校验：FFmpeg 落盘后抽样校验“请求 ID ↔ 文件路径”一致性。
+  - 回滚：修复集中在 Phase2B 匹配与上下文刷新分支，可按文件级回滚。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+- 复盘要点：
+  - 素材匹配必须对“命名代际差异”提供兼容层，不能假设请求 ID 永远同构。
+  - Phase2B 组装应以 `semantic_units` 的实际产物目录为事实来源刷新上下文。
+
+## 2026-02-12 AI Vision false 触发“误删 + 错用图片”双问题
+- 日期：2026-02-12
+- 现象与影响范围：
+  - AI Vision 判定 false 后，图片文件在验证阶段被物理删除，影响后续素材链路稳定性。
+  - Phase2B 兜底保留的候选图可能仍被 `markdown_enhancer` 使用，导致 false 图片进入文档。
+- 触发条件：
+  - `ConcreteKnowledgeValidator._finalize_validation_result` 命中 `not has_concrete and not has_formula` 分支时执行 `unlink`。
+  - `markdown_enhancer` 在消费 `materials.screenshot_items/screenshots` 时未识别“应排除”的图片标记。
+- 根因定位：
+  - 根因1：验证器把“判定结果”与“文件生命周期”耦合，产生删除副作用。
+  - 根因2：增强阶段缺少统一过滤规则，默认把候选图全部视为可用。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 移除 false 判定后的物理删除逻辑。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 为 `screenshot_items` 写入 `should_include`；
+    - 在“验证全拒绝但保留一张 fallback”场景写入 `should_include=False`。
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 新增 `should_include` 过滤：只保留可用图片项；
+    - 当存在图片元数据但全部被过滤时，不再回退使用原始 `screenshots`。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 新增/增强回归用例，覆盖“不删除文件”与“false 图片不进入增强”。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 `should_include` 过滤与 false 不删除回归用例，避免后续重构回退。
+  - 监控：按 unit_id 统计“validator reject 数”“markdown 实际插图数”，监测 reject 与插图异常同现。
+  - 校验：在 Phase2B 输出 JSON 中抽样检查 `screenshot_items.should_include` 与最终 markdown 插图一致性。
+  - 回滚：若需回退，仅需回退三处文件（validator/material_flow/markdown_enhancer），不影响上游素材提取。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+- 复盘要点：
+  - 判定链路应输出“可用性信号”，不应直接操控文件生命周期。
+  - 下游消费图片时必须遵守统一白名单字段（`should_include`），避免兜底样本污染文档。
+
+## 2026-02-14 全拒绝图片后仍出现 imgneeded 占位符污染
+- 日期：2026-02-14
+- 现象与影响范围：
+  - 当 `screenshot_items` 全部被过滤（例如 `should_include=false`）时，`enhanced_output.md` 仍可能出现 `【imgneeded_...】` 占位符文本。
+  - 文档不插图是正确行为，但占位符残留会误导为“插图失败”。
+- 触发条件：
+  - 结构化阶段提示词包含占位符协议说明，LLM 在“无图片候选（(none)）”场景下仍可能输出占位符。
+  - 旧逻辑仅在存在 `image_items` 时执行替换，对“无候选但有占位符”缺少清理。
+- 根因定位：
+  - “是否插图”与“是否清理占位符”耦合在同一替换分支；当无图可插入时，清理逻辑未执行。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - 新增 `_strip_imgneeded_placeholders`，统一移除 `【imgneeded_...】` 残留占位符。
+  - 在 `_build_structured_text_for_concept` 中：
+    - `image_items` 为空时直接清理占位符并返回；
+    - `image_items` 非空时在替换后再做一次清理，避免未命中占位符泄漏。
+  - 文件：`services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/structured_system.md`
+  - 文件：`services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/structured_user.md`
+  - 增加硬约束：图片候选为空（如 `(none)`）时禁止输出任何 `imgneeded` 占位符。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - 新增回归用例：无图片候选时即便 LLM 输出占位符，最终 markdown 也不应包含 `imgneeded`。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“无候选 + 占位符泄漏”回归用例，作为协议防护基线。
+  - 监控：对生成 markdown 增加 `imgneeded_` 关键字巡检，非零即告警。
+  - 校验：将“占位符残留数”纳入 Phase2B 质量验收指标。
+  - 回滚：修复集中在 `markdown_enhancer` 和 structured 提示词，可按文件级回退。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/structured_system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/markdown_enhancer/structured_user.md`
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+- 复盘要点：
+  - “不插图”不等于“可保留占位符”；占位符必须作为中间协议在最终产物中清零。
+  - 兜底清理应独立于图片替换分支，避免策略组合导致漏清理。
+
+## 2026-02-14 Legacy-Action 无效动作误导出（动态净时长<500ms）
+- 日期：2026-02-14
+- 现象与影响范围：
+  - `legacy_action_units` 可能导出“时长较长但内部真实动态很短”的动作素材，造成无效 clip/head/tail 进入后续识别与富文本。
+- 根因定位：
+  - 旧逻辑只按动作区间与 `action_type` 做保留判定，未显式约束“动态净时长”。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增动作动态净时长估算（动作总时长减内部稳定岛重叠时长）。
+    - 新增阈值：`legacy_action_min_dynamic_sec`（默认 `0.5`）。
+    - 动态净时长不足阈值的动作直接剔除。
+    - 被剔除动作仅生成 `tail` 截图兜底，不再生成 clip 与 `head` 截图。
+  - 文件：`config/module2_config.yaml`
+    - 新增 `pre_vl_static_pruning.legacy_action_min_dynamic_sec` 配置项。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+    - 补充与更新回归测试，覆盖“剔除后 tail-only”行为。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py -k "drops_segment_when_only_transition_inside or drops_segment_when_no_typed_actions or drops_short_dynamic_action_and_keeps_tail"`
+- 预防措施：
+  - 将“动态净时长阈值”纳入配置基线，并在验收脚本中校验 `legacy_action` 请求是否符合 `tail-only` 约束。
+
+## 2026-02-14 Whisper 模型下载阶段间歇性断连（Server disconnected without sending a response）
+- 日期：2026-02-14
+- 现象与影响范围：
+  - 在 `TranscribeVideo` 阶段首次拉取 Whisper 模型时，日志出现 `Server disconnected without sending a response`。
+  - 触发后转录失败，任务无法产出 `subtitles.txt`。
+- 根因定位：
+  - `model_downloader` 对 `hf_hub_download` 仅单次请求，网络抖动时缺少重试和端点回退策略。
+  - 文件完整性校验失败时固定走“强制重拉”，在弱网场景会放大失败概率。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/model_downloader.py`
+    - 新增网络错误判定与指数退避重试（默认 3 次）。
+    - 新增端点回退：主端点失败且判定为网络错误时，自动切换备用端点（官方/镜像双向回退）。
+    - 新增开关 `skip_integrity_check_on_failure`，默认启用：校验失败时跳过校验继续使用下载文件。
+    - 新增持久化校验状态与开关 `skip_reverify_after_success`（默认启用）：首次下载校验后写入状态，后续重启不再重复校验。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py`
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 透传 `whisper.skip_integrity_check_on_failure` 与 `whisper.skip_reverify_after_success` 配置，默认 `true`。
+  - 文件：`config/video_config.yaml`
+    - 新增并默认启用：`whisper.skip_integrity_check_on_failure: true`。
+    - 新增并默认启用：`whisper.skip_reverify_after_success: true`。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_model_downloader.py`
+    - 新增回归用例覆盖：
+      - 网络断连重试成功；
+      - 官方端点失败后镜像回退成功；
+      - 非网络错误不触发端点回退；
+      - 校验失败时跳过校验（不触发 `force_download`）。
+      - 已校验模型在重启后直接复用，不重复执行校验流程。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/model_downloader.py services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_model_downloader.py`
+  - `PYTHONPATH=. pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_model_downloader.py`
+  - `PYTHONPATH=. pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+- 预防措施：
+  - 将“断连重试 + 端点回退 + 首次校验后持久化复用”作为下载链路默认基线。
+  - 回归测试固定覆盖“网络错误/非网络错误/校验失败/重启复用”分支，防止后续重构回退。
+
+## 2026-02-15 VL 预切片超长段过大与 assets 清晰度约束
+- 日期：2026-02-15
+- 现象与影响范围：
+  - `split_video_by_semantic_units` 在超长语义单元上输出片段体积过大，增加 VL 预分析阶段存储与传输成本。
+  - 需求侧明确要求：最终进入 `assets` 的素材必须保持原视频清晰度来源，不能直接落用低清预切片。
+- 触发条件：
+  - 语义单元时长较长（默认阈值以上）时，预切片按原编码参数输出导致体积偏大。
+- 根因定位：
+  - 预切片脚本缺少“按片段时长降分辨率/码率”的策略。
+  - 预切片与最终资产导出的职责边界未在代码与测试中显式固化，存在误用风险。
+- 修复措施：
+  - `tools/split_video_by_semantic_units.py`
+    - 增加超长片段参数：`--large-segment-threshold-sec`、`--large-segment-scale-height`、`--large-segment-video-bitrate`。
+    - 命中阈值时追加 `-vf scale=-1:480 -b:v 500k`（参数可配置）。
+    - 在 `manifest.json` 记录该策略参数，并为命中片段写入 warning。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - 从 `semantic_split_pre_cut` 配置读取并透传策略到预切脚本。
+    - 明确注释“仅预切降本，最终 assets 回源原视频”。
+  - `config/module2_config.yaml`
+    - 新增 `vl_material_generation.semantic_split_pre_cut` 配置组。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 增强断言：教程资产导出调用 FFmpeg 时必须使用原视频路径。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k test_generate_tutorial_assets_per_unit_full_flow_before_phase2b`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留参数透传与“原视频回源导出”断言，防止后续重构将低清预切片误用于 assets。
+  - 监控：通过 `split_video_by_semantic_units` manifest 的 warning/参数字段追踪超长片段降质命中率。
+  - 校验：在验收样例中对比预切片与 assets 分辨率，确保“预切可降质、资产不降质”。
+  - 回滚：将 `semantic_split_pre_cut.enabled` 设为 `false` 可快速关闭该策略。
+
+## 2026-02-15 VL 预切片在低分辨率缩放时触发 libx264 偶数宽高约束
+- 日期：2026-02-15
+- 现象与影响范围：
+  - `AnalyzeWithVL` 在“视频切割”阶段失败，日志表现为 `视频切割失败 (code=1)`。
+  - 失败任务会进入 `AnalyzeWithVL` 异常分支，导致本次 VL 路由无法产出素材请求。
+- 触发条件：
+  - 命中 `semantic_split_pre_cut` 的超长片段降质策略时，预切命令使用 `-vf scale=-1:480`。
+  - 输入视频缩放后宽度变为奇数（例如 853x480），`libx264` 报错并中止编码。
+- 根因定位：
+  - `tools/split_video_by_semantic_units.py` 低清预切滤镜未保证宽高偶数。
+  - `libx264` 在常用 `yuv420` 编码路径下要求宽高都可被 2 整除。
+- 修复措施：
+  - 文件：`tools/split_video_by_semantic_units.py`
+    - 新增 `_normalize_even_scale_height`，将 `large_segment_scale_height` 规整为偶数并写入 warning。
+    - 低清预切滤镜从 `scale=-1:<height>` 改为 `scale=-2:<even_height>`，强制输出偶数宽度。
+    - dry-run 与 manifest warning 文案同步更新为 `scale=-2`，避免观测与真实命令不一致。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_split_video_even_scale.py`
+    - 新增回归测试，覆盖“奇数高度入参规整”和“ffmpeg 命令使用 `scale=-2:<even>`”。
+- 验证方式：
+  - 定位故障 manifest：`var/storage/storage/0407a8258efbbc4d74712e53a4790c00/semantic_unit_clips_vl/manifest.json`
+  - 关键证据（修复前 stderr）：`width not divisible by 2 (853x480)`。
+  - 回归测试：`pytest -q services/python_grpc/src/content_pipeline/tests/test_split_video_even_scale.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留偶数宽高约束用例，防止后续重构回退到 `scale=-1`。
+  - 监控：在 manifest 中持续采样 `ffmpeg_stderr` 关键字（`not divisible by 2`）。
+  - 校验：当启用 `semantic_split_pre_cut` 时，人工抽查 `ffmpeg_cmd` 是否为 `scale=-2:*`。
+  - 回滚：若需紧急回退，可将 `semantic_split_pre_cut.enabled` 设为 `false` 暂时关闭预切降质。
+
+## 2026-02-15 YouTube 下载失败（Sign in to confirm you’re not a bot）
+- 日期：2026-02-15
+- 现象与影响范围：
+  - `DownloadVideo` 阶段在 YouTube 链接上报错：`Sign in to confirm you're not a bot`。
+  - 任务在下载阶段直接失败，后续转写/分析全链路无法继续。
+- 根因定位：
+  - `VideoProcessor` 下载参数仅支持 `proxy`，未支持 `yt-dlp` 的 `cookies-from-browser` / `cookiefile`。
+  - gRPC 入口 `DownloadVideo(...)` 未从统一配置读取下载认证参数，导致用户侧配置无法生效。
+- 修复措施：
+  - 文件：`config/video_config.yaml`
+    - 新增 `video.download_cookies_from_browser`、`video.download_cookies_file`。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_load_download_video_options(...)`，统一解析下载认证参数并支持环境变量覆盖：
+      - `YTDLP_PROXY`
+      - `YTDLP_DISABLE_SSL_VERIFY`
+      - `YTDLP_COOKIES_FILE`
+      - `YTDLP_COOKIES_FROM_BROWSER`
+    - `DownloadVideo(...)` 中将参数透传给 `VideoProcessor`。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `VideoProcessor` 新增 `cookies_file/cookies_from_browser` 入参。
+    - 新增浏览器 Cookie 字符串解析（如 `chrome`、`edge:Default`）。
+    - 新增 Cookie 文件存在性校验。
+    - 新增 YouTube 风控错误的可执行提示（明确指向配置项）。
+    - `detect_playlist/get_playlist_info` 复用同一认证参数，避免“探测阶段先失败”。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 覆盖 cookie 参数注入与风控提示回归测试。
+  - 文件：`services/python_grpc/src/server/tests/test_download_video_config.py`
+    - 覆盖配置/环境变量解析与 gRPC 透传回归测试。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - `pytest -q services/python_grpc/src/server/tests/test_download_video_config.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：固定保留“配置透传 + 风控提示”用例，防止后续重构丢失参数链路。
+  - 监控：关注 `DownloadVideo failed` 日志中 `not a bot` 关键字命中率。
+  - 校验：上线前用一个受风控 YouTube 样例验证 `download_cookies_from_browser` 生效。
+  - 回滚：将 `download_cookies_from_browser` 与 `download_cookies_file` 置空即可回退到旧行为。
+
+## 2026-02-15 YouTube 下载失败（Requested format is not available）
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 报错：`Requested format is not available`。
+  - 任务在 `DownloadVideo` 阶段失败，后续阶段无法执行。
+- 根因定位：
+  - 旧格式表达式过于依赖 `mp4+m4a`，在目标视频仅提供 webm/其他容器时无法匹配可用流。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 下载格式从 `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best`
+      调整为自动回退策略：`best -> bestvideo+bestaudio/best`。
+    - 错误消息新增 `Requested format is not available` 专项提示。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 补充格式参数断言回归测试。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留格式断言，避免回归到硬编码 `mp4+m4a`。
+  - 监控：关注下载失败日志中 `Requested format is not available` 命中率。
+  - 校验：上线前用至少 1 个仅 webm 流样本回归下载。
+  - 回滚：将格式表达式恢复到旧值即可。
+
+## 2026-02-15 Cookie 手工导出易失效（需要自动同步浏览器登录态）
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 已配置 `download_cookies_file` 但仍出现 YouTube 风控；排查发现文件与浏览器实时登录态不同步。
+- 根因定位：
+  - 旧链路仅消费静态 cookie 文件，缺少“下载前自动同步浏览器 Cookie”能力。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_maybe_export_cookie_file_from_browser()`：
+      - 当 `download_cookies_from_browser` 与 `download_cookies_file` 同时存在时，先自动导出到文件。
+      - 导出失败但已有文件时回退使用已有文件；无文件时返回带导出失败原因的错误。
+    - `_build_auth_options()` 接入自动导出流程。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增自动导出回归测试。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：固定保留“browser->cookiefile 自动导出”单测。
+  - 监控：统计“自动导出失败但回退文件成功”与“自动导出失败且无文件”两类日志比例。
+  - 校验：上线前验证 `download_cookies_from_browser + download_cookies_file` 组合配置可自动生成文件。
+  - 回滚：仅保留 `download_cookies_file`，置空 `download_cookies_from_browser`。
+
+## 2026-02-15 格式选择器匹配失败（有 formats 但 `best` 仍不可用）
+- 日期：2026-02-15
+- 现象与影响范围：
+  - `-F` 可看到可用 `format_id`，但下载阶段仍报 `Requested format is not available`。
+- 根因定位：
+  - 在部分 YouTube 场景下，selector（`best`/`bestvideo+bestaudio`）与实际可用流集合存在匹配缺口。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 当 selector 链路失败时，增加格式探测并自动回退到显式 `format_id` 重试。
+    - 新增 `format_id` 选择逻辑：筛选音视频同轨格式并按分辨率/码率/fps 评分择优。
+    - 修复控制流缺陷：最后一个 selector 失败时不再提前抛错，确保显式 `format_id` 回退分支可执行。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增显式 `format_id` 回退测试，覆盖 `best -> bestvideo+bestaudio -> 96` 场景。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 selector 失败后显式 `format_id` 回退用例。
+  - 监控：关注“回退到显式 format_id”日志命中率与成功率。
+  - 校验：针对仅 HLS（91-96）样本做回归下载。
+  - 回滚：移除显式 `format_id` 回退分支，恢复 selector-only。
+
+## 2026-02-15 显式 format_id 仍失败时增加 m3u8+ffmpeg 兜底
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 同一 YouTube 链接在 `-F` 可列出 HLS 格式，但服务内下载阶段反复报 `Requested format is not available`。
+  - 影响 `DownloadVideo` 阶段成功率，阻断后续转写与结构化流程。
+- 根因定位：
+  - 在特定风控/网络上下文中，`yt-dlp` 的 selector 与显式 `format_id` 下载仍可能被判为不可用。
+  - 仅依赖 `yt-dlp` 下载阶段，缺少“提取播放地址后交由 ffmpeg 拉流”的兜底通道。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 m3u8 探测逻辑：从 `extract_info(download=False)` 的 formats 中筛选音视频同轨 `m3u8` 流并择优。
+    - 新增 ffmpeg 回退下载逻辑：调用 `ffmpeg -i <m3u8_url> -c copy`，并复用 `proxy`（映射为 `-http_proxy`）。
+    - 下载策略扩展为四级回退：`best -> bestvideo+bestaudio/best -> 显式 format_id -> m3u8+ffmpeg`。
+    - 修复回退控制流缺陷：显式 `format_id` 失败时改为“记录失败并继续尝试 m3u8+ffmpeg”，避免提前抛错导致兜底分支不可达。
+    - 新增诊断进度日志：代理启用状态、显式 `format_id` 失败后继续回退提示、m3u8 未提取提示。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - `Download auth enabled` 日志补充 `proxy` 值，便于定位“命令行可用但服务不可用”的代理差异。
+    - 错误提示文案同步标注四级回退已执行。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_fallback_to_m3u8_ffmpeg` 回归测试。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`（通过）
+  - `pytest` 在当前环境受目录 ACL 限制报 `WinError 5`，未能完成自动化执行。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：在具备可写临时目录权限的 CI/本机环境执行 `test_video_processor_download.py`。
+  - 监控：新增关注“尝试 m3u8 提取并回退到 ffmpeg 下载”日志命中率与成功率。
+  - 校验：上线前用仅 HLS 可用样本验证 ffmpeg 回退路径。
+  - 回滚：移除 m3u8+ffmpeg 分支，恢复至显式 `format_id` 为最后回退点。
+
+## 2026-02-15 DownloadVideo 失败（Unable to connect to proxy / WinError 10061）
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 日志显示 `Unable to connect to proxy`，并伴随 `WinError 10061`（目标计算机拒绝连接）。
+  - 该错误发生在 API 请求阶段，导致流程不会进入格式选择与回退下载逻辑。
+- 根因定位：
+  - `video.download_proxy` 配置指向未监听端口（例如 `http://127.0.0.1:7890`），与实际可用代理端口不一致。
+  - 旧错误包装文案缺少“代理连接失败”专项分流，用户容易误以为是格式/Cookie 问题。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 在 `_build_download_error_message(...)` 增加代理错误识别：
+      - `unable to connect to proxy`
+      - `proxyerror`
+      - `winerror 10061`
+    - 返回文案中输出当前 `proxy` 配置，并明确提示检查代理进程/端口或清空代理配置重试。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_proxy_connection_error_has_specific_hint` 回归测试。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - `pytest` 在当前环境仍受临时目录 ACL 限制，未能完整执行。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：在可写临时目录环境执行新增代理错误分支用例。
+  - 监控：当出现 `Unable to connect to proxy` 时，优先检查 `download_proxy` 与代理进程状态。
+  - 校验：上线前对 `video.download_proxy` 与手工命令 `--proxy` 做一致性检查。
+  - 回滚：移除代理错误分支可恢复旧通用文案，但不建议。
+
+## 2026-02-15 显式 format_id 单点失败导致可用流漏试
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 在 `best/bestvideo+bestaudio` 失败后，系统仅尝试一个最高显式 `format_id`。
+  - 若该 ID 临时不可用，会直接进入下一分支或失败，可能遗漏同轨且可下载的次优 ID。
+- 根因定位：
+  - 显式回退策略为“单点尝试”，缺少候选链重试机制。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 显式 `format_id` 选择逻辑改为返回排序候选列表（按分辨率/码率/fps 降序）。
+    - 下载阶段逐个尝试候选 ID，直到成功或候选耗尽。
+    - 最终异常附带本次尝试轨迹 `attempts=...`，提升线上问题定位效率。
+    - 当 formats 探测失败且目标为 YouTube 时，自动启用固定 HLS ID 链（`96/95/94/93/92/91`）继续回退，避免探测失败导致“0 个显式 ID 被尝试”。
+    - 异常中新增 `probes=...` 字段，显式记录探测阶段失败原因。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_fallback_to_next_explicit_format_id`，验证 `96` 失败后可自动回退到 `95` 成功。
+    - 新增 `test_download_fallback_to_fixed_youtube_id_chain_when_probe_fails`，验证探测失败时仍可执行固定 ID 链。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - `pytest` 受当前环境临时目录 ACL 限制，未能完整执行。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“显式 format_id 候选链”回归用例，防止回退到单 ID 逻辑。
+  - 监控：关注“回退到显式 format_id”日志序列是否出现多 ID 递进。
+  - 校验：上线前至少使用一个 `96` 失败、`95` 可用样本回归。
+  - 回滚：将候选链重试简化回单 ID 尝试。
+
+## 2026-02-15 YouTube 探测阶段连续 `Requested format is not available`
+- 日期：2026-02-15
+- 现象与影响范围：
+  - 错误中出现 `attempts=best -> bestvideo+bestaudio/best -> ... -> m3u8:probe_error`。
+  - `probes=...` 显示显式格式探测与 m3u8 探测均在提取阶段失败。
+- 根因定位：
+  - 在特定 YouTube 风控上下文下，默认提取客户端未返回可用流集合，导致探测阶段直接失败。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 YouTube `player_client` 回退链：`web_safari/tv_downgraded/web`。
+    - 显式格式探测与 m3u8 探测改为两阶段尝试（默认探测失败后自动使用客户端回退链重试）。
+    - 下载主链路也统一注入该 client chain，减少“探测与下载上下文不一致”。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_youtube_enables_player_client_chain`。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - 当前环境 `pytest` 仍受临时目录 ACL 限制，未执行完整测试。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 YouTube client chain 配置断言用例。
+  - 监控：持续观察 `probes=` 字段中 `yt_client_chain_probe_failed` 命中率。
+  - 校验：针对同一 URL 做“CLI -F vs 服务下载”对齐回归。
+  - 回滚：移除 `_with_youtube_player_client_chain(...)` 注入逻辑。
+
+## 2026-02-15 transcript `step1_validate` 对 AV1 误报“视频不可打开”
+- 日期：2026-02-15
+- 现象与影响范围：
+  - `step1_validate` 日志出现 `Could not open codec av1`、`Failed to initialize VideoCapture`。
+  - `transcript_pipeline` 在仅做输入校验阶段就可能失败，阻断后续基于字幕的流程（即使业务本身并不依赖逐帧解码）。
+- 根因定位：
+  - `services/python_grpc/src/transcript_pipeline/tools/file_validator.py` 的 `validate_video(...)` 仍直接使用裸 `cv2.VideoCapture`。
+  - 该入口未接入已落地的 `common/utils/opencv_decode.py` 解码探测与转码回退能力，导致 AV1 在 step1 被提前判定失败。
+- 修复措施：
+  - 文件：`services/python_grpc/src/transcript_pipeline/tools/file_validator.py`
+    - `validate_video(...)` 改为调用 `open_video_capture_with_fallback(...)`，统一走“探测可读性 + 必要时 ffmpeg 转码回退”。
+    - 当仍不可解码时，补充 `probe_primary_video_codec(...)` 的 codec 提示，返回更可定位的错误文案（如 `codec=av1`）。
+  - 文件：`services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+    - 新增“fallback 成功即校验通过”测试。
+    - 新增“fallback 失败时返回 codec 提示”测试。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/tools/file_validator.py services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 transcript 入口对 decode fallback 的单测，避免后续回退到裸 OpenCV 校验。
+  - 监控：关注 `step1_validate` 中 `Cannot decode video file (codec=...)` 与 `OpenCV decode fallback applied` 日志比例。
+  - 校验：上线前回放 1 条 AV1 样本，确认 step1 不再因 `VideoCapture` 初始化失败而中断。
+  - 回滚：若需快速回退，可恢复 `validate_video(...)` 到旧版 `cv2.VideoCapture` 实现（不推荐）。
+
+## 2026-02-15 长视频字幕被截断为 1000 条 + Whisper 语言参数未透传
+- 日期：2026-02-15
+- 现象与影响范围：
+  - transcript 流程 `step2_correction` 输入日志长期固定在 `subtitle_count=1000`，长视频后半段字幕被丢弃。
+  - `TranscribeVideo` 收到 `language=auto/en` 时，实际仍按默认语言执行，英文音频容易被错误按中文解码。
+- 触发条件：
+  - `step2_node` 使用 `read_subtitle_sample(..., count=1000)` 且注释误写为“读取全部”。
+  - gRPC `TranscribeVideo` 中读取了 `request.language`，但调用 `transcriber.transcribe(video_path)` 时未传入该参数。
+- 根因定位：
+  - 字幕读取工具 `read_subtitle_sample` 只支持固定整型上限，且调用侧硬编码 `1000`。
+  - 语言参数链路在 gRPC 层断裂，导致下游转录器始终走默认值。
+- 修复措施：
+  - 文件：`services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - `step2` 与 fallback 路径改为 `count=None`，取消 1000 条硬上限。
+  - 文件：`services/python_grpc/src/transcript_pipeline/tools/file_validator.py`
+    - `read_subtitle_sample` 及各解析器支持 `count=None/<=0` 表示“读取全部”。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/language_normalizer.py`（新增）
+    - 新增 Whisper 语言归一化：`auto/detect/none/null -> None`（自动检测），并兼容 `zh-cn/en-us` 等别名。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py`
+    - 转录默认语言改为 `auto`，并在调用并行转录前统一归一化。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 并行分段任务参数改为传递归一化后的语言。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - `TranscribeVideo` 改为透传语言到 `transcriber.transcribe(...)`，并用归一化语言参与复用指纹。
+  - 测试：
+    - 新增 `services/python_grpc/src/transcript_pipeline/tests/test_subtitle_read_all.py`
+    - 新增 `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_language_normalizer.py`
+- 验证方式：
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_subtitle_read_all.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_language_normalizer.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - 结果：`7 passed`。
+  - `python -m py_compile` 校验关键修改文件语法通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“无上限读取”与“language=auto/alias 归一化”回归用例，避免后续再次引入隐式截断和语言断链。
+  - 监控：增加对 `step2 subtitle_count` 与 `TranscribeVideo(language=...)` 的观测，若长视频持续命中 1000 立即告警。
+  - 校验：上线前用英文样本回放 `language=auto` 与 `language=en` 两组任务，确认识别语言行为一致可预期。
+  - 回滚：如需紧急回退，可仅回滚语言归一化模块，不影响“取消 1000 截断”的修复。
+
+## 2026-02-16 transcript step1 AV1 噪声报错（已修复）
+- 日期：2026-02-16
+- 现象与影响范围：
+  - `step1_validate` 入口日志出现 `Could not open codec av1`、`Failed to initialize VideoCapture`。
+  - 虽然 AV1 分支最终可能被放行，但入口错误日志容易被误判为失败并干扰运维排障。
+- 根因定位：
+  - `services/python_grpc/src/transcript_pipeline/tools/file_validator.py` 的 `validate_video(...)` 先执行 `cv2.VideoCapture(...)`，后判断 `codec=av1` 放行。
+  - 该顺序导致 AV1 在“可放行”前先触发 OpenCV 解码初始化失败日志。
+- 修复措施：
+  - 文件：`services/python_grpc/src/transcript_pipeline/tools/file_validator.py`
+    - 增加 `_is_av1_codec(...)`，统一识别 `av1/av01`。
+    - `validate_video(...)` 调整为“先 codec 探测，AV1/AV01 先短路放行”，不再先调用 `VideoCapture`。
+  - 文件：`services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+    - 新增 `av1/av01` 两条回归测试，断言 step1 校验不触发 `VideoCapture`。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_file_validator_video_decode_fallback.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 “AV1/AV01 不触发 VideoCapture” 断言，防止后续顺序回归。
+  - 监控：观察 step1 入口日志中 AV1 解码初始化错误占比是否回落。
+  - 校验：上线前回放 1 条 AV1 视频，确认 step1 无上述噪声报错且流程继续。
+  - 回滚：若需紧急回退，仅回滚 `validate_video(...)` 判定顺序改动。
+
+## 2026-02-16 transcript step2~step6 字符量下降疑似截断（排查与防护）
+- 日期：2026-02-16
+- 现象与影响范围：
+  - 样本目录 `var/storage/storage/57018a9f0c5fe43f4622fb60ce8a9957` 中，用户观察到 `subtitles.txt` 与 `semantic_units_phase2a.json` 文本量差异明显，担心被截断。
+  - 实测显示最终文本量约为字幕正文的 `29.5%`，对“是否遗漏有效信息”存在风险疑虑。
+- 根因定位：
+  - 本次样本中 `subtitles.txt` 与 `step2_correction_output.json` 未出现输入截断，`step2` 基本保留原量级。
+  - 收缩主要发生在 `step3~step6` 的清洗/去冗余/跨句合并阶段，属于语义压缩行为。
+  - 历史实现存在隐患：当 LLM 窗口输出不完整、结构异常或窗口报错时，可能出现“未显式声明删除但 ID 丢失”的静默漏句风险。
+- 修复措施：
+  - 文件：`services/python_grpc/src/transcript_pipeline/graph.py`
+    - `StepOutputConfig.REQUIRED_ENABLED_STEPS` 强制包含 `step3_merge`、`step4_clean_local`、`step5_clean_cross`。
+    - `StepOutputConfig.FULL_PERSISTENCE_STEPS` 同步包含上述步骤，确保中间产物完整落盘，不做 list 压缩。
+  - 文件：`services/python_grpc/src/transcript_pipeline/nodes/phase2_preprocessing.py`
+    - `step4`：batch 与全局两级 coverage 校验；缺失 sentence_id 自动回填原文；窗口异常返回原句而非空集。
+    - `step5`：窗口 keep/delete 覆盖率校验；缺失 ID 强制加入 keep；窗口异常默认 keep 全量窗口句子。
+    - `step6`：段落结果标准化与 source_sentence_ids 校验；窗口内缺失 ID 回填单句段落；去重后再做全局 coverage 补齐。
+  - 测试：
+    - `services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+      - 新增 required steps + full payload 回归断言（覆盖 step3/4/5）。
+    - `services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+      - 新增 step4 partial 输出补齐、step5 窗口异常保留、step6 覆盖补回测试。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_step_output_config.py`
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_phase2_env_tuning.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 coverage 补偿类回归用例，避免后续优化时回退到“静默漏句”。
+  - 监控：在 step4/5/6 运行日志持续观察 `coverage gap recovered` 命中率，超过阈值时告警并保留窗口原始响应。
+  - 校验：每次长视频上线前，对比 `step2 -> step6` sentence-id 覆盖率与字符量变化分布，确认收缩来自显式规则而非异常丢失。
+  - 回滚：如需紧急回退，仅回滚 step4/5/6 coverage guard 的新增逻辑，不影响 step3/4/5 产物留存能力。
+
+## 2026-02-16 AnalyzeWithVL 误读 `semantic_units_phase2a.json` 导致 FileNotFound
+- 日期：2026-02-16
+- 现象与影响范围：
+  - 日志报错：`AnalyzeWithVL 异常: [Errno 2] No such file or directory: ...semantic_units_phase2a.json`。
+  - 影响 VL 路由与后续素材提取，任务被迫 fallback 或中断。
+- 触发条件：
+  - Phase2A 默认异步写盘语义单元，AnalyzeWithVL 紧随其后触发且强制从磁盘读取。
+  - 在写盘尚未完成/文件尚不可见的窗口期，`open(semantic_units_path)` 直接失败。
+- 根因定位：
+  - 调用链存在“同进程已持有语义单元对象，但 AnalyzeWithVL 未复用内存对象、只读磁盘”的设计缺口。
+  - 该缺口与异步写盘时序叠加，形成稳定可复现竞态。
+- 修复措施：
+  - 在 `grpc_service_impl.py` 新增 Phase2A runtime cache（按 `output_dir` 缓存语义单元序列化结果）。
+  - `AnalyzeSemanticUnits` 完成后将最新语义单元 payload 写入 runtime cache。
+  - `AnalyzeWithVL` 改为：
+    - 优先从 runtime cache 加载语义单元；
+    - cache miss 时再回退文件读取；
+    - 读盘前先 `flush_async_json_writes(timeout_sec=10)`，并按候选路径扫描。
+  - 在 `AssembleRichText` 收尾 finally 中增加 Phase2A runtime cache 清理。
+  - 在 `rich_text_pipeline.py` 增加 `latest_phase2a_semantic_units_payload`，确保上游可直接拿到序列化结果。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 runtime cache 回归测试，覆盖“读写深拷贝一致性”和“清理后不可见”。
+  - 监控：新增关注日志关键词
+    - `AnalyzeWithVL loaded semantic units from runtime cache`
+    - `semantic_units_json not found (candidates=...)`
+  - 校验：回归验证“Phase2A 后立即 AnalyzeWithVL”场景，确认不再依赖 json 落盘完成时序。
+  - 回滚：如需快速回退，可仅禁用 runtime cache 读取分支，保留 flush+候选路径兜底。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_phase2a_runtime_cache.py`
+- 复盘要点：
+  - 同进程阶段串联优先走内存对象，磁盘只做持久化与跨进程恢复兜底。
+  - 引入异步写盘后，任何紧邻阶段都不应再假设“文件已立即可见”。
+
+## 2026-02-16 Java->Python 语义单元路径依赖导致跨阶段竞态（协议层修复）
+- 日期：2026-02-16
+- 现象与影响范围：
+  - `AnalyzeWithVL` 出现 `No such file or directory: semantic_units_phase2a.json`。
+  - Java Legacy 分支在读取/回写语义单元时同样依赖路径，放大链路对文件系统可见性的脆弱性。
+- 触发条件：
+  - Phase2A 异步写盘后立即触发 AnalyzeWithVL 或后续装配；文件尚未可见时按路径读取失败。
+- 根因定位：
+  - Java->Python 语义单元传输使用路径字段作为主协议载体，违背“跨 RPC 传结构化数据”的边界。
+  - Python/Java 虽已持有内存态语义单元，但协议未提供统一 ref/inline 通道。
+- 修复措施：
+  - proto 新增 `SemanticUnitsRef` / `SemanticUnitsInline`。
+  - `AnalyzeResponse` 增加 `semantic_units_ref` 与 `semantic_units_inline`。
+  - `VLAnalysisRequest` / `AssembleRequest` 增加 `oneof semantic_units_source`。
+  - Python 端实现 `inline > ref > runtime_cache > path` 解析优先级，并在 Assemble 前按需内部落盘（仅供 Pipeline 兼容）。
+  - Java 端改为优先发送 inline/ref；Legacy 分支更新语义单元后刷新 AnalyzeResult 的 inline payload 并失效旧 ref。
+- 验证方式：
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/保留 runtime cache ref 命中与清理回归（`test_phase2a_runtime_cache.py`）。
+  - 监控：重点观察日志关键词
+    - `semantic_source=semantic_units_ref|semantic_units_inline`
+    - `semantic_units_ref not found, fallback to runtime/disk`
+  - 校验：回归验证 `AnalyzeSemanticUnits -> AnalyzeWithVL -> AssembleRichText` 全链路在无路径输入下可完成。
+  - 回滚：可临时退回到 deprecated 的 `semantic_units_json_path` 路径字段，不影响协议兼容。
+- 相关文件/接口：
+  - `contracts/proto/video_processing.proto`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 复盘要点：
+  - 文件路径不应承担 RPC 协议语义，路径只能是持久化细节。
+  - 对高频主链路，优先定义“可校验的引用 + 可回退的内联载荷”双通道，避免单点依赖。
+
+## 2026-02-16 AnalyzeSemanticUnits 在极端场景未回填 inline/ref（补强）
+- 日期：2026-02-16
+- 现象与影响范围：
+  - 个别任务在 `AnalyzeSemanticUnits` 成功后，返回体缺少 `semantic_units_inline/ref`，Java 侧可能退回 `semantic_units_json_path`。
+  - 在异步写盘窗口下会放大路径可见性风险，触发后续 `AnalyzeWithVL`/`AssembleRichText` 的 path fallback。
+- 根因定位：
+  - `AnalyzeSemanticUnits` 依赖 `pipeline.latest_phase2a_semantic_units_payload` 回填 inline/ref。
+  - 当该内存字段未就绪时，原实现只记录日志并跳过缓存写入，导致响应无法携带内存语义通道。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - 增加兜底恢复：若内存 payload 缺失，先 `flush_async_json_writes(timeout_sec=10)`，再回读当前 `semantic_units_path`。
+    - 回读成功即写入 Phase2A runtime cache，并继续回填 `semantic_units_inline/ref`。
+    - 更新方法注释，明确 AnalyzeResponse 语义已升级为 ref/inline 主通道。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：后续补充一条 `latest_phase2a_semantic_units_payload` 缺失时仍能返回 inline/ref 的回归用例。
+  - 监控：关注日志关键词 `runtime payload recovered from json path` 与 `runtime payload unavailable after segmentation`。
+  - 校验：联调校验 AnalyzeResponse 在常规任务上 `semantic_units_inline.payload` 非空。
+  - 回滚：如恢复逻辑引入额外延迟，可仅关闭“flush+回读”分支，保留现有 path fallback 兼容。
+
+## 2026-02-16 旧字段 `semantic_units_json_path` 残留导致路径回退风险（硬切修复）
+- 日期：2026-02-16
+- 现象与影响范围：
+  - 即使协议已支持 `semantic_units_ref/semantic_units_inline`，调用链仍可能因为旧字段残留而回退路径传递。
+  - 在异步写盘窗口下，该回退会重新引入 `FileNotFound` 风险。
+- 根因定位：
+  - proto 与 Java/Python 代码同时保留了 `semantic_units_json_path` 输入/输出分支，形成“隐性旧通道”。
+  - 当 inline/ref 缺失或调用方沿用旧接口时，系统仍可通过路径字段继续工作，导致问题长期潜伏。
+- 修复措施：
+  - 文件：`contracts/proto/video_processing.proto`
+    - 在 `AnalyzeResponse`、`AssembleRequest`、`VLAnalysisRequest` 删除 `semantic_units_json_path`，并增加 `reserved` 声明。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - 删除 `request.semantic_units_json_path` 读取与相关 fallback 分支。
+    - Assemble 仅接受 `inline/ref/runtime`，再由服务端内部物化临时 JSON 供 Pipeline 使用。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 删除 `AnalyzeResult.semanticUnitsJsonPath` 字段。
+    - 删除/收敛基于路径的 `analyzeWithVLAsync` 与 `assembleRichTextAsync` 旧重载。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - Legacy 分支移除从路径加载语义单元逻辑，仅使用 inline。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/resilience/ResilientGrpcClient.java`
+    - 弹性组装接口改为透传 `AnalyzeResult`，不再接受路径参数。
+- 验证方式：
+  - `python -m grpc_tools.protoc -I contracts/proto --python_out=contracts/gen/python --grpc_python_out=contracts/gen/python contracts/proto/video_processing.proto`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py contracts/gen/python/video_processing_pb2.py contracts/gen/python/video_processing_pb2_grpc.py`
+  - `mvn -q -DskipTests compile -f services/java-orchestrator/pom.xml`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/补充编译期检查，禁止再次出现 `setSemanticUnitsJsonPath/getSemanticUnitsJsonPath` 调用。
+  - 监控：持续观察 `semantic_source` 日志命中，确认仅出现 `semantic_units_inline` 或 `semantic_units_ref`。
+  - 校验：联调时验证 Analyze/VL/Assemble 三段请求体均不含路径字段。
+  - 回滚：若紧急回滚，需回滚 proto 与 Java/Python 适配代码为同一版本，禁止只回滚单侧。
+
+
+## 2026-02-17 注释清理过程误伤代码导致 Phase2B 管线语法损坏（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 在进行 `semantic_unit_segmenter.py` 与 `rich_text_pipeline.py` 的乱码注释治理时，自动替换脚本误伤了代码正文。
+  - 直接表现为 `rich_text_pipeline.py` 出现截断语句（如 `nstance(...)`、`config_path()`），`py_compile` 失败，Phase2B 入口不可运行。
+- 根因定位：
+  - 采用了“基于文本偏移的批量替换”处理注释/文档字符串，未严格约束只作用于注释 token。
+  - 在包含多字节字符与复杂 docstring 分布的文件中，局部替换与行偏移叠加，导致代码行前缀被误删。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 从历史可解析版本 `b58cd67` 回灌基线，再手工回补 grouped 关键逻辑（`_assemble_document`、`_serialize_semantic_units`、`_load_semantic_units`）。
+    - 恢复 `KnowledgeGroup` 组装路径与 shared payload helper 复用，避免回退到旧平铺协议。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+    - 修复 `__post_init__` 与 `__init__` 中被误伤的初始化语句。
+    - 将 Phase3 resegment 提示词块恢复为可读中文，清除乱码文本。
+  - 注释治理策略调整：
+    - 仅允许基于 `tokenize` 的注释 token 替换，不再对原始文本做无边界批量替换。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/shared/semantic_payload.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_semantic_segment_prompt_definitions.py services/python_grpc/src/content_pipeline/tests/test_semantic_payload_utils.py services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_cache_grouped.py --basetemp var/tmp_pytest_comment_cleanup_semantic_20260217`
+  - 函数级烟测：`_assemble_document`、`_serialize_semantic_units`、`_load_semantic_units` 的 grouped 输入输出一致性（本地脚本验证通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：为“注释治理”引入最小回归，至少覆盖 `py_compile` 与 grouped 关键路径函数级烟测。
+  - 监控：在本地改造流程中把 `py_compile` 前置为强制门禁，先验证可解析再跑业务测试。
+  - 校验：注释替换必须限定为 token 级，不允许对代码文本进行无上下文替换。
+  - 回滚：若再次出现误伤，优先按文件级回灌最近可解析历史版本，再做最小差异重放。
+
+## 2026-02-17 Stage1 Step1 失败状态被误判为流水线成功（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - `step1_validate` 调用 DeepSeek 返回 `401 Authentication Fails` 时，节点返回 `current_step_status=error` 与 `errors`。
+  - `transcript_pipeline/graph.py` 的 `_execute_pipeline` 未校验最终状态，仍输出 `Pipeline completed successfully!`。
+  - `ProcessStage1` 只能在后续等待 `step2_correction_output.json` / `step6_merge_cross_output.json` 超时后，才以“产物缺失”失败，错误定位后移且误导排障。
+- 根因定位：
+  - Stage1 图执行使用“是否抛异常”作为唯一成功判据，忽略了节点以结构化状态返回失败（`failed/error/is_valid=false/errors`）这一决策通道。
+  - 导致“控制流结束成功”与“业务状态失败”发生语义分叉。
+- 修复措施：
+  - 文件：`services/python_grpc/src/transcript_pipeline/graph.py`
+    - 新增 `_raise_if_final_state_failed(final_state)` 统一状态校验。
+    - 在 `graph.ainvoke(...)` 后立即执行校验；命中失败状态时直接抛 `RuntimeError`，阻断后续“成功日志/完成状态”写入。
+  - 文件：`services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py`
+    - 新增参数化回归用例，覆盖 `current_step_status=error` 与 `current_step_status=failed + is_valid=false` 两类场景，确保 `_execute_pipeline` 必须抛错。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/graph.py services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py`
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_graph_resume_injection.py -q`（当前环境因 `numpy/skimage` 二进制不兼容在收集阶段失败，见“预防方案”）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保持“最终状态失败即抛错”的单测，不再仅校验 resume 注入路径。
+  - 监控：排查日志时将 `current_step_status` 与 `Pipeline completed successfully` 视为必须一致的观测对。
+  - 校验：对任何“以状态返回失败而非抛异常”的节点，统一纳入 pipeline 出口校验。
+  - 回滚：如需临时回滚，仅回退 `graph.py` 该校验函数与调用点，不影响节点内部逻辑。
+
+## 2026-02-17 首页任务列表未覆盖历史任务，导致手机端“查看结果”链路断裂（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 首页 `index.html` 只能显示当前进程内任务，服务重启后历史任务不可见。
+  - 手机端无法直接从任务列表跳转查看 `var/storage/storage` 下已有 Markdown 结果。
+- 根因定位：
+  - 任务列表数据源仅依赖 `TaskQueueManager` 内存态，没有聚合磁盘持久化任务目录。
+  - `mobile` 系列接口对历史任务ID缺少统一命名与路由约定。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `/api/mobile/tasks` 改为聚合运行态 + 磁盘态任务。
+    - 引入 `storage:{目录名}` 历史任务ID约定，并支持 `/markdown`、`/asset` 全链路读取。
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 任务列表改为定时拉取 `/api/mobile/tasks`，WebSocket仅做增量更新。
+    - 完成态任务统一跳转 `mobile-markdown.html?taskId=...`。
+- 验证方式：
+  - 手动验证 `GET /api/mobile/tasks` 含 `source=storage` 任务项。
+  - 手动打开 `mobile-markdown.html?taskId=storage:{目录名}` 能读取 markdown 与本地资源。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/保留接口级回归，校验任务列表必须同时包含运行态与磁盘态数据。
+  - 监控：在首页前端日志中持续采集 `mobile/tasks` 拉取成功率与返回数量。
+  - 校验：新增任务列表改造时，必须确认重启后历史任务可见性不回退。
+  - 回滚：如历史聚合引发异常，可临时回退到“运行态列表 + markdown接口保留历史读取”最小模式。
+
+## 2026-02-17 手机端 Markdown 视频片段无法播放（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 移动端 `mobile-markdown.html` 中视频片段链接存在“点击后无法稳定播放/预览不触发”的问题。
+  - 影响 `var/storage/storage` 任务目录中的本地 `.mp4` 片段在手机端查看体验。
+- 根因定位：
+  - 后端 `/api/mobile/tasks/{taskId}/asset` 未处理 `Range` 请求，部分移动浏览器（尤其 iOS/Safari）对 MP4 首包与分片响应要求更严格。
+  - 前端将 markdown 相对链接重写为 `/asset?path=...` 后，视频扩展名不再位于 URL 主路径，导致“按链接后缀识别视频”的预览逻辑失效。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 为 `asset` 接口增加 `Range` 请求处理，命中时返回 `206 Partial Content` 与 `Content-Range/Accept-Ranges`。
+    - 增加资源路径前导斜杠归一化，降低 markdown 链接写法差异导致的路径解析失败。
+  - 文件：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+    - 在链接改写时保留 `data-original-href`。
+    - 视频预览判断改为基于原始 markdown 链接后缀，而非改写后的 API URL。
+    - 补齐 KaTeX JS 依赖并启用 `markdown-it-katex` 容错初始化，保证 `$$...$$` 数学块渲染可用。
+    - 移动端渲染前压缩前导缩进（每 4 空格 -> 1 空格），且跳过代码围栏，提升手机阅读密度并保持源文件不变。
+- 验证方式：
+  - 手动验证：在手机端打开含视频链接/嵌入的 markdown，确认视频可加载与拖动播放。
+  - 接口验证：`GET /api/mobile/tasks/{taskId}/asset?path=...` 携带 `Range: bytes=0-1023` 返回 `206`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增前端渲染回归用例，覆盖“改写链接后的视频类型识别”。
+  - 监控：记录 `asset` 接口 `206/200/4xx` 比例及常见失败 path。
+  - 校验：移动端兼容性验证纳入发布前检查（至少 Android Chrome + iOS Safari）。
+  - 回滚：如 Range 逻辑出现兼容问题，可临时回退为 200 全量返回，同时保留前端链接识别修复。
+
+## 2026-02-17 Java 编译失败：`ResourceRegion` 包路径不匹配（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 执行 `mvn compile` 时，`MobileMarkdownController.java` 报错“找不到符号：`org.springframework.core.io.ResourceRegion`”。
+  - 直接阻塞 `services/java-orchestrator` 编译，影响移动端 markdown 相关接口发布。
+- 根因定位：
+  - 代码中 `ResourceRegion` 使用了错误包路径 `org.springframework.core.io.ResourceRegion`。
+  - 当前 Spring 依赖版本下，正确类型位于 `org.springframework.core.io.support.ResourceRegion`。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 将 import 从 `org.springframework.core.io.ResourceRegion` 调整为 `org.springframework.core.io.support.ResourceRegion`。
+  - 该修复为最小变更，仅修正类型解析，不改变 `Range` 响应业务逻辑。
+- 验证方式：
+  - 用户侧编译命令：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile`。
+  - 代理侧环境受限于本地仓库写权限（`C:\Users\CodexSandboxOffline\.m2\repository`），无法在当前沙箱完整复验编译链路。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：在 CI 增加 `services/java-orchestrator` 的 `compile` 阶段门禁，避免仅在本地暴露 import 不匹配问题。
+  - 校验：涉及 Spring 类型时优先以 IDE/依赖源码自动导包，避免手写包名。
+  - 监控：对“新增 Controller 后首次编译失败”归类统计，识别常见依赖版本错配模式。
+  - 回滚：如后续 Range 逻辑需回滚，可仅回退 `asset` 接口改动，import 修复应保留。
+
+## 2026-02-17 手机端任务元数据写入失败并产生空 JSON（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - `MobileMarkdownController` 写入 `mobile_task_meta.json` 时出现：`No serializer found for class ... TaskMetaFile`。
+  - 同时伴随读取报错：`No content to map due to end-of-input`，说明目标 JSON 在失败流程中被写成空文件。
+  - 影响手机端段落收藏/批注/任务重命名等元数据持久化功能。
+- 根因定位：
+  - `TaskMetaFile` / `NoteMeta` 使用 private 字段且无 getter/setter，默认 Jackson 属性可见性下会被识别为“空 Bean”，序列化直接失败。
+  - 写文件过程直接对目标文件落盘，序列化失败时可能留下空文件，导致后续读取持续 EOF。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 将 `TaskMetaFile`、`NoteMeta` 的持久化字段调整为 `public`，确保 Jackson 可稳定序列化/反序列化。
+    - `writeTaskMeta` 改为“临时文件写入 + 原子替换（不支持时降级 REPLACE_EXISTING）”，避免写入失败污染正式文件。
+    - `readTaskMeta` 新增空文件保护：检测到 0 字节文件时按损坏处理并删除，再回退默认结构。
+    - 反序列化后增加空值归一化，修复历史异常数据中的 `notes/favorites/comments` 空指针风险。
+- 验证方式：
+  - 端到端手动验证：在手机端执行“收藏/批注/重命名”，确认 `mobile_task_meta.json` 正常写入且重启后仍可读取。
+  - 接口验证：`PUT /api/mobile/tasks/{taskId}/meta` 后立即 `GET /api/mobile/tasks/{taskId}/meta`，返回体包含已保存字段。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充 Controller 级回归，覆盖 `TaskMetaFile` 序列化与“空文件自愈”读取路径。
+  - 监控：保留 `读取/写入任务元数据失败` 告警，按任务目录聚合失败率。
+  - 校验：新增持久化模型时统一要求“可序列化字段可见性”或显式 Jackson 注解。
+  - 回滚：若元数据逻辑需回滚，至少保留“临时文件 + 替换”写入策略，避免空文件回归。
+
+## 2026-02-17 Java 编译失败：`sanitizeComments` 泛型捕获类型不兼容（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - `mvn compile` 报错：`Map.Entry<String,capture#1 of ?> cannot be converted to Map.Entry<String,Object>`。
+  - 影响 `MobileMarkdownController` 编译通过，阻断服务构建。
+- 根因定位：
+  - 方法签名为 `sanitizeComments(Map<String, ?> input)`，但循环变量写成 `Map.Entry<String, Object>`，与通配符捕获类型不兼容。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 将循环声明从 `Map.Entry<String, Object>` 改为 `Map.Entry<String, ?>`。
+- 验证方式：
+  - 本地执行：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 校验：涉及 `Map<String, ?>` 的遍历时，禁止将 entry value 强制声明为 `Object` 泛型参数；统一使用 `?` 或显式 helper 做类型归一化。
+  - 测试：在 CI 保持 Java `compile` 门禁，防止泛型签名改动后只在本地暴露。
+
+## 2026-02-17 手机端手势复制报 `Write permission denied`，且复制/收藏仅在编辑模式生效（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 手机端 `mobile-markdown.html` 在双击/双击触摸复制时，浏览器提示 `Write permission denied`，复制失败。
+  - 手势链路中的复制与收藏能力被 `state.editMode` 条件拦截，阅读模式下无法直接使用。
+  - 影响手机端“快速浏览-快速操作”流程，必须先切换逐行编辑后才能执行常用动作。
+- 根因定位：
+  - 复制逻辑仅在 `navigator.clipboard` 不可用时才回退 `execCommand('copy')`；当 `clipboard.writeText` 存在但被权限策略拒绝时，没有回退路径。
+  - 手势事件（`dblclick` / `touchstart`）和段落动作入口存在统一 `state.editMode` 前置判断，导致阅读模式无法触发复制/收藏。
+  - 阅读态渲染缺少稳定的“DOM 到 Markdown 行号”映射，无法在非编辑态解析手势命中的段落索引。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+    - 新增“剪贴板主路径 + 回退路径”能力：先尝试 `navigator.clipboard.writeText`，失败后自动回退到 `textarea + execCommand('copy')`。
+    - 新增 `resolveGestureParagraphIndex`：优先读取 `.paragraph-card[data-p-index]`，其次读取渲染节点 `data-line`，统一解析段落索引。
+    - 在 Markdown 渲染阶段为块级 token 注入 `data-line`，补齐阅读态手势命中行号映射。
+    - 放开手势入口的编辑模式门槛：阅读模式下允许双击/双击触摸复制；长按触发收藏切换。
+    - 保留风险动作保护：滑动删除、滑动批注、文本编辑等仍需编辑模式，避免阅读态误触破坏内容。
+- 验证方式：
+  - 语法检查：对 `mobile-markdown.html` 内联脚本执行 `node --check`，确保前端脚本可解析。
+  - 手动验证：
+    - 阅读模式下双击段落可复制，不再出现 `Write permission denied` 导致的失败弹窗（在异步剪贴板被拒绝时会自动走回退复制）。
+    - 阅读模式下长按段落可收藏/取消收藏，并写入段落元数据。
+    - 阅读模式下左右滑动不执行删除/批注；编辑模式下保持原行为。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端交互回归，覆盖“Clipboard API 被拒绝时回退复制成功”与“阅读模式手势复制/收藏可用”。
+  - 监控：在前端日志中记录复制失败类型（权限拒绝/无可用复制能力），用于识别浏览器兼容性回退率。
+  - 校验：新增手势能力时区分“只读动作（复制/收藏）”与“破坏性动作（删除/编辑）”，禁止共用同一权限门槛。
+  - 回滚：如阅读态 `data-line` 映射出现兼容问题，可仅回退非编辑态手势入口，保留剪贴板回退逻辑。
+
+## 2026-02-17 手机端 Markdown 查看器三页签空白（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 进入 `mobile-markdown.html` 后，`任务列表`、`阅读`、`大纲` 三个页签均显示空白，用户无法继续操作。
+  - 在部分移动端浏览器/内嵌 WebView 环境更易复现，尤其是对 `dvh` 单位支持不完整的运行时。
+- 根因定位：
+  - 页面主容器高度仅使用 `100dvh` 与 `calc(100dvh - var(--bottom-nav-h))`。
+  - 当浏览器不识别 `dvh` 时，这些高度声明失效，导致内容区高度塌陷，三个页签共同依赖的 `.app-content/.app-view` 可见区域变为近似 0。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+    - 为 `.app` 增加 `min-height: 100vh` 作为兼容兜底，并保留 `min-height: 100dvh` 作为新浏览器优先路径。
+    - 为 `.app-content` 增加 `height: calc(100vh - var(--bottom-nav-h))` 与 `min-height: calc(100vh - var(--bottom-nav-h))` 兜底，保留 `dvh` 版本声明。
+    - 采用“先 `vh`、后 `dvh`”声明顺序，保证支持 `dvh` 的浏览器仍使用动态视口，不支持时自动回退 `vh`。
+- 验证方式：
+  - 语法检查：`node --check` 校验 `mobile-markdown.html` 内联脚本可正常解析（无语法回归）。
+  - 页面验证：在不支持 `dvh` 的移动端 WebView 打开查看器，确认三页签不再空白且能看到任务列表骨架。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端样式回归检查，覆盖“仅支持 `vh`”环境下的主容器高度计算。
+  - 监控：在前端初始化日志记录关键容器高度（如 `app-content.clientHeight`），快速识别布局塌陷。
+  - 校验：新增视口高度改造时强制要求 `vh + dvh` 双写兜底，不允许只写 `dvh`。
+  - 回滚：若本次样式兼容改造引发其他机型问题，可仅回退到 `vh` 固定方案，保障可用性优先。
+
+## 2026-02-17 手机端 ZIP 导出返回 500（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 移动端点击“导出 ZIP”后，前端提示 `导出失败`，后端返回 `500 Internal Server Error`。
+  - 失败路径集中在 `/api/mobile/tasks/{taskId}/export`，历史任务（`storage:*`）导出受影响。
+- 根因定位：
+  - 导出接口使用 `ResponseEntity<?>` 返回 `StreamingResponseBody`，在当前 Spring MVC 返回值处理链下存在被错误走消息转换路径的风险，导致请求在写出 ZIP 前即抛出 500。
+  - 导出文件名直接基于 `taskId` 生成，未做充分字符收敛，在跨浏览器/容器下存在 `Content-Disposition` 兼容隐患。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 将导出接口签名改为 `ResponseEntity<StreamingResponseBody>`，显式对齐流式响应类型，避免被当作普通对象序列化。
+    - 错误分支改为抛出 `ResponseStatusException`（404/500），统一交由 Spring 错误处理返回状态码。
+    - 新增 `buildSafeExportFilename`：将导出文件名收敛到 `[A-Za-z0-9._-]` 安全字符集合，规避 `Content-Disposition` 特殊字符兼容问题。
+    - 响应类型固定为 `application/octet-stream`，保持浏览器下载语义稳定。
+- 验证方式：
+  - 手动复现修复前问题：请求 `GET /api/mobile/tasks/storage%3A57018a9f0c5fe43f4622fb60ce8a9957/export` 返回 500。
+  - 代码级校验：确认导出接口返回类型、异常路径与文件名构造已按修复策略落地。
+  - 受沙箱 Maven 本地仓库权限限制（`C:\\Users\\CodexSandboxOffline\\.m2\\repository`），当前环境无法完成 `mvn compile` 全量编译复验。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充接口级回归，覆盖 `storage:*` 与运行态任务导出，断言返回头包含 `Content-Disposition` 且状态码为 200。
+  - 监控：记录导出接口 `2xx/4xx/5xx` 比例与失败 taskId，区分“构建失败”与“流写失败”。
+  - 校验：新增流式下载接口时强制使用显式泛型返回类型（如 `ResponseEntity<StreamingResponseBody>`）。
+  - 回滚：若流式导出仍存在兼容性问题，可临时回退为“先落盘临时 ZIP 再下载”的保守实现。

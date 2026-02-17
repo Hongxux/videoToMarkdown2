@@ -13,12 +13,12 @@
 # Nodes package
 from .phase1_preparation import step1_node
 from .phase2_preprocessing import (
-    step2_node, step3_node, step4_node, step5_node, step6_node
+    step2_node, step3_node, step3_5_node, step4_node, step5_node, step6_node, step5_6_node
 )
 
 __all__ = [
     # Phase 1
     "step1_node",
     # Phase 2
-    "step2_node", "step3_node", "step4_node", "step5_node", "step6_node",
+    "step2_node", "step3_node", "step3_5_node", "step4_node", "step5_node", "step6_node", "step5_6_node",
 ]

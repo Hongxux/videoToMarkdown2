@@ -22,6 +22,7 @@ from collections import namedtuple
 from faster_whisper import WhisperModel
 from .processing import BaseProcessor, ProgressUpdate
 from .alignment import LightweightVAD
+from .language_normalizer import normalize_whisper_language
 from services.python_grpc.src.common.utils.time import format_hhmmss
 
 # Dummy Segment data structure for manual construction
@@ -110,11 +111,19 @@ class Transcriber(BaseProcessor):
                 hf_endpoint = None
                 use_mirror = True
                 proxy = None
+                skip_integrity_check_on_failure = True
+                skip_reverify_after_success = True
                 if cfg:
                     w_cfg = cfg.get("whisper", {})
                     hf_endpoint = w_cfg.get("hf_endpoint")
                     use_mirror = w_cfg.get("use_mirror", True)
                     proxy = w_cfg.get("download_proxy")
+                    skip_integrity_check_on_failure = bool(
+                        w_cfg.get("skip_integrity_check_on_failure", True)
+                    )
+                    skip_reverify_after_success = bool(
+                        w_cfg.get("skip_reverify_after_success", True)
+                    )
                 
                 try:
                     # 显式检查并下载模型（带进度条和哈希校验）
@@ -122,7 +131,9 @@ class Transcriber(BaseProcessor):
                         self.model_size, 
                         hf_endpoint=hf_endpoint,
                         use_mirror=use_mirror,
-                        proxy=proxy
+                        proxy=proxy,
+                        skip_integrity_check_on_failure=skip_integrity_check_on_failure,
+                        skip_reverify_after_success=skip_reverify_after_success,
                     )
                     # 缓存校验通过的模型路径
                     _MODEL_CACHE[self.model_size] = model_dir
@@ -154,7 +165,7 @@ class Transcriber(BaseProcessor):
                 if self.on_manual_output_end:
                     self.on_manual_output_end()
 
-    async def transcribe(self, video_path, language="zh"):
+    async def transcribe(self, video_path, language="auto"):
         """
         异步转录接口：供 gRPC 服务调用。
         内部委托给 parallel_transcription.transcribe_parallel，
@@ -173,13 +184,15 @@ class Transcriber(BaseProcessor):
         if self.config:
             hf_endpoint = self.config.get("whisper", {}).get("hf_endpoint")
 
+        normalized_language = normalize_whisper_language(language)
+
         subtitle_text = await asyncio.to_thread(
             transcribe_parallel,
             video_path=video_path,
             model_size=self.model_size,
             device=self.device,
             compute_type=self.compute_type,
-            language=language,
+            language=normalized_language,
             segment_duration=self.segment_duration,
             num_workers=self.num_workers,
             hf_endpoint=hf_endpoint,

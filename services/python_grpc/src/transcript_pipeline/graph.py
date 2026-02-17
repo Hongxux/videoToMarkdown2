@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,27 +16,44 @@ from .checkpoint import STEP_INDEX_MAP, SQLiteCheckpointer, generate_thread_id
 from .monitoring.logger import setup_logging
 from .monitoring.metrics import MetricsCollector
 from .monitoring.tracer import PipelineTracer
-from .nodes import step1_node, step2_node, step3_node, step4_node, step5_node, step6_node
+from .nodes import step1_node, step2_node, step3_node, step3_5_node, step4_node, step5_6_node
 from .state import PipelineState, create_initial_state
 
 
 class StepOutputConfig:
     """步骤中间产物输出配置。"""
 
+    STEP_NAME_ALIASES = {
+        "step5_clean_cross": "step5_6_dedup_merge",
+        "step6_merge_cross": "step5_6_dedup_merge",
+    }
+
+    OUTPUT_FILE_STEP_ALIASES = {
+        "step5_6_dedup_merge": "step6_merge_cross",
+    }
+
     REQUIRED_ENABLED_STEPS = {
         "step2_correction",
-        "step6_merge_cross",
+        "step5_6_dedup_merge",
     }
 
     DEFAULT_ENABLED_STEPS = {
         "step2_correction",
-        "step6_merge_cross",
+        "step5_6_dedup_merge",
     }
 
     FULL_PERSISTENCE_STEPS = {
         "step2_correction",
-        "step6_merge_cross",
+        "step3_merge",
+        "step3_5_translate",
+        "step4_clean_local",
+        "step5_6_dedup_merge",
     }
+
+    @classmethod
+    def _canonical_step_name(cls, step_name: str) -> str:
+        normalized = str(step_name or "").strip()
+        return cls.STEP_NAME_ALIASES.get(normalized, normalized)
 
     def __init__(
         self,
@@ -43,16 +61,18 @@ class StepOutputConfig:
         enabled_steps: Optional[List[str]] = None,
         enable_all: bool = False,
         disable_all: bool = False,
+        async_write: bool = False,
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.async_write = bool(async_write)
 
         if disable_all:
             resolved_steps = set()
         elif enable_all:
-            resolved_steps = set(STEP_INDEX_MAP.keys())
+            resolved_steps = {self._canonical_step_name(name) for name in STEP_INDEX_MAP.keys()}
         elif enabled_steps is not None:
-            resolved_steps = set(enabled_steps)
+            resolved_steps = {self._canonical_step_name(name) for name in enabled_steps}
         else:
             resolved_steps = self.DEFAULT_ENABLED_STEPS.copy()
 
@@ -64,7 +84,8 @@ class StepOutputConfig:
         1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
         2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
         3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-        return step_name in self.enabled_steps
+        canonical_name = self._canonical_step_name(step_name)
+        return canonical_name in self.enabled_steps
 
     def save_step_output(self, step_name: str, state: Dict[str, Any]):
         """方法说明：StepOutputConfig.save_step_output 核心方法。
@@ -72,13 +93,39 @@ class StepOutputConfig:
         1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
         2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
         3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-        if not self.should_output(step_name):
+        canonical_name = self._canonical_step_name(step_name)
+        if not self.should_output(canonical_name):
             return
 
-        step_output = self._extract_step_output(step_name, state)
-        output_file = self.output_dir / f"{step_name}_output.json"
+        step_output = self._extract_step_output(canonical_name, state)
+        output_step_name = self.OUTPUT_FILE_STEP_ALIASES.get(canonical_name, canonical_name)
+        output_file = self.output_dir / f"{output_step_name}_output.json"
+
+        if self.async_write:
+            from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
+
+            enqueue_json_write(str(output_file), step_output, ensure_ascii=False, indent=2)
+            return
+
         with open(output_file, "w", encoding="utf-8") as output_stream:
             json.dump(step_output, output_stream, ensure_ascii=False, indent=2, default=str)
+
+    @staticmethod
+    def _sanitize_output_field(step_name: str, field: str, value: Any) -> Any:
+        """在写盘前清洗步骤输出，避免暴露不需要的字段。"""
+        if (
+            step_name == "step2_correction"
+            and field == "corrected_subtitles"
+            and isinstance(value, list)
+        ):
+            sanitized_items = []
+            for item in value:
+                if isinstance(item, dict):
+                    sanitized_items.append({k: v for k, v in item.items() if k != "corrections"})
+                else:
+                    sanitized_items.append(item)
+            return sanitized_items
+        return value
 
     def _extract_step_output(self, step_name: str, state: Dict[str, Any]) -> Dict[str, Any]:
         """方法说明：StepOutputConfig._extract_step_output 工具方法。
@@ -99,17 +146,17 @@ class StepOutputConfig:
                 "input": ["corrected_subtitles"],
                 "output": ["merged_sentences"],
             },
-            "step4_clean_local": {
+            "step3_5_translate": {
                 "input": ["merged_sentences"],
+                "output": ["translated_sentences"],
+            },
+            "step4_clean_local": {
+                "input": ["translated_sentences", "merged_sentences"],
                 "output": ["cleaned_sentences"],
             },
-            "step5_clean_cross": {
+            "step5_6_dedup_merge": {
                 "input": ["cleaned_sentences", "main_topic"],
-                "output": ["non_redundant_sentences"],
-            },
-            "step6_merge_cross": {
-                "input": ["non_redundant_sentences"],
-                "output": ["pure_text_script"],
+                "output": ["non_redundant_sentences", "pure_text_script"],
             },
         }
 
@@ -126,7 +173,7 @@ class StepOutputConfig:
 
         for field in io_spec["output"]:
             if field in state:
-                value = state[field]
+                value = self._sanitize_output_field(step_name, field, state[field])
                 should_compact_list = (
                     isinstance(value, list)
                     and len(value) > 10
@@ -185,9 +232,11 @@ STEP_NAME_TO_NUMBER = {
     "step1_validate": 1,
     "step2_correction": 2,
     "step3_merge": 3,
+    "step3_5_translate": 4,
     "step4_clean_local": 4,
     "step5_clean_cross": 5,
     "step6_merge_cross": 6,
+    "step5_6_dedup_merge": 6,
 }
 
 
@@ -214,9 +263,9 @@ def create_pipeline_graph(
     add_node("step1_validate", step1_node)
     add_node("step2_correction", step2_node)
     add_node("step3_merge", step3_node)
+    add_node("step3_5_translate", step3_5_node)
     add_node("step4_clean_local", step4_node)
-    add_node("step5_clean_cross", step5_node)
-    add_node("step6_merge_cross", step6_node)
+    add_node("step5_6_dedup_merge", step5_6_node)
 
     def should_continue_after_step1(state: PipelineState) -> str:
         if not state.get("is_valid", False):
@@ -236,9 +285,9 @@ def create_pipeline_graph(
             "step1_validate",
             "step2_correction",
             "step3_merge",
+            "step3_5_translate",
             "step4_clean_local",
-            "step5_clean_cross",
-            "step6_merge_cross",
+            "step5_6_dedup_merge",
         ]
         for step_name in step_order:
             if STEP_NAME_TO_NUMBER.get(step_name, 99) == max_step:
@@ -246,10 +295,10 @@ def create_pipeline_graph(
 
     edges = [
         ("step2_correction", "step3_merge"),
-        ("step3_merge", "step4_clean_local"),
-        ("step4_clean_local", "step5_clean_cross"),
-        ("step5_clean_cross", "step6_merge_cross"),
-        ("step6_merge_cross", END),
+        ("step3_merge", "step3_5_translate"),
+        ("step3_5_translate", "step4_clean_local"),
+        ("step4_clean_local", "step5_6_dedup_merge"),
+        ("step5_6_dedup_merge", END),
     ]
 
     if terminal_step:
@@ -282,6 +331,8 @@ async def run_pipeline(
     output_all_steps: bool = False,
     thread_id: Optional[str] = None,
     max_step: int = 6,
+    resume_state: Optional[Dict[str, Any]] = None,
+    resume_from_step: Optional[str] = None,
 ) -> Dict[str, Any]:
     """方法说明：run_pipeline 核心方法。
     执行步骤：
@@ -309,6 +360,8 @@ async def run_pipeline(
         output_dir=f"{output_dir}/intermediates",
         enabled_steps=output_steps,
         enable_all=output_all_steps,
+        async_write=str(os.getenv("TRANSCRIPT_ASYNC_PERSIST_WRITES", "1")).strip().lower()
+        not in {"0", "false", "no", "off"},
     )
     main_logger.info(f"Intermediate outputs: {len(output_config.enabled_steps)} steps enabled")
 
@@ -343,7 +396,34 @@ async def run_pipeline(
         metrics,
         sqlite_checkpointer,
         main_logger,
+        resume_state,
+        resume_from_step,
     )
+
+
+def _raise_if_final_state_failed(final_state: Dict[str, Any]) -> None:
+    """统一校验流水线最终状态，避免“失败状态被当作成功返回”."""
+    status = str(final_state.get("current_step_status") or "").strip().lower()
+    is_valid = final_state.get("is_valid")
+    errors = final_state.get("errors")
+
+    if status in {"failed", "error"}:
+        step_name = str(final_state.get("current_step") or "unknown")
+        raise RuntimeError(
+            f"Pipeline ended with failed step: step={step_name}, status={status}, errors={errors!r}"
+        )
+
+    if is_valid is False:
+        step_name = str(final_state.get("current_step") or "unknown")
+        raise RuntimeError(
+            f"Pipeline ended with invalid state: step={step_name}, is_valid={is_valid}, errors={errors!r}"
+        )
+
+    if isinstance(errors, list) and errors:
+        step_name = str(final_state.get("current_step") or "unknown")
+        raise RuntimeError(
+            f"Pipeline ended with non-empty errors: step={step_name}, errors={errors!r}"
+        )
 
 
 async def _execute_pipeline(
@@ -357,6 +437,8 @@ async def _execute_pipeline(
     metrics,
     sqlite_checkpointer,
     main_logger,
+    resume_state: Optional[Dict[str, Any]] = None,
+    resume_from_step: Optional[str] = None,
 ):
     """方法说明：_execute_pipeline 工具方法。
     执行步骤：
@@ -388,14 +470,44 @@ async def _execute_pipeline(
         else:
             main_logger.warning(f"No checkpoint found for thread {thread_id}, starting from scratch.")
 
+    if resume_state and isinstance(resume_state, dict):
+        initial_state.update(resume_state)
+        main_logger.info(
+            "Resume state injected: fields=%s",
+            sorted(resume_state.keys()),
+        )
+
+    normalized_resume_from_step = str(resume_from_step or "").strip()
+    if normalized_resume_from_step:
+        resume_index = STEP_INDEX_MAP.get(normalized_resume_from_step, 0)
+        if resume_index > 0:
+            initial_state["_resume_mode"] = True
+            initial_state["_last_completed_index"] = max(
+                int(initial_state.get("_last_completed_index", -1)),
+                resume_index,
+            )
+            main_logger.info(
+                "Resume from step override: step=%s index=%s",
+                normalized_resume_from_step,
+                initial_state["_last_completed_index"],
+            )
+        else:
+            main_logger.warning(
+                "Ignore unknown resume_from_step=%s",
+                normalized_resume_from_step,
+            )
+
     try:
         if tracer:
             tracer.checkpoint("pipeline_start", {"video": video_path, "thread_id": thread_id, "resume": resume})
 
         final_state = await graph.ainvoke(initial_state, config)
+        _raise_if_final_state_failed(final_state)
 
         if sqlite_checkpointer:
-            sqlite_checkpointer.update_run_status(thread_id, "completed", "step6_merge_cross", 6)
+            last_step = str(final_state.get("current_step") or "step5_6_dedup_merge")
+            completed_index = STEP_INDEX_MAP.get(last_step, STEP_INDEX_MAP.get("step5_6_dedup_merge", 6))
+            sqlite_checkpointer.update_run_status(thread_id, "completed", last_step, completed_index)
 
         if tracer:
             tracer.checkpoint("pipeline_end", {"status": "success"})
@@ -451,8 +563,8 @@ def get_graph_mermaid() -> str:
     S1[Step 1: validate] -->|valid| S2[Step 2: correction]
     S1 -->|invalid| END[END]
     S2 --> S3[Step 3: merge]
-    S3 --> S4[Step 4: clean_local]
-    S4 --> S5[Step 5: clean_cross]
-    S5 --> S6[Step 6: merge_cross]
-    S6 --> END
+    S3 --> S35[Step 3.5: translate]
+    S35 --> S4[Step 4: clean_local]
+    S4 --> S56[Step 5+6: dedup_merge]
+    S56 --> END
 """

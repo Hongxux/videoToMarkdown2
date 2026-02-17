@@ -1,5 +1,6 @@
 package com.mvp.module2.fusion.worker;
 
+import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.service.VideoProcessingOrchestrator;
@@ -143,7 +144,7 @@ public class TaskProcessingWorker {
         } catch (Exception e) {
             logger.error("❌ Task failed: " + task.taskId, e);
             taskQueueManager.failTask(task.taskId, e.getMessage());
-            webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, e.getMessage(), null);
+            webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, UserFacingErrorMapper.busyMessage(), null);
         }
     }
 }

@@ -1,0 +1,21 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 5,
+  "metadata": {
+    "language_info": {
+      "name": "java"
+    }
+  },
+  "cells": [
+    {
+      "id": "12041d2b-0c4f-45e8-9127-74e721afc235",
+      "cell_type": "code",
+      "source": "1. 优化VL分析的并行和流水线处理\r\n2. 修复Phase2B的识别素材错误\r\n3.对短的process的CV截图阶段，增加ROI识别避免因为字幕导致的干扰，并且还识别并只有保留增量截图",
+      "metadata": {
+        "language": "java"
+      },
+      "execution_count": null,
+      "outputs": []
+    }
+  ]
+}

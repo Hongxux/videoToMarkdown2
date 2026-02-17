@@ -223,13 +223,17 @@ import time
 import hashlib
 import shutil
 import json
+import gzip
+import re
+import copy
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from concurrent import futures
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import url2pathname
 import yaml
 
@@ -254,6 +258,10 @@ import video_processing_pb2_grpc
 # 模块导入
 _boot("[BOOT] import services.python_grpc.src.transcript_pipeline.graph")
 from services.python_grpc.src.transcript_pipeline.graph import run_pipeline
+from services.python_grpc.src.common.utils.async_disk_writer import (
+    enqueue_text_write,
+    flush_async_json_writes,
+)
 _boot("[BOOT] import services.python_grpc.src.media_engine.knowledge_engine.core.video")
 from services.python_grpc.src.media_engine.knowledge_engine.core.video import VideoProcessor
 _boot("[BOOT] import services.python_grpc.src.media_engine.knowledge_engine.core.transcription")
@@ -272,10 +280,17 @@ from services.python_grpc.src.content_pipeline import (
     MaterialRequests,
     SemanticUnitSegmenter
 )
+from services.python_grpc.src.content_pipeline.shared.semantic_payload import (
+    iter_semantic_unit_nodes as shared_iter_semantic_unit_nodes,
+    build_semantic_unit_index as shared_build_semantic_unit_index,
+    normalize_semantic_units_payload as shared_normalize_semantic_units_payload,
+    build_grouped_semantic_units_payload as shared_build_grouped_semantic_units_payload,
+)
 from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import (
     VisualFeatureExtractor,
     get_visual_process_pool,
-    get_shared_frame_registry
+    get_shared_frame_registry,
+    SharedFrameRegistry,
 )
 # 🔑 Import tools for GenerateMaterialRequests
 from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
@@ -355,6 +370,43 @@ def _load_yaml_file(path: Path) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning(f"Failed to load yaml {path}: {exc}")
         return {}
+
+
+def _load_download_video_options(config: Dict[str, Any]) -> Dict[str, Any]:
+    """读取下载配置并映射为 VideoProcessor 初始化参数。"""
+    video_cfg = config.get("video", {}) if isinstance(config, dict) else {}
+    if not isinstance(video_cfg, dict):
+        video_cfg = {}
+
+    def _pick_str(config_key: str, env_key: str) -> Optional[str]:
+        env_value = os.getenv(env_key, "").strip()
+        if env_value:
+            return env_value
+        config_value = video_cfg.get(config_key)
+        if config_value is None:
+            return None
+        value = str(config_value).strip()
+        return value or None
+
+    disable_ssl_env = os.getenv("YTDLP_DISABLE_SSL_VERIFY", "").strip()
+    if disable_ssl_env:
+        disable_ssl_verify = _to_bool(disable_ssl_env, False)
+    else:
+        disable_ssl_verify = _to_bool(video_cfg.get("disable_ssl_verify", False), False)
+
+    prefer_h264_env = os.getenv("YTDLP_PREFER_H264", "").strip()
+    if prefer_h264_env:
+        prefer_h264 = _to_bool(prefer_h264_env, True)
+    else:
+        prefer_h264 = _to_bool(video_cfg.get("prefer_h264", True), True)
+
+    return {
+        "proxy": _pick_str("download_proxy", "YTDLP_PROXY"),
+        "disable_ssl_verify": disable_ssl_verify,
+        "cookies_file": _pick_str("download_cookies_file", "YTDLP_COOKIES_FILE"),
+        "cookies_from_browser": _pick_str("download_cookies_from_browser", "YTDLP_COOKIES_FROM_BROWSER"),
+        "prefer_h264": prefer_h264,
+    }
 
 
 def _load_resume_control_from_configs() -> ResumeControl:
@@ -471,6 +523,33 @@ def _is_compacted_stage1_output(resource_path: str) -> bool:
     )
 
 
+def _load_stage1_output_list(resource_path: str, output_field: str) -> Tuple[Optional[List[Dict[str, Any]]], str]:
+    """读取 Stage1 步骤输出中的指定列表字段。"""
+    if not os.path.exists(resource_path):
+        return None, "missing_resource"
+
+    try:
+        with open(resource_path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+    except Exception:
+        return None, "invalid_json"
+
+    payload = data.get("output", data) if isinstance(data, dict) else {}
+    if not isinstance(payload, dict):
+        return None, "invalid_payload"
+
+    value = payload.get(output_field)
+    if isinstance(value, list):
+        return value, "ok"
+    if (
+        isinstance(value, dict)
+        and isinstance(value.get("count"), int)
+        and isinstance(value.get("sample"), list)
+    ):
+        return None, "compacted_output"
+    return None, "missing_output_field"
+
+
 def _write_resource_meta(
     resource_path: str,
     *,
@@ -535,6 +614,66 @@ def _validate_resource_reuse(
                 if dep_sig.get("mtime") != current.get("mtime"):
                     return False, f"dependency_mtime_mismatch_{dep_name}"
     return True, "ok"
+
+
+def _phase2a_semantic_units_candidates(output_dir: str) -> List[str]:
+    """返回 Phase2A 语义单元产物候选路径（主路径优先，兼容 intermediates）。"""
+    abs_output_dir = os.path.abspath(output_dir)
+    candidates = [
+        os.path.join(abs_output_dir, "semantic_units_phase2a.json"),
+        os.path.join(abs_output_dir, "intermediates", "semantic_units_phase2a.json"),
+    ]
+    deduplicated: List[str] = []
+    seen = set()
+    for candidate in candidates:
+        normalized = os.path.normcase(os.path.normpath(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduplicated.append(candidate)
+    return deduplicated
+
+
+def _resolve_reuse_candidate(
+    candidate_paths: List[str],
+    *,
+    group: str,
+    expected_input_fingerprint: str,
+    reuse_enabled: bool,
+) -> Tuple[Optional[str], str]:
+    """按复用策略选择可复用产物路径。"""
+    normalized_candidates: List[str] = []
+    seen = set()
+    for path in candidate_paths:
+        normalized = os.path.normcase(os.path.normpath(path))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        normalized_candidates.append(path)
+
+    if not normalized_candidates:
+        return None, "missing_resource"
+
+    if reuse_enabled:
+        candidate_reasons: List[str] = []
+        for candidate in normalized_candidates:
+            valid, reason = _validate_resource_reuse(
+                candidate,
+                group=group,
+                expected_input_fingerprint=expected_input_fingerprint,
+            )
+            if valid:
+                return candidate, "ok"
+            candidate_reasons.append(f"{candidate}:{reason}")
+        return None, " | ".join(candidate_reasons) if candidate_reasons else "missing_resource"
+
+    for candidate in normalized_candidates:
+        if not os.path.exists(candidate):
+            continue
+        if os.path.getsize(candidate) <= 0:
+            continue
+        return candidate, "legacy_exists"
+    return None, "missing_resource"
 
 
 def _find_stage1_output_conflicts(output_dir: str) -> List[Dict[str, str]]:
@@ -622,6 +761,93 @@ def _is_http_url(value: str) -> bool:
         return False
     lower = value.lower()
     return lower.startswith("http://") or lower.startswith("https://")
+
+
+def _is_bilibili_host(host: str) -> bool:
+    """
+    执行逻辑：
+    1) 判空并标准化 host（小写、去端口）。
+    2) 判断 host 是否属于 B 站主域或短链域。
+    实现方式：后缀匹配。
+    核心价值：将 B 站链接识别集中到单一入口，避免多处分支复制。
+    输入参数：
+    - host: URL host（类型：str）。
+    输出参数：
+    - bool：是否为 B 站域名。
+    """
+    if not host:
+        return False
+    normalized = host.lower().split(":", 1)[0]
+    bilibili_suffixes = ("bilibili.com", "b23.tv")
+    return any(
+        normalized == suffix or normalized.endswith(f".{suffix}")
+        for suffix in bilibili_suffixes
+    )
+
+
+def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
+    """
+    执行逻辑：
+    1) 仅在 B 站域名下尝试提取视频号。
+    2) 优先提取 BV 号，再提取 AV 号（含 query 的 bvid/aid）。
+    3) 返回规范化后的 AV/BV 号；无法提取时返回 None。
+    实现方式：urlparse + parse_qs + 正则。
+    核心价值：同一 B 站视频的不同分享参数可稳定命中同一 task 目录。
+    权衡：短链若未显式包含 AV/BV 且未做重定向解析，将回退到原 URL 逻辑。
+    输入参数：
+    - video_url: 视频链接（类型：str）。
+    输出参数：
+    - Optional[str]：提取到的 AV/BV 号。
+    """
+    if not video_url:
+        return None
+
+    parsed = urlparse(video_url)
+    if not _is_bilibili_host(parsed.netloc):
+        return None
+
+    query = parse_qs(parsed.query or "", keep_blank_values=True)
+    bvid = (query.get("bvid") or [""])[0].strip()
+    if bvid:
+        match = re.search(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE)
+        if match:
+            return match.group(0).upper()
+
+    aid = (query.get("aid") or [""])[0].strip()
+    if aid.isdigit():
+        return f"AV{aid}"
+
+    search_space = " ".join((parsed.path or "", parsed.query or "", parsed.fragment or ""))
+    bv_match = re.search(r"BV[0-9A-Za-z]{10}", search_space, flags=re.IGNORECASE)
+    if bv_match:
+        return bv_match.group(0).upper()
+
+    av_match = re.search(
+        r"(?:^|[^0-9A-Za-z])av(\d{1,20})(?:$|[^0-9A-Za-z])",
+        search_space,
+        flags=re.IGNORECASE,
+    )
+    if av_match:
+        return f"AV{av_match.group(1)}"
+    return None
+
+
+def _build_task_dir_encoding_source(video_url: str) -> str:
+    """
+    执行逻辑：
+    1) 若是 B 站链接且可提取 AV/BV 号，则使用该视频号作为目录编码原文。
+    2) 其他情况回退到原始 URL 文本。
+    实现方式：复用 _extract_bilibili_video_id。
+    核心价值：满足“B 站目录按 AV/BV 收敛”的业务规则，同时保持非 B 站兼容。
+    输入参数：
+    - video_url: 视频链接（类型：str）。
+    输出参数：
+    - str：用于 task 目录哈希的原文。
+    """
+    bilibili_video_id = _extract_bilibili_video_id(video_url)
+    if bilibili_video_id:
+        return bilibili_video_id
+    return str(video_url or "")
 
 
 def _normalize_local_video_path(video_path: str) -> str:
@@ -1394,7 +1620,7 @@ class GlobalResourceManager:
             logger.info("🧹 All CV validators cleaned up")
 
 
-class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceServicer):
+class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServiceServicer):
     """
     类说明：gRPC 服务实现，承载视频处理各阶段的编排与调度。
     执行逻辑：
@@ -1435,6 +1661,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         self._task_lock = threading.Lock()
         self._cache_metrics_task_id = None
         self._resume_report_lock = threading.Lock()
+        self._stage1_runtime_cache_lock = threading.Lock()
+        # Stage1 运行态缓存：按 output_dir 保留到任务完成，不做 TTL/容量淘汰。
+        self._stage1_runtime_cache: Dict[str, Dict[str, Any]] = {}
+        self._phase2a_runtime_cache_lock = threading.Lock()
+        # Phase2A 运行态缓存：保存语义单元序列化结果，供 AnalyzeWithVL 同进程内存直传。
+        self._phase2a_runtime_cache: Dict[str, Dict[str, Any]] = {}
+        # Phase2A 引用缓存：ref_id -> cache_entry，用于 Java/Python 跨 RPC 无路径传递。
+        self._phase2a_ref_cache: Dict[str, Dict[str, Any]] = {}
 
         # LLM 分类并发探测器：AIMD 逐步加压，遇到失败回退
         self._classify_concurrency_limiter = AdaptiveConcurrencyLimiter(
@@ -1490,6 +1724,273 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             self.resume_control.groups,
         )
 
+    def _clear_stage1_runtime_cache(self, output_dir: str) -> None:
+        """任务完成后清理指定 output_dir 的 Stage1 运行态缓存。"""
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return
+        with self._stage1_runtime_cache_lock:
+            removed = self._stage1_runtime_cache.pop(normalized_output_dir, None)
+        if removed is not None:
+            logger.info("Stage1 runtime cache cleared: output_dir=%s", normalized_output_dir)
+
+    def _cache_stage1_runtime_outputs(self, output_dir: str, final_state: Optional[Dict[str, Any]]) -> None:
+        """缓存 Stage1 关键产物到内存，供非复用链路直接透传。"""
+        if not isinstance(final_state, dict):
+            return
+
+        corrected_subtitles = final_state.get("corrected_subtitles", [])
+        pure_text_script = final_state.get("pure_text_script", [])
+        if not isinstance(corrected_subtitles, list):
+            corrected_subtitles = []
+        if not isinstance(pure_text_script, list):
+            pure_text_script = []
+        if not corrected_subtitles and not pure_text_script:
+            return
+
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return
+
+        cache_entry = {
+            "step2_subtitles": copy.deepcopy(corrected_subtitles),
+            "step6_paragraphs": copy.deepcopy(pure_text_script),
+        }
+        with self._stage1_runtime_cache_lock:
+            self._stage1_runtime_cache[normalized_output_dir] = cache_entry
+
+        logger.info(
+            "Stage1 runtime cache updated (retain-until-task-complete): output_dir=%s, step2_items=%s, step6_paragraphs=%s",
+            normalized_output_dir,
+            len(corrected_subtitles),
+            len(pure_text_script),
+        )
+
+    def _get_stage1_runtime_outputs(self, output_dir: str) -> Optional[Dict[str, Any]]:
+        """读取 Stage1 进程内缓存命中，未命中返回 None。"""
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        with self._stage1_runtime_cache_lock:
+            entry = self._stage1_runtime_cache.get(normalized_output_dir)
+            if entry is None:
+                return None
+            return {
+                "step2_subtitles": copy.deepcopy(entry.get("step2_subtitles", [])),
+                "step6_paragraphs": copy.deepcopy(entry.get("step6_paragraphs", [])),
+            }
+
+    def _clear_phase2a_runtime_cache(self, output_dir: str) -> None:
+        """任务完成后清理指定 output_dir 的 Phase2A 运行态缓存。"""
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return
+        with self._phase2a_runtime_cache_lock:
+            removed = self._phase2a_runtime_cache.pop(normalized_output_dir, None)
+            if isinstance(removed, dict):
+                removed_ref_id = str(removed.get("ref_id", "")).strip()
+                if removed_ref_id:
+                    self._phase2a_ref_cache.pop(removed_ref_id, None)
+        if removed is not None:
+            logger.info("Phase2A runtime cache cleared: output_dir=%s", normalized_output_dir)
+
+    def _cache_phase2a_runtime_semantic_units(
+        self,
+        output_dir: str,
+        semantic_units_path: str,
+        semantic_units: Optional[List[Dict[str, Any]]],
+        task_id: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """缓存 Phase2A 语义单元序列化结果，避免 AnalyzeWithVL 强依赖落盘时序。"""
+        if not isinstance(semantic_units, list):
+            return None
+
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        normalized_path = os.path.abspath(str(semantic_units_path or "").strip()) if semantic_units_path else ""
+        payload_text = json.dumps(
+            semantic_units,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        fingerprint = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+        ref_id = f"{(task_id or 'phase2a')}_{uuid.uuid4().hex}"
+        cache_entry = {
+            "semantic_units_path": normalized_path,
+            "semantic_units": copy.deepcopy(semantic_units),
+            "output_dir": normalized_output_dir,
+            "task_id": str(task_id or "").strip(),
+            "ref_id": ref_id,
+            "unit_count": len(semantic_units),
+            "schema_version": "phase2a.v1",
+            "fingerprint": fingerprint,
+        }
+        with self._phase2a_runtime_cache_lock:
+            previous = self._phase2a_runtime_cache.get(normalized_output_dir)
+            if isinstance(previous, dict):
+                previous_ref_id = str(previous.get("ref_id", "")).strip()
+                if previous_ref_id:
+                    self._phase2a_ref_cache.pop(previous_ref_id, None)
+            self._phase2a_runtime_cache[normalized_output_dir] = cache_entry
+            self._phase2a_ref_cache[ref_id] = cache_entry
+
+        logger.info(
+            "Phase2A runtime cache updated: output_dir=%s, semantic_units=%s, path=%s, ref_id=%s",
+            normalized_output_dir,
+            len(semantic_units),
+            normalized_path,
+            ref_id,
+        )
+        return copy.deepcopy(cache_entry)
+
+    def _get_phase2a_runtime_semantic_units(
+        self,
+        output_dir: str,
+        semantic_units_path: str = "",
+    ) -> Optional[List[Dict[str, Any]]]:
+        """读取 Phase2A 语义单元运行态缓存；未命中返回 None。"""
+        normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
+        if not normalized_output_dir:
+            return None
+
+        with self._phase2a_runtime_cache_lock:
+            entry = self._phase2a_runtime_cache.get(normalized_output_dir)
+            if entry is None:
+                return None
+            cached_units = entry.get("semantic_units")
+            cached_path = str(entry.get("semantic_units_path", "")).strip()
+
+        if not isinstance(cached_units, list):
+            return None
+
+        normalized_requested_path = os.path.abspath(str(semantic_units_path or "").strip()) if semantic_units_path else ""
+        if normalized_requested_path and cached_path and os.path.normcase(normalized_requested_path) != os.path.normcase(cached_path):
+            logger.info(
+                "Phase2A runtime cache path mismatch tolerated: output_dir=%s, request=%s, cached=%s",
+                normalized_output_dir,
+                normalized_requested_path,
+                cached_path,
+            )
+        return copy.deepcopy(cached_units)
+
+    def _get_phase2a_runtime_cache_entry_by_ref(self, ref_id: str) -> Optional[Dict[str, Any]]:
+        """按 ref_id 读取 Phase2A 缓存条目；未命中返回 None。"""
+        normalized_ref_id = str(ref_id or "").strip()
+        if not normalized_ref_id:
+            return None
+        with self._phase2a_runtime_cache_lock:
+            entry = self._phase2a_ref_cache.get(normalized_ref_id)
+            if entry is None:
+                return None
+            return copy.deepcopy(entry)
+
+    def _iter_semantic_unit_nodes(self, data: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """遍历语义单元节点并附带分组元信息。"""
+        return shared_iter_semantic_unit_nodes(data)
+
+    def _build_semantic_unit_index(self, data: Any) -> Dict[str, Dict[str, Any]]:
+        """为语义单元 payload 建立 `unit_id -> unit_node` 索引。"""
+        return shared_build_semantic_unit_index(data)
+
+    def _normalize_semantic_units_payload(self, data: Any) -> List[Dict[str, Any]]:
+        """规范化语义单元载荷，统一返回扁平 List[Dict]。"""
+        return shared_normalize_semantic_units_payload(data)
+
+    def _build_grouped_semantic_units_payload(
+        self,
+        semantic_units: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """将扁平语义单元重建为 `knowledge_groups` 结构。"""
+        return shared_build_grouped_semantic_units_payload(
+            semantic_units,
+            schema_version="phase2a.grouped.v1",
+            default_group_reason="同一核心论点聚合",
+            strip_unit_group_fields=True,
+        )
+
+    def _load_semantic_units_from_json_path(self, json_path: str) -> List[Dict[str, Any]]:
+        """从 JSON 文件加载语义单元并做结构规范化。"""
+        normalized_path = os.path.abspath(str(json_path or "").strip())
+        if not normalized_path:
+            return []
+        with open(normalized_path, "r", encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+        return self._normalize_semantic_units_payload(data)
+
+    def _build_semantic_units_inline_message(
+        self,
+        semantic_units: Optional[List[Dict[str, Any]]],
+    ) -> video_processing_pb2.SemanticUnitsInline:
+        """将语义单元编码为 inline protobuf（优先 gzip 以降低传输体积）。"""
+        inline_msg = video_processing_pb2.SemanticUnitsInline()
+        if not isinstance(semantic_units, list):
+            return inline_msg
+
+        raw_bytes = json.dumps(
+            semantic_units,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        compressed_bytes = gzip.compress(raw_bytes)
+        if len(compressed_bytes) < len(raw_bytes):
+            payload = compressed_bytes
+            codec = "json-utf8-gzip"
+        else:
+            payload = raw_bytes
+            codec = "json-utf8"
+        inline_msg.payload = payload
+        inline_msg.codec = codec
+        inline_msg.unit_count = len(semantic_units)
+        inline_msg.sha256 = hashlib.sha256(payload).hexdigest()
+        return inline_msg
+
+    def _decode_semantic_units_inline_message(
+        self,
+        inline_msg: video_processing_pb2.SemanticUnitsInline,
+    ) -> List[Dict[str, Any]]:
+        """解析 inline protobuf，返回规范化语义单元列表。"""
+        payload = bytes(getattr(inline_msg, "payload", b"") or b"")
+        if not payload:
+            return []
+
+        codec = str(getattr(inline_msg, "codec", "") or "").strip().lower()
+        if codec in {"json-utf8-gzip", "gzip"}:
+            decoded_bytes = gzip.decompress(payload)
+        elif codec in {"json-utf8", "json"} or not codec:
+            decoded_bytes = payload
+        else:
+            raise ValueError(f"unsupported semantic_units_inline codec: {codec}")
+
+        payload_text = decoded_bytes.decode("utf-8")
+        parsed = json.loads(payload_text)
+        return self._normalize_semantic_units_payload(parsed)
+
+    def _materialize_semantic_units_payload(
+        self,
+        output_dir: str,
+        task_id: str,
+        semantic_units: List[Dict[str, Any]],
+    ) -> str:
+        """
+        将内存语义单元落盘到 intermediates，供 Phase2B assemble_only 复用既有文件装配链路。
+        为什么：在不改动 RichTextPipeline 输入契约的前提下，消除 Java->Python 路径传递依赖。
+        """
+        intermediates_dir = os.path.join(output_dir, "intermediates")
+        os.makedirs(intermediates_dir, exist_ok=True)
+        grouped_payload = self._build_grouped_semantic_units_payload(semantic_units)
+        suffix = hashlib.sha256(json.dumps(grouped_payload, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:12]
+        task_tag = str(task_id or "unknown")
+        materialized_path = os.path.join(intermediates_dir, f"semantic_units_from_rpc_{task_tag}_{suffix}.json")
+        with open(materialized_path, "w", encoding="utf-8") as file_obj:
+            json.dump(grouped_payload, file_obj, ensure_ascii=False, indent=2)
+        return materialized_path
+
 
 
     
@@ -1526,7 +2027,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     async def DownloadVideo(self, request, context):
         """
         执行逻辑：
-        1) 以 URL 哈希创建 storage/{hash} 目录。
+        1) 以目录编码原文哈希创建 storage/{hash} 目录（B站优先 AV/BV）。
         2) 调用 VideoProcessor 下载视频到固定文件名。
         3) 计算文件大小与时长并返回结果。
         实现方式：VideoProcessor.download + ffprobe。
@@ -1546,9 +2047,11 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         try:
             self._increment_tasks()
 
-            # 🔑 生成基于 URL 的哈希值作为目录名
-            import hashlib
-            url_hash = hashlib.md5(video_url.encode('utf-8')).hexdigest()
+            # 🔑 目录哈希原文：B 站优先使用 AV/BV 号，其余链接保持原 URL
+            task_dir_source = _build_task_dir_encoding_source(video_url)
+            url_hash = hashlib.md5(task_dir_source.encode("utf-8")).hexdigest()
+            if task_dir_source != str(video_url or ""):
+                logger.info(f"[{task_id}] Bilibili task-dir key: {task_dir_source}")
             
             # 🔑 统一存储目录: var/storage/storage/{url_hash}/
             storage_root = _get_primary_storage_root()
@@ -1559,7 +2062,15 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             video_filename = "video"
             
             # 使用 VideoProcessor 下载
-            downloader = VideoProcessor()
+            download_options = _load_download_video_options(self.config)
+            downloader = VideoProcessor(**download_options)
+            if download_options.get("cookies_file") or download_options.get("cookies_from_browser"):
+                logger.info(
+                    f"[{task_id}] Download auth enabled: "
+                    f"cookies_file={bool(download_options.get('cookies_file'))}, "
+                    f"cookies_from_browser={download_options.get('cookies_from_browser') or ''}, "
+                    f"proxy={download_options.get('proxy') or ''}"
+                )
             video_path = await asyncio.to_thread(
                 downloader.download,
                 url=video_url,
@@ -1618,9 +2129,18 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         self._cache_metrics_begin(task_id, "TranscribeVideo")
         # 统一本地视频归档到 storage/{hash}：做什么是同域化；为什么是便于复用与清理；权衡是新增一次 I/O
         video_path = _ensure_local_video_in_storage(request.video_path)
-        language = request.language or "zh"
+        from services.python_grpc.src.media_engine.knowledge_engine.core.language_normalizer import (
+            normalize_whisper_language,
+            language_for_fingerprint,
+        )
+
+        resource_config = getattr(self.resources, "config", {}) or {}
+        default_language = (resource_config.get("whisper", {}) or {}).get("language", "auto")
+        requested_language = request.language or default_language
+        whisper_language = normalize_whisper_language(requested_language)
+        fingerprint_language = language_for_fingerprint(requested_language)
         
-        logger.info(f"[{task_id}] TranscribeVideo: {video_path}")
+        logger.info(f"[{task_id}] TranscribeVideo: {video_path} (language={fingerprint_language})")
         
         try:
             self._increment_tasks()
@@ -1636,7 +2156,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             reuse_fingerprint = _build_input_fingerprint(
                 video_path,
-                extra={"language": language, "stage": "transcribe"},
+                extra={"language": fingerprint_language, "stage": "transcribe"},
             )
             should_try_reuse = self._is_group_reuse_enabled("transcribe")
             reused = False
@@ -1686,11 +2206,10 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     raise RuntimeError("Global Transcriber not initialized")
                 
                 # transcribe 是异步方法
-                subtitle_text = await transcriber.transcribe(video_path)
+                subtitle_text = await transcriber.transcribe(video_path, language=whisper_language)
                 
-                # 🔑 保存字幕文件为 subtitles.txt
-                with open(subtitle_path, "w", encoding="utf-8") as f:
-                    f.write(subtitle_text)
+                # 🔑 保存字幕文件为 subtitles.txt（异步写盘进程，不阻塞主流程）
+                enqueue_text_write(subtitle_path, subtitle_text)
 
                 _write_resource_meta(
                     subtitle_path,
@@ -1700,7 +2219,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     priority=False,
                 )
 
-                logger.info(f"[{task_id}] Subtitles saved to: {subtitle_path}")
+                logger.info(f"[{task_id}] Subtitles queued to async writer: {subtitle_path}")
             
             return video_processing_pb2.TranscribeResponse(
                 success=True,
@@ -1755,14 +2274,39 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         # 输出文件路径
         step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
+        step3_path = os.path.join(intermediates_dir, "step3_merge_output.json")
+        step35_path = os.path.join(intermediates_dir, "step3_5_translate_output.json")
+        step4_path = os.path.join(intermediates_dir, "step4_clean_local_output.json")
         step6_path = os.path.join(intermediates_dir, "step6_merge_cross_output.json")
         
-        logger.info(f"[{task_id}] ProcessStage1: max_step={max_step}, output_dir={output_dir}")
+        logger.info(
+            f"[{task_id}] ProcessStage1: max_step={max_step}, output_dir={output_dir}, "
+            "flow=step1_validate->step2_correction->step3_merge->step3_5_translate->step4_clean_local->step5_6_dedup_merge"
+        )
         
         try:
             self._increment_tasks()
             
             # 🔑 检查是否已存在输出文件（缓存复用）
+            # 字幕写盘已异步化；仅当文件未就绪时做一次有界等待，避免阻塞常态路径。
+            subtitle_ready = os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0
+            if not subtitle_ready:
+                subtitle_wait_sec = max(
+                    1.0,
+                    float(_to_int(os.getenv("TRANSCRIPT_ASYNC_SUBTITLE_WAIT_SEC", 15), 15)),
+                )
+                flushed = flush_async_json_writes(timeout_sec=subtitle_wait_sec)
+                subtitle_ready = os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0
+                if subtitle_ready:
+                    logger.info(
+                        f"[{task_id}] Subtitle became ready after async wait "
+                        f"(flush={flushed}, wait_sec={subtitle_wait_sec})"
+                    )
+                else:
+                    raise FileNotFoundError(
+                        f"subtitle_path not ready after async wait: {subtitle_path}"
+                    )
+
             local_sentence_ts = os.path.join(output_dir, "local_storage", "sentence_timestamps.json")
             need_sentence_ts = not os.path.exists(local_sentence_ts)
 
@@ -1788,26 +2332,37 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 )
 
             reused_stage1 = False
+            resume_state: Dict[str, Any] = {}
+            resume_from_step = ""
             if stage1_group_enabled:
-                checks = []
-                for resource in (step2_path, step6_path):
+                checks: Dict[str, Tuple[str, bool, str]] = {}
+                for key, resource in (
+                    ("step2", step2_path),
+                    ("step6", step6_path),
+                ):
                     valid, reason = _validate_resource_reuse(
                         resource,
                         group="stage1_text",
                         expected_input_fingerprint=stage1_fp,
                     )
-                    checks.append((resource, valid, reason))
+                    checks[key] = (resource, valid, reason)
 
+                valid_ts = False
+                reason_ts = "missing_sentence_timestamps"
                 if not need_sentence_ts:
                     valid_ts, reason_ts = _validate_resource_reuse(
                         local_sentence_ts,
                         group="stage1_text",
                         expected_input_fingerprint=stage1_fp,
                     )
-                    checks.append((local_sentence_ts, valid_ts, reason_ts))
 
-                reused_stage1 = (not need_sentence_ts) and all(item[1] for item in checks)
-                for resource, valid, reason in checks:
+                reused_stage1 = (
+                    (not need_sentence_ts)
+                    and checks.get("step2", ("", False, ""))[1]
+                    and checks.get("step6", ("", False, ""))[1]
+                    and valid_ts
+                )
+                for resource, valid, reason in checks.values():
                     self._append_resume_report(
                         output_dir=output_dir,
                         task_id=task_id,
@@ -1831,30 +2386,134 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         priority=False,
                     )
 
+                if not reused_stage1:
+                    step2_valid = checks.get("step2", ("", False, ""))[1]
+                    if step2_valid:
+                        corrected_subtitles, step2_reason = _load_stage1_output_list(
+                            step2_path,
+                            "corrected_subtitles",
+                        )
+                        if corrected_subtitles is not None:
+                            resume_state["corrected_subtitles"] = corrected_subtitles
+                            resume_from_step = "step2_correction"
+                        else:
+                            logger.warning(
+                                f"[{task_id}] step2 payload invalid for partial reuse: {step2_reason}"
+                            )
+                            step2_valid = False
+
+                    if step2_valid:
+                        for resource, output_field, state_key, step_name in (
+                            (step3_path, "merged_sentences", "merged_sentences", "step3_merge"),
+                            (step35_path, "translated_sentences", "translated_sentences", "step3_5_translate"),
+                            (step4_path, "cleaned_sentences", "cleaned_sentences", "step4_clean_local"),
+                        ):
+                            valid, reason = _validate_resource_reuse(
+                                resource,
+                                group="stage1_text",
+                                expected_input_fingerprint=stage1_fp,
+                            )
+                            if valid:
+                                payload, payload_reason = _load_stage1_output_list(resource, output_field)
+                                if payload is not None:
+                                    resume_state[state_key] = payload
+                                    resume_from_step = step_name
+                                else:
+                                    valid = False
+                                    reason = payload_reason
+
+                            self._append_resume_report(
+                                output_dir=output_dir,
+                                task_id=task_id,
+                                stage="ProcessStage1",
+                                group="stage1_text",
+                                resource_path=resource,
+                                action="reuse" if valid else "recompute",
+                                reason=reason,
+                                priority=False,
+                            )
+
+            stage1_final_state: Dict[str, Any] = {}
             if reused_stage1:
                 logger.info(f"[{task_id}] ✅ Reusing existing Stage1 outputs")
             else:
                 if os.path.exists(step2_path) and os.path.exists(step6_path) and need_sentence_ts:
                     logger.warning(f"[{task_id}] sentence_timestamps.json missing, regenerating Step4 (and upstream) outputs")
-                # 🔑 调用 Stage1 Pipeline (支持 max_step)
-                # 确保 sentence_timestamps 至少经过 step4_clean_local 生成
+                # 🔑 调用 Stage1 Pipeline（支持 max_step）
+                # 当前链路在 step3_merge 与 step4_clean_local 之间包含 step3_5_translate。
+                # 仍强制 effective_max_step >= 4，确保 sentence_timestamps 至少经过 step4_clean_local 生成。
                 effective_max_step = max_step if max_step >= 4 else 4
-                await run_pipeline(
+                logger.info(
+                    f"[{task_id}] Stage1 effective_max_step={effective_max_step} "
+                    "(ensure step4_clean_local and sentence_timestamps)"
+                )
+                if resume_from_step:
+                    logger.info(
+                        f"[{task_id}] Stage1 partial reuse hit: resume_from={resume_from_step}, "
+                        f"resume_fields={sorted(resume_state.keys())}"
+                    )
+                stage1_final_state = await run_pipeline(
                    video_path=video_path,
                    subtitle_path=subtitle_path,
                    output_dir=output_dir,
-                   max_step=effective_max_step
+                   max_step=effective_max_step,
+                   output_steps=[
+                       "step2_correction",
+                       "step3_merge",
+                       "step3_5_translate",
+                       "step4_clean_local",
+                       "step5_6_dedup_merge",
+                   ],
+                   resume_state=resume_state or None,
+                   resume_from_step=resume_from_step or None,
                 )
 
-                for resource in (step2_path, step6_path):
-                    if os.path.exists(resource):
-                        _write_resource_meta(
-                            resource,
-                            group="stage1_text",
-                            input_fingerprint=stage1_fp,
-                            dependencies={},
-                            priority=False,
+                # Stage1 step2~step6 产物改为异步落盘后，这里只在关键文件未就绪时等待。
+                required_outputs = [step2_path, step6_path]
+                pending_required = [
+                    path
+                    for path in required_outputs
+                    if (not os.path.exists(path)) or os.path.getsize(path) <= 0
+                ]
+                if pending_required:
+                    persist_wait_sec = max(
+                        1.0,
+                        float(_to_int(os.getenv("TRANSCRIPT_ASYNC_STAGE1_PERSIST_WAIT_SEC", 30), 30)),
+                    )
+                    flushed = flush_async_json_writes(timeout_sec=persist_wait_sec)
+                    pending_required = [
+                        path
+                        for path in required_outputs
+                        if (not os.path.exists(path)) or os.path.getsize(path) <= 0
+                    ]
+                    if pending_required:
+                        raise RuntimeError(
+                            "Stage1 outputs not ready after async wait: "
+                            f"{pending_required} (flush={flushed}, wait_sec={persist_wait_sec})"
                         )
+                self._cache_stage1_runtime_outputs(output_dir=output_dir, final_state=stage1_final_state)
+
+                resource_meta_specs = [
+                    (step2_path, {}),
+                    (step3_path, {"step2": _file_signature(step2_path)}),
+                    (step35_path, {"step3": _file_signature(step3_path)}),
+                    (
+                        step4_path,
+                        {
+                            "step3": _file_signature(step3_path),
+                            "step3_5": _file_signature(step35_path),
+                        },
+                    ),
+                    (step6_path, {"step4": _file_signature(step4_path)}),
+                ]
+                for resource, dependencies in resource_meta_specs:
+                    _write_resource_meta(
+                        resource,
+                        group="stage1_text",
+                        input_fingerprint=stage1_fp,
+                        dependencies=dependencies,
+                        priority=False,
+                    )
             
             # 补齐 sentence_timestamps.json（来自 Stage1 local_storage）
             intermediates_dir = os.path.join(output_dir, "intermediates")
@@ -1910,10 +2569,11 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         执行逻辑：
         1) 归档视频并确定 Phase2A 输出目录。
         2) 若 semantic_units_phase2a.json 已存在则直接复用并解析。
-        3) 否则构建 RichTextPipeline + VisualFeatureExtractor 执行 analyze_only。
-        4) 将 screenshot/clip 结果转换为 protobuf 返回。
+        3) 否则构建 RichTextPipeline 执行仅语义切分并落盘。
+        4) AnalyzeResponse 返回 semantic_units_ref/semantic_units_inline；
+           素材请求由后续 Hybrid Analysis 生成。
         实现方式：RichTextPipeline + JSON 读写。
-        核心价值：复用 Phase2A 结果，避免重复分析。
+        核心价值：固化阶段边界（Phase2A 仅分割），避免在此阶段执行 CV/LLM 素材策略。
         决策逻辑：
         - 条件：os.path.exists(semantic_units_path)
         依据来源（证据链）：
@@ -1922,7 +2582,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         - request: 函数入参（类型：未标注）。
         - context: 函数入参（类型：未标注）。
         输出参数：
-        - AnalyzeResponse（含 screenshot_requests/clip_requests/semantic_units_json_path）。"""
+        - AnalyzeResponse（含 screenshot_requests/clip_requests/semantic_units_ref/semantic_units_inline）。"""
         import os  # Explicit local import
         task_id = request.task_id
         # 统一本地视频归档到 storage/{hash}：做什么是统一 Phase2A 路径；为什么是避免素材找不到；权衡是多一次 I/O
@@ -1933,7 +2593,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         # 统一输出目录到 storage/{hash}：做什么是让 Phase2A 产物与后续一致；为什么是减少跨目录查找；权衡是忽略外部路径差异
         output_dir = _normalize_output_dir(video_path)
-        semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
+        phase2a_candidates = _phase2a_semantic_units_candidates(output_dir)
+        semantic_units_path = phase2a_candidates[0]
         if not sentence_timestamps_path:
             # 默认使用 intermediates 路径（Stage1 已复制到此处）
             sentence_timestamps_path = os.path.join(output_dir, "intermediates", "sentence_timestamps.json")
@@ -1960,26 +2621,20 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 },
             )
             phase2a_reuse_enabled = self._is_group_reuse_enabled("phase2a")
-            can_reuse_phase2a = False
-            phase2a_reason = "disabled"
-            if phase2a_reuse_enabled:
-                can_reuse_phase2a, phase2a_reason = _validate_resource_reuse(
-                    semantic_units_path,
-                    group="phase2a",
-                    expected_input_fingerprint=phase2a_fp,
-                )
+            reuse_candidate_path, phase2a_reason = _resolve_reuse_candidate(
+                phase2a_candidates,
+                group="phase2a",
+                expected_input_fingerprint=phase2a_fp,
+                reuse_enabled=phase2a_reuse_enabled,
+            )
             
             # 🔑 检查是否已存在 Phase2A 输出（缓存复用）
-            if os.path.exists(semantic_units_path) and (can_reuse_phase2a or not phase2a_reuse_enabled):
+            if reuse_candidate_path:
+                semantic_units_path = reuse_candidate_path
                 logger.warning(
                     f"[{task_id}] ✅ Reusing existing Phase2A output: {semantic_units_path} "
-                    f"(cache hit -> 不会进入 _collect_material_requests；如需验证新策略请删除该文件后重跑)"
+                    f"(cache hit -> Phase2A 仅语义切分产物复用，不在本阶段生成素材请求)"
                 )
-                
-                # 从已有文件中提取 screenshot 和 clip 请求
-                import json
-                with open(semantic_units_path, "r", encoding="utf-8") as f:
-                    cached_data = json.load(f)
 
                 self._append_resume_report(
                     output_dir=output_dir,
@@ -1988,51 +2643,60 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     group="phase2a",
                     resource_path=semantic_units_path,
                     action="reuse",
-                    reason="ok" if phase2a_reuse_enabled else "legacy_exists",
+                    reason=phase2a_reason,
                     priority=True,
                 )
-                
-                pb_screenshots = []
-                pb_clips = []
-                
-                # 解析 semantic_units 提取素材需求
-                # JSON 格式是一个列表，每个单元有 material_requests.screenshot_requests 和 material_requests.clip_requests
-                semantic_units = cached_data if isinstance(cached_data, list) else cached_data.get("semantic_units", [])
-                
-                for su in semantic_units:
-                    material_reqs = su.get("material_requests", {})
-                    unit_id = su.get("unit_id", "")
-                    
-                    # 获取 screenshots
-                    for ss in material_reqs.get("screenshot_requests", []):
-                        pb_screenshots.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=ss.get("screenshot_id", f"{unit_id}/{unit_id}_ss_fallback_001"),
-                            timestamp_sec=ss.get("timestamp_sec", 0.0),
-                            label=ss.get("label", ""),
-                            semantic_unit_id=ss.get("semantic_unit_id", unit_id)
-                        ))
-                    
-                    # 获取 clips
-                    for clip in material_reqs.get("clip_requests", []):
-                        pb_clips.append(self._build_clip_request_pb(clip, unit_id))
-                
-                logger.info(f"[{task_id}] Loaded from cache: {len(pb_screenshots)} screenshots, {len(pb_clips)} clips")
-                
-                return video_processing_pb2.AnalyzeResponse(
+
+                logger.info(f"[{task_id}] Loaded from cache: Phase2A semantic units ready (no material requests in this stage)")
+
+                semantic_units_payload = self._get_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path=semantic_units_path,
+                )
+                if semantic_units_payload is None:
+                    try:
+                        semantic_units_payload = self._load_semantic_units_from_json_path(semantic_units_path)
+                    except Exception as load_error:
+                        logger.warning(
+                            f"[{task_id}] Failed to load semantic units for ref/inline response from {semantic_units_path}: {load_error}"
+                        )
+                        semantic_units_payload = []
+
+                response = video_processing_pb2.AnalyzeResponse(
                     success=True,
-                    screenshot_requests=pb_screenshots,
-                    clip_requests=pb_clips,
-                    semantic_units_json_path=semantic_units_path,
+                    screenshot_requests=[],
+                    clip_requests=[],
                     error_msg=""
                 )
+                cache_entry = self._cache_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path=semantic_units_path,
+                    semantic_units=semantic_units_payload,
+                    task_id=task_id,
+                )
+                if isinstance(cache_entry, dict):
+                    response.semantic_units_ref.CopyFrom(
+                        video_processing_pb2.SemanticUnitsRef(
+                            ref_id=str(cache_entry.get("ref_id", "")),
+                            task_id=task_id,
+                            output_dir=output_dir,
+                            unit_count=int(cache_entry.get("unit_count", 0) or 0),
+                            schema_version=str(cache_entry.get("schema_version", "phase2a.v1")),
+                            fingerprint=str(cache_entry.get("fingerprint", "")),
+                        )
+                    )
+                    response.semantic_units_inline.CopyFrom(
+                        self._build_semantic_units_inline_message(semantic_units_payload)
+                    )
+                return response
 
-            if phase2a_reuse_enabled and not can_reuse_phase2a:
+            if phase2a_reuse_enabled and not reuse_candidate_path:
                 self._append_resume_report(
                     output_dir=output_dir,
                     task_id=task_id,
                     stage="AnalyzeSemanticUnits",
                     group="phase2a",
-                    resource_path=semantic_units_path,
+                    resource_path=phase2a_candidates[0],
                     action="recompute",
                     reason=phase2a_reason,
                     priority=True,
@@ -2041,7 +2705,25 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             # 确保目录存在
             os.makedirs(output_dir, exist_ok=True)
-            
+
+            runtime_stage1_outputs = self._get_stage1_runtime_outputs(output_dir)
+            runtime_step2_subtitles: Optional[List[Dict[str, Any]]] = None
+            runtime_step6_paragraphs: Optional[List[Dict[str, Any]]] = None
+            if runtime_stage1_outputs:
+                candidate_step2 = runtime_stage1_outputs.get("step2_subtitles", [])
+                candidate_step6 = runtime_stage1_outputs.get("step6_paragraphs", [])
+                if isinstance(candidate_step2, list) and candidate_step2:
+                    runtime_step2_subtitles = candidate_step2
+                if isinstance(candidate_step6, list) and candidate_step6:
+                    runtime_step6_paragraphs = candidate_step6
+                logger.info(
+                    f"[{task_id}] Stage1 runtime cache hit: "
+                    f"step2_items={len(runtime_step2_subtitles or [])}, "
+                    f"step6_paragraphs={len(runtime_step6_paragraphs or [])}"
+                )
+            else:
+                logger.info(f"[{task_id}] Stage1 runtime cache miss, fallback to JSON loading")
+             
             # 🔑 创建 RichTextPipeline (使用正确的构造函数签名)
             pipeline = RichTextPipeline(
                 video_path=video_path,
@@ -2050,6 +2732,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 output_dir=output_dir,
                 sentence_timestamps_path=sentence_timestamps_path,
                 segmenter=self.resources.semantic_unit_segmenter,
+                step2_subtitles=runtime_step2_subtitles,
+                step6_paragraphs=runtime_step6_paragraphs,
             )
 
             # 复用全局单例切分器：做什么是避免每次 new Segmenter/LLMClient；为什么是降低 Phase2A 热路径开销；
@@ -2057,51 +2741,73 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             shared_segmenter = self.resources.semantic_unit_segmenter
             if shared_segmenter is not None:
                 pipeline.segmenter = shared_segmenter
-            
-            # 🚀 注入视觉提取器，使 Phase2A 能够执行视觉打分推荐最佳时间戳
-            visual_extractor = self.resources.get_visual_extractor(video_path)
-            pipeline.set_visual_extractor(visual_extractor)
-            
-            logger.warning(f"[{task_id}] Entering _collect_material_requests via analyze_only()")
-            # 🔑 调用 Phase2A: analyze_only
-            screenshot_requests, clip_requests, semantic_units_path = await pipeline.analyze_only()
-            
-            # 转换为 protobuf 格式
-            pb_screenshots = [
-                video_processing_pb2.ScreenshotRequest(
-                    screenshot_id=r.screenshot_id,
-                    timestamp_sec=r.timestamp_sec,
-                    label=r.label,
-                    semantic_unit_id=r.semantic_unit_id
-                )
-                for r in screenshot_requests
-            ]
-            
-            pb_clips = [
-                self._build_clip_request_pb(r, getattr(r, "semantic_unit_id", ""))
-                for r in clip_requests
-            ]
 
-            if os.path.exists(semantic_units_path):
+            logger.info(f"[{task_id}] Phase2A segmentation-only mode enabled: skip material request generation")
+            semantic_units_path = await pipeline.analyze_segmentation_only()
+            runtime_semantic_units = getattr(pipeline, "latest_phase2a_semantic_units_payload", None)
+            cache_entry = None
+            if not isinstance(runtime_semantic_units, list):
+                # 兜底：如果 pipeline 未暴露内存 payload，则尝试在本次请求内同步回读一次最新落盘结果。
+                # 目的：尽量保证 AnalyzeResponse 携带 inline/ref，进一步降低 Java->Python 路径依赖。
+                try:
+                    flush_async_json_writes(timeout_sec=10.0)
+                    runtime_semantic_units = self._load_semantic_units_from_json_path(semantic_units_path)
+                    logger.info(
+                        f"[{task_id}] Phase2A runtime payload recovered from json path: "
+                        f"units={len(runtime_semantic_units)}"
+                    )
+                except Exception as load_error:
+                    logger.warning(
+                        f"[{task_id}] Phase2A runtime payload unavailable after segmentation: "
+                        f"path={semantic_units_path}, error={load_error}"
+                    )
+            if isinstance(runtime_semantic_units, list):
+                cache_entry = self._cache_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path=semantic_units_path,
+                    semantic_units=runtime_semantic_units,
+                    task_id=task_id,
+                )
+            else:
+                logger.info(
+                    f"[{task_id}] Phase2A runtime cache skipped: payload unavailable, path={semantic_units_path}"
+                )
+
+            phase2a_dependencies = {
+                "step2": _file_signature(step2_json_path),
+                "step6": _file_signature(step6_json_path),
+                "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
+            }
+            for candidate_path in _phase2a_semantic_units_candidates(output_dir):
                 _write_resource_meta(
-                    semantic_units_path,
+                    candidate_path,
                     group="phase2a",
                     input_fingerprint=phase2a_fp,
-                    dependencies={
-                        "step2": _file_signature(step2_json_path),
-                        "step6": _file_signature(step6_json_path),
-                        "sentence_timestamps": _file_signature(sentence_timestamps_path) if sentence_timestamps_path else {},
-                    },
+                    dependencies=phase2a_dependencies,
                     priority=True,
                 )
             
-            return video_processing_pb2.AnalyzeResponse(
+            response = video_processing_pb2.AnalyzeResponse(
                 success=True,
-                screenshot_requests=pb_screenshots,
-                clip_requests=pb_clips,
-                semantic_units_json_path=semantic_units_path,
+                screenshot_requests=[],
+                clip_requests=[],
                 error_msg=""
             )
+            if isinstance(runtime_semantic_units, list) and isinstance(cache_entry, dict):
+                response.semantic_units_ref.CopyFrom(
+                    video_processing_pb2.SemanticUnitsRef(
+                        ref_id=str(cache_entry.get("ref_id", "")),
+                        task_id=task_id,
+                        output_dir=output_dir,
+                        unit_count=int(cache_entry.get("unit_count", 0) or 0),
+                        schema_version=str(cache_entry.get("schema_version", "phase2a.v1")),
+                        fingerprint=str(cache_entry.get("fingerprint", "")),
+                    )
+                )
+                response.semantic_units_inline.CopyFrom(
+                    self._build_semantic_units_inline_message(runtime_semantic_units)
+                )
+            return response
             
         except Exception as e:
             logger.error(f"[{task_id}] AnalyzeSemanticUnits failed: {e}")
@@ -2110,7 +2816,6 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 success=False,
                 screenshot_requests=[],
                 clip_requests=[],
-                semantic_units_json_path="",
                 error_msg=str(e)
             )
         finally:
@@ -2292,7 +2997,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         finally:
             self._decrement_tasks()
 
-    async def GenerateMaterialRequests(self, request, context):
+    async def _phase2a_generate_material_requests_impl(self, request, context):
         """
         执行逻辑：
         1) 构建 RichTextPipeline/截图范围计算器。
@@ -2628,61 +3333,70 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     })
             
             if screenshot_tasks:
-                # Step 1: 批量读取所有需要的帧到 SharedMemory
-                shm_map = await self._batch_read_frames_for_screenshots(
-                    video_path, 
-                    screenshot_tasks
-                )
-                
-                # Step 2: 提交到 ProcessPool 并行计算
-                from services.python_grpc.src.vision_validation.worker import run_screenshot_selection_task
-                loop = asyncio.get_event_loop()
-                futures = []
-                
+                estimated_ss_frames = 0
                 for task in screenshot_tasks:
-                    key = f"{task['unit_id']}_island{task['island_index']}"
-                    task_shm_frames = shm_map.get(key, {})
-                    
-                    if not task_shm_frames:
-                        # 回退：如果没有读取到帧，使用中点时间戳
-                        final_ss.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=f"{task['unit_id']}/{task['unit_id']}_ss_island_{task['island_index'] + 1:03d}",
-                            timestamp_sec=(task['expanded_start'] + task['expanded_end']) / 2,
-                            label=f"稳定岛{task['island_index']}",
-                            semantic_unit_id=task['unit_id']
-                        ))
-                        continue
-                    
-                    future = loop.run_in_executor(
-                        self.cv_process_pool,  # 复用现有的 ProcessPool
-                        functools.partial(
-                            run_screenshot_selection_task,
-                            video_path=video_path,
-                            unit_id=task['unit_id'],
-                            island_index=task['island_index'],
-                            expanded_start=task['expanded_start'],
-                            expanded_end=task['expanded_end'],
-                            shm_frames=task_shm_frames,
-                            fps=30.0  # 默认帧率，可从视频元信息获取
-                        )
+                    start_sec = float(task.get("expanded_start", 0.0))
+                    end_sec = float(task.get("expanded_end", start_sec))
+                    estimated_ss_frames += max(1, int(max(0.0, end_sec - start_sec) / 0.5) + 1)
+
+                screenshot_registry = self._create_ephemeral_frame_registry(estimated_ss_frames)
+                try:
+                    # Step 1: 批量读取所有需要的帧到 SharedMemory
+                    shm_map = await self._batch_read_frames_for_screenshots(
+                        video_path,
+                        screenshot_tasks,
+                        frame_registry=screenshot_registry,
                     )
-                    futures.append(future)
-                
-                # Step 3: 等待所有任务完成
-                if futures:
-                    results = await asyncio.gather(*futures)
-                    
-                    # Step 4: 构建 ScreenshotRequest
-                    for result in results:
-                        final_ss.append(video_processing_pb2.ScreenshotRequest(
-                            screenshot_id=f"{result['unit_id']}/{result['unit_id']}_ss_island_{result['island_index'] + 1:03d}",
-                            timestamp_sec=result['selected_timestamp'],
-                            label=f"稳定岛{result['island_index']}",
-                            semantic_unit_id=result['unit_id']
-                        ))
-                
-                # Step 5: 清理 SharedMemory
-                # FrameRegistry 会自动管理，无需手动清理
+
+                    # Step 2: 提交到 ProcessPool 并行计算
+                    from services.python_grpc.src.vision_validation.worker import run_screenshot_selection_task
+                    loop = asyncio.get_event_loop()
+                    futures = []
+
+                    for task in screenshot_tasks:
+                        key = f"{task['unit_id']}_island{task['island_index']}"
+                        task_shm_frames = shm_map.get(key, {})
+
+                        if not task_shm_frames:
+                            # 回退：如果没有读取到帧，使用中点时间戳
+                            final_ss.append(video_processing_pb2.ScreenshotRequest(
+                                screenshot_id=f"{task['unit_id']}/{task['unit_id']}_ss_island_{task['island_index'] + 1:03d}",
+                                timestamp_sec=(task['expanded_start'] + task['expanded_end']) / 2,
+                                label=f"稳定岛{task['island_index']}",
+                                semantic_unit_id=task['unit_id']
+                            ))
+                            continue
+
+                        future = loop.run_in_executor(
+                            self.cv_process_pool,  # 复用现有的 ProcessPool
+                            functools.partial(
+                                run_screenshot_selection_task,
+                                video_path=video_path,
+                                unit_id=task['unit_id'],
+                                island_index=task['island_index'],
+                                expanded_start=task['expanded_start'],
+                                expanded_end=task['expanded_end'],
+                                shm_frames=task_shm_frames,
+                                fps=30.0  # 默认帧率，可从视频元信息获取
+                            )
+                        )
+                        futures.append(future)
+
+                    # Step 3: 等待所有任务完成
+                    if futures:
+                        results = await asyncio.gather(*futures)
+
+                        # Step 4: 构建 ScreenshotRequest
+                        for result in results:
+                            final_ss.append(video_processing_pb2.ScreenshotRequest(
+                                screenshot_id=f"{result['unit_id']}/{result['unit_id']}_ss_island_{result['island_index'] + 1:03d}",
+                                timestamp_sec=result['selected_timestamp'],
+                                label=f"稳定岛{result['island_index']}",
+                                semantic_unit_id=result['unit_id']
+                            ))
+                finally:
+                    self._cleanup_ephemeral_frame_registry(screenshot_registry)
+
                 logger.info(f"[{task_id}] Parallel screenshot selection completed: {len(final_ss)} screenshots")
             
             logger.info(f"[{task_id}] Generated {len(final_clips)} clips, {len(final_ss)} screenshots")
@@ -2709,11 +3423,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     with open(semantic_units_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
 
-                    # 兼容两种结构：列表 or {"semantic_units": [...]}
-                    if isinstance(data, dict):
-                        units_data = data.get("semantic_units", [])
-                    else:
-                        units_data = data
+                    # 兼容 grouped/legacy 两种结构，统一建立 unit_id -> unit 节点引用索引。
+                    units_index = self._build_semantic_unit_index(data)
                     
                     # 构建 unit_id -> 素材请求映射
                     unit_ss_map = {}
@@ -2766,9 +3477,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                                 for i, au in enumerate(u.action_units)
                             ]
                     
-                    # 更新 JSON 数据
-                    for item in units_data:
-                        unit_id = item.get("unit_id", "")
+                    # 更新 JSON 数据（按 unit_id 原地回写，保持原始结构不被打平）。
+                    for unit_id, item in units_index.items():
                         
                         # 更新素材请求
                         if "material_requests" not in item:
@@ -2776,16 +3486,26 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         item["material_requests"]["screenshot_requests"] = unit_ss_map.get(unit_id, [])
                         item["material_requests"]["clip_requests"] = unit_clip_map.get(unit_id, [])
                         
-                        # 更新 action_units
-                        if unit_id in unit_action_map:
-                            item["action_units"] = unit_action_map[unit_id]
+                        # 同步 action_units / action_segments，避免两字段口径不一致
+                        # 约定：落盘后 action_segments 由 action_units 一致映射得到
+                        action_units_for_unit = unit_action_map.get(unit_id, [])
+                        item["action_units"] = action_units_for_unit
+                        item["action_segments"] = [
+                            {
+                                "start_sec": float(action.get("start_sec", 0.0)),
+                                "end_sec": float(action.get("end_sec", 0.0)),
+                                "knowledge_type": str(action.get("knowledge_type", "") or ""),
+                                "action_type": str(action.get("action_type", "") or ""),
+                                "confidence": float(action.get("confidence", 0.0) or 0.0),
+                                "reasoning": str(action.get("reasoning", "") or ""),
+                                "stable_islands": [],
+                            }
+                            for action in action_units_for_unit
+                        ]
                         
                         # 标记 CV 验证完成
                         item["cv_validated"] = True
 
-                    if isinstance(data, dict):
-                        data["semantic_units"] = units_data
-                    
                     # 保存更新后的 JSON
                     with open(semantic_units_path, 'w', encoding='utf-8') as f:
                         json.dump(data, f, ensure_ascii=False, indent=2)
@@ -2849,7 +3569,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - AssembleResponse（含 markdown/json 路径与统计信息）。"""
         task_id = request.task_id
-        semantic_units_json_path = os.path.abspath(request.semantic_units_json_path) # Convert to absolute path immediately
+        semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
         screenshots_dir = os.path.abspath(request.screenshots_dir) # Convert to absolute path immediately
         clips_dir = os.path.abspath(request.clips_dir) # Convert to absolute path immediately
         # 统一本地视频归档到 storage/{hash}：做什么是确保最终装配可追溯；为什么是与前序同域；权衡是可能增加一次 I/O
@@ -2865,7 +3585,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         
         logger.info(f"[{task_id}] AssembleRichText (Phase2B)")
         logger.info(f"  → video_path: {video_path}")
-        logger.info(f"  → semantic_units_json_path: {semantic_units_json_path}")
+        logger.info(f"  → semantic_source: {semantic_source_case or 'runtime_or_empty'}")
         logger.info(f"  → screenshots_dir: {screenshots_dir}")
         logger.info(f"  → clips_dir: {clips_dir}")
         logger.info(f"  → output_dir: {output_dir}")
@@ -2887,6 +3607,56 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             )
             audit_token = push_deepseek_audit_context(audit_context)
 
+            semantic_units_payload: List[Dict[str, Any]] = []
+            if semantic_source_case == "semantic_units_inline":
+                semantic_units_payload = self._decode_semantic_units_inline_message(request.semantic_units_inline)
+                logger.info(
+                    f"[{task_id}] AssembleRichText loaded semantic units from inline payload: units={len(semantic_units_payload)}"
+                )
+            elif semantic_source_case == "semantic_units_ref":
+                ref_id = str(request.semantic_units_ref.ref_id or "").strip()
+                ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
+                if isinstance(ref_entry, dict):
+                    semantic_units_payload = list(ref_entry.get("semantic_units", []) or [])
+                    logger.info(
+                        f"[{task_id}] AssembleRichText loaded semantic units from ref cache: "
+                        f"ref_id={ref_id}, units={len(semantic_units_payload)}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{task_id}] AssembleRichText semantic_units_ref not found, fallback to runtime/path: ref_id={ref_id}"
+                    )
+
+            if not semantic_units_payload:
+                runtime_semantic_units = self._get_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path="",
+                )
+                if runtime_semantic_units is not None:
+                    semantic_units_payload = runtime_semantic_units
+                    logger.info(
+                        f"[{task_id}] AssembleRichText loaded semantic units from runtime cache: "
+                        f"units={len(semantic_units_payload)}"
+                    )
+
+            materialized_semantic_units_path = ""
+            if semantic_units_payload:
+                materialized_semantic_units_path = self._materialize_semantic_units_payload(
+                    output_dir=output_dir,
+                    task_id=task_id,
+                    semantic_units=semantic_units_payload,
+                )
+                self._cache_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path=materialized_semantic_units_path,
+                    semantic_units=semantic_units_payload,
+                    task_id=task_id,
+                )
+                logger.info(f"[{task_id}] AssembleRichText materialized semantic units for Phase2B: {materialized_semantic_units_path}")
+
+            if not materialized_semantic_units_path:
+                raise FileNotFoundError("semantic_units source missing: neither inline/ref/runtime available")
+
             # 🔑 创建 RichTextPipeline
             # 注意: Phase2B 主要使用 semantic_units_json，step2/step6 在 Phase2A 已处理
             # 此处使用占位值，实际逻辑在 assemble_only 中加载 semantic_units_json
@@ -2900,7 +3670,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             
             # 🔑 调用 Phase2B: assemble_only
             markdown_path, json_path = await pipeline.assemble_only(
-                semantic_units_json_path=semantic_units_json_path,
+                semantic_units_json_path=materialized_semantic_units_path,
                 screenshots_dir=screenshots_dir,
                 clips_dir=clips_dir,
                 title=title
@@ -2940,6 +3710,9 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     pop_deepseek_audit_context(audit_token)
                 except Exception as audit_cleanup_exc:
                     logger.warning(f"[{task_id}] clean deepseek audit context failed: {audit_cleanup_exc}")
+            # 任务进入最终装配收尾后，释放本任务对应的 Stage1 运行态缓存。
+            self._clear_stage1_runtime_cache(output_dir)
+            self._clear_phase2a_runtime_cache(output_dir)
             self._write_cache_metrics(output_dir, task_id, "AssembleRichText")
             self._cleanup_non_priority_resources(output_dir, task_id)
             self._decrement_tasks()
@@ -3245,8 +4018,28 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 removed_meta_count,
                 retention_days,
             )
-            
-    def _batch_read_frames_to_shm(self, video_path: str, units_data: list) -> dict:
+
+    def _create_ephemeral_frame_registry(self, expected_frames: int) -> SharedFrameRegistry:
+        """按批次创建独立 SHM 注册表，避免跨批次 LRU 淘汰相互影响。"""
+        safe_expected = max(1, int(expected_frames))
+        headroom = max(4, safe_expected // 10)
+        return SharedFrameRegistry(max_frames=safe_expected + headroom)
+
+    def _cleanup_ephemeral_frame_registry(self, registry: Optional[SharedFrameRegistry]) -> None:
+        """释放批次级 SHM 资源，避免命名空间和内存残留。"""
+        if registry is None:
+            return
+        try:
+            registry.cleanup()
+        except Exception as exc:
+            logger.debug(f"Cleanup ephemeral SHM registry failed: {exc}")
+             
+    def _batch_read_frames_to_shm(
+        self,
+        video_path: str,
+        units_data: list,
+        frame_registry: Optional[SharedFrameRegistry] = None,
+    ) -> dict:
         """
         执行逻辑：
         1) 为每个单元采样 start/mid/end 三个时间点。
@@ -3266,6 +4059,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - dict：{unit_id: {frame_idx: shm_ref}}。"""
         shm_map = {} # unit_id -> {frame_idx: shm_ref}
+        registry = frame_registry or self.frame_registry
         import cv2
         import time
         import threading
@@ -3355,8 +4149,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         break
                     if curr_idx in frame_idx_set:
                         t1 = time.perf_counter()
-                        self.frame_registry.register_frame(curr_idx, frame)
-                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        registry.register_frame(curr_idx, frame)
+                        ref = registry.get_shm_ref(curr_idx)
                         if ref:
                             local_refs[curr_idx] = ref
                         local_shm_ms += (time.perf_counter() - t1) * 1000.0
@@ -3384,8 +4178,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         break
                     if curr_idx in frame_idx_set:
                         t1 = time.perf_counter()
-                        self.frame_registry.register_frame(curr_idx, frame)
-                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        registry.register_frame(curr_idx, frame)
+                        ref = registry.get_shm_ref(curr_idx)
                         if ref:
                             valid_shm_refs[curr_idx] = ref
                         shm_ms += (time.perf_counter() - t1) * 1000.0
@@ -3441,7 +4235,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         self, 
         video_path: str, 
         units_data: list,
-        coarse_fps: float = 2.0
+        coarse_fps: float = 2.0,
+        frame_registry: Optional[SharedFrameRegistry] = None,
     ) -> dict:
         """
         执行逻辑：
@@ -3464,6 +4259,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         - dict：{unit_id: {timestamp: shm_ref}}。"""
         import cv2
         import time
+        registry = frame_registry or self.frame_registry
         
         coarse_interval = 1.0 / coarse_fps
         coarse_shm_map = {}
@@ -3552,8 +4348,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         break
                     if curr_idx in frame_to_requests:
                         t1 = time.perf_counter()
-                        self.frame_registry.register_frame(curr_idx, frame)
-                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        registry.register_frame(curr_idx, frame)
+                        ref = registry.get_shm_ref(curr_idx)
                         if ref:
                             local_refs[curr_idx] = ref
                         local_shm_ms += (time.perf_counter() - t1) * 1000.0
@@ -3581,8 +4377,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         break
                     if curr_idx in frame_to_requests:
                         t1 = time.perf_counter()
-                        self.frame_registry.register_frame(curr_idx, frame)
-                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        registry.register_frame(curr_idx, frame)
+                        ref = registry.get_shm_ref(curr_idx)
                         if ref:
                             valid_refs[curr_idx] = ref
                     shm_ms += (time.perf_counter() - t1) * 1000.0
@@ -3623,7 +4419,11 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 logger.warning(
                     f"Coarse frames insufficient for {len(missing_units)} units, fallback to 3-point sampling"
                 )
-                fallback_map = self._batch_read_frames_to_shm(video_path, missing_units)
+                fallback_map = self._batch_read_frames_to_shm(
+                    video_path,
+                    missing_units,
+                    frame_registry=registry,
+                )
                 for u in missing_units:
                     uid = u["unit_id"]
                     if uid not in coarse_shm_map:
@@ -3657,7 +4457,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     async def _batch_read_frames_for_screenshots(
         self, 
         video_path: str, 
-        screenshot_tasks: List[dict]
+        screenshot_tasks: List[dict],
+        frame_registry: Optional[SharedFrameRegistry] = None,
     ) -> Dict[str, Dict[float, dict]]:
         """
         执行逻辑：
@@ -3678,6 +4479,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         输出参数：
         - dict：{unit_id_island: {timestamp: shm_ref}}。"""
         import cv2
+        registry = frame_registry or self.frame_registry
         
         shm_map = {}
         cap = cv2.VideoCapture(video_path)
@@ -3756,8 +4558,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         break
                     if curr_idx in all_frame_idx_set:
                         t1 = time.perf_counter()
-                        self.frame_registry.register_frame(curr_idx, frame)
-                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        registry.register_frame(curr_idx, frame)
+                        ref = registry.get_shm_ref(curr_idx)
                         if ref:
                             local_refs[curr_idx] = ref
                         local_shm_ms += (time.perf_counter() - t1) * 1000.0
@@ -3780,8 +4582,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         break
                     if curr_idx in all_frame_idx_set:
                         t1 = time.perf_counter()
-                        self.frame_registry.register_frame(curr_idx, frame)
-                        ref = self.frame_registry.get_shm_ref(curr_idx)
+                        registry.register_frame(curr_idx, frame)
+                        ref = registry.get_shm_ref(curr_idx)
                         if ref:
                             valid_shm_refs[curr_idx] = ref
                         shm_ms += (time.perf_counter() - t1) * 1000.0
@@ -3837,7 +4639,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             cap.release()
     
 
-    async def ValidateCVBatch(self, request, context):
+    async def _validation_validate_cv_batch_impl(self, request, context):
         """
         执行逻辑：
         1) 按知识类型分流：process 走完整 CV，abstract/concrete 走先粗后细。
@@ -3933,8 +4735,31 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             COARSE_FPS = 2.0
             coarse_interval = 1.0 / COARSE_FPS
 
+            def _estimate_task_frames(task_type: str, unit: dict) -> int:
+                if task_type == "cv":
+                    return 3
+                start_sec = float(unit.get("start_sec", 0.0))
+                end_sec = float(unit.get("end_sec", start_sec))
+                return max(3, int(max(0.0, end_sec - start_sec) * COARSE_FPS) + 1)
+
             def chunk_list(items, size):
-                return [items[i:i + size] for i in range(0, len(items), size)]
+                if not items:
+                    return []
+                frame_budget = max(8, int(getattr(self.frame_registry, "max_frames", 80) * 0.9))
+                chunks = []
+                current = []
+                current_frames = 0
+                for item in items:
+                    estimated = _estimate_task_frames(item.get("type", "cv"), item.get("unit", {}))
+                    if current and (len(current) >= size or (current_frames + estimated) > frame_budget):
+                        chunks.append(current)
+                        current = []
+                        current_frames = 0
+                    current.append(item)
+                    current_frames += estimated
+                if current:
+                    chunks.append(current)
+                return chunks
 
             tasks = []
             for u in all_units_data:
@@ -3948,22 +4773,12 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             )
 
             task_chunks = chunk_list(tasks, BATCH_SIZE) if tasks else []
-            # tail-merge：尾部太小则合并到前一批
-            if len(task_chunks) >= 2:
-                tail_size = len(task_chunks[-1])
-                merge_threshold = max(1, BATCH_SIZE // 2)
-                if tail_size < merge_threshold:
-                    task_chunks[-2].extend(task_chunks[-1])
-                    task_chunks.pop()
-                    logger.info(
-                        f"[{task_id}] Tail merge: last_size={tail_size} -> merged_size={len(task_chunks[-1])}"
-                    )
             total_chunks = len(task_chunks)
             max_inflight = max(1, self.cv_worker_count * 2)
 
             logger.info(
                 f"[{task_id}] Streaming gate pipeline: chunks={total_chunks}, batch={BATCH_SIZE}, "
-                f"inflight={max_inflight}"
+                f"inflight={max_inflight}, mode=chunk_isolated_shm"
             )
 
             async def wrap_task(fut, t_type, uid):
@@ -4008,43 +4823,60 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 输入参数：
                 - task_chunk: 统一任务列表（cv/cf 混合）。
                 输出参数：
-                - (shm_map, coarse_shm_map, io_ms, cv_count, cf_count)。
+                - (shm_map, coarse_shm_map, io_ms, cv_count, cf_count, cv_registry, cf_registry)。
                 """
                 io_start = time.perf_counter()
                 if not task_chunk:
-                    return {}, {}, 0.0, 0, 0
+                    return {}, {}, 0.0, 0, 0, None, None
                 cv_chunk = [t["unit"] for t in task_chunk if t["type"] == "cv"]
                 cf_chunk = [t["unit"] for t in task_chunk if t["type"] == "cf"]
 
-                io_futures = []
-                if cv_chunk:
-                    cv_io_future = loop.run_in_executor(
-                        None,
-                        self._batch_read_frames_to_shm,
-                        video_path,
-                        cv_chunk
-                    )
-                    io_futures.append(("cv", cv_io_future))
+                cv_registry = self._create_ephemeral_frame_registry(
+                    sum(_estimate_task_frames("cv", unit) for unit in cv_chunk)
+                ) if cv_chunk else None
+                cf_registry = self._create_ephemeral_frame_registry(
+                    sum(_estimate_task_frames("cf", unit) for unit in cf_chunk)
+                ) if cf_chunk else None
 
-                if cf_chunk:
-                    cf_io_future = loop.run_in_executor(
-                        None,
-                        self._batch_read_coarse_frames_to_shm,
-                        video_path,
-                        cf_chunk,
-                        COARSE_FPS
-                    )
-                    io_futures.append(("cf", cf_io_future))
+                try:
+                    io_futures = []
+                    if cv_chunk:
+                        cv_io_future = loop.run_in_executor(
+                            None,
+                            functools.partial(
+                                self._batch_read_frames_to_shm,
+                                video_path,
+                                cv_chunk,
+                                cv_registry,
+                            ),
+                        )
+                        io_futures.append(("cv", cv_io_future))
 
-                io_results = {}
-                for io_type, io_future in io_futures:
-                    io_results[io_type] = await io_future
+                    if cf_chunk:
+                        cf_io_future = loop.run_in_executor(
+                            None,
+                            functools.partial(
+                                self._batch_read_coarse_frames_to_shm,
+                                video_path,
+                                cf_chunk,
+                                COARSE_FPS,
+                                cf_registry,
+                            ),
+                        )
+                        io_futures.append(("cf", cf_io_future))
 
-                shm_map = io_results.get("cv", {})
-                coarse_shm_map = io_results.get("cf", {})
+                    io_results = {}
+                    for io_type, io_future in io_futures:
+                        io_results[io_type] = await io_future
 
-                io_ms = (time.perf_counter() - io_start) * 1000.0
-                return shm_map, coarse_shm_map, io_ms, len(cv_chunk), len(cf_chunk)
+                    shm_map = io_results.get("cv", {})
+                    coarse_shm_map = io_results.get("cf", {})
+                    io_ms = (time.perf_counter() - io_start) * 1000.0
+                    return shm_map, coarse_shm_map, io_ms, len(cv_chunk), len(cf_chunk), cv_registry, cf_registry
+                except Exception:
+                    self._cleanup_ephemeral_frame_registry(cv_registry)
+                    self._cleanup_ephemeral_frame_registry(cf_registry)
+                    raise
 
             async def drain_completed(pending_tasks):
                 if not pending_tasks:
@@ -4110,86 +4942,93 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 return pending, completed_count, responses
 
             if total_chunks > 0:
-                prefetch_task = asyncio.create_task(read_chunk(task_chunks[0]))
-                pending = set()
-
                 for idx, task_chunk in enumerate(task_chunks):
-                    if idx + 1 < total_chunks:
-                        next_task = asyncio.create_task(read_chunk(task_chunks[idx + 1]))
-                    else:
-                        next_task = None
+                    pending = set()
+                    shm_map = {}
+                    coarse_shm_map = {}
+                    cv_registry = None
+                    cf_registry = None
 
-                    shm_map, coarse_shm_map, io_ms, io_cv_cnt, io_cf_cnt = await prefetch_task
-                    prefetch_task = next_task
-                    logger.info(
-                        f"[{task_id}] Chunk {idx + 1}/{total_chunks} IO done: {io_ms:.1f}ms "
-                        f"(cv_units={io_cv_cnt}, cf_units={io_cf_cnt})"
-                    )
-                    total_io_ms += io_ms
-                    io_chunks += 1
-
-                    if not task_chunk:
-                        continue
-
-                    # 提交任务（持续喂入）
-                    from services.python_grpc.src.vision_validation.worker import run_coarse_fine_screenshot_task
-                    submitted = 0
-                    for t in task_chunk:
-                        unit_data = t["unit"]
-                        unit_id = unit_data["unit_id"]
-                        if t["type"] == "cv":
-                            shm_frames = shm_map.get(unit_id, None)
-                            task_func = functools.partial(
-                                run_cv_validation_task,
-                                video_path,
-                                unit_data,
-                                shm_frames
-                            )
-                            future = loop.run_in_executor(self.cv_process_pool, task_func)
-                            pending.add(asyncio.create_task(wrap_task(future, "cv", unit_id)))
-                        else:
-                            future = loop.run_in_executor(
-                                self.cv_process_pool,
-                                functools.partial(
-                                    run_coarse_fine_screenshot_task,
-                                    unit_id=unit_id,
-                                    start_sec=unit_data["start_sec"],
-                                    end_sec=unit_data["end_sec"],
-                                    coarse_shm_frames=coarse_shm_map.get(unit_id, {}),
-                                    coarse_interval=coarse_interval,
-                                    fine_shm_frames_by_island=None
-                                )
-                            )
-                            pending.add(asyncio.create_task(wrap_task(future, "cf", unit_id)))
-                        submitted += 1
-                    total_tasks += submitted
-                    logger.info(
-                        f"[{task_id}] Feed chunk {idx + 1}/{total_chunks}: submitted={submitted}, inflight={len(pending)}"
-                    )
-
-                    # inflight 控制：避免任务堆积导致内存爆
-                    while len(pending) >= max_inflight:
+                    try:
+                        shm_map, coarse_shm_map, io_ms, io_cv_cnt, io_cf_cnt, cv_registry, cf_registry = await read_chunk(task_chunk)
                         logger.info(
-                            f"[{task_id}] Inflight throttle: pending={len(pending)}, limit={max_inflight}"
+                            f"[{task_id}] Chunk {idx + 1}/{total_chunks} IO done: {io_ms:.1f}ms "
+                            f"(cv_units={io_cv_cnt}, cf_units={io_cf_cnt})"
                         )
-                        pending, completed, responses = await drain_completed(pending)
-                        for resp in responses:
-                            yield resp
-                        completed_tasks += completed
+                        total_io_ms += io_ms
+                        io_chunks += 1
 
-                    # Memory Guard (chunk-level)
-                    if 'shm_map' in locals():
-                        del shm_map
-                    if 'coarse_shm_map' in locals():
-                        del coarse_shm_map
-                    gc.collect()
+                        if not task_chunk:
+                            continue
 
-                # drain remaining tasks
-                while pending:
-                    pending, completed, responses = await drain_completed(pending)
-                    for resp in responses:
-                        yield resp
-                    completed_tasks += completed
+                        # 提交任务（chunk 内受控并发）
+                        from services.python_grpc.src.vision_validation.worker import run_coarse_fine_screenshot_task
+                        submitted = 0
+                        for t in task_chunk:
+                            unit_data = t["unit"]
+                            unit_id = unit_data["unit_id"]
+                            if t["type"] == "cv":
+                                shm_frames = shm_map.get(unit_id, None)
+                                task_func = functools.partial(
+                                    run_cv_validation_task,
+                                    video_path,
+                                    unit_data,
+                                    shm_frames
+                                )
+                                future = loop.run_in_executor(self.cv_process_pool, task_func)
+                                pending.add(asyncio.create_task(wrap_task(future, "cv", unit_id)))
+                            else:
+                                future = loop.run_in_executor(
+                                    self.cv_process_pool,
+                                    functools.partial(
+                                        run_coarse_fine_screenshot_task,
+                                        unit_id=unit_id,
+                                        start_sec=unit_data["start_sec"],
+                                        end_sec=unit_data["end_sec"],
+                                        coarse_shm_frames=coarse_shm_map.get(unit_id, {}),
+                                        coarse_interval=coarse_interval,
+                                        fine_shm_frames_by_island=None,
+                                        video_path=video_path,
+                                    )
+                                )
+                                pending.add(asyncio.create_task(wrap_task(future, "cf", unit_id)))
+                            submitted += 1
+
+                            while len(pending) >= max_inflight:
+                                logger.info(
+                                    f"[{task_id}] Inflight throttle: pending={len(pending)}, limit={max_inflight}"
+                                )
+                                pending, completed, responses = await drain_completed(pending)
+                                for resp in responses:
+                                    yield resp
+                                completed_tasks += completed
+
+                        total_tasks += submitted
+                        logger.info(
+                            f"[{task_id}] Feed chunk {idx + 1}/{total_chunks}: submitted={submitted}, inflight={len(pending)}"
+                        )
+
+                        while pending:
+                            pending, completed, responses = await drain_completed(pending)
+                            for resp in responses:
+                                yield resp
+                            completed_tasks += completed
+                    finally:
+                        # 先确保本 chunk 消费完成，再释放该 chunk 的 SHM 生命周期。
+                        while pending:
+                            pending, completed, responses = await drain_completed(pending)
+                            for resp in responses:
+                                yield resp
+                            completed_tasks += completed
+
+                        self._cleanup_ephemeral_frame_registry(cv_registry)
+                        self._cleanup_ephemeral_frame_registry(cf_registry)
+
+                        if 'shm_map' in locals():
+                            del shm_map
+                        if 'coarse_shm_map' in locals():
+                            del coarse_shm_map
+                        gc.collect()
             if total_chunks > 0:
                 avg_io = total_io_ms / max(1, io_chunks)
                 logger.info(
@@ -4210,7 +5049,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
     # ========== 🚀 V6: 资源释放 ==========
     
 
-    async def AnalyzeWithVL(self, request, context):
+    async def _validation_analyze_with_vl_impl(self, request, context):
         """
         🔥 V7: VL-Based Analysis - 使用 Qwen3-VL-Plus 直接分析视频
         
@@ -4230,10 +5069,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         返回:
             VLAnalysisResponse
         """
+        logger.info("===== AnalyzeWithVL Request Received =====")
         task_id = request.task_id
-        video_path = request.video_path
-        semantic_units_path = request.semantic_units_json_path
-        output_dir = request.output_dir
+        # 统一将本地视频归档到 storage/{hash}，确保 VL 阶段与前序阶段落盘同域
+        video_path = _ensure_local_video_in_storage(request.video_path)
+        output_dir = _normalize_output_dir(video_path) if video_path else (request.output_dir or "")
+        # 统一语义单元持久化路径：不再接收 Java 传入路径，仅在服务内用于报表/兜底持久化。
+        semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
+        semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
 
         def _persist_task_token_report(payload: dict) -> str:
             """
@@ -4276,7 +5119,10 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 logger.warning(f"[{task_id}] VL token报表落盘失败: {report_error}")
                 return ""
         
-        logger.info(f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}")
+        logger.info(
+            f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}, "
+            f"semantic_source={semantic_source_case or 'runtime_or_empty'}"
+        )
         
         try:
             self._increment_tasks()
@@ -4302,17 +5148,79 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     error_msg=""
                 )
             
-            # 加载语义单元
-            import json
-            with open(semantic_units_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            
-            if isinstance(data, dict) and "semantic_units" in data:
-                semantic_units = data["semantic_units"]
-            elif isinstance(data, list):
-                semantic_units = data
-            else:
-                semantic_units = []
+            # 加载语义单元：inline/ref 优先，其次运行态缓存，最后回退磁盘读取。
+            data = None
+            semantic_units: List[Dict[str, Any]] = []
+            source_case = semantic_source_case
+
+            if source_case == "semantic_units_inline":
+                semantic_units = self._decode_semantic_units_inline_message(request.semantic_units_inline)
+                data = semantic_units
+                logger.info(f"[{task_id}] AnalyzeWithVL loaded semantic units from inline payload: units={len(semantic_units)}")
+            elif source_case == "semantic_units_ref":
+                ref_id = str(request.semantic_units_ref.ref_id or "").strip()
+                ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
+                if isinstance(ref_entry, dict):
+                    semantic_units = list(ref_entry.get("semantic_units", []) or [])
+                    data = semantic_units
+                    ref_semantic_units_path = str(ref_entry.get("semantic_units_path", "") or "").strip()
+                    if ref_semantic_units_path:
+                        semantic_units_path = ref_semantic_units_path
+                    logger.info(
+                        f"[{task_id}] AnalyzeWithVL loaded semantic units from ref cache: "
+                        f"ref_id={ref_id}, units={len(semantic_units)}"
+                    )
+                else:
+                    logger.warning(f"[{task_id}] AnalyzeWithVL semantic_units_ref not found, fallback to runtime/disk: ref_id={ref_id}")
+
+            if not semantic_units:
+                runtime_semantic_units = self._get_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path=semantic_units_path,
+                )
+                if runtime_semantic_units is not None:
+                    semantic_units = runtime_semantic_units
+                    data = semantic_units
+                    logger.info(
+                        f"[{task_id}] AnalyzeWithVL loaded semantic units from runtime cache: "
+                        f"units={len(semantic_units)}, output_dir={output_dir}"
+                    )
+                else:
+                    candidate_paths: List[str] = []
+                    seen_paths = set()
+                    for candidate in [semantic_units_path, *_phase2a_semantic_units_candidates(output_dir)]:
+                        normalized_candidate = os.path.abspath(str(candidate or "").strip())
+                        if not normalized_candidate or normalized_candidate in seen_paths:
+                            continue
+                        seen_paths.add(normalized_candidate)
+                        candidate_paths.append(normalized_candidate)
+
+                    selected_path = next((path for path in candidate_paths if os.path.exists(path)), "")
+                    if not selected_path:
+                        # 异步写盘场景下，先做一次有限等待 flush，再尝试候选路径。
+                        flush_async_json_writes(timeout_sec=10.0)
+                        selected_path = next((path for path in candidate_paths if os.path.exists(path)), "")
+
+                    if not selected_path:
+                        raise FileNotFoundError(
+                            f"semantic_units_json not found (source={source_case or 'legacy_path'}, candidates={candidate_paths})"
+                        )
+
+                    with open(selected_path, "r", encoding="utf-8") as selected_file:
+                        data = json.load(selected_file)
+                    semantic_units = self._normalize_semantic_units_payload(data)
+                    semantic_units_path = selected_path
+
+            if semantic_units:
+                cache_path = semantic_units_path
+                if str(cache_path).startswith("<"):
+                    cache_path = ""
+                self._cache_phase2a_runtime_semantic_units(
+                    output_dir=output_dir,
+                    semantic_units_path=cache_path,
+                    semantic_units=semantic_units,
+                    task_id=task_id,
+                )
             
             if not semantic_units:
                 logger.warning(f"[{task_id}] 无语义单元，跳过 VL 分析")
@@ -4345,11 +5253,74 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
             def _normalize_knowledge_type(raw_value):
                 kt = (str(raw_value).strip() if raw_value is not None else "").lower()
-                if kt not in {"abstract", "concrete", "process"}:
+                abstract_aliases = {"abstract", "抽象", "讲解", "explanation"}
+                concrete_aliases = {"concrete", "具象", "具体", "实例", "示例"}
+                process_aliases = {"process", "过程", "过程性", "流程", "操作"}
+                if kt in abstract_aliases:
+                    return "abstract"
+                if kt in concrete_aliases:
+                    return "concrete"
+                if kt in process_aliases:
                     return "process"
-                return kt
+                return "process"
 
-            def _select_screenshots_sync(unit_id, start_sec, end_sec):
+            def _map_routing_intervals_to_absolute(raw_intervals, unit_start_sec, unit_end_sec):
+                """
+                将路由预处理里的区间统一映射到“原视频绝对时间轴”。
+                兼容相对区间（相对单元起点）和已是绝对区间两种输入。
+                """
+                mapped = []
+                if not isinstance(raw_intervals, list):
+                    return mapped
+
+                duration = max(0.0, float(unit_end_sec) - float(unit_start_sec))
+                for item in raw_intervals:
+                    s = e = None
+                    if isinstance(item, (list, tuple)) and len(item) >= 2:
+                        s, e = item[0], item[1]
+                    elif isinstance(item, dict):
+                        s = item.get("start_sec", item.get("start"))
+                        e = item.get("end_sec", item.get("end"))
+                    try:
+                        s = float(s)
+                        e = float(e)
+                    except Exception:
+                        continue
+                    if e <= s:
+                        continue
+
+                    # 相对区间：通常落在 [0, duration]。
+                    if s >= -1e-6 and e <= duration + 1e-6:
+                        abs_s = unit_start_sec + s
+                        abs_e = unit_start_sec + e
+                    else:
+                        abs_s = s
+                        abs_e = e
+
+                    abs_s = max(unit_start_sec, min(abs_s, unit_end_sec))
+                    abs_e = max(unit_start_sec, min(abs_e, unit_end_sec))
+                    if abs_e > abs_s:
+                        mapped.append((abs_s, abs_e))
+
+                if not mapped:
+                    return []
+                mapped.sort(key=lambda x: x[0])
+                merged = [mapped[0]]
+                for s, e in mapped[1:]:
+                    last_s, last_e = merged[-1]
+                    if s <= last_e + 1e-6:
+                        merged[-1] = (last_s, max(last_e, e))
+                    else:
+                        merged.append((s, e))
+                return merged
+
+            def _select_screenshots_sync(
+                unit_id,
+                start_sec,
+                end_sec,
+                stable_islands_override=None,
+                action_segments_override=None,
+            ):
                 """
                 说明：在 IO 线程池中执行的同步截图选择。
                 取舍：每次调用创建轻量级 selector，避免多线程共享状态引发不稳定。
@@ -4362,6 +5333,19 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         end_sec=end_sec,
                         coarse_fps=_safe_float(routing_cfg.get("screenshot_coarse_fps", 2.0), 2.0),
                         fine_fps=_safe_float(routing_cfg.get("screenshot_fine_fps", 10.0), 10.0),
+                        stable_islands_override=stable_islands_override,
+                        action_segments_override=action_segments_override,
+                        analysis_max_width=max(
+                            0,
+                            int(_safe_float(routing_cfg.get("screenshot_analysis_max_width", 640), 640)),
+                        ),
+                        long_window_fine_chunk_sec=max(
+                            0.0,
+                            _safe_float(routing_cfg.get("screenshot_long_window_fine_chunk_sec", 20.0), 20.0),
+                        ),
+                        decode_open_timeout_sec=route_decode_open_timeout_sec,
+                        decode_allow_inline_transcode=route_decode_allow_inline_transcode,
+                        decode_enable_async_transcode=route_decode_enable_async_transcode,
                     )
                     if results:
                         return results
@@ -4377,12 +5361,24 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 "process_short": 0,
                 "process_long": 0,
                 "process_preprocessed": 0,
+                "process_static_legacy": 0,
                 "unknown": 0
             }
             vl_units = []
             cv_screenshot_units = []
             cv_clip_units = []
             routing_cfg = vl_config.get("routing", {}) if isinstance(vl_config.get("routing", {}), dict) else {}
+            # 路由截图属于在线热路径：默认禁用同步整段转码，避免 AV1 导致分钟级阻塞。
+            route_decode_open_timeout_sec = max(
+                5,
+                int(_safe_float(routing_cfg.get("screenshot_decode_open_timeout_sec", 30.0), 30.0)),
+            )
+            route_decode_allow_inline_transcode = bool(
+                routing_cfg.get("screenshot_decode_allow_inline_transcode", False)
+            )
+            route_decode_enable_async_transcode = bool(
+                routing_cfg.get("screenshot_decode_enable_async_transcode", True)
+            )
             duration_threshold_sec = max(
                 0.0,
                 _safe_float(routing_cfg.get("process_duration_threshold_sec", 20.0), 20.0)
@@ -4412,6 +5408,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                     process_units.append(unit)
 
             process_route_map = {}
+            routing_generator = None
             if process_units:
                 routing_generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
                 process_route_map = await routing_generator.preprocess_process_units_for_routing(
@@ -4424,7 +5421,8 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             for unit in semantic_units:
                 raw_kt = unit.get("knowledge_type", "")
                 kt = _normalize_knowledge_type(raw_kt)
-                if kt == "process" and not (str(raw_kt).strip().lower() in {"process"}):
+                unit["knowledge_type"] = kt
+                if kt == "process" and not (str(raw_kt).strip().lower() in {"process", "过程", "过程性", "流程", "操作"}):
                     routing_stats["unknown"] += 1
                 start_sec = _safe_float(unit.get("start_sec", 0.0))
                 end_sec = _safe_float(unit.get("end_sec", 0.0))
@@ -4443,8 +5441,44 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 effective_duration = _safe_float(route_info.get("effective_duration_sec", duration), duration)
                 if bool(route_info.get("preprocess_applied", False)):
                     routing_stats["process_preprocessed"] += 1
-                unit["_routing_pre_prune"] = route_info.get("pre_prune_info", {})
+                pre_prune_info = route_info.get("pre_prune_info", {})
+                if not isinstance(pre_prune_info, dict):
+                    pre_prune_info = {}
+                unit["_routing_pre_prune"] = pre_prune_info
                 unit["_routing_effective_duration_sec"] = effective_duration
+                unit["_routing_stable_intervals_abs"] = _map_routing_intervals_to_absolute(
+                    pre_prune_info.get("stable_intervals_raw"),
+                    start_sec,
+                    end_sec,
+                )
+                unit["_routing_action_segments_abs"] = _map_routing_intervals_to_absolute(
+                    pre_prune_info.get("kept_segments"),
+                    start_sec,
+                    end_sec,
+                )
+
+                # process 统一先做“静态主导降级”判定（与短/长分流解耦）；
+                # 命中后直接送入 VL 侧降级链路，复用 stable-island -> action-units 逻辑。
+                force_stable_action_legacy = False
+                if routing_generator is not None:
+                    try:
+                        force_stable_action_legacy = routing_generator._should_use_stable_action_legacy_branch(
+                            semantic_unit=unit,
+                            pre_prune_info=pre_prune_info,
+                            raw_duration_sec=duration,
+                        )
+                    except Exception as _routing_branch_error:
+                        logger.warning(
+                            f"[{task_id}] 静态降级路由判定异常: unit={unit.get('unit_id', '')}, "
+                            f"err={_routing_branch_error}"
+                        )
+                        force_stable_action_legacy = False
+
+                if force_stable_action_legacy:
+                    routing_stats["process_static_legacy"] += 1
+                    unit["_routing_force_legacy_action"] = True
+                    vl_units.append(unit)
+                    continue
 
                 if effective_duration <= duration_threshold_sec:
                     routing_stats["process_short"] += 1
@@ -4460,6 +5494,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 f"abstract={routing_stats['abstract']}, concrete={routing_stats['concrete']}, "
                 f"process_short={routing_stats['process_short']}, process_long={routing_stats['process_long']}, "
                 f"process_preprocessed={routing_stats['process_preprocessed']}, "
+                f"process_static_legacy={routing_stats['process_static_legacy']}, "
                 f"threshold={duration_threshold_sec:.1f}s, "
                 f"unknown={routing_stats['unknown']}"
             )
@@ -4506,6 +5541,14 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
 
                     coarse_fps = max(0.5, _safe_float(routing_cfg.get("screenshot_coarse_fps", 2.0), 2.0))
                     fine_fps = max(1.0, _safe_float(routing_cfg.get("screenshot_fine_fps", 10.0), 10.0))
+                    analysis_max_width = max(
+                        0,
+                        int(_safe_float(routing_cfg.get("screenshot_analysis_max_width", 640), 640)),
+                    )
+                    long_window_fine_chunk_sec = max(
+                        0.0,
+                        _safe_float(routing_cfg.get("screenshot_long_window_fine_chunk_sec", 20.0), 20.0),
+                    )
                     ordered_units = sorted(
                         list(enumerate(cv_screenshot_units)),
                         key=lambda item: (_safe_float(item[1].get("start_sec", 0.0)), item[0]),
@@ -4532,6 +5575,30 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             unit_id = unit.get("unit_id", "")
                             start_sec = _safe_float(unit.get("start_sec", 0.0))
                             end_sec = _safe_float(unit.get("end_sec", 0.0))
+                            stable_override = []
+                            action_override = []
+                            if isinstance(unit.get("_routing_stable_intervals_abs"), list):
+                                for interval_item in unit.get("_routing_stable_intervals_abs") or []:
+                                    if not isinstance(interval_item, (list, tuple)) or len(interval_item) < 2:
+                                        continue
+                                    try:
+                                        s = float(interval_item[0])
+                                        e = float(interval_item[1])
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if e > s:
+                                        stable_override.append((s, e))
+                            if isinstance(unit.get("_routing_action_segments_abs"), list):
+                                for interval_item in unit.get("_routing_action_segments_abs") or []:
+                                    if not isinstance(interval_item, (list, tuple)) or len(interval_item) < 2:
+                                        continue
+                                    try:
+                                        s = float(interval_item[0])
+                                        e = float(interval_item[1])
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if e > s:
+                                        action_override.append((s, e))
 
                             try:
                                 result = await loop.run_in_executor(
@@ -4544,6 +5611,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                                         end_sec=end_sec,
                                         coarse_fps=coarse_fps,
                                         fine_fps=fine_fps,
+                                        stable_islands_override=stable_override,
+                                        action_segments_override=action_override,
+                                        analysis_max_width=analysis_max_width,
+                                        long_window_fine_chunk_sec=long_window_fine_chunk_sec,
+                                        decode_open_timeout_sec=route_decode_open_timeout_sec,
+                                        decode_allow_inline_transcode=route_decode_allow_inline_transcode,
+                                        decode_enable_async_transcode=route_decode_enable_async_transcode,
                                     ),
                                 )
                             except Exception as e:
@@ -4630,10 +5704,41 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                         unit_id = unit.get("unit_id", "")
                         start_sec = _safe_float(unit.get("start_sec", 0.0))
                         end_sec = _safe_float(unit.get("end_sec", 0.0))
+                        stable_override = []
+                        action_override = []
+                        if isinstance(unit.get("_routing_stable_intervals_abs"), list):
+                            for interval_item in unit.get("_routing_stable_intervals_abs") or []:
+                                if not isinstance(interval_item, (list, tuple)) or len(interval_item) < 2:
+                                    continue
+                                try:
+                                    s = float(interval_item[0])
+                                    e = float(interval_item[1])
+                                except (TypeError, ValueError):
+                                    continue
+                                if e > s:
+                                    stable_override.append((s, e))
+                        if isinstance(unit.get("_routing_action_segments_abs"), list):
+                            for interval_item in unit.get("_routing_action_segments_abs") or []:
+                                if not isinstance(interval_item, (list, tuple)) or len(interval_item) < 2:
+                                    continue
+                                try:
+                                    s = float(interval_item[0])
+                                    e = float(interval_item[1])
+                                except (TypeError, ValueError):
+                                    continue
+                                if e > s:
+                                    action_override.append((s, e))
                         async with semaphore:
                             results = await loop.run_in_executor(
                                 executor,
-                                functools.partial(_select_screenshots_sync, unit_id, start_sec, end_sec)
+                                functools.partial(
+                                    _select_screenshots_sync,
+                                    unit_id,
+                                    start_sec,
+                                    end_sec,
+                                    stable_override,
+                                    action_override,
+                                )
                             )
                         return unit_id, start_sec, end_sec, results
 
@@ -4705,13 +5810,39 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 unit_id = unit.get("unit_id", "")
                 start_sec = _safe_float(unit.get("start_sec", 0.0))
                 end_sec = _safe_float(unit.get("end_sec", 0.0))
-                cv_clip_requests.append({
-                    "clip_id": f"{unit_id}/{unit_id}_clip_route_001",
-                    "start_sec": start_sec,
-                    "end_sec": end_sec,
-                    "knowledge_type": unit.get("knowledge_type", ""),
-                    "semantic_unit_id": unit_id
-                })
+                action_segments = []
+                if isinstance(unit.get("_routing_action_segments_abs"), list):
+                    for interval_item in unit.get("_routing_action_segments_abs") or []:
+                        if not isinstance(interval_item, (list, tuple)) or len(interval_item) < 2:
+                            continue
+                        try:
+                            s = float(interval_item[0])
+                            e = float(interval_item[1])
+                        except (TypeError, ValueError):
+                            continue
+                        s = max(start_sec, min(s, end_sec))
+                        e = max(start_sec, min(e, end_sec))
+                        if e > s:
+                            action_segments.append((s, e))
+
+                if action_segments:
+                    for idx, (seg_start, seg_end) in enumerate(action_segments):
+                        cv_clip_requests.append({
+                            "clip_id": f"{unit_id}/{unit_id}_clip_route_action_{idx + 1:03d}",
+                            "start_sec": seg_start,
+                            "end_sec": seg_end,
+                            "knowledge_type": unit.get("knowledge_type", ""),
+                            "semantic_unit_id": unit_id,
+                            "segments": [{"start_sec": seg_start, "end_sec": seg_end}],
+                        })
+                else:
+                    cv_clip_requests.append({
+                        "clip_id": f"{unit_id}/{unit_id}_clip_route_001",
+                        "start_sec": start_sec,
+                        "end_sec": end_sec,
+                        "knowledge_type": unit.get("knowledge_type", ""),
+                        "semantic_unit_id": unit_id
+                    })
 
             # ==================================================================
             # VL 分析：仅处理 process>10s 的单元
@@ -4830,10 +5961,23 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
             # 🚀 Persistence: Save instructional_steps back to JSON
             # ==================================================================
             try:
+                has_updates = False
+                units_map = {u.get("unit_id"): u for u in semantic_units}
+                persist_payload: Any = data
+                if semantic_units_path and os.path.exists(semantic_units_path):
+                    try:
+                        with open(semantic_units_path, "r", encoding="utf-8") as persisted_file:
+                            persist_payload = json.load(persisted_file)
+                    except Exception as load_error:
+                        logger.warning(f"[{task_id}] Failed to load persisted semantic_units payload: {load_error}")
+                persist_units_map = self._build_semantic_unit_index(persist_payload)
+                if not persist_units_map:
+                    # 兜底重建为 grouped 结构，避免回写时退化为旧的扁平展示格式。
+                    persist_payload = self._build_grouped_semantic_units_payload(list(semantic_units or []))
+                    persist_units_map = self._build_semantic_unit_index(persist_payload)
+
+                updated_instructional_units = 0
                 if vl_clip_requests:
-                    has_updates = False
-                    units_map = {u.get("unit_id"): u for u in semantic_units}
-                    
                     # Group steps by unit
                     unit_steps = {} # uid -> list of step dicts
                     for clip in vl_clip_requests:
@@ -4853,7 +5997,13 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             
                             unit_steps[uid].append({
                                 "step_id": step_id,
+                                "step_description": clip.get("step_description", ""),
                                 "description": clip.get("step_description", ""),
+                                "main_action": str(clip.get("main_action") or "").strip(),
+                                "main_operation": list(clip.get("main_operation", []) or []),
+                                "precautions": list(clip.get("precautions", []) or []),
+                                "step_summary": str(clip.get("step_summary") or "").strip(),
+                                "operation_guidance": list(clip.get("operation_guidance", []) or []),
                                 "timestamp_range": [clip.get("start_sec"), clip.get("end_sec")],
                                 "materials": {
                                     "clip_id": clip.get("clip_id"),
@@ -4869,18 +6019,58 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                             except:
                                 pass
                             units_map[uid]["instructional_steps"] = steps
+                            target_node = persist_units_map.get(uid)
+                            if isinstance(target_node, dict):
+                                target_node["instructional_steps"] = steps
+                            updated_instructional_units += 1
                             has_updates = True
-                    
-                    if has_updates:
-                        with open(semantic_units_path, "w", encoding="utf-8") as f:
-                            # Re-use 'data' structure loaded earlier
-                            if isinstance(data, dict):
-                                # Ensure we don't lose other top-level keys
-                                data["semantic_units"] = semantic_units 
-                                json.dump(data, f, ensure_ascii=False, indent=2)
-                            else:
-                                json.dump(semantic_units, f, ensure_ascii=False, indent=2)
-                        logger.info(f"[{task_id}] ✅ Persisted instructional_steps to {semantic_units_path}")
+
+                route_override_units = [
+                    unit
+                    for unit in semantic_units
+                    if str(unit.get("_vl_route_override", "") or "").strip().lower() in {"abstract", "concrete"}
+                ]
+                no_needed_video_units = [
+                    str(unit.get("unit_id", "") or "")
+                    for unit in route_override_units
+                    if bool(unit.get("_vl_no_needed_video", False))
+                ]
+                should_type_abstract_units = [
+                    str(unit.get("unit_id", "") or "")
+                    for unit in route_override_units
+                    if str(unit.get("_vl_route_override", "") or "").strip().lower() == "abstract"
+                    and not bool(unit.get("_vl_no_needed_video", False))
+                ]
+                should_type_concrete_units = [
+                    str(unit.get("unit_id", "") or "")
+                    for unit in route_override_units
+                    if str(unit.get("_vl_route_override", "") or "").strip().lower() == "concrete"
+                ]
+                synced_route_override_units = 0
+                for unit in route_override_units:
+                    unit_id = str(unit.get("unit_id", "") or "").strip()
+                    if not unit_id:
+                        continue
+                    target_node = persist_units_map.get(unit_id)
+                    if not isinstance(target_node, dict):
+                        continue
+                    target_node["_vl_route_override"] = str(unit.get("_vl_route_override", "") or "").strip()
+                    target_node["_vl_no_needed_video"] = bool(unit.get("_vl_no_needed_video", False))
+                    synced_route_override_units += 1
+                if synced_route_override_units > 0:
+                    has_updates = True
+
+                if has_updates:
+                    with open(semantic_units_path, "w", encoding="utf-8") as f:
+                        json.dump(persist_payload, f, ensure_ascii=False, indent=2)
+                    logger.info(
+                        f"[{task_id}] Persisted semantic_units updates to {semantic_units_path} "
+                        f"(instructional_units={updated_instructional_units}, "
+                        f"route_override_units={synced_route_override_units}, "
+                        f"no_needed_video_units={len(no_needed_video_units)}, "
+                        f"should_type_abstract_units={len(should_type_abstract_units)}, "
+                        f"should_type_concrete_units={len(should_type_concrete_units)})"
+                    )
 
             except Exception as e:
                 logger.error(f"[{task_id}] Failed to persist instructional_steps: {e}")
@@ -4932,7 +6122,7 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
         finally:
             self._decrement_tasks()
 
-    async def ReleaseCVResources(self, request, context):
+    async def _validation_release_cv_resources_impl(self, request, context):
         """
         执行逻辑：
         1) 清理 CV 验证器缓存。
@@ -4970,6 +6160,20 @@ class VideoProcessingServicer(video_processing_pb2_grpc.VideoProcessingServiceSe
                 freed_workers_count=0,
                 freed_memory_mb=0.0
             )
+
+from .stages.phase2a_stage import Phase2AMaterialStageMixin
+from .stages.validation_vl_stage import ValidationAndVLStageMixin
+
+
+class VideoProcessingServicer(
+    ValidationAndVLStageMixin,
+    Phase2AMaterialStageMixin,
+    _VideoProcessingServicerCore,
+):
+    """按阶段职责组合后的 gRPC 服务实现。"""
+
+    pass
+
 
 async def serve(host: str = "0.0.0.0", port: int = 50051):
     """

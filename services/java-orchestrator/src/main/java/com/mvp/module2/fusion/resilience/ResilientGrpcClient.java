@@ -96,7 +96,7 @@ public class ResilientGrpcClient {
      * 弹性执行 Phase2B 富文本组装
      */
     public CompletableFuture<PythonGrpcClient.AssembleResult> assembleRichTextResilient(
-            String taskId, String videoPath, String semanticUnitsJsonPath,
+            String taskId, String videoPath, PythonGrpcClient.AnalyzeResult analyzeResult,
             String screenshotsDir, String clipsDir, String outputDir,
             String title, double videoDurationSec) {
         
@@ -111,7 +111,7 @@ public class ResilientGrpcClient {
         return circuitBreaker.execute(
             () -> retryPolicy.executeWithRetry(
                 () -> grpcClient.assembleRichTextAsync(
-                    taskId, videoPath, semanticUnitsJsonPath,
+                    taskId, videoPath, analyzeResult,
                     screenshotsDir, clipsDir, outputDir, title, timeoutSec
                 ),
                 retryConfig,

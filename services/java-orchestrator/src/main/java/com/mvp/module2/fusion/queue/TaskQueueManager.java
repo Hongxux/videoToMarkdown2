@@ -1,5 +1,6 @@
 package com.mvp.module2.fusion.queue;
 
+import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -187,8 +188,8 @@ public class TaskQueueManager {
         if (task != null) {
             task.status = TaskStatus.FAILED;
             task.completedAt = Instant.now();
-            task.statusMessage = "处理失败";
-            task.errorMessage = errorMessage;
+            task.statusMessage = UserFacingErrorMapper.busyMessage();
+            task.errorMessage = UserFacingErrorMapper.busyMessage();
             
             processingSlots.release();
             decrementUserTaskCount(task.userId);
@@ -246,6 +247,16 @@ public class TaskQueueManager {
                 tasks.add(task);
             }
         }
+        tasks.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
+        return tasks;
+    }
+
+    /**
+     * 获取所有任务（按创建时间倒序）。
+     * 用于移动端任务列表展示，避免前端必须知道 userId。
+     */
+    public List<TaskEntry> getAllTasks() {
+        List<TaskEntry> tasks = new ArrayList<>(allTasks.values());
         tasks.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
         return tasks;
     }

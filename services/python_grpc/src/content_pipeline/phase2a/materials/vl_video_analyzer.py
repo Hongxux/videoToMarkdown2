@@ -1,4 +1,4 @@
-"""
+﻿"""
 VL-Based Video Analyzer - 基于视觉语言模型的视频分析器
 
 功能：
@@ -32,6 +32,7 @@ from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
+from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
 # 统一 LLM 调用入口
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
@@ -51,6 +52,8 @@ class VLAnalysisResult:
     """单个视频片段的分析结果"""
     id: int = 0
     knowledge_type: str = ""
+    no_needed_video: bool = False
+    should_type: str = ""
     confidence: float = 0.0
     reasoning: str = ""
     key_evidence: str = ""
@@ -62,6 +65,11 @@ class VLAnalysisResult:
     step_id: int = 0
     step_description: str = ""
     analysis_mode: str = "default"
+    main_action: str = ""
+    main_operation: List[str] = field(default_factory=list)
+    precautions: List[str] = field(default_factory=list)
+    step_summary: str = ""
+    operation_guidance: List[str] = field(default_factory=list)
 
     # 绝对时间（由 VLVideoAnalyzer.convert_timestamps 计算）
     absolute_clip_start_sec: float = 0.0
@@ -185,6 +193,35 @@ class VLVideoAnalyzer:
         return "default"
 
     @staticmethod
+    def _build_route_rules_zh(*, subject: str, no_needed_index: int, should_type_index: int) -> str:
+        """统一生成中文路由规则文本，避免 default/tutorial 规则漂移。"""
+        return (
+            f"{no_needed_index}) no_needed_video 判定规则：\n"
+            f"   - 若{subject}不存在有价值的动态展示，且仅靠文字即可完整传达信息，必须返回 no_needed_video=true。\n"
+            f"   - 若视频中的动态演示对理解或复现有价值，返回 no_needed_video=false。\n"
+            f"{should_type_index}) should_type 路由覆盖规则（可选）：\n"
+            "   - should_type=abstract: 按 abstract 路由处理。\n"
+            "   - should_type=concrete: 按 concrete 路由处理。\n"
+            "   - 若 no_needed_video=true，则应等价按 abstract 路由处理（覆盖优先级最高）。\n"
+        )
+
+    @staticmethod
+    def _build_route_rules_en(
+        *,
+        subject: str,
+        no_needed_prefix: str = "",
+        should_type_prefix: str = "",
+    ) -> str:
+        """统一生成英文路由规则文本，供 fallback prompt 复用。"""
+        no_needed_lead = f"{no_needed_prefix} " if str(no_needed_prefix or "").strip() else ""
+        should_type_lead = f"{should_type_prefix} " if str(should_type_prefix or "").strip() else ""
+        return (
+            f"{no_needed_lead}no_needed_video rule: true only when {subject} has no valuable dynamic visual signal and text alone is sufficient.\n"
+            f"{should_type_lead}should_type rule (optional): abstract/concrete only. "
+            "If no_needed_video=true, treat it as abstract routing with highest priority.\n"
+        )
+
+    @staticmethod
     def _get_builtin_output_constraints_tutorial() -> str:
         """方法说明：VLVideoAnalyzer._get_builtin_output_constraints_tutorial 工具方法。
         执行步骤：
@@ -198,6 +235,10 @@ class VLVideoAnalyzer:
             "2) Each array item must be one complete step.\n"
             "3) Required fields per item: step_id (Integer), step_description (String), "
             "clip_start_sec (Float), clip_end_sec (Float), instructional_keyframe_timestamp (List[Float]).\n"
+            "   Optional fields: main_action (String), main_operation (List[String]), precautions (List[String]), "
+            "step_summary (String), operation_guidance (List[String]), "
+            "no_needed_video (Boolean), should_type (abstract/concrete).\n"
+            "   If an optional field is unnecessary for a step, omit it or return an empty value.\n"
             "4) Do not output reasoning, key_evidence, or knowledge_type fields.\n"
             "5) Segmentation rules:\n"
             "   - Keep explanation + execution + result of the same step together.\n"
@@ -206,6 +247,11 @@ class VLVideoAnalyzer:
             "6) instructional_keyframe_timestamp must be true instructional keyframes, "
             "prefer final state or just-before-submit moments.\n"
             "7) Avoid -1 for timestamps; if action spans whole clip use [0.0, clip_duration].\n"
+            + VLVideoAnalyzer._build_route_rules_en(
+                subject="the step",
+                no_needed_prefix="8)",
+                should_type_prefix="9)",
+            )
         )
 
     @staticmethod
@@ -220,12 +266,18 @@ class VLVideoAnalyzer:
             "【输出硬性约束】\n"
             "1) 只输出一个标准 JSON，不要 Markdown 代码块、不要解释、不要前后缀文字。\n"
             "2) 顶层必须是一个扁平 JSON 数组：[{...}, {...}]。\n"
-            "3) 每个对象必须包含字段：id, knowledge_type, confidence, clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。\n"
+            "3) 每个对象必须包含字段：id, knowledge_type, no_needed_video, confidence, clip_start_sec, clip_end_sec, suggested_screenshoot_timestamps。\n"
+            "   可选字段：should_type（仅允许 abstract / concrete）。\n"
             "4) 严禁输出 reasoning / key_evidence 字段，避免无关文本增加 token。\n"
             "5) 时间边界判断规则：\n"
             "   - 对于非【讲解型】内容，禁止随意输出 -1；请根据视觉变化尽力估算起止时间。\n"
             "   - 若该知识类型贯穿整个片段，可设 [0.0, clip_duration]。\n"
             "   - 仅在视觉信息完全无法支持判断时，才允许输出 -1。\n"
+            + VLVideoAnalyzer._build_route_rules_zh(
+                subject="该片段",
+                no_needed_index=6,
+                should_type_index=7,
+            )
         )
 
     def _get_output_constraints(self, analysis_mode: str = "default") -> str:
@@ -262,6 +314,12 @@ class VLVideoAnalyzer:
 4. clip_start_sec: 片段起始时间（秒，相对于视频开头）
 5. clip_end_sec: 片段结束时间（秒）
 6. suggested_screenshoot_timestamps: 建议的截图时间点数组（秒）
+7. no_needed_video: 是否不需要视频表达（布尔值）
+   - true: 该片段无有价值的动态展示，仅靠文字即可完整承载信息
+   - false: 该片段存在有价值的动态展示
+8. should_type: 路由覆盖类型（可选）
+   - 仅允许 "abstract" 或 "concrete"
+   - 若不需要覆盖，可省略
 
 请以 JSON 数组格式输出，格式如下：
 ```json
@@ -269,6 +327,8 @@ class VLVideoAnalyzer:
   {
     "id": 0,
     "knowledge_type": "实操",
+    "no_needed_video": false,
+    "should_type": "concrete",
     "confidence": 0.9,
     "clip_start_sec": 0.0,
     "clip_end_sec": 10.0,
@@ -335,6 +395,9 @@ class VLVideoAnalyzer:
                 return result
 
             # 计算并补齐绝对时间字段
+            no_needed_video_count = 0
+            should_abstract_count = 0
+            should_concrete_count = 0
             for i, ar in enumerate(analysis_results):
                 ar.analysis_mode = normalized_mode
 
@@ -345,6 +408,24 @@ class VLVideoAnalyzer:
                     semantic_unit_start_sec + ts
                     for ts in ar.suggested_screenshoot_timestamps
                 ]
+
+                route_override = self._normalize_should_type(ar.should_type)
+                ar.no_needed_video, ar.should_type = self._normalize_route_controls(
+                    ar.no_needed_video,
+                    route_override,
+                )
+                if route_override == "abstract":
+                    ar.knowledge_type = "abstract"
+                    should_abstract_count += 1
+                elif route_override == "concrete":
+                    ar.knowledge_type = "concrete"
+                    should_concrete_count += 1
+
+                if ar.no_needed_video:
+                    # no_needed_video=true 时，统一转为 abstract，供下游按抽象语义处理。
+                    ar.knowledge_type = "abstract"
+                    ar.should_type = "abstract"
+                    no_needed_video_count += 1
 
                 result.analysis_results.append(ar)
 
@@ -363,12 +444,22 @@ class VLVideoAnalyzer:
                         "step_id": step_id,
                         "step_description": ar.step_description,
                         "action_brief": action_brief,
+                        "main_action": str(ar.main_action or "").strip(),
+                        "main_operation": list(ar.main_operation or []),
+                        "precautions": list(ar.precautions or []),
+                        "step_summary": str(ar.step_summary or "").strip(),
+                        "operation_guidance": list(ar.operation_guidance or []),
                         "analysis_mode": normalized_mode,
                     })
                 else:
                     # 默认模式保留旧行为：讲解型不生成视频切片。
+                    if ar.no_needed_video:
+                        continue
+                    if route_override == "abstract":
+                        continue
                     k_type = str(ar.knowledge_type or "").strip("[]() \"'").lower()
-                    if k_type not in {"\u8bb2\u89e3\u578b", "explanation", "abstract_explanation"}:
+                    should_build_clip = route_override != "concrete"
+                    if should_build_clip and k_type not in {"\u8bb2\u89e3\u578b", "explanation", "abstract_explanation"}:
                         default_clip_stem = f"{semantic_unit_id}_clip_vl_{i + 1:03d}"
                         result.clip_requests.append({
                             "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, default_clip_stem),
@@ -379,9 +470,18 @@ class VLVideoAnalyzer:
                             "step_id": step_id,
                             "step_description": ar.step_description,
                             "action_brief": action_brief,
+                            "main_action": str(ar.main_action or "").strip(),
+                            "main_operation": list(ar.main_operation or []),
+                            "precautions": list(ar.precautions or []),
+                            "step_summary": str(ar.step_summary or "").strip(),
+                            "operation_guidance": list(ar.operation_guidance or []),
                             "analysis_mode": normalized_mode,
                         })
 
+                if ar.no_needed_video:
+                    continue
+                if route_override == "abstract":
+                    continue
                 for j, ts in enumerate(ar.absolute_screenshot_timestamps):
                     screenshot_id = self._build_unit_relative_asset_id(
                         semantic_unit_id,
@@ -414,6 +514,8 @@ class VLVideoAnalyzer:
             logger.info(
                 f"VL analysis completed: {semantic_unit_id}, mode={normalized_mode}, "
                 f"clips={len(result.clip_requests)}, screenshots={len(result.screenshot_requests)}, "
+                f"no_needed_video={no_needed_video_count}, "
+                f"should_abstract={should_abstract_count}, should_concrete={should_concrete_count}, "
                 f"prompt_tokens={result.token_usage.get('prompt_tokens', 0)}, "
                 f"total_tokens={result.token_usage.get('total_tokens', 0)}"
             )
@@ -641,10 +743,14 @@ class VLVideoAnalyzer:
             "You are an instructional video editor for 1-on-1 teaching replication.\n"
             "Your only task is to split the clip into complete procedural steps and choose instructional keyframes.\n"
             "Do NOT classify knowledge types.\n"
-            "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, instructional_keyframe_timestamp.\n"
+            "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, "
+            "instructional_keyframe_timestamp, and optional fields "
+            "(main_action, main_operation, precautions, step_summary, operation_guidance, no_needed_video, should_type).\n"
+            "Optional fields can be omitted or left empty when unnecessary.\n"
             "Keep explanation + execution + result in the same step.\n"
             "Remove hesitation/thinking-only intervals with no new information.\n"
-            "Each step should be at least 5 seconds; merge overly short steps with neighbors."
+            "Each step should be at least 5 seconds; merge overly short steps with neighbors.\n"
+            + self._build_route_rules_en(subject="the step")
         )
 
     async def _build_messages(
@@ -789,6 +895,20 @@ class VLVideoAnalyzer:
         except Exception as e:
             logger.error(f"视频编码失败: {e}")
             return None
+
+    def _should_force_inline_transcode_for_keyframe_extract(self, video_path: str) -> bool:
+        """
+        判断关键帧抽取是否应强制内联转码。
+
+        做什么：仅当输入片段位于 semantic_unit_clips_vl 子目录时返回 True。
+        为什么：该目录是 VL 待分析片段子集，允许局部 AV1->H.264 转码，避免全量视频被同步转码。
+        权衡：通过目录边界限制影响面；其它路径仍沿用默认解码策略。
+        """
+        normalized_path = str(video_path or "").replace("\\", "/").strip().lower()
+        if not normalized_path:
+            return False
+        parts = [part for part in normalized_path.split("/") if part]
+        return "semantic_unit_clips_vl" in parts
     
     async def _extract_keyframes(self, video_path: str, max_frames: int = 6) -> List[Dict[str, Any]]:
         """
@@ -803,46 +923,65 @@ class VLVideoAnalyzer:
             logger.warning(f"关键帧抽取依赖不可用（opencv/pillow）：{e}")
             return []
 
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
+        force_inline_transcode = self._should_force_inline_transcode_for_keyframe_extract(video_path)
+        cap, effective_video_path, used_fallback = open_video_capture_with_fallback(
+            video_path,
+            logger=logger,
+            allow_inline_transcode=True if force_inline_transcode else None,
+        )
+        if cap is None or not cap.isOpened():
+            logger.warning(
+                "关键帧抽取无法打开视频: source=%s, effective=%s, force_inline_transcode=%s",
+                video_path,
+                effective_video_path,
+                force_inline_transcode,
+            )
             return []
+        if used_fallback:
+            logger.info(
+                "关键帧抽取使用 OpenCV 解码兜底路径: source=%s, effective=%s",
+                video_path,
+                effective_video_path,
+            )
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
-        duration = (frame_count / fps) if fps > 0 and frame_count > 0 else 0.0
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+            duration = (frame_count / fps) if fps > 0 and frame_count > 0 else 0.0
 
-        # 均匀采样，避免过多帧
-        if max_frames <= 0:
-            max_frames = 1
-        if duration <= 0:
-            timestamps = [0.0]
-        else:
-            # 避免取到末尾导致 seek 失败
-            end = max(0.0, duration - 0.05)
-            if max_frames == 1:
-                timestamps = [max(0.0, end * 0.5)]
+            # 均匀采样，避免过多帧
+            if max_frames <= 0:
+                max_frames = 1
+            if duration <= 0:
+                timestamps = [0.0]
             else:
-                step = end / (max_frames - 1)
-                timestamps = [i * step for i in range(max_frames)]
+                # 避免取到末尾导致 seek 失败
+                end = max(0.0, duration - 0.05)
+                if max_frames == 1:
+                    timestamps = [max(0.0, end * 0.5)]
+                else:
+                    step = end / (max_frames - 1)
+                    timestamps = [i * step for i in range(max_frames)]
 
-        frames: List[Dict[str, Any]] = []
-        for ts in timestamps:
-            try:
-                cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
-                ok, frame_bgr = cap.read()
-                if not ok or frame_bgr is None:
+            frames: List[Dict[str, Any]] = []
+            for ts in timestamps:
+                try:
+                    cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000.0)
+                    ok, frame_bgr = cap.read()
+                    if not ok or frame_bgr is None:
+                        continue
+                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                    image = Image.fromarray(frame_rgb)
+                    data_uri = self._encode_image_as_jpeg_data_uri(image)
+                    if not data_uri:
+                        continue
+                    frames.append({"timestamp_sec": float(ts), "data_uri": data_uri})
+                except Exception:
                     continue
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                image = Image.fromarray(frame_rgb)
-                data_uri = self._encode_image_as_jpeg_data_uri(image)
-                if not data_uri:
-                    continue
-                frames.append({"timestamp_sec": float(ts), "data_uri": data_uri})
-            except Exception:
-                continue
 
-        cap.release()
-        return frames
+            return frames
+        finally:
+            cap.release()
 
     def _encode_image_as_jpeg_data_uri(self, image) -> Optional[str]:
         """将 PIL.Image 编码为满足 10MB 限制的 JPEG data-uri。"""
@@ -965,6 +1104,74 @@ class VLVideoAnalyzer:
 
         return normalized
 
+    def _normalize_text_list(self, value: Any) -> List[str]:
+        """Normalize scalar/list/string text input into a de-duplicated non-empty string list."""
+        if value is None:
+            return []
+
+        raw_items: List[Any]
+        if isinstance(value, (list, tuple, set)):
+            raw_items = list(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+
+            parsed_value: Any = None
+            try:
+                parsed_value = json.loads(text)
+            except Exception:
+                parsed_value = None
+
+            if isinstance(parsed_value, list):
+                raw_items = parsed_value
+            else:
+                raw_items = [segment for segment in re.split(r"[\n;；]+", text) if segment and segment.strip()]
+        else:
+            raw_items = [value]
+
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for item in raw_items:
+            text_item = str(item or "").strip()
+            if not text_item:
+                continue
+            dedup_key = text_item.lower()
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+            normalized.append(text_item)
+
+        return normalized
+
+    def _normalize_bool_flag(self, value: Any) -> bool:
+        """将模型返回的多种布尔表达归一为 bool。"""
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value != 0
+        text = str(value or "").strip().lower()
+        if not text:
+            return False
+        return text in {"1", "true", "yes", "y", "on", "是", "是的"}
+
+    def _normalize_should_type(self, value: Any) -> str:
+        """将 should_type 归一为 abstract/concrete/空字符串。"""
+        text = str(value or "").strip().lower()
+        if text in {"abstract", "抽象", "讲解", "explanation"}:
+            return "abstract"
+        if text in {"concrete", "具象", "具体", "实例"}:
+            return "concrete"
+        return ""
+
+    def _normalize_route_controls(self, no_needed_video: Any, should_type: Any) -> tuple[bool, str]:
+        """统一归一路由控制字段，并应用 no_needed_video 的最高优先级。"""
+        normalized_no_needed_video = self._normalize_bool_flag(no_needed_video)
+        normalized_should_type = self._normalize_should_type(should_type)
+        if normalized_no_needed_video:
+            return True, "abstract"
+        return normalized_no_needed_video, normalized_should_type
+
     def _enforce_tutorial_step_constraints(
         self,
         results: List[VLAnalysisResult],
@@ -991,6 +1198,11 @@ class VLVideoAnalyzer:
                 clip_end = clip_start + min_duration
 
             step_description = str(item.step_description or "").strip() or f"step_{index:02d}"
+            main_action = str(item.main_action or "").strip()
+            main_operation = self._normalize_text_list(item.main_operation)
+            precautions = self._normalize_text_list(item.precautions)
+            step_summary = str(item.step_summary or "").strip()
+            operation_guidance = self._normalize_text_list(item.operation_guidance)
 
             timestamps = self._normalize_timestamp_list(item.suggested_screenshoot_timestamps)
             clamped_timestamps: List[float] = []
@@ -1009,6 +1221,11 @@ class VLVideoAnalyzer:
             item.step_description = step_description
             item.knowledge_type = "process"
             item.analysis_mode = "tutorial_stepwise"
+            item.main_action = main_action
+            item.main_operation = main_operation
+            item.precautions = precautions
+            item.step_summary = step_summary
+            item.operation_guidance = operation_guidance
             item.clip_start_sec = clip_start
             item.clip_end_sec = clip_end
             item.suggested_screenshoot_timestamps = clamped_timestamps
@@ -1074,6 +1291,38 @@ class VLVideoAnalyzer:
             step_description = str(
                 item.get("step_description", item.get("description", item.get("title", ""))) or ""
             ).strip()
+            main_action = str(
+                item.get(
+                    "main_action",
+                    item.get("主要动作", ""),
+                )
+                or ""
+            ).strip()
+            raw_main_operation = item.get("main_operation", None)
+            if raw_main_operation is None:
+                raw_main_operation = item.get("main_operations", None)
+            if raw_main_operation is None:
+                raw_main_operation = item.get("primary_operations", None)
+            if raw_main_operation is None:
+                raw_main_operation = item.get("主要操作", None)
+            main_operation = self._normalize_text_list(raw_main_operation)
+            raw_precautions = item.get("precautions", None)
+            if raw_precautions is None:
+                raw_precautions = item.get("notes", None)
+            if raw_precautions is None:
+                raw_precautions = item.get("注意事项", None)
+            if raw_precautions is None:
+                raw_precautions = item.get("cautions", None)
+            precautions = self._normalize_text_list(raw_precautions)
+            step_summary = str(
+                item.get("step_summary", item.get("步骤小结", item.get("summary", ""))) or ""
+            ).strip()
+            raw_operation_guidance = item.get("operation_guidance", None)
+            if raw_operation_guidance is None:
+                raw_operation_guidance = item.get("操作指导", None)
+            if raw_operation_guidance is None:
+                raw_operation_guidance = item.get("guidance", None)
+            operation_guidance = self._normalize_text_list(raw_operation_guidance)
 
             raw_timestamps = item.get("instructional_keyframe_timestamp", None)
             if raw_timestamps is None:
@@ -1103,14 +1352,25 @@ class VLVideoAnalyzer:
             )
             has_step_schema = has_step_schema or tutorial_like
 
+            raw_no_needed_video = item.get("no_needed_video", item.get("no_need_video", item.get("video_not_needed")))
+            raw_should_type = item.get("should_type", item.get("target_type", item.get("suggested_type")))
+            no_needed_video, should_type = self._normalize_route_controls(raw_no_needed_video, raw_should_type)
+
             knowledge_type = str(item.get("knowledge_type", "") or "").strip()
             if tutorial_like:
                 # 教程模式忽略模型返回的 knowledge_type，仅保留步骤结构
                 knowledge_type = "process"
+            else:
+                if should_type in {"abstract", "concrete"}:
+                    knowledge_type = should_type
+                if no_needed_video:
+                    knowledge_type = "abstract"
 
             result = VLAnalysisResult(
                 id=safe_int(item.get("id", step_id), step_id),
                 knowledge_type=knowledge_type,
+                no_needed_video=no_needed_video,
+                should_type=should_type,
                 confidence=safe_float(item.get("confidence", 0.0), 0.0),
                 reasoning=str(item.get("reasoning", "") or ""),
                 key_evidence=key_evidence,
@@ -1120,6 +1380,11 @@ class VLVideoAnalyzer:
                 step_id=step_id if tutorial_like else 0,
                 step_description=step_description,
                 analysis_mode="tutorial_stepwise" if tutorial_like else "default",
+                main_action=main_action if tutorial_like else "",
+                main_operation=main_operation if tutorial_like else [],
+                precautions=precautions if tutorial_like else [],
+                step_summary=step_summary if tutorial_like else "",
+                operation_guidance=operation_guidance if tutorial_like else [],
             )
             results.append(result)
 
@@ -1127,6 +1392,13 @@ class VLVideoAnalyzer:
                 normalized_payload.append({
                     "step_id": step_id,
                     "step_description": step_description,
+                    "main_action": main_action,
+                    "main_operation": main_operation,
+                    "precautions": precautions,
+                    "step_summary": step_summary,
+                    "operation_guidance": operation_guidance,
+                    "no_needed_video": bool(no_needed_video),
+                    "should_type": should_type,
                     "clip_start_sec": clip_start_sec,
                     "clip_end_sec": clip_end_sec,
                     "instructional_keyframe_timestamp": timestamps,
@@ -1135,6 +1407,8 @@ class VLVideoAnalyzer:
                 normalized_payload.append({
                     "id": safe_int(item.get("id", index), index),
                     "knowledge_type": knowledge_type,
+                    "no_needed_video": bool(no_needed_video),
+                    "should_type": should_type,
                     "confidence": safe_float(item.get("confidence", 0.0), 0.0),
                     "clip_start_sec": clip_start_sec,
                     "clip_end_sec": clip_end_sec,
@@ -1147,6 +1421,13 @@ class VLVideoAnalyzer:
                 {
                     "step_id": int(r.step_id),
                     "step_description": str(r.step_description or "").strip(),
+                    "main_action": str(r.main_action or "").strip(),
+                    "main_operation": list(r.main_operation or []),
+                    "precautions": list(r.precautions or []),
+                    "step_summary": str(r.step_summary or "").strip(),
+                    "operation_guidance": list(r.operation_guidance or []),
+                    "no_needed_video": bool(getattr(r, "no_needed_video", False)),
+                    "should_type": str(getattr(r, "should_type", "") or ""),
                     "clip_start_sec": float(r.clip_start_sec),
                     "clip_end_sec": float(r.clip_end_sec),
                     "instructional_keyframe_timestamp": list(r.suggested_screenshoot_timestamps or []),
@@ -1257,3 +1538,4 @@ class VLVideoAnalyzer:
             return "\"key_evidence\": [" + ", ".join(parts) + "]"
 
         return pattern.sub(_repl, json_str)
+

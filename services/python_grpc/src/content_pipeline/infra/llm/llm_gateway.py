@@ -15,7 +15,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
 import threading
 
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
@@ -26,9 +26,15 @@ from services.python_grpc.src.content_pipeline.infra.llm.llm_client import (
     _AsyncInFlightDeduper,
 )
 from services.python_grpc.src.content_pipeline.infra.llm.deepseek_audit import append_deepseek_call_record
-from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import VisionAIClient, VisionAIConfig, get_vision_ai_client
+from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import (
+    VisionAIClient,
+    VisionAIConfig,
+    _VISION_BG_LOOP,
+    get_vision_ai_client,
+)
 
 logger = logging.getLogger(__name__)
+_HedgeResultT = TypeVar("_HedgeResultT")
 
 
 # =============================================================================
@@ -81,6 +87,132 @@ def _env_float(name: str, default: float) -> float:
         return float(str(raw).strip())
     except Exception:
         return float(default)
+
+
+_LLM_HEDGE_ENABLED = _env_bool("MODULE2_LLM_HEDGE_ENABLED", True)
+_LLM_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_LLM_HEDGE_DELAY_MS", 25000))
+
+_DEEPSEEK_HEDGE_ENABLED = _env_bool("MODULE2_DEEPSEEK_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
+_DEEPSEEK_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_DEEPSEEK_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
+
+_VISION_HEDGE_ENABLED = _env_bool("MODULE2_VISION_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
+_VISION_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VISION_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
+
+_VL_HEDGE_ENABLED = _env_bool("MODULE2_VL_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
+_VL_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VL_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
+
+
+async def _run_hedged_async_request(
+    *,
+    request_name: str,
+    enabled: bool,
+    delay_ms: int,
+    primary_factory: Callable[[], Awaitable[_HedgeResultT]],
+    secondary_factory: Optional[Callable[[], Awaitable[_HedgeResultT]]] = None,
+) -> _HedgeResultT:
+    """统一执行 hedged request：慢请求超时后补发并行副本，返回先成功者并取消迟到请求。"""
+    if not enabled or int(delay_ms) <= 0:
+        return await primary_factory()
+
+    secondary = secondary_factory or primary_factory
+    delay_seconds = max(0.001, float(delay_ms) / 1000.0)
+    primary_task = asyncio.create_task(primary_factory())
+    hedge_task: Optional[asyncio.Task[_HedgeResultT]] = None
+    pending_tasks: set[asyncio.Task[_HedgeResultT]] = set()
+
+    try:
+        try:
+            # 主请求在阈值内返回时不额外放大流量。
+            return await asyncio.wait_for(asyncio.shield(primary_task), timeout=delay_seconds)
+        except asyncio.TimeoutError:
+            logger.info("[%s] hedge triggered after %sms", request_name, delay_ms)
+
+        hedge_task = asyncio.create_task(secondary())
+        pending_tasks = {primary_task, hedge_task}
+        errors: list[Exception] = []
+
+        while pending_tasks:
+            done, pending = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
+            for finished in done:
+                try:
+                    result = finished.result()
+                    for late in pending:
+                        late.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    return result
+                except asyncio.CancelledError:
+                    continue
+                except Exception as exc:
+                    errors.append(exc)
+            pending_tasks = set(pending)
+
+        if errors:
+            raise errors[0]
+        raise RuntimeError(f"{request_name} hedged request finished without result")
+    finally:
+        for task in (primary_task, hedge_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *[task for task in (primary_task, hedge_task) if task is not None],
+            return_exceptions=True,
+        )
+
+
+async def _call_deepseek_text_once(
+    *,
+    client: LLMClient,
+    prompt: str,
+    system_message: Optional[str],
+    need_logprobs: bool,
+    disable_inflight_dedup: bool,
+) -> Tuple[str, Any, Any]:
+    if disable_inflight_dedup:
+        try:
+            return await client.complete_text(
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                disable_inflight_dedup=True,
+            )
+        except TypeError:
+            # 兼容注入的旧版 fake client（无 disable_inflight_dedup 参数）。
+            pass
+    return await client.complete_text(
+        prompt=prompt,
+        system_message=system_message,
+        need_logprobs=need_logprobs,
+    )
+
+
+async def _call_deepseek_json_once(
+    *,
+    client: LLMClient,
+    prompt: str,
+    system_message: Optional[str],
+    need_logprobs: bool,
+    max_tokens: Optional[int],
+    disable_inflight_dedup: bool,
+) -> Tuple[Dict[str, Any], Any, Any]:
+    if disable_inflight_dedup:
+        try:
+            return await client.complete_json(
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                max_tokens=max_tokens,
+                disable_inflight_dedup=True,
+            )
+        except TypeError:
+            # 兼容注入的旧版 fake client（无 disable_inflight_dedup 参数）。
+            pass
+    return await client.complete_json(
+        prompt=prompt,
+        system_message=system_message,
+        need_logprobs=need_logprobs,
+        max_tokens=max_tokens,
+    )
 
 
 # =============================================================================
@@ -192,10 +324,24 @@ async def deepseek_complete_text(
     logprobs = None
     error_text = ""
     try:
-        output_text, metadata, logprobs = await client.complete_text(
-            prompt=prompt,
-            system_message=system_message,
-            need_logprobs=need_logprobs,
+        output_text, metadata, logprobs = await _run_hedged_async_request(
+            request_name="deepseek_complete_text",
+            enabled=_DEEPSEEK_HEDGE_ENABLED,
+            delay_ms=_DEEPSEEK_HEDGE_DELAY_MS,
+            primary_factory=lambda: _call_deepseek_text_once(
+                client=client,
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                disable_inflight_dedup=False,
+            ),
+            secondary_factory=lambda: _call_deepseek_text_once(
+                client=client,
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                disable_inflight_dedup=True,
+            ),
         )
         return output_text, metadata, logprobs
     except Exception as exc:
@@ -250,11 +396,26 @@ async def deepseek_complete_json(
             cache_enabled=cache_enabled,
             inflight_dedup_enabled=inflight_dedup_enabled,
         )
-    return await client.complete_json(
-        prompt=prompt,
-        system_message=system_message,
-        need_logprobs=need_logprobs,
-        max_tokens=max_tokens,
+    return await _run_hedged_async_request(
+        request_name="deepseek_complete_json",
+        enabled=_DEEPSEEK_HEDGE_ENABLED,
+        delay_ms=_DEEPSEEK_HEDGE_DELAY_MS,
+        primary_factory=lambda: _call_deepseek_json_once(
+            client=client,
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            max_tokens=max_tokens,
+            disable_inflight_dedup=False,
+        ),
+        secondary_factory=lambda: _call_deepseek_json_once(
+            client=client,
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            max_tokens=max_tokens,
+            disable_inflight_dedup=True,
+        ),
     )
 
 
@@ -266,7 +427,8 @@ async def deepseek_complete_json(
 async def vision_validate_image(
     *,
     image_path: str,
-    prompt: str,
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
     skip_duplicate_check: bool = False,
     client: Optional[VisionAIClient] = None,
     config: Optional[VisionAIConfig] = None,
@@ -278,17 +440,67 @@ async def vision_validate_image(
     """
     if client is None:
         client = get_vision_ai_client(config)
-    return await client.validate_image(
-        image_path=image_path,
-        prompt=prompt,
-        skip_duplicate_check=skip_duplicate_check,
+    return await _run_hedged_async_request(
+        request_name="vision_validate_image",
+        enabled=_VISION_HEDGE_ENABLED,
+        delay_ms=_VISION_HEDGE_DELAY_MS,
+        primary_factory=lambda: client.validate_image(
+            image_path=image_path,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            skip_duplicate_check=skip_duplicate_check,
+        ),
+        secondary_factory=lambda: client.validate_image(
+            image_path=image_path,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            skip_duplicate_check=skip_duplicate_check,
+        ),
+    )
+
+
+async def vision_validate_images(
+    *,
+    image_paths: list[str],
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
+    skip_duplicate_check: bool = False,
+    max_batch_size: Optional[int] = None,
+    client: Optional[VisionAIClient] = None,
+    config: Optional[VisionAIConfig] = None,
+) -> list[Dict[str, Any]]:
+    """
+    作用：统一 Vision AI 批量异步调用入口。
+    为什么：集中管理批量参数与回退逻辑，避免业务层直接操作客户端细节。
+    """
+    if client is None:
+        client = get_vision_ai_client(config)
+    return await _run_hedged_async_request(
+        request_name="vision_validate_images",
+        enabled=_VISION_HEDGE_ENABLED,
+        delay_ms=_VISION_HEDGE_DELAY_MS,
+        primary_factory=lambda: client.validate_images_batch(
+            image_paths=image_paths,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            skip_duplicate_check=skip_duplicate_check,
+            max_batch_size=max_batch_size,
+        ),
+        secondary_factory=lambda: client.validate_images_batch(
+            image_paths=image_paths,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            skip_duplicate_check=skip_duplicate_check,
+            max_batch_size=max_batch_size,
+        ),
     )
 
 
 def vision_validate_image_sync(
     *,
     image_path: str,
-    prompt: str,
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
     skip_duplicate_check: bool = False,
     client: Optional[VisionAIClient] = None,
     config: Optional[VisionAIConfig] = None,
@@ -301,10 +513,65 @@ def vision_validate_image_sync(
     """
     if client is None:
         client = get_vision_ai_client(config)
-    return client.validate_image_sync(
-        image_path=image_path,
-        prompt=prompt,
-        skip_duplicate_check=skip_duplicate_check,
+    return _VISION_BG_LOOP.submit(
+        _run_hedged_async_request(
+            request_name="vision_validate_image_sync",
+            enabled=_VISION_HEDGE_ENABLED,
+            delay_ms=_VISION_HEDGE_DELAY_MS,
+            primary_factory=lambda: client.validate_image(
+                image_path=image_path,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                skip_duplicate_check=skip_duplicate_check,
+            ),
+            secondary_factory=lambda: client.validate_image(
+                image_path=image_path,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                skip_duplicate_check=skip_duplicate_check,
+            ),
+        ),
+        timeout=timeout,
+    )
+
+
+def vision_validate_images_sync(
+    *,
+    image_paths: list[str],
+    prompt: str = "",
+    system_prompt: Optional[str] = None,
+    skip_duplicate_check: bool = False,
+    max_batch_size: Optional[int] = None,
+    client: Optional[VisionAIClient] = None,
+    config: Optional[VisionAIConfig] = None,
+    timeout: Optional[float] = None,
+) -> list[Dict[str, Any]]:
+    """
+    作用：统一 Vision AI 批量同步调用入口（复用后台事件循环）。
+    为什么：兼容同步调用方，减少业务层对异步模型的耦合。
+    """
+    if client is None:
+        client = get_vision_ai_client(config)
+    return _VISION_BG_LOOP.submit(
+        _run_hedged_async_request(
+            request_name="vision_validate_images_sync",
+            enabled=_VISION_HEDGE_ENABLED,
+            delay_ms=_VISION_HEDGE_DELAY_MS,
+            primary_factory=lambda: client.validate_images_batch(
+                image_paths=image_paths,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                skip_duplicate_check=skip_duplicate_check,
+                max_batch_size=max_batch_size,
+            ),
+            secondary_factory=lambda: client.validate_images_batch(
+                image_paths=image_paths,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                skip_duplicate_check=skip_duplicate_check,
+                max_batch_size=max_batch_size,
+            ),
+        ),
         timeout=timeout,
     )
 
@@ -492,6 +759,8 @@ async def vl_chat_completion(
                 usage=usage,
                 model=model_name,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             err_str = str(exc)
             is_rate_limit = "429" in err_str or "rate" in err_str.lower()
@@ -501,6 +770,15 @@ async def vl_chat_completion(
             if acquired:
                 await _VL_CONCURRENCY.release(acquired)
 
+    async def _do_hedged_request() -> VLChatResult:
+        return await _run_hedged_async_request(
+            request_name="vl_chat_completion",
+            enabled=_VL_HEDGE_ENABLED,
+            delay_ms=_VL_HEDGE_DELAY_MS,
+            primary_factory=_do_request,
+            secondary_factory=_do_request,
+        )
+
     if cache_key and _VL_INFLIGHT_DEDUP_ENABLED:
-        return await _VL_DEDUPER.run(cache_key, _do_request)
-    return await _do_request()
+        return await _VL_DEDUPER.run(cache_key, _do_hedged_request)
+    return await _do_hedged_request()

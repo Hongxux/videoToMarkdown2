@@ -130,6 +130,22 @@ message AnalyzeRequest {
     string output_dir = 6;                  // 输出目录
 }
 
+message SemanticUnitsRef {
+    string ref_id = 1;                      // 语义单元引用ID（Python进程内）
+    string task_id = 2;                     // 任务ID（便于校验）
+    string output_dir = 3;                  // 关联输出目录
+    int32 unit_count = 4;                   // 语义单元数量
+    string schema_version = 5;              // 结构版本（如 phase2a.v1）
+    string fingerprint = 6;                 // 可选：一致性校验
+}
+
+message SemanticUnitsInline {
+    bytes payload = 1;                      // 语义单元payload（JSON字节，可压缩）
+    string codec = 2;                       // 编解码方式（json-utf8 / json-utf8-gzip）
+    int32 unit_count = 3;                   // 语义单元数量
+    string sha256 = 4;                      // 可选：payload完整性校验
+}
+
 message AnalyzeResponse {
     bool success = 1;                               // 是否成功
     
@@ -137,9 +153,11 @@ message AnalyzeResponse {
     repeated ScreenshotRequest screenshot_requests = 2;  // 截图请求列表
     repeated ClipRequest clip_requests = 3;              // 切片请求列表
     
-    // 中间结果 (JSON路径)
-    string semantic_units_json_path = 4;            // 语义单元分析结果
+    reserved 4;
+    reserved "semantic_units_json_path";
     string error_msg = 5;                           // 错误信息
+    SemanticUnitsRef semantic_units_ref = 6;        // 推荐：语义单元引用
+    SemanticUnitsInline semantic_units_inline = 7;  // 可选：语义单元内联载荷
 }
 
 message ScreenshotRequest {
@@ -170,11 +188,16 @@ message ClipSegment {
 message AssembleRequest {
     string task_id = 1;                     // 任务唯一ID
     string video_path = 2;                  // 原始视频路径
-    string semantic_units_json_path = 3;    // Phase2A 输出的语义单元分析结果
+    reserved 3;
+    reserved "semantic_units_json_path";
     string screenshots_dir = 4;             // Java FFmpeg 生成的截图目录
     string clips_dir = 5;                   // Java FFmpeg 生成的切片目录
     string output_dir = 6;                  // 输出目录
     string title = 7;                       // 文档标题（可选）
+    oneof semantic_units_source {
+        SemanticUnitsRef semantic_units_ref = 8;        // 推荐：语义单元引用
+        SemanticUnitsInline semantic_units_inline = 9;  // 可选：语义单元内联载荷
+    }
 }
 
 message AssembleResponse {
@@ -363,8 +386,13 @@ message ReleaseResourcesResponse {
 message VLAnalysisRequest {
     string task_id = 1;                     // 任务唯一ID
     string video_path = 2;                  // 视频文件路径
-    string semantic_units_json_path = 3;    // 语义单元 JSON 路径 (Phase2A 输出)
+    reserved 3;
+    reserved "semantic_units_json_path";
     string output_dir = 4;                  // 输出目录
+    oneof semantic_units_source {
+        SemanticUnitsRef semantic_units_ref = 5;        // 推荐：语义单元引用
+        SemanticUnitsInline semantic_units_inline = 6;  // 可选：语义单元内联载荷
+    }
 }
 
 message VLAnalysisResponse {

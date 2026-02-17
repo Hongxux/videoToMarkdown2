@@ -122,7 +122,7 @@ class PipelineTracer:
         # 步骤定义（用于可视化）
         self.step_order = [
             "step1_validate", "step2_correction", "step3_merge",
-            "step4_clean_local", "step5_clean_cross", "step6_merge_cross",
+            "step3_5_translate", "step4_clean_local", "step5_6_dedup_merge",
         ]
         
     def _generate_event_id(self) -> str:

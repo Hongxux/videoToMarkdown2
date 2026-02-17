@@ -1,4 +1,4 @@
-# Python 模块职责与方法清单
+﻿# Python 模块职责与方法清单
 
 - 更新日期：2026-02-09
 - 范围：`services/python_grpc/src`

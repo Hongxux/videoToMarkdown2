@@ -146,3 +146,26 @@ def test_render_prompt_missing_variable_raises(monkeypatch):
     with pytest.raises(KeyError):
         render_prompt(PromptKeys.DEEPSEEK_KC_BATCH_USER, context={"title": "only-title"})
 
+
+def test_concrete_knowledge_prompt_supports_system_key_and_legacy_user_key(monkeypatch):
+    _reset_loader_cache()
+    monkeypatch.setattr(
+        prompt_loader,
+        "load_module2_config",
+        lambda: {
+            "prompt_management": {
+                "enabled": True,
+                "root_dir": "",
+                "overrides": {},
+                "strict": False,
+            }
+        },
+    )
+
+    content_from_system_key = get_prompt(PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM)
+    content_from_legacy_user_key = get_prompt(PromptKeys.VISION_AI_CONCRETE_KNOWLEDGE_USER)
+
+    assert isinstance(content_from_system_key, str)
+    assert len(content_from_system_key) > 10
+    assert content_from_system_key == content_from_legacy_user_key
+

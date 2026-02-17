@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import List, Tuple
 
 import cv2
@@ -11,9 +12,13 @@ from services.python_grpc.src.content_pipeline.phase2a.vision.cv_models import (
     ActionUnit,
     CVConfig,
     FrameState,
+    Modality,
+    RedundancyType,
     RedundancySegment,
     StableIsland,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def detect_visual_states(validator, start_sec: float, end_sec: float, stable_only: bool = False):

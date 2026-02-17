@@ -1,4 +1,4 @@
-"""
+﻿"""
 ?????Module2 ?????? screenshot_selector ???
 ??????????????????????
 ???????????????????
@@ -7,9 +7,9 @@ Screenshot Selector - Week 3 Day 16-18
 Selects the best frame from a time range for screenshot enhancement.
 
 Scoring system:
-- S1 (稳定性): Continuous stable frames → higher score
-- S4 (无遮挡): No occlusions/overlays → higher score
-- Final: 0.5 × S1 + 0.5 × S4
+- S1 (绋冲畾鎬?: Continuous stable frames 鈫?higher score
+- S4 (鏃犻伄鎸?: No occlusions/overlays 鈫?higher score
+- Final: 0.5 脳 S1 + 0.5 脳 S4
 """
 
 import logging
@@ -22,18 +22,19 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 import json
 import time
+from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
 from services.python_grpc.src.content_pipeline.infra.runtime.cv_runtime_config import CV_FLOAT_DTYPE, CV_FLOAT_DEPTH
 
 logger = logging.getLogger(__name__)
 
-# 💥 性能优化: 引入 Numba JIT 加速像素级运算
+# 馃挜 鎬ц兘浼樺寲: 寮曞叆 Numba JIT 鍔犻€熷儚绱犵骇杩愮畻
 try:
     from numba import jit, prange
     HAS_NUMBA = True
     
     @jit(nopython=True, fastmath=True, parallel=True)
     def _numba_batch_mse(frames_data):
-        """批量计算 MSE，利用 AVX-512/SIMD 和多核并行"""
+        """Batch-compute per-frame MSE for adjacent frames."""
         n, h, w, c = frames_data.shape
         results = np.zeros(n - 1, dtype=np.float32)
         for i in prange(n - 1):
@@ -48,7 +49,7 @@ try:
 
     @jit(nopython=True, fastmath=True, parallel=True)
     def _numba_batch_struct_mse(edges_data):
-        """批量计算结构化 MSE (基于 Canny 边缘图)"""
+        """Batch-compute structural MSE based on Canny edges."""
         n, h, w = edges_data.shape
         results = np.zeros(n - 1, dtype=np.float32)
         for i in prange(n - 1):
@@ -68,19 +69,19 @@ except Exception as e:
 @dataclass
 class FrameScore:
     """
-    单帧评分结果 (多维评价矩阵)
+    鍗曞抚璇勫垎缁撴灉 (澶氱淮璇勪环鐭╅樀)
     """
     frame_idx: int
     timestamp_sec: float
     
-    # 评分
-    S1_stability: float     # 稳定性 (MSE-based) 0-100
-    S2_info_density: float  # 信息密度 (Standard 2) 0-100
-    S3_completeness: float  # 架构完整性 (Standard 3: 箭头/矩形) 0-100
-    S4_no_occlusion: float  # 无遮挡评分 0-100
-    final_score: float      # 综合评分 0-100
+    # 璇勫垎
+    S1_stability: float     # 绋冲畾鎬?(MSE-based) 0-100
+    S2_info_density: float  # 淇℃伅瀵嗗害 (Standard 2) 0-100
+    S3_completeness: float  # 鏋舵瀯瀹屾暣鎬?(Standard 3: 绠ご/鐭╁舰) 0-100
+    S4_no_occlusion: float  # 鏃犻伄鎸¤瘎鍒?0-100
+    final_score: float      # 缁煎悎璇勫垎 0-100
     
-    # 详细细节
+    # 璇︾粏缁嗚妭
     rectangle_count: int
     arrow_count: int
     has_occlusion: bool
@@ -90,13 +91,13 @@ class FrameScore:
 @dataclass
 class ScreenshotSelection:
     """
-    截图选择结果
+    鎴浘閫夋嫨缁撴灉
     """
     selected_frame_idx: int
     selected_timestamp: float
     screenshot_path: str
     
-    # 评分细节
+    # 璇勫垎缁嗚妭
     final_score: float
     S1_stability: float
     S2_info_density: float
@@ -108,35 +109,35 @@ class ScreenshotSelection:
 
 def _analyze_frame_quality_worker(frame: np.ndarray) -> Tuple[float, float, float, float]:
     """
-    V6.2 工业级质量分析 Worker
-    使用 Laplacian Variance (锐度) 和 Shannon Entropy (信息密度)
-    返回: (laplacian_var, shannon_entropy, sharpness_score, contrast_score)
+    V6.2 宸ヤ笟绾ц川閲忓垎鏋?Worker
+    浣跨敤 Laplacian Variance (閿愬害) 鍜?Shannon Entropy (淇℃伅瀵嗗害)
+    杩斿洖: (laplacian_var, shannon_entropy, sharpness_score, contrast_score)
     """
     try:
-        # A. ROI 定位 (排除黑边/工具栏)
+        # A. ROI 瀹氫綅 (鎺掗櫎榛戣竟/宸ュ叿鏍?
         gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray_full.shape
-        # 简单 ROI: 排除上下 10% (通常是UI区域)
+        # 绠€鍗?ROI: 鎺掗櫎涓婁笅 10% (閫氬父鏄疷I鍖哄煙)
         roi_gray = gray_full[int(h*0.1):int(h*0.9), :]
         
-        # B. 物理防抖 (Laplacian Variance)
-        # 越高越清晰，越低越模糊
+        # B. 鐗╃悊闃叉姈 (Laplacian Variance)
+        # 瓒婇珮瓒婃竻鏅帮紝瓒婁綆瓒婃ā绯?
         laplacian_var = cv2.Laplacian(roi_gray, CV_FLOAT_DEPTH).var()
         
-        # C. 信息熵 (Shannon Entropy)
+        # C. 淇℃伅鐔?(Shannon Entropy)
         hist = cv2.calcHist([roi_gray], [0], None, [256], [0, 256])
         if hist.sum() == 0: return 0.0, 0.0, 0.0, 0.0
         hist_norm = hist.ravel() / hist.sum()
         hist_norm = hist_norm[hist_norm > 0]
         shannon_entropy = -np.sum(hist_norm * np.log2(hist_norm))
         
-        # D. 边缘锐度 (Sobel Magnitude Mean - 辅助)
+        # D. 杈圭紭閿愬害 (Sobel Magnitude Mean - 杈呭姪)
         gx = cv2.Sobel(roi_gray, CV_FLOAT_DEPTH, 1, 0, ksize=3)
         gy = cv2.Sobel(roi_gray, CV_FLOAT_DEPTH, 0, 1, ksize=3)
         mag = cv2.sqrt(gx**2 + gy**2)
         sharpness_score = np.mean(mag)
         
-        # E. 对比度
+        # E. 瀵规瘮搴?
         max_v = np.max(roi_gray).astype(CV_FLOAT_DTYPE)
         min_v = np.min(roi_gray).astype(CV_FLOAT_DTYPE)
         contrast_score = float((max_v - min_v) / (max_v + min_v + 1e-6))
@@ -149,7 +150,7 @@ def _analyze_frame_quality_worker(frame: np.ndarray) -> Tuple[float, float, floa
 
 class ScreenshotSelector:
     """
-    截图选择器 (V6.2 Refined Logic)
+    鎴浘閫夋嫨鍣?(V6.2 Refined Logic)
     
     Improvements:
     1. Fluctuation Tolerance Island Clustering (<=2 jitter frames)
@@ -175,7 +176,7 @@ class ScreenshotSelector:
             from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
             config = load_module2_config()
         
-        # V6.2 默认严格权重
+        # V6.2 榛樿涓ユ牸鏉冮噸
         self.WEIGHT_S1 = 0.2
         self.WEIGHT_S2 = 0.3
         self.WEIGHT_S3 = 0.4
@@ -186,13 +187,13 @@ class ScreenshotSelector:
     @classmethod
     def create_lightweight(cls) -> 'ScreenshotSelector':
         """
-        🚀 工厂方法：创建轻量级实例（用于 ProcessPool Worker）
+        馃殌 宸ュ巶鏂规硶锛氬垱寤鸿交閲忕骇瀹炰緥锛堢敤浜?ProcessPool Worker锛?
         
-        不初始化 visual_extractor（在 Worker 中不需要读取视频）
+        涓嶅垵濮嬪寲 visual_extractor锛堝湪 Worker 涓笉闇€瑕佽鍙栬棰戯級
         """
         instance = object.__new__(cls)
         instance.visual_extractor = None
-        instance.detector = None  # 延迟初始化
+        instance.detector = None  # 寤惰繜鍒濆鍖?
         instance.WEIGHT_S1 = 0.2
         instance.WEIGHT_S2 = 0.3
         instance.WEIGHT_S3 = 0.4
@@ -200,7 +201,7 @@ class ScreenshotSelector:
         return instance
     
     def _ensure_detector(self):
-        """延迟初始化 detector"""
+        """延迟初始化视觉元素检测器。"""
         if self.detector is None:
             from services.python_grpc.src.content_pipeline.phase2a.vision.visual_element_detection_helpers import VisualElementDetector
             self.detector = VisualElementDetector()
@@ -213,18 +214,18 @@ class ScreenshotSelector:
         res_factor: float = 1.0
     ) -> dict:
         """
-        🚀 ProcessPool 兼容版本：从预读取的帧中选择最佳截图
+        馃殌 ProcessPool 鍏煎鐗堟湰锛氫粠棰勮鍙栫殑甯т腑閫夋嫨鏈€浣虫埅鍥?
         
-        保留完整的岛屿聚类 + 博弈 + 择优逻辑，但：
-        1. 接受预读取的帧（而非从视频读取）
-        2. 同步执行（而非 async）
-        3. 不保存文件（仅返回时间戳）
+        淇濈暀瀹屾暣鐨勫矝灞胯仛绫?+ 鍗氬紙 + 鎷╀紭閫昏緫锛屼絾锛?
+        1. 鎺ュ彈棰勮鍙栫殑甯э紙鑰岄潪浠庤棰戣鍙栵級
+        2. 鍚屾鎵ц锛堣€岄潪 async锛?
+        3. 涓嶄繚瀛樻枃浠讹紙浠呰繑鍥炴椂闂存埑锛?
         
         Args:
-            frames: 预读取的帧列表
-            timestamps: 对应的时间戳列表
-            fps: 视频帧率
-            res_factor: 分辨率系数（相对于 1080p）
+            frames: 棰勮鍙栫殑甯у垪琛?
+            timestamps: 瀵瑰簲鐨勬椂闂存埑鍒楄〃
+            fps: 瑙嗛甯х巼
+            res_factor: 鍒嗚鲸鐜囩郴鏁帮紙鐩稿浜?1080p锛?
             
         Returns:
             {
@@ -244,31 +245,32 @@ class ScreenshotSelector:
                 "analyzed_frames": 0
             }
         
-        # 1. 识别内容类型以调整阈值
+        # 1. 璇嗗埆鍐呭绫诲瀷浠ヨ皟鏁撮槇鍊?
         content_type = self._identify_action_type_v6(frames[0])
         threshold_config = self._get_adaptive_threshold(content_type, res_factor, fps)
         
-        # 2. 计算帧间 MSE 差异（同步版本）
+        # 2. 璁＄畻甯ч棿 MSE 宸紓锛堝悓姝ョ増鏈級
         mse_diffs = []
-        for i in range(len(frames) - 1):
-            f1 = frames[i].astype(CV_FLOAT_DTYPE, copy=False)
-            f2 = frames[i + 1].astype(CV_FLOAT_DTYPE, copy=False)
+        analysis_frames = frames
+        for i in range(len(analysis_frames) - 1):
+            f1 = analysis_frames[i].astype(CV_FLOAT_DTYPE, copy=False)
+            f2 = analysis_frames[i + 1].astype(CV_FLOAT_DTYPE, copy=False)
             diff = np.mean((f1 - f2) ** 2)
             mse_diffs.append(diff)
-        mse_diffs.append(0.0)  # 补齐最后一帧
+        mse_diffs.append(0.0)  # 琛ラ綈鏈€鍚庝竴甯?
         
-        # 3. 计算结构化 MSE（边缘图）
+        # 3. 璁＄畻缁撴瀯鍖?MSE锛堣竟缂樺浘锛?
         edge_maps = [cv2.Canny(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), 50, 150) for f in frames]
         struct_mse_diffs = []
-        for i in range(len(frames) - 1):
+        for i in range(len(analysis_frames) - 1):
             diff = (edge_maps[i].astype(np.int16) - edge_maps[i+1].astype(np.int16)) ** 2
             struct_mse_diffs.append(np.mean(diff) / (255 * 255))
         struct_mse_diffs.append(0.0)
         
-        # 4. 同步计算质量指标
+        # 4. 鍚屾璁＄畻璐ㄩ噺鎸囨爣
         quality_results = [_analyze_frame_quality_worker(f) for f in frames]
         
-        # 5. 波动容忍聚类
+        # 5. 娉㈠姩瀹瑰繊鑱氱被
         PIXEL_THRESH = threshold_config["pixel_mse"]
         STRUCT_THRESH = threshold_config["struct_mse"]
         MIN_STABLE_LEN = threshold_config["min_stable_frames"]
@@ -282,7 +284,7 @@ class ScreenshotSelector:
         LAP_GATE = 10.0 * res_factor
         CONT_GATE = 0.15
         
-        for i in range(len(frames) - 1):
+        for i in range(len(analysis_frames) - 1):
             mse, smse = mse_diffs[i], struct_mse_diffs[i]
             lap, ent, sharp, contrast = quality_results[i]
             
@@ -302,13 +304,13 @@ class ScreenshotSelector:
                 current_island = []
                 fluctuation_count = 0
         
-        # 处理最后一个岛屿
+        # 澶勭悊鏈€鍚庝竴涓矝灞?
         if len(current_island) >= MIN_STABLE_LEN:
             islands.append(self._finalize_island_sync(current_island, quality_results, mse_diffs, frames))
         
-        # 6. 岛屿博弈
+        # 6. 宀涘笨鍗氬紙
         if not islands:
-            # 兜底：选择 Entropy * Laplacian * TimeWeight 最高的帧
+            # 鍏滃簳锛氶€夋嫨 Entropy * Laplacian * TimeWeight 鏈€楂樼殑甯?
             best_score = -1
             best_idx = 0
             for i, (lap, ent, sharp, cont) in enumerate(quality_results):
@@ -325,19 +327,19 @@ class ScreenshotSelector:
                 "analyzed_frames": len(frames)
             }
         
-        # 7. 过滤有效岛屿
+        # 7. 杩囨护鏈夋晥宀涘笨
         valid_islands = self._filter_valid_islands_sync(islands, frames, quality_results, mse_diffs, PIXEL_THRESH)
         
         if not valid_islands:
-            valid_islands = islands  # 回退到所有岛屿
+            valid_islands = islands  # 鍥為€€鍒版墍鏈夊矝灞?
         
-        # 8. 岛屿去重（简化版本，避免 SSIM 计算开销）
+        # 8. 宀涘笨鍘婚噸锛堢畝鍖栫増鏈紝閬垮厤 SSIM 璁＄畻寮€閿€锛?
         unique_islands = self._deduplicate_islands_simple(valid_islands, timestamps)
         
         if not unique_islands:
             unique_islands = valid_islands
         
-        # 9. 岛内择优
+        # 9. 宀涘唴鎷╀紭
         best_island = None
         best_island_score = -1
         best_frame_idx = 0
@@ -357,11 +359,11 @@ class ScreenshotSelector:
         }
     
     def _finalize_island_sync(self, indices, quality_results, mse_diffs, frames):
-        """同步版本：结算岛屿统计指标"""
+        """同步版本：汇总稳定岛统计信息。"""
         avg_lap = np.mean([quality_results[i][0] for i in indices])
         avg_ent = np.mean([quality_results[i][1] for i in indices])
         
-        # 快速 S4 估算（抽样首尾中）
+        # 蹇€?S4 浼扮畻锛堟娊鏍烽灏句腑锛?
         sample_indices = [indices[0], indices[-1], indices[len(indices)//2]]
         s4_vals = [self._calculate_S4_no_occlusion_v6(frames[i]) for i in sample_indices]
         avg_s4 = np.mean(s4_vals)
@@ -378,7 +380,7 @@ class ScreenshotSelector:
         }
     
     def _filter_valid_islands_sync(self, islands, frames, quality_results, mse_diffs, pixel_thresh):
-        """同步版本：过滤有效岛屿"""
+        """同步版本：过滤无效稳定岛。"""
         if not islands:
             return []
         
@@ -387,23 +389,23 @@ class ScreenshotSelector:
         
         valid_islands = []
         for island in islands:
-            # 检查抖动帧占比
+            # 妫€鏌ユ姈鍔ㄥ抚鍗犳瘮
             if "indices" in island:
                 fluct_frames = [idx for idx in island["indices"] if mse_diffs[idx] > pixel_thresh]
                 if len(fluct_frames) / len(island["indices"]) > 0.2:
                     continue
             
-            # 内容密度检查
+            # 鍐呭瀵嗗害妫€鏌?
             if island["avg_entropy"] < global_ent_mean * 0.5:
                 continue
             
-            # 清晰度检查
+            # 娓呮櫚搴︽鏌?
             sharp_thresh = max(10.0, max_sharp * 0.6)
             sharp_count = sum(1 for idx in island["indices"] if quality_results[idx][0] > sharp_thresh)
             if sharp_count / len(island["indices"]) < 0.6:
                 continue
             
-            # 遮挡检查
+            # 閬尅妫€鏌?
             if island["avg_s4"] < 50:
                 continue
             
@@ -412,26 +414,26 @@ class ScreenshotSelector:
         return valid_islands
     
     def _deduplicate_islands_simple(self, islands, timestamps):
-        """简化版岛屿去重：基于时间距离"""
+        """简化版去重：基于时间间隔进行稳定岛去重。"""
         if len(islands) <= 1:
             return islands
         
         unique = [islands[0]]
         for island in islands[1:]:
-            # 如果两个岛屿的中心时间差 > 2s，认为是不同内容
+            # 濡傛灉涓や釜宀涘笨鐨勪腑蹇冩椂闂村樊 > 2s锛岃涓烘槸涓嶅悓鍐呭
             last_mid = timestamps[unique[-1]["indices"][len(unique[-1]["indices"])//2]]
             curr_mid = timestamps[island["indices"][len(island["indices"])//2]]
             
             if abs(curr_mid - last_mid) > 2.0:
                 unique.append(island)
             else:
-                # 保留后一个（通常内容更完整）
+                # 淇濈暀鍚庝竴涓紙閫氬父鍐呭鏇村畬鏁达級
                 unique[-1] = island
         
         return unique
     
     def _select_intra_island_winner_sync(self, island, frames, quality_results):
-        """同步版本：岛内择优"""
+        """同步版本：在稳定岛内选择最优帧。"""
         best_score = -1
         best_idx = island["indices"][0]
         
@@ -453,11 +455,12 @@ class ScreenshotSelector:
         timestamps: List[float],
         video_fps: float,
         total_frames: int,
+        max_width: Optional[int] = None,
     ) -> Tuple[List[float], List[np.ndarray]]:
         """
-        顺序读帧模式：按时间戳排序后，尽量以连续 read() 代替多次随机 seek。
+        椤哄簭璇诲抚妯″紡锛氭寜鏃堕棿鎴虫帓搴忓悗锛屽敖閲忎互杩炵画 read() 浠ｆ浛澶氭闅忔満 seek銆?
 
-        目标：降低 cap.set(...) 高频调用带来的 IO/解码开销。
+        鐩爣锛氶檷浣?cap.set(...) 楂橀璋冪敤甯︽潵鐨?IO/瑙ｇ爜寮€閿€銆?
         """
         if not timestamps:
             return [], []
@@ -490,6 +493,7 @@ class ScreenshotSelector:
 
             ret, frame = cap.read()
             if ret and frame is not None:
+                frame = self._resize_frame_max_width(frame, max_width=max_width)
                 out_timestamps.append(ts)
                 out_frames.append(frame)
                 current_idx = (current_idx if current_idx is not None else target_idx) + 1
@@ -498,40 +502,140 @@ class ScreenshotSelector:
 
         return out_timestamps, out_frames
 
+    @staticmethod
+    def _resize_frame_max_width(
+        frame: np.ndarray,
+        max_width: Optional[int] = None,
+    ) -> np.ndarray:
+        """按最大宽度下采样帧，降低路由截图阶段的内存占用。"""
+        if frame is None or not max_width or int(max_width) <= 0:
+            return frame
+        try:
+            h, w = frame.shape[:2]
+            if h <= 0 or w <= 0 or w <= int(max_width):
+                return frame
+
+            target_w = int(max_width)
+            scale = float(target_w) / float(w)
+            target_h = max(2, int(round(h * scale)))
+
+            # 编码器/部分算子更偏好偶数尺寸
+            if target_w % 2 != 0:
+                target_w -= 1
+            if target_h % 2 != 0:
+                target_h += 1
+            target_w = max(2, target_w)
+            target_h = max(2, target_h)
+
+            return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        except Exception:
+            return frame
+
+    @staticmethod
+    def _split_time_range(
+        start_sec: float,
+        end_sec: float,
+        max_span_sec: float,
+    ) -> List[Tuple[float, float]]:
+        """将长时间范围切分为多个子区间，复用 coarse-fine 的细采样逻辑。"""
+        safe_start = float(start_sec)
+        safe_end = float(end_sec)
+        safe_span = max(0.1, float(max_span_sec))
+        if safe_end <= safe_start:
+            return [(safe_start, safe_start + safe_span)]
+
+        if (safe_end - safe_start) <= safe_span:
+            return [(safe_start, safe_end)]
+
+        ranges: List[Tuple[float, float]] = []
+        cur = safe_start
+        while cur < safe_end:
+            nxt = min(safe_end, cur + safe_span)
+            if nxt > cur:
+                ranges.append((cur, nxt))
+            cur = nxt
+        return ranges
+
+    def _crop_frame_by_roi(
+        self,
+        frame: np.ndarray,
+        roi: Optional[Tuple[int, int, int, int]] = None,
+    ) -> np.ndarray:
+        """
+        鍦?ROI 鍐呰鍓抚锛岀敤浜庡噺灏戝瓧骞曠瓑杈圭紭鍣０骞叉壈銆?
+        鍋氫粈涔堬細
+        - 灏嗗悗缁ǔ瀹氬矝妫€娴嬩笌宀涘唴閫変紭闄愬畾鍒?ROI 鍖哄煙銆?        涓轰粈涔堬細
+        - 璺敱鎴浘鍦烘櫙甯告湁搴曢儴瀛楀箷鏉★紝鐩存帴鍙備笌璇勫垎浼氭媺浣庣ǔ瀹氭€у垽鏂川閲忋€?        """
+        if frame is None or roi is None:
+            return frame
+        try:
+            x1, y1, x2, y2 = roi
+            h, w = frame.shape[:2]
+            x1 = max(0, min(int(x1), w))
+            x2 = max(0, min(int(x2), w))
+            y1 = max(0, min(int(y1), h))
+            y2 = max(0, min(int(y2), h))
+            if x2 <= x1 or y2 <= y1:
+                return frame
+            cropped = frame[y1:y2, x1:x2]
+            return cropped if cropped.size > 0 else frame
+        except Exception:
+            return frame
+
     def select_screenshots_for_range_sync(
         self,
         video_path: str,
         start_sec: float,
         end_sec: float,
         coarse_fps: float = 2.0,
-        fine_fps: float = 10.0
+        fine_fps: float = 10.0,
+        roi: Optional[Tuple[int, int, int, int]] = None,
+        stable_islands_override: Optional[List[Tuple[float, float]]] = None,
+        action_segments_override: Optional[List[Tuple[float, float]]] = None,
+        analysis_max_width: Optional[int] = None,
+        long_window_fine_chunk_sec: float = 0.0,
+        decode_open_timeout_sec: int = 300,
+        decode_allow_inline_transcode: Optional[bool] = None,
+        decode_enable_async_transcode: Optional[bool] = None,
     ) -> List[Dict]:
         """
-        🚀 先粗后细截图选择 (同步版本，用于 ProcessPool - 仍需自行读取帧)
+        馃殌 鍏堢矖鍚庣粏鎴浘閫夋嫨 (鍚屾鐗堟湰锛岀敤浜?ProcessPool - 浠嶉渶鑷璇诲彇甯?
         
-        ⚠️ 注意: 此方法仍然在 Worker 中读取帧，用于简单场景。
-        对于高性能场景，应使用 detect_stable_islands_from_frames + select_best_frame_from_frames
+        鈿狅笍 娉ㄦ剰: 姝ゆ柟娉曚粛鐒跺湪 Worker 涓鍙栧抚锛岀敤浜庣畝鍗曞満鏅€?
+        瀵逛簬楂樻€ц兘鍦烘櫙锛屽簲浣跨敤 detect_stable_islands_from_frames + select_best_frame_from_frames
         """
         import time
         t0 = time.time()
         
         self._ensure_detector()
         
-        # 边界保护
+        # 杈圭晫淇濇姢
         if end_sec <= start_sec:
             end_sec = start_sec + 1.0
         
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            logger.error(f"Cannot open video: {video_path}")
+        cap, effective_video_path, used_decode_fallback = open_video_capture_with_fallback(
+            video_path,
+            logger=logger,
+            timeout_sec=max(5, int(decode_open_timeout_sec)),
+            allow_inline_transcode=decode_allow_inline_transcode,
+            enable_async_transcode=decode_enable_async_transcode,
+        )
+        if cap is None or not cap.isOpened():
+            logger.error(f"Cannot open video: source={video_path}, effective={effective_video_path}")
             return []
+        if used_decode_fallback:
+            logger.warning(
+                "ScreenshotSelector decode fallback applied: source=%s, effective=%s",
+                video_path,
+                effective_video_path,
+            )
         
         video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         video_duration = total_frames / video_fps
         end_sec = min(end_sec, video_duration)
         
-        # Stage 1: 粗采样（顺序读帧，减少随机 seek）
+        # Stage 1: 绮楅噰鏍凤紙椤哄簭璇诲抚锛屽噺灏戦殢鏈?seek锛?
         coarse_interval = 1.0 / coarse_fps
         coarse_ts_candidates = []
         t = start_sec
@@ -544,6 +648,7 @@ class ScreenshotSelector:
             timestamps=coarse_ts_candidates,
             video_fps=video_fps,
             total_frames=total_frames,
+            max_width=analysis_max_width,
         )
         
         if len(coarse_frames) < 2:
@@ -551,38 +656,120 @@ class ScreenshotSelector:
             return [{"timestamp_sec": (start_sec + end_sec) / 2, "island_index": 0, "score": 0.5, 
                      "island_start": start_sec, "island_end": end_sec}]
         
-        # Stage 1: 识别稳定岛
-        islands = self.detect_stable_islands_from_frames(coarse_frames, coarse_timestamps, coarse_interval)
+        # Stage 1: 璇嗗埆绋冲畾宀?
+        islands = []
+        if isinstance(stable_islands_override, list) and stable_islands_override:
+            for item in stable_islands_override:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                try:
+                    s = float(item[0])
+                    e = float(item[1])
+                except (TypeError, ValueError):
+                    continue
+                s = max(start_sec, s)
+                e = min(end_sec, e)
+                if e > s:
+                    islands.append({"start_sec": s, "end_sec": e})
+        else:
+            islands = self.detect_stable_islands_from_frames(
+                coarse_frames,
+                coarse_timestamps,
+                coarse_interval,
+                roi=roi,
+            )
         
         if not islands:
             islands = [{"start_sec": start_sec, "end_sec": end_sec}]
+
+        # 若上游已给出动作单元区间，则将截图搜索范围约束到“稳定岛∩动作段”；
+        # 这样短 process 走 CV 路由时也能复用 action 信息，避免整段扫描噪声。
+        action_ranges: List[Tuple[float, float]] = []
+        if isinstance(action_segments_override, list) and action_segments_override:
+            for item in action_segments_override:
+                if not isinstance(item, (list, tuple)) or len(item) < 2:
+                    continue
+                try:
+                    a_start = float(item[0])
+                    a_end = float(item[1])
+                except (TypeError, ValueError):
+                    continue
+                a_start = max(start_sec, a_start)
+                a_end = min(end_sec, a_end)
+                if a_end > a_start:
+                    action_ranges.append((a_start, a_end))
+
+        if action_ranges:
+            constrained_islands: List[Dict[str, float]] = []
+            for island in islands:
+                i_start = float(island.get("start_sec", start_sec))
+                i_end = float(island.get("end_sec", end_sec))
+                if i_end <= i_start:
+                    continue
+                for a_start, a_end in action_ranges:
+                    inter_start = max(i_start, a_start)
+                    inter_end = min(i_end, a_end)
+                    if inter_end > inter_start:
+                        constrained_islands.append({
+                            "start_sec": inter_start,
+                            "end_sec": inter_end,
+                        })
+
+            if constrained_islands:
+                islands = constrained_islands
+            else:
+                islands = [{"start_sec": s, "end_sec": e} for s, e in action_ranges]
         
-        # Stage 2: 细采样选最佳帧（顺序读帧 + 并行质量评分）
+        # Stage 2: 缁嗛噰鏍烽€夋渶浣冲抚锛堥『搴忚甯?+ 骞惰璐ㄩ噺璇勫垎锛?
         results = []
         fine_interval = 1.0 / fine_fps
         
         for island_idx, island in enumerate(islands):
             island_start = island["start_sec"]
             island_end = island["end_sec"]
-            
-            fine_ts_candidates = []
-            t = island_start
-            while t < island_end:
-                fine_ts_candidates.append(t)
-                t += fine_interval
 
-            fine_timestamps, fine_frames = self._read_frames_at_timestamps_sequential(
-                cap=cap,
-                timestamps=fine_ts_candidates,
-                video_fps=video_fps,
-                total_frames=total_frames,
-            )
-            
-            if not fine_frames:
+            # 长稳定岛分块细采样：避免一次性加载超长窗口 fine 帧列表。
+            sub_ranges = [(island_start, island_end)]
+            if float(long_window_fine_chunk_sec or 0.0) > 0.0 and (island_end - island_start) > float(long_window_fine_chunk_sec):
+                sub_ranges = self._split_time_range(
+                    start_sec=island_start,
+                    end_sec=island_end,
+                    max_span_sec=float(long_window_fine_chunk_sec),
+                )
+
+            best_ts = None
+            best_score = -1.0
+            for sub_start, sub_end in sub_ranges:
+                fine_ts_candidates = []
+                t = sub_start
+                while t < sub_end:
+                    fine_ts_candidates.append(t)
+                    t += fine_interval
+                if not fine_ts_candidates:
+                    continue
+
+                fine_timestamps, fine_frames = self._read_frames_at_timestamps_sequential(
+                    cap=cap,
+                    timestamps=fine_ts_candidates,
+                    video_fps=video_fps,
+                    total_frames=total_frames,
+                    max_width=analysis_max_width,
+                )
+                if not fine_frames:
+                    continue
+
+                cand_ts, cand_score = self.select_best_frame_from_frames(
+                    fine_frames,
+                    fine_timestamps,
+                    roi=roi,
+                )
+                if float(cand_score) > best_score:
+                    best_ts = cand_ts
+                    best_score = float(cand_score)
+
+            if best_ts is None:
                 continue
-            
-            best_ts, best_score = self.select_best_frame_from_frames(fine_frames, fine_timestamps)
-            
+
             results.append({
                 "timestamp_sec": best_ts,
                 "island_index": island_idx,
@@ -607,36 +794,39 @@ class ScreenshotSelector:
         timestamps: List[float],
         interval: float,
         stable_thresh: float = 0.005,
-        min_island_len: int = 2
+        min_island_len: int = 2,
+        roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[Dict]:
         """
-        🚀 Stage 1: 从预读取的帧中识别稳定岛 (纯计算，无 IO)
+        馃殌 Stage 1: 浠庨璇诲彇鐨勫抚涓瘑鍒ǔ瀹氬矝 (绾绠楋紝鏃?IO)
         
-        用于 ProcessPool Worker，接收主进程通过 SharedMemory 传递的帧
+        鐢ㄤ簬 ProcessPool Worker锛屾帴鏀朵富杩涚▼閫氳繃 SharedMemory 浼犻€掔殑甯?
         
         Args:
-            frames: 预读取的帧列表
-            timestamps: 对应的时间戳列表
-            interval: 采样间隔
-            stable_thresh: MSE 稳定阈值
-            min_island_len: 最小岛长度
+            frames: 棰勮鍙栫殑甯у垪琛?
+            timestamps: 瀵瑰簲鐨勬椂闂存埑鍒楄〃
+            interval: 閲囨牱闂撮殧
+            stable_thresh: MSE 绋冲畾闃堝€?
+            min_island_len: 鏈€灏忓矝闀垮害
             
         Returns:
-            稳定岛列表 [{"start_sec": float, "end_sec": float}, ...]
+            绋冲畾宀涘垪琛?[{"start_sec": float, "end_sec": float}, ...]
         """
         if len(frames) < 2:
             return []
+
+        analysis_frames = [self._crop_frame_by_roi(frame, roi) for frame in frames]
         
-        # 计算相邻帧 MSE
+        # 璁＄畻鐩搁偦甯?MSE
         mse_values = []
-        for i in range(len(frames) - 1):
-            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
-            f2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
+        for i in range(len(analysis_frames) - 1):
+            f1 = cv2.cvtColor(analysis_frames[i], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
+            f2 = cv2.cvtColor(analysis_frames[i + 1], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
             mse = np.mean((f1 - f2) ** 2) / (255 * 255)
             mse_values.append(mse)
         mse_values.append(0.0)
         
-        # 识别稳定岛
+        # 璇嗗埆绋冲畾宀?
         islands = []
         current_island_indices = []
         
@@ -651,7 +841,7 @@ class ScreenshotSelector:
                     })
                 current_island_indices = []
         
-        # 处理末尾
+        # 澶勭悊鏈熬
         if len(current_island_indices) >= min_island_len:
             islands.append({
                 "start_sec": timestamps[current_island_indices[0]],
@@ -664,16 +854,18 @@ class ScreenshotSelector:
     def select_best_frame_from_frames(
         self,
         frames: List[np.ndarray],
-        timestamps: List[float]
+        timestamps: List[float],
+        roi: Optional[Tuple[int, int, int, int]] = None,
+        return_index: bool = False,
     ) -> Tuple[float, float]:
         """
-        🚀 Stage 2: 从预读取的帧中选择最佳帧 (纯计算，无 IO)
+        馃殌 Stage 2: 浠庨璇诲彇鐨勫抚涓€夋嫨鏈€浣冲抚 (绾绠楋紝鏃?IO)
         
-        用于 ProcessPool Worker，接收主进程通过 SharedMemory 传递的帧
+        鐢ㄤ簬 ProcessPool Worker锛屾帴鏀朵富杩涚▼閫氳繃 SharedMemory 浼犻€掔殑甯?
         
         Args:
-            frames: 预读取的帧列表
-            timestamps: 对应的时间戳列表
+            frames: 棰勮鍙栫殑甯у垪琛?
+            timestamps: 瀵瑰簲鐨勬椂闂存埑鍒楄〃
             
         Returns:
             (best_timestamp, best_score)
@@ -682,21 +874,25 @@ class ScreenshotSelector:
             return (0.0, 0.0)
         
         if len(frames) == 1:
+            if return_index:
+                return (timestamps[0], 0.5, 0)
             return (timestamps[0], 0.5)
+
+        analysis_frames = [self._crop_frame_by_roi(frame, roi) for frame in frames]
         
-        # 质量评估（并行）
-        worker_count = max(1, min(4, len(frames)))
+        # 璐ㄩ噺璇勪及锛堝苟琛岋級
+        worker_count = max(1, min(4, len(analysis_frames)))
         if worker_count > 1:
             with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                quality_results = list(pool.map(_analyze_frame_quality_worker, frames))
+                quality_results = list(pool.map(_analyze_frame_quality_worker, analysis_frames))
         else:
-            quality_results = [_analyze_frame_quality_worker(f) for f in frames]
+            quality_results = [_analyze_frame_quality_worker(f) for f in analysis_frames]
         
-        # 计算 MSE
+        # 璁＄畻 MSE
         mse_values = []
-        for i in range(len(frames) - 1):
-            f1 = cv2.cvtColor(frames[i], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
-            f2 = cv2.cvtColor(frames[i + 1], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
+        for i in range(len(analysis_frames) - 1):
+            f1 = cv2.cvtColor(analysis_frames[i], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
+            f2 = cv2.cvtColor(analysis_frames[i + 1], cv2.COLOR_BGR2GRAY).astype(CV_FLOAT_DTYPE, copy=False)
             mse = np.mean((f1 - f2) ** 2) / (255 * 255)
             mse_values.append(mse)
         if mse_values:
@@ -704,13 +900,13 @@ class ScreenshotSelector:
         else:
             mse_values.append(0.0)
         
-        # 选择最佳帧
+        # 閫夋嫨鏈€浣冲抚
         best_score = -1
         best_idx = 0
         
-        for idx in range(len(frames)):
+        for idx in range(len(analysis_frames)):
             lap, ent, sharp, contrast = quality_results[idx]
-            s4 = self._calculate_S4_no_occlusion_v6(frames[idx])
+            s4 = self._calculate_S4_no_occlusion_v6(analysis_frames[idx])
             stability_bonus = max(0, 1.0 - mse_values[idx] * 100)
             
             score = (ent * 0.35) + (lap * 0.25) + (contrast * 0.1) + (s4 / 100.0 * 0.15) + (stability_bonus * 0.15)
@@ -719,6 +915,8 @@ class ScreenshotSelector:
                 best_score = score
                 best_idx = idx
         
+        if return_index:
+            return (timestamps[best_idx], best_score, best_idx)
         return (timestamps[best_idx], best_score)
 
 
@@ -730,22 +928,22 @@ class ScreenshotSelector:
         end_sec: float,
         output_dir: str = None,
         output_name: str = None,
-        save_image: bool = True  # 💥 新增: 是否保存图片文件
+        save_image: bool = True  # 馃挜 鏂板: 鏄惁淇濆瓨鍥剧墖鏂囦欢
     ) -> ScreenshotSelection:
         """
-        V6.2 核心流程: 波动容忍聚类 + 岛屿博弈 + 岛内择优
+        V6.2 鏍稿績娴佺▼: 娉㈠姩瀹瑰繊鑱氱被 + 宀涘笨鍗氬紙 + 宀涘唴鎷╀紭
         """
-        # 💥 存储 output_name 以便内部调用使用
+        # 馃挜 瀛樺偍 output_name 浠ヤ究鍐呴儴璋冪敤浣跨敤
         self._current_output_name = output_name
         
-        # 1. 视窗与采样准备
+        # 1. 瑙嗙獥涓庨噰鏍峰噯澶?
         fps = self._get_video_fps(video_path)
         safe_end_sec = max(start_sec + 1.0, end_sec)
         
-        # 2. 调用全局自适应决策引擎 (Phase 6.9: Unified Features)
+        # 2. 璋冪敤鍏ㄥ眬鑷€傚簲鍐崇瓥寮曟搸 (Phase 6.9: Unified Features)
         refined_visual = await self.visual_extractor.extract_visual_features(start_sec, safe_end_sec, sample_rate=1)
         
-        # 从缓存或返回对象中获取数据
+        # 浠庣紦瀛樻垨杩斿洖瀵硅薄涓幏鍙栨暟鎹?
         cache = self.visual_extractor.get_cached_content(start_sec, safe_end_sec, sample_rate=1)
         if not cache or not cache.enhanced_frames:
              return await self._handle_empty_frames_complex(start_sec, safe_end_sec, output_dir)
@@ -754,26 +952,26 @@ class ScreenshotSelector:
         timestamps = cache.timestamps
         mse_diffs_actual = refined_visual.mse_list
             
-        # 3. 分辨率系数与组件识别
+        # 3. 鍒嗚鲸鐜囩郴鏁颁笌缁勪欢璇嗗埆
         video_width = frames[0].shape[1]
         res_factor = video_width / 1920.0
         
-        # 识别内容类型以调整阈值
+        # 璇嗗埆鍐呭绫诲瀷浠ヨ皟鏁撮槇鍊?
         content_type = self._identify_action_type_v6(frames[0])
         threshold_config = self._get_adaptive_threshold(content_type, res_factor, fps)
         
         logger.info(f"Selecting V6.9 ({content_type}, ResFactor={res_factor:.2f}) from {start_sec:.2f}s to {safe_end_sec:.2f}s")
         
-        # 4. 基础指标全量并行计算
+        # 4. 鍩虹鎸囨爣鍏ㄩ噺骞惰璁＄畻
         import asyncio
         from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import get_visual_process_pool
         loop = asyncio.get_running_loop()
         executor = get_visual_process_pool()
         
-        # 4.5 预计算边缘图以用于结构 MSE (V6.2 Struct-MSE)
+        # 4.5 棰勮绠楄竟缂樺浘浠ョ敤浜庣粨鏋?MSE (V6.2 Struct-MSE)
         edge_maps = [cv2.Canny(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), 50, 150) for f in frames]
         
-        # Struct-MSE 核心计算 (Numba 加速版)
+        # Struct-MSE 鏍稿績璁＄畻 (Numba 鍔犻€熺増)
         if HAS_NUMBA and len(frames) > 1:
             edge_stack = np.stack(edge_maps)
             smse_results = _numba_batch_struct_mse(edge_stack)
@@ -785,27 +983,27 @@ class ScreenshotSelector:
                 struct_mse_diffs.append(np.mean(diff) / (255 * 255))
             struct_mse_diffs.append(0)
         
-        # 补全 MSE 列表长度 (对齐 timestamps)
+        # 琛ュ叏 MSE 鍒楄〃闀垮害 (瀵归綈 timestamps)
         if len(mse_diffs_actual) < len(timestamps):
             mse_diffs_actual.append(0.0)
 
-        # Quality Worker 并行
+        # Quality Worker 骞惰
         quality_tasks = [loop.run_in_executor(executor, _analyze_frame_quality_worker, f) for f in frames]
         quality_results = await asyncio.gather(*quality_tasks) # [(lap, ent, sharp, cont), ...]
         
-        # 5. 稳定岛聚类 (Fluctuation Tolerance Mechanism)
+        # 5. 绋冲畾宀涜仛绫?(Fluctuation Tolerance Mechanism)
         PIXEL_THRESH = threshold_config["pixel_mse"]
         STRUCT_THRESH = threshold_config["struct_mse"]
         MIN_STABLE_LEN = threshold_config["min_stable_frames"]
         
         islands = []
         current_island = []
-        fluctuation_count = 0 # 容错计数器
+        fluctuation_count = 0 # 瀹归敊璁℃暟鍣?
         
-        MAX_FLUCT_MSE = PIXEL_THRESH * 3.0 # 允许瞬间抖动到 3 倍阈值 (e.g. 鼠标飞过)
+        MAX_FLUCT_MSE = PIXEL_THRESH * 3.0 # 鍏佽鐬棿鎶栧姩鍒?3 鍊嶉槇鍊?(e.g. 榧犳爣椋炶繃)
         MAX_FLUCT_SMSE = STRUCT_THRESH * 3.0
         
-        # 质量门槛 (Quality Gate: Laplacian > 10.0*res_factor, Contrast > 0.15)
+        # 璐ㄩ噺闂ㄦ (Quality Gate: Laplacian > 10.0*res_factor, Contrast > 0.15)
         LAP_GATE = 10.0 * res_factor
         CONT_GATE = 0.15
         
@@ -813,46 +1011,46 @@ class ScreenshotSelector:
             mse, smse = mse_diffs_actual[i], struct_mse_diffs[i]
             lap, ent, sharp, contrast = quality_results[i]
             
-            # 判定基准
+            # 鍒ゅ畾鍩哄噯
             is_visually_stable = (mse < PIXEL_THRESH) and (smse < STRUCT_THRESH)
             is_high_quality = (lap > LAP_GATE) and (contrast > CONT_GATE)
             
-            # 容错判定: 如果不稳定，但抖动在容忍范围内，且不算太久，且画面依然清晰
+            # 瀹归敊鍒ゅ畾: 濡傛灉涓嶇ǔ瀹氾紝浣嗘姈鍔ㄥ湪瀹瑰繊鑼冨洿鍐咃紝涓斾笉绠楀お涔咃紝涓旂敾闈緷鐒舵竻鏅?
             is_tolerable_fluctuation = (mse < MAX_FLUCT_MSE) and (smse < MAX_FLUCT_SMSE) and is_high_quality
             
             if is_visually_stable and is_high_quality:
-                # 完美稳定帧: 加入岛屿，重置抖动计数
+                # 瀹岀編绋冲畾甯? 鍔犲叆宀涘笨锛岄噸缃姈鍔ㄨ鏁?
                 current_island.append(i)
                 fluctuation_count = 0 
                 
             elif is_tolerable_fluctuation and len(current_island) > 0 and fluctuation_count < 2:
-                # 容忍抖动帧: 暂时加入岛屿，增加抖动计数
-                # 💥 稳定性增强: 确保岛内抖动比例不超过 20%
+                # 瀹瑰繊鎶栧姩甯? 鏆傛椂鍔犲叆宀涘笨锛屽鍔犳姈鍔ㄨ鏁?
+                # 馃挜 绋冲畾鎬у寮? 纭繚宀涘唴鎶栧姩姣斾緥涓嶈秴杩?20%
                 current_island.append(i)
                 fluctuation_count += 1
                 
             else:
-                # 彻底断开: 结算当前岛屿
+                # 褰诲簳鏂紑: 缁撶畻褰撳墠宀涘笨
                 if len(current_island) >= MIN_STABLE_LEN:
-                    # 只有当岛屿不仅仅由抖动帧组成时才有效 (简单校验: 长度够长通常意味着包含稳定帧)
+                    # 鍙湁褰撳矝灞夸笉浠呬粎鐢辨姈鍔ㄥ抚缁勬垚鏃舵墠鏈夋晥 (绠€鍗曟牎楠? 闀垮害澶熼暱閫氬父鎰忓懗鐫€鍖呭惈绋冲畾甯?
                      islands.append(self._finalize_island(current_island, quality_results, mse_diffs_actual, frames))
                 
                 current_island = []
                 fluctuation_count = 0
 
-        # 处理最后一个岛屿
+        # 澶勭悊鏈€鍚庝竴涓矝灞?
         if len(current_island) >= MIN_STABLE_LEN:
             islands.append(self._finalize_island(current_island, quality_results, mse_diffs_actual, frames))
 
         import gc
         gc.collect()
 
-        # 6. 岛屿级博弈 (Island Optimization V6.3)
+        # 6. 宀涘笨绾у崥寮?(Island Optimization V6.3)
         debug_data = {"window": {"start": start_sec, "end": safe_end_sec}, "islands": []}
         
         if not islands:
             logger.warning(f"V6.2: No stable islands. Executing Fallback (Entropy*Sharpness*Time).")
-            # 💥 性能优化: 兜底逻辑前也要清理
+            # 馃挜 鎬ц兘浼樺寲: 鍏滃簳閫昏緫鍓嶄篃瑕佹竻鐞?
             del mse_diffs_actual
             del struct_mse_diffs
             del edge_maps
@@ -861,17 +1059,17 @@ class ScreenshotSelector:
             
             return self._fallback_select(frames, timestamps, quality_results, output_dir, save_image)
         else:
-            # A. 过滤有效岛屿
+            # A. 杩囨护鏈夋晥宀涘笨
             valid_islands = self.filter_valid_islands(islands, frames, quality_results, mse_diffs_actual, PIXEL_THRESH)
             
-            # 💥 性能优化: 指标使用完毕，及时释放大列表内存
+            # 馃挜 鎬ц兘浼樺寲: 鎸囨爣浣跨敤瀹屾瘯锛屽強鏃堕噴鏀惧ぇ鍒楄〃鍐呭瓨
             del mse_diffs_actual
             del struct_mse_diffs
             del edge_maps
             import gc
             gc.collect()
 
-            # B. 岛屿去重
+            # B. 宀涘笨鍘婚噸
             unique_islands = self.deduplicate_islands(valid_islands, frames)
             
             # If no unique islands left, fallback to top ranked original island or single best
@@ -879,7 +1077,7 @@ class ScreenshotSelector:
                 # Fallback to the original ranking game to pick at least one
                 unique_islands = islands # Revert to all
             
-            # C. 岛内择优 (Batch Processing for all unique islands)
+            # C. 宀涘唴鎷╀紭 (Batch Processing for all unique islands)
             final_selections = []
             
             for island in unique_islands:
@@ -887,35 +1085,48 @@ class ScreenshotSelector:
                 best_idx = self._select_intra_island_winner(island, frames, quality_results)
                 best_frame, best_ts = frames[best_idx], timestamps[best_idx]
                 
-                # 🚀 V6.2 High-Res Fix: Re-extract winner at original resolution to avoid blur
-                cap = cv2.VideoCapture(video_path)
+                # 馃殌 V6.2 High-Res Fix: Re-extract winner at original resolution to avoid blur
+                cap, effective_video_path, _ = open_video_capture_with_fallback(
+                    video_path,
+                    logger=logger,
+                )
+                if cap is None or not cap.isOpened():
+                    logger.warning(
+                        "High-res re-extract cannot open video: source=%s, effective=%s",
+                        video_path,
+                        effective_video_path,
+                    )
+                    high_res_frame = None
+                    cap = None
+                else:
                 
-                # Robust Seek: Seek earlier and scan forward to avoid keyframe snapping issues
-                seek_target = max(0, best_ts * 1000 - 1500) # Seek 1.5s back
-                cap.set(cv2.CAP_PROP_POS_MSEC, seek_target)
-                
-                target_ts_ms = best_ts * 1000
-                found_frame = None
-                min_diff = float('inf')
-                
-                # Scan max 60 frames (approx 2s at 30fps) - Safety break
-                for _ in range(60):
-                    ret, frame = cap.read()
-                    if not ret: break
-                    
-                    curr_pos = cap.get(cv2.CAP_PROP_POS_MSEC)
-                    diff = abs(curr_pos - target_ts_ms)
-                    
-                    if diff < min_diff:
-                        min_diff = diff
-                        found_frame = frame
-                        
-                    # If we passed the target by more than 1 frame duration (approx 40ms) and diff starts growing
-                    if curr_pos > target_ts_ms + 50: 
-                        break
-                
-                high_res_frame = found_frame
-                cap.release()
+                    # Robust Seek: Seek earlier and scan forward to avoid keyframe snapping issues
+                    seek_target = max(0, best_ts * 1000 - 1500) # Seek 1.5s back
+                    cap.set(cv2.CAP_PROP_POS_MSEC, seek_target)
+
+                    target_ts_ms = best_ts * 1000
+                    found_frame = None
+                    min_diff = float('inf')
+
+                    # Scan max 60 frames (approx 2s at 30fps) - Safety break
+                    for _ in range(60):
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+
+                        curr_pos = cap.get(cv2.CAP_PROP_POS_MSEC)
+                        diff = abs(curr_pos - target_ts_ms)
+
+                        if diff < min_diff:
+                            min_diff = diff
+                            found_frame = frame
+
+                        # If we passed the target by more than 1 frame duration (approx 40ms) and diff starts growing
+                        if curr_pos > target_ts_ms + 50:
+                            break
+
+                    high_res_frame = found_frame
+                    cap.release()
                 
                 if save_image:
                     if high_res_frame is not None:
@@ -925,7 +1136,7 @@ class ScreenshotSelector:
                         logger.warning(f"High-res re-extraction failed for frame {best_idx}, using proxy.")
                         path = self._save_screenshot(best_frame, best_ts, output_dir)
                 else:
-                    path = "" # 不实际保存文件
+                    path = "" # 涓嶅疄闄呬繚瀛樻枃浠?
                 
                 # Calculate scores
                 scores = self._calculate_final_scores(frames, best_idx, island, quality_results[best_idx])
@@ -974,12 +1185,12 @@ class ScreenshotSelector:
             return best_of_all if best_of_all else self._fallback_select(frames, timestamps, quality_results, output_dir, save_image)
 
     def _finalize_island(self, indices, quality_results, mse_diffs, frames):
-        """结算岛屿统计指标"""
+        """缁撶畻宀涘笨缁熻鎸囨爣"""
         # avg_laplacian is index 0 in quality_results
         avg_lap = np.mean([quality_results[i][0] for i in indices])
         avg_ent = np.mean([quality_results[i][1] for i in indices])
         
-        # 快速 S4 估算 (抽样首尾中)
+        # 蹇€?S4 浼扮畻 (鎶芥牱棣栧熬涓?
         sample_indices = [indices[0], indices[-1], indices[len(indices)//2]]
         s4_vals = [self._calculate_S4_no_occlusion_v6(frames[i]) for i in sample_indices]
         avg_s4 = np.mean(s4_vals)
@@ -996,7 +1207,7 @@ class ScreenshotSelector:
         }
 
     def _select_intra_island_winner(self, island, frames, quality_results):
-        """岛内择优: 综合 Entropy + Laplacian + S4"""
+        """宀涘唴鎷╀紭: 缁煎悎 Entropy + Laplacian + S4"""
         best_score = -1
         best_idx = island["indices"][0]
         
@@ -1004,7 +1215,7 @@ class ScreenshotSelector:
             lap, ent, sharp, contrast = quality_results[idx]
             s4 = self._calculate_S4_no_occlusion_v6(frames[idx])
             
-            # 岛内打分: 信息密度和清晰度优先
+            # 宀涘唴鎵撳垎: 淇℃伅瀵嗗害鍜屾竻鏅板害浼樺厛
             score = (ent * 0.4) + (lap * 0.3) + (contrast * 0.1) + (s4/100.0 * 0.2)
             
             if score > best_score:
@@ -1013,7 +1224,7 @@ class ScreenshotSelector:
         return best_idx
 
     def _identify_action_type_v6(self, frame_sample) -> str:
-        """V6 内容分类"""
+        """V6 鍐呭鍒嗙被"""
         gray = cv2.cvtColor(frame_sample, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         rect_count = self.detector.detect_rectangles(edges)
@@ -1025,14 +1236,14 @@ class ScreenshotSelector:
         return "popup"
 
     def _get_adaptive_threshold(self, content_type: str, res_factor: float, fps: float) -> Dict:
-        """V6 自适应阈值"""
-        # 基准 (1080P)
+        """V6：根据内容类型与分辨率自适应阈值。"""
+        # 鍩哄噯 (1080P)
         base_pixel = 80 * res_factor
         base_struct = 0.0015
         
         scale_map = {
-            "handwriting": {"p": 1.5, "s": 1.5, "time": 0.5}, # 允许大波动，短时间
-            "ppt_complex": {"p": 0.8, "s": 0.8, "time": 0.8}, # 要求稳定，稍短时间
+            "handwriting": {"p": 1.5, "s": 1.5, "time": 0.5}, # 鍏佽澶ф尝鍔紝鐭椂闂?
+            "ppt_complex": {"p": 0.8, "s": 0.8, "time": 0.8}, # 瑕佹眰绋冲畾锛岀◢鐭椂闂?
             "ppt_basic":   {"p": 1.0, "s": 1.0, "time": 0.6},
             "popup":       {"p": 1.0, "s": 1.0, "time": 0.5}
         }
@@ -1046,30 +1257,30 @@ class ScreenshotSelector:
         }
 
     def _calculate_S4_no_occlusion_v6(self, frame: np.ndarray) -> float:
-        """V6 S4: 鼠标+UI文本检测"""
+        """V6 S4：基于鼠标/UI痕迹估计遮挡惩罚。"""
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         penalty = 0
         
-        # 1. 鼠标 (高亮小块)
+        # 1. 榧犳爣 (楂樹寒灏忓潡)
         mask = cv2.inRange(gray, 240, 255)
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         mouse_candidates = [c for c in cnts if 10 < cv2.contourArea(c) < 150]
         if mouse_candidates: penalty += 30
         
-        # 2. UI 文本 (边缘过密区域)
+        # 2. UI 鏂囨湰 (杈圭紭杩囧瘑鍖哄煙)
         top_roi = gray[:int(h*0.1), :]
         if cv2.Canny(top_roi, 50, 150).mean() > 20: penalty += 20
         
         return max(0, 100 - penalty)
 
     def _fallback_select(self, frames, timestamps, quality_results, output_dir, save_image=True):
-        """兜底逻辑: Entropy * Laplacian * TimeWeight"""
+        """鍏滃簳閫昏緫: Entropy * Laplacian * TimeWeight"""
         best_score = -1
         best_idx = 0
         
         for i, (lap, ent, sharp, cont) in enumerate(quality_results):
-            # 时间权重: 越靠后越重要 (假设板书写完了)
+            # 鏃堕棿鏉冮噸: 瓒婇潬鍚庤秺閲嶈 (鍋囪鏉夸功鍐欏畬浜?
             time_bias = 1.0 + (i / len(frames)) * 0.5
             score = ent * lap * time_bias
             if score > best_score:
@@ -1082,7 +1293,7 @@ class ScreenshotSelector:
         else:
             path = ""
         
-        # 兜底分
+        # 鍏滃簳鍒?
         s4 = self._calculate_S4_no_occlusion_v6(best_frame)
         return ScreenshotSelection(best_idx, best_ts, path, 50.0, 50, 50, 50, s4, [])
 
@@ -1113,7 +1324,7 @@ class ScreenshotSelector:
 
     def filter_valid_islands(self, islands: list, frames: list, quality_results: list, mse_diffs_ref: list, pixel_thresh_ref: float) -> list:
         """
-        V6.3 过滤有效岛屿: 保留稳定且有内容价值的岛
+        V6.3 杩囨护鏈夋晥宀涘笨: 淇濈暀绋冲畾涓旀湁鍐呭浠峰€肩殑宀?
         Criteria:
         1. Duration > 0.6s (Handled in clustering)
         2. Entropy > Global Mean * 0.5
@@ -1128,9 +1339,9 @@ class ScreenshotSelector:
         
         valid_islands = []
         for island in islands:
-            # 0. 稳定性修正: 检查抖动帧占比 (防止伪岛屿)
-            # 我们假设岛内连续抖动 > 2 已经断开，但可能总占比依然很高
-            # 这里强制要求岛内高质量占比 > 80%
+            # 0. 绋冲畾鎬т慨姝? 妫€鏌ユ姈鍔ㄥ抚鍗犳瘮 (闃叉浼矝灞?
+            # 鎴戜滑鍋囪宀涘唴杩炵画鎶栧姩 > 2 宸茬粡鏂紑锛屼絾鍙兘鎬诲崰姣斾緷鐒跺緢楂?
+            # 杩欓噷寮哄埗瑕佹眰宀涘唴楂樿川閲忓崰姣?> 80%
             if "indices" in island:
                 fluct_frames = [idx for idx in island["indices"] if mse_diffs_ref[idx] > pixel_thresh_ref] 
                 if len(fluct_frames) / len(island["indices"]) > 0.2:
@@ -1162,7 +1373,7 @@ class ScreenshotSelector:
 
     def deduplicate_islands(self, valid_islands: list, frames: list) -> list:
         """
-        V6.3 岛屿去重: 基于 SSIM 保留唯一内容岛
+        V6.3 宀涘笨鍘婚噸: 鍩轰簬 SSIM 淇濈暀鍞竴鍐呭宀?
         Strategy:
         - Pick temp best frame for each island
         - Compare SSIM of effective content regions
@@ -1218,8 +1429,8 @@ class ScreenshotSelector:
 
     def _export_debug_trace_tiered(self, data, output_dir, ts, frames, timestamps, islands, quality_results, sharp_thresh, contrast_thresh):
         """
-        导出分层级决策链与对照图 (V6.2 Lean Mode)
-        用户要求: 不需要 Quality Pass, 重点区别岛屿与岛屿
+        瀵煎嚭鍒嗗眰绾у喅绛栭摼涓庡鐓у浘 (V6.2 Lean Mode)
+        鐢ㄦ埛瑕佹眰: 涓嶉渶瑕?Quality Pass, 閲嶇偣鍖哄埆宀涘笨涓庡矝灞?
         """
         if not output_dir: return
         try:
@@ -1227,11 +1438,11 @@ class ScreenshotSelector:
             case_dir = root_debug / f"case_{ts:.2f}s"
             case_dir.mkdir(parents=True, exist_ok=True)
             
-            # 1. 保存 JSON 决策树
+            # 1. 淇濆瓨 JSON 鍐崇瓥鏍?
             with open(case_dir / "decision_trace.json", 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
                 
-            # 2. Layer 1: Raw Samples (固定密度采样 - 视觉参考)
+            # 2. Layer 1: Raw Samples (鍥哄畾瀵嗗害閲囨牱 - 瑙嗚鍙傝€?
             raw_dir = case_dir / "01_raw_samples"
             raw_dir.mkdir(exist_ok=True)
             step = max(1, len(frames) // 10)
@@ -1239,12 +1450,12 @@ class ScreenshotSelector:
                 f_path = raw_dir / f"raw_idx{i}_{timestamps[i]:.2f}s.png"
                 cv2.imwrite(str(f_path), frames[i])
             
-            # 3. Layer 3: Stability Islands (重点: 岛屿与岛屿的区别)
+            # 3. Layer 3: Stability Islands (閲嶇偣: 宀涘笨涓庡矝灞跨殑鍖哄埆)
             isl_dir = case_dir / "03_islands_comparison"
             isl_dir.mkdir(exist_ok=True)
             
             for i, isl in enumerate(islands):
-                # 记录岛屿信息
+                # 璁板綍宀涘笨淇℃伅
                 # Save Start, Middle, End frames to visualize stability
                 mid = isl["indices"][len(isl["indices"])//2]
                 frames_to_save = {
@@ -1268,7 +1479,7 @@ class ScreenshotSelector:
                             
                 score = island_data['score'] if island_data else 0.0
                 
-                # 创建岛屿子文件夹，方便查看岛内一致性
+                # 鍒涘缓宀涘笨瀛愭枃浠跺す锛屾柟渚挎煡鐪嬪矝鍐呬竴鑷存€?
                 island_sub_dir = isl_dir / f"Rank{i+1}_Score{score:.2f}_Dur{isl['duration']}"
                 island_sub_dir.mkdir(exist_ok=True)
                 
@@ -1283,43 +1494,31 @@ class ScreenshotSelector:
             logger.error(f"Tiered debug trace failed: {e}", exc_info=True)
 
 
-    # 兼容性兜底方法：做什么是保留旧接口；为什么是避免调用方断裂；权衡是逻辑较简化
+    # 鍏煎鎬у厹搴曟柟娉曪細鍋氫粈涔堟槸淇濈暀鏃ф帴鍙ｏ紱涓轰粈涔堟槸閬垮厤璋冪敤鏂规柇瑁傦紱鏉冭　鏄€昏緫杈冪畝鍖?
     def _get_video_fps(self, path):
-        """方法说明：ScreenshotSelector._get_video_fps 工具方法。
-        执行步骤：
-        1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
-        2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
-        3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
+        """兼容旧接口：返回视频 FPS。"""
         return self.visual_extractor.fps
 
-    # 空帧兜底：做什么是返回空选择；为什么是保证下游流程不断；权衡是不再区分复杂空帧原因
+    # 绌哄抚鍏滃簳锛氬仛浠€涔堟槸杩斿洖绌洪€夋嫨锛涗负浠€涔堟槸淇濊瘉涓嬫父娴佺▼涓嶆柇锛涙潈琛℃槸涓嶅啀鍖哄垎澶嶆潅绌哄抚鍘熷洜
     def _handle_empty_frames_complex(self, s, e, o):
-        """方法说明：ScreenshotSelector._handle_empty_frames_complex 工具方法。
-        执行步骤：
-        1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
-        2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
-        3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
+        """空帧兜底：返回默认空选择结果。"""
         return self._create_empty_selection(s)
 
-    # 空选择构造：做什么是生成默认 ScreenshotSelection；为什么是统一返回结构；权衡是细节信息缺失
+    # 绌洪€夋嫨鏋勯€狅細鍋氫粈涔堟槸鐢熸垚榛樿 ScreenshotSelection锛涗负浠€涔堟槸缁熶竴杩斿洖缁撴瀯锛涙潈琛℃槸缁嗚妭淇℃伅缂哄け
     def _create_empty_selection(self, ts):
-        """方法说明：ScreenshotSelector._create_empty_selection 工具方法。
-        执行步骤：
-        1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
-        2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
-        3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
+        """生成空的 `ScreenshotSelection`。"""
         return ScreenshotSelection(0, ts, "", 0, 0, 0, 0, 0, [])
     def _save_screenshot(self, frame, ts, output_dir, output_name=None):
         """
-        使用 FFmpeg 提取高分辨率帧
+        浣跨敤 FFmpeg 鎻愬彇楂樺垎杈ㄧ巼甯?
         
-        💥 重构: 不再使用 OpenCV 代理帧，直接从原始视频提取高分辨率帧
+        馃挜 閲嶆瀯: 涓嶅啀浣跨敤 OpenCV 浠ｇ悊甯э紝鐩存帴浠庡師濮嬭棰戞彁鍙栭珮鍒嗚鲸鐜囧抚
         """
         import subprocess
         
         if not output_dir: output_dir = "screenshots"
         
-        # 确定输出文件名
+        # 纭畾杈撳嚭鏂囦欢鍚?
         final_name = output_name or getattr(self, '_current_output_name', None)
         if final_name:
             p = Path(output_dir) / f"{final_name}.png"
@@ -1327,17 +1526,17 @@ class ScreenshotSelector:
             p = Path(output_dir) / f"screenshot_{ts:.2f}s.png"
         p.parent.mkdir(parents=True, exist_ok=True)
         
-        # 获取视频路径 (从 visual_extractor)
+        # 鑾峰彇瑙嗛璺緞 (浠?visual_extractor)
         video_path = getattr(self.visual_extractor, 'video_path', None)
         
         if video_path and Path(video_path).exists():
-            # 使用 FFmpeg 提取高分辨率帧
+            # 浣跨敤 FFmpeg 鎻愬彇楂樺垎杈ㄧ巼甯?
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", str(ts),
                 "-i", video_path,
                 "-frames:v", "1",
-                "-q:v", "2",  # 高质量
+                "-q:v", "2",  # 楂樿川閲?
                 str(p)
             ]
             try:
@@ -1348,7 +1547,7 @@ class ScreenshotSelector:
             except Exception as e:
                 logger.warning(f"FFmpeg extraction failed at {ts:.2f}s: {e}, falling back to OpenCV")
         
-        # 回退: 使用 OpenCV 代理帧
+        # 鍥為€€: 浣跨敤 OpenCV 浠ｇ悊甯?
         cv2.imwrite(str(p), frame)
         return str(p)
 

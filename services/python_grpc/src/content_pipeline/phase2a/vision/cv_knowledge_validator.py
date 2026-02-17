@@ -33,6 +33,10 @@ import numpy as np
 import logging
 import os
 import time
+import hashlib
+import shutil
+import subprocess
+from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
@@ -85,11 +89,13 @@ class CVKnowledgeValidator:
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.video_path = video_path
+        self.source_video_path = video_path
         self.use_resource_manager = use_resource_manager
         self.cap: Optional[cv2.VideoCapture] = None
         self.fps: float = 30.0
         self.frame_count: int = 0
         self.duration_sec: float = 0.0
+        self._decode_fallback_path: Optional[str] = None
         
         # 性能优化: 缓存
         self.roi_cache = ROICache()
@@ -99,6 +105,184 @@ class CVKnowledgeValidator:
         self.last_unit_complexity = "medium"
         
         self._init_video()
+
+    @staticmethod
+    def _resolve_ffmpeg_bin() -> Optional[str]:
+        """
+        做什么：解析可用 ffmpeg 可执行路径。
+        为什么：OpenCV 在某些编码（如 AV1）上可能 `isOpened=true` 但 `read` 失败。
+        权衡：优先 PATH，兼容历史固定路径，避免强依赖单一安装方式。
+        """
+        candidates = [
+            str(os.getenv("FFMPEG_BIN", "") or "").strip(),
+            str(os.getenv("FFMPEG_PATH", "") or "").strip(),
+            "ffmpeg",
+            r"D:\New_ANACONDA\envs\whisper_env\Library\bin\ffmpeg.exe",
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if shutil.which(candidate):
+                return candidate
+            if Path(candidate).exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _probe_capture_readable(cap: Any) -> bool:
+        """
+        做什么：探测 capture 是否可真正解码出帧。
+        为什么：仅检查 `isOpened()` 无法覆盖“容器可开但编码不可解码”的场景。
+        权衡：初始化多一次轻量 read，换来更稳定的失败前置与回退。
+        """
+        try:
+            if cap is None or not hasattr(cap, "isOpened") or not cap.isOpened():
+                return False
+
+            original_pos = None
+            if hasattr(cap, "get"):
+                try:
+                    original_pos = float(cap.get(cv2.CAP_PROP_POS_FRAMES))
+                except Exception:
+                    original_pos = None
+
+            if hasattr(cap, "set"):
+                try:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                except Exception:
+                    pass
+
+            ret, frame = cap.read()
+            readable = bool(ret and frame is not None and getattr(frame, "size", 0) > 0)
+
+            if hasattr(cap, "set"):
+                try:
+                    if isinstance(original_pos, (int, float)) and original_pos >= 0:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, original_pos)
+                    else:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                except Exception:
+                    pass
+            return readable
+        except Exception:
+            return False
+
+    def _build_decode_fallback_path(self, source_path: str) -> Path:
+        """
+        做什么：生成稳定的转码缓存路径（按源路径+mtime+size 指纹）。
+        为什么：避免同一源文件被重复转码。
+        权衡：会在源目录写入 `_opencv_decode_fallback` 缓存文件。
+        """
+        source = Path(source_path)
+        try:
+            stat = source.stat()
+            fingerprint = f"{source.resolve()}::{stat.st_size}::{int(stat.st_mtime)}"
+        except Exception:
+            fingerprint = f"{source}::{time.time_ns()}"
+        digest = hashlib.md5(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        cache_dir = source.parent / "_opencv_decode_fallback"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / f"{source.stem}_{digest}_h264.mp4"
+
+    def _transcode_to_h264_for_opencv(self, source_path: str) -> Optional[str]:
+        """
+        做什么：将源视频转码为 H.264，供 OpenCV 稳定读取。
+        为什么：兜底 AV1 等在当前运行环境不可读的编码。
+        权衡：仅在探测失败时触发，避免影响常规性能。
+        """
+        ffmpeg_bin = self._resolve_ffmpeg_bin()
+        if not ffmpeg_bin:
+            logger.warning("ffmpeg not found, cannot apply decode fallback for: %s", source_path)
+            return None
+
+        fallback_path = self._build_decode_fallback_path(source_path)
+        if fallback_path.exists() and fallback_path.stat().st_size > 0:
+            return str(fallback_path)
+
+        command = [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            source_path,
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "22",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "96k",
+            "-movflags",
+            "+faststart",
+            str(fallback_path),
+        ]
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except Exception as exc:
+            logger.warning("ffmpeg decode fallback exception for %s: %s", source_path, exc)
+            return None
+
+        if result.returncode != 0:
+            logger.warning(
+                "ffmpeg decode fallback failed for %s: rc=%s, err=%s",
+                source_path,
+                result.returncode,
+                str(result.stderr or "").strip()[:300],
+            )
+            return None
+
+        if not fallback_path.exists() or fallback_path.stat().st_size <= 0:
+            logger.warning("ffmpeg decode fallback generated empty file for %s", source_path)
+            return None
+        return str(fallback_path)
+
+    def _open_direct_capture_with_decode_fallback(self, source_path: str) -> Tuple[cv2.VideoCapture, str]:
+        """
+        做什么：直接打开视频；若不可解码则转码后重开。
+        为什么：worker direct 模式下没有 ResourceManager 兜底，需要本地自治。
+        权衡：仅失败时转码，保证常规路径零额外成本。
+        """
+        cap = cv2.VideoCapture(source_path)
+        if self._probe_capture_readable(cap):
+            return cap, source_path
+        if cap is not None:
+            cap.release()
+
+        fallback_path = self._transcode_to_h264_for_opencv(source_path)
+        if not fallback_path:
+            raise ValueError(f"Cannot decode video: {source_path}")
+
+        fallback_cap = cv2.VideoCapture(fallback_path)
+        if not self._probe_capture_readable(fallback_cap):
+            if fallback_cap is not None:
+                fallback_cap.release()
+            raise ValueError(
+                f"Cannot decode video even after ffmpeg fallback: source={source_path}, fallback={fallback_path}"
+            )
+
+        self._decode_fallback_path = fallback_path
+        logger.warning(
+            "Decode fallback applied: source=%s, fallback=%s",
+            source_path,
+            fallback_path,
+        )
+        return fallback_cap, fallback_path
     
     def _init_video(self):
         """
@@ -118,23 +302,39 @@ class CVKnowledgeValidator:
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if self.use_resource_manager:
-            rm = get_resource_manager()
-            self.cap = rm.get_video_capture(self.video_path)
-            info = rm.get_video_info(self.video_path)
-            self.fps = info["fps"]
-            self.frame_count = info["frame_count"]
-            self.duration_sec = info["duration"]
-        else:
-            self.cap = cv2.VideoCapture(self.video_path)
-            if not self.cap.isOpened():
-                raise ValueError(f"Cannot open video: {self.video_path}")
-            
+            try:
+                rm = get_resource_manager()
+                self.cap = rm.get_video_capture(self.video_path)
+                info = rm.get_video_info(self.video_path)
+                if self._probe_capture_readable(self.cap):
+                    self.fps = info["fps"]
+                    self.frame_count = info["frame_count"]
+                    self.duration_sec = info["duration"]
+                else:
+                    logger.warning(
+                        "ResourceManager capture decode probe failed, fallback to direct mode: %s",
+                        self.video_path,
+                    )
+                    self.use_resource_manager = False
+            except Exception as exc:
+                logger.warning(
+                    "ResourceManager init failed, fallback to direct mode: %s, err=%s",
+                    self.video_path,
+                    exc,
+                )
+                self.use_resource_manager = False
+
+        if not self.use_resource_manager:
+            self.cap, effective_path = self._open_direct_capture_with_decode_fallback(self.video_path)
+            self.video_path = effective_path
             self.fps = self.cap.get(cv2.CAP_PROP_FPS)
             self.frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
             self.duration_sec = self.frame_count / self.fps if self.fps > 0 else 0
-            
-            logger.info(f"Video loaded (Direct): {self.video_path}, "
-                       f"FPS={self.fps:.2f}, Duration={self.duration_sec:.2f}s")
+
+            logger.info(
+                f"Video loaded (Direct): source={self.source_video_path}, "
+                f"effective={self.video_path}, FPS={self.fps:.2f}, Duration={self.duration_sec:.2f}s"
+            )
         
         # 🚀 动态计算缩放比例 (最大宽度 640)
         # 缩小处理分辨率能大幅降低内存消耗 (1080p -> 640p 内存减少 ~84%)
@@ -501,11 +701,33 @@ class CVKnowledgeValidator:
         - fps: 函数入参（类型：float）。
         输出参数：
         - Tuple[float, np.ndarray] 列表（与输入或处理结果一一对应）。"""
+        # 统一时间边界，避免上游时间戳漂移导致越界读帧
+        sample_fps = fps if isinstance(fps, (int, float)) and fps > 0 else 1.0
+        sampling_start = max(0.0, float(start_sec or 0.0))
+        sampling_end = max(sampling_start, float(end_sec or sampling_start))
+        if self.duration_sec > 0:
+            duration = float(self.duration_sec)
+            if sampling_start > duration:
+                logger.warning(
+                    f"Sampling start {sampling_start:.3f}s exceeds video duration {duration:.3f}s, skip"
+                )
+                return []
+            if sampling_end > duration:
+                logger.warning(
+                    f"Clamp sampling end_sec from {sampling_end:.3f}s to video duration {duration:.3f}s"
+                )
+                sampling_end = duration
+
         raw_frames = []
         if self.use_resource_manager:
             # 兼容: 如果 ResourceManager 返回 None 或空，回退到本地 cap
             try:
-                raw_frames = get_resource_manager().extract_frames(self.video_path, start_sec, end_sec, fps)
+                raw_frames = get_resource_manager().extract_frames(
+                    self.video_path,
+                    sampling_start,
+                    sampling_end,
+                    sample_fps,
+                )
             except Exception as e:
                 logger.warning(f"ResourceManager extract_frames failed: {e}, using local cap")
                 raw_frames = []
@@ -513,9 +735,21 @@ class CVKnowledgeValidator:
         # 如果 ResourceManager 未启用或失败，使用本地 cap
         if not raw_frames and self.cap:
              # 回退逻辑 (不推荐)
-            interval = 1.0 / fps
-            t = start_sec
-            while t <= end_sec:
+            interval = 1.0 / sample_fps
+            frame_step = 1.0 / self.fps if self.fps > 0 else interval
+            eps_sec = max(1e-6, interval * 0.01)
+            safe_end = sampling_end
+
+            # 尾帧保护：避免请求 duration 精确边界导致 OpenCV 读帧失败。
+            duration = float(self.duration_sec) if self.duration_sec > 0 else 0.0
+            if duration > 0:
+                tail_guard = max(frame_step * 0.5, eps_sec)
+                safe_end = min(safe_end, max(sampling_start, duration - tail_guard))
+
+            sample_count = int(np.floor((safe_end - sampling_start) / interval + eps_sec)) + 1
+            for idx in range(max(0, sample_count)):
+                # 使用 idx 计算时间点，避免 t += interval 的浮点累积误差。
+                t = round(min(sampling_start + idx * interval, safe_end), 6)
                 try:
                     if not isinstance(self.cap, cv2.VideoCapture):
                         logger.error(f"self.cap is not cv2.VideoCapture: {type(self.cap)}")
@@ -530,12 +764,16 @@ class CVKnowledgeValidator:
                     if ret and frame is not None:
                         raw_frames.append((t, frame))
                     else:
-                        logger.warning(f"Failed to read frame at {t}s")
+                        if duration > 0 and t >= (duration - max(interval, frame_step)):
+                            logger.debug(
+                                f"Skip unreadable tail frame at {t:.3f}s (duration={duration:.3f}s)"
+                            )
+                            break
+                        logger.warning(f"Failed to read frame at {t:.3f}s")
                 except Exception as e:
-                    logger.error(f"Error reading frame at {t}s: {e}, cap={self.cap}")
+                    logger.error(f"Error reading frame at {t:.3f}s: {e}, cap={self.cap}")
                     break
-                t += interval
-        
+
         # 🚀 统一缩放帧
         return [(t, self._resize_frame(f)) for t, f in raw_frames]
     

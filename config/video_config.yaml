@@ -13,9 +13,22 @@ video:
   output_dir: "output"
   download_subdir: "downloads"
   # 视频下载代理 (可选，如: "http://127.0.0.1:7890")
-  download_proxy: ""
+  download_proxy: "http://127.0.0.1:7897"
   # 是否禁用 SSL 证书验证 (仅在遇到证书问题时启用)
   disable_ssl_verify: false
+  # YouTube 风控场景建议启用：直接复用浏览器登录态 Cookie
+  # 示例:
+  # - "chrome"
+  # - "edge:Default"
+  # - "firefox:default-release"
+  download_cookies_from_browser: "edge:Default"
+  # 或者传入手工导出的 Netscape Cookie 文件路径
+  # 可填相对路径（相对当前启动目录）或绝对路径
+  download_cookies_file: "D:/videoToMarkdownTest2/cookies.txt"
+  # 下载阶段优先选择 H.264（avc1）可解码轨道，减少后续 OpenCV 兼容问题
+  # true: 优先 H.264，失败再回退到默认 best 链路
+  # false: 保持历史行为（best -> bestvideo+bestaudio/best）
+  prefer_h264: true
 
 # 2. AI 服务配置
 # -----------------------------------------------------------------------------
@@ -25,7 +38,7 @@ ai:
   # 推荐方式：设置环境变量 DEEPSEEK_API_KEY
   # Windows: setx DEEPSEEK_API_KEY "sk-your-key-here"
   # Linux/Mac: export DEEPSEEK_API_KEY="sk-your-key-here"
-  api_key: ""  # 留空，从环境变量读取（生产环境强烈建议）
+  api_key: "sk-97fdd2b65e8c4d1bbfa76e617c212a3c"  # 留空，从环境变量读取（生产环境强烈建议）
   base_url: "https://api.deepseek.com"
   
   # 字幕整理模型
@@ -73,6 +86,16 @@ whisper:
   # 如果镜像站 404，建议通过代理连接官方 Hub
   download_proxy: ""
   
+  # 当模型文件校验失败时是否跳过校验继续使用已下载文件
+  # true: 跳过校验失败并继续（容错优先）
+  # false: 触发强制重拉（完整性优先）
+  skip_integrity_check_on_failure: true
+
+  # 模型首次下载并校验后，后续重启是否跳过重复校验
+  # true: 仅首次校验，后续复用本地已校验标记
+  # false: 每次启动都执行校验流程
+  skip_reverify_after_success: true
+  
   # 计算类型 (仅 CPU): int8, int16, float32
   # 计算类型 (GPU): float16, int8_float16
   compute_type: "int8"
@@ -81,12 +104,15 @@ whisper:
   # 常用: zh(中文), en(英语), ja(日语), ko(韩语), auto(自动检测)
   # 完整列表: https://github.com/openai/whisper#available-models-and-languages
   language: "auto"
+  beam_size: 4
+  vad_filter: false
+  language_detect_probe_sec: 120
   
   # 并行转录配置
   parallel:
     enabled: true          # 是否启用并行转录
-    num_workers: 3         # 并行进程数（建议 2-4）
-    segment_duration: 600  # 分段时长（秒），600 = 10分钟
+    num_workers: 5         # 并行进程数（建议 2-6）
+    segment_duration: 150  # 分段时长（秒），150 = 2.5分钟
     segment_split_threshold_sec: 300  # 分段阈值（秒），<=该值不分段，默认5分钟
     auto_resource_scheduling: true    # 是否按CPU/内存自动调整并发
     reserve_cpu_cores: 1              # 给系统预留的CPU核心数
@@ -182,7 +208,7 @@ vision_ai:
   
   # 认证方式: Bearer Token (千帆平台)
   # 格式: bce-v3/ALTAK-xxxxx/yyyyyyy
-  bearer_token: ""  # 建议留空并使用环境变量注入，避免密钥泄漏
+  bearer_token: "bce-v3/ALTAK-nnnwJXbBpYKev1JlThzKL/0b20f94354d6380385a021bcfcf4cc6ab80cff48"  # 建议留空并使用环境变量注入，避免密钥泄漏
   
   # API 端点 (千帆平台 ERNIE 4.5 Turbo)
   base_url: "https://qianfan.baidubce.com/v2/chat/completions"
@@ -195,6 +221,31 @@ vision_ai:
   
   # 每次分析的最大帧数 (建议 5-8 张)
   max_frames_per_call: 8  # 建议 4~10；过大可能增加时延与 token 成本
+  batch:
+    enabled: true
+    max_size: 4
+    flush_ms: 20
+    max_inflight_batches: 2
+  # 人物主体预过滤（进入 Vision API 之前执行）
+  person_subject_filter:
+    enabled: true
+    # 人物蒙版像素占比 > area_threshold 时，直接判定为 false 并跳过 Vision
+    area_threshold: 0.3
+    # segmentation_mask 的二值化阈值（0~1）
+    mask_threshold: 0.5
+    high_conf_threshold: 0.8
+    high_conf_min_area: 0.08
+    # 0: General，1: Landscape（MediaPipe SelfieSegmentation）
+    model_selection: 1
+  # PP-Structure 拆图预处理
+  structure_preprocess:
+    enabled: true
+    # 结构化拆图去重阈值（越低越容易合并）
+    dedup_similarity_threshold: 0.6
+    # bbox 重叠比例阈值：交集面积/较小框面积 > 阈值时进行 bbox 合并
+    bbox_overlap_merge_threshold: 0.9
+    # (待提取 type 的 bbox 面积和) / (所有识别 type 的外接矩形面积) >= 阈值时，回退原图
+    skip_split_bbox_coverage_threshold: 0.8
 
 # 7. 视频下载配置
 # -----------------------------------------------------------------------------

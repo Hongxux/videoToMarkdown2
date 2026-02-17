@@ -1,22 +1,40 @@
 package com.mvp.module2.fusion.controller;
 
+import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.resilience.ResilientGrpcClient;
 import com.mvp.module2.fusion.resilience.CircuitBreaker;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.time.Instant;
+import java.util.Locale;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 视频处理 REST API 控制器
  * 
  * 端点：
  * POST /api/tasks          - 提交新任务
+ * POST /api/tasks/upload   - 上传视频并提交任务
  * GET  /api/tasks/{id}     - 获取任务状态
  * GET  /api/tasks/user/{userId} - 获取用户所有任务
  * DELETE /api/tasks/{id}   - 取消任务
@@ -29,6 +47,14 @@ import java.util.Map;
 public class VideoProcessingController {
     
     private static final Logger logger = LoggerFactory.getLogger(VideoProcessingController.class);
+    private static final Pattern BV_PATTERN = Pattern.compile("(?i)BV[0-9A-Za-z]{10}");
+    private static final Pattern WINDOWS_ABSOLUTE_PATH = Pattern.compile("^[A-Za-z]:[\\\\/].*");
+    private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
+    private static final Set<String> ALLOWED_VIDEO_EXTENSIONS = Set.of(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v");
+    private static final long MAX_UPLOAD_FILE_BYTES = 2L * 1024L * 1024L * 1024L;
+
+    @Value("${task.upload.dir:var/uploads}")
+    private String uploadDir;
     
     @Autowired
     private TaskQueueManager taskQueueManager;
@@ -41,21 +67,22 @@ public class VideoProcessingController {
      */
     @PostMapping("/tasks")
     public ResponseEntity<Map<String, Object>> submitTask(@RequestBody TaskSubmitRequest request) {
-        logger.info("Received task submission: {} from user {}", request.videoUrl, request.userId);
-        
-        // 确定优先级
-        TaskQueueManager.Priority priority = TaskQueueManager.Priority.NORMAL;
-        if ("vip".equalsIgnoreCase(request.priority)) {
-            priority = TaskQueueManager.Priority.VIP;
-        } else if ("high".equalsIgnoreCase(request.priority)) {
-            priority = TaskQueueManager.Priority.HIGH;
+        String normalizedVideoInput = normalizeVideoInput(request.videoUrl);
+        if (normalizedVideoInput.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "videoUrl 不能为空"
+            ));
         }
-        
+        String normalizedUserId = normalizeUserId(request.userId);
+        TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request.priority);
+        logger.info("Received task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
+
         // 提交任务
         TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
-            request.userId,
-            request.videoUrl,
-            request.outputDir,
+            normalizedUserId,
+            normalizedVideoInput,
+            normalizeOutputDir(request.outputDir),
             priority
         );
         
@@ -63,8 +90,77 @@ public class VideoProcessingController {
             "success", true,
             "taskId", task.taskId,
             "status", task.status.name(),
+            "normalizedVideoUrl", normalizedVideoInput,
             "message", "任务已提交，正在排队中"
         ));
+    }
+
+    /**
+     * 上传视频并提交任务
+     */
+    @PostMapping(value = "/tasks/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<Map<String, Object>> submitUploadTask(
+            @RequestParam("videoFile") MultipartFile videoFile,
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "outputDir", required = false) String outputDir,
+            @RequestParam(value = "priority", required = false) String priority
+    ) {
+        if (videoFile == null || videoFile.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "videoFile 不能为空"
+            ));
+        }
+        if (videoFile.getSize() > MAX_UPLOAD_FILE_BYTES) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "上传文件过大，当前限制 2048MB"
+            ));
+        }
+
+        String safeFileName = sanitizeUploadFileName(videoFile.getOriginalFilename());
+        if (!hasSupportedVideoExtension(safeFileName)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "仅支持常见视频格式：mp4/mov/mkv/avi/webm/m4v"
+            ));
+        }
+
+        String normalizedUserId = normalizeUserId(userId);
+        TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, priority);
+
+        try {
+            Path savedVideoPath = persistUploadedVideo(videoFile, safeFileName);
+            logger.info(
+                "Received upload task submission: file={} size={} user={} path={}",
+                safeFileName,
+                videoFile.getSize(),
+                normalizedUserId,
+                savedVideoPath
+            );
+
+            TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+                normalizedUserId,
+                savedVideoPath.toString(),
+                normalizeOutputDir(outputDir),
+                taskPriority
+            );
+
+            return ResponseEntity.ok(Map.of(
+                "success", true,
+                "taskId", task.taskId,
+                "status", task.status.name(),
+                "normalizedVideoUrl", savedVideoPath.toString(),
+                "uploadedFileName", safeFileName,
+                "message", "视频已上传，任务已提交，正在排队中"
+            ));
+        } catch (IOException e) {
+            logger.error("Failed to save uploaded video", e);
+            return ResponseEntity.status(503).body(Map.of(
+                "success", false,
+                "message", UserFacingErrorMapper.busyMessage()
+            ));
+        }
     }
     
     /**
@@ -127,9 +223,18 @@ public class VideoProcessingController {
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
         Map<String, Object> stats = taskQueueManager.getQueueStats();
-        stats.put("circuitBreakerState", grpcClient.getCircuitBreakerState().name());
-        stats.put("healthy", grpcClient.isHealthy());
+        boolean healthy = grpcClient.isHealthy();
+        CircuitBreaker.State cbState = grpcClient.getCircuitBreakerState();
+        stats.put("healthy", healthy);
+        stats.put("systemStatus", toUserSystemStatus(healthy, cbState));
         return ResponseEntity.ok(stats);
+    }
+
+    private String toUserSystemStatus(boolean healthy, CircuitBreaker.State cbState) {
+        if (healthy && cbState == CircuitBreaker.State.CLOSED) {
+            return "HEALTHY";
+        }
+        return "BUSY";
     }
     
     /**
@@ -153,6 +258,27 @@ public class VideoProcessingController {
             ? ResponseEntity.ok(health)
             : ResponseEntity.status(503).body(health);
     }
+
+    /**
+     * 用户视角健康状态（不暴露内部弹性组件术语）
+     */
+    @GetMapping("/health/user")
+    public ResponseEntity<Map<String, Object>> userHealthCheck() {
+        boolean pythonHealthy = grpcClient.isHealthy();
+        CircuitBreaker.State cbState = grpcClient.getCircuitBreakerState();
+        String systemStatus = toUserSystemStatus(pythonHealthy, cbState);
+        boolean healthy = "HEALTHY".equals(systemStatus);
+
+        Map<String, Object> health = Map.of(
+            "status", healthy ? "UP" : "BUSY",
+            "systemStatus", systemStatus,
+            "message", healthy ? "系统运行正常" : UserFacingErrorMapper.busyMessage()
+        );
+
+        return healthy
+            ? ResponseEntity.ok(health)
+            : ResponseEntity.status(503).body(health);
+    }
     
     /**
      * 重置熔断器（管理端点）
@@ -172,6 +298,119 @@ public class VideoProcessingController {
         public String userId;
         public String videoUrl;
         public String outputDir;
-        public String priority; // normal, high, vip
+        public String priority; // 已废弃：前台不再暴露，服务端将忽略客户端传值
+    }
+
+    private String normalizeVideoInput(String rawVideoInput) {
+        if (rawVideoInput == null) {
+            return "";
+        }
+        String trimmed = rawVideoInput.trim();
+        if (trimmed.isEmpty()) {
+            return "";
+        }
+
+        // 本地路径不做 URL 归一，避免误把路径中的 BV 字符串当成视频号。
+        if (looksLikeLocalPath(trimmed)) {
+            return trimmed;
+        }
+
+        Matcher matcher = BV_PATTERN.matcher(trimmed);
+        if (trimmed.regionMatches(true, 0, "http://", 0, 7)
+                || trimmed.regionMatches(true, 0, "https://", 0, 8)) {
+            if (trimmed.toLowerCase(Locale.ROOT).contains("bilibili.com") && matcher.find()) {
+                return "https://www.bilibili.com/video/" + matcher.group().toUpperCase(Locale.ROOT);
+            }
+            return trimmed;
+        }
+
+        if (matcher.matches()) {
+            return "https://www.bilibili.com/video/" + matcher.group().toUpperCase(Locale.ROOT);
+        }
+        if (matcher.find()) {
+            return "https://www.bilibili.com/video/" + matcher.group().toUpperCase(Locale.ROOT);
+        }
+        return trimmed;
+    }
+
+    private boolean looksLikeLocalPath(String value) {
+        if (value.startsWith("file://")) return true;
+        if (value.startsWith(".") || value.startsWith("/") || value.startsWith("\\")) return true;
+        return WINDOWS_ABSOLUTE_PATH.matcher(value).matches();
+    }
+
+    private TaskQueueManager.Priority resolvePriority(String normalizedUserId, String rawPriority) {
+        if (StringUtils.hasText(rawPriority)) {
+            logger.info("Ignore client priority '{}' for user={}", rawPriority, normalizedUserId);
+        }
+        return TaskQueueManager.Priority.NORMAL;
+    }
+
+    private String normalizeUserId(String rawUserId) {
+        String trimmed = rawUserId != null ? rawUserId.trim() : "";
+        if (!trimmed.isEmpty()) {
+            return trimmed;
+        }
+        return "user_" + System.currentTimeMillis();
+    }
+
+    private String normalizeOutputDir(String rawOutputDir) {
+        if (rawOutputDir == null) {
+            return null;
+        }
+        String trimmed = rawOutputDir.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String sanitizeUploadFileName(String rawFileName) {
+        String baseName = "uploaded_video.mp4";
+        if (StringUtils.hasText(rawFileName)) {
+            try {
+                baseName = Paths.get(rawFileName).getFileName().toString();
+            } catch (Exception ignored) {
+                baseName = rawFileName;
+            }
+        }
+        String sanitized = UNSAFE_FILENAME_CHARS.matcher(baseName).replaceAll("_");
+        sanitized = sanitized.replaceAll("_+", "_");
+        if (!StringUtils.hasText(sanitized)) {
+            sanitized = "uploaded_video.mp4";
+        }
+        if (sanitized.startsWith(".")) {
+            sanitized = "video" + sanitized;
+        }
+        if (!sanitized.contains(".")) {
+            sanitized = sanitized + ".mp4";
+        }
+        return sanitized;
+    }
+
+    private boolean hasSupportedVideoExtension(String fileName) {
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        for (String ext : ALLOWED_VIDEO_EXTENSIONS) {
+            if (lower.endsWith(ext)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Path persistUploadedVideo(MultipartFile videoFile, String safeFileName) throws IOException {
+        Path uploadRootPath = resolveUploadRoot();
+        String uniquePrefix = Instant.now().toEpochMilli() + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        Path targetPath = uploadRootPath.resolve(uniquePrefix + "_" + safeFileName).toAbsolutePath().normalize();
+        if (!targetPath.startsWith(uploadRootPath)) {
+            throw new IOException("非法上传路径");
+        }
+        try (InputStream inputStream = videoFile.getInputStream()) {
+            Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);
+        }
+        return targetPath;
+    }
+
+    private Path resolveUploadRoot() throws IOException {
+        Path uploadRootPath = Paths.get(uploadDir).toAbsolutePath().normalize();
+        Files.createDirectories(uploadRootPath);
+        return uploadRootPath;
     }
 }
