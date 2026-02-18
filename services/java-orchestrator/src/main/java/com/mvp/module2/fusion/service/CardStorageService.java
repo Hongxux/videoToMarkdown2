@@ -34,8 +34,13 @@ public class CardStorageService {
     private static final Logger logger = LoggerFactory.getLogger(CardStorageService.class);
     private static final String CARD_EXTENSION = ".md";
     private static final String FRONTMATTER_BOUNDARY = "---";
-    private static final String BACKLINK_HEADER = "## 🔗 反向链接";
-    private static final String MERGE_DRAFT_HEADER = "## 🧩 待合并草稿";
+    private static final String FRONTMATTER_TITLE_KEY = "title";
+    private static final String FRONTMATTER_CREATED_KEY = "created";
+    private static final String FRONTMATTER_TAGS_KEY = "tags";
+    private static final String FRONTMATTER_TYPE_KEY = "type";
+    private static final String FRONTMATTER_ALIASES_KEY = "aliases";
+    private static final String BACKLINK_HEADER = "## Backlinks";
+    private static final String MERGE_DRAFT_HEADER = "## Draft To Merge";
     private static final String TEAR_CALLOUT_HEADER = "> [!TEAR]";
     private static final int MAX_TITLE_LENGTH = 120;
     private static final Pattern ILLEGAL_TITLE_CHARS = Pattern.compile("[\\\\/:*?\"<>|\\p{Cntrl}]");
@@ -53,6 +58,7 @@ public class CardStorageService {
 
     private Path cardsRoot;
     private final Map<String, String> titleIndex = new ConcurrentHashMap<>();
+    private final Map<String, String> titleDisplayIndex = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -60,7 +66,7 @@ public class CardStorageService {
         try {
             Files.createDirectories(this.cardsRoot);
         } catch (IOException ex) {
-            logger.warn("创建概念卡片目录失败: {} err={}", this.cardsRoot, ex.getMessage());
+            logger.warn("create cards directory failed: {} err={}", this.cardsRoot, ex.getMessage());
         }
         refreshTitleIndex();
     }
@@ -69,7 +75,7 @@ public class CardStorageService {
         if (this.cardsRoot == null) {
             init();
         }
-        List<String> titles = new ArrayList<>(titleIndex.values());
+        List<String> titles = new ArrayList<>(titleDisplayIndex.values());
         titles.sort(String.CASE_INSENSITIVE_ORDER);
         return titles;
     }
@@ -78,8 +84,21 @@ public class CardStorageService {
         if (this.cardsRoot == null) {
             init();
         }
-        String targetTitle = normalizeTitle(rawTitle);
-        String targetKey = normalizeTitleKey(targetTitle);
+        String targetStorageTitle = resolveStorageTitle(rawTitle);
+        String targetStorageKey = normalizeLookupKey(targetStorageTitle);
+        Path targetPath = resolveCardPath(targetStorageTitle);
+        Set<String> targetKeys = new LinkedHashSet<>();
+        targetKeys.add(targetStorageKey);
+        targetKeys.add(normalizeLookupKey(rawTitle));
+        if (Files.exists(targetPath) && Files.isRegularFile(targetPath)) {
+            try {
+                CardDocument targetDoc = parseDocument(Files.readString(targetPath, StandardCharsets.UTF_8));
+                targetKeys.addAll(buildTermKeysForCard(targetStorageTitle, targetDoc.frontmatter));
+            } catch (Exception ex) {
+                logger.warn("scan target card aliases failed: title={} err={}", targetStorageTitle, ex.getMessage());
+            }
+        }
+        targetKeys.removeIf(key -> !StringUtils.hasText(key));
         if (!Files.isDirectory(cardsRoot)) {
             return List.of();
         }
@@ -89,22 +108,23 @@ public class CardStorageService {
                     .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(CARD_EXTENSION))
                     .forEach(path -> {
                         String filename = path.getFileName().toString();
-                        String sourceTitle = filename.substring(0, filename.length() - CARD_EXTENSION.length());
-                        if (!StringUtils.hasText(sourceTitle)) {
+                        String sourceStorageTitle = filename.substring(0, filename.length() - CARD_EXTENSION.length());
+                        if (!StringUtils.hasText(sourceStorageTitle)) {
                             return;
                         }
-                        if (normalizeTitleKey(sourceTitle).equals(targetKey)) {
+                        if (normalizeLookupKey(sourceStorageTitle).equals(targetStorageKey)) {
                             return;
                         }
                         try {
                             String raw = Files.readString(path, StandardCharsets.UTF_8);
                             CardDocument doc = parseDocument(raw);
-                            int count = countMatchedWikilinks(doc.body, targetKey);
+                            int count = countMatchedWikilinks(doc.body, targetKeys);
                             if (count > 0) {
+                                String sourceTitle = resolveDisplayTitle(sourceStorageTitle, doc.frontmatter);
                                 backlinks.add(new CardBacklinkItem(sourceTitle, count));
                             }
                         } catch (Exception ex) {
-                            logger.warn("扫描反向链接失败: source={} err={}", sourceTitle, ex.getMessage());
+                            logger.warn("scan backlinks failed: source={} err={}", sourceStorageTitle, ex.getMessage());
                         }
                     });
         }
@@ -113,21 +133,22 @@ public class CardStorageService {
     }
 
     public CardReadResult readCard(String rawTitle) throws IOException {
-        String safeTitle = normalizeTitle(rawTitle);
-        Path cardPath = resolveCardPath(safeTitle);
+        String storageTitle = resolveStorageTitle(rawTitle);
+        Path cardPath = resolveCardPath(storageTitle);
         if (!Files.exists(cardPath) || !Files.isRegularFile(cardPath)) {
-            CardMetadata meta = buildMetadata(safeTitle, Map.of(), null);
-            return new CardReadResult(safeTitle, "", cardPath, false, meta.created, meta.type, meta.tags);
+            CardMetadata meta = buildMetadata(storageTitle, normalizeDisplayTerm(rawTitle), Map.of(), null);
+            return new CardReadResult(meta.title, "", cardPath, false, meta.created, meta.type, meta.tags, meta.aliases);
         }
         String raw = Files.readString(cardPath, StandardCharsets.UTF_8);
         CardDocument doc = parseDocument(raw);
-        CardMetadata meta = buildMetadata(safeTitle, doc.frontmatter, null);
-        return new CardReadResult(safeTitle, doc.body, cardPath, true, meta.created, meta.type, meta.tags);
+        CardMetadata meta = buildMetadata(storageTitle, normalizeDisplayTerm(rawTitle), doc.frontmatter, null);
+        return new CardReadResult(meta.title, doc.body, cardPath, true, meta.created, meta.type, meta.tags, meta.aliases);
     }
 
     public CardSaveResult saveCard(String rawTitle, String markdown, CardWriteOptions options) throws IOException {
-        String safeTitle = normalizeTitle(rawTitle);
-        Path cardPath = resolveCardPath(safeTitle);
+        String requestedTitle = normalizeDisplayTerm(rawTitle);
+        String storageTitle = resolveStorageTitle(rawTitle);
+        Path cardPath = resolveCardPath(storageTitle);
         if (cardPath.getParent() != null) {
             Files.createDirectories(cardPath.getParent());
         }
@@ -139,27 +160,27 @@ public class CardStorageService {
 
         String existingBody = normalizeMarkdown(existingDoc.body).trim();
         String incomingBody = normalizeMarkdown(incomingDoc.body).trim();
-        CardMetadata metadata = buildMetadata(safeTitle, existingDoc.frontmatter, options);
+        CardMetadata metadata = buildMetadata(storageTitle, requestedTitle, existingDoc.frontmatter, options);
         String mergedBody = mergeBodiesPreservingManualEdits(existingBody, incomingBody);
-        String backlinkEntry = buildBacklinkEntry(options);
-        mergedBody = appendBacklinkEntry(mergedBody, backlinkEntry);
 
         String persisted = renderDocument(metadata, mergedBody);
         writeStringAtomically(cardPath, persisted);
         Instant updatedAt = Instant.now();
 
-        titleIndex.put(normalizeTitleKey(safeTitle), safeTitle);
+        refreshTitleIndex();
+        String locatorTitle = StringUtils.hasText(requestedTitle) ? requestedTitle : metadata.title;
         return new CardSaveResult(
-                safeTitle,
+                metadata.title,
                 cardPath,
                 persisted.length(),
                 updatedAt.toString(),
                 metadata.created,
                 metadata.type,
                 metadata.tags,
+                metadata.aliases,
                 "global",
                 cardPath,
-                Map.of("kind", "title", "value", safeTitle),
+                Map.of("kind", "title", "value", locatorTitle),
                 buildRevision(updatedAt, persisted.length())
         );
     }
@@ -199,6 +220,7 @@ public class CardStorageService {
                 "",
                 "local",
                 List.of(),
+                List.of(),
                 "local",
                 sourcePath,
                 locator,
@@ -206,29 +228,50 @@ public class CardStorageService {
         );
     }
 
-    private CardMetadata buildMetadata(String safeTitle, Map<String, String> existing, CardWriteOptions options) {
+    private CardMetadata buildMetadata(
+            String storageTitle,
+            String requestedTitle,
+            Map<String, String> existing,
+            CardWriteOptions options
+    ) {
         String optionCreated = options != null ? normalizeDate(options.created) : "";
-        String existingCreated = normalizeDate(existing.get("created"));
+        String existingCreated = normalizeDate(existing.get(FRONTMATTER_CREATED_KEY));
         String created = firstNonBlank(optionCreated, existingCreated, LocalDate.now().toString());
 
         String optionType = options != null ? normalizeType(options.type) : "";
-        String existingType = normalizeType(existing.get("type"));
+        String existingType = normalizeType(existing.get(FRONTMATTER_TYPE_KEY));
         String fallbackType = (options != null && Boolean.TRUE.equals(options.contextDependent)) ? "context" : "concept";
         String type = firstNonBlank(optionType, existingType, fallbackType);
 
         List<String> tags = options != null && options.tags != null
                 ? sanitizeTags(options.tags)
-                : parseTags(existing.get("tags"));
-        return new CardMetadata(safeTitle, created, type, tags);
+                : parseTags(existing.get(FRONTMATTER_TAGS_KEY));
+
+        String existingTitle = normalizeDisplayTerm(existing.get(FRONTMATTER_TITLE_KEY));
+        String title = firstNonBlank(existingTitle, normalizeDisplayTerm(requestedTitle), storageTitle);
+
+        List<String> aliases = new ArrayList<>(parseAliases(existing.get(FRONTMATTER_ALIASES_KEY)));
+        if (options != null && options.aliases != null && !options.aliases.isEmpty()) {
+            aliases.addAll(options.aliases);
+        }
+        String normalizedRequested = normalizeDisplayTerm(requestedTitle);
+        if (StringUtils.hasText(normalizedRequested)
+                && !normalizedRequested.equalsIgnoreCase(title)
+                && !normalizedRequested.equalsIgnoreCase(storageTitle)) {
+            aliases.add(normalizedRequested);
+        }
+        aliases = sanitizeAliases(aliases, title, storageTitle);
+        return new CardMetadata(title, created, type, tags, aliases);
     }
 
     private String renderDocument(CardMetadata metadata, String body) {
         StringBuilder out = new StringBuilder();
         out.append(FRONTMATTER_BOUNDARY).append('\n');
-        out.append("title: ").append(yamlQuote(metadata.title)).append('\n');
-        out.append("created: ").append(yamlQuote(metadata.created)).append('\n');
-        out.append("tags: ").append(renderTagsInline(metadata.tags)).append('\n');
-        out.append("type: ").append(yamlQuote(metadata.type)).append('\n');
+        out.append(FRONTMATTER_TITLE_KEY).append(": ").append(yamlQuote(metadata.title)).append('\n');
+        out.append(FRONTMATTER_CREATED_KEY).append(": ").append(yamlQuote(metadata.created)).append('\n');
+        out.append(FRONTMATTER_TAGS_KEY).append(": ").append(renderTagsInline(metadata.tags)).append('\n');
+        out.append(FRONTMATTER_TYPE_KEY).append(": ").append(yamlQuote(metadata.type)).append('\n');
+        out.append(FRONTMATTER_ALIASES_KEY).append(": ").append(renderAliasesInline(metadata.aliases)).append('\n');
         out.append(FRONTMATTER_BOUNDARY).append('\n');
         out.append('\n');
 
@@ -269,6 +312,14 @@ public class CardStorageService {
             }
             String key = line.substring(0, delimiter).trim().toLowerCase(Locale.ROOT);
             String value = line.substring(delimiter + 1).trim();
+            if (value.isEmpty()) {
+                ParsedFrontmatterList parsedList = parseIndentedList(lines, i + 1, closeIndex);
+                if (!parsedList.items.isEmpty()) {
+                    frontmatter.put(key, renderYamlInlineList(parsedList.items));
+                    i = parsedList.lastConsumedIndex;
+                    continue;
+                }
+            }
             if (!key.isEmpty()) {
                 frontmatter.put(key, stripYamlQuotes(value));
             }
@@ -282,6 +333,32 @@ public class CardStorageService {
             }
         }
         return new CardDocument(frontmatter, body.toString());
+    }
+
+    private ParsedFrontmatterList parseIndentedList(String[] lines, int startIndex, int closeIndex) {
+        List<String> items = new ArrayList<>();
+        int lastConsumedIndex = startIndex - 1;
+        for (int i = startIndex; i < closeIndex; i += 1) {
+            String line = lines[i];
+            String trimmed = line.trim();
+            if (trimmed.isEmpty()) {
+                lastConsumedIndex = i;
+                continue;
+            }
+            if (!Character.isWhitespace(line.charAt(0))) {
+                break;
+            }
+            if (trimmed.startsWith("- ")) {
+                String item = stripYamlQuotes(trimmed.substring(2).trim());
+                if (!item.isEmpty()) {
+                    items.add(item);
+                }
+                lastConsumedIndex = i;
+                continue;
+            }
+            break;
+        }
+        return new ParsedFrontmatterList(items, lastConsumedIndex);
     }
 
     private String mergeBodiesPreservingManualEdits(String existingBodyRaw, String incomingBodyRaw) {
@@ -314,73 +391,8 @@ public class CardStorageService {
                 + "\n```";
     }
 
-    private String buildBacklinkEntry(CardWriteOptions options) {
-        if (options == null) {
-            return "";
-        }
-        String sourceTaskId = sanitizeSingleLine(options.sourceTaskId);
-        String sourcePath = sanitizeSingleLine(options.sourcePath);
-        if (sourceTaskId.isEmpty() && sourcePath.isEmpty()) {
-            return "";
-        }
-        StringBuilder entry = new StringBuilder("- ");
-        if (!sourceTaskId.isEmpty()) {
-            entry.append("task `").append(sourceTaskId).append("`");
-        } else {
-            entry.append("source");
-        }
-        if (!sourcePath.isEmpty()) {
-            entry.append(" @ `").append(sourcePath).append("`");
-        }
-        return entry.toString();
-    }
-
-    private String appendBacklinkEntry(String bodyRaw, String backlinkEntryRaw) {
-        String body = normalizeMarkdown(bodyRaw).trim();
-        String entry = sanitizeSingleLine(backlinkEntryRaw);
-        if (entry.isEmpty()) {
-            return body;
-        }
-
-        List<String> lines = new ArrayList<>();
-        if (!body.isEmpty()) {
-            lines.addAll(List.of(body.split("\n", -1)));
-        }
-        int headerIndex = -1;
-        for (int i = 0; i < lines.size(); i += 1) {
-            if (BACKLINK_HEADER.equals(lines.get(i).trim())) {
-                headerIndex = i;
-                break;
-            }
-        }
-        if (headerIndex < 0) {
-            if (!lines.isEmpty() && !lines.get(lines.size() - 1).isBlank()) {
-                lines.add("");
-            }
-            lines.add(BACKLINK_HEADER);
-            lines.add(entry);
-            return String.join("\n", lines).trim();
-        }
-
-        int sectionEnd = lines.size();
-        for (int i = headerIndex + 1; i < lines.size(); i += 1) {
-            String line = lines.get(i).trim();
-            if (line.startsWith("## ") && !BACKLINK_HEADER.equals(line)) {
-                sectionEnd = i;
-                break;
-            }
-        }
-        for (int i = headerIndex + 1; i < sectionEnd; i += 1) {
-            if (entry.equals(lines.get(i).trim())) {
-                return String.join("\n", lines).trim();
-            }
-        }
-        lines.add(sectionEnd, entry);
-        return String.join("\n", lines).trim();
-    }
-
-    private int countMatchedWikilinks(String markdownBody, String targetKey) {
-        if (!StringUtils.hasText(markdownBody) || !StringUtils.hasText(targetKey)) {
+    private int countMatchedWikilinks(String markdownBody, Set<String> targetKeys) {
+        if (!StringUtils.hasText(markdownBody) || targetKeys == null || targetKeys.isEmpty()) {
             return 0;
         }
         int count = 0;
@@ -391,7 +403,7 @@ public class CardStorageService {
                 continue;
             }
             String linkTargetKey = normalizeLinkTargetKey(rawTarget);
-            if (targetKey.equals(linkTargetKey)) {
+            if (targetKeys.contains(linkTargetKey)) {
                 count += 1;
             }
         }
@@ -403,24 +415,7 @@ public class CardStorageService {
         if (!StringUtils.hasText(safe)) {
             return "";
         }
-        try {
-            return normalizeTitleKey(normalizeTitle(safe));
-        } catch (IllegalArgumentException ex) {
-            // 兼容历史脏数据，避免单个非法链接导致整张卡片的反向链接扫描失败。
-            return normalizeTitleKey(safe);
-        }
-    }
-
-    private String sanitizeSingleLine(String raw) {
-        String safe = normalizeMarkdown(raw).replace('\n', ' ').replace('\t', ' ').trim();
-        if (safe.isEmpty()) {
-            return "";
-        }
-        safe = safe.replaceAll("\\s+", " ");
-        if (safe.length() > 240) {
-            safe = safe.substring(0, 240).trim();
-        }
-        return safe;
+        return normalizeLookupKey(safe);
     }
 
     private void writeStringAtomically(Path target, String content) throws IOException {
@@ -483,7 +478,7 @@ public class CardStorageService {
         String text = normalizeMarkdown(markdown);
         int anchorIndex = text.indexOf(anchorText);
         if (anchorIndex < 0) {
-            throw new IllegalArgumentException("未找到指定锚点: anchor");
+            throw new IllegalArgumentException("anchor not found in source markdown");
         }
         int paragraphEnd = findParagraphBoundary(text, anchorIndex + anchorText.length());
         String leadingTail = text.substring(paragraphEnd).stripLeading();
@@ -539,7 +534,15 @@ public class CardStorageService {
     }
 
     private List<String> parseTags(String rawTags) {
-        String safe = String.valueOf(rawTags == null ? "" : rawTags).trim();
+        return sanitizeTags(parseYamlInlineList(rawTags));
+    }
+
+    private List<String> parseAliases(String rawAliases) {
+        return sanitizeAliases(parseYamlInlineList(rawAliases), "", "");
+    }
+
+    private List<String> parseYamlInlineList(String rawList) {
+        String safe = String.valueOf(rawList == null ? "" : rawList).trim();
         if (safe.isEmpty()) {
             return List.of();
         }
@@ -550,14 +553,14 @@ public class CardStorageService {
             return List.of();
         }
         String[] pieces = safe.split(",");
-        List<String> tags = new ArrayList<>();
+        List<String> values = new ArrayList<>();
         for (String piece : pieces) {
-            String tag = stripYamlQuotes(piece).trim();
-            if (!tag.isEmpty()) {
-                tags.add(tag);
+            String value = stripYamlQuotes(piece).trim();
+            if (!value.isEmpty()) {
+                values.add(value);
             }
         }
-        return sanitizeTags(tags);
+        return values;
     }
 
     private List<String> sanitizeTags(List<String> tags) {
@@ -581,6 +584,33 @@ public class CardStorageService {
         return new ArrayList<>(unique.values());
     }
 
+    private List<String> sanitizeAliases(List<String> aliases, String title, String storageTitle) {
+        if (aliases == null || aliases.isEmpty()) {
+            return List.of();
+        }
+        String normalizedTitle = normalizeLookupKey(title);
+        String normalizedStorageTitle = normalizeLookupKey(storageTitle);
+        LinkedHashMap<String, String> unique = new LinkedHashMap<>();
+        for (String raw : aliases) {
+            String alias = normalizeDisplayTerm(raw);
+            if (!StringUtils.hasText(alias)) {
+                continue;
+            }
+            if (alias.length() > 120) {
+                alias = alias.substring(0, 120).trim();
+            }
+            if (!StringUtils.hasText(alias)) {
+                continue;
+            }
+            String key = normalizeLookupKey(alias);
+            if (key.equals(normalizedTitle) || key.equals(normalizedStorageTitle)) {
+                continue;
+            }
+            unique.putIfAbsent(key, alias);
+        }
+        return new ArrayList<>(unique.values());
+    }
+
     private String renderTagsInline(List<String> tags) {
         List<String> safeTags = sanitizeTags(tags);
         if (safeTags.isEmpty()) {
@@ -589,6 +619,39 @@ public class CardStorageService {
         List<String> parts = new ArrayList<>(safeTags.size());
         for (String tag : safeTags) {
             parts.add(yamlQuote(tag));
+        }
+        return "[" + String.join(", ", parts) + "]";
+    }
+
+    private String renderAliasesInline(List<String> aliases) {
+        List<String> safeAliases = sanitizeAliases(aliases, "", "");
+        if (safeAliases.isEmpty()) {
+            return "[]";
+        }
+        List<String> parts = new ArrayList<>(safeAliases.size());
+        for (String alias : safeAliases) {
+            parts.add(yamlQuote(alias));
+        }
+        return "[" + String.join(", ", parts) + "]";
+    }
+
+    private String renderYamlInlineList(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return "[]";
+        }
+        List<String> safeValues = new ArrayList<>();
+        for (String value : values) {
+            String safe = stripYamlQuotes(value).trim();
+            if (!safe.isEmpty()) {
+                safeValues.add(safe);
+            }
+        }
+        if (safeValues.isEmpty()) {
+            return "[]";
+        }
+        List<String> parts = new ArrayList<>(safeValues.size());
+        for (String safeValue : safeValues) {
+            parts.add(yamlQuote(safeValue));
         }
         return "[" + String.join(", ", parts) + "]";
     }
@@ -617,6 +680,9 @@ public class CardStorageService {
         if ("concept".equals(safe)) {
             return "concept";
         }
+        if ("thought".equals(safe)) {
+            return "thought";
+        }
         return "";
     }
 
@@ -638,28 +704,96 @@ public class CardStorageService {
 
     private void refreshTitleIndex() {
         titleIndex.clear();
+        titleDisplayIndex.clear();
         if (cardsRoot == null || !Files.isDirectory(cardsRoot)) {
             return;
         }
         try (Stream<Path> stream = Files.list(cardsRoot)) {
             stream.filter(Files::isRegularFile)
                     .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(CARD_EXTENSION))
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString().toLowerCase(Locale.ROOT)))
                     .forEach(path -> {
                         String filename = path.getFileName().toString();
-                        String title = filename.substring(0, filename.length() - CARD_EXTENSION.length());
-                        if (!title.isBlank()) {
-                            titleIndex.put(normalizeTitleKey(title), title);
+                        String storageTitle = filename.substring(0, filename.length() - CARD_EXTENSION.length());
+                        if (!StringUtils.hasText(storageTitle)) {
+                            return;
+                        }
+                        Map<String, String> frontmatter = Map.of();
+                        try {
+                            String rawCard = Files.readString(path, StandardCharsets.UTF_8);
+                            CardDocument doc = parseDocument(rawCard);
+                            frontmatter = doc.frontmatter;
+                        } catch (Exception ex) {
+                            logger.warn("read card index metadata failed: file={} err={}", filename, ex.getMessage());
+                        }
+                        List<String> terms = collectTermsForCard(storageTitle, frontmatter);
+                        for (String term : terms) {
+                            registerIndexTerm(term, storageTitle);
                         }
                     });
         } catch (IOException ex) {
-            logger.warn("刷新概念卡片索引失败: {} err={}", cardsRoot, ex.getMessage());
+            logger.warn("refresh card title index failed: {} err={}", cardsRoot, ex.getMessage());
         }
+    }
+
+    private void registerIndexTerm(String rawTerm, String storageTitle) {
+        String term = normalizeDisplayTerm(rawTerm);
+        if (!StringUtils.hasText(term) || !StringUtils.hasText(storageTitle)) {
+            return;
+        }
+        String key = normalizeLookupKey(term);
+        titleIndex.putIfAbsent(key, storageTitle);
+        titleDisplayIndex.putIfAbsent(key, term);
+    }
+
+    private List<String> collectTermsForCard(String storageTitle, Map<String, String> frontmatter) {
+        LinkedHashSet<String> terms = new LinkedHashSet<>();
+        String displayTitle = resolveDisplayTitle(storageTitle, frontmatter);
+        if (StringUtils.hasText(displayTitle)) {
+            terms.add(displayTitle);
+        }
+        if (StringUtils.hasText(storageTitle)) {
+            terms.add(storageTitle);
+        }
+        for (String alias : parseAliases(frontmatter.get(FRONTMATTER_ALIASES_KEY))) {
+            if (StringUtils.hasText(alias)) {
+                terms.add(alias);
+            }
+        }
+        return new ArrayList<>(terms);
+    }
+
+    private Set<String> buildTermKeysForCard(String storageTitle, Map<String, String> frontmatter) {
+        Set<String> keys = new LinkedHashSet<>();
+        for (String term : collectTermsForCard(storageTitle, frontmatter)) {
+            String key = normalizeLookupKey(term);
+            if (StringUtils.hasText(key)) {
+                keys.add(key);
+            }
+        }
+        return keys;
+    }
+
+    private String resolveDisplayTitle(String storageTitle, Map<String, String> frontmatter) {
+        String frontmatterTitle = normalizeDisplayTerm(frontmatter.get(FRONTMATTER_TITLE_KEY));
+        return StringUtils.hasText(frontmatterTitle) ? frontmatterTitle : storageTitle;
+    }
+
+    private String resolveStorageTitle(String rawTitle) {
+        String lookupKey = normalizeLookupKey(rawTitle);
+        if (StringUtils.hasText(lookupKey)) {
+            String indexed = titleIndex.get(lookupKey);
+            if (StringUtils.hasText(indexed)) {
+                return indexed;
+            }
+        }
+        return normalizeTitle(rawTitle);
     }
 
     private String normalizeTitle(String rawTitle) {
         String title = String.valueOf(rawTitle == null ? "" : rawTitle).trim();
         if (title.isEmpty()) {
-            throw new IllegalArgumentException("卡片标题不能为空");
+            throw new IllegalArgumentException("card title cannot be empty");
         }
         title = ILLEGAL_TITLE_CHARS.matcher(title).replaceAll("_");
         title = title.replaceAll("\\s+", " ").trim();
@@ -672,14 +806,13 @@ public class CardStorageService {
             title = ensureFileSystemSafeTitle(title);
         }
         if (title.isEmpty()) {
-            throw new IllegalArgumentException("invalid card title");
+            throw new IllegalArgumentException("card title cannot be empty");
         }
         return title;
     }
 
     private String ensureFileSystemSafeTitle(String title) {
         String safe = TRAILING_DOT_OR_SPACE.matcher(String.valueOf(title == null ? "" : title)).replaceAll("");
-        // Windows 会将保留设备名视为特殊文件名，即使带扩展名也可能写入失败，统一加前缀规避。
         if (isWindowsReservedBasename(safe)) {
             safe = "_" + safe;
         }
@@ -699,8 +832,16 @@ public class CardStorageService {
         return WINDOWS_RESERVED_BASENAMES.contains(basename.toUpperCase(Locale.ROOT));
     }
 
-    private String normalizeTitleKey(String title) {
-        return String.valueOf(title).trim().toLowerCase(Locale.ROOT);
+    private String normalizeDisplayTerm(String rawTerm) {
+        String term = String.valueOf(rawTerm == null ? "" : rawTerm).trim();
+        if (!StringUtils.hasText(term)) {
+            return "";
+        }
+        return term.replaceAll("\\s+", " ").trim();
+    }
+
+    private String normalizeLookupKey(String term) {
+        return normalizeDisplayTerm(term).toLowerCase(Locale.ROOT);
     }
 
     private Path resolveCardPath(String safeTitle) {
@@ -734,6 +875,16 @@ public class CardStorageService {
         return Paths.get("var", "storage", "cards").toAbsolutePath().normalize();
     }
 
+    private static class ParsedFrontmatterList {
+        private final List<String> items;
+        private final int lastConsumedIndex;
+
+        private ParsedFrontmatterList(List<String> items, int lastConsumedIndex) {
+            this.items = items == null ? List.of() : List.copyOf(items);
+            this.lastConsumedIndex = lastConsumedIndex;
+        }
+    }
+
     private static class CardDocument {
         private final Map<String, String> frontmatter;
         private final String body;
@@ -753,12 +904,14 @@ public class CardStorageService {
         private final String created;
         private final String type;
         private final List<String> tags;
+        private final List<String> aliases;
 
-        private CardMetadata(String title, String created, String type, List<String> tags) {
+        private CardMetadata(String title, String created, String type, List<String> tags, List<String> aliases) {
             this.title = title;
             this.created = created;
             this.type = type;
             this.tags = tags == null ? List.of() : List.copyOf(tags);
+            this.aliases = aliases == null ? List.of() : List.copyOf(aliases);
         }
     }
 
@@ -767,6 +920,7 @@ public class CardStorageService {
         public String type;
         public String created;
         public List<String> tags;
+        public List<String> aliases;
         public String sourceTaskId;
         public String sourcePath;
     }
@@ -789,6 +943,7 @@ public class CardStorageService {
         public final String created;
         public final String type;
         public final List<String> tags;
+        public final List<String> aliases;
 
         public CardReadResult(
                 String title,
@@ -797,7 +952,8 @@ public class CardStorageService {
                 boolean exists,
                 String created,
                 String type,
-                List<String> tags
+                List<String> tags,
+                List<String> aliases
         ) {
             this.title = title;
             this.markdown = markdown == null ? "" : markdown;
@@ -806,6 +962,7 @@ public class CardStorageService {
             this.created = created == null ? "" : created;
             this.type = type == null ? "concept" : type;
             this.tags = tags == null ? List.of() : List.copyOf(tags);
+            this.aliases = aliases == null ? List.of() : List.copyOf(aliases);
         }
     }
 
@@ -817,6 +974,7 @@ public class CardStorageService {
         public final String created;
         public final String type;
         public final List<String> tags;
+        public final List<String> aliases;
         public final String targetType;
         public final String targetPath;
         public final Map<String, Object> locator;
@@ -839,6 +997,7 @@ public class CardStorageService {
                     created,
                     type,
                     tags,
+                    List.of(),
                     "global",
                     path,
                     Map.of("kind", "title", "value", title),
@@ -854,6 +1013,7 @@ public class CardStorageService {
                 String created,
                 String type,
                 List<String> tags,
+                List<String> aliases,
                 String targetType,
                 Path targetPath,
                 Map<String, Object> locator,
@@ -866,6 +1026,7 @@ public class CardStorageService {
             this.created = created == null ? "" : created;
             this.type = type == null ? "concept" : type;
             this.tags = tags == null ? List.of() : List.copyOf(tags);
+            this.aliases = aliases == null ? List.of() : List.copyOf(aliases);
             this.targetType = StringUtils.hasText(targetType) ? targetType.trim() : "global";
             this.targetPath = targetPath == null ? "" : targetPath.toString();
             this.locator = locator == null ? Map.of() : Map.copyOf(locator);

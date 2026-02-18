@@ -2,6 +2,69 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-18 概念卡片别名解耦：文件名与标题不再强绑定（支持 Obsidian aliases）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 既有 `CardStorageService` 以“标题=文件名”作为唯一寻址键，导致卡片重命名、同义词检索、跨语言词形等场景需要复制卡片或新建重复文件。
+  - 前端与后端都默认“term 直接映射到文件名”，与 Obsidian `aliases` 的“多术语指向同一笔记”语义不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：笔记系统中的“稳定标识（文件）”与“认知入口（标题/别名）”应解耦，才能避免知识碎片化。
+  - 复用杠杆1：复用现有 `CardStorageService` frontmatter 读写与 title 索引刷新流程，不引入数据库或新索引服务。
+  - 复用杠杆2：复用现有 `/api/mobile/cards/**` 路由契约，仅扩展 payload 字段（`aliases`），保持调用链稳定。
+  - 复用杠杆3：复用现有 `[[wikilink]]` 扫描逻辑，升级为“目标卡 title+aliases 多键命中”。
+- 架构决策：
+  - 决策1：`CardStorageService` 索引升级为 `term -> storageTitle`（term 包含 filename/title/aliases），`listTitles` 返回可检索术语集合。
+  - 决策2：`readCard/saveCard/listBacklinks` 统一先解析 `storageTitle`，再读写文件，避免别名触发新文件分叉。
+  - 决策3：frontmatter 增加并持久化 `aliases` 字段；解析兼容 inline list 与缩进 list。
+  - 决策4：`MobileCardController` 在读取/保存返回体中透出 `aliases`，前端后续可直接消费。
+- 调用链与决策链变化：
+  - 改造前：`term -> normalizeTitle -> {term}.md`（强绑定）。
+  - 改造后：`term -> titleIndex(term->storageTitle) -> storage file`；backlinks 统计按目标卡 `title+aliases+filename` 多键匹配。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - 更新：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=CardStorageServiceTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+## 2026-02-18 高亮卡片 Thought-Only 化：禁用术语解释导向，语境仅作例子引用
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 高亮术语后新建卡片时，默认模板和 AI 建议容易落入“词条解释”，形成伪原子性：看似单卡，实则不可推理。
+  - 既有链路把语境当成“定义来源”，而非“例子证据”，导致卡片难以进入主张-反驳-边界的知识网络。
+- 第一性原理与复用杠杆：
+  - 第一性原理：卡片盒原子单元应是“最小可推理主张”，不是“最小可解释术语”。
+  - 复用杠杆1：复用现有 `/api/mobile/cards/concept/{title}` 存储接口，不新增服务与存储层。
+  - 复用杠杆2：复用 `mobile-concept-cards.js` 的高亮触发、撕开交互、保存闭环，只替换模板与决策字段。
+  - 复用杠杆3：复用 `DeepSeekAdvisorService` 入口，不改外部调用路径，仅调整提示词目标与回退文案。
+- 架构决策：
+  - 决策1：高亮新卡默认模板改为 Thought 结构（主张/机制/语境例子/边界），不再使用“术语标题 + 空白正文”。
+  - 决策2：`resolveContextInfo` 固定返回 `type=thought`，并抽取 `contextExample` 字段；语境只作为例子，不作为定义全文。
+  - 决策3：后端 `MobileCardController` 增加反词典校验，拦截“定义句起手且缺少推理/语境例子”的伪原子内容。
+  - 决策4：`CardStorageService.normalizeType` 新增 `thought` 类型，确保元数据可稳定落盘并可回读。
+  - 决策5：`DeepSeekAdvisorService` 提示词改为 Thought-only 约束，明确禁止 glossary/dictionary 输出风格。
+- 调用链与决策链变化：
+  - 改造前：
+    - `highlight term -> open card -> template(## term)`。
+    - `ai-advice` 可能输出术语定义风格内容。
+    - 保存类型在 `context/concept` 间切换。
+  - 改造后：
+    - `highlight term -> open card -> template(主张/机制/语境例子/边界)`。
+    - `mobile-concept-cards.js.loadAdvice -> POST /api/mobile/cards/ai-advice(term, context, contextExample)`。
+    - `MobileCardController.saveCardByTitle` 执行 Thought 质量闸门 -> `CardStorageService.saveCard(type=thought)`。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+  - 更新：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=CardStorageServiceTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-18 移动端控制器边界重构：卡片链路从 `MobileMarkdownController` 拆分至 `MobileCardController`
 - 日期：2026-02-18
 - 触发背景与问题：

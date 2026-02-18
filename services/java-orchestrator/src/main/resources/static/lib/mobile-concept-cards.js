@@ -1,4 +1,4 @@
-﻿(function (global) {
+(function (global) {
     'use strict';
 
     const BLOCK_SELECTOR = 'p, li, blockquote, h1, h2, h3, h4, h5, h6, pre';
@@ -13,6 +13,10 @@
     const STORAGE_TITLE_ILLEGAL_CHARS = /[\\/:*?"<>|\u0000-\u001f]/g;
     const STORAGE_TITLE_TRAILING_DOTS_OR_SPACE = /[.\s]+$/;
     const STORAGE_TITLE_WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+    const SELECTION_TRIGGER_HIDE_DELAY_MS = 160;
+    const SELECTION_SNIPPET_MAX_CHARS = 220;
+    const SELECTION_TERM_MAX_CHARS = 120;
+    const THOUGHT_CARD_TYPE = 'thought';
 
     function createMobileConceptCards(options = {}) {
         const config = Object.assign({
@@ -44,6 +48,9 @@
             lastTouchOpenAt: 0,
             bound: false,
             highlightEngine: null,
+            selectionTrigger: null,
+            selectionPayload: null,
+            selectionChangeTimer: 0,
         };
 
         async function refresh(params = {}) {
@@ -64,6 +71,13 @@
             resetHighlightRuntime();
             closeActiveCard({ save: false, silent: true }).catch(() => null);
             unbindContainer();
+            clearSelectionChangeTimer();
+            hideSelectionTrigger({ immediate: true });
+            if (state.selectionTrigger && state.selectionTrigger.parentNode) {
+                state.selectionTrigger.parentNode.removeChild(state.selectionTrigger);
+            }
+            state.selectionTrigger = null;
+            state.selectionPayload = null;
             if (state.highlightEngine && typeof state.highlightEngine.destroy === 'function') {
                 state.highlightEngine.destroy();
             }
@@ -195,12 +209,16 @@
             state.container.addEventListener('touchend', onTouchEnd, { capture: true, passive: false });
             state.container.addEventListener('touchcancel', onTouchCancel, { capture: true, passive: true });
             document.addEventListener('pointerdown', onDocumentPointerDown, true);
+            document.addEventListener('selectionchange', onDocumentSelectionChange, true);
             window.addEventListener('scroll', onWindowScroll, true);
+            window.addEventListener('resize', onWindowResize, true);
             state.bound = true;
         }
 
         function unbindContainer() {
             resetHighlightRuntime();
+            clearSelectionChangeTimer();
+            hideSelectionTrigger({ immediate: true });
             if (!state.container || !state.bound) {
                 state.container = null;
                 state.bound = false;
@@ -212,9 +230,36 @@
             state.container.removeEventListener('touchend', onTouchEnd, true);
             state.container.removeEventListener('touchcancel', onTouchCancel, true);
             document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+            document.removeEventListener('selectionchange', onDocumentSelectionChange, true);
             window.removeEventListener('scroll', onWindowScroll, true);
+            window.removeEventListener('resize', onWindowResize, true);
             state.container = null;
             state.bound = false;
+        }
+
+        function onDocumentSelectionChange() {
+            clearSelectionChangeTimer();
+            state.selectionChangeTimer = window.setTimeout(() => {
+                state.selectionChangeTimer = 0;
+                refreshSelectionTrigger();
+            }, SELECTION_TRIGGER_HIDE_DELAY_MS);
+        }
+
+        function onWindowResize() {
+            if (!state.selectionPayload) {
+                hideSelectionTrigger({ immediate: true });
+                return;
+            }
+            showSelectionTrigger(state.selectionPayload);
+        }
+
+        function refreshSelectionTrigger() {
+            const payload = resolveSelectionPayload();
+            if (!payload) {
+                hideSelectionTrigger({ immediate: false });
+                return;
+            }
+            showSelectionTrigger(payload);
         }
 
         function onContainerClick(event) {
@@ -293,6 +338,10 @@
         }
 
         function onDocumentPointerDown(event) {
+            if (state.selectionTrigger && state.selectionTrigger.contains(event.target)) {
+                return;
+            }
+            hideSelectionTrigger({ immediate: true });
             if (!state.activeCard) return;
             const root = state.activeCard.root;
             if (root && root.contains(event.target)) {
@@ -307,10 +356,172 @@
         }
 
         function onWindowScroll() {
+            hideSelectionTrigger({ immediate: true });
             if (!state.activeCard) return;
             closeActiveCard({ save: true, silent: true }).catch((error) => {
                 emitNotice(`淇濆瓨姒傚康鍗＄墖澶辫触锛?{normalizeError(error)}`, 'error');
             });
+        }
+
+        function clearSelectionChangeTimer() {
+            if (!state.selectionChangeTimer) return;
+            clearTimeout(state.selectionChangeTimer);
+            state.selectionChangeTimer = 0;
+        }
+
+        function ensureSelectionTrigger() {
+            if (state.selectionTrigger && state.selectionTrigger.isConnected) {
+                return state.selectionTrigger;
+            }
+            const trigger = document.createElement('button');
+            trigger.type = 'button';
+            trigger.className = 'concept-selection-trigger';
+            trigger.textContent = '新建卡片';
+            trigger.hidden = true;
+            trigger.addEventListener('pointerdown', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            trigger.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                openCardFromSelection().catch((error) => {
+                    emitNotice(`新建卡片失败：${normalizeError(error)}`, 'error');
+                });
+            });
+            document.body.appendChild(trigger);
+            state.selectionTrigger = trigger;
+            return trigger;
+        }
+
+        function showSelectionTrigger(payload) {
+            if (!payload || !payload.rect) return;
+            const trigger = ensureSelectionTrigger();
+            const viewportW = Math.max(320, Number(global.innerWidth) || 0);
+            const viewportH = Math.max(320, Number(global.innerHeight) || 0);
+            const targetX = payload.rect.left + (payload.rect.width / 2);
+            const targetY = payload.rect.top - 14;
+            const clampedX = Math.max(56, Math.min(viewportW - 56, targetX));
+            const clampedY = Math.max(16, Math.min(viewportH - 18, targetY));
+            trigger.style.left = `${clampedX}px`;
+            trigger.style.top = `${clampedY}px`;
+            trigger.hidden = false;
+            trigger.classList.add('is-visible');
+            state.selectionPayload = payload;
+        }
+
+        function hideSelectionTrigger(options = {}) {
+            state.selectionPayload = null;
+            const trigger = state.selectionTrigger;
+            if (!trigger) return;
+            trigger.classList.remove('is-visible');
+            if (options.immediate) {
+                trigger.hidden = true;
+                return;
+            }
+            window.setTimeout(() => {
+                if (!trigger.classList.contains('is-visible')) {
+                    trigger.hidden = true;
+                }
+            }, 150);
+        }
+
+        function resolveSelectionPayload() {
+            if (!state.container || !global.getSelection) return null;
+            const selection = global.getSelection();
+            if (!selection || selection.isCollapsed || selection.rangeCount < 1) return null;
+            const term = normalizeSelectionTerm(selection.toString());
+            if (!term) return null;
+            const range = selection.getRangeAt(0);
+            if (!range) return null;
+            if (!isNodeInsideContainer(range.commonAncestorContainer)) return null;
+            const endpointNode = resolveRangeEndpointNode(range);
+            if (!endpointNode) return null;
+            const endpointElement = endpointNode.nodeType === Node.TEXT_NODE
+                ? endpointNode.parentElement
+                : endpointNode;
+            if (!endpointElement || !state.container.contains(endpointElement)) return null;
+            if (endpointElement.closest('.card-fissure, .concept-tear-scene')) return null;
+            const rect = resolveSelectionRect(range);
+            if (!rect) return null;
+            return {
+                term,
+                rect,
+                anchorNode: endpointNode,
+                selectionSnippet: normalizeSelectionSnippet(selection.toString()),
+            };
+        }
+
+        function resolveRangeEndpointNode(range) {
+            if (!range) return null;
+            return range.startContainer || range.commonAncestorContainer || null;
+        }
+
+        function isNodeInsideContainer(node) {
+            if (!state.container || !node) return false;
+            if (node.nodeType === Node.TEXT_NODE) {
+                return !!(node.parentNode && state.container.contains(node.parentNode));
+            }
+            return state.container.contains(node);
+        }
+
+        function resolveSelectionRect(range) {
+            if (!range) return null;
+            const firstRect = range.getClientRects && range.getClientRects().length
+                ? range.getClientRects()[0]
+                : null;
+            const fallbackRect = range.getBoundingClientRect ? range.getBoundingClientRect() : null;
+            const rect = firstRect || fallbackRect;
+            if (!rect) return null;
+            if (!Number.isFinite(rect.left) || !Number.isFinite(rect.top)) return null;
+            return rect;
+        }
+
+        function normalizeSelectionTerm(rawText) {
+            let text = String(rawText || '').replace(/\s+/g, ' ').trim();
+            if (!text) return '';
+            text = text.replace(/^[\s"'“”‘’`~!@#$%^&*()_+\-=[\]{}|;:,.<>/?，。！？；：、（）【】《》]+/, '');
+            text = text.replace(/[\s"'“”‘’`~!@#$%^&*()_+\-=[\]{}|;:,.<>/?，。！？；：、（）【】《》]+$/, '');
+            if (!text) return '';
+            if (text.length > SELECTION_TERM_MAX_CHARS) {
+                text = text.slice(0, SELECTION_TERM_MAX_CHARS).trim();
+            }
+            return text;
+        }
+
+        function normalizeSelectionSnippet(rawText) {
+            const normalized = String(rawText || '')
+                .replace(/\r\n?/g, '\n')
+                .split('\n')
+                .map((line) => line.trim())
+                .filter(Boolean)
+                .join('\n')
+                .trim();
+            if (!normalized) return '';
+            if (normalized.length <= SELECTION_SNIPPET_MAX_CHARS) {
+                return normalized;
+            }
+            return `${normalized.slice(0, SELECTION_SNIPPET_MAX_CHARS).trim()}…`;
+        }
+
+        function clearNativeSelection() {
+            if (!global.getSelection) return;
+            const selection = global.getSelection();
+            if (!selection || !selection.removeAllRanges) return;
+            selection.removeAllRanges();
+        }
+
+        async function openCardFromSelection(options = {}) {
+            const payload = options.payload || state.selectionPayload || resolveSelectionPayload();
+            if (!payload) return false;
+            hideSelectionTrigger({ immediate: true });
+            clearNativeSelection();
+            await openCard(payload.term, payload.anchorNode, {
+                allowToggleClose: false,
+                anchorNode: payload.anchorNode,
+                selectionSnippet: payload.selectionSnippet,
+            });
+            return true;
         }
 
         function resolveTermNode(target) {
@@ -320,17 +531,26 @@
             return node;
         }
 
-        async function openCard(term, triggerNode) {
+        async function openCard(term, triggerNode, options = {}) {
             const safeTerm = String(term || '').trim();
             if (!safeTerm || !state.container) return;
+            hideSelectionTrigger({ immediate: true });
             if (state.activeCard && state.activeCard.term === safeTerm) {
+                if (options.allowToggleClose === false) {
+                    if (state.activeCard.textarea && typeof state.activeCard.textarea.focus === 'function') {
+                        state.activeCard.textarea.focus({ preventScroll: true });
+                    }
+                    return;
+                }
                 await closeActiveCard({ save: true });
                 return;
             }
             await closeActiveCard({ save: true, silent: true });
 
-            const anchor = resolveAnchorBlock(triggerNode);
+            const anchor = resolveAnchorBlock(options.anchorNode || triggerNode);
             if (!anchor) return;
+            const seedSelectionSnippet = normalizeSelectionSnippet(options.selectionSnippet);
+            const contextInfo = resolveContextInfo(safeTerm, anchor, seedSelectionSnippet);
             const cardRoot = buildCardRoot(safeTerm);
             const tearScene = mountTearScene(anchor, cardRoot);
             if (!tearScene) {
@@ -348,6 +568,8 @@
                 root: cardRoot,
                 anchor,
                 tearScene,
+                seedSelectionSnippet,
+                contextInfo,
                 textarea: cardRoot.querySelector('[data-card-editor]'),
                 whisper: cardRoot.querySelector('[data-card-whisper]'),
                 closeBtn: cardRoot.querySelector('[data-card-close]'),
@@ -371,7 +593,11 @@
                 activeCard.textarea.value = String(existing.markdown);
             } else {
                 activeCard.newCard = true;
-                activeCard.textarea.value = `## ${safeTerm}\n\n`;
+                activeCard.textarea.value = buildNewCardTemplate(
+                    safeTerm,
+                    activeCard.seedSelectionSnippet,
+                    contextInfo
+                );
                 await loadAdvice(activeCard);
             }
             await loadBacklinks(activeCard);
@@ -380,8 +606,27 @@
         }
 
         function resolveAnchorBlock(startNode) {
-            if (!startNode || !startNode.closest) return null;
-            return startNode.closest(BLOCK_SELECTOR) || startNode.closest('*');
+            if (!startNode) return null;
+            const element = startNode.nodeType === Node.TEXT_NODE
+                ? startNode.parentElement
+                : startNode;
+            if (!element || !element.closest) return null;
+            return element.closest(BLOCK_SELECTOR) || element.closest('*');
+        }
+
+        function buildNewCardTemplate(term, selectionSnippet, contextInfo) {
+            const safeTerm = String(term || '').trim();
+            const safeSnippet = normalizeSelectionSnippet(selectionSnippet);
+            const fallbackExample = contextInfo ? extractContextExample(contextInfo.example) : '';
+            const quoteSource = safeSnippet || fallbackExample;
+            const quote = quoteSource
+                .split('\n')
+                .map((line) => `> ${line}`)
+                .join('\n');
+            const quoteBlock = quoteSource
+                ? `> 语境例子（仅作例子，不是定义）\n${quote}\n\n`
+                : '> 语境例子（请引用当前段落原文，不要写成名词解释）\n\n';
+            return `## ${safeTerm}\n\n- 主张：\n- 机制（为什么成立）：\n${quoteBlock}- 边界/反例：\n`;
         }
 
         function buildCardRoot(term) {
@@ -393,7 +638,7 @@
                         <span class="card-fissure-title">${escapeHtml(term)}</span>
                         <button type="button" class="card-fissure-close" data-card-close>鏀惰捣</button>
                     </header>
-                    <textarea class="card-fissure-editor" data-card-editor placeholder="鍐欎笅浣犵殑鐞嗚В"></textarea>
+                    <textarea class="card-fissure-editor" data-card-editor placeholder="写一个可独立成立的观点，不要写名词解释"></textarea>
                     <div class="card-fissure-wikilink-panel" data-wikilink-suggest hidden></div>
                     <div class="card-fissure-backlinks" data-card-backlinks hidden></div>
                     <div class="ai-whisper" data-card-whisper hidden></div>
@@ -673,13 +918,14 @@
         async function loadAdvice(card) {
             if (!card || !card.whisper) return;
             try {
-                const contextInfo = resolveContextInfo(card.term, card.anchor);
+                const contextInfo = card.contextInfo || resolveContextInfo(card.term, card.anchor, card.seedSelectionSnippet);
                 const response = await fetch(`${config.apiBase}/cards/ai-advice`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         term: card.term,
                         context: contextInfo.context,
+                        contextExample: contextInfo.example,
                         isContextDependent: contextInfo.isContextDependent,
                     }),
                 });
@@ -721,31 +967,45 @@
             return global.matchMedia('(prefers-reduced-motion: reduce)').matches;
         }
 
-        function resolveContextInfo(term, anchor) {
+        function resolveContextInfo(term, anchor, selectionSnippet) {
             const context = typeof config.getContext === 'function' ? (config.getContext() || {}) : {};
             const markdown = String(context.markdown || '');
             const anchorText = anchor ? String(anchor.textContent || '').trim() : '';
-            const mergedContext = (anchorText || markdown || '').slice(0, config.contextChars);
-            const count = markdown && term ? countOccurrences(markdown, term) : 0;
+            const seedSnippet = normalizeSelectionSnippet(selectionSnippet);
+            const mergedContext = [anchorText, seedSnippet, markdown]
+                .filter((part) => String(part || '').trim())
+                .join('\n')
+                .slice(0, config.contextChars);
+            const example = extractContextExample(seedSnippet || anchorText || mergedContext);
             return {
                 context: mergedContext,
-                isContextDependent: count <= 1,
-                type: count <= 1 ? 'context' : 'concept',
+                example,
+                isContextDependent: true,
+                type: THOUGHT_CARD_TYPE,
             };
+        }
+
+        function extractContextExample(rawContext) {
+            const normalized = String(rawContext || '').replace(/\s+/g, ' ').trim();
+            if (!normalized) return '';
+            if (normalized.length <= 160) {
+                return normalized;
+            }
+            return `${normalized.slice(0, 160).trim()}...`;
         }
 
         async function closeActiveCard(options = {}) {
             const active = state.activeCard;
             if (!active) return;
-            state.activeCard = null;
             clearTouchGesture();
             hideWikilinkSuggestions(active);
+            const saveResult = options.save !== false ? await saveCard(active, options) : null;
+            state.activeCard = null;
             if (active.tearScene && active.tearScene.wrapper) {
                 active.tearScene.wrapper.classList.remove('concept-anchor-active');
             } else if (active.anchor) {
                 active.anchor.classList.remove('concept-anchor-active');
             }
-            const saveResult = options.save !== false ? await saveCard(active, options) : null;
             if (active.root) {
                 active.root.classList.remove('is-open');
                 active.root.classList.add('is-closing');
@@ -850,7 +1110,8 @@
                 if (!storageTitle) {
                     throw new Error('概念标题非法，无法保存');
                 }
-                const contextInfo = resolveContextInfo(activeCard.term, activeCard.anchor);
+                const contextInfo = activeCard.contextInfo
+                    || resolveContextInfo(activeCard.term, activeCard.anchor, activeCard.seedSelectionSnippet);
                 const query = new URLSearchParams();
                 query.set('isContextDependent', String(contextInfo.isContextDependent));
                 query.set('type', contextInfo.type);
@@ -869,7 +1130,7 @@
                 }
                 appendLocalTitle(storageTitle);
                 if (!options || options.silent !== true) {
-                    emitNotice(`宸蹭繚瀛樻蹇靛崱鐗囷細${activeCard.term}`, 'success');
+                    emitNotice(`Saved card: ${activeCard.term}`, 'success');
                 }
                 return payload;
             } catch (error) {
@@ -999,7 +1260,7 @@
         }
 
         function normalizeError(error) {
-            if (!error) return '鏈煡閿欒';
+            if (!error) return 'Unknown error';
             if (typeof error === 'string') return error;
             if (error && typeof error.message === 'string') return error.message;
             return String(error);
@@ -1026,6 +1287,7 @@
             refresh,
             destroy,
             closeActiveCard,
+            openFromSelection: openCardFromSelection,
         });
     }
 

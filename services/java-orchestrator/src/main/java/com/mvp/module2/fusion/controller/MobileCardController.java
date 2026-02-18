@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @RestController
 @RequestMapping("/api/mobile/cards")
@@ -34,6 +35,15 @@ public class MobileCardController {
     private static final int CARD_CANDIDATES_TOPK_MIN = 20;
     private static final int CARD_CANDIDATES_TOPK_MAX = 1500;
     private static final int CARD_CANDIDATES_CONTEXT_MAX_CHARS = 20000;
+    private static final Pattern THOUGHT_SIGNAL_PATTERN = Pattern.compile(
+            "(?i)(因为|因此|所以|意味着|导致|说明|主张|判断|边界|反例|条件|取舍|however|therefore|because|implies|suggests|under|unless|if\\b)"
+    );
+    private static final Pattern CONTEXT_EXAMPLE_PATTERN = Pattern.compile(
+            "(?i)(例如|比如|例子|语境|原文|上下文|quote|context|example|case)"
+    );
+    private static final Pattern DICTIONARY_LEAD_PATTERN = Pattern.compile(
+            "(?i)^(?:#{1,6}\\s*)?.{0,96}(?:是(?:一种|指|指的是)?|通常指|可定义为|又称|缩写|means\\b|refers to\\b|is\\s+(?:a|an|the)\\b)"
+    );
 
     @Autowired
     private CardStorageService cardStorageService;
@@ -82,6 +92,7 @@ public class MobileCardController {
             payload.put("created", result.created);
             payload.put("type", result.type);
             payload.put("tags", result.tags);
+            payload.put("aliases", result.aliases);
             payload.put("exists", true);
             return ResponseEntity.ok(payload);
         } catch (IllegalArgumentException ex) {
@@ -105,6 +116,13 @@ public class MobileCardController {
     ) {
         if (markdown == null) {
             return ResponseEntity.badRequest().body(Map.of("message", "missing markdown content"));
+        }
+        ThoughtQualityCheckResult quality = validateThoughtCard(markdown);
+        if (!quality.accepted) {
+            return ResponseEntity.unprocessableEntity().body(Map.of(
+                    "message", quality.message,
+                    "code", "pseudo_atomicity_detected"
+            ));
         }
         try {
             CardStorageService.CardWriteOptions options = new CardStorageService.CardWriteOptions();
@@ -170,6 +188,7 @@ public class MobileCardController {
             DeepSeekAdvisorService.AdviceResult advice = deepSeekAdvisorService.requestAdvice(
                     request.term,
                     request.context,
+                    request.contextExample,
                     Boolean.TRUE.equals(request.isContextDependent)
             );
             Map<String, Object> payload = new LinkedHashMap<>();
@@ -196,6 +215,7 @@ public class MobileCardController {
         payload.put("created", result.created);
         payload.put("type", result.type);
         payload.put("tags", result.tags);
+        payload.put("aliases", result.aliases);
         payload.put("targetType", result.targetType);
         payload.put("targetPath", result.targetPath);
         payload.put("locator", result.locator != null ? result.locator : Map.of());
@@ -223,6 +243,46 @@ public class MobileCardController {
             }
         }
         return tags;
+    }
+
+    private ThoughtQualityCheckResult validateThoughtCard(String markdown) {
+        String normalized = String.valueOf(markdown == null ? "" : markdown).replace("\r\n", "\n").trim();
+        if (normalized.isEmpty()) {
+            return ThoughtQualityCheckResult.rejected("card content cannot be empty");
+        }
+        if (normalized.length() < 24) {
+            return ThoughtQualityCheckResult.rejected("card is too short; please provide a standalone thought");
+        }
+
+        String firstLine = "";
+        for (String line : normalized.split("\n")) {
+            String trimmed = String.valueOf(line == null ? "" : line).trim();
+            if (!trimmed.isEmpty()) {
+                firstLine = trimmed;
+                break;
+            }
+        }
+
+        boolean hasThoughtSignal = THOUGHT_SIGNAL_PATTERN.matcher(normalized).find();
+        boolean hasContextExample = CONTEXT_EXAMPLE_PATTERN.matcher(normalized).find();
+        boolean dictionaryLead = !firstLine.isEmpty() && DICTIONARY_LEAD_PATTERN.matcher(firstLine).find();
+
+        if (dictionaryLead && (!hasThoughtSignal || !hasContextExample)) {
+            return ThoughtQualityCheckResult.rejected(
+                    "card looks like a term definition. Please write a claim + mechanism + context example + boundary."
+            );
+        }
+        if (!hasThoughtSignal) {
+            return ThoughtQualityCheckResult.rejected(
+                    "card must contain reasoning signals (for example: 因为/因此/意味着 or because/therefore)."
+            );
+        }
+        if (!hasContextExample) {
+            return ThoughtQualityCheckResult.rejected(
+                    "card must cite current context as an example (for example: 例如/语境/上下文 or context/example)."
+            );
+        }
+        return ThoughtQualityCheckResult.accepted();
     }
 
     private int resolveCardCandidatesTopK(Integer requestedTopK) {
@@ -329,6 +389,25 @@ public class MobileCardController {
     public static class CardAdviceRequest {
         public String term;
         public String context;
+        public String contextExample;
         public Boolean isContextDependent;
+    }
+
+    private static class ThoughtQualityCheckResult {
+        private final boolean accepted;
+        private final String message;
+
+        private ThoughtQualityCheckResult(boolean accepted, String message) {
+            this.accepted = accepted;
+            this.message = message;
+        }
+
+        private static ThoughtQualityCheckResult accepted() {
+            return new ThoughtQualityCheckResult(true, "");
+        }
+
+        private static ThoughtQualityCheckResult rejected(String message) {
+            return new ThoughtQualityCheckResult(false, message);
+        }
     }
 }

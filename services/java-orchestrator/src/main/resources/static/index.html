@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
@@ -6469,6 +6469,17 @@
             canHandleParagraphSwipeGesture,
             openInlineStickyNote,
             deleteLineAtIndex,
+            openConceptCardFromSelection: async () => {
+                const controller = getConceptCardsController();
+                if (!controller || typeof controller.openFromSelection !== 'function') {
+                    return false;
+                }
+                try {
+                    return !!(await controller.openFromSelection({ source: 'long-press-selection' }));
+                } catch (_error) {
+                    return false;
+                }
+            },
             onDeleteSwipeCommitted: (meta) => {
                 playDeleteSwipeSound(meta || {});
             },

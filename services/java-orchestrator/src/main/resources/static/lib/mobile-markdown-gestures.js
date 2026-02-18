@@ -245,7 +245,7 @@
             copyParagraphText, clearParagraphHoldCue, getParagraphCardByIndex,
             triggerParagraphHoldActivated, toggleParagraphFavorite,
             canHandleParagraphSwipeGesture, openInlineStickyNote, deleteLineAtIndex,
-            onDeleteSwipeCommitted
+            onDeleteSwipeCommitted, openConceptCardFromSelection
         } = deps;
 
         // 手势动作映射支持外部覆盖，默认语义由 DEFAULT_GESTURE_ACTION_MAP 提供。
@@ -361,6 +361,21 @@
         function canTriggerLongPressAction(action, gesture) {
             if (action !== 'copy') return true;
             return canTriggerLongPressCopy(gesture);
+        }
+
+        async function tryOpenConceptCardFromSelection(gesture) {
+            if (!gesture || !gesture.selectionPresentAtStart) return false;
+            if (typeof openConceptCardFromSelection !== 'function') return false;
+            try {
+                return !!(await openConceptCardFromSelection({
+                    anchorX: gesture.startX,
+                    anchorY: gesture.startY,
+                    index: gesture.index,
+                    source: 'long-press-selection',
+                }));
+            } catch (_error) {
+                return false;
+            }
         }
 
         const updateSwipeFrame = () => {
@@ -481,8 +496,14 @@
             activeGesture.holdCard = getParagraphCardByIndex(index);
             if (activeGesture.holdCard) activeGesture.holdCard.classList.add('touch-hold-cue');
             
-            activeGesture.longPressTimer = setTimeout(() => {
+            activeGesture.longPressTimer = setTimeout(async () => {
                 activeGesture.longPressTriggered = true;
+                if (longPressAction === 'copy') {
+                    const opened = await tryOpenConceptCardFromSelection(activeGesture);
+                    if (opened) {
+                        return;
+                    }
+                }
                 if (longPressAction && isParagraphActionAllowed(longPressAction) && canTriggerLongPressAction(longPressAction, activeGesture)) {
                     if (longPressAction === 'copy') {
                         triggerParagraphHoldActivated(activeGesture.holdCard);
