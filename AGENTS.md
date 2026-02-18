@@ -1,5 +1,39 @@
 # AGENTS
 
+## Encoding Guard (Critical)
+- Scope:
+- Applies to all source files that may contain Chinese text, especially:
+- `services/**/*.java`
+- `services/**/*.js`
+- `services/**/*.html`
+- `services/**/*.css`
+
+- Mandatory encoding baseline:
+- Java/JS/HTML/CSS source files must be `UTF-8` **without BOM**.
+- `docs/architecture/*.md` must remain `UTF-8 with BOM`.
+
+- Safe editing rules for Chinese text:
+- Prefer `apply_patch` for Chinese text edits.
+- Do not mass-rewrite Chinese text through shell pipelines unless encoding is explicitly controlled.
+- Never mix comment and executable code on the same line (avoid `// ... code`), to prevent comment-swallow regressions.
+
+- Forbidden operations:
+- Do not use PowerShell default append/write behavior for Chinese without explicit encoding.
+- Do not run broad regex replace across whole files before sampling output lines.
+
+- Required pre-submit checks:
+- `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- If docs changed:
+- `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Optional mojibake scan:
+- `python -X utf8 tools/architecture/check_docs_encoding.py --check-mojibake`
+
+- Incident SOP (when mojibake appears):
+1. Confirm BOM + decode first, before touching business logic.
+2. Fix encoding, then fix broken strings/comments, then fix braces/structure.
+3. Re-compile after each small patch; follow first compiler error only.
+4. Record symptom/root-cause/fix/prevention in architecture docs.
+
 ## 角色定位
 你是我的讨论者和合作者，不是单纯的执行者。
 

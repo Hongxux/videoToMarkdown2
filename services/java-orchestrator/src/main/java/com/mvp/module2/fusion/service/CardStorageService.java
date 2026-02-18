@@ -60,7 +60,7 @@ public class CardStorageService {
         try {
             Files.createDirectories(this.cardsRoot);
         } catch (IOException ex) {
-            logger.warn("鍒涘缓姒傚康鍗＄墖鐩綍澶辫触: {} err={}", this.cardsRoot, ex.getMessage());
+            logger.warn("创建概念卡片目录失败: {} err={}", this.cardsRoot, ex.getMessage());
         }
         refreshTitleIndex();
     }
@@ -104,7 +104,7 @@ public class CardStorageService {
                                 backlinks.add(new CardBacklinkItem(sourceTitle, count));
                             }
                         } catch (Exception ex) {
-                            logger.warn("鎵弿鍙嶅悜閾炬帴澶辫触: source={} err={}", sourceTitle, ex.getMessage());
+                            logger.warn("扫描反向链接失败: source={} err={}", sourceTitle, ex.getMessage());
                         }
                     });
         }
@@ -406,7 +406,7 @@ public class CardStorageService {
         try {
             return normalizeTitleKey(normalizeTitle(safe));
         } catch (IllegalArgumentException ex) {
-            // 鍏煎鍘嗗彶鑴忔暟鎹紝閬垮厤鍗曚釜闈炴硶閾炬帴瀵艰嚧鏁村紶鍗＄墖鐨勫弽閾炬壂鎻忓け璐ャ€?
+            // 兼容历史脏数据，避免单个非法链接导致整张卡片的反向链接扫描失败。
             return normalizeTitleKey(safe);
         }
     }
@@ -483,7 +483,7 @@ public class CardStorageService {
         String text = normalizeMarkdown(markdown);
         int anchorIndex = text.indexOf(anchorText);
         if (anchorIndex < 0) {
-            throw new IllegalArgumentException("閺堫亝澹橀崚鐗堝瘹鐎规氨娈?anchor");
+            throw new IllegalArgumentException("未找到指定锚点: anchor");
         }
         int paragraphEnd = findParagraphBoundary(text, anchorIndex + anchorText.length());
         String leadingTail = text.substring(paragraphEnd).stripLeading();
@@ -652,14 +652,14 @@ public class CardStorageService {
                         }
                     });
         } catch (IOException ex) {
-            logger.warn("鍒锋柊姒傚康鍗＄墖绱㈠紩澶辫触: {} err={}", cardsRoot, ex.getMessage());
+            logger.warn("刷新概念卡片索引失败: {} err={}", cardsRoot, ex.getMessage());
         }
     }
 
     private String normalizeTitle(String rawTitle) {
         String title = String.valueOf(rawTitle == null ? "" : rawTitle).trim();
         if (title.isEmpty()) {
-            throw new IllegalArgumentException("鍗＄墖鏍囬涓嶈兘涓虹┖");
+            throw new IllegalArgumentException("卡片标题不能为空");
         }
         title = ILLEGAL_TITLE_CHARS.matcher(title).replaceAll("_");
         title = title.replaceAll("\\s+", " ").trim();
@@ -679,7 +679,7 @@ public class CardStorageService {
 
     private String ensureFileSystemSafeTitle(String title) {
         String safe = TRAILING_DOT_OR_SPACE.matcher(String.valueOf(title == null ? "" : title)).replaceAll("");
-        // Windows 鎶婁繚鐣欒澶囧悕褰撲綔鐗规畩鏂囦欢锛屽摢鎬曞甫鎵╁睍鍚嶄篃浼氬啓鍏ュけ璐ワ紝缁熶竴鍔犲墠缂€瑙勯伩銆?
+        // Windows 会将保留设备名视为特殊文件名，即使带扩展名也可能写入失败，统一加前缀规避。
         if (isWindowsReservedBasename(safe)) {
             safe = "_" + safe;
         }

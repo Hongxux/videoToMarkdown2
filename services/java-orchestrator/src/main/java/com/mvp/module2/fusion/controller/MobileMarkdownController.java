@@ -63,8 +63,10 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 /**
- * 绉诲姩绔?Markdown 鏌ョ湅 API銆? * 璁捐鐩爣锛? * 1. 澶嶇敤鐜版湁 TaskQueueManager锛屼笉寮曞叆棰濆鎸佷箙鍖栵紱
- * 2. 浠诲姟鍒楄〃鍚屾椂鑱氬悎杩愯鏃朵换鍔′笌 var/storage/storage 鍘嗗彶浠诲姟锛? * 3. 涓ユ牸鍋氳矾寰勫綊涓€鍜岀洰褰曡竟鐣屾牎楠岋紝閬垮厤璺緞绌胯秺銆? */
+ * 移动端 Markdown 查看 API。
+ * 设计目标：复用 TaskQueueManager，聚合运行态与存储态任务，
+ * 并严格进行路径归一化和目录边界校验，避免路径穿越。
+ */
 @RestController
 @RequestMapping("/api/mobile")
 public class MobileMarkdownController {
@@ -95,14 +97,14 @@ public class MobileMarkdownController {
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "pageSize", defaultValue = "20") int pageSize
     ) {
-        // 1. 鑾峰彇杩愯鏃朵换鍔?(閫氬父鏁伴噺寰堝皯锛岀洿鎺ュ叏閮ㄨ幏鍙?
+        // 1. 获取运行态任务（通常数量较少，可直接全量获取）
         List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
-        // 2. 鑾峰彇瀛樺偍浠诲姟 (鍒嗛〉)
+        // 2. 获取存储态任务（分页）
         com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult = 
                 storageTaskCacheService.getTasks(page, pageSize);
 
-        // 3. 鑱氬悎閫昏緫
-        // 绛栫暐锛氳繍琛屾椂浠诲姟鎬绘槸鏄剧ず鍦ㄦ渶鍓嶉潰锛堝洜涓洪€氬父鏄渶鏂扮殑锛夛紝鐒跺悗鍐嶈拷鍔犲瓨鍌ㄤ换鍔＄殑鍒嗛〉缁撴灉銆?        // 娉ㄦ剰锛氳繖绉嶇畝鍗曠殑鑱氬悎鍦ㄧ炕椤垫椂鍙兘浼氭湁杞诲井鐨勪笉涓€鑷达紙濡傛灉杩愯鏃朵换鍔℃濂藉湪缈婚〉鏈熼棿瀹屾垚骞跺綊妗ｏ級锛?        // 浣嗗浜庣Щ鍔ㄧ绠€鍗曠殑鍒楄〃娴忚鏉ヨ鏄彲浠ユ帴鍙楃殑锛屼笖閬垮厤浜嗗鏉傜殑鍏ㄩ噺鎺掑簭寮€閿€銆?        
+        // 3. 聚合逻辑
+        // 策略：优先展示运行态任务，再拼接存储态分页任务；该策略实现简单且满足移动端浏览场景。
         List<TaskView> finalViewList = new ArrayList<>();
 
         if (page == 0) {
@@ -122,7 +124,7 @@ public class MobileMarkdownController {
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("tasks", taskList);
-        // 鎬绘暟 = 杩愯鏃朵换鍔?+ 瀛樺偍浠诲姟鎬绘暟
+        // 总数 = 运行态任务数 + 存储态任务总数
         response.put("totalCount", runtimeTasks.size() + storageResult.totalCount);
         response.put("page", page);
         response.put("pageSize", pageSize);
@@ -136,7 +138,7 @@ public class MobileMarkdownController {
         if (request == null) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "璇锋眰浣撲笉鑳戒负绌?"
+                    "message", "请求体不能为空"
             ));
         }
 
@@ -144,7 +146,7 @@ public class MobileMarkdownController {
         if (normalizedVideoInput.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "videoUrl 涓嶈兘涓虹┖"
+                    "message", "videoUrl 不能为空"
             ));
         }
 
@@ -163,7 +165,7 @@ public class MobileMarkdownController {
                 "taskId", task.taskId,
                 "status", task.status.name(),
                 "normalizedVideoUrl", normalizedVideoInput,
-                "message", "浠诲姟宸叉彁浜わ紝姝ｅ湪鎺掗槦涓?"
+                "message", "任务已提交，正在排队中"
         ));
     }
 
@@ -177,13 +179,13 @@ public class MobileMarkdownController {
         if (videoFile == null || videoFile.isEmpty()) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "videoFile 涓嶈兘涓虹┖"
+                    "message", "videoFile 不能为空"
             ));
         }
         if (videoFile.getSize() > MAX_UPLOAD_FILE_BYTES) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "涓婁紶鏂囦欢杩囧ぇ锛屽綋鍓嶉檺鍒?2048MB"
+                    "message", "上传文件过大，当前限制 2048MB"
             ));
         }
 
@@ -191,7 +193,7 @@ public class MobileMarkdownController {
         if (!hasSupportedVideoExtension(safeFileName)) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "浠呮敮鎸佸父瑙佽棰戞牸寮忥細mp4/mov/mkv/avi/webm/m4v"
+                    "message", "仅支持常见视频格式：mp4/mov/mkv/avi/webm/m4v"
             ));
         }
 
@@ -212,10 +214,10 @@ public class MobileMarkdownController {
                     "status", task.status.name(),
                     "normalizedVideoUrl", savedVideoPath.toString(),
                     "uploadedFileName", safeFileName,
-                    "message", "瑙嗛宸蹭笂浼狅紝浠诲姟宸叉彁浜わ紝姝ｅ湪鎺掗槦涓?"
+                    "message", "视频已上传，任务已提交，正在排队中"
             ));
         } catch (IOException e) {
-            logger.error("绉诲姩绔笂浼犺棰戜繚瀛樺け璐?", e);
+            logger.error("移动端上传视频保存失败", e);
             return ResponseEntity.status(503).body(Map.of(
                     "success", false,
                     "message", UserFacingErrorMapper.busyMessage()
@@ -227,7 +229,7 @@ public class MobileMarkdownController {
     public ResponseEntity<?> getTaskMarkdown(@PathVariable String taskId) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            return ResponseEntity.status(404).body(Map.of("message", "浠诲姟涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
         }
 
         ResolvedMarkdown resolved;
@@ -236,8 +238,8 @@ public class MobileMarkdownController {
         } catch (IllegalArgumentException ex) {
             return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));
         } catch (IOException ex) {
-            logger.warn("璇诲彇 markdown 澶辫触: taskId={} err={}", taskId, ex.getMessage());
-            return ResponseEntity.status(500).body(Map.of("message", "璇诲彇 markdown 澶辫触"));
+            logger.warn("读取 markdown 失败: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "读取 markdown 失败"));
         }
 
         try {
@@ -252,8 +254,8 @@ public class MobileMarkdownController {
             response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
             return ResponseEntity.ok(response);
         } catch (IOException ex) {
-            logger.warn("璇诲彇 markdown 鍐呭澶辫触: taskId={} path={} err={}", taskId, resolved.markdownPath, ex.getMessage());
-            return ResponseEntity.status(500).body(Map.of("message", "璇诲彇 markdown 鍐呭澶辫触"));
+            logger.warn("读取 markdown 内容失败: taskId={} path={} err={}", taskId, resolved.markdownPath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "读取 markdown 内容失败"));
         }
     }
 
@@ -264,10 +266,10 @@ public class MobileMarkdownController {
     ) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            return ResponseEntity.status(404).body(Map.of("message", "浠诲姟涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
         }
         if (rawPath == null || rawPath.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("message", "缂哄皯 path 鍙傛暟"));
+            return ResponseEntity.badRequest().body(Map.of("message", "缺少 path 参数"));
         }
 
         ResolvedMarkdown resolved;
@@ -276,20 +278,20 @@ public class MobileMarkdownController {
         } catch (IllegalArgumentException ex) {
             return ResponseEntity.status(404).body(Map.of("message", ex.getMessage()));
         } catch (IOException ex) {
-            logger.warn("璇诲彇 markdown 澶辫触: taskId={} err={}", taskId, ex.getMessage());
-            return ResponseEntity.status(500).body(Map.of("message", "璇诲彇 markdown 澶辫触"));
+            logger.warn("读取 markdown 失败: taskId={} err={}", taskId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "读取 markdown 失败"));
         }
 
         String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
         Path target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
         if (!target.startsWith(resolved.baseDir)) {
-            return ResponseEntity.status(400).body(Map.of("message", "闈炴硶璺緞"));
+            return ResponseEntity.status(400).body(Map.of("message", "非法路径"));
         }
         if (!Files.exists(target) || !Files.isRegularFile(target)) {
-            return ResponseEntity.status(404).body(Map.of("message", "鏂囦欢涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "文件不存在"));
         }
         if (!isMarkdownFile(target.getFileName().toString())) {
-            return ResponseEntity.status(400).body(Map.of("message", "鐩爣涓嶆槸 markdown 鏂囦欢"));
+            return ResponseEntity.status(400).body(Map.of("message", "目标不是 markdown 文件"));
         }
 
         try {
@@ -304,8 +306,8 @@ public class MobileMarkdownController {
             response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
             return ResponseEntity.ok(response);
         } catch (IOException ex) {
-            logger.warn("璇诲彇鐩稿 markdown 澶辫触: taskId={} path={} err={}", taskId, rawPath, ex.getMessage());
-            return ResponseEntity.status(500).body(Map.of("message", "璇诲彇 markdown 澶辫触"));
+            logger.warn("读取相对 markdown 失败: taskId={} path={} err={}", taskId, rawPath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "读取 markdown 失败"));
         }
     }
 
@@ -315,19 +317,19 @@ public class MobileMarkdownController {
             @RequestBody MarkdownUpdateRequest request
     ) {
         if (request == null || request.markdown == null) {
-            return ResponseEntity.badRequest().body(Map.of("message", "缂哄皯 markdown 鍐呭"));
+            return ResponseEntity.badRequest().body(Map.of("message", "缺少 markdown 内容"));
         }
 
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            return ResponseEntity.status(404).body(Map.of("message", "浠诲姟涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
         }
 
         ResolvedMarkdown resolved;
         try {
             resolved = resolveMarkdown(task);
         } catch (Exception ex) {
-            return ResponseEntity.status(404).body(Map.of("message", "鏈壘鍒板彲缂栬緫 markdown"));
+            return ResponseEntity.status(404).body(Map.of("message", "未找到可编辑 markdown"));
         }
 
         Path target = resolved.markdownPath;
@@ -335,10 +337,10 @@ public class MobileMarkdownController {
             String decodedPath = URLDecoder.decode(request.path, StandardCharsets.UTF_8);
             target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
             if (!target.startsWith(resolved.baseDir)) {
-                return ResponseEntity.status(400).body(Map.of("message", "闈炴硶璺緞"));
+                return ResponseEntity.status(400).body(Map.of("message", "非法路径"));
             }
             if (!isMarkdownFile(target.getFileName().toString())) {
-                return ResponseEntity.status(400).body(Map.of("message", "鐩爣涓嶆槸 markdown 鏂囦欢"));
+                return ResponseEntity.status(400).body(Map.of("message", "目标不是 markdown 文件"));
             }
         }
 
@@ -356,8 +358,8 @@ public class MobileMarkdownController {
             payload.put("updatedAt", Instant.now().toString());
             return ResponseEntity.ok(payload);
         } catch (IOException ex) {
-            logger.warn("鍐欏叆 markdown 澶辫触: taskId={} path={} err={}", taskId, target, ex.getMessage());
-            return ResponseEntity.status(500).body(Map.of("message", "鍐欏叆 markdown 澶辫触"));
+            logger.warn("写入 markdown 失败: taskId={} path={} err={}", taskId, target, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "写入 markdown 失败"));
         }
     }
 
@@ -368,13 +370,13 @@ public class MobileMarkdownController {
     ) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            return ResponseEntity.status(404).body(Map.of("message", "浠诲姟涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
         }
         Path taskRoot;
         try {
             taskRoot = resolveTaskRootDir(task);
         } catch (Exception ex) {
-            return ResponseEntity.status(404).body(Map.of("message", "鏈壘鍒颁换鍔＄洰褰?"));
+            return ResponseEntity.status(404).body(Map.of("message", "未找到任务目录"));
         }
 
         String noteKey = normalizeMetaNoteKey(taskRoot, rawPath);
@@ -398,13 +400,13 @@ public class MobileMarkdownController {
     ) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            return ResponseEntity.status(404).body(Map.of("message", "浠诲姟涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
         }
         Path taskRoot;
         try {
             taskRoot = resolveTaskRootDir(task);
         } catch (Exception ex) {
-            return ResponseEntity.status(404).body(Map.of("message", "鏈壘鍒颁换鍔＄洰褰?"));
+            return ResponseEntity.status(404).body(Map.of("message", "未找到任务目录"));
         }
 
         TaskMetaFile meta = readTaskMeta(taskRoot);
@@ -429,7 +431,7 @@ public class MobileMarkdownController {
         }
 
         if (!writeTaskMeta(taskRoot, meta)) {
-            return ResponseEntity.status(500).body(Map.of("message", "鍐欏叆浠诲姟鍏冩暟鎹け璐?"));
+            return ResponseEntity.status(500).body(Map.of("message", "写入任务元数据失败"));
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -452,26 +454,26 @@ public class MobileMarkdownController {
     ) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            return ResponseEntity.status(404).body(Map.of("message", "浠诲姟涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
         }
         if (rawPath == null || rawPath.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("message", "缂哄皯 path 鍙傛暟"));
+            return ResponseEntity.badRequest().body(Map.of("message", "缺少 path 参数"));
         }
 
         ResolvedMarkdown resolved;
         try {
             resolved = resolveMarkdown(task);
         } catch (Exception ex) {
-            return ResponseEntity.status(404).body(Map.of("message", "鏈壘鍒?markdown 鍩虹洰褰?"));
+            return ResponseEntity.status(404).body(Map.of("message", "未找到 markdown 基目录"));
         }
 
         String decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
         Path target = resolveAssetTargetPath(resolved.baseDir, decodedPath);
         if (!target.startsWith(resolved.baseDir)) {
-            return ResponseEntity.status(400).body(Map.of("message", "闈炴硶璺緞"));
+            return ResponseEntity.status(400).body(Map.of("message", "非法路径"));
         }
         if (!Files.exists(target) || !Files.isRegularFile(target)) {
-            return ResponseEntity.status(404).body(Map.of("message", "鏂囦欢涓嶅瓨鍦?"));
+            return ResponseEntity.status(404).body(Map.of("message", "文件不存在"));
         }
 
         try {
@@ -512,7 +514,7 @@ public class MobileMarkdownController {
                                 .body(rangeResource);
                     }
                 } catch (Exception ex) {
-                    logger.warn("澶勭悊 Range 璇锋眰澶辫触锛屽洖閫€鍏ㄩ噺鍝嶅簲: taskId={} path={} range={} err={}",
+                    logger.warn("处理 Range 请求失败，回退全量响应: taskId={} path={} range={} err={}",
                             taskId, target, rangeHeader, ex.getMessage());
                 }
             }
@@ -527,8 +529,8 @@ public class MobileMarkdownController {
                     .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + target.getFileName() + "\"")
                     .body(resource);
         } catch (IOException ex) {
-            logger.warn("璇诲彇璧勬簮鏂囦欢澶辫触: taskId={} path={} err={}", taskId, target, ex.getMessage());
-            return ResponseEntity.status(500).body(Map.of("message", "璇诲彇璧勬簮鏂囦欢澶辫触"));
+            logger.warn("读取资源文件失败: taskId={} path={} err={}", taskId, target, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "读取资源文件失败"));
         }
     }
 
@@ -536,27 +538,27 @@ public class MobileMarkdownController {
     public ResponseEntity<StreamingResponseBody> exportTaskBundle(@PathVariable String taskId) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "浠诲姟涓嶅瓨鍦?");
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务不存在");
         }
         Path taskRoot;
         try {
             taskRoot = resolveTaskRootDir(task);
         } catch (Exception ex) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "鏈壘鍒颁换鍔＄洰褰?", ex);
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "未找到任务目录", ex);
         }
         if (!Files.exists(taskRoot) || !Files.isDirectory(taskRoot)) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "浠诲姟鐩綍涓嶅瓨鍦?");
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "任务目录不存在");
         }
 
         final List<ExportFileEntry> exportEntries;
         try {
             exportEntries = collectExportEntries(taskRoot);
         } catch (IOException ex) {
-            logger.warn("瀵煎嚭浠诲姟澶辫触: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "??????", ex);
+            logger.warn("导出任务失败: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "导出任务失败", ex);
         }
         if (exportEntries.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "鏈壘鍒板彲瀵煎嚭鐨?markdown/瑙嗛/鎴浘绱犳潗");
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "未找到可导出的 markdown/视频/截图素材");
         }
 
         String filename = buildSafeExportFilename(task.taskId);
@@ -564,10 +566,10 @@ public class MobileMarkdownController {
             try (ZipOutputStream zos = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
                 ExportZipResult zipResult = writeTaskExportZipStreaming(exportEntries, zos);
                 zos.finish();
-                logger.info("娴佸紡瀵煎嚭浠诲姟瀹屾垚: taskId={} root={} exported={} skipped={}",
+                logger.info("流式导出任务完成: taskId={} root={} exported={} skipped={}",
                         taskId, taskRoot, zipResult.exportedCount, zipResult.skippedCount);
             } catch (IOException ex) {
-                logger.warn("娴佸紡瀵煎嚭浠诲姟澶辫触: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                logger.warn("流式导出任务失败: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
                 throw ex;
             }
         };
@@ -766,16 +768,16 @@ public class MobileMarkdownController {
                 return resolveMarkdownInDirectory(taskDir, task.resultPath);
             }
         }
-        throw new IllegalArgumentException("浠诲姟灏氭湭鐢熸垚 Markdown");
+        throw new IllegalArgumentException("任务尚未生成 Markdown");
     }
 
     private ResolvedMarkdown resolveMarkdown(TaskEntry task) throws IOException {
         if (task == null || task.resultPath == null || task.resultPath.isBlank()) {
-            throw new IllegalArgumentException("浠诲姟灏氭湭鐢熸垚 Markdown");
+            throw new IllegalArgumentException("任务尚未生成 Markdown");
         }
         Path resultPath = Paths.get(task.resultPath).toAbsolutePath().normalize();
         if (!Files.exists(resultPath)) {
-            throw new IllegalArgumentException("缁撴灉璺緞涓嶅瓨鍦? " + resultPath);
+            throw new IllegalArgumentException("结果路径不存在: " + resultPath);
         }
         if (Files.isRegularFile(resultPath) && isMarkdownFile(resultPath.getFileName().toString())) {
             return new ResolvedMarkdown(resultPath, resultPath.getParent());
@@ -789,7 +791,7 @@ public class MobileMarkdownController {
 
     private ResolvedMarkdown resolveMarkdownInDirectory(Path searchRoot, String preferredPath) throws IOException {
         if (!Files.exists(searchRoot) || !Files.isDirectory(searchRoot)) {
-            throw new IllegalArgumentException("鏈壘鍒板彲鐢?markdown 鐩綍");
+            throw new IllegalArgumentException("未找到可用 markdown 目录");
         }
 
         if (preferredPath != null && !preferredPath.isBlank()) {
@@ -818,7 +820,7 @@ public class MobileMarkdownController {
         }
 
         if (markdownFiles.isEmpty()) {
-            throw new IllegalArgumentException("鏈壘鍒?markdown 鏂囦欢");
+            throw new IllegalArgumentException("未找到 markdown 文件");
         }
 
         markdownFiles.sort(
@@ -893,8 +895,8 @@ public class MobileMarkdownController {
         }
         try {
             if (Files.size(metaPath) == 0L) {
-                // 绌烘枃浠堕€氬父鏉ヨ嚜鍘嗗彶鍐欏叆涓柇锛屾寜鎹熷潖澶勭悊骞跺垹闄わ紝閬垮厤鍚庣画鎸佺画 EOF 鍣煶銆?
-                logger.warn("浠诲姟鍏冩暟鎹枃浠朵负绌猴紝鎸夋崯鍧忓鐞嗗苟閲嶅缓: {}", metaPath);
+                // 空元数据文件通常来自历史写入中断，按损坏处理并删除，避免后续持续 EOF 噪音。
+                logger.warn("任务元数据文件为空，按损坏处理并重建: {}", metaPath);
                 Files.deleteIfExists(metaPath);
                 return fallback;
             }
@@ -924,7 +926,7 @@ public class MobileMarkdownController {
             }
             return loaded;
         } catch (Exception ex) {
-            logger.warn("璇诲彇浠诲姟鍏冩暟鎹け璐? {} err={}", metaPath, ex.getMessage());
+            logger.warn("读取任务元数据失败: {} err={}", metaPath, ex.getMessage());
             return fallback;
         }
     }
@@ -945,7 +947,8 @@ public class MobileMarkdownController {
             if (meta.notesByMarkdown == null) {
                 meta.notesByMarkdown = new LinkedHashMap<>();
             }
-            // 鍏堝啓涓存椂鏂囦欢鍐嶆浛鎹紝閬垮厤搴忓垪鍖栧紓甯告椂鎶婄洰鏍囨枃浠舵埅鏂负绌恒€?            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tmpPath.toFile(), meta);
+            // 先写临时文件再替换，避免序列化异常时把目标文件截断为空。
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tmpPath.toFile(), meta);
             try {
                 Files.move(tmpPath, metaPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
             } catch (AtomicMoveNotSupportedException ignored) {
@@ -958,7 +961,7 @@ public class MobileMarkdownController {
             } catch (Exception ignored) {
                 // 临时文件清理失败不影响主流程，仅保留原始异常日志。
             }
-                logger.warn("鍐欏叆浠诲姟鍏冩暟鎹け璐? {} err={}", metaPath, ex.getMessage());
+                logger.warn("写入任务元数据失败: {} err={}", metaPath, ex.getMessage());
             return false;
         }
     }
@@ -1076,7 +1079,7 @@ public class MobileMarkdownController {
 
             @Override
             public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                logger.warn("閬嶅巻瀵煎嚭鐩綍澶辫触锛屽凡璺宠繃: root={} path={} err={}",
+                logger.warn("遍历导出目录失败，已跳过: root={} path={} err={}",
                         normalizedRoot, file, exc != null ? exc.getMessage() : "unknown");
                 return FileVisitResult.CONTINUE;
             }
@@ -1145,10 +1148,10 @@ public class MobileMarkdownController {
                 exportedCount += 1;
             } catch (IOException ex) {
                 if (entry.core) {
-                    throw new IOException("鏍稿績鏂囦欢鍐欏叆 ZIP 澶辫触: " + entry.entryName, ex);
+                    throw new IOException("核心文件写入 ZIP 失败: " + entry.entryName, ex);
                 }
                 skippedCount += 1;
-                logger.warn("瀵煎嚭 ZIP 鏃惰烦杩囨枃浠? entry={} path={} err={}",
+                logger.warn("导出 ZIP 时跳过文件: entry={} path={} err={}",
                         entry.entryName, entry.path, ex.getMessage());
             } finally {
                 if (opened) {
@@ -1260,7 +1263,7 @@ public class MobileMarkdownController {
 
     private TaskQueueManager.Priority resolvePriority(String normalizedUserId, String rawPriority) {
         if (StringUtils.hasText(rawPriority)) {
-            logger.info("蹇界暐瀹㈡埛绔紭鍏堢骇鍙傛暟: user={} priority={}", normalizedUserId, rawPriority);
+            logger.info("忽略客户端优先级参数: user={} priority={}", normalizedUserId, rawPriority);
         }
         return TaskQueueManager.Priority.NORMAL;
     }
@@ -1320,7 +1323,7 @@ public class MobileMarkdownController {
                 + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
         Path targetPath = uploadRootPath.resolve(uniquePrefix + "_" + safeFileName).toAbsolutePath().normalize();
         if (!targetPath.startsWith(uploadRootPath)) {
-            throw new IOException("闈炴硶涓婁紶璺緞");
+            throw new IOException("非法上传路径");
         }
         try (InputStream inputStream = videoFile.getInputStream()) {
             Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);

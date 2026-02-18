@@ -14,3 +14,17 @@ else
   echo "[secret-guard] Install Python or run tools/security/check_staged_secrets.py manually."
   exit 1
 fi
+
+if [[ "${BYPASS_ENCODING_GUARD:-0}" == "1" ]]; then
+  exit 0
+fi
+
+if command -v python >/dev/null 2>&1; then
+  python -X utf8 tools/security/check_staged_encoding_guard.py
+elif command -v py >/dev/null 2>&1; then
+  py -3 -X utf8 tools/security/check_staged_encoding_guard.py
+else
+  echo "[encoding-guard] Python not found. Cannot run staged encoding scan."
+  echo "[encoding-guard] Install Python or run tools/security/check_staged_encoding_guard.py manually."
+  exit 1
+fi

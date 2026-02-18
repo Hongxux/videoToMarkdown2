@@ -10,5 +10,5 @@ if (-not (Test-Path $hookFile)) {
 }
 
 git -C $repoRoot config core.hooksPath ".githooks"
-Write-Output "[secret-guard] core.hooksPath is set to .githooks"
-Write-Output "[secret-guard] pre-commit secret scan is now enabled."
+Write-Output "[hook-guard] core.hooksPath is set to .githooks"
+Write-Output "[hook-guard] pre-commit secret + encoding scan is now enabled."
