@@ -40,11 +40,15 @@ flowchart LR
   - 通信：`grpc/PythonGrpcClient`、`websocket/TaskWebSocketHandler`
   - 素材工程化：`service/JavaCVFFmpegService`
 - 移动端 Markdown 展示与任务提交：`controller/MobileMarkdownController` + `static/index.html`
-  - 统一静态入口：`static/index.html` 直接承载主页面；`static/mobile-markdown.html` 与 `index.html` 保持同构内容，避免跳转中间页
+  - 统一静态入口：`static/index.html` 直接承载主页面；历史入口 `/mobile-markdown.html` 由 `WebConfig` 服务端重定向到 `/index.html`
     - 聚合运行中任务与 `var/storage/storage` 历史任务（历史任务以 `storage:{目录名}` 作为外部任务ID）
     - 提供任务列表与 Markdown 正文读取/写回（支持段落级编辑后的整文保存）
     - 提供任务目录内图片/视频等资源文件预览
     - 提供移动端任务提交（URL/BV 直提 + 本地视频文件上传，调用 `/api/mobile/tasks/submit` 与 `/api/mobile/tasks/upload`）
+  - 前端运行时模块（无构建链，按脚本顺序加载）：
+    - `static/lib/mobile-view-navigation.js`：视图导航状态机与边缘返回手势。
+    - `static/lib/mobile-markdown-gestures.js`：段落手势交互与滑动动作编排。
+    - `static/lib/mobile-performance-utils.js`：双帧调度、JSON Worker 解析池、滚动动效绑定器。
 - 企业微信消息入口（Python）
   - 启动入口：`apps/wecom-bot/main.py`
   - 服务实现：`services/python_grpc/src/apps/bot/wecom_bot.py`
@@ -72,7 +76,7 @@ flowchart LR
 5. Java 侧执行截图/切片等素材抽取，再调用 `AssembleRichText` 生成最终 Markdown/JSON。
 6. 任务状态通过 REST 可查询，并通过 WebSocket 持续推送进度。
 7. 企业微信消息链路中，`wecom_bot` 复用 Java REST 接口提交任务并轮询状态，按 `QUEUED/RUNNING/RETRYING/SUCCEEDED/FAILED_FINAL` 回传个人聊天。
-8. 静态页面入口统一为 `/` -> `index.html`（主页面本体），并与 `/mobile-markdown.html` 保持同构内容；页面通过 `/api/mobile/tasks` 罗列任务（含内存任务与磁盘历史任务），按任务维度读取 markdown 与资源文件进行渲染。
+8. 静态页面入口统一为 `/` -> `index.html`（主页面本体）；历史路径 `/mobile-markdown.html` 由服务端重定向兼容到 `index.html`。页面通过 `/api/mobile/tasks` 罗列任务（含内存任务与磁盘历史任务），按任务维度读取 markdown 与资源文件进行渲染。
 
 ## 6. 接口清单（2026-02-17）
 - REST（Java）
@@ -157,3 +161,12 @@ flowchart LR
 - RPC 物化路径（`semantic_units_from_rpc_*.json`）统一落盘 grouped 结构，确保“展示形态”与主链路一致。
 - 回写兜底分支在索引缺失时也重建 grouped，不再退化为扁平 `semantic_units`。
 
+## 13. 2026-02-18 DeepSeek Hedge 上下文化估算补充
+- Phase2A 语义分段链路在 DeepSeek JSON 调用前统一注入 `hedge_context`：
+  - `video_duration_sec`：由 `sentence_timestamps.end_sec` 最大值推导；
+  - `step6_text_chars`：由 Step6 段落文本总长度计算；
+  - `batch_text_chars`：由当前批次（或边界合并判定双单元）文本长度计算。
+- `llm_gateway` 动态 hedge 延迟决策升级为“长度 + 上下文”联合估算：
+  - 上下文齐全时优先按业务语义负载换算有效 token；
+  - 上下文缺失时回退 prompt token 估算；
+  - 仍保留配置级开关实现快速回滚。

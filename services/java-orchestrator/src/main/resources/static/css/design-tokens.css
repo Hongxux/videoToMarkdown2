@@ -1,5 +1,5 @@
 ﻿:root {
-    --token-font-family-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --token-font-family-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
     --token-radius-2xs: 6px;
     --token-radius-xs: 7px;
     --token-radius-sm: 8px;

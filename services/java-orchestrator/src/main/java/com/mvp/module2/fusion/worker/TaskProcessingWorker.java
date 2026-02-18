@@ -143,8 +143,10 @@ public class TaskProcessingWorker {
             
         } catch (Exception e) {
             logger.error("❌ Task failed: " + task.taskId, e);
-            taskQueueManager.failTask(task.taskId, e.getMessage());
-            webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, UserFacingErrorMapper.busyMessage(), null);
+            String rawError = e.getMessage();
+            String userMessage = UserFacingErrorMapper.toUserMessage(rawError);
+            taskQueueManager.failTask(task.taskId, rawError);
+            webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, userMessage, null);
         }
     }
 }

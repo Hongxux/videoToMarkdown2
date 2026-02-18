@@ -1,4 +1,4 @@
-(function (global) {
+﻿(function (global) {
     'use strict';
 
     function toFiniteNumber(value, fallback) {
@@ -22,14 +22,14 @@
         const edgeBackCommitSettleDurationMs = Math.max(120, Math.round(toFiniteNumber(settings.edgeBackCommitSettleDurationMs, 250)));
 
         const onViewChanged = typeof settings.onViewChanged === 'function' ? settings.onViewChanged : function () {};
-        const onReadingViewLeave = typeof settings.onReadingViewLeave === 'function' ? settings.onReadingViewLeave : function () {};
+        const onContentViewLeave = typeof settings.onContentViewLeave === 'function' ? settings.onContentViewLeave : function () {};
         const onViewPushed = typeof settings.onViewPushed === 'function' ? settings.onViewPushed : function () {};
         const onBlockedView = typeof settings.onBlockedView === 'function' ? settings.onBlockedView : function () {};
 
         function normalizeViewId(viewId) {
             const id = String(viewId || '').toLowerCase();
-            if (id === 'tasks' || id === 'reading' || id === 'outline') {
-                return id;
+            if (id === 'tasks' || id === 'content' || id === 'outline' || id === 'reading') {
+                return id === 'reading' ? 'content' : id;
             }
             return 'tasks';
         }
@@ -76,7 +76,7 @@
         function pushView(viewId, options) {
             const requestedView = normalizeViewId(viewId);
             const previousView = normalizeViewId(state.currentView);
-            const blockedByMissingTask = (requestedView === 'reading' || requestedView === 'outline') && !state.currentTaskId;
+            const blockedByMissingTask = (requestedView === 'content' || requestedView === 'outline') && !state.currentTaskId;
             const nextView = blockedByMissingTask ? 'tasks' : requestedView;
             const historyMode = blockedByMissingTask
                 ? 'none'
@@ -102,16 +102,16 @@
 
             onViewChanged(nextView, previousView);
 
-            if (nextView !== 'reading') {
-                onReadingViewLeave();
+            if (nextView !== 'content') {
+                onContentViewLeave();
             }
 
             onViewPushed(nextView, previousView);
         }
 
         function resolveEdgeBackTarget(fromView) {
-            if (fromView === 'reading') {
-                // 阅读态右滑返回固定回任务列表，避免被历史栈中的临时页面干扰。
+            if (fromView === 'content') {
+                // 内容页右滑返回固定回任务列表，避免被历史栈中的临时页面干扰。
                 return 'tasks';
             }
             if (fromView !== 'outline') {
@@ -293,7 +293,7 @@
                 const touch = event.touches[0];
                 if (!touch || touch.clientX > Number(edgeBackMotion.hotZonePx || 24)) return;
                 const target = event.target;
-                if (target && target.closest && target.closest('input, textarea, select, video, .comment-modal')) {
+                if (target && target.closest && target.closest('input, textarea, select, video, .inline-sticky-note, .sticky-note-container')) {
                     return;
                 }
                 state.edgeBackGesture = {
@@ -366,3 +366,4 @@
         create: createMobileViewNavigation,
     });
 })(window);
+

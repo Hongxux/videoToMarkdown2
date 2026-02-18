@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 import sys
 
 import pytest
@@ -356,6 +356,35 @@ def test_download_auto_exports_cookie_file_from_browser(monkeypatch, tmp_path):
     assert _YoutubeDLSuccessStub.last_opts["cookiefile"] == str(cookie_file.resolve())
 
 
+def test_download_auto_downgrades_to_browser_when_cookie_file_missing(monkeypatch, tmp_path):
+    cookie_file = tmp_path / "cookies_missing.txt"
+
+    def _extract_fail_stub(browser_name, profile=None, logger=None, *, keyring=None, container=None):
+        _ = (browser_name, profile, logger, keyring, container)
+        raise Exception(
+            "Could not copy Chrome cookie database. "
+            "See https://github.com/yt-dlp/yt-dlp/issues/7271 for more info"
+        )
+
+    monkeypatch.setattr(video_mod, "extract_cookies_from_browser", _extract_fail_stub)
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLSuccessStub)
+
+    processor = video_mod.VideoProcessor(
+        cookies_file=str(cookie_file),
+        cookies_from_browser="edge:Default",
+    )
+    video_path = processor.download(
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert not cookie_file.exists()
+    assert _YoutubeDLSuccessStub.last_opts["cookiesfrombrowser"] == ("edge", "Default")
+    assert "cookiefile" not in _YoutubeDLSuccessStub.last_opts
+
+
 def test_download_not_bot_error_contains_cookie_guidance(monkeypatch, tmp_path):
     monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLNotBotStub)
 
@@ -404,6 +433,137 @@ def test_download_chrome_cookie_copy_error_has_specific_hint(monkeypatch, tmp_pa
     assert "YTDLP_COOKIES_FROM_BROWSER" in message
 
 
+def test_download_retries_without_cookie_when_browser_cookie_copy_fails(monkeypatch, tmp_path):
+    class _YoutubeDLCookieRetryStub:
+        calls = []
+
+        def __init__(self, opts):
+            self._opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def download(self, _urls):
+            type(self).calls.append(dict(self._opts))
+            if "cookiefile" in self._opts or "cookiesfrombrowser" in self._opts:
+                raise Exception(
+                    "ERROR: Could not copy Chrome cookie database. "
+                    "See https://github.com/yt-dlp/yt-dlp/issues/7271 for more info"
+                )
+            outtmpl = self._opts["outtmpl"]
+            output_path = Path(outtmpl.replace("%(ext)s", "mp4"))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
+
+    _YoutubeDLCookieRetryStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLCookieRetryStub)
+
+    processor = video_mod.VideoProcessor(cookies_from_browser="edge:Default")
+    video_path = processor.download(
+        url="https://www.youtube.com/watch?v=YFjfBk8HI5o",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert len(_YoutubeDLCookieRetryStub.calls) >= 2
+    first_call = _YoutubeDLCookieRetryStub.calls[0]
+    last_call = _YoutubeDLCookieRetryStub.calls[-1]
+    assert "cookiesfrombrowser" in first_call
+    assert "cookiesfrombrowser" not in last_call
+    assert "cookiefile" not in last_call
+
+
+def test_download_retries_without_cookie_when_dpapi_decrypt_fails(monkeypatch, tmp_path):
+    class _YoutubeDLDpapiRetryStub:
+        calls = []
+
+        def __init__(self, opts):
+            self._opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def download(self, _urls):
+            type(self).calls.append(dict(self._opts))
+            if "cookiefile" in self._opts or "cookiesfrombrowser" in self._opts:
+                raise Exception(
+                    "ERROR: Failed to decrypt with DPAPI. "
+                    "See https://github.com/yt-dlp/yt-dlp/issues/10927 for more info"
+                )
+            outtmpl = self._opts["outtmpl"]
+            output_path = Path(outtmpl.replace("%(ext)s", "mp4"))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
+
+    _YoutubeDLDpapiRetryStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLDpapiRetryStub)
+
+    processor = video_mod.VideoProcessor(cookies_from_browser="edge:Default")
+    video_path = processor.download(
+        url="https://www.bilibili.com/video/BV17YCEZ5EAQ",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert len(_YoutubeDLDpapiRetryStub.calls) >= 2
+    first_call = _YoutubeDLDpapiRetryStub.calls[0]
+    last_call = _YoutubeDLDpapiRetryStub.calls[-1]
+    assert "cookiesfrombrowser" in first_call
+    assert "cookiesfrombrowser" not in last_call
+    assert "cookiefile" not in last_call
+
+
+def test_download_retries_without_proxy_when_gateway_502(monkeypatch, tmp_path):
+    class _YoutubeDLProxy502RetryStub:
+        calls = []
+
+        def __init__(self, opts):
+            self._opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def download(self, _urls):
+            type(self).calls.append(dict(self._opts))
+            if self._opts.get("proxy"):
+                raise Exception(
+                    "ERROR: [generic] Unable to download webpage: HTTP Error 502: Bad Gateway "
+                    "(caused by <HTTPError 502: Bad Gateway>)"
+                )
+            outtmpl = self._opts["outtmpl"]
+            output_path = Path(outtmpl.replace("%(ext)s", "mp4"))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
+
+    _YoutubeDLProxy502RetryStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLProxy502RetryStub)
+
+    processor = video_mod.VideoProcessor(proxy="http://127.0.0.1:7897")
+    video_path = processor.download(
+        url="https://www.bilibili.com/video/BV17YCEZ5EAQ",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert len(_YoutubeDLProxy502RetryStub.calls) >= 2
+    first_call = _YoutubeDLProxy502RetryStub.calls[0]
+    last_call = _YoutubeDLProxy502RetryStub.calls[-1]
+    assert first_call.get("proxy") == "http://127.0.0.1:7897"
+    assert "proxy" not in last_call
+
+
 def test_download_proxy_connection_error_has_specific_hint(monkeypatch, tmp_path):
     class _YoutubeDLProxyFailStub:
         def __init__(self, _opts):
@@ -436,3 +596,100 @@ def test_download_proxy_connection_error_has_specific_hint(monkeypatch, tmp_path
     message = str(exc_info.value)
     assert "连接代理失败" in message
     assert "7890" in message
+
+
+def test_download_geo_restricted_error_has_specific_hint(monkeypatch, tmp_path):
+    class _YoutubeDLGeoRestrictedStub:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def download(self, _urls):
+            raise Exception(
+                "ERROR: [BiliBili] 1VPMXBJEBS: This video may be deleted or geo-restricted. "
+                "You might want to try a VPN or a proxy server (with --proxy)"
+            )
+
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLGeoRestrictedStub)
+
+    processor = video_mod.VideoProcessor(proxy="http://127.0.0.1:7897")
+    with pytest.raises(RuntimeError) as exc_info:
+        processor.download(
+            url="https://www.bilibili.com/video/BV1VPMXBJEBS",
+            output_dir=str(tmp_path),
+            filename="video",
+        )
+
+    message = str(exc_info.value)
+    assert ("地区限制" in message) or ("地域限制" in message)
+    assert "YTDLP_PROXY" in message
+    assert "download_cookies_file" in message
+
+
+def test_download_bilibili_bvid_extractor_error_has_specific_hint(monkeypatch, tmp_path):
+    class _YoutubeDLBilibiliBvidExtractorFailStub:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def download(self, _urls):
+            raise Exception(
+                "ERROR: [BiliBili] 1XKIJBSEBJ: An extractor error has occurred. "
+                "(caused by KeyError('bvid'))"
+            )
+
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLBilibiliBvidExtractorFailStub)
+
+    processor = video_mod.VideoProcessor()
+    with pytest.raises(RuntimeError) as exc_info:
+        processor.download(
+            url="https://www.bilibili.com/video/BV1XKIJBSEBJ",
+            output_dir=str(tmp_path),
+            filename="video",
+        )
+
+    message = str(exc_info.value)
+    assert "bvid" in message.lower()
+    assert ("大小写" in message) or ("原始链接" in message)
+
+
+def test_download_bilibili_bvid_extractor_error_without_site_prefix_has_specific_hint(monkeypatch, tmp_path):
+    class _YoutubeDLBvidExtractorNoSitePrefixFailStub:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def download(self, _urls):
+            raise Exception(
+                "ERROR: 1XKIJBSEBJ: An extractor error has occurred. "
+                "(caused by KeyError('bvid'))"
+            )
+
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLBvidExtractorNoSitePrefixFailStub)
+
+    processor = video_mod.VideoProcessor()
+    with pytest.raises(RuntimeError) as exc_info:
+        processor.download(
+            url="https://www.bilibili.com/video/BV1XKIJBSEBJ",
+            output_dir=str(tmp_path),
+            filename="video",
+        )
+
+    message = str(exc_info.value)
+    assert "bvid" in message.lower()
+    assert ("大小写" in message) or ("原始链接" in message)

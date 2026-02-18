@@ -330,6 +330,10 @@ class SemanticUnitSegmenter:
         ]
         effective_batch_size = max(1, int(batch_size or 1))
         paragraph_batches = self._chunk_paragraphs(paragraphs_for_llm, effective_batch_size)
+        hedge_context_base = self._build_segmentation_hedge_context(
+            paragraphs=paragraphs_for_llm,
+            sentence_timestamps=sentence_timestamps,
+        )
         logger.info(
             "Sending batched LLM requests for %s paragraphs "
             "(batch_size_ignored=%s, batches=%s, input_budget_tokens=%s)",
@@ -348,9 +352,13 @@ class SemanticUnitSegmenter:
                 paragraph_batches=paragraph_batches,
                 paragraphs=paragraphs,
                 sentence_timestamps=sentence_timestamps,
+                hedge_context_base=hedge_context_base,
             )
             total_tokens += sum(item["token_usage"] for item in batch_results)
-            all_units = await self._merge_batches_with_boundary_judgement(batch_results)
+            all_units = await self._merge_batches_with_boundary_judgement(
+                batch_results=batch_results,
+                hedge_context_base=hedge_context_base,
+            )
             total_tokens += sum(item.get("boundary_token_usage", 0) for item in batch_results[1:])
 
             for idx, unit in enumerate(all_units, start=1):
@@ -420,6 +428,7 @@ class SemanticUnitSegmenter:
         paragraph_batches: List[List[Dict[str, Any]]],
         paragraphs: List[Dict[str, Any]],
         sentence_timestamps: Dict[str, Dict[str, float]] = None,
+        hedge_context_base: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         semaphore = asyncio.Semaphore(_segment_batch_max_concurrency())
 
@@ -433,6 +442,7 @@ class SemanticUnitSegmenter:
                     batch_paragraphs=batch_paragraphs,
                     paragraphs=paragraphs,
                     sentence_timestamps=sentence_timestamps,
+                    hedge_context_base=hedge_context_base,
                 )
                 return {
                     "batch_index": batch_index,
@@ -459,23 +469,30 @@ class SemanticUnitSegmenter:
         batch_paragraphs: List[Dict[str, Any]],
         paragraphs: List[Dict[str, Any]],
         sentence_timestamps: Dict[str, Dict[str, float]] = None,
+        hedge_context_base: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[SemanticUnit], int]:
         prompt = self._build_segment_prompt(
             batch_paragraphs=batch_paragraphs,
             prev_tail_unit=None,
         )
 
+        hedge_context = self._build_batch_hedge_context(
+            batch_paragraphs=batch_paragraphs,
+            hedge_context_base=hedge_context_base,
+        )
         try:
             result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
                 prompt=prompt,
                 system_message=self._segment_system_prompt,
                 max_tokens=SEGMENTATION_MAX_OUTPUT_TOKENS,
+                hedge_context=hedge_context,
                 client=self.llm_client,
             )
         except TypeError:
             result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
                 prompt=prompt,
                 system_message=self._segment_system_prompt,
+                hedge_context=hedge_context,
                 client=self.llm_client,
             )
 
@@ -576,6 +593,7 @@ class SemanticUnitSegmenter:
     async def _merge_batches_with_boundary_judgement(
         self,
         batch_results: List[Dict[str, Any]],
+        hedge_context_base: Optional[Dict[str, Any]] = None,
     ) -> List[SemanticUnit]:
         if not batch_results:
             return []
@@ -594,6 +612,7 @@ class SemanticUnitSegmenter:
                     should_merge, boundary_tokens, merged_update = await self._judge_boundary_merge_with_llm(
                         prev_tail=prev_tail,
                         next_head=next_head,
+                        hedge_context_base=hedge_context_base,
                     )
                 batch_result["boundary_token_usage"] = boundary_tokens
                 if should_merge and self._can_merge_boundary_units(prev_tail, next_head, merged_update):
@@ -622,6 +641,7 @@ class SemanticUnitSegmenter:
         self,
         prev_tail: SemanticUnit,
         next_head: SemanticUnit,
+        hedge_context_base: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, int, Dict[str, Any]]:
         system_prompt = (
             "You judge whether two adjacent semantic units should be merged. "
@@ -629,18 +649,23 @@ class SemanticUnitSegmenter:
         )
         prompt = self._build_boundary_merge_prompt(prev_tail, next_head)
 
+        boundary_batch_chars = len(str(prev_tail.full_text or "")) + len(str(next_head.full_text or ""))
+        hedge_context = dict(hedge_context_base or {})
+        hedge_context["batch_text_chars"] = max(0, int(boundary_batch_chars))
         try:
             try:
                 result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
                     prompt=prompt,
                     system_message=system_prompt,
                     max_tokens=SEGMENTATION_BOUNDARY_MAX_OUTPUT_TOKENS,
+                    hedge_context=hedge_context,
                     client=self.llm_client,
                 )
             except TypeError:
                 result_json, metadata, _ = await llm_gateway.deepseek_complete_json(
                     prompt=prompt,
                     system_message=system_prompt,
+                    hedge_context=hedge_context,
                     client=self.llm_client,
                 )
 
@@ -799,6 +824,43 @@ class SemanticUnitSegmenter:
         chars_per_token = max(0.1, float(SEGMENTATION_EST_CHARS_PER_TOKEN))
         estimated_tokens = int(approx_chars / chars_per_token)
         return estimated_tokens + SEGMENTATION_PROMPT_TOKEN_BUFFER
+
+    def _build_segmentation_hedge_context(
+        self,
+        *,
+        paragraphs: List[Dict[str, Any]],
+        sentence_timestamps: Optional[Dict[str, Dict[str, float]]],
+    ) -> Dict[str, Any]:
+        step6_text_chars = 0
+        for paragraph in paragraphs or []:
+            step6_text_chars += len(str(paragraph.get("text", "") or ""))
+
+        video_duration_sec = 0.0
+        if isinstance(sentence_timestamps, dict) and sentence_timestamps:
+            for ts in sentence_timestamps.values():
+                if not isinstance(ts, dict):
+                    continue
+                end_sec = float(ts.get("end_sec", 0.0) or 0.0)
+                if end_sec > video_duration_sec:
+                    video_duration_sec = end_sec
+
+        return {
+            "step6_text_chars": max(0, int(step6_text_chars)),
+            "video_duration_sec": max(0.0, float(video_duration_sec)),
+        }
+
+    def _build_batch_hedge_context(
+        self,
+        *,
+        batch_paragraphs: List[Dict[str, Any]],
+        hedge_context_base: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        batch_text_chars = 0
+        for paragraph in batch_paragraphs or []:
+            batch_text_chars += len(str(paragraph.get("text", "") or ""))
+        hedge_context = dict(hedge_context_base or {})
+        hedge_context["batch_text_chars"] = max(0, int(batch_text_chars))
+        return hedge_context
 
     def _build_segment_prompt(
         self,

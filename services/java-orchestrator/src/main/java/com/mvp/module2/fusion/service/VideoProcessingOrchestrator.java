@@ -19,6 +19,7 @@ import java.io.ByteArrayOutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
@@ -171,6 +172,7 @@ public class VideoProcessingOrchestrator {
             long localPrepareStart = System.currentTimeMillis();
             if (!isHttpUrl(videoUrl)) {
                 videoPath = normalizeLocalVideoPath(videoUrl);
+                assertLocalVideoExists(videoUrl, videoPath);
                 outputDir = resolveOutputDirForLocalVideo(videoPath);
                 new File(outputDir).mkdirs();
                 logger.info("[{}] 统一本地任务输出目录 -> {}", taskId, outputDir);
@@ -767,6 +769,9 @@ public class VideoProcessingOrchestrator {
         // ???????/???? storage/{hash}????????????
         try {
             Path source = Paths.get(videoPath).toAbsolutePath().normalize();
+            if (!Files.exists(source) || !Files.isRegularFile(source)) {
+                throw new IllegalArgumentException("Local video not found: " + source);
+            }
             Path storageRoot = resolveStorageRoot();
             if (isUnderPath(source, storageRoot)) {
                 return source.toString();
@@ -792,9 +797,30 @@ public class VideoProcessingOrchestrator {
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
             logger.info("Copied local video into storage: {}", target);
             return target.toString();
+        } catch (IllegalArgumentException e) {
+            throw e;
         } catch (Exception e) {
-            logger.warn("Failed to place local video in storage, fallback to original path: {}", videoPath);
-            return videoPath;
+            throw new RuntimeException("Failed to place local video in storage: " + videoPath, e);
+        }
+    }
+
+    /**
+     * 在进入 FFmpeg / Python 阶段前做本地文件硬校验，避免“伪路径”穿透到后续链路。
+     */
+    private void assertLocalVideoExists(String rawInput, String normalizedPath) {
+        if (normalizedPath == null || normalizedPath.isBlank()) {
+            throw new IllegalArgumentException("Local video path is empty");
+        }
+        final Path resolved;
+        try {
+            resolved = Paths.get(normalizedPath).toAbsolutePath().normalize();
+        } catch (InvalidPathException e) {
+            throw new IllegalArgumentException("Invalid local video path: " + rawInput);
+        }
+        if (!Files.exists(resolved) || !Files.isRegularFile(resolved)) {
+            throw new IllegalArgumentException(
+                "Local video not found: " + rawInput + " (resolved: " + resolved + ")"
+            );
         }
     }
 

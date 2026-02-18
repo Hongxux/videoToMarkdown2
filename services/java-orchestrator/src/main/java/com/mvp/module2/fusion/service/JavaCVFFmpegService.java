@@ -55,6 +55,7 @@ public class JavaCVFFmpegService {
     private static final String SCREENSHOT_EXT = ".jpg";
     private static final float SCREENSHOT_JPEG_QUALITY = 0.90f;
     private static final long MIN_FAST_COPY_FILE_BYTES = 1_024L;
+    static final int MOBILE_FAST_COPY_CODEC_ID = avcodec.AV_CODEC_ID_H264;
     
     // 线程池：处理并发请求
     private ExecutorService executorService;
@@ -565,24 +566,32 @@ public class JavaCVFFmpegService {
 
         // 快速通道：优先走 ffmpeg stream copy，失败再回退到 JavaCV 重编码。
         boolean fastCopied = false;
-        try {
-            if (request.segments != null && !request.segments.isEmpty()) {
-                fastCopied = extractConcatClipFastCopy(videoPath, outputPath, request.segments);
-            } else {
-                fastCopied = extractSingleClipFastCopy(
-                    videoPath,
-                    outputPath,
-                    request.startSec,
-                    request.endSec
-                );
+        if (isFastCopyCodecCompatible(workerGrabber)) {
+            try {
+                if (request.segments != null && !request.segments.isEmpty()) {
+                    fastCopied = extractConcatClipFastCopy(videoPath, outputPath, request.segments);
+                } else {
+                    fastCopied = extractSingleClipFastCopy(
+                        videoPath,
+                        outputPath,
+                        request.startSec,
+                        request.endSec
+                    );
+                }
+                if (fastCopied) {
+                    logger.debug("Clip fast-copy path hit: {}", outputPath);
+                    return true;
+                }
+                logger.debug("Clip fast-copy fallback to re-encode: {}", outputPath);
+            } catch (Exception e) {
+                logger.debug("Clip fast-copy unavailable, fallback re-encode: {}", e.getMessage());
             }
-            if (fastCopied) {
-                logger.debug("Clip fast-copy path hit: {}", outputPath);
-                return true;
-            }
-            logger.debug("Clip fast-copy fallback to re-encode: {}", outputPath);
-        } catch (Exception e) {
-            logger.debug("Clip fast-copy unavailable, fallback re-encode: {}", e.getMessage());
+        } else {
+            logger.debug(
+                "Skip fast-copy due to incompatible codec for mobile playback: video={}, codecId={}",
+                videoPath,
+                workerGrabber != null ? workerGrabber.getVideoCodec() : -1
+            );
         }
 
         if (request.segments != null && !request.segments.isEmpty()) {
@@ -590,6 +599,17 @@ public class JavaCVFFmpegService {
             if (concatOk) return true;
         }
         return extractSingleClipWithGrabber(workerGrabber, outputPath, request.startSec, request.endSec);
+    }
+
+    static boolean isFastCopyCodecCompatible(int codecId) {
+        return codecId == MOBILE_FAST_COPY_CODEC_ID;
+    }
+
+    private boolean isFastCopyCodecCompatible(FFmpegFrameGrabber workerGrabber) {
+        if (workerGrabber == null) {
+            return false;
+        }
+        return isFastCopyCodecCompatible(workerGrabber.getVideoCodec());
     }
 
     /**
@@ -812,6 +832,7 @@ public class JavaCVFFmpegService {
             "-i", videoPath,
             "-t", formatSec(duration),
             "-c", "copy",
+            "-movflags", "+faststart",
             "-avoid_negative_ts", "make_zero",
             outputPath
         );
@@ -865,6 +886,7 @@ public class JavaCVFFmpegService {
                 "-safe", "0",
                 "-i", listFile.toString(),
                 "-c", "copy",
+                "-movflags", "+faststart",
                 outputPath
             );
             return runFastCopyProcess(pb, outputPath, "concat");

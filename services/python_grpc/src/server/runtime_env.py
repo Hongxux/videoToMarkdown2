@@ -1,71 +1,70 @@
-"""gRPC 服务运行时基础能力。
-职责边界：提供环境变量、标准输出容错、路径优先级等通用执行能力。
-"""
+"""服务启动期运行时环境整理工具。"""
 
 from __future__ import annotations
 
 import os
+import site
 import sys
+from typing import Iterable, List
 
 
-def configure_opencv_env() -> None:
-    """配置 OpenCV 运行时参数，减少无效 OpenCL 初始化开销。"""
-    if not os.getenv("OPENCV_OPENCL_RUNTIME"):
-        os.environ["OPENCV_OPENCL_RUNTIME"] = "disabled"
+def _iter_user_site_paths() -> List[str]:
+    paths: List[str] = []
+    try:
+        value = site.getusersitepackages()
+    except Exception:
+        value = []
+    if isinstance(value, str):
+        value = [value]
+    if isinstance(value, Iterable):
+        for raw in value:
+            token = str(raw or "").strip()
+            if token:
+                paths.append(os.path.normcase(os.path.normpath(token)))
+    return paths
 
 
-def reconfigure_stdio_errors() -> None:
-    """将 stdout/stderr 的编码错误策略设为可容错模式。"""
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(errors="backslashreplace")
-        except Exception:
+def sanitize_user_site_packages() -> bool:
+    """
+    执行逻辑：
+    1) 默认关闭 user-site 参与导入（可通过 GRPC_SERVER_ALLOW_USER_SITE=1 显式放开）。
+    2) 从 sys.path 中移除 user-site 目录，避免全局 pip 包污染 conda 环境。
+    实现方式：读取 site.getusersitepackages + 路径归一化过滤。
+    核心价值：稳定依赖解析顺序，避免出现 numpy/protobuf/paddleocr 被用户目录抢占。
+    """
+    allow_user_site = str(os.getenv("GRPC_SERVER_ALLOW_USER_SITE", "") or "").strip().lower()
+    if allow_user_site in {"1", "true", "yes", "y", "on"}:
+        return False
+    # 仅影响后续子进程；当前进程的 site 初始化已完成，需要同步清理 sys.path。
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
+    blocked = set(_iter_user_site_paths())
+    if not blocked:
+        return False
+
+    original = list(sys.path)
+    filtered: List[str] = []
+    removed = False
+    for entry in original:
+        normalized = os.path.normcase(os.path.normpath(str(entry or "").strip()))
+        if normalized in blocked:
+            removed = True
             continue
+        filtered.append(entry)
+    if removed:
+        sys.path[:] = filtered
+    return removed
 
 
 def safe_print(message: str) -> None:
-    """安全打印，遇到编码异常时自动转义不可编码字符。"""
+    """安全打印，避免控制台编码导致启动日志抛错。"""
     try:
         print(message, flush=True)
     except UnicodeEncodeError:
-        escaped = message.encode("ascii", "backslashreplace").decode("ascii")
-        print(escaped, flush=True)
+        text = str(message or "").encode("ascii", "backslashreplace").decode("ascii")
+        print(text, flush=True)
 
 
-def is_truthy_env(name: str) -> bool:
-    """将环境变量解析为布尔值。"""
-    value = os.getenv(name, "").strip().lower()
-    return value in {"1", "true", "yes", "y", "on"}
-
-
-def prepend_sys_path(path_value: str) -> None:
-    """将路径置于 `sys.path` 首位，保证导入优先级可控。"""
-    if not path_value:
-        return
-    normalized = os.path.abspath(path_value)
-    if normalized in sys.path:
-        sys.path.remove(normalized)
-    sys.path.insert(0, normalized)
-
-
-def log_boot_step(message: str, debug_enabled: bool) -> None:
-    """按调试开关输出启动阶段日志。"""
-    if debug_enabled:
+def log_boot_step(message: str, enabled: bool) -> None:
+    """按开关输出启动阶段进度日志。"""
+    if enabled:
         safe_print(message)
-
-
-def boot(message: str, debug_enabled: bool) -> None:
-    """兼容别名：保留历史 `boot` 方法名。"""
-    log_boot_step(message, debug_enabled)
-
-
-__all__ = [
-    "configure_opencv_env",
-    "reconfigure_stdio_errors",
-    "safe_print",
-    "is_truthy_env",
-    "prepend_sys_path",
-    "log_boot_step",
-    "boot",
-]
-

@@ -671,6 +671,7 @@ class VisionAIClient:
             "api_rate_wait_count": 0,
             "batch_fallback_to_single_calls": 0,
             "person_subject_skips": 0,
+            "person_subject_deleted_files": 0,
         }
 
     def _get_person_segmenter(self):
@@ -891,6 +892,18 @@ class VisionAIClient:
                 logger.info(f"Duplicate frame file deleted: {Path(image_path).name}")
         except Exception as e:
             logger.warning(f"Failed to delete duplicate frame file: {image_path}, err={e}")
+
+    def _delete_person_prefilter_image_file(self, image_path: str):
+        """命中人物主体预过滤后，最佳努力删除被过滤图片文件。"""
+        if not image_path:
+            return
+        try:
+            if os.path.exists(image_path):
+                os.remove(image_path)
+                self._stats["person_subject_deleted_files"] += 1
+                logger.info(f"Person-prefilter frame file deleted: {Path(image_path).name}")
+        except Exception as e:
+            logger.warning(f"Failed to delete person-prefilter frame file: {image_path}, err={e}")
     
     async def validate_image(
         self,
@@ -938,6 +951,7 @@ class VisionAIClient:
         prefilter_result = self._run_person_subject_prefilter(image_path)
         if prefilter_result is not None:
             self._stats["person_subject_skips"] += 1
+            self._delete_person_prefilter_image_file(image_path)
             if self._hash_cache:
                 self._hash_cache.store_result(image_path, prefilter_result)
             logger.info(
@@ -1089,6 +1103,7 @@ class VisionAIClient:
             prefilter_result = self._run_person_subject_prefilter(image_path)
             if prefilter_result is not None:
                 self._stats["person_subject_skips"] += 1
+                self._delete_person_prefilter_image_file(image_path)
                 if self._hash_cache:
                     self._hash_cache.store_result(image_path, prefilter_result)
                 ordered_results[idx] = prefilter_result

@@ -45,6 +45,18 @@ public class PythonGrpcClient {
     
     @Value("${grpc.python.timeout-seconds:300}")
     private int defaultTimeoutSeconds;
+
+    @Value("${grpc.python.keepalive.enabled:false}")
+    private boolean grpcKeepaliveEnabled;
+
+    @Value("${grpc.python.keepalive-time-seconds:600}")
+    private long grpcKeepaliveTimeSeconds;
+
+    @Value("${grpc.python.keepalive-timeout-seconds:20}")
+    private long grpcKeepaliveTimeoutSeconds;
+
+    @Value("${grpc.python.keepalive-without-calls:false}")
+    private boolean grpcKeepaliveWithoutCalls;
     
     private ManagedChannel channel;
     private VideoProcessingServiceGrpc.VideoProcessingServiceBlockingStub blockingStub;
@@ -52,14 +64,29 @@ public class PythonGrpcClient {
     @PostConstruct
     public void init() {
         logger.info("Initializing Python gRPC client: {}:{}", pythonHost, pythonPort);
-        
-        channel = ManagedChannelBuilder.forAddress(pythonHost, pythonPort)
+
+        ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forAddress(pythonHost, pythonPort)
             .usePlaintext()  // 开发环境使用明文
-            .maxInboundMessageSize(100 * 1024 * 1024)  // 100MB
-            .keepAliveTime(30, TimeUnit.SECONDS)
-            .keepAliveTimeout(10, TimeUnit.SECONDS)
-            .build();
-        
+            .maxInboundMessageSize(100 * 1024 * 1024);  // 100MB
+        if (grpcKeepaliveEnabled) {
+            // 做什么：按配置启用 gRPC keepalive。
+            // 为什么：部分网络拓扑（跨网段/NAT）可能需要保活，但默认关闭以避免触发服务端 too_many_pings。
+            // 权衡：开启后若频率过高会被服务端限流，因此默认值设置为保守档位（600s）。
+            builder = builder
+                .keepAliveTime(grpcKeepaliveTimeSeconds, TimeUnit.SECONDS)
+                .keepAliveTimeout(grpcKeepaliveTimeoutSeconds, TimeUnit.SECONDS)
+                .keepAliveWithoutCalls(grpcKeepaliveWithoutCalls);
+            logger.info(
+                "Python gRPC keepalive enabled: time={}s timeout={}s withoutCalls={}",
+                grpcKeepaliveTimeSeconds,
+                grpcKeepaliveTimeoutSeconds,
+                grpcKeepaliveWithoutCalls
+            );
+        } else {
+            logger.info("Python gRPC keepalive disabled to avoid server-side too_many_pings throttling");
+        }
+        channel = builder.build();
+
         blockingStub = VideoProcessingServiceGrpc.newBlockingStub(channel);
         
         logger.info("Python gRPC client initialized");

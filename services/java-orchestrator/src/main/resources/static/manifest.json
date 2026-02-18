@@ -1,0 +1,34 @@
+{
+  "id": "/mobile-markdown.html",
+  "name": "Mobile Markdown Viewer",
+  "short_name": "Markdown Viewer",
+  "description": "Mobile video parsing and markdown viewing web app",
+  "start_url": "/mobile-markdown.html",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f1f5f9",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/icons/pwa-icon-192.svg",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/pwa-icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "/mobile-markdown.html",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  }
+}

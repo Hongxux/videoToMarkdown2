@@ -40,6 +40,69 @@ def test_load_download_video_options_prefers_environment(monkeypatch):
     assert options["prefer_h264"] is False
 
 
+def test_load_download_video_options_uses_selected_profile_when_top_level_empty(monkeypatch):
+    config = {
+        "video": {
+            "download_profile": "public_no_cookie",
+            "download_proxy": "",
+            "download_cookies_file": "",
+            "download_cookies_from_browser": "",
+            "download_profiles": {
+                "public_no_cookie": {
+                    "download_proxy": "",
+                    "download_cookies_file": "",
+                    "download_cookies_from_browser": "",
+                },
+                "login_cookie": {
+                    "download_proxy": "http://127.0.0.1:7897",
+                    "download_cookies_file": "",
+                    "download_cookies_from_browser": "edge:Default",
+                },
+            },
+        }
+    }
+    monkeypatch.delenv("YTDLP_PROXY", raising=False)
+    monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("YTDLP_COOKIES_FROM_BROWSER", raising=False)
+
+    options_public = impl._load_download_video_options(config)
+    assert options_public["proxy"] is None
+    assert options_public["cookies_file"] is None
+    assert options_public["cookies_from_browser"] is None
+
+    config["video"]["download_profile"] = "login_cookie"
+    options_login = impl._load_download_video_options(config)
+    assert options_login["proxy"] == "http://127.0.0.1:7897"
+    assert options_login["cookies_file"] is None
+    assert options_login["cookies_from_browser"] == "edge:Default"
+
+
+def test_load_download_video_options_non_empty_top_level_overrides_profile(monkeypatch):
+    config = {
+        "video": {
+            "download_profile": "login_cookie",
+            "download_proxy": "http://cfg-proxy:7890",
+            "download_cookies_file": "manual_cookie.txt",
+            "download_cookies_from_browser": "chrome",
+            "download_profiles": {
+                "login_cookie": {
+                    "download_proxy": "http://127.0.0.1:7897",
+                    "download_cookies_file": "",
+                    "download_cookies_from_browser": "edge:Default",
+                },
+            },
+        }
+    }
+    monkeypatch.delenv("YTDLP_PROXY", raising=False)
+    monkeypatch.delenv("YTDLP_COOKIES_FILE", raising=False)
+    monkeypatch.delenv("YTDLP_COOKIES_FROM_BROWSER", raising=False)
+
+    options = impl._load_download_video_options(config)
+    assert options["proxy"] == "http://cfg-proxy:7890"
+    assert options["cookies_file"] == "manual_cookie.txt"
+    assert options["cookies_from_browser"] == "chrome"
+
+
 def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tmp_path):
     captured = {}
 

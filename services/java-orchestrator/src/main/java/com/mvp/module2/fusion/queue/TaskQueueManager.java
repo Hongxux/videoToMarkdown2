@@ -186,15 +186,16 @@ public class TaskQueueManager {
     public void failTask(String taskId, String errorMessage) {
         TaskEntry task = allTasks.get(taskId);
         if (task != null) {
+            String userMessage = UserFacingErrorMapper.toUserMessage(errorMessage);
             task.status = TaskStatus.FAILED;
             task.completedAt = Instant.now();
-            task.statusMessage = UserFacingErrorMapper.busyMessage();
-            task.errorMessage = UserFacingErrorMapper.busyMessage();
+            task.statusMessage = userMessage;
+            task.errorMessage = userMessage;
             
             processingSlots.release();
             decrementUserTaskCount(task.userId);
             
-            logger.error("Task failed: {} - {}", taskId, errorMessage);
+            logger.error("Task failed: {} - rawError={}, userMessage={}", taskId, errorMessage, userMessage);
         }
     }
     

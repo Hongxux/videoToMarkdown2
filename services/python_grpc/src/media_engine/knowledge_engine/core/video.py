@@ -142,18 +142,36 @@ class VideoProcessor(BaseProcessor):
             opts["proxy"] = self.proxy
 
         self._maybe_export_cookie_file_from_browser()
+        browser_opt = self._parse_cookies_from_browser(self.cookies_from_browser)
 
         if self.cookies_file:
             cookie_path = os.path.abspath(os.path.expanduser(self.cookies_file))
-            if not os.path.isfile(cookie_path):
+            if os.path.isfile(cookie_path):
+                opts["cookiefile"] = cookie_path
+            elif browser_opt:
+                # 做什么：当 cookie 文件缺失时自动降级为浏览器直读。
+                # 为什么：避免“文件缺失/导出失败”成为硬阻断，让下载链路继续推进。
+                # 权衡：若浏览器库仍不可读，后续会在 yt-dlp 阶段报更准确的浏览器权限错误。
+                opts["cookiesfrombrowser"] = browser_opt
+                if self._cookie_export_error:
+                    self.emit_progress(
+                        "download",
+                        0.11,
+                        f"自动导出 Cookie 失败，已降级为浏览器直读: {self.cookies_from_browser}",
+                    )
+                else:
+                    self.emit_progress(
+                        "download",
+                        0.11,
+                        f"Cookie 文件缺失，已降级为浏览器直读: {self.cookies_from_browser}",
+                    )
+            else:
                 if self._cookie_export_error:
                     raise FileNotFoundError(
                         f"Cookie 文件不存在: {cookie_path}。自动导出失败原因: {self._cookie_export_error}"
                     )
                 raise FileNotFoundError(f"Cookie 文件不存在: {cookie_path}")
-            opts["cookiefile"] = cookie_path
-        elif self.cookies_from_browser:
-            browser_opt = self._parse_cookies_from_browser(self.cookies_from_browser)
+        else:
             if browser_opt:
                 opts["cookiesfrombrowser"] = browser_opt
         return opts
@@ -202,14 +220,12 @@ class VideoProcessor(BaseProcessor):
         """将 yt-dlp 原始错误包装为可执行的修复提示。"""
         raw = str(err)
         lower_raw = raw.lower()
-        chrome_cookie_copy_failed = (
-            "could not copy chrome cookie database" in lower_raw
-            or ("could not copy" in lower_raw and "cookie database" in lower_raw and "chrome" in lower_raw)
-        )
-        if chrome_cookie_copy_failed:
+        browser_cookie_access_failed = self._is_browser_cookie_access_error(err)
+        if browser_cookie_access_failed:
             configured_browser = self.cookies_from_browser or "chrome"
             return (
-                "yt-dlp 无法复制 Chrome Cookie 数据库。常见原因是 Chrome 进程占用或权限上下文不一致。"
+                "yt-dlp 读取浏览器 Cookie 失败（可能是 Chrome 数据库复制失败或 DPAPI 解密失败）。"
+                " 常见原因是浏览器进程占用、服务权限上下文不一致，或系统密钥不可用。"
                 f" 当前 browser 配置: `{configured_browser}`。"
                 " 请尝试：1) 完全退出 Chrome（含后台进程）；"
                 "2) 让服务与浏览器在同一系统用户和同一权限级别下运行；"
@@ -231,6 +247,50 @@ class VideoProcessor(BaseProcessor):
                 f" 当前 proxy 配置: `{configured_proxy}`。"
                 " 请检查代理进程是否已启动，以及端口是否正确（例如你命令行可用的是 7897，但服务当前是 7890）。"
                 " 若暂不使用代理，请清空 `video.download_proxy` 与环境变量 `YTDLP_PROXY` 后重试。"
+                f" 原始错误: {raw}"
+            )
+
+        gateway_failed = self._is_gateway_bad_response_error(err)
+        if gateway_failed:
+            configured_proxy = self.proxy or "(empty)"
+            if self.proxy:
+                return (
+                    "yt-dlp 请求目标站点失败（网关错误 502/503/504），当前代理出口疑似异常。"
+                    f" 当前 proxy 配置: `{configured_proxy}`。"
+                    " 请优先更换代理节点或检查代理上游连通性；"
+                    " 若需快速验证，可临时清空 `video.download_proxy` 与 `YTDLP_PROXY` 后重试。"
+                    f" 原始错误: {raw}"
+                )
+            return (
+                "yt-dlp 请求目标站点失败（网关错误 502/503/504）。"
+                " 这通常是站点上游临时故障或当前网络出口链路异常。"
+                " 请稍后重试，或切换可用代理出口后再试。"
+                f" 原始错误: {raw}"
+            )
+
+        bilibili_bvid_extractor_failed = self._is_bilibili_bvid_extractor_error(err)
+        if bilibili_bvid_extractor_failed:
+            return (
+                "yt-dlp 解析 Bilibili 页面失败（未提取到 bvid 字段）。"
+                " 这通常是链接本身不可见/无效，或 BV 号大小写与原始链接不一致导致。"
+                " 请先在浏览器确认该链接可直接播放，并尽量使用页面地址栏原始链接（不要手动改 BV 大小写）。"
+                f" 原始错误: {raw}"
+            )
+
+        geo_or_deleted = (
+            "geo-restricted" in lower_raw
+            or "region restricted" in lower_raw
+            or "region-restricted" in lower_raw
+            or "video may be deleted" in lower_raw
+            or "has been deleted" in lower_raw
+            or "this video is unavailable" in lower_raw
+        )
+        if geo_or_deleted:
+            return (
+                "yt-dlp 下载失败：视频可能已删除、不可见，或受地区限制。"
+                " 请先确认链接在浏览器可直接播放；"
+                " 若当前网络存在地域限制，请配置 `video.download_proxy` 或环境变量 `YTDLP_PROXY` 到可访问出口。"
+                " 若视频需要登录态，请更新 `download_cookies_from_browser` / `download_cookies_file` 后重试。"
                 f" 原始错误: {raw}"
             )
 
@@ -260,6 +320,40 @@ class VideoProcessor(BaseProcessor):
                 " 或 `download_cookies_file`。"
             )
         return f"yt-dlp 被 YouTube 风控拦截（需要登录态 Cookie）。{hint} 原始错误: {raw}"
+
+    @staticmethod
+    def _is_browser_cookie_access_error(err: Exception) -> bool:
+        """判断是否为浏览器 Cookie 访问失败错误（复制失败或 DPAPI 解密失败）。"""
+        lower_raw = str(err).lower()
+        return (
+            "could not copy chrome cookie database" in lower_raw
+            or ("could not copy" in lower_raw and "cookie database" in lower_raw and "chrome" in lower_raw)
+            or "failed to decrypt with dpapi" in lower_raw
+        )
+
+    @staticmethod
+    def _is_gateway_bad_response_error(err: Exception) -> bool:
+        """判断是否为网关层错误（典型 502/503/504）。"""
+        lower_raw = str(err).lower()
+        return (
+            "http error 502" in lower_raw
+            or "http error 503" in lower_raw
+            or "http error 504" in lower_raw
+            or "bad gateway" in lower_raw
+            or "gateway timeout" in lower_raw
+        )
+
+    @staticmethod
+    def _is_bilibili_bvid_extractor_error(err: Exception) -> bool:
+        """判断是否为 Bilibili 提取阶段 bvid 缺失错误。"""
+        lower_raw = str(err).lower()
+        # 兼容两种上游格式：
+        # 1) ERROR: [BiliBili] ... (caused by KeyError('bvid'))
+        # 2) ERROR: <id>: An extractor error has occurred. (caused by KeyError('bvid'))
+        # 某些版本/场景会缺失 [BiliBili] 前缀，因此不能把站点标签作为硬条件。
+        has_bvid_key_error = "keyerror('bvid')" in lower_raw
+        has_extractor_marker = "extractor error has occurred" in lower_raw
+        return has_bvid_key_error and has_extractor_marker
 
     @staticmethod
     def _is_format_unavailable_error(err: Exception) -> bool:
@@ -647,6 +741,42 @@ class VideoProcessor(BaseProcessor):
             raise FileNotFoundError(f"未在 {output_dir} 找到以 {filename} 开头的有效视频文件")
             
         except Exception as e:
+            if (
+                self._is_browser_cookie_access_error(e)
+                and ("cookiefile" in auth_opts or "cookiesfrombrowser" in auth_opts)
+            ):
+                self.emit_progress(
+                    "download",
+                    0.21,
+                    "浏览器 Cookie 读取失败，自动降级为无 Cookie 重试一次",
+                )
+                origin_cookie_file = self.cookies_file
+                origin_cookie_browser = self.cookies_from_browser
+                origin_export_attempted = self._cookie_export_attempted
+                origin_export_error = self._cookie_export_error
+                try:
+                    self.cookies_file = None
+                    self.cookies_from_browser = None
+                    self._cookie_export_attempted = False
+                    self._cookie_export_error = None
+                    return self.download(url, output_dir, filename)
+                finally:
+                    self.cookies_file = origin_cookie_file
+                    self.cookies_from_browser = origin_cookie_browser
+                    self._cookie_export_attempted = origin_export_attempted
+                    self._cookie_export_error = origin_export_error
+            if self._is_gateway_bad_response_error(e) and self.proxy:
+                self.emit_progress(
+                    "download",
+                    0.22,
+                    "代理出口返回网关错误，自动降级为无代理重试一次",
+                )
+                origin_proxy = self.proxy
+                try:
+                    self.proxy = None
+                    return self.download(url, output_dir, filename)
+                finally:
+                    self.proxy = origin_proxy
             self.emit_progress("download", 0.0, f"下载失败: {str(e)}")
             raise RuntimeError(self._build_download_error_message(e))
 

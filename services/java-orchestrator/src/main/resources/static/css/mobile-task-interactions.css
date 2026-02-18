@@ -52,87 +52,194 @@
  * 为什么：减少视觉噪声，让输入区像系统搜索栏一样“安静待机”。
  * 权衡：保留最小可见边界，避免纯透明导致可发现性过低。 */
 .submit-card {
-    margin: 10px 12px 8px;
+    margin: 0;
     padding: 0;
     border: 0;
     border-radius: 0;
     background: transparent;
     box-shadow: none;
     display: grid;
-    gap: 0;
+    gap: 8px;
+}
+
+.submit-card.is-floating-tray {
+    position: fixed;
+    left: 50%;
+    bottom: calc(var(--bottom-nav-active-h) + max(70px, env(safe-area-inset-bottom)));
+    transform: translateX(-50%);
+    width: min(620px, calc(100vw - 28px));
+    margin: 0;
+    padding: 8px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.26), 0 12px 22px rgba(15, 23, 42, 0.14);
+    z-index: 34;
+    animation: composerTrayEnter 200ms var(--motion-ease-out) both;
+}
+
+@keyframes composerTrayEnter {
+    from {
+        opacity: 0;
+        transform: translate(-50%, 8px) scale(0.985);
+    }
+    to {
+        opacity: 1;
+        transform: translate(-50%, 0) scale(1);
+    }
 }
 
 .submit-source-shell {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 48px;
+    display: grid;
+    align-content: center;
+    gap: 6px;
+    min-height: 72px;
     border: 0;
-    border-radius: 14px;
-    background: rgba(15, 23, 42, 0.04);
+    border-radius: 12px;
+    background: #ffffff;
     box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.34);
-    padding: 4px 4px 4px 10px;
+    padding: 10px 12px;
+    position: relative;
+    overflow: hidden;
+    cursor: pointer;
     transition:
         background-color 140ms var(--motion-ease-out),
-        box-shadow 140ms var(--motion-ease-out);
+        box-shadow 140ms var(--motion-ease-out),
+        transform 180ms var(--motion-ease-out),
+        filter 180ms var(--motion-ease-out);
+}
+
+.submit-surface-copy {
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    letter-spacing: 0.02em;
+    line-height: 1.2;
 }
 
 .submit-source-shell:hover {
-    background: rgba(15, 23, 42, 0.06);
-    box-shadow: inset 0 0 0 1px rgba(100, 116, 139, 0.38), 0 8px 16px rgba(15, 23, 42, 0.1);
+    box-shadow: inset 0 0 0 1px rgba(100, 116, 139, 0.4);
+    transform: translateY(0);
+    filter: none;
 }
 
 .submit-source-shell.drag-active {
-    background: var(--surface-drop-bg-active);
-    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.46), 0 0 0 2px var(--surface-ring-soft);
+    background: rgba(239, 246, 255, 0.9);
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.5), 0 0 0 2px rgba(96, 165, 250, 0.16);
+}
+
+.submit-source-shell.drag-welcome {
+    transform: scale(1.002);
+    box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.54), 0 0 0 2px rgba(96, 165, 250, 0.18);
+}
+
+.submit-source-shell.drop-accepted {
+    animation: submitDropAccepted 320ms cubic-bezier(0.2, 0.9, 0.2, 1);
+}
+
+.submit-source-shell.is-emitting,
+.submit-source-shell.is-success,
+.submit-source-shell.is-error {
+    animation: submitEmitterPulse 360ms var(--motion-ease-out);
+}
+
+.submit-source-shell.is-success {
+    box-shadow: inset 0 0 0 1px rgba(34, 197, 94, 0.54), 0 0 0 2px rgba(34, 197, 94, 0.12), 0 8px 18px rgba(34, 197, 94, 0.2);
+}
+
+.submit-source-shell.is-error {
+    box-shadow: inset 0 0 0 1px rgba(171, 72, 99, 0.6), 0 0 0 2px rgba(171, 72, 99, 0.18), 0 8px 18px rgba(143, 52, 79, 0.16);
+}
+
+.submit-source-shell.is-rejecting {
+    animation: submitRejectWobble 420ms cubic-bezier(0.34, 1.56, 0.42, 1);
+}
+
+.submit-source-shell.is-link-suspect .submit-input {
+    text-decoration: underline wavy rgba(171, 72, 99, 0.64);
+    text-underline-offset: 4px;
+}
+
+.submit-drop-ripple,
+.submit-launch-ripple {
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+    background: radial-gradient(circle, rgba(96, 165, 250, 0.4) 0%, rgba(96, 165, 250, 0.16) 46%, rgba(96, 165, 250, 0) 74%);
+    animation: submitDropRipple 620ms cubic-bezier(0.2, 0.78, 0.2, 1) forwards;
+}
+
+.submit-launch-ripple {
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.56) 0%, rgba(147, 197, 253, 0.26) 45%, rgba(147, 197, 253, 0) 74%);
 }
 
 .submit-source-shell:focus-within {
-    background: var(--surface-bg);
-    box-shadow: inset 0 0 0 1px var(--primary), 0 0 0 2px var(--surface-ring-soft);
+    box-shadow: inset 0 0 0 1px var(--primary), 0 0 0 2px rgba(96, 165, 250, 0.18);
 }
 
 .submit-input {
-    flex: 1;
+    width: 100%;
     min-width: 0;
-    min-height: 38px;
+    min-height: 34px;
     border: 0;
     border-radius: 0;
     background: transparent;
     color: var(--text);
-    padding: 6px 0 6px 2px;
+    padding: 4px 0;
     font-size: 14px;
+    box-shadow: none;
+    cursor: text;
 }
 
 .submit-input::placeholder {
-    color: #64748b;
+    color: #94a3b8;
 }
 
 .submit-source-shell .submit-input:focus {
     box-shadow: none;
 }
 
-.submit-submit-trigger {
-    width: 38px;
-    min-width: 38px;
-    height: 38px;
-    min-height: 38px;
-    padding: 0;
-    border-radius: 11px;
-    box-shadow: none;
-    transition: transform 120ms var(--motion-ease-snappy), box-shadow 120ms var(--motion-ease-out);
+@keyframes submitDropRipple {
+    0% {
+        opacity: 0.78;
+        transform: scale(0.2);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1.08);
+    }
 }
 
-.submit-submit-trigger:hover,
-.submit-submit-trigger:focus-visible {
-    box-shadow: 0 4px 10px rgba(37, 99, 235, 0.22);
-    transform: translateY(-1px);
+@keyframes submitDropAccepted {
+    0% {
+        transform: scale(0.995);
+    }
+    40% {
+        transform: scale(1.014);
+    }
+    100% {
+        transform: scale(1);
+    }
 }
 
-.submit-submit-trigger .icon-glyph {
-    width: 18px;
-    height: 18px;
-    stroke-width: 2.2;
+@keyframes submitEmitterPulse {
+    0% {
+        filter: saturate(1);
+    }
+    38% {
+        filter: saturate(1.15);
+    }
+    100% {
+        filter: saturate(1);
+    }
+}
+
+@keyframes submitRejectWobble {
+    0% { transform: translateX(0); }
+    18% { transform: translateX(-4px); }
+    32% { transform: translateX(3.2px); }
+    46% { transform: translateX(-2.4px); }
+    62% { transform: translateX(1.8px); }
+    100% { transform: translateX(0); }
 }
 
 .submit-file-input {
@@ -140,15 +247,64 @@
 }
 
 .submit-tip {
-    display: none;
+    display: block;
     min-height: 0;
     font-size: 11px;
     color: var(--muted);
     margin: 4px 2px 0;
+    max-height: 0;
+    opacity: 0;
+    transform: translateY(-6px);
+    overflow: hidden;
+    transition:
+        max-height 220ms var(--motion-ease-out),
+        opacity 180ms var(--motion-ease-out),
+        transform 220ms var(--motion-ease-out);
 }
 
 .submit-tip:not(:empty) {
-    display: block;
+    max-height: 120px;
+    opacity: 1;
+    transform: translateY(0);
+}
+
+.submit-tip.is-entering {
+    animation: submitTipDropIn 260ms var(--motion-ease-out);
+}
+
+.submit-tip-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.submit-tip-text {
+    line-height: 1.45;
+}
+
+.submit-tip-action {
+    border: 0;
+    border-radius: 999px;
+    padding: 4px 10px;
+    min-height: 24px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    background: rgba(71, 85, 105, 0.12);
+    color: #334155;
+    box-shadow: inset 0 0 0 1px rgba(100, 116, 139, 0.22);
+}
+
+.submit-tip.error .submit-tip-action {
+    background: rgba(171, 72, 99, 0.14);
+    color: #8f344f;
+    box-shadow: inset 0 0 0 1px rgba(171, 72, 99, 0.26);
+}
+
+.submit-tip-action:disabled {
+    opacity: 0.7;
+    cursor: progress;
 }
 
 .submit-tip.success {
@@ -157,6 +313,17 @@
 
 .submit-tip.error {
     color: var(--danger);
+}
+
+@keyframes submitTipDropIn {
+    from {
+        opacity: 0;
+        transform: translateY(-6px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
 }
 
 .submit-card.empty-guide-pulse {
@@ -174,24 +341,23 @@
     }
 
     .submit-input {
-        background: #12161d;
+        background: transparent;
         color: var(--text);
-        box-shadow: inset 0 0 0 1px #2f3948;
+        box-shadow: none;
     }
 
     .submit-source-shell {
-        background: rgba(148, 163, 184, 0.08);
+        background: #151d2a;
         color: var(--text);
-        box-shadow: inset 0 0 0 1px #2f3948;
+        box-shadow: inset 0 0 0 1px #32465b;
     }
 
     .submit-source-shell:hover {
-        background: rgba(148, 163, 184, 0.12);
+        box-shadow: inset 0 0 0 1px #48678a;
     }
 
     .submit-source-shell:focus-within {
-        background: #12161d;
-        box-shadow: inset 0 0 0 1px #5b8df5, 0 0 0 2px rgba(91, 141, 245, 0.22);
+        box-shadow: inset 0 0 0 1px #5b8df5, 0 0 0 2px rgba(91, 141, 245, 0.18);
     }
 
     .submit-source-shell.drag-active {
@@ -204,7 +370,25 @@
         box-shadow: none;
     }
 
-    .submit-source-shell .submit-input {
-        background: transparent;
+    .submit-card.is-floating-tray {
+        background: rgba(24, 31, 42, 0.92);
+        box-shadow: inset 0 0 0 1px rgba(94, 120, 160, 0.38), 0 12px 22px rgba(0, 0, 0, 0.38);
     }
+
+    .submit-surface-copy {
+        color: #9fb0c6;
+    }
+
+    .submit-tip-action {
+        background: rgba(148, 163, 184, 0.14);
+        color: #d6e0ee;
+        box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.26);
+    }
+
+    .submit-tip.error .submit-tip-action {
+        background: rgba(180, 96, 122, 0.26);
+        color: #ffd7e3;
+        box-shadow: inset 0 0 0 1px rgba(227, 139, 165, 0.34);
+    }
+
 }

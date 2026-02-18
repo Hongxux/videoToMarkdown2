@@ -11,6 +11,7 @@ import hashlib
 import time
 import re
 import uuid
+import threading
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Any
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import ge
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 
 logger = logging.getLogger(__name__)
+
+_PPSTRUCTURE_IR_PATCH_LOCK = threading.Lock()
+_PPSTRUCTURE_IR_PATCH_APPLIED = False
 
 VISION_DESCRIPTION_ONLY_SYSTEM_PROMPT = """You are an educational image description assistant. Return JSON only. Single image: {\"img_description\":\"...\"}. Multi image: [{\"img_description\":\"...\"}]. Describe only visible facts."""
 
@@ -66,15 +70,7 @@ class ConcreteKnowledgeValidator:
         # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炲鍨鹃幇浣圭稁缂傚倷鐒﹁摫闁告瑥绻橀弻鐔碱敍閿濆洣姹楅悷婊呭鐢帡鎮欐繝鍐︿簻闁瑰搫绉烽崗宀勬煕濡濮嶉柟顔筋殜閻涱噣宕归鐓庮潛婵犵數鍋涢惇浼村礉閹存繍鍤曢柟闂寸绾惧吋绻涢幋锝夊摵妞ゆ梹妫冨铏圭磼濡搫顫戦梺绯曟櫆閻楁粌鈽夐崹顐犲亝闁告劏鏅濋崢閬嶆⒑闂堟侗鐒鹃柛搴ゆ珪缁傛帒鈽夐姀锛勫幍婵炴挻鑹鹃悘婵囦繆閸ф鐓冪憸婊堝礈閵娧呯闁糕剝顭囬々鍙夌節婵犲倻澧遍柡?VisionAIClient
         vision_config = self._load_vision_config(config_path)
         if vision_config:
-            try:
-                vision_config.person_subject_filter_enabled = False
-            except Exception:
-                pass
             self._vision_client = VisionAIClient(vision_config)
-            try:
-                self._vision_client.config.person_subject_filter_enabled = False
-            except Exception:
-                pass
             self._vision_enabled = vision_config.enabled
             self._cache_signature = self._build_cache_signature(vision_config)
         
@@ -156,6 +152,13 @@ class ConcreteKnowledgeValidator:
             )
             if str(item or "").strip()
         }
+        self._structure_force_disable_ir_optim = bool(
+            structure_cfg.get("force_disable_ir_optim", True)
+        )
+        self._structure_backend_compat_retry_enabled = bool(
+            structure_cfg.get("backend_compat_retry_enabled", True)
+        )
+        self._structure_backend_compat_retry_attempted = False
         self._structure_engine = None
         self._structure_engine_init_error: Optional[str] = None
         self._structure_paddlex_layout_model = None
@@ -260,6 +263,8 @@ class ConcreteKnowledgeValidator:
         defaults: Dict[str, Any] = {
             "enabled": True,
             "disable_ppstructure_after_backend_error": True,
+            "force_disable_ir_optim": True,
+            "backend_compat_retry_enabled": True,
             "dedup_similarity_threshold": float(structure_default_dedup_threshold),
             "bbox_overlap_merge_threshold": 0.9,
             "skip_split_bbox_coverage_threshold": 0.0,
@@ -303,6 +308,18 @@ class ConcreteKnowledgeValidator:
                 structure_cfg.get(
                     "disable_ppstructure_after_backend_error",
                     defaults["disable_ppstructure_after_backend_error"],
+                )
+            )
+            merged["force_disable_ir_optim"] = bool(
+                structure_cfg.get(
+                    "force_disable_ir_optim",
+                    defaults["force_disable_ir_optim"],
+                )
+            )
+            merged["backend_compat_retry_enabled"] = bool(
+                structure_cfg.get(
+                    "backend_compat_retry_enabled",
+                    defaults["backend_compat_retry_enabled"],
                 )
             )
             merged["dedup_similarity_threshold"] = float(
@@ -414,6 +431,86 @@ class ConcreteKnowledgeValidator:
         )
         return any(token in message for token in keywords)
 
+    @staticmethod
+    def _summarize_exception(exc: Exception, max_lines: int = 3, max_chars: int = 320) -> str:
+        message = str(exc or "").strip()
+        if not message:
+            return type(exc).__name__
+        lines = [line.strip() for line in message.splitlines() if line.strip()]
+        if not lines:
+            return type(exc).__name__
+        summary = " | ".join(lines[:max(1, int(max_lines))])
+        if len(lines) > max_lines:
+            summary += " | ..."
+        if len(summary) > max_chars:
+            summary = summary[: max_chars - 3] + "..."
+        return summary
+
+    def _attempt_structure_backend_compat_recovery(self, exc: Exception) -> bool:
+        if not bool(getattr(self, "_structure_backend_compat_retry_enabled", True)):
+            return False
+        if self._structure_backend_compat_retry_attempted:
+            return False
+        if not self._is_structure_backend_runtime_error(exc):
+            return False
+        self._structure_backend_compat_retry_attempted = True
+
+        # 一次性兼容重试：禁用 mkldnn，避免已知 oneDNN fused_conv2d 导出链路异常。
+        os.environ["FLAGS_use_mkldnn"] = "0"
+        self._structure_engine = None
+        self._structure_engine_init_error = None
+        recovered_engine = self._get_structure_engine()
+        if recovered_engine is None:
+            return False
+        logger.warning(
+            "PP-Structure backend compatibility retry enabled: FLAGS_use_mkldnn=0, engine reinitialized."
+        )
+        return True
+
+    def _patch_ppstructure_ir_optim_if_needed(self) -> None:
+        if not bool(getattr(self, "_structure_force_disable_ir_optim", True)):
+            return
+        if os.name != "nt":
+            return
+        global _PPSTRUCTURE_IR_PATCH_APPLIED
+        if _PPSTRUCTURE_IR_PATCH_APPLIED:
+            return
+        with _PPSTRUCTURE_IR_PATCH_LOCK:
+            if _PPSTRUCTURE_IR_PATCH_APPLIED:
+                return
+            try:
+                from paddle import inference  # type: ignore
+            except Exception as exc:
+                logger.warning(
+                    "PP-Structure IR compatibility patch skipped: paddle inference unavailable: %s",
+                    exc,
+                )
+                return
+            config_cls = getattr(inference, "Config", None)
+            if config_cls is None or not hasattr(config_cls, "switch_ir_optim"):
+                logger.warning(
+                    "PP-Structure IR compatibility patch skipped: inference.Config.switch_ir_optim missing."
+                )
+                return
+            original_switch_ir_optim = config_cls.switch_ir_optim
+
+            # 做什么：强制关闭 IR 优化；为什么：规避 Windows + PaddleOCR2.x 下布局模型触发 fused_conv2d/oneDNN 崩溃。
+            # 权衡：可能牺牲少量推理性能，但可换取 PP-Structure 主后端可用性，避免长期退化到 fallback。
+            def _force_disable_ir_optim(self, _enabled):  # type: ignore[no-untyped-def]
+                return original_switch_ir_optim(self, False)
+
+            try:
+                config_cls.switch_ir_optim = _force_disable_ir_optim
+                _PPSTRUCTURE_IR_PATCH_APPLIED = True
+                logger.warning(
+                    "PP-Structure compatibility patch enabled: force inference.Config.switch_ir_optim(False) on Windows."
+                )
+            except Exception as exc:
+                logger.warning(
+                    "PP-Structure IR compatibility patch failed: %s",
+                    exc,
+                )
+
     def _get_paddlex_layout_model(self):
         if self._structure_paddlex_layout_model is not None:
             return self._structure_paddlex_layout_model
@@ -502,6 +599,7 @@ class ConcreteKnowledgeValidator:
         if self._structure_engine_init_error:
             return None
         try:
+            self._patch_ppstructure_ir_optim_if_needed()
             from paddleocr import PPStructure  # type: ignore
             try:
                 from paddleocr import PPStructureV3  # type: ignore
@@ -514,7 +612,10 @@ class ConcreteKnowledgeValidator:
                 logger.warning("PP-Structure preprocessor disabled: class not found")
                 return None
             try:
-                self._structure_engine = engine_cls(show_log=False)
+                init_kwargs: Dict[str, Any] = {"show_log": False}
+                if bool(getattr(self, "_structure_force_disable_ir_optim", True)):
+                    init_kwargs["ir_optim"] = False
+                self._structure_engine = engine_cls(**init_kwargs)
             except TypeError:
                 self._structure_engine = engine_cls()
             logger.info(
@@ -802,7 +903,35 @@ class ConcreteKnowledgeValidator:
 
         try:
             raw_result = engine(image)
+            return self._parse_structure_blocks_from_raw_result(raw_result, image_w=image_w, image_h=image_h)
         except Exception as exc:
+            # 一次性尝试兼容重试，成功后继续走 PP-Structure 主路径。
+            if self._attempt_structure_backend_compat_recovery(exc):
+                recovered_engine = self._get_structure_engine()
+                if recovered_engine is not None:
+                    try:
+                        raw_result = recovered_engine(image)
+                        logger.info(
+                            "PP-Structure backend recovered for %s after compatibility retry.",
+                            Path(image_path).name,
+                        )
+                        return self._parse_structure_blocks_from_raw_result(
+                            raw_result,
+                            image_w=image_w,
+                            image_h=image_h,
+                        )
+                    except Exception as retry_exc:
+                        logger.warning(
+                            "PP-Structure compatibility retry failed for %s: %s",
+                            Path(image_path).name,
+                            self._summarize_exception(retry_exc),
+                        )
+                        logger.debug(
+                            "PP-Structure compatibility retry traceback for %s",
+                            Path(image_path).name,
+                            exc_info=retry_exc,
+                        )
+                        exc = retry_exc
             if bool(getattr(self, "_structure_disable_after_backend_error", True)) and self._is_structure_backend_runtime_error(exc):
                 self._structure_engine = None
                 self._structure_engine_init_error = f"runtime_backend_error:{type(exc).__name__}"
@@ -812,10 +941,21 @@ class ConcreteKnowledgeValidator:
             logger.warning(
                 "PP-Structure inference failed for %s, trying paddlex fallback: %s",
                 Path(image_path).name,
-                exc,
+                self._summarize_exception(exc),
+            )
+            logger.debug(
+                "PP-Structure inference traceback for %s",
+                Path(image_path).name,
+                exc_info=exc,
             )
             return self._collect_structure_blocks_via_paddlex(image_path)
 
+    def _parse_structure_blocks_from_raw_result(
+        self,
+        raw_result: Any,
+        image_w: int,
+        image_h: int,
+    ) -> List[Dict[str, Any]]:
         blocks: List[Dict[str, Any]] = []
         queue: List[Any] = [raw_result]
         while queue:
@@ -1446,6 +1586,19 @@ class ConcreteKnowledgeValidator:
             confidence = 1.0
         concrete_type = str(payload.get("concrete_type", "visual_description") or "visual_description")
         reason = str(payload.get("reason", "Vision AI description") or "Vision AI description")
+        reason_lower = reason.lower()
+        prefilter_source = str(payload.get("prefilter_source", "") or "").strip()
+        person_prefilter_hit = (
+            bool(prefilter_source)
+            or concrete_type.strip().lower() == "person_subject"
+            or "person_subject_prefilter" in reason_lower
+            or "person-subject prefilter" in reason_lower
+            or "预过滤" in reason
+        )
+        has_concrete_flag = self._vision_flag_to_bool(
+            payload.get("has_concrete_knowledge", payload.get("has_concrete", True))
+        )
+        should_include_flag = self._vision_flag_to_bool(payload.get("should_include", True))
         img_description = str(
             payload.get("img_description")
             or payload.get("img_desription")
@@ -1458,14 +1611,14 @@ class ConcreteKnowledgeValidator:
         if not img_description:
             img_description = "description unavailable"
         return ConcreteKnowledgeResult(
-            has_concrete=True,
+            has_concrete=has_concrete_flag if person_prefilter_hit else True,
             has_formula=False,
             confidence=confidence,
             concrete_type=concrete_type,
             reason=reason,
             is_mixed=False,
             non_text_ratio=0.0,
-            should_include=True,
+            should_include=should_include_flag if person_prefilter_hit else True,
             img_description=img_description,
         )
 

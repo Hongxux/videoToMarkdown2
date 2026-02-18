@@ -41,6 +41,7 @@ def test_extract_structured_screenshots_groups_expected_types(monkeypatch, tmp_p
     _write_dummy_image(image_path)
 
     validator._structure_preprocess_enabled = True
+    validator._structure_skip_split_bbox_coverage_threshold = 0.0
     monkeypatch.setattr(validator, "_get_structure_engine", lambda: object())
     monkeypatch.setattr(
         validator,
@@ -77,6 +78,7 @@ def test_extract_structured_screenshots_includes_bbox_metadata(monkeypatch, tmp_
 
     validator._structure_preprocess_enabled = True
     validator._structure_crop_margin_px = 0
+    validator._structure_skip_split_bbox_coverage_threshold = 0.0
     monkeypatch.setattr(validator, "_get_structure_engine", lambda: object())
     monkeypatch.setattr(
         validator,
@@ -108,6 +110,7 @@ def test_extract_structured_screenshots_merges_high_overlap_bboxes(monkeypatch, 
 
     validator._structure_preprocess_enabled = True
     validator._structure_bbox_overlap_merge_threshold = 0.9
+    validator._structure_skip_split_bbox_coverage_threshold = 0.0
     monkeypatch.setattr(validator, "_get_structure_engine", lambda: object())
     monkeypatch.setattr(
         validator,
@@ -137,6 +140,7 @@ def test_extract_structured_screenshots_absorbs_image_when_overlapped_by_bundle(
 
     validator._structure_preprocess_enabled = True
     validator._structure_bbox_overlap_merge_threshold = 0.9
+    validator._structure_skip_split_bbox_coverage_threshold = 0.0
     monkeypatch.setattr(validator, "_get_structure_engine", lambda: object())
     monkeypatch.setattr(
         validator,
@@ -167,6 +171,7 @@ def test_extract_structured_screenshots_merges_all_high_overlap_children_into_bu
 
     validator._structure_preprocess_enabled = True
     validator._structure_bbox_overlap_merge_threshold = 0.9
+    validator._structure_skip_split_bbox_coverage_threshold = 0.0
     monkeypatch.setattr(validator, "_get_structure_engine", lambda: object())
     monkeypatch.setattr(
         validator,
@@ -198,6 +203,7 @@ def test_extract_structured_screenshots_expands_bundle_with_nearby_text_and_code
     validator._structure_preprocess_enabled = True
     validator._structure_crop_margin_px = 0
     validator._structure_context_nearby_px = 3
+    validator._structure_skip_split_bbox_coverage_threshold = 0.0
     validator._structure_target_types = {
         "figure",
         "figure caption",
@@ -500,6 +506,7 @@ def test_collect_structure_blocks_disables_ppstructure_after_backend_error(monke
 
     validator._structure_preprocess_enabled = True
     validator._structure_disable_after_backend_error = True
+    validator._structure_backend_compat_retry_enabled = False
     validator._structure_engine = _BrokenEngine()
     validator._structure_engine_init_error = None
 
@@ -517,6 +524,60 @@ def test_collect_structure_blocks_disables_ppstructure_after_backend_error(monke
     assert validator._structure_engine is None
     assert validator._structure_engine_init_error == "runtime_backend_error:RuntimeError"
     assert validator._get_structure_engine() is None
+
+
+def test_collect_structure_blocks_backend_retry_recovers_engine(monkeypatch, tmp_path):
+    validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
+    image_path = tmp_path / "assets" / "SU917_retry" / "raw.png"
+    _write_dummy_image(image_path, width=260, height=180)
+
+    class _BrokenEngine:
+        def __call__(self, _):
+            raise RuntimeError(
+                "OneDnnContext does not have the input Filter. [operator < fused_conv2d > error]"
+            )
+
+    class _RecoveredEngine:
+        def __call__(self, _):
+            return [{"type": "figure", "bbox": (20, 20, 120, 100)}]
+
+    validator._structure_preprocess_enabled = True
+    validator._structure_disable_after_backend_error = True
+    validator._structure_backend_compat_retry_enabled = True
+    validator._structure_backend_compat_retry_attempted = False
+
+    engines = [_BrokenEngine(), _RecoveredEngine()]
+
+    def _next_engine():
+        if engines:
+            return engines.pop(0)
+        return _RecoveredEngine()
+
+    fallback_calls = {"count": 0}
+
+    def _fallback(_):
+        fallback_calls["count"] += 1
+        return []
+
+    monkeypatch.setattr(validator, "_get_structure_engine", _next_engine)
+    monkeypatch.setattr(validator, "_collect_structure_blocks_via_paddlex", _fallback)
+
+    outputs = validator._collect_structure_blocks(str(image_path))
+    assert outputs == [{"type": "figure", "bbox": (20, 20, 120, 100)}]
+    assert fallback_calls["count"] == 0
+    assert validator._structure_backend_compat_retry_attempted is True
+
+
+def test_summarize_exception_compacts_multiline_message(tmp_path):
+    validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
+    err = RuntimeError("line1\nline2\nline3\nline4")
+
+    summary = validator._summarize_exception(err, max_lines=2, max_chars=200)
+
+    assert "line1" in summary
+    assert "line2" in summary
+    assert "line3" not in summary
+    assert "..." in summary
 
 
 def test_apply_external_materials_uses_structured_crops_and_skips_unit_scan_fallback(tmp_path):
@@ -583,6 +644,78 @@ def test_apply_external_materials_uses_structured_crops_and_skips_unit_scan_fall
     assert unit.materials.screenshot_items[0].get("should_include") is False
     assert unit.materials.screenshot_items[0].get("img_description") == "ocr text"
     assert unit.materials.screenshot_items[0].get("img_path") == str(raw_img.resolve())
+    assert float(unit.materials.screenshot_items[0].get("timestamp_sec")) == 3.0
+    assert not raw_img.exists()
+
+
+def test_apply_external_materials_person_prefilter_reject_does_not_restore_deleted_file(tmp_path):
+    pipeline = _build_pipeline(tmp_path)
+    output_dir = Path(pipeline.output_dir)
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
+    (screenshots_dir / "SU931").mkdir(parents=True, exist_ok=True)
+    raw_img = screenshots_dir / "SU931" / "raw.png"
+    _write_dummy_image(raw_img, width=220, height=120)
+
+    class _StubValidator:
+        def __init__(self):
+            self.validate_called = 0
+
+        def extract_structured_screenshots(self, image_path: str, source_id: str = "", timestamp_sec=None):
+            return None
+
+        def dedupe_structured_candidates_keep_latest(self, candidates):
+            return candidates
+
+        def validate(self, image_path: str, skip_duplicate_check: bool = False):
+            self.validate_called += 1
+            if Path(image_path).exists():
+                Path(image_path).unlink()
+            return SimpleNamespace(
+                should_include=False,
+                concrete_type="person_subject",
+                img_description="人物主体截图，已在预处理阶段过滤",
+                reason="人物主体占比过高，预过滤跳过 Vision",
+            )
+
+    stub_validator = _StubValidator()
+    pipeline._concrete_validator = stub_validator
+
+    unit = SemanticUnit(
+        unit_id="SU931",
+        knowledge_type="concrete",
+        knowledge_topic="topic",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=8.0,
+    )
+
+    requests = MaterialRequests(
+        screenshot_requests=[
+            ScreenshotRequest(
+                screenshot_id="SU931/raw",
+                timestamp_sec=3.0,
+                label="head",
+                semantic_unit_id="SU931",
+            )
+        ],
+        clip_requests=[],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(screenshots_dir),
+        clips_dir=str(clips_dir),
+        material_requests=requests,
+    )
+
+    assert stub_validator.validate_called == 1
+    assert unit.materials is not None
+    assert unit.materials.screenshot_paths == []
+    assert unit.materials.screenshot_items == []
     assert not raw_img.exists()
 
 

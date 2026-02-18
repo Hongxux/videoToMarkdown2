@@ -20,6 +20,10 @@ def _bootstrap_repo_root() -> None:
 
 _bootstrap_repo_root()
 
+from services.python_grpc.src.server.runtime_env import sanitize_user_site_packages
+
+sanitize_user_site_packages()
+
 from services.python_grpc.src.common.logging import configure_pipeline_logging
 from services.python_grpc.src.server.dependency_check import run_dependency_check
 from services.python_grpc.src.server import serve

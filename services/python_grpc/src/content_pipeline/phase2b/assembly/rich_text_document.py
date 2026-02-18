@@ -118,6 +118,36 @@ class RichTextDocument:
     source_video: str = ""
     total_duration_sec: float = 0.0
     generated_at: str = ""
+
+    @property
+    def sections(self) -> List[RichTextSection]:
+        """
+        执行逻辑：
+        1) 将 knowledge_groups 下的 units 展平为列表。
+        2) 返回与旧版 sections 语义一致的数据视图。
+        实现方式：按组遍历并拼接 unit 列表。
+        核心价值：兼容旧调用方字段访问，降低模型字段演进风险。
+        输入参数：
+        - 无。
+        输出参数：
+        - RichTextSection 列表。"""
+        flattened: List[RichTextSection] = []
+        for group in self.knowledge_groups:
+            flattened.extend(group.units or [])
+        return flattened
+
+    def total_sections(self) -> int:
+        """
+        执行逻辑：
+        1) 遍历所有知识分组。
+        2) 汇总每个分组中的 unit 数量。
+        实现方式：按组求和。
+        核心价值：统一 section 计数入口，避免调用方重复拼接统计逻辑。
+        输入参数：
+        - 无。
+        输出参数：
+        - 整型计数结果。"""
+        return sum(len(group.units or []) for group in self.knowledge_groups)
     
     def add_group(self, group: KnowledgeGroup):
         """
@@ -247,7 +277,7 @@ class RichTextDocument:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(content)
         
-        total_units = sum(len(group.units) for group in self.knowledge_groups)
+        total_units = self.total_sections()
         logger.info(
             f"Exported Markdown: {output_path} (groups={len(self.knowledge_groups)}, units={total_units})"
         )

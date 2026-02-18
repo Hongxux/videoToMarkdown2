@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 _TEXT_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
 
 
+def _get_env_float(name: str, default: float, lower: float, upper: float) -> float:
+    """方法说明：`_get_env_float` 工具方法。
+    执行步骤：
+    1) 步骤1：读取环境变量并尝试解析为浮点数。
+    2) 步骤2：解析失败时使用默认值。
+    3) 步骤3：按上下界裁剪后返回结果。"""
+    try:
+        value = float(os.getenv(name, str(default)))
+    except Exception:
+        value = float(default)
+    return max(lower, min(upper, value))
+
+
 def _resolve_worker_readable_video_path(
     video_path: str,
     *,
@@ -361,11 +374,189 @@ def _get_ocr_extractor() -> Any:
     try:
         from services.python_grpc.src.content_pipeline.infra.runtime.ocr_utils import OCRExtractor
 
-        _validator_cache[key] = OCRExtractor()
+        # 增量截图阶段优先按中英双语初始化，避免仅英文识别导致 token 漏检。
+        ocr_lang = str(os.getenv("CV_ROUTE_OCR_LANG", "chi_sim+eng") or "chi_sim+eng").strip() or "chi_sim+eng"
+        _validator_cache[key] = OCRExtractor(lang=ocr_lang)
     except Exception as e:
         logger.warning(f"Route screenshot OCR extractor init failed: {e}")
         _validator_cache[key] = None
     return _validator_cache[key]
+
+
+def _get_region_ocr_engine() -> Tuple[str, Any]:
+    """方法说明：`_get_region_ocr_engine` 工具方法。
+    执行步骤：
+    1) 步骤1：读取配置决定 OCR 引擎优先级（auto/rapidocr/paddle/tesseract）。
+    2) 步骤2：懒加载并缓存区域 OCR 引擎实例。
+    3) 步骤3：不可用时返回 `("none", None)` 并降级到后备路径。"""
+    global _validator_cache
+
+    key = "route_screenshot_region_ocr_engine"
+    if key in _validator_cache:
+        cached = _validator_cache[key]
+        if isinstance(cached, tuple) and len(cached) == 2:
+            return cached[0], cached[1]
+        return "none", None
+
+    mode = str(os.getenv("CV_ROUTE_OCR_ENGINE", "auto") or "auto").strip().lower()
+    tried = []
+
+    def _try_rapidocr() -> Optional[Tuple[str, Any]]:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+
+            return ("rapidocr", RapidOCR())
+        except Exception as exc:
+            tried.append(f"rapidocr:{type(exc).__name__}")
+            return None
+
+    def _try_paddle() -> Optional[Tuple[str, Any]]:
+        try:
+            from paddleocr import PaddleOCR  # type: ignore
+
+            kwargs = {"lang": "ch", "use_angle_cls": True, "show_log": False}
+            try:
+                engine = PaddleOCR(**kwargs)
+            except TypeError:
+                kwargs.pop("show_log", None)
+                engine = PaddleOCR(**kwargs)
+            return ("paddle", engine)
+        except Exception as exc:
+            tried.append(f"paddle:{type(exc).__name__}")
+            return None
+
+    selected: Optional[Tuple[str, Any]] = None
+    if mode in {"auto", "rapidocr"}:
+        selected = _try_rapidocr()
+    if selected is None and mode in {"auto", "paddle"}:
+        selected = _try_paddle()
+    if selected is None and mode in {"auto", "tesseract"}:
+        # tesseract 走 OCRExtractor 回退，不在区域引擎内初始化。
+        selected = ("tesseract", None)
+
+    if selected is None:
+        _validator_cache[key] = ("none", None)
+        logger.debug("Route region OCR engine unavailable, mode=%s, tried=%s", mode, ",".join(tried))
+        return "none", None
+
+    _validator_cache[key] = selected
+    logger.info("Route region OCR engine selected: %s", selected[0])
+    return selected[0], selected[1]
+
+
+def _extract_ocr_regions_from_crop(crop: np.ndarray) -> List[Dict[str, Any]]:
+    """方法说明：`_extract_ocr_regions_from_crop` 工具方法。
+    执行步骤：
+    1) 步骤1：优先使用区域 OCR 引擎抽取文本框及置信度。
+    2) 步骤2：统一转换为 `x/y/w/h/text/confidence` 结构。
+    3) 步骤3：失败时回退到 `OCRExtractor.extract_text_regions_from_frame`。"""
+    if crop is None or getattr(crop, "size", 0) <= 0:
+        return []
+
+    conf_threshold = _get_env_float("CV_ROUTE_OCR_REGION_MIN_CONF", 0.35, 0.0, 1.0)
+    engine_name, engine = _get_region_ocr_engine()
+    regions: List[Dict[str, Any]] = []
+
+    try:
+        if engine_name == "rapidocr" and engine is not None:
+            result, _ = engine(crop)
+            for item in result or []:
+                if not isinstance(item, (list, tuple)) or len(item) < 3:
+                    continue
+                bbox, text, conf = item[0], item[1], item[2]
+                if not bbox:
+                    continue
+                try:
+                    xs = [float(p[0]) for p in bbox]
+                    ys = [float(p[1]) for p in bbox]
+                    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                except Exception:
+                    continue
+                text_norm = str(text or "").strip()
+                confidence = float(conf or 0.0)
+                if not text_norm or confidence < conf_threshold:
+                    continue
+                regions.append(
+                    {
+                        "text": text_norm,
+                        "x": int(round(x1)),
+                        "y": int(round(y1)),
+                        "w": max(1, int(round(x2 - x1))),
+                        "h": max(1, int(round(y2 - y1))),
+                        "confidence": confidence,
+                    }
+                )
+            return regions
+
+        if engine_name == "paddle" and engine is not None:
+            result = engine.ocr(crop, cls=True)
+            for line in (result[0] if result else []):
+                if not isinstance(line, (list, tuple)) or len(line) < 2:
+                    continue
+                bbox, payload = line[0], line[1]
+                if not isinstance(payload, (list, tuple)) or len(payload) < 2:
+                    continue
+                text_norm = str(payload[0] or "").strip()
+                confidence = float(payload[1] or 0.0)
+                if not text_norm or confidence < conf_threshold:
+                    continue
+                try:
+                    xs = [float(p[0]) for p in bbox]
+                    ys = [float(p[1]) for p in bbox]
+                    x1, y1, x2, y2 = min(xs), min(ys), max(xs), max(ys)
+                except Exception:
+                    continue
+                regions.append(
+                    {
+                        "text": text_norm,
+                        "x": int(round(x1)),
+                        "y": int(round(y1)),
+                        "w": max(1, int(round(x2 - x1))),
+                        "h": max(1, int(round(y2 - y1))),
+                        "confidence": confidence,
+                    }
+                )
+            return regions
+    except Exception as exc:
+        logger.debug("Route region OCR extraction failed via %s: %s", engine_name, exc)
+
+    extractor = _get_ocr_extractor()
+    if extractor is None:
+        return []
+    try:
+        fallback_regions = extractor.extract_text_regions_from_frame(crop)
+        return fallback_regions if isinstance(fallback_regions, list) else []
+    except Exception:
+        return []
+
+
+def _is_subtitle_like_region(region: Dict[str, Any], image_w: int, image_h: int) -> bool:
+    """方法说明：`_is_subtitle_like_region` 工具方法。
+    执行步骤：
+    1) 步骤1：读取文本框几何信息并做合法性校验。
+    2) 步骤2：按“靠近底部 + 横向较宽 + 行高较矮”规则判定字幕候选。
+    3) 步骤3：返回是否应在增量 OCR token 中排除。"""
+    if image_w <= 0 or image_h <= 0:
+        return False
+
+    x = int(region.get("x", 0) or 0)
+    y = int(region.get("y", 0) or 0)
+    w = int(region.get("w", 0) or 0)
+    h = int(region.get("h", 0) or 0)
+    if w <= 0 or h <= 0:
+        return False
+
+    bottom_band_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_BOTTOM_RATIO", 0.22, 0.05, 0.45)
+    min_width_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_MIN_WIDTH_RATIO", 0.28, 0.1, 0.9)
+    max_height_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_MAX_HEIGHT_RATIO", 0.14, 0.03, 0.4)
+
+    lower_band_start = image_h * (1.0 - bottom_band_ratio)
+    center_y = y + h * 0.5
+    near_bottom = center_y >= lower_band_start
+    horizontally_wide = (w / float(image_w)) >= min_width_ratio
+    short_line = (h / float(image_h)) <= max_height_ratio
+
+    return bool(near_bottom and horizontally_wide and short_line)
 
 
 def _extract_ocr_tokens(frame: np.ndarray, roi: Optional[Tuple[int, int, int, int]]) -> set:
@@ -375,10 +566,32 @@ def _extract_ocr_tokens(frame: np.ndarray, roi: Optional[Tuple[int, int, int, in
     2) 步骤2：调用 OCR 提取文本。
     3) 步骤3：将文本切分为 token 集合用于增量判定。"""
     extractor = _get_ocr_extractor()
-    if extractor is None or frame is None:
+    if frame is None:
         return set()
     try:
         crop = _crop_frame_by_roi(frame, roi)
+        if crop is None or getattr(crop, "size", 0) <= 0:
+            return set()
+
+        regions = _extract_ocr_regions_from_crop(crop)
+        if regions:
+            kept_regions: List[Dict[str, Any]] = []
+            h, w = int(crop.shape[0]), int(crop.shape[1])
+            for region in regions:
+                if not _is_subtitle_like_region(region, image_w=w, image_h=h):
+                    kept_regions.append(region)
+            tokens = {
+                tok.lower()
+                for region in kept_regions
+                for tok in _TEXT_TOKEN_PATTERN.findall(str(region.get("text", "") or ""))
+                if tok.strip()
+            }
+            if tokens:
+                return tokens
+
+        # 若区域 OCR 未产出有效 token，回退整图 OCR 保持兼容。
+        if extractor is None:
+            return set()
         text = extractor.extract_text_from_frame(crop, preprocess=True)
         if not text:
             return set()

@@ -841,13 +841,16 @@ def apply_external_materials(
     screenshot_candidates: List[Tuple[str, str, str, Optional[float]]] = []
     matched_screenshot_by_id: Dict[str, List[str]] = {}
     request_meta_by_id: Dict[str, ScreenshotRequest] = {}
+    unit_screenshot_requests: List[ScreenshotRequest] = []
     if material_requests.screenshot_requests:
         for req in material_requests.screenshot_requests:
             if req.semantic_unit_id != unit.unit_id:
                 continue
+            unit_screenshot_requests.append(req)
             req_id = str(req.screenshot_id or "").strip()
             if req_id:
-                request_meta_by_id[req_id] = req
+                for alias_id in _build_id_aliases(req_id):
+                    request_meta_by_id.setdefault(alias_id, req)
             req_paths = _collect_candidates_by_id(
                 screenshots_dir,
                 req.screenshot_id,
@@ -855,6 +858,8 @@ def apply_external_materials(
             )
             for path_item in req_paths:
                 screenshot_candidates.append((path_item, req.label, req.screenshot_id, float(req.timestamp_sec)))
+                for alias_id in _build_id_aliases(req_id, path_item):
+                    request_meta_by_id.setdefault(alias_id, req)
 
     if not screenshot_candidates:
         fallback_screenshots = _collect_candidates_by_unit_dir(
@@ -871,6 +876,16 @@ def apply_external_materials(
                 screenshot_stem = Path(path_item).stem
                 screenshot_id = f"{unit.unit_id}/{screenshot_stem}"
                 screenshot_candidates.append((path_item, screenshot_stem, screenshot_id, None))
+
+    def _resolve_request_meta_for_candidate(sid_text: str, raw_path: str) -> Optional[ScreenshotRequest]:
+        for alias_id in _build_id_aliases(str(sid_text or ""), str(raw_path or "")):
+            req_meta = request_meta_by_id.get(alias_id)
+            if req_meta is not None:
+                return req_meta
+        if len(unit_screenshot_requests) == 1:
+            # 兜底：当仅有一个请求且文件命名偏差导致未命中别名时，复用唯一请求元信息补齐时间戳。
+            return unit_screenshot_requests[0]
+        return None
 
     def _prefilter_screenshot_candidates(
         candidates: List[Tuple[str, str, str, Optional[float]]]
@@ -1057,7 +1072,8 @@ def apply_external_materials(
                 group_ocr_text = ""
                 for item in ordered_group_items:
                     sid_key = str(item.get("sid", "") or "").strip()
-                    req_meta = request_meta_by_id.get(sid_key)
+                    item_path = str(item.get("image_path", "") or "").strip()
+                    req_meta = _resolve_request_meta_for_candidate(sid_key, item_path)
                     if req_meta is None:
                         continue
                     maybe_text = str(getattr(req_meta, "ocr_text", "") or "").strip()
@@ -1137,7 +1153,7 @@ def apply_external_materials(
             except Exception:
                 candidate_file = raw_path
 
-        req_meta = request_meta_by_id.get(str(sid or "").strip())
+        req_meta = _resolve_request_meta_for_candidate(str(sid or "").strip(), raw_path)
         ocr_text_hint = ""
         if req_meta is not None:
             ocr_text_hint = str(getattr(req_meta, "ocr_text", "") or "").strip()
@@ -1182,9 +1198,34 @@ def apply_external_materials(
                     except TypeError:
                         res = self._concrete_validator.validate(raw_path)
             img_description = str(getattr(res, "img_description", "") or getattr(res, "reason", "")).strip()
+            res_reason = str(getattr(res, "reason", "") or "").strip()
+            res_reason_lower = res_reason.lower()
+            res_concrete_type = str(getattr(res, "concrete_type", "") or "").strip().lower()
+            is_person_prefilter_reject = bool(
+                (not res.should_include)
+                and (
+                    res_concrete_type == "person_subject"
+                    or "person_subject_prefilter" in res_reason_lower
+                    or "person-subject prefilter" in res_reason_lower
+                    or "预过滤" in res_reason
+                )
+            )
             if not res.should_include:
+                if is_person_prefilter_reject and _delete_source_file_under_assets(
+                    raw_path, reason="person-subject prefilter screenshot"
+                ):
+                    logger.info(
+                        "%s: deleted person-prefilter screenshot: %s",
+                        unit.unit_id,
+                        sid or raw_path,
+                    )
                 # 闂傚倸鍟ぐ鍐焊娴犲绠戠憸搴㈢椤旇棄绶炵€广儱绻掔粣妤呮⒑椤斿搫濡奸柛銊ュ椤ㄣ儱鐣濋崘顏咁潔闂侀潻绲婚崝瀣娴兼潙绀嗛柣妯肩帛閻濈喖姊婚崼銏犱粶闁告瑨娉曢幐鎺楀焺閸愩劎鍔甸梺鎼炲劜閹锋繄妲愬┑瀣畳闁靛繒濯Σ濠氭煕濮橆剟顎楃憸鏉垮级缁楃喎鈽夊Ο璇测偓鐢电磽娓氬洤骞栭柛妯款潐閹棃寮撮悙鑼煃闂備焦婢樼粔铏箾閸ヮ剚鍋?
-                if not is_ppstructure_text_only and original_image_bytes is not None and not os.path.exists(raw_path):
+                if (
+                    not is_person_prefilter_reject
+                    and not is_ppstructure_text_only
+                    and original_image_bytes is not None
+                    and not os.path.exists(raw_path)
+                ):
                     try:
                         Path(raw_path).parent.mkdir(parents=True, exist_ok=True)
                         with open(raw_path, "wb") as image_file:

@@ -33,7 +33,8 @@
 - `apps/grpc-server/main.py`：gRPC 标准启动入口。
 - `apps/worker/main.py`：Worker 标准启动入口。
 - `apps/wecom-bot/main.py`：企业微信回调机器人启动入口（监听 5000 端口）。
-- `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`：移动端任务列表、任务提交（URL/上传）与 Markdown 渲染页面。
+- `services/java-orchestrator/src/main/resources/static/index.html`：移动端任务列表、任务提交（URL/上传）与 Markdown 渲染主页面（唯一静态实现）。
+- `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/WebConfig.java`：历史入口 `/mobile-markdown.html` 到 `/index.html` 的服务端重定向兼容配置。
 
 ## 四、核心调用链与目录映射
 - API/编排（Java）：`services/java-orchestrator/`
@@ -80,3 +81,15 @@
   - `docs/architecture/overview.md`
   - `docs/architecture/repository-map.md`
   - `docs/architecture/upgrade-log.md`
+
+## 九、2026-02-18 Hedge Context 路由补充
+- 入口与构造：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+    - `_build_segmentation_hedge_context(...)`：构造 `video_duration_sec + step6_text_chars`。
+    - `_build_batch_hedge_context(...)`：在批次级补充 `batch_text_chars`。
+- 网关决策：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - `_resolve_deepseek_hedge_delay_ms(..., hedge_context)`：统一解析上下文并估算 delay。
+    - `deepseek_complete_json/deepseek_complete_text`：接收并透传 `hedge_context`。
+- 约束：
+  - 对冲时延估算禁止重新回退到硬编码常量路径（除显式关闭动态估算开关）。

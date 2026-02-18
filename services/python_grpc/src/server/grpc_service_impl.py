@@ -29,6 +29,10 @@ def _configure_opencv_env() -> None:
 
 _configure_opencv_env()
 
+from services.python_grpc.src.server.runtime_env import sanitize_user_site_packages
+
+sanitize_user_site_packages()
+
 
 def _reconfigure_stdio_errors() -> None:
     """
@@ -378,15 +382,37 @@ def _load_download_video_options(config: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(video_cfg, dict):
         video_cfg = {}
 
+    profile_name_raw = str(video_cfg.get("download_profile", "") or "").strip()
+    profile_name = profile_name_raw or "public_no_cookie"
+    profile_cfg: Dict[str, Any] = {}
+    profiles_raw = video_cfg.get("download_profiles", {})
+    if isinstance(profiles_raw, dict):
+        candidate = profiles_raw.get(profile_name)
+        if isinstance(candidate, dict):
+            profile_cfg = candidate
+        elif profile_name_raw:
+            logger.warning(f"Unknown video.download_profile: {profile_name}")
+    elif profile_name_raw:
+        logger.warning("video.download_profiles is not a dict, ignored")
+
+    def _pick_profile_str(config_key: str) -> Optional[str]:
+        value = profile_cfg.get(config_key)
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
     def _pick_str(config_key: str, env_key: str) -> Optional[str]:
         env_value = os.getenv(env_key, "").strip()
         if env_value:
             return env_value
         config_value = video_cfg.get(config_key)
         if config_value is None:
-            return None
+            return _pick_profile_str(config_key)
         value = str(config_value).strip()
-        return value or None
+        if value:
+            return value
+        return _pick_profile_str(config_key)
 
     disable_ssl_env = os.getenv("YTDLP_DISABLE_SSL_VERIFY", "").strip()
     if disable_ssl_env:
@@ -790,14 +816,14 @@ def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
     执行逻辑：
     1) 仅在 B 站域名下尝试提取视频号。
     2) 优先提取 BV 号，再提取 AV 号（含 query 的 bvid/aid）。
-    3) 返回规范化后的 AV/BV 号；无法提取时返回 None。
+    3) 返回提取到的 AV/BV 号；无法提取时返回 None。
     实现方式：urlparse + parse_qs + 正则。
     核心价值：同一 B 站视频的不同分享参数可稳定命中同一 task 目录。
     权衡：短链若未显式包含 AV/BV 且未做重定向解析，将回退到原 URL 逻辑。
     输入参数：
     - video_url: 视频链接（类型：str）。
     输出参数：
-    - Optional[str]：提取到的 AV/BV 号。
+    - Optional[str]：提取到的 AV/BV 号（BV 保留原始大小写）。
     """
     if not video_url:
         return None
@@ -811,7 +837,8 @@ def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
     if bvid:
         match = re.search(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE)
         if match:
-            return match.group(0).upper()
+            # 保留 URL 中 BV 原始大小写，避免因大小写改写导致后续链路误判。
+            return match.group(0)
 
     aid = (query.get("aid") or [""])[0].strip()
     if aid.isdigit():
@@ -820,7 +847,7 @@ def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
     search_space = " ".join((parsed.path or "", parsed.query or "", parsed.fragment or ""))
     bv_match = re.search(r"BV[0-9A-Za-z]{10}", search_space, flags=re.IGNORECASE)
     if bv_match:
-        return bv_match.group(0).upper()
+        return bv_match.group(0)
 
     av_match = re.search(
         r"(?:^|[^0-9A-Za-z])av(\d{1,20})(?:$|[^0-9A-Za-z])",

@@ -129,6 +129,26 @@ def test_build_result_from_vision_payload_uses_raw_response_as_description():
     assert "pip install" in result.img_description
 
 
+def test_build_result_from_vision_payload_keeps_person_prefilter_reject():
+    validator = ConcreteKnowledgeValidator.__new__(ConcreteKnowledgeValidator)
+
+    result = validator._build_result_from_vision_payload(
+        {
+            "has_concrete_knowledge": False,
+            "should_include": False,
+            "concrete_type": "person_subject",
+            "reason": "人物主体占比过高，预过滤跳过 Vision",
+            "img_description": "人物主体截图，已在预处理阶段过滤",
+            "prefilter_source": "mediapipe_selfie_segmentation",
+        }
+    )
+
+    assert result.has_concrete is False
+    assert result.should_include is False
+    assert result.concrete_type == "person_subject"
+    assert "预过滤" in result.reason
+
+
 def test_validate_does_not_call_extract_graphic_region_when_vision_disabled(monkeypatch, tmp_path):
     image_path = tmp_path / "raw_fallback.png"
     image_path.write_bytes(b"img")

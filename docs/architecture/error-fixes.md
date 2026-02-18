@@ -13,6 +13,214 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-18 Phase2B 人物主体预过滤未生效且命中后截图未删除（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - `Phase2B` 截图校验链路中，人物主体截图未按预期被“人物占比预过滤”拦截，示例：`assets/SU031/SU031_ss_route_001.jpg` 未被过滤。
+  - 即使底层预过滤已命中，截图文件也可能未被删除，或被上层流程恢复，导致资产目录残留无效图片。
+- 触发条件：
+  - `ConcreteKnowledgeValidator` 初始化后，`person_subject_filter_enabled` 被强制置为 `False`，导致预过滤在 Phase2B 实际关闭。
+  - Vision 结果映射阶段对 `should_include=False` 默认强制放行，未识别“人物预过滤拒绝”语义。
+  - `material_flow` 在检测到“验证器已删除文件”时默认恢复原图，用于兜底路径，覆盖了“应删除”的业务意图。
+- 根因定位：
+  - 决策链断裂：配置层已开启 `vision_ai.person_subject_filter.enabled=true`，但运行期被代码硬编码关闭。
+  - 语义映射缺失：预过滤拒绝结果（`person_subject`）未被从 Vision payload 透传到 `ConcreteKnowledgeResult`。
+  - 删除策略冲突：同一流程同时存在“预过滤删除”和“兜底恢复删除文件”两套策略，缺少场景分流。
+- 修复措施：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 移除 `person_subject_filter_enabled=False` 的强制覆盖，恢复配置驱动。
+    - 在 `_build_result_from_vision_payload` 中识别 `person_subject/prefilter_source/预过滤` 语义，保留 `should_include=False` 与 `has_concrete_knowledge=False`。
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+    - 新增命中人物预过滤后的删图动作（单图/批量路径一致），并记录 `person_subject_deleted_files` 统计。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - 对人物预过滤拒绝场景禁用“删除后恢复原图”兜底逻辑。
+    - 若文件仍存在，补充执行资产目录内删除，确保命中预过滤后文件不留存。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vision_ai_person_prefilter.py -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py -q -k person_prefilter`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增“预过滤命中即删图”“payload 保留预过滤拒绝语义”“Phase2B 不恢复已删预过滤图”回归用例。
+  - 监控：按任务记录 `person_subject_skips/person_subject_deleted_files`，监控两者比例是否偏离。
+  - 校验：代码评审新增规则，禁止在运行期硬编码覆盖 `vision_ai.person_subject_filter.*` 配置。
+  - 回滚：若误删风险上升，可仅回滚删图动作（保留过滤判定），并维持统计字段用于灰度评估。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/vision_ai_client.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vision_ai_person_prefilter.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_concrete_knowledge_validator_cleanup.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+- 复盘要点：
+  - 预过滤策略必须贯穿“配置 -> 判定 -> 结果映射 -> 资产处置”全链路，任何单点硬编码都可能导致策略失效。
+  - 删除类行为需显式区分场景（重复去重/文本页/人物预过滤），避免兜底恢复逻辑误伤目标策略。
+
+## 2026-02-18 B 站下载失败被统一映射为“系统繁忙”，缺少可执行修复路径（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 任务在下载阶段遇到 `yt-dlp` 的 `geo-restricted / deleted / proxy / cookie` 错误时，Java 编排层将失败统一映射为“系统繁忙，请稍后重试”。
+  - 前端与任务查询接口缺少可操作错误信息，用户无法判断应改链接、补 Cookie 还是修代理。
+- 触发条件：
+  - `TaskProcessingWorker` 捕获任意异常后，固定广播 `UserFacingErrorMapper.busyMessage()`。
+  - `TaskQueueManager.failTask(...)` 固定把 `statusMessage/errorMessage` 写为繁忙文案，覆盖真实类别。
+  - Python 下载器对 `geo-restricted` 仅返回泛化 `yt-dlp 执行失败`，未给出 B 站场景修复建议。
+- 根因定位：
+  - 错误分类逻辑只覆盖“系统繁忙”单路径，未对下载链路的高频可恢复错误做分类映射。
+  - 下载器与编排器两层都缺少针对 `geo/cookie/proxy` 的用户语义对齐，导致可恢复错误被当作不可恢复错误。
+- 修复措施：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/UserFacingErrorMapper.java`
+    - 新增 `toUserMessage(String)`，对 `geo/cookie/proxy` 错误做分类映射，其它错误保留“系统繁忙”兜底。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 任务失败广播改为使用 `toUserMessage(...)`，不再固定“系统繁忙”。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+    - 任务失败状态写入改为 `toUserMessage(...)` 分类结果，保留原始错误在日志中用于排障。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `_build_download_error_message` 新增 `geo-restricted / deleted` 分支，返回“链接可访问性 + 代理 + Cookie”的可执行指引。
+- 验证方式：
+  - Java 单测：`mvn -f services/java-orchestrator/pom.xml -Dtest=UserFacingErrorMapperTest test`
+  - Python 单测：`pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py -q`
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增 `UserFacingErrorMapperTest` 与 `geo-restricted` 下载错误测试，防止回归到“全部繁忙”。
+  - 监控：日志聚合按 `userMessage` 分类统计失败原因占比，持续观察 `geo/cookie/proxy` 分布。
+  - 校验：代码评审新增规则，用户可恢复错误不得直接映射为单一繁忙文案。
+  - 回滚：如分类文案出现误判，可仅回退映射函数实现，保持调用链不变。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/UserFacingErrorMapper.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `POST /api/tasks`
+  - `GET /api/tasks/{taskId}`
+- 复盘要点：
+  - “系统繁忙”只能作为末级兜底，不应覆盖可恢复错误。
+  - 跨语言调用链（Python 下载器 -> Java 编排器）必须共享同一错误语义模型，否则用户端会丢失可执行信息。
+
+## 2026-02-18 本地路径误判导致转录链路“Video not found”级联失败（修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 移动端提交包含“标题 + 短链”的混合文本时，任务会进入本地路径分支并生成伪路径（例如把 `https:\b23.tv\xxx` 拼进 Windows 文件名）。
+  - `VideoProcessingOrchestrator` 在“放置本地视频到 storage”失败后回退原字符串，导致 FFmpeg 探测和 Python 转录继续使用无效路径，最终任务失败。
+  - 影响 `POST /api/mobile/tasks/submit`、`POST /api/tasks` 的文本提交场景。
+- 触发条件：
+  - 输入不以标准 `http://`/`https://` 开头，但正文中携带短链或 URL 变体（如反斜杠分隔）。
+  - 编排器对本地路径缺少前置存在性硬校验，且对放置失败采用“盲目回退原路径”策略。
+- 根因定位：
+  - 控制器的 `normalizeVideoInput` 逻辑只覆盖标准 URL 与 BV 号，对混合文本中的 URL 抽取不足。
+  - 同样的归一化逻辑在两个控制器重复实现，容易出现行为漂移且难以统一修复。
+  - 编排器异常处理策略错误：吞掉落盘失败并继续向下游传播无效路径。
+- 修复措施：
+  - 新增共享工具：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/VideoInputNormalizer.java`
+    - 从混合文本中提取 URL；
+    - 归一化 `https:/`、`https:\`、`https:\xxx` 等异常分隔；
+    - 保留本地路径识别，B 站 BV 号继续标准化到 canonical URL。
+  - 控制器复用共享归一化：
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 编排器新增本地文件前置硬校验并移除盲目回退：
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 在进入 FFmpeg/Python 之前校验本地文件路径合法且文件存在；
+    - 本地视频放置失败时直接抛错，避免继续执行后续阶段。
+  - 新增单元测试：
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/VideoInputNormalizerTest.java`
+    - 覆盖“Windows 本地路径保留”“混合文本短链修复”“BV 标准化”等场景。
+- 验证方式：
+  - 单测：`mvn -f services/java-orchestrator/pom.xml -Dtest=VideoInputNormalizerTest test`
+  - 回归验证（手动）：
+    - 提交包含 `https:\b23.tv\xxx` 的混合文本，服务端应归一化为 `https://b23.tv/xxx` 并走下载链路；
+    - 提交不存在的本地路径时，应在准备阶段直接失败并返回明确错误，不再进入 FFmpeg/Transcribe。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：将 URL 归一化作为固定单测，新增“混合文本 + 异常斜杠”回归用例，防止后续改动退化。
+  - 监控：新增并关注“本地路径前置校验失败”计数，与“FFmpeg 打开失败”比值联动，验证前置拦截是否生效。
+  - 校验：新入口若接收视频输入，必须复用 `VideoInputNormalizer`，禁止再复制归一化逻辑。
+  - 回滚：若归一化策略误判，可回退到“仅标准 URL + BV 归一”版本，但保留编排器前置文件校验，避免伪路径穿透。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/VideoInputNormalizer.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/VideoInputNormalizerTest.java`
+  - `POST /api/tasks`
+  - `POST /api/mobile/tasks/submit`
+- 复盘要点：
+  - 输入标准化是跨入口的基础能力，应该集中实现并统一复用。
+  - 对“本地文件路径”这类高风险输入，必须在链路前段做强校验，不能依赖下游组件报错。
+  - 异常处理不能“吞错后继续”，否则会把定位难度从入口放大到整个流水线。
+
+### 2026-02-18 补充修正：BV 号归一化保留正文大小写
+- 现象：
+  - 早期归一化实现会将匹配到的 BV 号整体转大写，存在“还原 URL 与原始视频 ID 大小写不一致”的潜在风险。
+- 根因：
+  - `VideoInputNormalizer` 在 BV 匹配后使用 `toUpperCase` 处理整个 ID，而非仅规范前缀。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/VideoInputNormalizer.java`
+  - 新增 `normalizeBvIdPreserveBodyCase`：
+    - 仅将前缀规范为 `BV`；
+    - 保留后续 10 位 ID 的原始大小写。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/VideoInputNormalizerTest.java`
+  - 调整既有断言并新增回归用例，覆盖“前缀规范 + 正文大小写保持”。
+- 验证方式：
+  - 单测：`mvn -f services/java-orchestrator/pom.xml -Dtest=VideoInputNormalizerTest test`
+- 预防方案：
+  - 后续如新增站点 ID 归一化规则，优先区分“协议前缀规范”和“ID 主体保真”，避免过度标准化导致下载失败。
+
+## 2026-02-17 移动端提交流程错误反馈“弹窗化、机器语、无恢复路径”（已修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 视频提交失败时使用 `alert(...)` 阻塞页面，打断输入焦点与交互连续性。
+  - 错误文案直接拼接技术信息（HTTP 状态/后端错误文本），用户难以判断下一步操作。
+  - 失败态缺少统一触感反馈（输入区抖动/错误脉冲）和恢复动作（重试入口），导致“失败即卡住”。
+- 触发条件：
+  - `submitTaskFromMobileForm`、兜底提交脚本、部分手势异常分支进入 `catch` 时直接调用 `alert`。
+  - 服务端返回 4xx/5xx、网络抖动、链接/格式不匹配、上传文件过大时均会触发上述路径。
+- 根因定位：
+  - 错误处理逻辑分散在页面脚本、组件脚本和兜底脚本中，缺少统一的“用户语义错误模型”。
+  - 反馈层只考虑“报错可见”，未把失败态当作完整交互状态来设计（视觉、文案、恢复动作三者缺失）。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 新增提交错误语义映射：按“文件过大/格式不支持/链接异常/网络或繁忙/未知失败”输出人话文案。
+    - 提交流程移除 `alert`，失败统一走 `setTaskSubmitTip(..., 'error', options)`。
+    - 在可恢复场景注入 `onRetry`，直接提供“重试”按钮；链接异常场景启用输入高亮与聚焦。
+    - 兜底脚本同步去除 `alert`，复用同类映射与重试逻辑，避免主链路异常时退化为旧体验。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-composer.js`
+    - 扩展 `setTaskSubmitTip`：支持错误操作按钮、进入动画、链接可疑高亮。
+    - 错误反馈增加 `is-rejecting` 抖动触发，形成输入区“摇头拒绝”触感。
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+    - 新增失败动效样式：`submitRejectWobble`、错误提示下滑动画、提示内联按钮样式。
+    - 错误态视觉由高亮红改为更克制的玫瑰色系，降低“警报感”。
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+    - 调整全局 `--danger` 与 `--ring-danger` 色值，统一错误语义色调。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 手势异常分支移除 `alert`，改为非阻塞状态提示/日志。
+- 验证方式：
+  - 语法校验：
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-composer.js`
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 提取 `index.html` 内联脚本后执行 `node --check`。
+  - 行为验证（手动）：
+    - 空输入提交：输入区抖动，错误提示从输入区下方出现，无弹窗。
+    - 链接异常：提示可读，输入高亮并可直接修正。
+    - 可恢复失败（网络/繁忙）：提示内联出现“重试”按钮，点击可直接再次提交。
+    - 文件过大/格式不支持：给出可理解原因与替代建议，不暴露技术栈细节。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端回归用例，断言提交流程失败路径不出现 `window.alert`，并验证重试按钮仅在可恢复场景显示。
+  - 监控：记录提交失败分类分布（`too_large/unsupported/link/network/busy/unknown`），观察异常结构是否突变。
+  - 校验：前端评审清单新增“失败态必须包含文案语义 + 触感反馈 + 恢复动作”条目。
+  - 回滚：若新增交互影响稳定性，可回退至“仅内联文本提示”版本，但保留去 `alert` 与错误语义映射。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-composer.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+  - `POST /api/mobile/tasks/submit`
+  - `POST /api/mobile/tasks/upload`
+- 复盘要点：
+  - 错误态是产品体验的一等路径，不是“异常兜底”。
+  - 失败文案必须站在用户目标表达，而不是系统内部实现表达。
+  - 恢复动作应就近提供，避免让用户在失败后重新寻找入口。
+
 ## 2026-02-17 根入口存在“壳层重定向页”导致体验割裂与视觉 Token 不一致
 - 日期：2026-02-17
 - 现象与影响范围：
@@ -2562,3 +2770,496 @@
   - 校验：新增流式下载接口时强制使用显式泛型返回类型（如 `ResponseEntity<StreamingResponseBody>`）。
   - 回滚：若流式导出仍存在兼容性问题，可临时回退为“先落盘临时 ZIP 再下载”的保守实现。
 
+## 2026-02-17 手机端批注不可用：手势脚本语法错误 + 右滑路径失效（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 手机端阅读页中“右滑批注”无效，用户无法打开行批注弹窗。
+  - 同时出现手势能力整体降级（依赖手势模块的交互可能不可用），影响收藏/复制/删除等段落手势链路。
+- 根因定位：
+  - 文件 `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js` 存在同作用域重复声明（`const doubleTapAction`），导致脚本解析失败，手势模块加载中断。
+  - 滑动激活分支误写为仅允许 `dx < 0`（左滑），导致“右滑批注”路径无法进入，`commitAnnotateSwipe` 不会触发。
+- 修复措施：
+  - 修复重复常量声明：将不同触发阶段（`dblclick` / `touchstart` / `touchend`）的动作变量重命名为独立标识，避免作用域冲突。
+  - 修复滑动方向门控：滑动激活由“仅左滑”改为“左右滑都可激活”，并保持结算阶段“左滑删除、右滑批注”的行为分流。
+  - 保持现有架构不变：仅修复手势模块内部逻辑，不改动后端 `meta` 接口和批注数据结构。
+- 验证方式：
+  - 语法校验：`node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js` 通过。
+  - 行为验证（手动）：
+    - 编辑模式下右滑段落可打开批注弹窗并保存；
+    - 编辑模式下左滑删除仍可用；
+    - 无新增后端接口变更，批注仍通过 `/api/mobile/tasks/{taskId}/meta` 持久化。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端手势回归用例，至少覆盖“脚本可解析”“右滑触发批注”“左滑触发删除”三条主路径。
+  - 校验：对静态 JS 增加提交前语法检查（`node --check`），避免低级语法问题在运行时暴露。
+  - 监控：在手势模块初始化失败时增加明确日志埋点，便于快速定位“脚本未加载”类问题。
+  - 回滚：如新手势策略引发兼容性问题，可快速回退到上一个稳定版本的 `mobile-markdown-gestures.js`，保留后端持久化链路不变。
+
+## 2026-02-17 手机端“收藏只能取消收藏”偶发：双通道双击事件叠加导致状态二次翻转（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 用户在手机端执行段落“收藏”时，偶发出现状态异常，表现为收藏状态不稳定或只看到“取消收藏”方向生效。
+  - 影响范围集中在阅读页段落手势收藏链路（`doubleTap -> favorite`），后端 `meta` 存储接口不受影响。
+- 根因定位：
+  - 手势模块同时监听了 `touch` 双击结算链路与浏览器 `dblclick` 事件。
+  - 在部分移动端浏览器中，同一次用户交互可能同时触发两条链路，导致 `toggleParagraphFavorite` 被短时间调用两次，状态被“翻转两次”而回到原值或呈现为单向异常。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 在收藏动作入口新增“短窗口去重门禁”：
+      - 同一来源短时间重复触发（防抖）直接忽略；
+      - 跨来源（`touch-double-tap` 与 `dblclick`）在双击窗口内对同一段落的重复触发直接忽略。
+    - 为收藏动作补充触发来源标记（`source`），确保去重逻辑可区分同源与跨源事件。
+  - 取舍说明：
+    - 该修复保持现有交互语义不变，不移除任一事件通道，仅在动作入口做最小侵入去重，降低兼容回归风险。
+- 验证方式：
+  - 语法校验：`node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js` 通过。
+  - 行为验证（手动）：
+    - 阅读模式下双击段落，收藏可稳定在“未收藏 <-> 已收藏”之间单次切换；
+    - 不再出现同一次手势触发两次切换导致的回弹。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端手势回归，覆盖“同一段落双击只触发一次收藏状态变化”。
+  - 监控：在前端调试日志中保留收藏动作来源与去重命中计数，便于快速识别浏览器事件模型差异。
+  - 校验：新增/调整手势时，要求明确“触发源”并评估是否与既有事件链重叠。
+  - 回滚：若去重策略出现误拦截，可先仅保留跨来源去重，回退同源短窗口限制。
+
+## 2026-02-17 手机端“长按复制”失效：长按过程选区误判导致动作被拦截（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 用户在阅读页长按段落时，复制手势偶发或高概率无响应。
+  - 影响范围集中在手势层长按复制链路（`longPress -> copy`），不影响后端 `meta` 持久化。
+- 根因定位：
+  - 手势模块在长按触发时使用“当前是否存在选区”作为保护判断。
+  - 在移动端浏览器中，长按过程中常会自动生成文本选区，导致复制条件被误判为“不允许触发”，最终表现为长按复制失效。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 将复制保护判断从“触发时是否有选区”调整为“触摸开始时是否已有选区”。
+    - 在手势对象中记录 `selectionPresentAtStart`，仅在触摸起点已存在选区时执行边缘区域保护。
+  - 取舍说明：
+    - 保留“已有选区时避免误触复制”的保护意图，同时避免被系统在长按过程自动创建的选区误伤。
+- 验证方式：
+  - 语法校验：`node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js` 通过。
+  - 行为验证（手动）：
+    - 阅读模式下长按段落可稳定触发复制提示“已复制”；
+    - 在已有选区场景下，仍保持边缘触发保护策略。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端手势回归，覆盖“无初始选区时长按复制可触发”与“有初始选区时保护策略生效”。
+  - 监控：在调试日志中记录长按复制被保护拦截的原因（起始选区/边缘判定），便于快速定位兼容性差异。
+  - 校验：新增手势保护条件时，区分“起始状态”与“过程状态”，避免过程态信号被浏览器默认行为污染。
+  - 回滚：若保护策略仍与机型行为冲突，可临时关闭“已有选区保护”，优先保证长按复制可用性。
+
+## 2026-02-17 手机端长按复制“抓取反馈”缺失：阅读态节点样式未覆盖（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 用户在阅读模式长按段落执行复制时，复制动作可触发，但“抓取/按住激活”视觉反馈不明显或缺失，体验上接近“没有反应”。
+  - 影响阅读态段落手势链路（`longPress -> copy`），编辑态逐行卡片反馈基本正常。
+- 根因定位：
+  - 手势层会给命中节点添加 `touch-hold-cue` / `touch-hold-activated` / `copy-active` 类名。
+  - 阅读态命中的通常是 markdown 块节点（`p/li/blockquote/h1~h6/pre`），而现有样式仅覆盖 `.paragraph-card`，导致类名已添加但无对应视觉规则。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+    - 将 `touch-hold-cue` 与 `touch-hold-activated` 的样式范围从 `.paragraph-card` 扩展到阅读态 markdown 块节点。
+    - 在 `prefers-reduced-motion` 分支同步扩展选择器，保持无障碍行为一致。
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
+    - 将 `copy-active` 微动效从 `.paragraph-card` 扩展到阅读态 markdown 块节点，保证复制反馈在两种视图一致。
+  - 取舍说明：
+    - 采用“样式层扩展”而非改写手势命中逻辑，避免增加 JS 分支复杂度，降低回归风险并保持现有调用链稳定。
+- 验证方式：
+  - 手动验证：
+    - 阅读模式长按段落复制时，可看到按住高亮与激活动画。
+    - 复制成功后可看到段落微动效（`copy-active`）与提示胶囊。
+    - 编辑模式下原有反馈不回退。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端样式回归用例，覆盖“编辑态卡片节点 + 阅读态 markdown 节点”两类命中对象的反馈一致性。
+  - 监控：在手势调试日志中保留“命中节点标签名/类名”采样，快速识别“类名生效但样式未覆盖”问题。
+  - 校验：新增手势反馈类名时，必须同步检查阅读态与编辑态两套 DOM 结构是否都覆盖。
+  - 回滚：若样式扩展引发局部视觉冲突，可先仅保留 `touch-hold-*` 扩展，暂时回退 `copy-active` 扩展。
+
+## 2026-02-17 手机端“新增批注不可点击”与批注心流中断：移除模态框并改为行内便签（修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 右滑能进入批注界面，但“新增批注”无法稳定创建可编辑内容，实际可用性接近“只能打开、不能写”。
+  - 旧批注流程依赖模态框（`comment-modal`），会遮挡上下文，打断阅读与思考连续性。
+- 根因定位：
+  - 批注创建链路过度依赖模态框内部状态与事件绑定，入口与编辑上下文分离，交互路径脆弱。
+  - 设计层面使用“跳出上下文的弹层编辑”，与“就地记录想法”的目标冲突，导致心流中断与误操作成本上升。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 删除 `comment-modal` 的 DOM 结构与相关事件绑定。
+    - 保留 `openCommentModal` 入口名以兼容既有手势调用链，但内部实现重构为“行内便签（inline sticky note）”。
+    - 新增便签状态（`inlineSticky*`）与渲染/保存/关闭逻辑：就地输入、外点关闭、`Esc` 关闭、保存后直接写回 `paragraphMeta.comments`。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 右滑批注触发时传入触点坐标（`anchorX/anchorY`），便签从手势附近展开，保持直接操纵体验。
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+    - 移除旧模态样式，新增 `inline-sticky-note` 与 `inline-sticky-target-active` 样式，提供“纸张旁便签”视觉与上下文高亮。
+  - 取舍说明：
+    - 复用既有手势入口与元数据结构（`openCommentModal`、`paragraphMeta.comments`），避免改动后端协议；
+    - 仅替换前端交互容器与状态机，保持数据持久化链路稳定。
+- 验证方式：
+  - 语法校验：
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 提取 `index.html` 内联脚本后逐段 `node --check`，全部通过。
+  - 行为验证（手动）：
+    - 右滑后不再弹出模态框，而是在原文附近出现便签输入区；
+    - 可直接输入并点击“保存便签”，刷新后批注数据保留；
+    - 点击便签外部区域可关闭，不遮挡阅读上下文。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端交互回归，覆盖“右滑 -> 便签展开 -> 输入 -> 保存 -> 持久化回显”。
+  - 监控：新增便签动作埋点（open/save/close），跟踪“打开后无保存”占比评估可用性。
+  - 校验：后续涉及批注交互改造时，优先复用现有 `openCommentModal` 入口，禁止重新引入全屏阻断式模态流程。
+  - 回滚：如便签交互在特定机型异常，可临时保留行内便签样式并回退到“固定底部编辑条”方案，不恢复模态框。
+
+## 2026-02-18 行内便签保存后误切换到段落卡片视图，导致 Markdown 不渲染（修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 用户在内容页完成批注并点击“保存便签”后，正文会从 Markdown 渲染视图切到段落卡片列表，表现为“像旧编辑模式”，正文样式与渲染能力异常。
+  - 影响前端批注保存链路（`saveInlineStickyNote`），不影响后端批注元数据持久化。
+- 根因定位：
+  - `saveInlineStickyNote` 在保存后沿用旧回退逻辑：当 `refreshParagraphCardDom` 命中失败时调用 `renderParagraphEditor(state.currentTaskId)`。
+  - 在当前“内容页单态渲染”架构中，页面默认不存在 `.paragraph-card` 节点，因此该分支会稳定触发并把页面切换到段落卡片渲染。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 删除 `saveInlineStickyNote` 中“刷新卡片失败后回退 `renderParagraphEditor`”逻辑。
+    - 保留批注元数据更新与异步持久化流程，并在保存后仅做轻量前端标记刷新（`applyFavoriteTagsToMarkdown`），不改变当前 Markdown 渲染模式。
+    - 对同类回退点做加固：`commitParagraphEditing` 在卡片容器不存在时改为 `renderCurrentView()`，避免其它入口重复触发卡片模式回退。
+  - 取舍说明：
+    - 选择“保持当前渲染模式不切换”优先于“强行局部刷新段落卡片”，避免再次引入双渲染形态回流。
+- 验证方式：
+  - 语法校验：
+    - 提取 `index.html` 主内联脚本后执行 `node --check` 通过。
+  - 手动验证：
+    - 内容页右滑打开便签 -> 输入内容 -> 点击“保存便签”后，正文保持 Markdown 渲染，不再切换到段落卡片视图。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端回归用例，覆盖“便签保存后 `markdownBody` 不出现 `.paragraph-list` 卡片容器”断言。
+  - 监控：在调试日志中记录 `saveInlineStickyNote` 后渲染容器类型（Markdown/卡片），便于快速识别渲染模式回退。
+  - 校验：凡是批注/收藏等元数据动作，禁止直接调用 `renderParagraphEditor`；如需刷新，优先 `renderCurrentView` 或局部标记刷新。
+  - 回滚：若后续发现局部刷新不足，可临时改为保存后 `renderCurrentView()` 全量重绘，但仍禁止回退到段落卡片模式。
+
+
+## 2026-02-17 手机端 Markdown 视频片段无法播放（AV1 fast-copy 兼容性修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - Markdown 阅读器中的视频片段链接存在“可见但无法正常播放”的问题。
+  - 影响 `assets/**.mp4` 片段的移动端预览，尤其是仅支持 H.264 的浏览器/设备组合。
+- 根因定位：
+  - 片段提取链路 `extractClipWithWorkerGrabber` 默认优先走 ffmpeg `-c copy`（fast-copy），会继承源视频编码。
+  - 当源视频为 AV1 时，输出片段虽为 `.mp4`，但编码仍是 AV1，导致移动端兼容性不足。
+  - 抽样验证：`var/storage/storage/57018a9f0c5fe43f4622fb60ce8a9957/assets/SU012/SU012_clip_route_action_001.mp4` 的 `ffprobe` 结果显示 `codec_name=av1`。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+    - 新增 fast-copy 编码门控：仅当源视频编码为 H.264 时允许 fast-copy；否则直接回退到既有 JavaCV H.264 重编码路径。
+    - 为 fast-copy 输出补充 `-movflags +faststart`，提升移动端流式加载稳定性。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/JavaCVFFmpegServiceTest.java`
+    - 新增回归测试，锁定“仅 H.264 允许 fast-copy”规则。
+  - 文件：`services/java-orchestrator/pom.xml`
+    - 增加 `spring-boot-starter-test`（test scope），用于运行新增单测。
+- 验证方式：
+  - 单测：`mvn -f services/java-orchestrator/pom.xml -Dtest=JavaCVFFmpegServiceTest test`
+  - 语义校验：新增测试断言 `H264=true`，`AV1/HEVC/MPEG4=false`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：将“fast-copy 编码准入”作为固定回归点，防止后续性能优化绕开兼容门控。
+  - 监控：在 clip 提取日志中统计 fast-copy 命中率与 codecId 分布，及时识别新来源编码风险。
+  - 校验：新增提取策略时，必须同时评估“编码兼容性 + 端侧可播性”，不能仅以生成成功作为准入标准。
+  - 回滚：如门控策略触发异常，可临时关闭门控并强制全部重编码，优先保障可播放性。
+
+## 2026-02-17 进入阅读页出现重复刷新阶段（内容打开并发去重修复）
+- 日期：2026-02-17
+- 现象与影响范围：
+  - 用户从任务列表进入阅读页时，界面会反复出现“正在打开内容/正在准备内容”阶段，体感为重复刷新。
+  - 影响 `openTaskForContent -> loadTaskMarkdown` 前端链路，在弱网或连续点击时更明显。
+- 触发条件：
+  - 同一任务在短时间内被重复触发打开（例如连续点击、前一次请求未返回时再次触发）。
+  - 旧请求在新请求之后返回，继续回写 UI 状态，造成内容区二次闪烁。
+- 根因定位：
+  - 内容打开链路缺少并发去重与“过期请求丢弃”机制。
+  - `loadTaskMarkdown` 在异步请求返回后直接更新状态，没有校验该结果是否仍是当前有效请求。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 在 `state` 中新增内容打开控制字段：`contentOpenInFlight`、`contentOpenTaskId`、`contentOpenRequestSeq`。
+  - 新增 `isContentOpenRequestActive(requestSeq)` 用于校验请求是否仍有效。
+  - `openTaskForContent` 增加同任务并发去重：
+    - 若相同任务已在打开中，直接返回 `loading`，不再重复发起加载。
+    - 打开 pending 任务时显式作废旧请求，避免旧请求回写。
+    - 每次有效打开分配递增请求序号，并在完成后按序号释放 in-flight 状态。
+  - `loadTaskMarkdown` 增加请求序号校验：
+    - 在关键异步步骤（拉取 markdown、拉取 meta）后判断请求是否过期；
+    - 过期则直接返回，避免旧数据覆盖当前界面。
+  - `loadTaskMarkdown` 增加体验层优化：
+    - “正在准备内容”改为延迟显示（260ms），快请求不再闪现准备文案；
+    - 同任务重开且已有正文时不清空内容区，降低阅读中断感。
+  - “重新打开”按钮统一复用 `openTaskForContent(..., { forceMarkdownRequest: true })`，走同一防抖与失效保护链路。
+- 验证方式：
+  - 静态校验：提取 `index.html` 内联脚本并执行 `node --check`，确认语法通过。
+  - 行为验证（手动）：
+    - 连续点击同一任务，阅读页仅进入一次稳定加载流程；
+    - 在弱网下快速切换任务时，旧请求不再回写导致二次闪烁。
+    - 正常网络下进入阅读页，绝大多数情况下不再出现“正在准备内容...”占位文案。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端回归用例，覆盖“重复点击同任务”“先后点击不同任务”场景，断言最终仅展示最后一次请求结果。
+  - 监控：为内容打开链路增加调试日志（请求序号、是否过期、最终模式），便于定位并发更新问题。
+  - 校验：后续新增任何“打开内容”入口时，必须复用 `openTaskForContent`，禁止绕过请求序号保护直接调用 `loadTaskMarkdown`。
+  - 回滚：若请求序号保护引发兼容问题，可临时保留“同任务并发去重”并关闭过期丢弃，优先维持可打开能力。
+
+## 2026-02-18 Cookie 文件缺失导致下载硬失败（认证自动降级修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 配置同时启用 `download_cookies_from_browser` 与 `download_cookies_file` 时，若本地 cookie 文件被删除，且浏览器导出阶段失败，`DownloadVideo` 会在认证参数构建阶段直接失败。
+  - 影响下载链路可用性：即使目标视频不强依赖登录态，也会被 Cookie 阶段提前阻断。
+- 根因定位：
+  - `VideoProcessor._build_auth_options()` 对 `cookies_file` 采用“文件必须存在”的硬校验。
+  - 当文件缺失时，即便已配置 `cookies_from_browser`，旧逻辑仍可能抛 `FileNotFoundError`，缺少“自动降级到浏览器直读”的兜底分支。
+  - 当仅配置 `cookies_from_browser` 时，若触发 `Could not copy Chrome cookie database` 或 `Failed to decrypt with DPAPI`，旧逻辑会直接失败，缺少“移除 Cookie 再试”的兜底路径。
+  - 当配置代理出口且上游返回 `HTTP 502/503/504`（如 `Bad Gateway`）时，旧逻辑会直接失败，缺少“去代理再试”的兜底路径。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 调整认证构建逻辑：
+      - 优先使用存在的 `cookiefile`；
+      - 当 `cookiefile` 缺失且 `cookies_from_browser` 可解析时，自动降级为 `cookiesfrombrowser` 继续执行下载；
+      - 仅在两者都不可用时才保持原有硬失败。
+    - 新增浏览器 Cookie 复制失败自动重试：
+      - 命中 `Could not copy Chrome cookie database` 且当前启用了 Cookie 认证时，自动去掉 Cookie 配置重试一次下载。
+    - 新增代理网关错误自动重试：
+      - 命中 `HTTP 502/503/504` 且当前配置了 `proxy` 时，自动去掉代理重试一次下载。
+    - 新增网关错误专项提示，明确区分“代理连接失败”与“代理上游网关错误”。
+    - 增加降级进度日志，明确“自动导出失败/文件缺失后已降级”的运行状态。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_download_auto_downgrades_to_browser_when_cookie_file_missing` 回归测试，覆盖“文件缺失 + 导出失败 + 自动降级”路径。
+    - 新增 `test_download_retries_without_cookie_when_browser_cookie_copy_fails`，覆盖“浏览器 Cookie 复制失败 -> 无 Cookie 重试”路径。
+    - 新增 `test_download_retries_without_cookie_when_dpapi_decrypt_fails`，覆盖“DPAPI 解密失败 -> 无 Cookie 重试”路径。
+    - 新增 `test_download_retries_without_proxy_when_gateway_502`，覆盖“代理网关错误 -> 无代理重试”路径。
+- 验证方式：
+  - 语法校验：`python -m py_compile services/python_grpc/src/media_engine/knowledge_engine/core/video.py services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`（通过）。
+  - 自动化测试：`pytest -q services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py -k "cookie or downgrades"` 在当前环境受临时目录 ACL 限制触发 `WinError 5`，未能完整执行。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：固定保留“cookie 文件缺失自动降级”“浏览器 Cookie 复制失败重试”“DPAPI 解密失败重试”“代理 502 去代理重试”四类回归用例，防止后续重构恢复为硬失败。
+  - 监控：关注下载日志中“自动导出 Cookie 失败，已降级为浏览器直读”“浏览器 Cookie 读取失败，自动降级为无 Cookie 重试一次”“代理出口返回网关错误，自动降级为无代理重试一次”命中率与成功率。
+  - 校验：上线前用“删除 cookie 文件 + 保留 browser 配置”样例回归，确认可进入下载阶段。
+  - 回滚：如需恢复旧行为，可撤销该降级分支并回退到“文件缺失即失败”的策略。
+
+## 2026-02-18 B 站 BV 号大小写被改写导致提取失败（大小写保真修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 用户输入混合大小写 BV（如 `BV17ycez5EAQ`）后，前端/后端链路会把 BV 改写为全大写，再交给下载器，导致部分链接出现 `KeyError('bvid')` 或“提取失败”。
+  - 影响 B 站链接归一化链路（前端输入标准化、Java URL 规范化、Python B 站 ID 提取）。
+- 根因定位：
+  - 前端 `extractBvId` 使用 `toUpperCase()`，会把 BV 全量改写。
+  - Java `VideoInputNormalizer` 在规范化时会调整 BV 大小写（此前只固定前缀为 `BV`）。
+  - Python `_extract_bilibili_video_id` 会将提取到的 BV `.upper()` 后用于后续链路，存在被误用为“真实 ID”的风险。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - `extractBvId` 改为保留命中的原始 BV 大小写，不再 `toUpperCase()`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/VideoInputNormalizer.java`
+    - B 站 BV 规范化改为完整保留原始大小写，仅做 URL 结构归一。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - `_extract_bilibili_video_id` 对 BV 不再 `.upper()`，返回提取时的原始大小写。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/VideoInputNormalizerTest.java`
+    - 更新测试断言，锁定“BV 原始大小写保留”行为。
+  - 文件：`services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py`
+    - 更新测试断言，锁定 Python 侧提取与 task-dir 源值不再强制大写。
+- 验证方式：
+  - 单测：新增/更新断言覆盖“混合大小写 BV 输入 -> 输出保持原样”。
+  - 回归：同一链接在提交前后对比请求 URL，确认不再发生 BV 全大写改写。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保持 Java/Python 两侧“BV 大小写保真”回归用例，禁止恢复全大写归一化。
+  - 监控：在下载前日志中打印“原始输入 URL + 归一化 URL”，用于快速定位是否发生大小写改写。
+  - 校验：涉及 B 站 ID 处理时，默认“语义字段可归一、ID 原文不可改写”；若确需改写必须提供平台兼容性证据。
+  - 回滚：若出现极端兼容问题，可仅回滚 URL 结构归一逻辑，保持 BV 原始大小写策略不回退。
+
+## 2026-02-18 长视频任务偶发 `Too many pings` 失败（gRPC keepalive 限流修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 长视频任务在下载或后续阶段偶发失败，Java 侧错误为 `Download failed: Too many pings`。
+  - 前端用户提示被映射为“系统繁忙”，缺少可执行修复路径。
+  - 影响 Java orchestrator -> Python gRPC 服务调用链路稳定性。
+- 根因定位：
+  - Java gRPC 客户端默认启用了较激进的 keepalive（30s/10s），在长耗时调用场景下可能触发 Python gRPC 服务端心跳限流，返回 `too_many_pings`。
+  - 用户错误映射未识别该错误类别，导致业务上被误判为通用繁忙。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 将 keepalive 调整为可配置能力，默认关闭；
+    - 仅在显式开启 `grpc.python.keepalive.enabled=true` 时启用 keepalive，并输出参数日志。
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - 增加 keepalive 配置项，默认采用安全值：`enabled=false`，`time=600s`，`timeout=20s`，`without-calls=false`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/UserFacingErrorMapper.java`
+    - 新增 `Too many pings / too_many_pings / enhance your calm` 错误映射，返回“调整 keepalive”可执行提示。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/UserFacingErrorMapperTest.java`
+    - 新增回归测试，锁定 `Too many pings` 的用户提示映射。
+- 验证方式：
+  - 静态校验：检查 `PythonGrpcClient` 初始化日志，确认 keepalive 默认为 disabled。
+  - 运行回归：重启 Java orchestrator 后提交长视频，确认不再出现 `Too many pings`。
+  - 文案校验：模拟 `Too many pings` 错误，确认用户侧提示不再是“系统繁忙”。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留 `UserFacingErrorMapperTest.shouldMapTooManyPingsToGrpcKeepaliveHint`，防止错误映射回退。
+  - 监控：在日志平台统计 `too_many_pings` 出现次数，超过阈值时告警并核查 keepalive 配置。
+  - 校验：新环境启用 keepalive 前，先校验服务端心跳策略与最小间隔，避免使用 60s 以下激进值。
+  - 回滚：若特殊网络确需 keepalive，可逐步开启并放大间隔；若故障复发立即关闭 keepalive。
+
+### 2026-02-18 补充修正：`KeyError('bvid')` 无站点前缀时误落“系统繁忙”
+- 现象：
+  - 部分 yt-dlp 返回格式为 `ERROR: <id>: An extractor error has occurred. (caused by KeyError('bvid'))`，不含 `[BiliBili]` 前缀。
+  - 旧识别规则依赖站点前缀，导致 Python 侧提示退化为通用“yt-dlp 执行失败”，Java 侧进一步映射为“系统繁忙”。
+- 根因：
+  - 错误识别条件过窄，把 `[BiliBili]` 作为硬条件。
+  - Java `UserFacingErrorMapper` 未覆盖 `KeyError('bvid')` 与 extractor 关键词。
+- 修复：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - `bvid` 识别改为仅依赖 `extractor error has occurred + KeyError('bvid')` 组合，不再依赖站点前缀。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/UserFacingErrorMapper.java`
+    - 新增 `KeyError('bvid')/extractor error` 专项映射，返回可执行提示（原始链接 + BV 大小写 + 升级 yt-dlp）。
+  - 测试补充：
+    - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/UserFacingErrorMapperTest.java`
+
+## 2026-02-18 PP-Structure oneDNN 报错导致首帧长栈刷屏（兼容重试与日志降噪修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 结构预处理阶段日志出现 `OneDnnContext does not have the input Filter` / `operator < fused_conv2d > error` 长栈。
+  - 虽然流程会降级到 PaddleX fallback，不会阻断主链路，但首错日志噪声极大，影响问题定位效率与任务可观测性。
+- 根因定位：
+  - 当前环境下 `PP-Structure` 与 oneDNN/mkldnn 组合存在兼容性问题，首次推理触发运行时后端异常。
+  - 旧实现命中异常后直接熔断到 PaddleX，但 warning 文案直接拼接原始异常字符串，导致多行堆栈完整输出。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 新增 `backend_compat_retry_enabled`（默认 `true`）配置接入。
+    - 命中 oneDNN/mkldnn 关键字异常时，增加“一次性兼容重试”：
+      - 自动设置 `FLAGS_use_mkldnn=0`；
+      - 重建 PP-Structure 引擎并对当前图片重试一次；
+      - 若重试成功，继续走 PP-Structure 主路径；
+      - 若重试失败，再按原策略熔断到 PaddleX fallback。
+    - 新增异常摘要函数，warning 日志只保留压缩后的关键错误信息；完整栈下沉到 debug 日志。
+  - 文件：`config/video_config.yaml`
+    - 在 `vision_ai.structure_preprocess` 下新增 `backend_compat_retry_enabled: true` 配置项，支持按环境关闭兼容重试。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+    - 新增 `test_collect_structure_blocks_backend_retry_recovers_engine`，覆盖“首错 -> 兼容重试成功 -> 不走 fallback”路径。
+    - 新增 `test_summarize_exception_compacts_multiline_message`，锁定日志摘要行为。
+    - 为依赖结构拆图断言的用例显式设置 `validator._structure_skip_split_bbox_coverage_threshold = 0.0`，去除外部配置对测试稳定性的耦合。
+- 验证方式：
+  - 自动化测试：`pytest -q services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`，结果 `23 passed`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“后端兼容重试成功/失败”与“异常日志摘要”用例，防止后续重构回退为“只熔断不重试 + 长栈刷屏”。
+  - 监控：线上关注 `PP-Structure backend compatibility retry enabled` 与 `PP-Structure backend recovered` 命中率；若持续高频，优先评估默认切换到 PaddleX。
+  - 校验：新环境上线前执行最小样本结构预处理探测，确认 oneDNN/mkldnn 与 Paddle 版本组合是否稳定。
+  - 回滚：若兼容重试引入副作用，可将 `backend_compat_retry_enabled` 设为 `false`，恢复原“首错后熔断到 PaddleX”路径。
+
+## 2026-02-18 Phase2B 组装收尾日志访问旧字段导致 `AssembleRichText` 失败
+- 日期：2026-02-18
+- 现象与影响范围：
+  - gRPC `AssembleRichText` 在 Phase2B 组装收尾阶段报错：
+    - `AttributeError: 'RichTextDocument' object has no attribute 'sections'`
+  - 报错发生在 `assemble_only` 已完成 JSON/Markdown 输出之后的日志统计语句，导致接口被判定为失败并返回异常。
+- 根因定位：
+  - `RichTextDocument` 已演进为 `knowledge_groups -> units` 数据结构。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py` 仍残留旧字段 `document.sections` 的日志统计访问，属于模型字段迁移后的兼容遗漏。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - 将收尾日志统计从 `len(document.sections)` 改为基于 `knowledge_groups` 聚合 `units` 计算：
+      - `groups = document.knowledge_groups`
+      - `sections = sum(len(group.units) for group in groups)`
+    - 日志改为输出 `groups` 与 `sections`，确保统计语义与现有文档模型一致。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+    - 新增 `total_sections()` 统一计数入口，避免调用方重复拼装统计逻辑。
+    - 新增兼容属性 `sections`（按 `knowledge_groups -> units` 展平），降低旧字段残留访问的崩溃风险。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_rich_text_document_metrics.py`
+    - 新增轻量回归测试，覆盖：
+      - `sections` 兼容视图的展平顺序；
+      - `total_sections()` 的分组计数结果。
+- 验证方式：
+  - 静态校验：检索 Phase2B 组装路径中对 `document.sections` 的访问，确认无残留调用。
+  - 运行验证：执行最小复现场景，确认 `assemble_only` 可正常返回 `enhanced_output.md` 与 `result.json`，且不再触发 `AttributeError`。
+  - 自动化测试：`pytest services/python_grpc/src/content_pipeline/tests/test_rich_text_document_metrics.py -q --basetemp=tmp_manual_acl_probe_pytest`，结果 `2 passed`。
+  - 说明：当前沙箱环境下 `pytest` 临时目录存在 ACL 异常（`WinError 5`），本次采用脚本化 smoke 验证主链路。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/保留 assemble-only 合约测试，重点断言“组装收尾不因统计日志抛错”。
+  - 监控：对 `AssembleRichText failed` 增加按异常类型聚合，单独观察 `AttributeError` 波动。
+  - 校验：后续文档结构字段迁移时，统一执行“字段引用扫描（如 `rg sections`）+ 关键路径 smoke”作为提交前检查项。
+  - 回滚：若新统计逻辑引发兼容问题，可临时降级为仅输出固定文本日志，避免业务结果因日志语句失败。
+
+## 2026-02-18 DeepSeek JSON 对冲阈值固定 25000ms 导致触发失真（动态估算修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 运行日志持续出现：`[deepseek_complete_json] hedge triggered after 25000ms`。
+  - 对短 prompt（低 token）请求，对冲触发明显偏晚，无法在长尾阶段及时补发副本；影响 Phase2A/Phase2B 的 DeepSeek JSON 调用链路尾延迟控制。
+- 根因定位：
+  - hedge 触发延迟由固定常量 `MODULE2_DEEPSEEK_HEDGE_DELAY_MS`（默认 25000）决定，未使用请求长度或历史时延数据。
+  - 阈值策略与请求规模解耦，导致“同一固定值覆盖所有 prompt 规模”，在低负载/短输入场景下偏离最优触发点。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增 `_DeepseekHedgeDelayEstimator`：
+      - 输入：`prompt_tokens/total_tokens/latency_ms`；
+      - 输出：按历史分位（默认 Q0.82）估算动态 hedge delay。
+    - 新增 `_resolve_deepseek_hedge_delay_ms(...)`：
+      - 按 `prompt + system_message` 估算 token 规模；
+      - 返回动态 `delay_ms` 并透传给 `_run_hedged_async_request`。
+    - `deepseek_complete_json/deepseek_complete_text` 接入动态阈值，并在调用完成后把 metadata 回写到估算器，持续在线学习。
+    - 增加 benchmark 冷启动能力：从 `var/artifacts/benchmarks/**/requests_*.json` 导入历史样本，避免首批请求“无样本”。
+    - 保留固定阈值回退：可通过 `MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED=false` 关闭动态估算。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 既有 DeepSeek hedge 回归用例增加 `dynamic_delay_enabled=false` 显式约束，避免非确定性。
+    - 新增动态估算回归：
+      - `test_deepseek_dynamic_delay_estimate_scales_with_prompt_length`
+      - `test_deepseek_complete_json_uses_dynamic_delay`
+- 验证方式：
+  - 自动化测试：`pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`，结果 `6 passed`。
+  - 语法校验：`python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`（通过）。
+  - 历史样本对比（`var/artifacts/benchmarks/**/requests_*.json`，`11110` 条成功请求）：
+    - 固定阈值：`25000ms`（常量）
+    - 动态阈值：中位数 `6395ms`，P95 `22081ms`
+    - 动态阈值低于 `25000ms` 的样本占比：`97.44%`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“长度增长 -> delay 增长”与“调用链使用动态 delay”两类用例，防止回退到硬编码常量。
+  - 监控：在日志中观察 `hedge triggered after Xms` 的分布，若出现长期单一固定值，判定动态策略退化。
+  - 校验：新场景接入 DeepSeek JSON 前，优先检查是否可提供 `prompt_tokens/latency_ms` 观测数据，确保估算器可持续学习。
+  - 回滚：若动态策略在特殊环境抖动，可关闭 `MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED` 立即回到固定阈值模式。
+
+## 2026-02-18 语义分段批处理回归测试误回退（strict schema + prompt 识别脆弱）
+- 现象：
+  - `test_segment_batches_carry_prev_tail_and_merges_boundary_unit` 失败，结果从预期 `2` 个单元退化为 `4` 个 fallback 单元。
+  - 日志报错：`Invalid unit schema under strict mode`。
+- 根因：
+  - 测试桩返回旧 `semantic_units` 结构，缺少 strict 模式必需字段 `group_name`。
+  - 测试桩用 `"paragraph_id": "P001"` 子串分支，在跨批次提示包含 `prev_tail` 的情况下会误判批次，返回错误 payload。
+- 修复：
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py`
+    - 改为通过正则抽取 prompt 中段落 ID，并按首批 ID 序列（`[P001,P002]` / `[P003,P004]`）分支。
+    - 补齐返回 payload 的 `group_name` 字段，满足 strict schema。
+    - `hedge_context` 断言改为集合断言，避免并发调用顺序导致的脆弱下标断言。
+- 验证：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py -q`（通过）
+  - 联合回归：`pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py -q`（10 passed）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：涉及并发批处理的 fake LLM 必须按结构化字段分支，禁止依赖脆弱子串。
+  - 校验：strict schema 相关测试 payload 必须包含 `group_name`，避免隐式依赖宽松解析。
+  - 监控：若出现 `Invalid unit schema under strict mode`，优先比对 prompt 分支与 mock payload 字段完整性。
+  - 回滚：测试层可临时降级为 `knowledge_groups` 统一输出模板，快速排除 legacy schema 干扰。
+
+## 2026-02-18 前端任务列表标题误映射为 storage 目录名（改为 domain-视频名优先，BV/链接兜底）
+- 现象：
+  - 移动端任务列表中，部分任务标题直接显示为 storage 目录名（如哈希目录），可读性差且无法反映视频来源。
+  - 新提交任务在尚未拿到元数据标题时，前端没有稳定地显示 BV 号或链接信息，标题体验跳变明显。
+- 根因：
+  - 后端 `TaskView -> toListItem` 仅返回 `title`，未显式区分“元数据标题（domain-视频名）”与“缓存/回退标题（目录名、文件名）”。
+  - 前端渲染 `buildTaskItemHtml` 直接使用 `task.title`，导致 storage 回退标题直接暴露。
+  - 任务列表动效只覆盖入场/处理中/完成，缺少“标题从 BV/链接切换到 domain-视频名”的视觉反馈。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `TaskView` 新增 `metaTitle` 字段，用于明确承载来自 `mobile_task_meta.json.taskTitle` 的标题。
+    - `applyTaskTitleFromMeta` 在写入 `view.title` 的同时写入 `view.metaTitle`，并统一 `trim`。
+    - `toListItem` 新增 `metaTitle` 返回字段，前端可据此判断是否已拿到 domain-视频名。
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 新增 `resolveTaskCardTitle` 决策链：`metaTitle > BV/链接(videoUrl) > title > taskId`。
+    - 增加 storage 回退标题识别，避免目录名优先显示。
+    - 在 `applyTaskListMotionDiff` 中新增“标题变更”检测，命中时触发 `title` 动效 bucket。
+    - `syncTaskTitleFromState` 同步更新 `item.metaTitle`，确保本地改标题后列表即时一致。
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
+    - 新增 `.fx-title-highlight` 样式，复用现有 `highlightPulse` 动画，在标题替换瞬间给出高亮反馈。
+    - `prefers-reduced-motion` 下关闭该动画，保持可访问性一致。
+- 验证方式：
+  - 手动链路：
+    - 提交 BV/链接任务后，列表先显示 BV 或链接摘要；
+    - 元数据写入 `taskTitle` 后，列表自动切换为 domain-视频名；
+    - 切换瞬间出现标题高亮动画，首次水合渲染不触发误高亮。
+  - 构建验证：
+    - `mvn -pl services/java-orchestrator -DskipTests compile`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充任务列表标题解析函数的用例，覆盖 `metaTitle`、BV/链接、storageKey 回退的优先级行为。
+  - 监控：在前端埋点记录“标题来源类型”（meta/video/title/taskId）分布，监测目录名回退占比异常。
+  - 校验：提交前检查 `/api/mobile/tasks` 返回体是否包含 `metaTitle` 且前端渲染链路已消费。
+  - 回滚：若前端出现兼容问题，可先回退 `resolveTaskCardTitle` 到旧逻辑，同时保留后端 `metaTitle` 字段不破坏 API 兼容。

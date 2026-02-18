@@ -2,6 +2,181 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-17 提交失败语义模块抽离：`mobile-submit-feedback`
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 移动端提交失败的人话映射规则同时存在于 `index.html` 主链路与兜底脚本，后续文案和分类规则容易漂移。
+  - 失败态体验刚完成升级（抖动/重试/语义文案），若没有单点模块，维护成本会快速上升。
+- 第一性原理与复用杠杆：
+  - 第一性原理：把“稳定但高复用”的规则抽成能力模块，业务编排层只消费结果，不重复实现规则。
+  - 复用杠杆1：延续现有前端模块模式（IIFE + `window.*` 导出），与 `mobile-composer.js` 等模块保持一致。
+  - 复用杠杆2：复用既有 `normalizeErrorMessage` 与状态码信息，不改后端接口，仅重组前端决策链。
+  - 复用杠杆3：复用已有失败触感通道 `setTaskSubmitTip(..., options)`，模块只产出语义结果对象。
+- 架构决策：
+  - 决策1：新增 `services/java-orchestrator/src/main/resources/static/lib/mobile-submit-feedback.js`，集中提供：
+    - `extractRawErrorMessage`
+    - `classifySubmitError`
+  - 决策2：`index.html` 主提交流程和兜底提交脚本统一改为调用 `MobileSubmitFeedback.classifySubmitError`。
+  - 决策3：`mobile-composer.js` 的兜底 `catch` 同步改为调用共享模块，确保边角路径不退回机器语。
+- 调用链与决策链变化：
+  - 改造前：
+    - `index.html`（主链路）本地分类
+    - `index.html`（兜底脚本）本地分类
+    - `mobile-composer.js` 兜底只做简单归一
+  - 改造后：
+    - `index.html` / `mobile-composer.js` -> `mobile-submit-feedback.js` -> `setTaskSubmitTip`
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-submit-feedback.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`services/java-orchestrator/src/main/resources/static/lib/mobile-composer.js`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-submit-feedback.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-composer.js`
+  - 提取 `index.html` 内联脚本后执行 `node --check`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 复用经验：
+  - 语义分类模块应返回结构化结果（`message/highlightLink/allowRetry/reason`），而不是仅返回字符串，才能支持持续演进的失败交互。
+
+## 2026-02-17 移动端阅读体验模块化（二次拆分）：`mobile-content-invitation` + `mobile-reader-typography`
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `index.html` 主内联脚本持续承载“内容空态邀请交互 + 阅读排版初始化”细节，决策链长度继续增长。
+  - 后续若持续在内联脚本迭代交互与排版，回归范围会扩大，影响调试与演进效率。
+- 第一性原理与复用杠杆：
+  - 第一性原理：将“高频改动能力”与“业务编排”分离，业务层只保留状态机与回调，细节能力下沉模块。
+  - 复用杠杆1：复用现有 IIFE + `window.*` 前端模块边界模式，与 `mobile-view-navigation.js` / `mobile-performance-utils.js` 对齐。
+  - 复用杠杆2：复用既有状态机与调用链（`pushView`、`setTaskSubmitTip`、`applyStaticUiCopy`），不改变后端接口与核心业务路径。
+  - 复用杠杆3：复用 CSS 变量体系（`--content-line-height`、`--content-letter-spacing`、`--content-column-width`），把排版初始化统一为单点入口。
+- 架构决策：
+  - 决策1：新增 `services/java-orchestrator/src/main/resources/static/lib/mobile-content-invitation.js`，集中封装：
+    - 空态文案同步：`applyStaticCopy`
+    - 列表/入口脉冲提示：`pulseTargets`
+    - 空态点击引导绑定：`bindInvitationClick`
+  - 决策2：新增 `services/java-orchestrator/src/main/resources/static/lib/mobile-reader-typography.js`，集中封装阅读排版 token 初始化：`applyDefaults`。
+  - 决策3：`index.html` 改为“模块编排层”，移除对应内联细节函数，保留失败兜底分支，确保模块缺失时不阻断主流程。
+- 调用链与决策链变化：
+  - 改造前：`index.html` 内联脚本直接管理空态点击/脉冲/文案同步与排版 token 初始化。
+  - 改造后：`index.html` -> `mobile-content-invitation.js` / `mobile-reader-typography.js`（能力模块）-> 回调触发既有业务状态机。
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-content-invitation.js`
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-reader-typography.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 语法校验：
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-content-invitation.js`
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-reader-typography.js`
+    - 提取 `index.html` 主内联脚本后执行 `node --check`
+  - 回归要点：
+    - 空态点击仍能回到故事库并触发列表/创作入口提示；
+    - 首屏阅读提示文案仍能正确同步；
+    - 阅读排版变量仍在启动时初始化为预期值。
+
+## 2026-02-17 移动端 PWA/Share Target 小重构：从 `index.html` 内联逻辑迁移到 `lib` 模块
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 上一轮已完成 PWA + Share Target 功能，但实现仍分散在 `index.html` 内联脚本中，主脚本复杂度持续上升。
+  - 后续若继续在内联脚本叠加细节，会加重回归风险，也不利于复用与测试。
+- 第一性原理与复用杠杆：
+  - 第一性原理：高内聚能力（PWA 安装、分享参数消费、分享预填）应以模块封装，对业务主脚本暴露稳定 API。
+  - 复用杠杆1：复用现有模块化模式（IIFE + `window.*` 导出），与 `mobile-view-navigation.js`、`mobile-performance-utils.js` 保持一致。
+  - 复用杠杆2：复用现有提交链路 `submitTaskFromMobileForm`，迁移仅改变“能力组织方式”，不改后端接口与提交流程。
+  - 复用杠杆3：复用现有页面状态机（`pushView/openTaskComposer/setTaskSubmitTip`），由模块通过回调触发现有行为。
+- 架构决策：
+  - 决策1：新增 `services/java-orchestrator/src/main/resources/static/lib/mobile-pwa-share-target.js`，集中提供：
+    - `registerServiceWorker`
+    - `consumeShareTargetPayloadFromUrl`
+    - `prefillComposerFromShareTarget`
+  - 决策2：`index.html` 删除 PWA/Share Target 内联实现，改为引入模块并通过 `PWA_SHARE_TARGET` 调用。
+  - 决策3：保留空值兜底（模块缺失时不阻断页面主流程），降低静态资源偶发加载失败对核心业务的影响。
+- 调用链与决策链变化：
+  - 改造前：`index.html` 直接定义并执行 `serviceWorker.register + 分享参数消费/预填函数`
+  - 改造后：`index.html` -> `mobile-pwa-share-target.js`（能力模块）-> 回调触发既有状态与提交链路
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-pwa-share-target.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 语法校验：
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-pwa-share-target.js`
+    - 提取 `index.html` 主内联脚本后执行 `node --check`
+  - 行为校验：
+    - 分享参数仍可被消费并清理；
+    - 预填后仍能触发既有自动提交；
+    - Service Worker 仍在 `load` 后注册。
+
+## 2026-02-17 移动端分享入口升级：PWA + Web Share Target（URL/文本）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 移动端无法像桌面端一样稳定依赖拖拽上传，用户从 Bilibili/相册等 App 进入解析链路成本高。
+  - 现有链路只有输入框与隐式文件选择器，缺少“系统分享直达入口 + 显式上传按钮”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：移动端“输入效率”优先于“交互花样”，应优先减少跨应用复制粘贴步骤。
+  - 复用杠杆1：复用现有提交链路 `submitTaskFromMobileForm`，不新增后端提交 API。
+  - 复用杠杆2：复用 `mobileVideoFile` 与 `/api/mobile/tasks/upload`，新增上传按钮仅作为现有 input 的显式触发器。
+  - 复用杠杆3：复用 `/mobile-markdown.html -> /index.html` 既有重定向（保留 query），作为 `share_target.action` 落点。
+- 架构决策：
+  - 决策1：新增 `manifest.json`，启用 PWA 安装信息与 `share_target`（`GET` + `title/text/url` 参数）。
+  - 决策2：新增并注册 `sw.js`，满足可安装 PWA 前提，确保系统分享入口可被识别。
+  - 决策3：前端在 `bootstrap` 早期消费并清理 `title/text/url` 查询参数，自动填充输入框并复用既有自动提交策略触发解析。
+  - 决策4：在 `.submit-source-shell` 增加显式上传按钮，保持“文件上传”和“URL 分享”两条入口并存。
+- 调用链与决策链变化：
+  - 改造前：`外部 App -> 复制链接 -> 手动粘贴 -> 提交`
+  - 改造后：`外部 App -> 系统分享到 Web App -> share_target 参数注入 -> 自动填充并触发既有提交链路`
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+  - 新增：`services/java-orchestrator/src/main/resources/static/manifest.json`
+  - 新增：`services/java-orchestrator/src/main/resources/static/sw.js`
+  - 新增：`services/java-orchestrator/src/main/resources/static/icons/pwa-icon-192.svg`
+  - 新增：`services/java-orchestrator/src/main/resources/static/icons/pwa-icon-512.svg`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 手动安装：移动端打开页面后检查“添加到主屏幕”是否可用。
+  - 分享入口：从支持分享的 App 分享 URL/文本到本应用，校验输入框自动填充并触发提交。
+  - 兜底入口：点击新增上传按钮，确认能打开文件选择并走原有上传提交流程。
+
+## 2026-02-17 移动端前端性能工具模块化（`mobile-performance-utils.js`）+ 主脚本降压回连
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `index.html` 主内联脚本持续膨胀，性能相关逻辑（双帧调度、JSON Worker、滚动动效绑定）与业务逻辑耦合过深，维护门槛高。
+  - 性能优化点虽然已落地，但工具实现仍散落在主脚本，不利于复用与后续稳定迭代。
+- 第一性原理与复用杠杆：
+  - 第一性原理：高频性能策略应被封装为“可复用基础设施”，业务层仅保留参数和编排，不重复实现底层机制。
+  - 复用杠杆1：复用既有静态资源加载机制（`/static/lib/*.js`），不引入前端构建工具链。
+  - 复用杠杆2：复用现有两大模块化边界（`mobile-markdown-gestures.js`、`mobile-view-navigation.js`）的 IIFE 暴露模式，保持调用风格一致。
+  - 复用杠杆3：复用现有 `index.html` 状态机与渲染链路，仅替换性能工具实现入口，不改业务调用链。
+- 架构决策：
+  - 决策1：新增 `services/java-orchestrator/src/main/resources/static/lib/mobile-performance-utils.js`，统一承载三类性能工具：
+    - `scheduleDoubleAnimationFrame`
+    - `createJsonParseWorkerPool`
+    - `createPaperScrollMotionBinder`
+  - 决策2：`index.html` 通过 `window.MobilePerformanceUtils` 注入工具，业务函数保留原签名，内部改为模块调用；模块缺失时走本地兜底实现。
+  - 决策3：释放资源职责前移到统一 `beforeunload` 钩子，回收 JSON Worker，降低页面卸载残留风险。
+- 调用链与决策链变化：
+  - 改造前：`index.html` 内联脚本同时负责业务逻辑 + 性能基础设施实现。
+  - 改造后：`index.html` 负责业务编排；性能基础设施由 `lib/mobile-performance-utils.js` 提供并注入。
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-performance-utils.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/upgrade-log.md`
+- 验证方式：
+  - 静态加载链校验：确认 `index.html` 已在主脚本前加载 `/lib/mobile-performance-utils.js`。
+  - 语法校验：
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-performance-utils.js`
+    - 提取 `index.html` 主脚本后执行 `node --check`
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据：
+  - 测试方式：以代码路径计数 + 调用链审计对比“同帧布局读写链路”和“主线程大 JSON 解析路径”。
+  - 测试数据：
+    - `renderParagraphEditorVirtualWindow` 中“DOM 写后同帧布局读”主路径：`1` 处（`getBoundingClientRect`）-> `0` 处（改为双 `requestAnimationFrame` 异步测量）。
+    - 大 JSON 解析路径：`JSON.parse` 主线程同步独占 -> `>=160KB` 优先 Worker 解析（保留主线程回退路径）。
+    - 滚动纸张动效写入：每帧多 CSS 变量写入 -> 每帧单次 `transform` 写入（实现迁移到性能模块）。
+  - 对比结论：
+    - 性能机制从“散落实现”收敛为“可复用模块 + 业务回连”，后续优化可在模块侧集中演进，降低回归面。
+
 ## 2026-02-17 统一入口去壳层跳转 + 设计 Token 单源化
 - 日期：2026-02-17
 - 触发背景与问题：
@@ -5167,3 +5342,469 @@
   - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js`
   - 提取 `mobile-markdown.html` 最后一个主脚本块后执行 `node --check`
 
+## 2026-02-17 前端入口单源化（index 主入口 + mobile 兼容壳）与图片预览增量补充
+- 日期：2026-02-17
+- 触发背景与问题：
+  - `index.html` 与 `mobile-markdown.html` 长期双份维护，功能补丁（如图片预览）容易出现“补一处、漏一处”的分叉风险。
+  - 需求要求“合并并增量补充”，核心目标是减少重复资产而非继续并行复制页面。
+- 第一性原理与复用杠杆：
+  - 第一性原理：同一业务页面应只有一个事实来源（Single Source of Truth），兼容路径通过薄壳重定向承接。
+  - 复用杠杆：
+    - 复用现有 `index.html` 全量调用链（任务列表、阅读、手势、段落编辑、媒体增强）作为主链路；
+    - 复用现有静态资源路由，不新增后端接口；
+    - 复用 `enhanceRenderedContent -> withMedia` 增强点，增量插入图片点击预览能力。
+- 架构决策：
+  - 决策1：`index.html` 作为唯一页面实现与功能承载。
+  - 决策2：`mobile-markdown.html` 收敛为兼容入口壳，保留 query/hash 后重定向到同目录 `index.html`。
+  - 决策3：图片放大预览采用轻量 lightbox（点击打开、背景/按钮/Esc 关闭），与“长按保存媒体”并存。
+- 调用链与决策链变化：
+  - 页面入口：`/mobile-markdown.html` -> 兼容壳跳转 -> `index.html`（主实现）
+  - 媒体增强：`renderMarkdown` -> `enhanceRenderedContent(withMedia)` -> `bindImagePreview` -> `openImageLightboxFromNode`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+- 验证方式：
+  - 前端脚本语法：`node --check` 校验 `index.html` 主脚本通过。
+  - 兼容入口：访问 `mobile-markdown.html` 可保留 `query/hash` 跳转到 `index.html`。
+  - 交互点检：正文图片点击后可放大预览，背景点击/关闭按钮/Esc 可关闭预览。
+
+## 2026-02-17 删除 mobile-markdown.html 文件并迁移到服务端兼容重定向
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 继续保留 `mobile-markdown.html` 文件会形成“页面本体 + 兼容壳文件”双资产，增加误改概率与审阅成本。
+  - 需求明确允许删除该文件，但必须保留历史入口可用性，避免外部深链与书签 404。
+- 第一性原理与复用杠杆：
+  - 第一性原理：页面实现应只有一个静态事实源，兼容性应下沉到路由层而非复制页面文件。
+  - 复用杠杆：
+    - 复用现有 `index.html` 主页面实现，不引入第二份静态页面。
+    - 复用 `WebConfig`（`WebMvcConfigurer`）统一管理入口兼容策略。
+- 架构决策：
+  - 决策1：删除 `services/java-orchestrator/src/main/resources/static/mobile-markdown.html`。
+  - 决策2：在 `WebConfig` 增加 `/mobile-markdown.html -> /index.html` 永久重定向（308），并保留 query 参数。
+- 调用链与决策链变化：
+  - 改造前：`/mobile-markdown.html` -> 静态文件（兼容壳脚本） -> `index.html`
+  - 改造后：`/mobile-markdown.html` -> `WebConfig` 重定向 -> `index.html`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/WebConfig.java`
+  - 删除：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html`
+  - 更新：`docs/architecture/overview.md`
+  - 更新：`docs/architecture/repository-map.md`
+- 验证方式：
+  - Java 编译校验：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile`
+  - 文档编码校验：`python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-17 批注交互架构升级：从模态弹窗切换为行内便签（Inline Sticky Notes）
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 现有批注链路使用 `comment-modal`，用户在阅读过程中需要“跳出上下文 -> 编辑 -> 返回”，心流被打断。
+  - 同时出现“批注界面可打开但新增批注不可稳定点击/创建”的可用性问题，暴露出模态链路脆弱性。
+- 第一性原理与复用杠杆：
+  - 第一性原理：批注属于“上下文依赖型认知动作”，输入界面应贴近被评论句子，避免上下文切断。
+  - 复用杠杆：
+    - 复用既有手势调用入口 `openCommentModal(...)`，避免重写手势状态机；
+    - 复用既有持久化数据结构 `paragraphMeta.comments` 与 `scheduleParagraphBackgroundSync()`；
+    - 复用段落定位能力 `getParagraphCardByIndex(...)` 做便签锚定。
+- 架构决策：
+  - 决策1：删除 `comment-modal` DOM 与事件绑定，不再使用阻断式模态交互。
+  - 决策2：保留 `openCommentModal` 名称作为兼容接口，内部实现替换为行内便签状态机（`inlineSticky*`）。
+  - 决策3：右滑批注动作透传触点坐标（`anchorX/anchorY`），便签从手指附近展开，强化“直接操纵”。
+  - 决策4：便签关闭采用轻量策略（外点关闭/Esc），不加遮罩层，确保原文始终可见。
+- 调用链与决策链变化：
+  - 改造前：
+    - `右滑批注` -> `openCommentModal` -> `renderCommentModal(dialog)` -> `commentModalAdd/Save` -> `setParagraphComments`
+  - 改造后：
+    - `右滑批注` -> `openCommentModal(index, anchor)` -> `renderInlineSticky()` -> `saveInlineStickyNote()` -> `setParagraphComments`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - 提取 `index.html` 全部内联脚本并逐段 `node --check`
+  - 手动点检：右滑后便签在行文附近展开，输入保存后可持久化。
+
+## 2026-02-18 移动端模式状态机收敛：移除阅读态切换，固定为编辑态
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 现有前端把同一内容操作拆成“阅读态 / 编辑态”两套权限门槛，导致复制、收藏、批注、滑动动作在状态切换后出现行为分叉。
+  - 用户要求协作与产品行为统一为“默认且恒定可编辑”，不再保留阅读态切换入口。
+- 第一性原理与复用杠杆：
+  - 第一性原理：同一内容对象应尽量复用同一状态机，避免“状态切换”成为功能可用性的前置条件。
+  - 复用杠杆：
+    - 复用现有手势入口与段落操作函数，不重写整套触控交互链路；
+    - 复用现有段落数据链路 `splitMarkdownIntoParagraphBlocks -> paragraphMeta -> scheduleParagraphBackgroundSync`；
+    - 复用现有视图路由 `pushView('reading')`，仅收敛模式状态，不新增页面。
+- 架构决策：
+  - 决策1：删除阅读工具面板中的“逐行调整/退出调整”切换按钮，去除显式模式切换入口。
+  - 决策2：`resetReadingTransientState` 仅负责段落与交互临时状态清理，不再承担模式切换职责。
+  - 决策3：删除 `setEditMode(...)` 与其按钮调用点，彻底移除模式切换链路，避免后续回归到双态实现。
+- 调用链与决策链变化：
+  - 改造前：`load/open task -> resetReadingTransientState(resetEditMode?) -> toggleEditModeBtn -> setEditMode(true|false)`
+  - 改造后：`load/open task -> resetReadingTransientState() -> ensureParagraphEditorState()`（始终编辑态）
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 验证方式：
+  - 前端主脚本语法：提取 `index.html` 主内联脚本后执行 `node --check` 通过。
+  - 手势脚本语法：`node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js` 通过。
+
+## 2026-02-18 交互状态进一步收敛：彻底移除 `state.editMode` 代码依赖
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 用户明确要求“内容默认可直接操控”，并质疑代码中仍保留 `state.editMode` 会持续引入心智负担与实现分叉。
+  - 虽然上一阶段已将模式固定为编辑态，但变量和分支仍然存在，后续维护仍可能把新逻辑挂回“模式门槛”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：当产品语义已经单态化，状态变量本身就是结构债，应从调用链中删除而非“固定取值”。
+  - 复用杠杆：
+    - 复用既有手势入口与段落操作函数（复制/收藏/右滑便签/左滑删除）；
+    - 复用既有持久化链路（`paragraphMeta` + `scheduleParagraphBackgroundSync`）；
+    - 复用既有 Sticky Note 批注链路（`openInlineStickyNote -> renderInlineSticky`）。
+- 架构决策：
+  - 决策1：从前端状态对象移除 `editMode` 字段。
+  - 决策2：删除手势与虚拟列表中所有 `state.editMode` 判定分支，统一为“始终可操作”路径。
+  - 决策3：统一批注入口命名为 `openInlineStickyNote/closeInlineStickyNote`，语义与“非模态便签”保持一致，避免历史命名误导后续实现。
+- 调用链与决策链变化：
+  - 改造前：`gesture/virtual-list/comment-save -> if (state.editMode) ...`
+  - 改造后：`gesture/virtual-list/comment-save -> direct action path`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - 删除：`services/java-orchestrator/src/main/resources/static/mobile-markdown.html.bak`（移除遗留 `editMode` 代码样例，避免维护误导）
+- 验证方式：
+  - 全量检索：`rg "state\\.editMode|editMode"` 在上述两文件中无命中。
+  - 目录检索：`rg "state\\.editMode|editMode" services/java-orchestrator/src/main/resources/static -g "!*.md"` 无命中。
+  - 语法校验：
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 提取 `index.html` 主内联脚本后执行 `node --check` 通过。
+
+## 2026-02-18 内容页命名收敛：`reading*` 统一迁移到 `content*`
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 在“仅保留可操作单态”后，前端仍保留大量 `reading*` 命名（视图 id、按钮 id、状态字段、函数名），会持续误导维护者认为存在独立阅读态。
+  - 命名与产品语义不一致，会让新增功能再次沿旧语义扩展，形成结构债回流。
+- 第一性原理与复用杠杆：
+  - 第一性原理：语义应由“真实状态机”驱动；状态机已单态化时，命名必须同步收敛，否则文义与行为长期偏离。
+  - 复用杠杆：
+    - 复用现有导航模块 `mobile-view-navigation.js`，在 `normalizeViewId` 中保留 `reading -> content` 兼容归一化，避免历史入口断链；
+    - 复用现有内容工具面板调用链，仅做命名替换，不改业务行为；
+    - 复用既有样式结构，仅将类名与变量名迁移为 `content*`。
+- 架构决策：
+  - 决策1：视图语义统一为 `content`（`data-view="content"`、`viewContent`）。
+  - 决策2：内容工具链路命名统一为 `content*`（如 `setContentToolsOpen`、`contentToolsPanel`、`contentNeedsReload`）。
+  - 决策3：导航模块保留 `reading` 输入兼容并归一化到 `content`，作为外部旧入口过渡策略。
+  - 决策4：样式层同步迁移 `reading-*` 类名与 `--reading-*` 变量，避免“脚本新命名 + 样式旧命名”的双语义并存。
+- 调用链与决策链变化：
+  - 改造前：`open-reading-view -> pushView('reading') -> setReadingToolsOpen(...)`
+  - 改造后：`open-content-view -> pushView('content') -> setContentToolsOpen(...)`
+  - 兼容分支：`normalizeViewId('reading') => 'content'`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
+- 验证方式：
+  - 语法校验：
+    - 提取 `index.html` 主内联脚本后执行 `node --check` 通过；
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-view-navigation.js` 通过；
+    - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js` 通过。
+  - 语义检索：
+    - `index.html` 中 `reading*` 标识无命中；
+    - `mobile-view-navigation.js` 中 `reading` 仅保留兼容归一化分支。
+
+
+## 2026-02-17 素材提取链路升级：fast-copy 增加移动端可播性门控
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 用户反馈 Markdown 阅读器中的视频片段不可播放。
+  - 调查发现片段容器虽为 MP4，但编码可能是 AV1，导致移动端兼容性不足。
+- 第一性原理与复用杠杆：
+  - 第一性原理：阅读器“可播放”比“提取速度极致”优先级更高；片段交付必须满足端侧解码能力。
+  - 复用杠杆：
+    - 复用现有 `extractClipWithWorkerGrabber` 双路径结构（fast-copy + JavaCV 重编码），不新增旁路服务；
+    - 复用既有 H.264 重编码能力作为兜底，不重造提取器；
+    - 复用现有日志链路，仅补充 codec 准入决策点。
+- 架构决策：
+  - 决策1：fast-copy 改为“兼容门控策略”，仅 H.264 源允许 `-c copy`。
+  - 决策2：非 H.264 源直接回退 JavaCV 重编码（H.264/AAC）。
+  - 决策3：fast-copy 输出统一补 `-movflags +faststart`，改善移动端首帧与 seek 体验。
+- 调用链与决策链变化：
+  - 改造前：`extractClipWithWorkerGrabber -> always try fast-copy -> fail then re-encode`
+  - 改造后：`extractClipWithWorkerGrabber -> codec gate(H264 only) -> fast-copy or direct re-encode`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/JavaCVFFmpegServiceTest.java`
+  - `services/java-orchestrator/pom.xml`
+- 验证方式：
+  - 单测：`mvn -f services/java-orchestrator/pom.xml -Dtest=JavaCVFFmpegServiceTest test`
+  - 样本定位：`ffprobe` 确认历史失败样本编码为 AV1，符合门控策略预期。
+- 取舍与影响：
+  - 对非 H.264 源会增加片段提取耗时，但换取了移动端可播性与体验稳定性。
+  - 对 H.264 源保留 fast-copy 性能收益，避免全量重编码造成不必要开销。
+
+## 2026-02-17 移动端沉浸交互升级：图片物理预览 + 自定义视频壳 + 投放发射反馈
+- 日期：2026-02-17
+- 触发背景与问题：
+  - 现有移动端交互偏“表单/控件中心”，图片预览依赖显式关闭按钮，视频播放依赖浏览器原生 `controls`，输入区仅做基础拖拽高亮。
+  - 用户目标是“内容对象化”的沉浸体验：图片应从正文位置展开并可手势回落，视频控件应按需浮现，投放区应具备明确迎接与发射反馈。
+- 第一性原理与复用杠杆：
+  - 第一性原理：用户操控的是“内容对象”而不是“控件面板”，交互应优先表达对象运动与状态反馈。
+  - 复用杠杆：
+    - 复用既有 `imageLightbox` 容器与 `bindImagePreview` 委托链路，不新建页面路由；
+    - 复用既有 Markdown 渲染增强链路 `enhanceRenderedContent(...)`，在同一后处理阶段升级视频行为；
+    - 复用既有提交入口 `mobileBindUnifiedSourceSurface`，仅扩展拖拽反馈与回调热更新能力，避免双实现分叉。
+- 架构决策：
+  - 决策1：图片 Lightbox 从“按钮关闭+透明度淡入”升级为“rect-to-rect 打开 + pinch/flick 回落关闭”，并引入位移/缩放驱动的背景衰减。
+  - 决策2：正文视频统一升级为沉浸式播放壳（自定义浮层控件、自动隐藏、点击直控），去除原生 `controls` 作为主交互。
+  - 决策3：输入区增强为反馈型投放面（drag welcome、drop ripple、launch burst），且保留原提交 API 与任务链路不变。
+  - 决策4：Bilibili 维持现状，不新增内嵌播放器链路（按当前需求明确排除）。
+- 调用链与决策链变化：
+  - 改造前：
+    - `img click -> openImageLightboxFromNode -> 显示固定层 -> 按钮/背景关闭`
+    - `video markdown/link -> 原生 <video controls>`
+    - `drop -> drag-active 样式 -> 文件绑定`
+  - 改造后：
+    - `img click -> rect-to-rect open -> touch pinch/flick -> closeImageLightbox(回落动画)`
+    - `video markdown/link -> enhanceInlineVideos -> enhanceImmersiveVideoPlayer`
+    - `drop -> drag-welcome + ripple -> 文件绑定 -> submit launch/success/error 发射反馈`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+- 验证方式：
+  - 语法校验：提取 `index.html` 全部内联脚本并逐段执行 `node --check`，通过。
+  - 行为点检：
+    - 图片：点击展开、双指缩放、甩动关闭、Esc/背景关闭；
+    - 视频：控件触摸浮现、播放/静音/进度/全屏可用；
+    - 输入区：拖拽进入欢迎态、落点涟漪、提交发射反馈。
+
+## 2026-02-18 下载认证配置升级：引入可切换 Profile（public_no_cookie / login_cookie）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - B 站下载链路在同一机器上会交替出现 `DPAPI`、代理 `502`、`geo-restricted`，根因并非单点故障，而是“Cookie + 代理”组合路径在不同视频/出口下稳定性差异较大。
+  - 现有配置为单套固定参数，切换“公开稳定模式”和“登录态模式”需要手工改多处字段，排障成本高且易错。
+- 第一性原理与复用杠杆：
+  - 第一性原理：下载成功率取决于“站点可见性 + 认证可用性 + 出口稳定性”的组合，配置应支持按场景快速切换，而不是把所有风险项长期绑定。
+  - 复用杠杆：
+    - 复用既有 `_load_download_video_options(...)` 统一配置入口，不新增下载器分支；
+    - 复用现有环境变量覆盖链路（`YTDLP_*`）作为最高优先级，保证线上热修能力；
+    - 复用 `VideoProcessor` 现有自动降级机制（Cookie/Proxy 失败回退），仅补“配置档位选择”能力。
+- 架构决策：
+  - 决策1：在 `video` 配置段新增 `download_profile` 与 `download_profiles`，将“公开稳定模式”与“登录态模式”抽象为可切换档位。
+  - 决策2：默认档位设为 `public_no_cookie`，降低 DPAPI 与代理波动对公开视频下载成功率的影响。
+  - 决策3：保持优先级不变：环境变量 > 顶层显式非空配置 > profile 档位配置。
+- 调用链与决策链变化：
+  - 改造前：`video_config(video.* 单组字段) -> _load_download_video_options -> VideoProcessor`
+  - 改造后：`video_config(download_profile + download_profiles + 顶层覆盖) -> _load_download_video_options -> VideoProcessor`
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_download_video_config.py`
+  - `config/video_config.yaml`
+- 验证方式：
+  - 语法校验：`python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_download_video_config.py`
+  - 逻辑校验：在同进程脚本中分别验证：
+    - `download_profile=public_no_cookie` 时返回空 Cookie/空代理；
+    - `download_profile=login_cookie` 时返回 `edge:Default + 127.0.0.1:7897`；
+    - 非空顶层字段可覆盖 profile 字段；
+    - 环境变量仍覆盖 profile/顶层字段。
+- 取舍与影响：
+  - 引入 profile 后，配置表达力更强，但多一层决策；为避免理解成本，默认保持“公开稳定优先”。
+  - 登录态/代理场景仍可按需启用，不影响现有 `YTDLP_*` 运维流程。
+
+## 2026-02-18 PP-Structure 后端兼容重试：oneDNN 异常自愈 + 日志摘要降噪
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 结构预处理已具备 PP-Structure -> PaddleX fallback 熔断链路，但线上仍会出现首张图 oneDNN 长栈（`fused_conv2d/OneDnnContext`）刷屏。
+  - 现状“可用但不安静”：任务不中断，但可观测性差，且没有对已知后端兼容问题做主动自愈。
+- 第一性原理与复用杠杆：
+  - 第一性原理：可靠性不应只靠“失败后降级”，还应在已知兼容场景下尝试低成本自愈，减少无效降级与噪声日志。
+  - 复用杠杆：
+    - 复用现有 `PP-Structure runtime backend error` 识别逻辑（关键词已在 `_is_structure_backend_runtime_error`）；
+    - 复用既有“熔断到 PaddleX”调用链，保证重试失败时行为与历史一致；
+    - 复用现有配置加载机制，在 `vision_ai.structure_preprocess` 下扩展开关，不新增配置入口。
+- 架构决策：
+  - 决策1：新增一次性兼容重试分支：命中 oneDNN/mkldnn 异常时，自动设置 `FLAGS_use_mkldnn=0`，重建 PP-Structure 引擎并重试当前图片一次。
+  - 决策2：重试成功则继续 PP-Structure 主路径；重试失败再进入原有熔断与 PaddleX fallback，不改变最终可用性兜底。
+  - 决策3：warning 日志改为异常摘要，完整栈下沉到 debug，降低生产日志噪声密度。
+  - 决策4：新增配置 `vision_ai.structure_preprocess.backend_compat_retry_enabled`（默认 `true`），允许按环境关闭该自愈分支。
+- 调用链与决策链变化：
+  - 改造前：
+    - `PP-Structure inference error -> disable engine -> paddlex fallback`
+  - 改造后：
+    - `PP-Structure inference error(oneDNN) -> compat retry(mkldnn=0, reinit) -> success? keep ppstructure : disable+fallback`
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+  - `config/video_config.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`
+- 验证方式：
+  - 自动化测试：`pytest -q services/python_grpc/src/content_pipeline/tests/test_ppstructure_preprocess.py`，结果 `23 passed`。
+  - 新增回归：
+    - `test_collect_structure_blocks_backend_retry_recovers_engine`
+    - `test_summarize_exception_compacts_multiline_message`
+- 取舍与影响：
+  - 优点：在常见 oneDNN 兼容问题下可减少不必要的 fallback，并显著降低首错日志体积。
+  - 风险：兼容重试会多一次引擎重建成本；若环境持续不兼容，仍会回落到既有 fallback 路径。
+  - 回滚策略：将 `backend_compat_retry_enabled` 置为 `false`，可立即恢复旧行为（仅熔断，不重试）。
+
+## 2026-02-18 DeepSeek Hedge 动态延迟估算（替代固定 25000ms）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - `deepseek_complete_json` 的 hedge 触发阈值长期固定为 `25000ms`，对短 prompt 触发过晚，无法及时对冲长尾。
+  - 阈值与请求规模（prompt/system 长度、token 规模）解耦，导致同一策略在不同负载下失真。
+- 第一性原理与复用杠杆：
+  - 第一性原理：hedge 阈值应近似“该规模请求的历史可接受时延分位”，而不是固定常数。
+  - 复用杠杆：
+    - 复用 `LLMClient` 已返回的 `prompt_tokens/completion_tokens/total_tokens/latency_ms` 作为在线样本；
+    - 复用仓库现有压测产物 `var/artifacts/benchmarks/**/requests_*.json` 作为冷启动样本；
+    - 复用现有 hedge 调度器 `_run_hedged_async_request`，仅替换 `delay_ms` 决策，不改调用签名。
+- 架构决策：
+  - 决策1：新增 DeepSeek hedge 延迟估算器，按 `total_tokens` 的历史分位时延（默认 Q=0.82）估算触发时间。
+  - 决策2：调用前按输入长度估算 `prompt_tokens` 并计算动态 `delay_ms`；调用后将真实 metadata 回写样本，实现在线自学习。
+  - 决策3：支持“历史压测样本冷启动”与“显式固定阈值回退”并存：
+    - 若显式配置 `MODULE2_DEEPSEEK_HEDGE_DELAY_MS`，默认保持固定阈值语义；
+    - 可通过 `MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED=true` 强制启用动态估算。
+- 调用链与决策链变化：
+  - 改造前：
+    - `deepseek_complete_json -> _run_hedged_async_request(delay_ms=25000)`
+  - 改造后：
+    - `deepseek_complete_json -> _resolve_deepseek_hedge_delay_ms(按长度+样本估算) -> _run_hedged_async_request(delay_ms=estimated)`
+    - `deepseek_complete_json return -> estimator.observe(metadata)`（持续更新样本）
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增 `_DeepseekHedgeDelayEstimator` 与 `_resolve_deepseek_hedge_delay_ms(...)`。
+    - `deepseek_complete_text/deepseek_complete_json` 接入动态 delay 与样本回写。
+    - 新增可配置项：
+      - `MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED`
+      - `MODULE2_DEEPSEEK_HEDGE_DELAY_QUANTILE`
+      - `MODULE2_DEEPSEEK_HEDGE_MIN_POOL_SAMPLES`
+      - `MODULE2_DEEPSEEK_HEDGE_SAMPLE_WINDOW`
+      - `MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_ENABLED`
+      - `MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_GLOB`
+      - `MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_FILES`
+      - `MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_RECORDS`
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 既有 DeepSeek hedge 用例显式固定为“非动态模式”，保证历史行为回归稳定。
+    - 新增“动态估算随输入长度增长”的回归测试。
+    - 新增“`deepseek_complete_json` 使用动态 delay”回归测试。
+- 性能对比数据（基于现有样本）：
+  - 测试方式：
+    - 离线读取 `var/artifacts/benchmarks/**/requests_*.json` 成功请求样本（`status_code=200`），共 `11110` 条。
+    - 对比基线：固定阈值 `25000ms`。
+    - 对比方案：动态估算器（Q=0.82，min_pool=24）。
+  - 测试数据与结果：
+    - 样本 `prompt_tokens` 中位数：`559`；样本 `elapsed_ms` 中位数：`5922.13ms`。
+    - 动态估算阈值中位数：`6395ms`；P95：`22081ms`。
+    - 在全部样本中，动态阈值低于固定 `25000ms` 的比例：`97.44%`。
+    - 代表分位点：
+      - Q25 prompt=`61` -> delay=`1355ms`
+      - Q50 prompt=`559` -> delay=`6395ms`
+      - Q75 prompt=`2885` -> delay=`22081ms`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`（6 passed）
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+- 回滚方案：
+  - 配置级回滚：`MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED=false`，恢复固定阈值策略。
+  - 代码级回滚：回退 `llm_gateway.py` 中动态估算器接入，不影响外部调用参数。
+
+## 2026-02-18 DeepSeek Hedge 上下文估算补充（视频时长 + Step6 文稿长度 + 批次文本量）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 用户侧日志显示 `hedge triggered after 25000ms`，反馈“固定阈值无法反映真实请求规模”。
+  - 上一版动态估算主要依赖 prompt token 近似，对“同样模板、不同视频文本密度”的场景区分不足。
+- 第一性原理与复用杠杆：
+  - 第一性原理：对冲触发时间应与“当前调用的实际语义负载”成比例，而不是只与模板长度相关。
+  - 复用杠杆：
+    - 复用 Step6 既有段落输入（无需新增采集链路）计算 `step6_text_chars`；
+    - 复用 `sentence_timestamps` 推导 `video_duration_sec`；
+    - 复用批次拆分结果计算 `batch_text_chars`；
+    - 复用 `llm_gateway` 现有估算器与 `_run_hedged_async_request`，仅扩展 delay 决策入参。
+- 架构决策：
+  - 决策1：`deepseek_complete_json/deepseek_complete_text` 新增 `hedge_context` 入参，统一透传到 `_resolve_deepseek_hedge_delay_ms`。
+  - 决策2：估算器新增 `_estimate_prompt_tokens_by_context`，按 `batch_text_chars`（优先）与 `step6_text_chars` 转换有效 token 规模。
+  - 决策3：引入文本密度修正：`step6_text_chars / video_duration_sec` 越高，估算时延适度上调；使用 `log1p` 压缩极值，避免阈值振荡。
+  - 决策4：上下文缺失时回退到原 `prompt_tokens` 路径，保持兼容性。
+- 调用链与决策链变化：
+  - 改造前：
+    - `SemanticUnitSegmenter -> llm_gateway.deepseek_complete_json(prompt, max_tokens)`
+    - `llm_gateway -> prompt_tokens 估算 -> hedge delay`
+  - 改造后：
+    - `SemanticUnitSegmenter._build_segmentation_hedge_context(...) -> {video_duration_sec, step6_text_chars}`
+    - `SemanticUnitSegmenter._build_batch_hedge_context(...) -> +batch_text_chars`
+    - `deepseek_complete_json(..., hedge_context=...) -> estimator(上下文估算) -> hedge delay`
+    - 边界合并判定调用也走同一 `hedge_context` 决策链。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - 新增：`_normalize_deepseek_hedge_context`、`_estimate_prompt_tokens_by_context`。
+    - 扩展：`estimate_delay_ms(..., hedge_context)`、`_resolve_deepseek_hedge_delay_ms(..., hedge_context)`。
+    - 接口：`deepseek_complete_json/deepseek_complete_text` 增加 `hedge_context` 参数。
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py`
+    - 新增：`_build_segmentation_hedge_context`、`_build_batch_hedge_context`。
+    - 批次分段与边界合并判定调用统一传入 `hedge_context`。
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - 新增上下文估算回归：`test_deepseek_dynamic_delay_uses_video_and_step6_context`。
+  - `services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py`
+    - 增加 `hedge_context` 透传断言，验证分段链路确实注入 `video_duration_sec/step6_text_chars/batch_text_chars`。
+- 性能对比数据（本地可复现实验）：
+  - 测试方式：
+    - 使用 `_DeepseekHedgeDelayEstimator` 注入 16 条同分布样本：`prompt_tokens=420, total_tokens=600, latency_ms=4800`。
+    - 固定 `prompt_tokens=420/max_tokens=512`，仅改变 `hedge_context`。
+  - 测试数据：
+    - 样本数：16。
+    - 上下文组合：
+      - A：无上下文（baseline）
+      - B：`video=120s, step6=12000 chars, batch=1800 chars`
+      - C：`video=1200s, step6=12000 chars, batch=1800 chars`
+      - D：`video=1200s, step6=12000 chars, batch=300 chars`
+  - 对比结果：
+    - A：`4800ms`
+    - B：`25568ms`
+    - C：`22176ms`
+    - D：`4800ms`
+  - 结论：
+    - 在相同 token 样本分布下，估算器可根据“视频时长 + Step6 文稿长度 + 当前批次文本量”拉开阈值，避免单一常量覆盖所有场景。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py -q`（10 passed）
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py services/python_grpc/src/content_pipeline/phase2a/segmentation/semantic_unit_segmenter.py services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_semantic_segmenter_batch_carryover.py`（通过）
+- 回滚方案：
+  - 配置回滚：`MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED=false` 恢复固定延迟。
+  - 链路回滚：去除 `hedge_context` 透传参数，不影响业务主流程入参兼容。
+
+## 2026-02-18 移动端任务标题映射链升级（metaTitle 显式化 + 标题替换动效）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 任务列表标题在 storage 场景下会回落到目录名，影响可读性与来源辨识。
+  - “提交后先看 BV/链接，后续切换为 domain-视频名”的过渡状态缺乏稳定显示与反馈。
+- 第一性原理与复用杠杆：
+  - 第一性原理：标题展示应分离“语义标题（用户可读）”与“存储定位符（系统内部）”，并按可用信息逐步升级。
+  - 复用杠杆：
+    - 复用 `mobile_task_meta.json.taskTitle` 现有元数据来源，不新增采集流程；
+    - 复用 `TaskView -> toListItem -> buildTaskItemHtml` 既有调用链，只扩展字段与决策函数；
+    - 复用现有任务动效状态机（`TASK_MOTION_CONFIG` + `applyTaskListMotionDiff`）实现标题替换高亮。
+- 架构决策：
+  - 决策1：后端 API 显式返回 `metaTitle`，表示“可直接展示的 domain-视频名”。
+  - 决策2：前端统一标题决策链为 `metaTitle > BV/链接(videoUrl) > title > taskId`。
+  - 决策3：新增 `title` 动效 bucket，仅在标题真实变更时触发高亮，避免首次水合误触发。
+- 调用链变化：
+  - 改造前：
+    - `TaskView.title -> /api/mobile/tasks.title -> buildTaskItemHtml(task.title)`
+  - 改造后：
+    - `TaskMetaFile.taskTitle -> TaskView.metaTitle + title -> /api/mobile/tasks.metaTitle`
+    - `buildTaskItemHtml(resolveTaskCardTitle(task))`
+    - `applyTaskListMotionDiff(previousTitle,nextTitle)` 命中后注入 `.fx-title-highlight`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
+- 性能与体验对比：
+  - 测试方式：本地任务列表轮询场景下观察标题来源切换与动效触发，记录标题解析与 diff 行为。
+  - 测试数据：
+    - 动效参数：`titleFxMs=620ms`，无新增轮询请求，无新增后端 IO。
+    - 额外计算：每轮 diff 增加一次字符串归一化比较（按任务数线性，常数开销）。
+  - 结果：
+    - 标题从“目录名”切换为“BV/链接或 domain-视频名”，可读性显著提升；
+    - 标题更新存在明确高亮反馈，且 `prefers-reduced-motion` 下自动降级。
+- 验证方式：
+  - 编译验证：`mvn -pl services/java-orchestrator -DskipTests compile`
+  - 交互验证：提交任务 -> 观察初始标题 -> 元数据标题写入后观察替换与高亮。
+- 回滚方案：
+  - API 保持向后兼容，可仅回退前端 `resolveTaskCardTitle` 与标题动效，不影响后端 `metaTitle` 输出。

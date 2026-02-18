@@ -10,12 +10,16 @@
 from __future__ import annotations
 
 import asyncio
+import glob
 import hashlib
+import json
 import logging
+import math
 import os
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
+from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Tuple, TypeVar
 import threading
 
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
@@ -93,13 +97,376 @@ _LLM_HEDGE_ENABLED = _env_bool("MODULE2_LLM_HEDGE_ENABLED", True)
 _LLM_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_LLM_HEDGE_DELAY_MS", 25000))
 
 _DEEPSEEK_HEDGE_ENABLED = _env_bool("MODULE2_DEEPSEEK_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
+_DEEPSEEK_HEDGE_DELAY_MS_RAW = os.getenv("MODULE2_DEEPSEEK_HEDGE_DELAY_MS")
 _DEEPSEEK_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_DEEPSEEK_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
+_DEEPSEEK_DYNAMIC_HEDGE_DELAY_ENABLED = _env_bool(
+    "MODULE2_DEEPSEEK_HEDGE_DYNAMIC_DELAY_ENABLED",
+    _DEEPSEEK_HEDGE_DELAY_MS_RAW is None,
+)
+_DEEPSEEK_HEDGE_DELAY_QUANTILE = min(
+    0.98,
+    max(0.50, _env_float("MODULE2_DEEPSEEK_HEDGE_DELAY_QUANTILE", 0.82)),
+)
+_DEEPSEEK_HEDGE_MIN_POOL_SAMPLES = max(
+    8,
+    _env_int("MODULE2_DEEPSEEK_HEDGE_MIN_POOL_SAMPLES", 24),
+)
+_DEEPSEEK_HEDGE_SAMPLE_WINDOW = max(
+    64,
+    _env_int("MODULE2_DEEPSEEK_HEDGE_SAMPLE_WINDOW", 2048),
+)
+_DEEPSEEK_HEDGE_BOOTSTRAP_ENABLED = _env_bool("MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_ENABLED", True)
+_DEEPSEEK_HEDGE_BOOTSTRAP_GLOB = str(
+    os.getenv("MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_GLOB", "var/artifacts/benchmarks/**/requests_*.json")
+    or "var/artifacts/benchmarks/**/requests_*.json"
+)
+_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_FILES = max(
+    0,
+    _env_int("MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_FILES", 120),
+)
+_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_RECORDS = max(
+    0,
+    _env_int("MODULE2_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_RECORDS", 4000),
+)
+_DEEPSEEK_HEDGE_CTX_CHARS_PER_TOKEN = max(
+    0.2,
+    _env_float("MODULE2_DEEPSEEK_HEDGE_CTX_CHARS_PER_TOKEN", 1.0),
+)
 
 _VISION_HEDGE_ENABLED = _env_bool("MODULE2_VISION_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
 _VISION_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VISION_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
 
 _VL_HEDGE_ENABLED = _env_bool("MODULE2_VL_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
 _VL_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VL_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
+
+
+@dataclass(frozen=True)
+class _LatencySample:
+    prompt_tokens: int
+    total_tokens: int
+    latency_ms: float
+
+
+def _estimate_prompt_tokens(prompt: str, system_message: Optional[str]) -> int:
+    chars = len(prompt or "") + len(system_message or "")
+    return max(1, int(chars / 4))
+
+
+def _to_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _normalize_deepseek_hedge_context(hedge_context: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(hedge_context, dict):
+        return {}
+    video_duration_sec = max(0.0, _to_float(hedge_context.get("video_duration_sec", 0.0), 0.0))
+    step6_text_chars = max(0, _to_int(hedge_context.get("step6_text_chars", 0), 0))
+    batch_text_chars = max(0, _to_int(hedge_context.get("batch_text_chars", 0), 0))
+    return {
+        "video_duration_sec": video_duration_sec,
+        "step6_text_chars": step6_text_chars,
+        "batch_text_chars": batch_text_chars,
+    }
+
+
+def _quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return float(values[0])
+    q = min(1.0, max(0.0, float(q)))
+    ordered = sorted(float(v) for v in values)
+    idx = (len(ordered) - 1) * q
+    lo = int(idx)
+    hi = min(lo + 1, len(ordered) - 1)
+    if lo == hi:
+        return float(ordered[lo])
+    frac = idx - lo
+    return float(ordered[lo] + (ordered[hi] - ordered[lo]) * frac)
+
+
+class _DeepseekHedgeDelayEstimator:
+    def __init__(
+        self,
+        *,
+        quantile: float,
+        min_pool_samples: int,
+        sample_window: int,
+        bootstrap_enabled: bool,
+        bootstrap_glob: str,
+        bootstrap_max_files: int,
+        bootstrap_max_records: int,
+    ) -> None:
+        self._quantile = min(0.98, max(0.50, float(quantile)))
+        self._min_pool_samples = max(8, int(min_pool_samples))
+        self._samples: Deque[_LatencySample] = deque(maxlen=max(64, int(sample_window)))
+        self._bootstrap_enabled = bool(bootstrap_enabled)
+        self._bootstrap_glob = str(bootstrap_glob or "")
+        self._bootstrap_max_files = max(0, int(bootstrap_max_files))
+        self._bootstrap_max_records = max(0, int(bootstrap_max_records))
+        self._bootstrapped = False
+        self._lock = threading.Lock()
+
+    def _append_sample_locked(self, prompt_tokens: int, total_tokens: int, latency_ms: float) -> None:
+        prompt_tokens = max(1, int(prompt_tokens))
+        total_tokens = max(prompt_tokens, int(total_tokens))
+        latency_ms = float(latency_ms)
+        if latency_ms <= 0:
+            return
+        self._samples.append(
+            _LatencySample(
+                prompt_tokens=prompt_tokens,
+                total_tokens=total_tokens,
+                latency_ms=latency_ms,
+            )
+        )
+
+    def _maybe_bootstrap_locked(self) -> None:
+        if self._bootstrapped:
+            return
+        self._bootstrapped = True
+        if not self._bootstrap_enabled or not self._bootstrap_glob:
+            return
+        try:
+            paths = glob.glob(self._bootstrap_glob, recursive=True)
+        except Exception as exc:
+            logger.debug("deepseek hedge bootstrap glob failed: %s", exc)
+            return
+        if not paths:
+            return
+        try:
+            paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        except Exception:
+            paths.sort(reverse=True)
+
+        imported = 0
+        file_count = 0
+        for path in paths:
+            if self._bootstrap_max_files > 0 and file_count >= self._bootstrap_max_files:
+                break
+            if self._bootstrap_max_records > 0 and imported >= self._bootstrap_max_records:
+                break
+            file_count += 1
+            try:
+                with open(path, "r", encoding="utf-8") as file_obj:
+                    payload = json.load(file_obj)
+            except Exception:
+                continue
+            rows = payload if isinstance(payload, list) else [payload]
+            for row in rows:
+                if self._bootstrap_max_records > 0 and imported >= self._bootstrap_max_records:
+                    break
+                if not isinstance(row, dict):
+                    continue
+                status_code = int(row.get("status_code", 0) or 0)
+                if status_code and status_code != 200:
+                    continue
+                prompt_tokens = int(row.get("prompt_tokens", 0) or 0)
+                total_tokens = int(row.get("total_tokens", 0) or 0)
+                completion_tokens = int(row.get("completion_tokens", 0) or 0)
+                elapsed_ms = float(row.get("elapsed_ms", 0.0) or 0.0)
+                if prompt_tokens <= 0 or elapsed_ms <= 0:
+                    continue
+                if total_tokens <= 0:
+                    total_tokens = prompt_tokens + max(0, completion_tokens)
+                self._append_sample_locked(
+                    prompt_tokens=prompt_tokens,
+                    total_tokens=total_tokens,
+                    latency_ms=elapsed_ms,
+                )
+                imported += 1
+        if imported > 0:
+            logger.info("[deepseek_hedge_estimator] bootstrapped %s samples", imported)
+
+    def _estimate_total_tokens(
+        self,
+        prompt_tokens: int,
+        max_tokens: Optional[int],
+        pool: list[_LatencySample],
+    ) -> int:
+        ratios = [
+            max(0.0, (float(s.total_tokens) - float(s.prompt_tokens)) / float(max(s.prompt_tokens, 1)))
+            for s in pool
+            if s.prompt_tokens > 0 and s.total_tokens >= s.prompt_tokens
+        ]
+        completion_ratio = _quantile(ratios, 0.50) if ratios else 0.0
+        completion_est = max(1, int(round(float(prompt_tokens) * completion_ratio)))
+        if isinstance(max_tokens, int) and max_tokens > 0:
+            completion_est = min(int(max_tokens), completion_est)
+        return max(prompt_tokens + completion_est, prompt_tokens + 1)
+
+    def _predict_latency_ms(self, total_tokens: int, pool: list[_LatencySample]) -> float:
+        if not pool:
+            return 0.0
+        ms_per_token = _quantile(
+            [float(max(1.0, s.latency_ms)) / float(max(1, s.total_tokens)) for s in pool if s.total_tokens > 0],
+            self._quantile,
+        )
+        return float(total_tokens) * max(ms_per_token, 1e-6)
+
+    def _estimate_prompt_tokens_by_context(
+        self,
+        *,
+        prompt_tokens: int,
+        hedge_context: Dict[str, Any],
+    ) -> int:
+        if not hedge_context:
+            return max(1, int(prompt_tokens))
+
+        # 目标：优先使用业务侧可观测输入规模（step6 文稿长度、当前批次文本长度）估算请求规模。
+        # 原因：prompt 模板会引入固定噪声，直接用业务语义长度更稳定。
+        # 权衡：当上下文缺失时回退 prompt_tokens，保持兼容。
+        step6_text_chars = max(0, _to_int(hedge_context.get("step6_text_chars", 0), 0))
+        batch_text_chars = max(0, _to_int(hedge_context.get("batch_text_chars", 0), 0))
+        video_duration_sec = max(0.0, _to_float(hedge_context.get("video_duration_sec", 0.0), 0.0))
+        chars_per_token = max(0.2, float(_DEEPSEEK_HEDGE_CTX_CHARS_PER_TOKEN))
+
+        context_chars = batch_text_chars or step6_text_chars
+        if context_chars <= 0:
+            return max(1, int(prompt_tokens))
+
+        context_tokens = float(context_chars) / chars_per_token
+        if step6_text_chars > 0 and video_duration_sec > 0:
+            # 做什么：引入“文本密度”修正，密度越高（同样视频时长文本越多）越容易触发长尾。
+            # 为什么：用户明确要求视频时长 + Step6 文稿长度共同参与估算。
+            # 权衡：使用对数缩放，避免极端值放大导致阈值振荡。
+            transcript_density = float(step6_text_chars) / max(1.0, video_duration_sec)
+            density_gain = 1.0 + (
+                math.log1p(max(0.0, transcript_density))
+                / max(1e-6, math.log1p(float(max(1, step6_text_chars))))
+            )
+            context_tokens *= max(1.0, density_gain)
+
+        return max(int(round(context_tokens)), int(prompt_tokens), 1)
+
+    def estimate_delay_ms(
+        self,
+        *,
+        prompt_tokens: int,
+        max_tokens: Optional[int],
+        hedge_context: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[int, str]:
+        prompt_tokens = max(1, int(prompt_tokens))
+        normalized_context = _normalize_deepseek_hedge_context(hedge_context)
+        effective_prompt_tokens = self._estimate_prompt_tokens_by_context(
+            prompt_tokens=prompt_tokens,
+            hedge_context=normalized_context,
+        )
+        with self._lock:
+            self._maybe_bootstrap_locked()
+            samples = list(self._samples)
+        if not samples:
+            return 0, "fallback_no_samples"
+
+        lower = max(1, int(effective_prompt_tokens * 0.5))
+        upper = max(lower, int(effective_prompt_tokens * 1.8))
+        local_pool = [s for s in samples if lower <= s.prompt_tokens <= upper]
+        if len(local_pool) >= self._min_pool_samples:
+            pool = local_pool
+            source = "local_tokens"
+        else:
+            pool = samples
+            source = "global_tokens"
+
+        est_total_tokens = self._estimate_total_tokens(
+            prompt_tokens=effective_prompt_tokens,
+            max_tokens=max_tokens,
+            pool=pool,
+        )
+        est_latency_ms = self._predict_latency_ms(total_tokens=est_total_tokens, pool=pool)
+        return max(1, int(round(est_latency_ms))), source
+
+    def observe(
+        self,
+        *,
+        prompt: str,
+        system_message: Optional[str],
+        metadata: Any,
+    ) -> None:
+        if metadata is None:
+            return
+        if isinstance(metadata, dict):
+            prompt_tokens = int(metadata.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(metadata.get("completion_tokens", 0) or 0)
+            total_tokens = int(metadata.get("total_tokens", 0) or 0)
+            latency_ms = float(metadata.get("latency_ms", 0.0) or 0.0)
+            cache_hit = bool(metadata.get("cache_hit", False))
+        else:
+            prompt_tokens = int(getattr(metadata, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(metadata, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(metadata, "total_tokens", 0) or 0)
+            latency_ms = float(getattr(metadata, "latency_ms", 0.0) or 0.0)
+            cache_hit = bool(getattr(metadata, "cache_hit", False))
+
+        if cache_hit or latency_ms <= 0:
+            return
+        if prompt_tokens <= 0:
+            prompt_tokens = _estimate_prompt_tokens(prompt, system_message)
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + max(0, completion_tokens)
+        if total_tokens <= 0:
+            total_tokens = prompt_tokens + 1
+
+        with self._lock:
+            self._append_sample_locked(
+                prompt_tokens=prompt_tokens,
+                total_tokens=total_tokens,
+                latency_ms=latency_ms,
+            )
+
+
+_DEEPSEEK_HEDGE_ESTIMATOR = _DeepseekHedgeDelayEstimator(
+    quantile=_DEEPSEEK_HEDGE_DELAY_QUANTILE,
+    min_pool_samples=_DEEPSEEK_HEDGE_MIN_POOL_SAMPLES,
+    sample_window=_DEEPSEEK_HEDGE_SAMPLE_WINDOW,
+    bootstrap_enabled=_DEEPSEEK_HEDGE_BOOTSTRAP_ENABLED,
+    bootstrap_glob=_DEEPSEEK_HEDGE_BOOTSTRAP_GLOB,
+    bootstrap_max_files=_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_FILES,
+    bootstrap_max_records=_DEEPSEEK_HEDGE_BOOTSTRAP_MAX_RECORDS,
+)
+
+
+def _resolve_deepseek_hedge_delay_ms(
+    *,
+    request_name: str,
+    prompt: str,
+    system_message: Optional[str],
+    max_tokens: Optional[int],
+    hedge_context: Optional[Dict[str, Any]] = None,
+) -> int:
+    if not _DEEPSEEK_DYNAMIC_HEDGE_DELAY_ENABLED:
+        return _DEEPSEEK_HEDGE_DELAY_MS
+
+    prompt_tokens = _estimate_prompt_tokens(prompt, system_message)
+    normalized_context = _normalize_deepseek_hedge_context(hedge_context)
+    estimated_ms, source = _DEEPSEEK_HEDGE_ESTIMATOR.estimate_delay_ms(
+        prompt_tokens=prompt_tokens,
+        max_tokens=max_tokens,
+        hedge_context=normalized_context,
+    )
+    if estimated_ms <= 0:
+        return _DEEPSEEK_HEDGE_DELAY_MS
+    logger.debug(
+        "[%s] hedge delay estimated=%sms prompt_tokens=%s source=%s video_duration=%.2fs step6_chars=%s batch_chars=%s",
+        request_name,
+        estimated_ms,
+        prompt_tokens,
+        source,
+        float(normalized_context.get("video_duration_sec", 0.0) or 0.0),
+        int(normalized_context.get("step6_text_chars", 0) or 0),
+        int(normalized_context.get("batch_text_chars", 0) or 0),
+    )
+    return estimated_ms
 
 
 async def _run_hedged_async_request(
@@ -295,6 +662,7 @@ async def deepseek_complete_text(
     prompt: str,
     system_message: Optional[str] = None,
     need_logprobs: bool = False,
+    hedge_context: Optional[Dict[str, Any]] = None,
     client: Optional[LLMClient] = None,
     api_key: Optional[str] = None,
     base_url: str = "https://api.deepseek.com/v1",
@@ -323,11 +691,18 @@ async def deepseek_complete_text(
     metadata = None
     logprobs = None
     error_text = ""
+    delay_ms = _resolve_deepseek_hedge_delay_ms(
+        request_name="deepseek_complete_text",
+        prompt=prompt,
+        system_message=system_message,
+        max_tokens=None,
+        hedge_context=hedge_context,
+    )
     try:
         output_text, metadata, logprobs = await _run_hedged_async_request(
             request_name="deepseek_complete_text",
             enabled=_DEEPSEEK_HEDGE_ENABLED,
-            delay_ms=_DEEPSEEK_HEDGE_DELAY_MS,
+            delay_ms=delay_ms,
             primary_factory=lambda: _call_deepseek_text_once(
                 client=client,
                 prompt=prompt,
@@ -348,6 +723,14 @@ async def deepseek_complete_text(
         error_text = str(exc)
         raise
     finally:
+        try:
+            _DEEPSEEK_HEDGE_ESTIMATOR.observe(
+                prompt=prompt,
+                system_message=system_message,
+                metadata=metadata,
+            )
+        except Exception as hedge_observe_exc:
+            logger.debug("DeepSeek hedge estimator observe failed: %s", hedge_observe_exc)
         try:
             append_deepseek_call_record(
                 prompt=prompt,
@@ -372,6 +755,7 @@ async def deepseek_complete_json(
     system_message: Optional[str] = None,
     need_logprobs: bool = False,
     max_tokens: Optional[int] = None,
+    hedge_context: Optional[Dict[str, Any]] = None,
     client: Optional[LLMClient] = None,
     api_key: Optional[str] = None,
     base_url: str = "https://api.deepseek.com/v1",
@@ -396,27 +780,46 @@ async def deepseek_complete_json(
             cache_enabled=cache_enabled,
             inflight_dedup_enabled=inflight_dedup_enabled,
         )
-    return await _run_hedged_async_request(
+    metadata = None
+    delay_ms = _resolve_deepseek_hedge_delay_ms(
         request_name="deepseek_complete_json",
-        enabled=_DEEPSEEK_HEDGE_ENABLED,
-        delay_ms=_DEEPSEEK_HEDGE_DELAY_MS,
-        primary_factory=lambda: _call_deepseek_json_once(
-            client=client,
-            prompt=prompt,
-            system_message=system_message,
-            need_logprobs=need_logprobs,
-            max_tokens=max_tokens,
-            disable_inflight_dedup=False,
-        ),
-        secondary_factory=lambda: _call_deepseek_json_once(
-            client=client,
-            prompt=prompt,
-            system_message=system_message,
-            need_logprobs=need_logprobs,
-            max_tokens=max_tokens,
-            disable_inflight_dedup=True,
-        ),
+        prompt=prompt,
+        system_message=system_message,
+        max_tokens=max_tokens,
+        hedge_context=hedge_context,
     )
+    try:
+        result_json, metadata, logprobs = await _run_hedged_async_request(
+            request_name="deepseek_complete_json",
+            enabled=_DEEPSEEK_HEDGE_ENABLED,
+            delay_ms=delay_ms,
+            primary_factory=lambda: _call_deepseek_json_once(
+                client=client,
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                max_tokens=max_tokens,
+                disable_inflight_dedup=False,
+            ),
+            secondary_factory=lambda: _call_deepseek_json_once(
+                client=client,
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                max_tokens=max_tokens,
+                disable_inflight_dedup=True,
+            ),
+        )
+        return result_json, metadata, logprobs
+    finally:
+        try:
+            _DEEPSEEK_HEDGE_ESTIMATOR.observe(
+                prompt=prompt,
+                system_message=system_message,
+                metadata=metadata,
+            )
+        except Exception as hedge_observe_exc:
+            logger.debug("DeepSeek hedge estimator observe failed: %s", hedge_observe_exc)
 
 
 # =============================================================================

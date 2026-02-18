@@ -108,6 +108,107 @@ def test_validate_images_batch_person_subject_prefilter_keeps_order(monkeypatch)
         shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+def test_validate_image_person_subject_prefilter_deletes_file(monkeypatch):
+    tmp_root = Path("var") / f"tmp_test_vision_prefilter_delete_{uuid.uuid4().hex}"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    try:
+        image_path = tmp_root / "person.jpg"
+        image_path.write_bytes(b"p")
+
+        config = VisionAIConfig(
+            enabled=True,
+            bearer_token="token",
+            duplicate_detection_enabled=False,
+            person_subject_filter_enabled=True,
+            person_mask_area_threshold=0.3,
+        )
+        client = VisionAIClient(config)
+
+        def _fake_prefilter(path: str):
+            assert path == str(image_path)
+            return {
+                "has_concrete_knowledge": False,
+                "should_include": False,
+                "reason": "person_subject_prefilter",
+                "person_mask_ratio": 0.91,
+            }
+
+        async def _fake_call_vision_api(*args, **kwargs):
+            raise AssertionError("Vision API should not be called when prefilter matched")
+
+        monkeypatch.setattr(client, "_run_person_subject_prefilter", _fake_prefilter)
+        monkeypatch.setattr(client, "_call_vision_api", _fake_call_vision_api)
+
+        result = asyncio.run(client.validate_image(str(image_path)))
+
+        assert result["should_include"] is False
+        assert result["reason"] == "person_subject_prefilter"
+        assert not image_path.exists()
+        stats = client.get_stats()
+        assert stats.get("person_subject_skips", 0) == 1
+        assert stats.get("person_subject_deleted_files", 0) == 1
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def test_validate_images_batch_person_subject_prefilter_deletes_file(monkeypatch):
+    tmp_root = Path("var") / f"tmp_test_vision_prefilter_batch_delete_{uuid.uuid4().hex}"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    try:
+        image_person = tmp_root / "person.jpg"
+        image_non_person = tmp_root / "slide.jpg"
+        image_person.write_bytes(b"p")
+        image_non_person.write_bytes(b"s")
+
+        config = VisionAIConfig(
+            enabled=True,
+            bearer_token="token",
+            duplicate_detection_enabled=False,
+            batch_enabled=True,
+            batch_max_size=4,
+            person_subject_filter_enabled=True,
+            person_mask_area_threshold=0.3,
+        )
+        client = VisionAIClient(config)
+
+        def _fake_prefilter(path: str):
+            if path == str(image_person):
+                return {
+                    "has_concrete_knowledge": False,
+                    "should_include": False,
+                    "reason": "person_subject_prefilter",
+                    "person_mask_ratio": 0.88,
+                }
+            return None
+
+        async def _fake_call_vision_api_batch(image_paths, prompt="", system_prompt=None):
+            return [
+                {
+                    "has_concrete_knowledge": True,
+                    "should_include": True,
+                    "reason": "vision_ok",
+                }
+                for _ in image_paths
+            ]
+
+        monkeypatch.setattr(client, "_run_person_subject_prefilter", _fake_prefilter)
+        monkeypatch.setattr(client, "_call_vision_api_batch", _fake_call_vision_api_batch)
+
+        results = asyncio.run(
+            client.validate_images_batch([str(image_person), str(image_non_person)], prompt="")
+        )
+
+        assert results[0]["should_include"] is False
+        assert results[1]["should_include"] is True
+        assert not image_person.exists()
+        assert image_non_person.exists()
+        stats = client.get_stats()
+        assert stats.get("person_subject_skips", 0) == 1
+        assert stats.get("person_subject_deleted_files", 0) == 1
+    finally:
+        shutil.rmtree(tmp_root, ignore_errors=True)
+
+
 def test_person_subject_prefilter_threshold_is_strict_greater(monkeypatch):
     config = VisionAIConfig(
         person_subject_filter_enabled=True,

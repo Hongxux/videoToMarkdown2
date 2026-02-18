@@ -1247,8 +1247,13 @@ class RichTextPipeline:
             logger.error(f"[Phase2B] Markdown enhancement failed, fallback to base markdown: {error}")
             document.to_markdown(markdown_path, assets_relative_dir=self.config.assets_subdir)
 
+        groups = list(getattr(document, "knowledge_groups", []) or [])
+        if hasattr(document, "total_sections"):
+            total_sections = int(document.total_sections())
+        else:
+            total_sections = len(getattr(document, "sections", []) or [])
         logger.info(
-            f"[Phase2B] assemble_only done: sections={len(document.sections)}, markdown={markdown_path}, json={json_path}"
+            f"[Phase2B] assemble_only done: groups={len(groups)}, sections={total_sections}, markdown={markdown_path}, json={json_path}"
         )
         return markdown_path, json_path
 

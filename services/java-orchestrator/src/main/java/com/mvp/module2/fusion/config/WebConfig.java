@@ -3,11 +3,13 @@ package com.mvp.module2.fusion.config;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.task.AsyncTaskExecutor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.ResourceRegionHttpMessageConverter;
 import org.springframework.web.servlet.config.annotation.AsyncSupportConfigurer;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
+import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.util.List;
@@ -41,6 +43,13 @@ public class WebConfig implements WebMvcConfigurer {
         String frontendPath = System.getProperty("user.dir").replace("java_orchestrator", "frontend/");
         registry.addResourceHandler("/frontend/**")
                 .addResourceLocations("file:" + frontendPath);
+    }
+
+    @Override
+    public void addViewControllers(ViewControllerRegistry registry) {
+        registry.addRedirectViewController("/mobile-markdown.html", "/index.html")
+                .setStatusCode(HttpStatus.PERMANENT_REDIRECT)
+                .setKeepQueryParams(true);
     }
 
     @Override

@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.controller;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
+import com.mvp.module2.fusion.common.VideoInputNormalizer;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
@@ -57,7 +58,6 @@ import java.util.Set;
 import java.util.HashSet;
 import java.util.UUID;
 import java.util.stream.Stream;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -79,8 +79,6 @@ public class MobileMarkdownController {
     private static final int MARKDOWN_SCAN_DEPTH = 4;
     private static final String META_FILE_NAME = "mobile_task_meta.json";
     private static final String META_DEFAULT_NOTE_KEY = "__default__";
-    private static final Pattern BV_PATTERN = Pattern.compile("(?i)BV[0-9A-Za-z]{10}");
-    private static final Pattern WINDOWS_ABSOLUTE_PATH = Pattern.compile("^[A-Za-z]:[\\\\/].*");
     private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
     private static final Set<String> ALLOWED_VIDEO_EXTENSIONS = Set.of(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v");
     private static final long MAX_UPLOAD_FILE_BYTES = 2L * 1024L * 1024L * 1024L;
@@ -160,6 +158,7 @@ public class MobileMarkdownController {
 
         String normalizedUserId = normalizeUserId(request.userId);
         TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request.priority);
+        logger.info("Mobile task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
         TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
                 normalizedUserId,
                 normalizedVideoInput,
@@ -603,6 +602,7 @@ public class MobileMarkdownController {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("taskId", task.taskId);
         item.put("title", task.title != null ? task.title : task.taskId);
+        item.put("metaTitle", task.metaTitle != null ? task.metaTitle : "");
         item.put("videoUrl", task.videoUrl != null ? task.videoUrl : "");
         item.put("status", task.status != null ? task.status : "");
         item.put("createdAt", instantToText(task.createdAt));
@@ -1195,7 +1195,9 @@ public class MobileMarkdownController {
         }
         TaskMetaFile meta = readTaskMeta(root);
         if (meta.taskTitle != null && !meta.taskTitle.isBlank()) {
-            view.title = meta.taskTitle;
+            String normalizedTitle = meta.taskTitle.trim();
+            view.title = normalizedTitle;
+            view.metaTitle = normalizedTitle;
         }
     }
 
@@ -1233,39 +1235,7 @@ public class MobileMarkdownController {
 
 
     private String normalizeVideoInput(String rawVideoInput) {
-        if (rawVideoInput == null) {
-            return "";
-        }
-        String trimmed = rawVideoInput.trim();
-        if (trimmed.isEmpty()) {
-            return "";
-        }
-        if (looksLikeLocalPath(trimmed)) {
-            return trimmed;
-        }
-
-        Matcher matcher = BV_PATTERN.matcher(trimmed);
-        if (trimmed.regionMatches(true, 0, "http://", 0, 7)
-                || trimmed.regionMatches(true, 0, "https://", 0, 8)) {
-            if (trimmed.toLowerCase(Locale.ROOT).contains("bilibili.com") && matcher.find()) {
-                return "https://www.bilibili.com/video/" + matcher.group().toUpperCase(Locale.ROOT);
-            }
-            return trimmed;
-        }
-
-        if (matcher.matches()) {
-            return "https://www.bilibili.com/video/" + matcher.group().toUpperCase(Locale.ROOT);
-        }
-        if (matcher.find()) {
-            return "https://www.bilibili.com/video/" + matcher.group().toUpperCase(Locale.ROOT);
-        }
-        return trimmed;
-    }
-
-    private boolean looksLikeLocalPath(String value) {
-        if (value.startsWith("file://")) return true;
-        if (value.startsWith(".") || value.startsWith("/") || value.startsWith("\\")) return true;
-        return WINDOWS_ABSOLUTE_PATH.matcher(value).matches();
+        return VideoInputNormalizer.normalizeVideoInput(rawVideoInput);
     }
 
     private TaskQueueManager.Priority resolvePriority(String normalizedUserId, String rawPriority) {
@@ -1451,6 +1421,7 @@ public class MobileMarkdownController {
     private static class TaskView {
         private String taskId;
         private String title;
+        private String metaTitle;
         private String videoUrl;
         private String status;
         private Instant createdAt;
