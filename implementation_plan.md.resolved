@@ -1,0 +1,172 @@
+# Obsidian 式概念卡片 — 实现方案 (Philosophical Edition)
+
+## 核心理念
+> **The Card as a Physical Object** & **The AI as a Whisper**
+> 还原纸笔交互的触感，保持数据的纯粹性，让 AI 成为顾问而非代笔者。
+
+## 需求确认 (Revised)
+
+| 决策项 | 结论 |
+|--------|------|
+| 存储 | **真·Obsidian 风格**：后端直接读写 `var/storage/cards/*.md` 文件 |
+| 粒度 | 一张卡片 = 一个 MD 文件（文件名即标题） |
+| 交互 | **撕纸动效**：长按词语 → 段落上下裂开 → 卡片嵌入缝隙 |
+| 保存 | **无保存按钮**：合上裂缝（下滑/点击外部）即保存 |
+| 列表 | **无列表视图**：信任搜索与上下文高亮，不做"整理癖"功能 |
+| AI | **顾问模式**：AI 解释以灰色渐隐文字显示，点击确认后变为实色笔记 |
+| 链接 | **双向链接**：自动在卡片底部维护 `## 🔗 反向链接` 章节 |
+| 分类 | 自动判定：通用概念（跨文高亮） vs 当下思考（仅附着当前文） |
+
+---
+
+## 架构概览
+
+```mermaid
+graph TB
+    subgraph "前端 (The Tactile Layer)"
+        A["长按词语"] --> B["段落撕裂动画"]
+        B --> C["卡片嵌入层"]
+        C --> D["AI 顾问 (灰色文字)"]
+        D --> |"点击确认"| E["实色笔记 (Markdown)"]
+        C --> |"下滑/点击外部"| F["合上裂缝 & 自动保存"]
+        G["术语自动高亮"] --> |"点击"| B
+    end
+
+    subgraph "后端 (The Data Layer)"
+        H["GET /api/mobile/cards/{title}"]
+        I["POST /api/mobile/cards/{title}"]
+        J["POST /api/mobile/cards/ai-advice"]
+        K["GET /api/mobile/cards/titles"]
+    end
+
+    subgraph "文件系统 (The Obsidian Vault)"
+        L["var/storage/cards/第一性原理.md"]
+        M["var/storage/cards/量子纠缠.md"]
+    end
+
+    subgraph "DeepSeek"
+        N["deepseek-chat API"]
+    end
+
+    A --> H
+    H --> L
+    I --> L
+    J --> N
+    G --> K
+```
+
+---
+
+## 提议的代码变更
+
+### 组件 1：后端 — 文件系统层 & API
+
+---
+
+#### [NEW] [CardStorageService.java](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java)
+
+负责直接读写 [.md](file:///d:/videoToMarkdownTest2/AGENTS.md) 文件：
+- **Root Dir**: `var/storage/cards/`
+- **Read**: 读取指定标题的 [.md](file:///d:/videoToMarkdownTest2/AGENTS.md) 文件内容。
+- **Write**: 
+  - 写入内容到 [.md](file:///d:/videoToMarkdownTest2/AGENTS.md) 文件。
+  - 自动维护文件底部的 `## 🔗 反向链接` 区域。
+  - 如果是"当下思考"（Context-dependent），则卡片内容可能包含对原文的引用；如果是"通用概念"，则保持独立。
+- **Index**: 启动时扫描文件名建立 `Trie` 树或 `HashMap`，用于快速匹配高亮词。
+
+---
+
+#### [NEW] [DeepSeekAdvisorService.java](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java)
+
+AI 顾问服务：
+- 调用 DeepSeek chat API。
+- Prompt 核心变化：要求 AI 扮演"顾问"，给出简短、启发式的解释，而不是教科书式的定义。
+- 区分"通用概念"和"当下思考"的 Prompt 策略：
+  - 通用：解释定义、历史、原理。
+  - 当下：分析该词在当前上下文中的隐喻、作用。
+
+---
+
+#### [MODIFY] [MobileMarkdownController.java](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java)
+
+API 变得非常 RESTful 和文件导向：
+
+| 方法 | 路径 | 功能 |
+|------|------|------|
+| `GET` | `/api/mobile/cards/{title}` | 获取卡片内容（如果不存在则返回 404） |
+| `POST` | `/api/mobile/cards/{title}` | 保存/更新卡片内容 |
+| `GET` | `/api/mobile/cards/titles` | 获取所有卡片标题（供前端高亮） |
+| `POST` | `/api/mobile/cards/ai-advice` | 获取 AI 顾问建议 |
+
+---
+
+### 组件 2：前端 — 撕纸交互 & AI 顾问
+
+---
+
+#### [NEW] [mobile-concept-cards.js](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js)
+
+**核心交互逻辑**：
+1. **撕纸动画 (The Tear)**：
+   - 计算被点击段落的高度和位置。
+   - 在该段落用于显示的 DOM 节点下方插入一个 `.card-fissure` 容器。
+   - 动画展开高度，模拟"撑开"的效果。
+2. **卡片嵌入 (The Insert)**：
+   - 在 `.card-fissure` 中加载卡片编辑器。
+   - 如果是新卡片，先显示 AI 顾问的灰色文字（流式输出）。
+   - 用户点击灰色文字 -> 变为实色（采纳）。
+   - 用户双击 -> 变为引用块（Quote）。
+3. **自动收起 (The Snap)**：
+   - 监听 [scroll](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/resources/static/index.html#7078-7126) 或点击外部区域。
+   - 触发"合上"动画。
+   - 在合上瞬间发送保存请求。
+4. **术语高亮 (The Link)**：
+   - 加载时获取所有卡片标题。
+   - 遍历文本节点进行匹配，包裹 `<span class="concept-term">`。
+   - 仅高亮"通用概念"类型的卡片。
+
+---
+
+#### [NEW] [mobile-concept-cards.css](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css)
+
+**样式重点**：
+- `.card-fissure`: 阴影处理，制造"层级感"，仿佛下面的纸张露出来了。
+- `.ai-whisper`: 灰色、斜体、serif 字体，营造"顾问"感。
+- `.concept-highlight`: 极其克制的淡蓝色下划线，不打扰阅读。
+
+---
+
+#### [MODIFY] [index.html](file:///d:/videoToMarkdownTest2/services/java-orchestrator/src/main/resources/static/index.html)
+
+- 引入新的 JS/CSS。
+- **不增加** 底部 Tab（保持界面极简）。
+
+---
+
+## 验证计划
+
+### API 测试
+
+```bash
+# 1. 获取 AI 顾问建议
+curl -X POST http://localhost:8080/api/mobile/cards/ai-advice \
+  -H "Content-Type: application/json" \
+  -d '{"term":"熵增","context":"在混乱的房间里...","isContextDependent":false}'
+
+# 2. 保存卡片 (注意是存为 .md 内容)
+curl -X POST http://localhost:8080/api/mobile/cards/熵增 \
+  -H "Content-Type: text/plain" \
+  -d '## 熵增\n\n这是我的理解...\n\n> [AI] 熵增是热力学第二定律...'
+
+# 3. 读取卡片
+curl http://localhost:8080/api/mobile/cards/熵增
+
+# 4. 获取标题列表（高亮用）
+curl http://localhost:8080/api/mobile/cards/titles
+```
+
+### 体验走查 (The Feel)
+
+1. **撕裂感**：长按时，段落是否优雅地分开？有没有卡顿？
+2. **顾问感**：AI 的字是否像幽灵一样浮现？确认时是否有"落笔"的实感？
+3. **流动性**：是否可以在不离开阅读视线的情况下完成查阅/记录，然后无缝继续阅读？

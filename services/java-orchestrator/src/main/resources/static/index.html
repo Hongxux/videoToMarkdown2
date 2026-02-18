@@ -1617,6 +1617,7 @@
         if (item) {
             item.title = newTitle;
             item.metaTitle = newTitle;
+            item.titleSource = 'meta';
         }
     }
 
@@ -2376,6 +2377,45 @@
         return normalizeTaskTitleText(task && task.taskId) || '未命名故事';
     }
 
+    function normalizeTaskTitleSource(value) {
+        const normalized = String(value || '').trim();
+        if (normalized === 'meta' || normalized === 'video' || normalized === 'title' || normalized === 'taskId') {
+            return normalized;
+        }
+        return '';
+    }
+
+    function resolveTaskTitleSource(task) {
+        const provided = normalizeTaskTitleSource(task && task.titleSource);
+        if (provided) {
+            return provided;
+        }
+        const metaTitle = normalizeTaskTitleText(task && task.metaTitle);
+        if (metaTitle) {
+            return 'meta';
+        }
+        const videoDisplay = extractVideoInputDisplay(task && task.videoUrl);
+        if (videoDisplay) {
+            return 'video';
+        }
+        const title = normalizeTaskTitleText(task && task.title);
+        if (title && !isStorageFallbackTitle(task, title)) {
+            return 'title';
+        }
+        return 'taskId';
+    }
+
+    function collectTaskTitleSourceStats(tasks) {
+        const stats = { meta: 0, video: 0, title: 0, taskId: 0 };
+        (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+            const source = resolveTaskTitleSource(task);
+            if (Object.prototype.hasOwnProperty.call(stats, source)) {
+                stats[source] += 1;
+            }
+        });
+        return stats;
+    }
+
     function normalizeTaskTitleForDiff(task) {
         return resolveTaskCardTitle(task).replace(/\s+/g, ' ');
     }
@@ -2736,6 +2776,7 @@
         const taskIdRaw = String(task && task.taskId || '');
         const taskId = escapeHtml(taskIdRaw);
         const taskTitle = escapeHtml(resolveTaskCardTitle(task));
+        const titleSource = escapeHtml(resolveTaskTitleSource(task));
         const statusTextRaw = String(task && task.status || 'UNKNOWN');
         const statusVisual = getTaskStatusVisual(statusTextRaw);
         const progressPct = inferTaskProgressPercent(task);
@@ -2750,9 +2791,10 @@
         const classes = resolveTaskItemMotionClasses(taskIdRaw, statusVisual, options);
 
         const taskIdAttr = options.exiting ? '' : `data-task-id="${taskId}"`;
+        const titleSourceAttr = options.exiting ? '' : `data-title-source="${titleSource}"`;
         const disabledAttr = options.exiting ? 'disabled tabindex="-1" aria-hidden="true"' : '';
         return `
-            <button class="${classes.join(' ')}" ${taskIdAttr} ${disabledAttr}>
+            <button class="${classes.join(' ')}" ${taskIdAttr} ${titleSourceAttr} ${disabledAttr}>
                 <div class="task-main-row">
                     <div class="task-title-stack">
                         <div class="task-title">${taskTitle}</div>
@@ -3061,8 +3103,18 @@
             if (!crossFadeTaskListFromLoading(taskList, emptyHtml)) {
                 commitTaskListHtml(taskList, emptyHtml);
             }
+            delete taskList.dataset.titleSourceMeta;
+            delete taskList.dataset.titleSourceVideo;
+            delete taskList.dataset.titleSourceTitle;
+            delete taskList.dataset.titleSourceTaskId;
             return;
         }
+
+        const titleSourceStats = collectTaskTitleSourceStats(tasks);
+        taskList.dataset.titleSourceMeta = String(titleSourceStats.meta);
+        taskList.dataset.titleSourceVideo = String(titleSourceStats.video);
+        taskList.dataset.titleSourceTitle = String(titleSourceStats.title);
+        taskList.dataset.titleSourceTaskId = String(titleSourceStats.taskId);
 
         const rows = [];
         tasks.forEach((task, index) => {

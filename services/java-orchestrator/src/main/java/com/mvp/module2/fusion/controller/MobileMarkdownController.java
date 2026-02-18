@@ -603,6 +603,7 @@ public class MobileMarkdownController {
         item.put("taskId", task.taskId);
         item.put("title", task.title != null ? task.title : task.taskId);
         item.put("metaTitle", task.metaTitle != null ? task.metaTitle : "");
+        item.put("titleSource", resolveTaskTitleSource(task));
         item.put("videoUrl", task.videoUrl != null ? task.videoUrl : "");
         item.put("status", task.status != null ? task.status : "");
         item.put("createdAt", instantToText(task.createdAt));
@@ -615,6 +616,59 @@ public class MobileMarkdownController {
         item.put("progress", task.progress);
         item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
         return item;
+    }
+
+    private String resolveTaskTitleSource(TaskView task) {
+        if (task == null) {
+            return "taskId";
+        }
+        if (task.metaTitle != null && !task.metaTitle.isBlank()) {
+            return "meta";
+        }
+        if (task.videoUrl != null && !task.videoUrl.isBlank()) {
+            return "video";
+        }
+        String normalizedTitle = normalizeTaskTitleToken(task.title);
+        String normalizedTaskId = normalizeTaskTitleToken(task.taskId);
+        if (normalizedTitle != null) {
+            if (normalizedTaskId != null && normalizedTitle.equals(normalizedTaskId)) {
+                return "taskId";
+            }
+            if (isStorageFallbackTitle(task, normalizedTitle)) {
+                return "taskId";
+            }
+            return "title";
+        }
+        return "taskId";
+    }
+
+    private String normalizeTaskTitleToken(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private boolean isStorageFallbackTitle(TaskView task, String normalizedTitle) {
+        if (task == null || !task.storageTask || normalizedTitle == null) {
+            return false;
+        }
+        String storageKey = normalizeTaskTitleToken(task.storageKey);
+        if (storageKey != null && normalizedTitle.equals(storageKey)) {
+            return true;
+        }
+        String taskId = normalizeTaskTitleToken(task.taskId);
+        if (taskId == null) {
+            return false;
+        }
+        if (normalizedTitle.equals(taskId)) {
+            return true;
+        }
+        if (taskId.startsWith(STORAGE_TASK_PREFIX)) {
+            return normalizedTitle.equals(taskId.substring(STORAGE_TASK_PREFIX.length()));
+        }
+        return false;
     }
 
     private TaskView resolveTaskView(String taskId) {

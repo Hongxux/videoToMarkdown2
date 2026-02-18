@@ -5844,6 +5844,7 @@
   - 决策4：任务指标新增 `input_video_url`，把“原始输入来源”与“处理视频路径（video_path）”解耦，避免 storage 回放丢失 BV/链接语义。
   - 决策5：新增共享组件 `TaskDisplayNameResolver`，统一 runtime/storage 的标题解析策略，降低重复实现漂移风险。
   - 决策6：storage 缓存字段优先级固定为 `input_video_url -> video_url -> source_url -> original_video_url -> video_path`。
+  - 决策7：列表接口新增 `titleSource` 显式字段（`meta/video/title/taskId`），前端优先消费该决策结果并保留本地回退推断。
 - 调用链变化：
   - 改造前：
     - `TaskView.title -> /api/mobile/tasks.title -> buildTaskItemHtml(task.title)`
@@ -5851,6 +5852,8 @@
     - `TaskMetaFile.taskTitle -> TaskView.metaTitle + title -> /api/mobile/tasks.metaTitle`
     - `VideoProcessingOrchestrator.writeTaskMetricsReport -> task_metrics_latest.input_video_url`
     - `StorageTaskCacheService.readStorageMetadata -> resolveInputVideoUrl(多字段兼容) -> TaskDisplayNameResolver`
+    - `MobileMarkdownController.toListItem -> titleSource(meta/video/title/taskId)`
+    - `index.html.resolveTaskTitleSource -> buildTaskItemHtml(data-title-source)`
     - `buildTaskItemHtml(resolveTaskCardTitle(task))`
     - `applyTaskListMotionDiff(previousTitle,nextTitle)` 命中后注入 `.fx-title-highlight`
 - 已落地改动：
@@ -5972,3 +5975,55 @@
 - 回滚方案：
   - 配置层：将 `vision_ai.structure_preprocess.force_disable_ir_optim` 设为 `false` 可快速回退；
   - 代码层：移除 `_patch_ppstructure_ir_optim_if_needed` 调用，不影响 paddlex fallback 链路可用性。
+
+## 2026-02-18 Phase2B 增量补全自适应预算（按 body_text 长度）与“无相关描述跳过”
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 增量补全阶段已具备“有对齐证据才触发”的门槛，但在单元截图多、`img_description/sentence_text` 很长时，`image_evidence` 仍可能过大，带来 prompt token 浪费。
+  - 历史链路里存在标签型描述（如 `head/tail/stable`）混入 `img_description` 的情况，会触发无效补全调用。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 增量补全应优先保证“证据有效性”，其次才是“证据数量”；错误或无效证据比少量高质量证据更有害。
+    - token 成本应随正文规模动态分配，而不是固定条数；长正文应保留必要证据，短正文应强约束证据膨胀。
+  - 复用杠杆：
+    - 复用既有 `timestamp_sec/sentence_id/sentence_text` 对齐证据，不新建旁路上下文源；
+    - 复用 `MarkdownEnhancer` 现有增量补全入口与补丁协议，不改调用协议；
+    - 复用当前 token 估算口径（字符/4）与 trace 观测字段，确保对比口径一致。
+- 架构决策：
+  - 决策1：新增 `_build_img_desc_adaptive_budget(...)`，按 `body_text` 长度动态计算证据字符预算与条数上限（非固定阈值）。
+  - 决策2：新增 `_build_img_desc_evidence_with_budget(...)`，在调用 LLM 前执行“预算裁剪 + sentence_id 去重”。
+  - 决策3：新增 `_has_related_img_description(...)`，过滤占位型/标签型描述；若无相关描述则跳过该阶段。
+  - 决策4：增量补全日志新增预算指标：`raw_items/selected_items/raw_chars/selected_chars/prompt_tokens_before/prompt_tokens_after/saved_tokens`。
+- 调用链变化：
+  - 改造前：
+    - `_augment_body_with_image_descriptions` 直接拼接全部 `evidence_lines`；
+    - 无自适应预算，不记录裁剪前后 token 对比；
+    - 仅靠空字符串判断描述有效性。
+  - 改造后：
+    - `_build_augment_image_items` 先执行“相关描述”过滤；
+    - `_augment_body_with_image_descriptions` 先做预算裁剪，再组装 `image_evidence`；
+    - 触发日志同时输出裁剪前后 token 估算与节省比例。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 新增：`_has_related_img_description`、`_build_img_desc_adaptive_budget`、`_build_img_desc_evidence_with_budget`、`_estimate_tokens_from_chars` 等预算辅助逻辑；
+    - 修改：`_build_augment_image_items`（无相关描述直接过滤）；
+    - 修改：`_augment_body_with_image_descriptions`（预算裁剪 + token 对比日志）。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 新增：`test_img_desc_augment_skips_without_related_img_description`
+    - 新增：`test_img_desc_augment_adaptive_budget_reduces_prompt_tokens`
+- 性能/成本对比数据（token 估算口径：字符/4）：
+  - 测试方式：
+    - 使用同一 `body_text`（1540 chars）与同一批证据（18 条、长描述）对比“全量证据”与“自适应预算后证据”；
+    - 通过 `MarkdownEnhancer` 内部预算函数构造两版 prompt，统一估算 token。
+  - 测试数据：
+    - 全量证据：`raw_items=18`，`raw_prompt_chars=15497`，`raw_tokens_est=3874`
+    - 预算后：`selected_items=2`，`selected_prompt_chars=3174`，`selected_tokens_est=793`
+  - 结果：
+    - `saved_tokens_est=3081`，节省约 `79.5%`；
+    - 同时避免了“无相关描述”触发的无效 LLM 调用。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "img_desc_augment_uses_excluded_screenshot_items_as_evidence or img_desc_augment_supports_replace_and_add_patch_modes or img_desc_augment_ambiguous_patch_keeps_base_text or img_desc_augment_skips_without_related_img_description or img_desc_augment_adaptive_budget_reduces_prompt_tokens"`
+- 回滚方案：
+  - 代码层：将 `_build_img_desc_evidence_with_budget` 结果替换回全量 `evidence_lines`；
+  - 策略层：放宽/移除 `_has_related_img_description` 的占位描述过滤规则；
+  - 兼容性：补丁回放链路与 structured 阶段不受影响，可独立回滚。

@@ -3251,6 +3251,11 @@
   - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
     - 新增 `.fx-title-highlight` 样式，复用现有 `highlightPulse` 动画，在标题替换瞬间给出高亮反馈。
     - `prefers-reduced-motion` 下关闭该动画，保持可访问性一致。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `/api/mobile/tasks` 增加 `titleSource`（`meta/video/title/taskId`）显式字段，避免前端仅靠启发式反推来源。
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 新增 `resolveTaskTitleSource` 与 `normalizeTaskTitleSource`，优先消费后端 `titleSource`，不命中再本地回退推断。
+    - 任务列表项增加 `data-title-source` 属性，列表容器增加 `data-title-source-*` 聚合计数属性，便于排障与监控采样。
   - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/TaskDisplayNameResolver.java`
     - 新增统一展示名解析器，统一处理 `BV`、HTTP 链接、本地路径、fallback 任务号。
   - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`

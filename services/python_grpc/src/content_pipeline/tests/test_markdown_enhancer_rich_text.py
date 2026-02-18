@@ -1048,6 +1048,119 @@ def test_img_desc_augment_ambiguous_patch_keeps_base_text():
     assert result == base_text
 
 
+def test_img_desc_augment_skips_without_related_img_description():
+    class _CaptureLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def complete_text(self, prompt: str, system_message: str = None):
+            self.calls.append({"prompt": prompt, "system_message": system_message or ""})
+            return "unchanged", None, None
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._enable_img_desc_text_augment = True
+    cap = _CaptureLLM()
+    enhancer._llm_client = cap
+
+    section = EnhancedSection(
+        unit_id="SU410",
+        title="Concrete Unit",
+        knowledge_type="concrete",
+        original_body="原始正文",
+        augment_screenshot_items=[
+            {
+                "img_id": "SU410_img_01",
+                "img_path": "assets/SU410_img_01.png",
+                "img_description": "head",
+                "label": "head",
+                "timestamp_sec": 1.1,
+                "sentence_id": "S001",
+                "sentence_text": "打开配置",
+            }
+        ],
+    )
+
+    augment_items = enhancer._build_augment_image_items(section)
+    assert augment_items == []
+
+    result = asyncio.run(
+        enhancer._augment_body_with_image_descriptions(
+            section,
+            section.original_body,
+            augment_items,
+        )
+    )
+
+    assert result == section.original_body
+    assert cap.calls == []
+
+
+def test_img_desc_augment_adaptive_budget_reduces_prompt_tokens():
+    class _CaptureLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def complete_text(self, prompt: str, system_message: str = None):
+            self.calls.append({"prompt": prompt, "system_message": system_message or ""})
+            return prompt, None, None
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._enable_img_desc_text_augment = True
+    cap = _CaptureLLM()
+    enhancer._llm_client = cap
+
+    base_text = "这是较长正文。" * 220
+    section = EnhancedSection(
+        unit_id="SU411",
+        title="Concrete Unit",
+        knowledge_type="concrete",
+        original_body=base_text,
+    )
+    image_items = []
+    raw_lines = []
+    for idx in range(1, 19):
+        item = {
+            "img_id": f"SU411_img_{idx:02d}",
+            "img_description": f"截图{idx}展示了非常长的命令参数与界面细节：" + ("abc123-" * 55),
+            "timestamp_sec": 1.0 + idx,
+            "sentence_id": f"S{idx:03d}",
+            "sentence_text": "这一句同样很长用于验证预算裁剪：" + ("文本片段-" * 40),
+        }
+        image_items.append(item)
+        raw_lines.append(
+            f"- img_id={item['img_id']} | timestamp={float(item['timestamp_sec']):.2f}s | "
+            f"sentence_id={item['sentence_id']} | sentence_text={item['sentence_text']} | "
+            f"img_description={item['img_description']}"
+        )
+
+    _ = asyncio.run(
+        enhancer._augment_body_with_image_descriptions(
+            section,
+            base_text,
+            image_items,
+        )
+    )
+    assert len(cap.calls) == 1
+
+    selected_prompt = cap.calls[0]["prompt"]
+    selected_evidence_lines = [line for line in selected_prompt.splitlines() if line.startswith("- img_id=")]
+    assert 0 < len(selected_evidence_lines) < len(raw_lines)
+
+    raw_prompt = enhancer._img_desc_augment_user_prompt_template.format(
+        body_text=base_text,
+        image_evidence="\n".join(raw_lines),
+    )
+    raw_tokens = enhancer._estimate_tokens_from_chars(
+        len(raw_prompt) + len(enhancer._img_desc_augment_system_prompt)
+    )
+    selected_tokens = enhancer._estimate_tokens_from_chars(
+        len(selected_prompt) + len(enhancer._img_desc_augment_system_prompt)
+    )
+    assert selected_tokens < raw_tokens
+
+
 def test_markdown_enhancer_writes_llm_trace_jsonl(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(

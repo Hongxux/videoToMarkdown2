@@ -1461,14 +1461,13 @@ class MarkdownEnhancer:
         for idx, raw in enumerate(raw_items, start=1):
             if not isinstance(raw, dict):
                 continue
+            if not self._has_related_img_description(raw):
+                continue
             img_description = str(
                 raw.get("img_description")
                 or raw.get("img_desription")
-                or raw.get("label")
                 or ""
             ).strip()
-            if not img_description:
-                continue
             img_id = str(raw.get("img_id") or f"{section.unit_id}_img_{idx:02d}").strip()
             normalized.append(
                 {
@@ -1481,6 +1480,181 @@ class MarkdownEnhancer:
                 }
             )
         return normalized
+
+    @staticmethod
+    def _clip_text_for_prompt(value: str, max_chars: int) -> str:
+        """裁剪提示词字段，防止单字段过长占满预算。"""
+        text = str(value or "").strip()
+        limit = max(0, int(max_chars))
+        if limit <= 0:
+            return ""
+        if len(text) <= limit:
+            return text
+        if limit <= 3:
+            return text[:limit]
+        return text[: limit - 3] + "..."
+
+    @staticmethod
+    def _estimate_tokens_from_chars(total_chars: int) -> int:
+        """与 LLMClient 一致：按字符/4 粗估 token。"""
+        return max(1, int(max(0, int(total_chars)) / 4))
+
+    @staticmethod
+    def _has_related_img_description(item: Dict[str, Any]) -> bool:
+        """仅接受“可用于补全正文细节”的描述，过滤占位型/标签型描述。"""
+        if not isinstance(item, dict):
+            return False
+        desc = str(
+            item.get("img_description")
+            or item.get("img_desription")
+            or ""
+        ).strip()
+        if not desc:
+            return False
+        desc_lower = desc.lower()
+        if re.fullmatch(r"image_\d{1,4}", desc_lower):
+            return False
+        placeholder_values = {
+            "head",
+            "tail",
+            "stable",
+            "fallback",
+            "fallback_unit_scan",
+            "image",
+            "img",
+            "screenshot",
+        }
+        if desc_lower in placeholder_values:
+            return False
+        label = str(item.get("label") or "").strip().lower()
+        if label and desc_lower == label and label in placeholder_values:
+            return False
+        source_id = str(item.get("source_id") or "").strip().lower()
+        if source_id and desc_lower == source_id:
+            return False
+        return True
+
+    def _build_img_desc_adaptive_budget(self, body_text: str) -> Dict[str, int]:
+        """按正文长度动态计算增量补全证据预算。"""
+        body_chars = len(str(body_text or ""))
+
+        # 目标：正文越长，证据预算按比例增加，但总提示词上限受控，避免 token 膨胀。
+        target_prompt_chars = int(2200 + min(body_chars, 2800) * 0.9)
+        target_prompt_chars = max(2200, min(5200, target_prompt_chars))
+
+        template_overhead = len(
+            self._img_desc_augment_user_prompt_template.format(
+                body_text="",
+                image_evidence="",
+            )
+        )
+        system_chars = len(str(self._img_desc_augment_system_prompt or ""))
+        response_reserve_chars = 400
+        evidence_budget_chars = (
+            target_prompt_chars
+            - body_chars
+            - template_overhead
+            - system_chars
+            - response_reserve_chars
+        )
+        evidence_budget_chars = max(280, evidence_budget_chars)
+
+        if body_chars <= 600:
+            max_items = 12
+            max_desc_chars = 180
+            max_sentence_chars = 120
+        elif body_chars <= 1600:
+            max_items = 9
+            max_desc_chars = 130
+            max_sentence_chars = 90
+        else:
+            max_items = 7
+            max_desc_chars = 100
+            max_sentence_chars = 70
+
+        if evidence_budget_chars < 600:
+            max_items = min(max_items, 4)
+        elif evidence_budget_chars < 900:
+            max_items = min(max_items, 6)
+
+        return {
+            "body_chars": body_chars,
+            "target_prompt_chars": target_prompt_chars,
+            "evidence_budget_chars": evidence_budget_chars,
+            "max_items": max_items,
+            "max_desc_chars": max_desc_chars,
+            "max_sentence_chars": max_sentence_chars,
+            "template_overhead": template_overhead,
+            "system_chars": system_chars,
+        }
+
+    def _build_img_desc_evidence_with_budget(
+        self,
+        body_text: str,
+        evidence_items: List[Dict[str, Any]],
+    ) -> Tuple[List[str], Dict[str, int], set[str], List[str]]:
+        """基于自适应预算裁剪证据，优先保证每个 sentence_id 至少保留一条。"""
+        budget = self._build_img_desc_adaptive_budget(body_text)
+        selected_lines: List[str] = []
+        selected_sentence_ids: set[str] = set()
+        raw_lines: List[str] = []
+        raw_chars = 0
+        selected_chars = 0
+        dropped_by_budget = 0
+        dropped_by_duplicate_sentence = 0
+
+        for item in evidence_items:
+            img_id = str(item.get("img_id") or "").strip()
+            sentence_id = str(item.get("sentence_id") or "").strip()
+            sentence_text = self._clip_text_for_prompt(
+                str(item.get("sentence_text") or ""),
+                budget["max_sentence_chars"],
+            )
+            img_desc = self._clip_text_for_prompt(
+                str(item.get("img_description") or ""),
+                budget["max_desc_chars"],
+            )
+            time_text = str(item.get("time_text") or "").strip()
+
+            line = (
+                f"- img_id={img_id or '(unknown)'} | timestamp={time_text or '(none)'} | "
+                f"sentence_id={sentence_id or '(none)'} | sentence_text={sentence_text or '(none)'} | "
+                f"img_description={img_desc}"
+            )
+            raw_lines.append(line)
+            raw_chars += len(line) + 1
+
+            if sentence_id and sentence_id in selected_sentence_ids:
+                dropped_by_duplicate_sentence += 1
+                continue
+            if len(selected_lines) >= budget["max_items"]:
+                dropped_by_budget += 1
+                continue
+            projected_chars = selected_chars + len(line) + 1
+            if projected_chars > budget["evidence_budget_chars"]:
+                dropped_by_budget += 1
+                continue
+
+            selected_lines.append(line)
+            selected_chars = projected_chars
+            if sentence_id:
+                selected_sentence_ids.add(sentence_id)
+
+        metrics = {
+            "raw_items": len(raw_lines),
+            "selected_items": len(selected_lines),
+            "raw_evidence_chars": raw_chars,
+            "selected_evidence_chars": selected_chars,
+            "dropped_by_budget": dropped_by_budget,
+            "dropped_by_duplicate_sentence": dropped_by_duplicate_sentence,
+            "budget_evidence_chars": budget["evidence_budget_chars"],
+            "budget_max_items": budget["max_items"],
+            "body_chars": budget["body_chars"],
+            "target_prompt_chars": budget["target_prompt_chars"],
+            "template_overhead": budget["template_overhead"],
+            "system_chars": budget["system_chars"],
+        }
+        return selected_lines, metrics, selected_sentence_ids, raw_lines
 
     @staticmethod
     def _apply_img_desc_incremental_ops(
@@ -1595,8 +1769,7 @@ class MarkdownEnhancer:
             logger.info(f"[{section.unit_id}] img-desc augment skipped: {reason}")
             return text
 
-        evidence_lines: List[str] = []
-        used_sentence_ids: set[str] = set()
+        evidence_items: List[Dict[str, Any]] = []
         for item in image_items:
             if not isinstance(item, dict):
                 continue
@@ -1620,28 +1793,66 @@ class MarkdownEnhancer:
             if not sentence_id and not sentence_text and not time_text:
                 continue
 
-            if sentence_id:
-                used_sentence_ids.add(sentence_id)
-
-            evidence_lines.append(
-                f"- img_id={img_id or '(unknown)'} | timestamp={time_text or '(none)'} | "
-                f"sentence_id={sentence_id or '(none)'} | sentence_text={sentence_text or '(none)'} | "
-                f"img_description={img_desc}"
+            evidence_items.append(
+                {
+                    "img_id": img_id,
+                    "sentence_id": sentence_id,
+                    "sentence_text": sentence_text,
+                    "time_text": time_text,
+                    "img_description": img_desc,
+                }
             )
 
-        if not evidence_lines:
+        if not evidence_items:
             logger.info(f"[{section.unit_id}] img-desc augment skipped: no_alignment_evidence")
             return text
+
+        evidence_lines, budget_metrics, used_sentence_ids, raw_evidence_lines = self._build_img_desc_evidence_with_budget(
+            text,
+            evidence_items,
+        )
+        if not evidence_lines:
+            logger.info(
+                f"[{section.unit_id}] img-desc augment skipped: no_related_img_description_after_budget, "
+                f"raw_items={budget_metrics.get('raw_items', 0)}"
+            )
+            return text
+
+        raw_evidence_text = "\n".join(raw_evidence_lines)
+        selected_evidence_text = "\n".join(evidence_lines)
+        raw_prompt_chars = (
+            int(budget_metrics.get("template_overhead", 0))
+            + len(text)
+            + len(raw_evidence_text)
+            + int(budget_metrics.get("system_chars", 0))
+        )
+        selected_prompt_chars = (
+            int(budget_metrics.get("template_overhead", 0))
+            + len(text)
+            + len(selected_evidence_text)
+            + int(budget_metrics.get("system_chars", 0))
+        )
+        prompt_tokens_before = self._estimate_tokens_from_chars(raw_prompt_chars)
+        prompt_tokens_after = self._estimate_tokens_from_chars(selected_prompt_chars)
+        token_saved = max(0, prompt_tokens_before - prompt_tokens_after)
+        token_saved_pct = (float(token_saved) / float(prompt_tokens_before) * 100.0) if prompt_tokens_before > 0 else 0.0
 
         sentence_ids_text = ",".join(sorted(used_sentence_ids)) if used_sentence_ids else "(none)"
         logger.info(
             f"[{section.unit_id}] img-desc augment triggered: evidence={len(evidence_lines)}, "
             f"sentence_ids={sentence_ids_text}"
         )
+        logger.info(
+            f"[{section.unit_id}] img-desc augment budget: raw_items={budget_metrics.get('raw_items', 0)}, "
+            f"selected_items={budget_metrics.get('selected_items', 0)}, raw_chars={budget_metrics.get('raw_evidence_chars', 0)}, "
+            f"selected_chars={budget_metrics.get('selected_evidence_chars', 0)}, budget_chars={budget_metrics.get('budget_evidence_chars', 0)}, "
+            f"prompt_tokens_before={prompt_tokens_before}, prompt_tokens_after={prompt_tokens_after}, "
+            f"saved_tokens={token_saved}, saved_pct={token_saved_pct:.1f}%"
+        )
 
         prompt = self._img_desc_augment_user_prompt_template.format(
             body_text=text,
-            image_evidence="\n".join(evidence_lines),
+            image_evidence=selected_evidence_text,
         )
 
         start_ts = time.perf_counter()
