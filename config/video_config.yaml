@@ -1,20 +1,20 @@
-﻿# 閰嶇疆鏂囦欢 - Knowledge Engine Pipeline
-# 鎵€鏈夎矾寰勫潎鐩稿浜庨」鐩牴鐩綍
+﻿# 配置文件 - Knowledge Engine Pipeline
+# 所有路径均相对于项目根目录
 #
-# 閰嶇疆鏂囦欢浣跨敤璇存槑锛堥噸瑕侊級锛?
-# 1) 鏈枃浠舵槸 Python gRPC 涓婚摼璺敮涓€涓婚厤缃紝鎺ㄨ崘璺緞锛歝onfig/video_config.yaml銆?
-# 2) 鍘嗗彶鍓湰璺緞宸蹭笅绾垮苟鍒犻櫎锛涗慨鏀归厤缃鍙敼鏈枃浠躲€?
-# 3) 瀹夊叏椤癸紙API Key / Token锛夊缓璁娇鐢ㄧ幆澧冨彉閲忚鐩栵紝涓嶈灏嗙湡瀹炲瘑閽ユ彁浜ゅ埌浠撳簱銆?
-# 4) 閰嶇疆浼樺厛绾э細鏄惧紡浼犲弬 > 鐜鍙橀噺 > 鏈枃浠?> 浠ｇ爜榛樿鍊笺€?
+# 配置文件使用说明（重要）：
+# 1) 本文件是 Python gRPC 主链路唯一主配置，推荐路径：config/video_config.yaml。
+# 2) 历史副本路径已下线并删除；修改配置请只改本文件。
+# 3) 安全项（API Key / Token）建议使用环境变量覆盖，不要将真实密钥提交到仓库。
+# 4) 配置优先级：显式传参 > 环境变量 > 本文件 > 代码默认值。
 
-# 1. 瑙嗛涓嬭浇閰嶇疆
+# 1. 视频下载配置
 # -----------------------------------------------------------------------------
 video:
   output_dir: "output"
   download_subdir: "downloads"
-  # Download profile presets:
-  # - public_no_cookie: stable mode for public videos (default)
-  # - login_cookie: use browser cookie + proxy
+  # 下载策略预设：
+  # - public_no_cookie: 公开视频稳定模式（默认）
+  # - login_cookie: 启用浏览器 Cookie + 代理
   download_profile: "public_no_cookie"
   download_profiles:
     public_no_cookie:
@@ -25,142 +25,142 @@ video:
       download_proxy: "http://127.0.0.1:7897"
       download_cookies_from_browser: "edge:Default"
       download_cookies_file: ""
-  # 瑙嗛涓嬭浇浠ｇ悊 (鍙€夛紝濡? "http://127.0.0.1:7890")
+  # 视频下载代理 (可选，如: "http://127.0.0.1:7890")
   download_proxy: ""
-  # 鏄惁绂佺敤 SSL 璇佷功楠岃瘉 (浠呭湪閬囧埌璇佷功闂鏃跺惎鐢?
+  # 是否禁用 SSL 证书验证 (仅在遇到证书问题时启用)
   disable_ssl_verify: false
-  # YouTube 椋庢帶鍦烘櫙寤鸿鍚敤锛氱洿鎺ュ鐢ㄦ祻瑙堝櫒鐧诲綍鎬?Cookie
-  # 绀轰緥:
+  # YouTube 风控场景建议启用：直接复用浏览器登录态 Cookie
+  # 示例:
   # - "chrome"
   # - "edge:Default"
   # - "firefox:default-release"
   download_cookies_from_browser: ""
-  # 鎴栬€呬紶鍏ユ墜宸ュ鍑虹殑 Netscape Cookie 鏂囦欢璺緞
-  # 鍙～鐩稿璺緞锛堢浉瀵瑰綋鍓嶅惎鍔ㄧ洰褰曪級鎴栫粷瀵硅矾寰?
+  # 或者传入手工导出的 Netscape Cookie 文件路径
+  # 可填相对路径（相对当前启动目录）或绝对路径
   download_cookies_file: ""
-  # 涓嬭浇闃舵浼樺厛閫夋嫨 H.264锛坅vc1锛夊彲瑙ｇ爜杞ㄩ亾锛屽噺灏戝悗缁?OpenCV 鍏煎闂
-  # true: 浼樺厛 H.264锛屽け璐ュ啀鍥為€€鍒伴粯璁?best 閾捐矾
-  # false: 淇濇寔鍘嗗彶琛屼负锛坆est -> bestvideo+bestaudio/best锛?
+  # 下载阶段优先选择 H.264（avc1）可解码轨道，减少后续 OpenCV 兼容问题
+  # true: 优先 H.264，失败再回退到默认 best 链路
+  # false: 保持历史行为（best -> bestvideo+bestaudio/best）
   prefer_h264: true
 
-# 2. AI 鏈嶅姟閰嶇疆
+# 2. AI 服务配置
 # -----------------------------------------------------------------------------
 ai:
-  # DeepSeek API 閰嶇疆
-  # 鈿狅笍 瀹夊叏鎻愮ず锛氳鍕垮湪姝ゅ濉啓 API Key锛?
-  # 鎺ㄨ崘鏂瑰紡锛氳缃幆澧冨彉閲?DEEPSEEK_API_KEY
+  # DeepSeek API 配置
+  # ⚠️ 安全提示：请勿在此处填写 API Key！
+  # 推荐方式：设置环境变量 DEEPSEEK_API_KEY
   # Windows: setx DEEPSEEK_API_KEY "sk-your-key-here"
   # Linux/Mac: export DEEPSEEK_API_KEY="sk-your-key-here"
-  api_key: "sk-97fdd2b65e8c4d1bbfa76e617c212a3c"  # 鐣欑┖锛屼粠鐜鍙橀噺璇诲彇锛堢敓浜х幆澧冨己鐑堝缓璁級
+  api_key: ""  # 留空，从环境变量读取（生产环境强烈建议）
   base_url: "https://api.deepseek.com"
   
-  # 瀛楀箷鏁寸悊妯″瀷
+  # 字幕整理模型
   refinement:
     model: "deepseek-chat"
     temperature: 0.1
-    chunk_size: 2000      # 姣忎釜绮句慨鎵规鐨勫瓧绗︽暟 (鍙皟: 1500-4000)
-    max_concurrency: 0    # 鏈€澶у苟鍙戞暟 (0 = 涓嶉檺鍒讹紝閫傜敤浜?DeepSeek)
+    chunk_size: 2000      # 每个精修批次的字符数 (可调: 1500-4000)
+    max_concurrency: 0    # 最大并发数 (0 = 不限制，适用于 DeepSeek)
   
-  # 鍐呭鍒嗘瀽妯″瀷
+  # 内容分析模型
   analysis:
     model: "deepseek-chat"
     temperature: 0.2
-    fast_model: ""        # 鐢ㄤ簬绠€鍗曚换鍔＄殑蹇€熸ā鍨嬶紱涓虹┖鏃跺洖閫€ model
+    fast_model: ""        # 用于简单任务的快速模型；为空时回退 model
   
-  # 涓婚璇嗗埆妯″瀷
+  # 主题识别模型
   topic:
     model: "deepseek-chat"
     temperature: 0.1
 
-# 3. Whisper 杞綍閰嶇疆
+# 3. Whisper 转录配置
 # -----------------------------------------------------------------------------
 whisper:
-  # 杞綍绛栫暐 (Model Layer Optimization)
-  # - dynamic: 鑷姩鏍规嵁瑙嗛鏃堕暱閫夋嫨妯″瀷 (鎺ㄨ崘: <10m=medium, 10-60m=large-v2, >60m=large-v3)
-  # - fastest: 鏋侀€熸ā寮?(寮哄埗 base 妯″瀷 + CPU INT8锛岃€楁椂鏈€灏?
-  # - custom:  鑷畾涔夋ā寮?(瀹屽叏閬靛惊涓嬫柟 model_size 閰嶇疆)
-  strategy: "fastest"  # 寤鸿锛欳PU 鐜鐢?fastest锛孏PU/绮惧害浼樺厛鍙敼 dynamic
+  # 转录策略 (Model Layer Optimization)
+  # - dynamic: 自动根据视频时长选择模型 (推荐: <10m=medium, 10-60m=large-v2, >60m=large-v3)
+  # - fastest: 极速模式 (强制 base 模型 + CPU INT8，耗时最小)
+  # - custom:  自定义模式 (完全遵循下方 model_size 配置)
+  strategy: "fastest"  # 建议：CPU 环境用 fastest，GPU/精度优先可改 dynamic
 
-  # 妯″瀷澶у皬: tiny, base, small, medium, large-v2, large-v3
-  # 浠呭湪 strategy 涓?"custom" 鏃剁敓鏁堬紝鎴栦綔涓?dynamic 鐨勫厹搴?
-  model_size: "medium"  # 浠?strategy=custom 鏃剁敓鏁?
+  # 模型大小: tiny, base, small, medium, large-v2, large-v3
+  # 仅在 strategy 为 "custom" 时生效，或作为 dynamic 的兜底
+  model_size: "medium"  # 仅 strategy=custom 时生效
   
-  # 璁惧: cuda, cpu
-  device: "cpu"  # cpu/cuda锛涜嫢鏈哄櫒鏃?CUDA 璇蜂繚鎸?cpu
+  # 设备: cuda, cpu
+  device: "cpu"  # cpu/cuda；若机器无 CUDA 请保持 cpu
   
-  # 鏄惁浣跨敤 HF 闀滃儚鍔犻€?(榛樿 true)
+  # 是否使用 HF 镜像加速 (默认 true)
   use_mirror: false
   
-  # HuggingFace 涓嬭浇闀滃儚 (浠呭湪 use_mirror 涓?true 鏃剁敓鏁?
-  # 鐣欑┖鍒欓粯璁や娇鐢?https://hf-mirror.com
+  # HuggingFace 下载镜像 (仅在 use_mirror 为 true 时生效)
+  # 留空则默认使用 https://hf-mirror.com
   hf_endpoint: "https://hf-mirror.com"
   
-  # 涓嬭浇浠ｇ悊 (鍙€夛紝渚嬪 "http://127.0.0.1:7890")
-  # 濡傛灉闀滃儚绔?404锛屽缓璁€氳繃浠ｇ悊杩炴帴瀹樻柟 Hub
+  # 下载代理 (可选，例如 "http://127.0.0.1:7890")
+  # 如果镜像站 404，建议通过代理连接官方 Hub
   download_proxy: ""
   
-  # 褰撴ā鍨嬫枃浠舵牎楠屽け璐ユ椂鏄惁璺宠繃鏍￠獙缁х画浣跨敤宸蹭笅杞芥枃浠?
-  # true: 璺宠繃鏍￠獙澶辫触骞剁户缁紙瀹归敊浼樺厛锛?
-  # false: 瑙﹀彂寮哄埗閲嶆媺锛堝畬鏁存€т紭鍏堬級
+  # 当模型文件校验失败时是否跳过校验继续使用已下载文件
+  # true: 跳过校验失败并继续（容错优先）
+  # false: 触发强制重拉（完整性优先）
   skip_integrity_check_on_failure: true
 
-  # 妯″瀷棣栨涓嬭浇骞舵牎楠屽悗锛屽悗缁噸鍚槸鍚﹁烦杩囬噸澶嶆牎楠?
-  # true: 浠呴娆℃牎楠岋紝鍚庣画澶嶇敤鏈湴宸叉牎楠屾爣璁?
-  # false: 姣忔鍚姩閮芥墽琛屾牎楠屾祦绋?
+  # 模型首次下载并校验后，后续重启是否跳过重复校验
+  # true: 仅首次校验，后续复用本地已校验标记
+  # false: 每次启动都执行校验流程
   skip_reverify_after_success: true
   
-  # 璁＄畻绫诲瀷 (浠?CPU): int8, int16, float32
-  # 璁＄畻绫诲瀷 (GPU): float16, int8_float16
+  # 计算类型 (仅 CPU): int8, int16, float32
+  # 计算类型 (GPU): float16, int8_float16
   compute_type: "int8"
   
-  # 杞綍璇█ (鏀寔 99 绉嶈瑷€)
-  # 甯哥敤: zh(涓枃), en(鑻辫), ja(鏃ヨ), ko(闊╄), auto(鑷姩妫€娴?
-  # 瀹屾暣鍒楄〃: https://github.com/openai/whisper#available-models-and-languages
+  # 转录语言 (支持 99 种语言)
+  # 常用: zh(中文), en(英语), ja(日语), ko(韩语), auto(自动检测)
+  # 完整列表: https://github.com/openai/whisper#available-models-and-languages
   language: "auto"
   beam_size: 4
   vad_filter: false
   language_detect_probe_sec: 120
   
-  # 骞惰杞綍閰嶇疆
+  # 并行转录配置
   parallel:
-    enabled: true          # 鏄惁鍚敤骞惰杞綍
-    num_workers: 5         # 骞惰杩涚▼鏁帮紙寤鸿 2-6锛?
-    segment_duration: 150  # 鍒嗘鏃堕暱锛堢锛夛紝150 = 2.5鍒嗛挓
-    segment_split_threshold_sec: 300  # 鍒嗘闃堝€硷紙绉掞級锛?=璇ュ€间笉鍒嗘锛岄粯璁?鍒嗛挓
-    auto_resource_scheduling: true    # 鏄惁鎸塁PU/鍐呭瓨鑷姩璋冩暣骞跺彂
-    reserve_cpu_cores: 1              # 缁欑郴缁熼鐣欑殑CPU鏍稿績鏁?
-    reserve_cpu_ratio: 0.1            # 缁欑郴缁熼鐣欑殑CPU姣斾緥锛?~0.8锛?
-    reserve_memory_gb: 2.0            # 缁欑郴缁熼鐣欑殑鍙敤鍐呭瓨锛圙B锛?
-    memory_per_worker_gb: 1.5         # 鍗曚釜骞惰Worker浼扮畻鍗犵敤鍐呭瓨锛圙B锛?
-    gpu_max_workers: 1                # GPU妯″紡涓嬪苟琛屼笂闄愶紙閬垮厤鏄惧瓨浜夋姠锛?
-    segments_per_worker: 2            # 闀胯棰戞ā寮忎笅姣忎釜worker鐩爣娈垫暟锛堟彁楂楥PU鍒╃敤鐜囷級
-    min_segment_duration_sec: 90      # 鍗曟鏈€灏忔椂闀匡紝闃叉鍒嗘杩囩粏瀵艰嚧璋冨害寮€閿€杩囬珮
-    max_segment_count: 0              # 鍒嗘涓婇檺锛?=涓嶉檺鍒讹級
+    enabled: true          # 是否启用并行转录
+    num_workers: 5         # 并行进程数（建议 2-6）
+    segment_duration: 150  # 分段时长（秒），150 = 2.5分钟
+    segment_split_threshold_sec: 300  # 分段阈值（秒），<=该值不分段，默认5分钟
+    auto_resource_scheduling: true    # 是否按CPU/内存自动调整并发
+    reserve_cpu_cores: 1              # 给系统预留的CPU核心数
+    reserve_cpu_ratio: 0.1            # 给系统预留的CPU比例（0~0.8）
+    reserve_memory_gb: 2.0            # 给系统预留的可用内存（GB）
+    memory_per_worker_gb: 1.5         # 单个并行Worker估算占用内存（GB）
+    gpu_max_workers: 1                # GPU模式下并行上限（避免显存争抢）
+    segments_per_worker: 2            # 长视频模式下每个worker目标段数（提高CPU利用率）
+    min_segment_duration_sec: 90      # 单段最小时长，防止分段过细导致调度开销过高
+    max_segment_count: 0              # 分段上限（0=不限制）
 
-# 4. 澶勭悊娴佺▼閰嶇疆
+# 4. 处理流程配置
 # -----------------------------------------------------------------------------
 processing:
-  # 鏄惁鍚敤鏂偣缁紶
-  resume: true  # true=鍚敤闃舵澶嶇敤锛沠alse=姣忔鍏ㄩ噺閲嶈窇
+  # 是否启用断点续传
+  resume: true  # true=启用阶段复用；false=每次全量重跑
   
-  # 鍒嗘瀽鏃剁殑骞跺彂鏁?
-  analysis_concurrency: 8  # 鍊艰秺澶у悶鍚愯秺楂橈紝浣嗕細澧炲姞鍐呭瓨/CPU鍘嬪姏
+  # 分析时的并发数
+  analysis_concurrency: 8  # 值越大吞吐越高，但会增加内存/CPU压力
 
-# 鏂偣閲嶇画锛堟枃浠跺鐢級閰嶇疆
+# 断点重续（文件复用）配置
 resume_control:
-  # 馃攽 涓诲紑鍏筹細鍚敤鏂偣閲嶇画
-  enabled: true  # false 鏃跺皢蹇界暐鏈妭鍏朵綑鍙傛暟
-  # 褰撳墠浠呮敮鎸?file_reuse
+  # 🔑 主开关：启用断点重续
+  enabled: true  # false 时将忽略本节其余参数
+  # 当前仅支持 file_reuse
   mode: "file_reuse"
-  # 澶嶇敤鏍￠獙寮哄害锛歭ight / moderate / strict
+  # 复用校验强度：light / moderate / strict
   validation: "moderate"
-  # 澶嶇敤澶辨晥绛栫暐锛歳ecompute / fail_fast
+  # 复用失效策略：recompute / fail_fast
   on_invalid_reuse: "recompute"
-  # 闈炰紭鍏堣祫婧愪繚鐣欏ぉ鏁帮紙TTL锛?
-  non_priority_retention_days: 7  # 寤鸿鑼冨洿锛?~30锛涜秺澶х鐩樺崰鐢ㄨ秺楂?
-  # 浠?Phase2A 浣滀负浼樺厛闀挎湡淇濈暀璧勬簮
+  # 非优先资源保留天数（TTL）
+  non_priority_retention_days: 7  # 建议范围：3~30；越大磁盘占用越高
+  # 仅 Phase2A 作为优先长期保留资源
   priority_keep_only_phase2a: true
-  # 鍒嗙粍寮€鍏筹紙鍏ㄩ儴鍚敤锛?
+  # 分组开关（全部启用）
   groups:
     transcribe: true
     stage1_text: true
@@ -171,137 +171,137 @@ resume_control:
     assets: true
     phase2b: true
 
-# Module2 鏂囨。澧炲己閰嶇疆
+# Module2 文档增强配置
 # -----------------------------------------------------------------------------
 content_pipeline:
   markdown_enhancer:
-    # 鏄惁鍦ㄧ粨鏋勫寲鍓嶏紝鍩轰簬鍥剧墖鎻忚堪鍋氭鏂囧閲忚ˉ鍏?
-    # 榛樿寮€鍚紱鍙鐜鍙橀噺 MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT 瑕嗙洊
-    enable_img_desc_text_augment: true  # false 鍙檷浣?LLM 璋冪敤鎴愭湰锛屼絾鎻忚堪琛ュ叏鑳藉姏涓嬮檷
+    # 是否在结构化前，基于图片描述做正文增量补全
+    # 默认开启；可被环境变量 MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT 覆盖
+    enable_img_desc_text_augment: true  # false 可降低 LLM 调用成本，但描述补全能力下降
   observability:
     llm_trace:
-      # 鏄惁鍚敤 Phase2B LLM 璋冪敤杩借釜锛堥€愭钀界洏 JSONL锛?
-      enabled: true  # 鐢熶骇寤鸿榛樿 false锛岄棶棰樻帓鏌ユ椂鍐嶆墦寮€
-      # 杩借釜绮掑害锛歠ull=瀹屾暣 prompt/response锛泂ummary=鎴柇鎽樿
-      level: "full"  # full=瀹屾暣璇锋眰/鍝嶅簲锛宻ummary=鎽樿锛堟洿鐪佺鐩橈級
-      # 杈撳嚭璺緞锛堢浉瀵?result.json 鎵€鍦ㄧ洰褰曪級锛涚暀绌鸿蛋榛樿 intermediates/phase2b_llm_trace.jsonl
+      # 是否启用 Phase2B LLM 调用追踪（逐次落盘 JSONL）
+      enabled: true  # 生产建议默认 false，问题排查时再打开
+      # 追踪粒度：full=完整 prompt/response；summary=截断摘要
+      level: "full"  # full=完整请求/响应，summary=摘要（更省磁盘）
+      # 输出路径（相对 result.json 所在目录）；留空走默认 intermediates/phase2b_llm_trace.jsonl
       output_path: "intermediates/phase2b_llm_trace.jsonl"
     image_match_audit:
-      # 鏄惁钀界洏鍥剧墖鍖归厤瀹¤锛坱imestamp->sentence_id锛?
-      enabled: true  # 鐢熶骇寤鸿榛樿 false锛屽紑鍚悗渚夸簬瀵归綈閿欒杩芥煡
+      # 是否落盘图片匹配审计（timestamp->sentence_id）
+      enabled: true  # 生产建议默认 false，开启后便于对齐错误追查
 
-# 5. 鎻愮ず璇嶈矾寰勯厤缃?
+# 5. 提示词路径配置
 # -----------------------------------------------------------------------------
 prompts:
   analysis: "knowledge_engine/resources/default_prompt.md"
   topic:    "knowledge_engine/resources/topic_identification.md"
   refine:   "knowledge_engine/resources/subtitle_refinement.md"
 
-# 6. 瑙嗚绱犳潗鎻愬彇閰嶇疆
+# 6. 视觉素材提取配置
 # -----------------------------------------------------------------------------
 visual:
-  # 骞惰鎻愬彇鐨勬渶澶х嚎绋嬫暟
-  # 寤鸿鍊? CPU 鏍稿績鏁扮殑 1-2 鍊?
+  # 并行提取的最大线程数
+  # 建议值: CPU 核心数的 1-2 倍
   max_workers: 8
   
-  # 鏄惁璺宠繃宸插瓨鍦ㄧ殑鍥剧墖锛堟柇鐐归噸缁級
+  # 是否跳过已存在的图片（断点重续）
   skip_existing: true
   
-  # 姣忎釜绱犳潗鎻愬彇鐨勫€欓€夊抚鏁?(AI 灏嗕粠涓€夋嫨鏈€浣冲抚)
+  # 每个素材提取的候选帧数 (AI 将从中选择最佳帧)
   candidate_frames: 10
 
-# 6.1 瑙嗚 AI 閰嶇疆 (鏅鸿兘閫夊抚 - ERNIE 4.5 Turbo)
+# 6.1 视觉 AI 配置 (智能选帧 - ERNIE 4.5 Turbo)
 # -----------------------------------------------------------------------------
 vision_ai:
-  # 鏄惁鍚敤瑙嗚 AI 閫夊抚
-  enabled: true  # false 鏃堕€€鍖栦负绾?CV 璺緞
+  # 是否启用视觉 AI 选帧
+  enabled: true  # false 时退化为纯 CV 路径
   
-  # 鏈嶅姟鍟? ernie
+  # 服务商: ernie
   provider: "ernie"
   
-  # 璁よ瘉鏂瑰紡: Bearer Token (鍗冨竼骞冲彴)
-  # 鏍煎紡: bce-v3/ALTAK-xxxxx/yyyyyyy
-  bearer_token: "bce-v3/ALTAK-nnnwJXbBpYKev1JlThzKL/0b20f94354d6380385a021bcfcf4cc6ab80cff48"  # 寤鸿鐣欑┖骞朵娇鐢ㄧ幆澧冨彉閲忔敞鍏ワ紝閬垮厤瀵嗛挜娉勬紡
+  # 认证方式: Bearer Token (千帆平台)
+  # 格式: bce-v3/ALTAK-xxxxx/yyyyyyy
+  bearer_token: ""  # 建议留空并使用环境变量注入，避免密钥泄漏
   
-  # API 绔偣 (鍗冨竼骞冲彴 ERNIE 4.5 Turbo)
+  # API 端点 (千帆平台 ERNIE 4.5 Turbo)
   base_url: "https://qianfan.baidubce.com/v2/chat/completions"
   
-  # 妯″瀷鍚嶇О
-  model: "ernie-4.5-turbo-vl-32k"  # 涓庢湇鍔″晢鍙敤妯″瀷淇濇寔涓€鑷?
+  # 模型名称
+  model: "ernie-4.5-turbo-vl-32k"  # 与服务商可用模型保持一致
   
-  # 娓╁害鍙傛暟 (瓒婁綆瓒婄ǔ瀹?
-  temperature: 0.1  # 寤鸿 0.0~0.3锛涜秺浣庤秺绋冲畾锛岃秺楂樿秺鍙戞暎
+  # 温度参数 (越低越稳定)
+  temperature: 0.1  # 建议 0.0~0.3；越低越稳定，越高越发散
   
-  # 姣忔鍒嗘瀽鐨勬渶澶у抚鏁?(寤鸿 5-8 寮?
-  max_frames_per_call: 8  # 寤鸿 4~10锛涜繃澶у彲鑳藉鍔犳椂寤朵笌 token 鎴愭湰
+  # 每次分析的最大帧数 (建议 5-8 张)
+  max_frames_per_call: 8  # 建议 4~10；过大可能增加时延与 token 成本
   batch:
     enabled: true
     max_size: 4
     flush_ms: 20
     max_inflight_batches: 2
-  # 浜虹墿涓讳綋棰勮繃婊わ紙杩涘叆 Vision API 涔嬪墠鎵ц锛?
+  # 人物主体预过滤（进入 Vision API 之前执行）
   person_subject_filter:
     enabled: true
-    # 浜虹墿钂欑増鍍忕礌鍗犳瘮 > area_threshold 鏃讹紝鐩存帴鍒ゅ畾涓?false 骞惰烦杩?Vision
+    # 人物蒙版像素占比 > area_threshold 时，直接判定为 false 并跳过 Vision
     area_threshold: 0.3
-    # segmentation_mask 鐨勪簩鍊煎寲闃堝€硷紙0~1锛?
+    # segmentation_mask 的二值化阈值（0~1）
     mask_threshold: 0.5
     high_conf_threshold: 0.8
     high_conf_min_area: 0.08
-    # 0: General锛?: Landscape锛圡ediaPipe SelfieSegmentation锛?
+    # 0: General，1: Landscape（MediaPipe SelfieSegmentation）
     model_selection: 1
-  # PP-Structure 鎷嗗浘棰勫鐞?
+  # PP-Structure 拆图预处理
   structure_preprocess:
     enabled: true
     # Windows + PaddleOCR2.x 下强制关闭 IR 优化，规避 fused_conv2d / OneDNN 崩溃
     force_disable_ir_optim: true
     # 命中 oneDNN/mkldnn 后端异常时，是否自动禁用 mkldnn 后重试一次 PP-Structure
     backend_compat_retry_enabled: true
-    # 缁撴瀯鍖栨媶鍥惧幓閲嶉槇鍊硷紙瓒婁綆瓒婂鏄撳悎骞讹級
+    # 结构化拆图去重阈值（越低越容易合并）
     dedup_similarity_threshold: 0.6
-    # bbox 閲嶅彔姣斾緥闃堝€硷細浜ら泦闈㈢Н/杈冨皬妗嗛潰绉?> 闃堝€兼椂杩涜 bbox 鍚堝苟
+    # bbox 重叠比例阈值：交集面积/较小框面积 > 阈值时进行 bbox 合并
     bbox_overlap_merge_threshold: 0.9
-    # (寰呮彁鍙?type 鐨?bbox 闈㈢Н鍜? / (鎵€鏈夎瘑鍒?type 鐨勫鎺ョ煩褰㈤潰绉? >= 闃堝€兼椂锛屽洖閫€鍘熷浘
+    # (待提取 type 的 bbox 面积和) / (所有识别 type 的外接矩形面积) >= 阈值时，回退原图
     skip_split_bbox_coverage_threshold: 0.8
 
-# 7. 瑙嗛涓嬭浇閰嶇疆
+# 7. 视频下载配置
 # -----------------------------------------------------------------------------
 download:
-  # 骞惰涓嬭浇閰嶇疆
+  # 并行下载配置
   parallel:
-    enabled: true     # 鏄惁鍚敤骞惰涓嬭浇
-    max_workers: 3     # 鏈€澶у苟鍙戠嚎绋嬫暟锛堝缓璁?2-4锛?
+    enabled: true     # 是否启用并行下载
+    max_workers: 3     # 最大并发线程数（建议 2-4）
 
-# 8. 缂撳瓨閰嶇疆
+# 8. 缓存配置
 # -----------------------------------------------------------------------------
 cache:
-  # 鏄惁鍚敤 SQLite 缂撳瓨灞?
-  enabled: true  # false 鍙伩鍏嶇紦瀛樿剰璇伙紝浣嗕細澧炲姞閲嶅璁＄畻
-  # 缂撳瓨鏁版嵁搴撹矾寰?(鐩稿浜庤緭鍑虹洰褰?
+  # 是否启用 SQLite 缓存层
+  enabled: true  # false 可避免缓存脏读，但会增加重复计算
+  # 缓存数据库路径 (相对于输出目录)
   db_path: ".cache/pipeline_cache.db"
-  # 缂撳瓨杩囨湡鏃堕棿 (澶╋紝0 = 姘镐笉杩囨湡)
-  expire_days: 30  # 0=姘镐笉杩囨湡锛涚敓浜у缓璁缃?7~30 骞宠　纾佺洏鍗犵敤
+  # 缓存过期时间 (天，0 = 永不过期)
+  expire_days: 30  # 0=永不过期；生产建议设置 7~30 平衡磁盘占用
 
-# 9. 娴佹按绾块厤缃?(V9 鏂板)
+# 9. 流水线配置 (V9 新增)
 # -----------------------------------------------------------------------------
 pipeline:
-  # 鏄惁鍚敤娴佹按绾块噸鍙?(杞綍瀹屼竴娈电珛鍗崇簿淇?
-  overlap_enabled: true  # true=闃舵閲嶅彔鎵ц锛屾彁楂樺悶鍚?
-  # 闃舵闂撮槦鍒楀ぇ灏?
-  queue_size: 10  # 寤鸿 5~50锛涜繃灏忎細闃诲锛岃繃澶т細鍗犵敤鏇村鍐呭瓨
-  # 澶氶泦瑙嗛鏈€澶у苟鍙戝鐞嗘暟
+  # 是否启用流水线重叠 (转录完一段立即精修)
+  overlap_enabled: true  # true=阶段重叠执行，提高吞吐
+  # 阶段间队列大小
+  queue_size: 10  # 建议 5~50；过小会阻塞，过大会占用更多内存
+  # 多集视频最大并发处理数
   max_concurrent_episodes: 2
   
-  # 澶氳棰戝苟琛屽鐞?(V10 - 鐢熶骇鑰?娑堣垂鑰呮ā鍨?
-  parallel_videos: true             # 鍚敤澶氳棰戝苟琛屽鐞?
-  download_workers: 5               # 涓嬭浇骞跺彂鏁?
-  transcription_concurrency: 1      # GPU 寤鸿 1锛汣PU 鍙寜鏈哄櫒璧勬簮澧炲ぇ
-  postprocess_workers: 8            # 鍚庡鐞嗗苟鍙戞暟 (绮句慨+鍒嗘瀽+鍚堟垚)
-  transcription_queue_size: 3       # 寰呰浆褰曢槦鍒楀閲?
+  # 多视频并行处理 (V10 - 生产者-消费者模型)
+  parallel_videos: true             # 启用多视频并行处理
+  download_workers: 5               # 下载并发数
+  transcription_concurrency: 1      # GPU 建议 1；CPU 可按机器资源增大
+  postprocess_workers: 8            # 后处理并发数 (精修+分析+合成)
+  transcription_queue_size: 3       # 待转录队列容量
 
-# 9. 鍐呭鍒嗙被閰嶇疆锛堝凡涓嬬嚎锛?
+# 9. 内容分类配置（已下线）
 # -----------------------------------------------------------------------------
-# 璇存槑锛歚content_classification` 褰撳墠鏃犱换浣曠敓浜т唬鐮佽鍙栥€?
-# 涓洪伩鍏嶈瀵间娇鐢ㄨ€咃紝鏈厤缃妭宸茬Щ闄ゃ€?
-# 鑻ュ悗缁仮澶嶈鑳藉姏锛岃鍏堝湪 docs/architecture/upgrade-log.md 璁板綍璁捐涓庡奖鍝嶏紝
-# 鍐嶆柊澧炴竻鏅扮殑鈥滃紑鍏?榛樿鍊?褰卞搷鑼冨洿/鍥為€€鏂规鈥濄€?
+# 说明：`content_classification` 当前无任何生产代码读取。
+# 为避免误导使用者，本配置节已移除。
+# 若后续恢复该能力，请先在 docs/architecture/upgrade-log.md 记录设计与影响，
+# 再新增清晰的“开关/默认值/影响范围/回退方案”。

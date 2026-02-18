@@ -316,7 +316,7 @@ vl_material_generation:
   api:
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
     model: "qwen3-vl-plus"
-    api_key: "sk-bee8fc770460451da1cb9d8d0ab5f7a6"  # 建议留空并通过环境变量注入
+    api_key: ""  # 建议留空并通过环境变量注入
     max_retries: 2
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
@@ -458,4 +458,3 @@ vl_material_generation:
     enabled: true  # 失败时自动回退到 GenerateMaterialRequests
     on_parse_error: true  # JSON 解析失败时回退
     on_api_error: true  # API 调用失败时回退
-

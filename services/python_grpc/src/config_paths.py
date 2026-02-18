@@ -63,8 +63,8 @@ def _collect_search_roots(anchor_file: Optional[str] = None) -> List[Path]:
     return roots
 
 
-def load_yaml_dict(path: Path) -> Dict[str, Any]:
-    """读取 YAML 文件并保证返回字典；失败时返回空字典。"""
+def _read_yaml_dict_once(path: Path) -> Dict[str, Any]:
+    """单次读取 YAML 文件并返回字典，不做本地覆盖扩展。"""
     if not path or not path.exists():
         return {}
     try:
@@ -74,6 +74,64 @@ def load_yaml_dict(path: Path) -> Dict[str, Any]:
     except Exception as exc:
         logger.warning(f"Failed to load yaml {path}: {exc}")
         return {}
+
+
+def _deep_merge_dict(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    深度合并字典：
+    - 字典节点递归合并；
+    - 标量/列表节点由 override 覆盖。
+    """
+    result: Dict[str, Any] = dict(base or {})
+    for key, value in (override or {}).items():
+        current = result.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            result[key] = _deep_merge_dict(current, value)
+        else:
+            result[key] = value
+    return result
+
+
+def _resolve_local_override_path(path: Path) -> Optional[Path]:
+    """
+    解析本地覆盖文件路径：
+    - config/video_config.yaml -> config/video_config.local.yaml
+    - config/module2_config.yaml -> config/module2_config.local.yaml
+    """
+    if not path:
+        return None
+    suffix = path.suffix.lower()
+    if suffix not in {".yaml", ".yml"}:
+        return None
+    # 已经是 local 文件时不再继续拼接，避免递归到 *.local.local.yaml
+    if ".local." in path.name.lower():
+        return None
+    return path.with_name(f"{path.stem}.local{path.suffix}")
+
+
+def load_yaml_dict(path: Path, with_local_override: bool = True) -> Dict[str, Any]:
+    """
+    读取 YAML 文件并保证返回字典；支持同目录本地覆盖文件自动合并。
+
+    设计说明：
+    - 目标是实现“远端配置可提交（无密钥）+ 本地可运行（有密钥）”；
+    - 约定本地覆盖文件命名为 `*.local.yaml`，且默认不入库；
+    - 本地覆盖存在时按深度合并覆盖主配置，缺失时保持原行为。
+    """
+    resolved = Path(path) if path is not None else None
+    base = _read_yaml_dict_once(resolved) if resolved is not None else {}
+    if not with_local_override or resolved is None:
+        return base
+
+    local_override_path = _resolve_local_override_path(resolved)
+    if local_override_path is None or not local_override_path.exists():
+        return base
+
+    local = _read_yaml_dict_once(local_override_path)
+    if not local:
+        return base
+    logger.info("Applying local config override: base=%s override=%s", resolved, local_override_path)
+    return _deep_merge_dict(base, local)
 
 
 def _resolve_explicit_file(path_value: Optional[str], roots: List[Path]) -> Optional[Path]:

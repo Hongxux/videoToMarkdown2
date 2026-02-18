@@ -3475,3 +3475,34 @@
   - Check: before submit, run compile plus quick static checks for bare `//` merged lines and odd quote counts.
   - Rollback: if text rendering issues recur, only roll back message/comment wording, not structural fixes or BOM-free policy.
 
+## 2026-02-18 配置密钥泄漏风险与 `video_config.yaml` 注释乱码修复
+- 现象：
+  - 主配置文件中存在真实 API Key/Token，直接提交会泄漏机密。
+  - `config/video_config.yaml` 注释存在明显乱码（Mojibake），默认 `Get-Content` 阅读困难，易误解配置含义。
+  - 需求约束是“一次提交”同时达成“远端无 key、本地不丢 key”。
+- 根因：
+  - 既有配置读取链路仅支持单文件读取，缺少“可提交主配置 + 本地机密覆盖”分层机制。
+  - 历史编码污染导致注释文本被错误转码，乱码已写入文件正文而非仅终端显示问题。
+- 修复措施：
+  - 文件：`services/python_grpc/src/config_paths.py`
+    - 新增 `*.local.yaml` 自动发现与深度合并能力（默认开启），支持本地主配置覆盖。
+  - 文件：`config/video_config.yaml`
+    - 基于历史干净版本恢复中文注释；
+    - 将 `ai.api_key`、`vision_ai.bearer_token` 置空；
+    - 保留当前版本新增配置项（`download_profile(s)`、`force_disable_ir_optim`、`backend_compat_retry_enabled`）。
+  - 文件：`config/module2_config.yaml`
+    - 将 `vl_material_generation.api.api_key` 置空。
+  - 文件：`services/python_grpc/src/server/tests/test_config_paths_local_override.py`
+    - 新增回归：验证本地覆盖合并生效、无本地文件时保持主配置行为。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固定执行 `test_config_paths_local_override.py`，防止覆盖链路回退成“仅读主配置”。
+  - 监控：
+    - 提交前对受管主配置执行密钥模式扫描（如 `sk-`、`bce-v3/`），命中即阻断。
+  - 校验：
+    - 保证 `config/*.local.yaml` 被 `.gitignore` 忽略；
+    - 提交前用 `Get-Content` 抽检 `config/video_config.yaml` 注释可读性，避免乱码再次入库。
+  - 回滚：
+    - 若本地覆盖机制引发兼容问题，可临时禁用 `with_local_override` 并回退到单文件读取；
+    - 但必须保留“主配置密钥为空”的安全基线。
+

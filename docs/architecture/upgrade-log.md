@@ -6283,3 +6283,52 @@
   - 代码层：将 `_build_img_desc_evidence_with_budget` 结果替换回全量 `evidence_lines`；
   - 策略层：放宽/移除 `_has_related_img_description` 的占位描述过滤规则；
   - 兼容性：补丁回放链路与 structured 阶段不受影响，可独立回滚。
+
+## 2026-02-18 配置分层：远端无密钥 + 本地保留密钥（`*.local.yaml` 覆盖）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 目标是“一次提交”同时满足：
+    - 远端仓库 `config/*.yaml` 不包含 API Key/Token；
+    - 本地运行仍可读取真实密钥，不要求每次手工改回配置。
+  - 既有方案把密钥直接写在主配置内，提交时容易泄漏；同时 `video_config.yaml` 注释出现乱码，影响可维护性。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 密钥属于环境/实例级机密，不应进入可共享静态配置；
+    - 主配置应可提交、可审查、可复制，机密应通过可忽略层按环境注入。
+  - 复用杠杆：
+    - 复用现有 `load_yaml_dict(...)` 配置读取入口，不新增第二套配置加载链路；
+    - 复用现有 `config/video_config.yaml` 与 `config/module2_config.yaml` 文件结构，仅增加同名 `.local.yaml` 约定；
+    - 复用 `.gitignore` 机密文件忽略策略（`config/*.local.yaml|yml`）保证本地覆盖不入库。
+- 架构决策：
+  - 决策1：在 `services/python_grpc/src/config_paths.py` 中为 `load_yaml_dict` 增加本地覆盖自动合并能力（默认开启）。
+  - 决策2：主配置文件保留空密钥占位，真实密钥放入本地覆盖文件：
+    - `config/video_config.local.yaml`
+    - `config/module2_config.local.yaml`
+  - 决策3：主配置注释恢复为可读中文，避免因编码污染导致误读或误改。
+- 调用链变化：
+  - 改造前：
+    - `load_yaml_dict(path)` 仅读取单个主配置文件；
+    - 主配置内若包含密钥，提交存在泄漏风险。
+  - 改造后：
+    - `load_yaml_dict(path, with_local_override=True)` 读取主配置后，自动尝试同目录 `*.local.yaml` 并深度合并；
+    - 主配置可安全提交（密钥为空），本地覆盖自动生效（密钥可用）。
+- 已落地改动：
+  - `services/python_grpc/src/config_paths.py`
+    - 新增 `_read_yaml_dict_once`、`_deep_merge_dict`、`_resolve_local_override_path`；
+    - `load_yaml_dict` 支持本地覆盖自动合并。
+  - `config/video_config.yaml`
+    - 恢复中文注释可读性；
+    - `ai.api_key` 与 `vision_ai.bearer_token` 置空；
+    - 保留最新配置项（如 `download_profile(s)`、`structure_preprocess` 兼容开关）。
+  - `config/module2_config.yaml`
+    - `vl_material_generation.api.api_key` 置空。
+  - `services/python_grpc/src/server/tests/test_config_paths_local_override.py`
+    - 新增覆盖层合并回归测试。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/server/tests/test_config_paths_local_override.py`（通过）
+  - 关键字段人工校验：
+    - 主配置密钥字段为空；
+    - `config/*.local.yaml` 中本地密钥仍存在且不入库。
+- 回滚方案：
+  - 代码层：在 `load_yaml_dict(..., with_local_override=False)` 关闭覆盖读取；
+  - 配置层：若需暂时单文件运行，可把本地覆盖值回填主配置（不推荐，且提交前必须清空）。
