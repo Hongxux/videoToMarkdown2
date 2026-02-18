@@ -872,10 +872,29 @@ def apply_external_materials(
                 unit.unit_id,
                 len(fallback_screenshots),
             )
-            for path_item in fallback_screenshots:
+            enable_ordered_request_fallback = (
+                len(unit_screenshot_requests) > 0
+                and len(unit_screenshot_requests) == len(fallback_screenshots)
+            )
+            for fallback_idx, path_item in enumerate(fallback_screenshots):
                 screenshot_stem = Path(path_item).stem
                 screenshot_id = f"{unit.unit_id}/{screenshot_stem}"
-                screenshot_candidates.append((path_item, screenshot_stem, screenshot_id, None))
+                candidate_label = screenshot_stem
+                candidate_sid = screenshot_id
+                candidate_ts: Optional[float] = None
+                matched_req: Optional[ScreenshotRequest] = None
+                if enable_ordered_request_fallback and fallback_idx < len(unit_screenshot_requests):
+                    matched_req = unit_screenshot_requests[fallback_idx]
+                    candidate_label = str(getattr(matched_req, "label", "") or screenshot_stem)
+                    candidate_sid = str(getattr(matched_req, "screenshot_id", "") or screenshot_id)
+                    try:
+                        candidate_ts = float(getattr(matched_req, "timestamp_sec"))
+                    except Exception:
+                        candidate_ts = None
+                screenshot_candidates.append((path_item, candidate_label, candidate_sid, candidate_ts))
+                if matched_req is not None:
+                    for alias_id in _build_id_aliases(candidate_sid, path_item):
+                        request_meta_by_id.setdefault(alias_id, matched_req)
 
     def _resolve_request_meta_for_candidate(sid_text: str, raw_path: str) -> Optional[ScreenshotRequest]:
         for alias_id in _build_id_aliases(str(sid_text or ""), str(raw_path or "")):

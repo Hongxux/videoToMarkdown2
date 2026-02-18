@@ -3235,9 +3235,9 @@
   - 移动端任务列表中，部分任务标题直接显示为 storage 目录名（如哈希目录），可读性差且无法反映视频来源。
   - 新提交任务在尚未拿到元数据标题时，前端没有稳定地显示 BV 号或链接信息，标题体验跳变明显。
 - 根因：
-  - 后端 `TaskView -> toListItem` 仅返回 `title`，未显式区分“元数据标题（domain-视频名）”与“缓存/回退标题（目录名、文件名）”。
-  - 前端渲染 `buildTaskItemHtml` 直接使用 `task.title`，导致 storage 回退标题直接暴露。
-  - 任务列表动效只覆盖入场/处理中/完成，缺少“标题从 BV/链接切换到 domain-视频名”的视觉反馈。
+  - 下载成功后，任务指标的 `video_path` 被写成本地落盘路径；历史任务进入 storage 缓存后，原始 BV/链接语义丢失，标题链路回退为目录名/文件名。
+  - 后端展示名解析逻辑分散在 `MobileMarkdownController` 与 `StorageTaskCacheService`，策略漂移后难以保证 runtime 与 storage 一致。
+  - 缓存层未覆盖 `input_video_url/video_url/source_url/original_video_url` 的兼容优先级，历史数据字段变体会触发目录名回退。
 - 修复措施：
   - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
     - `TaskView` 新增 `metaTitle` 字段，用于明确承载来自 `mobile_task_meta.json.taskTitle` 的标题。
@@ -3251,15 +3251,92 @@
   - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
     - 新增 `.fx-title-highlight` 样式，复用现有 `highlightPulse` 动画，在标题替换瞬间给出高亮反馈。
     - `prefers-reduced-motion` 下关闭该动画，保持可访问性一致。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/TaskDisplayNameResolver.java`
+    - 新增统一展示名解析器，统一处理 `BV`、HTTP 链接、本地路径、fallback 任务号。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 指标文件新增 `input_video_url`，持久化保留原始输入来源，避免被 `video_path`（落盘路径）覆盖。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+    - 读取指标时按 `input_video_url -> video_url -> source_url -> original_video_url -> video_path` 解析来源；
+    - 标题推导改为复用 `TaskDisplayNameResolver`，保证 runtime/storage 同策略。
+  - 测试：
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/StorageTaskCacheServiceTest.java`
+    - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/TaskDisplayNameResolverTest.java`
 - 验证方式：
   - 手动链路：
     - 提交 BV/链接任务后，列表先显示 BV 或链接摘要；
     - 元数据写入 `taskTitle` 后，列表自动切换为 domain-视频名；
     - 切换瞬间出现标题高亮动画，首次水合渲染不触发误高亮。
-  - 构建验证：
-    - `mvn -pl services/java-orchestrator -DskipTests compile`
+  - 自动化验证（设计与静态）：
+    - 新增 `StorageTaskCacheService` 字段优先级回归用例，覆盖 `input_video_url/video_url/source_url/original_video_url/video_path`。
+    - 新增统一展示名解析器回归用例，覆盖 `BV`、本地路径、fallback 行为。
+  - 构建验证（受限说明）：
+    - 当前沙箱网络限制导致 Maven 无法拉取父 POM（`Permission denied: getsockopt`），未能在本环境完成完整编译。
 - 预防方案（测试/监控/校验/回滚）：
   - 测试：补充任务列表标题解析函数的用例，覆盖 `metaTitle`、BV/链接、storageKey 回退的优先级行为。
   - 监控：在前端埋点记录“标题来源类型”（meta/video/title/taskId）分布，监测目录名回退占比异常。
   - 校验：提交前检查 `/api/mobile/tasks` 返回体是否包含 `metaTitle` 且前端渲染链路已消费。
   - 回滚：若前端出现兼容问题，可先回退 `resolveTaskCardTitle` 到旧逻辑，同时保留后端 `metaTitle` 字段不破坏 API 兼容。
+
+## 2026-02-18 PP-Structure 在 Windows 触发 oneDNN fused_conv2d 崩溃并降级
+- 现象：
+  - 结构化预处理日志出现：
+    - `PP-Structure disabled after backend runtime error`
+    - `NotFoundError: OneDnnContext does not have the input Filter [operator < fused_conv2d > error]`
+  - 首张图触发异常后，后续图片全部进入 paddlex fallback，无法稳定使用 PP-Structure 主链路。
+- 根因：
+  - PaddleOCR 2.x 的 `tools/infer/utility.py` 在推理配置里硬编码 `switch_ir_optim(True)`，Windows + 当前 Paddle/oneDNN 组合下会触发崩溃路径。
+  - 运行环境同时存在 user-site 包污染，`numpy/protobuf/paddleocr` 可能被 `AppData\\Roaming\\Python` 抢占，放大不确定性。
+- 修复措施：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 增加 `_patch_ppstructure_ir_optim_if_needed()`，在 Windows 上一次性 monkeypatch `inference.Config.switch_ir_optim` 强制为 `False`。
+    - 增加配置项 `force_disable_ir_optim`，并在引擎初始化时显式传递 `ir_optim=False`。
+  - `services/python_grpc/src/server/runtime_env.py`
+    - 增加 `sanitize_user_site_packages()`，默认移除 user-site 路径并设置 `PYTHONNOUSERSITE=1`。
+  - 启动入口接入：
+    - `apps/grpc-server/main.py`
+    - `services/python_grpc/src/server/grpc_service_impl.py`
+  - 配置接入：
+    - `config/video_config.yaml` 增加 `vision_ai.structure_preprocess.force_disable_ir_optim: true`。
+- 验证结果：
+  - 依赖预检通过：`apps/grpc-server/main.py --check-deps --debug-imports`。
+  - 功能探针显示 `engine=PPStructure`、`engine_init_err=None`、`blocks_len=1`，不再自动降级。
+  - 对照实验（关闭补丁）可稳定复现 `runtime_backend_error:RuntimeError` 并落入 paddlex fallback。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留结构化预处理回归，重点覆盖“后端异常后禁用/重试/回退”分支；
+    - 启动链路增加 user-site 清理 smoke 验证，避免依赖漂移复发。
+  - 监控：
+    - 监控 `runtime_backend_error` 与 `PP-Structure disabled` 日志计数，出现连续增长立即告警；
+    - 区分主链路命中率（PP-Structure）与 fallback 命中率（paddlex）。
+  - 校验：
+    - 发布前执行 `--check-deps` 与单图探针，确认 `engine_init_err` 为空；
+    - 若变更 Paddle/PaddleOCR 版本，必须重新做 Windows 兼容回归。
+  - 回滚：
+    - 配置回滚 `force_disable_ir_optim=false`；
+    - 必要时仅保留 paddlex fallback，保障可用性优先。
+
+## 2026-02-18 PP-Structure text-only 删图后 timestamp_sec 丢失（增量补全证据缺失）
+- 现象：
+  - `PP-Structure` 未命中目标 type 时，流程按预期会删除原图并保留 `img_description`，但部分 `screenshot_items.timestamp_sec` 被写成 `null`。
+  - 增量补全阶段要求至少有一项对齐证据（`timestamp_sec/sentence_id/sentence_text`），时间戳丢失会导致这类图片描述不参与补全。
+  - 部分链路使用 `should_included`（历史字段）而非 `should_include`，字段不一致会让筛选行为不稳定。
+- 根因：
+  - `material_flow._apply_external_materials` 在 unit-scan fallback 分支中，候选图默认写入 `request_ts=None`，仅依赖 `sid` 精确命中请求元信息。
+  - 当 fallback 生成的 `sid` 与原始请求 `screenshot_id` 不一致时，元信息回填失败，`timestamp_sec` 最终落空。
+  - `MarkdownEnhancer` 的 includable 判定只识别 `should_include`，未兼容 `should_included`。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - fallback 分支新增“同数量顺序回填”策略：当 fallback 文件数与请求数一致时，按顺序回填 `label/sid/timestamp_sec`。
+    - 继续复用 `_resolve_request_meta_for_candidate` 的单请求兜底逻辑，确保命名偏差时仍可回填时间戳。
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `_is_screenshot_item_includable` 新增 `should_included` 兼容解析。
+    - `_has_explicit_screenshot_exclusion` 同步识别 `should_included`，确保筛选链路一致。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+    - 新增 `test_markdown_enhancer_skips_vision_false_screenshot_items_should_included_alias`。
+    - 新增 `test_apply_external_materials_text_only_fallback_candidates_recover_ordered_request_timestamps`。
+    - 增强 augment 用例，验证 `should_included=true/false` 两类都进入增量补全输入，且 `timestamp_sec` 完整透传。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：对 text-only 分支固定断言 `img_description` 与 `timestamp_sec` 同时存在，且原图已删除。
+  - 监控：统计 `excluded_no_timestamp` 映射状态，若异常升高优先排查 fallback 回填链路。
+  - 校验：发布前抽查 `materials.screenshot_items` 与 augment 输入，确认 `should_include/should_included` 均能被一致处理。
+  - 回滚：若顺序回填引入误配，可先关闭“同数量顺序回填”，保留别名+单请求兜底策略。

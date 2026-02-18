@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 from services.python_grpc.src.content_pipeline.markdown_enhancer import (
@@ -503,6 +504,19 @@ def test_markdown_enhancer_skips_vision_false_screenshot_items():
     assert filtered[0]["img_id"] == "img2"
 
 
+def test_markdown_enhancer_skips_vision_false_screenshot_items_should_included_alias():
+    enhancer = MarkdownEnhancer()
+    filtered = enhancer._filter_screenshot_items(
+        [
+            {"img_id": "img1", "img_path": "a.png", "should_included": False},
+            {"img_id": "img2", "img_path": "b.png", "should_included": True},
+        ]
+    )
+
+    assert len(filtered) == 1
+    assert filtered[0]["img_id"] == "img2"
+
+
 def test_markdown_enhancer_drops_paths_when_all_items_are_vision_false():
     enhancer = MarkdownEnhancer()
     filtered_items = enhancer._filter_screenshot_items(
@@ -585,76 +599,169 @@ def test_apply_external_materials_passes_upstream_ocr_hint_to_validator(tmp_path
     assert unit.materials.screenshot_items[0].get("img_description") == "ocr reused"
 
 
-def test_apply_external_materials_text_only_fallback_candidate_recovers_request_timestamp(tmp_path):
-    pipeline, output_dir = _build_pipeline(tmp_path)
-    assets_dir = output_dir / "assets"
-    unit_dir = assets_dir / "SUX08"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    shot_path = unit_dir / "SUX08_actual_name.png"
-    shot_path.write_bytes(b"img")
+def test_apply_external_materials_text_only_fallback_candidate_recovers_request_timestamp():
+    test_root = Path("tmp_manual_phase2b_ts_fix_single")
+    if test_root.exists():
+        shutil.rmtree(test_root, ignore_errors=True)
+    test_root.mkdir(parents=True, exist_ok=True)
+    try:
+        pipeline, output_dir = _build_pipeline(test_root)
+        assets_dir = output_dir / "assets"
+        unit_dir = assets_dir / "SUX08"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        shot_path = unit_dir / "SUX08_actual_name.png"
+        shot_path.write_bytes(b"img")
 
-    class _TextOnlyResult:
-        should_include = False
-        reason = "text-only"
-        img_description = "ocr reused"
+        class _TextOnlyResult:
+            should_include = False
+            reason = "text-only"
+            img_description = "ocr reused"
 
-    class _FallbackTextOnlyValidator:
-        def extract_structured_screenshots(self, _image_path: str, source_id: str = "", timestamp_sec=None):
-            return []
+        class _FallbackTextOnlyValidator:
+            def extract_structured_screenshots(self, image_path: str, source_id: str = "", timestamp_sec=None):
+                return []
 
-        def dedupe_structured_candidates_keep_latest(self, candidates):
-            return candidates
+            def dedupe_structured_candidates_keep_latest(self, candidates):
+                return candidates
 
-        def validate(
-            self,
-            _image_path: str,
-            ocr_text: str = "",
-            skip_duplicate_check: bool = False,
-        ):
-            return _TextOnlyResult()
+            def validate(
+                self,
+                _image_path: str,
+                ocr_text: str = "",
+                skip_duplicate_check: bool = False,
+            ):
+                return _TextOnlyResult()
 
-    pipeline._concrete_validator = _FallbackTextOnlyValidator()
+        pipeline._concrete_validator = _FallbackTextOnlyValidator()
 
-    unit = SemanticUnit(
-        unit_id="SUX08",
-        knowledge_type="concrete",
-        knowledge_topic="Fallback Timestamp",
-        full_text="demo",
-        source_paragraph_ids=[],
-        source_sentence_ids=[],
-        start_sec=0.0,
-        end_sec=8.0,
-    )
+        unit = SemanticUnit(
+            unit_id="SUX08",
+            knowledge_type="concrete",
+            knowledge_topic="Fallback Timestamp",
+            full_text="demo",
+            source_paragraph_ids=[],
+            source_sentence_ids=[],
+            start_sec=0.0,
+            end_sec=8.0,
+        )
 
-    requests = MaterialRequests(
-        screenshot_requests=[
-            ScreenshotRequest(
-                screenshot_id="SUX08/route_head",
-                timestamp_sec=9.9,
-                label="head",
-                semantic_unit_id="SUX08",
-            )
-        ],
-        clip_requests=[],
-        action_classifications=[],
-    )
+        requests = MaterialRequests(
+            screenshot_requests=[
+                ScreenshotRequest(
+                    screenshot_id="SUX08/route_head",
+                    timestamp_sec=9.9,
+                    label="head",
+                    semantic_unit_id="SUX08",
+                )
+            ],
+            clip_requests=[],
+            action_classifications=[],
+        )
 
-    pipeline._apply_external_materials(
-        unit=unit,
-        screenshots_dir=str(assets_dir),
-        clips_dir=str(assets_dir),
-        material_requests=requests,
-    )
+        pipeline._apply_external_materials(
+            unit=unit,
+            screenshots_dir=str(assets_dir),
+            clips_dir=str(assets_dir),
+            material_requests=requests,
+        )
 
-    assert unit.materials is not None
-    assert unit.materials.screenshot_paths == []
-    assert unit.materials.screenshot_items
-    item = unit.materials.screenshot_items[0]
-    assert item.get("should_include") is False
-    assert item.get("img_description") == "ocr reused"
-    assert float(item.get("timestamp_sec")) == 9.9
-    assert item.get("img_path") == str(shot_path.resolve())
-    assert not shot_path.exists()
+        assert unit.materials is not None
+        assert unit.materials.screenshot_paths == []
+        assert unit.materials.screenshot_items
+        item = unit.materials.screenshot_items[0]
+        assert item.get("should_include") is False
+        assert item.get("img_description") == "ocr reused"
+        assert float(item.get("timestamp_sec")) == 9.9
+        assert item.get("img_path") == str(shot_path.resolve())
+        assert not shot_path.exists()
+    finally:
+        shutil.rmtree(test_root, ignore_errors=True)
+
+
+def test_apply_external_materials_text_only_fallback_candidates_recover_ordered_request_timestamps():
+    test_root = Path("tmp_manual_phase2b_ts_fix_multi")
+    if test_root.exists():
+        shutil.rmtree(test_root, ignore_errors=True)
+    test_root.mkdir(parents=True, exist_ok=True)
+    try:
+        pipeline, output_dir = _build_pipeline(test_root)
+        assets_dir = output_dir / "assets"
+        unit_dir = assets_dir / "SUX09"
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        shot_a = unit_dir / "SUX09_a.png"
+        shot_b = unit_dir / "SUX09_b.png"
+        shot_a.write_bytes(b"img-a")
+        shot_b.write_bytes(b"img-b")
+
+        class _TextOnlyResult:
+            should_include = False
+            reason = "text-only"
+            img_description = "ocr reused"
+
+        class _FallbackTextOnlyValidator:
+            def extract_structured_screenshots(self, image_path: str, source_id: str = "", timestamp_sec=None):
+                return []
+
+            def dedupe_structured_candidates_keep_latest(self, candidates):
+                return candidates
+
+            def validate(
+                self,
+                _image_path: str,
+                ocr_text: str = "",
+                skip_duplicate_check: bool = False,
+            ):
+                return _TextOnlyResult()
+
+        pipeline._concrete_validator = _FallbackTextOnlyValidator()
+
+        unit = SemanticUnit(
+            unit_id="SUX09",
+            knowledge_type="concrete",
+            knowledge_topic="Fallback Timestamp Multi",
+            full_text="demo",
+            source_paragraph_ids=[],
+            source_sentence_ids=[],
+            start_sec=0.0,
+            end_sec=8.0,
+        )
+
+        requests = MaterialRequests(
+            screenshot_requests=[
+                ScreenshotRequest(
+                    screenshot_id="SUX09/route_head",
+                    timestamp_sec=1.1,
+                    label="head",
+                    semantic_unit_id="SUX09",
+                ),
+                ScreenshotRequest(
+                    screenshot_id="SUX09/route_tail",
+                    timestamp_sec=2.2,
+                    label="tail",
+                    semantic_unit_id="SUX09",
+                ),
+            ],
+            clip_requests=[],
+            action_classifications=[],
+        )
+
+        pipeline._apply_external_materials(
+            unit=unit,
+            screenshots_dir=str(assets_dir),
+            clips_dir=str(assets_dir),
+            material_requests=requests,
+        )
+
+        assert unit.materials is not None
+        assert unit.materials.screenshot_paths == []
+        assert len(unit.materials.screenshot_items) == 2
+        timestamps = sorted(float(item.get("timestamp_sec")) for item in unit.materials.screenshot_items)
+        assert timestamps == [1.1, 2.2]
+        assert all(item.get("should_include") is False for item in unit.materials.screenshot_items)
+        assert not shot_a.exists()
+        assert not shot_b.exists()
+    finally:
+        shutil.rmtree(test_root, ignore_errors=True)
 
 
 def test_markdown_enhancer_augment_items_keep_excluded_screenshot_descriptions():
@@ -676,15 +783,24 @@ def test_markdown_enhancer_augment_items_keep_excluded_screenshot_descriptions()
                 "img_id": "SUX07_img_99",
                 "img_path": "assets/SUX07_img_99.png",
                 "img_description": "excluded desc for augment",
-                "should_include": False,
+                "should_included": False,
                 "timestamp_sec": 3.2,
-            }
+            },
+            {
+                "img_id": "SUX07_img_98",
+                "img_path": "assets/SUX07_img_98.png",
+                "img_description": "included desc for augment",
+                "should_included": True,
+                "timestamp_sec": 4.1,
+            },
         ],
     )
 
     augment_items = enhancer._build_augment_image_items(section)
 
-    assert len(augment_items) == 1
-    assert augment_items[0]["img_id"] == "SUX07_img_99"
-    assert augment_items[0]["img_description"] == "excluded desc for augment"
-    assert float(augment_items[0]["timestamp_sec"]) == 3.2
+    assert len(augment_items) == 2
+    by_id = {item["img_id"]: item for item in augment_items}
+    assert by_id["SUX07_img_99"]["img_description"] == "excluded desc for augment"
+    assert float(by_id["SUX07_img_99"]["timestamp_sec"]) == 3.2
+    assert by_id["SUX07_img_98"]["img_description"] == "included desc for augment"
+    assert float(by_id["SUX07_img_98"]["timestamp_sec"]) == 4.1

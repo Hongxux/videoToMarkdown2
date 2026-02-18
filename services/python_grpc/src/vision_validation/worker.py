@@ -546,7 +546,7 @@ def _is_subtitle_like_region(region: Dict[str, Any], image_w: int, image_h: int)
     if w <= 0 or h <= 0:
         return False
 
-    bottom_band_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_BOTTOM_RATIO", 0.22, 0.05, 0.45)
+    bottom_band_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_BOTTOM_RATIO", 0.33, 0.05, 0.45)
     min_width_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_MIN_WIDTH_RATIO", 0.28, 0.1, 0.9)
     max_height_ratio = _get_env_float("CV_ROUTE_OCR_SUBTITLE_MAX_HEIGHT_RATIO", 0.14, 0.03, 0.4)
 

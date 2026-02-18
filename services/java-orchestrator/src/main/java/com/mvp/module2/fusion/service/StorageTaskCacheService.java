@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -169,7 +170,8 @@ public class StorageTaskCacheService {
         newTask.storageKey = key;
         newTask.taskRootDir = taskDir;
         newTask.title = deriveStorageTitle(taskDir, metadata);
-        newTask.videoUrl = metadata.videoPath != null ? metadata.videoPath : "";
+        String sourceVideoUrl = firstNonBlank(metadata.inputVideoUrl, metadata.videoPath);
+        newTask.videoUrl = sourceVideoUrl != null ? sourceVideoUrl : "";
         newTask.createdAt = metadata.generatedAt != null ? metadata.generatedAt : Instant.ofEpochMilli(dirModified);
         newTask.completedAt = metadata.generatedAt;
         newTask.dirLastModified = dirModified;
@@ -241,6 +243,7 @@ public class StorageTaskCacheService {
                     metadata.success = root.get("success").asBoolean(false);
                 }
                 if (root.has("generated_at")) metadata.generatedAt = parseInstant(root.get("generated_at").asText());
+                metadata.inputVideoUrl = resolveInputVideoUrl(root);
                 if (root.has("video_path")) metadata.videoPath = trimToNull(root.get("video_path").asText());
                 if (root.has("result_markdown_path")) metadata.resultMarkdownPath = trimToNull(root.get("result_markdown_path").asText());
             } catch (Exception e) {
@@ -291,13 +294,44 @@ public class StorageTaskCacheService {
     }
 
     private String deriveStorageTitle(Path taskDir, StorageMetadata meta) {
-        if (meta.videoPath != null) {
-            try {
-                Path p = Paths.get(meta.videoPath).getFileName();
-                if (p != null) return p.toString();
-            } catch (Exception e) {}
+        String sourceVideoUrl = firstNonBlank(meta.inputVideoUrl, meta.videoPath);
+        return TaskDisplayNameResolver.resolveTaskDisplayTitle(sourceVideoUrl, taskDir.getFileName().toString());
+    }
+
+    private String resolveInputVideoUrl(JsonNode root) {
+        if (root == null) {
+            return null;
         }
-        return taskDir.getFileName().toString();
+        String direct = jsonText(root, "input_video_url");
+        if (direct != null) {
+            return direct;
+        }
+        // 兼容历史写法，避免旧任务因字段差异回退到目录名映射。
+        return firstNonBlank(
+                jsonText(root, "video_url"),
+                jsonText(root, "source_url"),
+                jsonText(root, "original_video_url")
+        );
+    }
+
+    private String jsonText(JsonNode root, String field) {
+        if (root == null || field == null || field.isBlank() || !root.has(field)) {
+            return null;
+        }
+        return trimToNull(root.get(field).asText());
+    }
+
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            String normalized = trimToNull(value);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        return null;
     }
     
     private Instant parseInstant(String s) {
@@ -353,6 +387,7 @@ public class StorageTaskCacheService {
         boolean hasSuccessFlag;
         boolean success;
         Instant generatedAt;
+        String inputVideoUrl;
         String videoPath;
         String resultMarkdownPath;
     }

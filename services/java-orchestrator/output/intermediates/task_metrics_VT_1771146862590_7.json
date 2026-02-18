@@ -1,0 +1,64 @@
+{
+  "version" : "1.0",
+  "generated_at" : "2026-02-15T09:14:27.257898900Z",
+  "task_id" : "VT_1771146862590_7",
+  "success" : false,
+  "error_message" : "Download failed: yt-dlp 下载失败：目标站点当前可用流与本地格式筛选条件不匹配。 已建议使用更宽松的格式选择策略（bestvideo+bestaudio/best）。 原始错误: \u001B[0;31mERROR:\u001B[0m [youtube] YFjfBk8HI5o: Requested format is not available. Use --list-formats for a list of available formats",
+  "video_path" : "https://www.youtube.com/watch?v=YFjfBk8HI5o",
+  "output_dir" : "./output",
+  "result_markdown_path" : "",
+  "result_json_path" : "",
+  "stage_timings_ms" : {
+    "prepare_local_video" : 0,
+    "total_pipeline" : 4663
+  },
+  "flow_flags" : {
+    "downloaded_from_url" : false,
+    "used_vl_flow" : false,
+    "used_legacy_flow" : false
+  },
+  "llm_cost" : {
+    "currency" : "USD",
+    "pricing_basis" : "per_1m_tokens",
+    "vl" : {
+      "model" : "qwen3-vl-plus",
+      "input_tokens" : 0,
+      "output_tokens" : 0,
+      "total_tokens" : 0,
+      "token_source" : "",
+      "qwen3_vl_plus_cost" : {
+        "input_cost_usd" : 0.0,
+        "output_cost_usd" : 0.0,
+        "total_cost_usd" : 0.0
+      },
+      "ernie_4_5_turbo_vl_cost_range" : {
+        "input_cost_usd_min" : 0.0,
+        "input_cost_usd_max" : 0.0,
+        "output_cost_usd_min" : 0.0,
+        "output_cost_usd_max" : 0.0,
+        "total_cost_usd_min" : 0.0,
+        "total_cost_usd_max" : 0.0
+      },
+      "selected_pricing_model" : "qwen3-vl-plus",
+      "selected_cost_usd_min" : 0.0,
+      "selected_cost_usd_max" : 0.0
+    },
+    "deepseek_chat" : {
+      "model" : "deepseek-chat",
+      "input_tokens_uncached" : 0,
+      "input_tokens_cached" : 0,
+      "output_tokens" : 0,
+      "total_calls" : 0,
+      "cached_calls" : 0,
+      "token_source" : "",
+      "input_uncached_cost_usd" : 0.0,
+      "input_cached_cost_usd" : 0.0,
+      "output_cost_usd" : 0.0,
+      "total_cost_usd" : 0.0
+    },
+    "total_cost_usd_min" : 0.0,
+    "total_cost_usd_max" : 0.0,
+    "total_cost_usd" : 0.0,
+    "coverage_note" : "DeepSeek cost is computed from persisted traces (phase2b_llm_trace/deepseek_audit) only."
+  }
+}

@@ -479,6 +479,8 @@ class MarkdownEnhancer:
             return False
         if "should_include" in item:
             return self._parse_bool(item.get("should_include"), True)
+        if "should_included" in item:
+            return self._parse_bool(item.get("should_included"), True)
         if "has_concrete_knowledge" in item:
             return self._parse_bool(item.get("has_concrete_knowledge"), True)
         if "has_concrete" in item:
@@ -505,7 +507,7 @@ class MarkdownEnhancer:
                 continue
             has_gate_field = any(
                 field_name in item
-                for field_name in ("should_include", "has_concrete_knowledge", "has_concrete")
+                for field_name in ("should_include", "should_included", "has_concrete_knowledge", "has_concrete")
             )
             if has_gate_field and not self._is_screenshot_item_includable(item):
                 return True

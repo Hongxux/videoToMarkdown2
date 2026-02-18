@@ -159,6 +159,7 @@ public class VideoProcessingOrchestrator {
         long startTime = System.currentTimeMillis();
         String metricsOutputDir = outputDir;
         String metricsVideoPath = videoUrl;
+        String metricsInputVideoUrl = videoUrl;
         Map<String, Long> stageTimingsMs = new LinkedHashMap<>();
         Map<String, Object> flowFlags = new LinkedHashMap<>();
 
@@ -339,7 +340,15 @@ public class VideoProcessingOrchestrator {
         } finally {
             result.processingTimeMs = System.currentTimeMillis() - startTime;
             stageTimingsMs.put("total_pipeline", result.processingTimeMs);
-            writeTaskMetricsReport(taskId, metricsOutputDir, metricsVideoPath, result, stageTimingsMs, flowFlags);
+            writeTaskMetricsReport(
+                    taskId,
+                    metricsOutputDir,
+                    metricsVideoPath,
+                    metricsInputVideoUrl,
+                    result,
+                    stageTimingsMs,
+                    flowFlags
+            );
         }
         return result;
     }
@@ -366,6 +375,7 @@ public class VideoProcessingOrchestrator {
             String taskId,
             String outputDir,
             String videoPath,
+            String inputVideoUrl,
             ProcessingResult result,
             Map<String, Long> stageTimingsMs,
             Map<String, Object> flowFlags
@@ -388,6 +398,7 @@ public class VideoProcessingOrchestrator {
             payload.put("task_id", taskId);
             payload.put("success", result != null && result.success);
             payload.put("error_message", result != null ? (result.errorMessage != null ? result.errorMessage : "") : "");
+            payload.put("input_video_url", inputVideoUrl != null ? inputVideoUrl : "");
             payload.put("video_path", videoPath != null ? videoPath : "");
             payload.put("output_dir", outputDir);
             payload.put("result_markdown_path", result != null ? (result.markdownPath != null ? result.markdownPath : "") : "");

@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.common.VideoInputNormalizer;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
@@ -35,7 +36,6 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -1202,29 +1202,7 @@ public class MobileMarkdownController {
     }
 
     private String deriveTaskTitle(String videoUrl, String fallbackTaskId) {
-        if (videoUrl == null || videoUrl.isBlank()) {
-            return fallbackTaskId != null ? fallbackTaskId : "未命名任务";
-        }
-        try {
-            if (videoUrl.startsWith("http://") || videoUrl.startsWith("https://")) {
-                URI uri = URI.create(videoUrl);
-                String path = uri.getPath();
-                if (path != null && !path.isBlank()) {
-                    Path fileName = Paths.get(path).getFileName();
-                    if (fileName != null && !fileName.toString().isBlank()) {
-                        return fileName.toString();
-                    }
-                }
-            }
-            Path local = Paths.get(videoUrl);
-            Path fileName = local.getFileName();
-            if (fileName != null && !fileName.toString().isBlank()) {
-                return fileName.toString();
-            }
-            return videoUrl;
-        } catch (Exception ignored) {
-            return videoUrl;
-        }
+        return TaskDisplayNameResolver.resolveTaskDisplayTitle(videoUrl, fallbackTaskId);
     }
 
     private String instantToText(Instant instant) {

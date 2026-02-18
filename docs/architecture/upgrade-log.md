@@ -2,6 +2,63 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-18 增量截图 OCR 升级：区域识别中英兼容 + 疑似字幕排除（底部比例默认 0.33）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 增量截图判定原本依赖整图 OCR token，底部中英字幕会被当作“新增文本”，导致截图去重偏离“界面信息增量”目标。
+  - 线上样例显示整图 Tesseract 在当前环境下中文识别稳定性不足，存在“英文可读、中文丢失或乱码”的风险。
+- 第一性原理与复用杠杆：
+  - 第一性原理：增量截图判定应度量“界面语义变化”，而不是“视频字幕变化”；因此应先做区域识别再剔除字幕候选。
+  - 复用杠杆1：复用既有 `vision_validation.worker` 增量链路（`_extract_ocr_tokens -> _filter_incremental_screenshots`），不新建并行判定管线。
+  - 复用杠杆2：复用既有 ROI 底部裁切能力（`_get_route_roi`），与本次字幕区域过滤形成双层抑制。
+  - 复用杠杆3：复用 `OCRExtractor(lang=\"chi_sim+eng\")` 回退能力，保持与当前调用链兼容。
+- 架构决策：
+  - 决策1：增量截图 OCR 由“整图优先”升级为“区域优先”：
+    - 优先 `RapidOCR`（`CV_ROUTE_OCR_ENGINE=rapidocr/auto`）；
+    - 次选 `PaddleOCR`；
+    - 失败时回退 `OCRExtractor.extract_text_regions_from_frame` 与整图 OCR。
+  - 决策2：在区域文本聚合前引入疑似字幕过滤规则 `_is_subtitle_like_region`，按“靠近底部 + 横向较宽 + 行高较矮”判定并剔除。
+  - 决策3：字幕底部判定比例 `CV_ROUTE_OCR_SUBTITLE_BOTTOM_RATIO` 默认值提升为 `0.33`，增强底部字幕抑制力度。
+  - 决策4：Tesseract 回退链路统一按 `CV_ROUTE_OCR_LANG`（默认 `chi_sim+eng`）初始化，保证中英兼容基线。
+- 调用链与决策链变化：
+  - 改造前：
+    - `run_select_screenshots_for_range_task`/`run_coarse_fine_screenshot_task`
+    - -> `_extract_ocr_tokens`（整图 OCR）
+    - -> `_filter_incremental_screenshots`
+  - 改造后：
+    - `run_select_screenshots_for_range_task`/`run_coarse_fine_screenshot_task`
+    - -> `_extract_ocr_tokens`
+    - -> `_extract_ocr_regions_from_crop`（RapidOCR/Paddle 优先）
+    - -> `_is_subtitle_like_region` 过滤
+    - -> token 聚合
+    - -> `_filter_incremental_screenshots`
+- 已落地改动：
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - 新增/复用：`_get_region_ocr_engine`、`_extract_ocr_regions_from_crop`、`_is_subtitle_like_region`。
+    - 更新：`_extract_ocr_tokens` 改为区域优先 + 字幕过滤 + 回退整图 OCR。
+    - 更新：`CV_ROUTE_OCR_SUBTITLE_BOTTOM_RATIO` 默认值为 `0.33`。
+  - `services/python_grpc/src/content_pipeline/tests/test_route_screenshot_incremental.py`
+    - 增加字幕过滤场景与“底部非字幕文本保留”回归用例。
+- 性能对比数据（单图基准，样本图：`SU039_ss_step_02_key_01_lenny.jpg`）：
+  - 测试方式：
+    - 运行环境：`D:\\New_ANACONDA\\envs\\whisper_env\\python.exe`。
+    - 同图重复 5 次，统计 `avg/min/max` 耗时；并对比识别文本是否包含底部字幕。
+    - 参数：`CV_ROUTE_OCR_ENGINE=rapidocr`，`CV_ROUTE_OCR_SUBTITLE_BOTTOM_RATIO=0.33`。
+  - 测试结果：
+    - `rapidocr_regions_raw`：`avg=1228.1ms`，识别到中英文本 4 行（含字幕）。
+    - `rapidocr_regions_filtered`：`avg=864.1ms`，过滤后仅保留非字幕区域文本（该样例为顶部频道名）。
+    - `incremental_tokens_filtered`：`avg=1138.0ms`，最终 token 去除底部字幕干扰。
+    - `legacy_tesseract_fullframe`：`avg=406.4ms`，但中文识别质量不足（不满足增量判定可靠性要求）。
+  - 结论：
+    - 在“中英识别正确性 + 字幕抑制”目标下，`RapidOCR + 区域过滤` 优于整图 Tesseract；
+    - 纯耗时维度 Tesseract 更快，但质量不达标，不作为该场景首选。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_route_screenshot_incremental.py -q`（5 passed）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 风险与后续：
+  - 当前性能数据来自单图样本，建议补充多场景压测（浅色字幕/深色字幕/双语叠加/无字幕）形成稳定阈值建议。
+  - 若业务更偏“信息保留”，可将底部比例通过环境变量按任务类型细分，而非统一常量。
+
 ## 2026-02-17 提交失败语义模块抽离：`mobile-submit-feedback`
 - 日期：2026-02-17
 - 触发背景与问题：
@@ -5784,17 +5841,27 @@
   - 决策1：后端 API 显式返回 `metaTitle`，表示“可直接展示的 domain-视频名”。
   - 决策2：前端统一标题决策链为 `metaTitle > BV/链接(videoUrl) > title > taskId`。
   - 决策3：新增 `title` 动效 bucket，仅在标题真实变更时触发高亮，避免首次水合误触发。
+  - 决策4：任务指标新增 `input_video_url`，把“原始输入来源”与“处理视频路径（video_path）”解耦，避免 storage 回放丢失 BV/链接语义。
+  - 决策5：新增共享组件 `TaskDisplayNameResolver`，统一 runtime/storage 的标题解析策略，降低重复实现漂移风险。
+  - 决策6：storage 缓存字段优先级固定为 `input_video_url -> video_url -> source_url -> original_video_url -> video_path`。
 - 调用链变化：
   - 改造前：
     - `TaskView.title -> /api/mobile/tasks.title -> buildTaskItemHtml(task.title)`
   - 改造后：
     - `TaskMetaFile.taskTitle -> TaskView.metaTitle + title -> /api/mobile/tasks.metaTitle`
+    - `VideoProcessingOrchestrator.writeTaskMetricsReport -> task_metrics_latest.input_video_url`
+    - `StorageTaskCacheService.readStorageMetadata -> resolveInputVideoUrl(多字段兼容) -> TaskDisplayNameResolver`
     - `buildTaskItemHtml(resolveTaskCardTitle(task))`
     - `applyTaskListMotionDiff(previousTitle,nextTitle)` 命中后注入 `.fx-title-highlight`
 - 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/TaskDisplayNameResolver.java`
   - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
   - `services/java-orchestrator/src/main/resources/static/index.html`
   - `services/java-orchestrator/src/main/resources/static/css/mobile-task-feedback.css`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/StorageTaskCacheServiceTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/common/TaskDisplayNameResolverTest.java`
 - 性能与体验对比：
   - 测试方式：本地任务列表轮询场景下观察标题来源切换与动效触发，记录标题解析与 diff 行为。
   - 测试数据：
@@ -5804,7 +5871,104 @@
     - 标题从“目录名”切换为“BV/链接或 domain-视频名”，可读性显著提升；
     - 标题更新存在明确高亮反馈，且 `prefers-reduced-motion` 下自动降级。
 - 验证方式：
-  - 编译验证：`mvn -pl services/java-orchestrator -DskipTests compile`
+  - 测试验证：
+    - `StorageTaskCacheServiceTest` 覆盖 `input_video_url/video_url/source_url/original_video_url/video_path` 优先级。
+    - `TaskDisplayNameResolverTest` 覆盖 BV、本地路径与 fallback 解析。
+  - 编译验证：受当前沙箱网络限制，Maven 拉取父 POM 失败（`Permission denied: getsockopt`），未完成完整编译。
   - 交互验证：提交任务 -> 观察初始标题 -> 元数据标题写入后观察替换与高亮。
 - 回滚方案：
   - API 保持向后兼容，可仅回退前端 `resolveTaskCardTitle` 与标题动效，不影响后端 `metaTitle` 输出。
+
+## 2026-02-18 Phase2B text-only 元信息回填增强（timestamp_sec + should_included 兼容）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - PP-Structure 命中 text-only 时，流程会删原图并保留描述；在 fallback 命名偏差场景，`timestamp_sec` 会丢失为 `null`。
+  - 增量补全依赖对齐证据，时间戳丢失会削弱 `img_description` 的利用率。
+  - 历史数据存在 `should_included` 字段，和 `should_include` 并存，造成筛选链路行为不一致风险。
+- 第一性原理与复用杠杆：
+  - 第一性原理：只要要保留图片语义（`img_description`）参与文本补全，就必须保留最小时序证据（至少 `timestamp_sec`）。
+  - 复用杠杆：
+    - 复用现有 `request_meta_by_id + _build_id_aliases` 映射机制，不新增请求模型；
+    - 复用 `_resolve_request_meta_for_candidate`，只补 fallback 入口的回填质量；
+    - 复用 `MarkdownEnhancer` 现有 augment 链路（不受 include 标志限制），仅补字段兼容。
+- 架构决策：
+  - 决策1：当 fallback 文件数与请求数一致时，允许按顺序回填 `label/sid/timestamp_sec`，保证时序证据完整。
+  - 决策2：保留单请求兜底回填，覆盖命名偏差但请求唯一的场景。
+  - 决策3：`MarkdownEnhancer` 同时识别 `should_include` 与 `should_included`，统一 includable 判定。
+  - 决策4：augment 输入继续不按 include 真值过滤，确保 `true/false` 两类描述都可参与增量补全。
+- 调用链变化：
+  - 改造前：
+    - `unit-scan fallback -> screenshot_candidates(request_ts=None)`；
+    - `candidate.sid` 与原请求 ID 不一致时，`request_meta` 回填失败；
+    - `screenshot_items.timestamp_sec = null`。
+  - 改造后：
+    - `unit-scan fallback -> (count matched) ordered request meta backfill`；
+    - `timestamp_sec` 优先来自请求元信息（顺序回填 / 单请求兜底）；
+    - `MarkdownEnhancer` 对 `should_included` 与 `should_include` 同口径解析。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+- 性能对比数据：
+  - 测试方式：本地定向 pytest（4 条回归）+ text-only fallback 构造样本。
+  - 测试数据：
+    - 新增逻辑为字符串别名匹配与 O(n) 顺序回填（n 为 fallback 截图数，通常很小）。
+    - 未新增外部 I/O、未新增模型推理、未新增网络请求。
+  - 结果：
+    - `timestamp_sec` 在 fallback 命名偏差场景可稳定回填；
+    - `should_included=true/false` 两类样本均可进入 augment 输入，且时间戳保留。
+- 验证方式：
+  - `D:\\New_ANACONDA\\envs\\whisper_env\\python.exe -m pytest -q services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py -k "text_only_fallback_candidate_recovers_request_timestamp or text_only_fallback_candidates_recover_ordered_request_timestamps or augment_items_keep_excluded_screenshot_descriptions or should_included_alias"`
+- 回滚方案：
+  - 若顺序回填引入误配，可先回滚“同数量顺序回填”分支，保留别名命中与单请求兜底回填。
+
+## 2026-02-18 PP-Structure Windows 兼容修复（禁用 IR 优化 + user-site 隔离）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 线上日志持续出现 `OneDnnContext does not have the input Filter` / `fused_conv2d`，`PP-Structure` 首图触发后即退化到 paddlex fallback。
+  - 同机环境存在 user-site 包污染（`AppData\\Roaming\\Python\\Python312\\site-packages` 抢占 `numpy/protobuf/paddleocr`），导致依赖链不稳定。
+- 第一性原理与复用杠杆：
+  - 第一性原理：先保证“依赖解析确定性”，再保证“推理图优化路径稳定性”；任何一个不稳定都会让主链路退化。
+  - 复用杠杆：
+    - 复用 `ConcreteKnowledgeValidator` 现有结构化预处理入口，不新增并行推理分支；
+    - 复用 `vision_ai.structure_preprocess` 现有配置节点，仅增量扩展开关；
+    - 复用 gRPC 既有启动入口（`apps/grpc-server/main.py` 与 `grpc_service_impl.py`）统一做环境收敛，不改调用协议。
+- 架构决策：
+  - 决策1：Windows 环境下对 `paddle.inference.Config.switch_ir_optim` 做一次性兼容补丁，强制关闭 IR 优化，规避 `fused_conv2d/oneDNN` 崩溃路径。
+  - 决策2：在结构化预处理配置新增 `force_disable_ir_optim`（默认 `true`），可灰度回退。
+  - 决策3：服务启动阶段默认剔除 user-site 目录并设置 `PYTHONNOUSERSITE=1`（可由 `GRPC_SERVER_ALLOW_USER_SITE=1` 显式放开）。
+- 调用链变化：
+  - 改造前：
+    - `PPStructure init -> paddleocr.tools.infer.utility switch_ir_optim(True)`（硬编码）
+    - `Windows oneDNN fused_conv2d 报错 -> PP-Structure disabled -> paddlex fallback`
+  - 改造后：
+    - `sanitize_user_site_packages -> 统一依赖解析`
+    - `_patch_ppstructure_ir_optim_if_needed -> switch_ir_optim(False)`
+    - `PPStructure 主引擎可用，fallback 仅在真实异常时触发`
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/segmentation/concrete_knowledge_validator.py`
+    - 新增 Windows IR 兼容补丁方法与线程安全一次性 patch 机制。
+    - 配置新增 `force_disable_ir_optim` 读取与默认值，初始化 `PPStructure` 时显式传入 `ir_optim=False`。
+  - `config/video_config.yaml`
+    - `vision_ai.structure_preprocess.force_disable_ir_optim: true`
+  - `services/python_grpc/src/server/runtime_env.py`
+    - 新增 user-site 清理与安全日志输出工具。
+  - `apps/grpc-server/main.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 启动早期调用 `sanitize_user_site_packages()`。
+- 性能/稳定性对比数据（本机 `whisper_env`，样本图 `p95_vs_concurrency.png`）：
+  - 测试方式：
+    - 同一图片、同一进程，分别执行“开启兼容补丁”与“关闭兼容补丁”两组探针；
+    - 指标记录：单次 `_collect_structure_blocks` 耗时、返回块数、引擎状态。
+  - 测试数据：
+    - 组A（开启补丁）：3 次分别为 `10000.1ms / 8512.7ms / 8948.0ms`，`blocks=1`，`engine_err=None`。
+    - 组B（关闭补丁）：2 次分别为 `11430.7ms / 4504.5ms`，`blocks=3`（来自 paddlex fallback），`engine_err=runtime_backend_error:RuntimeError`，PP-Structure 被禁用。
+  - 结论：
+    - 该修复的核心收益是“主链路稳定可用”，不是纯加速优化；
+    - 在当前机型上关闭 IR 优化未造成明显不可接受的时延回退，同时避免了每次请求都进入降级路径。
+- 验证方式：
+  - 依赖预检：`D:\\New_ANACONDA\\envs\\whisper_env\\python.exe apps/grpc-server/main.py --check-deps --debug-imports`（通过）。
+  - 功能探针：`ConcreteKnowledgeValidator._collect_structure_blocks(...)` 返回 `engine=PPStructure`、`blocks_len=1`、`engine_init_err=None`。
+- 回滚方案：
+  - 配置层：将 `vision_ai.structure_preprocess.force_disable_ir_optim` 设为 `false` 可快速回退；
+  - 代码层：移除 `_patch_ppstructure_ir_optim_if_needed` 调用，不影响 paddlex fallback 链路可用性。
