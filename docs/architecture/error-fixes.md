@@ -3506,3 +3506,37 @@
     - 若本地覆盖机制引发兼容问题，可临时禁用 `with_local_override` 并回退到单文件读取；
     - 但必须保留“主配置密钥为空”的安全基线。
 
+## 2026-02-18 概念卡片暗黑模式断层 + DeepSeek 提示词硬编码修复
+- 现象：
+  - 暗黑模式下点击概念卡片会出现高亮白底卡片，与主页面深色主题割裂。
+  - `DeepSeekAdvisorService` 的系统/用户/降级提示词写死在 Java 代码中，调整提示词需要改代码并重新部署。
+- 根因：
+  - `mobile-concept-cards.css` 缺少暗黑媒体查询，且大量关键组件使用浅色硬编码。
+  - 提示词与调用逻辑同文件耦合，缺少可配置模板资源层。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+    - 新增 `@media (prefers-color-scheme: dark)`；
+    - 覆盖裂谷容器、书写层、候选面板、反链、AI 灰雾/离线灰雾与选中态颜色，避免暗黑下亮白突兀。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 提示词改为“外部模板加载 + 占位符渲染 + 缓存 + 默认回退”模式；
+    - 保持 DeepSeek 请求链路与参数结构不变。
+  - 新增模板文件：
+    - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/system-zh.txt`
+    - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/user-zh.txt`
+    - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/fallback-with-evidence-zh.txt`
+    - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/fallback-without-evidence-zh.txt`
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加提示词模板加载与占位符渲染的单元测试，覆盖模板缺失/空文件回退分支。
+    - 增加概念卡片暗黑模式截图回归，至少覆盖卡片展开、灰雾等待、离线灰雾三种状态。
+  - 监控：
+    - 在服务日志中保留模板加载失败告警（一次性缓存后告警），便于快速定位配置缺失。
+  - 校验：
+    - 提交前执行 `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 与文档编码检查脚本。
+  - 回滚：
+    - 若模板加载路径配置异常，可临时依赖 Java 内置默认模板继续提供服务；
+    - 若暗黑样式影响兼容，可仅回滚暗黑媒体查询块，不影响卡片 API 与数据链路。
+

@@ -6395,3 +6395,101 @@
 - 回滚方案：
   - 代码层：在 `load_yaml_dict(..., with_local_override=False)` 关闭覆盖读取；
   - 配置层：若需暂时单文件运行，可把本地覆盖值回填主配置（不推荐，且提交前必须清空）。
+
+## 2026-02-18 移动端撕纸交互升级：单击选词/双击选句 + 磁吸撕开 + 语境解释灰雾
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 旧交互以“点击高亮词直接开卡/选中文本触发”为主，缺乏明确的物理反馈与分阶段心智模型。
+  - AI 解释链路在网络慢或断网时缺少沉浸式占位，用户容易感知“卡顿/失败”而不是“思考中”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 先确定语义对象（词/句），再触发操作（撕开/关闭），可降低误触与认知负担。
+    - 触控手势应满足“连续反馈 -> 阈值确认 -> 状态吸附”，而非瞬时跳变。
+    - AI 返回延迟不可避免，应将等待态设计为语义一致的视觉状态，而不是流程中断提示。
+  - 复用杠杆：
+    - 复用既有 `openCard -> mountTearScene -> closeActiveCard` 卡片生命周期，不改后端存储与卡片 API。
+    - 复用既有 `POST /api/mobile/cards/ai-advice` 服务边界，仅升级提示词语义与前端呈现状态机。
+    - 复用现有高亮结构 `.concept-term`，在点击位置动态包裹词/句，不新建独立渲染层。
+- 架构决策：
+  - 决策1：交互改为“单击选词、双击选句、下滑超过磁吸阈值才打开”，并引入阻尼阻力与阈值触觉反馈。
+  - 决策2：打开阶段引入 `advicePrefetch`：下滑过程中预取 AI，松手完成撕开后再渲染结果。
+  - 决策3：AI 未返回时展示“思维灰雾（Blurred Text Skeleton）”；断网时展示冷色灰雾与文案“纸张已破，但思绪暂断。”。
+  - 决策4：去按钮化：移除关闭按钮，新增“上滑缝合”手势关闭，缝合时触发轻微咔哒音与回弹动画。
+  - 决策5：撕裂视觉升级为“裂谷深度 + 纸纹噪声 + 纤维毛边（`filter: url(#paper-fiber-distortion)`）+ 阴影焦点跟手指移动”。
+- 调用链变化：
+  - 改造前：
+    - 术语点击/长按直接开卡；
+    - AI 建议在开卡后直接请求，等待态无专门视觉分层；
+    - 关闭以按钮/外部点击为主，缺少物理缝合反馈。
+  - 改造后：
+    - `onContainerClick`：单击选词，双击选句（`Intl.Segmenter` 主路径 + 正则回退）。
+    - `onTouchMove`：阻力计算 + 开启前阴影深度预览 + 预取 AI + 阈值触觉反馈。
+    - `onTouchEnd`：磁吸阈值判定（<30% 回弹，>=30% 打开）。
+    - `wireCardSwipeSeal`：上滑关闭 + 阴影焦点跟随 + 缝合回弹/冲击动画 + 咔哒音效。
+    - `loadAdvice`：优先消费预取结果；无结果时灰雾占位，断网时冷色灰雾提示。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+    - 新增：`Intl.Segmenter` 词/句选择逻辑、开启动作阻尼、磁吸阈值、AI 预取缓存、灰雾状态、上滑缝合手势、纸纤维 SVG filter 注入。
+    - 调整：`openCard` 不再依赖关闭按钮链路；AI 解释在开卡后按预取结果渲染。
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+    - 新增：选中态样式、裂谷深度阴影、纸纹噪声、纤维毛边、灰雾骨架、断网冷色态、墨水显现动画、缝合回弹动画。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 更新：`buildSystemPrompt/buildUserPrompt/buildFallbackAdvice`，从“思考卡写作模板”转为“当前段落词/句语境解释”模板。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- 回滚方案：
+  - 前端回滚：恢复 `mobile-concept-cards.js/.css` 到改造前提交，可立即回退到旧交互模型。
+  - 提示词回滚：恢复 `DeepSeekAdvisorService` 三个 prompt 构造函数为旧版 Thought 卡模板。
+
+### 2026-02-18 追加：`ai-advice` 提示词中文化（保持 DeepSeek 调用链不变）
+- 触发背景：
+  - 前一版语境解释提示词采用英文描述，语义正确但不符合当前项目“中文优先”协作与调试习惯。
+- 变更范围：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - `buildSystemPrompt` 改为中文约束；
+    - `buildUserPrompt` 改为中文任务说明与中文输出约束；
+    - `buildFallbackAdvice` 改为中文降级文案。
+- 稳定性说明：
+  - DeepSeek 调用参数与链路保持不变：仍使用 `chat/completions`、`model/temperature/max_tokens/messages` 结构和 `Authorization: Bearer` 鉴权。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+### 2026-02-18 追加：概念卡片暗黑适配 + DeepSeek 提示词模板外置
+- 触发背景：
+  - 概念卡片样式在暗黑模式下仍使用浅色硬编码，导致“主界面暗色 + 卡片刺眼白底”的体验断层。
+  - `DeepSeekAdvisorService` 提示词硬编码在 Java 中，提示词微调需要走代码发布流程，迭代成本高。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 主题一致性应由“变量/主题层”驱动，而不是散落的硬编码颜色。
+    - 提示词属于策略配置，不应与调用逻辑强耦合在同一编译单元。
+  - 复用杠杆：
+    - 复用现有 DeepSeek 请求链路（`chat/completions + model/temperature/max_tokens/messages`），仅替换 prompt 来源。
+    - 复用 `mobile-markdown-app.css` 已有暗黑主题视觉基线（暗色表面、阴影、对比度），对概念卡片做增量覆盖。
+- 架构决策：
+  - 决策1：新增 `resources/prompts/deepseek-advisor/*.txt` 中文模板文件，通过占位符 `{term}/{scenario}/{context_block}/{example_block}` 注入动态上下文。
+  - 决策2：`DeepSeekAdvisorService` 增加可配置模板资源路径（`deepseek.advisor.prompt.*-resource`），并引入模板缓存与加载失败回退。
+  - 决策3：在 `mobile-concept-cards.css` 增加 `@media (prefers-color-scheme: dark)`，对裂谷面板、编辑器、灰雾层、触发器与纸纹纹理做深色适配。
+- 调用链变化：
+  - 改造前：
+    - `buildSystemPrompt/buildUserPrompt/buildFallbackAdvice` 直接返回 Java 字符串常量。
+    - 概念卡片颜色在明暗模式下基本一致（浅色硬编码）。
+  - 改造后：
+    - `build*Prompt -> loadPromptTemplate(resource) -> applyTemplate(values)`，在模板缺失/空文件时自动回退内置模板。
+    - 卡片在系统暗黑模式下使用独立深色配色与阴影体系，避免亮白突兀。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 新增外置模板资源注入、模板读取缓存、占位符替换、资源失败回退。
+  - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/system-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/user-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/fallback-with-evidence-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/fallback-without-evidence-zh.txt`
+    - 新增可独立维护的中文提示词模板。
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+    - 新增暗黑模式样式块，覆盖词句选中态、裂谷容器、编辑器、候选面板、反链区、AI 灰雾/离线灰雾、纸纹与阴影。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 回滚方案：
+  - 提示词层：将 `deepseek.advisor.prompt.*-resource` 指回旧模板或恢复旧版硬编码实现。
+  - 样式层：回退 `mobile-concept-cards.css` 的暗黑媒体查询块，不影响卡片业务链路与接口协议。

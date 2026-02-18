@@ -16,11 +16,16 @@
 
     // 滑动操作手感参数：阈值、阻尼、速度判定等集中配置。
     const SWIPE_PHYSICS = Object.freeze({
-        activateMinDxPx: 14,
-        activateDirectionRatio: 1.3,
+        activateMinDxPx: 26,
+        activateDirectionRatio: 1.7,
         commitRatio: 0.35,
+        deleteCommitRatio: 0.43,
+        annotateCommitRatio: 0.35,
         flickVelocityPxPerMs: 0.4,
         flickMinDxPx: 20,
+        deleteFlickVelocityPxPerMs: 0.52,
+        deleteFlickMinDxPx: 36,
+        flickCommitMinProgressRatio: 0.72,
         // 橡皮筋阻尼核心参数：limit 控制上限，curve 控制阻尼增长速度。
         rubberBandLimit: 120,
         rubberBandCurve: 0.64,
@@ -49,6 +54,10 @@
         opacity: 1,
     });
     const SWIPE_ICON_RESET_TRANSITION_MS = 320;
+    const SWIPE_PREWARM_IDLE_TIMEOUT_MS = 120;
+    const SWIPE_PREWARM_NEIGHBOR_OFFSETS = Object.freeze([-1, 1]);
+    const SWIPE_DOM_CACHE_LIMIT = 28;
+    const SWIPE_DOM_PRUNE_IDLE_TIMEOUT_MS = 180;
 
     function resolveConfig(rawConfig) {
         const next = Object.assign({}, DEFAULT_CONFIG, rawConfig || {});
@@ -255,10 +264,32 @@
         let lastFavoriteToggle = { index: -1, at: 0, source: '' };
         const favoriteCrossSourceGuardMs = Math.max((Number(config.doubleTapWindowMs) || DEFAULT_CONFIG.doubleTapWindowMs) + 80, 420);
         const favoriteSameSourceGuardMs = 120;
+        const defaultGestureBlockSelector = [
+            'button',
+            'textarea',
+            'input',
+            'select',
+            'option',
+            'label',
+            'a[href]',
+            '[contenteditable=\"true\"]',
+            '[data-concept-term]',
+            '.concept-term',
+            '.concept-card',
+            '.inline-sticky-editor',
+            '.inline-sticky-sheet',
+        ].join(', ');
 
         function resolveGestureAction(trigger) {
             const action = gestureActionMap[trigger];
             return action === 'copy' || action === 'favorite' ? action : null;
+        }
+
+        function isGestureTargetBlocked(eventTarget) {
+            if (typeof isParagraphGestureTargetBlocked === 'function') {
+                return !!isParagraphGestureTargetBlocked(eventTarget);
+            }
+            return !!(eventTarget && eventTarget.closest && eventTarget.closest(defaultGestureBlockSelector));
         }
 
         function resolveGestureTarget(eventTarget) {
@@ -317,7 +348,7 @@
         markdownBody.addEventListener('dblclick', async (event) => {
             const dblclickAction = resolveGestureAction('doubleTap');
             if (!dblclickAction || !isParagraphActionAllowed(dblclickAction)) return;
-            if (isParagraphGestureTargetBlocked(event.target)) return;
+            if (isGestureTargetBlocked(event.target)) return;
             const target = resolveGestureTarget(event.target);
             if (target) {
                 await executeParagraphGestureAction(dblclickAction, target.index, {
@@ -330,6 +361,119 @@
 
         // 核心手势状态机
         let activeGesture = null;
+        let swipeNeighborPrewarmCancel = null;
+        let swipeDomPruneCancel = null;
+
+        function clearSwipeNeighborPrewarm() {
+            if (typeof swipeNeighborPrewarmCancel === 'function') {
+                swipeNeighborPrewarmCancel();
+                swipeNeighborPrewarmCancel = null;
+            }
+        }
+
+        function clearSwipeDomPrune() {
+            if (typeof swipeDomPruneCancel === 'function') {
+                swipeDomPruneCancel();
+                swipeDomPruneCancel = null;
+            }
+        }
+
+        function stampSwipeCellUsage(card) {
+            if (!card || !card.dataset) return;
+            card.dataset.swipeCellLastUsedAt = String(Date.now());
+        }
+
+        function teardownSwipeCellDom(card) {
+            if (!card || card.dataset.swipeCellReady !== '1') return;
+            const contentWrap = card.querySelector('.swipe-content');
+            if (contentWrap) {
+                while (contentWrap.firstChild) {
+                    card.appendChild(contentWrap.firstChild);
+                }
+                contentWrap.remove();
+            }
+            card.querySelectorAll('.swipe-backdrop').forEach((node) => node.remove());
+            card.classList.remove('swipe-interaction-ready');
+            delete card.dataset.swipeCellReady;
+            delete card.dataset.swipeCellLastUsedAt;
+        }
+
+        function scheduleSwipeDomPrune(excludeCard) {
+            clearSwipeDomPrune();
+            const run = () => {
+                swipeDomPruneCancel = null;
+                const readyCards = Array.from(markdownBody.querySelectorAll('.paragraph-card[data-swipe-cell-ready="1"]'));
+                if (readyCards.length <= SWIPE_DOM_CACHE_LIMIT) {
+                    return;
+                }
+                const protectedCards = new Set();
+                if (excludeCard) protectedCards.add(excludeCard);
+                if (activeGesture && activeGesture.prewarmedCard) protectedCards.add(activeGesture.prewarmedCard);
+                if (activeGesture && activeGesture.swipeCard) protectedCards.add(activeGesture.swipeCard);
+                if (activeGesture && activeGesture.holdCard) protectedCards.add(activeGesture.holdCard);
+                const candidates = readyCards
+                    .filter((card) => !protectedCards.has(card))
+                    .sort((a, b) => (Number(a.dataset.swipeCellLastUsedAt) || 0) - (Number(b.dataset.swipeCellLastUsedAt) || 0));
+                const evictCount = Math.max(0, readyCards.length - SWIPE_DOM_CACHE_LIMIT);
+                for (let i = 0; i < evictCount && i < candidates.length; i += 1) {
+                    teardownSwipeCellDom(candidates[i]);
+                }
+            };
+            if (typeof window.requestIdleCallback === 'function'
+                && typeof window.cancelIdleCallback === 'function') {
+                const idleId = window.requestIdleCallback(run, { timeout: SWIPE_DOM_PRUNE_IDLE_TIMEOUT_MS });
+                swipeDomPruneCancel = () => window.cancelIdleCallback(idleId);
+                return;
+            }
+            const timeoutId = window.setTimeout(run, 36);
+            swipeDomPruneCancel = () => window.clearTimeout(timeoutId);
+        }
+
+        function scheduleSwipeNeighborPrewarm(index) {
+            clearSwipeNeighborPrewarm();
+            const run = () => {
+                swipeNeighborPrewarmCancel = null;
+                SWIPE_PREWARM_NEIGHBOR_OFFSETS.forEach((offset) => {
+                    const card = getParagraphCardByIndex(index + offset);
+                    if (!card) return;
+                    ensureSwipeCellDom(card);
+                    stampSwipeCellUsage(card);
+                });
+                scheduleSwipeDomPrune(null);
+            };
+            if (typeof window.requestIdleCallback === 'function'
+                && typeof window.cancelIdleCallback === 'function') {
+                const idleId = window.requestIdleCallback(run, { timeout: SWIPE_PREWARM_IDLE_TIMEOUT_MS });
+                swipeNeighborPrewarmCancel = () => window.cancelIdleCallback(idleId);
+                return;
+            }
+            const timeoutId = window.setTimeout(run, 24);
+            swipeNeighborPrewarmCancel = () => window.clearTimeout(timeoutId);
+        }
+
+        function prewarmSwipeInteractionCard(card) {
+            if (!card) return null;
+            const wasReady = card.dataset.swipeCellReady === '1';
+            card.classList.add('swipe-interaction-ready');
+            ensureSwipeCellDom(card);
+            stampSwipeCellUsage(card);
+            if (!wasReady) {
+                scheduleSwipeDomPrune(card);
+            }
+            return card;
+        }
+
+        function clearSwipeInteractionCard(gesture) {
+            if (!gesture) return;
+            const primaryCard = gesture.prewarmedCard;
+            if (primaryCard && primaryCard.classList) {
+                primaryCard.classList.remove('swipe-interaction-ready');
+            }
+            if (gesture.swipeCard && gesture.swipeCard !== primaryCard && gesture.swipeCard.classList) {
+                gesture.swipeCard.classList.remove('swipe-interaction-ready');
+            }
+            scheduleSwipeDomPrune(null);
+        }
 
         function hasActiveTextSelection() {
             const selection = window.getSelection && window.getSelection();
@@ -378,6 +522,20 @@
             }
         }
 
+        function resolveSwipeCommitRatio(direction) {
+            if (direction === 'left') {
+                return SWIPE_PHYSICS.deleteCommitRatio;
+            }
+            if (direction === 'right') {
+                return SWIPE_PHYSICS.annotateCommitRatio;
+            }
+            return SWIPE_PHYSICS.commitRatio;
+        }
+
+        function resolveSwipeCommitThreshold(cardWidth, direction) {
+            return Math.max(1, (Number(cardWidth) || 0) * resolveSwipeCommitRatio(direction));
+        }
+
         const updateSwipeFrame = () => {
             if (!activeGesture || !activeGesture.swipeActive) return;
             
@@ -387,7 +545,7 @@
             const direction = dx < 0 ? 'left' : 'right';
             g.swipeDirection = direction;
 
-            const commitThreshold = g.swipeCardWidth * SWIPE_PHYSICS.commitRatio;
+            const commitThreshold = resolveSwipeCommitThreshold(g.swipeCardWidth, direction);
             const sign = dx >= 0 ? 1 : -1;
             const isDeleteDirection = direction === 'left';
             let displayDx = 0;
@@ -454,7 +612,7 @@
             );
             if (!hasReadonlyGestureAction) return;
             if (event.touches.length !== 1) return;
-            if (isParagraphGestureTargetBlocked(event.target)) return;
+            if (isGestureTargetBlocked(event.target)) return;
             
             const touch = event.touches[0];
             const edgeGuard = (Number(edgeBackHotZonePx) || 24) + 6;
@@ -463,6 +621,8 @@
             const target = resolveGestureTarget(event.target);
             if (!target) return;
             const index = target.index;
+            const touchCard = prewarmSwipeInteractionCard(getParagraphCardByIndex(index));
+            scheduleSwipeNeighborPrewarm(index);
 
             // 清理旧状态
             if (state.touchGesture && state.touchGesture.longPressTimer) clearTimeout(state.touchGesture.longPressTimer);
@@ -490,10 +650,11 @@
                 swipeCardWidth: 0,
                 rafId: 0,
                 breathEpochMs: performance.now(),
+                prewarmedCard: touchCard,
             };
             
             // 长按计时器
-            activeGesture.holdCard = getParagraphCardByIndex(index);
+            activeGesture.holdCard = touchCard || getParagraphCardByIndex(index);
             if (activeGesture.holdCard) activeGesture.holdCard.classList.add('touch-hold-cue');
             
             activeGesture.longPressTimer = setTimeout(async () => {
@@ -559,13 +720,16 @@
 
             // 2. 激活滑动 (Lock)
             if (!activeGesture.swipeActive && !activeGesture.longPressTriggered) {
-                const canActivateSwipe = typeof canHandleParagraphSwipeGesture === 'function'
+                const internalCanActivate = absX >= SWIPE_PHYSICS.activateMinDxPx
+                    && absX > absY * SWIPE_PHYSICS.activateDirectionRatio;
+                const externalCanActivate = typeof canHandleParagraphSwipeGesture === 'function'
                     ? !!canHandleParagraphSwipeGesture(absX, absY)
-                    : (absX >= SWIPE_PHYSICS.activateMinDxPx && absX > absY * SWIPE_PHYSICS.activateDirectionRatio);
+                    : true;
+                const canActivateSwipe = internalCanActivate && externalCanActivate;
                 if (canActivateSwipe) {
                     const card = getParagraphCardByIndex(activeGesture.index);
                     if (card) {
-                        ensureSwipeCellDom(card);
+                        prewarmSwipeInteractionCard(card);
                         const contentEl = getSwipeContent(card);
                         if (contentEl) {
                             activeGesture.swipeActive = true;
@@ -597,8 +761,13 @@
             state.touchGesture = null;
             activeGesture = null;
             state.touchScrollActive = false;
+            clearSwipeNeighborPrewarm();
+            clearSwipeDomPrune();
 
-            if (g.longPressTriggered) return;
+            if (g.longPressTriggered) {
+                clearSwipeInteractionCard(g);
+                return;
+            }
 
             // ─── 结算滑动 ───
             if (g.swipeActive) {
@@ -614,14 +783,27 @@
                 }
                 const absVel = Math.abs(velocity);
                 const absX = Math.abs(g.currentX - g.startX);
-                const isFlick = absVel >= SWIPE_PHYSICS.flickVelocityPxPerMs && absX >= SWIPE_PHYSICS.flickMinDxPx;
-                const commitThreshold = g.swipeCardWidth * SWIPE_PHYSICS.commitRatio;
+                const direction = g.swipeDirection || ((g.currentX - g.startX) < 0 ? 'left' : 'right');
+                const directionSign = direction === 'left' ? -1 : 1;
+                const commitThreshold = resolveSwipeCommitThreshold(g.swipeCardWidth, direction);
+                let isFlick = false;
+                if (direction === 'left') {
+                    const minDeleteFlickDistance = Math.max(
+                        SWIPE_PHYSICS.deleteFlickMinDxPx,
+                        commitThreshold * SWIPE_PHYSICS.flickCommitMinProgressRatio
+                    );
+                    isFlick = absVel >= SWIPE_PHYSICS.deleteFlickVelocityPxPerMs
+                        && absX >= minDeleteFlickDistance;
+                } else {
+                    isFlick = absVel >= SWIPE_PHYSICS.flickVelocityPxPerMs
+                        && absX >= SWIPE_PHYSICS.flickMinDxPx;
+                }
                 // 复用 visual feedback 的判断逻辑：如果已经拉过了阈值，或者速度够快
-                const shouldCommit = absX >= commitThreshold || (isFlick && Math.sign(velocity) === Math.sign(g.swipeDx));
+                const shouldCommit = absX >= commitThreshold || (isFlick && Math.sign(velocity) === directionSign);
 
-                if (shouldCommit && g.swipeDirection === 'left') {
+                if (shouldCommit && direction === 'left') {
                     await commitDeleteSwipe(g);
-                } else if (shouldCommit && g.swipeDirection === 'right') {
+                } else if (shouldCommit && direction === 'right') {
                     await commitAnnotateSwipe(g);
                 } else {
                     springBack(g);
@@ -647,13 +829,20 @@
                     state.lastTapIndex = g.index;
                 }
             }
+            clearSwipeInteractionCard(g);
         }, { passive: true });
 
         markdownBody.addEventListener('touchcancel', () => {
             if (!activeGesture) return;
+            clearSwipeNeighborPrewarm();
+            clearSwipeDomPrune();
             if (activeGesture.rafId) cancelAnimationFrame(activeGesture.rafId);
             if (activeGesture.longPressTimer) clearTimeout(activeGesture.longPressTimer);
-            if (activeGesture.swipeActive) springBack(activeGesture);
+            if (activeGesture.swipeActive) {
+                springBack(activeGesture);
+            } else {
+                clearSwipeInteractionCard(activeGesture);
+            }
             clearParagraphHoldCue(activeGesture);
             state.touchGesture = null;
             activeGesture = null;
@@ -681,13 +870,19 @@
                 clearBackdropIconResetState(g.swipeCard);
             }, SWIPE_ICON_RESET_TRANSITION_MS + 34);
 
-            setTimeout(() => cleanSwipeClasses(el), SWIPE_PHYSICS.springBackMs);
+            setTimeout(() => {
+                cleanSwipeClasses(el);
+                clearSwipeInteractionCard(g);
+            }, SWIPE_PHYSICS.springBackMs);
         }
 
         async function commitDeleteSwipe(g) {
             const el = g.swipeContentEl;
             const card = g.swipeCard;
-            if (!el || !card) return;
+            if (!el || !card) {
+                clearSwipeInteractionCard(g);
+                return;
+            }
              
             // 只要确认，就把图标设为高亮状态
             const delBd = card.querySelector('.swipe-backdrop.swipe-delete');
@@ -697,7 +892,7 @@
             }
 
             el.classList.remove('swiping');
-            const commitThreshold = g.swipeCardWidth * SWIPE_PHYSICS.commitRatio;
+            const commitThreshold = resolveSwipeCommitThreshold(g.swipeCardWidth, 'left');
             const startX = Number.isFinite(g.swipeDx) ? g.swipeDx : (g.currentX - g.startX);
             const swipeDistance = Math.abs(startX);
             const overshoot = Math.max(0, swipeDistance - commitThreshold);
@@ -748,6 +943,7 @@
             hideAllBackdrops(card);
             card.classList.remove('swipe-collapse');
             card.style.maxHeight = '';
+            clearSwipeInteractionCard(g);
 
             await deleteLineAtIndex(g.index, {
                 confirmDelete: false,
@@ -759,7 +955,10 @@
         async function commitAnnotateSwipe(g) {
             const el = g.swipeContentEl;
             const card = g.swipeCard;
-            if (!el || !card) return;
+            if (!el || !card) {
+                clearSwipeInteractionCard(g);
+                return;
+            }
              
             // 确认视觉反馈
             const annBd = card.querySelector('.swipe-backdrop.swipe-annotate');

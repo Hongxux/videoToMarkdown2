@@ -21,6 +21,12 @@
     transform: scale(0.98);
 }
 
+.markdown-body .concept-term.is-selected {
+    color: #1f5b99;
+    background: rgba(56, 124, 189, 0.16);
+    text-decoration-color: rgba(31, 91, 153, 0.92);
+}
+
 .markdown-body .concept-anchor-active {
     box-shadow: inset 0 0 0 1px rgba(34, 73, 117, 0.08);
 }
@@ -155,6 +161,13 @@
 .concept-tear-scene .card-fissure-shell {
     margin-left: 8px;
     margin-right: 8px;
+    background:
+        linear-gradient(180deg, rgba(237, 243, 251, 0.96), rgba(214, 225, 241, 0.93));
+    box-shadow:
+        inset 0 22px 26px -18px rgba(8, 19, 33, 0.46),
+        inset 0 -24px 26px -20px rgba(8, 19, 33, 0.38),
+        inset 0 0 0 1px rgba(34, 64, 97, 0.22),
+        0 8px 18px rgba(8, 17, 30, 0.22);
 }
 
 .card-fissure-header {
@@ -330,6 +343,116 @@
     transform: translateY(0);
 }
 
+.ai-whisper.is-ink-reveal {
+    animation: ai-ink-reveal 820ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes ai-ink-reveal {
+    0% {
+        opacity: 0.22;
+        filter: blur(7px);
+        letter-spacing: 0.02em;
+    }
+    100% {
+        opacity: 1;
+        filter: blur(0);
+        letter-spacing: 0;
+    }
+}
+
+.ai-fog-layer {
+    margin-top: 8px;
+    padding: 10px;
+    border-radius: 10px;
+    border: 1px solid rgba(86, 110, 142, 0.24);
+    background:
+        radial-gradient(120% 100% at 50% 0%, rgba(198, 210, 228, 0.22), rgba(171, 188, 210, 0.08)),
+        linear-gradient(180deg, rgba(231, 237, 246, 0.46), rgba(202, 214, 231, 0.12));
+    backdrop-filter: blur(1.6px);
+}
+
+.ai-fog-line {
+    height: 10px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(148, 166, 190, 0.12), rgba(204, 216, 232, 0.42), rgba(148, 166, 190, 0.14));
+    background-size: 210% 100%;
+    animation: ai-fog-drift 1.75s ease-in-out infinite;
+    filter: blur(1px);
+}
+
+.ai-fog-line + .ai-fog-line {
+    margin-top: 7px;
+}
+
+.ai-fog-line.short {
+    width: 68%;
+}
+
+.ai-fog-status {
+    margin-top: 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgba(93, 108, 130, 0.88);
+    font-family: "Source Han Serif SC", "Noto Serif CJK SC", "Songti SC", serif;
+}
+
+.ai-fog-layer.is-offline {
+    border-color: rgba(133, 155, 189, 0.32);
+    background:
+        radial-gradient(120% 110% at 50% 0%, rgba(161, 181, 214, 0.18), rgba(136, 157, 191, 0.08)),
+        linear-gradient(180deg, rgba(202, 214, 232, 0.26), rgba(164, 182, 211, 0.08));
+}
+
+.ai-fog-layer.is-offline .ai-fog-line {
+    background: linear-gradient(90deg, rgba(130, 151, 179, 0.12), rgba(171, 190, 219, 0.3), rgba(130, 151, 179, 0.12));
+}
+
+@keyframes ai-fog-drift {
+    0% {
+        background-position: 0% 50%;
+        opacity: 0.68;
+    }
+    50% {
+        background-position: 100% 50%;
+        opacity: 0.92;
+    }
+    100% {
+        background-position: 0% 50%;
+        opacity: 0.68;
+    }
+}
+
+.card-fissure-seam-tip {
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    color: rgba(55, 79, 110, 0.7);
+}
+
+.concept-open-probe {
+    --tear-open-ratio: 0;
+    --tear-shadow-depth: 0.25;
+    --tear-shadow-focal-x: 50%;
+    position: relative;
+    box-shadow:
+        inset 0 calc(1px + (12px * var(--tear-open-ratio))) calc(14px + (26px * var(--tear-open-ratio)))
+        rgba(10, 22, 38, calc(0.16 + (0.36 * var(--tear-shadow-depth)))),
+        inset 0 0 0 1px rgba(44, 82, 126, 0.08);
+    background-image:
+        radial-gradient(circle at var(--tear-shadow-focal-x) 42%, rgba(195, 212, 235, 0.22), rgba(198, 212, 234, 0) 58%),
+        repeating-linear-gradient(22deg, rgba(50, 68, 94, 0.015) 0 1px, rgba(255, 255, 255, 0) 1px 3px);
+    transition: box-shadow 120ms ease, background-image 120ms ease;
+}
+
+.concept-open-probe.is-probe-rebound {
+    animation: concept-probe-rebound 260ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes concept-probe-rebound {
+    0% { transform: translateY(0); }
+    30% { transform: translateY(-2px); }
+    100% { transform: translateY(0); }
+}
+
 .concept-selection-trigger {
     position: fixed;
     left: 50%;
@@ -362,13 +485,301 @@
     transform: translate(-50%, 0) scale(0.96);
 }
 
+.concept-tear-scene {
+    --tear-open-ratio: 1;
+    --tear-shadow-depth: 0.72;
+    --tear-shadow-focal-x: 50%;
+    --tear-shadow-focal-y: 42%;
+    background:
+        linear-gradient(180deg, rgba(7, 15, 26, calc(0.14 * var(--tear-shadow-depth))), rgba(14, 26, 42, calc(0.24 * var(--tear-shadow-depth)))) padding-box;
+    box-shadow:
+        inset 0 calc(14px * var(--tear-shadow-depth)) calc(22px + (22px * var(--tear-shadow-depth)))
+        rgba(8, 17, 29, calc(0.22 + (0.25 * var(--tear-shadow-depth)))),
+        inset 0 calc(-10px * var(--tear-shadow-depth)) calc(16px + (20px * var(--tear-shadow-depth)))
+        rgba(9, 19, 33, calc(0.12 + (0.2 * var(--tear-shadow-depth))));
+}
+
+.concept-tear-scene::before {
+    content: "";
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    top: calc(var(--tear-top-height) - 6px);
+    height: 14px;
+    background: linear-gradient(180deg, rgba(229, 236, 246, 0.8), rgba(184, 200, 222, 0.42));
+    opacity: calc(0.35 + (0.55 * var(--tear-open-ratio)));
+    z-index: 5;
+    pointer-events: none;
+    filter: url(#paper-fiber-distortion);
+    mask-image: repeating-linear-gradient(
+        97deg,
+        rgba(0, 0, 0, 0.95) 0 8px,
+        rgba(0, 0, 0, 0.2) 8px 10px,
+        rgba(0, 0, 0, 0.86) 10px 18px
+    );
+}
+
+.concept-tear-scene::after {
+    content: "";
+    position: absolute;
+    left: 6px;
+    right: 6px;
+    top: calc(var(--tear-top-height) - 3px);
+    height: calc(10px + (46px * var(--tear-open-ratio)));
+    background:
+        radial-gradient(
+            90% 110% at var(--tear-shadow-focal-x) var(--tear-shadow-focal-y),
+            rgba(9, 20, 33, calc(0.38 * var(--tear-shadow-depth))),
+            rgba(9, 20, 33, 0) 68%
+        );
+    pointer-events: none;
+    z-index: 2;
+    transition: height 90ms ease, background 90ms ease;
+}
+
+.concept-tear-half {
+    background-image:
+        repeating-linear-gradient(16deg, rgba(34, 52, 73, 0.02) 0 1px, rgba(255, 255, 255, 0) 1px 4px),
+        repeating-linear-gradient(-12deg, rgba(18, 34, 52, 0.018) 0 1px, rgba(255, 255, 255, 0) 1px 3px);
+}
+
+.concept-tear-scene.is-open .concept-tear-half-top {
+    transform: translateY(calc(-8px - (8px * var(--tear-open-ratio)))) rotateX(calc(2deg + (5deg * var(--tear-open-ratio))));
+    filter: drop-shadow(0 8px 10px rgba(14, 27, 44, calc(0.14 + (0.18 * var(--tear-open-ratio)))));
+}
+
+.concept-tear-scene.is-open .concept-tear-half-bottom {
+    transform: translateY(calc(9px + (9px * var(--tear-open-ratio))));
+    filter: drop-shadow(0 -4px 6px rgba(14, 27, 44, calc(0.09 + (0.12 * var(--tear-open-ratio)))));
+}
+
+.concept-tear-scene.is-seal-rebound .concept-tear-half-top,
+.concept-tear-scene.is-seal-rebound .concept-tear-half-bottom {
+    animation: tear-seal-rebound 260ms cubic-bezier(0.2, 0.9, 0.3, 1) 1;
+}
+
+.concept-tear-scene.is-seal-impact {
+    animation: tear-seal-impact 260ms cubic-bezier(0.22, 1, 0.36, 1) 1;
+}
+
+@keyframes tear-seal-rebound {
+    0% { transform: translateY(0); }
+    44% { transform: translateY(-3px); }
+    100% { transform: translateY(0); }
+}
+
+@keyframes tear-seal-impact {
+    0% { transform: scale(1); }
+    42% { transform: scale(1.006); }
+    100% { transform: scale(1); }
+}
+
+@media (prefers-color-scheme: dark) {
+    .markdown-body .concept-term {
+        text-decoration-color: rgba(144, 176, 218, 0.58);
+    }
+
+    .markdown-body .concept-term:hover {
+        background: rgba(96, 130, 176, 0.28);
+        text-decoration-color: rgba(186, 210, 244, 0.88);
+    }
+
+    .markdown-body .concept-term:active {
+        background: rgba(104, 142, 195, 0.34);
+    }
+
+    .markdown-body .concept-term.is-selected {
+        color: #c9ddfb;
+        background: rgba(107, 144, 193, 0.34);
+        text-decoration-color: rgba(210, 227, 250, 0.95);
+    }
+
+    .markdown-body .concept-anchor-active {
+        box-shadow: inset 0 0 0 1px rgba(113, 149, 201, 0.18);
+    }
+
+    .concept-tear-half .concept-term {
+        text-decoration-color: rgba(152, 186, 232, 0.6) !important;
+    }
+
+    .card-fissure {
+        background: linear-gradient(180deg, rgba(12, 23, 37, 0.9), rgba(10, 19, 31, 0.7));
+        box-shadow: inset 0 14px 20px -10px rgba(0, 0, 0, 0.68),
+                    inset 0 -14px 20px -10px rgba(0, 0, 0, 0.56),
+                    inset 0 0 0 1px rgba(118, 145, 184, 0.2);
+    }
+
+    .card-fissure-shell {
+        border-color: rgba(116, 146, 188, 0.24);
+        background: linear-gradient(175deg, rgba(21, 30, 42, 0.96), rgba(15, 22, 33, 0.98));
+        box-shadow: inset 0 1px 0 rgba(170, 197, 233, 0.1),
+                    0 2px 6px rgba(0, 0, 0, 0.34);
+    }
+
+    .concept-tear-scene .card-fissure-shell {
+        background: linear-gradient(180deg, rgba(14, 26, 40, 0.95), rgba(10, 18, 30, 0.96));
+        box-shadow: inset 0 20px 24px -16px rgba(0, 0, 0, 0.78),
+                    inset 0 -22px 24px -18px rgba(0, 0, 0, 0.7),
+                    inset 0 0 0 1px rgba(120, 151, 193, 0.24),
+                    0 10px 20px rgba(0, 0, 0, 0.46);
+    }
+
+    .card-fissure-title {
+        color: var(--text, #e2e8f0);
+    }
+
+    .card-fissure-close {
+        background: rgba(111, 143, 186, 0.24);
+        color: #d7e7ff;
+    }
+
+    .card-fissure-close:active {
+        background: rgba(111, 143, 186, 0.36);
+        color: #f0f6ff;
+    }
+
+    .card-fissure-editor {
+        border-color: rgba(118, 152, 198, 0.3);
+        color: var(--text, #e2e8f0);
+        background: rgba(12, 20, 31, 0.95);
+    }
+
+    .card-fissure-editor:focus {
+        border-color: rgba(148, 183, 235, 0.62);
+        box-shadow: 0 0 0 3px rgba(102, 142, 201, 0.28);
+    }
+
+    .card-fissure-editor::placeholder {
+        color: rgba(164, 182, 208, 0.72);
+    }
+
+    .card-fissure-wikilink-panel {
+        border-color: rgba(122, 154, 198, 0.34);
+        background: rgba(12, 20, 32, 0.98);
+        box-shadow: 0 12px 26px rgba(0, 0, 0, 0.56);
+    }
+
+    .card-fissure-wikilink-item {
+        border-top-color: rgba(124, 157, 204, 0.2);
+        color: #d0ddf2;
+    }
+
+    .card-fissure-wikilink-item.is-active {
+        background: rgba(102, 139, 191, 0.32);
+        color: #ebf3ff;
+    }
+
+    .card-fissure-backlinks {
+        border-color: rgba(121, 152, 192, 0.3);
+        background: rgba(12, 21, 34, 0.7);
+    }
+
+    .card-fissure-backlinks-title {
+        color: #c5d7f2;
+        border-bottom-color: rgba(123, 154, 194, 0.24);
+    }
+
+    .card-fissure-backlinks-loading,
+    .card-fissure-backlinks-empty {
+        color: rgba(183, 201, 225, 0.9);
+    }
+
+    .card-fissure-backlink-item {
+        border-top-color: rgba(123, 154, 194, 0.2);
+        color: #d3e0f4;
+    }
+
+    .card-fissure-backlink-item:active {
+        background: rgba(102, 140, 192, 0.28);
+    }
+
+    .card-fissure-backlink-count {
+        color: rgba(167, 189, 219, 0.88);
+    }
+
+    .ai-whisper {
+        border-left-color: rgba(150, 179, 214, 0.52);
+        background: rgba(24, 34, 48, 0.82);
+        color: rgba(210, 222, 241, 0.94);
+    }
+
+    .ai-fog-layer {
+        border-color: rgba(125, 150, 186, 0.32);
+        background: radial-gradient(120% 100% at 50% 0%, rgba(120, 143, 179, 0.2), rgba(88, 108, 140, 0.08)),
+                    linear-gradient(180deg, rgba(33, 45, 62, 0.62), rgba(18, 28, 43, 0.34));
+    }
+
+    .ai-fog-line {
+        background: linear-gradient(90deg, rgba(111, 130, 160, 0.2), rgba(167, 186, 214, 0.4), rgba(111, 130, 160, 0.2));
+    }
+
+    .ai-fog-status {
+        color: rgba(178, 194, 219, 0.9);
+    }
+
+    .ai-fog-layer.is-offline {
+        border-color: rgba(126, 151, 189, 0.28);
+        background: radial-gradient(120% 110% at 50% 0%, rgba(108, 128, 161, 0.18), rgba(80, 98, 129, 0.08)),
+                    linear-gradient(180deg, rgba(26, 37, 53, 0.56), rgba(16, 24, 37, 0.34));
+    }
+
+    .ai-fog-layer.is-offline .ai-fog-line {
+        background: linear-gradient(90deg, rgba(108, 126, 154, 0.2), rgba(148, 167, 197, 0.36), rgba(108, 126, 154, 0.2));
+    }
+
+    .card-fissure-seam-tip {
+        color: rgba(164, 185, 215, 0.78);
+    }
+
+    .concept-open-probe {
+        box-shadow: inset 0 calc(1px + (12px * var(--tear-open-ratio))) calc(14px + (26px * var(--tear-open-ratio)))
+                    rgba(0, 0, 0, calc(0.3 + (0.42 * var(--tear-shadow-depth)))),
+                    inset 0 0 0 1px rgba(122, 154, 198, 0.14);
+        background-image: radial-gradient(circle at var(--tear-shadow-focal-x) 42%, rgba(116, 142, 178, 0.2), rgba(74, 94, 122, 0) 60%),
+                          repeating-linear-gradient(22deg, rgba(114, 140, 175, 0.028) 0 1px, rgba(0, 0, 0, 0) 1px 3px);
+    }
+
+    .concept-selection-trigger {
+        color: #e9f1ff;
+        background: linear-gradient(135deg, #2f5f97, #3f7dc4);
+        box-shadow: 0 8px 18px rgba(6, 18, 34, 0.56);
+    }
+
+    .concept-tear-scene {
+        background: linear-gradient(180deg, rgba(3, 8, 14, calc(0.26 * var(--tear-shadow-depth))), rgba(8, 14, 22, calc(0.38 * var(--tear-shadow-depth)))) padding-box;
+        box-shadow: inset 0 calc(14px * var(--tear-shadow-depth)) calc(24px + (20px * var(--tear-shadow-depth)))
+                    rgba(0, 0, 0, calc(0.38 + (0.3 * var(--tear-shadow-depth)))),
+                    inset 0 calc(-10px * var(--tear-shadow-depth)) calc(18px + (18px * var(--tear-shadow-depth)))
+                    rgba(0, 0, 0, calc(0.24 + (0.22 * var(--tear-shadow-depth))));
+    }
+
+    .concept-tear-scene::before {
+        background: linear-gradient(180deg, rgba(108, 131, 164, 0.54), rgba(77, 99, 130, 0.34));
+    }
+
+    .concept-tear-scene::after {
+        background: radial-gradient(90% 110% at var(--tear-shadow-focal-x) var(--tear-shadow-focal-y),
+                    rgba(0, 0, 0, calc(0.44 * var(--tear-shadow-depth))),
+                    rgba(0, 0, 0, 0) 68%);
+    }
+
+    .concept-tear-half {
+        background-image: repeating-linear-gradient(16deg, rgba(138, 162, 194, 0.05) 0 1px, rgba(0, 0, 0, 0) 1px 4px),
+                          repeating-linear-gradient(-12deg, rgba(120, 145, 177, 0.042) 0 1px, rgba(0, 0, 0, 0) 1px 3px);
+    }
+}
+
 @media (prefers-reduced-motion: reduce) {
     .markdown-body .concept-term,
     .concept-tear-half,
     .card-fissure,
     .card-fissure.is-closing,
-    .card-fissure-close,
     .ai-whisper,
+    .ai-fog-line,
+    .concept-open-probe,
+    .concept-tear-scene,
+    .concept-tear-scene::before,
+    .concept-tear-scene::after,
     .concept-selection-trigger {
         transition: none !important;
         animation: none !important;

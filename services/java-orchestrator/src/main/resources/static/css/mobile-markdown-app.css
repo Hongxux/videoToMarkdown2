@@ -611,6 +611,7 @@ button:active:not(:disabled),
 /* Markdown 正文排版与宽内容滚动 */
 /* [CONTENT-ROOT] 正文容器与基础可读性约束 */
 .markdown-body {
+    --swipe-content-bg: #ffffff;
     padding: 24px 20px;
     font-size: 15px;
     line-height: var(--content-line-height);
@@ -1424,6 +1425,11 @@ button:active:not(:disabled),
     transition: transform var(--motion-duration-fast) var(--motion-ease-snappy), box-shadow var(--motion-duration-fast) ease, background-color var(--motion-duration-fast) ease, border-radius var(--motion-duration-fast) ease;
 }
 
+.paragraph-card.swipe-interaction-ready {
+    content-visibility: visible;
+    contain-intrinsic-size: auto;
+}
+
 .paragraph-card:last-child {
     border-bottom: 0;
     margin-bottom: 0;
@@ -1441,6 +1447,8 @@ button:active:not(:disabled),
     transition: opacity 80ms ease;
     overflow: hidden;
     border-radius: inherit;
+    contain: paint;
+    backface-visibility: hidden;
 }
 
 .swipe-backdrop.active {
@@ -1457,11 +1465,16 @@ button:active:not(:disabled),
 /* 批注（右滑）底色 */
 .swipe-backdrop.swipe-annotate {
     --swipe-note-progress: 0;
+    --swipe-note-height: min(54px, max(22px, calc(100% - 4px)));
+    --swipe-note-width: min(56px, max(24px, calc(var(--swipe-note-height) * 1.04)));
     justify-content: flex-start;
     padding-left: 24px;
     background:
         radial-gradient(92% 120% at 8% 50%, rgba(254, 240, 138, 0.36) 0%, rgba(254, 240, 138, 0) 62%),
         linear-gradient(255deg, rgba(251, 191, 36, 0.18) 0%, rgba(217, 119, 6, 0.26) 100%);
+    will-change: opacity;
+    transform: translateZ(0);
+    backface-visibility: hidden;
 }
 
 .swipe-backdrop.swipe-annotate::before {
@@ -1469,32 +1482,36 @@ button:active:not(:disabled),
     position: absolute;
     left: 14px;
     top: 50%;
-    width: 56px;
-    height: 54px;
+    width: var(--swipe-note-width);
+    height: var(--swipe-note-height);
     border-radius: 9px 11px 13px 8px;
     background:
         linear-gradient(170deg, #fff7d1 0%, #fef08a 58%, #facc15 100%);
     box-shadow:
         inset 0 0 0 1px rgba(146, 64, 14, 0.2),
         0 8px 14px rgba(146, 64, 14, 0.24);
-    transform: translateX(calc(-18px + (var(--swipe-note-progress) * 22px))) translateY(-50%) rotate(calc(-11deg + (var(--swipe-note-progress) * 15deg))) scale(calc(0.82 + (var(--swipe-note-progress) * 0.26)));
+    transform: translateZ(0) translateX(calc(-18px + (var(--swipe-note-progress) * 22px))) translateY(-50%) rotate(calc(-11deg + (var(--swipe-note-progress) * 15deg))) scale(calc(0.82 + (var(--swipe-note-progress) * 0.26)));
     opacity: calc(0.28 + (var(--swipe-note-progress) * 0.72));
     transform-origin: 20% 80%;
     transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
 }
 
 .swipe-backdrop.swipe-annotate::after {
     content: '';
     position: absolute;
-    left: 52px;
-    top: calc(50% - 25px);
-    width: 13px;
-    height: 13px;
+    left: calc(14px + (var(--swipe-note-width) * 0.68));
+    top: calc(50% - (var(--swipe-note-height) * 0.46));
+    width: clamp(8px, calc(var(--swipe-note-height) * 0.24), 13px);
+    height: clamp(8px, calc(var(--swipe-note-height) * 0.24), 13px);
     background: linear-gradient(145deg, rgba(253, 224, 71, 0.86) 0%, rgba(217, 119, 6, 0.42) 100%);
     clip-path: polygon(0 0, 100% 0, 100% 100%);
-    transform: translateX(calc(-16px + (var(--swipe-note-progress) * 23px))) rotate(calc(-6deg + (var(--swipe-note-progress) * 8deg)));
+    transform: translateZ(0) translateX(calc(-16px + (var(--swipe-note-progress) * 23px))) rotate(calc(-6deg + (var(--swipe-note-progress) * 8deg)));
     opacity: calc(0.14 + (var(--swipe-note-progress) * 0.86));
     transition: transform 140ms cubic-bezier(0.22, 1, 0.36, 1), opacity 120ms ease;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
 }
 
 .swipe-backdrop.swipe-annotate.slap::before {
@@ -1551,7 +1568,7 @@ button:active:not(:disabled),
     position: relative;
     z-index: 1;
     /* 关键修复：必须有实心背景，否则 backdrop 颜色会透出来 */
-    background: var(--bg, #ffffff);
+    background: var(--swipe-content-bg, #ffffff);
     will-change: transform;
     transform-origin: center center;
 }
@@ -2247,6 +2264,7 @@ dialog.comment-modal {
     }
 
     .markdown-body {
+        --swipe-content-bg: var(--card);
         box-shadow: 0 18px 32px rgba(0, 0, 0, 0.52), inset 0 1px 0 rgba(255, 255, 255, 0.06);
     }
 
@@ -2415,30 +2433,30 @@ dialog.comment-modal {
 
     /* [SWIPE-CELL] Dark mode overrides */
     .swipe-backdrop.swipe-delete {
-        background: linear-gradient(105deg, #991b1b 0%, #b91c1c 48%, #dc2626 100%);
+        background: linear-gradient(105deg, rgba(127, 29, 29, 0.82) 0%, rgba(120, 30, 40, 0.9) 48%, rgba(107, 33, 46, 0.94) 100%);
     }
 
     .swipe-backdrop.swipe-annotate {
         background:
-            radial-gradient(92% 120% at 8% 50%, rgba(251, 191, 36, 0.22) 0%, rgba(251, 191, 36, 0) 62%),
-            linear-gradient(255deg, rgba(202, 138, 4, 0.2) 0%, rgba(146, 64, 14, 0.26) 100%);
+            radial-gradient(92% 120% at 8% 50%, rgba(217, 119, 6, 0.14) 0%, rgba(217, 119, 6, 0) 62%),
+            linear-gradient(255deg, rgba(120, 53, 15, 0.22) 0%, rgba(92, 46, 15, 0.3) 100%);
     }
 
     .swipe-backdrop.swipe-annotate::before {
-        background: linear-gradient(170deg, #61471a 0%, #73551f 52%, #8d661e 100%);
-        box-shadow: inset 0 0 0 1px rgba(255, 224, 141, 0.2), 0 8px 14px rgba(0, 0, 0, 0.34);
+        background: linear-gradient(170deg, #4e3d1f 0%, #5a4724 52%, #6a5426 100%);
+        box-shadow: inset 0 0 0 1px rgba(236, 204, 128, 0.16), 0 8px 14px rgba(0, 0, 0, 0.3);
     }
 
     .swipe-backdrop.swipe-annotate::after {
-        background: linear-gradient(145deg, rgba(251, 191, 36, 0.72) 0%, rgba(217, 119, 6, 0.28) 100%);
+        background: linear-gradient(145deg, rgba(217, 119, 6, 0.48) 0%, rgba(146, 64, 14, 0.26) 100%);
     }
 
     .swipe-backdrop.swipe-annotate .swipe-backdrop-icon {
-        color: rgba(255, 241, 194, 0.94);
+        color: rgba(241, 219, 168, 0.86);
     }
 
     .swipe-content {
-        background: var(--card);
+        background: var(--swipe-content-bg, var(--card));
     }
 }
 
