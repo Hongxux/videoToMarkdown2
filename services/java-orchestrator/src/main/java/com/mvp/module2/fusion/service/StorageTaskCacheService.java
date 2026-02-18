@@ -1,4 +1,4 @@
-package main.java.com.mvp.module2.fusion.service;
+package com.mvp.module2.fusion.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
