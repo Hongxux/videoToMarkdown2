@@ -1744,6 +1744,51 @@ button:active:not(:disabled),
     resize: vertical;
 }
 
+.paragraph-editor-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 8px;
+    margin-bottom: 8px;
+}
+
+.paragraph-editor-action {
+    min-width: 74px;
+}
+
+.paragraph-wikilink-panel {
+    position: fixed;
+    z-index: 1320;
+    border-radius: 10px;
+    border: 1px solid rgba(37, 99, 235, 0.24);
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 10px 20px rgba(15, 23, 42, 0.2);
+    max-height: 220px;
+    overflow-x: hidden;
+    overflow-y: auto;
+}
+
+.paragraph-wikilink-item {
+    width: 100%;
+    border: 0;
+    border-top: 1px solid rgba(148, 163, 184, 0.24);
+    background: transparent;
+    text-align: left;
+    padding: 8px 10px;
+    font-size: 13px;
+    color: #0f172a;
+    cursor: pointer;
+}
+
+.paragraph-wikilink-item:first-child {
+    border-top: 0;
+}
+
+.paragraph-wikilink-item.is-active {
+    background: rgba(219, 234, 254, 0.76);
+    color: #1d4ed8;
+}
+
 .paragraph-note {
     font-size: 12px;
     color: var(--favorite-text);

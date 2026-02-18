@@ -2,6 +2,262 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+## 2026-02-18 移动端控制器边界重构：卡片链路从 `MobileMarkdownController` 拆分至 `MobileCardController`
+- 日期：2026-02-18
+- 触发背景与问题：
+  - `MobileMarkdownController` 同时承载任务管理、Markdown 读写、卡片网络（titles/candidates/wikilink/backlinks/ai-advice）等职责，单类体量过大，回归面持续扩大。
+  - 本轮新增 `[[wikilink]] + backlinks` 后，卡片链路迭代频率上升，继续混在任务链路中会抬高变更冲突与定位成本。
+- 第一性原理与复用杠杆：
+  - 第一性原理：职责边界应沿“变化频率 + 业务闭环”划分；卡片网络链路与任务执行链路属于不同变化轴，应物理拆分。
+  - 复用杠杆1：复用现有 `CardStorageService` 与 `DeepSeekAdvisorService`，不改存储与推理服务。
+  - 复用杠杆2：复用现有 `/api/mobile/cards/**` 对外契约，前端调用与路径不变。
+  - 复用杠杆3：复用原有候选词排序、保存返回体、backlinks 动态计算逻辑，仅迁移归属。
+- 架构决策：
+  - 决策1：新增 `MobileCardController`，统一承接 `/api/mobile/cards/**` 路由族。
+  - 决策2：`MobileMarkdownController` 回归任务与 markdown 主链路，不再包含卡片接口与卡片专属 DTO。
+  - 决策3：保持接口语义与返回结构稳定，确保前端 `index.html` 与 `mobile-concept-cards.js` 无需改动。
+- 调用链与决策链变化：
+  - 改造前：
+    - `/api/mobile/cards/**` 与 `/api/mobile/tasks/**` 同驻 `MobileMarkdownController`。
+  - 改造后：
+    - `/api/mobile/cards/**` -> `MobileCardController`
+    - `/api/mobile/tasks/**` -> `MobileMarkdownController`
+    - 服务层保持不变：`CardStorageService`、`DeepSeekAdvisorService`
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 验证方式：
+  - 路由检索：
+    - `rg -n "RequestMapping\\(\"/api/mobile/cards\"\\)|/titles|/backlinks|/ai-advice|/thought" services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - `rg -n "/cards/" services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 编译验证：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 文档编码校验：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-18 移动端知识网络闭环：段落 `textarea` 编辑统一 + `[[wikilink]]` 补全 + `backlinks` 面板
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 既有链路偏向“文章 -> 卡片”的单向沉淀，段落编辑入口以 `prompt` 为主，无法稳定承载同套 `[[wikilink]]` 交互。
+  - 概念卡缺少“谁在引用我”的可见面板，用户在阅读态无法形成“卡片 -> 卡片”的闭环导航。
+- 第一性原理与复用杠杆：
+  - 第一性原理：Zettelkasten 的核心不是“写卡片”，而是“显式连接卡片”；因此必须优先保证链接写入与反向发现都可在同一阅读链路完成。
+  - 复用杠杆1：复用现有 `/api/mobile/cards/*` 路由边界与 `CardStorageService.listTitles/listBacklinks`，不新建存储服务与索引服务。
+  - 复用杠杆2：复用现有 `index.html` 段落卡片渲染状态机，仅将段落编辑入口统一为 `textarea`，避免引入新页面与新状态源。
+  - 复用杠杆3：复用已落地的 `mobile-concept-cards.js` 卡片生命周期（打开/关闭/保存）与术语高亮链路，在同一模块追加 `backlinks` 展示。
+- 架构决策：
+  - 决策1：段落编辑入口从 `prompt` 统一为段落卡片内联 `textarea`，并在编辑态复用同套 `[[wikilink]]` 补全策略。
+  - 决策2：`backlinks` 采用后端动态计算（按 `[[...]]` 反查）+ 前端面板展示，不把反向链接固化写回正文。
+  - 决策3：卡片路由族统一暴露 `GET /api/mobile/cards/{title}/backlinks` 与 `GET /api/mobile/cards/concept/{title}/backlinks` 双路由，兼容历史与新链路。
+  - 决策4：高亮候选词链路继续使用 `POST /api/mobile/cards/titles/candidates`，失败时前端回退全量标题，保证可用性优先。
+- 调用链与决策链变化：
+  - 改造前：
+    - 段落编辑：`阅读态 -> prompt -> 回写 markdown`，无法复用实时 `[[wikilink]]` 联想。
+    - 网络闭环：仅可正向保存概念，缺少“被谁引用”的就地反馈。
+  - 改造后：
+    - 段落编辑：`index.html(段落卡片) -> textarea(data-p-wikilink) -> 保存/取消按钮 -> markdown 回写`
+    - 反向链接：`mobile-concept-cards.js.loadBacklinks -> GET /api/mobile/cards/concept/{title}/backlinks -> 面板渲染可点击来源卡片`
+    - 兼容路由：`/cards/{title}/backlinks` 与 `/cards/concept/{title}/backlinks` 指向同一服务逻辑。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+- 性能与成本对比（合成基准，反向链接动态计算）：
+  - 测试方式：
+    - 在本地用 PowerShell 生成 1000 张模拟卡片（每张 24 个 `[[wikilink]]`），执行“遍历文件 + 正则匹配目标标题”测量耗时。
+    - 命令口径：一次性脚本生成数据、测 3 个目标标题、输出 `elapsed_ms`，结束后删除临时目录。
+  - 测试数据：
+    - `dataset_files=1000`，`links_per_file=24`
+    - `target=概念1 elapsed_ms=1419.80`
+    - `target=概念64 elapsed_ms=2104.96`
+    - `target=概念128 elapsed_ms=1412.49`
+    - `elapsed_avg_ms=1645.75`，`elapsed_min_ms=1412.49`，`elapsed_max_ms=2104.96`
+  - 结果与结论：
+    - 该口径是 PowerShell 脚本的保守上界，不等价于 Java 服务端真实耗时；但验证了“动态扫描可工作且无需新增存储索引”。
+    - 本次优先保证知识网络闭环与链路一致性，后续若卡片规模继续增大，再按需引入增量索引或缓存。
+- 验证方式：
+  - 代码检索：
+    - `rg -n "cards/titles|cards/titles/candidates|cards/.+backlinks" services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - `rg -n "toggleParagraphEditorBtn|data-p-wikilink|loadBacklinks|data-card-backlinks" services/java-orchestrator/src/main/resources/static/index.html services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 文档编码校验：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 乱码巡检（按需）：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py --check-mojibake`
+
+## 2026-02-18 概念卡片保存契约统一：`SaveResult` + `thought` 写回链路
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 概念卡片保存接口原先仅返回概念文件维度信息，前端“保存后定位反馈（K 状态）”缺少稳定契约。
+  - 当下思考（Local）需要直接写回原文锚点，原有接口无法表达“写回目标与定位信息”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：保存闭环不仅是“写盘成功”，还必须让前端能确定“写到哪里、如何回显”。
+  - 复用杠杆1：复用现有 `CardStorageService` 原子写能力，不新建存储服务。
+  - 复用杠杆2：复用现有 `/api/mobile/cards/*` 路由边界，保持移动端调用链稳定。
+  - 复用杠杆3：复用现有撕开交互组件 `mobile-concept-cards.js`，仅补保存后状态收敛逻辑。
+- 架构决策：
+  - 决策1：`CardStorageService.CardSaveResult` 扩展统一字段：`targetType/targetPath/locator/revision`。
+  - 决策2：新增 `POST /api/mobile/cards/thought`，以 `{source, anchor, content}` 驱动 Local 思考写回。
+  - 决策3：概念读写接口升级为 `/api/mobile/cards/concept/{title}`，并保留 `/api/mobile/cards/{title}` 兼容入口。
+  - 决策4：前端关闭卡片后消费统一保存结果，执行“回正文 + 定位 + 单次高亮”的 K 状态反馈。
+- 调用链与决策链变化：
+  - 改造前：
+    - `POST /api/mobile/cards/{title}` -> 仅概念卡落盘 -> 前端提示“已保存”。
+  - 改造后：
+    - Global：`POST /api/mobile/cards/concept/{title}` -> `CardStorageService.saveCard` -> `SaveResult`
+    - Local：`POST /api/mobile/cards/thought` -> `CardStorageService.saveThought` -> `SaveResult`
+    - 前端：`closeActiveCard` -> `saveCard` -> `enterPostSaveState(K)`
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 更新：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - 更新：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+  - 更新：`docs/architecture/overview.md`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -Dmaven.repo.local=.m2_temp/repository "-Dtest=CardStorageServiceTest" test -q`（受当前离线环境限制，依赖无法拉取，未完成）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-18 移动端高亮链路二次升级：引擎拆分 + Top-K 预过滤 + Worker 下沉
+- 日期：2026-02-18
+- 触发背景与问题：
+  - `mobile-concept-cards.js` 同时承担“卡片交互 + 高亮匹配 + 调度策略”，单文件职责过重，回归面过大。
+  - 当词库规模持续增长时，仍需要进一步降低主线程匹配负载，并为超大词库提供 Worker 兜底。
+- 第一性原理与复用杠杆：
+  - 第一性原理：高亮是可延迟增强能力，应与卡片交互解耦，并具备“按需计算 + 可降级”能力。
+  - 复用杠杆1：复用现有 `CardStorageService.listTitles()` 作为候选词源，不新增存储服务。
+  - 复用杠杆2：复用 `mobileConceptCards.create` 调用入口，页面编排层只加配置，不改业务状态机。
+  - 复用杠杆3：复用浏览器原生 `Worker/IntersectionObserver/requestIdleCallback`，避免引入前端构建链。
+- 架构决策：
+  - 决策1：新增 `mobile-highlight-engine.js`，将高亮索引、分帧调度、视口增量逻辑从 `mobile-concept-cards.js` 抽离。
+  - 决策2：新增 `mobile-highlight-worker.js`，将 `findMatchesByIndex` 匹配计算可选下沉到 Worker（按词条阈值启用）。
+  - 决策3：后端新增 `POST /api/mobile/cards/titles/candidates`，按上下文命中频次返回 Top-K 候选词，前端优先使用候选词高亮。
+  - 决策4：候选词接口失败时回退全量标题，保证功能可用性不受网络/服务异常影响。
+- 调用链与决策链变化：
+  - 改造前：
+    - `index.html` -> `mobile-concept-cards.js`
+    - `GET /api/mobile/cards/titles`
+    - `mobile-concept-cards.js` 内部完成全部高亮计算与调度
+  - 改造后：
+    - `index.html` -> `mobile-highlight-engine.js` -> `mobile-concept-cards.js`
+    - `GET /api/mobile/cards/titles`（全量标题，供卡片联想与回退）
+    - `POST /api/mobile/cards/titles/candidates`（Top-K 上下文候选）
+    - `mobile-highlight-engine.js`（主线程分帧）-> `mobile-highlight-worker.js`（大词库可选下沉）
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-highlight-engine.js`
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-highlight-worker.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 性能对比数据（合成基准）：
+  - 测试方式：
+    - 使用 Node `perf_hooks` 构造 10,000 词条、46,799 字符文本（1,800 次命中），比较“全量词条匹配”与“Top-K 词条匹配”阶段耗时。
+    - 命令方式：PowerShell 内联 Node 脚本（仓库内执行）。
+    - 说明：该数据聚焦匹配层耗时，不含真实 DOM 遍历与渲染；用于观察候选词裁剪的计算量变化。
+  - 测试结果：
+    - 全量 10,000：`index=3.11ms`，`compile=3.99ms`，`match=17.12ms`，`total=24.22ms`。
+    - Top-K 1,200：`index=0.26ms`，`compile=0.44ms`，`match=1.63ms`，`total=2.32ms`。
+    - 结论：在候选词裁剪场景下，匹配阶段耗时显著下降（约 `90.5%`），为移动端主线程留出更多交互预算。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-highlight-engine.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-highlight-worker.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-18 移动端概念高亮性能升级：分桶索引 + 视口增量调度
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 概念卡片词库规模增长后（目标上限可达 10,000），原实现采用“全量词条合并为单大正则 + 全文一次性 TreeWalker 扫描”，在移动端主线程上容易产生长任务。
+  - 高亮逻辑与阅读渲染同线程执行，滚动与触控响应会被阻塞，影响交互连续性。
+- 第一性原理与复用杠杆：
+  - 第一性原理：高亮属于“增强能力”，必须让位于阅读与交互主链路；宁可延迟补齐高亮，也不能阻塞首屏与滚动。
+  - 复用杠杆1：复用现有 `mobile-concept-cards.js` 模块边界，不新增前端构建流程与新依赖。
+  - 复用杠杆2：复用既有 `refresh -> unwrapHighlights -> applyHighlights` 调用入口，仅替换内部匹配与调度策略。
+  - 复用杠杆3：复用浏览器原生能力 `IntersectionObserver`、`requestIdleCallback`、`requestAnimationFrame`，避免引入 Worker 通信与序列化成本。
+- 架构决策：
+  - 决策1：`buildTermRegex` 从“单正则构造器”升级为“首字符分桶索引构造器”，按 bucket 惰性编译正则并缓存（`termRegexCache`）。
+  - 决策2：`applyHighlights` 从“容器全量文本节点扫描”升级为“块级节点（`BLOCK_SELECTOR`）增量调度”。
+  - 决策3：新增视口优先策略：首批仅高亮视口附近 block，其余 block 由 `IntersectionObserver` 触发按需高亮。
+  - 决策4：新增分帧预算策略：高亮队列在 `requestIdleCallback`/`requestAnimationFrame` 中按 `highlightFrameBudgetMs` 切片执行，避免单帧长任务。
+  - 决策5：保留降级链路：无 `IntersectionObserver` 时仍走全量分批执行，不阻断兼容浏览器。
+- 调用链与决策链变化：
+  - 改造前：
+    - `refresh`
+    - -> `unwrapHighlights`
+    - -> `applyHighlights(全容器 TreeWalker + 单大正则)`
+  - 改造后：
+    - `refresh`
+    - -> `resetHighlightRuntime`
+    - -> `unwrapHighlights`
+    - -> `applyHighlights(块级收集)`
+    - -> `pickInitialHighlightBlocks(首屏优先)`
+    - -> `enqueueHighlightBlocks`
+    - -> `drainHighlightQueue(分帧预算)`
+    - -> `highlightBlock -> findMatchesByIndex(分桶正则惰性编译)`
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+    - 新增状态：`blockObserver/highlightQueue/queuedBlocks/termRegexCache`。
+    - 新增函数：`resetHighlightRuntime`、`collectHighlightBlocks`、`pickInitialHighlightBlocks`、`enqueueHighlightBlocks`、`drainHighlightQueue`、`findMatchesByIndex` 等。
+    - 调整参数：`maxHighlightTerms` 默认提升至 `10000`，新增 `highlightInitialBlockLimit/highlightFrameBudgetMs/highlightObserverRootMargin`。
+- 性能对比数据（合成基准）：
+  - 测试方式：
+    - 命令：PowerShell 内联 Node 脚本（`perf_hooks`）对比“单大正则”与“首字符分桶正则”匹配耗时。
+    - 数据：10,000 词条（按首字母分布），46,799 字符文本，命中次数 1,800。
+    - 说明：该基准聚焦匹配层复杂度，不包含真实 DOM 遍历成本；真实页面收益还叠加“视口增量 + 分帧调度”。
+  - 测试结果：
+    - 基线（单大正则）：编译 `5.03ms`，匹配 `17.82ms`，命中 `1800`。
+    - 分桶方案：索引 `3.44ms`，编译 `3.18ms`，匹配 `13.59ms`，命中 `1800`，regex 数 `26`。
+    - 结论：匹配阶段耗时下降约 `23.7%`（`17.82ms -> 13.59ms`）；结合增量调度后，可显著降低主线程长任务风险。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-18 移动端 Obsidian 式概念卡片：文件直存 + 顾问建议 + 阅读内嵌交互
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 当前移动端只支持任务级 Markdown 阅读/编辑，缺少“术语即入口”的概念沉淀链路。
+  - 概念记录若继续附着在任务正文，会和段落收藏/便签职责重叠，且复用成本高。
+- 第一性原理与复用杠杆：
+  - 第一性原理：概念卡片应是可长期复用的独立知识对象，存储层必须脱离任务生命周期。
+  - 复用杠杆1：复用现有 Spring MVC 路由边界（`/api/mobile/**`），不新增独立网关或新服务进程。
+  - 复用杠杆2：复用当前 `index.html` 的“渲染后增强”接入点（`renderMarkdown -> enhanceRenderedContent`），避免重写阅读页状态机。
+  - 复用杠杆3：复用既有 DeepSeek API Key 环境变量（`DEEPSEEK_API_KEY`），Advisor 未配置时本地兜底，不阻断主链路。
+- 架构决策：
+  - 决策1：新增 `CardStorageService`，以 `var/storage/cards/*.md` 作为唯一事实源，按“标题=文件名”读写。
+  - 决策2：卡片文件统一采用 YAML Frontmatter（`title/created/tags/type`）+ 纯正文；数据层不再把“谁链接了我”写回正文。
+  - 决策3：新增 `DeepSeekAdvisorService`，提供“顾问式短建议”；当外部调用失败或未配置 Key 时自动回退本地建议。
+  - 决策4：保留 `sourceTaskId/sourcePath` 查询参数仅作兼容，后端不持久化这类 UI 视图信息；反向链接由展示层动态计算，导出时按需物化。
+  - 决策5：当请求显式携带来源上下文时，仅对 `## 🔗 反向链接` 区段执行 append+去重，避免覆盖手工编辑内容。
+  - 决策6：`saveCard` 落盘改为“读取最新文件 -> 合并 -> 临时文件原子替换”，避免并发/中断导致半写入。
+  - 决策7：当 incoming body 与磁盘 body 冲突且无法判定包含关系时，保留磁盘正文并将 incoming 追加到 `## 🧩 待合并草稿`，确保不丢人工修改。
+  - 决策8：前端新增 `mobile-concept-cards.js/.css` 独立模块，通过术语高亮 -> 长按/点击撕裂层 -> 自动收起保存闭环完成交互。
+  - 决策9：不新增列表页与额外 Tab，卡片入口完全内嵌在现有阅读视图中。
+- 调用链与决策链变化：
+  - 改造前：
+    - `index.html` 阅读页仅支持段落级手势（复制/收藏/便签）与任务级 Markdown 保存。
+  - 改造后：
+    - `index.html(renderMarkdown)` -> `mobile-concept-cards.refresh`
+    - `GET /api/mobile/cards/titles`（术语高亮）
+    - `GET /api/mobile/cards/{title}`（读取卡片）
+    - `POST /api/mobile/cards/ai-advice`（顾问建议，可回退）
+    - `POST /api/mobile/cards/{title}`（自动保存）
+    - `CardStorageService` -> `var/storage/cards/*.md`
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+  - 新增：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 新增：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 新增：`services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - 更新：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 新增：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+  - 新增：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekAdvisorServiceTest.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=CardStorageServiceTest,DeepSeekAdvisorServiceTest" test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-18 增量截图 OCR 升级：区域识别中英兼容 + 疑似字幕排除（底部比例默认 0.33）
 - 日期：2026-02-18
 - 触发背景与问题：

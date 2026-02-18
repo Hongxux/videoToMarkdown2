@@ -13,6 +13,79 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-18 概念卡片标题直接落盘触发 Windows 文件名边界风险（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 概念卡片保存链路使用 `term/title` 直接参与文件路径拼接，遇到 Windows 保留名（如 `CON`、`AUX`）或尾部点/空格时，可能在写入阶段失败。
+  - 前端 `mobile-concept-cards.js` 在请求 `/api/mobile/cards/{title}` 时直接透传 `activeCard.term`，当标题包含文件系统敏感字符时，失败概率提升。
+  - 影响接口：`GET /api/mobile/cards/{title}`、`POST /api/mobile/cards/{title}`。
+- 触发条件：
+  - 用户把复杂短语或系统保留名作为概念标题（例如 `CON`、`AUX.txt`、`concept   .`）。
+  - 旧逻辑只替换 `\\/:*?"<>|`，未覆盖 Windows 保留设备名与尾部点/空格规则。
+- 根因定位：
+  - 文件名标准化规则不完整：缺失 “保留设备名” 与 “尾部点/空格” 约束。
+  - 调用链缺少前端防御：请求层未在发送前执行同口径预清洗。
+- 修复措施：
+  - 后端：`CardStorageService.normalizeTitle` 增强为“文件系统安全标题”标准化：
+    - 新增尾部点/空格清理；
+    - 新增 Windows 保留名检测（`CON/PRN/AUX/NUL/COM1..9/LPT1..9`）并自动加前缀规避；
+    - 以上规则在长度截断后再次执行，避免截断回退到非法状态。
+  - 前端：`mobile-concept-cards.js` 新增 `normalizeStorageTitle`，在 `saveCard/loadCard` 请求前统一清洗标题，避免将高风险标题直接送入路径段。
+  - 测试：`CardStorageServiceTest` 新增覆盖 `CON`、`AUX.txt`、非法字符、尾部点空格场景。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=CardStorageServiceTest test`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：保留“保留名/非法字符/尾部点空格”回归用例，避免后续标准化规则回退。
+  - 校验：新增评审清单项，凡“用户输入 -> 文件名”链路必须统一经过标准化函数。
+  - 监控：对卡片保存失败日志按 `title` 标准化前后状态做采样，快速定位命名边界问题。
+  - 回滚：如需回滚前端防线，可仅回滚前端 `normalizeStorageTitle` 调用，保留后端强校验不变。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+  - `GET /api/mobile/cards/{title}`
+  - `POST /api/mobile/cards/{title}`
+- 复盘要点：
+  - “输入可见名”和“存储文件名”必须在边界层统一归一化，不能依赖底层 I/O 抛错兜底。
+  - 针对跨平台文件系统差异（Windows 保留名）要把规则固化到代码与测试，不依赖运行环境偶然发现。
+
+## 2026-02-18 概念卡片反向链接被硬写入正文导致元数据污染（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 概念卡片保存链路曾把“反向链接”直接写入 `.md` 正文（`## 🔗 反向链接` 区段）。
+  - 当来源任务重命名、路径变化或删除后，卡片正文会残留死链接与脏数据，破坏卡片原子性（Atomicity）。
+  - 影响 `/api/mobile/cards/{title}` 的保存与后续 Obsidian 阅读体验。
+- 触发条件：
+  - 前端在保存卡片时携带 `sourceTaskId/sourcePath/isContextDependent`。
+  - 后端将这些动态上下文信息按正文内容持久化，而非作为展示期元数据处理。
+- 根因定位：
+  - 架构边界混淆：把“动态视图元数据”误当成“静态正文内容”。
+  - 缺少“正文纯净性”守护规则与回归测试，导致实现偏向便利写入而非长期一致性。
+- 修复措施：
+  - `CardStorageService` 改为统一写入 `YAML Frontmatter + 纯正文`，不再持久化反向链接区段。
+  - `MobileMarkdownController` 保留 `sourceTaskId/sourcePath` 参数仅作兼容，不下沉到数据层。
+  - 架构文档与实现方案同步更新，明确“反向链接由运行时动态计算展示，或仅在导出时按需物化”。
+- 验证方式：
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+    - `shouldWriteFrontmatterAndKeepBodyPure` 断言正文不包含“反向链接”内容。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增/保留“正文纯净性”断言，禁止任何 UI 动态字段被写入正文。
+  - 校验：代码评审新增检查项，区分“事实数据（正文）”与“运行时视图（元数据）”。
+  - 监控：对卡片保存链路增加抽样扫描，发现 `## 🔗 反向链接` 这类保留段落即告警。
+  - 回滚：若动态视图短期不可用，允许在导出流程按需物化，不回退正文写入策略。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+  - `implementation_plan.md.resolved`
+  - `GET /api/mobile/cards/{title}`
+  - `POST /api/mobile/cards/{title}`
+- 复盘要点：
+  - 反向链接是“可变关系”，默认属于元数据层，不应直接进入事实正文。
+  - 保持 Markdown 原子性可以显著降低重命名、迁移和跨工具协作时的数据腐化风险。
+
 ## 2026-02-18 Phase2B 人物主体预过滤未生效且命中后截图未删除（已修复）
 - 日期：2026-02-18
 - 现象与影响范围：
@@ -3345,3 +3418,60 @@
   - 监控：统计 `excluded_no_timestamp` 映射状态，若异常升高优先排查 fallback 回填链路。
   - 校验：发布前抽查 `materials.screenshot_items` 与 augment 输入，确认 `should_include/should_included` 均能被一致处理。
   - 回滚：若顺序回填引入误配，可先关闭“同数量顺序回填”，保留别名+单请求兜底策略。
+
+## 2026-02-18 概念卡片保存覆盖桌面手工编辑（追加与原子写修复）
+- 现象：
+  - 移动端保存概念卡片时，若用户在 Obsidian/桌面端已手工编辑同一文件，后端全量覆盖写入会抹掉手工修改。
+  - 反向链接区段在旧实现中是“重建式写回”，存在覆盖该区段已有手工条目的风险。
+- 根因：
+  - `CardStorageService.saveCard` 使用“incoming body 直接覆盖”的写法，缺少磁盘最新内容合并。
+  - 文件写入使用直接 `Files.writeString`，在异常中断场景下存在半写入风险。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+    - `saveCard` 改为“读取磁盘最新 -> 合并正文 -> 原子替换写入”。
+    - 增加 `mergeBodiesPreservingManualEdits`：
+      - 可判定包含关系时优先保留信息量更大的版本；
+      - 冲突不可判定时保留磁盘正文，并把 incoming 追加到 `## 🧩 待合并草稿`，避免任何一侧内容丢失。
+    - 增加 `appendBacklinkEntry`：仅对 `## 🔗 反向链接` 区段做 append + 去重，不覆盖已有手工条目。
+    - 增加 `writeStringAtomically`：临时文件 + `ATOMIC_MOVE`（不支持时回退 `REPLACE_EXISTING`）。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 保存卡片时将 `sourceTaskId/sourcePath` 映射到 `CardWriteOptions`，仅在显式传入来源上下文时追加反向链接条目。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CardStorageServiceTest.java`
+    - 新增回归：
+      - `shouldAppendBacklinkInsteadOfOverwritingSection`
+      - `shouldPreserveManualDesktopEditsOnConflict`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固定回归“桌面手工编辑 + 移动端保存”场景，断言手工内容保留；
+    - 固定回归“反向链接段追加而非覆盖”场景，断言旧条目不丢且新条目去重追加。
+  - 监控：
+    - 记录 `saveCard` 冲突合并命中次数（进入 `待合并草稿` 的次数），高频时提示前端补充并发提示。
+  - 校验：
+    - 发布前执行 `mvn -f services/java-orchestrator/pom.xml "-Dtest=CardStorageServiceTest,DeepSeekAdvisorServiceTest" test -q`。
+  - 回滚：
+    - 若冲突策略导致阅读负担，可临时回退为“磁盘优先 + 拒绝保存返回冲突码”，但禁止回退到直接覆盖写入。
+
+## 2026-02-18 Java controllers compile failure (BOM + broken lines)
+- Symptom:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` failed with errors such as illegal BOM char (`\ufeff`), unterminated string literal, and illegal expression start.
+  - Affected files:
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CardStorageService.java`
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+- Root cause:
+  - UTF-8 BOM remained in Java source files while the compile pipeline expected BOM-free source text.
+  - Historical line-merge corruption in controller/service sources caused comment-swallowed code (`//` + code on same line), missing braces, and missing closing quotes in string literals.
+- Fix:
+  - Rewrote the three Java files as UTF-8 without BOM.
+  - Repaired broken statements in `MobileMarkdownController.java` and `CardStorageService.java`:
+    - restored swallowed `if/return/}` statements,
+    - closed broken string literals and exception constructor arguments,
+    - rebuilt `buildSafeExportFilename` method boundaries/scope.
+  - Verification passed:
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Prevention (test/monitor/check/rollback):
+  - Test: keep Java compile as a required gate in CI (`-DskipTests compile` at minimum).
+  - Monitor: add periodic BOM scan for `services/java-orchestrator/src/main/java/**/*.java`.
+  - Check: before submit, run compile plus quick static checks for bare `//` merged lines and odd quote counts.
+  - Rollback: if text rendering issues recur, only roll back message/comment wording, not structural fixes or BOM-free policy.
+

@@ -16,6 +16,8 @@
     <link rel="stylesheet" href="/css/design-tokens.css">
     <link rel="preload" as="style" href="/css/mobile-markdown-app.css">
     <link rel="stylesheet" href="/css/mobile-markdown-app.css">
+    <link rel="preload" as="style" href="/css/mobile-concept-cards.css">
+    <link rel="stylesheet" href="/css/mobile-concept-cards.css">
 </head>
 <body>
 <div class="app">
@@ -80,6 +82,13 @@
                     </div>
                 </div>
                 <div class="content-tools-panel" id="contentToolsPanel">
+                    <button class="btn has-icon" id="toggleParagraphEditorBtn" type="button" aria-pressed="false">
+                            <svg class="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M4 20c4-.6 7-2.5 9.2-5.8L20 6.4a2.2 2.2 0 0 0-3.1-3.1l-7.8 6.8C5.8 12.3 3.9 15.6 3.3 20z"></path>
+                                <path d="M11 11l2 2"></path>
+                            </svg>
+                            <span class="btn-label">进入编辑</span>
+                    </button>
                     <button class="btn has-icon" id="exportTaskBtn" type="button">
                             <svg class="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
                                 <path d="M12 4v10"/>
@@ -650,6 +659,8 @@
 <script src="/lib/mobile-pwa-share-target.js"></script>
 <script src="/lib/mobile-reader-typography.js"></script>
 <script src="/lib/mobile-content-invitation.js"></script>
+<script src="/lib/mobile-highlight-engine.js"></script>
+<script src="/lib/mobile-concept-cards.js"></script>
 <script>
     const API_BASE = `${window.location.origin}/api/mobile`;
     const TASK_API_BASE = `${window.location.origin}/api/mobile`;
@@ -722,6 +733,8 @@
         actionOpen: '打开故事',
         actionSaveFile: '保存文件',
         actionOutline: '故事大纲',
+        actionEnterEdit: '进入编辑',
+        actionExitEdit: '退出编辑',
         viewerHintOpen: '开启你的阅读之旅',
         viewerHintOpenContent: '选择一个故事，开始阅读',
         openContentFirst: '请先打开一个故事',
@@ -776,6 +789,7 @@
         paragraphBlocks: [],
         paragraphEditingIndex: -1,
         paragraphDraftText: '',
+        paragraphEditorEnabled: false,
         paragraphMeta: { favorites: {}, comments: {} },
         inlineStickyVisible: false,
         inlineStickyParagraphIndex: -1,
@@ -955,6 +969,14 @@
     let paragraphBackgroundSyncQueue = Promise.resolve();
     let paragraphBackgroundSyncTimer = null;
     let paragraphBackgroundSyncPending = null;
+    let paragraphWikilinkPanel = null;
+    let paragraphWikilinkActiveEditor = null;
+    let paragraphWikilinkSuggestions = [];
+    let paragraphWikilinkActiveIndex = -1;
+    let paragraphWikilinkTriggerStart = -1;
+    let paragraphWikilinkTitleLoadPromise = null;
+    let paragraphWikilinkTitlesLoaded = false;
+    let paragraphWikilinkTitles = [];
     let runtimeLibraryLoadPromise = null;
     let emptyStateSvgSeed = 0;
     const DEFAULT_VIDEO_POSTER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
@@ -1099,6 +1121,48 @@
     }
 
     let composerController = null;
+    let conceptCardsController = null;
+
+    function getConceptCardsController() {
+        if (conceptCardsController) {
+            return conceptCardsController;
+        }
+        const conceptModule = window.mobileConceptCards;
+        if (!conceptModule || typeof conceptModule.create !== 'function') {
+            return null;
+        }
+        conceptCardsController = conceptModule.create({
+            apiBase: API_BASE,
+            highlightCandidatesEndpoint: `${API_BASE}/cards/titles/candidates`,
+            highlightCandidatesTopK: 1200,
+            highlightWorkerUrl: '/lib/mobile-highlight-worker.js',
+            highlightWorkerMinTerms: 1200,
+            notify: (message, type) => {
+                if (type === 'error') {
+                    setTaskSummary(String(message || ''), 'error');
+                }
+            },
+            getContext: () => ({
+                taskId: state.currentTaskId || '',
+                path: buildSavePathHint(),
+                markdown: state.currentMarkdownRaw || '',
+            }),
+        });
+        return conceptCardsController;
+    }
+
+    function refreshConceptCards(container, markdownText) {
+        const controller = getConceptCardsController();
+        if (!controller || typeof controller.refresh !== 'function') {
+            return;
+        }
+        controller.refresh({
+            container,
+            markdownText,
+        }).catch((error) => {
+            console.warn('概念卡片高亮刷新失败', error);
+        });
+    }
 
     // 提交区控制器集中创建：把文案渲染、自动提交与触感反馈从页面脚本中抽离，
     // 页面层只保留业务编排，降低维护时的认知切换成本。
@@ -3142,9 +3206,11 @@
         state.paragraphBlocks = [];
         state.paragraphEditingIndex = -1;
         state.paragraphDraftText = '';
+        state.paragraphEditorEnabled = false;
         state.touchScrollActive = false;
         state.touchScrollLastMoveAt = 0;
         resetParagraphVirtualState();
+        hideParagraphWikilinkPanel();
         stopInlineStickyWobbleDecay();
         state.inlineStickyWobbleDeg = 0;
         state.inlineStickyWobbleLastTop = 0;
@@ -3154,6 +3220,9 @@
             markdownBody.classList.remove('edit-scroll-host');
         }
         closeInlineStickyNote();
+        if (conceptCardsController && typeof conceptCardsController.closeActiveCard === 'function') {
+            conceptCardsController.closeActiveCard({ save: true, silent: true }).catch(() => null);
+        }
     }
 
     // 统一处理后端返回的 Markdown 载荷，确保标题策略可控且一致。
@@ -3654,6 +3723,7 @@
         const container = document.getElementById('markdownBody');
         if (!container) return;
         container.classList.remove('edit-scroll-host');
+        hideParagraphWikilinkPanel();
         const contentText = String(markdownText || '');
         const token = Number(state.markdownRenderToken || 0) + 1;
         state.markdownRenderToken = token;
@@ -3673,6 +3743,7 @@
                 withMermaid: true,
             });
             applyFavoriteTagsToMarkdown(container);
+            refreshConceptCards(container, contentText);
         };
 
         if (contentText.length >= 90000) {
@@ -4716,6 +4787,232 @@
         return Math.sqrt(dx * dx + dy * dy);
     }
 
+    const PARAGRAPH_WIKILINK_TRIGGER_REGEX = /\[\[([^\]\n|]*)$/;
+    const PARAGRAPH_WIKILINK_MAX_ITEMS = 8;
+    const PARAGRAPH_WIKILINK_KEY_SKIP_SET = new Set(['ArrowUp', 'ArrowDown', 'Enter', 'Tab', 'Escape']);
+
+    function isParagraphEditorMode() {
+        return !!(state.currentTaskId && state.paragraphEditorEnabled);
+    }
+
+    function ensureParagraphWikilinkPanel() {
+        if (paragraphWikilinkPanel && paragraphWikilinkPanel.parentNode) {
+            return paragraphWikilinkPanel;
+        }
+        const panel = document.createElement('div');
+        panel.className = 'paragraph-wikilink-panel';
+        panel.hidden = true;
+        panel.addEventListener('mousedown', (event) => {
+            event.preventDefault();
+            const item = event.target.closest('[data-paragraph-wikilink-index]');
+            if (!item) return;
+            const index = Number(item.getAttribute('data-paragraph-wikilink-index'));
+            applyParagraphWikilinkSuggestion(index);
+        });
+        document.body.appendChild(panel);
+        paragraphWikilinkPanel = panel;
+        return panel;
+    }
+
+    function hideParagraphWikilinkPanel() {
+        paragraphWikilinkSuggestions = [];
+        paragraphWikilinkActiveIndex = -1;
+        paragraphWikilinkTriggerStart = -1;
+        paragraphWikilinkActiveEditor = null;
+        if (!paragraphWikilinkPanel) return;
+        paragraphWikilinkPanel.hidden = true;
+        paragraphWikilinkPanel.innerHTML = '';
+    }
+
+    async function ensureParagraphWikilinkTitlesLoaded() {
+        if (paragraphWikilinkTitlesLoaded) {
+            return paragraphWikilinkTitles;
+        }
+        if (paragraphWikilinkTitleLoadPromise) {
+            return paragraphWikilinkTitleLoadPromise;
+        }
+        paragraphWikilinkTitleLoadPromise = fetch(`${API_BASE}/cards/titles`)
+            .then(async (resp) => {
+                if (!resp.ok) {
+                    const text = await resp.text();
+                    throw new Error(text || `HTTP ${resp.status}`);
+                }
+                return resp.json();
+            })
+            .then((payload) => {
+                const raw = Array.isArray(payload && payload.titles) ? payload.titles : [];
+                const normalized = raw
+                    .map((item) => String(item || '').trim())
+                    .filter(Boolean);
+                paragraphWikilinkTitles = Array.from(new Set(normalized));
+                paragraphWikilinkTitlesLoaded = true;
+                return paragraphWikilinkTitles;
+            })
+            .catch((error) => {
+                console.warn('加载卡片标题失败（段落 wikilink）', error);
+                paragraphWikilinkTitles = [];
+                paragraphWikilinkTitlesLoaded = true;
+                return paragraphWikilinkTitles;
+            })
+            .finally(() => {
+                paragraphWikilinkTitleLoadPromise = null;
+            });
+        return paragraphWikilinkTitleLoadPromise;
+    }
+
+    function collectParagraphInlineCandidatesFromMarkdown() {
+        const source = String(state.currentMarkdownRaw || '');
+        if (!source) return [];
+        const bucket = [];
+        const headingRegex = /^#{1,6}\s+(.+)$/gm;
+        let headingMatch;
+        while ((headingMatch = headingRegex.exec(source)) !== null) {
+            const heading = String(headingMatch[1] || '').trim();
+            if (heading) {
+                bucket.push(heading);
+            }
+        }
+        const wikilinkRegex = /\[\[([^\]\n|]+)(?:\|[^\]]*)?\]\]/g;
+        let linkMatch;
+        while ((linkMatch = wikilinkRegex.exec(source)) !== null) {
+            const title = String(linkMatch[1] || '').trim();
+            if (title) {
+                bucket.push(title);
+            }
+        }
+        return bucket;
+    }
+
+    function collectParagraphWikilinkCandidates(query) {
+        const normalizedQuery = String(query || '').trim().toLowerCase();
+        const candidates = [];
+        const seen = new Set();
+        const pushUnique = (raw) => {
+            const value = String(raw || '').trim();
+            if (!value) return;
+            const key = value.toLowerCase();
+            if (seen.has(key)) return;
+            seen.add(key);
+            candidates.push(value);
+        };
+        paragraphWikilinkTitles.forEach(pushUnique);
+        (state.tasks || []).forEach((task) => {
+            pushUnique(task && (task.title || task.taskId));
+        });
+        collectParagraphInlineCandidatesFromMarkdown().forEach(pushUnique);
+
+        const startsWith = [];
+        const contains = [];
+        candidates.forEach((item) => {
+            if (!normalizedQuery) {
+                startsWith.push(item);
+                return;
+            }
+            const lower = item.toLowerCase();
+            const hit = lower.indexOf(normalizedQuery);
+            if (hit < 0) return;
+            if (hit === 0) {
+                startsWith.push(item);
+            } else {
+                contains.push(item);
+            }
+        });
+        return startsWith.concat(contains).slice(0, PARAGRAPH_WIKILINK_MAX_ITEMS);
+    }
+
+    function renderParagraphWikilinkPanelForEditor(editor, suggestions) {
+        const panel = ensureParagraphWikilinkPanel();
+        paragraphWikilinkSuggestions = Array.isArray(suggestions) ? suggestions : [];
+        paragraphWikilinkActiveIndex = paragraphWikilinkSuggestions.length ? 0 : -1;
+        paragraphWikilinkActiveEditor = editor;
+        panel.innerHTML = paragraphWikilinkSuggestions.map((item, index) => `
+            <button
+                type="button"
+                class="paragraph-wikilink-item${index === paragraphWikilinkActiveIndex ? ' is-active' : ''}"
+                data-paragraph-wikilink-index="${index}"
+            >
+                ${escapeHtml(item)}
+            </button>
+        `).join('');
+        const rect = editor.getBoundingClientRect();
+        panel.style.left = `${Math.max(8, Math.round(rect.left))}px`;
+        panel.style.top = `${Math.round(rect.bottom + 4)}px`;
+        panel.style.width = `${Math.max(180, Math.round(rect.width))}px`;
+        panel.hidden = paragraphWikilinkSuggestions.length === 0;
+    }
+
+    function refreshParagraphWikilinkActiveState() {
+        if (!paragraphWikilinkPanel) return;
+        paragraphWikilinkPanel.querySelectorAll('.paragraph-wikilink-item').forEach((node, index) => {
+            node.classList.toggle('is-active', index === paragraphWikilinkActiveIndex);
+        });
+    }
+
+    function moveParagraphWikilinkActiveIndex(direction) {
+        if (!paragraphWikilinkSuggestions.length) return;
+        const total = paragraphWikilinkSuggestions.length;
+        const current = Number.isFinite(paragraphWikilinkActiveIndex) && paragraphWikilinkActiveIndex >= 0
+            ? paragraphWikilinkActiveIndex
+            : 0;
+        paragraphWikilinkActiveIndex = (current + direction + total) % total;
+        refreshParagraphWikilinkActiveState();
+    }
+
+    function applyParagraphWikilinkSuggestion(index) {
+        const editor = paragraphWikilinkActiveEditor;
+        if (!editor) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        const selected = paragraphWikilinkSuggestions[Number(index)];
+        if (!selected) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        const cursor = Number(editor.selectionStart);
+        const triggerStart = Number(paragraphWikilinkTriggerStart);
+        if (!Number.isFinite(cursor) || !Number.isFinite(triggerStart) || triggerStart < 0 || triggerStart > cursor) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        const before = editor.value.slice(0, triggerStart);
+        const after = editor.value.slice(cursor);
+        const insert = `[[${selected}]]`;
+        editor.value = `${before}${insert}${after}`;
+        const nextCursor = before.length + insert.length;
+        editor.setSelectionRange(nextCursor, nextCursor);
+        state.paragraphDraftText = String(editor.value || '');
+        hideParagraphWikilinkPanel();
+        editor.focus({ preventScroll: true });
+    }
+
+    async function refreshParagraphWikilinkSuggestions(editor) {
+        if (!editor || !editor.matches('[data-p-editor]')) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        const cursor = Number(editor.selectionStart);
+        if (!Number.isFinite(cursor) || cursor < 0) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        const beforeCursor = String(editor.value || '').slice(0, cursor);
+        const triggerMatch = beforeCursor.match(PARAGRAPH_WIKILINK_TRIGGER_REGEX);
+        if (!triggerMatch) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        paragraphWikilinkTriggerStart = cursor - triggerMatch[0].length;
+        await ensureParagraphWikilinkTitlesLoaded();
+        const query = String(triggerMatch[1] || '');
+        const suggestions = collectParagraphWikilinkCandidates(query);
+        if (!suggestions.length) {
+            hideParagraphWikilinkPanel();
+            return;
+        }
+        renderParagraphWikilinkPanelForEditor(editor, suggestions);
+    }
+
     function renderParagraphCardHtml(index) {
         const block = state.paragraphBlocks[index];
         if (!block) {
@@ -4737,7 +5034,11 @@
         if (editing) {
             return `
                 <section class="paragraph-card editing${highlightClass}" data-p-index="${index}">
-                    <textarea class="paragraph-textarea" data-p-editor="${index}">${escapeHtml(state.paragraphDraftText)}</textarea>
+                    <textarea class="paragraph-textarea" data-p-editor="${index}" data-p-wikilink="1">${escapeHtml(state.paragraphDraftText)}</textarea>
+                    <div class="paragraph-editor-actions">
+                        <button class="btn btn-ghost paragraph-editor-action" type="button" data-p-save="${index}">保存</button>
+                        <button class="btn btn-ghost paragraph-editor-action" type="button" data-p-cancel="${index}">取消</button>
+                    </div>
                     ${noteHtml}
                 </section>
             `;
@@ -5128,6 +5429,19 @@
         return refreshParagraphCardsDom(reRenderIndexes);
     }
 
+    function focusParagraphEditorIfNeeded(index) {
+        if (!Number.isFinite(index) || index < 0) return;
+        requestAnimationFrame(() => {
+            const editor = document.querySelector(`[data-p-editor="${index}"]`);
+            if (!editor) return;
+            try {
+                editor.focus({ preventScroll: true });
+            } catch (_error) {
+                editor.focus();
+            }
+        });
+    }
+
     function renderParagraphEditor(taskId) {
         ensureParagraphEditorState();
         const container = document.getElementById('markdownBody');
@@ -5158,6 +5472,7 @@
                 `;
             }
             renderParagraphEditorVirtualWindow(taskId, true);
+            focusParagraphEditorIfNeeded(state.paragraphEditingIndex);
             return;
         }
 
@@ -5171,6 +5486,7 @@
             withMermaid: false,
             withOutline: false,
         });
+        focusParagraphEditorIfNeeded(state.paragraphEditingIndex);
     }
 
     function startParagraphEditing(index) {
@@ -5182,22 +5498,50 @@
         if (!block) {
             return false;
         }
-        // 统一渲染模式下不再依赖卡片内 textarea，改为手势触发后直接行级编辑。
-        const previousText = String(block.text || '');
-        const nextText = window.prompt(`编辑第 ${index + 1} 行（留空可清空）`, previousText);
-        if (nextText === null) {
+        const previousEditing = state.paragraphEditingIndex;
+        if (previousEditing === index) {
+            const existingEditor = document.querySelector(`[data-p-editor="${index}"]`);
+            if (existingEditor) {
+                existingEditor.focus({ preventScroll: true });
+            }
+            return true;
+        }
+        if (Number.isFinite(previousEditing) && previousEditing >= 0 && previousEditing < state.paragraphBlocks.length) {
+            commitParagraphEditing(previousEditing, { leaveEditing: true, refreshDom: false });
+        }
+        state.paragraphEditingIndex = index;
+        state.paragraphDraftText = String(block.text || '');
+        if (!refreshParagraphCardsDom([previousEditing, index])) {
+            renderParagraphEditor(state.currentTaskId);
+        }
+        requestAnimationFrame(() => {
+            const editor = document.querySelector(`[data-p-editor="${index}"]`);
+            if (!editor) return;
+            try {
+                editor.focus({ preventScroll: true });
+            } catch (_error) {
+                editor.focus();
+            }
+            const end = String(editor.value || '').length;
+            editor.setSelectionRange(end, end);
+        });
+        return true;
+    }
+
+    function cancelParagraphEditing(index) {
+        if (!Number.isFinite(index) || index < 0 || index >= state.paragraphBlocks.length) {
             return false;
         }
-        const normalizedNextText = String(nextText);
-        if (normalizedNextText === previousText) {
+        const previousEditing = state.paragraphEditingIndex;
+        if (previousEditing !== index) {
             return false;
         }
-        block.text = normalizedNextText;
         state.paragraphEditingIndex = -1;
         state.paragraphDraftText = '';
-        syncCurrentMarkdownFromBlocks();
-        scheduleParagraphBackgroundSync({ markdownChanged: true });
-        renderCurrentView();
+        hideParagraphWikilinkPanel();
+        if (!refreshParagraphCardsDom([previousEditing])) {
+            renderParagraphEditor(state.currentTaskId);
+        }
         return true;
     }
 
@@ -5227,6 +5571,7 @@
         if (leaveEditing) {
             state.paragraphEditingIndex = -1;
             state.paragraphDraftText = '';
+            hideParagraphWikilinkPanel();
         } else {
             state.paragraphEditingIndex = index;
             state.paragraphDraftText = normalizedNextText;
@@ -5240,8 +5585,48 @@
         return changed;
     }
 
+    function setParagraphEditorEnabled(enabled, options = {}) {
+        const nextEnabled = !!enabled;
+        if (!state.currentTaskId) {
+            state.paragraphEditorEnabled = false;
+            refreshQuickActionLabels();
+            return false;
+        }
+        if (state.paragraphEditorEnabled === nextEnabled) {
+            refreshQuickActionLabels();
+            return true;
+        }
+        if (!nextEnabled) {
+            const editingIndex = Number(state.paragraphEditingIndex);
+            if (Number.isFinite(editingIndex) && editingIndex >= 0) {
+                commitParagraphEditing(editingIndex, { leaveEditing: true, refreshDom: false });
+            }
+            hideParagraphWikilinkPanel();
+        } else {
+            ensureParagraphEditorState();
+        }
+        state.paragraphEditorEnabled = nextEnabled;
+        refreshQuickActionLabels();
+        if (options.render !== false) {
+            renderCurrentView();
+        }
+        return true;
+    }
+
+    function toggleParagraphEditorMode() {
+        if (!state.currentTaskId) {
+            setTaskSummary(UI_COPY.openContentFirst, 'error');
+            return;
+        }
+        setParagraphEditorEnabled(!state.paragraphEditorEnabled, { render: true });
+    }
+
     function renderCurrentView() {
         if (!state.currentTaskId) return;
+        if (isParagraphEditorMode()) {
+            renderParagraphEditor(state.currentTaskId);
+            return;
+        }
         renderMarkdown(state.currentMarkdownRaw || '', state.currentTaskId);
     }
 
@@ -6454,6 +6839,16 @@
             }
             setContentToolsOpen(false);
         });
+        document.addEventListener('pointerdown', (event) => {
+            if (!paragraphWikilinkPanel || paragraphWikilinkPanel.hidden) {
+                return;
+            }
+            const target = event.target;
+            if (target && target.closest && (target.closest('.paragraph-wikilink-panel') || target.closest('[data-p-editor]'))) {
+                return;
+            }
+            hideParagraphWikilinkPanel();
+        }, { passive: true });
 
         document.getElementById('reloadCurrentBtn').addEventListener('click', async () => {
             if (!state.currentTaskId) return;
@@ -6479,6 +6874,14 @@
                 console.warn('保存失败', error);
             }
         });
+
+        const toggleParagraphEditorBtn = document.getElementById('toggleParagraphEditorBtn');
+        if (toggleParagraphEditorBtn) {
+            toggleParagraphEditorBtn.addEventListener('click', () => {
+                toggleParagraphEditorMode();
+                setContentToolsOpen(false);
+            });
+        }
 
         const deleteSoundToggleBtn = document.getElementById('deleteSoundToggleBtn');
         if (deleteSoundToggleBtn) {
@@ -6564,6 +6967,126 @@
                     });
                 });
             }
+
+            markdownBody.addEventListener('click', (event) => {
+                if (!state.currentTaskId || !isParagraphEditorMode()) {
+                    return;
+                }
+                const saveBtn = event.target.closest('[data-p-save]');
+                if (saveBtn) {
+                    const index = Number(saveBtn.getAttribute('data-p-save'));
+                    if (Number.isFinite(index)) {
+                        commitParagraphEditing(index, { leaveEditing: true, refreshDom: true });
+                    }
+                    return;
+                }
+                const cancelBtn = event.target.closest('[data-p-cancel]');
+                if (cancelBtn) {
+                    const index = Number(cancelBtn.getAttribute('data-p-cancel'));
+                    if (Number.isFinite(index)) {
+                        cancelParagraphEditing(index);
+                    }
+                    return;
+                }
+                const editor = event.target.closest('[data-p-editor]');
+                if (editor) {
+                    return;
+                }
+                const card = event.target.closest('.paragraph-card[data-p-index]');
+                if (!card) {
+                    return;
+                }
+                const index = Number(card.getAttribute('data-p-index'));
+                if (!Number.isFinite(index) || index < 0) {
+                    return;
+                }
+                startParagraphEditing(index);
+            });
+
+            markdownBody.addEventListener('input', (event) => {
+                const editor = event.target.closest('[data-p-editor]');
+                if (!editor || !isParagraphEditorMode()) {
+                    return;
+                }
+                state.paragraphDraftText = String(editor.value || '');
+                refreshParagraphWikilinkSuggestions(editor).catch(() => {
+                    hideParagraphWikilinkPanel();
+                });
+            });
+
+            markdownBody.addEventListener('keyup', (event) => {
+                const editor = event.target.closest('[data-p-editor]');
+                if (!editor || !isParagraphEditorMode()) {
+                    return;
+                }
+                if (PARAGRAPH_WIKILINK_KEY_SKIP_SET.has(event.key)) {
+                    return;
+                }
+                refreshParagraphWikilinkSuggestions(editor).catch(() => {
+                    hideParagraphWikilinkPanel();
+                });
+            });
+
+            markdownBody.addEventListener('keydown', (event) => {
+                const editor = event.target.closest('[data-p-editor]');
+                if (!editor || !isParagraphEditorMode()) {
+                    return;
+                }
+                const index = Number(editor.getAttribute('data-p-editor'));
+                const panelVisible = !!(
+                    paragraphWikilinkPanel
+                    && !paragraphWikilinkPanel.hidden
+                    && paragraphWikilinkActiveEditor === editor
+                    && paragraphWikilinkSuggestions.length > 0
+                );
+                if (panelVisible) {
+                    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                        event.preventDefault();
+                        moveParagraphWikilinkActiveIndex(event.key === 'ArrowDown' ? 1 : -1);
+                        return;
+                    }
+                    if (event.key === 'Enter' || event.key === 'Tab') {
+                        event.preventDefault();
+                        const useIndex = Number.isFinite(paragraphWikilinkActiveIndex) && paragraphWikilinkActiveIndex >= 0
+                            ? paragraphWikilinkActiveIndex
+                            : 0;
+                        applyParagraphWikilinkSuggestion(useIndex);
+                        return;
+                    }
+                    if (event.key === 'Escape') {
+                        event.preventDefault();
+                        hideParagraphWikilinkPanel();
+                        return;
+                    }
+                }
+                if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+                    event.preventDefault();
+                    if (Number.isFinite(index) && index >= 0) {
+                        commitParagraphEditing(index, { leaveEditing: true, refreshDom: true });
+                    }
+                    return;
+                }
+                if (event.key === 'Escape' && Number.isFinite(index) && index >= 0) {
+                    event.preventDefault();
+                    cancelParagraphEditing(index);
+                }
+            });
+
+            markdownBody.addEventListener('focusout', (event) => {
+                const editor = event.target.closest('[data-p-editor]');
+                if (!editor) return;
+                window.setTimeout(() => {
+                    if (paragraphWikilinkActiveEditor !== editor) {
+                        hideParagraphWikilinkPanel();
+                    }
+                }, 120);
+            });
+
+            markdownBody.addEventListener('scroll', () => {
+                if (paragraphWikilinkPanel && !paragraphWikilinkPanel.hidden) {
+                    hideParagraphWikilinkPanel();
+                }
+            }, { passive: true });
         }
 
         document.getElementById('outlineList').addEventListener('click', (event) => {
@@ -7072,6 +7595,14 @@
         const outlineBtn = document.getElementById('contentOutlineBtn');
         if (outlineBtn) {
             setControlLabel(outlineBtn, UI_COPY.actionOutline);
+            outlineBtn.disabled = isParagraphEditorMode();
+        }
+        const toggleParagraphEditorBtn = document.getElementById('toggleParagraphEditorBtn');
+        if (toggleParagraphEditorBtn) {
+            const editing = isParagraphEditorMode();
+            setControlLabel(toggleParagraphEditorBtn, editing ? UI_COPY.actionExitEdit : UI_COPY.actionEnterEdit);
+            toggleParagraphEditorBtn.setAttribute('aria-pressed', editing ? 'true' : 'false');
+            toggleParagraphEditorBtn.disabled = !state.currentTaskId;
         }
     }
 
@@ -7220,6 +7751,9 @@
     window.addEventListener('beforeunload', () => {
         if (jsonParseWorkerPool && typeof jsonParseWorkerPool.dispose === 'function') {
             jsonParseWorkerPool.dispose();
+        }
+        if (conceptCardsController && typeof conceptCardsController.destroy === 'function') {
+            conceptCardsController.destroy();
         }
     });
 
