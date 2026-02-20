@@ -958,6 +958,7 @@ def test_assemble_only_exposes_phase2b_contract(tmp_path):
 
     assert Path(markdown_path).exists()
     assert Path(json_path).exists()
+    assert Path(markdown_path).name == "Assemble Title.md"
 
     import json
 

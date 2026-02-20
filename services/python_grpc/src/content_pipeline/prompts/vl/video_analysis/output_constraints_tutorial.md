@@ -5,13 +5,16 @@
 4) 字段定义:
    - 必填:
      - step_id (Integer)
-     - step_description (String): 详细描述该步骤的操作内容。
+     - step_description (String): 该步骤的总括说明（核心目的）。并描述操作后的状态变化或预期反馈，以供校验。
+     - main_operation (String): 【必填】这是能够完全替代视频演示的核心内容。无论视频在做什么，都必须输出。必须直接使用结构化 Markdown 格式（使用有序列表或无序列表，可包含粗体、代码块等）。包含具体的点击路径（如 A -> B）、填写的具体参数值和原封不动提取的代码/命令。必须确保能100%脱离视频盲操复现。**特别注意：当你认为某一步操作完成后需要视觉图片印证时，必须在该步骤文本后精准嵌入图片占位符 `[KEYFRAME_{N}]`（N代表这是第 N 个截图，从 1 开始）。**
      - clip_start_sec (Float): 步骤开始时间。
      - clip_end_sec (Float): 步骤结束时间。
-     - instructional_keyframe_timestamp (List[Float]): 关键帧时间点。
+     - instructional_keyframes (List[Object]): 该步骤中最重要的截图凭证。必须选取最能代表该步骤结果的瞬间。列表中的第 N 个元素会替换掉 `main_operation` 里的 `[KEYFRAME_{N}]` 占位符。
+        - timestamp_sec (Float): 关键帧精确相对时间（秒）。
+        - frame_reason (String): 描述这张图证明了什么（例如：“填写完代理服务器 IP 后的网络设置界面”）。要在 `main_operation` 中作为上下文关联。
+        - bbox (List[Integer]): `[ymin, xmin, ymax, xmax]` 格式，取值范围 0-1000（代表千分比）。框出画面中与当前操作紧密相关、最核心的区域（如被点击的按钮及其所在面板、发生改变的输出窗口），用于裁剪，去除全屏冗余信息以提升阅读体验。
    - 可选 (若无内容，请直接在 JSON 中省略该字段):
      - main_action (String): 核心动作摘要。
-     - main_operation (List[String]): 具体操作点列表。
      - precautions (List[String]): 易错点或注意事项。
      - step_summary (String): 步骤一句话总结。
      - operation_guidance (List[String]): 操作指引。

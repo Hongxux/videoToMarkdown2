@@ -1,6 +1,6 @@
-﻿"""CV Worker ????????
+"""CV Worker 多进程执行模块。
 
-??????????CV ????????????
+负责在独立进程中执行 CV 相关重计算任务，降低主流程阻塞风险。
 """
 
 import os
@@ -33,6 +33,12 @@ _attached_shms: Dict[str, shared_memory.SharedMemory] = {}  # 宸查檮鍔犵殑
 logger = logging.getLogger(__name__)
 
 _TEXT_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
+_ASCII_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9]+")
+_CJK_RUN_PATTERN = re.compile(r"[\u4e00-\u9fff]+")
+_CJK_PHRASE_CONNECTOR_PATTERN = re.compile(r"[的之]+")
+_CJK_NGRAM_MIN_LEN = 2
+_CJK_NGRAM_MAX_LEN = 4
+_CJK_NGRAM_CHAR_CAP = 24
 
 
 def _get_env_float(name: str, default: float, lower: float, upper: float) -> float:
@@ -559,6 +565,65 @@ def _is_subtitle_like_region(region: Dict[str, Any], image_w: int, image_h: int)
     return bool(near_bottom and horizontally_wide and short_line)
 
 
+def _build_cjk_phrase_tokens(text: str) -> set:
+    """方法说明：`_build_cjk_phrase_tokens` 工具方法。
+    执行步骤：
+    1) 步骤1：保留原始中文串，保证与旧行为兼容。
+    2) 步骤2：按“的/之”结构拆出修饰词与中心词并组合短语。
+    3) 步骤3：补充短 n-gram，降低“无空格中文串”漏匹配风险。"""
+    phrase = str(text or "").strip()
+    if not phrase:
+        return set()
+
+    tokens = {phrase}
+
+    segments = [seg for seg in _CJK_PHRASE_CONNECTOR_PATTERN.split(phrase) if seg]
+    if len(segments) > 1:
+        for seg in segments:
+            if len(seg) >= _CJK_NGRAM_MIN_LEN:
+                tokens.add(seg)
+        for idx in range(len(segments) - 1):
+            left = segments[idx]
+            right = segments[idx + 1]
+            if left and right:
+                tokens.add(f"{left}{right}")
+
+    if len(phrase) >= _CJK_NGRAM_MIN_LEN and len(phrase) <= _CJK_NGRAM_CHAR_CAP:
+        max_len = min(_CJK_NGRAM_MAX_LEN, len(phrase))
+        for window in range(_CJK_NGRAM_MIN_LEN, max_len + 1):
+            for start in range(0, len(phrase) - window + 1):
+                tokens.add(phrase[start : start + window])
+
+    return tokens
+
+
+def _tokenize_text_for_incremental(text: str) -> set:
+    """方法说明：`_tokenize_text_for_incremental` 工具方法。
+    执行步骤：
+    1) 步骤1：按兼容正则切出基础 token（英文/数字/中文串）。
+    2) 步骤2：英文数字 token 直接保留，中文串走短语增强切分。
+    3) 步骤3：返回小写去重集合，用于增量截图比较。"""
+    normalized = str(text or "").strip().lower()
+    if not normalized:
+        return set()
+
+    tokens = set()
+    for raw_token in _TEXT_TOKEN_PATTERN.findall(normalized):
+        token = str(raw_token or "").strip()
+        if not token:
+            continue
+        tokens.add(token)
+
+        for ascii_token in _ASCII_TOKEN_PATTERN.findall(token):
+            if ascii_token:
+                tokens.add(ascii_token)
+
+        for cjk_run in _CJK_RUN_PATTERN.findall(token):
+            tokens.update(_build_cjk_phrase_tokens(cjk_run))
+
+    return tokens
+
+
 def _extract_ocr_tokens(frame: np.ndarray, roi: Optional[Tuple[int, int, int, int]]) -> set:
     """方法说明：`_extract_ocr_tokens` 工具方法。
     执行步骤：
@@ -580,12 +645,9 @@ def _extract_ocr_tokens(frame: np.ndarray, roi: Optional[Tuple[int, int, int, in
             for region in regions:
                 if not _is_subtitle_like_region(region, image_w=w, image_h=h):
                     kept_regions.append(region)
-            tokens = {
-                tok.lower()
-                for region in kept_regions
-                for tok in _TEXT_TOKEN_PATTERN.findall(str(region.get("text", "") or ""))
-                if tok.strip()
-            }
+            tokens = set()
+            for region in kept_regions:
+                tokens.update(_tokenize_text_for_incremental(str(region.get("text", "") or "")))
             if tokens:
                 return tokens
 
@@ -595,7 +657,7 @@ def _extract_ocr_tokens(frame: np.ndarray, roi: Optional[Tuple[int, int, int, in
         text = extractor.extract_text_from_frame(crop, preprocess=True)
         if not text:
             return set()
-        return {tok.lower() for tok in _TEXT_TOKEN_PATTERN.findall(text) if tok.strip()}
+        return _tokenize_text_for_incremental(text)
     except Exception:
         return set()
 
@@ -1013,7 +1075,7 @@ def run_select_screenshots_for_range_task(
     decode_enable_async_transcode: bool = True,
 ) -> dict:
     """
-    璺敱鎴浘涓撶敤 Worker 鍏ュ彛锛氬湪杩涚▼姹犲唴鎵ц瀹屾暣 coarse-fine 閫夋嫨銆?
+    璺敱鎴浘涓撶敤 Worker 鍏ュ彛锛氬湪杩涚▼姹犲唴鎵ц瀹屾暣 coarse-fine 閫夋嫨銆?
     淇濈暀鍘熸湁 ScreenshotSelector 鐨勯€夋嫨閫昏緫锛屼粎鏀瑰彉璋冨害鏂瑰紡锛堜富杩涚▼ -> ProcessPool锛夈€?    """
     _check_memory_usage()
     started_at = time.perf_counter()
@@ -1129,7 +1191,7 @@ def run_select_screenshots_for_range_task(
 
 def warmup_worker() -> int:
     """
-    鐢ㄤ簬璇婃柇 ProcessPool 鏄惁鐪熸鍒嗛厤浠诲姟鍒板涓?Worker銆?
+    鐢ㄤ簬璇婃柇 ProcessPool 鏄惁鐪熸鍒嗛厤浠诲姟鍒板涓?Worker銆?
     浣跨敤鏂瑰紡锛氫富杩涚▼鍦ㄥ紑濮嬪苟琛屾埅鍥鹃€夋嫨鍓嶆彁浜?N 涓?warmup_worker 浠诲姟锛屾敹闆嗚繑鍥炵殑 PID 闆嗗悎銆?    """
     pid = os.getpid()
     logger.info(f"馃敟 Warmup worker task executed (PID={pid})")

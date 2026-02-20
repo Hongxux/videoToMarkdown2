@@ -9,6 +9,7 @@ import com.mvp.module2.fusion.grpc.PythonGrpcClient.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
@@ -17,6 +18,7 @@ import java.io.IOException;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.URI;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -27,7 +29,10 @@ import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.util.Locale;
 import java.time.Instant;
 import java.util.zip.GZIPInputStream;
@@ -120,6 +125,22 @@ public class VideoProcessingOrchestrator {
     private static final double DEEPSEEK_CHAT_INPUT_UNCACHED_PER_M = 2.00d;
     private static final double DEEPSEEK_CHAT_INPUT_CACHED_PER_M = 0.50d;
     private static final double DEEPSEEK_CHAT_OUTPUT_PER_M = 8.00d;
+    private static final Pattern BILIBILI_BV_PATTERN =
+        Pattern.compile("BV[0-9A-Za-z]{10}", Pattern.CASE_INSENSITIVE);
+    private static final Pattern BILIBILI_AV_PATTERN =
+        Pattern.compile("(?:^|[^0-9A-Za-z])av(\\d{1,20})(?:$|[^0-9A-Za-z])", Pattern.CASE_INSENSITIVE);
+
+    @Value("${video.download.grpc-deadline-seconds:1800}")
+    private int downloadGrpcDeadlineSec;
+
+    @Value("${video.download.hard-timeout-seconds:1800}")
+    private int downloadHardTimeoutSec;
+
+    @Value("${video.download.idle-timeout-seconds:120}")
+    private int downloadIdleTimeoutSec;
+
+    @Value("${video.download.poll-interval-seconds:5}")
+    private int downloadPollIntervalSec;
     
     // ???? (Functional Interface)
     @FunctionalInterface
@@ -167,6 +188,7 @@ public class VideoProcessingOrchestrator {
             String videoPath = videoUrl;
             double videoDuration = 60;
             boolean downloadedFromUrl = false;
+            DownloadResult downloadResult = null;
             boolean usedVLFlow = false;
             boolean usedLegacyFlow = false;
 
@@ -186,21 +208,60 @@ public class VideoProcessingOrchestrator {
             metricsOutputDir = outputDir;
 
             long downloadStart = System.currentTimeMillis();
-            if (isHttpUrl(videoUrl)) {
-                updateProgress(taskId, 0.05, "下载视频中...");
-                DownloadResult dl = grpcClient.downloadVideoAsync(taskId, videoUrl, outputDir, 300).get(5, TimeUnit.MINUTES);
-                if (!dl.success) {
-                    throw new RuntimeException("Download failed: " + dl.errorMsg);
+            try {
+                if (isHttpUrl(videoUrl)) {
+                    int downloadTimeoutSec = normalizePositive(downloadGrpcDeadlineSec, 1800);
+                    int hardTimeoutSec = Math.max(downloadTimeoutSec, normalizePositive(downloadHardTimeoutSec, 1800));
+                    int idleTimeoutSec = normalizePositive(downloadIdleTimeoutSec, 120);
+                    int pollIntervalSec = Math.min(
+                        normalizePositive(downloadPollIntervalSec, 5),
+                        Math.max(1, idleTimeoutSec)
+                    );
+                    String predictedDownloadDir = resolvePredictedDownloadWatchDir(videoUrl, outputDir);
+                    logger.info(
+                        "[{}] Download watchdog targets: request_output_dir={}, predicted_storage_dir={}",
+                        taskId,
+                        firstNonBlank(outputDir, "(empty)"),
+                        firstNonBlank(predictedDownloadDir, "(empty)")
+                    );
+                    updateProgress(taskId, 0.05, "Downloading video...");
+                    DownloadResult dl = waitForDownloadWithLease(
+                        taskId,
+                        videoUrl,
+                        outputDir,
+                        predictedDownloadDir,
+                        downloadTimeoutSec,
+                        hardTimeoutSec,
+                        idleTimeoutSec,
+                        pollIntervalSec
+                    );
+                    if (!dl.success) {
+                        throw new RuntimeException(
+                            "Download failed: " + firstNonBlank(
+                                dl.errorMsg,
+                                "python worker returned unsuccessful download response without details"
+                            )
+                        );
+                    }
+                    downloadedFromUrl = true;
+                    downloadResult = dl;
+                    if (dl.contentType != null && !dl.contentType.isBlank() && !"video".equalsIgnoreCase(dl.contentType)) {
+                        logger.warn(
+                            "[{}] Download content_type={} detected, pipeline keeps video-first path",
+                            taskId,
+                            dl.contentType
+                        );
+                    }
+                    videoPath = dl.videoPath;
+                    videoDuration = dl.durationSec;
+                    outputDir = new File(videoPath).getParentFile().getAbsolutePath();
+                    new File(outputDir).mkdirs();
+                    metricsVideoPath = videoPath;
+                    metricsOutputDir = outputDir;
                 }
-                downloadedFromUrl = true;
-                videoPath = dl.videoPath;
-                videoDuration = dl.durationSec;
-                outputDir = new File(videoPath).getParentFile().getAbsolutePath();
-                new File(outputDir).mkdirs();
-                metricsVideoPath = videoPath;
-                metricsOutputDir = outputDir;
+            } finally {
+                stageTimingsMs.put("download_video", System.currentTimeMillis() - downloadStart);
             }
-            stageTimingsMs.put("download_video", System.currentTimeMillis() - downloadStart);
 
             if (videoDuration <= 0) {
                 videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
@@ -303,7 +364,7 @@ public class VideoProcessingOrchestrator {
 
             updateProgress(taskId, 0.90, "生成最终文档...");
             long assembleStart = System.currentTimeMillis();
-            String title = new File(videoPath).getName().replace(".mp4", "");
+            String title = resolveDocumentTitle(downloadResult, outputDir, videoPath);
             AssembleResult assembleRes = grpcClient.assembleRichTextAsync(
                     taskId,
                     videoPath,
@@ -326,13 +387,18 @@ public class VideoProcessingOrchestrator {
             logger.info("✅ Pipeline Complete: {}", taskId);
 
             flowFlags.put("downloaded_from_url", downloadedFromUrl);
+            if (downloadResult != null) {
+                flowFlags.put("download_content_type", firstNonBlank(downloadResult.contentType, "unknown"));
+                flowFlags.put("download_source_platform", firstNonBlank(downloadResult.sourcePlatform, "unknown"));
+            }
             flowFlags.put("used_vl_flow", usedVLFlow);
             flowFlags.put("used_legacy_flow", usedLegacyFlow);
 
         } catch (Exception e) {
-            logger.error("❌ Pipeline Failed: {} - {}", taskId, e.getMessage());
+            String normalizedError = extractThrowableMessage(e);
+            logger.error("❌ Pipeline Failed: {} - {}", taskId, normalizedError, e);
             result.success = false;
-            result.errorMessage = e.getMessage();
+            result.errorMessage = normalizedError;
 
             flowFlags.putIfAbsent("downloaded_from_url", false);
             flowFlags.putIfAbsent("used_vl_flow", false);
@@ -816,7 +882,7 @@ public class VideoProcessingOrchestrator {
     }
 
     /**
-     * 在进入 FFmpeg / Python 阶段前做本地文件硬校验，避免“伪路径”穿透到后续链路。
+     * 閸︺劏绻橀崗?FFmpeg / Python 闂冭埖顔岄崜宥呬粵閺堫剙婀撮弬鍥︽绾剚鐗庢宀嬬礉闁灝鍘ら垾婊€鍚夌捄顖氱窞閳ユ繄鈹涢柅蹇撳煂閸氬海鐢婚柧鎹愮熅閵?
      */
     private void assertLocalVideoExists(String rawInput, String normalizedPath) {
         if (normalizedPath == null || normalizedPath.isBlank()) {
@@ -895,7 +961,7 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    // --- 绱犳潗璇锋眰鍚堝苟 ---
+    // --- 缂佽京濮靛妤冩嫚闁垮婀撮柛姘墕閼?---
     private List<JavaCVFFmpegService.ScreenshotRequest> mergeScreenshotRequests(
             List<PythonGrpcClient.ScreenshotRequest> phase2aRequests,
             List<PythonGrpcClient.ScreenshotRequestDTO> generatedRequests) {
@@ -1175,7 +1241,7 @@ public class VideoProcessingOrchestrator {
             // ???? action_units ??????????????????????
             List<Map<String, Object>> unitActions = (List<Map<String, Object>>) u.get("action_units");
             if (unitActions != null && !unitActions.isEmpty()) {
-                // 鐭棩蹇楋細瀹氫綅 JSON -> Java 鏄惁鎷垮埌 action_units.knowledge_type
+                // 闁活収鍘藉Λ鈺勭疀濡ゅ绐楅悗瑙勭煯缂?JSON -> Java 闁哄嫷鍨伴幆渚€骞忛崹顔肩厒 action_units.knowledge_type
                 Object firstKt = unitActions.get(0).get("knowledge_type");
                 logger.info("[{}] MatInputs from semantic_units: unit={}, actions={}, first_kt={}",
                     "MaterialGen", uid, unitActions.size(), firstKt);
@@ -1386,7 +1452,7 @@ public class VideoProcessingOrchestrator {
         if (inline != null) {
             analyzeResult.semanticUnitsInline = inline;
         }
-        // 语义内容已被 Java 侧更新，旧 ref 指向的是旧版本缓存，需主动失效避免误用。
+        // 鐠囶厺绠熼崘鍛啇瀹歌尪顫?Java 娓氀勬纯閺傚府绱濋弮?ref 閹稿洤鎮滈惃鍕Ц閺冄呭閺堫剛绱︾€涙﹫绱濋棁鈧稉璇插З婢惰鲸鏅ラ柆鍨帳鐠囶垳鏁ら妴?
         analyzeResult.semanticUnitsRef = null;
     }
     
@@ -1397,7 +1463,359 @@ public class VideoProcessingOrchestrator {
         if (progressCallback != null) progressCallback.onProgress(taskId, progress, message);
         logger.info("[{}] {} ({}%)", taskId, message, (int)(progress * 100));
     }
+
+    private DownloadResult waitForDownloadWithLease(
+            String taskId,
+            String videoUrl,
+            String outputDir,
+            String predictedDownloadDir,
+            int grpcDeadlineSec,
+            int hardTimeoutSec,
+            int idleTimeoutSec,
+            int pollIntervalSec) {
+        CompletableFuture<DownloadResult> downloadFuture = grpcClient.downloadVideoAsync(
+            taskId,
+            videoUrl,
+            outputDir,
+            grpcDeadlineSec
+        );
+        long startAt = System.currentTimeMillis();
+        long hardDeadlineAt = startAt + TimeUnit.SECONDS.toMillis(hardTimeoutSec);
+        long idleDeadlineAt = startAt + TimeUnit.SECONDS.toMillis(idleTimeoutSec);
+        List<String> watchDirs = buildDownloadWatchDirs(outputDir, predictedDownloadDir);
+        DownloadActivitySnapshot lastActivity = observeDownloadActivity(watchDirs);
+        long nextLeaseLogAt = 0L;
+
+        while (true) {
+            try {
+                return downloadFuture.get(pollIntervalSec, TimeUnit.SECONDS);
+            } catch (TimeoutException ignored) {
+                long now = System.currentTimeMillis();
+                DownloadActivitySnapshot observedActivity = observeDownloadActivity(watchDirs);
+                if (observedActivity.isChangedFrom(lastActivity)) {
+                    lastActivity = observedActivity;
+                    idleDeadlineAt = now + TimeUnit.SECONDS.toMillis(idleTimeoutSec);
+                    if (now >= nextLeaseLogAt) {
+                        logger.info(
+                            "[{}] Download lease renewed: bytes={}, files={}, latest_mtime={}, watch_dirs={}, hard_timeout={}s, idle_timeout={}s",
+                            taskId,
+                            observedActivity.totalBytes,
+                            observedActivity.fileCount,
+                            observedActivity.latestModifiedMs,
+                            String.join(" | ", watchDirs),
+                            hardTimeoutSec,
+                            idleTimeoutSec
+                        );
+                        nextLeaseLogAt = now + TimeUnit.SECONDS.toMillis(30);
+                    }
+                }
+                if (now >= hardDeadlineAt) {
+                    downloadFuture.cancel(true);
+                    throw new RuntimeException(
+                        String.format("Download hard timeout exceeded (%ds)", hardTimeoutSec)
+                    );
+                }
+                if (now >= idleDeadlineAt) {
+                    downloadFuture.cancel(true);
+                    throw new RuntimeException(
+                        String.format(
+                            "Download idle timeout exceeded (%ds without file activity in dirs: %s; bytes=%d, files=%d, latest_mtime=%d)",
+                            idleTimeoutSec,
+                            watchDirs.isEmpty() ? "(none)" : String.join(" | ", watchDirs),
+                            lastActivity.totalBytes,
+                            lastActivity.fileCount,
+                            lastActivity.latestModifiedMs
+                        )
+                    );
+                }
+            } catch (InterruptedException interruptedError) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(
+                    "Download stage interrupted while waiting for Python worker response",
+                    interruptedError
+                );
+            } catch (ExecutionException executionError) {
+                throw new RuntimeException(
+                    "Download stage execution failed: " + extractThrowableMessage(executionError),
+                    executionError
+                );
+            }
+        }
+    }
+
+    private String resolvePredictedDownloadWatchDir(String videoUrl, String fallbackOutputDir) {
+        if (!isHttpUrl(videoUrl)) {
+            return fallbackOutputDir;
+        }
+        Path storageRoot = resolvePythonPrimaryStorageRoot();
+        String taskDirSource = buildDownloadTaskDirSource(videoUrl);
+        String taskHash = md5Hex(taskDirSource);
+        return storageRoot.resolve(taskHash).toString();
+    }
+
+    private Path resolvePythonPrimaryStorageRoot() {
+        String envRoot = System.getenv("V2M_STORAGE_ROOT");
+        if (envRoot != null && !envRoot.isBlank()) {
+            return Paths.get(envRoot).toAbsolutePath().normalize();
+        }
+        return resolveRepoRoot()
+            .resolve("var")
+            .resolve("storage")
+            .resolve("storage")
+            .toAbsolutePath()
+            .normalize();
+    }
+
+    private String buildDownloadTaskDirSource(String videoUrl) {
+        String bilibiliVideoId = extractBilibiliVideoId(videoUrl);
+        if (bilibiliVideoId != null && !bilibiliVideoId.isBlank()) {
+            return bilibiliVideoId;
+        }
+        return videoUrl == null ? "" : videoUrl;
+    }
+
+    private String extractBilibiliVideoId(String videoUrl) {
+        if (videoUrl == null || videoUrl.isBlank()) {
+            return null;
+        }
+        try {
+            URI parsed = URI.create(videoUrl);
+            if (!isBilibiliHost(parsed.getHost())) {
+                return null;
+            }
+
+            Map<String, String> query = parseQueryParams(parsed.getRawQuery());
+            String bvid = query.getOrDefault("bvid", "");
+            if (!bvid.isBlank()) {
+                Matcher bvidMatcher = BILIBILI_BV_PATTERN.matcher(bvid);
+                if (bvidMatcher.find()) {
+                    return bvidMatcher.group();
+                }
+            }
+
+            String aid = query.getOrDefault("aid", "");
+            if (!aid.isBlank() && aid.chars().allMatch(Character::isDigit)) {
+                return "AV" + aid;
+            }
+
+            String searchSpace = String.join(
+                " ",
+                firstNonBlank(parsed.getRawPath(), ""),
+                firstNonBlank(parsed.getRawQuery(), ""),
+                firstNonBlank(parsed.getRawFragment(), "")
+            );
+            Matcher bvMatcher = BILIBILI_BV_PATTERN.matcher(searchSpace);
+            if (bvMatcher.find()) {
+                return bvMatcher.group();
+            }
+            Matcher avMatcher = BILIBILI_AV_PATTERN.matcher(searchSpace);
+            if (avMatcher.find()) {
+                return "AV" + avMatcher.group(1);
+            }
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isBilibiliHost(String host) {
+        if (host == null || host.isBlank()) {
+            return false;
+        }
+        String normalized = host.toLowerCase(Locale.ROOT).split(":", 2)[0];
+        return normalized.equals("bilibili.com")
+            || normalized.endsWith(".bilibili.com")
+            || normalized.equals("b23.tv")
+            || normalized.endsWith(".b23.tv");
+    }
+
+    private Map<String, String> parseQueryParams(String rawQuery) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return result;
+        }
+        String[] parts = rawQuery.split("&");
+        for (String part : parts) {
+            if (part == null || part.isBlank()) {
+                continue;
+            }
+            int equalsAt = part.indexOf('=');
+            String keyRaw = equalsAt >= 0 ? part.substring(0, equalsAt) : part;
+            String valueRaw = equalsAt >= 0 ? part.substring(equalsAt + 1) : "";
+            String key = decodeUrlComponent(keyRaw);
+            String value = decodeUrlComponent(valueRaw);
+            if (!key.isBlank() && !result.containsKey(key)) {
+                result.put(key, value);
+            }
+        }
+        return result;
+    }
+
+    private String resolveDocumentTitle(DownloadResult downloadResult, String outputDir, String videoPath) {
+        String fallbackTitle = new File(videoPath).getName().replaceFirst("\\.[^.]+$", "");
+        String grpcTitle = "";
+        if (downloadResult != null && downloadResult.videoTitle != null) {
+            grpcTitle = downloadResult.videoTitle.trim();
+        }
+        if (!grpcTitle.isBlank()) {
+            logger.info("Using grpc download title for markdown: {}", grpcTitle);
+            return grpcTitle;
+        }
+
+        String metaTitle = readTitleFromVideoMeta(outputDir);
+        if (metaTitle != null && !metaTitle.isBlank()) {
+            logger.info("Using video_meta title for markdown: {}", metaTitle);
+            return metaTitle;
+        }
+
+        return fallbackTitle;
+    }
+
+    private String readTitleFromVideoMeta(String outputDir) {
+        if (outputDir == null || outputDir.isBlank()) {
+            return "";
+        }
+        try {
+            Path metaPath = Paths.get(outputDir, "video_meta.json");
+            if (!Files.exists(metaPath)) {
+                return "";
+            }
+            JsonNode root = objectMapper.readTree(metaPath.toFile());
+            String title = root.path("title").asText("");
+            return title == null ? "" : title.trim();
+        } catch (Exception e) {
+            logger.warn("Failed to read video_meta.json title: {}", e.getMessage());
+            return "";
+        }
+    }
+
+    private String decodeUrlComponent(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        try {
+            return URLDecoder.decode(value, StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+            return value;
+        }
+    }
+
+    private List<String> buildDownloadWatchDirs(String requestedOutputDir, String predictedDownloadDir) {
+        LinkedHashSet<String> watchDirs = new LinkedHashSet<>();
+        if (requestedOutputDir != null && !requestedOutputDir.isBlank()) {
+            try {
+                watchDirs.add(Paths.get(requestedOutputDir).toAbsolutePath().normalize().toString());
+            } catch (Exception ignored) {
+                watchDirs.add(requestedOutputDir);
+            }
+        }
+        if (predictedDownloadDir != null && !predictedDownloadDir.isBlank()) {
+            try {
+                watchDirs.add(Paths.get(predictedDownloadDir).toAbsolutePath().normalize().toString());
+            } catch (Exception ignored) {
+                watchDirs.add(predictedDownloadDir);
+            }
+        }
+        return new ArrayList<>(watchDirs);
+    }
+
+    private DownloadActivitySnapshot observeDownloadActivity(List<String> watchDirs) {
+        long totalBytes = 0L;
+        long fileCount = 0L;
+        long latestModifiedMs = 0L;
+        if (watchDirs == null || watchDirs.isEmpty()) {
+            return new DownloadActivitySnapshot(totalBytes, fileCount, latestModifiedMs);
+        }
+        for (String dirPath : watchDirs) {
+            if (dirPath == null || dirPath.isBlank()) {
+                continue;
+            }
+            try {
+                Path dir = Paths.get(dirPath).toAbsolutePath().normalize();
+                if (!Files.isDirectory(dir)) {
+                    continue;
+                }
+                try (Stream<Path> stream = Files.walk(dir)) {
+                    Iterator<Path> iterator = stream.iterator();
+                    while (iterator.hasNext()) {
+                        Path file = iterator.next();
+                        if (!Files.isRegularFile(file)) {
+                            continue;
+                        }
+                        fileCount += 1L;
+                        try {
+                            totalBytes += Math.max(0L, Files.size(file));
+                        } catch (Exception ignored) {
+                            // 单文件大小读取失败不影响整体活性检测
+                        }
+                        try {
+                            latestModifiedMs = Math.max(latestModifiedMs, Files.getLastModifiedTime(file).toMillis());
+                        } catch (Exception ignored) {
+                            // 单文件 mtime 读取失败不影响整体活性检测
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // 目录不可访问时忽略，继续监控其余目录
+            }
+        }
+        return new DownloadActivitySnapshot(totalBytes, fileCount, latestModifiedMs);
+    }
+
+    private static final class DownloadActivitySnapshot {
+        private final long totalBytes;
+        private final long fileCount;
+        private final long latestModifiedMs;
+
+        private DownloadActivitySnapshot(long totalBytes, long fileCount, long latestModifiedMs) {
+            this.totalBytes = totalBytes;
+            this.fileCount = fileCount;
+            this.latestModifiedMs = latestModifiedMs;
+        }
+
+        private boolean isChangedFrom(DownloadActivitySnapshot previous) {
+            if (previous == null) {
+                return true;
+            }
+            return totalBytes != previous.totalBytes
+                || fileCount != previous.fileCount
+                || latestModifiedMs != previous.latestModifiedMs;
+        }
+    }
+
+    private int normalizePositive(int value, int fallback) {
+        return value > 0 ? value : fallback;
+    }
     
+    private String firstNonBlank(String value, String fallback) {
+        if (value != null && !value.isBlank()) {
+            return value;
+        }
+        return fallback;
+    }
+
+    private String extractThrowableMessage(Throwable throwable) {
+        if (throwable == null) {
+            return "Pipeline failed with unknown error";
+        }
+        Throwable cursor = throwable;
+        String fallbackType = throwable.getClass().getSimpleName();
+        int depth = 0;
+        while (cursor != null && depth < 8) {
+            String message = cursor.getMessage();
+            if (message != null && !message.isBlank()) {
+                if (depth == 0) {
+                    return message;
+                }
+                return cursor.getClass().getSimpleName() + ": " + message;
+            }
+            fallbackType = cursor.getClass().getSimpleName();
+            cursor = cursor.getCause();
+            depth++;
+        }
+        return fallbackType + " (message unavailable)";
+    }
+
     public CompletableFuture<ProcessingResult> submitTaskAsync(String videoUrl, String outputDir) {
         String taskId = "task_" + taskCounter.incrementAndGet() + "_" + System.currentTimeMillis();
         return CompletableFuture.supplyAsync(() -> processVideo(taskId, videoUrl, outputDir));
@@ -1465,7 +1883,7 @@ public class VideoProcessingOrchestrator {
      * ?????????CV/LLM ?? -> ???? -> ??????
      */
     private ExtractionRequests runLegacyAnalysis(String taskId, String videoPath, AnalyzeResult ar, Stage1Result s1, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) throws Exception {
-        // Load Semantic Units：仅使用 AnalyzeResponse 内联载荷（协议已移除路径字段）
+        // Load Semantic Units閿涙矮绮庢担璺ㄦ暏 AnalyzeResponse 閸愬懓浠堟潪鍊熷祹閿涘牆宕楃拋顔煎嚒缁夊娅庣捄顖氱窞鐎涙顔岄敍?
         JsonNode rootNode = loadSemanticUnitsRoot(ar);
         
         final boolean originallyArray = rootNode.isArray();

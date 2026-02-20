@@ -6,24 +6,35 @@ import java.lang.reflect.Field;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DeepSeekAdvisorServiceTest {
 
     @Test
-    void shouldFallbackWhenApiKeyMissing() throws Exception {
+    void shouldThrowWhenApiKeyMissing() throws Exception {
         DeepSeekAdvisorService service = new DeepSeekAdvisorService();
         setField(service, "advisorEnabled", true);
         setField(service, "apiKey", "");
 
-        DeepSeekAdvisorService.AdviceResult result = service.requestAdvice(
-                "熵增",
-                "房间越乱越难自己恢复。",
-                true
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> service.requestAdvice("term", "context", true)
         );
 
-        assertEquals("fallback", result.source);
-        assertTrue(result.advice.contains("熵增"));
+        assertEquals("DEEPSEEK_API_KEY is empty", error.getMessage());
+    }
+
+    @Test
+    void shouldThrowWhenAdvisorDisabled() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        setField(service, "advisorEnabled", false);
+        setField(service, "apiKey", "test-key");
+
+        IllegalStateException error = assertThrows(
+                IllegalStateException.class,
+                () -> service.requestAdvice("term", "context", true)
+        );
+
+        assertEquals("deepseek.advisor.enabled=false", error.getMessage());
     }
 
     @Test
@@ -38,4 +49,3 @@ class DeepSeekAdvisorServiceTest {
         field.set(target, value);
     }
 }
-

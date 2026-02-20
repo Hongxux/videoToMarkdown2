@@ -1,17 +1,21 @@
 """
-Phase 2B 缂備浇浜慨闈涱焽濡も偓闇夊ù锝堝Г缁侇喖鈽夐幘铏攭妞ゃ儱锕弻濠傤吋閸狅絼绶氬畷?(Material Flow Assembly)
+Phase 2B 缂備浇浜慨闈涱焽濡も偓闇夊ù锝堝Г缁侇喖鈽夐幘铏攭妞ゃ儱锕弻濠傤吋閸狅絼绶氬畷?(Material Flow Assembly)
 
-闂佸搫鐗滈崜姘冲暞闂佺鍕垫當闁汇倕瀚伴幃铏紣娴ｅ搫鏅?RichTextPipeline 婵炴垶鎼╅崢浠嬫偋鐎圭姷鐤€闁告劦浜濋悾杈╃磼鏉堚晛校婵炲吋顨嗗鍕礋椤撶喎鈧偤姊洪锝嗩潡缂侀鍋婇弫宥呯暆閸愵亶妲归柣鐘冲姧缁蹭粙鎯冮姀銏″珰妞ゆ挻绻勯悿鍛存煕濡や焦绀€闁?(SemanticUnit)
-闁哄鍎愰崜娆戔偓闈涘级缁嬪宕崟顐㈢樊婵炶揪绲鹃幐鎯р枔閹寸姭鍋撻棃娑滃闁绘稓鍠愰幏鍛村箻閸撲緡妲洪梺鍝勵槹閸斞呮濞嗘挸绠ｆい蹇撳缁傚牓鏌曢崱鏇熺グ妞ゎ偄顑嗛敍鎰板箣閻樺樊鏆┑鐐茬墢椤ｎ喚妲愬璺何?
-婵炴垶鎸诲Σ鎺椼€呴敃鍌氱闁绘棁顕ч崢瀵哥磽娴ｇ顏ф繛鍡愬灲閺?1. generate_materials: 闂佺儵鏅涢悺銊ф暜閹绢喖绠ョ憸鎴︺€侀幋鐘愁潟闁绘娅曠紞蹇涙煟閵忋垹鏋戦柛銊﹁壘闇夊ù锝堛€€閺屻倝鏌ㄥ☉妯煎ⅵ闁逞屽墮閸婂寮妶鍡欘洸閹肩补鍓濋煬顒傜磼?闂佸憡顨夊▍鏇烆渻閸屾稑绶為柛鏇ㄥ幗閸婄偞淇婇妞诲亾瀹曞洨顢呴梺鎸庣☉椤︻參鍩€?2. collect_material_requests: 闁荤喐鐟ョ€氼剟宕瑰┑鍫燁潟闁绘娅曠紞蹇涙⒒閸ワ絽浜惧┑顔炬嚀閸嬪﹦妲愬▎鎾寸劵闁稿本绮嶉弳蹇撁瑰鍐€楅柣掳鍔庣划璇参旈埀顒勫垂鎼达絿鐭?闂佸綊娼х紞濠囧闯閻戞ê绶為柛鏇ㄥ幗閸婄偞淇婇妞诲亾瀹曞洨顢呴梺鎸庣☉椤︻參鍩€?3. apply_external_materials: 闁诲繐绻愬Λ妤吽囨繝姘劸闁靛ě鍕闂佺懓鐡ㄩ崝妤€鈻撻幋鐘愁潟闁绘娅曠紞蹇涙偣瑜嶇€氼厾鑺遍鈧畷鐘恒亹閹烘垵璧嬮梺闈涙缁舵岸鎮板▎鎴炲珰濞达絾鐡曠€氭瑩鎮锋担鍛婂櫣闁挎繄鍋ゅ畷鍫曟倷妫版繂娈ф繛鎴炴煥椤︻垰鐣烽悢鐓庣闁告劧鑵归崑?
-闂佸搫绉堕…鍫㈢紦妤ｅ啯鍋嬮悷娆忓閸嬫捁顧傜紒?- 闂佸憡鏌ｉ崝瀣礊閺冨牆绠涢柣鏃囨閸欌偓: 闂佺硶鏅炲銊ц姳?Action Segments 闂佸搫鎳樼紓姘跺礂濡吋鍟戝ù锝囶焾椤ュ懘鎮峰▎蹇旑棦妞わ絽鐖煎畷顏嗕沪閹呭姷闂佹悶鍎伴崟姗€鍩€?- 闂佹椿鍘归崕鎾儊閹达箑绀嗛柛鈩冪懆椤箓鎮楅悽闈涘付闁? 闂佸搫绉烽～澶婄暤?Knowledge Type (婵犵鈧啿鈧粙顢欐径灞惧枂闁挎繂鎳愰埀?vs 闁哄鏅涘ú銊╁煝婵傜鍨? 闂佸憡鏌ｉ崝宥夊焵椤戞寧绁伴柣銊у枛瀵偆鈧潧鎽滈ˇ閬嶆煛婢跺濮夐柣掳鍎甸幃楣冨Ψ閿濆倸浜?- 闂佺厧顨庢禍顏堝焵椤掆偓閸婂摜鑺遍弻銉ョ闁告侗鍨抽幑? 闁荤姳绶ょ槐鏇㈡偩婵犳艾瀚夐柍褜鍓氶幏鍛暦閸ャ劎鏆犻梺鍝勫暙閻栫厧螞鐠恒劎鐜绘俊銈傚亾鐟?(Adaptive Envelope) 婵炲濮伴崕鎶藉灳濡崵鈹嶆繝闈涚墢椤﹂亶鏌℃径瀣闁伙綆鍓熷顐も偓娑櫱氶崑鎾诡槹闁?- 婵＄偟绻濋悞锕偹夊Δ鍛畱? 闂佸憡鍔曢幊鎰版偪閸℃ê绶炴慨姗€浜堕悰鎾绘煕韫囨梻鐭婄紒銊ョ－缁敻寮介锝嗩吅闂佹寧绋戦悧蹇氬綂闁诲氦顫夐懝楣冩儗?-> 闂佸憡顨嗗ú鏍储閹捐鏋佺紓鍫㈠Х缁?-> 闂備焦瀵ч悷銊╊敋閵堝绠掗柕蹇曞濡插鏌ㄥ☉姗嗘Ф闁?"""
+闂佸搫鐗滈崜姘冲暞闂佺鍕垫當闁汇倕瀚伴幃铏紣娴ｅ搫鏅?RichTextPipeline 婵炴垶鎼╅崢浠嬫偋鐎圭姷鐤€闁告劦浜濋悾杈╃磼鏉堚晛校婵炲吋顨嗗鍕礋椤撶喎鈧偤姊洪锝嗩潡缂侀鍋婇弫宥呯暆閸愵亶妲归柣鐘冲姧缁蹭粙鎯冮姀銏″珰妞ゆ挻绻勯悿鍛存煕濡や焦绀€闁?(SemanticUnit)
+闁哄鍎愰崜娆戔偓闈涘级缁嬪宕崟顐㈢樊婵炶揪绲鹃幐鎯р枔閹寸姭鍋撻棃娑滃闁绘稓鍠愰幏鍛村箻閸撲緡妲洪梺鍝勵槹閸斞呮濞嗘挸绠ｆい蹇撳缁傚牓鏌曢崱鏇熺グ妞ゎ偄顑嗛敍鎰板箣閻樺樊鏆┑鐐茬墢椤ｎ喚妲愬璺何?
+婵炴垶鎸诲Σ鎺椼€呴敃鍌氱闁绘棁顕ч崢瀵哥磽娴ｇ顏ф繛鍡愬灲閺?1. generate_materials: 闂佺儵鏅涢悺銊ф暜閹绢喖绠ョ憸鎴︺€侀幋鐘愁潟闁绘娅曠紞蹇涙煟閵忋垹鏋戦柛銊﹁壘闇夊ù锝堛€€閺屻倝鏌ㄥ☉妯煎ⅵ闁逞屽墮閸婂寮妶鍡欘洸閹肩补鍓濋煬顒傜磼?闂佸憡顨夊▍鏇烆渻閸屾稑绶為柛鏇ㄥ幗閸婄偞淇婇妞诲亾瀹曞洨顢呴梺鎸庣☉椤︻參鍩€?2. collect_material_requests: 闁荤喐鐟ョ€氼剟宕瑰┑鍫燁潟闁绘娅曠紞蹇涙⒒閸ワ絽浜惧┑顔炬嚀閸嬪﹦妲愬▎鎾寸劵闁稿本绮嶉弳蹇撁瑰鍐€楅柣掳鍔庣划璇参旈埀顒勫垂鎼达絿鐭?闂佸綊娼х紞濠囧闯閻戞ê绶為柛鏇ㄥ幗閸婄偞淇婇妞诲亾瀹曞洨顢呴梺鎸庣☉椤︻參鍩€?3. apply_external_materials: 闁诲繐绻愬Λ妤吽囨繝姘劸闁靛ě鍕闂佺懓鐡ㄩ崝妤€鈻撻幋鐘愁潟闁绘娅曠紞蹇涙偣瑜嶇€氼厾鑺遍鈧畷鐘恒亹閹烘垵璧嬮梺闈涙缁舵岸鎮板▎鎴炲珰濞达絾鐡曠€氭瑩鎮锋担鍛婂櫣闁挎繄鍋ゅ畷鍫曟倷妫版繂娈ф繛鎴炴煥椤︻垰鐣烽悢鐓庣闁告劧鑵归崑?
+闂佸搫绉堕…鍫㈢紦妤ｅ啯鍋嬮悷娆忓閸嬫捁顧傜紒?- 闂佸憡鏌ｉ崝瀣礊閺冨牆绠涢柣鏃囨閸欌偓: 闂佺硶鏅炲銊ц姳?Action Segments 闂佸搫鎳樼紓姘跺礂濡吋鍟戝ù锝囶焾椤ュ懘鎮峰▎蹇旑棦妞わ絽鐖煎畷顏嗕沪閹呭姷闂佹悶鍎伴崟姗€鍩€?- 闂佹椿鍘归崕鎾儊閹达箑绀嗛柛鈩冪懆椤箓鎮楅悽闈涘付闁? 闂佸搫绉烽～澶婄暤?Knowledge Type (婵犵鈧啿鈧粙顢欐径灞惧枂闁挎繂鎳愰埀?vs 闁哄鏅涘ú銊╁煝婵傜鍨? 闂佸憡鏌ｉ崝宥夊焵椤戞寧绁伴柣銊у枛瀵偆鈧潧鎽滈ˇ閬嶆煛婢跺濮夐柣掳鍎甸幃楣冨Ψ閿濆倸浜?- 闂佺厧顨庢禍顏堝焵椤掆偓閸婂摜鑺遍弻銉ョ闁告侗鍨抽幑? 闁荤姳绶ょ槐鏇㈡偩婵犳艾瀚夐柍褜鍓氶幏鍛暦閸ャ劎鏆犻梺鍝勫暙閻栫厧螞鐠恒劎鐜绘俊銈傚亾鐟?(Adaptive Envelope) 婵炲濮伴崕鎶藉灳濡崵鈹嶆繝闈涚墢椤﹂亶鏌℃径瀣闁伙綆鍓熷顐も偓娑櫱氶崑鎾诡槹闁?- 婵＄偟绻濋悞锕偹夊Δ鍛畱? 闂佸憡鍔曢幊鎰版偪閸℃ê绶炴慨姗€浜堕悰鎾绘煕韫囨梻鐭婄紒銊ョ－缁敻寮介锝嗩吅闂佹寧绋戦悧蹇氬綂闁诲氦顫夐懝楣冩儗?-> 闂佸憡顨嗗ú鏍储閹捐鏋佺紓鍫㈠Х缁?-> 闂備焦瀵ч悷銊╊敋閵堝绠掗柕蹇曞濡插鏌ㄥ☉姗嗘Ф闁?"""
 
 from __future__ import annotations
 
+import atexit
+import concurrent.futures
 import json
 import logging
 import os
 import hashlib
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,26 +36,155 @@ from services.python_grpc.src.content_pipeline.phase2b.assembly.rich_text_docume
 
 logger = logging.getLogger(__name__)
 
+_PHASE2B_STRUCTURE_POOL_LOCK = threading.Lock()
+_PHASE2B_STRUCTURE_POOL: Optional[concurrent.futures.ProcessPoolExecutor] = None
+_PHASE2B_STRUCTURE_POOL_WORKERS = 0
+_PHASE2B_WORKER_VALIDATOR = None
+
+
+def _is_truthy(value: Any) -> bool:
+    """将多种布尔表示归一化为 bool。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _resolve_parallel_workers(raw_value: str, task_count: int, hard_cap: int = 8) -> int:
+    """解析并发 worker 数，支持 auto 或显式整数。"""
+    if task_count <= 0:
+        return 1
+    token = str(raw_value or "auto").strip().lower()
+    if token in {"", "auto"}:
+        desired = max(1, (os.cpu_count() or 2) - 1)
+    else:
+        try:
+            desired = int(token)
+        except Exception:
+            desired = 1
+    return max(1, min(desired, hard_cap, task_count))
+
+
+def _should_enable_structure_process_parallel(task_count: int, validator: Any) -> bool:
+    """判定是否启用结构预处理多进程并发。"""
+    if task_count <= 1:
+        return False
+
+    mode = str(os.getenv("PHASE2B_STRUCTURE_PREPROCESS_MODE", "auto") or "auto").strip().lower()
+    if mode in {"off", "disabled", "false", "0", "serial"}:
+        return False
+    if mode == "process":
+        return True
+
+    # auto 模式下避免测试环境误触发多进程，减少不确定性。
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return False
+
+    # 仅对真实 ConcreteKnowledgeValidator 启用进程并发，避免 fake/mocked validator 破坏测试语义。
+    class_name = str(type(validator).__name__ or "").strip()
+    module_name = str(getattr(type(validator), "__module__", "") or "").strip()
+    if class_name != "ConcreteKnowledgeValidator":
+        return False
+    if "concrete_knowledge_validator" not in module_name:
+        return False
+    return True
+
+
+def _shutdown_phase2b_structure_pool() -> None:
+    """进程退出时释放 Phase2B 结构预处理进程池。"""
+    global _PHASE2B_STRUCTURE_POOL
+    global _PHASE2B_STRUCTURE_POOL_WORKERS
+
+    with _PHASE2B_STRUCTURE_POOL_LOCK:
+        if _PHASE2B_STRUCTURE_POOL is not None:
+            try:
+                _PHASE2B_STRUCTURE_POOL.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            _PHASE2B_STRUCTURE_POOL = None
+            _PHASE2B_STRUCTURE_POOL_WORKERS = 0
+
+
+atexit.register(_shutdown_phase2b_structure_pool)
+
+
+def _get_phase2b_structure_pool(worker_count: int) -> concurrent.futures.ProcessPoolExecutor:
+    """按 worker 数复用单例进程池，避免每个语义单元重复创建进程。"""
+    global _PHASE2B_STRUCTURE_POOL
+    global _PHASE2B_STRUCTURE_POOL_WORKERS
+
+    with _PHASE2B_STRUCTURE_POOL_LOCK:
+        if (
+            _PHASE2B_STRUCTURE_POOL is None
+            or _PHASE2B_STRUCTURE_POOL_WORKERS != int(worker_count)
+        ):
+            if _PHASE2B_STRUCTURE_POOL is not None:
+                try:
+                    _PHASE2B_STRUCTURE_POOL.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+            _PHASE2B_STRUCTURE_POOL = concurrent.futures.ProcessPoolExecutor(
+                max_workers=max(1, int(worker_count))
+            )
+            _PHASE2B_STRUCTURE_POOL_WORKERS = max(1, int(worker_count))
+    return _PHASE2B_STRUCTURE_POOL
+
+
+def _phase2b_structure_worker_run(task: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    子进程执行结构预处理。
+    说明：
+    1) 使用进程内单例 validator，避免同一进程重复初始化 PP-Structure。
+    2) 只返回结构化结果与错误摘要，主进程决定如何回退。
+    """
+    global _PHASE2B_WORKER_VALIDATOR
+
+    index = int(task.get("index", -1) or -1)
+    image_path = str(task.get("image_path", "") or "").strip()
+    source_id = str(task.get("source_id", "") or "").strip()
+    timestamp_sec = task.get("timestamp_sec")
+    output_dir = str(task.get("output_dir", "") or "").strip()
+
+    if _PHASE2B_WORKER_VALIDATOR is None:
+        from services.python_grpc.src.content_pipeline.phase2a.segmentation.concrete_knowledge_validator import (
+            ConcreteKnowledgeValidator,
+        )
+
+        _PHASE2B_WORKER_VALIDATOR = ConcreteKnowledgeValidator(
+            output_dir=output_dir if output_dir else None
+        )
+
+    try:
+        items = _PHASE2B_WORKER_VALIDATOR.extract_structured_screenshots(
+            image_path=image_path,
+            source_id=source_id,
+            timestamp_sec=float(timestamp_sec) if timestamp_sec is not None else None,
+        )
+        return {"index": index, "items": items, "error": ""}
+    except Exception as exc:  # pragma: no cover
+        return {"index": index, "items": None, "error": str(exc)}
+
 async def generate_materials(pipeline, unit: SemanticUnit):
     """
-    [闂佸湱鐟抽崱鈺傛杸闂備緡鍋呭Σ鎺旀閻?婵炴垶鎹囩紓姘额敋閵忥紕鈻曞璺猴工缁€瀣煕韫囨挸鏆熸繛鎻掓健楠炴帡濡疯閺呮悂鏌熺€涙ê濮夌紒鈧畝鍕骇闁规壆澧楅懖鐘绘煕濮橆剛澧戦柍?
-    闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 婵炴垶鎸搁敃锝囩箔閸涙潙妫橀柛銉戝啰鈧鏌＄€ｎ偄濮х紒鍙樺嵆楠炴捇骞囬鈧徊鍧楁偣閸ヨ泛骞掔紒鐘靛枛瀹曪繝寮撮悙鎻掔瑲婵炴垶鎼╅崢鎯р枔閹达箑绀夐柕濞垮€楃粙濠囨煟濡も偓濞诧箓顢?(Action Segments) 闂佸憡绮岄惉鑹板綂闁诲氦顫夐懝楣冩儗?(Stable Islands)闂?    2. 闂佸憡鏌ｉ崝瀣礊閺冨牊鎳氱€广儱鎳忛崐銈夋煥濞戞瑨澹樻い鏇ㄥ櫍閹秶鈧潧澹婇弳銏ゆ煟閵娿儱顏╁┑顔规櫆閹峰懎顭ㄩ崨顓ф毈濠电偛鐗呯徊鑽ゆ崲濡吋鍋橀悘鐐靛亾椤ρ呯磼瀹€鍕窗闁诲孩妞藉畷?(Merge)闂?    3. 闂佹椿鍘归崕鎾儊閹达箑绀嗛柛鈩冪懆椤箓鏌ㄥ☉娆掑妞ゆ洦鍣ｅ畷婵嬪Ω閵堝洨鈻曢柡澶嗘櫆缁嬫牠銆侀幋鐘靛暗閻犲洩灏欓埀顒傚厴瀹曟岸濡堕崨顖涙瘞 (婵?闁荤姳娴囩亸顏囶暰闂?闁哄鏅涘ú銊╁煝婵傜绠?闂佹寧绋戦懟顖炲窗閸涱垪鍋撶憴鍕殤缂佲偓瀹€鍕骇闁归偊鍓濋崺宀勬煙椤戝潡妾烽柍?    4. 缂備浇浜慨闈涱焽濡ゅ懏鍋ㄩ柣鏃傤焾閻忓洭鏌?       - 闁荤姳娴囩亸顏囶暰闂?(Explanation): 婵炲濮撮幊鎰板极閹捐绠ｉ柟閭﹀墮瑜扮娀姊哄▎鎯ф灈闁硅埖宀搁獮瀣敂閸曨剛顩?(婵?闁?缂備礁顑呴崯鍧楁偩閹呮殕?闂佹寧绋戞總鏃傜箔婢舵劖鍋ㄩ柣鏃傤焾閻忓洭鎮峰▎蹇旑棦妞わ絽鐖兼俊?       - 闁哄鏅涘ú銊╁煝婵傜鍨?(Process): 闂佹眹鍨婚崰鎰板垂濮樿鲸鍠嗛柛鈩冧緱閺嗐儵鏌ｅΔ鈧ú锕傤敊?(Clip) 闂佸憡鐟ラ敃顏堝储閵堝棛闄勬俊銈呭暞閻ｉ亶鏌涜箛鏂库枙闁轰緡鍘鹃弫顔款槼闁糕晛鎳樺畷鑸电┍閹典礁浜?    5. 闂佺绻戠划宀€鑺遍幎钘夊珘闁告繂瀚悡鎴︽煥濞戞瑤浜㈤悗姘ュ灲瀵噣鎮╅幓鎹霉閿濆棛鐭屽褎鐗曢埢鎾跺枈婢跺瞼顦梺鍛婂笚閻熴儱煤閺嶎厽鐒婚柍褜鍓熷畷姘舵偋閸繄鍊掗梺鍛婄懄閻楁粏褰婇柣搴ゎ潐閼归箖鎯屽┑瀣妞ゅ繐瀚粋鍫ユ煙鐎涙澧柛娆忕箻瀹曪繝寮撮悙鎻掔瑲闂佺绻戠划宀€鑺遍幎钘夌妞ゅ繐瀚粋鍫ユ煏?
-    闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - pipeline: 闁哄鏅滈崝姗€銆侀幋锕€绫嶉柡鍫㈡暩閻熸劕鈽夐幘鎰佸剱闁哄鍟撮弫宥囦沪閹呭€掓繛鎾寸缁嬫挾绮堝畝鍕骇闁归偊鍘肩徊褰掓煕濞嗘劗澧悽顖ｅ亞閳ь剚绋掗崝姗€宕楀鈧畷?(闂佽鎯屾禍婊兠?闂佸憡甯掑ú銊︽櫠?闂?    - unit: 閻庡灚婢橀幊搴ㄋ囬埡鍛仩闁糕剝鐟﹂悾?SemanticUnit 闁诲海鏁搁、濠囨寘閸曨垰违?
-    闁哄鐗婇幐鎼佸吹椤撱垺鏅?    - 闂佸搫鍟版慨鍓ф崲閹达箑鐐婇柣鎰ゴ閸嬫挾绮悰鈥充壕闁稿本绮嶇痪顖炴煙閹帒鍔欓柟渚垮姂瀵?unit.materials 闁诲繒鍋熼崑鐐哄焵椤戭剙绉剁粈澶娾攽婢舵ê浜滈柛?screenshot_paths/clip_paths 缂備焦绋戦ˇ顓㈠焵?    """
+    [闂佸湱鐟抽崱鈺傛杸闂備緡鍋呭Σ鎺旀閻?婵炴垶鎹囩紓姘额敋閵忥紕鈻曞璺猴工缁€瀣煕韫囨挸鏆熸繛鎻掓健楠炴帡濡疯閺呮悂鏌熺€涙ê濮夌紒鈧畝鍕骇闁规壆澧楅懖鐘绘煕濮橆剛澧戦柍?
+    闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 婵炴垶鎸搁敃锝囩箔閸涙潙妫橀柛銉戝啰鈧鏌＄€ｎ偄濮х紒鍙樺嵆楠炴捇骞囬鈧徊鍧楁偣閸ヨ泛骞掔紒鐘靛枛瀹曪繝寮撮悙鎻掔瑲婵炴垶鎼╅崢鎯р枔閹达箑绀夐柕濞垮€楃粙濠囨煟濡も偓濞诧箓顢?(Action Segments) 闂佸憡绮岄惉鑹板綂闁诲氦顫夐懝楣冩儗?(Stable Islands)闂?    2. 闂佸憡鏌ｉ崝瀣礊閺冨牊鎳氱€广儱鎳忛崐銈夋煥濞戞瑨澹樻い鏇ㄥ櫍閹秶鈧潧澹婇弳銏ゆ煟閵娿儱顏╁┑顔规櫆閹峰懎顭ㄩ崨顓ф毈濠电偛鐗呯徊鑽ゆ崲濡吋鍋橀悘鐐靛亾椤ρ呯磼瀹€鍕窗闁诲孩妞藉畷?(Merge)闂?    3. 闂佹椿鍘归崕鎾儊閹达箑绀嗛柛鈩冪懆椤箓鏌ㄥ☉娆掑妞ゆ洦鍣ｅ畷婵嬪Ω閵堝洨鈻曢柡澶嗘櫆缁嬫牠銆侀幋鐘靛暗閻犲洩灏欓埀顒傚厴瀹曟岸濡堕崨顖涙瘞 (婵?闁荤姳娴囩亸顏囶暰闂?闁哄鏅涘ú銊╁煝婵傜绠?闂佹寧绋戦懟顖炲窗閸涱垪鍋撶憴鍕殤缂佲偓瀹€鍕骇闁归偊鍓濋崺宀勬煙椤戝潡妾烽柍?    4. 缂備浇浜慨闈涱焽濡ゅ懏鍋ㄩ柣鏃傤焾閻忓洭鏌?       - 闁荤姳娴囩亸顏囶暰闂?(Explanation): 婵炲濮撮幊鎰板极閹捐绠ｉ柟閭﹀墮瑜扮娀姊哄▎鎯ф灈闁硅埖宀搁獮瀣敂閸曨剛顩?(婵?闁?缂備礁顑呴崯鍧楁偩閹呮殕?闂佹寧绋戞總鏃傜箔婢舵劖鍋ㄩ柣鏃傤焾閻忓洭鎮峰▎蹇旑棦妞わ絽鐖兼俊?       - 闁哄鏅涘ú銊╁煝婵傜鍨?(Process): 闂佹眹鍨婚崰鎰板垂濮樿鲸鍠嗛柛鈩冧緱閺嗐儵鏌ｅΔ鈧ú锕傤敊?(Clip) 闂佸憡鐟ラ敃顏堝储閵堝棛闄勬俊銈呭暞閻ｉ亶鏌涜箛鏂库枙闁轰緡鍘鹃弫顔款槼闁糕晛鎳樺畷鑸电┍閹典礁浜?    5. 闂佺绻戠划宀€鑺遍幎钘夊珘闁告繂瀚悡鎴︽煥濞戞瑤浜㈤悗姘ュ灲瀵噣鎮╅幓鎹霉閿濆棛鐭屽褎鐗曢埢鎾跺枈婢跺瞼顦梺鍛婂笚閻熴儱煤閺嶎厽鐒婚柍褜鍓熷畷姘舵偋閸繄鍊掗梺鍛婄懄閻楁粏褰婇柣搴ゎ潐閼归箖鎯屽┑瀣妞ゅ繐瀚粋鍫ユ煙鐎涙澧柛娆忕箻瀹曪繝寮撮悙鎻掔瑲闂佺绻戠划宀€鑺遍幎钘夌妞ゅ繐瀚粋鍫ユ煏?
+    闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - pipeline: 闁哄鏅滈崝姗€銆侀幋锕€绫嶉柡鍫㈡暩閻熸劕鈽夐幘鎰佸剱闁哄鍟撮弫宥囦沪閹呭€掓繛鎾寸缁嬫挾绮堝畝鍕骇闁归偊鍘肩徊褰掓煕濞嗘劗澧悽顖ｅ亞閳ь剚绋掗崝姗€宕楀鈧畷?(闂佽鎯屾禍婊兠?闂佸憡甯掑ú銊︽櫠?闂?    - unit: 閻庡灚婢橀幊搴ㄋ囬埡鍛仩闁糕剝鐟﹂悾?SemanticUnit 闁诲海鏁搁、濠囨寘閸曨垰违?
+    闁哄鐗婇幐鎼佸吹椤撱垺鏅?    - 闂佸搫鍟版慨鍓ф崲閹达箑鐐婇柣鎰ゴ閸嬫挾绮悰鈥充壕闁稿本绮嶇痪顖炴煙閹帒鍔欓柟渚垮姂瀵?unit.materials 闁诲繒鍋熼崑鐐哄焵椤戭剙绉剁粈澶娾攽婢舵ê浜滈柛?screenshot_paths/clip_paths 缂備焦绋戦ˇ顓㈠焵?    """
     materials = MaterialSet(modality=unit.modality)
     
     screenshot_paths = []
     screenshot_labels = []
     clip_paths = []
     
-    # 闂佸吋鍎抽崲鑼躲亹閸モ晝鐭欓柛鎰皺閺嗘壆鈧厜鍋撴繛鎴炆戠€氭煡鏌涢弬璇插缂傚秵妫冨畷锟犲即閻愭彃绗氭繛锝呮礌閸撴繃瀵?    stable_islands = getattr(unit, 'stable_islands', [])
+    # 闂佸吋鍎抽崲鑼躲亹閸モ晝鐭欓柛鎰皺閺嗘壆鈧厜鍋撴繛鎴炆戠€氭煡鏌涢弬璇插缂傚秵妫冨畷锟犲即閻愭彃绗氭繛锝呮礌閸撴繃瀵?    stable_islands = getattr(unit, 'stable_islands', [])
     action_segments = getattr(unit, 'action_segments', [])
     
     if action_segments:
-        # ==== 闂佸搫鐗嗛ˇ顖涙叏閳哄倹濯存繝濠傚暙缁€瀣煕? 闁荤喐鐟ョ€氼剟宕归娑氣枖闁?+ 闁荤喐鐟ョ€氼剟宕归娑氼洸?====
-        # 闁荤喐鐟ョ€氼剟宕归娑氣枖闁? 婵炴垶鎸哥粔浣冦亹娓氣偓瀹曪綁寮介澶婃婵炴垶鏌ㄩˇ顖氱暦閻旂厧绀傞柛鎰典邯閻?stable 闂備緡鍠撻崝宀勫垂?(闁荤姴鎼悿鍥╂崲?
+        # ==== 闂佸搫鐗嗛ˇ顖涙叏閳哄倹濯存繝濠傚暙缁€瀣煕? 闁荤喐鐟ョ€氼剟宕归娑氣枖闁?+ 闁荤喐鐟ョ€氼剟宕归娑氼洸?====
+        # 闁荤喐鐟ョ€氼剟宕归娑氣枖闁? 婵炴垶鎸哥粔浣冦亹娓氣偓瀹曪綁寮介澶婃婵炴垶鏌ㄩˇ顖氱暦閻旂厧绀傞柛鎰典邯閻?stable 闂備緡鍠撻崝宀勫垂?(闁荤姴鎼悿鍥╂崲?
         
-        # 濡絽鍟€?闂佸憡鑹炬鎼佀囬埡鍛仩? 婵犮垼鍩栭懝鐐叏閳哄倹濯存繝濠傛閳ь剚妞藉畷?(闂佸憡鑹炬總鏃傜博鐎靛憡瀚氭い鎾寸箘閻ゅ懘鏌涘Δ浣圭闁告ɑ鎹囧畷銉т沪閻撳海妲ｆ俊顐ゅ閿曨偆妲愬┑瀣哗闁诡垎灞芥櫖闂佸憡鑹鹃悧鍡涙嚐閻斿吋鈷掗柟缁㈠枟椤?
+        # 濡絽鍟€?闂佸憡鑹炬鎼佀囬埡鍛仩? 婵犮垼鍩栭懝鐐叏閳哄倹濯存繝濠傛閳ь剚妞藉畷?(闂佸憡鑹炬總鏃傜博鐎靛憡瀚氭い鎾寸箘閻ゅ懘鏌涘Δ浣圭闁告ɑ鎹囧畷銉т沪閻撳海妲ｆ俊顐ゅ閿曨偆妲愬┑瀣哗闁诡垎灞芥櫖闂佸憡鑹鹃悧鍡涙嚐閻斿吋鈷掗柟缁㈠枟椤?
         if len(action_segments) >= 2:
             merged_actions = pipeline._merge_action_segments(action_segments, gap_threshold_sec=5.0)
             if len(merged_actions) < len(action_segments):
@@ -61,7 +194,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
             action_segments = merged_actions
             unit.action_segments = merged_actions
         
-        # 濡絽鍟悾?婵炴潙鍚嬮敋閻庡灚鐓￠弫宥咁潩椤愩倕鏋犻梺绋跨箰閻楀棝藝閺屻儲鍋ㄩ柕濞炬櫓閺嗘洟鏌涢幒鎴烆棤閻?婵炴垶鎸搁敃銉╂偉?knowledge_type闂佹寧绋戦惉鐓庮啅鏉堛劌绶為弶鍫涘妽椤ρ囨煙闂堟稓啸闁汇劎鍠栭幃?LLM
+        # 濡絽鍟悾?婵炴潙鍚嬮敋閻庡灚鐓￠弫宥咁潩椤愩倕鏋犻梺绋跨箰閻楀棝藝閺屻儲鍋ㄩ柕濞炬櫓閺嗘洟鏌涢幒鎴烆棤閻?婵炴垶鎸搁敃銉╂偉?knowledge_type闂佹寧绋戦惉鐓庮啅鏉堛劌绶為弶鍫涘妽椤ρ囨煙闂堟稓啸闁汇劎鍠栭幃?LLM
         for a in action_segments:
             if isinstance(a.get("classification"), dict) and a.get("classification", {}).get("knowledge_type"):
                 continue
@@ -91,9 +224,9 @@ async def generate_materials(pipeline, unit: SemanticUnit):
         for i, (action, classification) in enumerate(zip(action_segments, batch_classifications)):
             action_start = action.get("start_sec", unit.start_sec)
             action_end = action.get("end_sec", unit.end_sec)
-            # 闂佸吋鍎抽崲鑼躲亹閸モ晜瀚氶柕澶堝劚琚熸繛杈剧稻缁苯鐣烽悢鐓庣闁告劑鍔岄弫鍫曟⒑椤斿搫濡挎繛鍫熷灩缁瑩宕橀懠顒佹瘞閻庡厜鍋?            action_internal_islands = action.get("internal_stable_islands", [])
+            # 闂佸吋鍎抽崲鑼躲亹閸モ晜瀚氶柕澶堝劚琚熸繛杈剧稻缁苯鐣烽悢鐓庣闁告劑鍔岄弫鍫曟⒑椤斿搫濡挎繛鍫熷灩缁瑩宕橀懠顒佹瘞閻庡厜鍋?            action_internal_islands = action.get("internal_stable_islands", [])
             
-            # 濡絽鍟€?Sentence闂佹寧绋掗惌顔剧箔瀹€鍕闁靛鍊楃粙濠囨⒑閹绘帞孝鐟滅増妫冮幆鍐礋椤栨矮绨奸梺鍛婄懀閸庤崵妲愬▎鎾崇濠㈣泛锕﹂幗鐔割殽閻愬瓨绀冩俊鐐插€垮鑽も偓娑櫭悡鍫ユ倵鐟欏嫮鐓紓宥呮嚇閺?            sentence_start = pipeline._align_to_sentence_start(action_start)
+            # 濡絽鍟€?Sentence闂佹寧绋掗惌顔剧箔瀹€鍕闁靛鍊楃粙濠囨⒑閹绘帞孝鐟滅増妫冮幆鍐礋椤栨矮绨奸梺鍛婄懀閸庤崵妲愬▎鎾崇濠㈣泛锕﹂幗鐔割殽閻愬瓨绀冩俊鐐插€垮鑽も偓娑櫭悡鍫ユ倵鐟欏嫮鐓紓宥呮嚇閺?            sentence_start = pipeline._align_to_sentence_start(action_start)
             sentence_end = pipeline._align_to_sentence_end(action_end)
             
             # Classification already done in batch
@@ -105,7 +238,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
             
             logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%}) - {classification.get('key_evidence', '')[:30]}")
 
-            # 濡絽鍟悾?Adaptive Action Envelope: 闁荤姴娴傞崢铏圭不閻旂厧纭€闁哄洨鍋涚敮妤呮煟椤撗冨箺婵＄偛鍊垮畷锝夘敍濞戞瑦顔掑┑鐐茬墢椤ｎ喚妲愭潏銊р枖?clip 缂傚倷鐒﹂幐璇差焽椤愶絿鈻旂€广儱鐗婄涵鍫曟偤?unit.end_sec
+            # 濡絽鍟悾?Adaptive Action Envelope: 闁荤姴娴傞崢铏圭不閻旂厧纭€闁哄洨鍋涚敮妤呮煟椤撗冨箺婵＄偛鍊垮畷锝夘敍濞戞瑦顔掑┑鐐茬墢椤ｎ喚妲愭潏銊р枖?clip 缂傚倷鐒﹂幐璇差焽椤愶絿鈻旂€广儱鐗婄涵鍫曟偤?unit.end_sec
             envelope_start, envelope_end = pipeline._compute_action_envelope(
                 unit=unit,
                 action_start=action_start,
@@ -120,9 +253,9 @@ async def generate_materials(pipeline, unit: SemanticUnit):
             )
             
             if knowledge_type == "讲解型":
-                # 濡絽鍟€?闂傚倸瀚粔鑸殿殽? 闁荤姳娴囩亸顏囶暰闂佹悶鍔岄鍛般亹瑜旈獮瀣敂閸曨偆鎮兼俊顐稻閻楁洟鎮㈤鍌涙殰?+ 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕閵夛附瀚曠紒杈ㄧ箖缁嬪顓奸崱妤冨€掗梺鍛婄懄閻楃偤锝炵€ｎ偓绱?                logger.info("  闂?Downgrade to screenshots only (闁荤姳娴囩亸顏囶暰闂?")
+                # 濡絽鍟€?闂傚倸瀚粔鑸殿殽? 闁荤姳娴囩亸顏囶暰闂佹悶鍔岄鍛般亹瑜旈獮瀣敂閸曨偆鎮兼俊顐稻閻楁洟鎮㈤鍌涙殰?+ 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕閵夛附瀚曠紒杈ㄧ箖缁嬪顓奸崱妤冨€掗梺鍛婄懄閻楃偤锝炵€ｎ偓绱?                logger.info("  闂?Downgrade to screenshots only (闁荤姳娴囩亸顏囶暰闂?")
                 
-                # 婵☆偓绲鹃悧鏇㈠箮濮樿泛绠ｆい蹇撳缁? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴? 闂佸憡鏌ｉ崝瀣礊閺冨倹灏庡瀣娴犵棇
+                # 婵☆偓绲鹃悧鏇㈠箮濮樿泛绠ｆい蹇撳缁? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴? 闂佸憡鏌ｉ崝瀣礊閺冨倹灏庡瀣娴犵棇
                 head_window_end = min(max(envelope_start + 0.5, action_start), envelope_end)
                 head_ss = await pipeline._select_screenshot(
                     start_sec=envelope_start,
@@ -133,7 +266,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                     screenshot_paths.append(head_ss)
                     screenshot_labels.append(f"动作{i+1}首帧")
                 
-                # 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
+                # 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
                 for j, island in enumerate(action_internal_islands):
                     island_start = island.get("start", action_start)
                     island_end = island.get("end", action_end)
@@ -147,7 +280,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                         screenshot_paths.append(island_ss)
                         screenshot_labels.append(f"动作{i+1}稳定帧{j+1}")
                 
-                # 闂佸搫鐗滈崑鍕箮濮樿泛绠ｆい蹇撳缁? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鏌ｉ崝瀣礊閺冨倻纾奸柛顐犲灩娴? 闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴犵棇
+                # 闂佸搫鐗滈崑鍕箮濮樿泛绠ｆい蹇撳缁? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鏌ｉ崝瀣礊閺冨倻纾奸柛顐犲灩娴? 闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴犵棇
                 tail_window_start = max(min(envelope_end - 0.5, action_end), envelope_start)
                 tail_ss = await pipeline._select_screenshot(
                     start_sec=tail_window_start,
@@ -159,8 +292,8 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                     screenshot_labels.append(f"动作{i+1}末帧")
             
             else:
-                # 闂傚倸鐗忛崑鐘活敊婢跺本鍠嗛柨婵嗘噽閳? 闂佸湱绮崝鏇°亹閸モ晜鍠嗛柛鈩冧緱閺?+ 婵☆偓绲鹃悧鏇㈡偄椤掑倹鏆?+ 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?                
-                # 1. 闂佸湱绮崝鏇°亹閸モ晜鍠嗛柛鈩冧緱閺嗐儵鏌ｅΔ鈧ú锕傤敊?(婵炶揪缍€濞夋洟寮妶澶嬪殜妞ゅ繐鐗冮崑鎾诲磼濮樺崬鐣ㄩ梺鍛婃煟閸斿绱為弮鍫濈闁告侗鍨抽幑鏇㈡煛閸愩劎鍩ｆ俊顐㈡健閹崇娀宕橀妸锔惧嚱)
+                # 闂傚倸鐗忛崑鐘活敊婢跺本鍠嗛柨婵嗘噽閳? 闂佸湱绮崝鏇°亹閸モ晜鍠嗛柛鈩冧緱閺?+ 婵☆偓绲鹃悧鏇㈡偄椤掑倹鏆?+ 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?                
+                # 1. 闂佸湱绮崝鏇°亹閸モ晜鍠嗛柛鈩冧緱閺嗐儵鏌ｅΔ鈧ú锕傤敊?(婵炶揪缍€濞夋洟寮妶澶嬪殜妞ゅ繐鐗冮崑鎾诲磼濮樺崬鐣ㄩ梺鍛婃煟閸斿绱為弮鍫濈闁告侗鍨抽幑鏇㈡煛閸愩劎鍩ｆ俊顐㈡健閹崇娀宕橀妸锔惧嚱)
                 clip_path = await pipeline._extract_action_clip(
                     start_sec=envelope_start,
                     end_sec=envelope_end,
@@ -169,7 +302,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                 if clip_path:
                     clip_paths.append(clip_path)
                 
-                # 2. 闂佸湱绮崝鏇°亹閸ヮ煉绱旈柡宓嫬顫撻梺瑙勬儗娴滄粌霉? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴? 闂佸憡鏌ｉ崝瀣礊閺冨倹灏庡瀣娴犵棇
+                # 2. 闂佸湱绮崝鏇°亹閸ヮ煉绱旈柡宓嫬顫撻梺瑙勬儗娴滄粌霉? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴? 闂佸憡鏌ｉ崝瀣礊閺冨倹灏庡瀣娴犵棇
                 head_window_end = min(max(envelope_start + 0.5, action_start), envelope_end)
                 head_ss = await pipeline._select_screenshot(
                     start_sec=envelope_start,
@@ -180,7 +313,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                     screenshot_paths.append(head_ss)
                     screenshot_labels.append(f"动作{i+1}首帧")
                 
-                # 3. 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
+                # 3. 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
                 for j, island in enumerate(action_internal_islands):
                     island_start = island.get("start", action_start)
                     island_end = island.get("end", action_end)
@@ -194,7 +327,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                         screenshot_paths.append(island_ss)
                         screenshot_labels.append(f"动作{i+1}稳定帧{j+1}")
                 
-                # 4. 闂佸湱绮崝鏇°亹閸ヮ剙瀚夋い鎰╁灪婵酣鏌熼幖顓濈盎婵? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鏌ｉ崝瀣礊閺冨倻纾奸柛顐犲灩娴? 闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴犵棇
+                # 4. 闂佸湱绮崝鏇°亹閸ヮ剙瀚夋い鎰╁灪婵酣鏌熼幖顓濈盎婵? 闂佸搫琚崕鍙夌珶濡偐鐜绘俊銈傚亾鐟滅増绋掔粙?[闂佸憡鏌ｉ崝瀣礊閺冨倻纾奸柛顐犲灩娴? 闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴犵棇
                 tail_window_start = max(min(envelope_end - 0.5, action_end), envelope_start)
                 tail_ss = await pipeline._select_screenshot(
                     start_sec=tail_window_start,
@@ -206,7 +339,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                     screenshot_labels.append(f"动作{i+1}末帧")
     
     elif stable_islands:
-        # ==== 闂佸搫鍟版慨瀛樻叏閳哄倹濯存繝濠傚暙缁€瀣煕韫囨挸鏋︾紒杈ㄧ箖缁傛帡宕ㄩ鍏兼⒒閳ь剝顫夐懝楣冩儗? 闂佸湱绮崝鏇°亹閸ャ劎鈻旀い鎾卞灪閿涚喖鎮?====
+        # ==== 闂佸搫鍟版慨瀛樻叏閳哄倹濯存繝濠傚暙缁€瀣煕韫囨挸鏋︾紒杈ㄧ箖缁傛帡宕ㄩ鍏兼⒒閳ь剝顫夐懝楣冩儗? 闂佸湱绮崝鏇°亹閸ャ劎鈻旀い鎾卞灪閿涚喖鎮?====
         for i, island in enumerate(stable_islands):
             island_start = island.get("start", unit.start_sec)
             island_end = island.get("end", unit.end_sec)
@@ -221,7 +354,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
                 screenshot_labels.append(f"稳定帧{i+1}")
     
     else:
-        # ==== 闂佹悶鍎抽崑銈夊焵椤戣棄浜? 闂佸搫鍟版慨鎶藉箲閵忊剝濯撮柡鍥╁櫏濮婄偓绻涢弶鎴剳缂侇喓鍔戝?====
+        # ==== 闂佹悶鍎抽崑銈夊焵椤戣棄浜? 闂佸搫鍟版慨鎶藉箲閵忊剝濯撮柡鍥╁櫏濮婄偓绻涢弶鎴剳缂侇喓鍔戝?====
         fallback_ss = await pipeline._select_screenshot(
             start_sec=unit.start_sec,
             end_sec=unit.end_sec,
@@ -248,7 +381,7 @@ async def generate_materials(pipeline, unit: SemanticUnit):
     materials.clip_paths = clip_paths
     materials.clip_path = clip_paths[0] if clip_paths else ""
     
-    # 濡絽鍟€?V7.4: 闂佸湱绮崝鏇°亹閸ヮ剙绀夐柕濞垮€楃粙濠囨煕濡や焦绀€闁告ɑ鎹囧畷姘跺幢濞嗘帩娼剁紓鍌欑劍閹稿鎮?    action_classifications = []
+    # 濡絽鍟€?V7.4: 闂佸湱绮崝鏇°亹閸ヮ剙绀夐柕濞垮€楃粙濠囨煕濡や焦绀€闁告ɑ鎹囧畷姘跺幢濞嗘帩娼剁紓鍌欑劍閹稿鎮?    action_classifications = []
     for action in action_segments:
         if "classification" in action:
             action_classifications.append({
@@ -265,25 +398,25 @@ async def generate_materials(pipeline, unit: SemanticUnit):
 
 async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialRequests:
     """
-    [闁荤喐鐟ョ€氼剟宕瑰┑瀣劵闁哄嫬绻掔敮鍝?闂佸憡甯掑Λ娆撴倵閻ｅ本瀚氭い鎾寸箘閻ゅ懘鏌涘Δ浣圭闁告ɑ鎹囬悰顕€宕滄担瑙勬闂佺懓鐡ㄩ崝妤冪矆瀹€鍕骇闁归偊鍨扮粻顖炴煕濞嗘劗澧虫い鏇ㄥ墮鏁堥柛宀嬪缁€鍕槈閹惧磭校濠⒀呮櫕閹壆浠﹂悾灞炬緰闂傚倸瀚幊蹇氥亹娓氣偓瀹曪綁寮介悽鐢殿槴闂?
-    闂佸搫鐗滈崜姘跺蓟閻斿皝鏋栭柡鍥╁У閺嗗繐霉濠婂啫顒㈤柣搴灠椤?"缂備浇浜慨闈涱焽濡ゅ懏顥嗛柍褜鍓欐晥闁稿本绋撻鎼佹煕? (MaterialRequests)闂佹寧绋戦懟顖炴儍閵忋垺鍠嗛柛鏇ㄥ亜閻忓﹤鈽夐幘鍐差劉濠⒀呮櫕閹澘鐣濋崘鍐╁浮閹虫捇鏁傜悰鈥充壕?
-    闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 闂佸憡鏌ｉ崝瀣礊閺冨倹鍠嗛柛鏇ㄥ亜閻忓﹪鏌ㄥ☉娆掑闁?generate_materials闂佹寧绋戦惌浣烘崲濡吋鍋橀悘鐐舵琚熸繛杈剧稻缁繘鎮楀ú顏勮Е闁割偅绮庨悷銏ゆ煕閹烘垶顥犻悶姘煎亰婵?    2. 闂傚倸娲犻崑鎾存叏閻熸澘鈧綊鎮楅姘煎殘闁绘艾顕粣?       - 闁荤姳绶ょ槐鏇㈡偩閼姐倕鍨濋柛鎾椻偓閳ь剚锕㈤幆鍐礋椤掍緡妲梻鍌氬€瑰娆戔偓鍨焽缁?(start_sec, end_sec)闂?       - 婵炴垶鎸鹃崕銈夋儊閳╁啰鈻旀い蹇撳琚熸繛杈剧稻缁酣寮幘璇茬闁归偊鍓氶弳婊冣槈閹绢垰浜鹃梺?Request ID (婵?action_01_open_file)闂?       - 闂佸搫绉烽～澶婄暤娓氣偓閹矂濡烽妸褎顫氱紓渚囧亯椤曆囨倵閻戣姤鍋ㄩ柣鏃傤焾閻?ScreenshotRequest (head/tail/stable) 闂?ClipRequest闂?    3. 婵炴潙鍚嬮敋閻庝絻灏欑划鐢稿冀椤愶絾顓洪梺?       - 闂佸搫鎳樼紓姘跺礂濮椻偓楠炲秹鍩℃担鍏告捣闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸?(Search Window) 婵炲濮伴崕鑼躲亹娴ｈ娈楁俊顖濐嚙閻掑鏌涢妷锕€鍔ら柟鏂ュ墲缁嬪顢橀悩鑼跺У闂?       - 闁诲海鏁搁、濠囶敊婢跺本鍠嗛柨婵嗘噽閳ь剛鍏樺畷姗€宕ㄩ褍鏅ｉ梺鐓庮殠娴滄粍鎱ㄩ埡鍐╁濞达絿顭堢敮鎶芥偡濞嗗繑顥㈡い锝呯埣楠炴捇骞囬鈧徊鍧楁偣閸ヮ剚鏁遍柣顏冨嵆婵?
-    闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - pipeline: 闁哄鏅滈崝姗€銆侀幋锕€绫嶉柡鍫㈡暩閻熸劕鈽夐幘鎰佸剱闁哄鍟存俊?    - unit: 閻庡灚婢橀幊搴ㄋ囬埡鍛仩闁糕剝鐟﹂悾?SemanticUnit 闁诲海鏁搁、濠囨寘閸曨垰违?
-    闁哄鐗婇幐鎼佸吹椤撱垺鏅?    - MaterialRequests: 闂佸憡鐗曢幊搴ㄥ箚閸儱绠ラ柍褜鍓熷鍨緞鎼搭喗缍堥梺鍛婂笚鐢帡濡舵禒瀣剭闁告洦鍘鹃ˇ閬嶆煛婢跺濮屾い鏇ㄥ墮鏁堥柛灞惧嚬閸ょ娀鎮归悙鈺傤潐缂佽鲸鐟╅獮瀣敂閸曨剛顩柣鐘叉喘閺€閬嶆儑娴兼潙违濞达絿鐡斿鎺懳涢悧鍫濈仴闁搞劌绻橀幃褔宕堕宥呮濠殿喚鎳撻崐鎼佸垂椤忓棙鍋橀柕濞垮劚閹搞倝鏌涢弬璇插缂傚秵妫冨畷姘跺幢濞嗘帩娼堕梺绋跨箰閸燁垶寮抽悢鐓庣妞ゆ洖妫涚粈鍡涙煏?    """
+    [闁荤喐鐟ョ€氼剟宕瑰┑瀣劵闁哄嫬绻掔敮鍝?闂佸憡甯掑Λ娆撴倵閻ｅ本瀚氭い鎾寸箘閻ゅ懘鏌涘Δ浣圭闁告ɑ鎹囬悰顕€宕滄担瑙勬闂佺懓鐡ㄩ崝妤冪矆瀹€鍕骇闁归偊鍨扮粻顖炴煕濞嗘劗澧虫い鏇ㄥ墮鏁堥柛宀嬪缁€鍕槈閹惧磭校濠⒀呮櫕閹壆浠﹂悾灞炬緰闂傚倸瀚幊蹇氥亹娓氣偓瀹曪綁寮介悽鐢殿槴闂?
+    闂佸搫鐗滈崜姘跺蓟閻斿皝鏋栭柡鍥╁У閺嗗繐霉濠婂啫顒㈤柣搴灠椤?"缂備浇浜慨闈涱焽濡ゅ懏顥嗛柍褜鍓欐晥闁稿本绋撻鎼佹煕? (MaterialRequests)闂佹寧绋戦懟顖炴儍閵忋垺鍠嗛柛鏇ㄥ亜閻忓﹤鈽夐幘鍐差劉濠⒀呮櫕閹澘鐣濋崘鍐╁浮閹虫捇鏁傜悰鈥充壕?
+    闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 闂佸憡鏌ｉ崝瀣礊閺冨倹鍠嗛柛鏇ㄥ亜閻忓﹪鏌ㄥ☉娆掑闁?generate_materials闂佹寧绋戦惌浣烘崲濡吋鍋橀悘鐐舵琚熸繛杈剧稻缁繘鎮楀ú顏勮Е闁割偅绮庨悷銏ゆ煕閹烘垶顥犻悶姘煎亰婵?    2. 闂傚倸娲犻崑鎾存叏閻熸澘鈧綊鎮楅姘煎殘闁绘艾顕粣?       - 闁荤姳绶ょ槐鏇㈡偩閼姐倕鍨濋柛鎾椻偓閳ь剚锕㈤幆鍐礋椤掍緡妲梻鍌氬€瑰娆戔偓鍨焽缁?(start_sec, end_sec)闂?       - 婵炴垶鎸鹃崕銈夋儊閳╁啰鈻旀い蹇撳琚熸繛杈剧稻缁酣寮幘璇茬闁归偊鍓氶弳婊冣槈閹绢垰浜鹃梺?Request ID (婵?action_01_open_file)闂?       - 闂佸搫绉烽～澶婄暤娓氣偓閹矂濡烽妸褎顫氱紓渚囧亯椤曆囨倵閻戣姤鍋ㄩ柣鏃傤焾閻?ScreenshotRequest (head/tail/stable) 闂?ClipRequest闂?    3. 婵炴潙鍚嬮敋閻庝絻灏欑划鐢稿冀椤愶絾顓洪梺?       - 闂佸搫鎳樼紓姘跺礂濮椻偓楠炲秹鍩℃担鍏告捣闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸?(Search Window) 婵炲濮伴崕鑼躲亹娴ｈ娈楁俊顖濐嚙閻掑鏌涢妷锕€鍔ら柟鏂ュ墲缁嬪顢橀悩鑼跺У闂?       - 闁诲海鏁搁、濠囶敊婢跺本鍠嗛柨婵嗘噽閳ь剛鍏樺畷姗€宕ㄩ褍鏅ｉ梺鐓庮殠娴滄粍鎱ㄩ埡鍐╁濞达絿顭堢敮鎶芥偡濞嗗繑顥㈡い锝呯埣楠炴捇骞囬鈧徊鍧楁偣閸ヮ剚鏁遍柣顏冨嵆婵?
+    闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - pipeline: 闁哄鏅滈崝姗€銆侀幋锕€绫嶉柡鍫㈡暩閻熸劕鈽夐幘鎰佸剱闁哄鍟存俊?    - unit: 閻庡灚婢橀幊搴ㄋ囬埡鍛仩闁糕剝鐟﹂悾?SemanticUnit 闁诲海鏁搁、濠囨寘閸曨垰违?
+    闁哄鐗婇幐鎼佸吹椤撱垺鏅?    - MaterialRequests: 闂佸憡鐗曢幊搴ㄥ箚閸儱绠ラ柍褜鍓熷鍨緞鎼搭喗缍堥梺鍛婂笚鐢帡濡舵禒瀣剭闁告洦鍘鹃ˇ閬嶆煛婢跺濮屾い鏇ㄥ墮鏁堥柛灞惧嚬閸ょ娀鎮归悙鈺傤潐缂佽鲸鐟╅獮瀣敂閸曨剛顩柣鐘叉喘閺€閬嶆儑娴兼潙违濞达絿鐡斿鎺懳涢悧鍫濈仴闁搞劌绻橀幃褔宕堕宥呮濠殿喚鎳撻崐鎼佸垂椤忓棙鍋橀柕濞垮劚閹搞倝鏌涢弬璇插缂傚秵妫冨畷姘跺幢濞嗘帩娼堕梺绋跨箰閸燁垶寮抽悢鐓庣妞ゆ洖妫涚粈鍡涙煏?    """
     screenshot_requests: List[ScreenshotRequest] = []
     clip_requests: List[ClipRequest] = []
     action_classifications: List[Dict[str, Any]] = []
     
-    # 闂佸吋鍎抽崲鑼躲亹閸モ晝鐭欓柛鎰皺閺嗘壆鈧厜鍋撴繛鎴炆戠€氭煡鏌涢弬璇插缂傚秵妫冨畷锟犲即閻愭彃绗氭繛锝呮礌閸撴繃瀵?    stable_islands = getattr(unit, 'stable_islands', [])
+    # 闂佸吋鍎抽崲鑼躲亹閸モ晝鐭欓柛鎰皺閺嗘壆鈧厜鍋撴繛鎴炆戠€氭煡鏌涢弬璇插缂傚秵妫冨畷锟犲即閻愭彃绗氭繛锝呮礌閸撴繃瀵?    stable_islands = getattr(unit, 'stable_islands', [])
     action_segments = getattr(unit, 'action_segments', [])
     
-    # 濡絽鍟€?闂佸憡鑹炬鎼佀囬埡鍛仩? 婵犮垼鍩栭懝鐐叏閳哄倹濯存繝濠傛閳ь剚妞藉畷?(婵炴垶鎸哥粚鐚nerate_materials婵烇絽娲︾换鍐偓鍨⒐缁嬪鍩€椤掑嫭鍤?
+    # 濡絽鍟€?闂佸憡鑹炬鎼佀囬埡鍛仩? 婵犮垼鍩栭懝鐐叏閳哄倹濯存繝濠傛閳ь剚妞藉畷?(婵炴垶鎸哥粚鐚nerate_materials婵烇絽娲︾换鍐偓鍨⒐缁嬪鍩€椤掑嫭鍤?
     if len(action_segments) >= 2:
         action_segments = pipeline._merge_action_segments(action_segments, gap_threshold_sec=5.0)
         unit.action_segments = action_segments
     
     if action_segments:
-        # 濡絽鍟悾?婵炴潙鍚嬮敋閻庡灚鐓￠弫宥咁潩椤愩倕鏋犻梺绋跨箰閻楀棝藝閺屻儲鍋ㄩ柕濞炬櫓閺嗘洟鏌涢幒鎴烆棤閻?婵炴垶鎸搁敃銉╂偉?knowledge_type闂佹寧绋戦惉鐓庮啅鏉堛劌绶為弶鍫涘妽椤ρ囨煙闂堟稓啸闁汇劎鍠栭幃?LLM
+        # 濡絽鍟悾?婵炴潙鍚嬮敋閻庡灚鐓￠弫宥咁潩椤愩倕鏋犻梺绋跨箰閻楀棝藝閺屻儲鍋ㄩ柕濞炬櫓閺嗘洟鏌涢幒鎴烆棤閻?婵炴垶鎸搁敃銉╂偉?knowledge_type闂佹寧绋戦惉鐓庮啅鏉堛劌绶為弶鍫涘妽椤ρ囨煙闂堟稓啸闁汇劎鍠栭幃?LLM
         for a in action_segments:
             if isinstance(a.get("classification"), dict) and a.get("classification", {}).get("knowledge_type"):
                 continue
@@ -310,13 +443,13 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
             for action, classification in zip(action_segments, batch_classifications):
                 action["classification"] = classification
 
-        # ==== 闂佸搫鐗嗛ˇ顖涙叏閳哄倹濯存繝濠傚暙缁€瀣煕?====
+        # ==== 闂佸搫鐗嗛ˇ顖涙叏閳哄倹濯存繝濠傚暙缁€瀣煕?====
         for i, (action, classification) in enumerate(zip(action_segments, batch_classifications)):
             action_start = action.get("start_sec", unit.start_sec)
             action_end = action.get("end_sec", unit.end_sec)
             action_internal_islands = action.get("internal_stable_islands", [])
             
-            # 濡絽鍟€?Sentence闂佹寧绋掗惌顔剧箔瀹€鍕闁靛鍊楃粙濠囨⒑閹绘帞孝鐟滅増妫冮幆鍐礋椤栨矮绨奸梺鍛婄懀閸庤崵妲愬▎鎾崇濠㈣泛锕﹂幗鐔割殽閻愬瓨绀冩俊鐐插€垮鑽も偓娑櫭悡鍫ユ倵鐟欏嫮鐓紓宥呮嚇閺?            sentence_start = pipeline._align_to_sentence_start(action_start)
+            # 濡絽鍟€?Sentence闂佹寧绋掗惌顔剧箔瀹€鍕闁靛鍊楃粙濠囨⒑閹绘帞孝鐟滅増妫冮幆鍐礋椤栨矮绨奸梺鍛婄懀閸庤崵妲愬▎鎾崇濠㈣泛锕﹂幗鐔割殽閻愬瓨绀冩俊鐐插€垮鑽も偓娑櫭悡鍫ユ倵鐟欏嫮鐓紓宥呮嚇閺?            sentence_start = pipeline._align_to_sentence_start(action_start)
             sentence_end = pipeline._align_to_sentence_end(action_end)
             
             # Classification already done in batch
@@ -336,7 +469,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
             
             logger.info(f"{unit.unit_id} action_{i+1}: {knowledge_type} (conf={confidence:.0%})")
 
-            # 濡絽鍟悾?Adaptive Action Envelope: 闁荤姴娴傞崢铏圭不閻旂厧纭€闁哄洨鍋涚敮妤呮煟椤撗冨箺婵＄偛鍊垮畷锝夘敍濞戞瑦顔掑┑鐐茬墢椤ｎ喚妲愭潏銊р枖?clip 缂傚倷鐒﹂幐璇差焽椤愶絿鈻旂€广儱鐗婄涵鍫曟偤?unit.end_sec
+            # 濡絽鍟悾?Adaptive Action Envelope: 闁荤姴娴傞崢铏圭不閻旂厧纭€闁哄洨鍋涚敮妤呮煟椤撗冨箺婵＄偛鍊垮畷锝夘敍濞戞瑦顔掑┑鐐茬墢椤ｎ喚妲愭潏銊р枖?clip 缂傚倷鐒﹂幐璇差焽椤愶絿鈻旂€广儱鐗婄涵鍫曟偤?unit.end_sec
             envelope_start, envelope_end = pipeline._compute_action_envelope(
                 unit=unit,
                 action_start=action_start,
@@ -351,7 +484,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
             )
             
             if knowledge_type == "讲解型":
-                # 闁荤姳娴囩亸顏囶暰闂? 闂佸憡鐟禍顏勩€掗崜浣瑰暫濞达絿鎳撻悞濠氭煕閵夛附瀚曠紒杈ㄧ箖缁嬪顓兼径瀣╃帛闁荤喐娲戝ù鍥綖鐎ｎ偓绱?                # 婵☆偓绲鹃悧鏇㈠箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴?闁?.0s
+                # 闁荤姳娴囩亸顏囶暰闂? 闂佸憡鐟禍顏勩€掗崜浣瑰暫濞达絿鎳撻悞濠氭煕閵夛附瀚曠紒杈ㄧ箖缁嬪顓兼径瀣╃帛闁荤喐娲戝ù鍥綖鐎ｎ偓绱?                # 婵☆偓绲鹃悧鏇㈠箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴?闁?.0s
                 head_search_start, head_search_end = pipeline._clamp_time_range(envelope_start - 1.0, envelope_start + 1.0)
                 fallback_head_ts = envelope_start
                 head_ts = await pipeline._select_screenshot_timestamp(head_search_start, head_search_end, fallback_head_ts)
@@ -366,7 +499,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
                     )
                 )
                 
-                # 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
+                # 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
                 for j, island in enumerate(action_internal_islands):
                     island_start = island.get("start", action_start)
                     island_end = island.get("end", action_end)
@@ -384,7 +517,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
                         )
                     )
                 
-                # 闂佸搫鐗滈崑鍕箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴?闁?.0s
+                # 闂佸搫鐗滈崑鍕箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴?闁?.0s
                 tail_search_start, tail_search_end = pipeline._clamp_time_range(envelope_end - 1.0, envelope_end + 1.0)
                 tail_search_end = min(tail_search_end, float(getattr(unit, "end_sec", tail_search_end)))
                 tail_search_start, tail_search_end = pipeline._clamp_time_range(tail_search_start, tail_search_end)
@@ -414,7 +547,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
                     )
                 )
                 
-                # 婵☆偓绲鹃悧鏇㈠箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴?闁?.0s
+                # 婵☆偓绲鹃悧鏇㈠箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲焦灏庡瀣娴?闁?.0s
                 head_search_start, head_search_end = pipeline._clamp_time_range(envelope_start - 1.0, envelope_start + 1.0)
                 fallback_head_ts = envelope_start
                 head_ts = await pipeline._select_screenshot_timestamp(head_search_start, head_search_end, fallback_head_ts)
@@ -429,7 +562,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
                     )
                 )
                 
-                # 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
+                # 缂備礁顑呴崯鍧楁偩閹呮殕婵炴垶鐟ラ悞濠氭煕?
                 for j, island in enumerate(action_internal_islands):
                     island_start = island.get("start", action_start)
                     island_end = island.get("end", action_end)
@@ -447,7 +580,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
                         )
                     )
                 
-                # 闂佸搫鐗滈崑鍕箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴?闁?.0s
+                # 闂佸搫鐗滈崑鍕箮濮樿泛绠ｆい蹇撳缁? 闂佺懓鍚嬬划搴ㄥ磼閵娧呯幓婵°倐鍋撶憸鐗堢洴楠炲秹鍩℃担鍏告捣婵?闂佸憡鐗曢幊鎰垝閸撲胶纾奸柛顐犲灩娴?闁?.0s
                 tail_search_start, tail_search_end = pipeline._clamp_time_range(envelope_end - 1.0, envelope_end + 1.0)
                 tail_search_end = min(tail_search_end, float(getattr(unit, "end_sec", tail_search_end)))
                 tail_search_start, tail_search_end = pipeline._clamp_time_range(tail_search_start, tail_search_end)
@@ -465,7 +598,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
                 )
     
     elif stable_islands:
-        # ==== 闂佸搫鍟版慨瀛樻叏閳哄倹濯存繝濠傚暙缁€瀣煕韫囨挸鏋︾紒杈ㄧ箖缁傛帡宕ㄩ鍏兼⒒閳ь剝顫夐懝楣冩儗? 闂佸湱绮崝鏇°亹閸ャ劎鈻旀い鎾卞灪閿涚喖鎮?====
+        # ==== 闂佸搫鍟版慨瀛樻叏閳哄倹濯存繝濠傚暙缁€瀣煕韫囨挸鏋︾紒杈ㄧ箖缁傛帡宕ㄩ鍏兼⒒閳ь剝顫夐懝楣冩儗? 闂佸湱绮崝鏇°亹閸ャ劎鈻旀い鎾卞灪閿涚喖鎮?====
         for i, island in enumerate(stable_islands):
             island_start = island.get("start", unit.start_sec)
             island_end = island.get("end", unit.end_sec)
@@ -483,7 +616,7 @@ async def collect_material_requests(pipeline, unit: SemanticUnit) -> MaterialReq
             )
     
     else:
-        # ==== 闂佹悶鍎抽崑銈夊焵椤戣棄浜? 闂佸搫鍟版慨鎶藉箲閵忊剝濯撮柡鍥╁櫏濮婄偓绻涢弶鎴剳缂侇喓鍔戝?====
+        # ==== 闂佹悶鍎抽崑銈夊焵椤戣棄浜? 闂佸搫鍟版慨鎶藉箲閵忊剝濯撮柡鍥╁櫏濮婄偓绻涢弶鎴剳缂侇喓鍔戝?====
         fallback_ts = (unit.start_sec + unit.end_sec) / 2
         best_ts = await pipeline._select_screenshot_timestamp(unit.start_sec, unit.end_sec, fallback_ts)
         
@@ -515,10 +648,10 @@ def apply_external_materials(
     material_requests: MaterialRequests
 ):
     """
-    [闁荤喍绀侀幊姗€宕㈤妶澶嬬劵闁哄嫬绻掔敮鍝?闁诲繐绻愬Λ妤吽囨繝姘劸闁靛鍎卞▍娆忣熆鐠虹儤鎼愰柕鍫滅矙閹啴宕熼鐙€妲洪梺鍝勵槹閸旀绮婇鈶╂敠闁归偊鍨煎Λ鍛存⒑閺夎法孝闁糕晛鐬奸幏鐘活敇濠靛牏鏋€闂佸憡顨嗗ú鏍储閹惧鈻旀い鎾村閸?
-    闂佸搫鐗滈崜姘跺蓟閻斿皝鏋栭柡鍥╁枑绗?"婵犮垼鍩栭悧鐘诲磿鐎靛憡顫曢柣妯挎珪缂嶅繘骞栫€涙ɑ鈷掗柡? 闂佹眹鍔岀€氼參鎮х€圭姷鐤€闁告劑鍔庨弶浠嬫煟濠婂啫绨荤紒杈ㄧ箞閺屽懎顫濋鍌氱厬闁?RichTextPipeline 闂佸憡鏌ｉ崝宥夊焵椤戞寧绁伴柣銊у枛閹粙濡搁敐鍌氫壕?
-    闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 闁荤姍鍐仾缂侇煈鍣ｅ畷锝夊箣閻樿尙鐤€闂佹寧绋掔喊宥夋偋閹绢喖绠?MaterialRequests 婵炴垶鎼╅崢鎯р枔?ID闂佹寧绋戦懟顖氾耿?screenshots_dir/clips_dir 婵炴垶鎼╅崣鍐焵椤掍礁绗掔紓宥咃躬瀵濡烽敃鈧ˉ婵嬫煛閸屾碍鐭楁繛鍡愬灲婵?    2. 濠碘槅鍨界槐鏇犳兜閿曞倸绀岀憸鐗堝笒鐢娊鏌ㄥ☉娆戭暡闁轰緡鍣ｉ獮鎰媴閸撳弶鈻肩紓浣割槸缁夌敻寮搁崘鈺冾浄閻犺櫣鍎ら崐鎶芥煛瀹ュ洤甯剁紒鎲嬬節瀹曟鎮℃惔顔兼櫍 (婵?flatten 闂佸憡绋栧Λ鍕箖閺囥垹违濞达絿顭堥惁鍫曟煕?婵炴垶鎸哥粔瀵糕偓鍨耿瀹?unit_id 缂?闂?    3. 闁荤姵鍔戦崝鎴﹀闯濞差亜绠崇憸宥夊春濡ゅ懏鏅?       - 闂佸憡宸婚弲婵嬪极?_concrete_validator 闁哄鏅滅粙鏍€侀幋锕€鐐婇柟顖嗗啫澹栭梺鍛婂姇閹冲酣顢欓幇顓ф鐎光偓閸愵亝顫?(闂佸憡锚椤兘宕?闂佸憡顭堥褍鈻?闂?       - 婵犮垼娉涚€氼噣骞冩繝鍕＜闁规儳顕埀顒夊灦瀹曠娀寮介妸銉у姷闂?(Structured Screenshots) 闂佹眹鍔岀€氼剟鎯堝鍜佸殨闁逞屽墴閺屽懘寮拌箛鏇炵闂?    4. 闂佺绻愰悿鍥ㄧ閸儱鍙婇柣妯垮皺濞堟悂鏌ㄥ☉娆掑闁汇劊鍨介獮宥夊箚瑜嶉悡鍌炴煟閵娿儱顏紒鈧畝鍕骇闁归偊浜為悷銏ゆ倵閻㈠灚鍤€缂併劍鐓￠幆?Step 闂?Action 闂佺绻愰悿鍥ㄧ閸儱违?    5. 闂佸搫鐗冮崑鎾剁磽娴ｅ摜澧ｆい銉ワ攻缁诲懘顢曢鍌滅崶闂佸搫娲ら悺銊╁蓟?unit.materials闂佹寧绋戦懟顖炴嚐閻旂厧鎹堕柕濞у啰绠掓繝銏″劶妞寸顪冮崒鐐茬鐟滄垿銆侀幋锕€绀傛繝濠傚暟娣囨椽鏌熷▓鍨簼鐎殿喖娼℃俊?
-    闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - self: 缂傚倷鐒﹂崹鐢告偩妤ｅ啯鍎?Pipeline 闁诲骸婀遍崑妯兼閵壯€鍋撻悽娈挎敯闁芥牕瀚版俊?    - unit: 闂佺儵鏅╅崰妤呮偉?SemanticUnit闂?    - screenshots_dir: 闂佽鎯屾禍婊兠瑰Ο鍏煎皫闁告洦鍓涢悥閬嶆煛瀹ュ懏璐℃繛鍙夊閵囨劙寮村Ο宄颁壕?    - clips_dir: 闁荤喐鐟ュΛ婵嬨€傞崼鏇熷亱闁搞儺鐓堥崬浠嬫偣瑜嶇€氼厾鑺遍鈧浠嬪捶椤撶喓鐛ラ悷婊呭濞插繘鍩€?    - material_requests: 闂佸憡顭囬崰搴綖閹扮増顥嗛柍褜鍓欐晥闁稿本绋撻鎼佹煕?(闂佸湱绮崝鎺旀?ID/Timestamp 缂備焦绋戦ˇ顖炲储閹捐鏋侀柣妤€鐗嗙粊锕€鈽夐幘绛规缂佹鎳樺?闂?    """
+    [闁荤喍绀侀幊姗€宕㈤妶澶嬬劵闁哄嫬绻掔敮鍝?闁诲繐绻愬Λ妤吽囨繝姘劸闁靛鍎卞▍娆忣熆鐠虹儤鎼愰柕鍫滅矙閹啴宕熼鐙€妲洪梺鍝勵槹閸旀绮婇鈶╂敠闁归偊鍨煎Λ鍛存⒑閺夎法孝闁糕晛鐬奸幏鐘活敇濠靛牏鏋€闂佸憡顨嗗ú鏍储閹惧鈻旀い鎾村閸?
+    闂佸搫鐗滈崜姘跺蓟閻斿皝鏋栭柡鍥╁枑绗?"婵犮垼鍩栭悧鐘诲磿鐎靛憡顫曢柣妯挎珪缂嶅繘骞栫€涙ɑ鈷掗柡? 闂佹眹鍔岀€氼參鎮х€圭姷鐤€闁告劑鍔庨弶浠嬫煟濠婂啫绨荤紒杈ㄧ箞閺屽懎顫濋鍌氱厬闁?RichTextPipeline 闂佸憡鏌ｉ崝宥夊焵椤戞寧绁伴柣銊у枛閹粙濡搁敐鍌氫壕?
+    闂佸搫绉堕…鍫㈢紦閹灐瑙勬媴鐞涒剝鐓犻梺?    1. 闁荤姍鍐仾缂侇煈鍣ｅ畷锝夊箣閻樿尙鐤€闂佹寧绋掔喊宥夋偋閹绢喖绠?MaterialRequests 婵炴垶鎼╅崢鎯р枔?ID闂佹寧绋戦懟顖氾耿?screenshots_dir/clips_dir 婵炴垶鎼╅崣鍐焵椤掍礁绗掔紓宥咃躬瀵濡烽敃鈧ˉ婵嬫煛閸屾碍鐭楁繛鍡愬灲婵?    2. 濠碘槅鍨界槐鏇犳兜閿曞倸绀岀憸鐗堝笒鐢娊鏌ㄥ☉娆戭暡闁轰緡鍣ｉ獮鎰媴閸撳弶鈻肩紓浣割槸缁夌敻寮搁崘鈺冾浄閻犺櫣鍎ら崐鎶芥煛瀹ュ洤甯剁紒鎲嬬節瀹曟鎮℃惔顔兼櫍 (婵?flatten 闂佸憡绋栧Λ鍕箖閺囥垹违濞达絿顭堥惁鍫曟煕?婵炴垶鎸哥粔瀵糕偓鍨耿瀹?unit_id 缂?闂?    3. 闁荤姵鍔戦崝鎴﹀闯濞差亜绠崇憸宥夊春濡ゅ懏鏅?       - 闂佸憡宸婚弲婵嬪极?_concrete_validator 闁哄鏅滅粙鏍€侀幋锕€鐐婇柟顖嗗啫澹栭梺鍛婂姇閹冲酣顢欓幇顓ф鐎光偓閸愵亝顫?(闂佸憡锚椤兘宕?闂佸憡顭堥褍鈻?闂?       - 婵犮垼娉涚€氼噣骞冩繝鍕＜闁规儳顕埀顒夊灦瀹曠娀寮介妸銉у姷闂?(Structured Screenshots) 闂佹眹鍔岀€氼剟鎯堝鍜佸殨闁逞屽墴閺屽懘寮拌箛鏇炵闂?    4. 闂佺绻愰悿鍥ㄧ閸儱鍙婇柣妯垮皺濞堟悂鏌ㄥ☉娆掑闁汇劊鍨介獮宥夊箚瑜嶉悡鍌炴煟閵娿儱顏紒鈧畝鍕骇闁归偊浜為悷銏ゆ倵閻㈠灚鍤€缂併劍鐓￠幆?Step 闂?Action 闂佺绻愰悿鍥ㄧ閸儱违?    5. 闂佸搫鐗冮崑鎾剁磽娴ｅ摜澧ｆい銉ワ攻缁诲懘顢曢鍌滅崶闂佸搫娲ら悺銊╁蓟?unit.materials闂佹寧绋戦懟顖炴嚐閻旂厧鎹堕柕濞у啰绠掓繝銏″劶妞寸顪冮崒鐐茬鐟滄垿銆侀幋锕€绀傛繝濠傚暟娣囨椽鏌熷▓鍨簼鐎殿喖娼℃俊?
+    闁哄鐗婇幐鎼佸矗閸℃稑鐭楅柛灞剧⊕濞堝爼鏌?    - self: 缂傚倷鐒﹂崹鐢告偩妤ｅ啯鍎?Pipeline 闁诲骸婀遍崑妯兼閵壯€鍋撻悽娈挎敯闁芥牕瀚版俊?    - unit: 闂佺儵鏅╅崰妤呮偉?SemanticUnit闂?    - screenshots_dir: 闂佽鎯屾禍婊兠瑰Ο鍏煎皫闁告洦鍓涢悥閬嶆煛瀹ュ懏璐℃繛鍙夊閵囨劙寮村Ο宄颁壕?    - clips_dir: 闁荤喐鐟ュΛ婵嬨€傞崼鏇熷亱闁搞儺鐓堥崬浠嬫偣瑜嶇€氼厾鑺遍鈧浠嬪捶椤撶喓鐛ラ悷婊呭濞插繘鍩€?    - material_requests: 闂佸憡顭囬崰搴綖閹扮増顥嗛柍褜鍓欐晥闁稿本绋撻鎼佹煕?(闂佸湱绮崝鎺旀?ID/Timestamp 缂備焦绋戦ˇ顖炲储閹捐鏋侀柣妤€鐗嗙粊锕€鈽夐幘绛规缂佹鎳樺?闂?    """
     materials = MaterialSet()
     screenshot_paths: List[str] = []
     screenshot_labels: List[str] = []
@@ -536,10 +669,23 @@ def apply_external_materials(
         return lowered or "abstract"
 
     normalized_kt = _normalize_knowledge_type(str(getattr(unit, "knowledge_type", "") or ""))
+    instructional_steps = getattr(unit, "instructional_steps", []) or []
+    is_tutorial_stepwise_unit = normalized_kt == "process" and bool(instructional_steps)
     request_has_screenshot = bool(list(getattr(material_requests, "screenshot_requests", []) or []))
-    # 闂佸憡顨呭ú銊︻殽閸モ晝椹抽柡宥庡亝濞堬綁鏌?    # 1) abstract/concrete 婵犳鍠栭鍥╁垝閹捐埖灏庨柣妤€鐗嗛悞濠氭煕閵夆晝鐣洪柣娑欑懅閹风姵绗熸繝鍕€?    # 2) process 婵炴垶鎸哥粔鎾疮閳ь剟鏌涘▎妯圭盎婵犫偓椤忓牊鈷旂€广儱娲悰鎾绘煕閹烘垶顥為柡渚囧櫍閹粙鎮㈤崨濠冪彙闂佹寧绋戦張顒佹櫠瀹ュ瀚?process闂佹寧绋戦悧鍡欌偓鍨耿楠炲繘顢楅崒婊冨綃 process + 闂佸搫瀚崕宕囨閿熺姴绠ｆい蹇撳缁傚牓鎮归崶顒佹暠闁活亙鍗抽弫宥嗗緞閹邦剙骞嬮柣鐘欏倸宓嗛柣娑欑懅閹风姵鎷呯喊妯轰壕?    is_process_degraded_branch = normalized_kt == "process" and not request_has_screenshot
+    # 闂佸憡顨呭ú銊︻殽閸モ晝椹抽柡宥庡亝濞堬綁鏌?    # 1) abstract/concrete 婵犳鍠栭鍥╁垝閹捐埖灏庨柣妤€鐗嗛悞濠氭煕閵夆晝鐣洪柣娑欑懅閹风姵绗熸繝鍕€?    # 2) process 婵炴垶鎸哥粔鎾疮閳ь剟鏌涘▎妯圭盎婵犫偓椤忓牊鈷旂€广儱娲悰鎾绘煕閹烘垶顥為柡渚囧櫍閹粙鎮㈤崨濠冪彙闂佹寧绋戦張顒佹櫠瀹ュ瀚?process闂佹寧绋戦悧鍡欌偓鍨耿楠炲繘顢楅崒婊冨綃 process + 闂佸搫瀚崕宕囨閿熺姴绠ｆい蹇撳缁傚牓鎮归崶顒佹暠闁活亙鍗抽弫宥嗗緞閹邦剙骞嬮柣鐘欏倸宓嗛柣娑欑懅閹风姵鎷呯喊妯轰壕?    is_process_degraded_branch = normalized_kt == "process" and not request_has_screenshot
     should_validate_screenshot = normalized_kt in {"abstract", "concrete", "process"}
     allow_clip = normalized_kt == "process"
+    is_process_degraded_branch = (
+        normalized_kt == "process"
+        and not request_has_screenshot
+        and not is_tutorial_stepwise_unit
+    )
+    should_validate_screenshot = (
+        normalized_kt in {"abstract", "concrete", "process"}
+        and not is_tutorial_stepwise_unit
+    )
+    allow_unit_dir_screenshot_fallback = not is_tutorial_stepwise_unit
+    allow_unit_dir_clip_fallback = not is_tutorial_stepwise_unit
 
     def _resolve_path_key(path_item: str) -> str:
         try:
@@ -696,7 +842,7 @@ def apply_external_materials(
         for ext in normalized_exts:
             checks.append(base_path / raw_path.parent / f"{stem_name}{ext}")
 
-        # 闂佺绻掗崢褔顢欓幇鏉跨濞达絾鎮傞幐顒勬煕濞戞粍顥夐柟顔芥礋閺佸秴顫濋鐕傜礈闂備胶鍋撳畷姗€鎯屾ィ鍐ㄧ煑妞ゆ牗绻傞崢鎾倶?"SU001/xxx" 闂佽В鍋撻柣锝呮湰绾剧鈽?"SU001_xxx"
+        # 闂佺绻掗崢褔顢欓幇鏉跨濞达絾鎮傞幐顒勬煕濞戞粍顥夐柟顔芥礋閺佸秴顫濋鐕傜礈闂備胶鍋撳畷姗€鎯屾ィ鍐ㄧ煑妞ゆ牗绻傞崢鎾倶?"SU001/xxx" 闂佽В鍋撻柣锝呮湰绾剧鈽?"SU001_xxx"
         if "/" in raw_id:
             flattened = raw_id.replace("/", "_")
             flat_path = Path(flattened)
@@ -708,7 +854,7 @@ def apply_external_materials(
             for ext in normalized_exts:
                 checks.append(base_path / f"{flat_stem}{ext}")
 
-        # 闂佺绻掗崢褔顢?legacy 闁荤姴娲弨閬嶆儑娴煎瓨鏅慨姗嗗幗閿?unit 闂佸搫鍊稿ú锝呪枎閵忊€崇窞閻熸瑥瀚ˇ褔鏌ㄥ☉妯垮闁汇劌澧介幏鐘诲即閻愭潙鈧亶鏌涘顒傂＄紒?unit 闂佺儵鏅╅崰鏍礊瀹ュ绀冮柛娑卞幖閻栭亶姊?
+        # 闂佺绻掗崢褔顢?legacy 闁荤姴娲弨閬嶆儑娴煎瓨鏅慨姗嗗幗閿?unit 闂佸搫鍊稿ú锝呪枎閵忊€崇窞閻熸瑥瀚ˇ褔鏌ㄥ☉妯垮闁汇劌澧介幏鐘诲即閻愭潙鈧亶鏌涘顒傂＄紒?unit 闂佺儵鏅╅崰鏍礊瀹ュ绀冮柛娑卞幖閻栭亶姊?
         if "/" not in raw_id:
             checks.append(base_path / base_name)
             if raw_path.suffix:
@@ -861,7 +1007,7 @@ def apply_external_materials(
                 for alias_id in _build_id_aliases(req_id, path_item):
                     request_meta_by_id.setdefault(alias_id, req)
 
-    if not screenshot_candidates:
+    if not screenshot_candidates and allow_unit_dir_screenshot_fallback:
         fallback_screenshots = _collect_candidates_by_unit_dir(
             screenshots_dir,
             [".png", ".jpg", ".jpeg"],
@@ -895,6 +1041,11 @@ def apply_external_materials(
                 if matched_req is not None:
                     for alias_id in _build_id_aliases(candidate_sid, path_item):
                         request_meta_by_id.setdefault(alias_id, matched_req)
+    elif not screenshot_candidates and is_tutorial_stepwise_unit:
+        logger.info(
+            "%s: tutorial_stepwise unit skip unit-folder screenshot fallback, keep request-id matching only",
+            unit.unit_id,
+        )
 
     def _resolve_request_meta_for_candidate(sid_text: str, raw_path: str) -> Optional[ScreenshotRequest]:
         for alias_id in _build_id_aliases(str(sid_text or ""), str(raw_path or "")):
@@ -920,14 +1071,89 @@ def apply_external_materials(
 
         expanded: List[Dict[str, Any]] = []
         dropped_count = 0
-        for candidate_index, (raw_path, label, sid, request_ts) in enumerate(normalized_candidates):
-            parent_key = _resolve_path_key(raw_path)
-            expanded_items: Optional[List[Dict[str, Any]]] = None
-            if should_validate_screenshot and self._concrete_validator:
-                extractor = getattr(self._concrete_validator, "extract_structured_screenshots", None)
-                if callable(extractor):
+        expanded_items_by_index: List[Optional[List[Dict[str, Any]]]] = [
+            None for _ in normalized_candidates
+        ]
+
+        if should_validate_screenshot and self._concrete_validator and normalized_candidates:
+            extractor = getattr(self._concrete_validator, "extract_structured_screenshots", None)
+            if callable(extractor):
+                use_process_parallel = _should_enable_structure_process_parallel(
+                    len(normalized_candidates),
+                    self._concrete_validator,
+                )
+
+                if use_process_parallel:
+                    worker_count = _resolve_parallel_workers(
+                        raw_value=os.getenv("PHASE2B_STRUCTURE_PREPROCESS_WORKERS", "auto"),
+                        task_count=len(normalized_candidates),
+                        hard_cap=16,
+                    )
+                    t0 = time.perf_counter()
                     try:
-                        expanded_items = extractor(
+                        pool = _get_phase2b_structure_pool(worker_count)
+                        future_to_index: Dict[concurrent.futures.Future, int] = {}
+                        for candidate_index, (
+                            raw_path,
+                            _label,
+                            sid,
+                            request_ts,
+                        ) in enumerate(normalized_candidates):
+                            task_payload = {
+                                "index": candidate_index,
+                                "image_path": raw_path,
+                                "source_id": sid,
+                                "timestamp_sec": request_ts,
+                                "output_dir": str(getattr(self, "output_dir", "") or ""),
+                            }
+                            future = pool.submit(_phase2b_structure_worker_run, task_payload)
+                            future_to_index[future] = candidate_index
+
+                        for future in concurrent.futures.as_completed(future_to_index):
+                            candidate_index = future_to_index[future]
+                            raw_path, _label, sid, _request_ts = normalized_candidates[candidate_index]
+                            try:
+                                payload = future.result()
+                                expanded_items_by_index[candidate_index] = payload.get("items")
+                                error_text = str(payload.get("error", "") or "").strip()
+                                if error_text:
+                                    logger.warning(
+                                        "%s: structure preprocess failed, fallback to raw screenshot: %s, err=%s",
+                                        unit.unit_id,
+                                        sid or raw_path,
+                                        error_text,
+                                    )
+                            except Exception as extract_error:
+                                logger.warning(
+                                    "%s: structure preprocess failed, fallback to raw screenshot: %s, err=%s",
+                                    unit.unit_id,
+                                    sid or raw_path,
+                                    extract_error,
+                                )
+                                expanded_items_by_index[candidate_index] = None
+
+                        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                        logger.info(
+                            "%s: structure preprocess process-parallel done: tasks=%d workers=%d elapsed_ms=%.1f",
+                            unit.unit_id,
+                            len(normalized_candidates),
+                            worker_count,
+                            elapsed_ms,
+                        )
+                    except Exception as parallel_error:
+                        logger.warning(
+                            "%s: structure preprocess process-parallel unavailable, fallback to serial: err=%s",
+                            unit.unit_id,
+                            parallel_error,
+                        )
+                        expanded_items_by_index = [None for _ in normalized_candidates]
+
+                # 对未命中并行结果的条目执行串行兜底，保证行为与旧逻辑一致。
+                for candidate_index, (raw_path, _label, sid, request_ts) in enumerate(normalized_candidates):
+                    if expanded_items_by_index[candidate_index] is not None:
+                        continue
+                    try:
+                        expanded_items_by_index[candidate_index] = extractor(
                             image_path=raw_path,
                             source_id=sid,
                             timestamp_sec=float(request_ts) if request_ts is not None else None,
@@ -939,7 +1165,11 @@ def apply_external_materials(
                             sid or raw_path,
                             extract_error,
                         )
-                        expanded_items = None
+                        expanded_items_by_index[candidate_index] = None
+
+        for candidate_index, (raw_path, label, sid, request_ts) in enumerate(normalized_candidates):
+            parent_key = _resolve_path_key(raw_path)
+            expanded_items = expanded_items_by_index[candidate_index]
 
             if expanded_items is None:
                 expanded.append(
@@ -1148,10 +1378,119 @@ def apply_external_materials(
         )
 
     skip_unit_scan_fallback = (
-        should_validate_screenshot
-        and structure_preprocess_drop_count > 0
-        and not effective_screenshot_candidates
+        is_tutorial_stepwise_unit
+        or (
+            should_validate_screenshot
+            and structure_preprocess_drop_count > 0
+            and not effective_screenshot_candidates
+        )
     )
+
+    def _read_image_bytes(image_path: str) -> Optional[bytes]:
+        if not image_path:
+            return None
+        try:
+            with open(image_path, "rb") as image_file:
+                return image_file.read()
+        except Exception:
+            return None
+
+    def _call_validator_validate(
+        image_path: str,
+        ocr_text_hint: str,
+        skip_duplicate_check: bool,
+    ) -> Any:
+        try:
+            return self._concrete_validator.validate(
+                image_path,
+                ocr_text=ocr_text_hint,
+                skip_duplicate_check=skip_duplicate_check,
+            )
+        except TypeError:
+            # 兼容旧版本 validator 不支持 skip_duplicate_check 形参。
+            try:
+                return self._concrete_validator.validate(image_path, ocr_text=ocr_text_hint)
+            except TypeError:
+                return self._concrete_validator.validate(image_path)
+
+    original_image_bytes_by_key: Dict[str, Optional[bytes]] = {}
+    if should_validate_screenshot and self._concrete_validator and effective_screenshot_candidates:
+        batch_validator = getattr(self._concrete_validator, "validate_batch", None)
+        pending_batch_tasks: List[Dict[str, Any]] = []
+        pending_batch_meta: List[Tuple[str, str, str]] = []
+
+        for candidate in effective_screenshot_candidates:
+            raw_path = str(candidate.get("image_path", "") or "").strip()
+            sid = str(candidate.get("sid", "") or "").strip()
+            if not raw_path or not os.path.exists(raw_path):
+                continue
+
+            pre_key = _resolve_path_key(raw_path)
+            if pre_key in self._prevalidated_concrete_results:
+                continue
+
+            req_meta = _resolve_request_meta_for_candidate(sid, raw_path)
+            ocr_text_hint = ""
+            if req_meta is not None:
+                ocr_text_hint = str(getattr(req_meta, "ocr_text", "") or "").strip()
+            skip_validator_duplicate_check = bool(
+                candidate.get("skip_validator_duplicate_check", False)
+            )
+            original_image_bytes_by_key.setdefault(pre_key, _read_image_bytes(raw_path))
+            pending_batch_tasks.append(
+                {
+                    "image_path": raw_path,
+                    "ocr_text": ocr_text_hint,
+                    "skip_duplicate_check": skip_validator_duplicate_check,
+                }
+            )
+            pending_batch_meta.append((pre_key, raw_path, sid))
+
+        unresolved_task_indexes = set(range(len(pending_batch_tasks)))
+        if pending_batch_tasks and callable(batch_validator):
+            batch_t0 = time.perf_counter()
+            try:
+                batch_results = batch_validator(pending_batch_tasks)
+                if (
+                    isinstance(batch_results, list)
+                    and len(batch_results) == len(pending_batch_tasks)
+                ):
+                    for task_index, result_obj in enumerate(batch_results):
+                        pre_key, _raw_path, _sid = pending_batch_meta[task_index]
+                        self._prevalidated_concrete_results[pre_key] = result_obj
+                        unresolved_task_indexes.discard(task_index)
+                    logger.info(
+                        "%s: screenshot validator batch-preload done: tasks=%d elapsed_ms=%.1f",
+                        unit.unit_id,
+                        len(pending_batch_tasks),
+                        (time.perf_counter() - batch_t0) * 1000.0,
+                    )
+                else:
+                    logger.warning(
+                        "%s: screenshot validator batch-preload returned invalid result size, fallback to single validate",
+                        unit.unit_id,
+                    )
+            except Exception as batch_error:
+                logger.warning(
+                    "%s: screenshot validator batch-preload failed, fallback to single validate: err=%s",
+                    unit.unit_id,
+                    batch_error,
+                )
+
+        for task_index in sorted(unresolved_task_indexes):
+            pre_key, raw_path, sid = pending_batch_meta[task_index]
+            task = pending_batch_tasks[task_index]
+            res = _call_validator_validate(
+                image_path=raw_path,
+                ocr_text_hint=str(task.get("ocr_text", "") or "").strip(),
+                skip_duplicate_check=bool(task.get("skip_duplicate_check", False)),
+            )
+            self._prevalidated_concrete_results[pre_key] = res
+            logger.debug(
+                "%s: screenshot validator single-preload done: %s",
+                unit.unit_id,
+                sid or raw_path,
+            )
 
     rejected_screenshot_count = 0
     for _idx, candidate in enumerate(effective_screenshot_candidates, start=1):
@@ -1190,32 +1529,21 @@ def apply_external_materials(
                 sentence_text = self._get_sentence_text_by_id(sentence_id)
 
         if should_validate_screenshot and self._concrete_validator:
-            original_image_bytes: Optional[bytes] = None
-            try:
-                with open(raw_path, "rb") as image_file:
-                    original_image_bytes = image_file.read()
-            except Exception:
-                original_image_bytes = None
-            try:
-                pre_key = str(Path(raw_path).resolve())
-            except Exception:
-                pre_key = os.path.abspath(raw_path)
+            pre_key = _resolve_path_key(raw_path)
+            if pre_key in original_image_bytes_by_key:
+                original_image_bytes = original_image_bytes_by_key.get(pre_key)
+            else:
+                original_image_bytes = _read_image_bytes(raw_path)
+                original_image_bytes_by_key[pre_key] = original_image_bytes
 
             if pre_key in self._prevalidated_concrete_results:
                 res = self._prevalidated_concrete_results[pre_key]
             else:
-                try:
-                    res = self._concrete_validator.validate(
-                        raw_path,
-                        ocr_text=ocr_text_hint,
-                        skip_duplicate_check=skip_validator_duplicate_check,
-                    )
-                except TypeError:
-                    # 兼容旧版本 validator 不支持 skip_duplicate_check 形参。
-                    try:
-                        res = self._concrete_validator.validate(raw_path, ocr_text=ocr_text_hint)
-                    except TypeError:
-                        res = self._concrete_validator.validate(raw_path)
+                res = _call_validator_validate(
+                    image_path=raw_path,
+                    ocr_text_hint=ocr_text_hint,
+                    skip_duplicate_check=skip_validator_duplicate_check,
+                )
             img_description = str(getattr(res, "img_description", "") or getattr(res, "reason", "")).strip()
             res_reason = str(getattr(res, "reason", "") or "").strip()
             res_reason_lower = res_reason.lower()
@@ -1238,7 +1566,7 @@ def apply_external_materials(
                         unit.unit_id,
                         sid or raw_path,
                     )
-                # 闂傚倸鍟ぐ鍐焊娴犲绠戠憸搴㈢椤旇棄绶炵€广儱绻掔粣妤呮⒑椤斿搫濡奸柛銊ュ椤ㄣ儱鐣濋崘顏咁潔闂侀潻绲婚崝瀣娴兼潙绀嗛柣妯肩帛閻濈喖姊婚崼銏犱粶闁告瑨娉曢幐鎺楀焺閸愩劎鍔甸梺鎼炲劜閹锋繄妲愬┑瀣畳闁靛繒濯Σ濠氭煕濮橆剟顎楃憸鏉垮级缁楃喎鈽夊Ο璇测偓鐢电磽娓氬洤骞栭柛妯款潐閹棃寮撮悙鑼煃闂備焦婢樼粔铏箾閸ヮ剚鍋?
+                # 闂傚倸鍟ぐ鍐焊娴犲绠戠憸搴㈢椤旇棄绶炵€广儱绻掔粣妤呮⒑椤斿搫濡奸柛銊ュ椤ㄣ儱鐣濋崘顏咁潔闂侀潻绲婚崝瀣娴兼潙绀嗛柣妯肩帛閻濈喖姊婚崼銏犱粶闁告瑨娉曢幐鎺楀焺閸愩劎鍔甸梺鎼炲劜閹锋繄妲愬┑瀣畳闁靛繒濯Σ濠氭煕濮橆剟顎楃憸鏉垮级缁楃喎鈽夊Ο璇测偓鐢电磽娓氬洤骞栭柛妯款潐閹棃寮撮悙鑼煃闂備焦婢樼粔铏箾閸ヮ剚鍋?
                 if (
                     not is_person_prefilter_reject
                     and not is_ppstructure_text_only
@@ -1382,7 +1710,7 @@ def apply_external_materials(
                 for path_item in _collect_candidates_by_id(clips_dir, req.clip_id, [".mp4", ".webm", ".mkv"]):
                     clip_candidates.append((path_item, req.clip_id))
 
-        if not clip_candidates:
+        if not clip_candidates and allow_unit_dir_clip_fallback:
             fallback_clips = _collect_candidates_by_unit_dir(clips_dir, [".mp4", ".webm", ".mkv"])
             if fallback_clips:
                 logger.info(
@@ -1394,6 +1722,11 @@ def apply_external_materials(
                     clip_stem = Path(path_item).stem
                     clip_id = f"{unit.unit_id}/{clip_stem}"
                     clip_candidates.append((path_item, clip_id))
+        elif not clip_candidates and is_tutorial_stepwise_unit:
+            logger.info(
+                "%s: tutorial_stepwise unit skip unit-folder clip fallback, keep request-id matching only",
+                unit.unit_id,
+            )
 
         clip_candidates = [
             (str(candidate[0]), str(candidate[1]))
@@ -1408,7 +1741,6 @@ def apply_external_materials(
     else:
         logger.info(f"Skip clip for non-process unit: {unit.unit_id} ({normalized_kt})")
 
-    instructional_steps = getattr(unit, "instructional_steps", []) or []
     if instructional_steps:
         for step in instructional_steps:
             if not isinstance(step, dict):
@@ -1522,10 +1854,16 @@ def apply_external_materials(
                     fallback_path,
                 )
     elif not materials.screenshot_paths and skip_unit_scan_fallback:
-        logger.info(
-            "%s: skip unit-scan screenshot fallback because structure preprocess returned no target type",
-            unit.unit_id,
-        )
+        if is_tutorial_stepwise_unit:
+            logger.info(
+                "%s: tutorial_stepwise unit skip unit-scan screenshot fallback (request-id mapping only)",
+                unit.unit_id,
+            )
+        else:
+            logger.info(
+                "%s: skip unit-scan screenshot fallback because structure preprocess returned no target type",
+                unit.unit_id,
+            )
 
     unit.materials = materials
 

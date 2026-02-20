@@ -112,6 +112,12 @@ public class PythonGrpcClient {
         public long fileSizeBytes;
         public double durationSec;
         public String errorMsg;
+        public String resolvedUrl;
+        public String videoTitle;
+        public String sourcePlatform;
+        public String canonicalId;
+        public String linkResolver;
+        public String contentType;
     }
     
     public CompletableFuture<DownloadResult> downloadVideoAsync(
@@ -136,6 +142,12 @@ public class PythonGrpcClient {
                 result.fileSizeBytes = response.getFileSizeBytes();
                 result.durationSec = response.getDurationSec();
                 result.errorMsg = response.getErrorMsg();
+                result.resolvedUrl = response.getResolvedUrl();
+                result.videoTitle = response.getVideoTitle();
+                result.sourcePlatform = response.getSourcePlatform();
+                result.canonicalId = response.getCanonicalId();
+                result.linkResolver = response.getLinkResolver();
+                result.contentType = response.getContentType();
                 
                 return result;
                 
@@ -143,7 +155,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] DownloadVideo failed: {}", taskId, e.getStatus());
                 DownloadResult result = new DownloadResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -186,7 +198,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] TranscribeVideo failed: {}", taskId, e.getStatus());
                 TranscribeResult result = new TranscribeResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -234,7 +246,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] ProcessStage1 failed: {}", taskId, e.getStatus());
                 Stage1Result result = new Stage1Result();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -360,7 +372,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] AnalyzeSemanticUnits failed: {}", taskId, e.getStatus());
                 AnalyzeResult result = new AnalyzeResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -465,7 +477,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] AssembleRichText failed: {}", taskId, e.getStatus());
                 AssembleResult result = new AssembleResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -727,7 +739,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] ClassifyKnowledgeBatch failed: {}", taskId, e.getStatus());
                 ClassificationBatchResult result = new ClassificationBatchResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -893,7 +905,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] GenerateMaterialRequests failed: {}", taskId, e.getStatus());
                 MaterialGenerationResult result = new MaterialGenerationResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -1013,7 +1025,7 @@ public class PythonGrpcClient {
                 logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
                 VLAnalysisResult result = new VLAnalysisResult();
                 result.success = false;
-                result.errorMsg = e.getStatus().getDescription();
+                result.errorMsg = statusDescriptionOrCode(e);
                 return result;
             }
         });
@@ -1055,12 +1067,22 @@ public class PythonGrpcClient {
                 logger.error("[{}] ReleaseCVResources failed: {}", taskId, e.getStatus());
                 ReleaseResourcesResult result = new ReleaseResourcesResult();
                 result.success = false;
-                result.message = e.getStatus().getDescription();
+                result.message = statusDescriptionOrCode(e);
                 return result;
             }
         });
     }
 
+    private String statusDescriptionOrCode(StatusRuntimeException e) {
+        if (e == null || e.getStatus() == null) {
+            return "gRPC call failed with unknown status";
+        }
+        String description = e.getStatus().getDescription();
+        if (description != null && !description.isBlank()) {
+            return description;
+        }
+        return "gRPC status=" + e.getStatus().getCode().name();
+    }
     private List<ClipSegment> buildClipSegments(List<com.mvp.videoprocessing.grpc.ClipSegment> segments) {
         List<ClipSegment> results = new ArrayList<>();
         if (segments == null || segments.isEmpty()) {

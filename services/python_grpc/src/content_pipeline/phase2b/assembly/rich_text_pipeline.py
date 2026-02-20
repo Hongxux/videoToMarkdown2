@@ -68,6 +68,7 @@ from services.python_grpc.src.content_pipeline.phase2b.assembly.material_flow im
     apply_external_materials,
 )
 from services.python_grpc.src.common.utils.video import get_video_duration
+from services.python_grpc.src.common.utils.path import sanitize_filename_component
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,15 @@ class RichTextPipeline:
         2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
         3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
         return slugify_text(value, max_len=max_len)
+
+    def _build_enhanced_markdown_filename(self, title: str) -> str:
+        raw_title = str(title or "").strip()
+        if raw_title.lower().endswith(".md"):
+            raw_title = raw_title[:-3]
+        filename_stem = sanitize_filename_component(raw_title, max_len=120)
+        if not filename_stem:
+            filename_stem = "enhanced_output"
+        return f"{filename_stem}.md"
 
     def _build_unit_asset_prefix(self, unit: SemanticUnit) -> str:
         """方法说明：RichTextPipeline._build_unit_asset_prefix 工具方法。
@@ -1228,7 +1238,8 @@ class RichTextPipeline:
         document = self._assemble_document(units, document_title)
 
         Path(self.output_dir).mkdir(parents=True, exist_ok=True)
-        markdown_path = os.path.join(self.output_dir, "enhanced_output.md")
+        markdown_filename = self._build_enhanced_markdown_filename(document_title)
+        markdown_path = os.path.join(self.output_dir, markdown_filename)
         json_path = os.path.join(self.output_dir, "result.json")
 
         document.to_json(json_path)

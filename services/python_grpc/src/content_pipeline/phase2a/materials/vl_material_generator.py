@@ -1,9 +1,9 @@
-﻿"""
+"""
 VL Material Generator - VL 素材生成鍣?
 
 功能锛?
 1. 调用 split_video_by_semantic_units.py 切割语义单元视频片段
-2. 对每个片段调鐢?VLVideoAnalyzer 进� VL 分析
+2. 对每个片段调鐢?VLVideoAnalyzer 进 VL 分析
 3. 汇总分析结果生成素材请姹?
 4. 优化截图时间点（鍦?±1s 范围内查找最佳帧锛?
 5. 失败时自动回退到现鏈?GenerateMaterialRequests 流程
@@ -50,6 +50,10 @@ from services.python_grpc.src.content_pipeline.phase2a.materials.errors import (
     VLMaterialGeneratorError,
     VLAnalysisError,
     JSONParseError,
+)
+from services.python_grpc.src.content_pipeline.phase2a.materials.vl_instructional_keyframe_extractor import (
+    crop_keyframe_inplace_by_bbox_1000,
+    normalize_bbox_1000,
 )
 from services.python_grpc.src.content_pipeline.common.utils.id_utils import build_unit_relative_asset_id
 from services.python_grpc.src.content_pipeline.common.utils.path_utils import find_repo_root
@@ -580,7 +584,7 @@ class VLMaterialGenerator:
 
     def _should_use_pre_vl_process_mode(self, worker_count: int) -> bool:
         """
-        判定 VL 前预处理是否启用多进程稳定段检测銆?        规则锛?        1) worker_count<=1 时不并栾�?        2) parallel_mode=async/off/disabled 时关闭；
+        判定 VL 前预处理是否启用多进程稳定段检测銆?        规则锛?        1) worker_count<=1 时不并栾?        2) parallel_mode=async/off/disabled 时关闭；
         3) parallel_mode=process 时强制开启；
         4) parallel_mode=auto 时仅在注鍏?cv_executor 时开启銆?        """
         if worker_count <= 1:
@@ -884,7 +888,7 @@ class VLMaterialGenerator:
         force_preprocess: bool = False,
     ) -> List[Dict[str, Any]]:
         """
-        并发执� VL 前预处理銆?        输入 unit_tasks 每项包含锛?        - semantic_unit: 语义单元字典
+        并发执 VL 前预处理銆?        输入 unit_tasks 每项包含锛?        - semantic_unit: 语义单元字典
         - clip_path: 对应单元切片路径
         """
         if not unit_tasks:
@@ -1091,9 +1095,10 @@ class VLMaterialGenerator:
             "Split the clip into complete steps. Keep explanation, execution, and result of the same step together. "
             "Remove thinking time such as mouse wandering, hesitation, and idle waiting with no new information. "
             "Each step must be at least 5 seconds; merge overly short steps with adjacent ones. "
-            "For each step, output step_description, optional main_action/main_operation/precautions/"
+            "For each step, output step_description, required main_operation, optional main_action/precautions/"
             "step_summary/operation_guidance, "
-            "and instructional_keyframe_timestamp as true instructional keyframes "
+            "and instructional_keyframes (objects with timestamp_sec, optional frame_reason and bbox) "
+            "as true instructional keyframes "
             "(prefer final state or just-before-submit moment). "
             "Optional fields can be omitted or returned as empty values when unnecessary."
         )
@@ -1223,6 +1228,34 @@ class VLMaterialGenerator:
                 normalized.append(text_item)
             return normalized
 
+        def _normalize_instructional_keyframe_objects(
+            value: Any,
+            *,
+            start_sec: float,
+            end_sec: float,
+        ) -> List[Dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            normalized: List[Dict[str, Any]] = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                raw_ts = item.get("timestamp_sec", item.get("timestamp", item.get("ts", None)))
+                ts = safe_float(raw_ts, start_sec)
+                if ts < start_sec:
+                    ts = start_sec
+                elif ts > end_sec:
+                    ts = end_sec
+                entry: Dict[str, Any] = {
+                    "timestamp_sec": float(ts),
+                    "frame_reason": str(item.get("frame_reason", "") or "").strip(),
+                }
+                bbox = normalize_bbox_1000(item.get("bbox"))
+                if bbox is not None:
+                    entry["bbox"] = bbox
+                normalized.append(entry)
+            return normalized
+
         raw_steps_by_id: Dict[int, Dict[str, Any]] = {}
         for raw_step in raw_response_json or []:
             if not isinstance(raw_step, dict):
@@ -1315,9 +1348,29 @@ class VLMaterialGenerator:
             clip_filename = f"{unit_id}_clip_step_{step_index:02d}_{action_brief}.mp4"
             clip_output_path = unit_dir / clip_filename
 
-            step_keyframes = screenshots_by_step.get(step_id, [])
-            if not step_keyframes and step_id <= 0:
-                step_keyframes = screenshots_by_step.get(idx, [])
+            step_keyframes: List[Dict[str, Any]] = _normalize_instructional_keyframe_objects(
+                raw_step.get("instructional_keyframes", None),
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
+            if not step_keyframes:
+                fallback_keyframes = screenshots_by_step.get(step_id, [])
+                if not fallback_keyframes and step_id <= 0:
+                    fallback_keyframes = screenshots_by_step.get(idx, [])
+                for fallback in fallback_keyframes:
+                    fallback_ts = safe_float(fallback.get("timestamp_sec", start_sec), start_sec)
+                    if fallback_ts < start_sec:
+                        fallback_ts = start_sec
+                    elif fallback_ts > end_sec:
+                        fallback_ts = end_sec
+                    fallback_item: Dict[str, Any] = {
+                        "timestamp_sec": float(fallback_ts),
+                        "frame_reason": str(fallback.get("frame_reason", "") or "").strip(),
+                    }
+                    bbox = normalize_bbox_1000(fallback.get("bbox"))
+                    if bbox is not None:
+                        fallback_item["bbox"] = bbox
+                    step_keyframes.append(fallback_item)
 
             keyframe_jobs: List[Dict[str, Any]] = []
             for key_idx, step_ss in enumerate(step_keyframes, start=1):
@@ -1330,6 +1383,8 @@ class VLMaterialGenerator:
                     {
                         "key_name": key_name,
                         "timestamp_sec": key_ts,
+                        "frame_reason": str(step_ss.get("frame_reason", "") or "").strip(),
+                        "bbox": normalize_bbox_1000(step_ss.get("bbox")),
                         "output_path": unit_dir / key_name,
                     }
                 )
@@ -1381,6 +1436,7 @@ class VLMaterialGenerator:
                 )
 
             keyframe_files: List[str] = []
+            keyframe_details: List[Dict[str, Any]] = []
             if keyframe_tasks:
                 keyframe_results = await asyncio.gather(*keyframe_tasks, return_exceptions=True)
                 for key_job, key_result in zip(job.get("keyframe_jobs", []), keyframe_results):
@@ -1391,7 +1447,28 @@ class VLMaterialGenerator:
                         )
                         continue
                     if bool(key_result):
-                        keyframe_files.append(str(key_job.get("key_name", "")))
+                        key_name = str(key_job.get("key_name", ""))
+                        key_path = Path(key_job["output_path"])
+                        bbox = normalize_bbox_1000(key_job.get("bbox"))
+                        if bbox is not None:
+                            crop_ok = crop_keyframe_inplace_by_bbox_1000(key_path, bbox)
+                            if not crop_ok:
+                                logger.warning(
+                                    "[VL-Tutorial] keyframe bbox crop failed, keep full frame: unit=%s step=%s file=%s bbox=%s",
+                                    unit_id,
+                                    job.get("step_index"),
+                                    key_name,
+                                    bbox,
+                                )
+                        keyframe_files.append(key_name)
+                        key_detail: Dict[str, Any] = {
+                            "image_file": key_name,
+                            "timestamp_sec": float(key_job.get("timestamp_sec", 0.0)),
+                            "frame_reason": str(key_job.get("frame_reason", "") or "").strip(),
+                        }
+                        if bbox is not None:
+                            key_detail["bbox"] = bbox
+                        keyframe_details.append(key_detail)
 
             return {
                 "step_id": int(job["step_index"]),
@@ -1406,6 +1483,7 @@ class VLMaterialGenerator:
                 "clip_end_sec": float(job["end_sec"]),
                 "clip_file": str(job["clip_filename"]) if clip_ok else "",
                 "instructional_keyframes": keyframe_files,
+                "instructional_keyframe_details": keyframe_details,
             }
 
         step_manifest = await asyncio.gather(*[_export_one_step(job) for job in step_jobs])
@@ -2828,7 +2906,7 @@ class VLMaterialGenerator:
         force_preprocess: bool = True,
     ) -> Dict[str, Dict[str, Any]]:
         """
-        在路由层涓?process 单元执栝处理并返回“有效时长”銆?
+        在路由层涓?process 单元执栝处理并返回“有效时长”銆?
         为什么：需要先基于 stable 剔除+边界修正后的真实片段长度，再做短/长分流銆?
         """
         route_map: Dict[str, Dict[str, Any]] = {}
@@ -3368,7 +3446,7 @@ class VLMaterialGenerator:
                 result.error_msg = str(e)
                 return result
         
-        # 3. 🚀 批量 CV 优化截图时间鐐?(无论是否使用缓存,都要执�!)
+        # 3. 🚀 批量 CV 优化截图时间鐐?(无论是否使用缓存,都要执!)
         try:
             if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
                 logger.info(f"开始批閲?CV 优化 {len(all_screenshot_requests)} 个截图请姹?..")

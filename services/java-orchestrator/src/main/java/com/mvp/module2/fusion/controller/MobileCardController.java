@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.controller;
 
 import com.mvp.module2.fusion.service.CardStorageService;
 import com.mvp.module2.fusion.service.DeepSeekAdvisorService;
+import com.mvp.module2.fusion.service.SelectionSyntaxRefineService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -50,6 +51,9 @@ public class MobileCardController {
 
     @Autowired
     private DeepSeekAdvisorService deepSeekAdvisorService;
+
+    @Autowired
+    private SelectionSyntaxRefineService selectionSyntaxRefineService;
 
     @GetMapping("/titles")
     public ResponseEntity<Map<String, Object>> listCardTitles() {
@@ -202,6 +206,54 @@ public class MobileCardController {
         } catch (Exception ex) {
             logger.warn("get ai advice failed: term={} err={}", request.term, ex.getMessage());
             return ResponseEntity.status(500).body(Map.of("message", "get ai advice failed"));
+        }
+    }
+
+    @PostMapping("/selection-refine")
+    public ResponseEntity<?> refineSelection(@RequestBody CardSelectionRefineRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "request body is required"));
+        }
+        // 注意：这里不能 trim。前端传入的 offset 是基于原始窗口字符串，trim 会导致偏移错位。
+        String sourceText = String.valueOf(request.sourceText == null ? "" : request.sourceText);
+        if (sourceText.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "sourceText is required"));
+        }
+        if (sourceText.length() > 600) {
+            return ResponseEntity.badRequest().body(Map.of("message", "sourceText too long"));
+        }
+        int cursorOffset = Math.max(0, Math.min(sourceText.length(), request.cursorOffset));
+        int currentStart = Math.max(0, Math.min(sourceText.length(), request.currentStartOffset));
+        int currentEnd = Math.max(currentStart, Math.min(sourceText.length(), request.currentEndOffset));
+        try {
+            SelectionSyntaxRefineService.SelectionRefineResult result = selectionSyntaxRefineService.refineSelection(
+                    sourceText,
+                    cursorOffset,
+                    String.valueOf(request.currentTerm == null ? "" : request.currentTerm).trim(),
+                    currentStart,
+                    currentEnd
+            );
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("improved", result.improved);
+            payload.put("term", result.term);
+            payload.put("startOffset", result.startOffset);
+            payload.put("endOffset", result.endOffset);
+            payload.put("confidence", result.confidence);
+            payload.put("source", result.source);
+            return ResponseEntity.ok(payload);
+        } catch (IllegalArgumentException ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
+        } catch (Exception ex) {
+            logger.warn("selection refine failed: err={}", ex.getMessage());
+            // 前端属于静默增强链路：失败时返回 improved=false，避免影响即时选词体验。
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("improved", false);
+            payload.put("term", "");
+            payload.put("startOffset", currentStart);
+            payload.put("endOffset", currentEnd);
+            payload.put("confidence", 0.0);
+            payload.put("source", "error");
+            return ResponseEntity.ok(payload);
         }
     }
 
@@ -391,6 +443,14 @@ public class MobileCardController {
         public String context;
         public String contextExample;
         public Boolean isContextDependent;
+    }
+
+    public static class CardSelectionRefineRequest {
+        public String sourceText;
+        public int cursorOffset;
+        public String currentTerm;
+        public int currentStartOffset;
+        public int currentEndOffset;
     }
 
     private static class ThoughtQualityCheckResult {

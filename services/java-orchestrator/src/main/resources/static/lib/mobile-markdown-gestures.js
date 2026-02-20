@@ -2,7 +2,7 @@
     'use strict';
 
     const DEFAULT_CONFIG = Object.freeze({
-        holdTriggerMs: 560,
+        holdTriggerMs: 1000,
         moveCancelPx: 10,
         tapTolerancePx: 12,
         doubleTapWindowMs: 330,
@@ -10,14 +10,14 @@
 
     // 手势动作映射：集中定义语义，后续改手势只需改这里。
     const DEFAULT_GESTURE_ACTION_MAP = Object.freeze({
-        doubleTap: 'favorite',
+        doubleTap: null,
         longPress: 'copy',
     });
 
     // 滑动操作手感参数：阈值、阻尼、速度判定等集中配置。
     const SWIPE_PHYSICS = Object.freeze({
         activateMinDxPx: 26,
-        activateDirectionRatio: 1.7,
+        activateDirectionRatio: 2.2,
         commitRatio: 0.35,
         deleteCommitRatio: 0.43,
         annotateCommitRatio: 0.35,
@@ -254,7 +254,7 @@
             copyParagraphText, clearParagraphHoldCue, getParagraphCardByIndex,
             triggerParagraphHoldActivated, toggleParagraphFavorite,
             canHandleParagraphSwipeGesture, openInlineStickyNote, deleteLineAtIndex,
-            onDeleteSwipeCommitted, openConceptCardFromSelection
+            onDeleteSwipeCommitted
         } = deps;
 
         // 手势动作映射支持外部覆盖，默认语义由 DEFAULT_GESTURE_ACTION_MAP 提供。
@@ -344,25 +344,16 @@
             }
         }
 
-        // 统一双击逻辑
-        markdownBody.addEventListener('dblclick', async (event) => {
-            const dblclickAction = resolveGestureAction('doubleTap');
-            if (!dblclickAction || !isParagraphActionAllowed(dblclickAction)) return;
-            if (isGestureTargetBlocked(event.target)) return;
-            const target = resolveGestureTarget(event.target);
-            if (target) {
-                await executeParagraphGestureAction(dblclickAction, target.index, {
-                    anchorX: event.clientX,
-                    anchorY: event.clientY,
-                    source: 'dblclick',
-                });
-            }
-        });
-
         // 核心手势状态机
         let activeGesture = null;
         let swipeNeighborPrewarmCancel = null;
         let swipeDomPruneCancel = null;
+        const GESTURE_NO_SELECT_CLASS = 'gesture-no-select';
+
+        function setGestureSelectionSuppressed(enabled) {
+            if (!markdownBody || !markdownBody.classList) return;
+            markdownBody.classList.toggle(GESTURE_NO_SELECT_CLASS, !!enabled);
+        }
 
         function clearSwipeNeighborPrewarm() {
             if (typeof swipeNeighborPrewarmCancel === 'function') {
@@ -507,21 +498,6 @@
             return canTriggerLongPressCopy(gesture);
         }
 
-        async function tryOpenConceptCardFromSelection(gesture) {
-            if (!gesture || !gesture.selectionPresentAtStart) return false;
-            if (typeof openConceptCardFromSelection !== 'function') return false;
-            try {
-                return !!(await openConceptCardFromSelection({
-                    anchorX: gesture.startX,
-                    anchorY: gesture.startY,
-                    index: gesture.index,
-                    source: 'long-press-selection',
-                }));
-            } catch (_error) {
-                return false;
-            }
-        }
-
         function resolveSwipeCommitRatio(direction) {
             if (direction === 'left') {
                 return SWIPE_PHYSICS.deleteCommitRatio;
@@ -627,6 +603,7 @@
             // 清理旧状态
             if (state.touchGesture && state.touchGesture.longPressTimer) clearTimeout(state.touchGesture.longPressTimer);
             clearParagraphHoldCue(state.touchGesture);
+            setGestureSelectionSuppressed(true);
 
             activeGesture = {
                 index,
@@ -644,6 +621,7 @@
                 // 状态位
                 hasMoved: false,
                 longPressTriggered: false,
+                holdArmedAt: 0,
                 swipeActive: false,
                 swipeCard: null,
                 swipeContentEl: null,
@@ -657,30 +635,21 @@
             activeGesture.holdCard = touchCard || getParagraphCardByIndex(index);
             if (activeGesture.holdCard) activeGesture.holdCard.classList.add('touch-hold-cue');
             
-            activeGesture.longPressTimer = setTimeout(async () => {
-                activeGesture.longPressTriggered = true;
-                if (longPressAction === 'copy') {
-                    const opened = await tryOpenConceptCardFromSelection(activeGesture);
-                    if (opened) {
-                        return;
-                    }
+            activeGesture.longPressTimer = setTimeout(() => {
+                if (!activeGesture) return;
+                activeGesture.longPressTimer = null;
+                // 长按达到阈值只进入“待决态”，真正动作在 touchend 统一结算。
+                if (hasActiveTextSelection()) {
+                    return;
                 }
-                if (longPressAction && isParagraphActionAllowed(longPressAction) && canTriggerLongPressAction(longPressAction, activeGesture)) {
-                    if (longPressAction === 'copy') {
-                        triggerParagraphHoldActivated(activeGesture.holdCard);
-                    }
-                    executeParagraphGestureAction(longPressAction, index, {
-                        anchorX: activeGesture.startX,
-                        anchorY: activeGesture.startY,
-                        gesture: activeGesture,
-                    }).catch((e) => {
-                        const message = (typeof e === 'string' ? e : (e && e.message)) || '手势操作失败，请稍后重试。';
-                        if (typeof window.setTaskSummary === 'function') {
-                            window.setTaskSummary(message, 'error');
-                            return;
-                        }
-                        console.warn('gesture action failed', e);
-                    });
+                if (!(longPressAction && isParagraphActionAllowed(longPressAction)
+                    && canTriggerLongPressAction(longPressAction, activeGesture))) {
+                    return;
+                }
+                activeGesture.longPressTriggered = true;
+                activeGesture.holdArmedAt = Date.now();
+                if (longPressAction === 'copy') {
+                    triggerParagraphHoldActivated(activeGesture.holdCard);
                 }
             }, config.holdTriggerMs);
 
@@ -688,10 +657,16 @@
             state.touchScrollActive = true;
         }, { passive: true });
 
+        markdownBody.addEventListener('selectstart', (event) => {
+            if (!activeGesture) return;
+            if (event.cancelable) event.preventDefault();
+        });
+
         // TouchMove: 这里的关键是只更新数据，渲染交给 rAF
         markdownBody.addEventListener('touchmove', (event) => {
             if (!activeGesture) return;
             const touch = event.touches[0];
+            if (!touch) return;
             activeGesture.currentX = touch.clientX;
             activeGesture.currentY = touch.clientY;
             activeGesture.lastX = touch.clientX;
@@ -707,19 +682,49 @@
             const dy = activeGesture.currentY - activeGesture.startY;
             const absX = Math.abs(dx);
             const absY = Math.abs(dy);
+            const hasCrossedMoveCancel = absX > config.moveCancelPx || absY > config.moveCancelPx;
+            const hasHorizontalIntent = absX > config.moveCancelPx && absX > absY * 0.72;
 
-            // 1. 取消长按
-            if (!activeGesture.swipeActive && (absX > config.moveCancelPx || absY > config.moveCancelPx)) {
+            // 1. 长按未达阈值就出现明显移动：取消本次手势，交还给滚动。
+            if (!activeGesture.longPressTriggered && !activeGesture.swipeActive && hasCrossedMoveCancel) {
                 activeGesture.hasMoved = true;
                 if (activeGesture.longPressTimer) {
                     clearTimeout(activeGesture.longPressTimer);
                     activeGesture.longPressTimer = null;
                 }
                 clearParagraphHoldCue(activeGesture);
+                clearSwipeNeighborPrewarm();
+                clearSwipeDomPrune();
+                clearSwipeInteractionCard(activeGesture);
+                state.touchGesture = null;
+                activeGesture = null;
+                state.touchScrollActive = false;
+                setGestureSelectionSuppressed(false);
+                return;
+            }
+
+            if ((activeGesture.swipeActive || (activeGesture.longPressTriggered && hasHorizontalIntent)) && event.cancelable) {
+                event.preventDefault();
             }
 
             // 2. 激活滑动 (Lock)
-            if (!activeGesture.swipeActive && !activeGesture.longPressTriggered) {
+            if (!activeGesture.swipeActive && activeGesture.longPressTriggered) {
+                // Scroll Priority: 检查水平滚动容器
+                const isScrollable = (function(el) {
+                    while (el && el !== markdownBody && el !== document.body) {
+                        const style = window.getComputedStyle(el);
+                        if ((style.overflowX === 'auto' || style.overflowX === 'scroll') && el.scrollWidth > el.clientWidth) {
+                            return true;
+                        }
+                        el = el.parentElement;
+                    }
+                    return false;
+                })(event.target);
+
+                if (isScrollable) {
+                    return;
+                }
+
                 const internalCanActivate = absX >= SWIPE_PHYSICS.activateMinDxPx
                     && absX > absY * SWIPE_PHYSICS.activateDirectionRatio;
                 const externalCanActivate = typeof canHandleParagraphSwipeGesture === 'function'
@@ -761,10 +766,11 @@
             state.touchGesture = null;
             activeGesture = null;
             state.touchScrollActive = false;
+            setGestureSelectionSuppressed(false);
             clearSwipeNeighborPrewarm();
             clearSwipeDomPrune();
 
-            if (g.longPressTriggered) {
+            if (!g.longPressTriggered) {
                 clearSwipeInteractionCard(g);
                 return;
             }
@@ -807,27 +813,29 @@
                     await commitAnnotateSwipe(g);
                 } else {
                     springBack(g);
+                    const longPressAction = resolveGestureAction('longPress');
+                    if (longPressAction && isParagraphActionAllowed(longPressAction)
+                        && canTriggerLongPressAction(longPressAction, g)
+                        && !hasActiveTextSelection()) {
+                        await executeParagraphGestureAction(longPressAction, g.index, {
+                            anchorX: g.currentX,
+                            anchorY: g.currentY,
+                            gesture: g,
+                        });
+                    }
                 }
                 return;
             }
 
-            // ─── 点击 / 双击 判定 (Legacy) ───
-            // 收藏手势在两种模式保持一致，避免模式切换后的心智负担。
-            const tapSettleAction = resolveGestureAction('doubleTap');
-            if (!g.hasMoved && tapSettleAction && isParagraphActionAllowed(tapSettleAction)) {
-                const now = Date.now();
-                if (state.lastTapIndex === g.index && now - state.lastTapAt <= config.doubleTapWindowMs) {
-                    await executeParagraphGestureAction(tapSettleAction, g.index, {
-                        anchorX: g.currentX,
-                        anchorY: g.currentY,
-                        source: 'touch-double-tap',
-                    });
-                    state.lastTapAt = 0;
-                    state.lastTapIndex = -1;
-                } else {
-                    state.lastTapAt = now;
-                    state.lastTapIndex = g.index;
-                }
+            const longPressAction = resolveGestureAction('longPress');
+            if (longPressAction && isParagraphActionAllowed(longPressAction)
+                && canTriggerLongPressAction(longPressAction, g)
+                && !hasActiveTextSelection()) {
+                await executeParagraphGestureAction(longPressAction, g.index, {
+                    anchorX: g.currentX,
+                    anchorY: g.currentY,
+                    gesture: g,
+                });
             }
             clearSwipeInteractionCard(g);
         }, { passive: true });
@@ -847,6 +855,7 @@
             state.touchGesture = null;
             activeGesture = null;
             state.touchScrollActive = false;
+            setGestureSelectionSuppressed(false);
         }, { passive: true });
 
         // ─── 动画实现 ───

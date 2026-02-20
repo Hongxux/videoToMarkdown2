@@ -1,0 +1,514 @@
+package com.example.semantictopography
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+/**
+ * 对齐后端 AST 协议的段落节点。
+ */
+data class SemanticNode(
+    val id: String,
+    val text: String,
+    val type: String = "paragraph",
+    val originalMarkdown: String? = null,
+    val relevanceScore: Float,
+    val bridgeText: String? = null,
+    val reasoning: String? = null
+)
+
+/**
+ * 段落交互事件模型。
+ */
+sealed class ParagraphGestureEvent {
+    data class SwipeLeft(
+        val nodeId: String,
+        val offsetX: Float,
+        val threshold: Float
+    ) : ParagraphGestureEvent()
+
+    data class SwipeRight(
+        val nodeId: String,
+        val offsetX: Float,
+        val threshold: Float,
+        val hasBridge: Boolean
+    ) : ParagraphGestureEvent()
+
+    data class DoubleTap(
+        val nodeId: String
+    ) : ParagraphGestureEvent()
+
+    data class Settle(
+        val nodeId: String,
+        val finalOffsetX: Float
+    ) : ParagraphGestureEvent()
+}
+
+/**
+ * 阅读器埋点事件。
+ */
+data class ReaderTelemetryEvent(
+    val nodeId: String,
+    val eventType: String,
+    val relevanceScore: Float,
+    val timestampMs: Long = System.currentTimeMillis(),
+    val payload: Map<String, String> = emptyMap()
+)
+
+/**
+ * 词句级高亮选择状态。
+ */
+data class TokenSelection(
+    val token: String,
+    val start: Int,
+    val end: Int
+)
+
+/**
+ * 三维解析卡片模型。
+ */
+data class TokenInsightCard(
+    val token: String,
+    val contextualize: String,
+    val firstPrinciple: String,
+    val industryHorizon: String
+)
+
+/**
+ * 与 java-orchestrator 的 /api/mobile/tasks/{taskId}/meta 契约对齐。
+ */
+data class MobileTaskMetaPayload(
+    val taskId: String,
+    val pathKey: String,
+    val favorites: Map<String, Boolean>,
+    val deleted: Map<String, Boolean>,
+    val comments: Map<String, List<String>>,
+    val taskTitle: String
+)
+
+/**
+ * 与 java-orchestrator 的 TaskMetaUpdateRequest 对齐。
+ */
+data class MobileTaskMetaUpdateRequest(
+    val path: String?,
+    val taskTitle: String?,
+    val favorites: Map<String, Boolean>,
+    val deleted: Map<String, Boolean>,
+    val comments: Map<String, List<String>>
+)
+
+/**
+ * Telemetry 单事件模型。
+ */
+data class MobileTelemetryEvent(
+    val nodeId: String,
+    val eventType: String,
+    val relevanceScore: Float,
+    val timestampMs: Long,
+    val payload: Map<String, String>
+)
+
+/**
+ * 任务元数据 API。
+ */
+interface MobileMarkdownMetaApi {
+    suspend fun fetchTaskMeta(taskId: String, pathHint: String?): MobileTaskMetaPayload
+
+    suspend fun updateTaskMeta(taskId: String, request: MobileTaskMetaUpdateRequest): MobileTaskMetaPayload
+}
+
+/**
+ * 后端 telemetry 上报 API。
+ */
+interface MobileMarkdownTelemetryApi {
+    suspend fun ingestTaskTelemetry(
+        taskId: String,
+        pathHint: String?,
+        events: List<MobileTelemetryEvent>
+    )
+}
+
+/**
+ * 支持主动 flush 的 telemetry API。
+ */
+interface FlushableMobileMarkdownTelemetryApi : MobileMarkdownTelemetryApi {
+    suspend fun flush(reason: String)
+
+    fun flushAsync(reason: String)
+}
+
+/**
+ * 微批队列配置。
+ */
+data class TelemetryQueueConfig(
+    val batchSize: Int = 50,
+    val periodicFlushMs: Long = 5_000L
+)
+
+/**
+ * 直接通过 HTTP 对接 java-orchestrator。
+ *
+ * 默认对齐现有网页端 API_BASE = /api/mobile。
+ */
+class HttpMobileMarkdownMetaApi(
+    private val apiBaseUrl: String
+) : MobileMarkdownMetaApi {
+
+    override suspend fun fetchTaskMeta(taskId: String, pathHint: String?): MobileTaskMetaPayload {
+        return withContext(Dispatchers.IO) {
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val query = if (!pathHint.isNullOrBlank()) {
+                "?path=" + URLEncoder.encode(pathHint, StandardCharsets.UTF_8)
+            } else {
+                ""
+            }
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/meta$query")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8_000
+                readTimeout = 8_000
+                setRequestProperty("Accept", "application/json")
+            }
+            connection.useAndReadPayload()
+        }
+    }
+
+    override suspend fun updateTaskMeta(taskId: String, request: MobileTaskMetaUpdateRequest): MobileTaskMetaPayload {
+        return withContext(Dispatchers.IO) {
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/meta")
+            val body = JSONObject().apply {
+                put("path", request.path ?: "")
+                if (!request.taskTitle.isNullOrBlank()) {
+                    put("taskTitle", request.taskTitle)
+                }
+                put("favorites", JSONObject().apply {
+                    request.favorites.forEach { (key, value) ->
+                        if (value) {
+                            put(key, true)
+                        }
+                    }
+                })
+                put("deleted", JSONObject().apply {
+                    request.deleted.forEach { (key, value) ->
+                        if (value) {
+                            put(key, true)
+                        }
+                    }
+                })
+                put("comments", JSONObject().apply {
+                    request.comments.forEach { (key, values) ->
+                        val arr = JSONArray()
+                        values.forEach { comment ->
+                            if (comment.isNotBlank()) {
+                                arr.put(comment)
+                            }
+                        }
+                        if (arr.length() > 0) {
+                            put(key, arr)
+                        }
+                    }
+                })
+            }.toString()
+
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "PUT"
+                connectTimeout = 8_000
+                readTimeout = 8_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+            }
+
+            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
+                writer.write(body)
+            }
+            connection.useAndReadPayload()
+        }
+    }
+
+    /**
+     * 统一处理 HTTP 返回与 JSON 解析。
+     */
+    private fun HttpURLConnection.useAndReadPayload(): MobileTaskMetaPayload {
+        return try {
+            val code = responseCode
+            val stream = if (code in 200..299) {
+                inputStream
+            } else {
+                errorStream
+            }
+            val text = stream?.use {
+                BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+            }.orEmpty()
+            if (code !in 200..299) {
+                throw IllegalStateException("HTTP $code: $text")
+            }
+            parseMobileTaskMetaPayload(text)
+        } finally {
+            disconnect()
+        }
+    }
+}
+
+/**
+ * 通过微批队列对接 /api/telemetry/ingest。
+ *
+ * 关键策略：
+ * 1. 前端事件先入内存队列（可扩展为 Room 持久队列）。
+ * 2. 队列达到 batchSize（默认 50）立即发送。
+ * 3. 支持外部在锁屏/退出文章时主动 flush。
+ */
+class HttpMobileMarkdownTelemetryApi(
+    private val apiBaseUrl: String,
+    private val queueConfig: TelemetryQueueConfig = TelemetryQueueConfig()
+) : FlushableMobileMarkdownTelemetryApi {
+    private data class PendingTelemetry(
+        val taskId: String,
+        val pathHint: String?,
+        val event: MobileTelemetryEvent
+    )
+
+    private val queueMutex = Mutex()
+    private val pendingQueue = ArrayDeque<PendingTelemetry>()
+    private val senderScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val batchSeq = AtomicLong(0L)
+
+    init {
+        if (queueConfig.periodicFlushMs > 0L) {
+            senderScope.launch {
+                while (isActive) {
+                    delay(queueConfig.periodicFlushMs)
+                    flush(reason = "periodic_flush")
+                }
+            }
+        }
+    }
+
+    override suspend fun ingestTaskTelemetry(
+        taskId: String,
+        pathHint: String?,
+        events: List<MobileTelemetryEvent>
+    ) {
+        if (events.isEmpty()) {
+            return
+        }
+        var shouldFlush = false
+        queueMutex.withLock {
+            events.forEach { event ->
+                pendingQueue.addLast(
+                    PendingTelemetry(
+                        taskId = taskId,
+                        pathHint = pathHint,
+                        event = event
+                    )
+                )
+            }
+            shouldFlush = pendingQueue.size >= queueConfig.batchSize
+        }
+        if (shouldFlush) {
+            flushAsync(reason = "batch_size_reached")
+        }
+    }
+
+    override suspend fun flush(reason: String) {
+        val drained = queueMutex.withLock {
+            if (pendingQueue.isEmpty()) {
+                return
+            }
+            val copy = pendingQueue.toList()
+            pendingQueue.clear()
+            copy
+        }
+
+        val grouped = drained.groupBy { it.taskId to (it.pathHint ?: "") }
+        try {
+            grouped.forEach { (taskAndPath, items) ->
+                sendBatch(
+                    taskId = taskAndPath.first,
+                    pathHint = taskAndPath.second,
+                    events = items.map { it.event },
+                    reason = reason,
+                    sequence = batchSeq.incrementAndGet()
+                )
+            }
+        } catch (error: Exception) {
+            // 发送失败回滚到队首，避免事件丢失。
+            queueMutex.withLock {
+                drained.asReversed().forEach { item ->
+                    pendingQueue.addFirst(item)
+                }
+            }
+            throw error
+        }
+    }
+
+    override fun flushAsync(reason: String) {
+        senderScope.launch {
+            runCatching {
+                flush(reason)
+            }
+        }
+    }
+
+    /**
+     * 页面销毁时可调用，释放后台协程。
+     */
+    fun close() {
+        senderScope.cancel()
+    }
+
+    private suspend fun sendBatch(
+        taskId: String,
+        pathHint: String?,
+        events: List<MobileTelemetryEvent>,
+        reason: String,
+        sequence: Long
+    ) {
+        withContext(Dispatchers.IO) {
+            val url = URL("$apiBaseUrl/telemetry/ingest")
+            val body = JSONObject().apply {
+                put("taskId", taskId)
+                put("path", pathHint ?: "")
+                put("flushReason", reason)
+                put("batchSeq", sequence)
+                put("batchSize", events.size)
+                put("events", JSONArray().apply {
+                    events.forEach { event ->
+                        put(JSONObject().apply {
+                            put("nodeId", event.nodeId)
+                            put("eventType", event.eventType)
+                            put("relevanceScore", event.relevanceScore)
+                            put("timestampMs", event.timestampMs)
+                            put("payload", JSONObject().apply {
+                                event.payload.forEach { (k, v) ->
+                                    put(k, v)
+                                }
+                            })
+                        })
+                    }
+                })
+            }.toString()
+
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 8_000
+                readTimeout = 8_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+            }
+            try {
+                OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
+                    writer.write(body)
+                }
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val text = stream?.use {
+                    BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+                }.orEmpty()
+                if (code !in 200..299) {
+                    throw IllegalStateException("HTTP $code: $text")
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+    }
+}
+
+/**
+ * JNI 桥接对象。
+ */
+object LexicalNativeBridge {
+    init {
+        runCatching {
+            System.loadLibrary("lexical_onnx_bridge")
+        }
+    }
+
+    external fun segmentAt(text: String, cursor: Int): String?
+
+    external fun explainToken(token: String, context: String): String?
+}
+
+private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
+    val root = JSONObject(if (text.isBlank()) "{}" else text)
+    val favoritesObj = root.optJSONObject("favorites") ?: JSONObject()
+    val deletedObj = root.optJSONObject("deleted") ?: JSONObject()
+    val commentsObj = root.optJSONObject("comments") ?: JSONObject()
+
+    val favorites = LinkedHashMap<String, Boolean>()
+    val favoriteIter = favoritesObj.keys()
+    while (favoriteIter.hasNext()) {
+        val key = favoriteIter.next()
+        if (key.isNotBlank() && favoritesObj.optBoolean(key, false)) {
+            favorites[key] = true
+        }
+    }
+
+    val comments = LinkedHashMap<String, List<String>>()
+    val commentsIter = commentsObj.keys()
+    while (commentsIter.hasNext()) {
+        val key = commentsIter.next()
+        if (key.isBlank()) {
+            continue
+        }
+        val raw = commentsObj.opt(key)
+        val normalized = when (raw) {
+            is JSONArray -> {
+                buildList {
+                    for (i in 0 until raw.length()) {
+                        val value = raw.optString(i).trim()
+                        if (value.isNotBlank()) {
+                            add(value)
+                        }
+                    }
+                }
+            }
+            is String -> {
+                val one = raw.trim()
+                if (one.isBlank()) emptyList() else listOf(one)
+            }
+            else -> emptyList()
+        }
+        if (normalized.isNotEmpty()) {
+            comments[key] = normalized
+        }
+    }
+
+    val deleted = LinkedHashMap<String, Boolean>()
+    val deletedIter = deletedObj.keys()
+    while (deletedIter.hasNext()) {
+        val key = deletedIter.next()
+        if (key.isNotBlank() && deletedObj.optBoolean(key, false)) {
+            deleted[key] = true
+        }
+    }
+
+    return MobileTaskMetaPayload(
+        taskId = root.optString("taskId"),
+        pathKey = root.optString("pathKey"),
+        favorites = favorites,
+        deleted = deleted,
+        comments = comments,
+        taskTitle = root.optString("taskTitle")
+    )
+}

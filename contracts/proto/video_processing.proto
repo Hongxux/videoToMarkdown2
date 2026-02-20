@@ -64,11 +64,17 @@ message DownloadRequest {
 }
 
 message DownloadResponse {
-    bool success = 1;           // 是否成功
-    string video_path = 2;      // 下载后的视频文件路径
-    int64 file_size_bytes = 3;  // 文件大小（字节）
-    double duration_sec = 4;    // 视频时长（秒）- 用于动态超时计算
-    string error_msg = 5;       // 错误信息
+    bool success = 1;           // ????
+    string video_path = 2;      // ??????????
+    int64 file_size_bytes = 3;  // ????????
+    double duration_sec = 4;    // ??????? ????????
+    string error_msg = 5;       // ????
+    string resolved_url = 6;    // ????????????
+    string video_title = 7;     // ????????
+    string source_platform = 8; // ?????douyin/bilibili/unknown
+    string canonical_id = 9;    // ?????ID?? aweme_id/BV??
+    string link_resolver = 10;  // ??????
+    string content_type = 11;   // ?????video/note/unknown
 }
 
 // ==========================================

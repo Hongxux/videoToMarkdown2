@@ -45,6 +45,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -76,6 +77,7 @@ public class MobileMarkdownController {
     private static final String DEFAULT_MARKDOWN_NAME = "enhanced_output.md";
     private static final int MARKDOWN_SCAN_DEPTH = 4;
     private static final String META_FILE_NAME = "mobile_task_meta.json";
+    private static final String TELEMETRY_FILE_NAME = "mobile_task_telemetry.ndjson";
     private static final String META_DEFAULT_NOTE_KEY = "__default__";
     private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
     private static final Set<String> ALLOWED_VIDEO_EXTENSIONS = Set.of(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v");
@@ -388,6 +390,7 @@ public class MobileMarkdownController {
         payload.put("taskTitle", meta.taskTitle != null ? meta.taskTitle : "");
         payload.put("pathKey", noteKey);
         payload.put("favorites", noteMeta.favorites != null ? noteMeta.favorites : Map.of());
+        payload.put("deleted", noteMeta.deleted != null ? noteMeta.deleted : Map.of());
         payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         return ResponseEntity.ok(payload);
@@ -420,10 +423,14 @@ public class MobileMarkdownController {
         if (request != null && request.favorites != null) {
             noteMeta.favorites = sanitizeFavorites(request.favorites);
         }
+        if (request != null && request.deleted != null) {
+            noteMeta.deleted = sanitizeDeleted(request.deleted);
+        }
         if (request != null && request.comments != null) {
             noteMeta.comments = new LinkedHashMap<>(sanitizeComments(request.comments));
         }
         if ((noteMeta.favorites == null || noteMeta.favorites.isEmpty())
+                && (noteMeta.deleted == null || noteMeta.deleted.isEmpty())
                 && (noteMeta.comments == null || noteMeta.comments.isEmpty())) {
             meta.notesByMarkdown.remove(noteKey);
         } else {
@@ -440,10 +447,88 @@ public class MobileMarkdownController {
         payload.put("taskTitle", meta.taskTitle != null ? meta.taskTitle : "");
         payload.put("pathKey", noteKey);
         payload.put("favorites", noteMeta.favorites != null ? noteMeta.favorites : Map.of());
+        payload.put("deleted", noteMeta.deleted != null ? noteMeta.deleted : Map.of());
         payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         payload.put("updatedAt", Instant.now().toString());
         return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/telemetry", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> ingestTaskTelemetry(
+            @PathVariable String taskId,
+            @RequestBody TaskTelemetryIngestRequest request
+    ) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "任务不存在"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "未找到任务目录"));
+        }
+        if (request == null || request.events == null || request.events.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "缺少 telemetry events"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request.path);
+        Path telemetryPath = taskRoot.resolve(TELEMETRY_FILE_NAME).normalize();
+        if (!telemetryPath.startsWith(taskRoot)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "telemetry 路径非法"));
+        }
+
+        List<Map<String, Object>> accepted = new ArrayList<>();
+        for (TelemetryEventItem item : request.events) {
+            if (item == null) continue;
+            String eventType = trimToNullSafe(item.eventType);
+            if (eventType == null) continue;
+            String nodeId = trimToNullSafe(item.nodeId);
+
+            Map<String, Object> record = new LinkedHashMap<>();
+            record.put("taskId", task.taskId);
+            record.put("pathKey", noteKey);
+            record.put("nodeId", nodeId != null ? nodeId : "");
+            record.put("eventType", eventType);
+            record.put("relevanceScore", item.relevanceScore != null ? item.relevanceScore : 0.0d);
+            record.put("timestampMs", item.timestampMs != null ? item.timestampMs : System.currentTimeMillis());
+            record.put("ingestedAt", Instant.now().toString());
+            record.put("payload", sanitizeTelemetryPayload(item.payload));
+            accepted.add(record);
+        }
+
+        if (accepted.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "无有效 telemetry 事件"));
+        }
+
+        try {
+            Files.createDirectories(taskRoot);
+            StringBuilder builder = new StringBuilder();
+            for (Map<String, Object> record : accepted) {
+                builder.append(objectMapper.writeValueAsString(record)).append('\n');
+            }
+            Files.writeString(
+                    telemetryPath,
+                    builder.toString(),
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE,
+                    StandardOpenOption.APPEND
+            );
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("pathKey", noteKey);
+            payload.put("accepted", accepted.size());
+            payload.put("telemetryPath", telemetryPath.toString());
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        } catch (Exception ex) {
+            logger.warn("写入 telemetry 失败: taskId={} path={} err={}", taskId, telemetryPath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "写入 telemetry 失败"));
+        }
     }
 
     @GetMapping("/tasks/{taskId}/asset")
@@ -918,6 +1003,9 @@ public class MobileMarkdownController {
                 if (entry.getValue().favorites == null) {
                     entry.getValue().favorites = new LinkedHashMap<>();
                 }
+                if (entry.getValue().deleted == null) {
+                    entry.getValue().deleted = new LinkedHashMap<>();
+                }
                 if (entry.getValue().comments == null) {
                     entry.getValue().comments = new LinkedHashMap<>();
                 } else {
@@ -998,7 +1086,18 @@ public class MobileMarkdownController {
     }
 
     private Map<String, Boolean> sanitizeFavorites(Map<String, Boolean> input) {
+        return sanitizeBooleanFlags(input);
+    }
+
+    private Map<String, Boolean> sanitizeDeleted(Map<String, Boolean> input) {
+        return sanitizeBooleanFlags(input);
+    }
+
+    private Map<String, Boolean> sanitizeBooleanFlags(Map<String, Boolean> input) {
         Map<String, Boolean> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
         for (Map.Entry<String, Boolean> entry : input.entrySet()) {
             if (entry.getKey() == null || entry.getKey().isBlank()) continue;
             if (Boolean.TRUE.equals(entry.getValue())) {
@@ -1041,6 +1140,30 @@ public class MobileMarkdownController {
             }
         }
         return output;
+    }
+
+    private Map<String, String> sanitizeTelemetryPayload(Map<String, ?> input) {
+        Map<String, String> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) continue;
+            if (entry.getValue() == null) continue;
+            String value = String.valueOf(entry.getValue()).trim();
+            if (!value.isEmpty()) {
+                output.put(entry.getKey(), value);
+            }
+        }
+        return output;
+    }
+
+    private String trimToNullSafe(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private List<ExportFileEntry> collectExportEntries(Path taskRoot) throws IOException {
@@ -1419,6 +1542,7 @@ public class MobileMarkdownController {
 
     private static class NoteMeta {
         public Map<String, Boolean> favorites = new LinkedHashMap<>();
+        public Map<String, Boolean> deleted = new LinkedHashMap<>();
         public Map<String, Object> comments = new LinkedHashMap<>();
     }
 
@@ -1431,7 +1555,21 @@ public class MobileMarkdownController {
         public String path;
         public String taskTitle;
         public Map<String, Boolean> favorites;
+        public Map<String, Boolean> deleted;
         public Map<String, Object> comments;
+    }
+
+    public static class TaskTelemetryIngestRequest {
+        public String path;
+        public List<TelemetryEventItem> events;
+    }
+
+    public static class TelemetryEventItem {
+        public String nodeId;
+        public String eventType;
+        public Double relevanceScore;
+        public Long timestampMs;
+        public Map<String, Object> payload;
     }
 
     public static class TaskSubmitRequest {

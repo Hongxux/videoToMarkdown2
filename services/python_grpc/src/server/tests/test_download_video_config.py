@@ -103,6 +103,37 @@ def test_load_download_video_options_non_empty_top_level_overrides_profile(monke
     assert options["cookies_from_browser"] == "chrome"
 
 
+def test_load_download_video_options_external_downloader(monkeypatch):
+    config = {
+        "video": {
+            "external_downloader": "aria2c",
+            "external_downloader_args": [
+                "--split=8",
+                "--max-connection-per-server=8",
+            ],
+        }
+    }
+    monkeypatch.delenv("YTDLP_EXTERNAL_DOWNLOADER", raising=False)
+    monkeypatch.delenv("YTDLP_EXTERNAL_DOWNLOADER_ARGS", raising=False)
+
+    options = impl._load_download_video_options(config)
+    assert options["external_downloader"] == "aria2c"
+    assert options["external_downloader_args"] == [
+        "--split=8",
+        "--max-connection-per-server=8",
+    ]
+
+    monkeypatch.setenv("YTDLP_EXTERNAL_DOWNLOADER", "aria2c.exe")
+    monkeypatch.setenv("YTDLP_EXTERNAL_DOWNLOADER_ARGS", "--split=12 --max-connection-per-server=12")
+
+    env_options = impl._load_download_video_options(config)
+    assert env_options["external_downloader"] == "aria2c.exe"
+    assert env_options["external_downloader_args"] == [
+        "--split=12",
+        "--max-connection-per-server=12",
+    ]
+
+
 def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tmp_path):
     captured = {}
 
@@ -130,6 +161,8 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
                     "download_cookies_from_browser": "chrome",
                     "download_cookies_file": "",
                     "prefer_h264": False,
+                    "external_downloader": "aria2c",
+                    "external_downloader_args": ["--split=4"],
                 }
             }
 
@@ -160,4 +193,61 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
     assert captured["init_kwargs"]["disable_ssl_verify"] is True
     assert captured["init_kwargs"]["cookies_from_browser"] == "chrome"
     assert captured["init_kwargs"]["prefer_h264"] is False
+    assert captured["init_kwargs"]["external_downloader"] == "aria2c"
+    assert captured["init_kwargs"]["external_downloader_args"] == ["--split=4"]
     assert captured["download_call"]["filename"] == "video"
+
+
+def test_download_video_routes_douyin_url_to_douyin_downloader(monkeypatch, tmp_path):
+    call_log = {"video_processor_init_count": 0, "douyin_call": {}}
+
+    class _VideoProcessorShouldNotRun:
+        def __init__(self, **_kwargs):
+            call_log["video_processor_init_count"] += 1
+
+        def download(self, **_kwargs):
+            raise AssertionError("VideoProcessor.download should not be called for douyin url")
+
+    async def _douyin_downloader_stub(*, task_id: str, video_url: str, task_dir: str, video_filename: str = "video") -> str:
+        call_log["douyin_call"] = {
+            "task_id": task_id,
+            "video_url": video_url,
+            "task_dir": task_dir,
+            "video_filename": video_filename,
+        }
+        output_path = Path(task_dir) / f"{video_filename}.mp4"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"douyin-video")
+        return str(output_path)
+
+    class _ServicerStub:
+        def __init__(self):
+            self.config = {"video": {}}
+
+        def _cache_metrics_begin(self, *_args, **_kwargs):
+            return None
+
+        def _increment_tasks(self):
+            return None
+
+        def _decrement_tasks(self):
+            return None
+
+        def _get_video_duration(self, _video_path: str) -> float:
+            return 2.5
+
+    monkeypatch.setattr(impl, "VideoProcessor", _VideoProcessorShouldNotRun)
+    monkeypatch.setattr(impl, "_download_video_with_douyin_downloader", _douyin_downloader_stub)
+    monkeypatch.setattr(impl, "_get_primary_storage_root", lambda: str(tmp_path))
+
+    request = types.SimpleNamespace(
+        task_id="task-download-douyin",
+        video_url="https://www.douyin.com/video/7466666666666666666",
+        output_dir="",
+    )
+    response = asyncio.run(impl._VideoProcessingServicerCore.DownloadVideo(_ServicerStub(), request, None))
+
+    assert response.success is True
+    assert call_log["video_processor_init_count"] == 0
+    assert call_log["douyin_call"]["video_url"] == request.video_url
+    assert call_log["douyin_call"]["video_filename"] == "video"

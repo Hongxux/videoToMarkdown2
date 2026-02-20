@@ -53,27 +53,16 @@ public class DeepSeekAdvisorService {
             "- 不要输出标题、前言、总结。",
             "- 不要写脱离语境的通用术语定义。",
             "- 优先控制在 120 字以内。");
-
-    private static final String DEFAULT_FALLBACK_WITH_EVIDENCE_PROMPT = String.join("\n",
-            "- 本段含义：在{scene}里，“{term}”指向这段话真正讨论的对象或动作。",
-            "- 推理线索：依据线索“{evidence}”解释，不采用脱离上下文的词典定义。",
-            "- 边界提醒：当语境变化时，这个解释需要重新判断。");
-
-    private static final String DEFAULT_FALLBACK_WITHOUT_EVIDENCE_PROMPT = String.join("\n",
-            "- 本段含义：请按段落意图理解“{term}”，不要按抽象定义理解。",
-            "- 推理线索：优先参考前后句中的因果、指代和语气线索。",
-            "- 边界提醒：如果上下文发生改变，这个解释可能失效。");
-
     @Value("${deepseek.advisor.enabled:true}")
     private boolean advisorEnabled;
 
-    @Value("${deepseek.advisor.base-url:https://api.deepseek.com}")
+    @Value("${deepseek.advisor.base-url:https://api.deepseek.com/v1}")
     private String advisorBaseUrl;
 
     @Value("${deepseek.advisor.model:deepseek-chat}")
     private String advisorModel;
 
-    @Value("${deepseek.advisor.timeout-seconds:18}")
+    @Value("${deepseek.advisor.timeout-seconds:60}")
     private int timeoutSeconds;
 
     @Value("${DEEPSEEK_API_KEY:}")
@@ -84,12 +73,6 @@ public class DeepSeekAdvisorService {
 
     @Value("${deepseek.advisor.prompt.user-resource:classpath:prompts/deepseek-advisor/user-zh.txt}")
     private Resource userPromptResource;
-
-    @Value("${deepseek.advisor.prompt.fallback-with-evidence-resource:classpath:prompts/deepseek-advisor/fallback-with-evidence-zh.txt}")
-    private Resource fallbackWithEvidencePromptResource;
-
-    @Value("${deepseek.advisor.prompt.fallback-without-evidence-resource:classpath:prompts/deepseek-advisor/fallback-without-evidence-zh.txt}")
-    private Resource fallbackWithoutEvidencePromptResource;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -109,35 +92,33 @@ public class DeepSeekAdvisorService {
         String safeContext = String.valueOf(context == null ? "" : context).trim();
         String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
 
-        if (!advisorEnabled || !StringUtils.hasText(apiKey)) {
-            return AdviceResult.fallback(buildFallbackAdvice(safeTerm, safeContext, safeContextExample, contextDependent));
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
         }
 
+        String content;
         try {
-            String content = callDeepSeek(safeTerm, safeContext, safeContextExample, contextDependent);
-            if (!StringUtils.hasText(content)) {
-                return AdviceResult.fallback(buildFallbackAdvice(safeTerm, safeContext, safeContextExample, contextDependent));
-            }
-            return AdviceResult.deepseek(content.trim());
+            content = callDeepSeek(safeTerm, safeContext, safeContextExample, contextDependent);
         } catch (Exception ex) {
-            logger.warn("DeepSeek advisor call failed, fallback to local advice: {}", ex.getMessage());
-            return AdviceResult.fallback(buildFallbackAdvice(safeTerm, safeContext, safeContextExample, contextDependent));
+            throw new IllegalStateException("DeepSeek advisor call failed: " + ex.getMessage(), ex);
         }
+        if (!StringUtils.hasText(content)) {
+            return AdviceResult.empty("deepseek-empty");
+        }
+        return AdviceResult.deepseek(content.trim());
     }
 
     private String callDeepSeek(String term, String context, String contextExample, boolean contextDependent) throws Exception {
-        String endpoint = String.valueOf(advisorBaseUrl == null ? "" : advisorBaseUrl).trim();
-        if (endpoint.endsWith("/")) {
-            endpoint = endpoint.substring(0, endpoint.length() - 1);
-        }
-        if (endpoint.isEmpty()) {
-            throw new IllegalStateException("deepseek.advisor.base-url is empty");
-        }
+        String endpoint = normalizeDeepSeekBaseUrl(advisorBaseUrl);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("model", advisorModel);
         payload.put("temperature", 0.35);
         payload.put("max_tokens", 320);
+        payload.put("stream", false);
         payload.put("messages", List.of(
                 Map.of("role", "system", "content", buildSystemPrompt()),
                 Map.of("role", "user", "content", buildUserPrompt(term, context, contextExample, contextDependent))
@@ -145,14 +126,15 @@ public class DeepSeekAdvisorService {
         String payloadJson = objectMapper.writeValueAsString(payload);
 
         HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint + "/chat/completions"))
-                .timeout(Duration.ofSeconds(Math.max(5, timeoutSeconds)))
+                .timeout(Duration.ofSeconds(Math.max(60, timeoutSeconds)))
                 .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
                 .header("Authorization", "Bearer " + apiKey.trim())
                 .POST(HttpRequest.BodyPublishers.ofString(payloadJson))
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("HTTP " + response.statusCode());
+            throw new IllegalStateException("DeepSeek HTTP " + response.statusCode() + ": " + summarizeResponseBody(response.body()));
         }
 
         JsonNode root = objectMapper.readTree(response.body());
@@ -161,6 +143,28 @@ public class DeepSeekAdvisorService {
             return "";
         }
         return choices.get(0).path("message").path("content").asText("");
+    }
+
+    private String normalizeDeepSeekBaseUrl(String rawBaseUrl) {
+        String endpoint = String.valueOf(rawBaseUrl == null ? "" : rawBaseUrl).trim();
+        if (endpoint.endsWith("/")) {
+            endpoint = endpoint.substring(0, endpoint.length() - 1);
+        }
+        if (endpoint.isEmpty()) {
+            throw new IllegalStateException("deepseek.advisor.base-url is empty");
+        }
+        if (!endpoint.matches("(?i).*/v\\d+$")) {
+            endpoint = endpoint + "/v1";
+        }
+        return endpoint;
+    }
+
+    private String summarizeResponseBody(String body) {
+        String raw = String.valueOf(body == null ? "" : body).replace('\n', ' ').trim();
+        if (raw.length() <= 260) {
+            return raw;
+        }
+        return raw.substring(0, 260) + "...";
     }
 
     private String buildSystemPrompt() {
@@ -181,36 +185,6 @@ public class DeepSeekAdvisorService {
                 values
         );
     }
-
-    private String buildFallbackAdvice(String term, String context, String contextExample, boolean contextDependent) {
-        String safeContext = trimContext(context);
-        String safeExample = trimContext(contextExample);
-        String evidence = firstNonBlank(safeExample, safeContext);
-        String scene = contextDependent ? "当前段落" : "当前语境";
-        Map<String, String> values = new LinkedHashMap<>();
-        values.put("scene", scene);
-        values.put("term", term);
-        values.put("evidence", evidence);
-        if (StringUtils.hasText(evidence)) {
-            return applyTemplate(
-                    loadPromptTemplate(
-                            "fallback-with-evidence",
-                            fallbackWithEvidencePromptResource,
-                            DEFAULT_FALLBACK_WITH_EVIDENCE_PROMPT
-                    ),
-                    values
-            );
-        }
-        return applyTemplate(
-                loadPromptTemplate(
-                        "fallback-without-evidence",
-                        fallbackWithoutEvidencePromptResource,
-                        DEFAULT_FALLBACK_WITHOUT_EVIDENCE_PROMPT
-                ),
-                values
-        );
-    }
-
     private String loadPromptTemplate(String cacheKey, Resource resource, String defaultTemplate) {
         return promptTemplateCache.computeIfAbsent(cacheKey, key -> readPromptTemplate(resource, defaultTemplate, key));
     }
@@ -241,19 +215,6 @@ public class DeepSeekAdvisorService {
         }
         return resolved;
     }
-
-    private String firstNonBlank(String... values) {
-        if (values == null) {
-            return "";
-        }
-        for (String value : values) {
-            if (StringUtils.hasText(value)) {
-                return value.trim();
-            }
-        }
-        return "";
-    }
-
     private String trimContext(String context) {
         String normalized = String.valueOf(context == null ? "" : context).replace('\n', ' ').trim();
         if (normalized.length() <= 280) {
@@ -275,8 +236,8 @@ public class DeepSeekAdvisorService {
             return new AdviceResult(advice, "deepseek");
         }
 
-        public static AdviceResult fallback(String advice) {
-            return new AdviceResult(advice, "fallback");
+        public static AdviceResult empty(String source) {
+            return new AdviceResult("", String.valueOf(source == null ? "" : source));
         }
     }
 }

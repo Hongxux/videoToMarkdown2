@@ -231,13 +231,15 @@ import gzip
 import re
 import copy
 import uuid
+import shlex
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from concurrent import futures
 from typing import Optional, List, Dict, Any, Tuple
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from urllib.request import url2pathname
 import yaml
 
@@ -299,6 +301,19 @@ from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_ext
 # 🔑 Import tools for GenerateMaterialRequests
 from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
 from services.python_grpc.src.content_pipeline.infra.llm.llm_client import AdaptiveConcurrencyLimiter
+from .douyin_download import (
+    download_video_with_douyin_downloader as _download_video_with_douyin_downloader,
+)
+from .download_service import run_download_flow
+from .platform_rules import (
+    build_task_dir_encoding_source as _build_task_dir_encoding_source_from_rules,
+    extract_bilibili_video_id as _extract_bilibili_video_id_from_rules,
+    is_bilibili_host as _is_bilibili_host_from_rules,
+    is_douyin_host as _is_douyin_host_from_rules,
+    is_douyin_url as _is_douyin_url_from_rules,
+)
+from .share_link_resolver import resolve_share_link
+from .vl_report_writer import VLReportWriter
 
 logger = logging.getLogger(__name__)
 
@@ -363,6 +378,26 @@ def _to_int(value: Any, default: int) -> int:
         return default
 
 
+def _normalize_cli_args(value: Any) -> Optional[List[str]]:
+    """将配置值归一化为命令行参数列表。"""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = shlex.split(text, posix=False)
+        except ValueError:
+            parsed = text.split()
+        normalized = [str(item).strip() for item in parsed if str(item).strip()]
+        return normalized or None
+    if isinstance(value, (list, tuple)):
+        normalized = [str(item).strip() for item in value if str(item).strip()]
+        return normalized or None
+    return None
+
+
 def _load_yaml_file(path: Path) -> Dict[str, Any]:
     """加载 YAML 文件，失败时返回空字典。"""
     if not path.exists():
@@ -414,6 +449,20 @@ def _load_download_video_options(config: Dict[str, Any]) -> Dict[str, Any]:
             return value
         return _pick_profile_str(config_key)
 
+    def _pick_args(config_key: str, env_key: str) -> Optional[List[str]]:
+        env_value = os.getenv(env_key, "").strip()
+        if env_value:
+            return _normalize_cli_args(env_value)
+
+        config_value = video_cfg.get(config_key)
+        if config_value is None:
+            return _normalize_cli_args(profile_cfg.get(config_key))
+
+        normalized = _normalize_cli_args(config_value)
+        if normalized:
+            return normalized
+        return _normalize_cli_args(profile_cfg.get(config_key))
+
     disable_ssl_env = os.getenv("YTDLP_DISABLE_SSL_VERIFY", "").strip()
     if disable_ssl_env:
         disable_ssl_verify = _to_bool(disable_ssl_env, False)
@@ -432,6 +481,8 @@ def _load_download_video_options(config: Dict[str, Any]) -> Dict[str, Any]:
         "cookies_file": _pick_str("download_cookies_file", "YTDLP_COOKIES_FILE"),
         "cookies_from_browser": _pick_str("download_cookies_from_browser", "YTDLP_COOKIES_FROM_BROWSER"),
         "prefer_h264": prefer_h264,
+        "external_downloader": _pick_str("external_downloader", "YTDLP_EXTERNAL_DOWNLOADER"),
+        "external_downloader_args": _pick_args("external_downloader_args", "YTDLP_EXTERNAL_DOWNLOADER_ARGS"),
     }
 
 
@@ -790,91 +841,128 @@ def _is_http_url(value: str) -> bool:
 
 
 def _is_bilibili_host(host: str) -> bool:
-    """
-    执行逻辑：
-    1) 判空并标准化 host（小写、去端口）。
-    2) 判断 host 是否属于 B 站主域或短链域。
-    实现方式：后缀匹配。
-    核心价值：将 B 站链接识别集中到单一入口，避免多处分支复制。
-    输入参数：
-    - host: URL host（类型：str）。
-    输出参数：
-    - bool：是否为 B 站域名。
-    """
-    if not host:
-        return False
-    normalized = host.lower().split(":", 1)[0]
-    bilibili_suffixes = ("bilibili.com", "b23.tv")
-    return any(
-        normalized == suffix or normalized.endswith(f".{suffix}")
-        for suffix in bilibili_suffixes
-    )
+    return _is_bilibili_host_from_rules(host)
+
+
+def _is_douyin_host(host: str) -> bool:
+    return _is_douyin_host_from_rules(host)
+
+
+def _is_douyin_url(video_url: str) -> bool:
+    return _is_douyin_url_from_rules(video_url)
 
 
 def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
-    """
-    执行逻辑：
-    1) 仅在 B 站域名下尝试提取视频号。
-    2) 优先提取 BV 号，再提取 AV 号（含 query 的 bvid/aid）。
-    3) 返回提取到的 AV/BV 号；无法提取时返回 None。
-    实现方式：urlparse + parse_qs + 正则。
-    核心价值：同一 B 站视频的不同分享参数可稳定命中同一 task 目录。
-    权衡：短链若未显式包含 AV/BV 且未做重定向解析，将回退到原 URL 逻辑。
-    输入参数：
-    - video_url: 视频链接（类型：str）。
-    输出参数：
-    - Optional[str]：提取到的 AV/BV 号（BV 保留原始大小写）。
-    """
-    if not video_url:
-        return None
-
-    parsed = urlparse(video_url)
-    if not _is_bilibili_host(parsed.netloc):
-        return None
-
-    query = parse_qs(parsed.query or "", keep_blank_values=True)
-    bvid = (query.get("bvid") or [""])[0].strip()
-    if bvid:
-        match = re.search(r"BV[0-9A-Za-z]{10}", bvid, flags=re.IGNORECASE)
-        if match:
-            # 保留 URL 中 BV 原始大小写，避免因大小写改写导致后续链路误判。
-            return match.group(0)
-
-    aid = (query.get("aid") or [""])[0].strip()
-    if aid.isdigit():
-        return f"AV{aid}"
-
-    search_space = " ".join((parsed.path or "", parsed.query or "", parsed.fragment or ""))
-    bv_match = re.search(r"BV[0-9A-Za-z]{10}", search_space, flags=re.IGNORECASE)
-    if bv_match:
-        return bv_match.group(0)
-
-    av_match = re.search(
-        r"(?:^|[^0-9A-Za-z])av(\d{1,20})(?:$|[^0-9A-Za-z])",
-        search_space,
-        flags=re.IGNORECASE,
-    )
-    if av_match:
-        return f"AV{av_match.group(1)}"
-    return None
+    extracted = _extract_bilibili_video_id_from_rules(video_url)
+    return extracted or None
 
 
 def _build_task_dir_encoding_source(video_url: str) -> str:
+    return _build_task_dir_encoding_source_from_rules(video_url)
+
+
+def _normalize_video_title(raw_title: str) -> str:
+    """归一化视频标题，去除首尾空白和重复空格。"""
+    title = re.sub(r"\s+", " ", str(raw_title or "")).strip()
+    return title
+
+
+def _write_video_meta_file(
+    *,
+    task_dir: str,
+    video_path: str,
+    source_url: str,
+    resolved_url: str,
+    platform: str,
+    canonical_id: str,
+    title: str,
+    resolver: str,
+) -> None:
     """
-    执行逻辑：
-    1) 若是 B 站链接且可提取 AV/BV 号，则使用该视频号作为目录编码原文。
-    2) 其他情况回退到原始 URL 文本。
-    实现方式：复用 _extract_bilibili_video_id。
-    核心价值：满足“B 站目录按 AV/BV 收敛”的业务规则，同时保持非 B 站兼容。
-    输入参数：
-    - video_url: 视频链接（类型：str）。
-    输出参数：
-    - str：用于 task 目录哈希的原文。
+    写入下载元数据，供 Java 编排侧在组装 Markdown 时复用标题。
     """
-    bilibili_video_id = _extract_bilibili_video_id(video_url)
-    if bilibili_video_id:
-        return bilibili_video_id
-    return str(video_url or "")
+    if not task_dir:
+        return
+    payload = {
+        "source_url": str(source_url or ""),
+        "resolved_url": str(resolved_url or ""),
+        "video_path": str(video_path or ""),
+        "platform": str(platform or ""),
+        "canonical_id": str(canonical_id or ""),
+        "title": _normalize_video_title(title),
+        "resolver": str(resolver or ""),
+        "generated_at": datetime.now().isoformat(),
+    }
+    meta_path = os.path.join(task_dir, "video_meta.json")
+    with open(meta_path, "w", encoding="utf-8") as file_obj:
+        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+
+
+def _read_video_meta_title(task_dir: str) -> str:
+    if not task_dir:
+        return ""
+    meta_path = os.path.join(task_dir, "video_meta.json")
+    if not os.path.exists(meta_path):
+        return ""
+    try:
+        with open(meta_path, "r", encoding="utf-8") as file_obj:
+            payload = json.load(file_obj)
+    except Exception as exc:
+        logger.warning(f"Failed to read video_meta title from {meta_path}: {exc}")
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return _normalize_video_title(str(payload.get("title", "") or ""))
+
+
+def _is_placeholder_assemble_title(raw_title: str) -> bool:
+    normalized = _normalize_video_title(raw_title)
+    if not normalized:
+        return True
+    placeholder_set = {
+        "视频内容",
+        "知识文档",
+        "video content",
+        "knowledge document",
+    }
+    return normalized.lower() in placeholder_set
+
+
+def _build_title_from_video_path(video_path: str) -> str:
+    normalized_path = _normalize_local_video_path(video_path)
+    if not normalized_path:
+        return ""
+    candidate_title = ""
+    try:
+        from services.python_grpc.src.transcript_pipeline.tools.file_validator import (
+            extract_video_title as _extract_video_title_from_path,
+        )
+        candidate_title = _extract_video_title_from_path(normalized_path)
+    except Exception:
+        candidate_title = Path(normalized_path).stem
+    stem = _normalize_video_title(candidate_title)
+    if not stem:
+        return ""
+    generic_stems = {"video", "clip", "output", "input"}
+    if stem.lower() in generic_stems:
+        return ""
+    return stem
+
+
+def _resolve_assemble_document_title(*, request_title: str, output_dir: str, video_path: str) -> str:
+    normalized_request_title = _normalize_video_title(request_title)
+    if normalized_request_title and not _is_placeholder_assemble_title(normalized_request_title):
+        return normalized_request_title
+
+    meta_title = _read_video_meta_title(output_dir)
+    if meta_title:
+        return meta_title
+
+    path_title = _build_title_from_video_path(video_path)
+    if path_title:
+        return path_title
+
+    return "视频内容"
 
 
 def _normalize_local_video_path(video_path: str) -> str:
@@ -2050,75 +2138,50 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             active_tasks=self._active_tasks,
             status=status
         )
-
     async def DownloadVideo(self, request, context):
         """
         执行逻辑：
-        1) 以目录编码原文哈希创建 storage/{hash} 目录（B站优先 AV/BV）。
-        2) 调用 VideoProcessor 下载视频到固定文件名。
-        3) 计算文件大小与时长并返回结果。
-        实现方式：VideoProcessor.download + ffprobe。
-        核心价值：统一下载路径，便于后续复用与清理。
-        输入参数：
-        - request: 函数入参（类型：未标注）。
-        - context: 函数入参（类型：未标注）。
-        输出参数：
-        - DownloadResponse（含 video_path、file_size_bytes、duration_sec）。"""
+        1) 解析输入链接并按平台规则生成统一 task 目录。
+        2) 委托 download_service 执行下载与元数据落盘，保持 grpc 层精简。
+        3) 返回增强后的 DownloadResponse，供 Java 编排与 sidecar 复用。
+        """
         task_id = request.task_id
         self._cache_metrics_begin(task_id, "DownloadVideo")
-        video_url = request.video_url
-        # output_dir 从 request 中获取，但我们会覆盖为统一的 storage 目录
-        
-        logger.info(f"[{task_id}] DownloadVideo: {video_url}")
-        
+        raw_video_input = str(request.video_url or "")
+
+        logger.info(f"[{task_id}] DownloadVideo: {raw_video_input}")
+
         try:
             self._increment_tasks()
+            flow_result = await run_download_flow(
+                task_id=task_id,
+                raw_video_input=raw_video_input,
+                config=self.config,
+                resolve_share_link=resolve_share_link,
+                build_task_dir_encoding_source=_build_task_dir_encoding_source,
+                get_primary_storage_root=_get_primary_storage_root,
+                is_douyin_url=_is_douyin_url,
+                douyin_downloader=_download_video_with_douyin_downloader,
+                load_download_video_options=_load_download_video_options,
+                video_processor_cls=VideoProcessor,
+                get_video_duration=self._get_video_duration,
+                write_video_meta_file=_write_video_meta_file,
+                logger=logger,
+            )
 
-            # 🔑 目录哈希原文：B 站优先使用 AV/BV 号，其余链接保持原 URL
-            task_dir_source = _build_task_dir_encoding_source(video_url)
-            url_hash = hashlib.md5(task_dir_source.encode("utf-8")).hexdigest()
-            if task_dir_source != str(video_url or ""):
-                logger.info(f"[{task_id}] Bilibili task-dir key: {task_dir_source}")
-            
-            # 🔑 统一存储目录: var/storage/storage/{url_hash}/
-            storage_root = _get_primary_storage_root()
-            task_dir = os.path.join(storage_root, url_hash)
-            os.makedirs(task_dir, exist_ok=True)
-            
-            # 视频固定命名为 video (VideoProcessor会自动添加扩展名)
-            video_filename = "video"
-            
-            # 使用 VideoProcessor 下载
-            download_options = _load_download_video_options(self.config)
-            downloader = VideoProcessor(**download_options)
-            if download_options.get("cookies_file") or download_options.get("cookies_from_browser"):
-                logger.info(
-                    f"[{task_id}] Download auth enabled: "
-                    f"cookies_file={bool(download_options.get('cookies_file'))}, "
-                    f"cookies_from_browser={download_options.get('cookies_from_browser') or ''}, "
-                    f"proxy={download_options.get('proxy') or ''}"
-                )
-            video_path = await asyncio.to_thread(
-                downloader.download,
-                url=video_url,
-                output_dir=task_dir,
-                filename=video_filename
-            )
-            
-            # 获取视频时长
-            duration_sec = self._get_video_duration(video_path)
-            file_size = os.path.getsize(video_path)
-            
-            logger.info(f"[{task_id}] Video saved to: {video_path}")
-            
             return video_processing_pb2.DownloadResponse(
-                success=True,
-                video_path=video_path,
-                file_size_bytes=file_size,
-                duration_sec=duration_sec,
-                error_msg=""
+                success=flow_result.success,
+                video_path=flow_result.video_path,
+                file_size_bytes=flow_result.file_size_bytes,
+                duration_sec=flow_result.duration_sec,
+                error_msg=flow_result.error_msg,
+                resolved_url=flow_result.resolved_url,
+                video_title=flow_result.video_title,
+                source_platform=flow_result.source_platform,
+                canonical_id=flow_result.canonical_id,
+                link_resolver=flow_result.link_resolver,
+                content_type=flow_result.content_type,
             )
-            
         except Exception as e:
             logger.error(f"[{task_id}] DownloadVideo failed: {e}")
             return video_processing_pb2.DownloadResponse(
@@ -2126,11 +2189,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 video_path="",
                 file_size_bytes=0,
                 duration_sec=0.0,
-                error_msg=str(e)
+                error_msg=str(e),
+                resolved_url="",
+                video_title="",
+                source_platform="",
+                canonical_id="",
+                link_resolver="",
+                content_type="unknown",
             )
         finally:
             self._decrement_tasks()
-    
+
     async def TranscribeVideo(self, request, context):
         """
         执行逻辑：
@@ -3605,6 +3674,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         
         # 统一输出目录到 storage/{hash}：做什么是让最终产物同域聚合；为什么是便于回放定位；权衡是覆盖调用方传入的 output_dir
         output_dir = _normalize_output_dir(video_path)
+        title = _resolve_assemble_document_title(
+            request_title=str(getattr(request, "title", "") or ""),
+            output_dir=output_dir,
+            video_path=video_path,
+        )
         self._cache_metrics_begin(task_id, "AssembleRichText")
         
         # 确保目录存在
@@ -5104,48 +5178,30 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         # 统一语义单元持久化路径：不再接收 Java 传入路径，仅在服务内用于报表/兜底持久化。
         semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
         semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
+        vl_model_name = "ernie-4.5-turbo-vl-32k"
+
+        vl_report_writer = VLReportWriter(
+            task_id=task_id,
+            video_path=video_path,
+            semantic_units_path=semantic_units_path,
+            output_dir=output_dir,
+            logger=logger,
+        )
+
+        def _sync_vl_report_context() -> None:
+            vl_report_writer.task_id = task_id
+            vl_report_writer.video_path = video_path
+            vl_report_writer.semantic_units_path = semantic_units_path
+            vl_report_writer.output_dir = output_dir
 
         def _persist_task_token_report(payload: dict) -> str:
-            """
-            按任务落盘 VL token 报表。
+            _sync_vl_report_context()
+            return vl_report_writer.persist_token_report(payload=payload or {}, vl_model=vl_model_name)
 
-            为什么：
-            1) 任务级可观测性需要可追溯文件，而不仅是日志；
-            2) 便于后续做离线聚合分析（成本、节省率、裁剪效果）。
-            """
-            try:
-                import json as _json
+        def _persist_vl_analysis_output(payload: dict) -> str:
+            _sync_vl_report_context()
+            return vl_report_writer.persist_analysis_output(payload=payload or {}, vl_model=vl_model_name)
 
-                base_dir = output_dir or (os.path.dirname(video_path) if video_path else os.getcwd())
-                report_dir = os.path.join(base_dir, "intermediates")
-                os.makedirs(report_dir, exist_ok=True)
-
-                report_name = f"vl_token_report_{task_id}.json" if task_id else "vl_token_report_unknown.json"
-                report_path = os.path.join(report_dir, report_name)
-                latest_path = os.path.join(report_dir, "vl_token_report_latest.json")
-
-                report_payload = {
-                    "version": "1.0",
-                    "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "task_id": task_id,
-                    "video_path": video_path,
-                    "semantic_units_path": semantic_units_path,
-                    "output_dir": output_dir,
-                }
-                report_payload.update(payload or {})
-
-                with open(report_path, "w", encoding="utf-8") as report_file:
-                    _json.dump(report_payload, report_file, ensure_ascii=False, indent=2)
-
-                with open(latest_path, "w", encoding="utf-8") as latest_file:
-                    _json.dump(report_payload, latest_file, ensure_ascii=False, indent=2)
-
-                logger.info(f"[{task_id}] VL token报表已落盘: {report_path}")
-                return report_path
-            except Exception as report_error:
-                logger.warning(f"[{task_id}] VL token报表落盘失败: {report_error}")
-                return ""
-        
         logger.info(
             f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}, "
             f"semantic_source={semantic_source_case or 'runtime_or_empty'}"
@@ -5157,6 +5213,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 加载 VL 配置
             from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
             vl_config = load_module2_config().get("vl_material_generation", {})
+            if isinstance(vl_config.get("api", {}), dict):
+                vl_model_name = str(vl_config.get("api", {}).get("model", vl_model_name) or vl_model_name).strip()
             vl_enabled = vl_config.get("enabled", False)
             
             if not vl_enabled:
@@ -5165,8 +5223,25 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     "status": "vl_disabled",
                     "vl_enabled": False,
                     "used_fallback": False,
+                    "vl_model": vl_model_name,
                     "routing_stats": {},
                     "token_stats": {},
+                })
+                _persist_vl_analysis_output({
+                    "status": "vl_disabled",
+                    "vl_enabled": False,
+                    "used_fallback": False,
+                    "vl_model": vl_model_name,
+                    "routing_stats": {},
+                    "token_stats": {},
+                    "result_counts": {
+                        "semantic_units_total": 0,
+                        "vl_units": 0,
+                        "screenshots": 0,
+                        "clips": 0,
+                    },
+                    "merged_screenshots": [],
+                    "merged_clips": [],
                 })
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
@@ -5255,8 +5330,25 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     "status": "no_semantic_units",
                     "vl_enabled": True,
                     "used_fallback": False,
+                    "vl_model": vl_model_name,
                     "routing_stats": {"total": 0},
                     "token_stats": {},
+                })
+                _persist_vl_analysis_output({
+                    "status": "no_semantic_units",
+                    "vl_enabled": True,
+                    "used_fallback": False,
+                    "vl_model": vl_model_name,
+                    "routing_stats": {"total": 0},
+                    "token_stats": {},
+                    "result_counts": {
+                        "semantic_units_total": 0,
+                        "vl_units": 0,
+                        "screenshots": 0,
+                        "clips": 0,
+                    },
+                    "merged_screenshots": [],
+                    "merged_clips": [],
                 })
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
@@ -5783,9 +5875,27 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                     "status": "fallback",
                                     "vl_enabled": True,
                                     "used_fallback": True,
+                                    "vl_model": vl_model_name,
                                     "error_msg": err,
                                     "routing_stats": routing_stats,
                                     "token_stats": vl_token_stats,
+                                })
+                                _persist_vl_analysis_output({
+                                    "status": "fallback",
+                                    "vl_enabled": True,
+                                    "used_fallback": True,
+                                    "vl_model": vl_model_name,
+                                    "error_msg": err,
+                                    "routing_stats": routing_stats,
+                                    "token_stats": vl_token_stats,
+                                    "result_counts": {
+                                        "semantic_units_total": len(semantic_units),
+                                        "vl_units": len(vl_units),
+                                        "screenshots": len(cv_screenshot_requests) + len(vl_screenshot_requests),
+                                        "clips": len(cv_clip_requests) + len(vl_clip_requests),
+                                    },
+                                    "merged_screenshots": list(cv_screenshot_requests) + list(vl_screenshot_requests),
+                                    "merged_clips": list(cv_clip_requests) + list(vl_clip_requests),
                                 })
                                 return video_processing_pb2.VLAnalysisResponse(
                                     success=True,
@@ -5888,9 +5998,27 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             "status": "fallback",
                             "vl_enabled": True,
                             "used_fallback": True,
+                            "vl_model": vl_model_name,
                             "error_msg": vl_result.error_msg,
                             "routing_stats": routing_stats,
                             "token_stats": vl_token_stats,
+                        })
+                        _persist_vl_analysis_output({
+                            "status": "fallback",
+                            "vl_enabled": True,
+                            "used_fallback": True,
+                            "vl_model": vl_model_name,
+                            "error_msg": vl_result.error_msg,
+                            "routing_stats": routing_stats,
+                            "token_stats": vl_token_stats,
+                            "result_counts": {
+                                "semantic_units_total": len(semantic_units),
+                                "vl_units": len(vl_units),
+                                "screenshots": len(cv_screenshot_requests) + len(vl_screenshot_requests),
+                                "clips": len(cv_clip_requests) + len(vl_clip_requests),
+                            },
+                            "merged_screenshots": list(cv_screenshot_requests) + list(vl_screenshot_requests),
+                            "merged_clips": list(cv_clip_requests) + list(vl_clip_requests),
                         })
                         return video_processing_pb2.VLAnalysisResponse(
                             success=True,
@@ -6106,6 +6234,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "status": "success",
                 "vl_enabled": True,
                 "used_fallback": False,
+                "vl_model": vl_model_name,
                 "routing_stats": routing_stats,
                 "token_stats": vl_token_stats,
                 "result_counts": {
@@ -6116,6 +6245,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     "vl_clips_generated": len(vl_clip_requests),
                     "vl_screenshots_generated": len(vl_screenshot_requests),
                 },
+            })
+            _persist_vl_analysis_output({
+                "status": "success",
+                "vl_enabled": True,
+                "used_fallback": False,
+                "vl_model": vl_model_name,
+                "routing_stats": routing_stats,
+                "token_stats": vl_token_stats,
+                "result_counts": {
+                    "semantic_units_total": len(semantic_units),
+                    "vl_units": len(vl_units),
+                    "screenshots": len(screenshot_requests),
+                    "clips": len(clip_requests),
+                    "vl_clips_generated": len(vl_clip_requests),
+                    "vl_screenshots_generated": len(vl_screenshot_requests),
+                },
+                "merged_screenshots": merged_screenshots,
+                "merged_clips": merged_clips,
             })
 
             return video_processing_pb2.VLAnalysisResponse(
@@ -6136,9 +6283,27 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "status": "exception",
                 "vl_enabled": True,
                 "used_fallback": True,
+                "vl_model": vl_model_name,
                 "error_msg": str(e),
                 "routing_stats": {},
                 "token_stats": {},
+            })
+            _persist_vl_analysis_output({
+                "status": "exception",
+                "vl_enabled": True,
+                "used_fallback": True,
+                "vl_model": vl_model_name,
+                "error_msg": str(e),
+                "routing_stats": {},
+                "token_stats": {},
+                "result_counts": {
+                    "semantic_units_total": 0,
+                    "vl_units": 0,
+                    "screenshots": 0,
+                    "clips": 0,
+                },
+                "merged_screenshots": [],
+                "merged_clips": [],
             })
             return video_processing_pb2.VLAnalysisResponse(
                 success=False,
@@ -6285,4 +6450,5 @@ if __name__ == "__main__":
     )
     
     asyncio.run(serve())
+
 

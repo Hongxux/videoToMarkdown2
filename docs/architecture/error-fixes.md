@@ -13,6 +13,435 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-19 下载看门狗误判 idle timeout（下载进行中但被判超时）
+- 日期：2026-02-19
+- 现象与影响范围：
+  - 在线视频下载阶段报错：`Download idle timeout exceeded (120s without progress in output dir: ./output)`。
+  - 用户侧观察到下载实际上仍在进行，但 Java 编排侧在 120 秒内误判“无进展”并中断任务。
+- 触发条件：
+  - `VideoProcessingOrchestrator.waitForDownloadWithLease` 仅监控请求传入的 `outputDir`（例如 `./output`）。
+  - Python `DownloadVideo` 实际下载目录为 `var/storage/storage/{hash}`（或 `V2M_STORAGE_ROOT/{hash}`），与 `outputDir` 不一致。
+  - 长视频或较慢链路下载时，`./output` 无文件变化，触发 idle timeout。
+- 根因定位：
+  - Java 看门狗的“进展信号”与 Python 下载落盘目录不在同一路径，监控目标错误导致误判。
+  - 进展判定过窄，只看目录字节，不看文件数与更新时间变化。
+- 修复措施：
+  - Java 侧下载看门狗改为双路径监控：
+    - `request_output_dir`（兼容原行为）；
+    - 按 Python 同规则预测的 `predicted_storage_dir`（`V2M_STORAGE_ROOT` 或 `var/storage/storage/{hash}`，B 站优先 AV/BV 归一化后再 MD5）。
+  - 进展判定升级为“文件活动快照”：
+    - 总字节数 `bytes`；
+    - 文件数量 `files`；
+    - 最新修改时间 `latest_mtime`。
+  - 续租日志补充监控目录与活动统计，便于排障。
+  - idle 超时报错补充被监控目录与最近活动快照，便于区分“真实卡死”与“监控路径偏差”。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手工复现：
+    - 对同一 B 站 URL 发起下载任务，确认日志出现 `Download watchdog targets` 与 `Download lease renewed`；
+    - 下载进行中不再在 120 秒内误触发 idle timeout。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充下载看门狗单测，覆盖“request output 与真实落盘目录不一致”场景。
+  - 监控：将 `watch_dirs/bytes/files/latest_mtime` 纳入下载阶段诊断日志关键字段。
+  - 校验：后续若 Python 调整 task 目录规则（如 hash 原文策略），需同步 Java 侧预测逻辑并做契约测试。
+  - 回滚：如紧急回滚，可临时提升 `video.download.idle-timeout-seconds`，但不应长期依赖超时放宽掩盖监控路径错误。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - gRPC 接口：`DownloadVideo`
+- 复盘要点：
+  - 看门狗必须监控“真实工作集”而不是“期望输出目录”。
+  - 多语言链路（Java/Python）中，目录映射规则应明确契约化并做双端一致性校验。
+
+## 2026-02-18 卡片手势误触、长按复制误触发与滚动关卡片阈值不稳（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 用户在阅读时做下滑或左右滑动，容易被误判为“选词/开卡”。
+  - 长按复制前会先出现系统选区与标记，复制触发阈值偏短。
+  - 卡片上滑关闭与滚动关闭阈值过低，导致意外关闭。
+- 触发条件：
+  - 概念卡触摸开始阶段即尝试选词并高亮焦点，未等待明确下拉意图。
+  - 段落手势在触摸初始阶段未抑制系统选区，浏览器可能先生成选区。
+  - 关闭阈值与滚动宽限不足，轻微滚动/上滑即可触发关卡。
+- 根因定位：
+  - 手势状态机在“意图识别”与“动作执行”之间缺少明确的延迟门槛。
+  - 选词评分中的中文虚词集合存在异常字符，导致中文词组边界判断不稳定。
+- 修复措施：
+  - 概念卡开卡手势改为“仅命中已有术语 + 下拉超过起始阈值后才进入选词/开卡”：
+    - 新增 `TEAR_OPEN_PROBE_START_PX`；
+    - 仅在超过阈值后 `focusTermNode`，并在水平意图明显时提前取消。
+  - 提升关闭稳定性：
+    - 上滑关闭阈值提升（`tearCloseSnapRatio`、`tearCloseMinSwipePx`、`TEAR_CLOSE_FULL_PULL_PX`）。
+    - 滚动关闭增加 `closeCardOnWindowScrollGraceMs` 宽限，并提高关闭位移阈值。
+  - 复制触发改为更“保守”策略：
+    - 长按阈值提升到 `1100ms`；
+    - 移除段落 `dblclick` 手势入口；
+    - 触摸开始即启用 `gesture-no-select`，阻断系统选区标记。
+  - 中文选词稳态修复：
+    - 修正 `TERM_EDGE_PARTICLE_SET`、`TERM_STOPWORD_SET`；
+    - 增加“中文 2-3 token 短语”和“的/地/得连接短语”加分。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：增加“滑动不误开卡”“长按复制前不出现选区”“滚动小位移不关卡”交互回归用例。
+  - 校验：交互评审固定检查“意图阈值 > 动作触发”与“开启手势/关闭手势成对逆向”。
+  - 回滚：如需短期放宽灵敏度，仅回调阈值常量，不恢复 `dblclick` 或选区旁路入口。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 复盘要点：
+  - 手势交互必须先识别意图，再执行动作，避免“动作过早启动”。
+  - 中文词组选取需要稳定的虚词边界集合，否则会持续出现误选词。
+
+## 2026-02-18 DeepSeek 建议接口持续回退本地兜底（已修复为仅远端调用）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - `/api/mobile/cards/ai-advice` 基本每次都返回本地 `buildFallbackAdvice` 结果，导致用户看不到真实模型输出。
+  - 前端虽然显示了迷雾等待层，但后端立即回退本地文案，掩盖了远端请求失败根因。
+- 触发条件：
+  - Java 侧 `deepseek.advisor.base-url` 默认值与 Python 侧不一致（缺少 `/v1`）。
+  - 远端请求失败或空响应时，服务层无条件回退 `buildFallbackAdvice`，前端无法区分“远端失败”与“本地兜底”。
+- 根因定位：
+  - 调用链存在“隐式兜底分支”，把传输层/配置层错误吞掉，形成“看起来成功、实际上未调用成功”的假象。
+  - DeepSeek endpoint 组装口径未与 Python 统一。
+- 修复措施：
+  - 删除本地兜底解释链路：
+    - `requestAdvice` 不再调用 `buildFallbackAdvice`；
+    - 移除 `buildFallbackAdvice` 及相关 `fallback` factory。
+  - 对齐 Python 请求口径：
+    - `deepseek.advisor.base-url` 默认改为 `https://api.deepseek.com/v1`；
+    - 新增 base-url 归一化：未带版本后缀时自动补 `/v1`，最终调用 `/chat/completions`。
+  - 超时策略改为 60 秒：
+    - `deepseek.advisor.timeout-seconds` 默认值设为 `60`；
+    - 请求超时下限提升为 60 秒。
+  - 诊断增强：
+    - 非 2xx 响应抛出包含状态码与裁剪后响应体的错误信息，便于定位鉴权/配额/参数问题。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 手工验证：
+    - 配置有效 API Key 后，`/api/mobile/cards/ai-advice` 返回 `source=deepseek`；
+    - 人为制造鉴权失败时，接口不再回退本地解释，而是返回可诊断错误。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：增加服务层单测覆盖“base-url 自动补 `/v1`”“无 API key 报错”“非 2xx 不回退”。
+  - 监控：记录 `source=deepseek` 命中率与非 2xx 状态码分布，发现异常及时告警。
+  - 校验：新增评审检查项，禁止在远端 LLM 调用失败路径拼接本地解释冒充成功结果。
+  - 回滚：如需临时保活，可在控制层将异常降级为空建议（`advice=""`），但不恢复本地解释文案。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `POST /api/mobile/cards/ai-advice`
+- 复盘要点：
+  - LLM 失败处理要“可观测优先”，不能用内容兜底掩盖通道失败。
+  - Java/Python 双实现必须保持 endpoint 与超时口径一致，避免“单端可用、单端失效”。
+
+## 2026-02-18 AI 查询触发源过多（已收敛为滑动阈值预取）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 卡片中的 AI 建议查询存在多入口触发，包含“开卡时兜底查询”以及历史交互入口，查询时机不稳定。
+  - 用户期望仅在“手指滑动达到明确意图阈值”时预取，避免无意触发与行为分叉。
+- 触发条件：
+  - `loadAdvice` 在无预取结果时会直接调用 `requestAdviceResult` 发起网络请求。
+  - `ai-whisper` 仍保留点击/双击交互入口，容易被误判为查询触发相关行为点。
+- 根因定位：
+  - 查询调用链未严格约束为单一入口，导致“意图触发”和“兜底触发”并存。
+- 修复措施：
+  - 触发源收敛为单一路径：仅保留“滑动进度达到阈值后预取”。
+    - 新增常量 `ADVICE_PREFETCH_PROGRESS_RATIO = 0.08`，并用于 `onTouchMove` 判定。
+  - `loadAdvice` 改为仅消费预取结果：
+    - 若无预取 Promise，直接隐藏 whisper/fog，不再自行发起查询。
+  - 移除 `ai-whisper` 点击/双击行为入口，避免形成额外交互触发点。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 手工验证：
+    - 仅点击开卡（无滑动）时不触发 AI 查询；
+    - 滑动进度超过约 8% 后开卡，命中预取并展示建议；
+    - 点击或双击 whisper 不再触发相关交互入口。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端交互回归，覆盖“无滑动不开查”“阈值达标预取”“whisper 无 click/dblclick 入口”。
+  - 校验：涉及 AI 查询链路改动时，必须明确“唯一触发源 + 阈值常量”。
+  - 回滚：如需恢复开卡即查，可仅恢复 `loadAdvice` 的 fallback 查询，不影响预取阈值主链路。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - `POST /api/mobile/cards/ai-advice`
+- 复盘要点：
+  - AI 能力应绑定明确意图触发，不应依赖隐式兜底链路。
+  - 单触发源可显著降低误触、降低请求噪音并提升交互可解释性。
+
+## 2026-02-18 选中文本后弹出“新建卡片”触发器（`.concept-selection-trigger`）干扰阅读（已移除）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 用户在阅读中仅做文本选取时，会弹出浮层按钮 `[新建卡片]`，打断阅读与手势连续性。
+  - 该入口与现有“撕开/上滑缝合”卡片物理交互语义不一致，形成并行交互旁路。
+- 触发条件：
+  - 前端保留了 `selection-trigger` 相关 UI、控制器导出和手势桥接能力。
+- 根因定位：
+  - 卡片创建能力同时存在“物理手势主路径”与“选区浮层旁路”，缺少单通道收敛。
+  - 历史代码未随交互策略演进清理，导致冗余入口长期残留。
+- 修复措施：
+  - 删除选区浮层入口整条链路：
+    - `mobile-concept-cards.js` 移除 `selection-trigger` 相关状态、函数、导出与调用；
+    - `index.html` 移除 `openConceptCardFromSelection` 桥接；
+    - `mobile-markdown-gestures.js` 移除“长按选区优先开概念卡片”分支。
+  - 删除样式层 `.concept-selection-trigger` 的普通态、暗色态与减弱动效态定义。
+  - 卡片开合收敛为既有主路径：点击/双击命中术语 + 撕开/上滑缝合关闭，不再响应“选区弹按钮建卡”。
+- 验证方式：
+  - `rg -n "concept-selection-trigger|openFromSelection|openConceptCardFromSelection|openCardFromSelection" services/java-orchestrator/src/main/resources/static` 无结果。
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：交互回归增加“选中文本不出现建卡浮层”用例。
+  - 校验：涉及卡片交互新增入口时，必须评审是否破坏“物理手势单通道”原则。
+  - 回滚：如未来确需恢复选区建卡能力，应作为独立设计决策并明确与手势主路径的优先级与冲突策略。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 复盘要点：
+  - 阅读模式中的“选区”应默认被解释为阅读行为，而非建卡意图。
+  - 物理化交互要避免按钮旁路，否则会降低一致性并制造误触。
+
+## 2026-02-18 card-fissure 关闭按钮残留与撕裂交互语义冲突（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 概念卡片采用“撕开/缝合”交互语义，但样式层仍保留 `.card-fissure-close` 关闭按钮定义。
+  - 即使当前模板未渲染按钮，这类残留会误导后续迭代，导致“按钮关闭”回流并破坏交互一致性。
+- 触发条件：
+  - 历史样式未随交互演进同步清理。
+- 根因定位：
+  - 关闭能力存在“物理手势主通道 + UI 按钮旁路”的设计分叉，未执行一次性去拐杖收敛。
+- 修复措施：
+  - 删除 `mobile-concept-cards.css` 中 `.card-fissure-close` 及暗色模式覆盖样式。
+  - 保留并强化“上滑缝合关闭”作为唯一显式关闭通道，确保开启与关闭手势互为逆向。
+- 验证方式：
+  - `rg -n "card-fissure-close" services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css` 无结果。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 校验：后续评审增加“是否存在与手势主通道冲突的按钮旁路”检查项。
+  - 测试：交互回归中固定验证“仅上滑关闭，不存在额外关闭控件”。
+  - 回滚：如需临时提供可见关闭入口，应先在设计评审明确物理语义变更，再同步更新文档与手势契约。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+- 复盘要点：
+  - 撕裂式卡片应遵循单一物理心智模型，避免用按钮兜底破坏手势闭环。
+  - 清理无用样式不仅是代码卫生，也是防止产品语义回退的工程手段。
+
+## 2026-02-18 AI 建议映射异常仍被展示（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 卡片打开后，`/api/mobile/cards/ai-advice` 返回了与当前词条映射不稳定的内容时，前端仍直接展示在 whisper 区域。
+  - 用户会看到占位符、提示词泄露或与当前词条无关的建议，干扰阅读与编辑。
+- 触发条件：
+  - `loadAdvice` 仅判断 `advice` 是否非空，未校验“是否可展示”。
+  - 后端返回内容存在提示模板残留（如 `{term}`、`context_block`）或泛化文本时，前端没有兜底过滤。
+- 根因定位：
+  - 展示链路缺少“语义映射校验”层，导致“网络成功”被误判为“内容有效”。
+  - 请求返回结构中的 `term/source` 没有参与前端显示决策。
+- 修复措施：
+  - 在 `mobile-concept-cards.js` 新增建议展示校验链：
+    - 先做格式归一化（去除围栏代码块、冗余前缀）；
+    - 拦截占位符与提示词泄露模式；
+    - 校验响应 `term` 与当前卡片 `term` 一致性；
+    - 校验建议文本与“当前词条/上下文关键词”至少存在一处重叠。
+  - `loadAdvice` 仅在 `shouldDisplayAdvice(...)` 返回 `true` 时展示 whisper；否则直接隐藏建议区，不显示异常映射内容。
+  - `requestAdviceResult` 扩展返回 `term/source` 字段，为前端校验提供输入。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 手工验证：
+    - 注入包含 `{term}` / `context_block` 的建议响应，确认不再展示；
+    - 返回与当前卡片无关键词重叠的建议，确认不展示；
+    - 返回正常建议，确认可展示。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端回归样本，覆盖“模板泄露拦截”“term 不一致拦截”“上下文无重叠拦截”“正常建议放行”。
+  - 监控：按 `source` 维度采样建议被前端拦截比例，识别模型输出质量退化。
+  - 校验：后续调整提示词模板时，必须同步跑“占位符泄露”检查。
+  - 回滚：若校验过严导致展示率过低，可先放宽“关键词重叠”阈值，保留占位符/提示词泄露与 term 一致性校验。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `POST /api/mobile/cards/ai-advice`
+- 复盘要点：
+  - “有返回”不等于“可展示”，建议链路必须把可用性校验前置到 UI 展示前。
+  - 对 LLM 输出做轻量结构化校验，能显著降低错误信息直达用户的概率。
+
+## 2026-02-18 页面滚动误关卡片 + 上滑关闭阈值过低（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 用户在卡片打开后下滑页面查看内容时，只要触发 `onWindowScroll` 就会立即关闭卡片。
+  - 卡片上滑关闭对轻微手势过于敏感，误关闭概率高。
+- 触发条件：
+  - `onWindowScroll` 监听器在任意滚动时无条件执行 `closeActiveCard`。
+  - 上滑关闭判断仅依赖进度比（`tearCloseSnapRatio`），缺少“最小上滑距离”阈值。
+- 根因定位：
+  - 滚动行为与关闭行为耦合过紧，没有区分“阅读滚动”和“离场意图”。
+  - 手势决策缺少双阈值（比例 + 位移）约束。
+- 修复措施：
+  - 新增滚动关闭开关与阈值配置：
+    - `closeCardOnWindowScroll`（默认 `false`）；
+    - `closeCardOnWindowScrollDeltaPx`（默认 `220`）。
+  - 卡片打开时记录 `openScrollY`，仅在显式开启滚动关闭且滚动距离超过阈值时才关闭。
+  - 上滑关闭新增最小距离阈值：
+    - `tearCloseMinSwipePx`（默认 `42`）；
+    - 关闭判定改为“进度阈值 + 最小位移阈值”同时满足。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手工验证：
+    - 卡片打开后下滑页面，卡片不再立即关闭；
+    - 轻微上滑不关闭，达到阈值后上滑才关闭。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充交互回归，覆盖“滚动不关卡片”“上滑位移不足不关闭”“上滑位移达标关闭”。
+  - 校验：涉及手势关闭的改动必须明确“开关 + 阈值”并给出默认值。
+  - 回滚：如需恢复旧行为，可将 `closeCardOnWindowScroll` 设为 `true` 并调小 `closeCardOnWindowScrollDeltaPx`，不改核心链路。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+- 复盘要点：
+  - 阅读交互优先保障“连续浏览”，滚动不应隐式触发 destructive 行为。
+  - 手势关闭应采用“意图强度”双阈值，而非单一比例判定。
+
+## 2026-02-18 双击选句子失效（单击先包裹短语导致双击路径丢失）修复
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 阅读页中双击文本时，无法稳定选中整句，常退化为单词/短语命中。
+  - 影响概念卡片“句子级选取”链路，降低长句理解与卡片上下文质量。
+- 触发条件：
+  - `click` 事件第一击就执行了短语包裹（`ensureTermNodeForPhrase`），第二击时 DOM 已变化。
+  - 双击句子仍依赖 `click.detail>=2` 的隐式分支，容易被第一击副作用干扰。
+- 根因定位：
+  - 事件优先级错误：单击处理没有给双击留出判定窗口，导致“双击语义”被“单击副作用”吞掉。
+  - 句子选取链路缺少显式 `dblclick` 入口，时序不稳定。
+- 修复措施：
+  - 新增显式双击入口：`onContainerDoubleClick`（绑定 `dblclick` capture）。
+  - 单击改为延迟提交：`SINGLE_CLICK_COMMIT_DELAY_MS=240`，仅在窗口内未触发双击时再执行短语选取。
+  - 在 `destroy/unbind` 中统一清理单击定时器，避免悬挂回调污染后续状态。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手工验证：
+    - 单击命中短语仍可用；
+    - 双击可稳定命中整句；
+    - 两者不再相互抢占。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端事件流回归，覆盖“single click 延迟提交 + dblclick 抢占”时序。
+  - 校验：涉及 `click/detail` 的改动必须评估“第一击副作用是否破坏第二击语义”。
+  - 回滚：若体验偏慢，可小幅下调单击延迟（例如 `180~220ms`），保留显式 `dblclick` 通道。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+- 复盘要点：
+  - 交互语义冲突优先用“事件分层 + 定时窗口”解耦，不要在同一事件里硬判多语义。
+  - 双击这类复合手势应有独立入口，避免依赖 `click.detail` 侧推。
+
+## 2026-02-18 中文单击选词命中不准（名词短语不完整）修复
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 在阅读页单击术语时，系统有时只命中一个碎片词，无法稳定选中“名词+修饰词”的完整短语。
+  - 影响概念卡片入口准确率，尤其在中文技术文本里表现明显。
+- 触发条件：
+  - 点击位置落在中文复合短语中，`Intl.Segmenter` 默认分词粒度较细；
+  - 原有算法按“相邻 token 贪心扩展”选词，容易偏向长度而非语义边界。
+- 根因定位：
+  - 选词决策链缺少“已知术语词典优先”能力，无法复用已加载的概念词库做就近精确命中。
+  - 分词窗口扩展策略过于简单，没有对中文短语边界和虚词边界进行打分约束。
+  - 正则回退分支对超长连续串缺少裁剪，极端场景会把大段文字当成一个词。
+- 修复措施：
+  - 在 `resolveSegmentedTermFromText` 中增加“词典命中优先”：
+    - 使用 `state.highlightTerms` 在点击点附近窗口做匹配；
+    - 命中时直接返回更稳定的术语区间。
+  - 重写分词窗口策略：
+    - 用“包含点击中心的多窗口候选 + 打分”替代贪心扩展；
+    - 打分显式考虑 token 数、短语长度、中文短语形态、虚词边界、词库命中。
+  - 增强正则回退：
+    - 对超长匹配串按点击中心裁剪，避免整段粘连。
+  - 参数调整：
+    - 分词最大 token 从 `4` 调整到 `6`，字符上限从 `30` 调整到 `36`，提升“修饰词 + 名词”覆盖率。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 手工验证：在中文段落中单击术语，观察选词是否更稳定落在完整名词短语。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端回归样本，至少覆盖“词典命中优先”“中文短语评分命中”“正则回退裁剪”三类。
+  - 校验：后续调整选词参数时，必须同时评估中文/英文混排段落，避免单语优化破坏另一语种。
+  - 回滚：若个别设备出现异常，可先回退窗口参数（token/char 上限），保留“词典优先 + 回退裁剪”链路。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+- 复盘要点：
+  - 术语选词应优先复用“已知词典”这个现有杠杆，再做算法补偿，收益高且回归风险低。
+  - 中文短语抽取不能只依赖分词器原始结果，必须有短语级评分层。
+
+## 2026-02-18 移动端复制阈值偏短导致选词误触复制，且标记易误触（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 用户在阅读页尝试选词时，长按复制动作容易抢先触发，干扰正常选词流程。
+  - 双击/手势链路中的“标记（favorite）”容易误触，造成段落高亮污染阅读视图。
+- 触发条件：
+  - 长按阈值较短（`560ms`）时，选词与复制在同一时窗竞争。
+  - 双击动作映射到 `favorite`，以及历史 `favorites` 元数据仍参与渲染。
+- 根因定位：
+  - 复制阈值配置偏激进，且长按触发前未根据“当前是否已有选区”做二次判定。
+  - 标记能力同时存在“动作入口 + 渲染入口”，未提供统一关闭开关。
+- 修复措施：
+  - 将段落手势长按阈值从 `560ms` 提升到 `760ms`（`index.html` 与 `mobile-markdown-gestures.js` 同步）。
+  - 长按计时触发时若检测到活动选区，则不执行复制，优先保留选词操作。
+  - 关闭双击手势动作映射（`doubleTap: null`），仅保留长按复制。
+  - 关闭标记能力：`PARAGRAPH_MARK_ENABLED=false`，禁用 `favorite` 动作授权与渲染；若发现历史 `favorites`，运行时清空并回写。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（当前因既有 Java 文件报错未通过：`VideoProcessingOrchestrator.java:1155`，与本次前端改动无关）
+  - 手工验证：阅读页中执行“选词、长按复制、双击段落”，确认选词不再被复制抢占、双击不再产生标记。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端交互回归，覆盖“选词优先于复制”“doubleTap 无动作”“历史 favorites 不渲染”。
+  - 校验：手势参数调整时，必须同时评估“选词/复制/滑动”三方冲突窗口。
+  - 回滚：若复制变慢影响体验，可小幅回调阈值（例如 `700ms`），但保持“有选区不复制”与“标记关闭”不变。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 复盘要点：
+  - 复制与选词是同源手势冲突，阈值调优必须配合运行时选区判定。
+  - 交互能力下线应做“入口关闭 + 渲染关闭 + 历史状态清理”三件套，避免残留副作用。
+
+## 2026-02-18 移动端段落手势滑动误触选词（已修复）
+- 日期：2026-02-18
+- 现象与影响范围：
+  - 在阅读页段落区域执行“下滑滚动”或“左/右滑手势”时，浏览器会误进入原生文本选词状态，导致手势反馈被打断。
+  - 影响范围集中在 `mobile-markdown-gestures.js` 的段落手势链路，表现为滑动不稳定、误高亮文本。
+- 触发条件：
+  - 单指触摸段落后发生位移，但尚未到达 `swipeActive` 激活阈值；
+  - 浏览器先处理原生选词，再进入应用层手势判定。
+- 根因定位：
+  - 现有逻辑仅在 `activeGesture.swipeActive` 为真时才 `preventDefault`，早期位移窗口未抑制默认选词行为。
+  - 阅读容器缺少“手势进行中临时禁选词”的样式态，导致系统 `selectstart` 可直接抢占交互。
+- 修复措施：
+  - 前端手势层新增 `GESTURE_NO_SELECT_CLASS` 与 `setGestureSelectionSuppressed`，在 `touchstart -> touchend/touchcancel` 生命周期内临时切换禁选词状态。
+  - 新增 `selectstart` 事件拦截：仅在 `activeGesture` 存在时阻止选区创建。
+  - `touchmove` 增加横向意图门控（`hasHorizontalIntent`），在横向手势或已激活滑动时提前 `preventDefault`，避免误选词且不阻断纵向滚动。
+  - 样式层新增 `.markdown-body.gesture-no-select`，统一关闭 `user-select/-webkit-user-select/-webkit-touch-callout`。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手工验证：阅读页中连续执行“下滑滚动、左滑删除、右滑批注”，确认不再出现误选词且手势可稳定触发。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充前端手势回归用例，至少覆盖“纵向滚动不选词”“横向滑动不选词且可触发动作”。
+  - 校验：手势逻辑新增阈值时，强制检查“默认浏览器行为窗口（touchstart 到 swipeActive 之间）”是否有防护。
+  - 回滚：若后续发现机型兼容问题，可先回退 `hasHorizontalIntent` 门控比例，保留 `gesture-no-select` 与 `selectstart` 防线。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+- 复盘要点：
+  - 手势交互不能只关注“激活后态”，必须覆盖“激活前窗口”的浏览器默认行为竞争。
+  - “事件层拦截 + 样式层禁选”双层防线比单点 `preventDefault` 更稳健。
+
 ## 2026-02-18 概念卡片标题直接落盘触发 Windows 文件名边界风险（已修复）
 - 日期：2026-02-18
 - 现象与影响范围：
@@ -3539,4 +3968,138 @@
   - 回滚：
     - 若模板加载路径配置异常，可临时依赖 Java 内置默认模板继续提供服务；
     - 若暗黑样式影响兼容，可仅回滚暗黑媒体查询块，不影响卡片 API 与数据链路。
+
+## 2026-02-19 下载阶段频发 `RuntimeException: null` 导致任务不可诊断终止
+- 现象：
+  - 任务在下载阶段经常在约 300 秒附近失败，`TaskProcessingWorker` 日志为 `RuntimeException: null`。
+  - `TaskQueueManager` 记录 `rawError=null`，前端只能看到“系统繁忙”，无法定位根因。
+  - `task_metrics_*.json` 中 `error_message` 为空字符串，故障追踪断链。
+- 根因：
+  - 下载调用采用固定 `future.get(5min)` 等待，超时/中断/执行异常在部分路径上 message 为空。
+  - Worker 在 `result.success=false` 时直接 `new RuntimeException(result.errorMessage)`，当 errorMessage 为空时再次放大为空异常。
+  - gRPC `StatusRuntimeException` 在无 description 时直接透传 `null`，未做 code 级兜底。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 下载阶段由“单次固定等待”改为“租约式等待”：
+      - 保留可配置硬超时 `video.download.hard-timeout-seconds`；
+      - 引入无进展超时 `video.download.idle-timeout-seconds`；
+      - 通过 `video.download.poll-interval-seconds` 轮询 future，并基于输出目录字节增长续租；
+      - gRPC 截止时间改为可配置 `video.download.grpc-deadline-seconds`。
+    - 统一异常归一化，保证 `result.errorMessage` 不再为空。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 失败路径改为非空错误兜底，禁止再次构造 `RuntimeException(null)`。
+    - 捕获后通过 cause 链提取可读 rawError。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - gRPC 异常统一通过 `statusDescriptionOrCode` 映射；
+    - 无 description 时回退为 `gRPC status=<CODE>`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/UserFacingErrorMapper.java`
+    - 重建为可编译版本；
+    - 新增下载超时关键词映射（idle/hard/deadline exceeded）到可执行用户提示。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=UserFacingErrorMapperTest test -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化下载超时映射单测（idle/hard/deadline exceeded 三类文本）。
+    - 增加下载阶段“无进展超时”集成测试（模拟目录字节长期不变）。
+  - 监控：
+    - 关键日志保留 `Download lease renewed`、`Download idle timeout exceeded`、`Download hard timeout exceeded`。
+  - 校验：
+    - 提交前必须运行 `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`；
+    - 如涉及文档变更，运行 `python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 若租约机制触发误判，可临时将 `video.download.idle-timeout-seconds` 提高，或回退到仅硬超时模式（保留非空错误链路）。
+
+## 2026-02-19 打开内容失败 `showControl is not defined`（大纲按钮显隐回归）
+- 现象：
+  - 用户在任务列表点击任意任务后，前端提示“打开内容失败：showControl is not defined”（部分浏览器堆栈会显示为 `showcontroller is not defined`）。
+  - 失败发生在 Markdown 已拉取后，页面渲染阶段中断，导致内容页无法正常进入。
+- 根因：
+  - `buildOutline` 在渲染大纲时调用了 `showControl('contentOutlineBtn', ...)`，但全局未定义 `showControl`。
+  - 该引用错误在 `openTaskForContent -> loadTaskMarkdown -> renderCurrentView -> buildOutline` 链路中抛出，被上层统一包装成“打开内容失败”。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 新增 `showControl(controlId, visible)` 统一显隐函数；
+    - 显隐时同步 `hidden` 与 `aria-hidden`，并在隐藏焦点按钮时主动 `blur`，避免可访问性与焦点残留问题；
+    - 保持 `buildOutline` 调用点不变，仅补齐缺失能力，最小化回归面。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端回归：覆盖“无标题内容（隐藏大纲按钮）/有标题内容（显示大纲按钮）”两条路径，确保不再抛 `ReferenceError`。
+  - 监控：
+    - 在前端全局错误采集中标记 `ReferenceError` + `buildOutline` 关键字，命中时上报任务 ID 与最近一次视图切换事件。
+  - 校验：
+    - 提交前运行 `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`；
+    - 涉及 `docs/architecture/*.md` 变更时运行 `python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 若后续需回退，优先仅回退 `showControl` 调用点到内联显隐逻辑，避免触及 `openTaskForContent` 主链路。
+
+## 2026-02-19 段落长按与词句开卡手势语义偏差（动作触发时机不一致）
+- 现象：
+  - 段落长按达到阈值后会立即触发复制，用户在同一次手势中无法再通过“松手/左右滑”做最终动作选择。
+  - 词句链路使用“下拉开卡”，与目标交互“再双击已选词组或句子开卡”不一致，导致学习成本与误触路径增加。
+- 根因：
+  - 手势状态机将“识别到阈值”与“执行业务动作”耦合在同一时刻，缺少统一结算阶段。
+  - 词句模块缺少“选中后短期可开卡”的显式状态（arm window），导致“选择动作”与“开卡动作”无法按阶段拆分。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 长按到 1s 仅置 `armed`，复制/删除/批注统一在 `touchend` 结算；
+    - 长按未达阈值前若出现明显移动，取消本次手势并交还滚动；
+    - 结算分支改为：左滑删除、右滑批注、其余松手复制。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+    - 新增“选中后 3 秒再双击开卡”状态管理；
+    - 双击默认先执行“选句”，仅在“再双击阶段且命中已选文本”时开卡；
+    - 下拉开卡分支默认关闭。
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 段落长按阈值配置改为 `1000ms`。
+- 验证结果：
+  - 代码层：段落/词句手势主链路均改为状态机结算，不再在阈值时直接触发不可逆副作用。
+  - 构建层：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过（按本次改动后的提交前检查执行）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 新增前端手势回归用例：`长按1s松手复制`、`长按1s左滑删除`、`长按1s右滑批注`、`双击选句`、`再双击开卡`。
+  - 监控：
+    - 在前端埋点中区分 `gesture_armed`、`gesture_committed`、`card_open_by_reopen_double_tap`，便于观测误触率。
+  - 校验：
+    - 提交前执行 `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`；
+    - 若变更 `docs/architecture/*.md`，执行 `python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 可按文件粒度回滚前端手势模块，不涉及后端接口与持久化结构变更。
+
+## 2026-02-19 单击选词后双击不开卡 + selection-refine 返回难以落地
+- 现象：
+  - 移动端单击选词后，随后双击常无响应，不触发开卡。
+  - `/api/mobile/cards/selection-refine` 即使返回 payload，前端大多数情况下不应用边界优化，体感等同“无优化”。
+- 根因：
+  - 前端触摸分支存在额外阶段门槛（`open-prime`），导致“单击后双击开卡”路径被拦截为“再次选句/保持选中”。
+  - 触摸短点与双击阈值过严（位移 5px、时长 350ms、双击窗 330ms），真实设备易漏识别。
+  - 后端控制器在 `/selection-refine` 入口对 `sourceText` 执行 `trim()`，打破前端 offset 坐标系，导致回传边界无法稳定映射。
+  - 后端 refine 强依赖 DJL 模型，模型不可用时几乎总是 `improved=false`，缺乏可用降级。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+    - 移除“必须 open-prime 才能开卡”的额外门槛；
+    - 命中已选目标且双击成立时直接开卡；
+    - 放宽触摸识别阈值（短点位移/时长、双击时窗）提升可触达率。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - `sourceText` 改为原样透传，保留空白字符坐标；仅使用 `isBlank()` 做必填校验。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/SelectionSyntaxRefineService.java`
+    - 将 `mobile.selection-refine.max-source-chars` 默认提升至 `560`；
+    - 增加规则回退打分（无 DJL 或 DJL 未判定 improved 时）以输出可用扩边建议。
+- 验证结果：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端回归用例：`single -> double(open selected)`、`double(select sentence)`、`double on non-selected(no open)`。
+    - 增加后端 refine 偏移回归：输入带前导/尾随空白时，返回边界仍与原字符串坐标一致。
+  - 监控：
+    - 记录 refine 返回源（`djl-bert-tiny` / `rule-fallback` / `djl-unavailable`）及 improved 比例，持续观察有效优化率。
+  - 校验：
+    - 提交前执行 `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`；
+    - 文档变更执行 `python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 前端可单独回滚双击判定改动；
+    - 后端可单独回滚 `sourceText` 处理与规则回退逻辑，不影响主业务接口。
 

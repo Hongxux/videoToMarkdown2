@@ -1,0 +1,10 @@
+作为人格审判庭，请依据以下历史十维画像和近期行为切片，进行灵魂重塑。
+
+=== 历史十维画像 (Current Profile) ===
+{current_profile}
+
+=== 近期收集的微观假说 (Recent Slices) ===
+{hypothesis_slices}
+
+执行要求：
+交叉比对漂移点，严格按照 `system` 中的 10 个维度定义与 Schema 结构，输出最新版本的十维精神画像 JSON。这是该用户的下一次迭代的灵魂读档。绝对不能包含 JSON 以外的任何分析过程。

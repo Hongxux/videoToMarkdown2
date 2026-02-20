@@ -1137,6 +1137,8 @@
             highlightCandidatesTopK: 1200,
             highlightWorkerUrl: '/lib/mobile-highlight-worker.js',
             highlightWorkerMinTerms: 1200,
+            selectionRefineEndpoint: `${API_BASE}/cards/selection-refine`,
+            selectionRefineEnabled: true,
             notify: (message, type) => {
                 if (type === 'error') {
                     setTaskSummary(String(message || ''), 'error');
@@ -5018,7 +5020,7 @@
         if (!block) {
             return '';
         }
-        const favorite = !!state.paragraphMeta.favorites[index];
+        const favorite = PARAGRAPH_MARK_ENABLED && !!state.paragraphMeta.favorites[index];
         const highlightClass = favorite ? ' is-highlighted' : '';
         const comments = getParagraphComments(index);
         const commentCount = comments.length;
@@ -5665,17 +5667,18 @@
         state.paragraphMeta = { favorites: nextFavorites, comments: nextComments };
     }
 
-    const PARAGRAPH_READONLY_ACTIONS = new Set(['copy', 'favorite']);
+    const PARAGRAPH_READONLY_ACTIONS = new Set(['copy']);
+    const PARAGRAPH_MARK_ENABLED = false;
     const PARAGRAPH_GESTURE_BLOCK_SELECTOR = 'button, textarea, img, video';
     const PARAGRAPH_GESTURE_CONFIG = Object.freeze({
-        holdTriggerMs: 560,
+        holdTriggerMs: 1000,
         moveCancelPx: 10,
         tapTolerancePx: 12,
         doubleTapWindowMs: 330,
     });
     // 手势动作映射集中配置：后续改交互策略时只改映射，不改手势状态机分支。
     const PARAGRAPH_GESTURE_ACTION_MAP = Object.freeze({
-        doubleTap: 'favorite',
+        doubleTap: null,
         longPress: 'copy',
     });
 
@@ -5931,6 +5934,14 @@
         const favorites = state.paragraphMeta && state.paragraphMeta.favorites
             ? state.paragraphMeta.favorites
             : {};
+        if (!PARAGRAPH_MARK_ENABLED) {
+            if (Object.keys(favorites).length) {
+                state.paragraphMeta.favorites = {};
+                scheduleParagraphBackgroundSync({ metaChanged: true });
+            }
+            renderInlineStickyAnnotations(container);
+            return;
+        }
         Object.keys(favorites).forEach((rawIndex) => {
             if (!favorites[rawIndex]) {
                 return;
@@ -5974,6 +5985,9 @@
     }
 
     async function toggleParagraphFavorite(index, options = {}) {
+        if (!PARAGRAPH_MARK_ENABLED) {
+            return false;
+        }
         ensureParagraphEditorState();
         if (!Number.isFinite(index) || index < 0 || index >= state.paragraphBlocks.length) {
             return false;
@@ -6469,17 +6483,6 @@
             canHandleParagraphSwipeGesture,
             openInlineStickyNote,
             deleteLineAtIndex,
-            openConceptCardFromSelection: async () => {
-                const controller = getConceptCardsController();
-                if (!controller || typeof controller.openFromSelection !== 'function') {
-                    return false;
-                }
-                try {
-                    return !!(await controller.openFromSelection({ source: 'long-press-selection' }));
-                } catch (_error) {
-                    return false;
-                }
-            },
             onDeleteSwipeCommitted: (meta) => {
                 playDeleteSwipeSound(meta || {});
             },
@@ -7107,8 +7110,28 @@
                 handleEmptyStateAction(emptyActionBtn.getAttribute('data-empty-action'));
                 return;
             }
+            
+            // Handle Toggle Button
+            const toggleBtn = event.target.closest('.outline-toggle');
+            if (toggleBtn) {
+                event.preventDefault();
+                event.stopPropagation(); // 避免触发节点跳转
+                const node = toggleBtn.closest('.outline-item-wrapper');
+                const children = node.querySelector('.outline-children');
+                if (children) {
+                    const isHidden = children.style.display === 'none';
+                    children.style.display = isHidden ? '' : 'none';
+                    toggleBtn.setAttribute('aria-expanded', isHidden ? 'true' : 'false');
+                }
+                return;
+            }
+
+            // Handle Navigation
             const link = event.target.closest('[data-target-id]');
             if (!link) return;
+            // 如果点到了 toggle 按钮（虽然上面拦截了，但双重保险）
+            if (event.target.closest('.outline-toggle')) return;
+
             const targetId = link.getAttribute('data-target-id');
             if (!targetId) return;
             const heading = document.getElementById(targetId);
@@ -7282,12 +7305,18 @@
         if (!headings.length) {
             outlineList.innerHTML = buildOutlineEmptyStateHtml();
             state.activeOutlineId = '';
+            showControl('contentOutlineBtn', false);
             teardownScrollSpy();
             return;
         }
+        showControl('contentOutlineBtn', true);
+
+        // 1. 构建树状数据结构
+        const root = { level: 0, children: [] };
+        const stack = [root];
 
         const usedIds = new Set();
-        const items = headings.map((heading, index) => {
+        headings.forEach((heading, index) => {
             let id = heading.id ? String(heading.id).trim() : '';
             if (!id || usedIds.has(id)) {
                 id = `md-heading-${index + 1}`;
@@ -7297,22 +7326,97 @@
             }
             usedIds.add(id);
             heading.id = id;
+
             const level = Number(heading.tagName.substring(1)) || 1;
             const text = (heading.textContent || '').trim() || `标题 ${index + 1}`;
-            return `<a class="outline-item outline-level-${level}" href="javascript:void(0)" data-target-id="${id}">${escapeHtml(text)}</a>`;
+            const node = { id, level, text, children: [] };
+
+            // 找到正确的父节点 (Stack top level needs to be < current level)
+            while (stack.length > 1 && stack[stack.length - 1].level >= level) {
+                stack.pop();
+            }
+            stack[stack.length - 1].children.push(node);
+            stack.push(node);
         });
 
-        outlineList.innerHTML = items.join('');
+        // 2. 递归渲染 DOM
+        function renderNode(node) {
+            const hasChildren = node.children && node.children.length > 0;
+            // H1/H2 默认展开，更深层默认折叠 (可配置)
+            // 这里为了实现 "H2 items have a down-arrow toggle"，我们让 H2 的子级容器可折叠
+            const expanded = node.level < 2; 
+            
+            let html = '';
+            if (node.level > 0) {
+                // 只有一级标题才有 "章节" 这种语义前缀吗？或者纯文本。
+                // 交互层：整个条目可点跳转
+                html += `
+                    <div class="outline-node" data-target-id="${node.id}">
+                        <div class="outline-label">${escapeHtml(node.text)}</div>
+                        ${hasChildren ? `
+                            <button class="outline-toggle" type="button" aria-label="切换折叠" aria-expanded="${expanded}">
+                                <svg class="icon-glyph" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+                            </button>
+                        ` : ''}
+                    </div>
+                `;
+            }
+            
+            if (hasChildren) {
+                // outline-tree 是根容器，outline-children 是子级容器
+                const className = node.level === 0 ? 'outline-tree' : 'outline-children';
+                // 根节点始终显示，子节点根据 expanded 状态
+                const style = (node.level === 0 || expanded) ? '' : 'style="display:none"';
+                html += `<ul class="${className}" ${style}>`;
+                node.children.forEach(child => {
+                    html += `<li class="outline-item-wrapper level-${child.level}">`;
+                    html += renderNode(child);
+                    html += `</li>`;
+                });
+                html += `</ul>`;
+            }
+            return html;
+        }
+
+        outlineList.innerHTML = renderNode(root);
+
+        // 3. 绑定折叠事件 (利用事件委托)
+        // 注意：click 跳转事件已在全局委托中处理 (document.getElementById('outlineList').addEventListener('click'...))
+        // 这里只需要处理 toggle 按钮，或者在全局处理中增加 toggle 逻辑
+        
         installScrollSpy(headings);
     }
 
     function setActiveOutline(targetId) {
         if (!targetId) return;
         state.activeOutlineId = targetId;
-        document.querySelectorAll('#outlineList .outline-item').forEach((item) => {
-            const isActive = item.getAttribute('data-target-id') === targetId;
-            item.classList.toggle('active', isActive);
+        
+        // 1. 移除旧激活状态
+        document.querySelectorAll('#outlineList .outline-node.active').forEach((node) => {
+            node.classList.remove('active');
         });
+
+        // 2. 激活新节点
+        const targetNode = document.querySelector(`#outlineList .outline-node[data-target-id="${targetId}"]`);
+        if (targetNode) {
+            targetNode.classList.add('active');
+            // 3. 自动展开父级
+            let parent = targetNode.closest('.outline-children');
+            while (parent) {
+                if (parent.style.display === 'none') {
+                    parent.style.display = '';
+                    // 找到控制该 ul 的 toggle 按钮
+                    // 结构: li > (div.outline-node > button) + ul.outline-children
+                    // parent 是 ul，它的兄弟节点 div.outline-node 里的 button 需要更新状态
+                    const wrapper = parent.closest('.outline-item-wrapper');
+                    if (wrapper) {
+                        const toggle = wrapper.querySelector('.outline-node > .outline-toggle');
+                        if (toggle) toggle.setAttribute('aria-expanded', 'true');
+                    }
+                }
+                parent = parent.parentElement.closest('.outline-children');
+            }
+        }
     }
 
     function teardownScrollSpy() {
@@ -7361,6 +7465,18 @@
         state.scrollSpyContainer = scrollContainer;
         scrollContainer.addEventListener('scroll', handler, { passive: true });
         run();
+    }
+
+    // 统一控制头部按钮显隐，避免调用侧散落重复逻辑并保持可访问性状态同步。
+    function showControl(controlId, visible) {
+        const control = document.getElementById(controlId);
+        if (!control) return;
+        const shouldShow = !!visible;
+        control.hidden = !shouldShow;
+        control.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
+        if (!shouldShow && document.activeElement === control && typeof control.blur === 'function') {
+            control.blur();
+        }
     }
 
     function setControlLabel(control, label) {

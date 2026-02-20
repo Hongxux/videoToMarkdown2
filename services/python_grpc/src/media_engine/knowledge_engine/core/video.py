@@ -50,6 +50,8 @@ class VideoProcessor(BaseProcessor):
         cookies_file: Optional[str] = None,
         cookies_from_browser: Optional[str] = None,
         prefer_h264: bool = True,
+        external_downloader: Optional[str] = None,
+        external_downloader_args: Optional[list[str]] = None,
     ):
         """
         执行逻辑：
@@ -69,6 +71,11 @@ class VideoProcessor(BaseProcessor):
         self.cookies_file = cookies_file
         self.cookies_from_browser = cookies_from_browser
         self.prefer_h264 = bool(prefer_h264)
+        raw_external_downloader = str(external_downloader or "").strip()
+        self.external_downloader = raw_external_downloader or None
+        self.external_downloader_args = [
+            str(arg).strip() for arg in (external_downloader_args or []) if str(arg).strip()
+        ]
         self._cookie_export_attempted = False
         self._cookie_export_error: Optional[str] = None
         self._last_explicit_probe_error: Optional[str] = None
@@ -589,6 +596,17 @@ class VideoProcessor(BaseProcessor):
         
         auth_opts = self._build_auth_options()
         ydl_opts.update(auth_opts)
+        if self.external_downloader:
+            ydl_opts["external_downloader"] = self.external_downloader
+            self.emit_progress("download", 0.145, f"使用外部下载器: {self.external_downloader}")
+            if self.external_downloader_args:
+                downloader_key = Path(self.external_downloader).stem.lower()
+                args_copy = list(self.external_downloader_args)
+                ydl_opts["external_downloader_args"] = {
+                    downloader_key: args_copy,
+                    "default": args_copy,
+                }
+                self.emit_progress("download", 0.146, f"外部下载器参数: {' '.join(args_copy)}")
         if self._is_youtube_url(url):
             ydl_opts = self._with_youtube_player_client_chain(ydl_opts)
             self.emit_progress("download", 0.14, "YouTube 下载启用 player_client 回退链: web_safari/tv_downgraded/web")

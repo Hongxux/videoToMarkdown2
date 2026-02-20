@@ -2,6 +2,88 @@
 
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
+
+## 2026-02-20 移动阅读元数据扩展：左滑改“标记删除”并新增 Telemetry 入湖 API
+- 日期：2026-02-20
+- 触发背景与问题：
+  - 原段落左滑路径直接走“删除语义”，在认知阅读场景下会过早丢失上下文，不利于后续二次复核。
+  - 交互埋点仅停留在前端回调层，后端无法稳定消费事件流，难以形成画像闭环。
+- 第一性原理与复用杠杆：
+  - 第一性原理：阅读交互中的“删除”优先应是可逆决策（标记）而非不可逆物理删除。
+  - 复用杠杆1：复用既有 `/api/mobile/tasks/{taskId}/meta` 存储面，不新增并行元数据文件结构。
+  - 复用杠杆2：复用 `normalizeMetaNoteKey` 与任务目录边界校验，保证 `pathKey` 语义一致。
+  - 复用杠杆3：复用 `ObjectMapper` 与任务目录写入策略，新增 telemetry 仅增加增量文件 `mobile_task_telemetry.ndjson`。
+- 架构决策：
+  - 决策1：`meta` 协议增加 `deleted` 布尔映射（段落软删除标记），与 `favorites/comments` 并列。
+  - 决策2：新增 `POST /api/telemetry/ingest`（通用接入）与兼容 `POST /api/mobile/tasks/{taskId}/telemetry`（任务侧接入），按行落盘 NDJSON，保证后端可消费。
+  - 决策3：前端原型左滑动作改为“标记删除并回位”，不再触发物理删除回调。
+- 调用链与决策链变化：
+  - 改造前：`SwipeLeft -> onDeleteNode -> 前端移除段落(可丢上下文)`；`onTelemetry -> 仅本地回调`。
+  - 改造后：`SwipeLeft -> deleted[nodeId]=true -> PUT /meta`；`emitTelemetry -> Micro-batch Queue(50/退出/锁屏) -> POST /api/telemetry/ingest -> NDJSON`。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/TelemetryIngestController.java`
+  - `docs/android_prototypes/SemanticTopographyContracts.kt`
+  - `docs/android_prototypes/SemanticTopographyReader.kt`
+  - `docs/android_prototypes/SemanticTopographyGestureReducer.kt`
+  - `docs/android_prototypes/SemanticTopographyUtils.kt`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-19 下载阶段看门狗对齐 Python 存储目录（防误判 idle timeout）
+- 日期：2026-02-19
+- 触发背景与问题：
+  - 下载任务在进行中仍被 Java 端判定 `idle timeout`，提前中断。
+  - 根因是 Java 监控 `outputDir`，而 Python `DownloadVideo` 实际写入 `var/storage/storage/{hash}`。
+- 第一性原理与复用杠杆：
+  - 第一性原理：看门狗的观测对象必须与真实执行路径一致，否则“监控正确性”先于“超时策略”失效。
+  - 复用杠杆1：复用现有 `waitForDownloadWithLease` 轮询续租框架，不引入新线程模型。
+  - 复用杠杆2：复用现有 `md5Hex`、`resolveRepoRoot`，并与 Python 的 B 站 AV/BV 归一化规则对齐。
+  - 复用杠杆3：复用原配置项（`grpc-deadline/hard-timeout/idle-timeout/poll-interval`），不改配置面。
+- 架构决策：
+  - 决策1：下载看门狗改为双目录观测：`request_output_dir` + `predicted_storage_dir`。
+  - 决策2：进展判定从“单一目录字节增量”升级为“文件活动快照（bytes/files/latest_mtime）”。
+  - 决策3：idle 超时信息输出监控目录与最近活动快照，提升故障可解释性。
+- 调用链与决策链变化：
+  - 改造前：`processVideo -> waitForDownloadWithLease(outputDir only) -> observeOutputDirBytes(outputDir)`。
+  - 改造后：`processVideo -> waitForDownloadWithLease(requestDir + predictedStorageDir) -> observeDownloadActivity(bytes/files/mtime)`。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 联调观察下载日志含 `Download watchdog targets` 与周期性 `Download lease renewed`。
+
+## 2026-02-18 卡片交互阈值重构：先识别意图，再执行动作（Gesture Intent Gate）
+- 日期：2026-02-18
+- 触发背景与问题：
+  - 卡片交互在触摸早期就进入选词/开卡，导致“想滑动阅读”被误判为“想建卡”。
+  - 长按复制阈值偏短，系统选区容易先出现，破坏“长按复制”心智。
+  - 关闭链路阈值偏低，滚动与上滑容易误关卡片。
+- 第一性原理与复用杠杆：
+  - 第一性原理：触摸交互应遵循“意图识别 > 动作执行”，动作必须晚于阈值确认。
+  - 复用杠杆1：复用既有 `mobile-concept-cards.js` 撕开/缝合状态机，不新增新入口。
+  - 复用杠杆2：复用 `mobile-markdown-gestures.js` 复制与滑动主链，仅调整阈值与入口。
+  - 复用杠杆3：复用现有 AI 预取链路（8% 进度预取），不引入额外按钮触发。
+- 架构决策：
+  - 决策1：概念卡触摸开卡改为“仅命中术语 + 下拉超过起始阈值才进入 probe”。
+  - 决策2：段落复制仅保留长按入口，移除 `dblclick` 动作入口并提高长按阈值。
+  - 决策3：滚动关闭增加宽限与位移阈值，上滑关闭提升最小位移与 snap 比例。
+  - 决策4：中文词组选词评分增加短语窗偏好，修正虚词边界集。
+- 调用链与决策链变化：
+  - 改造前：`touchstart -> 立即选词/聚焦 -> 小幅移动也可能触发开卡或复制前选区`
+  - 改造后：`touchstart -> 意图观察 -> 达阈值后才聚焦/开卡/预取 -> 不达阈值则回弹`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-concept-cards.css`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-18 概念卡片别名解耦：文件名与标题不再强绑定（支持 Obsidian aliases）
 - 日期：2026-02-18
 - 触发背景与问题：
@@ -6493,3 +6575,607 @@
 - 回滚方案：
   - 提示词层：将 `deepseek.advisor.prompt.*-resource` 指回旧模板或恢复旧版硬编码实现。
   - 样式层：回退 `mobile-concept-cards.css` 的暗黑媒体查询块，不影响卡片业务链路与接口协议。
+
+### 2026-02-19 追加：下载阶段由固定超时升级为“租约超时 + 硬上限”机制
+- 触发背景：
+  - 下载阶段存在高频“300 秒附近失败 + `RuntimeException: null`”问题，导致任务失败但不可诊断。
+  - 单一固定超时无法区分“真正卡死”与“慢但有进展”的下载任务。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 跨进程 I/O 不能没有上限，否则会导致线程被无限占用；
+    - 只用固定上限会误杀慢任务，需引入“是否有进展”的判据。
+  - 复用杠杆：
+    - 复用现有 `TaskProcessingWorker -> VideoProcessingOrchestrator -> PythonGrpcClient` 调用链；
+    - 复用现有 `TaskQueueManager` 失败映射与日志链路；
+    - 复用 `task_metrics` 结果落盘，不新增独立存储链路。
+- 架构决策：
+  - 决策1：保留可配置硬超时（`video.download.hard-timeout-seconds`）作为保险丝。
+  - 决策2：引入无进展超时（`video.download.idle-timeout-seconds`），以输出目录字节增长作为租约续期信号。
+  - 决策3：下载等待改为短轮询（`video.download.poll-interval-seconds`），并在有进展时续租 idle deadline。
+  - 决策4：gRPC 下载截止时间改为可配置（`video.download.grpc-deadline-seconds`），并统一错误归一化，禁止空错误透传。
+- 调用链变化：
+  - 改造前：
+    - `processVideo` 内部固定 `downloadVideoAsync(...).get(5min)`；
+    - 超时后常出现空 message，Worker 二次包装为 `RuntimeException(null)`。
+  - 改造后：
+    - `processVideo -> waitForDownloadWithLease -> downloadVideoAsync`；
+    - 轮询 future + 目录字节观测续租；
+    - 超时分为 `idle timeout` 与 `hard timeout` 两类；
+    - `TaskProcessingWorker` 与 `PythonGrpcClient` 均做非空错误兜底。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 增加下载租约等待逻辑与 4 个下载超时配置项；
+    - 统一 `extractThrowableMessage` 错误归一化；
+    - 修复失败路径 `result.success=false` 回归。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 失败分支改为非空错误包装，避免 `RuntimeException(null)`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - `StatusRuntimeException` 无描述时回退 `gRPC status=<CODE>`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/common/UserFacingErrorMapper.java`
+    - 重建并增加下载超时映射提示。
+- 性能对比数据（本次变更新增）：
+  - 测试方式：
+    - 在 `services/java-orchestrator/output` 目录执行 200 次“顶层文件长度求和”扫描，模拟租约检查开销。
+    - 命令：PowerShell 循环 + `Get-ChildItem -File` 统计字节。
+  - 测试数据：
+    - 迭代次数：200
+    - 总耗时：167.392 ms
+    - 单次平均：0.837 ms
+  - 对比结论：
+    - 改造前：无目录扫描（0 次）。
+    - 改造后：默认 5 秒一次扫描，按本机数据折算额外 CPU 时间约 `0.837ms / 5000ms ≈ 0.017%`，可接受。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=UserFacingErrorMapperTest test -q`
+
+### 2026-02-19 追加：移动端阅读手势改为“长按进入待决态 + 松手统一结算”，并切换为“再双击开卡”
+- 触发背景：
+  - 现有段落手势在长按阈值触发时立即复制，无法满足“先长按进入动作态，再由松手/左右滑分支结算”的交互预期。
+  - 词句链路此前采用“下拉打开卡片”，与“再双击已选词组/句子打开卡片”的新交互目标不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 手势识别与业务动作执行应解耦，避免在阈值时刻提前产生不可逆副作用；
+    - 词句选择与卡片打开应分离成两段意图，降低误触开卡概率。
+  - 复用杠杆：
+    - 复用 `mobile-markdown-gestures.js` 现有段落滑动物理反馈与删除/批注动作执行链；
+    - 复用 `mobile-concept-cards.js` 现有词组/句子解析与 `openCard(...)` 卡片打开链路；
+    - 复用 `index.html` 中 `PARAGRAPH_GESTURE_CONFIG` 配置注入点，无需新增模块。
+- 架构决策：
+  - 决策1：段落长按达到 1 秒仅进入“待决态”（armed），动作统一在 `touchend` 结算。
+  - 决策2：长按未达阈值前出现明显移动时，直接取消本次手势并交还滚动，避免滚动误判为动作。
+  - 决策3：取消下拉开卡主路径，改为“选中后 3 秒窗口内，再双击命中已选文本”才打开卡片。
+  - 决策4：保留“双击词=选句”的首要语义；仅当处于“再双击开卡”阶段才执行开卡分支。
+- 调用链变化：
+  - 改造前：
+    - 段落：`touchstart -> longPressTimer 到点即 copy`；
+    - 词句：`single tap/double click 选择 -> 下拉触发 openCard`。
+  - 改造后：
+    - 段落：`touchstart -> longPress armed -> touchend 按轨迹结算(copy/delete/annotate)`；
+    - 词句：`single tap 选词组 -> double tap 选句子 -> 再双击(命中已选且在 3s 窗口内) -> openCard`。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-markdown-gestures.js`
+    - 长按定时器改为仅设置 armed 状态，不再立即执行复制；
+    - `touchmove` 增加“预阈值移动即取消并交还滚动”；
+    - `touchend` 统一结算：左滑删除、右滑批注、其余松手复制。
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+    - 新增“选中后 3 秒可再双击开卡”状态机；
+    - 触摸短点链路改为“第一次双击选句，第二次双击（命中已选）开卡”；
+    - 下拉开卡开关默认关闭，仅保留兼容代码路径。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - `PARAGRAPH_GESTURE_CONFIG.holdTriggerMs` 调整为 `1000ms`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 回滚方案：
+  - 若新手势需回退，可将段落手势恢复为“长按即执行”分支，并将词句开卡开关切回下拉路径；
+  - 回滚仅涉及 `mobile-markdown-gestures.js` / `mobile-concept-cards.js` / `index.html`，不影响后端 API 与存储格式。
+
+### 2026-02-19 追加：修复“单击后双击不开卡”与 `selection-refine` 偏移失真
+- 触发背景：
+  - 用户反馈移动端“单击选词后双击无反应，未打开卡片”；
+  - 同时 `/api/mobile/cards/selection-refine` 返回未有效优化选词边界，前端几乎不应用纠偏结果。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 双击开卡需要满足“命中已选目标 + 双击识别成立”，不应被额外阶段门槛阻塞；
+    - 任何 offset 驱动的纠偏接口必须保持“入参与解算的文本基准一致”，否则坐标系漂移。
+  - 复用杠杆：
+    - 复用 `mobile-concept-cards.js` 既有 `resolveReopenSelectionTarget/openCard` 链路；
+    - 复用 `MobileCardController -> SelectionSyntaxRefineService` 的 refine 接口，不改前端协议字段。
+- 架构决策：
+  - 决策1：移除触摸端“open-prime 才能开卡”的额外阶段门槛，改为“选中后命中目标的双击直接开卡”。
+  - 决策2：放宽触摸短点阈值（位移/时长）与双击窗口，降低真实设备下的漏识别。
+  - 决策3：`/selection-refine` 控制器禁止对 `sourceText` 做 `trim()`，保持 offset 基准不变。
+  - 决策4：当 DJL 模型不可用或未判定 improved 时，增加规则回退打分，确保接口可产生可用边界扩展。
+- 调用链变化：
+  - 改造前：
+    - 触摸开卡：`single -> double` 仍可能停留在“选句”分支，需额外阶段才可开卡；
+    - refine：`controller trim(sourceText)` 造成 offset 漂移，前端升级判定常失败。
+  - 改造后：
+    - 触摸开卡：`selected + doubleTap(hit selected)` 直接 `openCard`；
+    - refine：`sourceText` 原样传入 + 规则回退可在无模型时继续提供扩边建议。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+    - 触摸双击分支改为命中已选即开卡；
+    - 放宽 `STRICT_SHORT_TAP_*` 与 `TOUCH_SELECTION_DOUBLE_TAP_WINDOW_MS`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - `refineSelection` 中 `sourceText` 去除 `trim()`，改为 `isBlank()` 校验。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/SelectionSyntaxRefineService.java`
+    - `max-source-chars` 默认值提升到 `560`；
+    - 新增规则回退评分与 improved 判定，作为 DJL 不可用/不提升时的兜底输出。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- 回滚方案：
+  - 前端可回滚到旧双击分支（含 open-prime）；后端可回滚 `sourceText trim` 改动与规则回退逻辑；
+  - 回滚不影响卡片存储协议与既有 API 路由。
+
+### 2026-02-20 追加：Python 下载链路新增抖音 URL 识别与 douyin-downloader 分流
+- 触发背景：
+  - 现有 `DownloadVideo` 统一走 `VideoProcessor(yt-dlp)`，对抖音链接缺少专门分流能力。
+  - 目标是在 Python 入口识别抖音链接，并复用仓库内 `douyin-downloader` 既有下载实现，避免重复造轮子。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 链接识别与下载执行应解耦，平台差异应在入口分流，不应污染通用下载器；
+    - gRPC 下载接口对后续链路的核心契约是“返回可转写的视频文件路径”，下载器内部目录结构应被适配层屏蔽。
+  - 复用杠杆：
+    - 复用 `services/python_grpc/src/server/grpc_service_impl.py` 的 `DownloadVideo` 统一入口与任务目录规范；
+    - 复用仓库已有 `douyin-downloader/downloader.py` CLI 作为抖音下载执行器；
+    - 复用现有 `_get_video_duration`、存储目录哈希和响应结构，保持下游 `TranscribeVideo` 链路不变。
+- 架构决策：
+  - 决策1：新增 `_is_douyin_url`/`_is_douyin_host` 作为平台识别原子能力，仅在 `DownloadVideo` 入口分流。
+  - 决策2：抖音分支通过 `_download_video_with_douyin_downloader` 调用 `douyin-downloader` 原生 CLI，不改其内部业务逻辑。
+  - 决策3：为保持主链路契约稳定，抖音下载后统一选取最新视频并归一到 `task_dir/video.<ext>` 返回。
+- 调用链变化：
+  - 改造前：
+    - `DownloadVideo -> VideoProcessor.download(yt-dlp) -> 返回 video_path`
+  - 改造后：
+    - `DownloadVideo -> if _is_douyin_url: _download_video_with_douyin_downloader -> 返回归一路径`
+    - `DownloadVideo -> else: VideoProcessor.download(yt-dlp) -> 返回 video_path`
+- 已落地改动：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增抖音域名识别、下载结果视频扫描与抖音下载适配函数；
+    - `DownloadVideo` 新增抖音分流分支，非抖音路径保持原行为。
+  - `services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py`
+    - 新增抖音 URL 识别测试。
+  - `services/python_grpc/src/server/tests/test_download_video_config.py`
+    - 新增 `DownloadVideo` 抖音分流测试，断言抖音场景不触发 `VideoProcessor`。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py services/python_grpc/src/server/tests/test_download_video_config.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：本次仅执行功能正确性回归与编译检查，未进行吞吐/时延压测。
+  - 测试数据：N/A（功能变更）。
+
+### 2026-02-20 追加：将抖音下载“运行时依赖”从仓库根脚本抽取到 services 内置模块
+- 触发背景：
+  - 现有 Python gRPC 主链路虽然已支持抖音分流，但下载实现仍通过子进程调用仓库根目录 `douyin-downloader/downloader.py`。
+  - 该方式对目录结构和外部脚本耦合较高，不利于 services 内聚与后续维护。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 业务主链路应依赖稳定模块边界，而非依赖仓库布局（脚本路径）；
+    - 抖音下载能力的最小闭环是“URL 归一 -> 浏览器抓取直链 -> 流式下载落盘”，不必把整套外部 CLI 全量引入。
+  - 复用杠杆：
+    - 复用 `douyin-downloader` 已验证的浏览器抓包策略核心逻辑（`aweme_detail` + 网络拦截 + HTML 兜底）；
+    - 复用 `grpc_service_impl.py` 既有 `DownloadVideo` 分流入口与返回契约（单一路径返回）。
+- 架构决策：
+  - 决策1：在 `services/python_grpc/src/server/douyin_download.py` 内置抖音下载实现，不再通过 `subprocess` 调 root 脚本。
+  - 决策2：`grpc_service_impl.py` 仅保留“识别 + 调用”职责，下载细节沉淀到 `douyin_download` 模块。
+  - 决策3：为 URL 归一引入 `modal_id -> /video/{id}` 规则，统一浏览器抓取入口，提升稳定性。
+- 调用链变化：
+  - 改造前：
+    - `DownloadVideo -> _download_video_with_douyin_downloader -> subprocess(root/douyin-downloader/downloader.py)`
+  - 改造后：
+    - `DownloadVideo -> services.server.douyin_download.download_video_with_douyin_downloader`
+    - `-> BrowserDownloadStrategy(Playwright) -> aiohttp 下载到 task_dir/video.mp4`
+- 已落地改动：
+  - `services/python_grpc/src/server/douyin_download.py`
+    - 从外部 CLI 包装器升级为 services 内置下载模块；
+    - 内置 `BrowserDownloadStrategy` 与视频 URL 提取链路；
+    - 增加 URL 归一与流式下载重试逻辑。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 通过模块导入复用新实现；
+    - 删除原文件内联的抖音下载 subprocess 实现。
+  - `services/python_grpc/src/server/tests/test_douyin_download_module.py`
+    - 新增模块级测试，覆盖视频 ID 提取与页面 URL 归一逻辑。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/douyin_download.py`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+  - `pytest services/python_grpc/src/server/tests/test_douyin_download_module.py -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：本次执行结构改造正确性与模块级回归测试，未进行吞吐/时延压测。
+  - 测试数据：`test_douyin_download_module.py` 共 4 条用例通过。
+
+### 2026-02-20 追加：引入分享链接统一解析层（Playwright 优先，覆盖抖音与 B 站短链）
+- 触发背景：
+  - 用户输入常为“分享文案 + 短链”的混合文本（如 `v.douyin.com` / `b23.tv`），`DownloadVideo` 直接消费原文会出现平台识别不稳定或链接不规范问题。
+  - 目标是在下载前统一完成“抽取 URL -> 展开短链 -> 归一主链接”，并优先使用 Playwright 保证与真实浏览器行为一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 链接解析是下载前置能力，应与具体下载器解耦；
+    - 分享短链解析要以“浏览器最终落地 URL”为准，减少仅靠字符串规则导致的误判。
+  - 复用杠杆：
+    - 复用 services 已接入的 Playwright 运行环境；
+    - 复用 `DownloadVideo` 现有分流入口（douyin/bilibili）与后续下载链路，避免改协议。
+- 架构决策：
+  - 决策1：新增 `share_link_resolver` 模块作为统一入口，返回结构化解析结果（平台、提取链接、归一链接、解析器来源）。
+  - 决策2：解析策略采用“Playwright 优先 + HTTP 重定向回退 + 纯规则直返”三级链路。
+  - 决策3：抖音归一规则区分 `video` 与 `note`，B 站归一到 `BV/AV` 主链接格式。
+- 调用链变化：
+  - 改造前：
+    - `DownloadVideo(request.video_url) -> 直接平台识别 -> 下载`
+  - 改造后：
+    - `DownloadVideo(request.video_url) -> resolve_share_link -> 平台识别/下载`
+    - 其中 `resolve_share_link` 支持从整段分享文案提取首个 URL。
+- 已落地改动：
+  - `services/python_grpc/src/server/share_link_resolver.py`
+    - 新增统一解析能力：URL 抽取、Playwright 展开、重定向回退、平台归一。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `DownloadVideo` 增加前置解析步骤，后续分流使用解析后的主链接。
+  - `services/python_grpc/src/server/tests/test_share_link_resolver.py`
+    - 新增解析层单测，覆盖抖音文案短链、B 站短链与直链场景。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/share_link_resolver.py`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+  - `pytest services/python_grpc/src/server/tests/test_share_link_resolver.py -q`
+  - 使用真实样例做运行验证：
+    - 抖音样例：`https://v.douyin.com/Q1ymsCrYEa0/` -> `https://www.douyin.com/note/7598573188708049137`
+    - B站样例：`https://b23.tv/sAEO5dN` -> `https://www.bilibili.com/video/BV11yigBfEkL`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：模块级功能回归 + 真实短链解析验证。
+  - 测试数据：`test_share_link_resolver.py` 3 条用例通过；2 条真实链接解析成功。
+
+### 2026-02-20 追加：将分享标题打通为最终 Markdown 标题来源
+- 触发背景：
+  - 用户要求“最终 Markdown 标题使用视频标题”，而现有链路在 Phase2B 组装前默认使用 `video.mp4` 文件名作为标题。
+  - 对于抖音/B站分享链路，这会导致文档标题可读性差、与原内容不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 标题属于下载阶段可确定的元数据，应在下载完成时固化，并供后续阶段复用；
+    - 组装阶段应优先消费结构化元数据，而非反推文件名。
+  - 复用杠杆：
+    - 复用 `share_link_resolver` 已有 Playwright 解析结果（含平台、canonical 链接）；
+    - 复用 Java `VideoProcessingOrchestrator` 既有 Phase2B 入参 `title`，仅替换来源不改协议。
+- 架构决策：
+  - 决策1：`DownloadVideo` 完成后写出 `video_meta.json`（标题、原始/解析链接、平台、canonical_id、解析器来源）。
+  - 决策2：`VideoProcessingOrchestrator` 在调用 `assembleRichTextAsync` 前优先读取 `video_meta.json.title`；无标题再回退文件名。
+  - 决策3：分享文案内嵌标题（`【...】` / `《...》`）作为标题兜底，避免页面标题缺失时丢失业务标题。
+- 调用链变化：
+  - 改造前：
+    - `DownloadVideo -> 仅返回 video_path`
+    - `Phase2B title <- file(videoPath).name`
+  - 改造后：
+    - `DownloadVideo -> 写入 video_meta.json(title, platform, links...)`
+    - `Phase2B title <- video_meta.json.title (fallback: 文件名)`
+- 已落地改动：
+  - `services/python_grpc/src/server/share_link_resolver.py`
+    - `ResolvedShareLink` 增加 `title` 字段；
+    - Playwright 解析时提取 `og:title/twitter:title/document.title`；
+    - 新增分享文案内嵌标题提取与平台后缀清理。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `DownloadVideo` 写入 `video_meta.json`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - Phase2B 前新增 `resolveDocumentTitle`，优先读取 `video_meta.json`。
+  - `services/python_grpc/src/server/tests/test_share_link_resolver.py`
+    - 增加标题相关用例（短链标题提取、内嵌标题兜底）。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_share_link_resolver.py -q`
+  - `python -m py_compile services/python_grpc/src/server/share_link_resolver.py`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：功能回归 + 真实分享链路解析验证。
+  - 测试数据：`test_share_link_resolver.py` 共 4 条用例通过。
+
+### 2026-02-20 追加：下载契约显式化与下载流程模块化重构
+- 触发背景：
+  - 现有链路通过 `video_meta.json` 侧写标题与解析信息，Java 侧读取 sidecar 才能拿到标题，契约不够显式。
+  - `grpc_service_impl.DownloadVideo` 职责过重（解析、分流、下载、落盘、回包耦合在一处），扩展平台规则和测试成本偏高。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 关键业务元数据应沿 RPC 主契约返回，而非依赖非强约束 sidecar；
+    - 平台规则应单点维护，避免重复实现导致演进分叉；
+    - 入口方法应保持“编排薄层”，复杂流程下沉到可复用模块。
+  - 复用杠杆：
+    - 复用既有 `share_link_resolver`、`douyin_download`、`video_meta.json` 写入能力；
+    - 复用 `platform_rules.py` 作为规则源；
+    - 复用 Java 侧既有组装入参 `title`，仅调整标题来源优先级。
+- 架构决策：
+  - 决策1：扩展 `DownloadResponse`，显式返回 `resolved_url/video_title/source_platform/canonical_id/link_resolver/content_type`。
+  - 决策2：新增 `services/python_grpc/src/server/download_service.py`，承接下载主流程，`grpc_service_impl.DownloadVideo` 仅做编排与回包。
+  - 决策3：`share_link_resolver.py` 与 `grpc_service_impl.py` 统一复用 `platform_rules.py`，消除平台规则重复实现。
+  - 决策4：标题策略改为候选打分（embedded/page/fallback）并返回来源/置信度，降低噪声标题误选概率。
+  - 决策5：Java 侧 `resolveDocumentTitle` 优先级调整为 `grpc.videoTitle > video_meta.json > 文件名`。
+- 调用链变化：
+  - 改造前：
+    - `DownloadVideo(重逻辑) -> sidecar(video_meta.json)`
+    - `Assemble title <- video_meta.json or 文件名`
+  - 改造后：
+    - `DownloadVideo(薄编排) -> download_service(解析+分流+下载+元数据) -> DownloadResponse(显式元数据)`
+    - `Assemble title <- grpc.videoTitle -> video_meta.json -> 文件名`
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+    - `DownloadResponse` 新增 6 个元数据字段。
+  - `services/python_grpc/src/server/download_service.py`
+    - 新增下载流程模块 `run_download_flow`。
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `DownloadVideo` 下沉为薄编排；
+    - 旧规则函数保留名称但委托到 `platform_rules.py`。
+  - `services/python_grpc/src/server/share_link_resolver.py`
+    - 规则复用 `platform_rules.py`；
+    - 新增标题候选打分与最佳标题选择逻辑。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - `DownloadResult` 对齐新增字段并完成映射。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 文档标题优先读取 gRPC 显式标题；
+    - 增加 `download_content_type/source_platform` 流程指标记录。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorTitleResolutionTest.java`
+    - 新增跨语言契约消费优先级单测。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_share_link_resolver.py -q`
+  - `pytest services/python_grpc/src/server/tests/test_download_video_config.py -q`
+  - `pytest services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py -q`
+  - `python -m py_compile services/python_grpc/src/server/share_link_resolver.py`
+  - `python -m py_compile services/python_grpc/src/server/download_service.py`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：协议回归 + Python/Java 编译验证 + 单元测试。
+  - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：Reader Telemetry 冷热分流与逻辑池上下文挂载
+- 触发背景：
+  - Android 端已改为微批上报到 `/api/telemetry/ingest`，但后端仍是单文件直写，未满足“冷数据分析层 + 热数据逻辑池”的分流目标。
+  - 业务要求明确：服务端接到批处理后不能直接调用 LLM，热事件只保留 4 类并挂载 nodeId 对应 Markdown 语义上下文。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 事件摄入层必须是低成本、高吞吐、可追溯的数据入口；
+    - 语义推理链路必须建立在筛选后的高价值事件之上，避免把所有交互噪声放大到模型算力开销。
+  - 复用杠杆：
+    - 复用 `TaskQueueManager` 运行态任务索引能力定位 runtime 任务产物；
+    - 复用 `StorageTaskCacheService` 历史任务索引能力定位 storage 任务 Markdown；
+    - 复用既有 markdown 目录扫描优先级（`enhanced_output.md > enhanced_output2.md > output.md`）。
+- 架构决策：
+  - 决策1：`/api/telemetry/ingest` 改为三路落盘：
+    - `telemetry.ingest.file`：原始接收流（raw）
+    - `telemetry.ingest.cold-file`：冷数据工程分析流（cold）
+    - `telemetry.ingest.logic-pool-file`：热数据逻辑池流（hot）
+  - 决策2：热事件白名单固定为 4 类：
+    - `paragraph_resonance_double_tap`
+    - `paragraph_mark_deleted_by_swipe`
+    - `note_saved`
+    - `lexical_card_opened`
+  - 决策3：热事件上下文挂载优先级：
+    - 优先从任务 Markdown 解析 nodeId（`l-xx/line-xx/p-xx/node-xx` 或尾号）映射行文本与邻域片段；
+    - 若映射失败，回退读取事件 payload 中可用文本字段；
+    - 仍失败则标记 `nodeContextFound=false` 并计数回包。
+  - 决策4：摄入链路明确不触发 LLM，仅做 sanitize、分流、上下文增强与持久化。
+- 调用链变化：
+  - 改造前：
+    - `POST /api/telemetry/ingest -> accepted[] -> 单 NDJSON`
+  - 改造后：
+    - `POST /api/telemetry/ingest -> sanitize -> cold/hot classify -> hot context mount -> raw/cold/hot NDJSON`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/TelemetryIngestController.java`
+    - 新增热事件白名单筛选；
+    - 新增 runtime/storage 双通路 Markdown 定位；
+    - 新增 nodeId 行号解析与上下文片段挂载；
+    - 新增三路 sink 落盘与统计回包（`accepted/coldCount/hotCount/unresolvedHotContextCount`）。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：编译回归 + 编码校验。
+  - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：article_exit 异步微观假说提取（Cognitive Cache Layer）
+- 触发背景：
+  - 冷热事件分流已完成，但仍缺少“把行为信号转为可消费认知切片”的轻量推理环节。
+  - 业务要求明确“首次 LLM 介入”必须在用户退出文章时异步触发，且用小模型高频小颗粒运行。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 推理应与采集解耦：采集链路负责高吞吐写入，推理链路负责低频高价值提炼；
+    - 用户退出文章是一个自然会话边界，适合作为微观认知总结触发点。
+  - 复用杠杆：
+    - 复用 `/api/telemetry/ingest` 既有冷/热记录与 node 文本上下文；
+    - 复用 Spring `@Async("taskExecutor")` 异步执行能力，确保 ingest 主请求不被 LLM 阻塞；
+    - 复用运行态任务 `userId` 作为用户分桶键，无法解析时回退 `task_<taskId>`。
+- 架构决策：
+  - 决策1：仅在 `flushReason=article_exit` 时触发微观假说提取，锁屏/后台 flush 不触发。
+  - 决策2：新增 `MicroHypothesisExtractorService`：
+    - 优先调用可配置小模型端点（OpenAI-compatible `/chat/completions`）；
+    - 调用失败或未配置时自动回退启发式规则，保证链路可用。
+  - 决策3：输出统一结构：
+    - `action`
+    - `content_type`
+    - `inferred_hypothesis`
+  - 决策4：落地为按用户分桶的临时认知缓存：
+    - `var/telemetry/cognitive-cache/<userKey>/cognitive_cache.ndjson`
+    - 附带 `generatedAt/expiresAt/source` 元信息。
+- 调用链变化：
+  - 改造前：
+    - `article_exit -> /api/telemetry/ingest -> raw/cold/hot NDJSON`
+  - 改造后：
+    - `article_exit -> /api/telemetry/ingest -> raw/cold/hot NDJSON`
+    - `-> async MicroHypothesisExtractorService -> Cognitive Cache NDJSON`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+    - 新增微观假说异步提取、LLM 调用、启发式回退、缓存落盘。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/TelemetryIngestController.java`
+    - 增加 `article_exit` 触发逻辑、用户键解析、回包触发状态字段。
+  - `services/java-orchestrator/src/main/resources/application.properties`
+    - 新增 `telemetry.micro-hypothesis.*` 配置项。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：编译回归 + 文档编码校验。
+  - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：遥测推理提示词外置模板化（Prompt Externalization）
+- 触发背景：
+  - 微观假说与宏观画像熔炉的提示词之前分散在 Java 常量与方法内联字符串中，修改成本高且难以版本化治理。
+  - 业务要求将“相关提示词抽取出来，单独存放”，支持后端按配置切换模板。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - Prompt 属于可迭代策略，不应与业务控制流强耦合；
+    - 运行时策略应通过资源文件和配置项管理，降低重新编译发布成本。
+  - 复用杠杆：
+    - 复用 `DeepSeekAdvisorService` 已验证的模板加载模式（Resource + UTF-8 + 缓存 + fallback）；
+    - 复用 `application.properties` 配置体系，统一 prompt 资源路径注入方式。
+- 架构决策：
+  - 决策1：`MicroHypothesisExtractorService` 与 `MacroPersonaForgeService` 统一改为“资源模板优先 + 代码默认回退”。
+  - 决策2：新增模板资源目录：
+    - `services/java-orchestrator/src/main/resources/prompts/telemetry/micro-hypothesis/`
+    - `services/java-orchestrator/src/main/resources/prompts/telemetry/macro-forge/`
+  - 决策3：新增配置键：
+    - `telemetry.micro-hypothesis.prompt.system-resource`
+    - `telemetry.micro-hypothesis.prompt.user-resource`
+    - `telemetry.macro-forge.prompt.system-resource`
+    - `telemetry.macro-forge.prompt.user-resource`
+- 调用链变化：
+  - 改造前：
+    - `service code (hardcoded prompt) -> /chat/completions`
+  - 改造后：
+    - `application.properties -> classpath prompt template -> service cache/fallback -> /chat/completions`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+    - 已接入模板加载与缓存，保留默认 prompt 回退。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MacroPersonaForgeService.java`
+    - 移除内联 prompt，改为模板加载与占位符替换。
+  - `services/java-orchestrator/src/main/resources/application.properties`
+    - 增加 micro/macro prompt 资源路径配置。
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/**`
+    - 新增四份中文提示词模板（micro system/user, macro system/user）。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无吞吐/时延优化目标。
+  - 测试方式：编译回归 + 文档编码校验。
+  - 测试数据：以上两条命令执行通过。
+
+### 2026-02-20 追加：第四阶段宏观画像熔炉（Macro Persona Forge）
+- 触发背景：
+  - 微观假说已具备稳定产出能力，但缺少“阶段性重估十维画像”的高阶收敛环节。
+  - 业务要求是“低频高价值重算”：不在每次事件触发，而在假说积累或阅读里程碑后触发一次昂贵主模型重塑。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 高吞吐链路负责采集，低频链路负责重估；二者必须解耦，避免把重模型开销引入实时上报路径。
+    - 人格重塑应基于时间窗口内的“微观证据集合”，而非单条行为噪声。
+  - 复用杠杆：
+    - 复用 `cognitive_cache.ndjson` 作为微观切片来源；
+    - 复用 `taskExecutor` 异步线程池，保证主链路不阻塞；
+    - 复用 OpenAI-compatible `/chat/completions` 接口，便于切换 DeepSeek-R1/其他推理后端。
+- 架构决策：
+  - 决策1：新增 `MacroPersonaForgeService`，由微观提取成功后触发 `maybeForge(userKey)` 判定，不满足阈值直接返回。
+  - 决策2：触发条件采用 OR 策略：
+    - 微观假说累计达到 `N`（`telemetry.macro-forge.hypothesis-threshold`）；
+    - 近期核心文章数达到 `5`（`telemetry.macro-forge.core-articles-threshold`）；
+    - 距离上次熔炉达到 `3` 天且存在新增切片（`telemetry.macro-forge.interval-days`）。
+  - 决策3：熔炉输出统一工件：
+    - `persona_10d.json`：十维画像（`dimensions`）+ `evolution_verdict`。
+    - `macro_forge_history.ndjson`：每次重塑历史。
+    - `macro_forge_state.json`：上次消费边界与触发元数据。
+  - 决策4：LLM 失败时启用启发式回退，保证画像链路可持续演进。
+- 调用链变化：
+  - 改造前：
+    - `article_exit -> micro hypothesis -> cognitive_cache.ndjson`
+  - 改造后：
+    - `article_exit -> micro hypothesis -> cognitive_cache.ndjson`
+    - `-> maybeForge(userKey) -> (阈值命中) -> DeepSeek-R1 -> persona_10d.json + evolution_verdict`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MacroPersonaForgeService.java`
+    - 新增阈值判定、主模型调用、十维画像归一化、状态/历史持久化。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+    - 微观假说落盘后挂接 `macroPersonaForgeService.maybeForge(userKey)`。
+  - `services/java-orchestrator/src/main/resources/application.properties`
+    - 新增 `telemetry.macro-forge.*` 配置项。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门性能优化目标。
+  - 测试方式：编译回归 + 文档编码校验。
+  - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：LLM 输出容错解析与交互审计异步落盘
+- 触发背景：
+  - 提示词已进入独立模板管理后，LLM 输出字段和包裹结构可能随策略迭代变化，固定键解析容易出现空结果。
+  - 业务要求每次 LLM 交互都可追溯，不能只在成功提取认知切片时留痕。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 采集链路与推理链路解耦后，推理环节必须具备“结构容错 + 可观测性”才能持续迭代提示词；
+    - 审计写盘不能反向阻塞主链路，应异步化。
+  - 复用杠杆：
+    - 复用 `taskExecutor` 异步执行器作为交互日志落盘通道；
+    - 复用现有 NDJSON 追加写入模式，保持后续离线分析管道一致。
+- 架构决策：
+  - 决策1：`MicroHypothesisExtractorService` 解析器支持数组直出、包装对象（`items/results/data/output/hypotheses/slices`）与字段别名映射。
+  - 决策2：新增 `TelemetryLlmInteractionLogService`，统一异步写入 LLM 交互日志（成功/失败/跳过配置均留痕）。
+  - 决策3：micro/macro 两条 LLM 调用链均接入审计落盘，记录请求摘要、状态码、解析结果与耗时。
+- 调用链变化：
+  - 改造前：
+    - `llm call -> parse -> (仅成功路径) cognitive/persona 落盘`
+  - 改造后：
+    - `llm call -> parse -> async interaction audit NDJSON`
+    - `-> business output (cognitive cache / persona forge output)`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+    - 增强 JSON 数组容错解析与字段别名读取；
+    - 新增每次调用的交互审计上报。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MacroPersonaForgeService.java`
+    - 新增每次调用的交互审计上报。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TelemetryLlmInteractionLogService.java`
+    - 新增异步 NDJSON 落盘服务。
+  - `services/java-orchestrator/src/main/resources/application.properties`
+    - 新增 `telemetry.llm-interaction-log.root` 配置项。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无专门吞吐/时延优化目标。
+  - 测试方式：编译回归 + 编码校验。
+  - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：新 Prompt Schema 提取兼容（content_focus / dual-tier persona）
+- 触发背景：
+  - 提示词升级后，微观输出从 `content_type` 演进为 `content_focus`，宏观输出由单层 `dimensions` 演进为 `surface_context + deep_soul_matrix` 双层结构。
+  - 若不做兼容，旧链路会出现“解析为空”或“画像字段缺失”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 输出契约会随着提示词演化，应由服务端解析层承担向后兼容，不应要求上游 prompt 永远静态。
+    - 画像持久化应保持“对外新结构可读、对内旧逻辑可运行”的双轨能力。
+  - 复用杠杆：
+    - 复用现有 `normalizeProfile` 归一化路径，新增新旧结构映射；
+    - 复用已有 NDJSON 审计链路与 `taskExecutor`，保持可观测性一致。
+- 架构决策：
+  - 决策1：微观提取支持 `content_focus` 字段并映射到内部标准字段 `content_type`。
+  - 决策1.1：微观提取新增 `confidence` 字段落盘，缺失时使用受控默认值并做区间裁剪（0.1~1.0）。
+  - 决策2：宏观归一化支持从 `deep_soul_matrix` 反向生成内部 `dimensions`，并同时保留 `surface_context/deep_soul_matrix` 原样输出。
+  - 决策3：新增反射单测锁定新 schema 的输入输出行为，降低后续 prompt 迭代回归风险。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+    - 增加 `content_focus/contentFocus` 字段别名提取。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MacroPersonaForgeService.java`
+    - 增加双层画像字段归一化与新旧维度映射。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorServiceParsingTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/MacroPersonaForgeServiceNormalizationTest.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=MicroHypothesisExtractorServiceParsingTest,MacroPersonaForgeServiceNormalizationTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：无吞吐/时延专项优化目标。
+  - 测试方式：结构兼容单测 + 编译回归 + 编码校验。
+  - 测试数据：见“验证方式”命令执行结果。

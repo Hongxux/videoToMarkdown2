@@ -27,6 +27,15 @@ video:
       download_cookies_file: ""
   # 视频下载代理 (可选，如: "http://127.0.0.1:7890")
   download_proxy: ""
+  # 外部下载器（提速推荐）：aria2c
+  # 为空时走 yt-dlp 内置下载器
+  external_downloader: "aria2c"
+  # 外部下载器参数：支持字符串或 YAML 列表
+  external_downloader_args:
+    - "--min-split-size=1M"
+    - "--max-connection-per-server=16"
+    - "--split=16"
+    - "--file-allocation=none"
   # 是否禁用 SSL 证书验证 (仅在遇到证书问题时启用)
   disable_ssl_verify: false
   # YouTube 风控场景建议启用：直接复用浏览器登录态 Cookie

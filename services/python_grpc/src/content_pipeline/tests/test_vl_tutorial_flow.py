@@ -1,7 +1,7 @@
 """
 VL 鏁欑▼妯″紡娴嬭瘯锛?
-1) 瑙ｆ瀽 step schema 鏄惁姝ｇ‘
-2) 鏍￠獙澶氭楠?process 鍦?Phase2B 鍓嶇殑浜х墿瀵煎嚭锛坢ock VL + mock ffmpeg锛?
+1) 瑙ｆ瀽 step schema 鏄惁姝ｇ‘
+2) 鏍￠獙澶氭楠?process 鍦?Phase2B 鍓嶇殑浜х墿瀵煎嚭锛坢ock VL + mock ffmpeg锛?
 """
 
 from __future__ import annotations
@@ -71,6 +71,57 @@ def _build_generator_config() -> Dict[str, Any]:
     }
 
 
+def test_vl_init_supports_bearer_token_with_qianfan_defaults():
+    analyzer = VLVideoAnalyzer(
+        {
+            "api": {
+                "base_url": "https://qianfan.baidubce.com/v2/chat/completions",
+                "bearer_token": "test-bearer-token",
+            }
+        }
+    )
+
+    assert analyzer._api_key == "test-bearer-token"
+    assert analyzer.model == "ernie-4.5-turbo-vl-32k"
+    assert analyzer.video_input_mode == "keyframes"
+
+
+def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path: Path):
+    clip = tmp_path / "demo.mp4"
+    clip.write_bytes(b"fake-video")
+
+    analyzer = VLVideoAnalyzer(
+        {
+            "api": {
+                "base_url": "https://qianfan.baidubce.com/v2/chat/completions",
+                "bearer_token": "test-bearer-token",
+                "video_input_mode": "dashscope_upload",
+            }
+        }
+    )
+
+    call_counter = {"upload_calls": 0}
+
+    async def _fake_upload(_video_path: str):
+        call_counter["upload_calls"] += 1
+        return "https://example.com/fake.mp4"
+
+    async def _fake_extract(_video_path: str, max_frames: int = 6):
+        _ = max_frames
+        return [{"timestamp_sec": 0.5, "data_uri": "data:image/jpeg;base64,AA=="}]
+
+    monkeypatch.setattr(analyzer, "_try_get_dashscope_temp_url", _fake_upload)
+    monkeypatch.setattr(analyzer, "_extract_keyframes", _fake_extract)
+
+    messages = asyncio.run(analyzer._build_messages(str(clip), analysis_mode="default"))
+
+    assert call_counter["upload_calls"] == 0
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    assert messages[1]["role"] == "user"
+    assert any(item.get("type") == "image_url" for item in messages[1]["content"])
+
+
 def test_tutorial_schema_parse_and_normalize():
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
     payload = [
@@ -78,13 +129,19 @@ def test_tutorial_schema_parse_and_normalize():
             "step_id": 1,
             "step_description": "Open settings",
             "main_action": "Open settings panel",
-            "main_operation": ["Click the settings icon", "Enter network settings"],
+            "main_operation": "1. Click the settings icon\n2. Enter network settings\n[KEYFRAME_1]",
             "precautions": ["Do not edit unrelated options"],
             "step_summary": "settings page opened",
             "operation_guidance": ["click settings", "open network settings"],
             "clip_start_sec": 0.0,
             "clip_end_sec": 7.0,
-            "instructional_keyframe_timestamp": [6.2],
+            "instructional_keyframes": [
+                {
+                    "timestamp_sec": 6.2,
+                    "frame_reason": "settings page visible",
+                    "bbox": [120, 80, 760, 920],
+                }
+            ],
         },
         {
             "step_id": 2,
@@ -108,7 +165,14 @@ def test_tutorial_schema_parse_and_normalize():
     assert results[0].step_id == 1
     assert results[0].step_description == "Open settings"
     assert results[0].main_action == "Open settings panel"
-    assert results[0].main_operation == ["Click the settings icon", "Enter network settings"]
+    assert results[0].main_operation == ["1. Click the settings icon\n2. Enter network settings\n[KEYFRAME_1]"]
+    assert results[0].instructional_keyframes == [
+        {
+            "timestamp_sec": 6.2,
+            "frame_reason": "settings page visible",
+            "bbox": [120, 80, 760, 920],
+        }
+    ]
     assert results[0].precautions == ["Do not edit unrelated options"]
     assert results[0].step_summary == "settings page opened"
     assert results[0].operation_guidance == ["click settings", "open network settings"]
@@ -116,11 +180,19 @@ def test_tutorial_schema_parse_and_normalize():
     assert results[0].knowledge_type == "process"
     assert results[1].suggested_screenshoot_timestamps == [12.2]
     assert normalized[0]["instructional_keyframe_timestamp"] == [6.2]
+    assert normalized[0]["instructional_keyframes"] == [
+        {
+            "timestamp_sec": 6.2,
+            "frame_reason": "settings page visible",
+            "bbox": [120, 80, 760, 920],
+        }
+    ]
     assert set(normalized[0].keys()) == {
         "step_id",
         "step_description",
         "main_action",
         "main_operation",
+        "instructional_keyframes",
         "precautions",
         "step_summary",
         "operation_guidance",
@@ -498,6 +570,13 @@ def test_analyze_clip_uses_unit_relative_ids_for_tutorial_mode(monkeypatch):
                     clip_start_sec=1.0,
                     clip_end_sec=9.0,
                     suggested_screenshoot_timestamps=[7.5],
+                    instructional_keyframes=[
+                        {
+                            "timestamp_sec": 7.5,
+                            "frame_reason": "port value changed",
+                            "bbox": [100, 120, 900, 980],
+                        }
+                    ],
                     step_id=2,
                     step_description="change port",
                 )
@@ -520,6 +599,8 @@ def test_analyze_clip_uses_unit_relative_ids_for_tutorial_mode(monkeypatch):
     assert result.success is True
     assert result.clip_requests[0]["clip_id"] == "SU200/SU200_clip_step_02_change_port"
     assert result.screenshot_requests[0]["screenshot_id"] == "SU200/SU200_ss_step_02_key_01_change_port"
+    assert result.screenshot_requests[0]["frame_reason"] == "port value changed"
+    assert result.screenshot_requests[0]["bbox"] == [100, 120, 900, 980]
 
 
 def test_generate_marks_unit_abstract_when_no_needed_video(monkeypatch):
@@ -739,23 +820,35 @@ class _FakeAnalyzer:
                 "step_id": 1,
                 "step_description": "open settings",
                 "main_action": "open settings page",
-                "main_operation": ["click settings", "open config tab"],
+                "main_operation": "1. click settings\n2. open config tab\n[KEYFRAME_1]",
                 "precautions": ["do not change unrelated fields"],
                 "step_summary": "settings opened",
                 "operation_guidance": ["open settings", "enter config tab"],
                 "clip_start_sec": 0.0,
                 "clip_end_sec": 8.0,
-                "instructional_keyframe_timestamp": [7.2],
+                "instructional_keyframes": [
+                    {
+                        "timestamp_sec": 7.2,
+                        "frame_reason": "settings panel loaded",
+                        "bbox": [120, 80, 760, 920],
+                    }
+                ],
             },
             {
                 "step_id": 2,
                 "step_description": "change port",
                 "main_action": "modify port",
-                "main_operation": ["update port value", "click save"],
+                "main_operation": "1. update port value\n2. click save\n[KEYFRAME_1]",
                 "precautions": [],
                 "clip_start_sec": 8.0,
                 "clip_end_sec": 17.0,
-                "instructional_keyframe_timestamp": [16.5],
+                "instructional_keyframes": [
+                    {
+                        "timestamp_sec": 16.5,
+                        "frame_reason": "save button clicked",
+                        "bbox": [100, 120, 900, 980],
+                    }
+                ],
             },
         ]
         result.analysis_results = [
@@ -913,6 +1006,8 @@ def test_generate_tutorial_assets_per_unit_full_flow_before_phase2b(tmp_path, mo
     assert data["steps"][0]["precautions"] == ["do not change unrelated fields"]
     assert data["steps"][0]["step_summary"] == "settings opened"
     assert data["steps"][0]["operation_guidance"] == ["open settings", "enter config tab"]
+    assert data["steps"][0]["instructional_keyframe_details"][0]["frame_reason"] == "settings panel loaded"
+    assert data["steps"][0]["instructional_keyframe_details"][0]["bbox"] == [120, 80, 760, 920]
 
 
 def test_resolve_pre_vl_parallel_workers_prefers_cv_executor():

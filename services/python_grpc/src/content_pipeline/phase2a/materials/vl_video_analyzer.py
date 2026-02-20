@@ -2,7 +2,7 @@
 VL-Based Video Analyzer - 基于视觉语言模型的视频分析器
 
 功能：
-1. 使用 Qwen3-VL-Plus 分析语义单元视频片段
+1. 使用可配置的 VL 模型分析语义单元视频片段
 2. 解析 AI 返回的知识类型、视频截取区间、截图时间戳
 3. 将相对时间戳（片段内）转换为绝对时间戳（原视频）
 
@@ -67,6 +67,7 @@ class VLAnalysisResult:
     analysis_mode: str = "default"
     main_action: str = ""
     main_operation: List[str] = field(default_factory=list)
+    instructional_keyframes: List[Dict[str, Any]] = field(default_factory=list)
     precautions: List[str] = field(default_factory=list)
     step_summary: str = ""
     operation_guidance: List[str] = field(default_factory=list)
@@ -91,7 +92,7 @@ class VLClipAnalysisResponse:
 
 
 class VLVideoAnalyzer:
-    """基于 Qwen3-VL-Plus 的视频分析器"""
+    """基于视觉语言模型（VL）的通用视频分析器"""
     
     def __init__(self, config: Dict[str, Any]):
         """
@@ -102,15 +103,43 @@ class VLVideoAnalyzer:
         """
         api_config = config.get("api", {})
         
-        # 优先使用 api_key，其次从环境变量读取
-        api_key = api_config.get("api_key", "")
+        self.base_url = str(
+            api_config.get("base_url", "https://qianfan.baidubce.com/v2/chat/completions") or ""
+        ).strip()
+        self.model = str(api_config.get("model", "ernie-4.5-turbo-vl-32k") or "").strip()
+        self.provider = str(api_config.get("provider", "") or "").strip().lower()
+
+        # 统一鉴权解析：兼容 api_key（DashScope）与 bearer_token（千帆）。
+        # 解析优先级：显式 api_key > 显式 bearer_token > 环境变量。
+        api_key = str(api_config.get("api_key", "") or "").strip()
         if not api_key:
-            api_key_env = api_config.get("api_key_env", "DASHSCOPE_API_KEY")
-            api_key = os.environ.get(api_key_env, "")
+            api_key = str(api_config.get("bearer_token", "") or "").strip()
+
+        api_key_env = str(api_config.get("api_key_env", "") or "").strip()
+        bearer_env = str(api_config.get("bearer_token_env", "") or "").strip()
+        if not api_key_env:
+            api_key_env = "QIANFAN_BEARER_TOKEN" if self._is_qianfan_endpoint(self.base_url) else "DASHSCOPE_API_KEY"
+        if not bearer_env:
+            bearer_env = "VISION_AI_BEARER_TOKEN"
+
+        if not api_key:
+            for env_name in (api_key_env, bearer_env):
+                if not env_name:
+                    continue
+                candidate = str(os.environ.get(env_name, "") or "").strip()
+                if candidate:
+                    api_key = candidate
+                    break
         self._api_key = api_key
-        
-        self.base_url = api_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        self.model = api_config.get("model", "qwen3-vl-plus")
+        self._api_key_env = api_key_env
+
+        # 千帆可选 appid 透传（官方推荐用于计费/路由）。
+        self.appid = str(api_config.get("appid", "") or "").strip()
+        if not self.appid:
+            appid_env = str(api_config.get("appid_env", "VISION_AI_APP_ID") or "").strip()
+            if appid_env:
+                self.appid = str(os.environ.get(appid_env, "") or "").strip()
+
         self.max_retries = api_config.get("max_retries", 2)
         
         # 视频压缩配置 (API 限制 10MB)
@@ -119,9 +148,13 @@ class VLVideoAnalyzer:
         self.max_tokens = api_config.get("max_tokens", 4096)
         self.temperature = api_config.get("temperature", 0.2)
 
-        # 兼容 DashScope data-uri 限制的输入策略
-        # auto: data-uri(小文件) -> DashScope File.upload(若可用) -> 关键帧降级
-        self.video_input_mode = api_config.get("video_input_mode", "auto")
+        # 输入策略：
+        # - DashScope 默认 auto（data-uri -> upload -> keyframes）
+        # - 千帆默认 keyframes，避免误走 DashScope 专有上传链路
+        default_video_input_mode = "keyframes" if self._is_qianfan_endpoint(self.base_url) else "auto"
+        self.video_input_mode = str(
+            api_config.get("video_input_mode", default_video_input_mode) or default_video_input_mode
+        ).strip().lower()
         self.max_input_frames = int(api_config.get("max_input_frames", 6))
         self.max_image_dim = int(api_config.get("max_image_dim", 1024))
         
@@ -133,11 +166,14 @@ class VLVideoAnalyzer:
         )
         
         # 初始化 OpenAI 兼容客户端
-        self.client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=self.base_url,
-            http_client=self.http_client
-        )
+        client_kwargs: Dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": self.base_url,
+            "http_client": self.http_client,
+        }
+        if self.appid:
+            client_kwargs["default_headers"] = {"appid": self.appid}
+        self.client = AsyncOpenAI(**client_kwargs)
         
         # 截图优化配置
         self.screenshot_optimization = config.get("screenshot_optimization", {})
@@ -166,7 +202,20 @@ class VLVideoAnalyzer:
         tutorial_cfg = config.get("tutorial_mode", {}) if isinstance(config.get("tutorial_mode", {}), dict) else {}
         self.tutorial_min_step_duration_sec = float(tutorial_cfg.get("min_step_duration_sec", 5.0))
         
-        logger.info(f"VLVideoAnalyzer 初始化完成: model={self.model}")
+        logger.info(
+            f"VLVideoAnalyzer 初始化完成: provider={self.provider or 'auto'}, "
+            f"model={self.model}, mode={self.video_input_mode}, base_url={self.base_url}"
+        )
+
+    @staticmethod
+    def _is_dashscope_endpoint(base_url: str) -> bool:
+        normalized = str(base_url or "").strip().lower()
+        return "dashscope.aliyuncs.com" in normalized
+
+    @staticmethod
+    def _is_qianfan_endpoint(base_url: str) -> bool:
+        normalized = str(base_url or "").strip().lower()
+        return "qianfan.baidubce.com" in normalized or "aistudio.baidu.com" in normalized
 
     def __del__(self):
         """析构时确保资源释放 (注意: 在异步环境中，建议显式调用 close)"""
@@ -234,8 +283,9 @@ class VLVideoAnalyzer:
             "1) Output exactly one valid JSON array. No markdown, no prefix/suffix text, no explanations.\n"
             "2) Each array item must be one complete step.\n"
             "3) Required fields per item: step_id (Integer), step_description (String), "
-            "clip_start_sec (Float), clip_end_sec (Float), instructional_keyframe_timestamp (List[Float]).\n"
-            "   Optional fields: main_action (String), main_operation (List[String]), precautions (List[String]), "
+            "clip_start_sec (Float), clip_end_sec (Float), main_operation (String), instructional_keyframes (List[Object]).\n"
+            "   instructional_keyframes item fields: timestamp_sec (Float), optional frame_reason (String), optional bbox ([ymin,xmin,ymax,xmax], 0-1000).\n"
+            "   Optional fields: main_action (String), precautions (List[String]), "
             "step_summary (String), operation_guidance (List[String]), "
             "no_needed_video (Boolean), should_type (abstract/concrete).\n"
             "   If an optional field is unnecessary for a step, omit it or return an empty value.\n"
@@ -244,7 +294,7 @@ class VLVideoAnalyzer:
             "   - Keep explanation + execution + result of the same step together.\n"
             "   - Remove thinking/hesitation time (mouse wandering, idle pause, no new information).\n"
             "   - No step shorter than 5 seconds. Merge short steps with adjacent steps.\n"
-            "6) instructional_keyframe_timestamp must be true instructional keyframes, "
+            "6) instructional_keyframes must be true instructional keyframes, "
             "prefer final state or just-before-submit moments.\n"
             "7) Avoid -1 for timestamps; if action spans whole clip use [0.0, clip_duration].\n"
             + VLVideoAnalyzer._build_route_rules_en(
@@ -488,12 +538,15 @@ class VLVideoAnalyzer:
                         f"{semantic_unit_id}_ss_vl_{i + 1:02d}_{j + 1:02d}",
                     )
                     label = f"{ar.knowledge_type}_screenshot_{j+1}"
+                    keyframe_meta: Dict[str, Any] = {}
                     if normalized_mode == "tutorial_stepwise":
                         screenshot_id = self._build_unit_relative_asset_id(
                             semantic_unit_id,
                             f"{semantic_unit_id}_ss_step_{step_id:02d}_key_{j + 1:02d}_{action_brief}",
                         )
                         label = f"step_{step_id:02d}:{ar.step_description or action_brief}_keyframe_{j+1}"
+                        if j < len(ar.instructional_keyframes or []):
+                            keyframe_meta = dict(ar.instructional_keyframes[j] or {})
 
                     result.screenshot_requests.append({
                         "screenshot_id": screenshot_id,
@@ -508,6 +561,8 @@ class VLVideoAnalyzer:
                         "analysis_mode": normalized_mode,
                         "is_instructional_keyframe": normalized_mode == "tutorial_stepwise",
                         "keyframe_index": j + 1,
+                        "frame_reason": str(keyframe_meta.get("frame_reason", "") or ""),
+                        "bbox": self._normalize_bbox_1000(keyframe_meta.get("bbox")),
                     })
 
             result.success = True
@@ -628,7 +683,7 @@ class VLVideoAnalyzer:
         analysis_mode: str = "default",
     ) -> tuple[List[VLAnalysisResult], Dict[str, int], List[Dict[str, Any]]]:
         """
-        调用 Qwen3-VL-Plus API 并解析结果。
+        调用 VL API 并解析结果。
 
         Returns:
             tuple: (分析结果列表, token 使用量, 归一化 JSON 结果)
@@ -744,8 +799,9 @@ class VLVideoAnalyzer:
             "Your only task is to split the clip into complete procedural steps and choose instructional keyframes.\n"
             "Do NOT classify knowledge types.\n"
             "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, "
-            "instructional_keyframe_timestamp, and optional fields "
-            "(main_action, main_operation, precautions, step_summary, operation_guidance, no_needed_video, should_type).\n"
+            "main_operation, instructional_keyframes, and optional fields "
+            "(main_action, precautions, step_summary, operation_guidance, no_needed_video, should_type).\n"
+            "instructional_keyframes item schema: timestamp_sec, optional frame_reason, optional bbox([ymin,xmin,ymax,xmax],0-1000).\n"
             "Optional fields can be omitted or left empty when unnecessary.\n"
             "Keep explanation + execution + result in the same step.\n"
             "Remove hesitation/thinking-only intervals with no new information.\n"
@@ -791,7 +847,7 @@ class VLVideoAnalyzer:
 
         mode = (self.video_input_mode or "auto").lower()
         if mode not in ("auto", "data_uri", "dashscope_upload", "keyframes"):
-            mode = "auto"
+            mode = "keyframes" if self._is_qianfan_endpoint(self.base_url) else "auto"
 
         video_file_size = 0
         try:
@@ -799,8 +855,9 @@ class VLVideoAnalyzer:
         except Exception:
             video_file_size = 0
 
-        # 1) data-uri（仅小文件安全）
-        if mode in ("auto", "data_uri") and video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
+        # 1) data-uri（仅 DashScope 小文件安全）
+        can_use_dashscope_inline = self._is_dashscope_endpoint(self.base_url)
+        if can_use_dashscope_inline and mode in ("auto", "data_uri") and video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
             video_base64 = self._encode_video_base64(video_path)
             if video_base64:
                 return [
@@ -812,7 +869,7 @@ class VLVideoAnalyzer:
                 ]
 
         # 2) DashScope File.upload 获取临时 URL（需要 dashscope SDK）
-        if mode in ("auto", "dashscope_upload"):
+        if can_use_dashscope_inline and mode in ("auto", "dashscope_upload"):
             temp_url = await self._try_get_dashscope_temp_url(video_path)
             if temp_url:
                 return [
@@ -823,7 +880,10 @@ class VLVideoAnalyzer:
                     ]}
                 ]
 
-        # 3) 降级为关键帧
+        if mode == "dashscope_upload" and not can_use_dashscope_inline:
+            logger.warning("当前 base_url 非 DashScope，跳过 dashscope_upload 模式并降级为关键帧")
+
+        # 3) 降级为关键帧（千帆链路默认路径）
         frames = await self._extract_keyframes(video_path, max_frames=self.max_input_frames)
         if not frames:
             raise ValueError(f"无法读取视频文件或抽帧失败: {video_path}")
@@ -855,6 +915,8 @@ class VLVideoAnalyzer:
 
         如果 dashscope SDK 不存在或上传失败，返回 None（由上层降级到关键帧）。
         """
+        if not self._is_dashscope_endpoint(self.base_url):
+            return None
         try:
             import dashscope  # type: ignore
         except Exception as e:
@@ -1144,6 +1206,80 @@ class VLVideoAnalyzer:
 
         return normalized
 
+    def _normalize_main_operation(self, value: Any) -> List[str]:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return self._normalize_text_list(list(value))
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parsed_value = json.loads(text)
+            except Exception:
+                parsed_value = None
+            if isinstance(parsed_value, list):
+                return self._normalize_text_list(parsed_value)
+            return [text]
+        text_item = str(value or "").strip()
+        return [text_item] if text_item else []
+
+    def _normalize_bbox_1000(self, value: Any) -> Optional[List[int]]:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            return None
+        try:
+            ymin = int(round(float(value[0])))
+            xmin = int(round(float(value[1])))
+            ymax = int(round(float(value[2])))
+            xmax = int(round(float(value[3])))
+        except Exception:
+            return None
+
+        ymin = max(0, min(1000, ymin))
+        xmin = max(0, min(1000, xmin))
+        ymax = max(0, min(1000, ymax))
+        xmax = max(0, min(1000, xmax))
+
+        if ymax < ymin:
+            ymin, ymax = ymax, ymin
+        if xmax < xmin:
+            xmin, xmax = xmax, xmin
+        return [ymin, xmin, ymax, xmax]
+
+    def _normalize_instructional_keyframes(
+        self,
+        value: Any,
+        *,
+        fallback_timestamps: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
+        fallback_timestamps = list(fallback_timestamps or [])
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(value, list):
+            for index, item in enumerate(value, start=1):
+                if not isinstance(item, dict):
+                    continue
+                raw_ts = item.get("timestamp_sec", item.get("timestamp", item.get("ts", None)))
+                if raw_ts is None and (index - 1) < len(fallback_timestamps):
+                    raw_ts = fallback_timestamps[index - 1]
+                ts_list = self._normalize_timestamp_list(raw_ts)
+                if not ts_list:
+                    continue
+                entry: Dict[str, Any] = {
+                    "timestamp_sec": ts_list[0],
+                    "frame_reason": str(item.get("frame_reason", "") or "").strip(),
+                }
+                bbox = self._normalize_bbox_1000(item.get("bbox"))
+                if bbox is not None:
+                    entry["bbox"] = bbox
+                normalized.append(entry)
+            if normalized:
+                return normalized
+
+        for ts in fallback_timestamps:
+            normalized.append({"timestamp_sec": float(ts), "frame_reason": ""})
+        return normalized
+
     def _normalize_bool_flag(self, value: Any) -> bool:
         """将模型返回的多种布尔表达归一为 bool。"""
         if isinstance(value, bool):
@@ -1199,7 +1335,7 @@ class VLVideoAnalyzer:
 
             step_description = str(item.step_description or "").strip() or f"step_{index:02d}"
             main_action = str(item.main_action or "").strip()
-            main_operation = self._normalize_text_list(item.main_operation)
+            main_operation = self._normalize_main_operation(item.main_operation)
             precautions = self._normalize_text_list(item.precautions)
             step_summary = str(item.step_summary or "").strip()
             operation_guidance = self._normalize_text_list(item.operation_guidance)
@@ -1217,12 +1353,39 @@ class VLVideoAnalyzer:
                 fallback_ts = clip_start if clip_end <= clip_start else (clip_start + clip_end) / 2.0
                 clamped_timestamps = [round(fallback_ts, 6)]
 
+            keyframes = self._normalize_instructional_keyframes(
+                item.instructional_keyframes,
+                fallback_timestamps=clamped_timestamps,
+            )
+            clamped_keyframes: List[Dict[str, Any]] = []
+            for key_index, keyframe in enumerate(keyframes, start=1):
+                raw_ts = keyframe.get("timestamp_sec", None)
+                fallback_ts = clamped_timestamps[min(key_index - 1, len(clamped_timestamps) - 1)]
+                key_ts = safe_float(raw_ts, fallback_ts)
+                if key_ts < clip_start:
+                    key_ts = clip_start
+                elif key_ts > clip_end:
+                    key_ts = clip_end
+                key_entry: Dict[str, Any] = {
+                    "timestamp_sec": round(key_ts, 6),
+                    "frame_reason": str(keyframe.get("frame_reason", "") or "").strip(),
+                }
+                bbox = self._normalize_bbox_1000(keyframe.get("bbox"))
+                if bbox is not None:
+                    key_entry["bbox"] = bbox
+                clamped_keyframes.append(key_entry)
+
+            if not clamped_keyframes:
+                clamped_keyframes = [{"timestamp_sec": ts, "frame_reason": ""} for ts in clamped_timestamps]
+            clamped_timestamps = [float(item.get("timestamp_sec", 0.0)) for item in clamped_keyframes]
+
             item.step_id = index
             item.step_description = step_description
             item.knowledge_type = "process"
             item.analysis_mode = "tutorial_stepwise"
             item.main_action = main_action
             item.main_operation = main_operation
+            item.instructional_keyframes = clamped_keyframes
             item.precautions = precautions
             item.step_summary = step_summary
             item.operation_guidance = operation_guidance
@@ -1305,7 +1468,7 @@ class VLVideoAnalyzer:
                 raw_main_operation = item.get("primary_operations", None)
             if raw_main_operation is None:
                 raw_main_operation = item.get("主要操作", None)
-            main_operation = self._normalize_text_list(raw_main_operation)
+            main_operation = self._normalize_main_operation(raw_main_operation)
             raw_precautions = item.get("precautions", None)
             if raw_precautions is None:
                 raw_precautions = item.get("notes", None)
@@ -1333,6 +1496,14 @@ class VLVideoAnalyzer:
                 raw_timestamps = item.get("suggested_screenshot_timestamps", [])
             timestamps = self._normalize_timestamp_list(raw_timestamps)
 
+            raw_instructional_keyframes = item.get("instructional_keyframes", None)
+            instructional_keyframes = self._normalize_instructional_keyframes(
+                raw_instructional_keyframes,
+                fallback_timestamps=timestamps,
+            )
+            if instructional_keyframes:
+                timestamps = [float(frame.get("timestamp_sec", 0.0)) for frame in instructional_keyframes]
+
             clip_start_sec = safe_float(item.get("clip_start_sec", 0.0), 0.0)
             clip_end_sec = safe_float(item.get("clip_end_sec", 0.0), 0.0)
             if clip_end_sec < clip_start_sec:
@@ -1348,6 +1519,7 @@ class VLVideoAnalyzer:
                 ("step_id" in item)
                 or ("step_description" in item)
                 or ("instructional_keyframe_timestamp" in item)
+                or ("instructional_keyframes" in item)
                 or normalized_mode == "tutorial_stepwise"
             )
             has_step_schema = has_step_schema or tutorial_like
@@ -1382,6 +1554,7 @@ class VLVideoAnalyzer:
                 analysis_mode="tutorial_stepwise" if tutorial_like else "default",
                 main_action=main_action if tutorial_like else "",
                 main_operation=main_operation if tutorial_like else [],
+                instructional_keyframes=instructional_keyframes if tutorial_like else [],
                 precautions=precautions if tutorial_like else [],
                 step_summary=step_summary if tutorial_like else "",
                 operation_guidance=operation_guidance if tutorial_like else [],
@@ -1401,6 +1574,7 @@ class VLVideoAnalyzer:
                     "should_type": should_type,
                     "clip_start_sec": clip_start_sec,
                     "clip_end_sec": clip_end_sec,
+                    "instructional_keyframes": instructional_keyframes,
                     "instructional_keyframe_timestamp": timestamps,
                 })
             else:
@@ -1423,6 +1597,7 @@ class VLVideoAnalyzer:
                     "step_description": str(r.step_description or "").strip(),
                     "main_action": str(r.main_action or "").strip(),
                     "main_operation": list(r.main_operation or []),
+                    "instructional_keyframes": list(r.instructional_keyframes or []),
                     "precautions": list(r.precautions or []),
                     "step_summary": str(r.step_summary or "").strip(),
                     "operation_guidance": list(r.operation_guidance or []),

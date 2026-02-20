@@ -312,21 +312,28 @@ vl_material_generation:
     screenshot_decode_allow_inline_transcode: false
     screenshot_decode_enable_async_transcode: true
   
-  # Qwen3-VL-Plus API 配置
+  # 视频分析 VL API 配置（参考 Vision AI：千帆 LLM-turbo）
   api:
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: "qwen3-vl-plus"
-    api_key: ""  # 建议留空并通过环境变量注入
+    provider: "ernie"
+    base_url: "https://qianfan.baidubce.com/v2/chat/completions"
+    model: "ernie-4.5-turbo-vl-32k"
+    # 鉴权：优先读取 bearer_token，其次兼容 api_key；两者都支持环境变量注入
+    bearer_token: ""
+    bearer_token_env: "VISION_AI_BEARER_TOKEN"
+    api_key: ""
+    # 千帆可选 appid（若服务端要求可通过环境变量注入）
+    appid: ""
+    appid_env: "VISION_AI_APP_ID"
     max_retries: 2
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
     
-    # 视频输入策略 (应对 DashScope 10MB data-uri 限制)
-    # auto: 自动选择 (小文件用 data-uri, 大文件尝试上传或降级关键帧)
+    # 视频输入策略
+    # auto: 仅在 DashScope 场景自动尝试 data-uri / upload
     # data_uri: 强制使用 data-uri (仅适用小文件)
     # dashscope_upload: 强制使用 DashScope File.upload
-    # keyframes: 强制使用关键帧抽取
-    video_input_mode: "auto"
+    # keyframes: 强制使用关键帧抽取（千帆建议默认）
+    video_input_mode: "keyframes"
     
     # 关键帧降级参数 (当视频过大无法直接传输时)
     max_input_frames: 6  # 最多抽取6帧
