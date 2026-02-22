@@ -378,6 +378,121 @@ def test_apply_external_materials_short_process_with_explicit_screenshot_runs_va
     assert unit.materials.screenshot_paths == [str(screenshot_path.resolve())]
 
 
+def test_apply_external_materials_tutorial_stepwise_skips_validator(tmp_path):
+    pipeline, output_dir = _build_pipeline(tmp_path)
+    assets_dir = output_dir / "assets"
+    unit_dir = assets_dir / "SUXT01"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = unit_dir / "SUXT01_step_01.png"
+    screenshot_path.write_bytes(b"img")
+
+    class _AcceptResult:
+        should_include = True
+        reason = "accept"
+        img_description = "accept"
+
+    calls = {"count": 0}
+
+    class _CountingValidator:
+        def validate(self, _image_path: str):
+            calls["count"] += 1
+            return _AcceptResult()
+
+    pipeline._concrete_validator = _CountingValidator()
+
+    unit = SemanticUnit(
+        unit_id="SUXT01",
+        knowledge_type="process",
+        knowledge_topic="Tutorial Stepwise",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=8.0,
+        mult_steps=True,
+    )
+    unit.instructional_steps = [{"step_id": 1, "materials": {"screenshot_ids": ["SUXT01/SUXT01_step_01"]}}]
+
+    requests = MaterialRequests(
+        screenshot_requests=[
+            ScreenshotRequest(
+                screenshot_id="SUXT01/SUXT01_step_01",
+                timestamp_sec=1.2,
+                label="step_01",
+                semantic_unit_id="SUXT01",
+            )
+        ],
+        clip_requests=[],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(assets_dir),
+        clips_dir=str(assets_dir),
+        material_requests=requests,
+    )
+
+    assert calls["count"] == 0
+    assert unit.materials is not None
+    assert unit.materials.screenshot_paths == [str(screenshot_path.resolve())]
+
+
+def test_apply_external_materials_tutorial_stepwise_skips_unit_scan_fallback(tmp_path):
+    pipeline, output_dir = _build_pipeline(tmp_path)
+    assets_dir = output_dir / "assets"
+    unit_dir = assets_dir / "SUXT02"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    screenshot_path = unit_dir / "SUXT02_fallback.png"
+    screenshot_path.write_bytes(b"img")
+
+    calls = {"count": 0}
+
+    class _AcceptResult:
+        should_include = True
+        reason = "accept"
+        img_description = "accept"
+
+    class _CountingValidator:
+        def validate(self, _image_path: str):
+            calls["count"] += 1
+            return _AcceptResult()
+
+    pipeline._concrete_validator = _CountingValidator()
+
+    unit = SemanticUnit(
+        unit_id="SUXT02",
+        knowledge_type="process",
+        knowledge_topic="Tutorial No Fallback",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=8.0,
+        mult_steps=True,
+    )
+    unit.instructional_steps = [{"step_id": 1, "materials": {"screenshot_ids": []}}]
+
+    requests = MaterialRequests(
+        screenshot_requests=[],
+        clip_requests=[],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(assets_dir),
+        clips_dir=str(assets_dir),
+        material_requests=requests,
+    )
+
+    assert calls["count"] == 0
+    assert unit.materials is not None
+    assert unit.materials.screenshot_paths == []
+    assert unit.materials.screenshot_items == []
+    assert screenshot_path.exists()
+
+
 def test_apply_external_materials_restores_image_if_validator_deletes_it(tmp_path):
     pipeline, output_dir = _build_pipeline(tmp_path)
     assets_dir = output_dir / "assets"

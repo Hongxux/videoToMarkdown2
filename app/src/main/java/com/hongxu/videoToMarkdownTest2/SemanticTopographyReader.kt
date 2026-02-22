@@ -1,5 +1,4 @@
-package com.example.semantictopography
-
+package com.hongxu.videoToMarkdownTest2
 import android.annotation.SuppressLint
 import android.graphics.Typeface
 import android.text.Spannable
@@ -63,7 +62,6 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.layout.onSizeChanged
@@ -83,13 +81,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * 语义地形阅读器主容器。
- *
- * 新增对后端 meta API 的接入能力：
- * 1. 双击共鸣会映射为 favorites[nodeId] = true。
- * 2. 右滑批注保存会写入 comments[nodeId]。
- * 3. 使用 /api/mobile/tasks/{taskId}/meta 读写。
- */
+ * 閻犲浂鍘虹粻鐔煎捶閺夎儻鍩岄梻鍐ㄦ嚀椤曚即宕抽妸銈呯槣閻庡湱鎳撳▍鎺楀Υ? *
+ * 闁哄倹婢橀·鍐偓鐢垫嚀閹绮?meta API 闁汇劌瀚敮鎾礂閵夈劌鍘撮柛鏃€鍐荤槐?
+ * 1. 闁告瑥鑻崵顕€宕楅柆宥囶洿濞村吋纰嶅Σ褏浜搁崟顏囩 favorites[nodeId] = true闁? * 2. 闁告瑨娅曠划锕傚箥鐟欏嫭鏆堝ǎ鍥ㄧ箓閻°劍瀵煎顒€鏅搁柛?comments[nodeId]闁? * 3. 濞达綀娉曢弫?/api/mobile/tasks/{taskId}/meta 閻犲洩顕ч崯鎾诲Υ? */
 @Composable
 fun SemanticTopographyReader(
     nodes: List<SemanticNode>,
@@ -264,7 +258,14 @@ fun SemanticTopographyReader(
     ) {
         itemsIndexed(
             items = nodes,
-            key = { _, node -> node.id }
+            key = { index, node ->
+                val base = node.id.trim()
+                if (base.isNotEmpty()) {
+                    "$base#$index"
+                } else {
+                    "node#$index"
+                }
+            }
         ) { index, node ->
             TopographyParagraph(
                 node = node,
@@ -304,8 +305,7 @@ fun SemanticTopographyReader(
 }
 
 /**
- * 段落组件，承载段落手势主通道和词句手术刀入口。
- */
+ * 婵炲牅绲婚幆銈囩磼閸曨亝顐介柨娑樻湰婢规瑦娼懞銉斀闁解偓閼恒儱顤侀柛鏂裤仒鐎靛矂鏌呭鏈靛闁告粌鐭侀惁婵嬪矗閵夛箑顤侀柡鍫灠閸ㄤ線宕楅妷銉ョ稉闁? */
 @Composable
 private fun TopographyParagraph(
     node: SemanticNode,
@@ -763,7 +763,7 @@ private fun TopographyParagraph(
 
                     if (isFavorited) {
                         Text(
-                            text = "已标记为共鸣段落",
+                            text = "鐎圭寮堕悥锝囨媼妫颁浇绀嬮柛蹇涗憾缁傚繐鈻撴担鍐╁劙",
                             fontSize = 12.sp,
                             color = Color(0xFF996C00),
                             modifier = Modifier.padding(top = 6.dp)
@@ -771,7 +771,7 @@ private fun TopographyParagraph(
                     }
                     if (isMarkedDeleted) {
                         Text(
-                            text = "已标记删除（可在后端二次清理）",
+                            text = "Marked as deleted (can be cleaned on server side later)",
                             fontSize = 12.sp,
                             color = Color(0xFF9C2D2D),
                             modifier = Modifier.padding(top = 6.dp)
@@ -792,10 +792,10 @@ private fun TopographyParagraph(
                             value = noteDraft,
                             onValueChange = { noteDraft = it },
                             label = {
-                                Text("段落批注")
+                                Text("Paragraph note")
                             },
                             placeholder = {
-                                Text("记录你的想法，这将成为正向画像信号")
+                                Text("Write your note here; this will become a positive feedback signal")
                             },
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -817,7 +817,7 @@ private fun TopographyParagraph(
                                     }
                                 }
                             ) {
-                                Text("取消")
+                                Text("Cancel")
                             }
 
                             Button(
@@ -841,7 +841,7 @@ private fun TopographyParagraph(
                                     }
                                 }
                             ) {
-                                Text("保存")
+                                Text("Save")
                             }
                         }
                     }
@@ -855,7 +855,7 @@ private fun TopographyParagraph(
                         ) {
                             existingComments.takeLast(3).forEach { comment ->
                                 Text(
-                                    text = "• $comment",
+                                    text = "闁?$comment",
                                     color = Color(0xFF55636D),
                                     fontSize = 12.sp,
                                     lineHeight = 18.sp
@@ -870,8 +870,7 @@ private fun TopographyParagraph(
 }
 
 /**
- * 基于 SubcomposeLayout 叠放桥接层和正文层。
- */
+ * 闁糕晞妗ㄧ花?SubcomposeLayout 闁告瑧濮甸弬浣割浖閵夛箑澶嶉悘鐐插€搁幏鏉款潰閿濆棙鐎悘鐐插€堕埀? */
 @Composable
 private fun SubcomposeAnchorLayout(
     modifier: Modifier,
@@ -908,8 +907,7 @@ private fun SubcomposeAnchorLayout(
 }
 
 /**
- * 桥接便签视图。
- */
+ * 婵℃ぜ鍎茬敮瀛樼瑹鐠侯煈鍔悷娆忔濞存﹢濡? */
 @Composable
 private fun BridgeBubble(
     text: String,
@@ -948,7 +946,7 @@ private fun BridgeBubble(
             }
 
             Text(
-                text = " 向导：$text",
+                text = " 闁告碍鍨甸閬嶆晬?text",
                 color = Color(0xFF2F4E60),
                 fontSize = 13.sp,
                 lineHeight = 20.sp,
@@ -959,8 +957,7 @@ private fun BridgeBubble(
 }
 
 /**
- * 词句三维解析卡片。
- */
+ * 閻犲洤绉磋ぐ鐐寸▔婢跺本妯婇悷娆欑稻閻庝粙宕￠敍鍕暬闁? */
 @Composable
 private fun TokenInsightCardView(
     card: TokenInsightCard,
@@ -980,25 +977,25 @@ private fun TokenInsightCardView(
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "词句手术刀：${card.token}",
+                text = "閻犲洤绉磋ぐ鐐哄箥鐎ｎ偅閽╅柛鎺嗗亾闁?{card.token}",
                 fontSize = 14.sp,
                 color = Color(0xFF20445D),
                 fontWeight = FontWeight.Bold
             )
             Text(
-                text = "语境化：${card.contextualize}",
+                text = "閻犲浂鍘奸。銊╁礌閺嶇數绐?{card.contextualize}",
                 fontSize = 13.sp,
                 color = Color(0xFF304A5A),
                 lineHeight = 20.sp
             )
             Text(
-                text = "第一性：${card.firstPrinciple}",
+                text = "缂佹鍏涚粩鎾箑瑜濈槐?{card.firstPrinciple}",
                 fontSize = 13.sp,
                 color = Color(0xFF304A5A),
                 lineHeight = 20.sp
             )
             Text(
-                text = "行业广角：${card.industryHorizon}",
+                text = "閻炴稑濂旂粭鐔肩嵁閼愁垼娼￠柨?{card.industryHorizon}",
                 fontSize = 13.sp,
                 color = Color(0xFF304A5A),
                 lineHeight = 20.sp
@@ -1008,8 +1005,7 @@ private fun TokenInsightCardView(
 }
 
 /**
- * Markwon 段落渲染视图，附带词句级单击和双击探针。
- */
+ * Markwon 婵炲牅绲婚幆銈呫€掗崣澶屽帬閻熸瑥妫楀ù姗€鏁嶅畝鍕€嶉悽顖ょ畳閻︽繈宕ｉ妷褔鐛撻柛妤佹礀閸ゎ噣宕仦钘夎摕闁告垹绮敮浼存煢閸稈鍋? */
 @SuppressLint("ClickableViewAccessibility")
 @Composable
 private fun MarkdownParagraph(
@@ -1104,8 +1100,7 @@ private fun MarkdownParagraph(
 }
 
 /**
- * 将选中词元样式叠加到 Markwon 渲染结果上。
- */
+ * 閻忓繐妫濋埀顒€顦懙鎴犳嫚瀹ュ懎甯楅柡宥呭槻缁憋繝宕ｉ悩鎻掝潱闁?Markwon 婵炴挸寮堕悡瀣磼閹惧浜☉鎾愁焾閳? */
 private fun applySelectionStyle(
     textView: TextView,
     selection: TokenSelection?,
@@ -1264,8 +1259,7 @@ private fun resolveFirstTokenSelection(
 }
 
 /**
- * 将触点映射为 TextView 内字符游标。
- */
+ * 閻忓繐妫滆闁绘劘顫夊Σ褏浜搁崟顏囩 TextView 闁告劕鎳庨悺褏绮敂鐣屽煑闁哄秴娲㈤埀? */
 private fun resolveCursorOffset(
     textView: TextView,
     x: Float,

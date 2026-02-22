@@ -322,53 +322,71 @@ class RichTextDocument:
         
         # 正文后的步骤渲染
         if section.instructional_steps:
-             for step in section.instructional_steps:
-                 step_desc = step.get('step_description') or step.get('description') or ""
-                 lines.append(f"### Step {step.get('step_id')}: {step_desc}")
-                 main_action = str(step.get("main_action") or "").strip()
-                 main_operation = self._normalize_step_text_list(
-                     step.get("main_operation")
-                     if step.get("main_operation") is not None
-                     else step.get("main_operations")
-                 )
-                 precautions = self._normalize_step_text_list(
-                     step.get("precautions")
-                     if step.get("precautions") is not None
-                     else step.get("notes")
-                 )
-                 step_summary = str(step.get("step_summary") or step.get("summary") or "").strip()
-                 operation_guidance = self._normalize_step_text_list(
-                     step.get("operation_guidance")
-                     if step.get("operation_guidance") is not None
-                     else step.get("guidance")
-                 )
-                 if main_action:
-                     lines.append(f"- 主要动作：{main_action}")
-                 if main_operation:
-                     lines.append(f"- 主要操作：{'；'.join(main_operation)}")
-                 if precautions:
-                     lines.append(f"- 注意事项：{'；'.join(precautions)}")
-                 if step_summary:
-                     lines.append(f"- 步骤小结：{step_summary}")
-                 if operation_guidance:
-                     lines.append(f"- 操作指导：{'；'.join(operation_guidance)}")
-                 mats = step.get('materials', {})
-                 # 步骤截图
-                 ss_paths = mats.get('screenshot_paths', [])
-                 if ss_paths:
-                     for ss in ss_paths:
+            main_flow_index = 0
+            for step in section.instructional_steps:
+                step_desc = str(step.get("step_description") or step.get("description") or "").strip()
+                step_type = self._normalize_step_type(
+                    step.get("step_type")
+                    or step.get("stepType")
+                    or step.get("step_category")
+                    or step.get("type")
+                )
+                if step_type == "MAIN_FLOW":
+                    main_flow_index += 1
+                    lines.append(f"#### {main_flow_index}.{step_desc}")
+                elif step_type in {"CONDITIONAL", "OPTIONAL"}:
+                    lines.append(f"> [!NOTE] 分支情况处理：{step_desc}")
+                else:
+                    lines.append(f"> [!WARNING] 常见报错解决：{step_desc}")
+
+                body_lines: List[str] = []
+                main_action = str(step.get("main_action") or "").strip()
+                main_operation = self._normalize_step_text_list(
+                    step.get("main_operation")
+                    if step.get("main_operation") is not None
+                    else step.get("main_operations")
+                )
+                precautions = self._normalize_step_text_list(
+                    step.get("precautions")
+                    if step.get("precautions") is not None
+                    else step.get("notes")
+                )
+                step_summary = str(step.get("step_summary") or step.get("summary") or "").strip()
+                operation_guidance = self._normalize_step_text_list(
+                    step.get("operation_guidance")
+                    if step.get("operation_guidance") is not None
+                    else step.get("guidance")
+                )
+                if main_action:
+                    body_lines.append(f"- 主要动作：{main_action}")
+                if main_operation:
+                    body_lines.append(f"- 主要操作：{'；'.join(main_operation)}")
+                if precautions:
+                    body_lines.append(f"- 注意事项：{'；'.join(precautions)}")
+                if step_summary:
+                    body_lines.append(f"- 步骤小结：{step_summary}")
+                if operation_guidance:
+                    body_lines.append(f"- 操作指导：{'；'.join(operation_guidance)}")
+                mats = step.get("materials", {})
+                ss_paths = mats.get("screenshot_paths", [])
+                if ss_paths:
+                    for ss in ss_paths:
                         ss_path = self._relative_path(ss, assets_dir)
-                        lines.append(f"![Step Snapshot]({ss_path})")
-                 # 步骤 Clip
-                 step_clip_paths = mats.get('clip_paths', [])
-                 if not step_clip_paths:
-                     clip_p = mats.get('clip_path')
-                     if clip_p:
-                         step_clip_paths = [clip_p]
-                 for clip_p in step_clip_paths:
-                     clip_path = self._relative_path(clip_p, assets_dir)
-                     lines.append(f"![Step Clip]({clip_path})")
-                 lines.append("")
+                        body_lines.append(f"![Step Snapshot]({ss_path})")
+                step_clip_paths = mats.get("clip_paths", [])
+                if not step_clip_paths:
+                    clip_p = mats.get("clip_path")
+                    if clip_p:
+                        step_clip_paths = [clip_p]
+                for clip_p in step_clip_paths:
+                    clip_path = self._relative_path(clip_p, assets_dir)
+                    body_lines.append(f"![Step Clip]({clip_path})")
+
+                if step_type == "MAIN_FLOW":
+                    lines.extend(body_lines)
+                else:
+                    lines.extend(self._quote_lines(body_lines))
+                lines.append("")
 
         # 素材渲染 (Fallback / Top-level)
         materials = section.materials
@@ -427,6 +445,29 @@ class RichTextDocument:
             return [segment.strip() for segment in normalized.split(";") if segment.strip()]
         text = str(value).strip()
         return [text] if text else []
+
+    def _normalize_step_type(self, value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if not text:
+            return "MAIN_FLOW"
+        if text in {"MAIN_FLOW", "CONDITIONAL", "OPTIONAL", "TROUBLESHOOTING"}:
+            return text
+        if text in {"BRANCH", "CONDITION", "IF"}:
+            return "CONDITIONAL"
+        if text in {"OPTION"}:
+            return "OPTIONAL"
+        if text in {"ERROR", "EXCEPTION", "DEBUG", "FIX"}:
+            return "TROUBLESHOOTING"
+        return "MAIN_FLOW"
+
+    def _quote_lines(self, lines: List[str]) -> List[str]:
+        output: List[str] = []
+        for line in lines:
+            if line:
+                output.append(f"> {line}")
+            else:
+                output.append(">")
+        return output
     
     def _relative_path(self, abs_path: str, assets_dir: str) -> str:
         """

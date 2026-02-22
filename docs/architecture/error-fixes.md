@@ -13,6 +13,91 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-22 Python 端 DeepSeek 模型语义漂移（局部硬编码与别名未统一）
+- 日期：2026-02-22
+- 现象与影响范围：
+  - Python 端部分链路没有统一模型别名路由，`deepseek-v3/deepseek-r1/v3 reasoner` 等配置在不同入口行为不一致。
+  - `markdown_enhancer` 的结构化步骤局部硬编码 `deepseek-reasoner`，可能与配置中原本的 chat/reasoner 语义不一致。
+- 触发条件：
+  - 配置使用了 DeepSeek 历史别名或自然语言别名（例如 `deepseek-v3`、`v3.2 reasoner`）。
+  - 调用链路未走统一路由入口，或存在局部硬编码模型名。
+- 根因定位：
+  - Python 侧缺少“模型别名 -> 官方模型名”的统一路由层。
+  - 单点模块为稳定性临时硬编码了模型，破坏了“配置驱动”的一致性。
+- 修复措施：
+  - 新增统一路由工具：`resolve_deepseek_model`，统一映射到 V3.2 官方模型：
+    - chat：`deepseek-chat`
+    - reasoner：`deepseek-reasoner`
+  - 在以下入口接入统一路由：
+    - `content_pipeline.infra.llm.LLMClient`
+    - `content_pipeline.infra.llm.llm_gateway`
+    - `transcript_pipeline.llm.client.create_llm_client`
+    - `transcript_pipeline.llm.DeepSeekClient`
+  - `markdown_enhancer` 去掉局部硬编码 reasoner，改为读取配置后路由。
+  - 新增回归测试：`test_deepseek_model_router.py`。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/common/utils/tests/test_deepseek_model_router.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k structured`
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：模型别名契约测试作为必跑基线，新增别名必须新增断言。
+  - 监控：记录请求中的 `configured_model/resolved_model`，避免线上“写的是A，跑的是B”。
+  - 校验：评审时禁止在业务层继续新增硬编码模型名（尤其 `reasoner/chat`）。
+  - 回滚：若需紧急回退，仅回退路由接入点，不删除路由工具与测试。
+- 相关文件/接口：
+  - `services/python_grpc/src/common/utils/deepseek_model_router.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `services/python_grpc/src/transcript_pipeline/llm/client.py`
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/common/utils/tests/test_deepseek_model_router.py`
+- 复盘要点：
+  - 模型选型逻辑必须集中收敛，不能散落在各业务模块。
+  - 局部硬编码会在“环境切换/配置迁移”时放大为系统行为漂移。
+
+## 2026-02-22 DeepSeek-V3.2 Reasoner 配置语义与实际路由不一致
+- 日期：2026-02-22
+- 现象与影响范围：
+  - 生产/测试希望走 DeepSeek-V3.2 Reasoner，但 `persona_reading` 与 `cards` 默认配置仍是 `deepseek-v3`。
+  - 部分配置使用 `v3 reasoner`/`deepseek-resoner` 时，路由结果与预期不一致，导致链路实际未稳定使用 `deepseek-reasoner`。
+- 触发条件：
+  - 配置层使用 `deepseek-v3` 或自然语言别名（`v3 reasoner`）表达“希望走 reasoner”。
+  - `DeepSeekModelRouter` 中 `v3 reasoner` 别名被映射到 `deepseek-chat`。
+- 根因定位：
+  - 模型别名语义设计存在歧义：把“V3 chat 模式”与“V3.2 reasoner 表述”混在同一别名分支。
+  - 配置默认值与当前生产目标（Reasoner）不一致，导致环境未显式覆盖时回落到 chat。
+- 修复措施：
+  - 生产配置改为：
+    - `telemetry.persona-reading.model=deepseek-reasoner`
+    - `deepseek.advisor.model=deepseek-reasoner`
+  - 服务默认值改为 `deepseek-reasoner`：
+    - `PersonaAwareReadingService`
+    - `DeepSeekAdvisorService`
+  - 路由修复与兼容增强：
+    - `v3 reasoner` / `v3.2 reasoner` / `deepseek-v3.2-reasoner` / `deepseek-resoner` -> `deepseek-reasoner`
+    - 保留 `deepseek-v3` / `v3` -> `deepseek-chat`
+  - 新增单测：`DeepSeekModelRouterTest` 覆盖上述别名映射。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=DeepSeekModelRouterTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增模型别名契约测试，任何新增别名必须声明“目标模型 + 用例”。
+  - 监控：在 persona-reading 与 advisor 交互日志中固定记录 `configuredModel/resolvedModel`，用于线上核对。
+  - 校验：发布前检查 `application.properties` 中 persona/cards 的模型配置是否一致。
+  - 回滚：如需恢复低时延模式，仅回退上述两个配置到 `deepseek-v3`，不回滚路由器修复。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekModelRouter.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekModelRouterTest.java`
+- 复盘要点：
+  - 模型路由属于“架构契约层”，不能仅凭命名直觉做别名映射。
+  - 配置默认值必须与当前生产目标一致，否则环境缺省会吞掉架构决策。
+
 ## 2026-02-19 下载看门狗误判 idle timeout（下载进行中但被判超时）
 - 日期：2026-02-19
 - 现象与影响范围：
@@ -4102,4 +4187,127 @@
   - 回滚：
     - 前端可单独回滚双击判定改动；
     - 后端可单独回滚 `sourceText` 处理与规则回退逻辑，不影响主业务接口。
+
+## 2026-02-20 tutorial_stepwise 步骤图错位与渲染不一致
+- 现象：
+  - tutorial_stepwise 单元在最终 Markdown 中仍使用旧的“列表+说明”格式，未按步骤模板展示。
+  - `main_operation` 内的 `[KEYFRAME_N]` 或历史 `imgneeded` 占位符未稳定替换为步骤关键帧。
+  - 部分关键帧虽导出成功，但未按 VL 返回的 `bbox` 聚焦裁剪，信息密度不足。
+- 根因：
+  - `markdown_enhancer` tutorial 渲染仍按旧结构输出，未直接消费“字符串型 main_operation + keyframe 对象”契约。
+  - step loader 对 `instructional_keyframe_details`/对象型 `instructional_keyframes` 兼容不足。
+  - 关键帧导出链路只做 FFmpeg 抽帧，缺少 bbox 后处理裁剪步骤。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - tutorial 检测改为“只要是 process 且存在 tutorial_steps 即进入 tutorial 分支”；
+    - 支持加载对象型 keyframe（含 `image_file/image_path/timestamp/bbox`）；
+    - 新增 tutorial 占位符替换逻辑（`[KEYFRAME_N]` + 兼容旧 `imgneeded/IMG`）。
+    - tutorial 渲染改为：
+      - `#### {step_id}.{step_description}`
+      - 渲染替换后的 `main_operation`
+      - 末尾追加 step clip embed。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `main_operation` 按字符串主契约保存；
+    - 关键帧导出后按 `bbox` 执行就地裁剪，失败回退保留全帧并记录告警。
+- 验证结果：
+  - `pytest ... -q`（7 个针对性用例）通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 维持 tutorial 渲染契约用例（KEYFRAME/旧占位符替换）；
+    - 维持 bbox 裁剪单测与 tutorial 材料匹配回归用例。
+  - 监控：
+    - 增加 tutorial 关键帧裁剪失败告警统计（按 unit/step/file 聚合）。
+  - 校验：
+    - 文档变更后执行 `python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 可按文件粒度回滚 `markdown_enhancer` 渲染策略或 `vl_material_generator` 裁剪逻辑，不影响其他知识类型链路。
+
+## 2026-02-22 Insight Card 语境截断与 R1 模型调用异常
+- 现象：
+  - 术语卡片提示词仅携带当前命中 node，模型看不到“前后文”，解释稳定性不足。
+  - `contextBlock` 在采集层与提示词层分别被 240/280 截断，长段落证据被裁掉。
+  - 将 `deepseek-r1` 直接用于 `/chat/completions` 时返回 400（`Model Not Exist`），卡片生成退化为 fallback。
+- 根因：
+  - `PersonaInsightCardService` 的 `TagContext` 只缓存 `primarySnippet`，没有上下文窗口结构。
+  - `DeepSeekAdvisorService.trimContext` 内置硬截断。
+  - 多服务各自维护模型名，没有统一别名路由，导致 R1 入口不一致。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+    - 改为按 `node-1/node/node+1` 组装带标签上下文块：
+      - `【前文语境】`
+      - `【当前聚焦段落（在此处该词横空出世）】`
+      - `【后文发展】`
+    - `llmTrace.context` 与实际提示词统一使用上述窗口块。
+    - 保留卡片展示层短摘要，但不再对提示词上下文截断。
+    - 修复快照标题乱码：`## LLM原始输出`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 移除 `trimContext` 长度截断，仅做换行归一。
+    - 调用前通过模型路由器解析模型名。
+  - 新增文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekModelRouter.java`
+    - 统一模型别名：
+      - `deepseek-r1 -> deepseek-reasoner`
+      - `deepseek-v3 -> deepseek-chat`
+  - 复用落地：
+    - `PersonaAwareReadingService`、`MacroPersonaForgeService`、`DeepSeekAdvisorService` 全部走同一模型路由。
+- 验证结果：
+  - 编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - A轮（全量）：
+    - `index count=48`，`llm_interactions: OK=47, SKIPPED_REUSED=1`
+    - 样本 `context` 长度：`1211`，显著大于 240，且包含三段标签。
+  - B轮（抽样）：
+    - `index count=10`，`FALLBACK=10`
+    - 原因：运行环境网络限制（`Permission denied: getsockopt`），非代码逻辑回退。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 新增回归断言：`contextBlock` 必含三段标签且长度不做 240/280 截断。
+    - 维持生产链 runner 的 task 级落盘校验（index + llm_interactions + card snapshot）。
+  - 监控：
+    - 统计 `persona_insight_cards` 的 `status/source/llmError` 分布，区分“模型空响应”与“网络异常”。
+  - 校验：
+    - 提交前固定执行：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+    - 文档变更执行：`python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 可按文件粒度回退 `DeepSeekModelRouter` 接入与 `contextBlock` 窗口组装，不影响 controller API 契约。
+
+## 2026-02-22 Insight Card 快照仅有语境摘要，缺失卡片正文与请求追踪
+- 现象：
+  - `var/storage/.../.mobile_persona_cache/insight_cards/cards/*.md` 只有“语境快照”摘要，未包含卡片主体章节（`语境化/深度/广度`）。
+  - `insights_tags` 存在重复变体（大小写/空白）与“标签并未出现于 node 原文”问题，导致卡片化请求噪声偏高。
+  - 排查时无法直接拿到单次卡片生成的原始请求 payload 与响应 body。
+- 根因：
+  - 任务快照使用 `articleSection` 摘要拼装，而不是实际 `targetMarkdown` 卡片正文。
+  - `collectTagContexts` 仅按字符串聚合，未做 canonical 去重与原文命中校验。
+  - `DeepSeekAdvisorService.requestStructuredAdvice` 仅返回模型 content，未暴露请求/响应原文。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+    - `collectTagContexts` 新增：
+      - canonical key 去重（忽略大小写、换行和连续空白）；
+      - `insights_tags` 必须命中 node `raw_markdown`，否则过滤；
+    - 快照落盘改为写入 `targetMarkdown` 完整正文；
+    - 快照中剔除 `### 语境快照@...` 段，保留可读核心正文；
+    - 任务交互日志新增：
+      - `llmRequestPayloadJson`
+      - `llmResponseBodyJson`
+      - `llmResponseContentRaw`
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 结构化调用返回值扩展请求/响应原文字段，供卡片链路落盘。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/PersonaInsightCardServiceTest.java`
+    - 新增回归用例，验证“去重 + 原文约束”。
+  - 文件：`services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/user-zh.txt`
+    - 强化提示词：`insights_tags` 必须来自 `text_chunk` 原文，否则输出 `[]`。
+- 验证结果：
+  - 编译通过：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 单测通过：`mvn -f services/java-orchestrator/pom.xml "-Dtest=DeepSeekAdvisorServiceTest,PersonaInsightCardServiceTest" test -q`
+  - 产物抽样：`cards/agent_force.md` 已含 `语境化/深度/广度` 正文结构，且不再仅是语境摘要。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留 `PersonaInsightCardServiceTest`，持续验证标签去重和原文命中约束。
+    - 生产链 runner 每次发布前至少做一次卡片目录抽样，确认正文结构完整。
+  - 监控：
+    - 在 `llm_interactions.ndjson` 中持续观察 `SKIPPED_REUSED/OK/FALLBACK` 占比，避免“全复用导致无追踪样本”。
+  - 校验：
+    - 发布前固定检查：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+    - 文档提交前执行：`python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 快照渲染和标签过滤均为服务内局部策略，可按文件粒度回滚，不影响 controller 契约与数据库结构。
 

@@ -312,18 +312,19 @@ vl_material_generation:
     screenshot_decode_allow_inline_transcode: false
     screenshot_decode_enable_async_transcode: true
   
-  # 视频分析 VL API 配置（参考 Vision AI：千帆 LLM-turbo）
+  # 视频分析 VL API 配置（参考 Vision AI：DashScope OpenAI 兼容接口）
   api:
-    provider: "ernie"
-    base_url: "https://qianfan.baidubce.com/v2/chat/completions"
-    model: "ernie-4.5-turbo-vl-32k"
-    # 鉴权：优先读取 bearer_token，其次兼容 api_key；两者都支持环境变量注入
+    provider: "dashscope"
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: "qwen-vl-max-2025-08-13"
+    # 鉴权：优先读取 api_key，其次兼容 bearer_token；两者都支持环境变量注入
     bearer_token: ""
-    bearer_token_env: "VISION_AI_BEARER_TOKEN"
+    bearer_token_env: ""
     api_key: ""
-    # 千帆可选 appid（若服务端要求可通过环境变量注入）
+    api_key_env: "DASHSCOPE_API_KEY"
+    # DashScope 无需 appid；该字段仅为兼容保留
     appid: ""
-    appid_env: "VISION_AI_APP_ID"
+    appid_env: ""
     max_retries: 2
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
@@ -332,8 +333,8 @@ vl_material_generation:
     # auto: 仅在 DashScope 场景自动尝试 data-uri / upload
     # data_uri: 强制使用 data-uri (仅适用小文件)
     # dashscope_upload: 强制使用 DashScope File.upload
-    # keyframes: 强制使用关键帧抽取（千帆建议默认）
-    video_input_mode: "keyframes"
+    # keyframes: 强制使用关键帧抽取（跨平台兜底）
+    video_input_mode: "auto"
     
     # 关键帧降级参数 (当视频过大无法直接传输时)
     max_input_frames: 6  # 最多抽取6帧
@@ -422,6 +423,11 @@ vl_material_generation:
     # Export tutorial assets to output_dir/{assets_root_dir}/{unit_id}/
     export_assets: true
 
+    # 当命中 pre-vl 剪枝并使用 pruned clip 做分析时：
+    # true  = 导出素材时回到原始语义单元 clip（更高清），用映射后的时间戳截取
+    # false = 继续从 pruned clip 导出（避免时间映射误差，但清晰度可能下降）
+    export_from_original_clip_when_prepruned: true
+
     # Root directory name under output_dir
     assets_root_dir: "vl_tutorial_units"
 
@@ -439,6 +445,52 @@ vl_material_generation:
     # Keyframe image extension: png / jpg / jpeg
     keyframe_image_ext: "png"
 
+    # 关键帧 bbox 二次外扩比例（按框宽/高），用于避免裁剪过紧看不清上下文
+    keyframe_bbox_expand_ratio: 0.15
+
+    # 关键帧 bbox 每侧最小外扩（0-1000 坐标系），20=2%
+    keyframe_bbox_min_border_span_1000: 20
+
+    # 在目标时间戳前后搜索 I 帧的时间窗（秒）
+    keyframe_iframe_search_window_sec: 0.2
+
+    # 是否在搜索窗内按清晰度选择最优 I 帧
+    keyframe_select_sharpest_iframe: true
+
+    # 是否对关键帧执行“半屏裁剪”（裁剪窗面积约为原图 50%，且必须包含 bbox）
+    keyframe_halfscreen_crop: true
+
+    # 裁剪后放大倍数（仅二次裁剪时设为 1.0，表示不放大）
+    keyframe_upscale_factor: 1.0
+
+    # 放大插值方式：lanczos4 / cubic / linear
+    keyframe_upscale_interpolation: "lanczos4"
+
+    # USM 锐化参数（仅二次裁剪时关闭）
+    keyframe_usm_sigma: 0.0
+    keyframe_usm_amount: 0.0
+    keyframe_usm_threshold: 0
+
+    # 是否在结果图上绘制红色 bbox 框
+    keyframe_draw_bbox_red: true
+
+    # 红框是否使用“扩展后 bbox”坐标；false=使用模型原始 bbox（推荐，更贴近操作点）
+    keyframe_draw_bbox_use_expanded: false
+
+    # true=直接在原始整帧上画红框（不裁剪、不缩放）；用于严格核对 bbox 位置
+    keyframe_draw_on_original_frame: true
+
+    # 原图画框后，按红框宽/高向外二次扩展的裁剪比例（0=不再二次扩展）
+    keyframe_original_draw_crop_expand_ratio: 0.3
+
+    # 二次裁剪每侧最小扩展（0-1000 坐标，20=2%）
+    keyframe_original_draw_crop_min_border_span_1000: 20
+
+    # 红框线宽比例（相对 min(width,height)）；恢复历史默认 1%
+    keyframe_red_box_thickness_ratio: 0.01
+
+    # true=原图画框后直接输出；false=继续执行二次裁剪链路
+    keyframe_skip_post_draw_processing: false
 
   # Screenshot optimization settings
   screenshot_optimization:

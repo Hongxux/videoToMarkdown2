@@ -5,14 +5,17 @@
 4) 字段定义:
    - 必填:
      - step_id (Integer)
-     - step_description (String): 该步骤的总括说明（核心目的）。并描述操作后的状态变化或预期反馈，以供校验。
-     - main_operation (String): 【必填】这是能够完全替代视频演示的核心内容。无论视频在做什么，都必须输出。必须直接使用结构化 Markdown 格式（使用有序列表或无序列表，可包含粗体、代码块等）。包含具体的点击路径（如 A -> B）、填写的具体参数值和原封不动提取的代码/命令。必须确保能100%脱离视频盲操复现。**特别注意：当你认为某一步操作完成后需要视觉图片印证时，必须在该步骤文本后精准嵌入图片占位符 `[KEYFRAME_{N}]`（N代表这是第 N 个截图，从 1 开始）。**
-     - clip_start_sec (Float): 步骤开始时间。
-     - clip_end_sec (Float): 步骤结束时间。
-     - instructional_keyframes (List[Object]): 该步骤中最重要的截图凭证。必须选取最能代表该步骤结果的瞬间。列表中的第 N 个元素会替换掉 `main_operation` 里的 `[KEYFRAME_{N}]` 占位符。
+      - step_type (String): 【必填】严格从以下枚举中选取其一：`MAIN_FLOW` (主流程，必须执行的关键线性步骤), `CONDITIONAL` (条件分支，仅在特定情况或特定版本下才需要的步骤), `OPTIONAL` (可选操作，锦上添花的设置，跳过也不影响最终目标), `TROUBLESHOOTING` (排错处理，视频中展示了报错/失败情况并演示了如何修复)。
+      - step_description (String): 该步骤的简短说明（仅作为本步骤的短标题）。
+      - main_operation (String): 【必填】完全替代视频演示的核心教学文本（Markdown 格式）。结构上，你必须在整段文本最开头写明目标（如 `** 本步目标**：...`），在最后结尾写明预期结果（如 `** 预期反馈**：操作后的界面变化...`），在两者之间使用编号列表写出具体的实操点击路径和参数，并请极度自然地将**“讲解者的解释和原因”**杂揉在这几步操作文本中。**如果 `step_type` 不是主干流程，必须在最上方显眼处写明触发条件（例如：“**【遇到报错时执行：如果终端提示...】**”）。** 必须在需要的步骤后精准嵌入图片占位符 `[KEYFRAME_{N}]`（N从1开始）。注意：`instructional_keyframes` 数组里的所有图片，都必须有对应的 `[KEYFRAME_{N}]` 占位符去承载！这绝对不能遗漏！
+      - clip_start_sec (Float): 步骤开始时间。
+      - clip_end_sec (Float): 步骤结束时间。
+      - instructional_keyframes (List[Object]): 该步骤中最重要的截图凭证。必须选取最能代表该步骤结果的瞬间。列表中的第 N 个元素必须严格对应 `main_operation` 里的 `[KEYFRAME_{N}]` 占位符。
         - timestamp_sec (Float): 关键帧精确相对时间（秒）。
-        - frame_reason (String): 描述这张图证明了什么（例如：“填写完代理服务器 IP 后的网络设置界面”）。要在 `main_operation` 中作为上下文关联。
-        - bbox (List[Integer]): `[ymin, xmin, ymax, xmax]` 格式，取值范围 0-1000（代表千分比）。框出画面中与当前操作紧密相关、最核心的区域（如被点击的按钮及其所在面板、发生改变的输出窗口），用于裁剪，去除全屏冗余信息以提升阅读体验。
+        - frame_reason (String): 描述这张图证明了什么。用于 Markdown 图注。
+        - target_ui_type (String): 目标 UI 元素的具体类型（例如：提交按钮、输入框、下拉菜单栏、侧边栏列表项等）。
+        - target_text (String): 目标区域囊括的具体文本内容（必须如实记录画面上的字眼，以便进行后续的 OCR 断言或网格匹配，如："Confirm"、"Proxy"、"File"）。
+        - target_relative_position (String): 目标在整个画面中的大致方位（如“屏幕右上角”）以及与其他显著 UI 模块的空间关系（如“位于左侧导航树的最下方”、“在 Cancel 按钮的右侧”）。该语义特征将作为 Stage 2 视觉网格锚定的关键线索。
    - 可选 (若无内容，请直接在 JSON 中省略该字段):
      - main_action (String): 核心动作摘要。
      - precautions (List[String]): 易错点或注意事项。
@@ -31,6 +34,36 @@
    - 若该步骤不存在有价值的动态展示，且仅靠文字即可完整传达信息，必须返回 no_needed_video=true。
    - 若该步骤中的动态演示对理解或复现有价值，返回 no_needed_video=false。
 10) should_type 路由覆盖规则（可选）:
-   - should_type=abstract: 按 abstract 路由处理。
-   - should_type=concrete: 按 concrete 路由处理。
-   - 若 no_needed_video=true，则应等价按 abstract 路由处理（覆盖优先级最高）。
+    - should_type=abstract: 按 abstract 路由处理。
+    - should_type=concrete: 按 concrete 路由处理。
+    - 若 no_needed_video=true，则应等价按 abstract 路由处理（覆盖优先级最高）。
+    
+11) 严格输出示例 (请深刻理解其结构与占位符映射关系):
+```json
+[
+  {
+    "step_id": 1,
+    "step_type": "MAIN_FLOW",
+    "step_description": "修改 IDE 代理设置",
+    "main_operation": "**本步目标**：为 Android Studio 配置本地代理，应对国内网络环境。\n\n1. 点击菜单栏 **File -> Settings**。这里建议先配好本地代理映射，以免后续下载依赖时卡死。\n   [KEYFRAME_1]\n2. 在搜索框输入 `Proxy`，将 IP 改为 `127.0.0.1`，点击 Apply。\n   [KEYFRAME_2]\n\n**预期反馈**：能够看到 Proxy 界面下方的连通性测试显示为绿色 Success。",
+    "clip_start_sec": 10.0,
+    "clip_end_sec": 20.0,
+    "instructional_keyframes": [
+      {
+        "timestamp_sec": 12.5,
+        "frame_reason": "Settings 菜单入口",
+        "target_ui_type": "菜单项",
+        "target_text": "Settings",
+        "target_relative_position": "位于屏幕顶端工具栏偏左，File 下拉菜单中"
+      },
+      {
+        "timestamp_sec": 18.0,
+        "frame_reason": "Proxy 填写完成状态",
+        "target_ui_type": "配置表单及按钮",
+        "target_text": "127.0.0.1, Apply, Success",
+        "target_relative_position": "画面中部的代理配置面板，要求包含输入框、底部的 Apply 按钮和右侧结果反馈文字"
+      }
+    ]
+  }
+]
+```

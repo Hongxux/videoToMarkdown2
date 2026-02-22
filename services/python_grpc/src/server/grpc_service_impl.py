@@ -378,6 +378,14 @@ def _to_int(value: Any, default: int) -> int:
         return default
 
 
+def _to_float(value: Any, default: float) -> float:
+    """Convert config value to float."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _normalize_cli_args(value: Any) -> Optional[List[str]]:
     """将配置值归一化为命令行参数列表。"""
     if value is None:
@@ -475,12 +483,21 @@ def _load_download_video_options(config: Dict[str, Any]) -> Dict[str, Any]:
     else:
         prefer_h264 = _to_bool(video_cfg.get("prefer_h264", True), True)
 
+    short_video_max_duration_sec_env = os.getenv("YTDLP_SHORT_VIDEO_MAX_DURATION_SEC", "").strip()
+    if short_video_max_duration_sec_env:
+        short_video_max_duration_sec = _to_float(short_video_max_duration_sec_env, 3600.0)
+    else:
+        short_video_max_duration_sec = _to_float(video_cfg.get("short_video_max_duration_sec", 3600.0), 3600.0)
+    if short_video_max_duration_sec <= 0:
+        short_video_max_duration_sec = 3600.0
+
     return {
         "proxy": _pick_str("download_proxy", "YTDLP_PROXY"),
         "disable_ssl_verify": disable_ssl_verify,
         "cookies_file": _pick_str("download_cookies_file", "YTDLP_COOKIES_FILE"),
         "cookies_from_browser": _pick_str("download_cookies_from_browser", "YTDLP_COOKIES_FROM_BROWSER"),
         "prefer_h264": prefer_h264,
+        "short_video_max_duration_sec": short_video_max_duration_sec,
         "external_downloader": _pick_str("external_downloader", "YTDLP_EXTERNAL_DOWNLOADER"),
         "external_downloader_args": _pick_args("external_downloader_args", "YTDLP_EXTERNAL_DOWNLOADER_ARGS"),
     }
@@ -5178,7 +5195,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         # 统一语义单元持久化路径：不再接收 Java 传入路径，仅在服务内用于报表/兜底持久化。
         semantic_units_path = os.path.join(output_dir, "semantic_units_phase2a.json")
         semantic_source_case = request.WhichOneof("semantic_units_source") if hasattr(request, "WhichOneof") else None
-        vl_model_name = "ernie-4.5-turbo-vl-32k"
+        vl_model_name = "qwen-vl-max-2025-08-13"
 
         vl_report_writer = VLReportWriter(
             task_id=task_id,
@@ -6154,6 +6171,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                 "step_id": step_id,
                                 "step_description": clip.get("step_description", ""),
                                 "description": clip.get("step_description", ""),
+                                "step_type": str(clip.get("step_type") or "MAIN_FLOW").strip().upper() or "MAIN_FLOW",
                                 "main_action": str(clip.get("main_action") or "").strip(),
                                 "main_operation": list(clip.get("main_operation", []) or []),
                                 "precautions": list(clip.get("precautions", []) or []),

@@ -589,9 +589,12 @@ class VisionAIConfig:
     2) 步骤2：协调类内方法完成业务处理。
     3) 步骤3：输出处理结果并提供可复用能力。"""
     enabled: bool = False
+    api_key: str = ""
     bearer_token: str = ""
-    base_url: str = "https://qianfan.baidubce.com/v2/chat/completions"
-    model: str = "ernie-4.5-turbo-vl-32k"
+    api_key_env: str = ""
+    bearer_token_env: str = ""
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    model: str = "qwen-vl-max-2025-08-13"
     temperature: float = 0.3
     timeout: float = 60.0
     rate_limit_per_minute: int = 60
@@ -637,6 +640,7 @@ class VisionAIClient:
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.config = config or VisionAIConfig()
+        self._api_key, self._api_key_env = self._resolve_api_key(self.config)
         
         # HTTP 客户端 (连接池 + HTTP/2)
         self._http_client: Optional[httpx.AsyncClient] = None
@@ -673,6 +677,52 @@ class VisionAIClient:
             "person_subject_skips": 0,
             "person_subject_deleted_files": 0,
         }
+
+    @staticmethod
+    def _is_dashscope_endpoint(base_url: str) -> bool:
+        normalized = str(base_url or "").strip().lower()
+        return "dashscope.aliyuncs.com" in normalized
+
+    @staticmethod
+    def _is_qianfan_endpoint(base_url: str) -> bool:
+        normalized = str(base_url or "").strip().lower()
+        return "qianfan.baidubce.com" in normalized or "aistudio.baidu.com" in normalized
+
+    @classmethod
+    def _resolve_api_key(cls, config: VisionAIConfig) -> Tuple[str, str]:
+        api_key = str(getattr(config, "api_key", "") or "").strip()
+        if not api_key:
+            api_key = str(getattr(config, "bearer_token", "") or "").strip()
+
+        base_url = str(getattr(config, "base_url", "") or "").strip()
+        api_key_env = str(getattr(config, "api_key_env", "") or "").strip()
+        bearer_env = str(getattr(config, "bearer_token_env", "") or "").strip()
+
+        if not api_key_env:
+            api_key_env = "VISION_AI_BEARER_TOKEN" if cls._is_qianfan_endpoint(base_url) else "DASHSCOPE_API_KEY"
+        if not bearer_env:
+            bearer_env = "VISION_AI_BEARER_TOKEN"
+
+        if not api_key:
+            env_candidates: List[str] = [api_key_env, bearer_env]
+            if cls._is_qianfan_endpoint(base_url):
+                env_candidates.append("QIANFAN_BEARER_TOKEN")
+            deduped_envs: List[str] = []
+            seen_envs = set()
+            for env_name in env_candidates:
+                normalized_env = str(env_name or "").strip()
+                if not normalized_env or normalized_env in seen_envs:
+                    continue
+                seen_envs.add(normalized_env)
+                deduped_envs.append(normalized_env)
+            for env_name in deduped_envs:
+                candidate = str(os.environ.get(env_name, "") or "").strip()
+                if candidate:
+                    api_key = candidate
+                    api_key_env = env_name
+                    break
+
+        return api_key, api_key_env
 
     def _get_person_segmenter(self):
         """
@@ -962,7 +1012,7 @@ class VisionAIClient:
             return prefilter_result
 
         # Step 3: API 调用
-        if not self.config.enabled or not self.config.bearer_token:
+        if not self.config.enabled or not self._api_key:
             return {"error": "Vision AI not configured", "should_include": True}
         
         result = await self._call_vision_api(image_path, prompt, system_prompt)
@@ -1206,7 +1256,7 @@ class VisionAIClient:
                 "temperature": self.config.temperature,
             }
             headers = {
-                "Authorization": f"Bearer {self.config.bearer_token}",
+                "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json",
             }
 
@@ -1305,7 +1355,7 @@ class VisionAIClient:
             }
             
             headers = {
-                "Authorization": f"Bearer {self.config.bearer_token}",
+                "Authorization": f"Bearer {self._api_key}",
                 "Content-Type": "application/json"
             }
             
@@ -1465,6 +1515,86 @@ class VisionAIClient:
 
 _global_vision_client: Optional[VisionAIClient] = None
 
+def _normalize_vision_chat_base_url(base_url: str) -> str:
+    raw = str(base_url or "").strip()
+    if not raw:
+        return "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    if raw.endswith("/chat/completions"):
+        return raw
+    return raw.rstrip("/") + "/chat/completions"
+
+
+def _resolve_runtime_default_vision_config() -> VisionAIConfig:
+    try:
+        from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
+
+        module2_config = load_module2_config()
+    except Exception as exc:
+        logger.warning(f"VisionAI runtime default config load failed: {exc}")
+        return VisionAIConfig(enabled=False)
+
+    if not isinstance(module2_config, dict):
+        return VisionAIConfig(enabled=False)
+
+    vision_block = module2_config.get("vision_ai", {})
+    if isinstance(vision_block, dict) and bool(vision_block.get("enabled", False)):
+        return VisionAIConfig(
+            enabled=True,
+            api_key=str(vision_block.get("api_key", "") or "").strip(),
+            bearer_token=str(vision_block.get("bearer_token", "") or "").strip(),
+            api_key_env=str(vision_block.get("api_key_env", "") or "").strip(),
+            bearer_token_env=str(vision_block.get("bearer_token_env", "") or "").strip(),
+            base_url=_normalize_vision_chat_base_url(
+                str(
+                    vision_block.get(
+                        "base_url",
+                        "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+                    )
+                    or ""
+                )
+            ),
+            model=str(vision_block.get("model", "qwen-vl-max-2025-08-13") or "").strip() or "qwen-vl-max-2025-08-13",
+            temperature=float(vision_block.get("temperature", 0.3) or 0.3),
+            rate_limit_per_minute=int(vision_block.get("rate_limit_per_minute", 60) or 60),
+            duplicate_detection_enabled=bool(vision_block.get("duplicate_detection", True)),
+            similarity_threshold=float(vision_block.get("similarity_threshold", 0.95) or 0.95),
+        )
+
+    vl_block = module2_config.get("vl_material_generation", {})
+    vl_api = vl_block.get("api", {}) if isinstance(vl_block, dict) else {}
+    vl_enabled = bool(vl_block.get("enabled", False)) if isinstance(vl_block, dict) else False
+    if not isinstance(vl_api, dict):
+        return VisionAIConfig(enabled=False)
+
+    return VisionAIConfig(
+        enabled=vl_enabled,
+        api_key=str(vl_api.get("api_key", "") or "").strip(),
+        bearer_token=str(vl_api.get("bearer_token", "") or "").strip(),
+        api_key_env=str(vl_api.get("api_key_env", "") or "").strip(),
+        bearer_token_env=str(vl_api.get("bearer_token_env", "") or "").strip(),
+        base_url=_normalize_vision_chat_base_url(
+            str(vl_api.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1") or "")
+        ),
+        model=str(vl_api.get("model", "qwen-vl-max-2025-08-13") or "").strip() or "qwen-vl-max-2025-08-13",
+        temperature=float(vl_api.get("temperature", 0.2) or 0.2),
+        rate_limit_per_minute=60,
+        duplicate_detection_enabled=True,
+        similarity_threshold=0.95,
+    )
+
+
+def _vision_client_config_signature(config: VisionAIConfig) -> Tuple[Any, ...]:
+    return (
+        bool(getattr(config, "enabled", False)),
+        str(getattr(config, "base_url", "") or "").strip(),
+        str(getattr(config, "model", "") or "").strip(),
+        str(getattr(config, "api_key_env", "") or "").strip(),
+        str(getattr(config, "bearer_token_env", "") or "").strip(),
+        bool(getattr(config, "duplicate_detection_enabled", True)),
+        float(getattr(config, "similarity_threshold", 0.95) or 0.95),
+    )
+
+
 def get_vision_ai_client(config: Optional[VisionAIConfig] = None) -> VisionAIClient:
     """
     执行逻辑：
@@ -1480,6 +1610,22 @@ def get_vision_ai_client(config: Optional[VisionAIConfig] = None) -> VisionAICli
     输出参数：
     - 函数计算/封装后的结果对象。"""
     global _global_vision_client
+    resolved_config = config or _resolve_runtime_default_vision_config()
+
     if _global_vision_client is None:
-        _global_vision_client = VisionAIClient(config)
+        _global_vision_client = VisionAIClient(resolved_config)
+        return _global_vision_client
+
+    current_signature = _vision_client_config_signature(_global_vision_client.config)
+    target_signature = _vision_client_config_signature(resolved_config)
+    should_replace = False
+    if current_signature != target_signature and config is not None:
+        should_replace = True
+    if (
+        not bool(getattr(_global_vision_client.config, "enabled", False))
+        and bool(getattr(resolved_config, "enabled", False))
+    ):
+        should_replace = True
+    if should_replace:
+        _global_vision_client = VisionAIClient(resolved_config)
     return _global_vision_client

@@ -51,6 +51,9 @@ video:
   # true: 优先 H.264，失败再回退到默认 best 链路
   # false: 保持历史行为（best -> bestvideo+bestaudio/best）
   prefer_h264: true
+  # 短视频阈值（秒）：小于该值时优先最高分辨率（bestvideo+bestaudio/best）
+  # 默认 3600（1小时）；可通过环境变量 YTDLP_SHORT_VIDEO_MAX_DURATION_SEC 覆盖
+  short_video_max_duration_sec: 3600
 
 # 2. AI 服务配置
 # -----------------------------------------------------------------------------
@@ -219,24 +222,26 @@ visual:
   # 每个素材提取的候选帧数 (AI 将从中选择最佳帧)
   candidate_frames: 10
 
-# 6.1 视觉 AI 配置 (智能选帧 - ERNIE 4.5 Turbo)
+# 6.1 视觉 AI 配置 (智能选帧 - Qwen VL Plus)
 # -----------------------------------------------------------------------------
 vision_ai:
   # 是否启用视觉 AI 选帧
   enabled: true  # false 时退化为纯 CV 路径
   
-  # 服务商: ernie
-  provider: "ernie"
+  # 服务商: dashscope
+  provider: "dashscope"
   
-  # 认证方式: Bearer Token (千帆平台)
-  # 格式: bce-v3/ALTAK-xxxxx/yyyyyyy
+  # 认证方式：优先 api_key，其次兼容 bearer_token；建议通过环境变量注入
+  api_key: ""
+  api_key_env: "DASHSCOPE_API_KEY"
   bearer_token: ""  # 建议留空并使用环境变量注入，避免密钥泄漏
+  bearer_token_env: ""
   
-  # API 端点 (千帆平台 ERNIE 4.5 Turbo)
-  base_url: "https://qianfan.baidubce.com/v2/chat/completions"
+  # API 端点 (DashScope OpenAI 兼容接口，Vision 直连需完整 chat/completions 路径)
+  base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
   
   # 模型名称
-  model: "ernie-4.5-turbo-vl-32k"  # 与服务商可用模型保持一致
+  model: "qwen-vl-max-2025-08-13"
   
   # 温度参数 (越低越稳定)
   temperature: 0.1  # 建议 0.0~0.3；越低越稳定，越高越发散

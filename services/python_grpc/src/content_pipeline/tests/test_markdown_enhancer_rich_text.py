@@ -211,23 +211,35 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
                 "step_id": 1,
                 "step_description": "open settings",
                 "main_action": "open settings panel",
-                "main_operation": ["click settings", "open network tab"],
+                "main_operation": "click settings\nopen network tab\n[KEYFRAME_1]",
                 "precautions": ["do not edit unrelated options"],
                 "step_summary": "settings panel opened and network tab visible",
                 "operation_guidance": ["click settings first", "then open network tab"],
                 "clip_start_sec": 0.0,
                 "clip_end_sec": 6.0,
-                "instructional_keyframe_timestamp": [5.4],
+                "instructional_keyframes": [
+                    {
+                        "timestamp_sec": 5.4,
+                        "frame_reason": "settings panel visible",
+                        "bbox": [100, 80, 900, 980],
+                    }
+                ],
             },
             {
                 "step_id": 2,
                 "step_description": "change port",
                 "main_action": "change service port",
-                "main_operation": ["update port", "save config"],
+                "main_operation": "update port\nsave config\n[KEYFRAME_1]",
                 "precautions": [],
                 "clip_start_sec": 6.0,
                 "clip_end_sec": 13.0,
-                "instructional_keyframe_timestamp": [12.2],
+                "instructional_keyframes": [
+                    {
+                        "timestamp_sec": 12.2,
+                        "frame_reason": "port value saved",
+                        "bbox": [120, 120, 880, 920],
+                    }
+                ],
             },
         ],
         "steps": [
@@ -235,25 +247,39 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
                 "step_id": 1,
                 "step_description": "open settings",
                 "main_action": "open settings panel",
-                "main_operation": ["click settings", "open network tab"],
+                "main_operation": "click settings\nopen network tab\n[KEYFRAME_1]",
                 "precautions": ["do not edit unrelated options"],
                 "step_summary": "settings panel opened and network tab visible",
                 "operation_guidance": ["click settings first", "then open network tab"],
                 "clip_start_sec": 0.0,
                 "clip_end_sec": 6.0,
                 "clip_file": clip1.name,
-                "instructional_keyframes": [key1.name],
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key1.name,
+                        "timestamp_sec": 5.4,
+                        "frame_reason": "settings panel visible",
+                        "bbox": [100, 80, 900, 980],
+                    }
+                ],
             },
             {
                 "step_id": 2,
                 "step_description": "change port",
                 "main_action": "change service port",
-                "main_operation": ["update port", "save config"],
+                "main_operation": "update port\nsave config\n[KEYFRAME_1]",
                 "precautions": [],
                 "clip_start_sec": 6.0,
                 "clip_end_sec": 13.0,
                 "clip_file": clip2.name,
-                "instructional_keyframes": [key2.name],
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key2.name,
+                        "timestamp_sec": 12.2,
+                        "frame_reason": "port value saved",
+                        "bbox": [120, 120, 880, 920],
+                    }
+                ],
             },
         ],
     }
@@ -289,19 +315,198 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
         )
     )
 
-    assert "1. 1. open settings: from 0.00s to 6.00s" in markdown
-    assert "2. 2. change port: from 6.00s to 13.00s" in markdown
-    assert "主要动作: open settings panel" in markdown
-    assert "主要操作: click settings；open network tab" in markdown
-    assert "注意事项: do not edit unrelated options" in markdown
-    assert "步骤小结: settings panel opened and network tab visible" in markdown
-    assert "操作指导: click settings first；then open network tab" in markdown
-    assert "注意事项: avoid occupied ports" not in markdown
-    assert markdown.count("步骤小结:") == 1
-    assert markdown.count("操作指导:") == 1
+    assert "#### 1.open settings" in markdown
+    assert "#### 2.change port" in markdown
+    assert "click settings" in markdown
+    assert "open network tab" in markdown
+    assert "[KEYFRAME_1]" not in markdown
     assert "![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png]]" in markdown
+    assert "![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png]]" in markdown
+    assert "![[vl_tutorial_units/SU002/SU002_clip_step_01_open_settings.mp4]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_02_change_port.mp4]]" in markdown
     assert "> ?? **" not in markdown
+
+
+def test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed(tmp_path):
+    unit_dir = tmp_path / "vl_tutorial_units" / "SU003"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    clip1 = unit_dir / "SU003_clip_step_01_install.mp4"
+    key1 = unit_dir / "SU003_ss_step_01_key_01_install.png"
+    clip1.write_bytes(b"asset")
+    key1.write_bytes(b"asset")
+
+    steps_payload = {
+        "unit_id": "SU003",
+        "schema": "tutorial_stepwise_v1",
+        "raw_response": [
+            {
+                "step_id": 1,
+                "step_description": "install sdk",
+                "main_operation": "open package manager\n【imgneeded_SU003_img_01】\nconfirm install",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 8.0,
+                "instructional_keyframes": [{"timestamp_sec": 3.5}],
+            }
+        ],
+        "steps": [
+            {
+                "step_id": 1,
+                "step_description": "install sdk",
+                "main_operation": "open package manager\n【imgneeded_SU003_img_01】\nconfirm install",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 8.0,
+                "clip_file": clip1.name,
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key1.name,
+                        "timestamp_sec": 3.5,
+                    }
+                ],
+            }
+        ],
+    }
+    (unit_dir / "SU003_steps.json").write_text(json.dumps(steps_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU003",
+                "title": "Tutorial Unit",
+                "knowledge_type": "process",
+                "body_text": "tutorial body",
+                "mult_steps": True,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "【imgneeded_SU003_img_01】" not in markdown
+    assert "![[vl_tutorial_units/SU003/SU003_ss_step_01_key_01_install.png]]" in markdown
+    assert "![[vl_tutorial_units/SU003/SU003_clip_step_01_install.mp4]]" in markdown
+
+
+def test_tutorial_step_type_renders_note_warning_without_consuming_main_flow_index(tmp_path):
+    unit_dir = tmp_path / "vl_tutorial_units" / "SU004"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    clip_main_1 = unit_dir / "SU004_clip_step_01_open_homepage.mp4"
+    clip_conditional = unit_dir / "SU004_clip_step_02_branch_proxy.mp4"
+    clip_main_2 = unit_dir / "SU004_clip_step_03_download_installer.mp4"
+    clip_warning = unit_dir / "SU004_clip_step_04_fix_permission.mp4"
+    key_main_1 = unit_dir / "SU004_ss_step_01_key_01_open_homepage.png"
+    key_conditional = unit_dir / "SU004_ss_step_02_key_01_branch_proxy.png"
+    key_main_2 = unit_dir / "SU004_ss_step_03_key_01_download_installer.png"
+    key_warning = unit_dir / "SU004_ss_step_04_key_01_fix_permission.png"
+    for file_path in [
+        clip_main_1,
+        clip_conditional,
+        clip_main_2,
+        clip_warning,
+        key_main_1,
+        key_conditional,
+        key_main_2,
+        key_warning,
+    ]:
+        file_path.write_bytes(b"asset")
+
+    steps_payload = {
+        "unit_id": "SU004",
+        "schema": "tutorial_stepwise_v1",
+        "steps": [
+            {
+                "step_id": 1,
+                "step_type": "MAIN_FLOW",
+                "step_description": "打开官网",
+                "main_operation": "访问下载页\n[KEYFRAME_1]",
+                "clip_file": clip_main_1.name,
+                "instructional_keyframe_details": [{"image_file": key_main_1.name, "timestamp_sec": 3.0}],
+            },
+            {
+                "step_id": 2,
+                "step_type": "CONDITIONAL",
+                "step_description": "分支：代理网络环境下改用镜像下载",
+                "main_operation": "切换镜像地址\n[KEYFRAME_1]",
+                "clip_file": clip_conditional.name,
+                "instructional_keyframe_details": [{"image_file": key_conditional.name, "timestamp_sec": 8.0}],
+            },
+            {
+                "step_id": 3,
+                "step_type": "MAIN_FLOW",
+                "step_description": "下载安装包",
+                "main_operation": "点击下载并保存\n[KEYFRAME_1]",
+                "clip_file": clip_main_2.name,
+                "instructional_keyframe_details": [{"image_file": key_main_2.name, "timestamp_sec": 15.0}],
+            },
+            {
+                "step_id": 4,
+                "step_type": "TROUBLESHOOTING",
+                "step_description": "报错：安装时报权限不足",
+                "main_operation": "以管理员权限重试安装\n[KEYFRAME_1]",
+                "clip_file": clip_warning.name,
+                "instructional_keyframe_details": [{"image_file": key_warning.name, "timestamp_sec": 22.0}],
+            },
+        ],
+    }
+    (unit_dir / "SU004_steps.json").write_text(json.dumps(steps_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU004",
+                "title": "Tutorial Unit",
+                "knowledge_type": "process",
+                "body_text": "tutorial body",
+                "mult_steps": True,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "#### 1.打开官网" in markdown
+    assert "#### 2.下载安装包" in markdown
+    assert "#### 2.分支：代理网络环境下改用镜像下载" not in markdown
+    assert "#### 3.报错：安装时报权限不足" not in markdown
+    assert "> [!NOTE] 分支情况处理：分支：代理网络环境下改用镜像下载" in markdown
+    assert "> [!WARNING] 常见报错解决：报错：安装时报权限不足" in markdown
+    assert "> 切换镜像地址" in markdown
+    assert "> 以管理员权限重试安装" in markdown
+    assert "> ![[vl_tutorial_units/SU004/SU004_ss_step_02_key_01_branch_proxy.png]]" in markdown
+    assert "> ![[vl_tutorial_units/SU004/SU004_clip_step_04_fix_permission.mp4]]" in markdown
 
 
 def test_group_and_unit_headings_use_fixed_two_level_structure(tmp_path, monkeypatch):
@@ -928,7 +1133,7 @@ def test_img_desc_augment_uses_excluded_screenshot_items_as_evidence():
         unit_id="SU399",
         title="Concrete Unit",
         knowledge_type="concrete",
-        original_body="鍘熷姝ｆ枃",
+        original_body="original body",
         screenshot_items=[
             {
                 "img_id": "SU399_img_01",
@@ -1232,10 +1437,9 @@ def test_markdown_enhancer_writes_llm_trace_jsonl(tmp_path, monkeypatch):
     trace_path = tmp_path / "intermediates" / "phase2b_llm_trace.jsonl"
     assert trace_path.exists()
     lines = [line for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) >= 3
+    assert len(lines) >= 2
     payloads = [json.loads(line) for line in lines]
     steps = {item.get("step_name") for item in payloads}
-    assert "hierarchy_classification" in steps
     assert "img_desc_augment" in steps
     assert "structured_text" in steps
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from services.python_grpc.src.config_paths import load_yaml_dict, resolve_video_config_path
+from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 
 
 @dataclass
@@ -142,7 +143,8 @@ def create_llm_client(
 
     base_url = ai_config.get("base_url", "https://api.deepseek.com")
     purpose_config = ai_config.get(purpose, ai_config.get("analysis", {}))
-    model = purpose_config.get("model", "deepseek-chat")
+    configured_model = purpose_config.get("model", "deepseek-chat")
+    model = resolve_deepseek_model(configured_model, default_model="deepseek-chat")
     temperature = float(purpose_config.get("temperature", 0.1))
     max_tokens = int(purpose_config.get("max_tokens", 4096))
     timeout = float(purpose_config.get("timeout", ai_config.get("timeout", 180.0)))
@@ -185,15 +187,40 @@ def create_vision_client(config_path: str = "config.yaml") -> "LLMClient":
     config = load_config(config_path)
     vision_config = config.get("vision_ai", {})
 
-    bearer_token = vision_config.get("bearer_token", "")
-    base_url = vision_config.get("base_url", "https://qianfan.baidubce.com/v2/chat/completions")
-    model = vision_config.get("vision_model", "ernie-4.5-turbo-vl-32k")
+    base_url = str(vision_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions") or "").strip()
+    normalized_base_url = base_url.lower()
+    is_qianfan = ("qianfan.baidubce.com" in normalized_base_url) or ("aistudio.baidu.com" in normalized_base_url)
+    default_model = "ernie-4.5-turbo-vl-32k" if is_qianfan else "qwen-vl-max-2025-08-13"
+    model = str(vision_config.get("model", vision_config.get("vision_model", default_model)) or "").strip()
+    api_key = str(vision_config.get("api_key", "") or "").strip()
+    if not api_key:
+        api_key = str(vision_config.get("bearer_token", "") or "").strip()
+    if not api_key:
+        api_key_env = str(vision_config.get("api_key_env", "") or "").strip()
+        bearer_env = str(vision_config.get("bearer_token_env", "") or "").strip()
+        if not api_key_env:
+            api_key_env = "VISION_AI_BEARER_TOKEN" if is_qianfan else "DASHSCOPE_API_KEY"
+        if not bearer_env:
+            bearer_env = "VISION_AI_BEARER_TOKEN"
+        env_candidates = [api_key_env, bearer_env]
+        if is_qianfan:
+            env_candidates.append("QIANFAN_BEARER_TOKEN")
+        seen_envs = set()
+        for env_name in env_candidates:
+            normalized_env_name = str(env_name or "").strip()
+            if not normalized_env_name or normalized_env_name in seen_envs:
+                continue
+            seen_envs.add(normalized_env_name)
+            candidate = str(os.getenv(normalized_env_name, "") or "").strip()
+            if candidate:
+                api_key = candidate
+                break
     temperature = vision_config.get("temperature", 0.3)
     max_tokens = int(vision_config.get("max_tokens", 4096))
     timeout = float(vision_config.get("timeout", 180.0))
 
     llm_config = LLMConfig(
-        api_key=bearer_token,
+        api_key=api_key,
         base_url=base_url,
         model=model,
         temperature=temperature,

@@ -32,6 +32,7 @@ from services.python_grpc.src.common.utils.patch_protocol import (
     normalize_replace_add_patch_item,
     pick_full_text_fallback,
 )
+from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 from services.python_grpc.src.config_paths import resolve_video_config_path
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
@@ -388,6 +389,12 @@ class MarkdownEnhancer:
                 api_key=self.api_key,
                 base_url=self.base_url + "/v1"  # LLMClient 需要 /v1 后缀
             )
+
+        # 统一走 V3.2 模型路由：默认沿用客户端模型，支持配置文件与环境变量覆盖。
+        default_model = "deepseek-chat"
+        if self._llm_client is not None:
+            default_model = str(getattr(self._llm_client, "model", "") or "deepseek-chat")
+        self._structured_text_model = self._load_deepseek_model(default_model=default_model)
         
         
         # V2: assets 目录 (用于 Obsidian 相对路径)
@@ -597,6 +604,27 @@ class MarkdownEnhancer:
 
         return enabled
 
+    def _load_deepseek_model(self, default_model: str) -> str:
+        """加载 DeepSeek 模型配置，并统一映射到 V3.2 chat/reasoner 官方模型名。"""
+        model_name = resolve_deepseek_model(default_model, default_model="deepseek-chat")
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                if isinstance(config, dict):
+                    analysis_cfg = config.get("ai", {}).get("analysis", {})
+                    configured = str(analysis_cfg.get("model", "") or "").strip()
+                    if configured:
+                        model_name = resolve_deepseek_model(configured, default_model=model_name)
+            except Exception as exc:
+                logger.warning(f"Failed to load deepseek model from config: {exc}")
+
+        env_override = str(os.getenv("MODULE2_MARKDOWN_ENHANCER_MODEL", "") or "").strip()
+        if env_override:
+            model_name = resolve_deepseek_model(env_override, default_model=model_name)
+        return model_name
+
     def _load_llm_trace_config(self, default_enabled: bool = False) -> Dict[str, Any]:
         """加载 LLM trace 配置：config.yaml 为主，环境变量覆盖。"""
         config_value: Dict[str, Any] = {
@@ -729,6 +757,31 @@ class MarkdownEnhancer:
         async with self._llm_trace_lock:
             with open(self._llm_trace_file_path, "a", encoding="utf-8") as file_obj:
                 file_obj.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    async def _complete_text_with_model_fallback(
+        self,
+        *,
+        prompt: str,
+        system_message: str,
+        model: str,
+    ) -> Tuple[str, Any, Any]:
+        """优先透传模型参数；若桩客户端不支持 `model` 关键字则自动回退。"""
+        if self._llm_client is None:
+            raise RuntimeError("LLM client is not initialized")
+        try:
+            return await self._llm_client.complete_text(
+                prompt=prompt,
+                system_message=system_message,
+                model=model,
+            )
+        except TypeError as exc:
+            # 兼容历史测试桩：旧签名不接收 model 参数。
+            if "unexpected keyword argument 'model'" not in str(exc):
+                raise
+            return await self._llm_client.complete_text(
+                prompt=prompt,
+                system_message=system_message,
+            )
     
     @property
     def enabled(self) -> bool:
@@ -1145,7 +1198,39 @@ class MarkdownEnhancer:
             return False
         if not section.tutorial_steps:
             return False
-        return bool(section.mult_steps or len(section.tutorial_steps) > 1)
+        return True
+
+    @staticmethod
+    def _normalize_tutorial_step_type(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if not text:
+            return "MAIN_FLOW"
+        if text in {"MAIN_FLOW", "CONDITIONAL", "OPTIONAL", "TROUBLESHOOTING"}:
+            return text
+        alias_map = {
+            "MAIN": "MAIN_FLOW",
+            "PRIMARY": "MAIN_FLOW",
+            "NORMAL": "MAIN_FLOW",
+            "BRANCH": "CONDITIONAL",
+            "CONDITION": "CONDITIONAL",
+            "IF": "CONDITIONAL",
+            "OPTION": "OPTIONAL",
+            "ERROR": "TROUBLESHOOTING",
+            "EXCEPTION": "TROUBLESHOOTING",
+            "DEBUG": "TROUBLESHOOTING",
+            "FIX": "TROUBLESHOOTING",
+        }
+        return alias_map.get(text, "MAIN_FLOW")
+
+    @staticmethod
+    def _quote_lines(block_lines: List[str]) -> List[str]:
+        quoted: List[str] = []
+        for line in block_lines:
+            if line:
+                quoted.append(f"> {line}")
+            else:
+                quoted.append(">")
+        return quoted
 
     def _load_tutorial_steps(self, unit_id: str, inline_steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         def _safe_float(value: Any, default: float = 0.0) -> float:
@@ -1217,6 +1302,82 @@ class MarkdownEnhancer:
                 normalized.append(text_item)
             return normalized
 
+        def _normalize_main_operation(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return ""
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return "\n".join(_normalize_text_list(parsed)).strip()
+                return text
+            if isinstance(value, (list, tuple, set)):
+                return "\n".join(_normalize_text_list(list(value))).strip()
+            return str(value).strip()
+
+        def _normalize_bbox_1000(value: Any) -> Optional[List[int]]:
+            if not isinstance(value, (list, tuple)) or len(value) != 4:
+                return None
+            try:
+                xmin = int(round(float(value[0])))
+                ymin = int(round(float(value[1])))
+                xmax = int(round(float(value[2])))
+                ymax = int(round(float(value[3])))
+            except Exception:
+                return None
+            xmin = max(0, min(1000, xmin))
+            ymin = max(0, min(1000, ymin))
+            xmax = max(0, min(1000, xmax))
+            ymax = max(0, min(1000, ymax))
+            if xmax < xmin:
+                xmin, xmax = xmax, xmin
+            if ymax < ymin:
+                ymin, ymax = ymax, ymin
+            return [xmin, ymin, xmax, ymax]
+
+        def _normalize_keyframe_entries(value: Any, base_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            normalized: List[Dict[str, Any]] = []
+            for item in value:
+                if isinstance(item, str):
+                    image_path = _to_abs(item, base_dir=base_dir)
+                    if image_path:
+                        normalized.append({"image_path": image_path})
+                    continue
+                if not isinstance(item, dict):
+                    continue
+
+                entry: Dict[str, Any] = {}
+                image_value = (
+                    item.get("image_path")
+                    or item.get("image_file")
+                    or item.get("img_path")
+                    or item.get("path")
+                    or item.get("file_path")
+                )
+                image_path = _to_abs(image_value, base_dir=base_dir)
+                if image_path:
+                    entry["image_path"] = image_path
+
+                raw_ts = item.get("timestamp_sec", item.get("timestamp"))
+                if raw_ts is not None:
+                    entry["timestamp_sec"] = _safe_float(raw_ts, 0.0)
+                frame_reason = str(item.get("frame_reason", "") or "").strip()
+                if frame_reason:
+                    entry["frame_reason"] = frame_reason
+                bbox = _normalize_bbox_1000(item.get("bbox"))
+                if bbox is not None:
+                    entry["bbox"] = bbox
+                if entry:
+                    normalized.append(entry)
+            return normalized
+
         def _normalize_step(raw_step: Dict[str, Any], order: int, base_dir: Optional[Path] = None) -> Dict[str, Any]:
             step_id = _safe_int(raw_step.get("step_id", order), order)
             step_desc = str(
@@ -1225,6 +1386,12 @@ class MarkdownEnhancer:
                 or raw_step.get("title")
                 or f"step_{step_id}"
             ).strip()
+            step_type = self._normalize_tutorial_step_type(
+                raw_step.get("step_type")
+                or raw_step.get("stepType")
+                or raw_step.get("step_category")
+                or raw_step.get("type")
+            )
             main_action = str(
                 raw_step.get("main_action")
                 or raw_step.get("主要动作")
@@ -1235,7 +1402,7 @@ class MarkdownEnhancer:
                 raw_main_operation = raw_step.get("main_operations")
             if raw_main_operation is None:
                 raw_main_operation = raw_step.get("主要操作")
-            main_operation = _normalize_text_list(raw_main_operation)
+            main_operation = _normalize_main_operation(raw_main_operation)
             raw_precautions = raw_step.get("precautions")
             if raw_precautions is None:
                 raw_precautions = raw_step.get("notes")
@@ -1280,10 +1447,20 @@ class MarkdownEnhancer:
             if not clip_file:
                 clip_file = materials.get("clip_path") or materials.get("clip")
 
-            keyframe_files = raw_step.get("instructional_keyframes")
-            if not isinstance(keyframe_files, list):
-                keyframe_files = []
-            if not keyframe_files:
+            keyframe_entries: List[Dict[str, Any]] = []
+            keyframe_entries.extend(
+                _normalize_keyframe_entries(
+                    raw_step.get("instructional_keyframe_details"),
+                    base_dir=base_dir,
+                )
+            )
+            keyframe_entries.extend(
+                _normalize_keyframe_entries(
+                    raw_step.get("instructional_keyframes"),
+                    base_dir=base_dir,
+                )
+            )
+            if not keyframe_entries:
                 material_items = materials.get("screenshot_items")
                 if isinstance(material_items, list):
                     for item in material_items:
@@ -1295,15 +1472,48 @@ class MarkdownEnhancer:
                             item.get("img_path") or item.get("path") or item.get("file_path") or ""
                         ).strip()
                         if item_path:
-                            keyframe_files.append(item_path)
-            if not keyframe_files:
+                            keyframe_entries.append(
+                                {
+                                    "image_path": _to_abs(item_path, base_dir=base_dir),
+                                    "timestamp_sec": _safe_float(item.get("timestamp_sec", 0.0), 0.0),
+                                }
+                            )
+            if not keyframe_entries:
                 material_images = materials.get("screenshot_paths") or materials.get("screenshots")
                 if isinstance(material_images, list):
-                    keyframe_files = material_images
+                    for path_item in material_images:
+                        image_path = _to_abs(path_item, base_dir=base_dir)
+                        if image_path:
+                            keyframe_entries.append({"image_path": image_path})
+
+            deduped_keyframes: List[Dict[str, Any]] = []
+            seen_keyframes: set[str] = set()
+            for item in keyframe_entries:
+                key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                if key in seen_keyframes:
+                    continue
+                seen_keyframes.add(key)
+                deduped_keyframes.append(item)
+
+            timestamps = _extract_timestamps(raw_step)
+            for item in deduped_keyframes:
+                ts_value = item.get("timestamp_sec")
+                if ts_value is None:
+                    continue
+                timestamps.append(_safe_float(ts_value, 0.0))
+            deduped_timestamps: List[float] = []
+            seen_ts: set[float] = set()
+            for ts in timestamps:
+                marker = round(float(ts), 6)
+                if marker in seen_ts:
+                    continue
+                seen_ts.add(marker)
+                deduped_timestamps.append(float(ts))
 
             return {
                 "step_id": step_id,
                 "step_description": step_desc,
+                "step_type": step_type,
                 "main_action": main_action,
                 "main_operation": main_operation,
                 "precautions": precautions,
@@ -1312,13 +1522,9 @@ class MarkdownEnhancer:
                 "action_brief": str(raw_step.get("action_brief", "") or "").strip(),
                 "clip_start_sec": clip_start,
                 "clip_end_sec": clip_end,
-                "instructional_keyframe_timestamp": _extract_timestamps(raw_step),
+                "instructional_keyframe_timestamp": deduped_timestamps,
                 "clip_file": _to_abs(clip_file, base_dir=base_dir),
-                "instructional_keyframes": [
-                    _to_abs(path_item, base_dir=base_dir)
-                    for path_item in keyframe_files
-                    if str(path_item or "").strip()
-                ],
+                "instructional_keyframes": deduped_keyframes,
             }
 
         by_step: Dict[int, Dict[str, Any]] = {}
@@ -1365,6 +1571,12 @@ class MarkdownEnhancer:
                     elif not existed.get("instructional_keyframe_timestamp"):
                         existed["instructional_keyframe_timestamp"] = normalized["instructional_keyframe_timestamp"]
                     if existed:
+                        incoming_step_type = normalized.get("step_type", "MAIN_FLOW")
+                        existing_step_type = self._normalize_tutorial_step_type(existed.get("step_type"))
+                        if incoming_step_type != "MAIN_FLOW" or not existing_step_type:
+                            existed["step_type"] = incoming_step_type
+                        else:
+                            existed["step_type"] = existing_step_type
                         if not existed.get("main_action"):
                             existed["main_action"] = normalized["main_action"]
                         if normalized["main_operation"] and not existed.get("main_operation"):
@@ -1385,6 +1597,12 @@ class MarkdownEnhancer:
                         by_step[normalized["step_id"]] = normalized
                         continue
                     existed["step_description"] = normalized["step_description"] or existed["step_description"]
+                    incoming_step_type = normalized.get("step_type", "MAIN_FLOW")
+                    existing_step_type = self._normalize_tutorial_step_type(existed.get("step_type"))
+                    if incoming_step_type != "MAIN_FLOW" or not existing_step_type:
+                        existed["step_type"] = incoming_step_type
+                    else:
+                        existed["step_type"] = existing_step_type
                     existed["main_action"] = normalized["main_action"] or existed.get("main_action", "")
                     if normalized["main_operation"]:
                         existed["main_operation"] = normalized["main_operation"]
@@ -1987,6 +2205,45 @@ class MarkdownEnhancer:
         stripped = re.sub(r"[ \t]+\n", "\n", stripped)
         return stripped
 
+    @staticmethod
+    def _replace_tutorial_keyframe_placeholders(content: str, keyframe_embeds: List[str]) -> str:
+        if not content:
+            return content
+        if not keyframe_embeds:
+            return re.sub(r"\[\s*KEYFRAME_\d+\s*\]", "", content, flags=re.IGNORECASE)
+
+        def _replace(match: re.Match) -> str:
+            try:
+                idx = int(match.group(1))
+            except Exception:
+                idx = 0
+            if idx <= 0 or idx > len(keyframe_embeds):
+                return ""
+            return keyframe_embeds[idx - 1]
+
+        return re.sub(r"\[\s*KEYFRAME_(\d+)\s*\]", _replace, content, flags=re.IGNORECASE)
+
+    @staticmethod
+    def _replace_tutorial_legacy_placeholders(content: str, keyframe_embeds: List[str]) -> str:
+        if not content:
+            return content
+        if not keyframe_embeds:
+            text = re.sub(r"【\s*imgneeded_[^】]*】", "", content, flags=re.IGNORECASE)
+            return re.sub(r"\[\s*IMG:[^\]]+\]", "", text, flags=re.IGNORECASE)
+
+        embed_index = 0
+
+        def _replace(_match: re.Match) -> str:
+            nonlocal embed_index
+            if embed_index >= len(keyframe_embeds):
+                return ""
+            replacement = keyframe_embeds[embed_index]
+            embed_index += 1
+            return replacement
+
+        text = re.sub(r"【\s*imgneeded_[^】]*】", _replace, content, flags=re.IGNORECASE)
+        return re.sub(r"\[\s*IMG:[^\]]+\]", _replace, text, flags=re.IGNORECASE)
+
     def _append_missing_image_embeds(self, content: str, screenshot_items: List[Dict[str, Any]]) -> str:
         if not screenshot_items:
             return content
@@ -2048,10 +2305,10 @@ class MarkdownEnhancer:
 
         start_ts = time.perf_counter()
         try:
-            content, meta, _ = await self._llm_client.complete_text(
+            content, meta, _ = await self._complete_text_with_model_fallback(
                 prompt=prompt,
                 system_message=self._structured_system_prompt,
-                model="deepseek-reasoner",
+                model=self._structured_text_model,
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
@@ -2093,77 +2350,93 @@ class MarkdownEnhancer:
         if not steps:
             return []
 
-        def _to_text_list(value: Any) -> List[str]:
-            if value is None:
-                return []
-            if isinstance(value, list):
-                return [str(item or "").strip() for item in value if str(item or "").strip()]
-            if isinstance(value, str):
-                text = value.strip()
-                if not text:
-                    return []
-                return [segment.strip() for segment in re.split(r"[\n;；]+", text) if segment.strip()]
-            return [str(value).strip()] if str(value).strip() else []
-
         lines: List[str] = []
+        main_flow_index = 0
         for order, step in enumerate(steps, start=1):
+            step_type = self._normalize_tutorial_step_type(
+                step.get("step_type")
+                if isinstance(step, dict)
+                else None
+            )
             step_id = int(step.get("step_id", order) or order)
             desc = str(step.get("step_description", "") or f"step_{step_id}").strip()
-            start_sec = float(step.get("clip_start_sec", 0.0) or 0.0)
-            end_sec = float(step.get("clip_end_sec", start_sec) or start_sec)
-            if end_sec < start_sec:
-                start_sec, end_sec = end_sec, start_sec
-            main_action = str(step.get("main_action") or "").strip()
-            main_operation = _to_text_list(
-                step.get("main_operation")
-                if step.get("main_operation") is not None
-                else step.get("main_operations")
-            )
-            precautions = _to_text_list(
-                step.get("precautions")
-                if step.get("precautions") is not None
-                else step.get("notes")
-            )
-            step_summary = str(
-                step.get("step_summary") or step.get("summary") or ""
-            ).strip()
-            operation_guidance = _to_text_list(
-                step.get("operation_guidance")
-                if step.get("operation_guidance") is not None
-                else step.get("guidance")
-            )
+            if step_type == "MAIN_FLOW":
+                main_flow_index += 1
+                lines.append(f"#### {main_flow_index}.{desc}")
+            elif step_type in {"CONDITIONAL", "OPTIONAL"}:
+                lines.append(f"> [!NOTE] 分支情况处理：{desc}")
+            elif step_type == "TROUBLESHOOTING":
+                lines.append(f"> [!WARNING] 常见报错解决：{desc}")
+            else:
+                main_flow_index += 1
+                lines.append(f"#### {main_flow_index}.{desc}")
 
-            lines.append(f"{order}. {step_id}. {desc}: from {start_sec:.2f}s to {end_sec:.2f}s")
-            if main_action:
-                lines.append(f"    - 主要动作: {main_action}")
-            if main_operation:
-                lines.append(f"    - 主要操作: {'；'.join(main_operation)}")
-            if precautions:
-                lines.append(f"    - 注意事项: {'；'.join(precautions)}")
-            if step_summary:
-                lines.append(f"    - 步骤小结: {step_summary}")
-            if operation_guidance:
-                lines.append(f"    - 操作指导: {'；'.join(operation_guidance)}")
+            keyframe_entries = step.get("instructional_keyframes") or []
+            if not isinstance(keyframe_entries, list):
+                keyframe_entries = []
+            keyframe_embeds: List[str] = []
+            for item in keyframe_entries:
+                image_path = ""
+                if isinstance(item, dict):
+                    image_path = str(item.get("image_path") or item.get("image_file") or "").strip()
+                elif isinstance(item, str):
+                    image_path = str(item).strip()
+                if not image_path:
+                    continue
+                embed = self._format_obsidian_embed(image_path)
+                if embed:
+                    keyframe_embeds.append(embed)
 
-            keyframes = step.get("instructional_keyframes") or []
-            timestamps = step.get("instructional_keyframe_timestamp") or []
-            if keyframes:
-                for idx, key_path in enumerate(keyframes, start=1):
-                    suffix = ""
-                    if idx <= len(timestamps):
-                        try:
-                            suffix = f" ({float(timestamps[idx - 1]):.2f}s)"
-                        except Exception:
-                            suffix = ""
-                    lines.append(f"    - Keyframe {idx}{suffix}: {self._format_obsidian_embed(str(key_path))}")
-            elif timestamps:
-                for idx, ts in enumerate(timestamps, start=1):
-                    lines.append(f"    - Keyframe {idx}: {float(ts):.2f}s")
+            raw_main_operation = step.get("main_operation")
+            if raw_main_operation is None:
+                raw_main_operation = step.get("main_operations")
+            if isinstance(raw_main_operation, list):
+                main_operation = "\n".join(
+                    [str(item or "").strip() for item in raw_main_operation if str(item or "").strip()]
+                ).strip()
+            else:
+                main_operation = str(raw_main_operation or "").strip()
+
+            if not main_operation:
+                fallback_main_action = str(step.get("main_action") or "").strip()
+                main_operation = fallback_main_action
+
+            has_keyframe_placeholder = bool(
+                re.search(r"\[\s*KEYFRAME_\d+\s*\]", main_operation, flags=re.IGNORECASE)
+            )
+            rendered_operation = self._replace_tutorial_keyframe_placeholders(
+                main_operation,
+                keyframe_embeds,
+            )
+            rendered_operation = self._replace_tutorial_legacy_placeholders(
+                rendered_operation,
+                keyframe_embeds,
+            )
+            rendered_operation = self._strip_imgneeded_placeholders(rendered_operation).strip()
+
+            if rendered_operation:
+                operation_lines = rendered_operation.splitlines()
+                if keyframe_embeds and not has_keyframe_placeholder:
+                    for embed in keyframe_embeds:
+                        if embed not in rendered_operation:
+                            operation_lines.append(embed)
+                if step_type == "MAIN_FLOW":
+                    lines.extend(operation_lines)
+                else:
+                    lines.extend(self._quote_lines(operation_lines))
+            elif keyframe_embeds:
+                if step_type == "MAIN_FLOW":
+                    lines.extend(keyframe_embeds)
+                else:
+                    lines.extend(self._quote_lines(keyframe_embeds))
 
             clip_path = str(step.get("clip_file") or step.get("clip_path") or "").strip()
             if clip_path:
-                lines.append(f"    - Step video: {self._format_obsidian_embed(clip_path)}")
-
+                clip_embed = self._format_obsidian_embed(clip_path)
+                if step_type == "MAIN_FLOW":
+                    lines.append(clip_embed)
+                else:
+                    lines.extend(self._quote_lines([clip_embed]))
             lines.append("")
 
         return lines

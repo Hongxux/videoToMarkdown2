@@ -12,11 +12,14 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict
 import time
+import cv2
+import numpy as np
 
 from concurrent.futures import ProcessPoolExecutor
 
 
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
+import services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator as vl_material_generator_module
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer import (
     VLAnalysisResult,
     VLClipAnalysisResponse,
@@ -86,6 +89,194 @@ def test_vl_init_supports_bearer_token_with_qianfan_defaults():
     assert analyzer.video_input_mode == "keyframes"
 
 
+def test_vl_init_uses_dashscope_defaults_and_env_api_key(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-test-key")
+
+    analyzer = VLVideoAnalyzer(
+        {
+            "api": {
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            }
+        }
+    )
+
+    assert analyzer._api_key == "dashscope-test-key"
+    assert analyzer.model == "qwen-vl-max-2025-08-13"
+    assert analyzer.video_input_mode == "auto"
+
+
+def test_export_keyframe_wrapper_passes_iframe_selection_config(monkeypatch, tmp_path):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "keyframe_iframe_search_window_sec": 0.35,
+                "keyframe_select_sharpest_iframe": True,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    captured: Dict[str, Any] = {}
+
+    async def _fake_export_keyframe_with_ffmpeg(**kwargs):
+        captured.update(kwargs)
+        output_path = kwargs["output_path"]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"frame")
+        return True
+
+    monkeypatch.setattr(vl_material_generator_module, "export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    output_path = Path(tmp_path) / "key.png"
+    ok = asyncio.run(
+        generator._export_keyframe_with_ffmpeg(
+            video_path="demo.mp4",
+            timestamp_sec=12.5,
+            output_path=output_path,
+        )
+    )
+
+    assert ok is True
+    assert captured["video_path"] == "demo.mp4"
+    assert float(captured["timestamp_sec"]) == 12.5
+    assert captured["output_path"] == output_path
+    assert float(captured["iframe_search_window_sec"]) == 0.35
+    assert captured["select_sharpest_iframe"] is True
+
+
+def test_generator_reads_draw_bbox_use_expanded_flag():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "keyframe_draw_bbox_use_expanded": True,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+    assert generator.tutorial_keyframe_draw_bbox_use_expanded is True
+
+
+def test_generator_reads_draw_on_original_frame_flag():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "keyframe_draw_on_original_frame": True,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+    assert generator.tutorial_keyframe_draw_on_original_frame is True
+
+
+def test_generator_reads_original_draw_crop_expand_and_thickness_flags():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "keyframe_original_draw_crop_expand_ratio": 0.45,
+                "keyframe_red_box_thickness_ratio": 0.003,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+    assert abs(generator.tutorial_keyframe_original_draw_crop_expand_ratio - 0.45) < 1e-6
+    assert abs(generator.tutorial_keyframe_red_box_thickness_ratio - 0.003) < 1e-6
+
+
+def test_generator_reads_original_draw_crop_min_expand_flag():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "keyframe_original_draw_crop_min_border_span_1000": 33,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+    assert int(generator.tutorial_keyframe_original_draw_crop_min_border_span_1000) == 33
+
+
+def test_generator_reads_skip_post_draw_processing_flag():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "keyframe_skip_post_draw_processing": True,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+    assert generator.tutorial_keyframe_skip_post_draw_processing is True
+
+
+def test_vl_analyze_clips_batch_preserves_order_and_exceptions(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+
+    async def _fake_analyze_clip(
+        clip_path: str,
+        semantic_unit_start_sec: float,
+        semantic_unit_id: str,
+        extra_prompt: str | None = None,
+        analysis_mode: str = "default",
+    ) -> VLClipAnalysisResponse:
+        _ = (clip_path, semantic_unit_start_sec, extra_prompt, analysis_mode)
+        if semantic_unit_id == "U2":
+            raise RuntimeError("boom-u2")
+        response = VLClipAnalysisResponse(success=True)
+        response.error_msg = semantic_unit_id
+        return response
+
+    monkeypatch.setattr(analyzer, "analyze_clip", _fake_analyze_clip)
+
+    results = asyncio.run(
+        analyzer.analyze_clips_batch(
+            tasks=[
+                {
+                    "clip_path": "u1.mp4",
+                    "semantic_unit_start_sec": 0.0,
+                    "semantic_unit_id": "U1",
+                    "analysis_mode": "default",
+                },
+                {
+                    "clip_path": "u2.mp4",
+                    "semantic_unit_start_sec": 10.0,
+                    "semantic_unit_id": "U2",
+                    "analysis_mode": "default",
+                },
+                {
+                    "clip_path": "u3.mp4",
+                    "semantic_unit_start_sec": 20.0,
+                    "semantic_unit_id": "U3",
+                    "analysis_mode": "tutorial_stepwise",
+                },
+            ],
+            max_inflight=2,
+            return_exceptions=True,
+        )
+    )
+
+    assert isinstance(results[0], VLClipAnalysisResponse)
+    assert isinstance(results[1], Exception)
+    assert isinstance(results[2], VLClipAnalysisResponse)
+    assert results[0].error_msg == "U1"
+    assert results[2].error_msg == "U3"
+
+
 def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path: Path):
     clip = tmp_path / "demo.mp4"
     clip.write_bytes(b"fake-video")
@@ -139,6 +330,9 @@ def test_tutorial_schema_parse_and_normalize():
                 {
                     "timestamp_sec": 6.2,
                     "frame_reason": "settings page visible",
+                    "target_ui_type": "menu_item",
+                    "target_text": "Settings",
+                    "target_relative_position": "top-left in toolbar",
                     "bbox": [120, 80, 760, 920],
                 }
             ],
@@ -170,23 +364,32 @@ def test_tutorial_schema_parse_and_normalize():
         {
             "timestamp_sec": 6.2,
             "frame_reason": "settings page visible",
+            "target_ui_type": "menu_item",
+            "target_text": "Settings",
+            "target_relative_position": "top-left in toolbar",
             "bbox": [120, 80, 760, 920],
         }
     ]
     assert results[0].precautions == ["Do not edit unrelated options"]
     assert results[0].step_summary == "settings page opened"
     assert results[0].operation_guidance == ["click settings", "open network settings"]
+    assert results[0].step_type == "MAIN_FLOW"
     assert results[1].precautions == []
     assert results[0].knowledge_type == "process"
     assert results[1].suggested_screenshoot_timestamps == [12.2]
+    assert results[1].step_type == "MAIN_FLOW"
     assert normalized[0]["instructional_keyframe_timestamp"] == [6.2]
     assert normalized[0]["instructional_keyframes"] == [
         {
             "timestamp_sec": 6.2,
             "frame_reason": "settings page visible",
+            "target_ui_type": "menu_item",
+            "target_text": "Settings",
+            "target_relative_position": "top-left in toolbar",
             "bbox": [120, 80, 760, 920],
         }
     ]
+    assert normalized[0]["step_type"] == "MAIN_FLOW"
     assert set(normalized[0].keys()) == {
         "step_id",
         "step_description",
@@ -201,6 +404,7 @@ def test_tutorial_schema_parse_and_normalize():
         "clip_start_sec",
         "clip_end_sec",
         "instructional_keyframe_timestamp",
+        "step_type",
     }
     assert normalized[0]["no_needed_video"] is False
     assert normalized[0]["should_type"] == ""
@@ -958,13 +1162,13 @@ def test_generate_tutorial_assets_per_unit_full_flow_before_phase2b(tmp_path, mo
         }
 
     async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
-        assert video_path == source_video_path
+        assert video_path in {source_video_path, str(clip_file)}
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"step-clip")
         return True
 
     async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
-        assert video_path == source_video_path
+        assert video_path in {source_video_path, str(clip_file)}
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"keyframe")
         return True
@@ -1002,7 +1206,7 @@ def test_generate_tutorial_assets_per_unit_full_flow_before_phase2b(tmp_path, mo
     assert len(data.get("raw_response", [])) == 2
     assert len(data.get("steps", [])) == 2
     assert data["steps"][0]["main_action"] == "open settings page"
-    assert data["steps"][0]["main_operation"] == ["click settings", "open config tab"]
+    assert data["steps"][0]["main_operation"] == "1. click settings\n2. open config tab\n[KEYFRAME_1]"
     assert data["steps"][0]["precautions"] == ["do not change unrelated fields"]
     assert data["steps"][0]["step_summary"] == "settings opened"
     assert data["steps"][0]["operation_guidance"] == ["open settings", "enter config tab"]
@@ -1230,6 +1434,432 @@ def test_analyze_unit_tasks_parallel_one_unit_one_api(monkeypatch):
     assert call_u2["clip_path"] == "u2_pruned.mp4"
     assert call_u2["analysis_mode"] == "tutorial_stepwise"
     assert "ctx-u2" in (call_u2["extra_prompt"] or "")
+
+
+def test_analyze_unit_tasks_prefers_batch_entry_when_available():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "vl_analysis": {
+                "parallel_workers": 2,
+                "parallel_hard_cap": 8,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    class _BatchAnalyzer:
+        def __init__(self):
+            self.batch_calls = []
+            self.single_calls = []
+
+        async def analyze_clips_batch(
+            self,
+            *,
+            tasks: list[dict[str, Any]],
+            max_inflight: int | None = None,
+            return_exceptions: bool = True,
+        ) -> list[VLClipAnalysisResponse]:
+            self.batch_calls.append(
+                {
+                    "tasks": tasks,
+                    "max_inflight": max_inflight,
+                    "return_exceptions": return_exceptions,
+                }
+            )
+            return [VLClipAnalysisResponse(success=True) for _ in tasks]
+
+        async def analyze_clip(
+            self,
+            clip_path: str,
+            semantic_unit_start_sec: float,
+            semantic_unit_id: str,
+            extra_prompt: str | None = None,
+            analysis_mode: str = "default",
+        ) -> VLClipAnalysisResponse:
+            _ = (clip_path, semantic_unit_start_sec, semantic_unit_id, extra_prompt, analysis_mode)
+            self.single_calls.append(semantic_unit_id)
+            return VLClipAnalysisResponse(success=True)
+
+    analyzer = _BatchAnalyzer()
+    generator._analyzer = analyzer
+
+    unit_tasks = [
+        {
+            "unit_id": "B1",
+            "start_sec": 0.0,
+            "end_sec": 10.0,
+            "duration": 10.0,
+            "clip_path": "b1.mp4",
+            "analysis_mode": "default",
+            "extra_prompt": None,
+            "semantic_unit": {"unit_id": "B1"},
+        },
+        {
+            "unit_id": "B2",
+            "start_sec": 10.0,
+            "end_sec": 20.0,
+            "duration": 10.0,
+            "clip_path": "b2.mp4",
+            "analysis_mode": "default",
+            "extra_prompt": None,
+            "semantic_unit": {"unit_id": "B2"},
+        },
+    ]
+    pre_prune_results = [
+        {
+            "applied": False,
+            "clip_path_for_vl": "b1.mp4",
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 10.0)],
+        },
+        {
+            "applied": False,
+            "clip_path_for_vl": "b2.mp4",
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 10.0)],
+        },
+    ]
+
+    analysis_results, task_metadata, pruned_units = asyncio.run(
+        generator._analyze_unit_tasks_in_parallel(
+            unit_tasks=unit_tasks,
+            pre_prune_results=pre_prune_results,
+        )
+    )
+
+    assert len(analysis_results) == 2
+    assert len(task_metadata) == 2
+    assert pruned_units == 0
+    assert len(analyzer.batch_calls) == 1
+    assert analyzer.batch_calls[0]["max_inflight"] == 2
+    assert analyzer.batch_calls[0]["return_exceptions"] is True
+    assert analyzer.single_calls == []
+
+
+def test_analyze_unit_tasks_prefers_existing_pruned_clip(tmp_path):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "vl_analysis": {
+                "parallel_workers": 1,
+                "parallel_hard_cap": 4,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    clips_dir = tmp_path / "semantic_unit_clips_vl"
+    pruned_dir = clips_dir / "vl_pruned_clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    pruned_dir.mkdir(parents=True, exist_ok=True)
+
+    original_clip = clips_dir / "SU101.mp4"
+    pruned_clip = pruned_dir / "SU101_pruned.mp4"
+    original_clip.write_bytes(b"original")
+    pruned_clip.write_bytes(b"pruned")
+
+    class _CountingAnalyzer:
+        def __init__(self):
+            self.calls = []
+
+        async def analyze_clip(
+            self,
+            clip_path: str,
+            semantic_unit_start_sec: float,
+            semantic_unit_id: str,
+            extra_prompt: str | None = None,
+            analysis_mode: str = "default",
+        ) -> VLClipAnalysisResponse:
+            self.calls.append(
+                {
+                    "clip_path": clip_path,
+                    "start": semantic_unit_start_sec,
+                    "unit_id": semantic_unit_id,
+                    "extra_prompt": extra_prompt,
+                    "analysis_mode": analysis_mode,
+                }
+            )
+            return VLClipAnalysisResponse(success=True)
+
+    analyzer = _CountingAnalyzer()
+    generator._analyzer = analyzer
+
+    unit_tasks = [
+        {
+            "unit_id": "SU101",
+            "start_sec": 0.0,
+            "end_sec": 20.0,
+            "duration": 20.0,
+            "clip_path": str(original_clip),
+            "analysis_mode": "tutorial_stepwise",
+            "extra_prompt": None,
+            "semantic_unit": {"unit_id": "SU101"},
+        }
+    ]
+    pre_prune_results = [
+        {
+            "applied": False,
+            "clip_path_for_vl": str(original_clip),
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 20.0)],
+        }
+    ]
+
+    _, task_metadata, _ = asyncio.run(
+        generator._analyze_unit_tasks_in_parallel(
+            unit_tasks=unit_tasks,
+            pre_prune_results=pre_prune_results,
+        )
+    )
+
+    assert len(analyzer.calls) == 1
+    assert analyzer.calls[0]["clip_path"] == str(pruned_clip)
+    assert task_metadata[0]["vl_clip_path"] == str(pruned_clip)
+
+
+def test_save_tutorial_assets_uses_analysis_relative_timestamps(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "export_assets": True,
+                "save_step_json": False,
+                "asset_export_parallel_workers": 1,
+                "asset_export_parallel_hard_cap": 1,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    analysis_clip_path = str(tmp_path / "analysis_source.mp4")
+
+    clip_calls = []
+    keyframe_calls = []
+
+    async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
+        clip_calls.append((video_path, float(start_sec), float(end_sec)))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return True
+
+    async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
+        keyframe_calls.append((video_path, float(timestamp_sec)))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"key")
+        return True
+
+    monkeypatch.setattr(generator, "_export_clip_asset_with_ffmpeg", _fake_export_clip_asset_with_ffmpeg)
+    monkeypatch.setattr(generator, "_export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    clip_requests = [
+        {
+            "semantic_unit_id": "SU777",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "step_description": "step one",
+            "action_brief": "step_one",
+            "start_sec": 100.0,
+            "end_sec": 120.0,
+            "_analysis_relative_start_sec": 1.0,
+            "_analysis_relative_end_sec": 3.0,
+        }
+    ]
+    screenshot_requests = [
+        {
+            "semantic_unit_id": "SU777",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "timestamp_sec": 110.0,
+            "_relative_timestamp": 10.0,
+            "_analysis_relative_timestamp": 2.0,
+        }
+    ]
+
+    asyncio.run(
+        generator._save_tutorial_assets_for_unit(
+            video_path=analysis_clip_path,
+            output_dir=str(output_dir),
+            unit_id="SU777",
+            clip_requests=clip_requests,
+            screenshot_requests=screenshot_requests,
+            raw_response_json=[],
+            use_analysis_relative_timestamps=True,
+        )
+    )
+
+    assert len(clip_calls) == 1
+    assert clip_calls[0][0] == analysis_clip_path
+    assert clip_calls[0][1] == 1.0
+    assert clip_calls[0][2] == 3.0
+
+    assert len(keyframe_calls) == 1
+    assert keyframe_calls[0][0] == analysis_clip_path
+    assert keyframe_calls[0][1] == 2.0
+
+
+def test_save_tutorial_assets_prefers_mapped_screenshot_timestamps_for_keyframes(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "export_assets": True,
+                "save_step_json": False,
+                "asset_export_parallel_workers": 1,
+                "asset_export_parallel_hard_cap": 1,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    original_clip_path = str(tmp_path / "original_source.mp4")
+
+    clip_calls = []
+    keyframe_calls = []
+
+    async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
+        clip_calls.append((video_path, float(start_sec), float(end_sec)))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return True
+
+    async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
+        keyframe_calls.append((video_path, float(timestamp_sec)))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"key")
+        return True
+
+    monkeypatch.setattr(generator, "_export_clip_asset_with_ffmpeg", _fake_export_clip_asset_with_ffmpeg)
+    monkeypatch.setattr(generator, "_export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    clip_requests = [
+        {
+            "semantic_unit_id": "SU778",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "step_description": "step one",
+            "action_brief": "step_one",
+            "start_sec": 100.0,
+            "end_sec": 120.0,
+            "_analysis_relative_start_sec": 1.0,
+            "_analysis_relative_end_sec": 3.0,
+        }
+    ]
+    screenshot_requests = [
+        {
+            "semantic_unit_id": "SU778",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "timestamp_sec": 110.0,
+            "_relative_timestamp": 10.0,
+            "_analysis_relative_timestamp": 2.0,
+            "bbox": [100, 200, 400, 300],
+        }
+    ]
+    raw_response_json = [
+        {
+            "step_id": 1,
+            "step_description": "step one",
+            "clip_start_sec": 1.0,
+            "clip_end_sec": 3.0,
+            "instructional_keyframes": [
+                {
+                    "timestamp_sec": 2.0,
+                    "bbox": [100, 200, 400, 300],
+                }
+            ],
+        }
+    ]
+
+    asyncio.run(
+        generator._save_tutorial_assets_for_unit(
+            video_path=original_clip_path,
+            output_dir=str(output_dir),
+            unit_id="SU778",
+            clip_requests=clip_requests,
+            screenshot_requests=screenshot_requests,
+            raw_response_json=raw_response_json,
+            use_analysis_relative_timestamps=False,
+            prefer_screenshot_requests_keyframes=True,
+        )
+    )
+
+    assert len(clip_calls) == 1
+    assert clip_calls[0][0] == original_clip_path
+    assert clip_calls[0][1] == 100.0
+    assert clip_calls[0][2] == 120.0
+
+    assert len(keyframe_calls) == 1
+    assert keyframe_calls[0][0] == original_clip_path
+    assert keyframe_calls[0][1] == 110.0
+
+
+def test_apply_grid_anchor_crop_for_keyframe(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "grid_anchor_enabled": True,
+                "grid_rows": 20,
+                "grid_cols": 20,
+                "grid_overlay_alpha": 0.4,
+                "grid_overlay_line_thickness": 1,
+                "grid_crop_expand_ratio": 0.15,
+                "grid_crop_min_border_px": 6,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    image_path = tmp_path / "frame.png"
+    image = np.full((200, 300, 3), 160, dtype=np.uint8)
+    assert cv2.imwrite(str(image_path), image)
+
+    async def _fake_vision_validate_image(**kwargs):
+        assert kwargs.get("image_path", "").endswith("_grid_overlay.png")
+        return {
+            "visual_verification": "located target area",
+            "grid_start": "C4",
+            "grid_end": "E7",
+        }
+
+    monkeypatch.setattr(
+        vl_material_generator_module.llm_gateway,
+        "vision_validate_image",
+        _fake_vision_validate_image,
+    )
+
+    meta = asyncio.run(
+        generator._apply_grid_anchor_crop_for_keyframe(
+            keyframe_path=image_path,
+            target_text="Settings",
+            target_ui_type="menu_item",
+            target_relative_position="top-left",
+        )
+    )
+
+    assert meta["grid_anchor_status"] == "ok"
+    assert meta["grid_start"] == "C4"
+    assert meta["grid_end"] == "E7"
+    assert meta["grid_overlay_file"] == "frame_grid_overlay.png"
+    assert (tmp_path / "frame_grid_overlay.png").exists()
+
+    cropped = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    assert cropped is not None
+    assert int(cropped.shape[0]) < 200
+    assert int(cropped.shape[1]) < 300
 
 
 def test_tutorial_assets_export_uses_parallel_limited_workers(tmp_path, monkeypatch):

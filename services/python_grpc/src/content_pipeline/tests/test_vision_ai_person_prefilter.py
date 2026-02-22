@@ -6,7 +6,71 @@ from pathlib import Path
 from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import (
     VisionAIClient,
     VisionAIConfig,
+    get_vision_ai_client,
 )
+import services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client as vision_ai_client_module
+
+
+def test_vision_client_prefers_explicit_api_key_over_env(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "env-key")
+    config = VisionAIConfig(
+        enabled=True,
+        api_key="config-key",
+        bearer_token="legacy-bearer",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    client = VisionAIClient(config)
+
+    assert client._api_key == "config-key"
+    assert client._api_key_env == "DASHSCOPE_API_KEY"
+
+
+def test_vision_client_loads_dashscope_api_key_from_env(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-env-key")
+    config = VisionAIConfig(
+        enabled=True,
+        api_key="",
+        bearer_token="",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    client = VisionAIClient(config)
+
+    assert client._api_key == "dashscope-env-key"
+    assert client._api_key_env == "DASHSCOPE_API_KEY"
+
+
+def test_get_vision_ai_client_loads_runtime_vl_api_config(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "runtime-vl-key")
+    monkeypatch.setattr(vision_ai_client_module, "_global_vision_client", None)
+
+    def _fake_load_module2_config():
+        return {
+            "vl_material_generation": {
+                "enabled": True,
+                "api": {
+                    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                    "model": "qwen-vl-max-2025-08-13",
+                    "api_key": "",
+                    "api_key_env": "DASHSCOPE_API_KEY",
+                    "bearer_token": "",
+                    "bearer_token_env": "",
+                    "temperature": 0.2,
+                },
+            }
+        }
+
+    import services.python_grpc.src.content_pipeline.infra.runtime.config_loader as config_loader_module
+
+    monkeypatch.setattr(config_loader_module, "load_module2_config", _fake_load_module2_config)
+    client = get_vision_ai_client(None)
+    try:
+        assert client.config.enabled is True
+        assert client.config.base_url.endswith("/chat/completions")
+        assert client.config.model == "qwen-vl-max-2025-08-13"
+        assert client._api_key == "runtime-vl-key"
+    finally:
+        asyncio.run(client.close())
+        monkeypatch.setattr(vision_ai_client_module, "_global_vision_client", None)
 
 
 def test_validate_image_person_subject_prefilter_skips_vision(monkeypatch):

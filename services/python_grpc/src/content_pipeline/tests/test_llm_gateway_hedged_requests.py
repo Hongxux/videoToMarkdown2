@@ -133,6 +133,65 @@ def test_vl_hedge_uses_second_and_cancels_slow_primary(monkeypatch):
     assert state["cancelled"] == 1
 
 
+def test_vl_chat_completions_keeps_order_and_respects_inflight(monkeypatch):
+    state = {"active": 0, "max_active": 0}
+
+    async def _fake_vl_chat_completion(**kwargs):
+        state["active"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        try:
+            marker = str(kwargs.get("cache_key", ""))
+            if marker.endswith("slow"):
+                await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(0.01)
+            return llm_gateway.VLChatResult(
+                content=marker,
+                finish_reason="stop",
+                usage={"total_tokens": 1},
+                model="fake-model",
+            )
+        finally:
+            state["active"] -= 1
+
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
+
+    results = asyncio.run(
+        llm_gateway.vl_chat_completions(
+            requests=[
+                {
+                    "client": object(),
+                    "model": "fake-model",
+                    "messages": [],
+                    "max_tokens": 16,
+                    "temperature": 0.1,
+                    "cache_key": "req-0-slow",
+                },
+                {
+                    "client": object(),
+                    "model": "fake-model",
+                    "messages": [],
+                    "max_tokens": 16,
+                    "temperature": 0.1,
+                    "cache_key": "req-1-fast",
+                },
+                {
+                    "client": object(),
+                    "model": "fake-model",
+                    "messages": [],
+                    "max_tokens": 16,
+                    "temperature": 0.1,
+                    "cache_key": "req-2-fast",
+                },
+            ],
+            max_inflight=2,
+        )
+    )
+
+    assert [item.content for item in results] == ["req-0-slow", "req-1-fast", "req-2-fast"]
+    assert state["max_active"] <= 2
+
+
 def test_vision_sync_hedge_uses_second_and_cancels_slow_primary(monkeypatch):
     monkeypatch.setattr(llm_gateway, "_VISION_HEDGE_ENABLED", True)
     monkeypatch.setattr(llm_gateway, "_VISION_HEDGE_DELAY_MS", 20)

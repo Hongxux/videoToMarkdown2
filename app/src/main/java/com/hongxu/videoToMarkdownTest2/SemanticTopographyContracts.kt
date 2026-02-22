@@ -1,5 +1,6 @@
-package com.example.semantictopography
+package com.hongxu.videoToMarkdownTest2
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -283,7 +284,7 @@ class HttpMobileMarkdownMetaApi(
 }
 
 /**
- * 通过微批队列对接 /api/telemetry/ingest。
+ * 通过微批队列对接 /api/mobile/tasks/{taskId}/telemetry。
  *
  * 关键策略：
  * 1. 前端事件先入内存队列（可扩展为 Room 持久队列）。
@@ -294,6 +295,10 @@ class HttpMobileMarkdownTelemetryApi(
     private val apiBaseUrl: String,
     private val queueConfig: TelemetryQueueConfig = TelemetryQueueConfig()
 ) : FlushableMobileMarkdownTelemetryApi {
+    private companion object {
+        const val TAG = "MobileTelemetry"
+    }
+
     private data class PendingTelemetry(
         val taskId: String,
         val pathHint: String?,
@@ -310,7 +315,11 @@ class HttpMobileMarkdownTelemetryApi(
             senderScope.launch {
                 while (isActive) {
                     delay(queueConfig.periodicFlushMs)
-                    flush(reason = "periodic_flush")
+                    runCatching {
+                        flush(reason = "periodic_flush")
+                    }.onFailure { error ->
+                        Log.w(TAG, "Periodic telemetry flush failed: ${error.message}", error)
+                    }
                 }
             }
         }
@@ -370,7 +379,11 @@ class HttpMobileMarkdownTelemetryApi(
                     pendingQueue.addFirst(item)
                 }
             }
-            throw error
+            Log.w(
+                TAG,
+                "Telemetry flush failed and events were re-queued: reason=$reason, size=${drained.size}",
+                error
+            )
         }
     }
 
@@ -397,13 +410,10 @@ class HttpMobileMarkdownTelemetryApi(
         sequence: Long
     ) {
         withContext(Dispatchers.IO) {
-            val url = URL("$apiBaseUrl/telemetry/ingest")
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/telemetry")
             val body = JSONObject().apply {
-                put("taskId", taskId)
                 put("path", pathHint ?: "")
-                put("flushReason", reason)
-                put("batchSeq", sequence)
-                put("batchSize", events.size)
                 put("events", JSONArray().apply {
                     events.forEach { event ->
                         put(JSONObject().apply {
@@ -439,7 +449,9 @@ class HttpMobileMarkdownTelemetryApi(
                     BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
                 }.orEmpty()
                 if (code !in 200..299) {
-                    throw IllegalStateException("HTTP $code: $text")
+                    throw IllegalStateException(
+                        "HTTP $code: $text (reason=$reason, seq=$sequence, taskId=$taskId)"
+                    )
                 }
             } finally {
                 connection.disconnect()

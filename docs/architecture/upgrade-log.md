@@ -3,6 +3,140 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-02-22 Python 侧 DeepSeek-V3.2 模型路由统一（按原配置语义）
+- 日期：2026-02-22
+- 触发背景与问题：
+  - 用户要求 Python 端与 Java 端一致，统一使用 DeepSeek-V3.2。
+  - 同时要求保持“原配置语义”：原来配置偏 chat 的场景继续走 `chat`，偏 reasoner 的场景走 `reasoner`。
+  - 既有 Python 链路缺少统一别名路由，且 `markdown_enhancer` 存在局部硬编码 `deepseek-reasoner`，会绕开配置语义。
+- 第一性原理与复用杠杆：
+  - 第一性原理：模型路由属于跨链路契约，必须“配置语义一致 -> 运行结果一致”。
+  - 复用杠杆1：复用 Python 端现有中心入口 `llm_gateway/LLMClient/create_llm_client`，不新增旁路调用链。
+  - 复用杠杆2：复用现有 `config.yaml(ai.analysis.model)` 配置面，避免新增配置心智负担。
+- 架构决策：
+  - 决策1：新增 Python 统一路由工具 `resolve_deepseek_model`，把别名映射到 V3.2 官方模型名：
+    - `deepseek-v3/v3 -> deepseek-chat`
+    - `deepseek-r1/v3 reasoner/v3.2 reasoner/deepseek-resoner -> deepseek-reasoner`
+  - 决策2：在 content_pipeline 与 transcript_pipeline 的 DeepSeek 客户端入口统一接入路由：
+    - `content_pipeline.infra.llm.LLMClient`
+    - `content_pipeline.infra.llm.llm_gateway`
+    - `transcript_pipeline.llm.client.create_llm_client`
+    - `transcript_pipeline.llm.DeepSeekClient`
+  - 决策3：`markdown_enhancer` 去掉局部硬编码 reasoner，改为按配置加载并路由后的模型。
+- 调用链与决策链变化：
+  - 改造前：
+    - Python 多入口直接吃原始模型字符串，别名语义不统一。
+    - `markdown_enhancer` 局部强制 reasoner，可能偏离配置。
+  - 改造后：
+    - 所有 DeepSeek 主入口先路由，再发起请求，确保落到 V3.2 `chat/reasoner`。
+    - `markdown_enhancer` 按配置语义选型，不再硬编码。
+- 已落地改动：
+  - `services/python_grpc/src/common/utils/deepseek_model_router.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `services/python_grpc/src/transcript_pipeline/llm/client.py`
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/common/utils/tests/test_deepseek_model_router.py`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：统一模型语义，不以吞吐/时延优化为目标。
+  - 测试方式：路由单测 + 受影响模块回归测试。
+  - 测试数据：见“验证方式”命令执行结果。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/common/utils/tests/test_deepseek_model_router.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k structured`
+  - `pytest -q services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`
+
+## 2026-02-22 DeepSeek-V3.2 Reasoner 统一到 Persona Reading 与 Insight Cards
+- 日期：2026-02-22
+- 触发背景与问题：
+  - 生产与测试链路需要统一到 DeepSeek-V3.2 的思考模式（Reasoner），覆盖 `persona_reading` 与 `cards` 生成。
+  - 现有配置仍以 `deepseek-v3` 为默认，且别名 `v3 reasoner` 被错误路由到 `deepseek-chat`，会导致“配置写了 reasoner，实际走了 chat”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：模型能力选择必须“配置语义 = 实际执行语义”，否则压测、线上行为与故障定位都会失真。
+  - 复用杠杆1：复用既有 `DeepSeekModelRouter`，不新增并行模型路由器。
+  - 复用杠杆2：复用既有 `telemetry.persona-reading.model` 与 `deepseek.advisor.model` 配置面，避免改 controller 接口契约。
+- 架构决策：
+  - 决策1：生产配置默认改为 Reasoner：
+    - `telemetry.persona-reading.model=deepseek-reasoner`
+    - `deepseek.advisor.model=deepseek-reasoner`
+  - 决策2：服务层默认值同步改为 `deepseek-reasoner`，确保测试/最小配置场景不会回落到 `chat`。
+  - 决策3：修正并扩展模型别名路由：
+    - `v3 reasoner` / `v3.2 reasoner` / `deepseek-v3.2-reasoner` / `deepseek-resoner` => `deepseek-reasoner`
+    - 保持 `deepseek-v3` / `v3` => `deepseek-chat`，兼容非思考模式。
+- 调用链与决策链变化：
+  - 改造前：
+    - `persona_reading/cards config -> deepseek-v3 -> resolve chat`
+    - `v3 reasoner -> (错误) resolve chat`
+  - 改造后：
+    - `persona_reading/cards config -> deepseek-reasoner -> resolve reasoner`
+    - `v3/v3.2 reasoner aliases -> resolve reasoner`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekModelRouter.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekModelRouterTest.java`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：统一模型执行语义与可运维性，不以吞吐优化为主目标。
+  - 测试方式：编译回归 + 路由单测。
+  - 测试数据：模型别名路由断言（Reasoner 别名与 V3 Chat 别名）。
+- 外部依据（官方文档）：
+  - DeepSeek API 模型说明：`deepseek-chat` 与 `deepseek-reasoner`（V3.2 非思考/思考模式）。
+  - 来源：`https://api-docs.deepseek.com/quick_start/pricing`、`https://api-docs.deepseek.com/guides/reasoning_model`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-21 Persona Reading 后置知识卡片流水线（insights_tags -> 复用卡片）
+- 日期：2026-02-21
+- 触发背景与问题：
+  - `persona-reading` 已能输出 `insights_tags`，但缺少自动落地链路，标签未形成可复用知识卡片。
+  - 同一文章重复命中的术语没有稳定的复用与反向链接策略，前端难以消费统一卡片网络。
+- 第一性原理与复用杠杆：
+  - 第一性原理：阅读画像输出必须尽快转成可复用知识资产，否则信号会在链路中流失。
+  - 复用杠杆1：复用既有 `DeepSeekAdvisorService`（已有三层提示词与 LLM 调用）。
+  - 复用杠杆2：复用 `CardStorageService`（全局 Markdown 卡片存储、合并、wikilink 反链）。
+  - 复用杠杆3：复用 `MobileMarkdownController.appendPersonalizedReading` 入口，不改前端请求协议主干。
+- 架构决策：
+  - 决策1：新增 `PersonaInsightCardService`，在文章读取时异步处理 `insights_tags`。
+  - 决策2：新服务在任务目录落盘 `.mobile_persona_cache/insight_cards/`，写入：
+    - `insight_cards_index.json`（任务级索引）
+    - `llm_interactions.ndjson`（每次 LLM 交互结果）
+    - `cards/*.md`（任务级卡片快照）
+  - 决策3：全局卡片继续写入 `CardStorageService` 管理目录，若卡片已存在则追加文章语境块，不重复新建。
+  - 决策4：语境层统一新增“在此语境下”语句，并把同文标签以 `[[wikilink]]` 形式写入，驱动 backlinks。
+- 调用链与决策链变化：
+  - 改造前：`GET markdown -> persona-reading payload 返回`（仅返回，不沉淀卡片）。
+  - 改造后：`GET markdown -> persona-reading payload -> PersonaInsightCardService.generateAsync -> DeepSeekAdvisorService/CardStorageService -> task cache + global cards`。
+- 已落地改动：
+  - 新增：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-21 追加：卡片解释改为结构化 JSON 出参（替代文本关键词分段）
+- 触发背景：
+  - 原 `parseAdviceSections` 依赖文本关键词（如“语境/原理/广度”）进行分段，模型一旦输出风格漂移就会误判。
+- 架构决策：
+  - 决策1：`DeepSeekAdvisorService` 新增 `requestStructuredAdvice(...)`，要求模型严格输出 JSON：
+    - `contextual_explanations[]`
+    - `depth[]`
+    - `breadth[]`
+  - 决策2：`PersonaInsightCardService` 新增 `parseAdviceSectionsFromJson(...)`，只做 JSON 解析，不再使用文本关键词匹配。
+  - 决策3：卡片重组 Markdown 时，三个数组统一按有序序号输出，保证前端/人工阅读一致性。
+  - 决策4：保留原 `requestAdvice(...)` 文本模式，避免影响既有 `/api/mobile/cards/ai-advice` 链路。
+- 已落地改动：
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - 更新：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - 新增：`services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/structured-system-zh.txt`
+  - 新增：`services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/structured-user-zh.txt`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-20 移动阅读元数据扩展：左滑改“标记删除”并新增 Telemetry 入湖 API
 - 日期：2026-02-20
 - 触发背景与问题：
@@ -7179,3 +7313,452 @@
   - 对比项：无吞吐/时延专项优化目标。
   - 测试方式：结构兼容单测 + 编译回归 + 编码校验。
   - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：Tutorial Stepwise Phase2B 直连渲染与关键帧裁剪链路
+- 触发背景：
+  - tutorial_stepwise 提示词升级后，步骤主体改为 `main_operation` 富文本字符串，并使用 `instructional_keyframes` 对象（含 `timestamp_sec`、`bbox`）表达教学关键帧。
+  - 旧链路仍按“时间范围内选图 + 通用结构化增强”处理，导致步骤图片时机不稳定、占位符替换不直观。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 教程步骤已经由 VL 明确给出“何时截、截哪里”，Phase2B 应优先保持该事实证据，不再二次猜测。
+    - 渲染层应直接消费步骤契约，不应把 tutorial_stepwise 强行回落到 abstract/concrete 的通用文本结构化路径。
+  - 复用杠杆：
+    - 复用现有 `vl_material_generator` FFmpeg 导出能力；
+    - 复用 `markdown_enhancer` 的 Obsidian embed 与占位符替换框架；
+    - 复用现有 tutorial step JSON（`vl_tutorial_units/{unit_id}/{unit_id}_steps.json`）作为 Phase2B 唯一事实来源。
+- 架构决策：
+  - 决策1：tutorial 关键帧在导出后按 `bbox` 直接裁剪，失败时保留全帧并记录告警，不阻断流程。
+  - 决策2：tutorial 步骤 `main_operation` 以字符串为主契约保存，优先保留 VL 原始 markdown 与 `[KEYFRAME_N]` 占位关系。
+  - 决策3：`markdown_enhancer` tutorial 分支改为步骤级模板渲染：
+    - `#### {step_id}.{step_description}`
+    - `main_operation` 内占位符替换为对应关键帧 embed
+    - 步骤末尾追加 step clip embed
+  - 决策4：tutorial_stepwise 单元在 Phase2B 走“请求ID直连匹配”，跳过 unit-scan 兜底回灌。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py`
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_process_multistep_renders_ordered_steps_with_assets services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py::test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py::test_apply_external_materials_tutorial_stepwise_skips_validator services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py::test_apply_external_materials_tutorial_stepwise_skips_unit_scan_fallback services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_generate_tutorial_assets_per_unit_full_flow_before_phase2b -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：本次目标是链路正确性，不是吞吐/时延优化。
+  - 测试方式：步骤渲染契约回归 + 关键帧裁剪单测 + tutorial 材料匹配回归。
+  - 测试数据：上方 pytest 命令 7 个用例通过。
+
+### 2026-02-20 追加：阅读加载链路接入双重画像驱动段落二次处理
+- 触发背景：
+  - 现状在 `GET /api/mobile/tasks/{taskId}/markdown` 仅返回原始 markdown 文本，不会根据用户画像动态生成段落级个性化属性。
+  - 业务要求是“用户点开文章即拿到可渲染的段落 JSON 数组”，并包含 `relevance_score / bridge_text / insights_tags`。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 内容个性化应前置为“可缓存的段落标注工件”，避免每次打开文章都做全量推理导致首屏抖动；
+    - 画像是推理条件，不应嵌入前端渲染逻辑，后端应完成“画像 + 段落”的语义聚合。
+  - 复用杠杆：
+    - 复用现有 `persona_10d.json`（双重画像）作为实时读取源；
+    - 复用 `TaskProcessingWorker` 完成态事件，异步预计算个性化阅读工件；
+    - 复用 OpenAI-compatible `/chat/completions` 与提示词外置机制；
+    - 复用 `TelemetryLlmInteractionLogService` 做 LLM 交互审计异步落盘。
+- 架构决策：
+  - 决策1：新增 `PersonaAwareReadingService`，负责：
+    - markdown 段落切分（含列表/子嵌套块聚合）；
+    - 画像读取；
+    - LLM 标注与启发式回退；
+    - 结果缓存（按 `taskId + userKey + markdownPath`）。
+  - 决策2：在任务成功完成后异步预计算，优先命中缓存；加载时未命中再即时补算并回填缓存。
+  - 决策3：`/markdown` 与 `/markdown/by-path` 返回中新增：
+    - `personalizedNodes`
+    - `personalizationSource`
+    - `personalizationUserKey`
+    - `personalizationGeneratedAt`
+    - `personaProfile`
+  - 决策4：persona 数据源优先读取 mock 文件 `var/tmp_mock_persona.json`（支持工作目录与仓库根目录双路径解析），未命中时才回退用户分桶 `persona_10d.json`。
+- 调用链变化：
+  - 改造前：
+    - `任务完成 -> 仅 markdown 文件`
+    - `打开文章 -> 读取 markdown 原文 -> 前端渲染`
+  - 改造后：
+    - `任务完成 -> async PersonaAwareReadingService.precompute`
+    - `打开文章 -> 读取 markdown + 加载/补算 personalizedNodes -> 一并下发`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/system-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/user-zh.txt`
+  - `services/java-orchestrator/var/tmp_mock_persona.json`（由 `var/tmp_mock_persona.json` 迁移）
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：本次目标为链路接通与契约正确性，不做吞吐专项优化。
+  - 测试方式：编译回归 + 文档编码校验。
+  - 测试数据：见“验证方式”命令执行结果。
+
+### 2026-02-20 追加：Android 原型补齐个性化段落渲染（三阈值排版 + bridge 粒子 + insight 词锚）
+- 触发背景：
+  - 后端已下发 `personalizedNodes`，但前端原型对 `relevance_score / bridge_text / insight_terms` 的映射不完整。
+  - 目标是让“阅读打开瞬间”的渲染直接体现双重画像判定结果，而不是仅靠普通 markdown 样式。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 个性化价值必须落在视觉注意力分配上，优先改字体空间占用、行距和密度，而不是只改颜色；
+    - 低分内容也应保留弱信号入口（bridge 粒子），防止“纯折叠”导致信息损失；
+    - 词汇级交互应复用后端洞察词清单，避免端上重复做全量 NLP。
+  - 复用杠杆：
+    - 复用既有 `TopographyParagraph` 手势主链（右滑桥接、左滑标记、双击共鸣）；
+    - 复用 `LexicalNativeBridge.explainToken` 与 `TokenInsightCard` 卡片渲染；
+    - 复用现有 telemetry 事件上报链，仅补充 `insight_terms` 来源标记。
+- 架构决策：
+  - 决策1：`relevance_score` 三阈值改为硬映射：
+    - `>0.85`：字号提升到 20~22sp 区间、行距拉开、内容横向留白收缩；
+    - `0.3~0.85`：维持 16sp 常态阅读；
+    - `<0.3`：13sp + 冷灰 + 行距压缩，并增加段落左侧微光竖线作为“语义降噪区”提示。
+  - 决策2：`bridge_text` 仅在低分段落附加“段尾呼吸粒子”（2s 周期，alpha 0.3~1.0），保留右滑揭示桥接层。
+  - 决策3：`SemanticNode` 新增 `insightTerms/insightsTags` 双字段与统一归一方法 `resolvedInsightTerms()`，兼容命名差异。
+  - 决策4：新增 `parseSemanticNodesFromPayload`，兼容读取：
+    - `personalizedNodes/nodes`
+    - `relevance_score/relevanceScore`
+    - `bridge_text/bridgeText`
+    - `insight_terms/insights_tags`
+  - 决策5：`MarkdownParagraph` 增加词锚预高亮与点击命中；点中 insight 词直接触发卡片（来源标记为 `insight_terms`）。
+- 已落地改动：
+  - `docs/android_prototypes/SemanticTopographyReader.kt`
+  - `docs/android_prototypes/SemanticTopographyContracts.kt`
+- 验证方式：
+  - 代码级检查：`git diff` 人工核对阈值映射、手势回调和字段别名兼容。
+  - 说明：本次变更位于 `docs/android_prototypes` 原型目录，不参与 `services/java-orchestrator` Maven 编译产物。
+- 性能说明（本次非性能优化）：
+  - 对比项：目标是前端渲染语义一致性，不是吞吐或帧率专项优化。
+  - 测试方式：静态代码核对 + 交互链路审查。
+  - 测试数据：无压测数据产出。
+
+### 2026-02-20 追加：阅读预计算缓存改为 task 目录落盘
+- 触发背景：
+  - 现状 `PersonaAwareReadingService` 将预计算结果写入全局目录 `var/telemetry/persona-reading`。
+  - 需求要求“任务完成后的异步预计算结果”必须保存在对应 task 目录，便于任务级打包、迁移与排障。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 预计算工件属于任务上下文，应与 task 产物同域存放，避免跨目录关联成本与清理风险。
+    - 读取链路应保留兼容，避免历史缓存切换导致首开回退全量重算。
+  - 复用杠杆：
+    - 复用现有 `markdownPath` 解析能力定位任务目录；
+    - 复用现有缓存 JSON 结构与 fingerprint 机制，不改 API 出参契约。
+- 架构决策：
+  - 决策1：缓存路径优先改为 task 目录下：
+    - `<taskRoot>/.mobile_persona_cache/persona_reading/{userKey}_{mdKey}.json`
+  - 决策2：保留旧缓存路径读取兼容（`var/telemetry/persona-reading`）：
+    - 若命中旧缓存，则自动迁移写入 task 目录新路径。
+  - 决策3：taskRoot 解析优先级：
+    - 先向上查找 `mobile_task_meta.json` 所在目录；
+    - 未命中则按 taskId（含 `storage:` 前缀剥离）匹配祖先目录名；
+    - 再未命中则回退 markdown 所在目录。
+  - 决策4：新增只读诊断接口用于定位缓存落盘与命中状态：
+    - `GET /api/mobile/tasks/{taskId}/personalization/cache`
+    - 支持可选参数 `userId` 与 `path`；
+    - 返回 `cachePath/cacheScope/cacheExists/taskScopedPath/legacyPath` 等调试字段。
+  - 决策5：在 markdown 返回体附加缓存定位字段，便于联调：
+    - `personalizationCachePath`
+    - `personalizationCacheScope`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：目标是落盘归属与兼容迁移，不做吞吐专项优化。
+  - 测试方式：编译回归 + 路径决策代码审查。
+  - 测试数据：无专项压测数据。
+
+### 2026-02-20 追加：Persona Reading 交互日志保留原始 LLM 返回
+- 触发背景：
+  - 调试个性化段落标注时，仅有 `responseBodyPreview` 无法复盘模型完整输出，难以定位解析失败与字段偏差。
+- 架构决策：
+  - 在 `persona_reading_ranker` 的交互日志中追加：
+    - `responseBodyRaw`：模型网关完整响应 JSON
+    - `responseContentRaw`：`choices[0].message.content` 原始文本
+  - 保持原有 `responseBodyPreview`，兼容现有低成本巡检脚本。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能说明（本次非性能优化）：
+  - 对比项：本次为可观测性增强，不改变推理路径。
+  - 测试方式：编译回归 + 实际触发一次 markdown 个性化请求后核对 ndjson 字段。
+  - 测试数据：见本次实跑记录。
+
+### 2026-02-20 追加：个性化段落补齐 `reason` 字段与段落正文对照
+- 触发背景：
+  - 现状个性化节点返回 `relevance_score/bridge_text/insights_tags`，缺少“为什么这样打分”的显式解释字段。
+  - 调试时虽然有 `node_id`，但需要直接看到对应段落正文，才能验证模型判断是否合理。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 个性化分数如果不可解释，前端交互（折叠/高亮/桥接）就难以建立可验证的闭环。
+    - `node_id` 只有在绑定段落正文时才具备可审计性。
+  - 复用杠杆：
+    - 复用现有 `raw_markdown` 节点字段，不新增结构化存储表。
+    - 复用现有 persona-reading 缓存与回读流程，在缓存回读阶段补齐旧数据的 `reason` 兼容。
+- 架构决策：
+  - 决策1：persona-reading 节点契约新增 `reason` 字段，要求返回简短打分依据。
+  - 决策2：LLM 解析阶段增加 `reason/why/rationale/analysis` 多别名兼容，降低提示词漂移风险。
+  - 决策3：启发式回退路径与缓存回读路径均补齐 `reason`，保证字段始终存在。
+  - 决策4：保留并下发 `raw_markdown`，作为 `node_id` 的正文对照来源。
+  - 决策5：更新 `prompts/telemetry/persona-reading/*.txt`，将 `reason` 写入强约束 schema。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/system-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/user-zh.txt`
+- 验证方式与结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+  - 通过目标任务实跑后导出 `node_id + raw_markdown + reason` 对照文件用于人工校验。
+- 性能说明（本次非性能优化）：
+  - 对比项：本次是可解释性增强，不改变模型调用数量与批次策略。
+  - 测试方式：编译回归 + 实跑导出结果核验。
+  - 测试数据：单次文章任务链路；未做吞吐压测。
+
+### 2026-02-21 追加：Persona Reading 改为 Chunk 粒度评分（附属节点吸附 + 分数血统共享）
+- 触发背景：
+  - 旧链路按 node 逐条送入模型，标题/短引语与正文上下文割裂，评分容易失真。
+  - 目标是先做“附属节点吸附”，再以完整语义片段调用 LLM，并将结果共享回填到该片段全部节点。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 模型打分本质是上下文判断；如果标题与导读被切碎，分数就失去语义依据。
+    - 渲染端需要稳定分层，不应出现“同一段逻辑里标题低分正文高分”的割裂视觉。
+  - 复用杠杆：
+    - 复用现有 `parseMarkdownNodes` 的 node 顺序与类型识别；
+    - 复用现有 `reason/bridge_text/insights_tags` 契约和缓存结构，仅改推理粒度；
+    - 复用现有 `/chat/completions`、交互日志与回退策略。
+- 架构决策：
+  - 决策1：新增 Buffer-Chunk 组装器：
+    - 附属节点（heading、短 quote、纯图片）先入缓冲栈；
+    - 遇到实体节点（paragraph/list_block/code_block）时，拼接 `text_chunk` 并生成 `chunk_id + node_ids`。
+  - 决策2：LLM 入参改为 Chunk 数组（`chunk_id/node_ids/text_chunk`），返回也以 chunk 为单位。
+  - 决策3：回填策略改为“血统共享”：
+    - 一个 chunk 的 `relevance_score/reason/bridge_text/insights_tags` 同步赋值给 chunk 内全部 node。
+  - 决策4：启发式回退同样按 chunk 计算，确保 LLM 成功与失败路径行为一致。
+  - 决策5：尾部未命中实体节点的附属节点并入最后一个 chunk，避免评分孤岛。
+- 调用链变化：
+  - 改造前：
+    - `Node Array -> LLM逐node评分 -> node回填`
+  - 改造后：
+    - `Node Array -> Buffer吸附 -> Chunk组装 -> LLM按chunk评分 -> chunk结果共享回填到nodes`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/system-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/user-zh.txt`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py --check-mojibake`
+- 性能说明（本次非性能优化）：
+  - 对比项：目标是评分语义准确性与渲染一致性，不是吞吐压测。
+  - 测试方式：编译回归 + 实跑任务核验 chunk 共享回填结果。
+  - 测试数据：基于单任务文档实跑结果进行结构验证。
+
+### 2026-02-21 追加：发送粒度对照实验（group vs semantic_unit）
+- 触发背景：
+  - 需要验证“一个 group 发送”与“一个语义单元发送”两种策略在同文档、同画像下的差异。
+- 架构决策：
+  - 决策1：在 `PersonaAwareReadingService` 增加可切换粒度策略：
+    - `semantic_unit`：附属节点吸附到实体节点后发送（默认）。
+    - `group`：按 `##` 级标题聚合整组发送。
+  - 决策2：本次实验通过 `userId` 标记切换：
+    - 包含 `mode_semantic` => `semantic_unit`
+    - 包含 `mode_group` => `group`
+  - 决策3：在 markdown 返回体增加 `personalizationChunkStrategy`，便于前后端联调确认实际策略。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 性能对比数据：
+  - 测试方式：
+    - 同一任务：`storage:c786a1956e66ba020dfb2ed46a3b0c3c`
+    - 同一文档：`enhanced_output.md`
+    - 同一画像：`var/tmp_mock_persona.json`
+    - 分别使用 `debug_compare_mode_semantic_20260221` 与 `debug_compare_mode_group_20260221`
+  - 日志结果：
+    - `semantic_unit`：`chunkCount=47`, `chunkCallCount=47`, `chunkSuccessCount=47`, `parsedCount=199`, `durationMs=159585`
+    - `group`：`chunkCount=15`, `chunkCallCount=15`, `chunkSuccessCount=15`, `parsedCount=199`, `durationMs=51686`
+  - 结论：
+    - `group` 相比 `semantic_unit` 在本次样本中调用次数减少约 68%，总耗时减少约 67.6%；
+    - 但 `group` 的打分区分度下降（该样本 `max_score` 从 `0.55` 降到 `0.25`），存在“整组同质化低分”的风险。
+
+### 2026-02-21 追加：Tutorial Keyframe 从 bbox 裁剪切换到语义网格锚定
+- 触发背景：
+  - 现有 bbox 链路对模型坐标稳定性依赖较强，存在尺度与坐标解释差异导致的裁剪不稳。
+  - 新提示词已经输出 `target_ui_type/target_text/target_relative_position`，需要下游改为“语义锚定 + 网格二次定位”。
+- 架构决策：
+  - 决策1：保留上游 `instructional_keyframes` 的时间戳与语义字段解析，截图主链不再依赖 bbox 执行裁剪。
+  - 决策2：新增二阶段视觉锚定：
+    - 先对关键帧生成 20x20 半透明网格叠加图；
+    - 再调用 `grid_spatial_anchor.md` 让 Vision 模型返回 `grid_start/grid_end`；
+    - 本地按网格范围 + 扩展参数执行最终裁剪。
+  - 决策3：将网格锚定能力沉淀到可复用模块函数（网格绘制、网格坐标解析、网格裁剪），供测试与后续流程复用。
+- 调用链变化：
+  - 改造前：
+    - `instructional_keyframes.bbox -> 本地bbox扩展 -> 关键帧裁剪`
+  - 改造后：
+    - `instructional_keyframes(语义字段) -> 网格叠加 -> Vision网格定位 -> 本地网格扩展裁剪`
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/prompt_registry.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：优先提升截图定位稳定性与提示词语义对齐，不以吞吐为优化目标。
+  - 测试方式：单测覆盖网格绘制/裁剪与教程链路关键节点，编译回归验证跨模块兼容性。
+  - 测试数据：关键帧网格裁剪单元样例 + 教程流程模拟样例（49个测试用例）。
+
+### 2026-02-21 追加：Persona Reading 并发参数最终定版为 `concurrency=32`
+- 触发背景：
+  - `Persona Reading` 已确认使用 `semantic_unit` 粒度和 `batch_size=1` 以保证解析稳定性。
+  - 需要在 `coverage=1.0` 前提下继续冲吞吐，确定最终并发上限，并形成可复用的选型方法。
+- 测试方式（可复现）：
+  - 压测脚本：`scripts/bench_persona_reading_grid.py`
+  - 固定输入：
+    - 文档：`var/storage/storage/c786a1956e66ba020dfb2ed46a3b0c3c/enhanced_output.md`
+    - 画像：`services/java-orchestrator/var/tmp_mock_persona.json`
+    - 提示词：`services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/system-zh.txt` + `user-zh.txt`
+  - 固定策略：
+    - chunk 粒度：`semantic_unit`
+    - `batch_size=1`
+    - 每个并发点重复：`repeat=5`
+  - 样本规模：
+    - 语义 chunk 数：`47`
+    - 每个并发点请求数：`47 * 5 = 235`
+- 数据对比（24/28/32）：
+  - 数据来源：`var/benchmarks/persona_reading_semantic_grid_r5_cx3_20260221_225646/raw/summary_rows.csv`
+  - `c=24`：`coverage=1.0000`，`error_requests=0`，`elapsed=58.88s`，`chunk_tps=0.798`，`p95=6634.6ms`
+  - `c=28`：`coverage=1.0000`，`error_requests=0`，`elapsed=54.04s`，`chunk_tps=0.870`，`p95=6899.9ms`
+  - `c=32`：`coverage=1.0000`，`error_requests=0`，`elapsed=52.17s`，`chunk_tps=0.901`，`p95=6999.2ms`
+  - 结论（数据角度）：
+    - 在 `coverage` 与 `error` 同为最优（`1.0` / `0`）时，`c=32` 具有最短总耗时与最高吞吐。
+    - `c=32` 相比 `c=24`：总耗时下降约 `11.40%`（`58.88s -> 52.17s`），吞吐提升约 `12.91%`（`0.798 -> 0.901`）。
+    - 代价是尾延迟上升（`p95` 增加约 `5.5%`），但尚未引入解析失败。
+- 理论分析（为什么是 32）：
+  - 角度1：排队论（Little’s Law，`L = λW`）
+    - 单请求处理时延 `W` 约 4~5 秒；提高并发 `L` 可以在 `W` 基本可控时显著提升吞吐 `λ`。
+    - 当前 `c=32` 仍处于“吞吐继续上升、成功率不下降”的可用区间，尚未跨过失败拐点。
+  - 角度2：链路瓶颈分解
+    - 当前主瓶颈在远端模型推理与网络往返，`batch_size=1` 规避了大 prompt 导致的 JSON 漂移风险。
+    - 提高并发本质是在外部 I/O 等待阶段做流水并行；直到远端限流/连接抖动出现前，吞吐会随并发上探。
+    - `c=32` 的 `p95` 上行说明队列已变长，进入“高吞吐换高尾延迟”区间，但尚未出现错误扩散。
+- 复盘经验（可复用）：
+  - 经验1：评分链路优先保证结构可解析性，`batch_size>1` 会显著抬升 JSON 解析风险；在此类任务中应先锁定 `batch_size=1` 再调并发。
+  - 经验2：并发参数选型应使用分层门槛：
+    - 第一门槛：`coverage=1.0`
+    - 第二门槛：`error_requests=0`
+    - 第三门槛：在前两者满足时最大化吞吐/最小化总耗时
+  - 经验3：仅看吞吐会误判，必须同时监控 `p95`；`p95` 连续抬升是逼近不稳定边界的先兆。
+  - 经验4：高并发压测必须有请求级异常兜底（本次已在脚本中加入 request exception 捕获），避免单点网络抖动中断整轮实验。
+- 最终决策：
+  - `Persona Reading` 压测基线参数定为：`semantic_unit + batch_size=1 + concurrency=32`。
+  - 运行时建议保留回退档：`concurrency=24`（当观测到尾延迟异常升高或外部网络抖动时降级）。
+- 已落地改动：
+  - `scripts/bench_persona_reading_grid.py`（新增异常兜底，保证高并发测试可持续执行）
+  - `docs/architecture/upgrade-log.md`（本记录）
+- 验证方式：
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+### 2026-02-22 追加：Persona Reading 生产默认策略固化为 `semantic_unit`
+- 触发背景：
+  - Persona Reading 的分段策略需要在生产环境保持稳定一致，避免因环境未显式配置而出现策略漂移。
+- 架构决策：
+  - 在生产配置中显式声明 `telemetry.persona-reading.chunk-strategy=semantic_unit`，不再仅依赖代码 `@Value` 默认值。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/application.properties`
+- 性能对比数据（本次非性能优化）：
+  - 目标：配置基线稳定化，不涉及算法与吞吐优化。
+  - 测试方式：编译回归 + 文档编码校验。
+  - 测试数据：配置项存在性与服务启动配置读取一致性。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-22 追加：Insight Card 上下文窗口化 + DeepSeek R1 路由工具抽象
+- 触发背景：
+  - 术语卡片提示词 `contextBlock` 之前仅使用当前命中段落，且存在固定长度截断，导致模型缺少“前后文发展关系”。
+  - `deepseek-r1` 直接作为 `model` 调用 `/chat/completions` 出现模型不存在，卡片链路退化到 fallback。
+- 架构决策：
+  - 决策1：`PersonaInsightCardService` 组装 `contextBlock` 时改为窗口语义：
+    - `node-1` -> `【前文语境】`
+    - `node` -> `【当前聚焦段落（在此处该词横空出世）】`
+    - `node+1` -> `【后文发展】`
+  - 决策2：取消提示词路径的长度截断：
+    - 采集层不再对 `raw_markdown/reason/contextBlock` 做 240 截断；
+    - `DeepSeekAdvisorService.trimContext` 取消 280 截断，仅做换行归一。
+  - 决策3：抽象 `DeepSeekModelRouter`（服务内通用工具类）：
+    - `deepseek-r1 -> deepseek-reasoner`
+    - `deepseek-v3 -> deepseek-chat`
+    - 已在 `DeepSeekAdvisorService`、`PersonaAwareReadingService`、`MacroPersonaForgeService` 复用。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekModelRouter.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MacroPersonaForgeService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/tools/ProdChainCardQualityRunner.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/tools/ProdChainCardQualityRunnerTest.java`
+- A/B 测试与性能数据：
+  - A轮（全量）：
+    - 配置：`deepseek.advisor.model=deepseek-r1`（经路由映射到 `deepseek-reasoner`），`max-tags=48`
+    - 数据集：`.../c786a1956e66ba020dfb2ed46a3b0c3c_ab_a2/enhanced_output.md`
+    - 结果：`index count=48`，`llm_interactions: OK=47, SKIPPED_REUSED=1`
+    - 耗时：`930.5s`（包含等待异步落盘）
+  - B轮（抽样）：
+    - 配置：`deepseek.advisor.model=deepseek-reasoner`，`max-tags=10`
+    - 数据集：`.../c786a1956e66ba020dfb2ed46a3b0c3c_ab_b3/enhanced_output.md`
+    - 结果：`index count=10`，`llm_interactions: FALLBACK=10`
+    - 错误：`Permission denied: getsockopt`（运行环境网络限制）
+    - 耗时：`61.7s`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 生产链 runner 输出：
+    - `var/storage/storage/c786a1956e66ba020dfb2ed46a3b0c3c_ab_a2/.mobile_persona_cache/insight_cards/quality_test/prod_chain_quality_report.json`
+    - `var/storage/storage/c786a1956e66ba020dfb2ed46a3b0c3c_ab_b3/.mobile_persona_cache/insight_cards/quality_test/prod_chain_quality_report.json`
+
+### 2026-02-22 追加：Insight Card 去重与原文约束 + 快照改为完整卡片正文
+- 触发背景：
+  - 任务目录下 `insight_cards/cards/*.md` 仅包含“语境快照摘要”，缺少卡片主体（语境化/深度/广度）。
+  - `insights_tags` 存在大小写变体重复与“标签不在原文”污染风险，导致卡片请求噪声偏高。
+  - 需要可追溯获取卡片 LLM 原始请求与响应 JSON。
+- 架构决策：
+  - 决策1：`PersonaInsightCardService.collectTagContexts` 增加双保险：
+    - 标签按 canonical key（忽略大小写/空白）去重；
+    - 每个标签必须命中当前 node `raw_markdown`，否则丢弃。
+  - 决策2：卡片任务快照改为“完整卡片正文优先”：
+    - `cards/*.md` 直接落 `targetMarkdown`（含语境化/深度/广度）；
+    - 任务快照中剔除 `### 语境快照@...` 片段，避免调试视图被冗余元信息污染。
+  - 决策3：卡片链路可观测性增强：
+    - `DeepSeekAdvisorService.StructuredAdviceResult` 补充 `requestPayloadJson/responseBodyJson`；
+    - `PersonaInsightCardService` 将 `llmRequestPayloadJson/llmResponseBodyJson/llmResponseContentRaw` 落到任务级 `llm_interactions.ndjson` 与卡片快照。
+  - 决策4：模型默认策略切换：
+    - 默认从 `deepseek-r1` 切到 `deepseek-v3`（映射 `deepseek-chat`），减少高时延。
+    - 新增别名兼容：`v3 reasoner`、`v3_reasoner`、`deepseek-v3-reasoner` -> `deepseek-chat`。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekModelRouter.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MacroPersonaForgeService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/main/resources/prompts/telemetry/persona-reading/user-zh.txt`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/PersonaInsightCardServiceTest.java`
+- 性能对比数据（本次以时延策略切换为主）：
+  - 目标：从高时延 `r1` 路线切到 `v3` 默认配置，降低卡片生成等待成本。
+  - 测试方式：编译回归 + 生产链 runner 烟测。
+  - 测试数据：
+    - `ProdChainCardQualityRunnerTest`（`wait-seconds=180`）可在约 37s 返回 index 可用状态；
+    - 卡片快照渲染路径可读，正文包含语境化/深度/广度章节。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=DeepSeekAdvisorServiceTest,PersonaInsightCardServiceTest" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=ProdChainCardQualityRunnerTest" "-Dprod.chain.markdownPath=D:/videoToMarkdownTest2/var/storage/storage/c786a1956e66ba020dfb2ed46a3b0c3c/enhanced_output.md" "-Dprod.chain.userId=prod_chain_quality@semantic" "-Dprod.chain.wait-seconds=180" test -q`

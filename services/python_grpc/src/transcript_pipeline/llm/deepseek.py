@@ -19,6 +19,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple, TypeVar
 import httpx
 
 from .client import LLMClient, LLMConfig, LLMResponse
+from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -148,6 +149,7 @@ class _AsyncInFlightDeduper:
 
 class DeepSeekClient(LLMClient):
     def __init__(self, config: LLMConfig):
+        config.model = resolve_deepseek_model(config.model, default_model="deepseek-chat")
         super().__init__(config)
         self._client: Optional[httpx.AsyncClient] = None
         self._client_lock = asyncio.Lock()

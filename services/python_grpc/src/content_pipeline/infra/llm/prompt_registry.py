@@ -53,6 +53,7 @@ class PromptKeys:
     VL_VIDEO_ANALYSIS_TUTORIAL_SYSTEM = "vl.video_analysis.tutorial.system"
     VL_VIDEO_ANALYSIS_CONSTRAINTS_DEFAULT = "vl.video_analysis.constraints.default"
     VL_VIDEO_ANALYSIS_CONSTRAINTS_TUTORIAL = "vl.video_analysis.constraints.tutorial"
+    VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR = "vl.video_analysis.grid_spatial_anchor"
 
     DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM = "deepseek.video_clip.motion_value.system"
     DEEPSEEK_VIDEO_CLIP_TRANSITION_SYSTEM = "deepseek.video_clip.transition.system"
@@ -187,6 +188,11 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         description="VL 教程模式输出约束",
     ),
 
+    PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR: PromptRegistryEntry(
+        key=PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR,
+        relative_path="vl/video_analysis/grid_spatial_anchor.md",
+        description="VL tutorial grid spatial anchor prompt",
+    ),
     PromptKeys.DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM: PromptRegistryEntry(
         key=PromptKeys.DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM,
         relative_path="deepseek/video_clip/motion_value_system.md",
@@ -206,3 +212,4 @@ def get_prompt_entry(key: str) -> PromptRegistryEntry:
     if key not in PROMPT_REGISTRY:
         raise KeyError(f"Unknown prompt key: {key}")
     return PROMPT_REGISTRY[key]
+

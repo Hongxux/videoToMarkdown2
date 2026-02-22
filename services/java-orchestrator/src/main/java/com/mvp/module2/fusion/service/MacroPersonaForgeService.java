@@ -88,7 +88,7 @@ public class MacroPersonaForgeService {
     private boolean enabled;
     @Value("${telemetry.macro-forge.base-url:https://api.deepseek.com/v1}")
     private String baseUrl;
-    @Value("${telemetry.macro-forge.model:deepseek-r1}")
+    @Value("${telemetry.macro-forge.model:deepseek-v3}")
     private String model;
     @Value("${telemetry.macro-forge.api-key:${DEEPSEEK_API_KEY:}}")
     private String apiKey;
@@ -196,13 +196,15 @@ public class MacroPersonaForgeService {
             List<Map<String, String>> pendingSlices
     ) {
         String endpoint = normalizeEndpoint(baseUrl);
+        String resolvedModel = DeepSeekModelRouter.resolveModel(model);
         Map<String, Object> interaction = new LinkedHashMap<>();
         Instant startedAt = Instant.now();
         interaction.put("status", "INIT");
         interaction.put("model", valueToString(model).trim());
+        interaction.put("resolvedModel", resolvedModel);
         interaction.put("endpoint", endpoint);
         interaction.put("sliceCount", pendingSlices == null ? 0 : pendingSlices.size());
-        if (!StringUtils.hasText(endpoint) || !StringUtils.hasText(model)) {
+        if (!StringUtils.hasText(endpoint) || !StringUtils.hasText(resolvedModel)) {
             interaction.put("status", "SKIPPED_CONFIG");
             interaction.put("error", "missing endpoint or model");
             persistLlmInteractionAsync(userKey, interaction, startedAt);
@@ -212,7 +214,7 @@ public class MacroPersonaForgeService {
             String systemPrompt = buildForgeSystemPrompt();
             String userPrompt = buildForgeUserPrompt(currentProfile, pendingSlices);
             Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("model", model);
+            payload.put("model", resolvedModel);
             payload.put("temperature", 0.35);
             payload.put("max_tokens", 1500);
             payload.put("stream", false);

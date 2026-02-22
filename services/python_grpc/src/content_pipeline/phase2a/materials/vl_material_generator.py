@@ -51,9 +51,13 @@ from services.python_grpc.src.content_pipeline.phase2a.materials.errors import (
     VLAnalysisError,
     JSONParseError,
 )
+from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
+from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
+from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_instructional_keyframe_extractor import (
-    crop_keyframe_inplace_by_bbox_1000,
+    crop_keyframe_inplace_by_grid_range,
     normalize_bbox_1000,
+    save_grid_overlay_image,
 )
 from services.python_grpc.src.content_pipeline.common.utils.id_utils import build_unit_relative_asset_id
 from services.python_grpc.src.content_pipeline.common.utils.path_utils import find_repo_root
@@ -213,6 +217,9 @@ class VLMaterialGenerator:
         self.tutorial_export_assets = bool(self.tutorial_mode_config.get("export_assets", True))
         self.tutorial_save_step_json = bool(self.tutorial_mode_config.get("save_step_json", True))
         self.tutorial_assets_root_dir = str(self.tutorial_mode_config.get("assets_root_dir", "vl_tutorial_units") or "vl_tutorial_units")
+        self.tutorial_export_from_original_clip_when_prepruned = bool(
+            self.tutorial_mode_config.get("export_from_original_clip_when_prepruned", True)
+        )
         self.tutorial_asset_export_parallel_workers = self.tutorial_mode_config.get("asset_export_parallel_workers", "auto")
         try:
             self.tutorial_asset_export_parallel_hard_cap = max(
@@ -224,6 +231,149 @@ class VLMaterialGenerator:
         self.tutorial_keyframe_image_ext = str(self.tutorial_mode_config.get("keyframe_image_ext", "png") or "png").lower()
         if self.tutorial_keyframe_image_ext not in {"png", "jpg", "jpeg"}:
             self.tutorial_keyframe_image_ext = "png"
+        try:
+            self.tutorial_keyframe_bbox_expand_ratio = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_bbox_expand_ratio", 0.15)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_bbox_expand_ratio = 0.15
+        try:
+            self.tutorial_keyframe_bbox_min_border_span_1000 = max(
+                0,
+                int(self.tutorial_mode_config.get("keyframe_bbox_min_border_span_1000", 20)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_bbox_min_border_span_1000 = 20
+        try:
+            self.tutorial_keyframe_iframe_search_window_sec = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_iframe_search_window_sec", 0.2)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_iframe_search_window_sec = 0.2
+        self.tutorial_keyframe_select_sharpest_iframe = bool(
+            self.tutorial_mode_config.get("keyframe_select_sharpest_iframe", True)
+        )
+        self.tutorial_keyframe_halfscreen_crop = bool(
+            self.tutorial_mode_config.get("keyframe_halfscreen_crop", True)
+        )
+        try:
+            self.tutorial_keyframe_upscale_factor = max(
+                1.0,
+                float(self.tutorial_mode_config.get("keyframe_upscale_factor", 3.0)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_upscale_factor = 3.0
+        self.tutorial_keyframe_upscale_interpolation = str(
+            self.tutorial_mode_config.get("keyframe_upscale_interpolation", "lanczos4") or "lanczos4"
+        ).strip()
+        try:
+            self.tutorial_keyframe_usm_sigma = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_usm_sigma", 1.0)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_usm_sigma = 1.0
+        try:
+            self.tutorial_keyframe_usm_amount = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_usm_amount", 1.6)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_usm_amount = 1.6
+        try:
+            self.tutorial_keyframe_usm_threshold = max(
+                0,
+                int(self.tutorial_mode_config.get("keyframe_usm_threshold", 0)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_usm_threshold = 0
+        self.tutorial_keyframe_draw_bbox_red = bool(
+            self.tutorial_mode_config.get("keyframe_draw_bbox_red", True)
+        )
+        self.tutorial_keyframe_draw_bbox_use_expanded = bool(
+            self.tutorial_mode_config.get("keyframe_draw_bbox_use_expanded", False)
+        )
+        self.tutorial_keyframe_draw_on_original_frame = bool(
+            self.tutorial_mode_config.get("keyframe_draw_on_original_frame", True)
+        )
+        try:
+            self.tutorial_keyframe_original_draw_crop_expand_ratio = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_original_draw_crop_expand_ratio", 0.30)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_original_draw_crop_expand_ratio = 0.30
+        try:
+            self.tutorial_keyframe_original_draw_crop_min_border_span_1000 = max(
+                0,
+                int(self.tutorial_mode_config.get("keyframe_original_draw_crop_min_border_span_1000", 20)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_original_draw_crop_min_border_span_1000 = 20
+        try:
+            self.tutorial_keyframe_red_box_thickness_ratio = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_red_box_thickness_ratio", 0.01)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_red_box_thickness_ratio = 0.01
+        self.tutorial_keyframe_skip_post_draw_processing = bool(
+            self.tutorial_mode_config.get("keyframe_skip_post_draw_processing", True)
+        )
+        self.tutorial_grid_anchor_enabled = bool(
+            self.tutorial_mode_config.get("grid_anchor_enabled", True)
+        )
+        try:
+            self.tutorial_grid_rows = max(
+                2,
+                int(self.tutorial_mode_config.get("grid_rows", 20)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_grid_rows = 20
+        try:
+            self.tutorial_grid_cols = max(
+                2,
+                int(self.tutorial_mode_config.get("grid_cols", 20)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_grid_cols = 20
+        try:
+            self.tutorial_grid_overlay_alpha = max(
+                0.1,
+                min(0.8, float(self.tutorial_mode_config.get("grid_overlay_alpha", 0.38))),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_grid_overlay_alpha = 0.38
+        try:
+            self.tutorial_grid_overlay_line_thickness = max(
+                1,
+                min(2, int(self.tutorial_mode_config.get("grid_overlay_line_thickness", 1))),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_grid_overlay_line_thickness = 1
+        self.tutorial_grid_overlay_variant = str(
+            self.tutorial_mode_config.get("grid_overlay_variant", "full") or "full"
+        ).strip()
+        try:
+            self.tutorial_grid_crop_expand_ratio = max(
+                0.0,
+                float(self.tutorial_mode_config.get("grid_crop_expand_ratio", 0.15)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_grid_crop_expand_ratio = 0.15
+        try:
+            self.tutorial_grid_crop_min_border_px = max(
+                0,
+                int(self.tutorial_mode_config.get("grid_crop_min_border_px", 12)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_grid_crop_min_border_px = 12
+        self._tutorial_grid_anchor_prompt = get_prompt(
+            PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR,
+            fallback=self._get_default_grid_spatial_anchor_prompt(),
+        )
 
         # Control whether multi-step clip requests are merged
         self.merge_multistep_clip_requests = bool(config.get("merge_multistep_clip_requests", False))
@@ -308,6 +458,7 @@ class VLMaterialGenerator:
                         "error_msg": result.error_msg if hasattr(result, 'error_msg') else "",
                         "analysis_mode": getattr(result, "analysis_mode", "default"),
                         "raw_response_json": getattr(result, "raw_response_json", []) or [],
+                        "raw_llm_interactions": getattr(result, "raw_llm_interactions", []) or [],
                         "clip_requests": result.clip_requests if hasattr(result, 'clip_requests') else [],
                         "screenshot_requests": result.screenshot_requests if hasattr(result, 'screenshot_requests') else [],
                         "metadata": meta
@@ -521,7 +672,10 @@ class VLMaterialGenerator:
             analysis_mode = unit_task["analysis_mode"]
             extra_prompt = unit_task["extra_prompt"]
 
-            clip_path_for_vl = pre_prune_info.get("clip_path_for_vl", clip_path)
+            clip_path_for_vl = self._resolve_vl_analysis_clip_path(
+                original_clip_path=clip_path,
+                preferred_clip_path=pre_prune_info.get("clip_path_for_vl", clip_path),
+            )
 
             if pre_prune_info.get("applied"):
                 pruned_units += 1
@@ -561,26 +715,110 @@ class VLMaterialGenerator:
             f"[VL-UnitParallel] start: units={len(task_inputs)}, workers={worker_count}, policy=one-unit-one-api"
         )
 
-        semaphore = asyncio.Semaphore(worker_count)
-
-        async def _run_single(task_input: Dict[str, Any]):
-            async with semaphore:
-                return await self.analyzer.analyze_clip(
-                    clip_path=task_input["clip_path"],
-                    semantic_unit_start_sec=task_input["semantic_unit_start_sec"],
-                    semantic_unit_id=task_input["semantic_unit_id"],
-                    extra_prompt=task_input.get("extra_prompt"),
-                    analysis_mode=task_input.get("analysis_mode", "default"),
+        batch_runner = getattr(self.analyzer, "analyze_clips_batch", None)
+        if callable(batch_runner):
+            analysis_results = await batch_runner(
+                tasks=task_inputs,
+                max_inflight=worker_count,
+                return_exceptions=True,
+            )
+            if not isinstance(analysis_results, list):
+                raise RuntimeError("analyze_clips_batch returned non-list result")
+            if len(analysis_results) != len(task_inputs):
+                logger.warning(
+                    "[VL-UnitParallel] batch result size mismatch: expected=%s, actual=%s",
+                    len(task_inputs),
+                    len(analysis_results),
                 )
+                if len(analysis_results) < len(task_inputs):
+                    analysis_results = list(analysis_results) + [
+                        RuntimeError("vl_batch_result_missing")
+                    ] * (len(task_inputs) - len(analysis_results))
+                else:
+                    analysis_results = list(analysis_results)[: len(task_inputs)]
+        else:
+            semaphore = asyncio.Semaphore(worker_count)
 
-        analysis_results = await asyncio.gather(
-            *[_run_single(task_input) for task_input in task_inputs],
-            return_exceptions=True,
-        )
+            async def _run_single(task_input: Dict[str, Any]):
+                async with semaphore:
+                    return await self.analyzer.analyze_clip(
+                        clip_path=task_input["clip_path"],
+                        semantic_unit_start_sec=task_input["semantic_unit_start_sec"],
+                        semantic_unit_id=task_input["semantic_unit_id"],
+                        extra_prompt=task_input.get("extra_prompt"),
+                        analysis_mode=task_input.get("analysis_mode", "default"),
+                    )
+
+            analysis_results = await asyncio.gather(
+                *[_run_single(task_input) for task_input in task_inputs],
+                return_exceptions=True,
+            )
         logger.info(
             f"[VL-UnitParallel] done: dispatched={len(task_inputs)}, results={len(analysis_results)}"
         )
         return analysis_results, task_metadata, pruned_units
+
+    def _resolve_vl_analysis_clip_path(
+        self,
+        *,
+        original_clip_path: str,
+        preferred_clip_path: Optional[str] = None,
+    ) -> str:
+        """
+        Resolve VL analysis input clip path with "pruned-first, original-fallback" policy.
+        """
+        original_text = str(original_clip_path or "").strip()
+        preferred_text = str(preferred_clip_path or "").strip()
+        if not original_text and not preferred_text:
+            return ""
+
+        preferred_path = Path(preferred_text) if preferred_text else None
+        original_path = Path(original_text) if original_text else None
+
+        def _exists(path_obj: Optional[Path]) -> bool:
+            if path_obj is None:
+                return False
+            try:
+                return path_obj.exists()
+            except Exception:
+                return False
+
+        def _is_pruned_path(path_obj: Optional[Path]) -> bool:
+            if path_obj is None:
+                return False
+            return "vl_pruned_clips" in {str(part).lower() for part in path_obj.parts}
+
+        # 1) Explicitly provided pruned path wins.
+        if _is_pruned_path(preferred_path) and _exists(preferred_path):
+            return str(preferred_path)
+
+        # 2) If a pruned sibling exists, prefer it over semantic_unit_clips_vl original clip.
+        if original_path is not None:
+            pruned_dir = original_path.parent / "vl_pruned_clips"
+            if pruned_dir.exists():
+                stem = original_path.stem
+                pruned_candidates: List[Path] = [
+                    pruned_dir / f"{stem}_pruned.mp4",
+                    pruned_dir / f"{stem}_legacy_action_pruned.mp4",
+                ]
+                pruned_candidates.extend(sorted(pruned_dir.glob(f"{stem}*_pruned.mp4")))
+                seen: set[str] = set()
+                for candidate in pruned_candidates:
+                    key = str(candidate).lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    if _exists(candidate):
+                        return str(candidate)
+
+        # 3) Fallback to preferred then original.
+        if _exists(preferred_path):
+            return str(preferred_path)
+        if _exists(original_path):
+            return str(original_path)
+
+        # Keep compatibility when all candidates are missing: preserve preferred input if present.
+        return preferred_text or original_text
 
     def _should_use_pre_vl_process_mode(self, worker_count: int) -> bool:
         """
@@ -1097,11 +1335,224 @@ class VLMaterialGenerator:
             "Each step must be at least 5 seconds; merge overly short steps with adjacent ones. "
             "For each step, output step_description, required main_operation, optional main_action/precautions/"
             "step_summary/operation_guidance, "
-            "and instructional_keyframes (objects with timestamp_sec, optional frame_reason and bbox) "
+            "and instructional_keyframes (objects with timestamp_sec, optional frame_reason, optional target_ui_type, "
+            "optional target_text, optional target_relative_position) "
             "as true instructional keyframes "
             "(prefer final state or just-before-submit moment). "
             "Optional fields can be omitted or returned as empty values when unnecessary."
         )
+
+    @staticmethod
+    def _get_default_grid_spatial_anchor_prompt() -> str:
+        return (
+            "You are a visual anchoring assistant.\n"
+            "Locate the target area on this grid-overlaid image.\n"
+            "target_text={target_text}\n"
+            "target_ui_type={target_ui_type}\n"
+            "target_relative_position={target_relative_position}\n"
+            "Return only JSON: "
+            '{"visual_verification":"...", "grid_start":"C4", "grid_end":"E7"}'
+        )
+
+    def _render_grid_anchor_prompt(
+        self,
+        *,
+        target_text: str,
+        target_ui_type: str,
+        target_relative_position: str,
+    ) -> str:
+        template = str(getattr(self, "_tutorial_grid_anchor_prompt", "") or "").strip()
+        if not template:
+            template = self._get_default_grid_spatial_anchor_prompt()
+        return (
+            template.replace("{target_text}", target_text)
+            .replace("{target_ui_type}", target_ui_type)
+            .replace("{target_relative_position}", target_relative_position)
+        )
+
+    @staticmethod
+    def _extract_json_object_candidate(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return raw
+        code_block = re.search(r"```(?:json)?\\s*([\\s\\S]*?)```", raw, flags=re.IGNORECASE)
+        if code_block:
+            raw = str(code_block.group(1) or "").strip()
+        start = raw.find("{")
+        if start < 0:
+            return raw
+        in_str = False
+        escape = False
+        depth = 0
+        for idx, ch in enumerate(raw[start:], start=start):
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == "\"":
+                    in_str = False
+                continue
+            if ch == "\"":
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return raw[start : idx + 1]
+        return raw
+
+    def _parse_grid_anchor_payload(self, payload: Any) -> Dict[str, str]:
+        if isinstance(payload, dict):
+            raw_dict = payload
+        else:
+            raw_dict = {}
+        if "grid_start" in raw_dict and "grid_end" in raw_dict:
+            return {
+                "grid_start": str(raw_dict.get("grid_start", "") or "").strip().upper(),
+                "grid_end": str(raw_dict.get("grid_end", "") or "").strip().upper(),
+                "visual_verification": str(raw_dict.get("visual_verification", "") or "").strip(),
+            }
+
+        raw_text = str(raw_dict.get("raw_response", payload) or "").strip()
+        if not raw_text:
+            return {"grid_start": "", "grid_end": "", "visual_verification": ""}
+        candidate = self._extract_json_object_candidate(raw_text)
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return {
+                    "grid_start": str(obj.get("grid_start", "") or "").strip().upper(),
+                    "grid_end": str(obj.get("grid_end", "") or "").strip().upper(),
+                    "visual_verification": str(obj.get("visual_verification", "") or "").strip(),
+                }
+        except Exception:
+            pass
+        return {"grid_start": "", "grid_end": "", "visual_verification": ""}
+
+    async def _apply_grid_anchor_crop_for_keyframe(
+        self,
+        *,
+        keyframe_path: Path,
+        target_text: str,
+        target_ui_type: str,
+        target_relative_position: str,
+    ) -> Dict[str, Any]:
+        if not self.tutorial_grid_anchor_enabled:
+            return {"grid_anchor_status": "disabled"}
+        if not (target_text or target_ui_type or target_relative_position):
+            return {"grid_anchor_status": "missing_semantic_anchor"}
+
+        overlay_path = keyframe_path.parent / f"{keyframe_path.stem}_grid_overlay{keyframe_path.suffix}"
+        overlay_ok = save_grid_overlay_image(
+            source_image_path=keyframe_path,
+            output_image_path=overlay_path,
+            grid_rows=self.tutorial_grid_rows,
+            grid_cols=self.tutorial_grid_cols,
+            alpha=self.tutorial_grid_overlay_alpha,
+            line_thickness=self.tutorial_grid_overlay_line_thickness,
+            variant=self.tutorial_grid_overlay_variant,
+        )
+        if not overlay_ok:
+            return {"grid_anchor_status": "overlay_failed"}
+
+        prompt = self._render_grid_anchor_prompt(
+            target_text=target_text,
+            target_ui_type=target_ui_type,
+            target_relative_position=target_relative_position,
+        )
+        request_audit: Dict[str, Any] = {
+            "model": "vision_ai",
+            "image_path": str(overlay_path),
+            "prompt": prompt,
+            "target_text": target_text,
+            "target_ui_type": target_ui_type,
+            "target_relative_position": target_relative_position,
+        }
+        try:
+            payload = await llm_gateway.vision_validate_image(
+                image_path=str(overlay_path),
+                prompt=prompt,
+                skip_duplicate_check=True,
+            )
+        except Exception as error:
+            return {
+                "grid_anchor_status": "vision_failed",
+                "grid_anchor_error": str(error),
+                "grid_overlay_file": overlay_path.name,
+                "grid_anchor_llm_interaction": {
+                    "stage": "grid_spatial_anchor",
+                    "success": False,
+                    "request": request_audit,
+                    "error": str(error),
+                },
+            }
+
+        parsed = self._parse_grid_anchor_payload(payload)
+        grid_start = str(parsed.get("grid_start", "") or "").strip().upper()
+        grid_end = str(parsed.get("grid_end", "") or "").strip().upper()
+        if not grid_start or not grid_end:
+            return {
+                "grid_anchor_status": "invalid_grid_response",
+                "grid_overlay_file": overlay_path.name,
+                "grid_anchor_llm_interaction": {
+                    "stage": "grid_spatial_anchor",
+                    "success": False,
+                    "request": request_audit,
+                    "response": payload if isinstance(payload, dict) else {"raw_response": str(payload)},
+                    "error": "invalid_grid_response",
+                },
+            }
+
+        crop_meta = crop_keyframe_inplace_by_grid_range(
+            image_path=keyframe_path,
+            grid_start=grid_start,
+            grid_end=grid_end,
+            grid_rows=self.tutorial_grid_rows,
+            grid_cols=self.tutorial_grid_cols,
+            expand_ratio=self.tutorial_grid_crop_expand_ratio,
+            min_border_px=self.tutorial_grid_crop_min_border_px,
+        )
+        if crop_meta is None:
+            return {
+                "grid_anchor_status": "crop_failed",
+                "grid_start": grid_start,
+                "grid_end": grid_end,
+                "grid_overlay_file": overlay_path.name,
+                "grid_anchor_llm_interaction": {
+                    "stage": "grid_spatial_anchor",
+                    "success": False,
+                    "request": request_audit,
+                    "response": payload if isinstance(payload, dict) else {"raw_response": str(payload)},
+                    "parsed": parsed,
+                    "error": "crop_failed",
+                },
+            }
+
+        result: Dict[str, Any] = {
+            "grid_anchor_status": "ok",
+            "grid_start": grid_start,
+            "grid_end": grid_end,
+            "grid_overlay_file": overlay_path.name,
+            "crop_x0": int(crop_meta.get("crop_x0", 0)),
+            "crop_y0": int(crop_meta.get("crop_y0", 0)),
+            "crop_x1": int(crop_meta.get("crop_x1", 0)),
+            "crop_y1": int(crop_meta.get("crop_y1", 0)),
+            "grid_anchor_llm_interaction": {
+                "stage": "grid_spatial_anchor",
+                "success": True,
+                "request": request_audit,
+                "response": payload if isinstance(payload, dict) else {"raw_response": str(payload)},
+                "parsed": parsed,
+            },
+        }
+        visual_verification = str(parsed.get("visual_verification", "") or "").strip()
+        if visual_verification:
+            result["visual_verification"] = visual_verification
+        return result
 
     def _slugify_action_brief(self, text_value: str, max_len: int = 48) -> str:
         """将步骤描述转换为稳定文件名片段。"""
@@ -1156,6 +1607,8 @@ class VLMaterialGenerator:
             timestamp_sec=timestamp_sec,
             output_path=output_path,
             logger=logger,
+            iframe_search_window_sec=self.tutorial_keyframe_iframe_search_window_sec,
+            select_sharpest_iframe=self.tutorial_keyframe_select_sharpest_iframe,
         )
 
     async def _save_tutorial_assets_for_unit(
@@ -1166,6 +1619,9 @@ class VLMaterialGenerator:
         clip_requests: List[Dict[str, Any]],
         screenshot_requests: List[Dict[str, Any]],
         raw_response_json: List[Dict[str, Any]],
+        raw_llm_interactions: Optional[List[Dict[str, Any]]] = None,
+        use_analysis_relative_timestamps: bool = False,
+        prefer_screenshot_requests_keyframes: bool = False,
     ) -> None:
         """
         Persist tutorial assets per semantic unit:
@@ -1193,6 +1649,8 @@ class VLMaterialGenerator:
             if str(s.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise"
             and str(s.get("semantic_unit_id", "")).strip() == str(unit_id)
         ]
+        use_relative_ts = bool(use_analysis_relative_timestamps)
+        prefer_screenshot_keyframes = bool(prefer_screenshot_requests_keyframes)
 
         def _normalize_text_list(value: Any) -> List[str]:
             if value is None:
@@ -1228,6 +1686,65 @@ class VLMaterialGenerator:
                 normalized.append(text_item)
             return normalized
 
+        def _normalize_main_operation(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return ""
+                try:
+                    parsed = json.loads(text)
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list):
+                    return "\n".join(_normalize_text_list(parsed)).strip()
+                return text
+            if isinstance(value, (list, tuple, set)):
+                return "\n".join(_normalize_text_list(list(value))).strip()
+            return str(value).strip()
+
+        def _normalize_step_type(value: Any) -> str:
+            text = str(value or "").strip().upper()
+            if text in {"CONDITIONAL", "CONDITION", "BRANCH"}:
+                return "CONDITIONAL"
+            if text in {"OPTIONAL", "OPTION"}:
+                return "OPTIONAL"
+            if text in {"TROUBLESHOOTING", "TROUBLESHOOT", "DEBUG", "ERROR_FIX", "RECOVERY"}:
+                return "TROUBLESHOOTING"
+            return "MAIN_FLOW"
+
+        def _normalize_keyframe_anchor_fields(value: Any) -> Dict[str, str]:
+            if not isinstance(value, dict):
+                return {
+                    "target_ui_type": "",
+                    "target_text": "",
+                    "target_relative_position": "",
+                }
+            return {
+                "target_ui_type": str(
+                    value.get(
+                        "target_ui_type",
+                        value.get("ui_type", value.get("target_type", value.get("uiTargetType", ""))),
+                    )
+                    or ""
+                ).strip(),
+                "target_text": str(
+                    value.get(
+                        "target_text",
+                        value.get("ui_text", value.get("target_content", value.get("text_anchor", ""))),
+                    )
+                    or ""
+                ).strip(),
+                "target_relative_position": str(
+                    value.get(
+                        "target_relative_position",
+                        value.get("relative_position", value.get("position_hint", value.get("spatial_hint", ""))),
+                    )
+                    or ""
+                ).strip(),
+            }
+
         def _normalize_instructional_keyframe_objects(
             value: Any,
             *,
@@ -1250,6 +1767,10 @@ class VLMaterialGenerator:
                     "timestamp_sec": float(ts),
                     "frame_reason": str(item.get("frame_reason", "") or "").strip(),
                 }
+                anchor_fields = _normalize_keyframe_anchor_fields(item)
+                entry["target_ui_type"] = anchor_fields["target_ui_type"]
+                entry["target_text"] = anchor_fields["target_text"]
+                entry["target_relative_position"] = anchor_fields["target_relative_position"]
                 bbox = normalize_bbox_1000(item.get("bbox"))
                 if bbox is not None:
                     entry["bbox"] = bbox
@@ -1270,13 +1791,32 @@ class VLMaterialGenerator:
             step_id = int(safe_float(ss.get("step_id", 0), 0.0))
             screenshots_by_step.setdefault(step_id, []).append(ss)
         for step_ss in screenshots_by_step.values():
-            step_ss.sort(key=lambda x: float(x.get("timestamp_sec", 0.0)))
+            if use_relative_ts:
+                step_ss.sort(
+                    key=lambda x: safe_float(
+                        x.get(
+                            "_analysis_relative_timestamp",
+                            x.get("_relative_timestamp", x.get("timestamp_sec", 0.0)),
+                        ),
+                        0.0,
+                    )
+                )
+            else:
+                step_ss.sort(key=lambda x: float(x.get("timestamp_sec", 0.0)))
 
         ordered_clips = sorted(
             tutorial_clips,
             key=lambda c: (
                 int(safe_float(c.get("step_id", 0), 0.0)),
-                float(c.get("start_sec", 0.0)),
+                safe_float(
+                    c.get(
+                        "_analysis_relative_start_sec",
+                        c.get("start_sec", 0.0),
+                    )
+                    if use_relative_ts
+                    else c.get("start_sec", 0.0),
+                    0.0,
+                ),
             ),
         )
 
@@ -1297,20 +1837,23 @@ class VLMaterialGenerator:
             step_index = step_id if step_id > 0 else idx
             step_description = str(clip.get("step_description", "") or "").strip()
             raw_step = raw_steps_by_id.get(step_index, {})
+            step_type = _normalize_step_type(
+                clip.get("step_type", raw_step.get("step_type", raw_step.get("stepType", "")))
+            )
             main_action = str(
                 clip.get("main_action")
                 or raw_step.get("main_action")
                 or raw_step.get("主要动作")
                 or ""
             ).strip()
-            raw_main_operation = clip.get("main_operation")
-            if raw_main_operation is None:
-                raw_main_operation = raw_step.get("main_operation", None)
+            raw_main_operation = raw_step.get("main_operation", None)
             if raw_main_operation is None:
                 raw_main_operation = raw_step.get("main_operations", None)
             if raw_main_operation is None:
+                raw_main_operation = clip.get("main_operation")
+            if raw_main_operation is None:
                 raw_main_operation = raw_step.get("主要操作", None)
-            main_operation = _normalize_text_list(raw_main_operation)
+            main_operation = _normalize_main_operation(raw_main_operation)
             raw_precautions = clip.get("precautions")
             if raw_precautions is None:
                 raw_precautions = raw_step.get("precautions", None)
@@ -1340,25 +1883,50 @@ class VLMaterialGenerator:
             if action_brief == "action" and step_description:
                 action_brief = self._slugify_action_brief(step_description)
 
-            start_sec = safe_float(clip.get("start_sec", 0.0), 0.0)
-            end_sec = safe_float(clip.get("end_sec", start_sec), start_sec)
+            if use_relative_ts:
+                start_sec = safe_float(
+                    raw_step.get(
+                        "clip_start_sec",
+                        clip.get("_analysis_relative_start_sec", clip.get("start_sec", 0.0)),
+                    ),
+                    0.0,
+                )
+                end_sec = safe_float(
+                    raw_step.get(
+                        "clip_end_sec",
+                        clip.get("_analysis_relative_end_sec", clip.get("end_sec", start_sec)),
+                    ),
+                    start_sec,
+                )
+                start_sec = max(0.0, start_sec)
+                end_sec = max(0.0, end_sec)
+            else:
+                start_sec = safe_float(clip.get("start_sec", 0.0), 0.0)
+                end_sec = safe_float(clip.get("end_sec", start_sec), start_sec)
             if end_sec < start_sec:
                 start_sec, end_sec = end_sec, start_sec
 
             clip_filename = f"{unit_id}_clip_step_{step_index:02d}_{action_brief}.mp4"
             clip_output_path = unit_dir / clip_filename
 
-            step_keyframes: List[Dict[str, Any]] = _normalize_instructional_keyframe_objects(
-                raw_step.get("instructional_keyframes", None),
-                start_sec=start_sec,
-                end_sec=end_sec,
-            )
-            if not step_keyframes:
-                fallback_keyframes = screenshots_by_step.get(step_id, [])
-                if not fallback_keyframes and step_id <= 0:
-                    fallback_keyframes = screenshots_by_step.get(idx, [])
+            fallback_keyframes = screenshots_by_step.get(step_id, [])
+            if not fallback_keyframes and step_id <= 0:
+                fallback_keyframes = screenshots_by_step.get(idx, [])
+
+            def _build_step_keyframes_from_fallback() -> List[Dict[str, Any]]:
+                built: List[Dict[str, Any]] = []
                 for fallback in fallback_keyframes:
-                    fallback_ts = safe_float(fallback.get("timestamp_sec", start_sec), start_sec)
+                    fallback_ts = safe_float(
+                        (
+                            fallback.get(
+                                "_analysis_relative_timestamp",
+                                fallback.get("_relative_timestamp", fallback.get("timestamp_sec", start_sec)),
+                            )
+                            if use_relative_ts
+                            else fallback.get("timestamp_sec", start_sec)
+                        ),
+                        start_sec,
+                    )
                     if fallback_ts < start_sec:
                         fallback_ts = start_sec
                     elif fallback_ts > end_sec:
@@ -1367,10 +1935,27 @@ class VLMaterialGenerator:
                         "timestamp_sec": float(fallback_ts),
                         "frame_reason": str(fallback.get("frame_reason", "") or "").strip(),
                     }
+                    anchor_fields = _normalize_keyframe_anchor_fields(fallback)
+                    fallback_item["target_ui_type"] = anchor_fields["target_ui_type"]
+                    fallback_item["target_text"] = anchor_fields["target_text"]
+                    fallback_item["target_relative_position"] = anchor_fields["target_relative_position"]
                     bbox = normalize_bbox_1000(fallback.get("bbox"))
                     if bbox is not None:
                         fallback_item["bbox"] = bbox
-                    step_keyframes.append(fallback_item)
+                    built.append(fallback_item)
+                return built
+
+            step_keyframes: List[Dict[str, Any]] = []
+            if prefer_screenshot_keyframes and fallback_keyframes:
+                step_keyframes = _build_step_keyframes_from_fallback()
+            else:
+                step_keyframes = _normalize_instructional_keyframe_objects(
+                    raw_step.get("instructional_keyframes", None),
+                    start_sec=start_sec,
+                    end_sec=end_sec,
+                )
+                if not step_keyframes:
+                    step_keyframes = _build_step_keyframes_from_fallback()
 
             keyframe_jobs: List[Dict[str, Any]] = []
             for key_idx, step_ss in enumerate(step_keyframes, start=1):
@@ -1384,6 +1969,9 @@ class VLMaterialGenerator:
                         "key_name": key_name,
                         "timestamp_sec": key_ts,
                         "frame_reason": str(step_ss.get("frame_reason", "") or "").strip(),
+                        "target_ui_type": str(step_ss.get("target_ui_type", "") or "").strip(),
+                        "target_text": str(step_ss.get("target_text", "") or "").strip(),
+                        "target_relative_position": str(step_ss.get("target_relative_position", "") or "").strip(),
                         "bbox": normalize_bbox_1000(step_ss.get("bbox")),
                         "output_path": unit_dir / key_name,
                     }
@@ -1393,6 +1981,7 @@ class VLMaterialGenerator:
                 {
                     "step_index": step_index,
                     "step_description": step_description,
+                    "step_type": step_type,
                     "main_action": main_action,
                     "main_operation": main_operation,
                     "precautions": precautions,
@@ -1449,32 +2038,36 @@ class VLMaterialGenerator:
                     if bool(key_result):
                         key_name = str(key_job.get("key_name", ""))
                         key_path = Path(key_job["output_path"])
-                        bbox = normalize_bbox_1000(key_job.get("bbox"))
-                        if bbox is not None:
-                            crop_ok = crop_keyframe_inplace_by_bbox_1000(key_path, bbox)
-                            if not crop_ok:
-                                logger.warning(
-                                    "[VL-Tutorial] keyframe bbox crop failed, keep full frame: unit=%s step=%s file=%s bbox=%s",
-                                    unit_id,
-                                    job.get("step_index"),
-                                    key_name,
-                                    bbox,
-                                )
+                        target_ui_type = str(key_job.get("target_ui_type", "") or "").strip()
+                        target_text = str(key_job.get("target_text", "") or "").strip()
+                        target_relative_position = str(key_job.get("target_relative_position", "") or "").strip()
+                        grid_anchor_meta = await self._apply_grid_anchor_crop_for_keyframe(
+                            keyframe_path=key_path,
+                            target_text=target_text,
+                            target_ui_type=target_ui_type,
+                            target_relative_position=target_relative_position,
+                        )
                         keyframe_files.append(key_name)
                         key_detail: Dict[str, Any] = {
                             "image_file": key_name,
                             "timestamp_sec": float(key_job.get("timestamp_sec", 0.0)),
                             "frame_reason": str(key_job.get("frame_reason", "") or "").strip(),
+                            "target_ui_type": target_ui_type,
+                            "target_text": target_text,
+                            "target_relative_position": target_relative_position,
                         }
+                        bbox = normalize_bbox_1000(key_job.get("bbox"))
                         if bbox is not None:
                             key_detail["bbox"] = bbox
+                        key_detail.update(dict(grid_anchor_meta or {}))
                         keyframe_details.append(key_detail)
 
             return {
                 "step_id": int(job["step_index"]),
                 "step_description": str(job["step_description"]),
+                "step_type": str(job.get("step_type", "MAIN_FLOW") or "MAIN_FLOW"),
                 "main_action": str(job.get("main_action", "") or ""),
-                "main_operation": list(job.get("main_operation", []) or []),
+                "main_operation": str(job.get("main_operation", "") or ""),
                 "precautions": list(job.get("precautions", []) or []),
                 "step_summary": str(job.get("step_summary", "") or ""),
                 "operation_guidance": list(job.get("operation_guidance", []) or []),
@@ -1493,6 +2086,7 @@ class VLMaterialGenerator:
                 "unit_id": unit_id,
                 "schema": "tutorial_stepwise_v1",
                 "raw_response": raw_response_json or [],
+                "llm_interactions": raw_llm_interactions or [],
                 "steps": step_manifest,
             }
             json_path = unit_dir / f"{unit_id}_steps.json"
@@ -3392,13 +3986,37 @@ class VLMaterialGenerator:
                         abs_ts = max(unit_start_sec, min(abs_ts, unit_end_sec))
                         ss_item["timestamp_sec"] = abs_ts
                     if str(meta.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise":
+                        export_from_original = bool(
+                            self.tutorial_export_from_original_clip_when_prepruned
+                            and pre_prune_info.get("applied")
+                            and kept_segments
+                        )
+                        if export_from_original:
+                            tutorial_asset_video_path = str(
+                                meta.get("clip_path")
+                                or meta.get("vl_clip_path")
+                                or video_path
+                            ).strip() or video_path
+                            use_relative_ts_for_export = False
+                            prefer_screenshot_keyframes = True
+                        else:
+                            tutorial_asset_video_path = str(
+                                meta.get("vl_clip_path")
+                                or meta.get("clip_path")
+                                or video_path
+                            ).strip() or video_path
+                            use_relative_ts_for_export = True
+                            prefer_screenshot_keyframes = False
                         await self._save_tutorial_assets_for_unit(
-                            video_path=video_path,
+                            video_path=tutorial_asset_video_path,
                             output_dir=output_dir or str(Path(video_path).parent),
                             unit_id=unit_id,
                             clip_requests=analysis_result.clip_requests,
                             screenshot_requests=analysis_result.screenshot_requests,
                             raw_response_json=getattr(analysis_result, "raw_response_json", []) or [],
+                            raw_llm_interactions=getattr(analysis_result, "raw_llm_interactions", []) or [],
+                            use_analysis_relative_timestamps=use_relative_ts_for_export,
+                            prefer_screenshot_requests_keyframes=prefer_screenshot_keyframes,
                         )
 
                     

@@ -196,6 +196,32 @@ class _YoutubeDLProbeFailFallbackIdStub:
         output_path.write_bytes(b"video")
 
 
+class _YoutubeDLDurationAwareSuccessStub:
+    duration = 0.0
+    calls = []
+
+    def __init__(self, opts):
+        self._opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return False
+
+    def extract_info(self, _url, download=False):
+        _ = download
+        return {"duration": float(type(self).duration)}
+
+    def download(self, _urls):
+        fmt = self._opts.get("format")
+        type(self).calls.append(fmt)
+        outtmpl = self._opts["outtmpl"]
+        output_path = Path(outtmpl.replace("%(ext)s", "mp4"))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"video")
+
+
 def test_download_applies_cookie_auth_options(monkeypatch, tmp_path):
     cookie_file = tmp_path / "cookies.txt"
     cookie_file.write_text("# Netscape HTTP Cookie File", encoding="utf-8")
@@ -322,6 +348,57 @@ def test_download_can_disable_h264_preference(monkeypatch, tmp_path):
 
     assert Path(video_path).exists()
     assert _YoutubeDLSuccessStub.last_opts["format"] == "best"
+
+
+def test_download_short_video_prefers_highest_resolution(monkeypatch, tmp_path):
+    _YoutubeDLDurationAwareSuccessStub.duration = 3599.0
+    _YoutubeDLDurationAwareSuccessStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLDurationAwareSuccessStub)
+
+    processor = video_mod.VideoProcessor(prefer_h264=True)
+    video_path = processor.download(
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert _YoutubeDLDurationAwareSuccessStub.calls[0] == "bestvideo+bestaudio/best"
+
+
+def test_download_long_video_keeps_h264_priority(monkeypatch, tmp_path):
+    _YoutubeDLDurationAwareSuccessStub.duration = 3600.0
+    _YoutubeDLDurationAwareSuccessStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLDurationAwareSuccessStub)
+
+    processor = video_mod.VideoProcessor(prefer_h264=True)
+    video_path = processor.download(
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert _YoutubeDLDurationAwareSuccessStub.calls[0] == _H264_FMT
+
+
+def test_download_custom_short_video_threshold_takes_effect(monkeypatch, tmp_path):
+    _YoutubeDLDurationAwareSuccessStub.duration = 2000.0
+    _YoutubeDLDurationAwareSuccessStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLDurationAwareSuccessStub)
+
+    processor = video_mod.VideoProcessor(
+        prefer_h264=True,
+        short_video_max_duration_sec=1800.0,
+    )
+    video_path = processor.download(
+        url="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        output_dir=str(tmp_path),
+        filename="video",
+    )
+
+    assert Path(video_path).exists()
+    assert _YoutubeDLDurationAwareSuccessStub.calls[0] == _H264_FMT
 
 
 def test_download_auto_exports_cookie_file_from_browser(monkeypatch, tmp_path):

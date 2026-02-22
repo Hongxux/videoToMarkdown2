@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Tuple, TypeV
 import threading
 
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
+from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 from services.python_grpc.src.content_pipeline.infra.llm.llm_client import (
     LLMClient,
     AdaptiveConcurrencyLimiter,
@@ -138,6 +139,7 @@ _VISION_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VISION_HEDGE_DELAY_MS", _LLM_H
 
 _VL_HEDGE_ENABLED = _env_bool("MODULE2_VL_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
 _VL_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VL_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
+_VL_BATCH_MAX_INFLIGHT = max(1, _env_int("MODULE2_VL_BATCH_MAX_INFLIGHT", 8))
 
 
 @dataclass(frozen=True)
@@ -639,7 +641,8 @@ def get_deepseek_client(
     为什么：统一客户端池，避免各模块重复初始化导致连接池与并发策略漂移。
     权衡：单例按 key 复用，若要强制隔离，可显式传不同参数生成新实例。
     """
-    key = _build_deepseek_client_key(api_key or "", base_url, model, temperature)
+    resolved_model = resolve_deepseek_model(model, default_model="deepseek-chat")
+    key = _build_deepseek_client_key(api_key or "", base_url, resolved_model, temperature)
     with _DEEPSEEK_LOCK:
         client = _DEEPSEEK_CLIENTS.get(key)
         if client is not None:
@@ -647,7 +650,7 @@ def get_deepseek_client(
         client = LLMClient(
             api_key=api_key,
             base_url=base_url,
-            model=model,
+            model=resolved_model,
             temperature=temperature,
             enable_logprobs=enable_logprobs,
             cache_enabled=cache_enabled,
@@ -677,11 +680,12 @@ async def deepseek_complete_text(
     为什么：把重试/缓存/并发治理沉到统一入口。
     权衡：保留 client 注入通道，便于测试或自定义模型。
     """
+    resolved_model = resolve_deepseek_model(model, default_model="deepseek-chat")
     if client is None:
         client = get_deepseek_client(
             api_key=api_key,
             base_url=base_url,
-            model=model,
+            model=resolved_model,
             temperature=temperature,
             enable_logprobs=enable_logprobs,
             cache_enabled=cache_enabled,
@@ -735,7 +739,7 @@ async def deepseek_complete_text(
             append_deepseek_call_record(
                 prompt=prompt,
                 system_message=str(system_message or ""),
-                model=model,
+                model=resolved_model,
                 temperature=float(temperature),
                 need_logprobs=bool(need_logprobs),
                 output_text=str(output_text or ""),
@@ -770,11 +774,12 @@ async def deepseek_complete_json(
     为什么：集中控制 JSON 解析、缓存与并发策略。
     权衡：允许 max_tokens 透传，但需注意缓存 key 维度变化。
     """
+    resolved_model = resolve_deepseek_model(model, default_model="deepseek-chat")
     if client is None:
         client = get_deepseek_client(
             api_key=api_key,
             base_url=base_url,
-            model=model,
+            model=resolved_model,
             temperature=temperature,
             enable_logprobs=enable_logprobs,
             cache_enabled=cache_enabled,
@@ -1185,3 +1190,49 @@ async def vl_chat_completion(
     if cache_key and _VL_INFLIGHT_DEDUP_ENABLED:
         return await _VL_DEDUPER.run(cache_key, _do_hedged_request)
     return await _do_hedged_request()
+
+
+async def vl_chat_completions(
+    *,
+    requests: list[Dict[str, Any]],
+    max_inflight: Optional[int] = None,
+) -> list[VLChatResult]:
+    """
+    作用：批量执行 VL ChatCompletion，保持输入顺序返回结果。
+    为什么：上层批量视频分析需要一个统一批量入口，避免各处重复实现并发控制。
+    权衡：采用“并发单请求”而不是“单请求多视频”，兼容现有网关与缓存语义。
+    """
+    if not requests:
+        return []
+
+    try:
+        resolved_inflight = int(max_inflight) if max_inflight is not None else int(_VL_BATCH_MAX_INFLIGHT)
+    except Exception:
+        resolved_inflight = int(_VL_BATCH_MAX_INFLIGHT)
+    resolved_inflight = max(1, min(resolved_inflight, len(requests)))
+
+    semaphore = asyncio.Semaphore(resolved_inflight)
+    ordered_results: list[Optional[VLChatResult]] = [None] * len(requests)
+
+    async def _run_single(index: int, payload: Dict[str, Any]) -> None:
+        async with semaphore:
+            if not isinstance(payload, dict):
+                raise ValueError(f"vl_chat_completions request[{index}] must be dict")
+            ordered_results[index] = await vl_chat_completion(
+                client=payload["client"],
+                model=str(payload["model"]),
+                messages=payload["messages"],
+                max_tokens=int(payload["max_tokens"]),
+                temperature=float(payload["temperature"]),
+                response_format=payload.get("response_format"),
+                cache_key=payload.get("cache_key"),
+            )
+
+    await asyncio.gather(*[_run_single(index, payload) for index, payload in enumerate(requests)])
+
+    finalized_results: list[VLChatResult] = []
+    for index, item in enumerate(ordered_results):
+        if item is None:
+            raise RuntimeError(f"vl_chat_completions result missing at index {index}")
+        finalized_results.append(item)
+    return finalized_results

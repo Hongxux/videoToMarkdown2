@@ -39,6 +39,7 @@ class VideoProcessor(BaseProcessor):
         "best",
         "bestvideo+bestaudio/best",
     )
+    _SHORT_VIDEO_MAX_DURATION_SEC = 3600.0
     _YOUTUBE_HLS_FALLBACK_FORMAT_IDS = ("96", "95", "94", "93", "92", "91")
     _YOUTUBE_PLAYER_CLIENT_CHAIN = ("web_safari", "tv_downgraded", "web")
     
@@ -50,6 +51,7 @@ class VideoProcessor(BaseProcessor):
         cookies_file: Optional[str] = None,
         cookies_from_browser: Optional[str] = None,
         prefer_h264: bool = True,
+        short_video_max_duration_sec: Optional[float] = None,
         external_downloader: Optional[str] = None,
         external_downloader_args: Optional[list[str]] = None,
     ):
@@ -71,6 +73,9 @@ class VideoProcessor(BaseProcessor):
         self.cookies_file = cookies_file
         self.cookies_from_browser = cookies_from_browser
         self.prefer_h264 = bool(prefer_h264)
+        self.short_video_max_duration_sec = self._normalize_short_video_max_duration_sec(
+            short_video_max_duration_sec
+        )
         raw_external_downloader = str(external_downloader or "").strip()
         self.external_downloader = raw_external_downloader or None
         self.external_downloader_args = [
@@ -90,6 +95,73 @@ class VideoProcessor(BaseProcessor):
         if self.prefer_h264:
             return self._H264_FIRST_FORMAT_CANDIDATES
         return self._DEFAULT_FORMAT_CANDIDATES
+
+    @classmethod
+    def _normalize_short_video_max_duration_sec(cls, raw_value: Optional[float]) -> float:
+        """
+        做什么：规范化短视频阈值配置。
+        为什么：统一兜底行为，避免非法值导致格式策略异常。
+        权衡：非法/非正值会回退默认阈值，不支持“0=关闭”语义。
+        """
+        try:
+            value = float(raw_value)
+        except Exception:
+            return cls._SHORT_VIDEO_MAX_DURATION_SEC
+        if value <= 0:
+            return cls._SHORT_VIDEO_MAX_DURATION_SEC
+        return value
+
+    @staticmethod
+    def _extract_duration_from_info(info: Dict[str, Any]) -> Optional[float]:
+        """从 yt-dlp 探测结果提取时长（秒）。"""
+        raw_duration = info.get("duration")
+        try:
+            duration = float(raw_duration)
+            if duration > 0:
+                return duration
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _prioritize_short_video_highest_resolution_candidates(
+        cls,
+        base_candidates: Tuple[str, ...],
+    ) -> Tuple[str, ...]:
+        """
+        做什么：将短视频格式链重排为“最高分辨率优先”。
+        为什么：短视频体量相对可控，优先画质收益更大。
+        权衡：可能增加编解码压力，因此仅对 1 小时以内视频启用。
+        """
+        ordered = ["bestvideo+bestaudio/best", *base_candidates]
+        deduplicated: list[str] = []
+        for item in ordered:
+            selector = str(item or "").strip()
+            if selector and selector not in deduplicated:
+                deduplicated.append(selector)
+        return tuple(deduplicated)
+
+    def _probe_video_duration_for_format_selection(
+        self,
+        *,
+        url: str,
+        base_opts: Dict[str, Any],
+    ) -> Optional[float]:
+        """
+        做什么：在正式下载前探测视频时长，用于决定格式优先级。
+        为什么：满足“短视频优先最高分辨率”的下载策略。
+        权衡：会增加一次轻量 metadata 请求，但可换来更稳定的画质策略。
+        """
+        probe_opts = dict(base_opts)
+        probe_opts.pop("format", None)
+        try:
+            with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if isinstance(info, dict):
+                return self._extract_duration_from_info(info)
+        except Exception:
+            return None
+        return None
 
     @staticmethod
     def _is_youtube_url(url: str) -> bool:
@@ -231,7 +303,7 @@ class VideoProcessor(BaseProcessor):
         if browser_cookie_access_failed:
             configured_browser = self.cookies_from_browser or "chrome"
             return (
-                "yt-dlp 读取浏览器 Cookie 失败（可能是 Chrome 数据库复制失败或 DPAPI 解密失败）。"
+                "yt-dlp 读取浏览器 Cookie 失败（可能是 Chrome Cookie 数据库复制失败或 DPAPI 解密失败）。"
                 " 常见原因是浏览器进程占用、服务权限上下文不一致，或系统密钥不可用。"
                 f" 当前 browser 配置: `{configured_browser}`。"
                 " 请尝试：1) 完全退出 Chrome（含后台进程）；"
@@ -406,8 +478,15 @@ class VideoProcessor(BaseProcessor):
                 format_ids.append(fmt_id)
         return format_ids
 
-    def _resolve_explicit_muxed_format_ids(self, url: str, base_opts: Dict[str, Any]) -> list[str]:
+    def _resolve_explicit_muxed_format_ids(
+        self,
+        url: str,
+        base_opts: Dict[str, Any],
+        *,
+        prefer_h264: Optional[bool] = None,
+    ) -> list[str]:
         """当 selector 匹配失败时，探测 formats 并返回显式 format_id 候选列表。"""
+        rank_with_h264 = self.prefer_h264 if prefer_h264 is None else bool(prefer_h264)
         probe_opts = dict(base_opts)
         probe_opts.pop("format", None)
         errors = []
@@ -417,7 +496,7 @@ class VideoProcessor(BaseProcessor):
             self._last_explicit_probe_error = None
             format_ids = self._pick_ranked_muxed_format_ids(
                 info if isinstance(info, dict) else {},
-                prefer_h264=self.prefer_h264,
+                prefer_h264=rank_with_h264,
             )
             if format_ids:
                 return format_ids
@@ -432,7 +511,7 @@ class VideoProcessor(BaseProcessor):
                     info = ydl.extract_info(url, download=False)
                 format_ids = self._pick_ranked_muxed_format_ids(
                     info if isinstance(info, dict) else {},
-                    prefer_h264=self.prefer_h264,
+                    prefer_h264=rank_with_h264,
                 )
                 if format_ids:
                     self._last_explicit_probe_error = None
@@ -572,12 +651,12 @@ class VideoProcessor(BaseProcessor):
                 ffmpeg_path = p
                 break
 
-        format_candidates = self._get_format_candidates()
+        base_format_candidates = self._get_format_candidates()
 
         # 配置选项
         ydl_opts = {
             # 自动选择最佳可用格式：优先 H.264（可配置关闭），失败后回退。
-            'format': format_candidates[0],
+            'format': base_format_candidates[0],
             'outtmpl': output_template,
             'merge_output_format': 'mp4',
             'noplaylist': True,
@@ -610,6 +689,19 @@ class VideoProcessor(BaseProcessor):
         if self._is_youtube_url(url):
             ydl_opts = self._with_youtube_player_client_chain(ydl_opts)
             self.emit_progress("download", 0.14, "YouTube 下载启用 player_client 回退链: web_safari/tv_downgraded/web")
+
+        format_candidates = base_format_candidates
+        explicit_probe_prefer_h264 = self.prefer_h264
+        probed_duration = self._probe_video_duration_for_format_selection(url=url, base_opts=ydl_opts)
+        if probed_duration is not None and probed_duration < self.short_video_max_duration_sec:
+            format_candidates = self._prioritize_short_video_highest_resolution_candidates(base_format_candidates)
+            explicit_probe_prefer_h264 = False
+            self.emit_progress(
+                "download",
+                0.205,
+                f"检测到短视频({probed_duration:.1f}s < {self.short_video_max_duration_sec:.1f}s)，优先最高分辨率下载",
+            )
+        ydl_opts["format"] = format_candidates[0]
 
         if 'cookiefile' in auth_opts:
             self.emit_progress("download", 0.12, f"使用 Cookie 文件: {auth_opts['cookiefile']}")
@@ -661,7 +753,11 @@ class VideoProcessor(BaseProcessor):
                     raise
 
             if last_error is not None and self._is_format_unavailable_error(last_error):
-                explicit_format_ids = self._resolve_explicit_muxed_format_ids(url, ydl_opts)
+                explicit_format_ids = self._resolve_explicit_muxed_format_ids(
+                    url,
+                    ydl_opts,
+                    prefer_h264=explicit_probe_prefer_h264,
+                )
                 if not explicit_format_ids and self._is_youtube_url(url):
                     explicit_format_ids = list(self._YOUTUBE_HLS_FALLBACK_FORMAT_IDS)
                     self.emit_progress(

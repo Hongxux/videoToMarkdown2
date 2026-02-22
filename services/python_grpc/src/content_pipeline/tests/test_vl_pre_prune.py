@@ -1,7 +1,7 @@
 """
-VL 鍓嶇疆闈欐€佹鍓旈櫎閫昏緫鍗曞厓娴嬭瘯銆?
-瑕嗙洊鐩爣锛?1) stable 鏍稿績鍖洪棿鍓旈櫎鍚庝繚鐣欏尯闂磋绠楁纭紱
-2) 瑁佸壀鐗囨鐩稿鏃堕棿鏄犲皠鍥炲師濮嬫椂闂磋酱姝ｇ‘锛?3) 涓婁笅鏂囨彁绀哄寘鍚?knowledge_topic 涓庝笂涓嬫枃鏂囨湰銆?"""
+VL pre-prune unit tests.
+Coverage goals: 1) stable core interval removal keeps expected kept intervals;
+2) pruned-relative time maps back to original timeline; 3) prompt includes knowledge_topic and text context."""
 
 from __future__ import annotations
 
@@ -841,7 +841,7 @@ def test_dedupe_incremental_legacy_drop_tail_screenshots_keeps_latest_incrementa
     monkeypatch.setattr(
         vl_material_generator_module,
         "open_video_capture_with_fallback",
-        lambda _video_path, logger=None: (_FakeCap(), "effective.mp4", False),
+        lambda _video_path, logger=None, allow_inline_transcode=None: (_FakeCap(), "effective.mp4", False),
     )
 
     def _fake_extract_ocr_tokens(frame, _roi):
@@ -1073,7 +1073,10 @@ def test_generate_diverts_static_dominant_multistep_unit_to_legacy_action_branch
         ]
         return [_FakeAnalysisResult()], metadata, 1
 
+    save_calls = []
+
     async def _fake_save_tutorial_assets_for_unit(**kwargs):
+        save_calls.append(dict(kwargs))
         return None
 
     monkeypatch.setattr(generator, "_resolve_pre_prune_results_for_unit_tasks", _fake_resolve_pre_prune_results_for_unit_tasks)
@@ -1098,6 +1101,10 @@ def test_generate_diverts_static_dominant_multistep_unit_to_legacy_action_branch
         assert result.screenshot_requests[0]["screenshot_id"] == "SU001/SU001_ss_step_01_key_01_mock_action"
         assert int(result.token_stats.get("stable_action_legacy_units", 0)) == 1
         assert int(result.token_stats.get("vl_units", 0)) == 1
+        assert len(save_calls) == 1
+        assert save_calls[0]["video_path"] == str(Path("semantic_unit_clips_vl") / "SU001.mp4")
+        assert bool(save_calls[0].get("use_analysis_relative_timestamps")) is False
+        assert bool(save_calls[0].get("prefer_screenshot_requests_keyframes")) is True
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -1260,7 +1267,7 @@ def test_generate_applies_incremental_dedupe_for_legacy_drop_tails(monkeypatch):
     monkeypatch.setattr(
         vl_material_generator_module,
         "open_video_capture_with_fallback",
-        lambda _video_path, logger=None: (_FakeCap(), "effective.mp4", False),
+        lambda _video_path, logger=None, allow_inline_transcode=None: (_FakeCap(), "effective.mp4", False),
     )
 
     def _fake_extract_ocr_tokens(frame, _roi):
@@ -1427,8 +1434,8 @@ def test_subtract_intervals_keeps_edges_for_stable_core_cut():
 
 def test_map_pruned_relative_time_back_to_original_axis():
     """
-    淇濈暀娈?[0,2] + [4,10] 鏃讹細
-    - 鏂扮墖娈电浉瀵?1.5s -> 鍘熷 1.5s锛堢涓€娈靛唴锛?    - 鏂扮墖娈电浉瀵?3.0s -> 鍘熷 5.0s锛堣惤鍏ョ浜屾锛屽亸绉?1.0s锛?    """
+    Keep segments [0,2] + [4,10]:
+    - new relative 1.5s -> original 1.5s (inside first segment); new relative 3.0s -> original 5.0s (inside second segment, offset 1.0s)."""
     generator = _build_generator()
     kept = [(0.0, 2.0), (4.0, 10.0)]
 
@@ -1441,7 +1448,7 @@ def test_map_pruned_relative_time_back_to_original_axis():
 
 def test_build_pruning_context_prompt_contains_topic_and_text():
     """
-    涓婁笅鏂囨彁绀哄簲鍖呭惈 knowledge_topic銆佹枃鏈笂涓嬫枃銆佷繚鐣?鍓旈櫎鍖洪棿銆?    """
+    Prompt should include knowledge_topic, text context, and kept/removed intervals."""
     generator = _build_generator()
     su: Dict[str, Any] = {
         "unit_id": "SU100",
@@ -1463,11 +1470,11 @@ def test_build_pruning_context_prompt_contains_topic_and_text():
 
 def test_token_saving_estimation_linear_seconds():
     """
-    楠岃瘉鈥滄寜淇濈暀鏃堕暱绾挎€у洖鎺ㄥ熀绾?token鈥濈殑鏍稿績浼扮畻閫昏緫銆?
-    绀轰緥锛?    - 鍘熷鏃堕暱 10s
+    Validate the linear estimate logic for base token usage by kept duration.
+    Example: original duration 10s, kept duration 4s, actual total_tokens=120.
     - 淇濈暀鏃堕暱 4s
     - 瀹為檯 total_tokens=120
-    鍒欏熀绾夸及绠楃害涓?120/4*10=300锛岃妭鐪佺害 180銆?    """
+    Then base estimate is about 120/4*10=300 and saved tokens are about 180."""
     generator = _build_generator()
 
     unit_duration = 10.0
@@ -1490,8 +1497,8 @@ def test_token_saving_estimation_linear_seconds():
 
 def test_removed_intervals_require_stable_longer_than_3s():
     """
-    鏂扮害鏉燂細stable 鍘熷闀垮害蹇呴』 >3s 鎵嶅彲鍓旈櫎銆?    - 3.0s锛堝 1-4锛変笉鍓旈櫎
-    - 3.1s锛堝 1-4.1锛夊彲鍓旈櫎鏍稿績鍖?    """
+    New contract: stable original duration must be >3s to be pruned. 3.0s (e.g. 1-4) is not pruned;
+    3.1s (e.g. 1-4.1) can prune core interval."""
     generator = _build_generator()
 
     # 边界：正好 3.0s，不应剔除
@@ -1507,7 +1514,7 @@ def test_removed_intervals_require_stable_longer_than_3s():
 
 def test_map_pruned_interval_to_original_segments_cross_gap():
     """
-    褰?pruned 鍖洪棿璺ㄨ秺琚墧闄ら棿闅欐椂锛屽簲鏄犲皠涓哄師鏃堕棿杞翠笂鐨勫娈靛尯闂淬€?    kept=[0,2]+[4,6]锛宲runed 涓?[1,3] -> 鍘熷 [1,2] + [4,5]
+    When pruned interval crosses removed gaps, map to multiple original segments: kept=[0,2]+[4,6], pruned [1,3] -> original [1,2] + [4,5].
     """
     generator = _build_generator()
     kept = [(0.0, 2.0), (4.0, 6.0)]
@@ -1522,7 +1529,7 @@ def test_map_pruned_interval_to_original_segments_cross_gap():
 
 def test_find_clip_for_unit_avoids_substring_collision(tmp_path):
     """
-    SU01 涓?SU010 骞跺瓨鏃讹紝涓嶈兘鐢ㄥ瓙涓插尮閰嶅鑷磋閫夈€?    """
+    SU01 and SU010 can co-exist; substring matching must not select wrong clip."""
     generator = _build_generator()
     clips_dir = tmp_path / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
@@ -1545,7 +1552,7 @@ def test_find_clip_for_unit_avoids_substring_collision(tmp_path):
 
 def test_split_complete_sentences_by_pause_threshold():
     """
-    0.3s 鍙婁互涓婂仠椤垮簲鍒囧嚭鏂扮殑鍙ｈ鍙ャ€?    """
+    Pauses >= 0.3s should split into a new spoken sentence."""
     generator = _build_generator()
 
     subtitles = [
@@ -1563,8 +1570,8 @@ def test_split_complete_sentences_by_pause_threshold():
 
 def test_refine_kept_segments_before_concat_applies_semantic_physical_and_buffers(tmp_path, monkeypatch):
     """
-    Stable 鍓旈櫎鍚庣殑 kept 鐗囨鍦ㄥ悎骞跺墠浼氱粡鍘嗭細
-    1) 璇箟鍙ュご鍥炴媺锛?) 缁堢偣骞跺叆 MSE 璺冲彉锛?) 璇祦缂撳啿銆?    """
+    Before concat, kept segments after stable-prune should pass:
+    1) semantic sentence-head pullback; 2) end merge by MSE jump; 3) speech-stream buffer."""
     generator = _build_generator()
 
     async def _fake_detect_segment_mse_jump_end(clip_path, semantic_end_sec, clip_duration_sec):

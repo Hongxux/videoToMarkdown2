@@ -23,6 +23,7 @@ def test_load_download_video_options_prefers_environment(monkeypatch):
             "download_cookies_file": "cfg_cookies.txt",
             "download_cookies_from_browser": "edge:Default",
             "prefer_h264": True,
+            "short_video_max_duration_sec": 3500,
         }
     }
     monkeypatch.setenv("YTDLP_PROXY", "http://env-proxy:7890")
@@ -30,6 +31,7 @@ def test_load_download_video_options_prefers_environment(monkeypatch):
     monkeypatch.setenv("YTDLP_COOKIES_FILE", "env_cookies.txt")
     monkeypatch.setenv("YTDLP_COOKIES_FROM_BROWSER", "chrome")
     monkeypatch.setenv("YTDLP_PREFER_H264", "false")
+    monkeypatch.setenv("YTDLP_SHORT_VIDEO_MAX_DURATION_SEC", "1800")
 
     options = impl._load_download_video_options(config)
 
@@ -38,6 +40,7 @@ def test_load_download_video_options_prefers_environment(monkeypatch):
     assert options["cookies_file"] == "env_cookies.txt"
     assert options["cookies_from_browser"] == "chrome"
     assert options["prefer_h264"] is False
+    assert options["short_video_max_duration_sec"] == 1800.0
 
 
 def test_load_download_video_options_uses_selected_profile_when_top_level_empty(monkeypatch):
@@ -161,6 +164,7 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
                     "download_cookies_from_browser": "chrome",
                     "download_cookies_file": "",
                     "prefer_h264": False,
+                    "short_video_max_duration_sec": 2400,
                     "external_downloader": "aria2c",
                     "external_downloader_args": ["--split=4"],
                 }
@@ -193,6 +197,7 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
     assert captured["init_kwargs"]["disable_ssl_verify"] is True
     assert captured["init_kwargs"]["cookies_from_browser"] == "chrome"
     assert captured["init_kwargs"]["prefer_h264"] is False
+    assert captured["init_kwargs"]["short_video_max_duration_sec"] == 2400.0
     assert captured["init_kwargs"]["external_downloader"] == "aria2c"
     assert captured["init_kwargs"]["external_downloader_args"] == ["--split=4"]
     assert captured["download_call"]["filename"] == "video"

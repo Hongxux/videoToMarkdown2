@@ -1,4 +1,4 @@
-package com.example.semantictopography
+package com.hongxu.videoToMarkdownTest2
 
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.lazy.LazyListState
@@ -7,9 +7,6 @@ import org.json.JSONObject
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-/**
- * 优先使用 JNI 分词结果，失败时回退到本地边界探测。
- */
 fun resolveTokenSelection(
     text: String,
     cursor: Int,
@@ -25,9 +22,6 @@ fun resolveTokenSelection(
     return fallbackTokenSelection(text, cursor)
 }
 
-/**
- * 解析 native 返回的分词片段协议。
- */
 private fun parseSegmentPayload(
     text: String,
     payload: String?
@@ -57,9 +51,6 @@ private fun parseSegmentPayload(
     }.getOrNull()
 }
 
-/**
- * 本地回退的词元边界计算。
- */
 private fun fallbackTokenSelection(
     text: String,
     cursor: Int
@@ -91,16 +82,10 @@ private fun fallbackTokenSelection(
     )
 }
 
-/**
- * 词元字符定义。
- */
 private fun isTokenChar(value: Char): Boolean {
     return value.isLetterOrDigit() || value == '_' || (value.code in 0x4E00..0x9FFF)
 }
 
-/**
- * 解析 native 返回的三维解析卡片。
- */
 fun parseTokenInsightCard(
     token: String,
     nativePayload: String?
@@ -125,15 +110,12 @@ fun parseTokenInsightCard(
 
     return TokenInsightCard(
         token = token,
-        contextualize = "当前上下文里，“$token”承担关键语义锚点，影响这段话的理解路径。",
-        firstPrinciple = "从第一性视角看，“$token”用于压缩复杂概念，减少读者的认知跳跃成本。",
-        industryHorizon = "在行业实践中，可把“$token”映射为可观测指标或流程决策节点，提升复盘效率。"
+        contextualize = "In this context, \"$token\" carries key semantic weight and changes reading intent.",
+        firstPrinciple = "From first principles, \"$token\" compresses complex meaning and reduces cognitive jumps.",
+        industryHorizon = "In practice, \"$token\" can map to observable metrics or operational decisions."
     )
 }
 
-/**
- * 将段落滚动到视觉中心附近。
- */
 suspend fun autoCenterItem(
     listState: LazyListState,
     itemIndex: Int,
@@ -157,9 +139,6 @@ suspend fun autoCenterItem(
     }
 }
 
-/**
- * 在原型文件中避免直接依赖 Compose Color 扩展的版本差异。
- */
 fun Color.toArgbSafe(): Int {
     val a = (alpha * 255).roundToInt().coerceIn(0, 255)
     val r = (red * 255).roundToInt().coerceIn(0, 255)

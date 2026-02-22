@@ -1,4 +1,4 @@
-﻿"""
+"""
 VL-Based Video Analyzer - 基于视觉语言模型的视频分析器
 
 功能：
@@ -27,6 +27,7 @@ import io
 import math
 import httpx
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, field
@@ -64,6 +65,7 @@ class VLAnalysisResult:
     # 教程模式新增字段
     step_id: int = 0
     step_description: str = ""
+    step_type: str = "MAIN_FLOW"
     analysis_mode: str = "default"
     main_action: str = ""
     main_operation: List[str] = field(default_factory=list)
@@ -89,6 +91,7 @@ class VLClipAnalysisResponse:
     token_usage: Dict[str, int] = field(default_factory=dict)
     analysis_mode: str = "default"
     raw_response_json: List[Dict[str, Any]] = field(default_factory=list)
+    raw_llm_interactions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class VLVideoAnalyzer:
@@ -104,9 +107,10 @@ class VLVideoAnalyzer:
         api_config = config.get("api", {})
         
         self.base_url = str(
-            api_config.get("base_url", "https://qianfan.baidubce.com/v2/chat/completions") or ""
+            api_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1") or ""
         ).strip()
-        self.model = str(api_config.get("model", "ernie-4.5-turbo-vl-32k") or "").strip()
+        default_model = "ernie-4.5-turbo-vl-32k" if self._is_qianfan_endpoint(self.base_url) else "qwen-vl-max-2025-08-13"
+        self.model = str(api_config.get("model", default_model) or "").strip()
         self.provider = str(api_config.get("provider", "") or "").strip().lower()
 
         # 统一鉴权解析：兼容 api_key（DashScope）与 bearer_token（千帆）。
@@ -241,6 +245,21 @@ class VLVideoAnalyzer:
             return "tutorial_stepwise"
         return "default"
 
+    def _normalize_step_type(self, value: Any) -> str:
+        """归一教程步骤类型，未知值回落为 MAIN_FLOW。"""
+        text = str(value or "").strip().upper()
+        if not text:
+            return "MAIN_FLOW"
+        if text in {"MAIN_FLOW", "MAIN", "PRIMARY", "PRIMARY_FLOW"}:
+            return "MAIN_FLOW"
+        if text in {"CONDITIONAL", "CONDITION", "BRANCH"}:
+            return "CONDITIONAL"
+        if text in {"OPTIONAL", "OPTION"}:
+            return "OPTIONAL"
+        if text in {"TROUBLESHOOTING", "TROUBLESHOOT", "DEBUG", "ERROR_FIX", "RECOVERY"}:
+            return "TROUBLESHOOTING"
+        return "MAIN_FLOW"
+
     @staticmethod
     def _build_route_rules_zh(*, subject: str, no_needed_index: int, should_type_index: int) -> str:
         """统一生成中文路由规则文本，避免 default/tutorial 规则漂移。"""
@@ -284,9 +303,11 @@ class VLVideoAnalyzer:
             "2) Each array item must be one complete step.\n"
             "3) Required fields per item: step_id (Integer), step_description (String), "
             "clip_start_sec (Float), clip_end_sec (Float), main_operation (String), instructional_keyframes (List[Object]).\n"
-            "   instructional_keyframes item fields: timestamp_sec (Float), optional frame_reason (String), optional bbox ([ymin,xmin,ymax,xmax], 0-1000).\n"
+            "   instructional_keyframes item fields: timestamp_sec (Float), optional frame_reason (String), "
+            "optional target_ui_type (String), optional target_text (String), optional target_relative_position (String), "
+            "optional bbox ([xmin,ymin,xmax,ymax], 0-1000).\n"
             "   Optional fields: main_action (String), precautions (List[String]), "
-            "step_summary (String), operation_guidance (List[String]), "
+            "step_summary (String), operation_guidance (List[String]), step_type (MAIN_FLOW/CONDITIONAL/OPTIONAL/TROUBLESHOOTING), "
             "no_needed_video (Boolean), should_type (abstract/concrete).\n"
             "   If an optional field is unnecessary for a step, omit it or return an empty value.\n"
             "4) Do not output reasoning, key_evidence, or knowledge_type fields.\n"
@@ -431,13 +452,21 @@ class VLVideoAnalyzer:
 
         try:
             # 调用 VL API
-            analysis_results, token_usage, raw_json = await self._call_vl_api(
+            api_call_result = await self._call_vl_api(
                 clip_path,
                 extra_prompt=extra_prompt,
                 analysis_mode=normalized_mode,
             )
+            if isinstance(api_call_result, tuple) and len(api_call_result) == 4:
+                analysis_results, token_usage, raw_json, raw_interactions = api_call_result
+            elif isinstance(api_call_result, tuple) and len(api_call_result) == 3:
+                analysis_results, token_usage, raw_json = api_call_result
+                raw_interactions = []
+            else:
+                raise ValueError(f"unexpected _call_vl_api return payload: {type(api_call_result)}")
             result.token_usage = token_usage
             result.raw_response_json = raw_json or []
+            result.raw_llm_interactions = raw_interactions or []
 
             if not analysis_results:
                 result.success = False
@@ -480,6 +509,7 @@ class VLVideoAnalyzer:
                 result.analysis_results.append(ar)
 
                 step_id = int(ar.step_id) if int(ar.step_id) > 0 else (i + 1)
+                step_type = self._normalize_step_type(getattr(ar, "step_type", ""))
                 action_brief = self._sanitize_action_brief(ar.step_description)
 
                 if normalized_mode == "tutorial_stepwise":
@@ -489,10 +519,13 @@ class VLVideoAnalyzer:
                         "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, tutorial_clip_stem),
                         "start_sec": ar.absolute_clip_start_sec,
                         "end_sec": ar.absolute_clip_end_sec,
+                        "_analysis_relative_start_sec": ar.clip_start_sec,
+                        "_analysis_relative_end_sec": ar.clip_end_sec,
                         "knowledge_type": "process",
                         "semantic_unit_id": semantic_unit_id,
                         "step_id": step_id,
                         "step_description": ar.step_description,
+                        "step_type": step_type,
                         "action_brief": action_brief,
                         "main_action": str(ar.main_action or "").strip(),
                         "main_operation": list(ar.main_operation or []),
@@ -515,10 +548,13 @@ class VLVideoAnalyzer:
                             "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, default_clip_stem),
                             "start_sec": ar.absolute_clip_start_sec,
                             "end_sec": ar.absolute_clip_end_sec,
+                            "_analysis_relative_start_sec": ar.clip_start_sec,
+                            "_analysis_relative_end_sec": ar.clip_end_sec,
                             "knowledge_type": ar.knowledge_type,
                             "semantic_unit_id": semantic_unit_id,
                             "step_id": step_id,
                             "step_description": ar.step_description,
+                            "step_type": step_type,
                             "action_brief": action_brief,
                             "main_action": str(ar.main_action or "").strip(),
                             "main_operation": list(ar.main_operation or []),
@@ -554,14 +590,19 @@ class VLVideoAnalyzer:
                         "label": label,
                         "semantic_unit_id": semantic_unit_id,
                         "_relative_timestamp": ar.suggested_screenshoot_timestamps[j],
+                        "_analysis_relative_timestamp": ar.suggested_screenshoot_timestamps[j],
                         "_semantic_unit_start": semantic_unit_start_sec,
                         "step_id": step_id,
                         "step_description": ar.step_description,
+                        "step_type": step_type,
                         "action_brief": action_brief,
                         "analysis_mode": normalized_mode,
                         "is_instructional_keyframe": normalized_mode == "tutorial_stepwise",
                         "keyframe_index": j + 1,
                         "frame_reason": str(keyframe_meta.get("frame_reason", "") or ""),
+                        "target_ui_type": str(keyframe_meta.get("target_ui_type", "") or "").strip(),
+                        "target_text": str(keyframe_meta.get("target_text", "") or "").strip(),
+                        "target_relative_position": str(keyframe_meta.get("target_relative_position", "") or "").strip(),
                         "bbox": self._normalize_bbox_1000(keyframe_meta.get("bbox")),
                     })
 
@@ -579,8 +620,59 @@ class VLVideoAnalyzer:
             logger.error(f"VL analysis failed ({semantic_unit_id}): {e}")
             result.success = False
             result.error_msg = str(e)
+            result.raw_llm_interactions = list(getattr(e, "_raw_llm_interactions", []) or [])
 
         return result
+
+    async def analyze_clips_batch(
+        self,
+        *,
+        tasks: List[Dict[str, Any]],
+        max_inflight: Optional[int] = None,
+        return_exceptions: bool = True,
+    ) -> List[Any]:
+        """批量分析多个视频片段，按输入顺序返回结果。"""
+        if not tasks:
+            return []
+
+        default_inflight = max(1, min(len(tasks), (os.cpu_count() or 4)))
+        try:
+            resolved_inflight = int(max_inflight) if max_inflight is not None else default_inflight
+        except Exception:
+            resolved_inflight = default_inflight
+        resolved_inflight = max(1, min(resolved_inflight, len(tasks)))
+
+        semaphore = asyncio.Semaphore(resolved_inflight)
+        ordered_results: List[Any] = [None] * len(tasks)
+
+        async def _run_single(index: int, task: Dict[str, Any]) -> None:
+            async with semaphore:
+                try:
+                    ordered_results[index] = await self.analyze_clip(
+                        clip_path=str(task.get("clip_path", "") or ""),
+                        semantic_unit_start_sec=float(task.get("semantic_unit_start_sec", 0.0) or 0.0),
+                        semantic_unit_id=str(task.get("semantic_unit_id", "") or ""),
+                        extra_prompt=task.get("extra_prompt"),
+                        analysis_mode=str(task.get("analysis_mode", "default") or "default"),
+                    )
+                except Exception as exc:
+                    if return_exceptions:
+                        ordered_results[index] = exc
+                    else:
+                        raise
+
+        await asyncio.gather(*[_run_single(index, task) for index, task in enumerate(tasks)])
+
+        if return_exceptions:
+            return [item if item is not None else RuntimeError("empty_batch_result") for item in ordered_results]
+
+        finalized_results: List[VLClipAnalysisResponse] = []
+        for index, item in enumerate(ordered_results):
+            if not isinstance(item, VLClipAnalysisResponse):
+                raise RuntimeError(f"batch result invalid at index={index}")
+            finalized_results.append(item)
+        return finalized_results
+
     def _extract_token_usage(self, response: Any) -> Dict[str, int]:
         """
         从 OpenAI 兼容响应中提取 token 使用量。
@@ -676,12 +768,91 @@ class VLVideoAnalyzer:
         raw = json.dumps(payload, sort_keys=True, ensure_ascii=False)
         return "vl:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _sanitize_media_url_for_audit(url: str) -> Dict[str, Any]:
+        """审计落盘时对媒体 URL 做轻量脱敏，避免 data-uri 体积膨胀。"""
+        raw = str(url or "")
+        if not raw:
+            return {"kind": "empty", "value": ""}
+        if raw.startswith("data:"):
+            digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+            prefix = raw[:64]
+            return {
+                "kind": "data_uri",
+                "prefix": prefix,
+                "length": len(raw),
+                "sha256": digest,
+            }
+        return {"kind": "url", "value": raw}
+
+    def _sanitize_messages_for_audit(self, messages: Any) -> List[Dict[str, Any]]:
+        """保留文本与结构化字段，压缩媒体体积，便于逐步追溯 LLM 交互。"""
+        sanitized: List[Dict[str, Any]] = []
+        if not isinstance(messages, list):
+            return sanitized
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role", "") or "").strip()
+            content = message.get("content")
+            normalized_content: Any
+            if isinstance(content, list):
+                normalized_items: List[Dict[str, Any]] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        normalized_items.append({"type": "unknown", "value": str(item)})
+                        continue
+                    item_type = str(item.get("type", "") or "").strip().lower()
+                    if item_type == "text":
+                        normalized_items.append(
+                            {
+                                "type": "text",
+                                "text": str(item.get("text", "") or ""),
+                            }
+                        )
+                    elif item_type == "image_url":
+                        image_obj = item.get("image_url") if isinstance(item.get("image_url"), dict) else {}
+                        normalized_items.append(
+                            {
+                                "type": "image_url",
+                                "image_url": self._sanitize_media_url_for_audit(str(image_obj.get("url", "") or "")),
+                            }
+                        )
+                    elif item_type == "video_url":
+                        video_obj = item.get("video_url") if isinstance(item.get("video_url"), dict) else {}
+                        normalized_items.append(
+                            {
+                                "type": "video_url",
+                                "video_url": self._sanitize_media_url_for_audit(str(video_obj.get("url", "") or "")),
+                            }
+                        )
+                    else:
+                        normalized_items.append(
+                            {
+                                "type": item_type or "unknown",
+                                "value": json.loads(json.dumps(item, ensure_ascii=False)),
+                            }
+                        )
+                normalized_content = normalized_items
+            elif isinstance(content, str):
+                normalized_content = content
+            elif content is None:
+                normalized_content = ""
+            else:
+                try:
+                    normalized_content = json.loads(json.dumps(content, ensure_ascii=False))
+                except Exception:
+                    normalized_content = str(content)
+            sanitized.append({"role": role, "content": normalized_content})
+        return sanitized
+
     async def _call_vl_api(
         self,
         video_path: str,
         extra_prompt: Optional[str] = None,
         analysis_mode: str = "default",
-    ) -> tuple[List[VLAnalysisResult], Dict[str, int], List[Dict[str, Any]]]:
+    ) -> tuple[List[VLAnalysisResult], Dict[str, int], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
         调用 VL API 并解析结果。
 
@@ -694,6 +865,8 @@ class VLVideoAnalyzer:
             extra_prompt=extra_prompt,
             analysis_mode=normalized_mode,
         )
+        request_messages_audit = self._sanitize_messages_for_audit(messages)
+        raw_interactions: List[Dict[str, Any]] = []
 
         # 构建稳定 cache_key（仅用于首轮尝试，避免重试阶段误用缓存）
         base_cache_key = None
@@ -761,10 +934,51 @@ class VLVideoAnalyzer:
                     finish_reason=finish_reason,
                     analysis_mode=normalized_mode,
                 )
-                return parsed_results, token_usage, raw_json
+                raw_interactions.append(
+                    {
+                        "stage": "vl_video_analysis",
+                        "attempt": attempt + 1,
+                        "success": True,
+                        "request": {
+                            "model": self.model,
+                            "temperature": float(response_kwargs.get("temperature", self.temperature)),
+                            "max_tokens": int(self.max_tokens),
+                            "response_format": response_kwargs.get("response_format"),
+                            "analysis_mode": normalized_mode,
+                            "video_path": str(video_path or ""),
+                            "messages": request_messages_audit,
+                        },
+                        "response": {
+                            "finish_reason": finish_reason,
+                            "usage": dict(token_usage or {}),
+                            "content": str(content or ""),
+                            "parsed_payload": raw_json,
+                        },
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
+                return parsed_results, token_usage, raw_json, raw_interactions
 
             except Exception as e:
                 last_error = e
+                raw_interactions.append(
+                    {
+                        "stage": "vl_video_analysis",
+                        "attempt": attempt + 1,
+                        "success": False,
+                        "request": {
+                            "model": self.model,
+                            "temperature": float(response_kwargs.get("temperature", self.temperature)),
+                            "max_tokens": int(self.max_tokens),
+                            "response_format": response_kwargs.get("response_format"),
+                            "analysis_mode": normalized_mode,
+                            "video_path": str(video_path or ""),
+                            "messages": request_messages_audit,
+                        },
+                        "error": str(e),
+                        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+                    }
+                )
                 if attempt < self.max_retries:
                     wait_time = 2 ** attempt
                     logger.warning(f"VL API call failed (attempt {attempt+1}/{self.max_retries+1}): {e}, wait {wait_time}s")
@@ -782,7 +996,8 @@ class VLVideoAnalyzer:
                             analysis_mode=normalized_mode,
                         )
                     await asyncio.sleep(wait_time)
-
+        if last_error is not None:
+            setattr(last_error, "_raw_llm_interactions", raw_interactions)
         raise last_error
 
     def _get_tutorial_system_prompt(self) -> str:
@@ -801,7 +1016,9 @@ class VLVideoAnalyzer:
             "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, "
             "main_operation, instructional_keyframes, and optional fields "
             "(main_action, precautions, step_summary, operation_guidance, no_needed_video, should_type).\n"
-            "instructional_keyframes item schema: timestamp_sec, optional frame_reason, optional bbox([ymin,xmin,ymax,xmax],0-1000).\n"
+            "instructional_keyframes item schema: timestamp_sec, optional frame_reason, "
+            "optional target_ui_type, optional target_text, optional target_relative_position, "
+            "optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
             "Optional fields can be omitted or left empty when unnecessary.\n"
             "Keep explanation + execution + result in the same step.\n"
             "Remove hesitation/thinking-only intervals with no new information.\n"
@@ -1229,23 +1446,52 @@ class VLVideoAnalyzer:
         if not isinstance(value, (list, tuple)) or len(value) != 4:
             return None
         try:
-            ymin = int(round(float(value[0])))
-            xmin = int(round(float(value[1])))
-            ymax = int(round(float(value[2])))
-            xmax = int(round(float(value[3])))
+            xmin = int(round(float(value[0])))
+            ymin = int(round(float(value[1])))
+            xmax = int(round(float(value[2])))
+            ymax = int(round(float(value[3])))
         except Exception:
             return None
 
-        ymin = max(0, min(1000, ymin))
         xmin = max(0, min(1000, xmin))
-        ymax = max(0, min(1000, ymax))
+        ymin = max(0, min(1000, ymin))
         xmax = max(0, min(1000, xmax))
+        ymax = max(0, min(1000, ymax))
 
-        if ymax < ymin:
-            ymin, ymax = ymax, ymin
         if xmax < xmin:
             xmin, xmax = xmax, xmin
-        return [ymin, xmin, ymax, xmax]
+        if ymax < ymin:
+            ymin, ymax = ymax, ymin
+        return [xmin, ymin, xmax, ymax]
+
+    @staticmethod
+    def _normalize_keyframe_semantic_fields(item: Dict[str, Any]) -> Dict[str, str]:
+        target_ui_type = str(
+            item.get(
+                "target_ui_type",
+                item.get("ui_type", item.get("target_type", item.get("uiTargetType", ""))),
+            )
+            or ""
+        ).strip()
+        target_text = str(
+            item.get(
+                "target_text",
+                item.get("ui_text", item.get("target_content", item.get("text_anchor", ""))),
+            )
+            or ""
+        ).strip()
+        target_relative_position = str(
+            item.get(
+                "target_relative_position",
+                item.get("relative_position", item.get("position_hint", item.get("spatial_hint", ""))),
+            )
+            or ""
+        ).strip()
+        return {
+            "target_ui_type": target_ui_type,
+            "target_text": target_text,
+            "target_relative_position": target_relative_position,
+        }
 
     def _normalize_instructional_keyframes(
         self,
@@ -1269,6 +1515,10 @@ class VLVideoAnalyzer:
                     "timestamp_sec": ts_list[0],
                     "frame_reason": str(item.get("frame_reason", "") or "").strip(),
                 }
+                semantic_fields = self._normalize_keyframe_semantic_fields(item)
+                for field_name, field_value in semantic_fields.items():
+                    if field_value:
+                        entry[field_name] = field_value
                 bbox = self._normalize_bbox_1000(item.get("bbox"))
                 if bbox is not None:
                     entry["bbox"] = bbox
@@ -1334,6 +1584,7 @@ class VLVideoAnalyzer:
                 clip_end = clip_start + min_duration
 
             step_description = str(item.step_description or "").strip() or f"step_{index:02d}"
+            step_type = self._normalize_step_type(getattr(item, "step_type", ""))
             main_action = str(item.main_action or "").strip()
             main_operation = self._normalize_main_operation(item.main_operation)
             precautions = self._normalize_text_list(item.precautions)
@@ -1370,17 +1621,31 @@ class VLVideoAnalyzer:
                     "timestamp_sec": round(key_ts, 6),
                     "frame_reason": str(keyframe.get("frame_reason", "") or "").strip(),
                 }
+                semantic_fields = self._normalize_keyframe_semantic_fields(keyframe)
+                for field_name, field_value in semantic_fields.items():
+                    if field_value:
+                        key_entry[field_name] = field_value
                 bbox = self._normalize_bbox_1000(keyframe.get("bbox"))
                 if bbox is not None:
                     key_entry["bbox"] = bbox
                 clamped_keyframes.append(key_entry)
 
             if not clamped_keyframes:
-                clamped_keyframes = [{"timestamp_sec": ts, "frame_reason": ""} for ts in clamped_timestamps]
+                clamped_keyframes = [
+                    {
+                        "timestamp_sec": ts,
+                        "frame_reason": "",
+                        "target_ui_type": "",
+                        "target_text": "",
+                        "target_relative_position": "",
+                    }
+                    for ts in clamped_timestamps
+                ]
             clamped_timestamps = [float(item.get("timestamp_sec", 0.0)) for item in clamped_keyframes]
 
             item.step_id = index
             item.step_description = step_description
+            item.step_type = step_type
             item.knowledge_type = "process"
             item.analysis_mode = "tutorial_stepwise"
             item.main_action = main_action
@@ -1454,6 +1719,9 @@ class VLVideoAnalyzer:
             step_description = str(
                 item.get("step_description", item.get("description", item.get("title", ""))) or ""
             ).strip()
+            step_type = self._normalize_step_type(
+                item.get("step_type", item.get("stepType", item.get("step_category", item.get("type", ""))))
+            )
             main_action = str(
                 item.get(
                     "main_action",
@@ -1551,6 +1819,7 @@ class VLVideoAnalyzer:
                 suggested_screenshoot_timestamps=timestamps,
                 step_id=step_id if tutorial_like else 0,
                 step_description=step_description,
+                step_type=step_type if tutorial_like else "MAIN_FLOW",
                 analysis_mode="tutorial_stepwise" if tutorial_like else "default",
                 main_action=main_action if tutorial_like else "",
                 main_operation=main_operation if tutorial_like else [],
@@ -1565,6 +1834,7 @@ class VLVideoAnalyzer:
                 normalized_payload.append({
                     "step_id": step_id,
                     "step_description": step_description,
+                    "step_type": step_type,
                     "main_action": main_action,
                     "main_operation": main_operation,
                     "precautions": precautions,
@@ -1595,6 +1865,7 @@ class VLVideoAnalyzer:
                 {
                     "step_id": int(r.step_id),
                     "step_description": str(r.step_description or "").strip(),
+                    "step_type": self._normalize_step_type(getattr(r, "step_type", "")),
                     "main_action": str(r.main_action or "").strip(),
                     "main_operation": list(r.main_operation or []),
                     "instructional_keyframes": list(r.instructional_keyframes or []),

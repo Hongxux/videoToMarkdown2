@@ -31,6 +31,7 @@ from tenacity import (
 import httpx
 import psutil
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
+from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
 
 logger = logging.getLogger(__name__)
 
@@ -691,7 +692,7 @@ class LLMClient:
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         self.api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
         self.base_url = base_url
-        self.model = model
+        self.model = resolve_deepseek_model(model, default_model="deepseek-chat")
         self.temperature = temperature
         # 🚀 性能开关：默认关闭 logprobs（当前调用点普遍未使用，且会增加服务端计算与返回体积）
         self._enable_logprobs = (
@@ -800,12 +801,13 @@ class LLMClient:
         为什么：保证 prompt/参数 一致时才复用结果，避免“不同参数同 prompt”误命中。
         权衡：key 生成有轻微 CPU 开销，但远小于一次网络调用。
         """
+        resolved_model = resolve_deepseek_model(model or self.model, default_model=self.model)
         h = hashlib.sha256()
         h.update(str(kind).encode("utf-8"))
         h.update(b"\0")
         h.update(str(self.base_url).encode("utf-8"))
         h.update(b"\0")
-        h.update(str(model or self.model).encode("utf-8"))
+        h.update(str(resolved_model).encode("utf-8"))
         h.update(b"\0")
         h.update(repr(float(self.temperature)).encode("utf-8"))
         h.update(b"\0")
@@ -945,6 +947,7 @@ class LLMClient:
         - system_message: 函数入参（类型：str）。
         输出参数：
         - 结构化结果字典（包含关键字段信息）。"""
+        resolved_model = resolve_deepseek_model(model or self.model, default_model=self.model)
         enable_logprobs = bool(need_logprobs or self._enable_logprobs)
 
         cache_key: Optional[str] = None
@@ -956,7 +959,7 @@ class LLMClient:
                 response_format="json_object",
                 enable_logprobs=enable_logprobs,
                 max_tokens=max_tokens,
-                model=model,
+                model=resolved_model,
             )
             cached = await _GLOBAL_CACHE.get(cache_key)
             if cached is not None:
@@ -989,7 +992,7 @@ class LLMClient:
 
             try:
                 kwargs = {
-                    "model": model or self.model,
+                    "model": resolved_model,
                     "messages": messages,
                     "temperature": self.temperature,
                     "response_format": {"type": "json_object"},
@@ -1103,6 +1106,7 @@ class LLMClient:
         """
         完成文本生成请求。支持通过 model 参数临时覆盖默认模型。
         """
+        resolved_model = resolve_deepseek_model(model or self.model, default_model=self.model)
         enable_logprobs = bool(need_logprobs or self._enable_logprobs)
 
         cache_key: Optional[str] = None
@@ -1113,7 +1117,7 @@ class LLMClient:
                 system_message,
                 response_format="",
                 enable_logprobs=enable_logprobs,
-                model=model,
+                model=resolved_model,
             )
             cached = await _GLOBAL_CACHE.get(cache_key)
             if cached is not None:
@@ -1140,7 +1144,7 @@ class LLMClient:
             acquired_permits = await self.concurrency_limiter.acquire(permits)
             try:
                 kwargs = {
-                    "model": model or self.model,
+                    "model": resolved_model,
                     "messages": messages,
                     "temperature": self.temperature,
                 }
@@ -1238,4 +1242,4 @@ def create_llm_client(
     - temperature: 函数入参（类型：float）。
     输出参数：
     - LLMClient 对象或调用结果。"""
-    return LLMClient(model=model, temperature=temperature)
+    return LLMClient(model=resolve_deepseek_model(model, default_model="deepseek-chat"), temperature=temperature)

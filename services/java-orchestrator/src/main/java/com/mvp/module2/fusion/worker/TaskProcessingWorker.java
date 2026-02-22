@@ -4,6 +4,7 @@ import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.scheduler.LoadBasedScheduler;
+import com.mvp.module2.fusion.service.PersonaAwareReadingService;
 import com.mvp.module2.fusion.service.VideoProcessingOrchestrator;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import jakarta.annotation.PostConstruct;
@@ -39,6 +40,9 @@ public class TaskProcessingWorker {
 
     @Autowired
     private LoadBasedScheduler loadScheduler;
+
+    @Autowired(required = false)
+    private PersonaAwareReadingService personaAwareReadingService;
 
     private ExecutorService workerPool;
     private volatile boolean running = true;
@@ -136,6 +140,9 @@ public class TaskProcessingWorker {
             if (result.success) {
                 taskQueueManager.completeTask(task.taskId, result.markdownPath);
                 webSocketHandler.broadcastTaskUpdate(task.taskId, "COMPLETED", 1.0, "处理完成", result.markdownPath);
+                if (personaAwareReadingService != null) {
+                    personaAwareReadingService.precomputeAsync(task.taskId, task.userId, result.markdownPath);
+                }
                 logger.info("✅ Task completed: {} -> {}", task.taskId, result.markdownPath);
             } else {
                 throw new RuntimeException(

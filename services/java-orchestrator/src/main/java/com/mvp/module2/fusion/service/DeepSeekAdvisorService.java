@@ -1,5 +1,6 @@
 package com.mvp.module2.fusion.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -18,8 +19,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -53,17 +56,73 @@ public class DeepSeekAdvisorService {
             "- 不要输出标题、前言、总结。",
             "- 不要写脱离语境的通用术语定义。",
             "- 优先控制在 120 字以内。");
+    private static final String DEFAULT_STRUCTURED_SYSTEM_PROMPT = String.join("\n",
+            "你是一个阅读语境术语解释助手。",
+            "你必须只输出 JSON 对象，禁止输出 markdown、解释文本、代码围栏。",
+            "JSON schema 固定为：",
+            "{",
+            "  \"contextual_explanations\": [\"...\"],",
+            "  \"depth\": [\"...\"],",
+            "  \"breadth\": [\"...\"]",
+            "}",
+            "三个数组都必须存在，每个数组 1~3 条短句。"
+    );
+
+    private static final String DEFAULT_STRUCTURED_USER_PROMPT = String.join("\n",
+            "术语：{term}",
+            "模式：{scenario}",
+            "语境段落：{context_block}",
+            "锚点句：{example_block}",
+            "",
+            "请输出 JSON：",
+            "1. contextual_explanations: 语境化解释（数组）",
+            "2. depth: 第一性原理与机制（数组）",
+            "3. breadth: 跨场景/行业广度（数组）",
+            "",
+            "要求：",
+            "- 仅输出一个 JSON 对象",
+            "- 不要输出任何额外文本"
+    );
+    private static final String DEFAULT_STRUCTURED_BATCH_USER_PROMPT = String.join("\n",
+            "术语列表（同一语境）：",
+            "{terms_block}",
+            "模式：{scenario}",
+            "语境段落：{context_block}",
+            "锚点句（共享）：{example_block}",
+            "",
+            "请输出一个 JSON 对象，格式固定为：",
+            "{",
+            "  \"items\": [",
+            "    {",
+            "      \"term\": \"术语原文\",",
+            "      \"contextual_explanations\": [\"...\"],",
+            "      \"depth\": [\"...\"],",
+            "      \"breadth\": [\"...\"]",
+            "    }",
+            "  ]",
+            "}",
+            "",
+            "要求：",
+            "- items 覆盖全部术语，顺序与输入保持一致",
+            "- term 必须与输入术语原文一致",
+            "- 每个数组 1~3 条短句",
+            "- 仅输出 JSON，不得输出其他文本"
+    );
+
     @Value("${deepseek.advisor.enabled:true}")
     private boolean advisorEnabled;
 
     @Value("${deepseek.advisor.base-url:https://api.deepseek.com/v1}")
     private String advisorBaseUrl;
 
-    @Value("${deepseek.advisor.model:deepseek-chat}")
+    @Value("${deepseek.advisor.model:deepseek-reasoner}")
     private String advisorModel;
 
     @Value("${deepseek.advisor.timeout-seconds:60}")
     private int timeoutSeconds;
+
+    @Value("${deepseek.advisor.structured-max-tokens:8000}")
+    private int structuredMaxTokens;
 
     @Value("${DEEPSEEK_API_KEY:}")
     private String apiKey;
@@ -73,6 +132,12 @@ public class DeepSeekAdvisorService {
 
     @Value("${deepseek.advisor.prompt.user-resource:classpath:prompts/deepseek-advisor/user-zh.txt}")
     private Resource userPromptResource;
+
+    @Value("${deepseek.advisor.prompt.structured-system-resource:classpath:prompts/deepseek-advisor/structured-system-zh.txt}")
+    private Resource structuredSystemPromptResource;
+
+    @Value("${deepseek.advisor.prompt.structured-user-resource:classpath:prompts/deepseek-advisor/structured-user-zh.txt}")
+    private Resource structuredUserPromptResource;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final HttpClient httpClient = HttpClient.newBuilder()
@@ -111,18 +176,240 @@ public class DeepSeekAdvisorService {
         return AdviceResult.deepseek(content.trim());
     }
 
-    private String callDeepSeek(String term, String context, String contextExample, boolean contextDependent) throws Exception {
-        String endpoint = normalizeDeepSeekBaseUrl(advisorBaseUrl);
+    public StructuredAdviceResult requestStructuredAdvice(String term, String context, String contextExample, boolean contextDependent) {
+        String safeTerm = String.valueOf(term == null ? "" : term).trim();
+        if (safeTerm.isEmpty()) {
+            throw new IllegalArgumentException("term cannot be empty");
+        }
+        String safeContext = String.valueOf(context == null ? "" : context).trim();
+        String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
 
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
+        }
+
+        DeepSeekCallResult callResult;
+        String structuredSystemPrompt = buildStructuredSystemPrompt();
+        String structuredUserPrompt = buildStructuredUserPrompt(safeTerm, safeContext, safeContextExample, contextDependent);
+        try {
+            callResult = callStructuredWithRetry(
+                    structuredSystemPrompt,
+                    structuredUserPrompt,
+                    Math.max(256, structuredMaxTokens)
+            );
+        } catch (Exception ex) {
+            throw new IllegalStateException("DeepSeek structured advisor call failed: " + ex.getMessage(), ex);
+        }
+        String raw = String.valueOf(callResult.content == null ? "" : callResult.content).trim();
+        if (isFinishReasonLength(callResult.finishReason)) {
+            return StructuredAdviceResult.empty(
+                    "deepseek-truncated",
+                    raw,
+                    callResult.requestPayloadJson,
+                    callResult.responseBodyJson
+            );
+        }
+        if (!StringUtils.hasText(raw)) {
+            return StructuredAdviceResult.empty(
+                    "deepseek-empty",
+                    "",
+                    callResult.requestPayloadJson,
+                    callResult.responseBodyJson
+            );
+        }
+
+        StructuredAdviceResult parsed = parseStructuredAdvice(raw);
+        if (parsed.hasContent()) {
+            return StructuredAdviceResult.deepseek(
+                    parsed.contextualExplanations,
+                    parsed.depth,
+                    parsed.breadth,
+                    raw,
+                    callResult.requestPayloadJson,
+                    callResult.responseBodyJson
+            );
+        }
+        return StructuredAdviceResult.empty(
+                "deepseek-parse-empty",
+                raw,
+                callResult.requestPayloadJson,
+                callResult.responseBodyJson
+        );
+    }
+
+    public Map<String, StructuredAdviceResult> requestStructuredAdviceBatch(
+            List<String> terms,
+            String context,
+            String contextExample,
+            boolean contextDependent
+    ) {
+        List<String> safeTerms = normalizeTerms(terms);
+        if (safeTerms.isEmpty()) {
+            throw new IllegalArgumentException("terms cannot be empty");
+        }
+        if (safeTerms.size() == 1) {
+            String term = safeTerms.get(0);
+            StructuredAdviceResult single = requestStructuredAdvice(term, context, contextExample, contextDependent);
+            return Map.of(term, single);
+        }
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
+        }
+        String safeContext = String.valueOf(context == null ? "" : context).trim();
+        String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
+
+        DeepSeekCallResult callResult;
+        String structuredSystemPrompt = buildStructuredSystemPrompt();
+        String structuredUserPrompt = buildStructuredBatchUserPrompt(
+                safeTerms,
+                safeContext,
+                safeContextExample,
+                contextDependent
+        );
+        try {
+            callResult = callStructuredWithRetry(
+                    structuredSystemPrompt,
+                    structuredUserPrompt,
+                    Math.max(256, structuredMaxTokens),
+                    true
+            );
+        } catch (Exception ex) {
+            throw new IllegalStateException("DeepSeek structured batch advisor call failed: " + ex.getMessage(), ex);
+        }
+        String raw = String.valueOf(callResult.content == null ? "" : callResult.content).trim();
+        if (isFinishReasonLength(callResult.finishReason)) {
+            return buildBatchFallbackResults(
+                    safeTerms,
+                    "deepseek-batch-truncated",
+                    raw,
+                    callResult.requestPayloadJson,
+                    callResult.responseBodyJson
+            );
+        }
+        if (!StringUtils.hasText(raw)) {
+            return buildBatchFallbackResults(
+                    safeTerms,
+                    "deepseek-batch-empty",
+                    "",
+                    callResult.requestPayloadJson,
+                    callResult.responseBodyJson
+            );
+        }
+        Map<String, StructuredAdviceResult> parsed = parseStructuredAdviceBatch(
+                raw,
+                callResult.requestPayloadJson,
+                callResult.responseBodyJson
+        );
+        if (parsed.isEmpty()) {
+            return buildBatchFallbackResults(
+                    safeTerms,
+                    "deepseek-batch-parse-empty",
+                    raw,
+                    callResult.requestPayloadJson,
+                    callResult.responseBodyJson
+            );
+        }
+        LinkedHashMap<String, StructuredAdviceResult> resolved = new LinkedHashMap<>();
+        for (String term : safeTerms) {
+            String key = normalizeTermKey(term);
+            StructuredAdviceResult result = parsed.get(key);
+            if (result == null || !result.hasContent()) {
+                result = StructuredAdviceResult.empty(
+                        "deepseek-batch-miss",
+                        raw,
+                        callResult.requestPayloadJson,
+                        callResult.responseBodyJson
+                );
+            }
+            resolved.put(term, result);
+        }
+        return resolved;
+    }
+
+    private DeepSeekCallResult callStructuredWithRetry(
+            String systemPrompt,
+            String userPrompt,
+            int initialMaxTokens
+    ) throws Exception {
+        return callStructuredWithRetry(systemPrompt, userPrompt, initialMaxTokens, false);
+    }
+
+    private DeepSeekCallResult callStructuredWithRetry(
+            String systemPrompt,
+            String userPrompt,
+            int initialMaxTokens,
+            boolean forceJsonObject
+    ) throws Exception {
+        int attempt = 0;
+        int currentMaxTokens = Math.max(256, initialMaxTokens);
+        DeepSeekCallResult lastResult = new DeepSeekCallResult("", "", "", "");
+        while (attempt < 3) {
+            attempt += 1;
+            lastResult = callDeepSeekWithPromptsDetailed(systemPrompt, userPrompt, 0.2, currentMaxTokens, forceJsonObject);
+            if (!isFinishReasonLength(lastResult.finishReason)) {
+                return lastResult;
+            }
+            int next = Math.min(16000, Math.max(currentMaxTokens * 2, currentMaxTokens + 1024));
+            if (next <= currentMaxTokens) {
+                break;
+            }
+            currentMaxTokens = next;
+        }
+        return lastResult;
+    }
+
+    private boolean isFinishReasonLength(String finishReason) {
+        return "length".equalsIgnoreCase(String.valueOf(finishReason == null ? "" : finishReason).trim());
+    }
+
+    private String callDeepSeek(String term, String context, String contextExample, boolean contextDependent) throws Exception {
+        return callDeepSeekWithPrompts(
+                buildSystemPrompt(),
+                buildUserPrompt(term, context, contextExample, contextDependent),
+                0.35,
+                320
+        );
+    }
+
+    private String callDeepSeekWithPrompts(
+            String systemPrompt,
+            String userPrompt,
+            double temperature,
+            int maxTokens
+    ) throws Exception {
+        return callDeepSeekWithPromptsDetailed(systemPrompt, userPrompt, temperature, maxTokens, false).content;
+    }
+
+    private DeepSeekCallResult callDeepSeekWithPromptsDetailed(
+            String systemPrompt,
+            String userPrompt,
+            double temperature,
+            int maxTokens,
+            boolean forceJsonObject
+    ) throws Exception {
+        String endpoint = normalizeDeepSeekBaseUrl(advisorBaseUrl);
+        String resolvedModel = DeepSeekModelRouter.resolveModel(advisorModel);
+        if (!StringUtils.hasText(resolvedModel)) {
+            throw new IllegalStateException("deepseek.advisor.model is empty");
+        }
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("model", advisorModel);
-        payload.put("temperature", 0.35);
-        payload.put("max_tokens", 320);
+        payload.put("model", resolvedModel);
+        payload.put("temperature", temperature);
+        payload.put("max_tokens", maxTokens);
         payload.put("stream", false);
         payload.put("messages", List.of(
-                Map.of("role", "system", "content", buildSystemPrompt()),
-                Map.of("role", "user", "content", buildUserPrompt(term, context, contextExample, contextDependent))
+                Map.of("role", "system", "content", String.valueOf(systemPrompt == null ? "" : systemPrompt)),
+                Map.of("role", "user", "content", String.valueOf(userPrompt == null ? "" : userPrompt))
         ));
+        if (forceJsonObject) {
+            payload.put("response_format", Map.of("type", "json_object"));
+        }
         String payloadJson = objectMapper.writeValueAsString(payload);
 
         HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint + "/chat/completions"))
@@ -133,16 +420,19 @@ public class DeepSeekAdvisorService {
                 .POST(HttpRequest.BodyPublishers.ofString(payloadJson))
                 .build();
         HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        String responseBody = String.valueOf(response.body() == null ? "" : response.body());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            throw new IllegalStateException("DeepSeek HTTP " + response.statusCode() + ": " + summarizeResponseBody(response.body()));
+            throw new IllegalStateException("DeepSeek HTTP " + response.statusCode() + ": " + summarizeResponseBody(responseBody));
         }
 
-        JsonNode root = objectMapper.readTree(response.body());
+        JsonNode root = objectMapper.readTree(responseBody);
         JsonNode choices = root.path("choices");
         if (!choices.isArray() || choices.isEmpty()) {
-            return "";
+            return new DeepSeekCallResult("", payloadJson, responseBody, "");
         }
-        return choices.get(0).path("message").path("content").asText("");
+        String content = choices.get(0).path("message").path("content").asText("");
+        String finishReason = choices.get(0).path("finish_reason").asText("");
+        return new DeepSeekCallResult(content, payloadJson, responseBody, finishReason);
     }
 
     private String normalizeDeepSeekBaseUrl(String rawBaseUrl) {
@@ -185,6 +475,260 @@ public class DeepSeekAdvisorService {
                 values
         );
     }
+
+    private String buildStructuredSystemPrompt() {
+        return loadPromptTemplate("structured_system", structuredSystemPromptResource, DEFAULT_STRUCTURED_SYSTEM_PROMPT);
+    }
+
+    private String buildStructuredUserPrompt(String term, String context, String contextExample, boolean contextDependent) {
+        String safeContext = trimContext(context);
+        String safeExample = trimContext(contextExample);
+        String scenario = contextDependent ? "段落绑定" : "全局语境";
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("term", term);
+        values.put("scenario", scenario);
+        values.put("context_block", safeContext.isEmpty() ? PROMPT_TEMPLATE_CONTEXT_EMPTY : safeContext);
+        values.put("example_block", safeExample.isEmpty() ? PROMPT_TEMPLATE_CONTEXT_EMPTY : safeExample);
+        return applyTemplate(
+                loadPromptTemplate("structured_user", structuredUserPromptResource, DEFAULT_STRUCTURED_USER_PROMPT),
+                values
+        );
+    }
+
+    private String buildStructuredBatchUserPrompt(
+            List<String> terms,
+            String context,
+            String contextExample,
+            boolean contextDependent
+    ) {
+        String safeContext = trimContext(context);
+        String safeExample = trimContext(contextExample);
+        String scenario = contextDependent ? "段落绑定" : "全局语境";
+        String termsBlock = renderTermsBlock(terms);
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("terms_block", StringUtils.hasText(termsBlock) ? termsBlock : PROMPT_TEMPLATE_CONTEXT_EMPTY);
+        values.put("scenario", scenario);
+        values.put("context_block", safeContext.isEmpty() ? PROMPT_TEMPLATE_CONTEXT_EMPTY : safeContext);
+        values.put("example_block", safeExample.isEmpty() ? PROMPT_TEMPLATE_CONTEXT_EMPTY : safeExample);
+        return applyTemplate(DEFAULT_STRUCTURED_BATCH_USER_PROMPT, values);
+    }
+
+    private String renderTermsBlock(List<String> terms) {
+        if (terms == null || terms.isEmpty()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (int index = 0; index < terms.size(); index += 1) {
+            String term = String.valueOf(terms.get(index) == null ? "" : terms.get(index)).trim();
+            if (!StringUtils.hasText(term)) {
+                continue;
+            }
+            builder.append(index + 1).append(". ").append(term).append('\n');
+        }
+        return builder.toString().trim();
+    }
+
+    private StructuredAdviceResult parseStructuredAdvice(String rawText) {
+        String text = String.valueOf(rawText == null ? "" : rawText).trim();
+        if (!StringUtils.hasText(text)) {
+            return StructuredAdviceResult.empty("structured-empty", text);
+        }
+        String json = extractJsonObject(text);
+        if (!StringUtils.hasText(json)) {
+            return StructuredAdviceResult.empty("structured-no-json", text);
+        }
+        try {
+            Map<String, Object> root = objectMapper.readValue(
+                    json,
+                    new TypeReference<Map<String, Object>>() {}
+            );
+            List<String> contextual = normalizeStringList(root.get("contextual_explanations"));
+            if (contextual.isEmpty()) {
+                contextual = normalizeStringList(root.get("contextualExplanations"));
+            }
+            List<String> depth = normalizeStringList(root.get("depth"));
+            List<String> breadth = normalizeStringList(root.get("breadth"));
+            if (breadth.isEmpty()) {
+                breadth = normalizeStringList(root.get("width"));
+            }
+            return new StructuredAdviceResult(contextual, depth, breadth, "deepseek", text, "", "");
+        } catch (Exception ex) {
+            return StructuredAdviceResult.empty("structured-parse-error", text);
+        }
+    }
+
+    private Map<String, StructuredAdviceResult> parseStructuredAdviceBatch(
+            String rawText,
+            String requestPayloadJson,
+            String responseBodyJson
+    ) {
+        String text = String.valueOf(rawText == null ? "" : rawText).trim();
+        if (!StringUtils.hasText(text)) {
+            return Map.of();
+        }
+        String json = extractJsonObject(text);
+        if (!StringUtils.hasText(json)) {
+            return Map.of();
+        }
+        try {
+            Map<String, Object> root = objectMapper.readValue(
+                    json,
+                    new TypeReference<Map<String, Object>>() {}
+            );
+            Object items = root.get("items");
+            if (!(items instanceof List<?> list) || list.isEmpty()) {
+                return Map.of();
+            }
+            LinkedHashMap<String, StructuredAdviceResult> output = new LinkedHashMap<>();
+            for (Object item : list) {
+                if (!(item instanceof Map<?, ?> rawMap) || rawMap.isEmpty()) {
+                    continue;
+                }
+                String term = normalizeTerm(String.valueOf(readAlias(rawMap, "term", "tag", "keyword", "insight_tag")));
+                if (!StringUtils.hasText(term)) {
+                    continue;
+                }
+                List<String> contextual = normalizeStringList(readAlias(rawMap, "contextual_explanations", "contextualExplanations"));
+                List<String> depth = normalizeStringList(readAlias(rawMap, "depth", "deep", "principles", "mechanism"));
+                List<String> breadth = normalizeStringList(readAlias(rawMap, "breadth", "width", "cross_domain", "industry"));
+                output.put(
+                        normalizeTermKey(term),
+                        StructuredAdviceResult.deepseek(
+                                contextual,
+                                depth,
+                                breadth,
+                                text,
+                                requestPayloadJson,
+                                responseBodyJson
+                        )
+                );
+            }
+            return output;
+        } catch (Exception ex) {
+            return Map.of();
+        }
+    }
+
+    private Object readAlias(Map<?, ?> source, String... aliases) {
+        if (source == null || aliases == null || aliases.length == 0) {
+            return null;
+        }
+        for (String alias : aliases) {
+            if (!StringUtils.hasText(alias)) {
+                continue;
+            }
+            if (source.containsKey(alias)) {
+                return source.get(alias);
+            }
+        }
+        return null;
+    }
+
+    private List<String> normalizeTerms(List<String> terms) {
+        if (terms == null || terms.isEmpty()) {
+            return List.of();
+        }
+        LinkedHashMap<String, String> ordered = new LinkedHashMap<>();
+        for (String rawTerm : terms) {
+            String term = normalizeTerm(rawTerm);
+            if (!StringUtils.hasText(term)) {
+                continue;
+            }
+            ordered.putIfAbsent(normalizeTermKey(term), term);
+        }
+        return new ArrayList<>(ordered.values());
+    }
+
+    private String normalizeTerm(String rawTerm) {
+        return String.valueOf(rawTerm == null ? "" : rawTerm)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replace('\n', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+    }
+
+    private String normalizeTermKey(String term) {
+        return normalizeTerm(term).toLowerCase(Locale.ROOT);
+    }
+
+    private Map<String, StructuredAdviceResult> buildBatchFallbackResults(
+            List<String> terms,
+            String source,
+            String raw,
+            String requestPayloadJson,
+            String responseBodyJson
+    ) {
+        if (terms == null || terms.isEmpty()) {
+            return Map.of();
+        }
+        LinkedHashMap<String, StructuredAdviceResult> output = new LinkedHashMap<>();
+        for (String term : terms) {
+            String safeTerm = normalizeTerm(term);
+            if (!StringUtils.hasText(safeTerm)) {
+                continue;
+            }
+            output.put(
+                    safeTerm,
+                    StructuredAdviceResult.empty(source, raw, requestPayloadJson, responseBodyJson)
+            );
+        }
+        return output;
+    }
+
+    private List<String> normalizeStringList(Object raw) {
+        if (raw == null) {
+            return List.of();
+        }
+        List<String> output = new ArrayList<>();
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                String text = String.valueOf(item == null ? "" : item).trim();
+                if (StringUtils.hasText(text)) {
+                    output.add(trimContext(text));
+                }
+                if (output.size() >= 3) {
+                    break;
+                }
+            }
+            return output;
+        }
+        String text = String.valueOf(raw).trim();
+        if (!StringUtils.hasText(text)) {
+            return List.of();
+        }
+        if (text.startsWith("[") && text.endsWith("]")) {
+            try {
+                List<String> parsed = objectMapper.readValue(text, new TypeReference<List<String>>() {});
+                return normalizeStringList(parsed);
+            } catch (Exception ignored) {
+                // noop
+            }
+        }
+        output.add(trimContext(text));
+        return output;
+    }
+
+    private String extractJsonObject(String text) {
+        int start = text.indexOf('{');
+        if (start < 0) {
+            return null;
+        }
+        int depth = 0;
+        for (int i = start; i < text.length(); i += 1) {
+            char ch = text.charAt(i);
+            if (ch == '{') {
+                depth += 1;
+            } else if (ch == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    return text.substring(start, i + 1);
+                }
+            }
+        }
+        return null;
+    }
+
     private String loadPromptTemplate(String cacheKey, Resource resource, String defaultTemplate) {
         return promptTemplateCache.computeIfAbsent(cacheKey, key -> readPromptTemplate(resource, defaultTemplate, key));
     }
@@ -216,11 +760,10 @@ public class DeepSeekAdvisorService {
         return resolved;
     }
     private String trimContext(String context) {
-        String normalized = String.valueOf(context == null ? "" : context).replace('\n', ' ').trim();
-        if (normalized.length() <= 280) {
-            return normalized;
-        }
-        return normalized.substring(0, 280).trim() + "...";
+        return String.valueOf(context == null ? "" : context)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .trim();
     }
 
     public static class AdviceResult {
@@ -238,6 +781,105 @@ public class DeepSeekAdvisorService {
 
         public static AdviceResult empty(String source) {
             return new AdviceResult("", String.valueOf(source == null ? "" : source));
+        }
+    }
+
+    public static class StructuredAdviceResult {
+        public final List<String> contextualExplanations;
+        public final List<String> depth;
+        public final List<String> breadth;
+        public final String source;
+        public final String raw;
+        public final String requestPayloadJson;
+        public final String responseBodyJson;
+
+        private StructuredAdviceResult(
+                List<String> contextualExplanations,
+                List<String> depth,
+                List<String> breadth,
+                String source,
+                String raw,
+                String requestPayloadJson,
+                String responseBodyJson
+        ) {
+            this.contextualExplanations = contextualExplanations == null ? List.of() : List.copyOf(contextualExplanations);
+            this.depth = depth == null ? List.of() : List.copyOf(depth);
+            this.breadth = breadth == null ? List.of() : List.copyOf(breadth);
+            this.source = String.valueOf(source == null ? "" : source).trim();
+            this.raw = String.valueOf(raw == null ? "" : raw).trim();
+            this.requestPayloadJson = String.valueOf(requestPayloadJson == null ? "" : requestPayloadJson).trim();
+            this.responseBodyJson = String.valueOf(responseBodyJson == null ? "" : responseBodyJson).trim();
+        }
+
+        public boolean hasContent() {
+            return !contextualExplanations.isEmpty() || !depth.isEmpty() || !breadth.isEmpty();
+        }
+
+        public static StructuredAdviceResult deepseek(
+                List<String> contextualExplanations,
+                List<String> depth,
+                List<String> breadth,
+                String raw
+        ) {
+            return new StructuredAdviceResult(contextualExplanations, depth, breadth, "deepseek", raw, "", "");
+        }
+
+        public static StructuredAdviceResult deepseek(
+                List<String> contextualExplanations,
+                List<String> depth,
+                List<String> breadth,
+                String raw,
+                String requestPayloadJson,
+                String responseBodyJson
+        ) {
+            return new StructuredAdviceResult(
+                    contextualExplanations,
+                    depth,
+                    breadth,
+                    "deepseek",
+                    raw,
+                    requestPayloadJson,
+                    responseBodyJson
+            );
+        }
+
+        public static StructuredAdviceResult empty(String source) {
+            return new StructuredAdviceResult(List.of(), List.of(), List.of(), source, "", "", "");
+        }
+
+        public static StructuredAdviceResult empty(String source, String raw) {
+            return new StructuredAdviceResult(List.of(), List.of(), List.of(), source, raw, "", "");
+        }
+
+        public static StructuredAdviceResult empty(
+                String source,
+                String raw,
+                String requestPayloadJson,
+                String responseBodyJson
+        ) {
+            return new StructuredAdviceResult(
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    source,
+                    raw,
+                    requestPayloadJson,
+                    responseBodyJson
+            );
+        }
+    }
+
+    private static class DeepSeekCallResult {
+        private final String content;
+        private final String requestPayloadJson;
+        private final String responseBodyJson;
+        private final String finishReason;
+
+        private DeepSeekCallResult(String content, String requestPayloadJson, String responseBodyJson, String finishReason) {
+            this.content = String.valueOf(content == null ? "" : content).trim();
+            this.requestPayloadJson = String.valueOf(requestPayloadJson == null ? "" : requestPayloadJson).trim();
+            this.responseBodyJson = String.valueOf(responseBodyJson == null ? "" : responseBodyJson).trim();
+            this.finishReason = String.valueOf(finishReason == null ? "" : finishReason).trim();
         }
     }
 }

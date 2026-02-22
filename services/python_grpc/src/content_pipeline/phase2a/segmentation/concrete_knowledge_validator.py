@@ -187,11 +187,41 @@ class ConcreteKnowledgeValidator:
                 logger.info("Vision AI disabled in config, using CV-only mode")
                 return None
             
+            base_url = str(
+                vision_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions") or ""
+            ).strip()
+            normalized_base_url = base_url.lower()
+            is_qianfan = ("qianfan.baidubce.com" in normalized_base_url) or ("aistudio.baidu.com" in normalized_base_url)
+            default_model = "ernie-4.5-turbo-vl-32k" if is_qianfan else "qwen-vl-max-2025-08-13"
+
+            api_key = str(vision_config.get("api_key", "") or "").strip()
             bearer_token = str(vision_config.get("bearer_token", "") or "").strip()
-            if not bearer_token:
-                bearer_token = str(os.getenv("VISION_AI_BEARER_TOKEN", "") or "").strip()
-            if not bearer_token:
-                logger.warning("vision_ai.bearer_token and VISION_AI_BEARER_TOKEN are both empty, using CV-only mode")
+            auth_token = api_key or bearer_token
+
+            api_key_env = str(vision_config.get("api_key_env", "") or "").strip()
+            bearer_token_env = str(vision_config.get("bearer_token_env", "") or "").strip()
+            if not api_key_env:
+                api_key_env = "VISION_AI_BEARER_TOKEN" if is_qianfan else "DASHSCOPE_API_KEY"
+            if not bearer_token_env:
+                bearer_token_env = "VISION_AI_BEARER_TOKEN"
+
+            if not auth_token:
+                env_candidates = [api_key_env, bearer_token_env]
+                if is_qianfan:
+                    env_candidates.append("QIANFAN_BEARER_TOKEN")
+                seen_env_names = set()
+                for env_name in env_candidates:
+                    normalized_env_name = str(env_name or "").strip()
+                    if not normalized_env_name or normalized_env_name in seen_env_names:
+                        continue
+                    seen_env_names.add(normalized_env_name)
+                    candidate = str(os.getenv(normalized_env_name, "") or "").strip()
+                    if candidate:
+                        auth_token = candidate
+                        api_key_env = normalized_env_name
+                        break
+            if not auth_token:
+                logger.warning("vision_ai auth token is empty, using CV-only mode")
                 return None
 
             batch_cfg = vision_config.get("batch", {}) if isinstance(vision_config.get("batch"), dict) else {}
@@ -207,9 +237,12 @@ class ConcreteKnowledgeValidator:
             # 闂傚倸鍊搁崐椋庣矆娓氣偓楠炴牠顢曢敂缁樻櫈闂佸憡渚楅崹顏堝磻閹炬剚娼╅柣鎾抽椤偆绱?VisionAIConfig
             ai_config = VisionAIConfig(
                 enabled=True,
-                bearer_token=bearer_token,
-                base_url=vision_config.get("base_url", "https://qianfan.baidubce.com/v2/chat/completions"),
-                model=vision_config.get("model", vision_config.get("vision_model", "ernie-4.5-turbo-vl-32k")),
+                api_key=auth_token,
+                bearer_token=auth_token,
+                api_key_env=api_key_env,
+                bearer_token_env=bearer_token_env,
+                base_url=base_url,
+                model=vision_config.get("model", vision_config.get("vision_model", default_model)),
                 temperature=vision_config.get("temperature", 0.3),
                 rate_limit_per_minute=vision_config.get("rate_limit_per_minute", 60),
                 duplicate_detection_enabled=vision_config.get("duplicate_detection", True),
@@ -239,7 +272,10 @@ class ConcreteKnowledgeValidator:
                 person_model_selection=0 if int(person_cfg.get("model_selection", 1) or 1) <= 0 else 1,
             )
             
-            logger.info(f"ERNIE Vision API enabled: model={ai_config.model}, duplicate_detection={ai_config.duplicate_detection_enabled}")
+            logger.info(
+                f"Vision API enabled: model={ai_config.model}, base_url={ai_config.base_url}, "
+                f"duplicate_detection={ai_config.duplicate_detection_enabled}"
+            )
             return ai_config
             
         except Exception as e:
