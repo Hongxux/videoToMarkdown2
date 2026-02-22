@@ -31,8 +31,22 @@ data class SemanticNode(
     val originalMarkdown: String? = null,
     val relevanceScore: Float,
     val bridgeText: String? = null,
-    val reasoning: String? = null
-)
+    val reasoning: String? = null,
+    val insightTerms: List<String> = emptyList(),
+    val insightsTags: List<String> = emptyList()
+) {
+    /**
+     * 兼容后端不同字段命名：
+     * - insight_terms
+     * - insights_tags
+     */
+    fun resolvedInsightTerms(): List<String> {
+        return (insightTerms + insightsTags)
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+}
 
 /**
  * 段落交互事件模型。
@@ -511,4 +525,130 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
         comments = comments,
         taskTitle = root.optString("taskTitle")
     )
+}
+
+/**
+ * 读取后端 markdown 接口返回中的个性化节点数组。
+ * 兼容字段：
+ * - personalizedNodes / nodes
+ * - relevance_score / relevanceScore
+ * - bridge_text / bridgeText
+ * - insight_terms / insights_tags
+ */
+fun parseSemanticNodesFromPayload(payloadText: String): List<SemanticNode> {
+    if (payloadText.isBlank()) {
+        return emptyList()
+    }
+    val root = JSONObject(payloadText)
+    val nodes = when {
+        root.has("personalizedNodes") -> root.optJSONArray("personalizedNodes")
+        root.has("nodes") -> root.optJSONArray("nodes")
+        else -> null
+    } ?: return emptyList()
+
+    return buildList {
+        for (i in 0 until nodes.length()) {
+            val item = nodes.optJSONObject(i) ?: continue
+            add(parseSemanticNode(item))
+        }
+    }
+}
+
+private fun parseSemanticNode(node: JSONObject): SemanticNode {
+    val id = node.optStringByAlias("node_id", "nodeId", "id") ?: ""
+    val text = node.optStringByAlias("text", "raw_markdown", "rawMarkdown") ?: ""
+    val type = node.optStringByAlias("type", "node_type", "nodeType") ?: "paragraph"
+    val originalMarkdown = node.optStringByAlias("original_markdown", "originalMarkdown", "raw_markdown", "rawMarkdown")
+    val relevanceScore = node.optFloatByAlias("relevance_score", "relevanceScore") ?: 0f
+    val bridgeText = node.optStringByAlias("bridge_text", "bridgeText")
+    val reasoning = node.optStringByAlias("reasoning")
+    val insightTerms = readJsonArrayStringsByAlias(
+        node,
+        "insight_terms",
+        "insightTerms"
+    )
+    val insightsTags = readJsonArrayStringsByAlias(
+        node,
+        "insights_tags",
+        "insightsTags",
+        "insight_tags",
+        "insightTags"
+    )
+
+    return SemanticNode(
+        id = id,
+        text = text,
+        type = type,
+        originalMarkdown = originalMarkdown,
+        relevanceScore = relevanceScore.coerceIn(0f, 1f),
+        bridgeText = bridgeText,
+        reasoning = reasoning,
+        insightTerms = insightTerms,
+        insightsTags = insightsTags
+    )
+}
+
+private fun JSONObject.optStringByAlias(vararg aliases: String): String? {
+    aliases.forEach { key ->
+        if (!has(key)) {
+            return@forEach
+        }
+        val value = optString(key).trim()
+        if (value.isNotBlank()) {
+            return value
+        }
+    }
+    return null
+}
+
+private fun JSONObject.optFloatByAlias(vararg aliases: String): Float? {
+    aliases.forEach { key ->
+        if (!has(key)) {
+            return@forEach
+        }
+        val raw = opt(key)
+        val parsed = when (raw) {
+            is Number -> raw.toFloat()
+            is String -> raw.toFloatOrNull()
+            else -> null
+        }
+        if (parsed != null) {
+            return parsed
+        }
+    }
+    return null
+}
+
+private fun readJsonArrayStringsByAlias(
+    node: JSONObject,
+    vararg aliases: String
+): List<String> {
+    aliases.forEach { key ->
+        if (!node.has(key)) {
+            return@forEach
+        }
+        val value = node.opt(key)
+        when (value) {
+            is JSONArray -> {
+                val items = buildList {
+                    for (i in 0 until value.length()) {
+                        val item = value.optString(i).trim()
+                        if (item.isNotBlank()) {
+                            add(item)
+                        }
+                    }
+                }
+                if (items.isNotEmpty()) {
+                    return items
+                }
+            }
+            is String -> {
+                val one = value.trim()
+                if (one.isNotBlank()) {
+                    return listOf(one)
+                }
+            }
+        }
+    }
+    return emptyList()
 }

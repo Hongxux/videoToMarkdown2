@@ -57,8 +57,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.consume
 import androidx.compose.ui.input.pointer.pointerInput
@@ -347,12 +350,32 @@ private fun TopographyParagraph(
         mutableStateOf<TokenInsightCard?>(null)
     }
 
+    val normalizedScore = node.relevanceScore.coerceIn(0f, 1f)
     val hasBridge = !node.bridgeText.isNullOrBlank()
-    val isFocused = node.relevanceScore > 0.7f
-    val isNoise = node.relevanceScore < 0.3f
-    val textSize = if (isFocused) 18.sp else if (isNoise) 14.sp else 16.sp
-    val textColor = if (isNoise) Color(0xFF8E8E8E) else Color(0xFF212121)
-    val fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Normal
+    val isAbsoluteFocus = normalizedScore > 0.85f
+    val isNoise = normalizedScore < 0.3f
+    val textSize = when {
+        isAbsoluteFocus -> max(20f, normalizedScore * 22f).sp
+        isNoise -> 13.sp
+        else -> 16.sp
+    }
+    val lineSpacingMultiplier = when {
+        isAbsoluteFocus -> 1.78f
+        isNoise -> 1.22f
+        else -> 1.58f
+    }
+    val textColor = when {
+        isNoise -> Color(0xFF5B6169).copy(alpha = 0.4f)
+        isAbsoluteFocus -> Color(0xFF101820)
+        else -> Color(0xFF212121)
+    }
+    val fontWeight = if (isAbsoluteFocus) FontWeight.Medium else FontWeight.Normal
+    val focusShrinkRatio = ((normalizedScore - 0.85f) / 0.15f).coerceIn(0f, 1f)
+    val horizontalContentPadding = if (isAbsoluteFocus) {
+        (14f - 6f * focusShrinkRatio).dp
+    } else {
+        14.dp
+    }
 
     val rightThreshold = max(140f, paragraphWidthPx * 0.24f)
     val leftThreshold = max(140f, paragraphWidthPx * 0.24f)
@@ -360,14 +383,17 @@ private fun TopographyParagraph(
 
     val bridgeRevealProgress = (offsetX.value / rightLockOffset).coerceIn(0f, 1f)
     val breathingAlpha by rememberInfiniteTransition(label = "noise-bridge-breathing").animateFloat(
-        initialValue = 0.35f,
-        targetValue = 0.95f,
+        initialValue = 0.3f,
+        targetValue = 1f,
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200),
+            animation = tween(durationMillis = 2_000),
             repeatMode = RepeatMode.Reverse
         ),
         label = "noise-bridge-breathing-alpha"
     )
+    val resolvedInsightTerms = remember(node.id, node.insightTerms, node.insightsTags) {
+        node.resolvedInsightTerms()
+    }
 
     SubcomposeAnchorLayout(
         modifier = Modifier
@@ -389,6 +415,18 @@ private fun TopographyParagraph(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(14.dp))
+                    .drawBehind {
+                        if (isNoise) {
+                            val x = 2.dp.toPx()
+                            drawLine(
+                                color = Color(0xFF8DA4B5).copy(alpha = 0.28f + 0.2f * breathingAlpha),
+                                start = Offset(x = x, y = size.height * 0.1f),
+                                end = Offset(x = x, y = size.height * 0.9f),
+                                strokeWidth = 1.6.dp.toPx(),
+                                cap = StrokeCap.Round
+                            )
+                        }
+                    }
                     .alpha(if (isMarkedDeleted) 0.6f else 1f)
                     .pointerInput(node.id) {
                         detectHorizontalDragGestures(
@@ -584,7 +622,7 @@ private fun TopographyParagraph(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .padding(horizontal = horizontalContentPadding, vertical = 12.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.Top,
@@ -592,25 +630,16 @@ private fun TopographyParagraph(
                             .fillMaxWidth()
                             .alpha(resonanceScale.value)
                     ) {
-                        if (isNoise && hasBridge) {
-                            Text(
-                                text = "✧",
-                                color = Color(0xFF2EA8E6),
-                                fontSize = 15.sp,
-                                modifier = Modifier
-                                    .padding(end = 8.dp, top = 2.dp)
-                                    .alpha(breathingAlpha)
-                            )
-                        }
-
                         MarkdownParagraph(
                             markdown = node.originalMarkdown ?: node.text,
                             plainText = node.text,
                             markwon = markwon,
                             textSizeSp = textSize.value,
+                            lineSpacingMultiplier = lineSpacingMultiplier,
                             textColor = textColor,
                             fontWeight = fontWeight,
                             selection = tokenSelection,
+                            insightTerms = resolvedInsightTerms,
                             modifier = Modifier
                                 .weight(1f)
                                 .alpha(if (isBridgeExpanded || isNoteExpanded) 0.98f else 1f),
@@ -637,6 +666,41 @@ private fun TopographyParagraph(
                                                 "end" to selection.end.toString()
                                             )
                                         )
+                                    )
+                                }
+                            },
+                            onInsightTermTap = { term ->
+                                val selection = resolveFirstTokenSelection(
+                                    source = node.text,
+                                    token = term
+                                )
+                                tokenSelection = selection
+                                tokenCard = parseTokenInsightCard(
+                                    token = term,
+                                    nativePayload = runCatching {
+                                        LexicalNativeBridge.explainToken(
+                                            term,
+                                            node.text
+                                        )
+                                    }.getOrNull()
+                                )
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onTelemetry(
+                                    ReaderTelemetryEvent(
+                                        nodeId = node.id,
+                                        eventType = "lexical_card_opened",
+                                        relevanceScore = node.relevanceScore,
+                                        payload = mapOf(
+                                            "token" to term,
+                                            "source" to "insight_terms"
+                                        )
+                                    )
+                                )
+                                scope.launch {
+                                    autoCenterItem(
+                                        listState = listState,
+                                        itemIndex = index,
+                                        centerRatio = 0.45f
                                     )
                                 }
                             },
@@ -679,6 +743,22 @@ private fun TopographyParagraph(
                                 }
                             }
                         )
+                    }
+                    if (isNoise && hasBridge) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 4.dp),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(6.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF6EC6FF))
+                                    .alpha(breathingAlpha)
+                            )
+                        }
                     }
 
                     if (isFavorited) {
@@ -937,10 +1017,13 @@ private fun MarkdownParagraph(
     plainText: String,
     markwon: Markwon,
     textSizeSp: Float,
+    lineSpacingMultiplier: Float,
     textColor: Color,
     fontWeight: FontWeight,
     selection: TokenSelection?,
+    insightTerms: List<String>,
     onTokenSingleTap: (cursor: Int) -> Unit,
+    onInsightTermTap: (term: String) -> Unit,
     onTokenDoubleTap: (cursor: Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -963,6 +1046,11 @@ private fun MarkdownParagraph(
                             x = e.x,
                             y = e.y
                         ) ?: return false
+                        val insightTerm = resolveTappedInsightTerm(textView, cursor)
+                        if (insightTerm != null) {
+                            onInsightTermTap(insightTerm)
+                            return true
+                        }
                         onTokenSingleTap(cursor)
                         return false
                     }
@@ -988,16 +1076,28 @@ private fun MarkdownParagraph(
         },
         update = { textView ->
             textView.textSize = textSizeSp
+            textView.setLineSpacing(0f, lineSpacingMultiplier)
             textView.setTextColor(textColor.toArgbSafe())
             textView.typeface = when (fontWeight) {
                 FontWeight.Bold -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+                FontWeight.Medium -> Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
                 else -> Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
             }
             markwon.setMarkdown(textView, markdown)
+            val source = textView.text
+                ?.toString()
+                .orEmpty()
+                .ifBlank { plainText }
+            val insightRanges = resolveInsightTermRanges(
+                source = source,
+                terms = insightTerms
+            )
+            textView.tag = InsightTapContext(insightRanges)
             applySelectionStyle(
                 textView = textView,
                 selection = selection,
-                fallbackText = plainText
+                fallbackText = plainText,
+                insightRanges = insightRanges
             )
         }
     )
@@ -1009,13 +1109,38 @@ private fun MarkdownParagraph(
 private fun applySelectionStyle(
     textView: TextView,
     selection: TokenSelection?,
-    fallbackText: String
+    fallbackText: String,
+    insightRanges: List<InsightTermRange>
 ) {
     val source = textView.text
         ?.toString()
         .orEmpty()
         .ifBlank { fallbackText }
     val spannable = SpannableString(source)
+
+    insightRanges.forEach { range ->
+        if (range.start < 0 || range.end > source.length || range.start >= range.end) {
+            return@forEach
+        }
+        spannable.setSpan(
+            UnderlineSpan(),
+            range.start,
+            range.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        spannable.setSpan(
+            ForegroundColorSpan(0xFF1A7FB0.toInt()),
+            range.start,
+            range.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        spannable.setSpan(
+            BackgroundColorSpan(0x1A63B8E6),
+            range.start,
+            range.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
 
     if (selection != null &&
         selection.start >= 0 &&
@@ -1049,6 +1174,93 @@ private fun applySelectionStyle(
     }
 
     textView.text = spannable
+}
+
+private data class InsightTermRange(
+    val term: String,
+    val start: Int,
+    val end: Int
+)
+
+private data class InsightTapContext(
+    val ranges: List<InsightTermRange>
+)
+
+private fun resolveTappedInsightTerm(
+    textView: TextView,
+    cursor: Int
+): String? {
+    val context = textView.tag as? InsightTapContext ?: return null
+    return context.ranges.firstOrNull { cursor in it.start until it.end }?.term
+}
+
+private fun resolveInsightTermRanges(
+    source: String,
+    terms: List<String>
+): List<InsightTermRange> {
+    if (source.isBlank() || terms.isEmpty()) {
+        return emptyList()
+    }
+
+    val normalizedTerms = terms
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .distinct()
+        .sortedByDescending { it.length }
+
+    val allMatches = mutableListOf<InsightTermRange>()
+    normalizedTerms.forEach { term ->
+        var cursor = 0
+        while (cursor < source.length) {
+            val hit = source.indexOf(term, startIndex = cursor, ignoreCase = true)
+            if (hit < 0) {
+                break
+            }
+            val end = hit + term.length
+            allMatches += InsightTermRange(
+                term = source.substring(hit, end),
+                start = hit,
+                end = end
+            )
+            cursor = end
+        }
+    }
+
+    if (allMatches.isEmpty()) {
+        return emptyList()
+    }
+
+    val selected = mutableListOf<InsightTermRange>()
+    allMatches
+        .sortedWith(compareBy<InsightTermRange> { it.start }.thenByDescending { it.end - it.start })
+        .forEach { candidate ->
+            val overlap = selected.any { existing ->
+                candidate.start < existing.end && candidate.end > existing.start
+            }
+            if (!overlap) {
+                selected += candidate
+            }
+        }
+    return selected.sortedBy { it.start }
+}
+
+private fun resolveFirstTokenSelection(
+    source: String,
+    token: String
+): TokenSelection? {
+    val normalized = token.trim()
+    if (source.isBlank() || normalized.isBlank()) {
+        return null
+    }
+    val start = source.indexOf(normalized, ignoreCase = true)
+    if (start < 0) {
+        return null
+    }
+    return TokenSelection(
+        token = source.substring(start, start + normalized.length),
+        start = start,
+        end = start + normalized.length
+    )
 }
 
 /**
