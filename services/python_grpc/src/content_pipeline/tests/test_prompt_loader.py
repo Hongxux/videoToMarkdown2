@@ -169,3 +169,28 @@ def test_concrete_knowledge_prompt_supports_system_key_and_legacy_user_key(monke
     assert len(content_from_system_key) > 10
     assert content_from_system_key == content_from_legacy_user_key
 
+
+def test_vl_arg_prompt_keys_are_loadable(monkeypatch):
+    _reset_loader_cache()
+    monkeypatch.setattr(
+        prompt_loader,
+        "load_module2_config",
+        lambda: {
+            "prompt_management": {
+                "enabled": True,
+                "root_dir": "",
+                "overrides": {},
+                "strict": False,
+            }
+        },
+    )
+
+    system_prompt = get_prompt(PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM)
+    user_prompt = get_prompt(PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_USER)
+
+    assert isinstance(system_prompt, str)
+    assert isinstance(user_prompt, str)
+    assert len(system_prompt) > 10
+    assert "{{main_operation}}" in user_prompt
+    assert "{{subtitle_context}}" in user_prompt
+

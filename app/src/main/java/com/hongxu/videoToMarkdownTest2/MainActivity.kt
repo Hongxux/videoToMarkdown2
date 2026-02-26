@@ -166,7 +166,8 @@ internal enum class SortOrder {
 
 internal enum class HomeSection {
     TASKS,
-    COLLECTIONS
+    COLLECTIONS,
+    FOOTPRINTS
 }
 
 internal data class TaskRouteUiState(
@@ -237,6 +238,8 @@ private const val BACKGROUND_TASK_REFRESH_INTERVAL_MS = 15_000L
 private const val ACTIVE_TASK_REFRESH_INTERVAL_MS = 5_000L
 private const val CLIPBOARD_TASK_PROMPT_PREFS = "clipboard_task_prompt"
 private const val CLIPBOARD_TASK_PROMPT_KEY = "last_prompted_url"
+private const val READER_SCROLL_POSITION_PREFS = "reader_scroll_position"
+private const val READER_SCROLL_SAVE_OFFSET_DELTA_PX = 96
 private const val TASK_FLASH_DURATION_MS = 10_000L
 private const val SUBMISSION_MODE_URL = "url"
 private const val SUBMISSION_MODE_UPLOAD = "upload"
@@ -254,6 +257,71 @@ private data class ClipboardTaskCandidate(
     val normalizedUrl: String,
     val displayUrl: String
 )
+
+private data class TaskReaderScrollPosition(
+    val firstVisibleItemIndex: Int,
+    val firstVisibleItemScrollOffset: Int
+)
+
+private class TaskReaderScrollPositionStore(
+    context: Context
+) {
+    private val preferences = context.getSharedPreferences(
+        READER_SCROLL_POSITION_PREFS,
+        Context.MODE_PRIVATE
+    )
+    private val memoryCache = mutableMapOf<String, TaskReaderScrollPosition>()
+
+    fun load(taskId: String): TaskReaderScrollPosition? {
+        val normalizedTaskId = taskId.trim()
+        if (normalizedTaskId.isEmpty()) {
+            return null
+        }
+        memoryCache[normalizedTaskId]?.let { cached ->
+            return cached
+        }
+        val indexKey = buildIndexKey(normalizedTaskId)
+        if (!preferences.contains(indexKey)) {
+            return null
+        }
+        val restored = TaskReaderScrollPosition(
+            firstVisibleItemIndex = preferences.getInt(indexKey, 0).coerceAtLeast(0),
+            firstVisibleItemScrollOffset = preferences
+                .getInt(buildOffsetKey(normalizedTaskId), 0)
+                .coerceAtLeast(0)
+        )
+        memoryCache[normalizedTaskId] = restored
+        return restored
+    }
+
+    fun save(taskId: String, position: TaskReaderScrollPosition) {
+        val normalizedTaskId = taskId.trim()
+        if (normalizedTaskId.isEmpty()) {
+            return
+        }
+        val normalizedPosition = TaskReaderScrollPosition(
+            firstVisibleItemIndex = position.firstVisibleItemIndex.coerceAtLeast(0),
+            firstVisibleItemScrollOffset = position.firstVisibleItemScrollOffset.coerceAtLeast(0)
+        )
+        val previous = memoryCache[normalizedTaskId]
+        if (previous == normalizedPosition) {
+            return
+        }
+        memoryCache[normalizedTaskId] = normalizedPosition
+        preferences.edit()
+            .putInt(buildIndexKey(normalizedTaskId), normalizedPosition.firstVisibleItemIndex)
+            .putInt(buildOffsetKey(normalizedTaskId), normalizedPosition.firstVisibleItemScrollOffset)
+            .apply()
+    }
+
+    private fun buildIndexKey(taskId: String): String {
+        return "task_${taskId}_index"
+    }
+
+    private fun buildOffsetKey(taskId: String): String {
+        return "task_${taskId}_offset"
+    }
+}
 
 data class ActiveSubmissionHint(
     val workId: String,
@@ -342,6 +410,13 @@ private fun MobileTaskApp() {
     val metaApi = remember(apiBaseUrl) { HttpMobileMarkdownMetaApi(apiBaseUrl) }
     val telemetryApi = remember(apiBaseUrl) { HttpMobileMarkdownTelemetryApi(apiBaseUrl) }
     val cardApi = remember(apiBaseUrl) { HttpMobileConceptCardApi(apiBaseUrl) }
+    val footprintRepo = remember(context) { ReadingFootprintRepository(context.applicationContext) }
+    val appUpdateManager = remember(context, apiBaseUrl) {
+        MobileAppAutoUpdateManager(
+            context = context.applicationContext,
+            apiBaseUrl = apiBaseUrl
+        )
+    }
     val markwon = remember(context, renderConfig) { buildReaderMarkwon(context, renderConfig) }
     val taskCompletionNotifier = remember(context) {
         TaskCompletionNotifier(context.applicationContext)
@@ -349,6 +424,9 @@ private fun MobileTaskApp() {
     val snackbarHostState = remember { SnackbarHostState() }
     val clipboardPromptHistory = remember(context) {
         ClipboardPromptHistory(context.applicationContext)
+    }
+    val readerScrollPositionStore = remember(context) {
+        TaskReaderScrollPositionStore(context.applicationContext)
     }
     val refreshMutex = remember { Mutex() }
     val probeState by collectionViewModel.probeState.collectAsState()
@@ -365,6 +443,12 @@ private fun MobileTaskApp() {
     var listLoading by remember { mutableStateOf(false) }
     var actionLoading by remember { mutableStateOf(false) }
     var actionMessage by remember { mutableStateOf("") }
+    var forceUpdateRequired by remember { mutableStateOf(false) }
+    var forceUpdateVersionCode by remember { mutableStateOf(0) }
+    var forceUpdateVersionName by remember { mutableStateOf("") }
+    var autoUpdateDownloadInProgress by remember { mutableStateOf(false) }
+    var autoUpdateProgressPercent by remember { mutableStateOf<Int?>(null) }
+    var autoUpdateStatusText by remember { mutableStateOf("") }
     var editingTaskId by remember { mutableStateOf<String?>(null) }
     var editingTaskTitleValue by remember { mutableStateOf(TextFieldValue("")) }
     var revealedTaskId by remember { mutableStateOf<String?>(null) }
@@ -539,6 +623,15 @@ private fun MobileTaskApp() {
             taskRouteViewModel.setComposerExpanded(false)
             taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
             recordTaskOpened(task.taskId)
+            // 记录阅读足迹：打开文章
+            scope.launch {
+                runCatching {
+                    footprintRepo.recordArticleOpened(
+                        taskId = task.taskId,
+                        taskTitle = session.title.ifBlank { task.taskId }
+                    )
+                }
+            }
             actionMessage = ""
         }.onFailure { error ->
             actionMessage = "Open failed: ${error.message ?: "unknown"}"
@@ -670,6 +763,82 @@ private fun MobileTaskApp() {
         }
     }
 
+    fun updateForceUpdateTarget(versionCode: Int, versionName: String) {
+        if (versionCode > 0) {
+            forceUpdateVersionCode = versionCode
+        }
+        if (versionName.isNotBlank()) {
+            forceUpdateVersionName = versionName
+        }
+    }
+
+    suspend fun runAutoUpdateCheck(trigger: String) {
+        when (val updateAction = appUpdateManager.checkAndAutoUpdate()) {
+            is MobileAppAutoUpdateManager.AutoUpdateAction.DownloadStarted -> {
+                autoUpdateDownloadInProgress = true
+                autoUpdateProgressPercent = 0
+                autoUpdateStatusText = "Downloading ${updateAction.versionName} (0%)"
+                forceUpdateRequired = updateAction.forceUpdate
+                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
+                actionMessage = "Detected new version ${updateAction.versionName}, auto download started."
+            }
+
+            is MobileAppAutoUpdateManager.AutoUpdateAction.InstallPrompted -> {
+                autoUpdateDownloadInProgress = false
+                autoUpdateProgressPercent = 100
+                autoUpdateStatusText = "Package ready. Opening installer for ${updateAction.versionName}."
+                forceUpdateRequired = updateAction.forceUpdate
+                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
+                actionMessage = "Version ${updateAction.versionName} downloaded. Opening installer."
+            }
+
+            is MobileAppAutoUpdateManager.AutoUpdateAction.InstallPermissionRequired -> {
+                autoUpdateDownloadInProgress = false
+                autoUpdateProgressPercent = 100
+                autoUpdateStatusText = "Install permission required for ${updateAction.versionName}."
+                forceUpdateRequired = updateAction.forceUpdate
+                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
+                actionMessage = "Allow unknown app installs to continue upgrade to ${updateAction.versionName}."
+            }
+
+            is MobileAppAutoUpdateManager.AutoUpdateAction.Failed -> {
+                autoUpdateDownloadInProgress = false
+                autoUpdateProgressPercent = null
+                if (updateAction.forceUpdate || forceUpdateRequired) {
+                    forceUpdateRequired = true
+                    updateForceUpdateTarget(
+                        updateAction.versionCode ?: forceUpdateVersionCode,
+                        updateAction.versionName.ifBlank { forceUpdateVersionName }
+                    )
+                    autoUpdateStatusText = "Mandatory update failed: ${updateAction.message}"
+                    actionMessage = "Auto update check failed: ${updateAction.message}"
+                } else if (trigger == "launch" || trigger == "resume") {
+                    autoUpdateStatusText = ""
+                    actionMessage = "Auto update check failed: ${updateAction.message}"
+                }
+            }
+
+            is MobileAppAutoUpdateManager.AutoUpdateAction.NoOp -> {
+                forceUpdateRequired = false
+                forceUpdateVersionCode = 0
+                forceUpdateVersionName = ""
+                autoUpdateDownloadInProgress = false
+                autoUpdateProgressPercent = null
+                autoUpdateStatusText = ""
+            }
+
+            is MobileAppAutoUpdateManager.AutoUpdateAction.DownloadInProgress -> {
+                val progressText = updateAction.progressPercent?.let { "$it%" } ?: "preparing"
+                autoUpdateDownloadInProgress = true
+                autoUpdateProgressPercent = updateAction.progressPercent
+                autoUpdateStatusText = "Downloading ${updateAction.versionName} ($progressText)"
+                forceUpdateRequired = updateAction.forceUpdate
+                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
+                actionMessage = autoUpdateStatusText
+            }
+        }
+    }
+
     fun enqueueSubmissionWork(
         mode: String,
         preferredTitle: String,
@@ -769,7 +938,18 @@ private fun MobileTaskApp() {
             }
         }
         refreshTasks(showLoading = true)
+        runAutoUpdateCheck(trigger = "launch")
         inspectClipboardForTaskCandidate()
+    }
+
+    LaunchedEffect(autoUpdateDownloadInProgress) {
+        if (!autoUpdateDownloadInProgress) {
+            return@LaunchedEffect
+        }
+        while (autoUpdateDownloadInProgress) {
+            delay(1_000)
+            runAutoUpdateCheck(trigger = "monitor")
+        }
     }
 
     LaunchedEffect(preferActiveRefresh) {
@@ -799,6 +979,17 @@ private fun MobileTaskApp() {
             when (event.type) {
                 SubmissionEventType.STARTED -> {
                     actionMessage = "任务已提交，后台开始处理。"
+                    // 记录阅读足迹：视频任务创建
+                    if (!event.taskId.isNullOrBlank()) {
+                        scope.launch {
+                            runCatching {
+                                footprintRepo.recordVideoTaskCreated(
+                                    taskId = event.taskId,
+                                    taskTitle = event.title.orEmpty().ifBlank { event.taskId }
+                                )
+                            }
+                        }
+                    }
                 }
 
                 SubmissionEventType.SUCCEEDED -> {
@@ -877,6 +1068,7 @@ private fun MobileTaskApp() {
                 inspectClipboardForTaskCandidate()
                 scope.launch {
                     refreshTasks(showLoading = false)
+                    runAutoUpdateCheck(trigger = "resume")
                 }
             }
         }
@@ -886,8 +1078,53 @@ private fun MobileTaskApp() {
         }
     }
 
+    if (forceUpdateRequired) {
+        ForceUpdateBlockingRoute(
+            versionName = forceUpdateVersionName,
+            versionCode = forceUpdateVersionCode,
+            statusText = autoUpdateStatusText,
+            downloading = autoUpdateDownloadInProgress,
+            progressPercent = autoUpdateProgressPercent,
+            onRetryUpdate = {
+                scope.launch {
+                    runAutoUpdateCheck(trigger = "force_manual")
+                }
+            }
+        )
+        return
+    }
+
     if (readerSession != null) {
         val session = readerSession ?: return
+        val savedReaderScrollPosition = remember(session.taskId) {
+            readerScrollPositionStore.load(session.taskId)
+        }
+        val initialReaderScrollPosition = remember(
+            session.taskId,
+            session.nodes.size,
+            savedReaderScrollPosition
+        ) {
+            val maxIndex = (session.nodes.size - 1).coerceAtLeast(0)
+            TaskReaderScrollPosition(
+                firstVisibleItemIndex = (savedReaderScrollPosition?.firstVisibleItemIndex ?: 0)
+                    .coerceIn(0, maxIndex),
+                firstVisibleItemScrollOffset = (savedReaderScrollPosition?.firstVisibleItemScrollOffset ?: 0)
+                    .coerceAtLeast(0)
+            )
+        }
+        var latestReaderScrollPosition by remember(session.taskId) {
+            mutableStateOf(initialReaderScrollPosition)
+        }
+        var checkpointReaderScrollPosition by remember(session.taskId) {
+            mutableStateOf(initialReaderScrollPosition)
+        }
+
+        DisposableEffect(session.taskId) {
+            onDispose {
+                readerScrollPositionStore.save(session.taskId, latestReaderScrollPosition)
+            }
+        }
+
         Surface(modifier = Modifier.fillMaxSize()) {
             Box(modifier = Modifier.fillMaxSize()) {
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -936,6 +1173,8 @@ private fun MobileTaskApp() {
                         metaApi = metaApi,
                         telemetryApi = telemetryApi,
                         cardApi = cardApi,
+                        initialFirstVisibleItemIndex = initialReaderScrollPosition.firstVisibleItemIndex,
+                        initialFirstVisibleItemScrollOffset = initialReaderScrollPosition.firstVisibleItemScrollOffset,
                         onScrollDown = {
                             if (readerChromeVisible) {
                                 readerChromeVisible = false
@@ -944,6 +1183,87 @@ private fun MobileTaskApp() {
                         onScrollUp = {
                             if (!readerChromeVisible) {
                                 readerChromeVisible = true
+                            }
+                        },
+                        onReadingPositionChanged = { index, offset ->
+                            val maxIndex = (session.nodes.size - 1).coerceAtLeast(0)
+                            val normalizedPosition = TaskReaderScrollPosition(
+                                firstVisibleItemIndex = index.coerceIn(0, maxIndex),
+                                firstVisibleItemScrollOffset = offset.coerceAtLeast(0)
+                            )
+                            latestReaderScrollPosition = normalizedPosition
+                            val indexChanged = normalizedPosition.firstVisibleItemIndex !=
+                                checkpointReaderScrollPosition.firstVisibleItemIndex
+                            val offsetDelta = kotlin.math.abs(
+                                normalizedPosition.firstVisibleItemScrollOffset -
+                                    checkpointReaderScrollPosition.firstVisibleItemScrollOffset
+                            )
+                            if (indexChanged || offsetDelta >= READER_SCROLL_SAVE_OFFSET_DELTA_PX) {
+                                readerScrollPositionStore.save(session.taskId, normalizedPosition)
+                                checkpointReaderScrollPosition = normalizedPosition
+                            }
+                        },
+                        onTelemetry = { telemetryEvent ->
+                            // 根据 telemetry 事件类型记录阅读足迹
+                            val scrollIdx = latestReaderScrollPosition.firstVisibleItemIndex
+                            val title = session.title.ifBlank { session.taskId }
+                            when (telemetryEvent.eventType) {
+                                "resonance_toggle", "swipe_right_favorite" -> {
+                                    scope.launch {
+                                        runCatching {
+                                            footprintRepo.recordParagraphBold(
+                                                taskId = session.taskId,
+                                                taskTitle = title,
+                                                blockId = telemetryEvent.nodeId,
+                                                snippetText = telemetryEvent.payload["text"].orEmpty().take(200),
+                                                scrollIndex = scrollIdx
+                                            )
+                                        }
+                                    }
+                                }
+                                "token_segment", "token_double_tap" -> {
+                                    scope.launch {
+                                        runCatching {
+                                            footprintRepo.recordTokenDoubleClick(
+                                                taskId = session.taskId,
+                                                taskTitle = title,
+                                                blockId = telemetryEvent.nodeId,
+                                                token = telemetryEvent.payload["token"].orEmpty()
+                                                    .ifBlank { telemetryEvent.payload["text"].orEmpty() },
+                                                tokenStart = telemetryEvent.payload["start"]?.toIntOrNull() ?: -1,
+                                                tokenEnd = telemetryEvent.payload["end"]?.toIntOrNull() ?: -1,
+                                                scrollIndex = scrollIdx
+                                            )
+                                        }
+                                    }
+                                }
+                                "comment_panel_opened" -> {
+                                    scope.launch {
+                                        runCatching {
+                                            footprintRepo.recordAnnotationAdded(
+                                                taskId = session.taskId,
+                                                taskTitle = title,
+                                                blockId = telemetryEvent.nodeId,
+                                                annotationText = telemetryEvent.payload["source"].orEmpty(),
+                                                scrollIndex = scrollIdx
+                                            )
+                                        }
+                                    }
+                                }
+                                "insight_term_tapped" -> {
+                                    scope.launch {
+                                        runCatching {
+                                            footprintRepo.recordInsightCardViewed(
+                                                taskId = session.taskId,
+                                                taskTitle = title,
+                                                blockId = telemetryEvent.nodeId,
+                                                insightTag = telemetryEvent.payload["term"].orEmpty()
+                                                    .ifBlank { telemetryEvent.payload["token"].orEmpty() },
+                                                scrollIndex = scrollIdx
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     )
@@ -1003,6 +1323,21 @@ private fun MobileTaskApp() {
         return
     }
 
+    if (homeSection == HomeSection.FOOTPRINTS) {
+        ReadingFootprintTimeline(
+            footprintsFlow = footprintRepo.observeAllFootprints(),
+            onBack = {
+                taskRouteViewModel.setHomeSection(HomeSection.TASKS)
+            },
+            onNavigateToArticle = { target ->
+                scope.launch {
+                    openTaskById(target.taskId, target.taskTitle)
+                }
+            }
+        )
+        return
+    }
+
     if (homeSection == HomeSection.COLLECTIONS) {
         CollectionsRoute(
             collections = collectionCards,
@@ -1047,14 +1382,24 @@ private fun MobileTaskApp() {
                             text = "Task Library",
                             fontWeight = FontWeight.SemiBold
                         )
-                        TextButton(
-                            onClick = {
-                                taskRouteViewModel.setHomeSection(HomeSection.COLLECTIONS)
-                                collectionViewModel.refreshCollections()
-                            },
-                            enabled = !actionLoading
-                        ) {
-                            Text("查看合集")
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                onClick = {
+                                    taskRouteViewModel.setHomeSection(HomeSection.FOOTPRINTS)
+                                },
+                                enabled = !actionLoading
+                            ) {
+                                Text("阅读足迹")
+                            }
+                            TextButton(
+                                onClick = {
+                                    taskRouteViewModel.setHomeSection(HomeSection.COLLECTIONS)
+                                    collectionViewModel.refreshCollections()
+                                },
+                                enabled = !actionLoading
+                            ) {
+                                Text("查看合集")
+                            }
                         }
                     }
                 }
@@ -1525,7 +1870,11 @@ private fun MobileTaskApp() {
             }
 
             AnimatedVisibility(
-                visible = actionLoading || listLoading || actionMessage.isNotBlank(),
+                visible = actionLoading ||
+                    listLoading ||
+                    actionMessage.isNotBlank() ||
+                    autoUpdateDownloadInProgress ||
+                    (!forceUpdateRequired && autoUpdateStatusText.isNotBlank()),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(horizontal = 16.dp, vertical = 28.dp),
@@ -1533,12 +1882,11 @@ private fun MobileTaskApp() {
                 exit = fadeOut(animationSpec = tween(durationMillis = 150))
             ) {
                 Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         if (actionLoading || listLoading) {
                             CircularProgressIndicator(
@@ -1556,6 +1904,22 @@ private fun MobileTaskApp() {
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
+                        if (autoUpdateDownloadInProgress) {
+                            val normalizedProgress = autoUpdateProgressPercent?.coerceIn(0, 100)
+                            val progressText = normalizedProgress?.let { "$it%" } ?: "preparing..."
+                            if (normalizedProgress != null) {
+                                LinearProgressIndicator(
+                                    progress = { normalizedProgress / 100f },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            } else {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            }
+                            Text(
+                                text = "Update download progress: $progressText",
+                                color = Color(0xFF475467)
+                            )
+                        }
                     }
                 }
             }
@@ -1616,6 +1980,85 @@ private fun MobileTaskApp() {
 @Composable
 private fun TaskRoute(content: @Composable () -> Unit) {
     content()
+}
+
+@Composable
+private fun ForceUpdateBlockingRoute(
+    versionName: String,
+    versionCode: Int,
+    statusText: String,
+    downloading: Boolean,
+    progressPercent: Int?,
+    onRetryUpdate: () -> Unit
+) {
+    val normalizedVersionName = versionName.trim().ifEmpty { "latest" }
+    val versionLabel = if (versionCode > 0) {
+        "$normalizedVersionName ($versionCode)"
+    } else {
+        normalizedVersionName
+    }
+    val normalizedStatusText = when {
+        statusText.isNotBlank() -> statusText
+        downloading -> "Downloading mandatory update..."
+        else -> "This app version is no longer supported. Update is required to continue."
+    }
+    val normalizedProgress = progressPercent?.coerceIn(0, 100)
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp, vertical = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = "Mandatory Update Required",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "Install version $versionLabel before continuing to use this app.",
+                color = Color(0xFF475467)
+            )
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = normalizedStatusText,
+                        color = Color(0xFF344054)
+                    )
+                    if (normalizedProgress != null) {
+                        LinearProgressIndicator(
+                            progress = { normalizedProgress / 100f },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            text = "Download progress: $normalizedProgress%",
+                            color = Color(0xFF667085)
+                        )
+                    } else if (downloading) {
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+            Button(
+                onClick = onRetryUpdate,
+                enabled = !downloading
+            ) {
+                Text(
+                    text = if (downloading) {
+                        "Downloading..."
+                    } else {
+                        "Retry Update"
+                    }
+                )
+            }
+        }
+    }
 }
 
 @Composable

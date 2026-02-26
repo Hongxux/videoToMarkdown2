@@ -7,7 +7,7 @@ package com.hongxu.videoToMarkdownTest2
  * 1. 先按双换行拆为 top-level 块
  * 2. 每个 top-level 块内识别 heading / blockquote / list / code-fence / 普通段落
  * 3. 连续 list items 合并为一个块（保持 Markwon 渲染完整性）
- * 4. bridgeText / reasoning 只保留在首块
+ * 4. reasoning 只保留在首块
  * 5. 若 node 只产出一个块，blockId == node.id（向后兼容）
  */
 
@@ -34,7 +34,6 @@ data class SemanticBlock(
     /** 继承自父 node。 */
     val relevanceScore: Float,
     /** 仅 blockIndex==0 时有值。 */
-    val bridgeText: String?,
     /** 仅 blockIndex==0 时有值。 */
     val reasoning: String?,
     /** 继承自父 node。 */
@@ -83,7 +82,6 @@ internal fun splitSingleNode(node: SemanticNode): List<SemanticBlock> {
             indentLevel = stripped.indentLevel,
             type = node.type,
             relevanceScore = node.relevanceScore,
-            bridgeText = if (index == 0) node.bridgeText else null,
             reasoning = if (index == 0) node.reasoning else null,
             insightTerms = node.insightTerms,
             insightsTags = node.insightsTags
@@ -106,7 +104,6 @@ private fun nodeToSingleBlock(node: SemanticNode): SemanticBlock {
         indentLevel = 0,
         type = node.type,
         relevanceScore = node.relevanceScore,
-        bridgeText = node.bridgeText,
         reasoning = node.reasoning,
         insightTerms = node.insightTerms,
         insightsTags = node.insightsTags

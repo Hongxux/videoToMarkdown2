@@ -33,7 +33,7 @@ class SemanticTopographyReaderNoiseCapsuleTest {
                         id = nodeId,
                         text = "This paragraph is low relevance and should be hidden behind capsule by default.",
                         relevanceScore = 0.12f,
-                        bridgeText = "Summary: this is low-priority contextual detail."
+                        reasoning = "Summary: this is low-priority contextual detail."
                     )
                 ),
                 markwon = Markwon.create(context),

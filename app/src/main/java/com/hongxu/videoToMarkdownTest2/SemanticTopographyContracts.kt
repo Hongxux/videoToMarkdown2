@@ -31,7 +31,6 @@ data class SemanticNode(
     val type: String = "paragraph",
     val originalMarkdown: String? = null,
     val relevanceScore: Float,
-    val bridgeText: String? = null,
     val reasoning: String? = null,
     val insightTerms: List<String> = emptyList(),
     val insightsTags: List<String> = emptyList()
@@ -62,8 +61,7 @@ sealed class ParagraphGestureEvent {
     data class SwipeRight(
         val nodeId: String,
         val offsetX: Float,
-        val threshold: Float,
-        val hasBridge: Boolean
+        val threshold: Float
     ) : ParagraphGestureEvent()
 
     data class DoubleTap(
@@ -694,7 +692,6 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
  * 兼容字段：
  * - personalizedNodes / nodes
  * - relevance_score / relevanceScore
- * - bridge_text / bridgeText
  * - insight_terms / insights_tags
  */
 fun parseSemanticNodesFromPayload(payloadText: String): List<SemanticNode> {
@@ -737,8 +734,7 @@ private fun parseSemanticNode(node: JSONObject): SemanticNode {
         "contentMarkdown"
     )
     val relevanceScore = node.optFloatByAlias("relevance_score", "relevanceScore") ?: 0f
-    val bridgeText = node.optStringByAlias("bridge_text", "bridgeText")
-    val reasoning = node.optStringByAlias("reasoning")
+    val reasoning = node.optStringByAlias("reasoning", "reason")
     val insightTerms = readJsonArrayStringsByAlias(
         node,
         "insight_terms",
@@ -758,7 +754,6 @@ private fun parseSemanticNode(node: JSONObject): SemanticNode {
         type = type,
         originalMarkdown = originalMarkdown,
         relevanceScore = relevanceScore.coerceIn(0f, 1f),
-        bridgeText = bridgeText,
         reasoning = reasoning,
         insightTerms = insightTerms,
         insightsTags = insightsTags

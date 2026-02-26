@@ -3,6 +3,78 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-02-26 Persona Reading 契约收敛（完整下线 `bridge_text`）
+- 日期：2026-02-26
+- 触发背景与问题：
+  - Persona Reading 提示词已切换为 `chunk_id / reason / relevance_score / insights_tags`，但后端与 Android 端仍保留 `bridge_text/bridgeText` 历史字段，存在契约漂移风险。
+  - 漂移会导致两类问题：字段被错误继续依赖（前端渲染分支）、以及旧缓存透传历史字段（接口表面已变更但数据仍混入旧键）。
+- 第一性原理与复用杠杆：
+  - 第一性原理：协议字段必须“单一事实源”，即提示词、服务端输出、客户端消费同构，避免双轨语义。
+  - 复用杠杆1：复用现有 `reason` 字段作为解释文本，不新增新字段、不增加额外解析分支。
+  - 复用杠杆2：复用 `parseSemanticNode` 与 `SemanticBlock` 现有链路，只移除旧字段并让 `reason` 兼容 `reasoning` 别名读取。
+  - 复用杠杆3：复用服务端缓存标准化入口 `normalizeCachedNode`，集中清理旧键，避免历史缓存污染新契约。
+- 架构决策：
+  - 决策1：后端 `PersonaAwareReadingService` 停止解析/生成 `bridge_text`，输出仅保留 `reason` 与 `insights_tags`。
+  - 决策2：Android 端移除 `SemanticNode/SemanticBlock` 的 `bridgeText` 字段，噪音胶囊与高分导语统一使用 `reasoning(reason)`。
+  - 决策3：手势与决策模型去除 `hasBridge/OpenBridge` 分支，右滑统一进入注释面板路径，减少分支复杂度。
+  - 决策4：缓存读取阶段显式删除 `bridge_text/bridgeText`，保证新老缓存混用时对外契约稳定。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Prompt -> reason + relevance + bridge_text + insights_tags`
+    - `Service assemble -> nodes 带 bridge_text`
+    - `Android parse -> bridgeText -> 噪音胶囊/高分导语`
+  - 改造后：
+    - `Prompt -> reason + relevance + insights_tags`
+    - `Service assemble -> nodes 无 bridge_text（并清理缓存旧键）`
+    - `Android parse -> reasoning(reason) -> 噪音胶囊/高分导语`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticBlockSplitter.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyGestureReducer.kt`
+  - `app/src/test/java/com/hongxu/videoToMarkdownTest2/SemanticBlockSplitterTest.kt`
+  - `app/src/androidTest/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReaderNoiseCapsuleTest.kt`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：字段契约一致性与可维护性提升，不以吞吐/时延优化为目标。
+  - 测试方式：编译校验 + 关键单测回归（语义块拆分、阅读器噪音胶囊用例）。
+  - 测试数据：见“验证方式”命令结果。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-26 Telemetry HOT 分流升级（Token 三层上下文补齐）
+- 日期：2026-02-26
+- 触发背景与问题：
+  - 仅靠段落级 `nodeText` 无法解释 token 级交互的真实焦点，导致微观假说容易产生“段落级泛化”。
+  - HOT 事件集合缺少一部分高价值动作（选区复制/喜欢/反喜欢/加粗、噪音胶囊展开、删除恢复等），会让认知信号漏入冷层。
+- 第一性原理与复用杠杆：
+  - 第一性原理：行为推断必须同时具备“动作类型 + 焦点对象 + 局部语境”三元组，否则推断不可判定。
+  - 复用杠杆1：复用既有 `/api/telemetry/ingest` 入站协议，不新增接口、不改客户端协议版本。
+  - 复用杠杆2：复用现有 `resolveNodeContext` 节点补全链路，在其基础上增加 token 分支补全。
+  - 复用杠杆3：复用 `MicroHypothesisExtractorService` 的小模型输入结构，增量追加 `focus_text/token_type/local_context`。
+- 架构决策：
+  - 决策1：扩展 `HOT_EVENT_TYPES`，纳入选区占有欲/排斥类动作与反悔动作。
+  - 决策2：新增 token 分支补全，热记录增加 `focusText/focusSource/tokenType/localContext/localContextFound`。
+  - 决策3：微观假说动作映射新增对上述事件的标准化映射，并将焦点词与局部语境显式送入小模型输入。
+- 调用链与决策链变化：
+  - 改造前：
+    - `event -> HOT? -> nodeText -> micro-hypothesis(context only)`
+  - 改造后：
+    - `event -> HOT? -> nodeContext`
+    - `token event -> focusText + tokenType + localContext`
+    - `micro-hypothesis -> action + context + focus_text + token_type + local_context`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/TelemetryIngestController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：语义判定准确性提升，不以吞吐/时延优化为目标。
+  - 测试方式：编译校验 + 热事件字段完整性人工抽样。
+  - 测试数据：见“验证方式”命令结果。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-24 Android 更新后台发布管理能力落地（受鉴权上传 + 一键发布/回滚）
 - 日期：2026-02-24
 - 触发背景与问题：
@@ -8480,3 +8552,36 @@
 - 验证方式：
   - `.\\gradlew.bat :app:compileDebugKotlin`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-26 Phase2A VL 后处理升级：按语义单元上下文补全 tutorial step 的 main_operation
+- 触发背景：
+  - VL 在 `tutorial_stepwise` 模式下已经能产出步骤结构，但 `main_operation` 在部分视频里缺少“字幕口述中的原因、避坑、预期反馈”等上下文信息。
+- 第一性原理：
+  - 步骤文本不是孤立字段，而是“动作 + 语义解释 + 约束”共同组成的最小教学闭环。
+  - 后处理应以“语义单元”为上下文边界，避免跨单元串扰，保证信息密度与定位稳定。
+- 复用杠杆：
+  - 复用现有 Prompt 基础设施：`PromptKeys` + `get_prompt(...)` 动态加载。
+  - 复用现有 VL 主链路：`VLMaterialGenerator.generate()` 的单语义单元收敛循环，不改 `VLVideoAnalyzer` 主职责。
+  - 复用现有字幕能力：`_load_subtitles_for_output_dir` / `_build_unit_relative_subtitles` 构造语义单元内字幕上下文。
+- 架构决策：
+  - 决策1：新增 prompt key `deepseek.vl_arg.structured.system/user`，将 `deepseek/vl_arg/structured_*.md` 纳入统一注册与加载。
+  - 决策2：在 `VLMaterialGenerator` 内增加 `vl_arg_postprocess` 阶段，按“单语义单元单次请求 + 批量按 step_id 回写”的方式补全 `main_operation`。
+  - 决策3：后处理结果双写回：
+    - `analysis_result.raw_response_json[*].main_operation/main_operations`
+    - `analysis_result.analysis_results[*].main_operation`
+    - `analysis_result.clip_requests[*].main_operation/main_operations`
+  - 决策4：后处理失败不阻断主流程，仅记录告警并保留 VL 原结果，保证可用性优先。
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/infra/llm/prompt_registry.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（本次属于质量增强，非吞吐优化）：
+  - 测试方式：语法编译 + 定向单测 + 语义单元级后处理最小运行验证。
+  - 测试数据：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/prompt_registry.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py` 通过。
+    - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py -k "vl_arg_prompt_keys_are_loadable" -q` 通过（1 passed）。
+    - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "generate_postprocesses_main_operation_with_unit_context or generate_tutorial_assets_per_unit_full_flow_before_phase2b" -q` 在测试收集阶段失败，原因为环境依赖冲突：`ImportError: cannot import name 'Sentinel' from typing_extensions`（与本次改动无关）。
+    - 手工最小运行验证（调用 `_postprocess_unit_main_operations`）通过，断言 `raw_response_json` 与 `clip_requests` 的 `main_operation` 已被增强结果回写。
+  - 对比说明：
+    - 本次新增每语义单元一次 DeepSeek 后处理调用，目标是提升教学文本完整性；额外时延与 token 成本主要随语义单元数增长，单元内步骤通过一次批量返回完成，后续可按 `vl_arg_postprocess` 配置进行限流或开关治理。

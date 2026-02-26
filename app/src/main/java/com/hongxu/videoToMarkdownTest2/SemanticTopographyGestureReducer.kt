@@ -8,8 +8,6 @@ package com.hongxu.videoToMarkdownTest2
  * 2. 输出业务语义动作。
  */
 sealed class ParagraphSwipeDecision {
-    data object OpenBridge : ParagraphSwipeDecision()
-
     data object OpenNote : ParagraphSwipeDecision()
 
     data object Delete : ParagraphSwipeDecision()
@@ -23,12 +21,10 @@ sealed class ParagraphSwipeDecision {
 fun resolveParagraphSwipeDecision(
     endOffset: Float,
     rightThreshold: Float,
-    leftThreshold: Float,
-    hasBridge: Boolean
+    leftThreshold: Float
 ): ParagraphSwipeDecision {
     return when {
-        endOffset > rightThreshold && hasBridge -> ParagraphSwipeDecision.OpenBridge
-        endOffset > rightThreshold && !hasBridge -> ParagraphSwipeDecision.OpenNote
+        endOffset > rightThreshold -> ParagraphSwipeDecision.OpenNote
         endOffset < -leftThreshold -> ParagraphSwipeDecision.Delete
         else -> ParagraphSwipeDecision.Reset
     }

@@ -61,11 +61,12 @@ public class DeepSeekAdvisorService {
             "你必须只输出 JSON 对象，禁止输出 markdown、解释文本、代码围栏。",
             "JSON schema 固定为：",
             "{",
+            "  \"background\": [\"...\"],",
             "  \"contextual_explanations\": [\"...\"],",
             "  \"depth\": [\"...\"],",
             "  \"breadth\": [\"...\"]",
             "}",
-            "三个数组都必须存在，每个数组 1~3 条短句。"
+            "四个数组都必须存在，每个数组 1~3 条短句。"
     );
 
     private static final String DEFAULT_STRUCTURED_USER_PROMPT = String.join("\n",
@@ -75,13 +76,31 @@ public class DeepSeekAdvisorService {
             "锚点句：{example_block}",
             "",
             "请输出 JSON：",
-            "1. contextual_explanations: 语境化解释（数组）",
-            "2. depth: 第一性原理与机制（数组）",
-            "3. breadth: 跨场景/行业广度（数组）",
+            "1. background: 背景知识与落地背景（数组）",
+            "2. contextual_explanations: 语境化解释（数组）",
+            "3. depth: 第一性原理与机制（数组）",
+            "4. breadth: 跨场景/行业广度（数组）",
             "",
             "要求：",
             "- 仅输出一个 JSON 对象",
             "- 不要输出任何额外文本"
+    );
+    private static final String DEFAULT_STRUCTURED_BATCH_SYSTEM_PROMPT = String.join("\n",
+            "你是一个阅读语境术语解释助手。",
+            "你必须只输出 JSON 对象，禁止输出 markdown、解释文本、代码围栏。",
+            "JSON schema 固定为：",
+            "{",
+            "  \"items\": [",
+            "    {",
+            "      \"term\": \"术语原文\",",
+            "      \"background\": [\"...\"],",
+            "      \"contextual_explanations\": [\"...\"],",
+            "      \"depth\": [\"...\"],",
+            "      \"breadth\": [\"...\"]",
+            "    }",
+            "  ]",
+            "}",
+            "items 覆盖全部术语，且每个术语的四个数组都必须存在。"
     );
     private static final String DEFAULT_STRUCTURED_BATCH_USER_PROMPT = String.join("\n",
             "术语列表（同一语境）：",
@@ -95,6 +114,7 @@ public class DeepSeekAdvisorService {
             "  \"items\": [",
             "    {",
             "      \"term\": \"术语原文\",",
+            "      \"background\": [\"...\"],",
             "      \"contextual_explanations\": [\"...\"],",
             "      \"depth\": [\"...\"],",
             "      \"breadth\": [\"...\"]",
@@ -105,7 +125,7 @@ public class DeepSeekAdvisorService {
             "要求：",
             "- items 覆盖全部术语，顺序与输入保持一致",
             "- term 必须与输入术语原文一致",
-            "- 每个数组 1~3 条短句",
+            "- background/contextual_explanations/depth/breadth 四个数组都必须存在，且每个数组 1~3 条短句",
             "- 仅输出 JSON，不得输出其他文本"
     );
 
@@ -224,6 +244,7 @@ public class DeepSeekAdvisorService {
         StructuredAdviceResult parsed = parseStructuredAdvice(raw);
         if (parsed.hasContent()) {
             return StructuredAdviceResult.deepseek(
+                    parsed.background,
                     parsed.contextualExplanations,
                     parsed.depth,
                     parsed.breadth,
@@ -265,7 +286,7 @@ public class DeepSeekAdvisorService {
         String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
 
         DeepSeekCallResult callResult;
-        String structuredSystemPrompt = buildStructuredSystemPrompt();
+        String structuredSystemPrompt = buildStructuredBatchSystemPrompt();
         String structuredUserPrompt = buildStructuredBatchUserPrompt(
                 safeTerms,
                 safeContext,
@@ -480,6 +501,10 @@ public class DeepSeekAdvisorService {
         return loadPromptTemplate("structured_system", structuredSystemPromptResource, DEFAULT_STRUCTURED_SYSTEM_PROMPT);
     }
 
+    private String buildStructuredBatchSystemPrompt() {
+        return DEFAULT_STRUCTURED_BATCH_SYSTEM_PROMPT;
+    }
+
     private String buildStructuredUserPrompt(String term, String context, String contextExample, boolean contextDependent) {
         String safeContext = trimContext(context);
         String safeExample = trimContext(contextExample);
@@ -542,6 +567,7 @@ public class DeepSeekAdvisorService {
                     json,
                     new TypeReference<Map<String, Object>>() {}
             );
+            List<String> background = normalizeStringList(root.get("background"));
             List<String> contextual = normalizeStringList(root.get("contextual_explanations"));
             if (contextual.isEmpty()) {
                 contextual = normalizeStringList(root.get("contextualExplanations"));
@@ -551,7 +577,7 @@ public class DeepSeekAdvisorService {
             if (breadth.isEmpty()) {
                 breadth = normalizeStringList(root.get("width"));
             }
-            return new StructuredAdviceResult(contextual, depth, breadth, "deepseek", text, "", "");
+            return new StructuredAdviceResult(background, contextual, depth, breadth, "deepseek", text, "", "");
         } catch (Exception ex) {
             return StructuredAdviceResult.empty("structured-parse-error", text);
         }
@@ -588,12 +614,14 @@ public class DeepSeekAdvisorService {
                 if (!StringUtils.hasText(term)) {
                     continue;
                 }
+                List<String> background = normalizeStringList(readAlias(rawMap, "background", "bg"));
                 List<String> contextual = normalizeStringList(readAlias(rawMap, "contextual_explanations", "contextualExplanations"));
                 List<String> depth = normalizeStringList(readAlias(rawMap, "depth", "deep", "principles", "mechanism"));
                 List<String> breadth = normalizeStringList(readAlias(rawMap, "breadth", "width", "cross_domain", "industry"));
                 output.put(
                         normalizeTermKey(term),
                         StructuredAdviceResult.deepseek(
+                                background,
                                 contextual,
                                 depth,
                                 breadth,
@@ -785,6 +813,7 @@ public class DeepSeekAdvisorService {
     }
 
     public static class StructuredAdviceResult {
+        public final List<String> background;
         public final List<String> contextualExplanations;
         public final List<String> depth;
         public final List<String> breadth;
@@ -794,6 +823,7 @@ public class DeepSeekAdvisorService {
         public final String responseBodyJson;
 
         private StructuredAdviceResult(
+                List<String> background,
                 List<String> contextualExplanations,
                 List<String> depth,
                 List<String> breadth,
@@ -802,6 +832,7 @@ public class DeepSeekAdvisorService {
                 String requestPayloadJson,
                 String responseBodyJson
         ) {
+            this.background = background == null ? List.of() : List.copyOf(background);
             this.contextualExplanations = contextualExplanations == null ? List.of() : List.copyOf(contextualExplanations);
             this.depth = depth == null ? List.of() : List.copyOf(depth);
             this.breadth = breadth == null ? List.of() : List.copyOf(breadth);
@@ -812,7 +843,17 @@ public class DeepSeekAdvisorService {
         }
 
         public boolean hasContent() {
-            return !contextualExplanations.isEmpty() || !depth.isEmpty() || !breadth.isEmpty();
+            return !background.isEmpty() || !contextualExplanations.isEmpty() || !depth.isEmpty() || !breadth.isEmpty();
+        }
+
+        public static StructuredAdviceResult deepseek(
+                List<String> background,
+                List<String> contextualExplanations,
+                List<String> depth,
+                List<String> breadth,
+                String raw
+        ) {
+            return new StructuredAdviceResult(background, contextualExplanations, depth, breadth, "deepseek", raw, "", "");
         }
 
         public static StructuredAdviceResult deepseek(
@@ -821,10 +862,11 @@ public class DeepSeekAdvisorService {
                 List<String> breadth,
                 String raw
         ) {
-            return new StructuredAdviceResult(contextualExplanations, depth, breadth, "deepseek", raw, "", "");
+            return deepseek(List.of(), contextualExplanations, depth, breadth, raw);
         }
 
         public static StructuredAdviceResult deepseek(
+                List<String> background,
                 List<String> contextualExplanations,
                 List<String> depth,
                 List<String> breadth,
@@ -833,6 +875,7 @@ public class DeepSeekAdvisorService {
                 String responseBodyJson
         ) {
             return new StructuredAdviceResult(
+                    background,
                     contextualExplanations,
                     depth,
                     breadth,
@@ -843,12 +886,23 @@ public class DeepSeekAdvisorService {
             );
         }
 
+        public static StructuredAdviceResult deepseek(
+                List<String> contextualExplanations,
+                List<String> depth,
+                List<String> breadth,
+                String raw,
+                String requestPayloadJson,
+                String responseBodyJson
+        ) {
+            return deepseek(List.of(), contextualExplanations, depth, breadth, raw, requestPayloadJson, responseBodyJson);
+        }
+
         public static StructuredAdviceResult empty(String source) {
-            return new StructuredAdviceResult(List.of(), List.of(), List.of(), source, "", "", "");
+            return new StructuredAdviceResult(List.of(), List.of(), List.of(), List.of(), source, "", "", "");
         }
 
         public static StructuredAdviceResult empty(String source, String raw) {
-            return new StructuredAdviceResult(List.of(), List.of(), List.of(), source, raw, "", "");
+            return new StructuredAdviceResult(List.of(), List.of(), List.of(), List.of(), source, raw, "", "");
         }
 
         public static StructuredAdviceResult empty(
@@ -858,6 +912,7 @@ public class DeepSeekAdvisorService {
                 String responseBodyJson
         ) {
             return new StructuredAdviceResult(
+                    List.of(),
                     List.of(),
                     List.of(),
                     List.of(),

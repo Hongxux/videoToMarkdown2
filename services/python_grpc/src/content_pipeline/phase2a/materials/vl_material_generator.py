@@ -374,6 +374,44 @@ class VLMaterialGenerator:
             PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR,
             fallback=self._get_default_grid_spatial_anchor_prompt(),
         )
+        raw_vl_arg_postprocess_config = self.tutorial_mode_config.get("vl_arg_postprocess", {})
+        if isinstance(raw_vl_arg_postprocess_config, dict):
+            self.vl_arg_postprocess_config = raw_vl_arg_postprocess_config
+        else:
+            self.vl_arg_postprocess_config = {}
+        self.vl_arg_postprocess_enabled = bool(self.vl_arg_postprocess_config.get("enabled", True))
+        self.vl_arg_postprocess_model = str(
+            self.vl_arg_postprocess_config.get("model", "deepseek-chat") or "deepseek-chat"
+        ).strip() or "deepseek-chat"
+        try:
+            self.vl_arg_postprocess_max_main_operation_chars = max(
+                200,
+                int(self.vl_arg_postprocess_config.get("max_main_operation_chars", 4000)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_max_main_operation_chars = 4000
+        try:
+            self.vl_arg_postprocess_max_context_chars = max(
+                400,
+                int(self.vl_arg_postprocess_config.get("max_context_chars", 8000)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_max_context_chars = 8000
+        try:
+            self.vl_arg_postprocess_max_subtitle_lines = max(
+                8,
+                int(self.vl_arg_postprocess_config.get("max_subtitle_lines", 120)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_max_subtitle_lines = 120
+        self._vl_arg_structured_system_prompt = get_prompt(
+            PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM,
+            fallback=self._get_default_vl_arg_structured_system_prompt(),
+        )
+        self._vl_arg_structured_user_prompt_template = get_prompt(
+            PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_USER,
+            fallback=self._get_default_vl_arg_structured_user_prompt_template(),
+        )
 
         # Control whether multi-step clip requests are merged
         self.merge_multistep_clip_requests = bool(config.get("merge_multistep_clip_requests", False))
@@ -1341,6 +1379,386 @@ class VLMaterialGenerator:
             "(prefer final state or just-before-submit moment). "
             "Optional fields can be omitted or returned as empty values when unnecessary."
         )
+
+    @staticmethod
+    def _get_default_vl_arg_structured_system_prompt() -> str:
+        return (
+            "你是教程步骤增强助手。"
+            "请基于语义单元上下文补充 main_operation，使其逻辑清晰、细节完整。"
+            "仅返回补充后的 Markdown 正文，不要返回 JSON。"
+        )
+
+    @staticmethod
+    def _get_default_vl_arg_structured_user_prompt_template() -> str:
+        return (
+            "【原始核心操作(main_operation)】\n"
+            "{{main_operation}}\n\n"
+            "【语义单元字幕上下文】\n"
+            "{{subtitle_context}}\n\n"
+            "请直接输出补充后的 Markdown："
+        )
+
+    @staticmethod
+    def _normalize_main_operation_markdown(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                return "\n".join(
+                    [str(item or "").strip() for item in parsed if str(item or "").strip()]
+                ).strip()
+            return text
+        if isinstance(value, (list, tuple, set)):
+            return "\n".join(
+                [str(item or "").strip() for item in value if str(item or "").strip()]
+            ).strip()
+        return str(value).strip()
+
+    @staticmethod
+    def _strip_markdown_fence(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return ""
+        fenced = re.match(r"^```(?:markdown|md)?\s*([\s\S]*?)\s*```$", raw, flags=re.IGNORECASE)
+        if fenced:
+            return str(fenced.group(1) or "").strip()
+        return raw
+
+    def _render_vl_arg_structured_user_prompt(
+        self,
+        *,
+        main_operation: str,
+        subtitle_context: str,
+    ) -> str:
+        template = str(getattr(self, "_vl_arg_structured_user_prompt_template", "") or "").strip()
+        if not template:
+            template = self._get_default_vl_arg_structured_user_prompt_template()
+        return (
+            template.replace("{{main_operation}}", main_operation)
+            .replace("{{subtitle_context}}", subtitle_context)
+            .replace("{main_operation}", main_operation)
+            .replace("{subtitle_context}", subtitle_context)
+        )
+
+    @staticmethod
+    def _build_vl_arg_batch_main_operation_text(step_payloads: List[Dict[str, Any]]) -> str:
+        blocks: List[str] = []
+        for payload in step_payloads:
+            step_id = int(safe_float(payload.get("step_id", 0), 0.0))
+            if step_id <= 0:
+                continue
+            main_operation = str(payload.get("main_operation", "") or "").strip()
+            if not main_operation:
+                continue
+            blocks.append(f"[STEP_ID={step_id}]\n{main_operation}")
+        return "\n\n".join(blocks).strip()
+
+    @staticmethod
+    def _get_default_vl_arg_batch_contract_prompt() -> str:
+        return (
+            "【批量输出契约】\n"
+            "你收到的是同一语义单元内多个步骤的 main_operation。\n"
+            "请严格按以下结构返回每个步骤的增强结果：\n"
+            "[STEP_ID=<整数>]\n"
+            "<该步骤增强后的 Markdown>\n\n"
+            "约束：\n"
+            "1) 每个 STEP_ID 仅输出一次；\n"
+            "2) 仅输出上述结构，不要输出 JSON；\n"
+            "3) 不要输出代码块围栏。"
+        )
+
+    def _render_vl_arg_batch_prompt(
+        self,
+        *,
+        step_payloads: List[Dict[str, Any]],
+        subtitle_context: str,
+    ) -> str:
+        step_text = self._build_vl_arg_batch_main_operation_text(step_payloads)
+        if not step_text:
+            return ""
+        base_prompt = self._render_vl_arg_structured_user_prompt(
+            main_operation=step_text,
+            subtitle_context=subtitle_context,
+        )
+        step_ids = [
+            int(safe_float(item.get("step_id", 0), 0.0))
+            for item in step_payloads
+            if int(safe_float(item.get("step_id", 0), 0.0)) > 0
+        ]
+        valid_step_ids = ", ".join([str(step_id) for step_id in step_ids])
+        return (
+            f"{base_prompt}\n\n"
+            f"{self._get_default_vl_arg_batch_contract_prompt()}\n"
+            f"仅允许输出以下 STEP_ID: {valid_step_ids}"
+        ).strip()
+
+    def _parse_vl_arg_batch_response(
+        self,
+        *,
+        text: str,
+        expected_step_ids: List[int],
+    ) -> Dict[int, str]:
+        cleaned_text = self._strip_markdown_fence(text)
+        if not cleaned_text:
+            return {}
+        expected_ids = {int(item) for item in expected_step_ids if int(item) > 0}
+        if not expected_ids:
+            return {}
+
+        step_marker_pattern = re.compile(r"^\[STEP_ID\s*=\s*(\d+)\]\s*$", re.IGNORECASE | re.MULTILINE)
+        markers = list(step_marker_pattern.finditer(cleaned_text))
+        if not markers:
+            if len(expected_ids) == 1:
+                only_step_id = next(iter(expected_ids))
+                return {only_step_id: cleaned_text.strip()}
+            return {}
+
+        parsed_by_step: Dict[int, str] = {}
+        for index, marker in enumerate(markers):
+            step_id = int(marker.group(1))
+            if step_id not in expected_ids:
+                continue
+            start_idx = marker.end()
+            end_idx = markers[index + 1].start() if index + 1 < len(markers) else len(cleaned_text)
+            body = cleaned_text[start_idx:end_idx].strip()
+            if body:
+                parsed_by_step[step_id] = body
+        return parsed_by_step
+
+    def _build_vl_arg_subtitle_context(
+        self,
+        *,
+        semantic_unit: Dict[str, Any],
+        output_dir: str,
+    ) -> str:
+        unit_id = str(semantic_unit.get("unit_id", "") or "").strip() or "UNKNOWN"
+        unit_start_sec = safe_float(semantic_unit.get("start_sec", 0.0), 0.0)
+        unit_end_sec = safe_float(semantic_unit.get("end_sec", unit_start_sec), unit_start_sec)
+        if unit_end_sec < unit_start_sec:
+            unit_end_sec = unit_start_sec
+
+        topic = str(semantic_unit.get("knowledge_topic", "") or "").strip()
+        full_text = str(semantic_unit.get("full_text", "") or "").strip()
+        text = str(semantic_unit.get("text", "") or "").strip()
+        context_lines: List[str] = []
+        if topic:
+            context_lines.append(f"语义单元主题：{topic}")
+        if full_text or text:
+            context_lines.append(f"语义单元文本：{full_text or text}")
+
+        subtitle_lines: List[str] = []
+        try:
+            all_subtitles = self._load_subtitles_for_output_dir(output_dir)
+            relative_subtitles = self._build_unit_relative_subtitles(
+                all_subtitles,
+                unit_start_sec,
+                unit_end_sec,
+            )
+        except Exception as error:
+            logger.warning(
+                "[VL-Arg] load subtitles failed: unit=%s, output_dir=%s, error=%s",
+                unit_id,
+                output_dir,
+                error,
+            )
+            relative_subtitles = []
+
+        max_lines = max(1, int(self.vl_arg_postprocess_max_subtitle_lines))
+        for sub in relative_subtitles[:max_lines]:
+            sub_text = str(sub.get("text", "") or "").strip()
+            if not sub_text:
+                continue
+            sub_start = safe_float(sub.get("start_sec", 0.0), 0.0)
+            sub_end = safe_float(sub.get("end_sec", sub_start), sub_start)
+            subtitle_lines.append(f"[{sub_start:.2f}s-{sub_end:.2f}s] {sub_text}")
+
+        if subtitle_lines:
+            context_lines.append("语义单元字幕：\n" + "\n".join(subtitle_lines))
+        else:
+            context_lines.append("语义单元字幕：无")
+
+        context = "\n".join([line for line in context_lines if line])
+        max_chars = max(400, int(self.vl_arg_postprocess_max_context_chars))
+        if len(context) > max_chars:
+            context = context[:max_chars].rstrip() + "..."
+        return context
+
+    async def _postprocess_unit_main_operations(
+        self,
+        *,
+        analysis_result: Any,
+        semantic_unit: Dict[str, Any],
+        output_dir: str,
+    ) -> None:
+        if not self.vl_arg_postprocess_enabled:
+            return
+        if not isinstance(semantic_unit, dict):
+            return
+        if str(getattr(analysis_result, "analysis_mode", "") or "").strip().lower() != "tutorial_stepwise":
+            return
+
+        raw_steps = getattr(analysis_result, "raw_response_json", []) or []
+        if not isinstance(raw_steps, list) or not raw_steps:
+            return
+
+        subtitle_context = self._build_vl_arg_subtitle_context(
+            semantic_unit=semantic_unit,
+            output_dir=output_dir,
+        )
+        if not subtitle_context:
+            return
+
+        unit_id = str(semantic_unit.get("unit_id", "") or "").strip() or "UNKNOWN"
+        raw_steps_by_id: Dict[int, Dict[str, Any]] = {}
+        for index, raw_step in enumerate(raw_steps, start=1):
+            if not isinstance(raw_step, dict):
+                continue
+            step_id = int(safe_float(raw_step.get("step_id", index), float(index)))
+            if step_id <= 0:
+                step_id = index
+            raw_steps_by_id[step_id] = raw_step
+
+        parsed_steps_by_id: Dict[int, Any] = {}
+        for index, parsed_step in enumerate(getattr(analysis_result, "analysis_results", []) or [], start=1):
+            step_id = int(safe_float(getattr(parsed_step, "step_id", index), float(index)))
+            if step_id <= 0:
+                step_id = index
+            parsed_steps_by_id[step_id] = parsed_step
+
+        clips_by_step: Dict[int, List[Dict[str, Any]]] = {}
+        for clip in getattr(analysis_result, "clip_requests", []) or []:
+            if not isinstance(clip, dict):
+                continue
+            step_id = int(safe_float(clip.get("step_id", 0), 0.0))
+            if step_id <= 0:
+                continue
+            clips_by_step.setdefault(step_id, []).append(clip)
+
+        step_ids = sorted(set(raw_steps_by_id.keys()) | set(parsed_steps_by_id.keys()) | set(clips_by_step.keys()))
+        if not step_ids:
+            return
+
+        step_payloads: List[Dict[str, Any]] = []
+        for step_id in step_ids:
+            raw_step = raw_steps_by_id.get(step_id)
+            parsed_step = parsed_steps_by_id.get(step_id)
+
+            raw_main_operation: Any = None
+            if isinstance(raw_step, dict):
+                raw_main_operation = raw_step.get("main_operation")
+                if raw_main_operation is None:
+                    raw_main_operation = raw_step.get("main_operations")
+            if raw_main_operation is None and parsed_step is not None:
+                raw_main_operation = getattr(parsed_step, "main_operation", None)
+            if raw_main_operation is None and clips_by_step.get(step_id):
+                raw_main_operation = clips_by_step[step_id][0].get("main_operation")
+
+            main_operation = self._normalize_main_operation_markdown(raw_main_operation)
+            if not main_operation:
+                continue
+            if len(main_operation) > self.vl_arg_postprocess_max_main_operation_chars:
+                main_operation = (
+                    main_operation[: self.vl_arg_postprocess_max_main_operation_chars].rstrip() + "..."
+                )
+
+            step_payloads.append(
+                {
+                    "step_id": step_id,
+                    "main_operation": main_operation,
+                    "raw_step": raw_step,
+                    "parsed_step": parsed_step,
+                    "clips": clips_by_step.get(step_id, []),
+                }
+            )
+        if not step_payloads:
+            return
+
+        prompt = self._render_vl_arg_batch_prompt(
+            step_payloads=step_payloads,
+            subtitle_context=subtitle_context,
+        )
+        if not prompt:
+            return
+
+        step_ids_in_batch = [int(item.get("step_id", 0)) for item in step_payloads]
+        try:
+            enhanced_text, _metadata, _logprobs = await llm_gateway.deepseek_complete_text(
+                prompt=prompt,
+                system_message=self._vl_arg_structured_system_prompt,
+                model=self.vl_arg_postprocess_model,
+                hedge_context={
+                    "semantic_unit_id": unit_id,
+                    "step_ids": step_ids_in_batch,
+                    "stage": "vl_arg_main_operation_postprocess_batch",
+                },
+            )
+        except Exception as error:
+            logger.warning(
+                "[VL-Arg] batch postprocess failed: unit=%s, step_ids=%s, error=%s",
+                unit_id,
+                step_ids_in_batch,
+                error,
+            )
+            return
+
+        enhanced_by_step = self._parse_vl_arg_batch_response(
+            text=str(enhanced_text or ""),
+            expected_step_ids=step_ids_in_batch,
+        )
+        if not enhanced_by_step:
+            logger.warning(
+                "[VL-Arg] batch postprocess parse failed: unit=%s, step_ids=%s, response_preview=%s",
+                unit_id,
+                step_ids_in_batch,
+                str(enhanced_text or "")[:240],
+            )
+            return
+
+        updated_steps = 0
+        for payload in step_payloads:
+            step_id = int(payload.get("step_id", 0))
+            if step_id <= 0:
+                continue
+            raw_step = payload.get("raw_step")
+            parsed_step = payload.get("parsed_step")
+            step_clips = payload.get("clips") or []
+            normalized_enhanced = self._strip_markdown_fence(
+                str(enhanced_by_step.get(step_id, "") or "")
+            )
+            if not normalized_enhanced:
+                continue
+            if isinstance(raw_step, dict):
+                raw_step["main_operation"] = normalized_enhanced
+                raw_step["main_operations"] = normalized_enhanced
+            if parsed_step is not None:
+                try:
+                    parsed_step.main_operation = [normalized_enhanced]
+                except Exception as error:
+                    logger.warning(
+                        "[VL-Arg] write parsed step failed: unit=%s, step_id=%s, error=%s",
+                        unit_id,
+                        step_id,
+                        error,
+                    )
+            for clip in step_clips:
+                clip["main_operation"] = [normalized_enhanced]
+                clip["main_operations"] = normalized_enhanced
+
+            updated_steps += 1
+
+        if updated_steps > 0:
+            logger.info(
+                "[VL-Arg] main_operation postprocess done: unit=%s, updated_steps=%s",
+                unit_id,
+                updated_steps,
+            )
 
     @staticmethod
     def _get_default_grid_spatial_anchor_prompt() -> str:
@@ -3584,6 +4002,8 @@ class VLMaterialGenerator:
             VLGenerationResult: 生成结果
         """
         result = VLGenerationResult()
+        resolved_output_dir = str(output_dir or Path(video_path).parent)
+        self._current_subtitle_output_dir = resolved_output_dir
         
         if not self.enabled:
             result.success = False
@@ -3622,7 +4042,7 @@ class VLMaterialGenerator:
             )
         
         # 检查是否有缓存
-        cache_path = self._get_cache_path(video_path, output_dir)
+        cache_path = self._get_cache_path(video_path, resolved_output_dir)
         use_cache = self.config.get("use_cache", True)
         
         # VL分析结果(来自缓存或新分析)
@@ -3828,6 +4248,11 @@ class VLMaterialGenerator:
                         )
                         continue
 
+                    await self._postprocess_unit_main_operations(
+                        analysis_result=analysis_result,
+                        semantic_unit=meta.get("semantic_unit", {}),
+                        output_dir=resolved_output_dir,
+                    )
                     semantic_unit = meta.get("semantic_unit", {})
                     should_type_override = self._analysis_result_should_type_override(analysis_result)
                     has_no_needed_video = self._analysis_result_has_no_needed_video(analysis_result)
@@ -4009,7 +4434,7 @@ class VLMaterialGenerator:
                             prefer_screenshot_keyframes = False
                         await self._save_tutorial_assets_for_unit(
                             video_path=tutorial_asset_video_path,
-                            output_dir=output_dir or str(Path(video_path).parent),
+                            output_dir=resolved_output_dir,
                             unit_id=unit_id,
                             clip_requests=analysis_result.clip_requests,
                             screenshot_requests=analysis_result.screenshot_requests,

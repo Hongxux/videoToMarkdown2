@@ -12,6 +12,7 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 import java.net.URI
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 data class VideoProbeEpisode(
     val episodeNo: Int,
@@ -243,12 +244,36 @@ data class CollectionBatchSkippedDto(
 )
 
 object CollectionApiFactory {
+    private const val DEFAULT_CONNECT_TIMEOUT_SEC = 10
+    private const val DEFAULT_READ_TIMEOUT_SEC = 10
+    private const val VIDEO_INFO_TIMEOUT_MULTIPLIER = 2
+    private const val VIDEO_INFO_CONNECT_TIMEOUT_SEC =
+        DEFAULT_CONNECT_TIMEOUT_SEC * VIDEO_INFO_TIMEOUT_MULTIPLIER
+    private const val VIDEO_INFO_READ_TIMEOUT_SEC =
+        DEFAULT_READ_TIMEOUT_SEC * VIDEO_INFO_TIMEOUT_MULTIPLIER
+
+    private val probeTimeoutPaths = setOf("/api/mobile/video-info", "/api/video-info")
+
     fun create(baseUrl: String): CollectionRetrofitApi {
         val logging = HttpLoggingInterceptor().apply {
             level = HttpLoggingInterceptor.Level.NONE
         }
         val client = OkHttpClient.Builder()
             .addInterceptor(logging)
+            .addInterceptor { chain ->
+                val request = chain.request()
+                val path = request.url.encodedPath
+                val timeoutChain = if (probeTimeoutPaths.contains(path)) {
+                    chain
+                        .withConnectTimeout(VIDEO_INFO_CONNECT_TIMEOUT_SEC, TimeUnit.SECONDS)
+                        .withReadTimeout(VIDEO_INFO_READ_TIMEOUT_SEC, TimeUnit.SECONDS)
+                } else {
+                    chain
+                }
+                timeoutChain.proceed(request)
+            }
+            .connectTimeout(DEFAULT_CONNECT_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)
+            .readTimeout(DEFAULT_READ_TIMEOUT_SEC.toLong(), TimeUnit.SECONDS)
             .build()
         return Retrofit.Builder()
             .baseUrl(normalizeBaseUrl(baseUrl))

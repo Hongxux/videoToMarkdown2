@@ -13,6 +13,77 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-26 Telemetry HOT 漏采与 Token 焦点词丢失
+- 日期：2026-02-26
+- 现象与影响范围：
+  - 多个高价值交互事件未进入 HOT 逻辑池，微观假说样本偏冷，画像更新速度与准确性下降。
+  - token 级事件仅携带段落文本，上下文粒度过粗，无法稳定定位用户真实认知焦点。
+- 触发条件：
+  - `HOT_EVENT_TYPES` 未覆盖 `selection_action_copy/like/unlike/bold`、`paragraph_restore_deleted_by_swipe`、`noise_capsule_expanded` 等动作。
+  - HOT 记录对 token 事件只读取 `payload.token`，缺少多别名兼容与局部语境提取。
+- 根因定位：
+  - 热事件枚举与前端事件演进不同步，存在“端上已报，后端未热化”的枚举漂移。
+  - 事件补全过程未区分段落级与 token 级，导致焦点词在长段落中语义稀释。
+- 修复措施：
+  - 扩充 HOT 事件集合，并新增 `TOKEN_LEVEL_EVENTS` 分支处理。
+  - 新增 token 三层上下文字段：`focusText/focusSource/tokenType/localContext/localContextFound`。
+  - 微观假说输入新增 `focus_text/token_type/local_context`，并补齐新增事件到标准动作映射。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 热记录抽样检查：`var/telemetry/mobile_reader_logic_pool.ndjson` 中 token 事件应包含 `focusText` 与 `localContext`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：新增“事件枚举对齐检查”，确保 Android 端新增事件在 HOT/Action 映射均有归宿。
+  - 监控：按事件类型输出 `hotCount/tokenContextMissingCount` 指标，发现焦点词缺失及时告警。
+  - 校验：提示词升级前后执行一次 I/O schema 对齐核对，重点检查 `action_cluster` 与 token 上下文字段。
+  - 回滚：可仅回退 token 分支补全字段，不影响基础 raw/cold/hot 入站与落盘链路。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/TelemetryIngestController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/MicroHypothesisExtractorService.java`
+  - `POST /api/telemetry/ingest`
+- 复盘要点：
+  - 行为遥测体系中，事件枚举是“数据契约”而非实现细节，必须纳入版本化治理。
+  - token 级行为必须坚持“焦点对象 + 局部语境 + 节点语境”三层补全，才能避免认知推断漂移。
+
+## 2026-02-26 Android `GET /api/mobile/video-info` 超时过短且后台完成无提醒
+- 日期：2026-02-26
+- 现象与影响范围：
+  - Android 端执行视频探测（`GET /api/mobile/video-info`）时，在弱网或平台探测耗时偏长场景下容易超时，用户误以为探测失败。
+  - 用户在探测过程中切到后台后，即使探测完成也缺少系统提醒，必须手动回到页面才能知道结果。
+- 触发条件：
+  - 探测请求耗时超过客户端默认超时窗口（约 10s）。
+  - 探测进行中应用切到后台（Home 键、切换 App）。
+- 根因定位：
+  - `CollectionApiFactory` 未对视频探测链路单独配置超时，沿用默认 `OkHttp` connect/read 超时。
+  - `CollectionFeatureViewModel` 仅更新前台状态流，没有“后台完成通知”路径。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+  - 对 `/api/mobile/video-info` 与 `/api/video-info` 增加路径级超时策略；将 connect/read 超时从 10s 提升为 20s（2 倍）。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+  - 探测执行改为 `Dispatchers.IO + SupervisorJob` 的独立后台协程，并在新探测开始前取消旧探测，避免并发探测状态互相覆盖。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskCompletionNotifier.kt`
+  - 新增视频探测完成通知能力；在 `ProcessLifecycleOwner` 判定应用处于后台时，探测成功/失败均发送系统通知提醒。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增补 Android 侧探测链路回归用例，覆盖“弱网 + 探测超过 10s”与“切后台后通知触发”场景。
+  - 监控：
+    - 对探测失败增加 `timeout/network` 分类统计，按端点与平台维度聚合观察。
+  - 校验：
+    - 新增移动端接口评审检查项：慢查询接口必须显式声明超时策略与后台完成反馈策略。
+  - 回滚：
+    - 若通知策略产生误触，可临时仅保留超时调整，关闭后台探测完成通知入口。
+- 相关文件/接口：
+  - `GET /api/mobile/video-info`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskCompletionNotifier.kt`
+- 复盘要点：
+  - 视频探测不是轻量请求，不能沿用默认短超时；应按接口语义做差异化超时配置。
+  - 只提供前台 UI 反馈无法覆盖真实移动场景，后台完成提醒应作为长耗时探测的标准能力。
+
 ## 2026-02-25 Android 语义阅读器 token 批注点击崩溃与节点批注覆盖正文
 - 日期：2026-02-25
 - 现象与影响范围：
@@ -5087,4 +5158,30 @@
     - 新增评审清单：长耗时阶段必须提供结构化硬信号 checkpoint，不允许仅依赖日志文案。
   - 回滚：
     - 若新桥接策略异常，可临时退回 Stage1 专用桥接，同时保留 Python 结构化信号输出，便于二次切换。
+
+## 2026-02-26 Android 阅读器 insight tags 行双击无法触发整节点加粗
+- 日期：2026-02-26
+- 现象与影响范围：
+  - 词级 `insight tags` 存在的段落中，用户双击时偶发无法进入段落级“共鸣/加粗”状态。
+  - 用户体感为“有 insight 标签的行双击失效”，且在整段加粗后担心 insight 下划线丢失。
+- 根因定位：
+  - 双击入口存在 `textView.hasSelection()` 的前置拦截；在系统原生双击选词先抢占时，会提前终止段落双击链路。
+  - insight 样式与整段样式叠加顺序未显式保障“下划线最后落盘”，在后续样式调整中有可见性回归风险。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 双击入口改为先清理原生选区（`clearNativeTextSelection`），移除“已有选区直接 return”的硬拦截，确保双击稳定进入整段加粗链路。
+  - 在 `applySelectionStyle(...)` 中将 insight 范围先归一为 `safeInsightRanges`，并将 insight 下划线改为样式链路末尾叠加，保证整段加粗后仍保留下划线。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin`：未通过（环境内存/分页文件限制导致 Gradle Daemon 启动失败，错误 `Native memory allocation (mmap) failed`）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：未通过（环境内存/分页文件限制，JVM `mmap` 失败）。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 补充阅读器手势回归：覆盖“命中 insight term 的双击仍触发整段加粗”与“整段加粗后 insight 下划线保留”。
+  - 监控：
+    - 保留并观察 `paragraph_resonance_double_tap` 事件命中率，按“含 insight/不含 insight 段落”分组看异常波动。
+  - 校验：
+    - 评审约束：手势入口不得依赖易被系统抢占的瞬时选区状态作为硬门禁。
+  - 回滚：
+    - 若出现误触升高，可仅回调双击抑制窗口参数，保留“清理选区 + 下划线末尾叠加”两项修复。
 

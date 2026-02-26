@@ -1145,6 +1145,62 @@ button:active:not(:disabled),
     margin: 0 auto;
 }
 
+.markdown-loading-shell {
+    display: grid;
+    gap: 14px;
+    padding: 14px 2px 8px;
+    max-width: min(720px, 100%);
+}
+
+.markdown-loading-title {
+    font-size: 16px;
+    font-weight: 620;
+    color: #0f172a;
+    letter-spacing: -0.01em;
+}
+
+.markdown-loading-detail {
+    font-size: 13px;
+    color: #475569;
+    line-height: 1.58;
+}
+
+.markdown-loading-lines {
+    display: grid;
+    gap: 11px;
+}
+
+.markdown-loading-line {
+    display: block;
+    position: relative;
+    height: 11px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgba(226, 232, 240, 0.92) 0%, rgba(241, 245, 249, 0.96) 100%);
+    overflow: hidden;
+}
+
+.markdown-loading-line::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    transform: translateX(-100%);
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0) 0%, rgba(255, 255, 255, 0.72) 48%, rgba(255, 255, 255, 0) 100%);
+    animation: markdownLoadingShimmer 1.25s ease-in-out infinite;
+}
+
+.markdown-loading-line.w-95 { width: 95%; }
+.markdown-loading-line.w-92 { width: 92%; }
+.markdown-loading-line.w-88 { width: 88%; }
+.markdown-loading-line.w-72 { width: 72%; }
+.markdown-loading-line.w-64 { width: 64%; }
+.markdown-loading-line.w-56 { width: 56%; }
+
+@keyframes markdownLoadingShimmer {
+    100% {
+        transform: translateX(100%);
+    }
+}
+
 .task-list.invitation-pulse,
 .submit-card.invitation-pulse {
     animation: invitationTargetPulse 620ms cubic-bezier(0.22, 1, 0.36, 1) 1;
@@ -1352,6 +1408,10 @@ button:active:not(:disabled),
     .outline-item,
     .paper-scroll-surface {
         transition: none !important;
+    }
+
+    .markdown-loading-line::after {
+        animation: none !important;
     }
 
     .paragraph-card.touch-hold-activated,

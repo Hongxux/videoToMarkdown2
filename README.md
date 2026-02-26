@@ -45,3 +45,8 @@
 - 总览：`docs/architecture/overview.md`
 - 仓库职责图：`docs/architecture/repository-map.md`
 - 升级记录：`docs/architecture/upgrade-log.md`
+
+## Android Update Release
+- SOP doc: `scripts/release/README.AndroidUpdate.md`
+- One-command flow (upload + publish + verify): `scripts/release/release_and_verify_android_update.ps1`
+- Interactive wizard: `scripts/release/android_update_wizard.ps1`

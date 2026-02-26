@@ -3249,6 +3249,29 @@
         return resp.json();
     }
 
+    function renderMarkdownLoadingSkeleton(options = {}) {
+        const title = escapeHtml(String((options && options.title) || '正在打开内容...'));
+        const detail = escapeHtml(String((options && options.detail) || '正在传输 Markdown 正文，请稍候。'));
+        const markdownBody = document.getElementById('markdownBody');
+        if (!markdownBody) {
+            return;
+        }
+        markdownBody.innerHTML = `
+            <div class="markdown-loading-shell" role="status" aria-live="polite">
+                <div class="markdown-loading-title">${title}</div>
+                <div class="markdown-loading-detail">${detail}</div>
+                <div class="markdown-loading-lines" aria-hidden="true">
+                    <span class="markdown-loading-line w-95"></span>
+                    <span class="markdown-loading-line w-72"></span>
+                    <span class="markdown-loading-line w-88"></span>
+                    <span class="markdown-loading-line w-64"></span>
+                    <span class="markdown-loading-line w-92"></span>
+                    <span class="markdown-loading-line w-56"></span>
+                </div>
+            </div>
+        `;
+    }
+
     function isContentOpenRequestActive(requestSeq) {
         return Number(requestSeq) > 0 && Number(requestSeq) === Number(state.contentOpenRequestSeq);
     }
@@ -3267,33 +3290,38 @@
         resetContentTransientState();
         renderTaskList();
         const viewerTitle = document.getElementById('viewerTitle');
-        const markdownBody = document.getElementById('markdownBody');
-        const loadingHintDelayMs = 260;
-        let loadingHintTimerId = 0;
+        let slowTransferHintTimerId = 0;
 
         if (keepExistingVisibleContent) {
             if (viewerTitle) {
                 viewerTitle.textContent = '正在更新内容...';
             }
         } else {
-            loadingHintTimerId = window.setTimeout(() => {
+            if (viewerTitle) {
+                viewerTitle.textContent = '正在打开内容...';
+            }
+            renderMarkdownLoadingSkeleton({
+                title: '正在打开内容...',
+                detail: '正在拉取正文并准备渲染。',
+            });
+            slowTransferHintTimerId = window.setTimeout(() => {
                 if (shouldAbortApply()) {
                     return;
                 }
-                if (viewerTitle) {
-                    viewerTitle.textContent = '正在打开内容...';
-                }
-                if (markdownBody) {
-                    markdownBody.innerHTML = '<div class="empty">正在准备内容...</div>';
-                }
-            }, loadingHintDelayMs);
+                renderMarkdownLoadingSkeleton({
+                    title: '内容传输中...',
+                    detail: '当前正文较长，仍在传输，请稍候。',
+                });
+            }, 1600);
         }
 
-        const payload = await fetchMarkdownPayload(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/markdown`)
+        const payload = await fetchMarkdownPayload(
+            `${API_BASE}/tasks/${encodeURIComponent(taskId)}/markdown?includePersonalization=false`
+        )
             .finally(() => {
-                if (loadingHintTimerId) {
-                    window.clearTimeout(loadingHintTimerId);
-                    loadingHintTimerId = 0;
+                if (slowTransferHintTimerId) {
+                    window.clearTimeout(slowTransferHintTimerId);
+                    slowTransferHintTimerId = 0;
                 }
             });
         if (shouldAbortApply()) {
@@ -3326,8 +3354,12 @@
         setContentNeedsReload(false);
         setContentToolsAdvancedReveal(false);
         resetContentTransientState();
+        renderMarkdownLoadingSkeleton({
+            title: '正在打开笔记...',
+            detail: '正在拉取所选 Markdown 文件。',
+        });
         const payload = await fetchMarkdownPayload(
-            `${API_BASE}/tasks/${encodeURIComponent(taskId)}/markdown/by-path?path=${encodeURIComponent(relativePath)}`
+            `${API_BASE}/tasks/${encodeURIComponent(taskId)}/markdown/by-path?path=${encodeURIComponent(relativePath)}&includePersonalization=false`
         );
         applyMarkdownPayloadToState(payload, {
             keepExistingTitle: true,
@@ -3369,7 +3401,10 @@
 
         const markdownBody = document.getElementById('markdownBody');
         if (markdownBody) {
-            markdownBody.innerHTML = '<div class="empty">内容正在生成中，系统会在完成后提供可编辑内容。你可以稍后点击“重新打开”查看最新结果。</div>';
+            renderMarkdownLoadingSkeleton({
+                title: '内容正在生成中...',
+                detail: '系统会在完成后自动替换为可编辑正文。',
+            });
         }
         teardownScrollSpy();
         const outlineList = document.getElementById('outlineList');

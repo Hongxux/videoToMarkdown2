@@ -45,6 +45,8 @@ class PromptKeys:
     DEEPSEEK_MD_STRUCTURED_USER = "deepseek.markdown.structured.user"
     DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM = "deepseek.markdown.img_desc_augment.system"
     DEEPSEEK_MD_IMG_DESC_AUG_USER = "deepseek.markdown.img_desc_augment.user"
+    DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM = "deepseek.vl_arg.structured.system"
+    DEEPSEEK_VL_ARG_STRUCTURED_USER = "deepseek.vl_arg.structured.user"
 
     VISION_AI_CONCRETE_KNOWLEDGE_SYSTEM = "vision_ai.concrete_knowledge.system"
     VISION_AI_CONCRETE_KNOWLEDGE_USER = "vision_ai.concrete_knowledge.user"
@@ -192,6 +194,16 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         key=PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR,
         relative_path="vl/video_analysis/grid_spatial_anchor.md",
         description="VL tutorial grid spatial anchor prompt",
+    ),
+    PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM,
+        relative_path="deepseek/vl_arg/structured_system.md",
+        description="VL main_operation 增强 System Prompt",
+    ),
+    PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_USER: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_USER,
+        relative_path="deepseek/vl_arg/structured_user.md",
+        description="VL main_operation 增强 User Prompt",
     ),
     PromptKeys.DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM: PromptRegistryEntry(
         key=PromptKeys.DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM,

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.common.VideoInputNormalizer;
+import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
@@ -89,6 +90,9 @@ public class MobileMarkdownController {
     @Autowired
     private TaskQueueManager taskQueueManager;
 
+    @Autowired(required = false)
+    private PythonGrpcClient pythonGrpcClient;
+
     @Autowired
     private com.mvp.module2.fusion.service.StorageTaskCacheService storageTaskCacheService;
 
@@ -103,6 +107,9 @@ public class MobileMarkdownController {
 
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
+
+    @Value("${mobile.video-info.timeout-seconds:30}")
+    private int mobileVideoInfoTimeoutSeconds;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     @GetMapping("/tasks")
@@ -176,18 +183,21 @@ public class MobileMarkdownController {
 
         String normalizedUserId = normalizeUserId(request.userId);
         TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request.priority);
+        String lockedTitle = resolveSubmissionTaskTitle(request.videoUrl, normalizedVideoInput);
         logger.info("Mobile task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
         TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
                 normalizedUserId,
                 normalizedVideoInput,
                 normalizeOutputDir(request.outputDir),
-                priority
+                priority,
+                lockedTitle
         );
         linkCollectionEpisodeIfNecessary(request.collectionId, request.episodeNo, task.taskId);
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
         payload.put("taskId", task.taskId);
+        payload.put("title", task.title != null ? task.title : "");
         payload.put("status", task.status.name());
         payload.put("normalizedVideoUrl", normalizedVideoInput);
         payload.put("collectionId", request.collectionId != null ? request.collectionId.trim() : "");
@@ -412,7 +422,8 @@ public class MobileMarkdownController {
     @GetMapping("/tasks/{taskId}/markdown")
     public ResponseEntity<?> getTaskMarkdown(
             @PathVariable String taskId,
-            @RequestParam(value = "userId", required = false) String userId
+            @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "includePersonalization", defaultValue = "true") boolean includePersonalization
     ) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
@@ -438,15 +449,17 @@ public class MobileMarkdownController {
             response.put("status", task.status);
             response.put("lastOpenedAt", instantToText(openedAt));
             response.put("markdown", markdown);
+            response.put("markdownBytes", markdown.getBytes(StandardCharsets.UTF_8).length);
             response.put("markdownPath", resolved.markdownPath.toString());
             response.put("baseDir", resolved.baseDir.toString());
             response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
-            appendPersonalizedReading(
+            appendOrWarmupPersonalizedReading(
                     response,
                     task.taskId,
                     resolveReaderUserId(task, userId),
                     resolved.markdownPath,
-                    markdown
+                    markdown,
+                    includePersonalization
             );
             return ResponseEntity.ok(response);
         } catch (IOException ex) {
@@ -459,6 +472,7 @@ public class MobileMarkdownController {
     public ResponseEntity<?> getTaskMarkdownByRelativePath(
             @PathVariable String taskId,
             @RequestParam(value = "userId", required = false) String userId,
+            @RequestParam(value = "includePersonalization", defaultValue = "true") boolean includePersonalization,
             @RequestParam("path") String rawPath
     ) {
         TaskView task = resolveTaskView(taskId);
@@ -500,15 +514,17 @@ public class MobileMarkdownController {
             response.put("status", task.status);
             response.put("lastOpenedAt", instantToText(openedAt));
             response.put("markdown", markdown);
+            response.put("markdownBytes", markdown.getBytes(StandardCharsets.UTF_8).length);
             response.put("markdownPath", target.toString());
             response.put("baseDir", resolved.baseDir.toString());
             response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
-            appendPersonalizedReading(
+            appendOrWarmupPersonalizedReading(
                     response,
                     task.taskId,
                     resolveReaderUserId(task, userId),
                     target,
-                    markdown
+                    markdown,
+                    includePersonalization
             );
             return ResponseEntity.ok(response);
         } catch (IOException ex) {
@@ -1291,10 +1307,46 @@ public class MobileMarkdownController {
         }
     }
 
+    private void appendOrWarmupPersonalizedReading(
+            Map<String, Object> response,
+            String taskId,
+            String userId,
+            Path markdownPath,
+            String markdown,
+            boolean includePersonalization
+    ) {
+        if (response == null) {
+            return;
+        }
+        if (includePersonalization) {
+            appendPersonalizedReading(response, taskId, userId, markdownPath, markdown);
+            response.put("personalizationIncluded", true);
+            return;
+        }
+        response.put("personalizationIncluded", false);
+        if (personaAwareReadingService == null) {
+            response.put("personalizationWarmupStatus", "unavailable");
+            return;
+        }
+        String markdownPathText = markdownPath != null ? markdownPath.toString() : "";
+        if (!StringUtils.hasText(markdownPathText)) {
+            response.put("personalizationWarmupStatus", "skipped_no_markdown_path");
+            return;
+        }
+        try {
+            personaAwareReadingService.precomputeAsync(taskId, userId, markdownPathText);
+            response.put("personalizationWarmupStatus", "started");
+        } catch (Exception ex) {
+            logger.warn("start personalization warmup failed: taskId={} err={}", taskId, ex.getMessage());
+            response.put("personalizationWarmupStatus", "failed_to_start");
+        }
+    }
+
     private TaskView fromRuntimeTask(TaskEntry task) {
         TaskView view = new TaskView();
         view.taskId = task.taskId;
-        view.title = deriveTaskTitle(task.videoUrl, task.taskId);
+        String lockedTitle = trimToNullSafe(task.title);
+        view.title = lockedTitle != null ? lockedTitle : deriveTaskTitle(task.videoUrl, task.taskId);
         view.videoUrl = task.videoUrl;
         view.status = task.status != null ? task.status.name() : TaskStatus.QUEUED.name();
         view.createdAt = task.createdAt;
@@ -2029,6 +2081,59 @@ public class MobileMarkdownController {
 
     private String deriveTaskTitle(String videoUrl, String fallbackTaskId) {
         return TaskDisplayNameResolver.resolveTaskDisplayTitle(videoUrl, fallbackTaskId);
+    }
+
+    private String resolveSubmissionTaskTitle(String rawVideoInput, String normalizedVideoInput) {
+        String fromVideoInfo = resolveTitleFromVideoInfo(rawVideoInput, normalizedVideoInput);
+        if (fromVideoInfo != null) {
+            return fromVideoInfo;
+        }
+        return deriveTaskTitle(normalizedVideoInput, normalizedVideoInput);
+    }
+
+    private String resolveTitleFromVideoInfo(String rawVideoInput, String normalizedVideoInput) {
+        if (pythonGrpcClient == null) {
+            return null;
+        }
+        String probeInput = chooseVideoInfoProbeInput(rawVideoInput, normalizedVideoInput);
+        if (probeInput == null || probeInput.isBlank()) {
+            return null;
+        }
+        int timeoutSec = Math.max(15, mobileVideoInfoTimeoutSeconds);
+        String probeTaskId = "MVI_" + UUID.randomUUID();
+        try {
+            PythonGrpcClient.VideoInfoResult result = pythonGrpcClient.getVideoInfo(
+                    probeTaskId,
+                    probeInput,
+                    timeoutSec
+            );
+            if (result == null || !result.success) {
+                return null;
+            }
+            String videoTitle = trimToNullSafe(result.videoTitle);
+            if (videoTitle != null) {
+                return videoTitle;
+            }
+            return trimToNullSafe(result.canonicalId);
+        } catch (Exception ex) {
+            logger.debug("mobile submit resolve title via video-info failed: input={} err={}", probeInput, ex.getMessage());
+            return null;
+        }
+    }
+
+    private String chooseVideoInfoProbeInput(String rawInput, String normalizedInput) {
+        String raw = trimToNullSafe(rawInput);
+        String normalized = trimToNullSafe(normalizedInput);
+        if (raw != null) {
+            String lowerRaw = raw.toLowerCase(Locale.ROOT);
+            if (lowerRaw.contains("http://") || lowerRaw.contains("https://")) {
+                return raw;
+            }
+        }
+        if (normalized != null) {
+            return normalized;
+        }
+        return raw;
     }
 
     private String instantToText(Instant instant) {

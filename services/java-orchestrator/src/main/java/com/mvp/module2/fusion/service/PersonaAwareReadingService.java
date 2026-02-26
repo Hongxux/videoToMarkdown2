@@ -63,7 +63,7 @@ public class PersonaAwareReadingService {
     private static final String DEFAULT_SYSTEM_PROMPT = String.join("\n",
             "你是个性化阅读编排器。",
             "输入包含用户画像 JSON 与文章段落节点数组。",
-            "你必须为每个节点输出：node_id, relevance_score(0~1), bridge_text, insights_tags。",
+            "你必须为每个节点输出：node_id, reason, relevance_score(0~1), insights_tags。",
             "必须只输出 JSON 数组，禁止 markdown 与解释。");
 
     private static final String DEFAULT_USER_PROMPT = String.join("\n",
@@ -76,7 +76,7 @@ public class PersonaAwareReadingService {
             "输出约束：",
             "1) 每个输入 node_id 都必须有对应输出。",
             "2) relevance_score 为 0.0~1.0 浮点。",
-            "3) 仅当 relevance_score >= 0.9 或 <= 0.1 时输出 bridge_text，否则为 null。",
+            "3) reason 解释该分值背后的核心依据。",
             "4) insights_tags 提供 0~6 个术语。",
             "5) 只输出 JSON 数组。");
 
@@ -384,7 +384,6 @@ public class PersonaAwareReadingService {
                             chunk.chunkId,
                             anchor.relevanceScore,
                             reason,
-                            anchor.bridgeText,
                             anchor.insightsTags
                     ));
                     chunkTrace.put("status", "OK");
@@ -470,7 +469,6 @@ public class PersonaAwareReadingService {
                         0.5d
                 );
                 String reason = normalizeReasonText(readByAlias(row, "reason", "why", "rationale", "analysis"));
-                String bridge = normalizeBridgeText(readByAlias(row, "bridge_text", "bridgeText", "comment"));
                 List<String> tags = normalizeTagList(firstNonBlank(
                         readByAlias(row, "insights_tags", "insight_tags", "insight_terms", "insights_terms"),
                         ""
@@ -480,7 +478,7 @@ public class PersonaAwareReadingService {
                     ParagraphNode anchor = chunk != null ? byId.get(chunk.primaryNodeId) : null;
                     reason = buildDefaultReason(anchor, relevance);
                 }
-                chunkAnnotations.add(new ChunkAnnotation(chunkId, relevance, reason, bridge, tags));
+                chunkAnnotations.add(new ChunkAnnotation(chunkId, relevance, reason, tags));
             }
             return expandChunkAnnotations(chunks, byId, chunkAnnotations);
         } catch (Exception ex) {
@@ -542,14 +540,8 @@ public class PersonaAwareReadingService {
             }
             score = Math.max(0.05d, Math.min(0.95d, score));
             String reason = buildHeuristicReason(hitCodeBlock, hitListBlock, hitSkill, hitChallenge, shortText, score);
-            String bridge = null;
-            if (score >= 0.9d) {
-                bridge = "High-priority paragraph for the current user context.";
-            } else if (score <= 0.1d) {
-                bridge = "Low-priority paragraph for the current user context.";
-            }
             List<String> tags = extractInsightsTags(chunkText);
-            chunkAnnotations.add(new ChunkAnnotation(chunk.chunkId, score, reason, bridge, tags));
+            chunkAnnotations.add(new ChunkAnnotation(chunk.chunkId, score, reason, tags));
         }
         return expandChunkAnnotations(chunks, byId, chunkAnnotations);
     }
@@ -570,14 +562,13 @@ public class PersonaAwareReadingService {
             ChunkAnnotation annotation = annotationByChunk.get(chunk.chunkId);
             double score = annotation != null ? annotation.relevanceScore : 0.5d;
             String reason = annotation != null ? annotation.reason : null;
-            String bridge = annotation != null ? annotation.bridgeText : null;
             List<String> tags = annotation != null ? annotation.insightsTags : List.of();
             ParagraphNode anchor = byId.get(chunk.primaryNodeId);
             if (reason == null) {
                 reason = buildDefaultReason(anchor, score);
             }
             for (String nodeId : chunk.nodeIds) {
-                output.add(new NodeAnnotation(nodeId, score, reason, bridge, tags));
+                output.add(new NodeAnnotation(nodeId, score, reason, tags));
             }
         }
         output.sort(Comparator.comparingInt(item -> byId.containsKey(item.nodeId) ? byId.get(item.nodeId).order : Integer.MAX_VALUE));
@@ -602,7 +593,6 @@ public class PersonaAwareReadingService {
             NodeAnnotation annotation = byId.get(node.nodeId);
             double score = annotation != null ? annotation.relevanceScore : 0.5d;
             String reason = annotation != null ? annotation.reason : buildDefaultReason(node, score);
-            String bridge = annotation != null ? annotation.bridgeText : null;
             List<String> tags = annotation != null ? annotation.insightsTags : extractInsightsTags(node.rawMarkdown);
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("node_id", node.nodeId);
@@ -611,7 +601,6 @@ public class PersonaAwareReadingService {
             item.put("raw_markdown", node.rawMarkdown);
             item.put("relevance_score", score);
             item.put("reason", reason);
-            item.put("bridge_text", bridge);
             item.put("insights_tags", tags);
             output.add(item);
         }
@@ -639,7 +628,6 @@ public class PersonaAwareReadingService {
             ParagraphNode anchor = nodeById.get(chunk.primaryNodeId);
             double score = annotation != null ? annotation.relevanceScore : 0.5d;
             String reason = annotation != null ? annotation.reason : buildDefaultReason(anchor, score);
-            String bridge = annotation != null ? annotation.bridgeText : null;
             List<String> tags = annotation != null ? annotation.insightsTags : extractInsightsTags(chunk.chunkText);
 
             Map<String, Object> item = new LinkedHashMap<>();
@@ -649,7 +637,6 @@ public class PersonaAwareReadingService {
             item.put("raw_markdown", chunk.chunkText);
             item.put("relevance_score", score);
             item.put("reason", reason);
-            item.put("bridge_text", bridge);
             item.put("insights_tags", tags);
             item.put("source_node_ids", new ArrayList<>(chunk.nodeIds));
             item.put("primary_node_id", chunk.primaryNodeId);
@@ -1614,14 +1601,6 @@ public class PersonaAwareReadingService {
         }
     }
 
-    private String normalizeBridgeText(String raw) {
-        String value = String.valueOf(raw == null ? "" : raw).trim();
-        if (value.isEmpty() || "null".equalsIgnoreCase(value)) {
-            return null;
-        }
-        return trimText(value, 160);
-    }
-
     private String normalizeReasonText(String raw) {
         String value = String.valueOf(raw == null ? "" : raw).trim();
         if (value.isEmpty() || "null".equalsIgnoreCase(value)) {
@@ -1757,6 +1736,8 @@ public class PersonaAwareReadingService {
             return node;
         }
         node.putAll(input);
+        node.remove("bridge_text");
+        node.remove("bridgeText");
         String rawMarkdown = firstNonBlank(
                 String.valueOf(input.getOrDefault("raw_markdown", "")),
                 String.valueOf(input.getOrDefault("rawMarkdown", ""))
@@ -1855,20 +1836,17 @@ public class PersonaAwareReadingService {
         private final String chunkId;
         private final double relevanceScore;
         private final String reason;
-        private final String bridgeText;
         private final List<String> insightsTags;
 
         private ChunkAnnotation(
                 String chunkId,
                 double relevanceScore,
                 String reason,
-                String bridgeText,
                 List<String> insightsTags
         ) {
             this.chunkId = chunkId;
             this.relevanceScore = relevanceScore;
             this.reason = reason;
-            this.bridgeText = bridgeText;
             this.insightsTags = insightsTags != null ? insightsTags : List.of();
         }
     }
@@ -1884,20 +1862,17 @@ public class PersonaAwareReadingService {
         private final String nodeId;
         private final double relevanceScore;
         private final String reason;
-        private final String bridgeText;
         private final List<String> insightsTags;
 
         private NodeAnnotation(
                 String nodeId,
                 double relevanceScore,
                 String reason,
-                String bridgeText,
                 List<String> insightsTags
         ) {
             this.nodeId = nodeId;
             this.relevanceScore = relevanceScore;
             this.reason = reason;
-            this.bridgeText = bridgeText;
             this.insightsTags = insightsTags != null ? insightsTags : List.of();
         }
     }

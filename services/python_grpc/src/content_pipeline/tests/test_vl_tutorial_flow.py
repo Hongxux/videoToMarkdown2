@@ -1228,6 +1228,205 @@ def test_generate_tutorial_assets_per_unit_full_flow_before_phase2b(tmp_path, mo
     assert data["steps"][0]["instructional_keyframe_details"][0]["bbox"] == [120, 80, 760, 920]
 
 
+def test_generate_postprocesses_main_operation_with_unit_context(tmp_path, monkeypatch):
+    class _FakeAnalyzerForPostprocess:
+        async def analyze_clip(
+            self,
+            clip_path: str,
+            semantic_unit_start_sec: float,
+            semantic_unit_id: str,
+            extra_prompt: str | None = None,
+            analysis_mode: str = "default",
+        ) -> VLClipAnalysisResponse:
+            _ = (clip_path, extra_prompt)
+            assert analysis_mode == "tutorial_stepwise"
+            result = VLClipAnalysisResponse(
+                success=True,
+                analysis_mode="tutorial_stepwise",
+                token_usage={"prompt_tokens": 12, "completion_tokens": 24, "total_tokens": 36},
+            )
+            result.raw_response_json = [
+                {
+                    "step_id": 1,
+                    "step_description": "open settings",
+                    "main_operation": "click settings",
+                    "clip_start_sec": 0.0,
+                    "clip_end_sec": 7.0,
+                },
+                {
+                    "step_id": 2,
+                    "step_description": "change port",
+                    "main_operation": "change port and save",
+                    "clip_start_sec": 7.0,
+                    "clip_end_sec": 15.0,
+                },
+            ]
+            result.analysis_results = [
+                VLAnalysisResult(
+                    step_id=1,
+                    step_description="open settings",
+                    analysis_mode="tutorial_stepwise",
+                    main_operation=["click settings"],
+                ),
+                VLAnalysisResult(
+                    step_id=2,
+                    step_description="change port",
+                    analysis_mode="tutorial_stepwise",
+                    main_operation=["change port and save"],
+                ),
+            ]
+            result.clip_requests = [
+                {
+                    "clip_id": f"{semantic_unit_id}/{semantic_unit_id}_clip_step_01_open_settings",
+                    "start_sec": semantic_unit_start_sec + 0.0,
+                    "end_sec": semantic_unit_start_sec + 7.0,
+                    "knowledge_type": "process",
+                    "semantic_unit_id": semantic_unit_id,
+                    "step_id": 1,
+                    "step_description": "open settings",
+                    "analysis_mode": "tutorial_stepwise",
+                    "main_operation": ["click settings"],
+                },
+                {
+                    "clip_id": f"{semantic_unit_id}/{semantic_unit_id}_clip_step_02_change_port",
+                    "start_sec": semantic_unit_start_sec + 7.0,
+                    "end_sec": semantic_unit_start_sec + 15.0,
+                    "knowledge_type": "process",
+                    "semantic_unit_id": semantic_unit_id,
+                    "step_id": 2,
+                    "step_description": "change port",
+                    "analysis_mode": "tutorial_stepwise",
+                    "main_operation": ["change port and save"],
+                },
+            ]
+            result.screenshot_requests = []
+            return result
+
+    video_path = tmp_path / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    clips_dir = tmp_path / "semantic_unit_clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = clips_dir / "001_SU010_demo_100.00-130.00.mp4"
+    clip_file.write_bytes(b"clip")
+
+    semantic_units = [
+        {
+            "unit_id": "SU010",
+            "knowledge_type": "process",
+            "mult_steps": True,
+            "start_sec": 100.0,
+            "end_sec": 130.0,
+            "knowledge_topic": "代理端口配置",
+            "full_text": "先打开设置，再把端口改成 8899，最后保存。",
+        }
+    ]
+
+    generator = VLMaterialGenerator(_build_generator_config())
+    generator._analyzer = _FakeAnalyzerForPostprocess()
+
+    async def _fake_split_video_by_semantic_units(video_path, semantic_units, output_dir=None):
+        _ = (video_path, semantic_units, output_dir)
+        return str(clips_dir)
+
+    def _fake_find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec):
+        _ = (clips_dir, unit_id, start_sec, end_sec)
+        return str(clip_file)
+
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_split_video_by_semantic_units)
+    monkeypatch.setattr(generator, "_find_clip_for_unit", _fake_find_clip_for_unit)
+    monkeypatch.setattr(
+        generator,
+        "_build_unit_relative_subtitles",
+        lambda subtitles, unit_start_sec, unit_end_sec: [
+            {"start_sec": 0.5, "end_sec": 2.4, "text": "先打开设置页面"},
+            {"start_sec": 2.5, "end_sec": 5.8, "text": "把端口改成八八九九然后保存"},
+        ],
+    )
+
+    saved_payload: Dict[str, Any] = {}
+
+    async def _fake_save_tutorial_assets_for_unit(
+        video_path: str,
+        output_dir: str,
+        unit_id: str,
+        clip_requests: list[Dict[str, Any]],
+        screenshot_requests: list[Dict[str, Any]],
+        raw_response_json: list[Dict[str, Any]],
+        raw_llm_interactions: list[Dict[str, Any]] | None = None,
+        use_analysis_relative_timestamps: bool = False,
+        prefer_screenshot_requests_keyframes: bool = False,
+    ) -> None:
+        _ = (
+            video_path,
+            output_dir,
+            unit_id,
+            screenshot_requests,
+            raw_llm_interactions,
+            use_analysis_relative_timestamps,
+            prefer_screenshot_requests_keyframes,
+        )
+        saved_payload["clip_requests"] = clip_requests
+        saved_payload["raw_response_json"] = raw_response_json
+
+    monkeypatch.setattr(generator, "_save_tutorial_assets_for_unit", _fake_save_tutorial_assets_for_unit)
+
+    deepseek_calls: list[Dict[str, Any]] = []
+
+    async def _fake_deepseek_complete_text(*, prompt: str, system_message: str | None = None, **kwargs):
+        deepseek_calls.append(
+            {
+                "prompt": prompt,
+                "system_message": system_message,
+                "kwargs": kwargs,
+            }
+        )
+        return (
+            "[STEP_ID=1]\n"
+            "- 增强步骤1：打开设置并确认进入配置页。\n\n"
+            "[STEP_ID=2]\n"
+            "- 增强步骤2：修改端口并保存配置。",
+            {"prompt_tokens": 21},
+            None,
+        )
+
+    monkeypatch.setattr(
+        vl_material_generator_module.llm_gateway,
+        "deepseek_complete_text",
+        _fake_deepseek_complete_text,
+    )
+
+    result = asyncio.run(
+        generator.generate(
+            video_path=str(video_path),
+            semantic_units=semantic_units,
+            output_dir=str(output_dir),
+        )
+    )
+
+    assert result.success is True
+    assert len(deepseek_calls) == 1
+    assert "click settings" in deepseek_calls[0]["prompt"]
+    assert "change port and save" in deepseek_calls[0]["prompt"]
+    assert "先打开设置页面" in deepseek_calls[0]["prompt"]
+    assert "把端口改成八八九九然后保存" in deepseek_calls[0]["prompt"]
+    assert "[STEP_ID=1]" in deepseek_calls[0]["prompt"]
+    assert "[STEP_ID=2]" in deepseek_calls[0]["prompt"]
+    assert deepseek_calls[0]["kwargs"]["hedge_context"]["stage"] == "vl_arg_main_operation_postprocess_batch"
+    assert deepseek_calls[0]["kwargs"]["hedge_context"]["step_ids"] == [1, 2]
+
+    by_step = {int(item.get("step_id", 0)): item for item in result.clip_requests}
+    assert by_step[1]["main_operation"] == ["- 增强步骤1：打开设置并确认进入配置页。"]
+    assert by_step[2]["main_operation"] == ["- 增强步骤2：修改端口并保存配置。"]
+
+    saved_steps = saved_payload["raw_response_json"]
+    assert saved_steps[0]["main_operation"] == "- 增强步骤1：打开设置并确认进入配置页。"
+    assert saved_steps[0]["main_operations"] == "- 增强步骤1：打开设置并确认进入配置页。"
+    assert saved_steps[1]["main_operation"] == "- 增强步骤2：修改端口并保存配置。"
+    assert saved_steps[1]["main_operations"] == "- 增强步骤2：修改端口并保存配置。"
+
+
 def test_resolve_pre_vl_parallel_workers_prefers_cv_executor():
     pool = ProcessPoolExecutor(max_workers=2)
     try:

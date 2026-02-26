@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.os.Build
 import android.os.SystemClock
 import android.text.Layout
+import android.text.Selection
 import android.view.HapticFeedbackConstants
 import android.util.LruCache
 import android.text.Spannable
@@ -166,7 +167,6 @@ fun SemanticTopographyReader(
     initialFirstVisibleItemIndex: Int = 0,
     initialFirstVisibleItemScrollOffset: Int = 0,
     onMarkDeleted: (String) -> Unit = {},
-    onBridgeOpen: (String) -> Unit = {},
     onResonance: (String) -> Unit = {},
     onScrollDown: () -> Unit = {},
     onScrollUp: () -> Unit = {},
@@ -693,7 +693,6 @@ fun SemanticTopographyReader(
                         deletedState.remove(block.blockId)
                         scheduleMetaSync(reason = "restore_deleted")
                     },
-                    onBridgeOpen = onBridgeOpen,
                     onResonance = {
                         if (favoritesState[block.blockId] == true) {
                             favoritesState.remove(block.blockId)
@@ -823,7 +822,6 @@ private fun TopographyParagraph(
     onRequestOpenTokenAnnotationBubble: (TokenSelection, InsightTermAnchor?) -> Unit,
     onMarkDeleted: () -> Unit,
     onRestoreDeleted: () -> Unit,
-    onBridgeOpen: (String) -> Unit,
     onResonance: () -> Unit,
     onCommentCommitted: (String) -> Unit,
     onRequestOpenCommentPanel: (String) -> Unit,
@@ -854,9 +852,6 @@ private fun TopographyParagraph(
     }
     var textRenderRefreshVersion by remember(block.blockId) {
         mutableIntStateOf(0)
-    }
-    var isBridgeExpanded by remember(block.blockId) {
-        mutableStateOf(false)
     }
     var isNoiseExpanded by remember(block.blockId) {
         mutableStateOf(false)
@@ -972,9 +967,9 @@ private fun TopographyParagraph(
         .filter { it.note.isNotBlank() }
 
     val normalizedScore = block.relevanceScore.coerceIn(0f, 1f)
-    val hasBridge = !block.bridgeText.isNullOrBlank()
+    val hasReasoning = !block.reasoning.isNullOrBlank()
     val isAbsoluteFocus = normalizedScore >= 0.85f
-    val isNoise = normalizedScore < 0.3f
+    val isNoise = !DISABLE_TEXT_IS_NOISE_JUDGMENT && normalizedScore < 0.3f
     val focusGuideColor = Color(0xFF4F46E5)
     val focusBridgeColor = focusGuideColor.copy(alpha = 0.7f)
     val textSize = renderConfig.textSizeDefaultSp.sp
@@ -1042,11 +1037,11 @@ private fun TopographyParagraph(
     val swipeArmThresholdPx = with(density) { 44.dp.toPx() }
     val swipeIntentDominanceRatio = 1.85f
     val latestIsMarkedDeleted = androidx.compose.runtime.rememberUpdatedState(isMarkedDeleted)
-    val breathingAlpha = rememberNoiseBreathingAlpha(enabled = isNoise && !hasBridge)
+    val breathingAlpha = rememberNoiseBreathingAlpha(enabled = isNoise && !hasReasoning)
     val resolvedInsightTerms = remember(block.blockId, block.insightTerms, block.insightsTags) {
         block.resolvedInsightTerms()
     }
-    val useNoiseCapsule = isNoise && hasBridge
+    val useNoiseCapsule = isNoise && hasReasoning
     val noiseGuideExpandProgress by animateFloatAsState(
         targetValue = if (useNoiseCapsule && isNoiseExpanded) 1f else 0f,
         animationSpec = spring(dampingRatio = 0.8f, stiffness = 400f),
@@ -1134,7 +1129,7 @@ private fun TopographyParagraph(
                                     strokeWidth = 3.dp.toPx(),
                                     cap = StrokeCap.Round
                                 )
-                            } else if (isNoise && !hasBridge) {
+                            } else if (isNoise && !hasReasoning) {
                                 val x = 2.dp.toPx()
                                 drawLine(
                                     color = Color(0xFF8DA4B5).copy(alpha = 0.28f + 0.2f * breathingAlpha),
@@ -1266,8 +1261,7 @@ private fun TopographyParagraph(
                                                 ParagraphGestureEvent.SwipeRight(
                                                     nodeId = block.blockId,
                                                     offsetX = endOffset,
-                                                    threshold = annotateOpenThreshold,
-                                                    hasBridge = hasBridge
+                                                    threshold = annotateOpenThreshold
                                                 )
                                             )
                                             onRequestOpenCommentPanel("swipe_right")
@@ -1293,7 +1287,6 @@ private fun TopographyParagraph(
                                                 stiffness = Spring.StiffnessMedium
                                             )
                                         )
-                                        isBridgeExpanded = false
                                         onGestureEvent(
                                             ParagraphGestureEvent.Settle(
                                                 nodeId = block.blockId,
@@ -1356,9 +1349,9 @@ private fun TopographyParagraph(
                         .fillMaxWidth()
                         .padding(horizontal = horizontalContentPadding, vertical = paragraphInnerVerticalPadding)
                 ) {
-                    if (isAbsoluteFocus && hasBridge) {
+                    if (isAbsoluteFocus && hasReasoning) {
                         FocusBridgeLead(
-                            text = block.bridgeText.orEmpty(),
+                            text = block.reasoning.orEmpty(),
                             color = focusBridgeColor,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1379,7 +1372,7 @@ private fun TopographyParagraph(
                         )
                     ) {
                         NoiseBridgeCapsule(
-                            text = block.bridgeText.orEmpty(),
+                            text = block.reasoning.orEmpty(),
                             expanded = isNoiseExpanded,
                             chevronColor = Color(renderConfig.noiseChevronColorArgb),
                             chevronRotateDurationMs = renderConfig.noiseChevronRotateDurationMs,
@@ -1437,7 +1430,7 @@ private fun TopographyParagraph(
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .alpha(if (isBridgeExpanded || isCommentPanelExpanded) 0.98f else 1f)
+                                        .alpha(if (isCommentPanelExpanded) 0.98f else 1f)
                                         .drawBehind {
                                             val center = rippleCenter
                                             if (center != null) {
@@ -2400,54 +2393,6 @@ private fun InlineCommentPanel(
     }
 }
 
-@Composable
-private fun BridgeBubble(
-    text: String,
-    revealProgress: Float
-) {
-    val alpha = revealProgress.coerceIn(0f, 1f)
-
-    Card(
-        shape = RoundedCornerShape(14.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = Color(0xFFEFF4F8)
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .alpha(alpha)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.Top
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(20.dp)
-                    .clip(CircleShape)
-                    .background(Color(0xFF3F6A84)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    text = "AI",
-                    color = Color.White,
-                    fontSize = 9.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            Text(
-                text = "Summary text",
-                color = Color(0xFF2F4E60),
-                fontSize = 13.sp,
-                lineHeight = 20.sp,
-                modifier = Modifier.padding(start = 8.dp)
-            )
-        }
-    }
-}
-
 /**
  * 悬浮卡片气泡布局信息。
  * 用于计算气泡相对锚点的位置与尾巴方向。
@@ -3050,6 +2995,7 @@ private fun applyReaderTextLayoutPolicy(textView: TextView) {
 }
 
 private val MARKDOWN_LIST_LINE_PATTERN = Regex("(?m)^\\s*(?:[-*+]\\s+|\\d+[\\.)]\\s+)")
+private const val DISABLE_TEXT_IS_NOISE_JUDGMENT = true
 private const val MARKDOWN_CACHE_MAX_ENTRIES = 180
 private const val MARKDOWN_CACHE_MAX_TEXT_LENGTH = 12_000
 private val READER_MARKDOWN_CACHE = object : LruCache<String, CharSequence>(MARKDOWN_CACHE_MAX_ENTRIES) {}
@@ -3169,9 +3115,8 @@ private fun MarkdownParagraph(
                     }
 
                     override fun onDoubleTap(e: MotionEvent): Boolean {
-                        if (textView.hasSelection()) {
-                            return false
-                        }
+                        // 双击应稳定触发整段加粗态，先清理原生选区避免被系统双击选词抢占。
+                        clearNativeTextSelection(textView)
                         suppressNativeSelectionUntilMs =
                             SystemClock.uptimeMillis() + ViewConfiguration.getDoubleTapTimeout().toLong()
                         onParagraphDoubleTap(
@@ -3496,10 +3441,12 @@ private fun applySelectionStyle(
         emptyList()
     }
 
-    insightRanges.forEach { range ->
-        if (range.start < 0 || range.end > source.length || range.start >= range.end) {
-            return@forEach
-        }
+    val safeInsightRanges = insightRanges.filter { range ->
+        range.start >= 0 &&
+            range.end <= source.length &&
+            range.start < range.end
+    }
+    safeInsightRanges.forEach { range ->
         spannable.setSpan(
             ReaderForegroundColorSpan(0xFF1A7FB0.toInt()),
             range.start,
@@ -3508,15 +3455,6 @@ private fun applySelectionStyle(
         )
         spannable.setSpan(
             ReaderBoldSpan(),
-            range.start,
-            range.end,
-            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-        )
-        spannable.setSpan(
-            ReaderLikedUnderlineSpan(
-                color = 0xFF1A7FB0.toInt(),
-                thicknessPx = 2.2f
-            ),
             range.start,
             range.end,
             Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
@@ -3638,6 +3576,19 @@ private fun applySelectionStyle(
             ReaderLiftSpan(0.1f),
             safeSelection.start,
             safeSelection.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+
+    // 保证 insight tags 的下划线在整段加粗等样式后依然可见。
+    safeInsightRanges.forEach { range ->
+        spannable.setSpan(
+            ReaderLikedUnderlineSpan(
+                color = 0xFF1A7FB0.toInt(),
+                thicknessPx = 2.2f
+            ),
+            range.start,
+            range.end,
             Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
         )
     }
@@ -4356,6 +4307,11 @@ private fun normalizeLexicalCursor(
         return null
     }
     return cursor.coerceIn(0, text.length - 1)
+}
+
+private fun clearNativeTextSelection(textView: TextView) {
+    val text = textView.text as? Spannable ?: return
+    Selection.removeSelection(text)
 }
 
 private fun resolveCurrentTextSelection(textView: TextView): TokenSelection? {

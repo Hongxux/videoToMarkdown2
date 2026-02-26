@@ -65,6 +65,7 @@ public class TaskQueueManager {
         public String taskId;
         public String userId;
         public String videoUrl;
+        public String title;
         public String outputDir;
         public Priority priority;
         public TaskStatus status;
@@ -100,12 +101,23 @@ public class TaskQueueManager {
     }
 
     public synchronized TaskEntry submitTask(String userId, String videoUrl, String outputDir, Priority priority) {
+        return submitTask(userId, videoUrl, outputDir, priority, null);
+    }
+
+    public synchronized TaskEntry submitTask(
+            String userId,
+            String videoUrl,
+            String outputDir,
+            Priority priority,
+            String preferredTitle
+    ) {
         String taskId = generateTaskId();
 
         TaskEntry entry = new TaskEntry();
         entry.taskId = taskId;
         entry.userId = userId;
         entry.videoUrl = videoUrl;
+        entry.title = normalizeOptionalText(preferredTitle);
         entry.outputDir = outputDir;
         entry.priority = priority;
         entry.status = TaskStatus.QUEUED;
@@ -328,5 +340,13 @@ public class TaskQueueManager {
         task.resourcesReleased = true;
         processingSlots.release();
         decrementUserTaskCount(task.userId);
+    }
+
+    private String normalizeOptionalText(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 }

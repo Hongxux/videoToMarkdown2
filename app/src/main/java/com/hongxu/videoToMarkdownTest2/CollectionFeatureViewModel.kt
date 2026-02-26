@@ -2,10 +2,16 @@ package com.hongxu.videoToMarkdownTest2
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -45,6 +51,8 @@ class CollectionFeatureViewModel(
         context = application.applicationContext,
         apiBaseUrl = apiBaseUrl
     )
+    private val probeScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val taskCompletionNotifier = TaskCompletionNotifier(application.applicationContext)
 
     private val _probeState = MutableStateFlow<ProbeUiState>(ProbeUiState.Idle)
     val probeState: StateFlow<ProbeUiState> = _probeState.asStateFlow()
@@ -77,6 +85,7 @@ class CollectionFeatureViewModel(
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     private var realtimeCollectionJob: Job? = null
+    private var probeJob: Job? = null
 
     init {
         refreshCollections()
@@ -102,13 +111,20 @@ class CollectionFeatureViewModel(
             _probeState.value = ProbeUiState.Error("请输入视频链接")
             return
         }
-        viewModelScope.launch {
-            _probeState.value = ProbeUiState.Loading(normalized)
+        probeJob?.cancel()
+        _probeState.value = ProbeUiState.Loading(normalized)
+        probeJob = probeScope.launch {
             runCatching {
                 repository.probeVideoInfo(normalized)
             }.onSuccess { result ->
                 if (!result.success) {
                     _probeState.value = ProbeUiState.Error("探测失败，请稍后重试")
+                    notifyProbeFinishedIfBackground(
+                        input = normalized,
+                        success = false,
+                        resolvedTitle = result.title,
+                        detail = "empty result"
+                    )
                     return@onSuccess
                 }
                 val defaultSelected = if (result.isCollection) {
@@ -120,10 +136,46 @@ class CollectionFeatureViewModel(
                 }
                 _selectedEpisodeNos.value = defaultSelected
                 _probeState.value = ProbeUiState.Success(result)
+                notifyProbeFinishedIfBackground(
+                    input = normalized,
+                    success = true,
+                    resolvedTitle = result.title
+                )
             }.onFailure { error ->
-                _probeState.value = ProbeUiState.Error("探测失败：${error.message ?: "unknown"}")
+                val detail = error.message ?: "unknown"
+                _probeState.value = ProbeUiState.Error("探测失败：$detail")
+                notifyProbeFinishedIfBackground(
+                    input = normalized,
+                    success = false,
+                    resolvedTitle = null,
+                    detail = detail
+                )
             }
         }
+    }
+
+    private fun notifyProbeFinishedIfBackground(
+        input: String,
+        success: Boolean,
+        resolvedTitle: String?,
+        detail: String? = null
+    ) {
+        if (isAppForeground()) {
+            return
+        }
+        taskCompletionNotifier.notifyVideoProbeCompleted(
+            input = input,
+            resolvedTitle = resolvedTitle,
+            success = success,
+            detail = detail
+        )
+    }
+
+    private fun isAppForeground(): Boolean {
+        return ProcessLifecycleOwner.get()
+            .lifecycle
+            .currentState
+            .isAtLeast(Lifecycle.State.STARTED)
     }
 
     fun clearProbeResult() {
@@ -295,6 +347,8 @@ class CollectionFeatureViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        probeJob?.cancel()
+        probeScope.cancel()
         repository.stopRealtime()
     }
 }

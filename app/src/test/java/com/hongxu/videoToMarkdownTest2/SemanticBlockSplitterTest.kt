@@ -65,10 +65,10 @@ class SemanticBlockSplitterTest {
         assertTrue(blocks[4].markdown.contains("- 子项"))
     }
 
-    // ─── bridgeText 仅首块 ────────────────────────────────
+    // ─── reasoning 仅首块 ────────────────────────────────
 
     @Test
-    fun `bridgeText only on first block`() {
+    fun `reasoning only on first block`() {
         val md = """
             |### 标题
             |
@@ -78,14 +78,11 @@ class SemanticBlockSplitterTest {
             id = "n4",
             text = md,
             originalMarkdown = md,
-            bridgeText = "桥接引导文本",
             reasoning = "推理说明"
         )
         val blocks = splitSemanticNodesIntoBlocks(listOf(node))
         assertEquals(2, blocks.size)
-        assertEquals("桥接引导文本", blocks[0].bridgeText)
         assertEquals("推理说明", blocks[0].reasoning)
-        assertNull(blocks[1].bridgeText)
         assertNull(blocks[1].reasoning)
     }
 
@@ -276,7 +273,6 @@ class SemanticBlockSplitterTest {
         originalMarkdown: String? = null,
         type: String = "paragraph",
         relevanceScore: Float = 0.5f,
-        bridgeText: String? = null,
         reasoning: String? = null,
         insightTerms: List<String> = emptyList(),
         insightsTags: List<String> = emptyList()
@@ -287,7 +283,6 @@ class SemanticBlockSplitterTest {
             type = type,
             originalMarkdown = originalMarkdown,
             relevanceScore = relevanceScore,
-            bridgeText = bridgeText,
             reasoning = reasoning,
             insightTerms = insightTerms,
             insightsTags = insightsTags
