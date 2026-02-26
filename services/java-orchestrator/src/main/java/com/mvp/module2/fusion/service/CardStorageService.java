@@ -53,7 +53,7 @@ public class CardStorageService {
             "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
     );
 
-    @Value("${task.cards.root:var/storage/cards}")
+    @Value("${task.cards.root:var/cards}")
     private String configuredCardsRoot;
 
     private Path cardsRoot;
@@ -861,10 +861,16 @@ public class CardStorageService {
             return Paths.get(configuredCardsRoot.trim()).toAbsolutePath().normalize();
         }
         Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        Path repositoryRoot = null;
+        Path discoveredRoot = null;
         for (int i = 0; i < 8; i += 1) {
-            Path candidate = current.resolve("var").resolve("storage").resolve("cards");
-            if (Files.isDirectory(candidate)) {
-                return candidate.toAbsolutePath().normalize();
+            Path candidate = current.resolve("var").resolve("cards");
+            if (discoveredRoot == null && Files.isDirectory(candidate)) {
+                discoveredRoot = candidate.toAbsolutePath().normalize();
+            }
+            if (Files.exists(current.resolve(".git"))) {
+                repositoryRoot = current;
+                break;
             }
             Path parent = current.getParent();
             if (parent == null) {
@@ -872,7 +878,13 @@ public class CardStorageService {
             }
             current = parent;
         }
-        return Paths.get("var", "storage", "cards").toAbsolutePath().normalize();
+        if (repositoryRoot != null) {
+            return repositoryRoot.resolve("var").resolve("cards").toAbsolutePath().normalize();
+        }
+        if (discoveredRoot != null) {
+            return discoveredRoot;
+        }
+        return Paths.get("var", "cards").toAbsolutePath().normalize();
     }
 
     private static class ParsedFrontmatterList {

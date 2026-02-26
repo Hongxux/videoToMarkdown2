@@ -195,20 +195,29 @@ public class MicroHypothesisExtractorService {
         String nodeId = trimToEmpty(String.valueOf(record.getOrDefault("nodeId", "")));
         String nodeText = trimToEmpty(String.valueOf(record.getOrDefault("nodeText", "")));
         String snippet = trimToEmpty(String.valueOf(record.getOrDefault("nodeMarkdownSnippet", "")));
+        String focusText = trimToEmpty(String.valueOf(record.getOrDefault("focusText", "")));
+        String tokenType = trimToEmpty(String.valueOf(record.getOrDefault("tokenType", "")));
+        String localContext = trimToEmpty(String.valueOf(record.getOrDefault("localContext", "")));
 
         @SuppressWarnings("unchecked")
         Map<String, Object> payloadRaw = record.get("payload") instanceof Map<?, ?> map
                 ? (Map<String, Object>) map
                 : Map.of();
+        if (focusText.isEmpty()) {
+            focusText = extractPayloadFocusText(payloadRaw);
+        }
+        if (tokenType.isEmpty()) {
+            tokenType = inferTokenType(eventType, payloadRaw);
+        }
         String payloadHint = extractPayloadHint(payloadRaw);
 
-        String context = firstNonBlank(nodeText, snippet, payloadHint, "");
+        String context = firstNonBlank(localContext, nodeText, snippet, payloadHint, focusText, "");
         if (context.length() > MAX_CONTEXT_CHARS) {
             context = context.substring(0, MAX_CONTEXT_CHARS).trim();
         }
         String contentType = inferContentType(context, eventType);
 
-        return new ActionObservation(action, eventType, nodeId, timestampMs, contentType, context);
+        return new ActionObservation(action, eventType, nodeId, timestampMs, contentType, context, focusText, tokenType, localContext);
     }
 
     private List<HypothesisSlice> inferBySmallModel(ExtractionRequest request, List<ActionObservation> observations) {
@@ -233,6 +242,15 @@ public class MicroHypothesisExtractorService {
                 line.put("event_type", item.eventType);
                 line.put("content_type", item.contentType);
                 line.put("context", item.context);
+                if (!item.focusText.isEmpty()) {
+                    line.put("focus_text", item.focusText);
+                }
+                if (!item.tokenType.isEmpty()) {
+                    line.put("token_type", item.tokenType);
+                }
+                if (!item.localContext.isEmpty()) {
+                    line.put("local_context", item.localContext);
+                }
                 compactInputs.add(line);
             }
             interaction.put("inputSample", compactInputs);
@@ -334,7 +352,16 @@ public class MicroHypothesisExtractorService {
             List<HypothesisSlice> output = new ArrayList<>();
             for (Map<String, Object> row : parsed) {
                 String action = normalizeActionFlexible(
-                        readFieldByAlias(row, "action", "event_action", "interaction", "行为", "动作"),
+                        readFieldByAlias(
+                                row,
+                                "action",
+                                "action_cluster",
+                                "actionCluster",
+                                "event_action",
+                                "interaction",
+                                "行为",
+                                "动作"
+                        ),
                         readFieldByAlias(row, "event_type", "eventType", "事件类型")
                 );
                 String contentType = firstNonBlank(
@@ -563,10 +590,20 @@ public class MicroHypothesisExtractorService {
     private String mapAction(String eventType, boolean hot) {
         String normalized = eventType.toLowerCase(Locale.ROOT);
         return switch (normalized) {
-            case "paragraph_mark_deleted_by_swipe" -> "DELETED";
+            case "paragraph_mark_deleted_by_swipe", "paragraph_mark_deleted_by_swipe_confirmed" -> "DELETED";
+            case "selection_action_unlike" -> "DELETED";
             case "paragraph_resonance_double_tap" -> "RESONANCE";
+            case "selection_action_like", "paragraph_restore_deleted_by_swipe" -> "RESONANCE";
             case "note_saved" -> "NOTE_SAVED";
-            case "lexical_card_opened" -> "LEXICAL_CARD_OPENED";
+            case "selection_action_copy",
+                    "selection_action_bold",
+                    "selection_action_unbold",
+                    "selection_action_annotate" -> "NOTE_SAVED";
+            case "lexical_card_opened",
+                    "selection_action_search_card",
+                    "insight_term_tapped",
+                    "lexical_token_selected",
+                    "noise_capsule_expanded" -> "LEXICAL_CARD_OPENED";
             default -> hot ? null : "COLD_SIGNAL";
         };
     }
@@ -605,7 +642,8 @@ public class MicroHypothesisExtractorService {
         }
         String[] keys = {
                 "originalMarkdown", "original_markdown", "nodeText",
-                "paragraphText", "paragraph_text", "text", "content"
+                "paragraphText", "paragraph_text", "text", "content",
+                "token", "focusText", "focus_text", "selectedText", "selected_text", "term"
         };
         for (String key : keys) {
             String value = trimToNull(String.valueOf(payload.getOrDefault(key, "")));
@@ -616,10 +654,46 @@ public class MicroHypothesisExtractorService {
         return "";
     }
 
+    private String extractPayloadFocusText(Map<String, Object> payload) {
+        if (payload == null || payload.isEmpty()) {
+            return "";
+        }
+        String[] keys = {"focusText", "focus_text", "selectedText", "selected_text", "token", "term", "keyword"};
+        for (String key : keys) {
+            String value = trimToNull(String.valueOf(payload.getOrDefault(key, "")));
+            if (value != null) {
+                return trimToMax(value, 80);
+            }
+        }
+        return "";
+    }
+
+    private String inferTokenType(String eventType, Map<String, Object> payload) {
+        String source = trimToEmpty(String.valueOf(payload != null ? payload.getOrDefault("source", "") : ""));
+        if ("insight_terms".equalsIgnoreCase(source)) {
+            return "insight_term";
+        }
+        String normalizedEventType = trimToEmpty(eventType).toLowerCase(Locale.ROOT);
+        if (normalizedEventType.startsWith("selection_action_")) {
+            return "selection";
+        }
+        if ("lexical_card_opened".equals(normalizedEventType)) {
+            return "lexical_card";
+        }
+        if ("lexical_token_selected".equals(normalizedEventType) || "insight_term_tapped".equals(normalizedEventType)) {
+            return "token";
+        }
+        return "";
+    }
+
     private String normalizeActionFlexible(String actionRaw, String eventTypeRaw) {
         String normalized = normalizeAction(actionRaw);
         if (!normalized.isEmpty()) {
             return normalized;
+        }
+        String fromCluster = mapActionCluster(actionRaw);
+        if (!fromCluster.isEmpty()) {
+            return fromCluster;
         }
         String action = trimToEmpty(actionRaw).toLowerCase(Locale.ROOT);
         if (action.contains("deleted") || action.contains("remove") || action.contains("swipe")) {
@@ -660,6 +734,33 @@ public class MicroHypothesisExtractorService {
             }
             mapped = mapAction(eventType, false);
             return mapped != null ? mapped : "";
+        }
+        return "";
+    }
+
+    private String mapActionCluster(String raw) {
+        String cluster = trimToEmpty(raw);
+        if (cluster.isEmpty()) {
+            return "";
+        }
+        String normalized = cluster.toLowerCase(Locale.ROOT);
+        if (normalized.contains("value") && normalized.contains("resonance")) {
+            return "RESONANCE";
+        }
+        if (normalized.contains("curiosity") && (normalized.contains("boundary") || normalized.contains("epistemic"))) {
+            return "LEXICAL_CARD_OPENED";
+        }
+        if (normalized.contains("friction") && normalized.contains("rejection")) {
+            return "DELETED";
+        }
+        if (normalized.contains("价值") || normalized.contains("共鸣") || normalized.contains("认同")) {
+            return "RESONANCE";
+        }
+        if (normalized.contains("探索") || normalized.contains("边界") || normalized.contains("求知")) {
+            return "LEXICAL_CARD_OPENED";
+        }
+        if (normalized.contains("摩擦") || normalized.contains("排斥") || normalized.contains("拒绝")) {
+            return "DELETED";
         }
         return "";
     }
@@ -854,6 +955,9 @@ public class MicroHypothesisExtractorService {
         private final long timestampMs;
         private final String contentType;
         private final String context;
+        private final String focusText;
+        private final String tokenType;
+        private final String localContext;
 
         private ActionObservation(
                 String action,
@@ -861,7 +965,10 @@ public class MicroHypothesisExtractorService {
                 String nodeId,
                 long timestampMs,
                 String contentType,
-                String context
+                String context,
+                String focusText,
+                String tokenType,
+                String localContext
         ) {
             this.action = action;
             this.eventType = eventType;
@@ -869,6 +976,9 @@ public class MicroHypothesisExtractorService {
             this.timestampMs = timestampMs;
             this.contentType = contentType;
             this.context = context;
+            this.focusText = focusText == null ? "" : focusText;
+            this.tokenType = tokenType == null ? "" : tokenType;
+            this.localContext = localContext == null ? "" : localContext;
         }
     }
 }

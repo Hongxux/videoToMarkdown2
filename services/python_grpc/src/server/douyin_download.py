@@ -25,16 +25,18 @@ import aiohttp
 
 
 logger = logging.getLogger(__name__)
+_RUNTIME_META_FILENAME = "douyin_runtime_meta.json"
 
 try:
     from playwright.async_api import async_playwright, Browser, BrowserContext, Page
 
     PLAYWRIGHT_AVAILABLE = True
-except Exception:
+except Exception as _pw_import_err:
     PLAYWRIGHT_AVAILABLE = False
     Browser = Any  # type: ignore[assignment]
     BrowserContext = Any  # type: ignore[assignment]
     Page = Any  # type: ignore[assignment]
+    logger.warning(f"Playwright import failed: {_pw_import_err}")
 
 
 class TaskType(Enum):
@@ -398,6 +400,29 @@ def _resolve_douyin_cookie() -> Optional[str]:
     return cookie or None
 
 
+def _normalize_runtime_title(raw_title: Any) -> str:
+    return re.sub(r"\s+", " ", str(raw_title or "")).strip()
+
+
+def _persist_runtime_metadata(task_dir: str, metadata: Dict[str, Any]) -> None:
+    if not task_dir:
+        return
+    payload = {
+        "title": _normalize_runtime_title(metadata.get("title", "")),
+        "author": _normalize_runtime_title(metadata.get("author", "")),
+        "video_url": str(metadata.get("video_url", "") or "").strip(),
+        "source": "services.douyin_download.browser_strategy",
+        "generated_at_epoch": int(time.time()),
+    }
+    meta_path = Path(task_dir) / _RUNTIME_META_FILENAME
+    try:
+        meta_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(meta_path, "w", encoding="utf-8") as file_obj:
+            json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        logger.warning(f"写入抖音运行时元数据失败: {exc}")
+
+
 async def _download_file(video_url: str, output_path: Path, referer_url: str) -> None:
     headers = {
         "User-Agent": (
@@ -461,6 +486,8 @@ async def download_video_with_douyin_downloader(
         result = await strategy.download(task)
         if not result.success:
             raise RuntimeError(result.error_message or "抖音浏览器策略执行失败")
+        if isinstance(result.metadata, dict):
+            _persist_runtime_metadata(task_dir=task_dir, metadata=result.metadata)
         resolved_url = str(result.metadata.get("video_url", "")).strip()
         if not resolved_url:
             raise RuntimeError("抖音浏览器策略未返回 video_url")
@@ -472,3 +499,142 @@ async def download_video_with_douyin_downloader(
         return str(normalized_path)
     finally:
         await strategy.cleanup()
+
+
+async def probe_douyin_video_info(
+    *,
+    video_url: str,
+    timeout_ms: int = 30000,
+) -> Dict[str, Any]:
+    """
+    轻量级抖音视频元信息探测（不下载视频文件）。
+    通过 Playwright 捕获 aweme_detail API 响应，
+    提取 title、duration、cover 等元信息。
+    返回与 yt-dlp probe_video_info 兼容的 dict 结构。
+    """
+    # 延迟导入 playwright，避免模块级 PLAYWRIGHT_AVAILABLE 标志可能因
+    # 导入顺序导致的假阴性。
+    try:
+        from playwright.async_api import async_playwright as _lazy_async_playwright
+    except Exception as import_err:
+        raise RuntimeError(f"Playwright 未安装或导入失败: {import_err}") from import_err
+
+    page_url = _build_candidate_page_url(video_url)
+    playwright_instance = None
+    browser = None
+
+    try:
+        playwright_instance = await _lazy_async_playwright().start()
+        browser = await playwright_instance.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+                "--no-sandbox",
+            ],
+        )
+        context = await browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+        )
+        page = await context.new_page()
+        captured_payload: Dict[str, Optional[Dict[str, Any]]] = {"aweme_detail": None}
+
+        async def _capture_detail_response(response) -> None:
+            try:
+                if response.status != 200:
+                    return
+                url = response.url or ""
+                if "aweme/v1/web/aweme/detail" not in url:
+                    return
+                text = await response.text()
+                if not text:
+                    return
+                data = json.loads(text)
+                detail = data.get("aweme_detail") if isinstance(data, dict) else None
+                if isinstance(detail, dict):
+                    captured_payload["aweme_detail"] = detail
+            except Exception:
+                return
+
+        page.on("response", lambda resp: asyncio.create_task(_capture_detail_response(resp)))
+
+        try:
+            cookies = _resolve_douyin_cookie()
+            if cookies:
+                cookie_list = []
+                for item in cookies.split(";"):
+                    if "=" in item:
+                        key, value = item.strip().split("=", 1)
+                        cookie_list.append({"name": key, "value": value, "domain": ".douyin.com", "path": "/"})
+                await page.context.add_cookies(cookie_list)
+
+            await page.goto(page_url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await asyncio.sleep(2)
+
+            # 尝试从 aweme_detail 提取元信息
+            detail = captured_payload.get("aweme_detail")
+            if isinstance(detail, dict):
+                return _build_probe_result_from_aweme_detail(detail, page_url)
+
+            # 等待更久再检查一次
+            await asyncio.sleep(3)
+            detail = captured_payload.get("aweme_detail")
+            if isinstance(detail, dict):
+                return _build_probe_result_from_aweme_detail(detail, page_url)
+
+            # 回退到页面标题
+            page_title = await page.title()
+            return {
+                "title": _normalize_runtime_title(page_title),
+                "duration": 0.0,
+                "webpage_url": page_url,
+            }
+        finally:
+            await page.close()
+    finally:
+        if browser:
+            await browser.close()
+        if playwright_instance:
+            await playwright_instance.stop()
+
+
+def _build_probe_result_from_aweme_detail(
+    detail: Dict[str, Any], page_url: str
+) -> Dict[str, Any]:
+    """将 aweme_detail 转换为与 yt-dlp probe_video_info 兼容的 dict。"""
+    video = detail.get("video") or {}
+    duration = 0.0
+    raw_duration = video.get("duration")
+    if raw_duration is not None:
+        try:
+            # aweme_detail 中 duration 单位为毫秒
+            duration = float(raw_duration) / 1000.0
+        except (ValueError, TypeError):
+            duration = 0.0
+
+    # 提取封面
+    cover_url = ""
+    cover_obj = video.get("cover") or video.get("origin_cover") or video.get("dynamic_cover") or {}
+    url_list = cover_obj.get("url_list") or []
+    if url_list:
+        cover_url = str(url_list[-1] or "").strip()
+
+    title = _normalize_runtime_title(detail.get("desc"))
+    author_name = ((detail.get("author") or {}).get("nickname") or "")
+
+    return {
+        "title": title,
+        "fulltitle": title,
+        "duration": duration,
+        "thumbnail": cover_url,
+        "webpage_url": page_url,
+        "uploader": author_name,
+    }
+

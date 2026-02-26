@@ -323,7 +323,7 @@ class VLMaterialGenerator:
             self.tutorial_mode_config.get("keyframe_skip_post_draw_processing", True)
         )
         self.tutorial_grid_anchor_enabled = bool(
-            self.tutorial_mode_config.get("grid_anchor_enabled", True)
+            self.tutorial_mode_config.get("grid_anchor_enabled", False)
         )
         try:
             self.tutorial_grid_rows = max(

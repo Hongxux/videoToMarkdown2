@@ -19,7 +19,6 @@ import statistics
 import inspect
 import numpy as np
 from collections import namedtuple
-from faster_whisper import WhisperModel
 from .processing import BaseProcessor, ProgressUpdate
 from .alignment import LightweightVAD
 from .language_normalizer import normalize_whisper_language

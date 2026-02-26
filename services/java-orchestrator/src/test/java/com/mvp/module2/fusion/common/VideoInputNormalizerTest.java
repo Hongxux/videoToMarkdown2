@@ -19,9 +19,9 @@ class VideoInputNormalizerTest {
     }
 
     @Test
-    void shouldCanonicalizeBilibiliVideoUrlWithBvId() {
+    void shouldCanonicalizeBilibiliVideoUrlWithBvIdAndKeepEpisodeIndex() {
         String input = "https://www.bilibili.com/video/BV1xx411c7mD?p=1";
-        assertEquals("https://www.bilibili.com/video/BV1xx411c7mD", VideoInputNormalizer.normalizeVideoInput(input));
+        assertEquals("https://www.bilibili.com/video/BV1xx411c7mD?p=1", VideoInputNormalizer.normalizeVideoInput(input));
     }
 
     @Test

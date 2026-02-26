@@ -126,7 +126,7 @@ public class KnowledgeClassificationOrchestrator {
                 return circuitBreaker.executeSupplier(() -> {
                     try {
                         // Using 600s timeout as per robustness tuning
-                        return grpcClient.classifyKnowledgeBatchAsync(taskId, batch, step2Path, 600).join();
+                        return grpcClient.classifyKnowledgeBatch(taskId, batch, step2Path, 600);
                     } catch (Exception e) {
                         throw new RuntimeException(e);
                     }

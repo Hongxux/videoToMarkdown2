@@ -21,6 +21,9 @@ option py_generic_services = true;
 service VideoProcessingService {
     // 步骤1: 下载视频 (IO密集 - Python)
     rpc DownloadVideo(DownloadRequest) returns (DownloadResponse);
+
+    // 步骤1.5: 探测视频元信息（不下载文件）
+    rpc GetVideoInfo(VideoInfoRequest) returns (VideoInfoResponse);
     
     // 步骤2: Whisper转录 (GPU/CPU密集 - Python)
     rpc TranscribeVideo(TranscribeRequest) returns (TranscribeResponse);
@@ -51,6 +54,7 @@ service VideoProcessingService {
     
     // 健康检查
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc StreamTaskWatchdogSignals(WatchdogSignalStreamRequest) returns (stream WatchdogSignalEvent);
 }
 
 // ==========================================
@@ -75,6 +79,38 @@ message DownloadResponse {
     string canonical_id = 9;    // ?????ID?? aweme_id/BV??
     string link_resolver = 10;  // ??????
     string content_type = 11;   // ?????video/note/unknown
+}
+
+message VideoInfoRequest {
+    string task_id = 1;         // 任务唯一ID
+    string video_input = 2;     // 视频输入（BV号 / URL / 分享文本）
+}
+
+message EpisodeInfo {
+    int32 index = 1;            // 分集序号（1-based）
+    string title = 2;           // 分集标题
+    double duration_sec = 3;    // 分集时长（秒，未知时为0）
+    string episode_url = 4;     // 分集链接（若可用）
+    string episode_cover_url = 5; // 分集封面 URL（若可用）
+}
+
+message VideoInfoResponse {
+    bool success = 1;                 // 是否成功
+    string error_msg = 2;             // 错误信息
+    string raw_input = 3;             // 原始输入
+    string resolved_url = 4;          // 解析后的链接
+    string source_platform = 5;       // 来源平台
+    string canonical_id = 6;          // 规范ID（如 BV / aweme_id）
+    string video_title = 7;           // 视频标题
+    double duration_sec = 8;          // 当前视频/分集时长（秒）
+    bool is_collection = 9;           // 是否为合集/多P
+    int32 total_episodes = 10;        // 总集数
+    int32 current_episode_index = 11; // 当前分集序号（1-based，未知时为0）
+    string current_episode_title = 12;// 当前分集标题
+    repeated EpisodeInfo episodes = 13; // 分集列表
+    string link_resolver = 14;        // 分享链接解析方式
+    string content_type = 15;         // 内容类型（video/note/unknown）
+    string cover_url = 16;            // 视频封面 URL（若可用）
 }
 
 // ==========================================
@@ -285,6 +321,28 @@ message ServerStatus {
     double memory_percent = 2;  // 内存使用率 (0-100)
     int64 available_memory_mb = 3;  // 可用内存（MB）
     bool gpu_available = 4;     // GPU是否可用
+}
+
+message WatchdogSignalStreamRequest {
+    string task_id = 1;
+    string stage = 2;
+    int64 from_stream_seq = 3;
+    int32 idle_timeout_sec = 4;
+}
+
+message WatchdogSignalEvent {
+    string schema = 1;
+    string source = 2;
+    string task_id = 3;
+    string stage = 4;
+    string status = 5;
+    string checkpoint = 6;
+    int32 completed = 7;
+    int32 pending = 8;
+    int64 seq = 9;
+    int64 stream_seq = 10;
+    int64 updated_at_ms = 11;
+    string signal_type = 12;
 }
 
 // =============================================================================

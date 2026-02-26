@@ -2,12 +2,14 @@ package com.mvp.module2.fusion.controller;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.common.VideoInputNormalizer;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
+import com.mvp.module2.fusion.service.CollectionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,6 +26,7 @@ import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -52,6 +55,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -94,6 +98,9 @@ public class MobileMarkdownController {
     @Autowired(required = false)
     private com.mvp.module2.fusion.service.PersonaInsightCardService personaInsightCardService;
 
+    @Autowired(required = false)
+    private CollectionRepository collectionRepository;
+
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
 
@@ -118,9 +125,12 @@ public class MobileMarkdownController {
         for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
             finalViewList.add(fromCachedTask(cached));
         }
+        finalViewList.sort(Comparator.comparingLong(this::bestTimestamp).reversed());
+        Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
 
         List<Map<String, Object>> taskList = new ArrayList<>(finalViewList.size());
         for (TaskView task : finalViewList) {
+            attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
             if (onlyMultiSegment && !isTaskMultiSegmentReadable(task)) {
                 continue;
             }
@@ -157,6 +167,12 @@ public class MobileMarkdownController {
                     "message", "videoUrl cannot be empty"
             ));
         }
+        if (!isCollectionInputValid(request.collectionId, request.episodeNo)) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "collectionId and episodeNo must be provided together, and episodeNo must be positive"
+            ));
+        }
 
         String normalizedUserId = normalizeUserId(request.userId);
         TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request.priority);
@@ -167,14 +183,174 @@ public class MobileMarkdownController {
                 normalizeOutputDir(request.outputDir),
                 priority
         );
+        linkCollectionEpisodeIfNecessary(request.collectionId, request.episodeNo, task.taskId);
 
-        return ResponseEntity.ok(Map.of(
-                "success", true,
-                "taskId", task.taskId,
-                "status", task.status.name(),
-                "normalizedVideoUrl", normalizedVideoInput,
-                "message", "task submitted and queued"
-        ));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("status", task.status.name());
+        payload.put("normalizedVideoUrl", normalizedVideoInput);
+        payload.put("collectionId", request.collectionId != null ? request.collectionId.trim() : "");
+        payload.put("episodeNo", request.episodeNo);
+        payload.put("message", "task submitted and queued");
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/collections")
+    public ResponseEntity<Map<String, Object>> listCollections() {
+        if (collectionRepository == null) {
+            return ResponseEntity.ok(Map.of("collections", List.of()));
+        }
+        List<CollectionRepository.CollectionView> collections = collectionRepository.listCollections();
+        Map<String, TaskEntry> runtimeTaskById = new LinkedHashMap<>();
+        for (TaskEntry runtimeTask : taskQueueManager.getAllTasks()) {
+            if (runtimeTask == null || runtimeTask.taskId == null || runtimeTask.taskId.isBlank()) {
+                continue;
+            }
+            runtimeTaskById.put(runtimeTask.taskId, runtimeTask);
+        }
+
+        List<Map<String, Object>> collectionItems = new ArrayList<>(collections.size());
+        for (CollectionRepository.CollectionView collection : collections) {
+            List<CollectionRepository.EpisodeView> episodes = collectionRepository.listEpisodes(collection.collectionId);
+            List<Map<String, Object>> episodeItems = new ArrayList<>(episodes.size());
+            int completedCount = 0;
+            for (CollectionRepository.EpisodeView episode : episodes) {
+                String taskId = episode.taskId != null ? episode.taskId.trim() : "";
+                String status = null;
+                if (!taskId.isEmpty()) {
+                    TaskEntry runtimeTask = runtimeTaskById.get(taskId);
+                    if (runtimeTask != null && runtimeTask.status != null) {
+                        status = runtimeTask.status.name();
+                        if (runtimeTask.status == TaskStatus.COMPLETED) {
+                            completedCount += 1;
+                        }
+                    }
+                }
+                Map<String, Object> episodeItem = new LinkedHashMap<>();
+                episodeItem.put("episodeNo", episode.episodeNo);
+                episodeItem.put("title", episode.episodeTitle != null ? episode.episodeTitle : "");
+                episodeItem.put("episodeUrl", episode.episodeUrl != null ? episode.episodeUrl : "");
+                episodeItem.put("durationSec", episode.durationSec);
+                episodeItem.put("taskId", taskId.isEmpty() ? null : taskId);
+                episodeItem.put("status", status);
+                episodeItems.add(episodeItem);
+            }
+
+            Map<String, Object> collectionItem = new LinkedHashMap<>();
+            collectionItem.put("collectionId", collection.collectionId);
+            collectionItem.put("platform", collection.platform != null ? collection.platform : "");
+            collectionItem.put("canonicalId", collection.canonicalId != null ? collection.canonicalId : "");
+            collectionItem.put("title", collection.title != null ? collection.title : "");
+            collectionItem.put("totalEpisodes", collection.totalEpisodes);
+            collectionItem.put("completedCount", completedCount);
+            collectionItem.put("episodes", episodeItems);
+            collectionItems.add(collectionItem);
+        }
+
+        return ResponseEntity.ok(Map.of("collections", collectionItems));
+    }
+
+    @PostMapping("/collections/{collectionId}/submit-batch")
+    public ResponseEntity<Map<String, Object>> submitCollectionBatch(
+            @PathVariable("collectionId") String collectionId,
+            @RequestBody(required = false) CollectionBatchSubmitRequest request
+    ) {
+        if (collectionRepository == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", "collection repository is not available"
+            ));
+        }
+        String normalizedCollectionId = collectionId != null ? collectionId.trim() : "";
+        if (normalizedCollectionId.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "collectionId cannot be empty"
+            ));
+        }
+        Optional<CollectionRepository.CollectionView> collectionOpt = collectionRepository.findCollection(normalizedCollectionId);
+        if (collectionOpt.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "success", false,
+                    "message", "collection not found"
+            ));
+        }
+
+        List<CollectionRepository.EpisodeView> allEpisodes = collectionRepository.listEpisodes(normalizedCollectionId);
+        if (allEpisodes.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "collection episodes are empty"
+            ));
+        }
+
+        List<Integer> requestedEpisodeNos = request != null ? request.episodeNos : null;
+        Set<Integer> selectedNos = new LinkedHashSet<>();
+        if (requestedEpisodeNos != null) {
+            for (Integer episodeNo : requestedEpisodeNos) {
+                if (episodeNo == null || episodeNo <= 0) {
+                    continue;
+                }
+                selectedNos.add(episodeNo);
+            }
+        }
+        boolean submitAllUnlinked = selectedNos.isEmpty();
+        String normalizedUserId = normalizeUserId(request != null ? request.userId : null);
+        TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request != null ? request.priority : null);
+        String normalizedOutputDir = normalizeOutputDir(request != null ? request.outputDir : null);
+
+        List<Map<String, Object>> submitted = new ArrayList<>();
+        List<Map<String, Object>> skipped = new ArrayList<>();
+        for (CollectionRepository.EpisodeView episode : allEpisodes) {
+            if (!submitAllUnlinked && !selectedNos.contains(episode.episodeNo)) {
+                continue;
+            }
+            String existingTaskId = episode.taskId != null ? episode.taskId.trim() : "";
+            if (!existingTaskId.isEmpty()) {
+                skipped.add(Map.of(
+                        "episodeNo", episode.episodeNo,
+                        "title", episode.episodeTitle != null ? episode.episodeTitle : "",
+                        "reason", "already linked",
+                        "taskId", existingTaskId
+                ));
+                continue;
+            }
+            String normalizedVideoInput = normalizeVideoInput(episode.episodeUrl);
+            if (normalizedVideoInput.isBlank()) {
+                skipped.add(Map.of(
+                        "episodeNo", episode.episodeNo,
+                        "title", episode.episodeTitle != null ? episode.episodeTitle : "",
+                        "reason", "episodeUrl is empty or invalid"
+                ));
+                continue;
+            }
+
+            TaskEntry task = taskQueueManager.submitTask(
+                    normalizedUserId,
+                    normalizedVideoInput,
+                    normalizedOutputDir,
+                    priority
+            );
+            linkCollectionEpisodeIfNecessary(normalizedCollectionId, episode.episodeNo, task.taskId);
+            submitted.add(Map.of(
+                    "episodeNo", episode.episodeNo,
+                    "title", episode.episodeTitle != null ? episode.episodeTitle : "",
+                    "taskId", task.taskId,
+                    "status", task.status != null ? task.status.name() : "",
+                    "normalizedVideoUrl", normalizedVideoInput
+            ));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("collectionId", normalizedCollectionId);
+        payload.put("submittedCount", submitted.size());
+        payload.put("skippedCount", skipped.size());
+        payload.put("submitted", submitted);
+        payload.put("skipped", skipped);
+        payload.put("message", "batch submission finished");
+        return ResponseEntity.ok(payload);
     }
 
     @PostMapping(value = "/tasks/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
@@ -254,11 +430,13 @@ public class MobileMarkdownController {
         }
 
         try {
+            Instant openedAt = markTaskOpened(task);
             String markdown = Files.readString(resolved.markdownPath, StandardCharsets.UTF_8);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("taskId", task.taskId);
             response.put("title", task.title);
             response.put("status", task.status);
+            response.put("lastOpenedAt", instantToText(openedAt));
             response.put("markdown", markdown);
             response.put("markdownPath", resolved.markdownPath.toString());
             response.put("baseDir", resolved.baseDir.toString());
@@ -314,11 +492,13 @@ public class MobileMarkdownController {
         }
 
         try {
+            Instant openedAt = markTaskOpened(task);
             String markdown = Files.readString(target, StandardCharsets.UTF_8);
             Map<String, Object> response = new LinkedHashMap<>();
             response.put("taskId", task.taskId);
             response.put("title", target.getFileName().toString());
             response.put("status", task.status);
+            response.put("lastOpenedAt", instantToText(openedAt));
             response.put("markdown", markdown);
             response.put("markdownPath", target.toString());
             response.put("baseDir", resolved.baseDir.toString());
@@ -335,6 +515,81 @@ public class MobileMarkdownController {
             logger.warn("read relative markdown failed: taskId={} path={} err={}", taskId, rawPath, ex.getMessage());
             return ResponseEntity.status(500).body(Map.of("message", "?? markdown ??"));
         }
+    }
+
+    @PostMapping("/tasks/{taskId}/opened")
+    public ResponseEntity<?> markTaskOpenedTimestamp(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Instant openedAt = markTaskOpened(task);
+        if (openedAt == null) {
+            return ResponseEntity.status(500).body(Map.of("message", "update task open timestamp failed"));
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("title", task.title != null ? task.title : task.taskId);
+        payload.put("lastOpenedAt", instantToText(openedAt));
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/tasks/{taskId}")
+    public ResponseEntity<?> getTaskRuntimeStatus(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        String displayTitle = task.title != null && !task.title.isBlank() ? task.title : task.taskId;
+        response.put("taskId", task.taskId);
+        response.put("title", displayTitle);
+        response.put("status", task.status != null ? task.status : "");
+        response.put("progress", task.progress);
+        response.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        response.put("createdAt", instantToText(task.createdAt));
+        response.put("completedAt", instantToText(task.completedAt));
+        response.put("markdownAvailable", task.markdownAvailable);
+        return ResponseEntity.ok(response);
+    }
+
+    @DeleteMapping("/tasks/{taskId}")
+    public ResponseEntity<Map<String, Object>> cancelRuntimeTask(@PathVariable String taskId) {
+        TaskEntry runtimeTask = taskQueueManager.getTask(taskId);
+        if (runtimeTask == null) {
+            return ResponseEntity.status(404).body(Map.of(
+                    "success", false,
+                    "status", "NOT_FOUND",
+                    "message", "task not found"
+            ));
+        }
+
+        TaskStatus currentStatus = runtimeTask.status != null ? runtimeTask.status : TaskStatus.QUEUED;
+        if (currentStatus == TaskStatus.COMPLETED
+                || currentStatus == TaskStatus.FAILED
+                || currentStatus == TaskStatus.CANCELLED) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "success", false,
+                    "status", currentStatus.name(),
+                    "message", "task is already finished"
+            ));
+        }
+
+        boolean cancelled = taskQueueManager.cancelTask(taskId);
+        if (!cancelled) {
+            return ResponseEntity.status(409).body(Map.of(
+                    "success", false,
+                    "status", currentStatus.name(),
+                    "message", "task cannot be cancelled in current state"
+            ));
+        }
+
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "status", TaskStatus.CANCELLED.name(),
+                "message", "task cancelled and no new steps will be scheduled"
+        ));
     }
 
     @GetMapping("/tasks/{taskId}/personalization/cache")
@@ -462,10 +717,13 @@ public class MobileMarkdownController {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("taskId", task.taskId);
         payload.put("taskTitle", meta.taskTitle != null ? meta.taskTitle : "");
+        payload.put("lastOpenedAt", meta.lastOpenedAt != null ? meta.lastOpenedAt : "");
         payload.put("pathKey", noteKey);
         payload.put("favorites", noteMeta.favorites != null ? noteMeta.favorites : Map.of());
         payload.put("deleted", noteMeta.deleted != null ? noteMeta.deleted : Map.of());
         payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
+        payload.put("tokenLike", noteMeta.tokenLike != null ? noteMeta.tokenLike : Map.of());
+        payload.put("tokenAnnotations", noteMeta.tokenAnnotations != null ? sanitizeTokenAnnotations(noteMeta.tokenAnnotations) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         return ResponseEntity.ok(payload);
     }
@@ -487,9 +745,11 @@ public class MobileMarkdownController {
         }
 
         TaskMetaFile meta = readTaskMeta(taskRoot);
+        String normalizedTaskTitle = null;
         if (request != null && request.taskTitle != null) {
             String title = request.taskTitle.trim();
             meta.taskTitle = title.isEmpty() ? null : title;
+            normalizedTaskTitle = meta.taskTitle;
         }
 
         String noteKey = normalizeMetaNoteKey(taskRoot, request != null ? request.path : null);
@@ -503,9 +763,17 @@ public class MobileMarkdownController {
         if (request != null && request.comments != null) {
             noteMeta.comments = new LinkedHashMap<>(sanitizeComments(request.comments));
         }
+        if (request != null && request.tokenLike != null) {
+            noteMeta.tokenLike = sanitizeTokenLike(request.tokenLike);
+        }
+        if (request != null && request.tokenAnnotations != null) {
+            noteMeta.tokenAnnotations = new LinkedHashMap<>(sanitizeTokenAnnotations(request.tokenAnnotations));
+        }
         if ((noteMeta.favorites == null || noteMeta.favorites.isEmpty())
                 && (noteMeta.deleted == null || noteMeta.deleted.isEmpty())
-                && (noteMeta.comments == null || noteMeta.comments.isEmpty())) {
+                && (noteMeta.comments == null || noteMeta.comments.isEmpty())
+                && (noteMeta.tokenLike == null || noteMeta.tokenLike.isEmpty())
+                && (noteMeta.tokenAnnotations == null || noteMeta.tokenAnnotations.isEmpty())) {
             meta.notesByMarkdown.remove(noteKey);
         } else {
             meta.notesByMarkdown.put(noteKey, noteMeta);
@@ -514,15 +782,27 @@ public class MobileMarkdownController {
         if (!writeTaskMeta(taskRoot, meta)) {
             return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
         }
+        if (request != null && request.taskTitle != null) {
+            if (!syncVideoMetaTitle(taskRoot, normalizedTaskTitle)) {
+                return ResponseEntity.status(500).body(Map.of("message", "write video metadata failed"));
+            }
+        }
+        if (normalizedTaskTitle != null) {
+            task.title = normalizedTaskTitle;
+            task.metaTitle = normalizedTaskTitle;
+        }
 
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
         payload.put("taskId", task.taskId);
         payload.put("taskTitle", meta.taskTitle != null ? meta.taskTitle : "");
+        payload.put("lastOpenedAt", meta.lastOpenedAt != null ? meta.lastOpenedAt : "");
         payload.put("pathKey", noteKey);
         payload.put("favorites", noteMeta.favorites != null ? noteMeta.favorites : Map.of());
         payload.put("deleted", noteMeta.deleted != null ? noteMeta.deleted : Map.of());
         payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
+        payload.put("tokenLike", noteMeta.tokenLike != null ? noteMeta.tokenLike : Map.of());
+        payload.put("tokenAnnotations", noteMeta.tokenAnnotations != null ? sanitizeTokenAnnotations(noteMeta.tokenAnnotations) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         payload.put("updatedAt", Instant.now().toString());
         return ResponseEntity.ok(payload);
@@ -751,13 +1031,15 @@ public class MobileMarkdownController {
 
     private Map<String, Object> toListItem(TaskView task) {
         Map<String, Object> item = new LinkedHashMap<>();
+        String displayTitle = task.title != null && !task.title.isBlank() ? task.title : task.taskId;
         item.put("taskId", task.taskId);
-        item.put("title", task.title != null ? task.title : task.taskId);
+        item.put("title", displayTitle);
         item.put("metaTitle", task.metaTitle != null ? task.metaTitle : "");
         item.put("titleSource", resolveTaskTitleSource(task));
         item.put("videoUrl", task.videoUrl != null ? task.videoUrl : "");
         item.put("status", task.status != null ? task.status : "");
         item.put("createdAt", instantToText(task.createdAt));
+        item.put("lastOpenedAt", instantToText(task.lastOpenedAt));
         item.put("completedAt", instantToText(task.completedAt));
         item.put("resultPath", task.resultPath != null ? task.resultPath : "");
         item.put("markdownPath", task.markdownPath != null ? task.markdownPath.toString() : "");
@@ -766,7 +1048,66 @@ public class MobileMarkdownController {
         item.put("storageKey", task.storageKey != null ? task.storageKey : "");
         item.put("progress", task.progress);
         item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        item.put("collectionId", task.collectionId != null ? task.collectionId : "");
+        item.put("episodeNo", task.episodeNo);
+        item.put("episodeTitle", task.episodeTitle != null ? task.episodeTitle : "");
+        item.put("collectionTitle", task.collectionTitle != null ? task.collectionTitle : "");
+        item.put("totalEpisodes", task.totalEpisodes);
         return item;
+    }
+
+    private Map<String, CollectionRepository.EpisodeTaskBinding> findCollectionBindingByTaskId(List<TaskView> tasks) {
+        if (collectionRepository == null || tasks == null || tasks.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> taskIds = new LinkedHashSet<>();
+        for (TaskView task : tasks) {
+            if (task == null || task.taskId == null || task.taskId.isBlank()) {
+                continue;
+            }
+            if (task.storageTask || task.taskId.startsWith(STORAGE_TASK_PREFIX)) {
+                continue;
+            }
+            taskIds.add(task.taskId);
+        }
+        if (taskIds.isEmpty()) {
+            return Map.of();
+        }
+        return collectionRepository.findEpisodeBindingsByTaskIds(taskIds);
+    }
+
+    private void attachCollectionBinding(TaskView task, CollectionRepository.EpisodeTaskBinding binding) {
+        if (task == null || binding == null) {
+            return;
+        }
+        task.collectionId = binding.collectionId;
+        task.episodeNo = binding.episodeNo;
+        task.episodeTitle = binding.episodeTitle;
+        task.collectionTitle = binding.collectionTitle;
+        task.totalEpisodes = binding.totalEpisodes;
+    }
+
+    private boolean isCollectionInputValid(String collectionId, Integer episodeNo) {
+        boolean hasCollectionId = collectionId != null && !collectionId.trim().isEmpty();
+        boolean hasEpisodeNo = episodeNo != null;
+        if (hasCollectionId != hasEpisodeNo) {
+            return false;
+        }
+        if (hasEpisodeNo) {
+            return episodeNo > 0;
+        }
+        return true;
+    }
+
+    private void linkCollectionEpisodeIfNecessary(String collectionId, Integer episodeNo, String taskId) {
+        if (!isCollectionInputValid(collectionId, episodeNo) || collectionRepository == null || episodeNo == null) {
+            return;
+        }
+        boolean linked = collectionRepository.linkTaskToEpisode(collectionId.trim(), episodeNo, taskId);
+        if (!linked) {
+            logger.warn("link collection episode failed: collectionId={} episodeNo={} taskId={}",
+                    collectionId, episodeNo, taskId);
+        }
     }
 
     private boolean isTaskMultiSegmentReadable(TaskView task) {
@@ -876,6 +1217,14 @@ public class MobileMarkdownController {
             return fromRuntimeTask(runtimeTask);
         }
 
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> cachedByTaskIdOpt =
+                storageTaskCacheService.getTaskByTaskId(taskId);
+        if (cachedByTaskIdOpt.isPresent()) {
+            TaskView view = fromCachedTask(cachedByTaskIdOpt.get());
+            view.taskId = taskId;
+            return view;
+        }
+
         String storageKey = null;
         if (taskId.startsWith(STORAGE_TASK_PREFIX)) {
             storageKey = taskId.substring(STORAGE_TASK_PREFIX.length());
@@ -932,7 +1281,6 @@ public class MobileMarkdownController {
             response.put("personalizationChunkStrategy", payload.chunkStrategy != null ? payload.chunkStrategy : "");
             response.put("personaProfile", payload.persona != null ? payload.persona : Map.of());
             if (personaInsightCardService != null) {
-                personaInsightCardService.generateAsync(taskId, userId, markdownPath, payload.nodes);
                 Map<String, Object> insightIndex = personaInsightCardService.loadIndexSnapshot(taskId, markdownPath);
                 if (!insightIndex.isEmpty()) {
                     response.put("insightCardIndex", insightIndex);
@@ -1163,6 +1511,15 @@ public class MobileMarkdownController {
             if (loaded.taskTitle != null && loaded.taskTitle.trim().isEmpty()) {
                 loaded.taskTitle = null;
             }
+            if (loaded.lastOpenedAt != null) {
+                String normalizedLastOpened = loaded.lastOpenedAt.trim();
+                if (normalizedLastOpened.isEmpty()) {
+                    loaded.lastOpenedAt = null;
+                } else {
+                    Instant parsed = parseInstantSafe(normalizedLastOpened);
+                    loaded.lastOpenedAt = parsed != null ? parsed.toString() : null;
+                }
+            }
             for (Map.Entry<String, NoteMeta> entry : loaded.notesByMarkdown.entrySet()) {
                 if (entry.getValue() == null) {
                     entry.setValue(new NoteMeta());
@@ -1178,6 +1535,16 @@ public class MobileMarkdownController {
                     entry.getValue().comments = new LinkedHashMap<>();
                 } else {
                     entry.getValue().comments = new LinkedHashMap<>(sanitizeComments(entry.getValue().comments));
+                }
+                if (entry.getValue().tokenLike == null) {
+                    entry.getValue().tokenLike = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().tokenLike = sanitizeTokenLike(entry.getValue().tokenLike);
+                }
+                if (entry.getValue().tokenAnnotations == null) {
+                    entry.getValue().tokenAnnotations = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().tokenAnnotations = new LinkedHashMap<>(sanitizeTokenAnnotations(entry.getValue().tokenAnnotations));
                 }
             }
             return loaded;
@@ -1222,6 +1589,60 @@ public class MobileMarkdownController {
         }
     }
 
+    private boolean syncVideoMetaTitle(Path taskRoot, String title) {
+        if (taskRoot == null) {
+            return false;
+        }
+        Path videoMetaPath = taskRoot.resolve("video_meta.json").normalize();
+        Path tmpPath = taskRoot.resolve("video_meta.json.tmp").normalize();
+        if (!videoMetaPath.startsWith(taskRoot)) {
+            return false;
+        }
+        try {
+            Files.createDirectories(taskRoot);
+            ObjectNode root = loadVideoMetaNode(videoMetaPath);
+            if (title == null || title.isBlank()) {
+                root.remove("title");
+            } else {
+                root.put("title", title);
+            }
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(tmpPath.toFile(), root);
+            try {
+                Files.move(tmpPath, videoMetaPath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(tmpPath, videoMetaPath, StandardCopyOption.REPLACE_EXISTING);
+            }
+            return true;
+        } catch (Exception ex) {
+            try {
+                Files.deleteIfExists(tmpPath);
+            } catch (Exception ignored) {
+                // Ignore tmp cleanup failures.
+            }
+            logger.warn("write video metadata title failed: {} err={}", videoMetaPath, ex.getMessage());
+            return false;
+        }
+    }
+
+    private ObjectNode loadVideoMetaNode(Path videoMetaPath) {
+        if (videoMetaPath == null || !Files.isRegularFile(videoMetaPath)) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            if (Files.size(videoMetaPath) == 0L) {
+                return objectMapper.createObjectNode();
+            }
+            JsonNode loaded = objectMapper.readTree(videoMetaPath.toFile());
+            if (loaded instanceof ObjectNode) {
+                return (ObjectNode) loaded;
+            }
+            return objectMapper.createObjectNode();
+        } catch (Exception ex) {
+            logger.warn("read video metadata failed: {} err={}", videoMetaPath, ex.getMessage());
+            return objectMapper.createObjectNode();
+        }
+    }
+
     private String normalizeMetaNoteKey(Path taskRoot, String rawPath) {
         if (rawPath == null || rawPath.isBlank()) {
             return META_DEFAULT_NOTE_KEY;
@@ -1258,6 +1679,10 @@ public class MobileMarkdownController {
     }
 
     private Map<String, Boolean> sanitizeDeleted(Map<String, Boolean> input) {
+        return sanitizeBooleanFlags(input);
+    }
+
+    private Map<String, Boolean> sanitizeTokenLike(Map<String, Boolean> input) {
         return sanitizeBooleanFlags(input);
     }
 
@@ -1305,6 +1730,22 @@ public class MobileMarkdownController {
 
             if (!normalized.isEmpty()) {
                 output.put(entry.getKey(), normalized);
+            }
+        }
+        return output;
+    }
+
+    private Map<String, String> sanitizeTokenAnnotations(Map<String, ?> input) {
+        Map<String, String> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            if (entry.getKey() == null || entry.getKey().isBlank()) continue;
+            if (entry.getValue() == null) continue;
+            String value = String.valueOf(entry.getValue()).trim();
+            if (!value.isEmpty()) {
+                output.put(entry.getKey().trim(), value);
             }
         }
         return output;
@@ -1473,6 +1914,9 @@ public class MobileMarkdownController {
     }
 
     private long bestTimestamp(TaskView task) {
+        if (task != null && task.lastOpenedAt != null) {
+            return task.lastOpenedAt.toEpochMilli();
+        }
         if (task.createdAt != null) {
             return task.createdAt.toEpochMilli();
         }
@@ -1534,6 +1978,52 @@ public class MobileMarkdownController {
             String normalizedTitle = meta.taskTitle.trim();
             view.title = normalizedTitle;
             view.metaTitle = normalizedTitle;
+        }
+        if (meta.lastOpenedAt != null && !meta.lastOpenedAt.isBlank()) {
+            view.lastOpenedAt = parseInstantSafe(meta.lastOpenedAt);
+        }
+    }
+
+    private Instant markTaskOpened(TaskView task) {
+        if (task == null) {
+            return null;
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return null;
+        }
+
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        String normalizedTitle = trimToNullSafe(task.title);
+        String normalizedTaskId = trimToNullSafe(task.taskId);
+        if ((meta.taskTitle == null || meta.taskTitle.isBlank())
+                && normalizedTitle != null
+                && (normalizedTaskId == null || !normalizedTitle.equals(normalizedTaskId))) {
+            meta.taskTitle = normalizedTitle;
+            task.title = normalizedTitle;
+            task.metaTitle = normalizedTitle;
+        }
+
+        Instant openedAt = Instant.now();
+        meta.lastOpenedAt = openedAt.toString();
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return null;
+        }
+        task.lastOpenedAt = openedAt;
+        return openedAt;
+    }
+
+    private Instant parseInstantSafe(String rawValue) {
+        String normalized = trimToNullSafe(rawValue);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(normalized);
+        } catch (Exception ex) {
+            return null;
         }
     }
 
@@ -1705,6 +2195,7 @@ public class MobileMarkdownController {
         public String version = "1.0";
         public String updatedAt = "";
         public String taskTitle = null;
+        public String lastOpenedAt = null;
         public Map<String, NoteMeta> notesByMarkdown = new LinkedHashMap<>();
     }
 
@@ -1712,6 +2203,8 @@ public class MobileMarkdownController {
         public Map<String, Boolean> favorites = new LinkedHashMap<>();
         public Map<String, Boolean> deleted = new LinkedHashMap<>();
         public Map<String, Object> comments = new LinkedHashMap<>();
+        public Map<String, Boolean> tokenLike = new LinkedHashMap<>();
+        public Map<String, Object> tokenAnnotations = new LinkedHashMap<>();
     }
 
     public static class MarkdownUpdateRequest {
@@ -1725,6 +2218,8 @@ public class MobileMarkdownController {
         public Map<String, Boolean> favorites;
         public Map<String, Boolean> deleted;
         public Map<String, Object> comments;
+        public Map<String, Boolean> tokenLike;
+        public Map<String, Object> tokenAnnotations;
     }
 
     public static class TaskTelemetryIngestRequest {
@@ -1745,6 +2240,15 @@ public class MobileMarkdownController {
         public String videoUrl;
         public String outputDir;
         public String priority;
+        public String collectionId;
+        public Integer episodeNo;
+    }
+
+    public static class CollectionBatchSubmitRequest {
+        public List<Integer> episodeNos;
+        public String userId;
+        public String outputDir;
+        public String priority;
     }
 
     private static class TaskView {
@@ -1754,6 +2258,7 @@ public class MobileMarkdownController {
         private String videoUrl;
         private String status;
         private Instant createdAt;
+        private Instant lastOpenedAt;
         private Instant completedAt;
         private String resultPath;
         private boolean markdownAvailable;
@@ -1765,5 +2270,10 @@ public class MobileMarkdownController {
         private String statusMessage;
         private double progress;
         private TaskEntry runtimeTask;
+        private String collectionId;
+        private Integer episodeNo;
+        private String episodeTitle;
+        private String collectionTitle;
+        private Integer totalEpisodes;
     }
 }

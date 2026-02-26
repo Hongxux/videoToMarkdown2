@@ -6,8 +6,9 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -62,10 +63,12 @@ class StepOutputConfig:
         enable_all: bool = False,
         disable_all: bool = False,
         async_write: bool = False,
+        write_scope_key: str = "",
     ):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.async_write = bool(async_write)
+        self.write_scope_key = str(write_scope_key or "").strip()
 
         if disable_all:
             resolved_steps = set()
@@ -104,7 +107,13 @@ class StepOutputConfig:
         if self.async_write:
             from services.python_grpc.src.common.utils.async_disk_writer import enqueue_json_write
 
-            enqueue_json_write(str(output_file), step_output, ensure_ascii=False, indent=2)
+            enqueue_json_write(
+                str(output_file),
+                step_output,
+                ensure_ascii=False,
+                indent=2,
+                scope_key=self.write_scope_key,
+            )
             return
 
         with open(output_file, "w", encoding="utf-8") as output_stream:
@@ -200,6 +209,8 @@ def create_checkpointed_node(
     step_name: str,
     checkpointer: Optional[SQLiteCheckpointer] = None,
     output_config: Optional[StepOutputConfig] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    max_step: int = 6,
 ):
     """方法说明：create_checkpointed_node 核心方法。
     执行步骤：
@@ -223,6 +234,29 @@ def create_checkpointed_node(
         if output_config:
             output_config.save_step_output(step_name, merged_state)
 
+        if progress_callback:
+            try:
+                completed = max(0, min(int(step_index), int(max_step)))
+                pending = max(0, int(max_step) - completed)
+                progress_callback(
+                    {
+                        "event": "step_completed",
+                        "stage": "stage1",
+                        "step_name": step_name,
+                        "checkpoint": step_name,
+                        "completed": completed,
+                        "pending": pending,
+                        "status": "running",
+                        "timestamp_ms": int(time.time() * 1000),
+                    }
+                )
+            except Exception as callback_error:
+                logging.getLogger("stage1_pipeline").warning(
+                    "Stage1 progress callback failed at %s: %s",
+                    step_name,
+                    callback_error,
+                )
+
         return result
 
     return wrapper
@@ -245,6 +279,7 @@ def create_pipeline_graph(
     sqlite_checkpointer: Optional[SQLiteCheckpointer] = None,
     output_config: Optional[StepOutputConfig] = None,
     max_step: int = 6,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> StateGraph:
     """方法说明：create_pipeline_graph 核心方法。
     执行步骤：
@@ -255,7 +290,14 @@ def create_pipeline_graph(
 
     def add_node(name: str, func):
         if sqlite_checkpointer or output_config:
-            wrapped = create_checkpointed_node(func, name, sqlite_checkpointer, output_config)
+            wrapped = create_checkpointed_node(
+                func,
+                name,
+                sqlite_checkpointer,
+                output_config,
+                progress_callback=progress_callback,
+                max_step=max_step,
+            )
             graph.add_node(name, wrapped)
         else:
             graph.add_node(name, func)
@@ -333,6 +375,7 @@ async def run_pipeline(
     max_step: int = 6,
     resume_state: Optional[Dict[str, Any]] = None,
     resume_from_step: Optional[str] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """方法说明：run_pipeline 核心方法。
     执行步骤：
@@ -362,6 +405,7 @@ async def run_pipeline(
         enable_all=output_all_steps,
         async_write=str(os.getenv("TRANSCRIPT_ASYNC_PERSIST_WRITES", "1")).strip().lower()
         not in {"0", "false", "no", "off"},
+        write_scope_key=str(Path(output_dir).resolve()),
     )
     main_logger.info(f"Intermediate outputs: {len(output_config.enabled_steps)} steps enabled")
 
@@ -383,6 +427,7 @@ async def run_pipeline(
         sqlite_checkpointer=sqlite_checkpointer,
         output_config=output_config,
         max_step=max_step,
+        progress_callback=progress_callback,
     )
 
     return await _execute_pipeline(
@@ -398,6 +443,8 @@ async def run_pipeline(
         main_logger,
         resume_state,
         resume_from_step,
+        progress_callback,
+        max_step,
     )
 
 
@@ -439,6 +486,8 @@ async def _execute_pipeline(
     main_logger,
     resume_state: Optional[Dict[str, Any]] = None,
     resume_from_step: Optional[str] = None,
+    progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    max_step: int = 6,
 ):
     """方法说明：_execute_pipeline 工具方法。
     执行步骤：
@@ -498,6 +547,23 @@ async def _execute_pipeline(
             )
 
     try:
+        if progress_callback:
+            try:
+                progress_callback(
+                    {
+                        "event": "pipeline_start",
+                        "stage": "stage1",
+                        "checkpoint": "pipeline_start",
+                        "step_name": "pipeline_start",
+                        "completed": 0,
+                        "pending": max(0, int(max_step)),
+                        "status": "running",
+                        "timestamp_ms": int(time.time() * 1000),
+                    }
+                )
+            except Exception as callback_error:
+                main_logger.warning("Stage1 progress callback start event failed: %s", callback_error)
+
         if tracer:
             tracer.checkpoint("pipeline_start", {"video": video_path, "thread_id": thread_id, "resume": resume})
 
@@ -516,6 +582,23 @@ async def _execute_pipeline(
             metrics.save()
             metrics.print_summary()
 
+        if progress_callback:
+            try:
+                progress_callback(
+                    {
+                        "event": "pipeline_end",
+                        "stage": "stage1",
+                        "checkpoint": str(final_state.get("current_step") or "step5_6_dedup_merge"),
+                        "step_name": str(final_state.get("current_step") or "step5_6_dedup_merge"),
+                        "completed": max(0, int(max_step)),
+                        "pending": 0,
+                        "status": "completed",
+                        "timestamp_ms": int(time.time() * 1000),
+                    }
+                )
+            except Exception as callback_error:
+                main_logger.warning("Stage1 progress callback end event failed: %s", callback_error)
+
         main_logger.info("Pipeline completed successfully!")
         main_logger.info(f"Output: {final_state.get('pure_text_script', 'N/A')}")
         return final_state
@@ -529,6 +612,23 @@ async def _execute_pipeline(
         if tracer:
             tracer.checkpoint("pipeline_error", {"error": str(error)})
             tracer.save()
+        if progress_callback:
+            try:
+                progress_callback(
+                    {
+                        "event": "pipeline_error",
+                        "stage": "stage1",
+                        "checkpoint": str(initial_state.get("current_step") or "unknown"),
+                        "step_name": str(initial_state.get("current_step") or "unknown"),
+                        "completed": 0,
+                        "pending": max(0, int(max_step)),
+                        "status": "failed",
+                        "error": str(error),
+                        "timestamp_ms": int(time.time() * 1000),
+                    }
+                )
+            except Exception as callback_error:
+                main_logger.warning("Stage1 progress callback error event failed: %s", callback_error)
         raise
 
 

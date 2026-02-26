@@ -84,6 +84,16 @@ class VideoProcessingOrchestratorTitleResolutionTest {
         assertEquals("final-name", actual);
     }
 
+    @Test
+    void buildDownloadTaskDirSourceShouldAppendEpisodeIndexForBilibiliPartUrl() throws Exception {
+        VideoProcessingOrchestrator orchestrator = new VideoProcessingOrchestrator();
+        String input = "https://www.bilibili.com/video/BV1n9CwYoEro?p=2";
+
+        String actual = invokeBuildDownloadTaskDirSource(orchestrator, input);
+
+        assertEquals("BV1n9CwYoEro_2", actual);
+    }
+
     private String invokeResolveDocumentTitle(
         VideoProcessingOrchestrator orchestrator,
         DownloadResult downloadResult,
@@ -98,5 +108,17 @@ class VideoProcessingOrchestratorTitleResolutionTest {
         );
         method.setAccessible(true);
         return (String) method.invoke(orchestrator, downloadResult, outputDir, videoPath);
+    }
+
+    private String invokeBuildDownloadTaskDirSource(
+        VideoProcessingOrchestrator orchestrator,
+        String videoUrl
+    ) throws Exception {
+        Method method = VideoProcessingOrchestrator.class.getDeclaredMethod(
+            "buildDownloadTaskDirSource",
+            String.class
+        );
+        method.setAccessible(true);
+        return (String) method.invoke(orchestrator, videoUrl);
     }
 }

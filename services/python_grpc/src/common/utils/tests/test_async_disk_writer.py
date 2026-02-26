@@ -67,3 +67,33 @@ def test_async_writer_persists_json_and_text_files():
 
     assert text_path.exists()
     assert "hello" in text_path.read_text(encoding="utf-8")
+
+
+def test_async_writer_flush_supports_scope_key():
+    tmp_path = _make_repo_tmp_dir("test_async_writer_flush_supports_scope_key")
+    scope_a = tmp_path / "task_a"
+    scope_b = tmp_path / "task_b"
+    json_a = scope_a / "intermediates" / "step2_correction_output.json"
+
+    try:
+        enqueue_json_write(
+            str(json_a),
+            {"step": "step2_correction", "output": {"corrected_subtitles": [{"subtitle_id": "SUB_A"}]}},
+            ensure_ascii=False,
+            indent=2,
+            scope_key=str(scope_a),
+        )
+        for index in range(12):
+            enqueue_json_write(
+                str(scope_b / "intermediates" / f"bulk_{index}.json"),
+                {"index": index, "payload": "x" * 1024},
+                ensure_ascii=False,
+                indent=2,
+                scope_key=str(scope_b),
+            )
+    except PermissionError as error:
+        pytest.skip(f"spawn process unavailable in current environment: {error}")
+
+    assert flush_async_json_writes(timeout_sec=10.0, scope_key=str(scope_a)) is True
+    assert json_a.exists()
+    assert flush_async_json_writes(timeout_sec=20.0) is True

@@ -318,9 +318,13 @@ public class CVValidationOrchestrator {
             return circuitBreaker.executeSupplier(
                 Retry.decorateSupplier(retry, () -> {
                     try {
-                        return grpcClient.validateCVBatchStreaming(
-                            taskId, videoPath, batch, BATCH_TIMEOUT_SEC, resultConsumer
-                        ).get(BATCH_TIMEOUT_SEC, TimeUnit.SECONDS);
+                        return grpcClient.validateCVBatchStreamingBlocking(
+                            taskId,
+                            videoPath,
+                            batch,
+                            BATCH_TIMEOUT_SEC,
+                            resultConsumer
+                        );
                     } catch (Exception e) {
                         throw new RuntimeException("gRPC streaming call failed", e);
                     }

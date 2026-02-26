@@ -13,6 +13,39 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-02-25 Android 语义阅读器 token 批注点击崩溃与节点批注覆盖正文
+- 日期：2026-02-25
+- 现象与影响范围：
+  - 在语义阅读器中，选中 token 后点击“批注”会出现闪退风险。
+  - 节点批注面板在部分布局路径下会覆盖正文，而不是在节点下方撑开，影响阅读和交互。
+- 触发条件：
+  - token 批注入口触发 JNI 分词调用时，点击落点在边界光标（如段尾）会放大 native 越界风险。
+  - `SubcomposeAnchorLayout` 前景层存在多个根节点时，旧实现按同一 `y=0` 叠放，导致批注面板与正文重叠。
+- 根因定位：
+  - 批注链路缺少 JNI 光标归一化，native 入参边界不稳定。
+  - 批注编辑器焦点请求缺少容错，焦点时序异常时会直接抛出异常。
+  - 前景布局高度按 `max(height)` 而非累计高度，且前景子项未做纵向顺排。
+- 修复措施：
+  - 新增 `normalizeLexicalCursor(text, cursor)`，在调用 `LexicalNativeBridge.segmentAt` 前做光标边界归一化。
+  - `TokenAnnotationEditorOverlay` 的 `focusRequester.requestFocus()` 与键盘显示改为 `runCatching` 包裹，避免焦点时序导致崩溃。
+  - `SubcomposeAnchorLayout` 改为：
+    - 前景高度使用 `sumOf { it.height }`；
+    - 前景子项按累计 `foregroundY` 纵向摆放，确保“节点正文 + 节点批注面板”自然下撑。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充“批注入口边界光标（段首/段尾/空段）”回归用例，覆盖 JNI 入参与纯 Kotlin 回退逻辑。
+  - 校验：涉及 `Popup`/焦点请求的交互路径统一使用容错封装，避免时序异常直接中断。
+  - 监控：为批注入口增加轻量 telemetry 计数（open/editor_commit/editor_dismiss/error），便于快速定位回归。
+  - 回滚：若线上仍出现异常，可仅回退 `SubcomposeAnchorLayout` 纵排变更或临时关闭 JNI 分词入口，保留数据层与批注存储契约。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyUtils.kt`
+- 复盘要点：
+  - 交互链路调用 native 能力时，边界值归一化应作为默认前置步骤。
+  - 自定义布局组件必须明确“单根/多根子树”行为，否则很容易在功能扩展后出现覆盖型回归。
+
 ## 2026-02-22 Python 端 DeepSeek 模型语义漂移（局部硬编码与别名未统一）
 - 日期：2026-02-22
 - 现象与影响范围：
@@ -4310,4 +4343,748 @@
     - 文档提交前执行：`python -X utf8 tools/architecture/check_docs_encoding.py`。
   - 回滚：
     - 快照渲染和标签过滤均为服务内局部策略，可按文件粒度回滚，不影响 controller 契约与数据库结构。
+
+## 2026-02-22 Android Markdown 列表/缩进/引用样式丢失（Markwon Span 被覆盖）
+- 日期：2026-02-22
+- 现象与影响范围：
+  - Android 阅读器中，Markdown 的有序列表、无序列表、层级缩进、`> 引用` 未按预期渲染。
+  - 受影响范围为 `SemanticTopographyReader` 中所有通过 `Markwon` 渲染的段落节点。
+- 触发条件：
+  - `markwon.setMarkdown(textView, markdown)` 渲染完成后，后续逻辑再次使用纯文本重建 `SpannableString` 并回写 `textView.text`。
+- 根因定位：
+  - 二次回写使用了纯字符串作为源，导致 Markwon 产出的段落级/列表级/引用级 Span 被整体丢弃。
+  - 高亮逻辑与 Markdown 渲染逻辑耦合，未做“仅叠加自定义 Span”的边界隔离。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `applySelectionStyle` 改为基于 `textView.text`（已含 Markwon Span）创建 `SpannableStringBuilder`，不再从纯文本重建。
+  - 新增 `ReaderOverlaySpan` 标记接口与四类自定义高亮 Span（下划线/前景色/背景色/相对字号），避免误删 Markwon Span。
+  - 新增 `clearReaderOverlaySpans`，每次更新先清理旧的自定义高亮 Span，再增量叠加新高亮。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Android 侧渲染回归样例，覆盖 `ol/ul/nested list/blockquote` 在叠加高亮后的视觉与结构。
+  - 校验：
+    - 对 `TextView` Markdown 渲染链路建立约束：禁止在渲染后以纯文本重建整段 `Spannable`。
+  - 回滚：
+    - 如出现兼容性问题，可仅回滚自定义 Overlay Span 逻辑，不回滚 Markwon 主渲染链路。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+
+## 2026-02-22 Android Markdown 列表层次弱 + 圆点比例失衡（清洗漏斗与自定义列表插件叠加）
+- 日期：2026-02-22
+- 现象与影响范围：
+  - 列表层级缩进不明显，嵌套结构阅读阻力高。
+  - 圆点与字体大小不协调，在不同段落字号下出现“圆点过小/过硬”的视觉违和。
+  - 部分 Markdown 在进入阅读器前丢失前导空格/Tab，嵌套列表与代码缩进被压平。
+- 触发条件：
+  - 节点解析阶段对 Markdown 字段执行 `.trim()`。
+  - fallback 组装阶段对分段内容执行 `.map { it.trim() }`。
+  - 列表渲染使用 `CustomListPlugin` 固定缩进与固定圆点半径，且未按嵌套层级递增缩进。
+- 根因定位：
+  - 文本清洗漏斗错误地把 Markdown 语义空白（leading spaces/tab）当作噪声清理。
+  - 自定义列表渲染策略未和字号、层级联动，导致结构和视觉比例失衡。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`
+    - 新增 `optRawStringByAlias`，用于 `text/original_markdown` 原文读取，避免 `.trim()` 吞掉前导空白。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+    - fallback 组装移除 `.map { it.trim() }`，保留分段原始缩进。
+    - 重写 `CustomListPlugin`：
+      - 左缩进按层级递增（`baseIndent + level * nestedStep`）。
+      - 圆点半径按当前行 `Paint.textSize` 自适应，并按层级轻微收敛。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MarkdownReaderRenderConfig.kt`
+    - 将列表缩进默认参数调高到更可读的层级区分（`output/tab` 默认 `5`）。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Android 阅读器样例：多级 `ul/ol` + tab 缩进代码块，断言结构与层级可见性。
+  - 校验：
+    - 约束 Markdown 字段读取禁止直接 `.trim()`；仅对元数据字段（如 `id/type`）做裁剪。
+  - 回滚：
+    - 如新列表样式需要回调，可仅回退 `CustomListPlugin` 参数，不回退“原文保留”修复。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MarkdownReaderRenderConfig.kt`
+
+## 2026-02-22 Persona Reading 后首点术语卡片偶发 404/空内容（异步竞态）
+- 现象：
+  - `persona_reading` 已返回，但用户首点术语时卡片接口仍可能返回不存在或空 markdown。
+  - 并发点击同一术语时，会触发重复生成请求，造成不必要的模型调用与写入竞争。
+- 根因：
+  - 生成链路位于 `appendPersonalizedReading` 中，但之前是 `generateAsync`，响应返回与卡片落库之间存在时间窗。
+  - `getCardByTitle` 仅做读取，不负责缺失场景兜底生成，导致前端必须重试。
+  - 缺少标题级/任务级并发去重，竞态下可能重复进入生成路径。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 在 `appendPersonalizedReading` 改为调用 `personaInsightCardService.generateSync(...)`，确保生成后再加载 `insightCardIndex`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+    - 新增 `generateSync(...)`。
+    - 抽取 `generateWithOptimisticLock(...)`，统一异步/同步入口复用同一乐观锁机制（`optimisticInFlightTokens + generationLocks`）。
+    - 保留“指纹一致但卡片缺失则继续生成”的保护逻辑，避免错误跳过。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - `getCardByTitle` 在读取失败或 markdown 为空时，同步触发生成并返回。
+    - 增加标题级 in-flight 去重和短轮询等待，降低并发重复生成概率。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“首点术语即取卡”的集成回归样例，断言首请求可返回非空 markdown。
+    - 增加并发同术语场景，断言仅单次生成落库。
+  - 监控：
+    - 记录 `card not found or not generated` 的接口比率，按任务与术语分桶观察。
+    - 统计 in-flight 命中率，评估并发去重效果。
+  - 校验：
+    - 提交前固定执行：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+    - 文档提交前执行：`python -X utf8 tools/architecture/check_docs_encoding.py`。
+  - 回滚：
+    - 如需降级，可先回滚 `generateSync` 调用点到异步模式，同时保留 `getCardByTitle` 同步兜底以维持可用性。
+
+## 2026-02-22 Android 噪音段落折叠展开后图片/视频渲染异常（Markwon 媒体 Span 被覆盖）
+- 日期：2026-02-22
+- 现象与影响范围：
+  - 在 Android Markdown 阅读器中，`isNoise && hasBridge` 段落从胶囊展开后，部分含图片/视频的内容无法正常渲染。
+  - 影响范围为 `SemanticTopographyReader` 中通过 `MarkdownParagraph` 渲染且会进入 `applySelectionStyle` 的段落。
+- 触发条件：
+  - 段落展开后执行 `markwon.setMarkdown(...)`，随后 `applySelectionStyle` 无条件重建 `SpannableStringBuilder` 并回写 `textView.text`。
+  - 当文本中存在媒体相关 Span（图片/视频替换 Span）时，二次覆盖可能导致媒体渲染信息丢失。
+- 根因定位：
+  - 高亮叠加逻辑与 Markwon 渲染结果耦合过深，未先判断“是否需要叠加 Overlay Span”。
+  - 对含媒体 Span 的富文本进行了不必要的文本覆盖，破坏了媒体渲染链路。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `applySelectionStyle` 新增短路策略：
+    - 无术语高亮且无选区高亮时，直接返回，不再改写 `textView.text`。
+    - 检测到媒体 Span（`ReplacementSpan` / `AsyncDrawable` / `Image` / `Video`）时，跳过 Overlay 覆盖，优先保留媒体渲染。
+  - 仅在确需叠加高亮时才应用 `ReaderOverlaySpan`，并保持最小写回。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Android 渲染回归：噪音胶囊展开后，含 `![]()` 与视频占位的段落仍可正常显示。
+  - 监控：
+    - 在阅读器埋点中补充 `noise_capsule_expanded` 后媒体加载状态统计，观察修复后失败率。
+  - 校验：
+    - 评审约束：`markwon.setMarkdown` 之后禁止无条件重建整段 `textView.text`。
+  - 回滚：
+    - 若需快速回退，可先禁用 Overlay 高亮叠加逻辑，保留 Markwon 原始渲染。
+
+## 2026-02-22 Android 噪音段落展开后媒体仍异常（高频重组触发重复 setMarkdown）
+- 日期：2026-02-22
+- 现象与影响范围：
+  - 在上一轮“跳过媒体 Span 覆盖”修复后，噪音胶囊展开态中的图片/视频仍存在不稳定渲染或加载失败。
+  - 影响范围主要集中于 `isNoise && hasBridge` 的展开段落。
+- 触发条件：
+  - 展开态包含动画驱动状态变化，段落组件频繁重组。
+  - `MarkdownParagraph` 在每次重组时都执行 `markwon.setMarkdown(textView, markdown)`，导致媒体加载链路被反复重置。
+  - 展开内容容器曾对整块区域绑定点击收起手势，可能干扰媒体交互事件。
+- 根因定位：
+  - `setMarkdown` 缺少“内容是否变化”的幂等保护，重组频率直接放大为渲染重置频率。
+  - 噪音呼吸动画在不需要场景下也持续运行，增加不必要重组。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 新增 `InsightTapContext.renderedMarkdown`，仅当 markdown 真正变化时才调用 `markwon.setMarkdown(...)`。
+  - 新增 `rememberNoiseBreathingAlpha(enabled)`，仅在 `isNoise && !hasBridge` 时启用呼吸动画，减少无关重组。
+  - 移除展开内容容器整块 `pointerInput` 收起手势，保留右下角 affordance 收起入口，避免干扰媒体交互。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“展开态包含远程图片/视频占位 markdown”的稳定性回归，验证多次展开/收起后仍能渲染。
+  - 监控：
+    - 对噪音展开链路增加 `setMarkdown` 调用计数采样，确认单次展开不会出现异常高频重置。
+  - 校验：
+    - 评审要求：`AndroidView` 中的重操作（解析/网络触发）必须带幂等保护。
+  - 回滚：
+    - 若后续出现兼容性问题，可先回退“整块点击收起”交互，不回退 `setMarkdown` 幂等保护。
+
+## 2026-02-22 Android 噪音展开区仍显示原始 Markdown（fallbackText 回写污染）
+- 日期：2026-02-22
+- 现象与影响范围：
+  - 噪音胶囊展开后，部分段落直接显示 `![img](...)` 等原始 Markdown 文本，而不是富文本渲染结果。
+  - 影响 `SemanticTopographyReader` 中 `MarkdownParagraph -> applySelectionStyle` 路径。
+- 触发条件：
+  - 当 `textView.text` 在某些媒体段落初始阶段为空时，`applySelectionStyle` 回退到 `fallbackText`（原始 markdown）并写回 `TextView`。
+- 根因定位：
+  - 高亮叠加函数把“用于索引计算的 fallback 文本”当成了“可回写显示文本”，导致 raw markdown 污染 UI。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `applySelectionStyle` 移除 `fallbackText` 参数，改为仅在 `textView.text` 非空时叠加 Overlay；为空直接返回，不再回写 raw markdown。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“媒体段落首帧为空时不显示原始 markdown”的回归用例。
+  - 校验：
+    - 约束：高亮函数禁止用 fallback 原文回写 `TextView`。
+  - 回滚：
+    - 若高亮逻辑再次引发兼容问题，可临时禁用 `applySelectionStyle` 回写，仅保留 Markwon 渲染。
+
+## 2026-02-23 B站/抖音下载后 `video_title` 为空
+- 日期：2026-02-23
+- 现象与影响范围：
+  - 用户在 `DownloadVideo` 后只能拿到 `video_title=""`，B站与抖音链路都出现“文件可下载但标题丢失”。
+  - 影响 `services/python_grpc/src/server/share_link_resolver.py`、`services/python_grpc/src/server/download_service.py`、`services/python_grpc/src/server/douyin_download.py` 的标题决策链。
+- 触发条件：
+  - 运行环境无法正常启动 Playwright（Windows 报 `WinError 5: 拒绝访问`）时，`share_link_resolver` 对 canonical 链接分支仅依赖 Playwright 抓标题，未稳定回退。
+  - 抖音下载器虽然在浏览器策略里拿到了 `title`，但未把该标题回填到 `download_service` 的统一元数据链路。
+  - 普通下载链路（yt-dlp）未把运行时元数据标题暴露给 `download_service`，导致 resolver 失败时缺乏二级兜底。
+- 根因定位：
+  - **单点依赖**：标题解析过度依赖 resolver 的前置阶段，缺少“下载时观测到的真实元数据”回填机制。
+  - **链路断层**：抖音下载器的运行时 metadata 与统一 `video_meta.json` 的写入链路未打通。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/share_link_resolver.py`
+  - 新增 HTTP 页面标题抓取兜底：`_resolve_url_with_http_page_title`，支持从 `og:title` / `twitter:title` / `<title>` 抽取标题。
+  - canonical 分支在 Playwright 失败或不可用时自动回退到 HTTP 标题抓取。
+  - 增加平台名占位标题过滤（`抖音` / `bilibili` 等）避免把站点名误判为视频名。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - 新增 `last_video_title` 运行时字段，在 yt-dlp 进度 hook 中捕获 `info_dict.title`，为下载后回填提供数据。
+  - 文件：`services/python_grpc/src/server/douyin_download.py`
+  - 新增 `douyin_runtime_meta.json` 落盘，记录浏览器策略拿到的 `title/author/video_url`。
+  - 文件：`services/python_grpc/src/server/download_service.py`
+  - 当 resolver 标题为空时，新增两级回填：
+    - 先读下载器运行时标题（`downloader.last_video_title`）。
+    - 再读抖音运行时元数据文件（`douyin_runtime_meta.json`）。
+  - 新增日志标记回填来源（`downloader-runtime` / `downloader-runtime-meta`）。
+- 验证结果：
+  - 真实链接验证：
+    - 输入：`https://www.bilibili.com/video/BV1dz6oBWEWx/?spm_id_from=333.1007.tianma.1-1-1.click&vd_source=d72d89f64e3acc7c73191e3aed96fb3a`
+    - 输出：`title=什么是大模型Skill 10分钟弄懂`，`title_source=page`，`resolver=canonical-no-redirect`。
+  - 自动化测试：
+    - `pytest services/python_grpc/src/server/tests/test_share_link_resolver.py services/python_grpc/src/server/tests/test_download_video_config.py -q` 通过（`8 passed, 1 skipped`）。
+    - 新增/增强测试覆盖：
+      - 无 Playwright 时 B站 canonical 链接的 HTTP 标题回退。
+      - 无 Playwright 时抖音 canonical 链接的 HTTP 标题回退。
+      - `download_service` 从下载器运行时标题与抖音 runtime meta 回填 `video_title`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留“Playwright 不可用 + canonical 直链”的标题回归测试，防止再次回退为单点依赖。
+  - 监控：
+    - 在下载日志中持续采样 `title_source` 与 `link_resolver`，观察 `video_title` 为空的比例。
+  - 校验：
+    - 评审约束：标题链路必须至少包含“解析前置 + 下载运行时”两级来源，不允许仅靠单点抽取。
+  - 回滚：
+    - 如 HTTP 标题策略引入误判，可先回退 `share_link_resolver` 的 HTTP 抽取分支，保留下载运行时回填链路不变。
+
+## 2026-02-23 Android 阅读器滚动/拖拽卡顿（高频重组触发重渲染）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - Android 阅读器在段落横向轻扫、快速滚动时出现明显掉帧，主观感受为“拖不动、跟手性差”。
+  - 影响范围为 `SemanticTopographyReader -> TopographyParagraph -> MarkdownParagraph(AndroidView)` 渲染链路。
+- 触发条件：
+  - 横向手势 `onHorizontalDrag` 高频触发时，每次事件都通过 `scope.launch { offsetX.snapTo(...) }` 更新位移。
+  - `offsetX` 变化导致段落重组，`AndroidView.update` 随之高频进入，重复执行 Span 处理与术语匹配。
+- 根因定位：
+  - 手势帧级状态与重渲染逻辑耦合，导致“每帧位移”被放大为“每帧排版/高亮链路”。
+  - `MarkdownParagraph` 缺少足够细粒度的幂等保护，拖拽场景下存在不必要的 `applyMediaLayout/applySelectionStyle/resolveInsightTermRanges` 重复执行。
+  - 字体解析链路未缓存，`resolveWithWeight` 在高频 update 下重复构造 `Typeface`。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 手势更新改为同步状态写入：`offsetX` 从 `Animatable` 拆为 `mutableFloatStateOf`，拖拽 move 事件内不再启动协程。
+  - 仅在收尾阶段执行动画：新增 `animateOffsetXTo(...)`，用于 `onDragEnd/onDragCancel` 与菜单动作的回弹。
+  - `MarkdownParagraph` 增加渲染幂等缓存：
+    - 扩展 `InsightTapContext`，记录 `sourceText/termsFingerprint/selectionFingerprint/textStyleFingerprint/lineHeight/hasMedia/appliedWidth`。
+    - 新增快速返回分支：当 markdown、样式、选区、术语、宽度均未变化时直接返回。
+    - 仅在必要时触发重逻辑：`markwon.setMarkdown`、`applyMediaLayout`、`resolveInsightTermRanges`、`applySelectionStyle`。
+  - `applySelectionStyle` 增加“无高亮/媒体段”清理分支，避免残留 overlay span 污染后续渲染。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MarkdownTypefaceResolver.kt`
+  - 新增缓存：
+    - `weightedCache`：缓存 `resolve/resolveWithWeight` 结果。
+    - `bundledCache`：缓存 bundled 字体资源加载结果，减少重复 `ResourcesCompat.getFont`。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加阅读器交互回归：连续横向轻扫 + 滚动场景，验证无明显掉帧与无高亮残留。
+  - 监控：
+    - 增加 `MarkdownParagraph` update 命中采样（fast-skip 命中率、重逻辑命中率），持续观察重渲染比例。
+  - 校验：
+    - 评审约束：手势 move 回调禁止“每帧起协程 + 重型 UI 更新”。
+  - 回滚：
+    - 若出现兼容性风险，可先仅回滚 `fast-skip` 条件，保留“拖拽同步更新 + 字体缓存”两项收益改动。
+
+## 2026-02-23 Android 长按菜单位置偏移（坐标系不一致）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - 在阅读器段落里长按后，`Delete` 菜单经常出现在离手指较远的位置。
+  - 影响范围为 `SemanticTopographyReader` 中 `TopographyParagraph -> MarkdownParagraph -> DropdownMenu` 长按路径。
+- 触发条件：
+  - 长按事件上报的是 `TextView` 内部局部坐标（`e.x/e.y`）。
+  - 菜单偏移使用的是外层 Compose 宿主坐标系，二者未做转换。
+- 根因定位：
+  - 长按锚点坐标与菜单宿主坐标不在同一参考系，导致 `DpOffset` 偏移量失真。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `MarkdownParagraph.onLongPress` 改为上报“相对阅读器根节点”的坐标：
+    - `TextView.getLocationInWindow + e.x/e.y - overlayRootWindowOffset`。
+  - 在 `TopographyParagraph` 的菜单宿主容器上记录自身相对根节点偏移（`menuHostOverlayOffset`）。
+  - 打开菜单前将长按坐标转换到菜单宿主本地坐标：
+    - `pressOffset - menuHostOverlayOffset`，并做非负裁剪。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 UI 回归：在段落顶部/中部/底部长按，断言菜单位置贴近按压点。
+  - 校验：
+    - 评审约束：跨 `AndroidView` 与 Compose 弹层交互时，必须显式说明并统一坐标系。
+  - 回滚：
+    - 如出现少量机型偏差，可先仅保留“全局坐标上报”，回退宿主偏移裁剪策略做单独调参。
+
+## 2026-02-23 Persona 节点缩进丢失 + Android 阅读器编码串扰导致语法错误
+- 日期：2026-02-23
+- 现象与影响范围：
+  - Android 阅读器消费个性化节点时，`raw_markdown` 的无序列表缩进与段首空白在展示前被抹平，嵌套列表层级失真。
+  - `SemanticTopographyReader.kt` 内存在历史编码串扰，部分乱码把注释与代码粘连到同一行，触发 Kotlin 编译错误（`Expecting '"'`、`Unexpected tokens`）。
+- 触发条件：
+  - 后端 Persona 节点构建链路在多处对 `raw_markdown/chunkText` 执行了 `.trim()`。
+  - Android 文件中个别乱码行破坏了字符串闭合与代码换行边界。
+- 根因定位：
+  - `trim()` 在节点组装阶段属于有损变换，会删除段首缩进，导致列表上下文丢失。
+  - 编码串扰破坏了 Kotlin 源文件的词法边界（注释吞并代码、字符串引号缺失）。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaAwareReadingService.java`
+  - 去除 Persona 节点构建中的有损 `trim()`：
+    - `parseMarkdownNodes`：`joinLines(...).trim()` 改为保留原始 `joinLines(...)`。
+    - `createChunk`：节点拼装阶段不再 `trim()` `node.rawMarkdown`。
+    - `buildSemanticChunks` 尾段合并：不再 `trim()` `tail.chunkText` 与 `node.rawMarkdown`，改为 `StringUtils.hasText(...)` 判空。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 修复编码串扰引发的语法问题：
+    - 拆分被乱码粘连的注释/代码行，恢复合法 Kotlin 语法结构。
+    - 修复损坏的字符串字面量与用户提示文本，避免引号缺失导致编译失败。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 补充“嵌套无序列表 + 段首缩进”样例，校验 `raw_markdown` 经 persona 节点链路后保持字面一致性。
+    - 维持 Android 阅读器编译闸门，禁止带语法错误的文本变更进入主干。
+  - 监控：
+    - 对 persona payload 抽样记录“首字符是否为空白 + 列表正则命中深度”，观察缩进丢失率。
+  - 校验：
+    - 代码评审约束：节点构建链路禁止对 markdown 正文做无理由 `trim()`。
+    - 编码约束：含中文源码改动后必须走编译校验，避免乱码行进入提交。
+  - 回滚：
+    - 若出现兼容风险，可先仅回退 Android 文案修复，保留后端去 `trim()` 的保真修复。
+
+## 2026-02-23 Android 启动崩溃（Regex 静态初始化失败）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - App 打开阅读页时主线程直接崩溃，日志为 `ExceptionInInitializerError`。
+  - 堆栈定位到 `SemanticTopographyReaderKt.<clinit>`，根因为 `PatternSyntaxException: Missing closing bracket in character class`。
+  - 影响范围是 `SemanticTopographyReader.kt` 的静态正则初始化路径，导致页面首次组合即崩溃。
+- 触发条件：
+  - `READER_UNORDERED_LIST_PATTERN` 的正则字面量被乱码污染，字符类 `[...]` 失配。
+- 根因定位：
+  - 源码编码串扰把无序列表正则中的合法字符替换为非法片段，导致 regex 在类加载时编译失败。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 将损坏表达式修正为稳定版本：
+    - `private val READER_UNORDERED_LIST_PATTERN = Regex("(?m)^[\\s\\u3000]*(?:[-*+•]\\s+)")`
+  - 保留既有逻辑语义：识别以 `-/*/+`（及 `•`）开头的无序列表行，不引入业务行为变化。
+- 验证结果：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加正则常量的最小单元覆盖，至少校验“可编译 + 命中样例 + 非命中样例”。
+  - 监控：
+    - 启动阶段捕获并上报 `ExceptionInInitializerError` 与 `PatternSyntaxException`，快速发现静态初始化异常。
+  - 校验：
+    - 涉及 regex 常量变更时强制执行 `:app:compileDebugKotlin`，禁止仅靠本地运行验证。
+  - 回滚：
+    - 如后续发现兼容差异，可仅回退该正则一行，风险面最小且不影响其它链路。
+
+## 2026-02-23 任务标题返回错误（未优先使用 `video_meta.json.title`）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - 移动端任务列表中，部分历史任务标题显示为 `taskId`、URL 片段或文件名，未返回预期的视频标题。
+  - 受影响链路为 `StorageTaskCacheService -> MobileMarkdownController /api/mobile/tasks` 的 storage 任务标题聚合路径。
+- 触发条件：
+  - 任务目录存在 `var/storage/storage/<taskKey>/video_meta.json` 且其中 `title` 有值，但缓存层未优先读取该字段。
+- 根因定位：
+  - 任务缓存元数据读取逻辑仅依赖 `intermediates/task_metrics_latest.json` 与 URL/路径回退规则，缺失 `video_meta.json.title` 的显式优先级。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+  - 在 `readStorageMetadata` 中新增 `readVideoMetaTitle(taskDir)`，先读取 `taskDir/video_meta.json` 的 `title`。
+  - 标题优先级调整为：
+    - `video_meta.json.title`
+    - `task_metrics_latest.json` 的 `video_title/document_title/title`
+    - 现有 URL/路径推导回退。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/StorageTaskCacheServiceTest.java`
+  - 新增回归用例 `shouldPreferVideoMetaTitleWhenPresent`，覆盖“metrics 与 video_meta 同时存在时，优先返回 video_meta.title”。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=StorageTaskCacheServiceTest test -q` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留并扩展 `StorageTaskCacheServiceTest`，覆盖 `video_meta` 缺失、空值、非法 JSON 等边界场景。
+  - 监控：
+    - 对 `/api/mobile/tasks` 增加标题来源抽样日志（`video_meta/metrics/fallback`），快速发现回退比例异常。
+  - 校验：
+    - 评审约束：涉及任务展示名的修改必须显式声明“标题来源优先级”。
+  - 回滚：
+    - 如出现兼容问题，可仅回退 `video_meta` 优先级逻辑，恢复到 metrics 优先。
+
+## 2026-02-23 任务内 insight 卡片已生成但卡片接口未命中（前端读取失败）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - Persona insight 链路已在任务目录写出卡片快照：
+    - `var/storage/storage/<taskKey>/.mobile_persona_cache/insight_cards/cards/*.md`
+  - 但 `GET /api/mobile/cards/concept/{title}` 仅查全局卡片库，未命中时直接回退到“在线生成”，导致已生成快照无法被复用。
+  - 前端 `mobile-concept-cards.js` 读取卡片时未携带 `taskId`，后端无法定位当前任务目录。
+- 触发条件：
+  - 当前术语仅存在于任务内快照，尚未落入全局卡片库（或全局卡片暂不可读）。
+  - 前端请求 `/api/mobile/cards/concept/{title}` 未附带任务上下文。
+- 根因定位：
+  - 卡片读取链路存在“全局库单路径依赖”，缺少任务快照回退策略。
+  - 前后端接口契约中缺失 `taskId` 透传，无法把“当前阅读任务”映射到 `insight_cards/cards`。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - `getCardByTitle` 增加可选参数 `taskId`。
+  - 新增“任务快照回退 + 回填全局库”逻辑：
+    - 全局卡片未命中时，按 `taskId -> storageKey -> taskRoot` 定位
+      `/.mobile_persona_cache/insight_cards/cards/<normalized-term>.md`。
+    - 从快照提取正文后调用 `CardStorageService.saveCard(...)` 回填全局卡片库，再走统一读卡路径返回。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-concept-cards.js`
+  - 前端读取/保存/反链请求补充任务上下文透传：
+    - 读卡 `GET /cards/concept/{title}?taskId=...`
+    - 反链 `GET /cards/concept/{title}/backlinks?taskId=...`
+    - 保存时附带 `sourceTaskId/sourcePath`。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 补充“全局未命中 + 任务快照命中”用例，验证卡片可被恢复并返回 200。
+    - 补充前端请求参数契约检查，确保 `taskId` 在读卡链路稳定透传。
+  - 监控：
+    - 增加日志字段记录读卡来源（`global` / `task_snapshot_restore` / `generated`），便于定位回退比例异常。
+  - 校验：
+    - 评审约束：涉及任务作用域数据读取时，必须确认是否存在跨目录回退链路。
+  - 回滚：
+    - 如恢复逻辑引发兼容问题，可先禁用“快照回填”，保留 `taskId` 透传与全局读取主链路。
+
+## 2026-02-23 任务列表重命名未同步 `video_meta.json.title` + 交互链路不符合就地编辑要求
+- 日期：2026-02-23
+- 现象与影响范围：
+  - List View 中任务项重命名交互无法做到“原地编辑 + 自动聚焦全选 + 失焦保存”。
+  - 后端即使更新了 `mobile_task_meta.json.taskTitle`，也不会同步更新 `video_meta.json.title`，导致后续标题来源回退时出现不一致。
+- 触发条件：
+  - 用户在任务列表发起重命名，仅依赖任务元数据写入，未同步 `video_meta.json`。
+  - 列表项交互仍停留在非就地编辑流程，无法快速覆盖重写标题。
+- 根因定位：
+  - 前端缺少“编辑态”状态机（聚焦、选区、失焦提交、列表项弱化）。
+  - 后端 `/api/mobile/tasks/{taskId}/meta` 在处理 `taskTitle` 时只写 `mobile_task_meta.json`，未维护 `video_meta.json` 同步。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - 增加 `SwipeRenameTaskListItem`：
+    - 左滑露出 `Rename`；
+    - 标题原位切换为 `BasicTextField`；
+    - 自动聚焦、全选、弹键盘；
+    - `IME Done` 与失焦统一触发保存；
+    - 编辑态对非编辑项应用弱化（`alpha=0.5`）与黑色半透明遮罩（`alpha=0.30`）。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - 新增 `renameTaskTitle(taskId, title)`，调用 `/api/mobile/tasks/{taskId}/meta` 仅提交 `taskTitle`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 在 `updateTaskMeta` 中，当 `taskTitle` 发生更新时同步写入 `video_meta.json.title`。
+  - 新增 `syncVideoMetaTitle(...)` 与 `loadVideoMetaNode(...)`，采用 tmp 文件 + 原子替换策略，避免写入中断导致损坏。
+- 验证结果：
+  - Android 编译验证受外部依赖下载 TLS 问题阻塞：`androidx.work:work-runtime-ktx:2.9.1` 无法拉取。
+  - 后端全量编译受当前工作区无关错误阻塞：`PersonaInsightCardService` 缺失常量 `TASK_CARD_SNAPSHOT_DIR`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加列表重命名 UI 回归：左滑 -> 重命名 -> 自动全选 -> 失焦保存。
+    - 增加后端用例：更新 `taskTitle` 后断言 `video_meta.json.title` 与 `mobile_task_meta.json.taskTitle` 一致。
+  - 监控：
+    - 增加标题写入来源日志（`meta_only` / `meta_and_video_meta`）统计同步失败比例。
+  - 校验：
+    - 评审要求：任何任务标题写入链路必须声明“持久化落点”并保持多来源一致。
+  - 回滚：
+    - 若前端交互需要快速回退，可保留后端同步逻辑，仅回退 `SwipeRenameTaskListItem` 到原列表项实现。
+
+## 2026-02-23 Insight 卡片落盘路径与原始 LLM 段落污染（收敛为 `var/cards`）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - insight 卡片生成时除了写入全局卡片库外，还会在任务目录写入快照：
+    - `var/storage/storage/<taskKey>/.mobile_persona_cache/insight_cards/cards/*.md`
+  - 快照中包含 `## LLM原始请求Payload`、`## LLM原始响应Body`、`## LLM原始输出Content` 等原始段落。
+  - 同时卡片正文在部分路径会附加 `## LLM原始输出` 区块，影响前端阅读体验与内容纯净度。
+- 触发条件：
+  - `PersonaInsightCardService` 在每次 `upsertCardForTag` 后调用 `persistTaskSnapshot(...)`。
+  - `buildInitialCardBodyFromJson(...)` 在 `llmRaw` 非空时追加原始输出段落。
+- 根因定位：
+  - 卡片主数据与任务调试快照耦合在同一生成流程，且原始 LLM 调试信息直接注入内容层。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - 取消任务卡片快照落盘：
+    - 删除 `TASK_CARD_SNAPSHOT_DIR` 常量与对应目录创建。
+    - 移除 `persistTaskSnapshot(...)`、`appendJsonSection(...)` 调用链。
+  - 卡片正文去除原始 LLM 区块：
+    - `buildInitialCardBodyFromJson(...)` 移除 `llmRaw` 参数与 `## LLM原始输出` 注入逻辑。
+  - 结果：卡片内容仅通过 `CardStorageService.saveCard(...)` 落到全局 `var/cards`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - 读取链路收敛为全局卡片库：
+    - 移除任务快照回退读取逻辑，`GET /api/mobile/cards/concept/{title}` 仅走全局卡片库。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加用例断言“生成后仅 `var/cards` 存在新增卡片，任务目录不再生成 `insight_cards/cards/*.md`”。
+    - 增加用例断言“卡片正文不包含 `LLM原始` 字样段落”。
+  - 校验：
+    - 评审约束：调试与追踪信息不得进入面向用户的卡片正文。
+  - 回滚：
+    - 如需恢复调试快照，仅恢复 telemetry 日志，不恢复正文注入与任务快照卡片落盘。
+
+## 2026-02-23 Bilibili 多集识别缺失与 Android 端乱码
+- 日期：2026-02-23
+- 现象与影响范围：
+  - 后端仅能按单视频识别，无法稳定返回 Bilibili 合集总集数、当前分集序号、每集标题。
+  - 任务目录编码源在 Bilibili 分集场景未区分 `p` 参数，导致不同分集可能映射到同一 raw key。
+  - Android 阅读端存在中文乱码（按钮文案与注释），影响可读性与维护效率。
+- 触发条件：
+  - 输入为 Bilibili 合集链接（例如包含 `?p=2`）、BV 号或分享口令时，元信息探测链路缺少分集建模。
+  - raw 编码仅使用 `BV`，未拼接分集后缀。
+  - Android 部分文件存在历史编码污染文本。
+- 根因定位：
+  - 后端缺少“仅探测元信息（不下载）”的统一接口，Java REST 与 Python 抽取逻辑之间无标准化契约。
+  - Bilibili 任务目录编码策略未纳入 `p` 维度，无法表达分集粒度。
+  - Android 侧存在历史 mojibake 文本残留，且未做集中巡检。
+- 修复措施：
+  - 协议与服务：
+    - `contracts/proto/video_processing.proto` 新增 `GetVideoInfo`、`VideoInfoRequest/Response`、`EpisodeInfo`。
+    - Python gRPC 新增 `GetVideoInfo` 实现，基于 `yt-dlp extract_info(download=False)` 探测：
+      - `platform/title/duration`；
+      - `is_collection/total_episodes`；
+      - `current_episode_index/current_episode_title`；
+      - `episodes[]`（每集序号、标题、时长、链接）。
+    - Java 编排层新增 REST 接口：
+      - `GET /api/video-info?videoInput=...`
+      - `POST /api/video-info`
+  - 编码规则：
+    - Bilibili raw key 改为 `BV_n`（当 `p=n` 且 `n>0`），单集仍为 `BV`。
+    - 覆盖 Python 与 Java 两侧编码源生成逻辑，保持任务目录一致性。
+  - Android 乱码：
+    - 修复 `MainActivity.kt` 用户可见文案 `"鍙栨秷"` 为 `"取消"`。
+    - 修复 `MainActivity.kt` 与 `SemanticTopographyReader.kt` 中乱码注释，替换为可维护中文注释。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=VideoProcessingControllerVideoInfoTest,VideoInputNormalizerTest,VideoProcessingOrchestratorTitleResolutionTest" test -q` 通过。
+  - `python -m pytest services/python_grpc/src/server/tests/test_get_video_info.py services/python_grpc/src/server/tests/test_bilibili_task_dir_key.py -q`：2 skipped（环境约束，非失败）。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+  - `.\gradlew.bat :app:compileDebugKotlin --quiet` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化 Bilibili `p` 参数解析与 `BV_n` 编码规则单测。
+    - 固化 `/api/video-info` 返回结构契约测试（合集/单集、current episode、episodes 标题完整性）。
+    - 保留 Android 端乱码关键字巡检（提交前 `rg` 扫描）作为轻量静态检查。
+  - 监控：
+    - 增加视频探测日志字段：`platform/canonical_id/current_episode_index/total_episodes`，便于排查分集识别偏差。
+  - 校验：
+    - 评审约束：涉及链接归一化与任务目录编码的改动，必须显式声明 raw key 规则是否变化。
+  - 回滚：
+    - 如新探测链路异常，可临时回退到原下载链路的标题/时长提取，但保留 `BV_n` 规则避免目录冲突。
+
+## 2026-02-23 Android 阅读器词级交互修复（删除二段式 + 加粗即时渲染 + 词级元数据持久化）
+- 现象：
+  - 左滑删除误触率高，且“删除后再左滑恢复”在部分情况下不生效。
+  - 选词后点击“加粗”，前端存在未即时渲染的情况。
+  - 词级“喜欢/批注”重开文章后无法恢复。
+- 根因：
+  - 删除恢复判定依赖旧闭包状态，手势回调与状态更新存在时序漂移。
+  - TextView 更新存在 fast-skip 路径，导致加粗切换后未强制重渲染。
+  - 元数据契约仅覆盖段落级字段（favorites/deleted/comments），缺少词级字段。
+- 修复措施：
+  - 手势侧：
+    - 增加横滑武装阈值与横纵意图判定，降低上下滚动时误触发横滑。
+    - 删除动作改为二段式确认（首次左滑武装，时窗内再次左滑确认删除）。
+    - 删除恢复使用最新状态引用，避免旧状态误判。
+  - 渲染侧：
+    - 增加 `renderRefreshVersion`，在加粗/取消加粗时强制触发 TextView 更新链路。
+  - 契约侧：
+    - Android/Java 同步扩展 `tokenLike` 与 `tokenAnnotations`。
+    - 阅读器增加词级状态加载、提交、样式恢复与段落面板聚合展示。
+- 验证结果：
+  - `.\\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加词级交互回归用例：喜欢切换、批注保存/重开恢复、删除二段式确认。
+    - 增加 meta 契约字段回归检查：`tokenLike/tokenAnnotations`。
+  - 监控：
+    - 增加 telemetry 事件：删除武装、删除确认、词级批注保存、词级喜欢切换。
+  - 校验：
+    - 评审时强制核对“手势意图阈值 + 状态闭包更新 + 强制重渲染触发点”三项。
+  - 回滚：
+    - 如词级契约出现兼容问题，可临时降级为仅前端内存态展示，不阻塞段落级主流程。
+
+## 2026-02-23 Android 阅读器交互补丁（二段式删除稳定性 + 长按选词菜单可达性 + 加粗即时刷新）
+- 日期：2026-02-23
+- 现象与影响范围：
+  - 长按选词在部分段落上无法稳定拉起横向上下文菜单，导致词级复制/喜欢/加粗/批注/搜索不可用。
+  - 左右滑触发在阅读滚动中仍有误触，删除动作体感偏“容易误触发”。
+  - 词级加粗在个别场景下存在“点击后未立即可视化生效”的感知问题。
+- 触发条件：
+  - 用户在正文区进行长按或拖拽选词时，段落手势与原生 `ActionMode` 竞争输入焦点。
+  - 用户执行以竖向滚动为主、夹杂微弱横向抖动的手势时。
+  - `TextView` 叠加 span 后复用同一 `Spannable` 实例，刷新链路未显式触发重绘。
+- 根因定位：
+  - 段落横滑判定基于单帧水平/垂直增量，缺少累计意图判定，噪声手势更容易误判为横滑。
+  - 选词 `ActionMode` 生命周期未显式反向驱动段落手势状态，导致交互互斥不彻底。
+  - 样式叠加后在“同对象更新”路径缺少 `invalidate`，导致加粗视觉反馈存在延迟。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 长按选词与手势互斥：
+    - 为 `MarkdownParagraph` 增加 `onSelectionModeChanged` 回调；
+    - 在 `ActionMode` 创建/销毁时同步更新段落 `isNativeSelectionModeActive`；
+    - selection mode 活跃时直接短路横滑处理，避免与选词手势竞争。
+  - 横滑误触收敛与删除二段式稳定化：
+    - 引入 `accumulatedDragX/accumulatedDragY` 累计判定；
+    - 提高横滑武装阈值与横纵主导比（`44dp`、`1.85`）；
+    - 调整删除/批注触发阈值，降低阅读滚动中的误触概率。
+  - 加粗即时渲染：
+    - 在 `applySelectionStyle(...)` 中为“同对象 span 复用路径”补充 `textView.invalidate()`，确保点击后立即重绘。
+  - 清理冗余逻辑：
+    - 移除 `SelectionContextAction.Annotate` 分支中的无效局部变量推导，保留单一编辑器打开路径。
+- 验证结果：
+  - `.\\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“长按选词 + 横滑并发手势”回归，断言菜单可达且横滑不抢占。
+    - 增加“微横向抖动竖向滚动”回归，断言不会进入删除武装态。
+    - 增加“加粗/取消加粗点击后即时渲染”UI 回归。
+  - 监控：
+    - 继续采集 `paragraph_swipe_start`、`paragraph_mark_deleted_armed`、`selection_action_bold` 事件，观察误触与操作完成率。
+  - 校验：
+    - 评审清单新增“ActionMode 生命周期是否显式与段落手势状态解耦”核对项。
+  - 回滚：
+    - 若手势互斥策略影响既有交互，可仅回退累计阈值参数，保留 selection mode 互斥与加粗刷新补丁。
+
+## 2026-02-24 Android 选词加粗仅 toast 不生效（按 implementation_plan.resolved 收敛）
+- 日期：2026-02-24
+- 现象与影响范围：
+  - 选词点击“加粗/取消加粗”后仅有 toast，无明显字重变化。
+  - 喜欢下划线在部分机型上绘制不稳定，且词级批注在 fallback 锚点下仍可能贴近文字主体。
+- 根因定位：
+  - `ToggleBold` 分支残留 `textRenderRefreshVersion += 1`，触发不必要的 markdown 重设，造成样式可见性抖动。
+  - `applySelectionStyle(...)` 在同对象路径仅 `invalidate()`，`LineBackgroundSpan` 未必被完整重走布局绘制。
+  - `ReaderBoldSpan` 仅使用 `isFakeBoldText`，在部分字体栈下视觉权重不足。
+  - fallback 锚点 `halfLine` 偏小，词级批注弹层在某些点击位置过于贴近文本。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 移除 `ToggleBold` 的 `textRenderRefreshVersion += 1`。
+  - `applySelectionStyle(...)` 改为始终 `textView.text = SpannableStringBuilder(spannable)`，确保 span 布局与绘制链路完整执行。
+  - `ReaderBoldSpan` 升级为 `Typeface.BOLD + isFakeBoldText` 双保险。
+  - `ReaderLikedUnderlineSpan` 增加 `DashPathEffect`，保持喜欢下划线的虚线视觉一致性。
+  - `resolveFallbackAnchor(...)` 中 `halfLine` 从 `0.52f` 提升到 `0.9f`，将批注弹层锚点下移到词行下方。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - Android 编译受外部仓库 TLS 握手异常影响，`checkDebugAarMetadata` 依赖解析失败（非代码编译错误）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加词级加粗可见性回归：点击后 1 帧内字重变化断言。
+    - 增加喜欢下划线渲染回归：虚线样式与相邻 token 连线效果断言。
+  - 监控：
+    - 对 `selection_action_bold/unbold` 追加前后样式快照字段，便于排查“触发成功但视觉失败”。
+  - 校验：
+    - 评审时强制核对 `LineBackgroundSpan` 场景不得仅依赖 `invalidate()`。
+  - 回滚：
+    - 若个别字体在 `Typeface.BOLD` 下回退异常，可临时退回 `isFakeBoldText`，但保留 `SpannableStringBuilder` 重新赋值策略。
+
+## 2026-02-24 合集阅读通过 VT 任务号无法读取 Markdown（taskId 与 storageKey 失配）
+- 日期：2026-02-24
+- 现象与影响范围：
+  - Android 合集页点击阅读时调用 `GET /api/mobile/tasks/{taskId}/markdown`，当 `taskId` 为 `VT_*` 且运行时任务对象已失效时返回 `task not found`。
+  - 典型触发样例：`VT_1771907724319_4` 在存储层对应目录是哈希键（例如 `0a9d3176320428da26316e1c4c891d64`），而不是同名目录。
+- 根因定位：
+  - `MobileMarkdownController.resolveTaskView(...)` 在运行时队列未命中后，仅按 `storageKey` 查询缓存，默认把 `taskId` 当目录键使用。
+  - `StorageTaskCacheService` 未建立 `task_id -> storageKey` 索引，无法将 `VT_*` 反查到实际存储目录。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+  - 在缓存模型中补充 `CachedTask.taskId`，并从 `task_metrics_latest.json` 读取 `task_id/taskId` 字段。
+  - 新增 `getTaskByTaskId(String taskId)`，支持通过任务号反查缓存任务。
+  - 在刷新流程增加 `taskIdToStorageKey` 索引重建，保证目录扫描后映射稳定。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - 在 `resolveTaskView(...)` 中新增按 `taskId` 反查缓存的回退链，命中后保持响应 `taskId` 与请求一致。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/StorageTaskCacheServiceTest.java`
+  - 新增测试：`shouldResolveCachedTaskByTaskIdWhenStorageKeyIsHashed`，覆盖 `VT_* -> 哈希目录` 场景。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留并扩展 `task_id` 反查单测，覆盖 `task_id` 与 `taskId` 两种历史字段。
+  - 监控：
+    - 关注移动端 `GET /api/mobile/tasks/{taskId}/markdown` 的 `404 task not found` 比例，按 `taskId` 前缀聚合告警。
+  - 校验：
+    - 新增评审清单：凡涉及任务展示/读取接口，必须显式说明“运行时 ID 与存储键失配”的回退策略。
+  - 回滚：
+    - 若新索引逻辑出现异常，可临时关闭 `getTaskByTaskId` 回退，仅保留原 `storageKey` 路径，同时保留测试用例以便快速恢复。
+
+## 2026-02-24 B站合集批量提交分P丢失（`resolved_url` 过早 canonical 导致同集重复下载）
+- 日期：2026-02-24
+- 现象与影响范围：
+  - 合集批量提交时，任务入参 `source_url` 为分P链接（如 `https://www.bilibili.com/video/BV1n9CwYoEro?p=2`），但下载链路里的 `resolved_url` 被归一为 `https://www.bilibili.com/video/BV1n9CwYoEro`。
+  - 结果是多条任务下载命中同一集，导致合集分集处理错误。
+- 触发条件：
+  - `DownloadVideo` 调用 `resolve_share_link` 后直接使用 `resolved_share.resolved_url` 作为下载地址。
+  - `resolve_share_link` 在 B站场景会 canonical 成不带查询参数的 `BV` 主链接。
+- 根因定位：
+  - 下载链路把“canonical 标识链接”直接当成“实际下载链接”，丢失了分P语义参数 `p`。
+  - 虽然任务目录编码已复用 `build_task_dir_encoding_source` 保留 `BV_n`，但下载地址本身未同步保留 `p`，形成“目录分开、下载同集”的不一致。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/download_service.py`
+  - 在 `run_download_flow` 中新增 B站分P保留逻辑：
+    - 从 `resolved_extracted_url/raw_video_input/video_url` 提取 `p`；
+    - 当平台为 `bilibili` 且 `p>0` 时，将 `p` 回填到实际下载 URL（仅覆盖 `p`，其余参数保持规范化）。
+  - 保持 `canonical_id` 与现有分享链接解析逻辑不变，避免破坏既有 collection id 与缓存键语义。
+  - 文件：`services/python_grpc/src/server/tests/test_download_service_bilibili_episode_url.py`
+  - 新增回归测试：`test_run_download_flow_preserves_bilibili_episode_query_for_download`。
+- 验证结果：
+  - `pytest services/python_grpc/src/server/tests/test_download_service_bilibili_episode_url.py -q -p no:tmpdir` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 未通过（当前环境 `services/java-orchestrator/target/generated-sources/protobuf/java/**` 存在既有文件读取异常，与本次 Python 修复无直接关系）。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化“分P输入 + canonical resolved_url”场景回归，断言实际下载 URL 必须保留 `p`。
+  - 监控：
+    - 下载阶段日志增加 `resolved_url/source_url` 对比巡检，按 `canonical_id` 聚合同时监测 `p` 分布异常。
+  - 校验：
+    - 评审约束：涉及 URL canonical 逻辑时，必须区分“标识链接”和“执行链接”，不得混用。
+  - 回滚：
+    - 若回填策略触发兼容问题，可临时仅在检测到 `p` 时启用，保留其余场景原逻辑。
+
+## 2026-02-24 看门狗误判软心跳为强进展（长任务场景下重启/失败策略失真）
+- 日期：2026-02-24
+- 现象与影响范围：
+  - 超长任务（尤其 Phase2A/Phase2B）在仅有保活信号时，Java 侧可能错误重置 idle 计数，导致“连续无进展 3 次失败”策略触发不准确。
+  - 用户侧表现为：任务看似持续“有进展”，但实际阶段可能已长时间卡住，子步骤重启/失败时机延后。
+- 根因定位：
+  - 看门狗历史实现对结构化信号缺少 `soft/hard` 语义边界，`seq` 或文案变化可被当作强进展。
+  - Stage1 之外阶段缺少统一结构化心跳来源，Java 端不得不混用文案推断与粗粒度进度。
+- 修复措施：
+  - Python：
+    - 新增 `TaskWatchdogSignalWriter`，统一输出 `task_watchdog_heartbeat.json`。
+    - 在 `DownloadVideo/TranscribeVideo/AnalyzeSemanticUnits/AssembleRichText` 全链路补充硬信号（`start/checkpoint/completed/failed`）并增加软保活。
+    - Stage1 心跳补 `signal_type` 字段，软心跳明确标记为 `soft`。
+  - Java：
+    - 新增 `TaskProgressWatchdogBridge`，在下载/转录/Phase2A/Phase2B 窗口轮询并转发结构化信号。
+    - `WatchdogSignalCodec` 解析 `signal_type`，并按 `stage` 生成用户可读状态。
+    - `TaskWatchdog` 仅将 `hard` 计入强进展，`soft` 不重置 idle strike。
+- 验证结果：
+  - `python -X utf8 -m py_compile services/python_grpc/src/server/watchdog_signal_writer.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/transcript_pipeline/graph.py` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增补信号编解码与看门狗状态机用例，覆盖 `signal_type=soft` 不触发强进展。
+  - 监控：
+    - 按阶段统计 `soft/hard` 比例与 idle strike 触发分布，识别异常长停滞阶段。
+  - 校验：
+    - 新增评审清单：长耗时阶段必须提供结构化硬信号 checkpoint，不允许仅依赖日志文案。
+  - 回滚：
+    - 若新桥接策略异常，可临时退回 Stage1 专用桥接，同时保留 Python 结构化信号输出，便于二次切换。
 

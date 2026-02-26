@@ -71,3 +71,56 @@ def test_resolve_plain_bilibili_link_without_redirect(monkeypatch):
     assert resolved.canonical_id == "BV17YCEZ5EAQ"
     assert resolved.resolved_url == "https://www.bilibili.com/video/BV17YCEZ5EAQ"
     assert resolved.resolver == "canonical-no-redirect"
+
+
+def test_resolve_plain_bilibili_link_without_playwright_uses_http_meta(monkeypatch):
+    url = "https://www.bilibili.com/video/BV17YCEZ5EAQ/?spm_id_from=333.1007"
+
+    async def _fake_http_page_title(fetch_url: str, timeout_sec: int = 20):
+        assert fetch_url == "https://www.bilibili.com/video/BV17YCEZ5EAQ"
+        assert timeout_sec == 12
+        return fetch_url, "从夯到拉，锐评 39 个前端技术！-哔哩哔哩"
+
+    monkeypatch.setattr(mod, "PLAYWRIGHT_AVAILABLE", False)
+    monkeypatch.setattr(mod, "_resolve_url_with_http_page_title", _fake_http_page_title)
+
+    resolved = asyncio.run(mod.resolve_share_link(url))
+    assert resolved.platform == "bilibili"
+    assert resolved.title == "从夯到拉，锐评 39 个前端技术！"
+    assert resolved.title_source == "page"
+    assert resolved.resolver == "canonical-no-redirect"
+
+
+def test_resolve_plain_douyin_link_without_playwright_uses_http_meta(monkeypatch):
+    url = "https://www.douyin.com/video/7604776435760319796"
+
+    async def _fake_http_page_title(fetch_url: str, timeout_sec: int = 20):
+        assert fetch_url == url
+        assert timeout_sec == 12
+        return fetch_url, "测试抖音标题 - 抖音"
+
+    monkeypatch.setattr(mod, "PLAYWRIGHT_AVAILABLE", False)
+    monkeypatch.setattr(mod, "_resolve_url_with_http_page_title", _fake_http_page_title)
+
+    resolved = asyncio.run(mod.resolve_share_link(url))
+    assert resolved.platform == "douyin"
+    assert resolved.title == "测试抖音标题"
+    assert resolved.title_source == "page"
+    assert resolved.resolver == "canonical-no-redirect"
+
+
+def test_normalize_page_title_filters_generic_platform_title():
+    assert mod._normalize_page_title("抖音") == ""
+    assert mod._normalize_page_title("bilibili") == ""
+
+
+def test_extract_title_from_html_prefers_og_title():
+    html = """
+    <html>
+      <head>
+        <meta property="og:title" content="  这是 OG 标题 - 哔哩哔哩  " />
+        <title>页面标题</title>
+      </head>
+    </html>
+    """
+    assert mod._extract_title_from_html(html) == "这是 OG 标题"

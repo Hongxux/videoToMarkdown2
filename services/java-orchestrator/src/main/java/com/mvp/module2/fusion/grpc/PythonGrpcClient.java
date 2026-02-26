@@ -4,6 +4,7 @@ import com.mvp.videoprocessing.grpc.*;
 import com.google.protobuf.ByteString;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
+import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -119,6 +120,33 @@ public class PythonGrpcClient {
         public String linkResolver;
         public String contentType;
     }
+
+    public static class EpisodeInfo {
+        public int index;
+        public String title;
+        public double durationSec;
+        public String episodeUrl;
+        public String episodeCoverUrl;
+    }
+
+    public static class VideoInfoResult {
+        public boolean success;
+        public String errorMsg;
+        public String rawInput;
+        public String resolvedUrl;
+        public String sourcePlatform;
+        public String canonicalId;
+        public String videoTitle;
+        public double durationSec;
+        public boolean isCollection;
+        public int totalEpisodes;
+        public int currentEpisodeIndex;
+        public String currentEpisodeTitle;
+        public List<EpisodeInfo> episodes = new ArrayList<>();
+        public String linkResolver;
+        public String contentType;
+        public String coverUrl;
+    }
     
     public CompletableFuture<DownloadResult> downloadVideoAsync(
             String taskId, String videoUrl, String outputDir, int timeoutSec) {
@@ -160,6 +188,54 @@ public class PythonGrpcClient {
             }
         });
     }
+
+    public VideoInfoResult getVideoInfo(String taskId, String videoInput, int timeoutSec) {
+        try {
+            logger.info("[{}] Calling GetVideoInfo: {}", taskId, videoInput);
+
+            VideoInfoRequest request = VideoInfoRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoInput(videoInput != null ? videoInput : "")
+                .build();
+
+            VideoInfoResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .getVideoInfo(request);
+
+            VideoInfoResult result = new VideoInfoResult();
+            result.success = response.getSuccess();
+            result.errorMsg = response.getErrorMsg();
+            result.rawInput = response.getRawInput();
+            result.resolvedUrl = response.getResolvedUrl();
+            result.sourcePlatform = response.getSourcePlatform();
+            result.canonicalId = response.getCanonicalId();
+            result.videoTitle = response.getVideoTitle();
+            result.durationSec = response.getDurationSec();
+            result.isCollection = response.getIsCollection();
+            result.totalEpisodes = response.getTotalEpisodes();
+            result.currentEpisodeIndex = response.getCurrentEpisodeIndex();
+            result.currentEpisodeTitle = response.getCurrentEpisodeTitle();
+            result.linkResolver = response.getLinkResolver();
+            result.contentType = response.getContentType();
+            result.coverUrl = response.getCoverUrl();
+            for (com.mvp.videoprocessing.grpc.EpisodeInfo episode : response.getEpisodesList()) {
+                EpisodeInfo mapped = new EpisodeInfo();
+                mapped.index = episode.getIndex();
+                mapped.title = episode.getTitle();
+                mapped.durationSec = episode.getDurationSec();
+                mapped.episodeUrl = episode.getEpisodeUrl();
+                mapped.episodeCoverUrl = episode.getEpisodeCoverUrl();
+                result.episodes.add(mapped);
+            }
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] GetVideoInfo failed: {}", taskId, e.getStatus());
+            VideoInfoResult result = new VideoInfoResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
     
     // ========== 步骤2: Whisper转录 ==========
     
@@ -170,38 +246,41 @@ public class PythonGrpcClient {
         public String errorMsg;
     }
     
+    public TranscribeResult transcribeVideo(
+            String taskId, String videoPath, String language, int timeoutSec) {
+        try {
+            logger.info("[{}] Calling TranscribeVideo", taskId);
+
+            TranscribeRequest request = TranscribeRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath)
+                .setLanguage(language)
+                .build();
+
+            TranscribeResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .transcribeVideo(request);
+
+            TranscribeResult result = new TranscribeResult();
+            result.success = response.getSuccess();
+            result.subtitlePath = response.getSubtitlePath();
+            result.subtitleText = response.getSubtitleText();
+            result.errorMsg = response.getErrorMsg();
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] TranscribeVideo failed: {}", taskId, e.getStatus());
+            TranscribeResult result = new TranscribeResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public CompletableFuture<TranscribeResult> transcribeVideoAsync(
             String taskId, String videoPath, String language, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] Calling TranscribeVideo", taskId);
-                
-                TranscribeRequest request = TranscribeRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath)
-                    .setLanguage(language)
-                    .build();
-                
-                TranscribeResponse response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .transcribeVideo(request);
-                
-                TranscribeResult result = new TranscribeResult();
-                result.success = response.getSuccess();
-                result.subtitlePath = response.getSubtitlePath();
-                result.subtitleText = response.getSubtitleText();
-                result.errorMsg = response.getErrorMsg();
-                
-                return result;
-                
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] TranscribeVideo failed: {}", taskId, e.getStatus());
-                TranscribeResult result = new TranscribeResult();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
-            }
-        });
+        return CompletableFuture.supplyAsync(
+            () -> transcribeVideo(taskId, videoPath, language, timeoutSec)
+        );
     }
     
     // ========== 步骤3: Stage1处理 ==========
@@ -214,42 +293,156 @@ public class PythonGrpcClient {
         public String errorMsg;
     }
     
-    public CompletableFuture<Stage1Result> processStage1Async(
-            String taskId, String videoPath, String subtitlePath, 
+    public Stage1Result processStage1(
+            String taskId, String videoPath, String subtitlePath,
             String outputDir, int maxStep, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] Calling ProcessStage1 (max_step={})", taskId, maxStep);
-                
-                Stage1Request request = Stage1Request.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath)
-                    .setSubtitlePath(subtitlePath)
-                    .setOutputDir(outputDir)
-                    .setMaxStep(maxStep)
-                    .build();
-                
-                Stage1Response response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .processStage1(request);
-                
-                Stage1Result result = new Stage1Result();
-                result.success = response.getSuccess();
-                result.step2JsonPath = response.getStep2JsonPath();
-                result.step6JsonPath = response.getStep6JsonPath();
-                result.sentenceTimestampsPath = response.getSentenceTimestampsPath();
-                result.errorMsg = response.getErrorMsg();
-                
-                return result;
-                
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] ProcessStage1 failed: {}", taskId, e.getStatus());
-                Stage1Result result = new Stage1Result();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
+        try {
+            logger.info("[{}] Calling ProcessStage1 (max_step={})", taskId, maxStep);
+
+            Stage1Request request = Stage1Request.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath)
+                .setSubtitlePath(subtitlePath)
+                .setOutputDir(outputDir)
+                .setMaxStep(maxStep)
+                .build();
+
+            Stage1Response response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .processStage1(request);
+
+            Stage1Result result = new Stage1Result();
+            result.success = response.getSuccess();
+            result.step2JsonPath = response.getStep2JsonPath();
+            result.step6JsonPath = response.getStep6JsonPath();
+            result.sentenceTimestampsPath = response.getSentenceTimestampsPath();
+            result.errorMsg = response.getErrorMsg();
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] ProcessStage1 failed: {}", taskId, e.getStatus());
+            Stage1Result result = new Stage1Result();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
+    public CompletableFuture<Stage1Result> processStage1Async(
+            String taskId, String videoPath, String subtitlePath,
+            String outputDir, int maxStep, int timeoutSec) {
+        return CompletableFuture.supplyAsync(
+            () -> processStage1(taskId, videoPath, subtitlePath, outputDir, maxStep, timeoutSec)
+        );
+    }
+
+    public static class WatchdogSignalProgress {
+        public String schema;
+        public String source;
+        public String taskId;
+        public String stage;
+        public String status;
+        public String checkpoint;
+        public int completed;
+        public int pending;
+        public long seq;
+        public long streamSeq;
+        public long updatedAtMs;
+        public String signalType;
+    }
+
+    public static class WatchdogSignalStreamResult {
+        public boolean success;
+        public boolean unsupported;
+        public boolean deadlineExceeded;
+        public boolean cancelled;
+        public boolean stageTerminal;
+        public long lastStreamSeq;
+        public String errorMsg;
+    }
+
+    public WatchdogSignalStreamResult streamTaskWatchdogSignalsBlocking(
+            String taskId,
+            String stage,
+            long fromStreamSeq,
+            int idleTimeoutSec,
+            int callTimeoutSec,
+            java.util.function.Consumer<WatchdogSignalProgress> signalConsumer) {
+        WatchdogSignalStreamResult result = new WatchdogSignalStreamResult();
+        result.success = false;
+        result.unsupported = false;
+        result.deadlineExceeded = false;
+        result.cancelled = false;
+        result.stageTerminal = false;
+        result.lastStreamSeq = Math.max(0L, fromStreamSeq);
+        result.errorMsg = "";
+
+        if (taskId == null || taskId.isBlank()) {
+            result.errorMsg = "taskId is blank";
+            return result;
+        }
+
+        int safeIdleTimeoutSec = Math.max(5, idleTimeoutSec);
+        int safeCallTimeoutSec = Math.max(2, callTimeoutSec);
+        String safeStage = stage == null ? "" : stage.trim();
+
+        try {
+            WatchdogSignalStreamRequest request = WatchdogSignalStreamRequest.newBuilder()
+                .setTaskId(taskId)
+                .setStage(safeStage)
+                .setFromStreamSeq(Math.max(0L, fromStreamSeq))
+                .setIdleTimeoutSec(safeIdleTimeoutSec)
+                .build();
+
+            java.util.Iterator<WatchdogSignalEvent> iterator = blockingStub
+                .withDeadlineAfter(safeCallTimeoutSec, TimeUnit.SECONDS)
+                .streamTaskWatchdogSignals(request);
+
+            while (iterator.hasNext()) {
+                WatchdogSignalEvent event = iterator.next();
+                WatchdogSignalProgress progress = new WatchdogSignalProgress();
+                progress.schema = event.getSchema();
+                progress.source = event.getSource();
+                progress.taskId = event.getTaskId();
+                progress.stage = event.getStage();
+                progress.status = event.getStatus();
+                progress.checkpoint = event.getCheckpoint();
+                progress.completed = event.getCompleted();
+                progress.pending = event.getPending();
+                progress.seq = event.getSeq();
+                progress.streamSeq = event.getStreamSeq();
+                progress.updatedAtMs = event.getUpdatedAtMs();
+                progress.signalType = event.getSignalType();
+
+                if (progress.streamSeq > result.lastStreamSeq) {
+                    result.lastStreamSeq = progress.streamSeq;
+                }
+                if (signalConsumer != null) {
+                    signalConsumer.accept(progress);
+                }
+
+                String normalizedStatus = progress.status == null
+                    ? ""
+                    : progress.status.trim().toLowerCase(Locale.ROOT);
+                if (!safeStage.isBlank() && ("completed".equals(normalizedStatus) || "failed".equals(normalizedStatus))) {
+                    result.stageTerminal = true;
+                }
             }
-        });
+
+            result.success = true;
+            return result;
+        } catch (StatusRuntimeException statusError) {
+            Status.Code code = statusError.getStatus() != null
+                ? statusError.getStatus().getCode()
+                : Status.Code.UNKNOWN;
+            result.errorMsg = statusDescriptionOrCode(statusError);
+            result.unsupported = code == Status.Code.UNIMPLEMENTED;
+            result.deadlineExceeded = code == Status.Code.DEADLINE_EXCEEDED;
+            result.cancelled = code == Status.Code.CANCELLED;
+            return result;
+        } catch (Exception e) {
+            result.errorMsg = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            return result;
+        }
     }
     
     // ========== 步骤4: Phase2A 语义分析 ==========
@@ -300,82 +493,95 @@ public class PythonGrpcClient {
         public String errorMsg;
     }
     
+    public AnalyzeResult analyzeSemanticUnits(
+            String taskId, String videoPath, String step2JsonPath,
+            String step6JsonPath, String sentenceTimestampsPath,
+            String outputDir, int timeoutSec) {
+        try {
+            logger.info("[{}] Calling AnalyzeSemanticUnits (Phase2A)", taskId);
+
+            AnalyzeRequest request = AnalyzeRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath)
+                .setStep2JsonPath(step2JsonPath)
+                .setStep6JsonPath(step6JsonPath)
+                .setSentenceTimestampsPath(sentenceTimestampsPath)
+                .setOutputDir(outputDir)
+                .build();
+
+            AnalyzeResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .analyzeSemanticUnits(request);
+
+            AnalyzeResult result = new AnalyzeResult();
+            result.success = response.getSuccess();
+            if (response.hasSemanticUnitsRef()) {
+                com.mvp.videoprocessing.grpc.SemanticUnitsRef ref = response.getSemanticUnitsRef();
+                SemanticUnitsRefDTO dto = new SemanticUnitsRefDTO();
+                dto.refId = ref.getRefId();
+                dto.taskId = ref.getTaskId();
+                dto.outputDir = ref.getOutputDir();
+                dto.unitCount = ref.getUnitCount();
+                dto.schemaVersion = ref.getSchemaVersion();
+                dto.fingerprint = ref.getFingerprint();
+                result.semanticUnitsRef = dto;
+            }
+            if (response.hasSemanticUnitsInline()) {
+                com.mvp.videoprocessing.grpc.SemanticUnitsInline inline = response.getSemanticUnitsInline();
+                SemanticUnitsInlineDTO dto = new SemanticUnitsInlineDTO();
+                dto.payload = inline.getPayload().toByteArray();
+                dto.codec = inline.getCodec();
+                dto.unitCount = inline.getUnitCount();
+                dto.sha256 = inline.getSha256();
+                result.semanticUnitsInline = dto;
+            }
+            result.errorMsg = response.getErrorMsg();
+
+            for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
+                ScreenshotRequest r = new ScreenshotRequest();
+                r.screenshotId = req.getScreenshotId();
+                r.timestampSec = req.getTimestampSec();
+                r.label = req.getLabel();
+                r.semanticUnitId = req.getSemanticUnitId();
+                result.screenshotRequests.add(r);
+            }
+
+            for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
+                ClipRequest r = new ClipRequest();
+                r.clipId = req.getClipId();
+                r.startSec = req.getStartSec();
+                r.endSec = req.getEndSec();
+                r.knowledgeType = req.getKnowledgeType();
+                r.semanticUnitId = req.getSemanticUnitId();
+                r.segments = buildClipSegments(req.getSegmentsList());
+                result.clipRequests.add(r);
+            }
+
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] AnalyzeSemanticUnits failed: {}", taskId, e.getStatus());
+            AnalyzeResult result = new AnalyzeResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public CompletableFuture<AnalyzeResult> analyzeSemanticUnitsAsync(
             String taskId, String videoPath, String step2JsonPath,
             String step6JsonPath, String sentenceTimestampsPath,
             String outputDir, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] Calling AnalyzeSemanticUnits (Phase2A)", taskId);
-                
-                AnalyzeRequest request = AnalyzeRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath)
-                    .setStep2JsonPath(step2JsonPath)
-                    .setStep6JsonPath(step6JsonPath)
-                    .setSentenceTimestampsPath(sentenceTimestampsPath)
-                    .setOutputDir(outputDir)
-                    .build();
-                
-                AnalyzeResponse response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .analyzeSemanticUnits(request);
-                
-                AnalyzeResult result = new AnalyzeResult();
-                result.success = response.getSuccess();
-                if (response.hasSemanticUnitsRef()) {
-                    com.mvp.videoprocessing.grpc.SemanticUnitsRef ref = response.getSemanticUnitsRef();
-                    SemanticUnitsRefDTO dto = new SemanticUnitsRefDTO();
-                    dto.refId = ref.getRefId();
-                    dto.taskId = ref.getTaskId();
-                    dto.outputDir = ref.getOutputDir();
-                    dto.unitCount = ref.getUnitCount();
-                    dto.schemaVersion = ref.getSchemaVersion();
-                    dto.fingerprint = ref.getFingerprint();
-                    result.semanticUnitsRef = dto;
-                }
-                if (response.hasSemanticUnitsInline()) {
-                    com.mvp.videoprocessing.grpc.SemanticUnitsInline inline = response.getSemanticUnitsInline();
-                    SemanticUnitsInlineDTO dto = new SemanticUnitsInlineDTO();
-                    dto.payload = inline.getPayload().toByteArray();
-                    dto.codec = inline.getCodec();
-                    dto.unitCount = inline.getUnitCount();
-                    dto.sha256 = inline.getSha256();
-                    result.semanticUnitsInline = dto;
-                }
-                result.errorMsg = response.getErrorMsg();
-                
-                // 转换列表
-                for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
-                    ScreenshotRequest r = new ScreenshotRequest();
-                    r.screenshotId = req.getScreenshotId();
-                    r.timestampSec = req.getTimestampSec();
-                    r.label = req.getLabel();
-                    r.semanticUnitId = req.getSemanticUnitId();
-                    result.screenshotRequests.add(r);
-                }
-                
-                for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
-                    ClipRequest r = new ClipRequest();
-                    r.clipId = req.getClipId();
-                    r.startSec = req.getStartSec();
-                    r.endSec = req.getEndSec();
-                    r.knowledgeType = req.getKnowledgeType();
-                    r.semanticUnitId = req.getSemanticUnitId();
-                    r.segments = buildClipSegments(req.getSegmentsList());
-                    result.clipRequests.add(r);
-                }
-                
-                return result;
-                
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] AnalyzeSemanticUnits failed: {}", taskId, e.getStatus());
-                AnalyzeResult result = new AnalyzeResult();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
-            }
-        });
+        return CompletableFuture.supplyAsync(
+            () -> analyzeSemanticUnits(
+                taskId,
+                videoPath,
+                step2JsonPath,
+                step6JsonPath,
+                sentenceTimestampsPath,
+                outputDir,
+                timeoutSec
+            )
+        );
     }
     
     // ========== 步骤6: Phase2B 富文本组装 ==========
@@ -390,13 +596,13 @@ public class PythonGrpcClient {
         public String errorMsg;
     }
     
-    public CompletableFuture<AssembleResult> assembleRichTextAsync(
+    public AssembleResult assembleRichText(
             String taskId, String videoPath, AnalyzeResult analyzeResult,
             String screenshotsDir, String clipsDir, String outputDir,
             String title, int timeoutSec) {
         SemanticUnitsRefDTO ref = analyzeResult != null ? analyzeResult.semanticUnitsRef : null;
         SemanticUnitsInlineDTO inline = analyzeResult != null ? analyzeResult.semanticUnitsInline : null;
-        return assembleRichTextAsync(
+        return assembleRichText(
             taskId,
             videoPath,
             ref,
@@ -409,78 +615,93 @@ public class PythonGrpcClient {
         );
     }
 
-    private CompletableFuture<AssembleResult> assembleRichTextAsync(
+    public CompletableFuture<AssembleResult> assembleRichTextAsync(
+            String taskId, String videoPath, AnalyzeResult analyzeResult,
+            String screenshotsDir, String clipsDir, String outputDir,
+            String title, int timeoutSec) {
+        return CompletableFuture.supplyAsync(
+            () -> assembleRichText(
+                taskId,
+                videoPath,
+                analyzeResult,
+                screenshotsDir,
+                clipsDir,
+                outputDir,
+                title,
+                timeoutSec
+            )
+        );
+    }
+
+    private AssembleResult assembleRichText(
             String taskId, String videoPath,
             SemanticUnitsRefDTO semanticUnitsRef,
             SemanticUnitsInlineDTO semanticUnitsInline,
             String screenshotsDir, String clipsDir, String outputDir,
             String title, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] Calling AssembleRichText (Phase2B)", taskId);
-                
-                AssembleRequest request = AssembleRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath)
-                    .setScreenshotsDir(screenshotsDir)
-                    .setClipsDir(clipsDir)
-                    .setOutputDir(outputDir)
-                    .setTitle(title)
-                    .build();
-                AssembleRequest.Builder requestBuilder = request.toBuilder();
-                if (semanticUnitsInline != null
-                    && semanticUnitsInline.payload != null
-                    && semanticUnitsInline.payload.length > 0) {
-                    requestBuilder.setSemanticUnitsInline(
-                        com.mvp.videoprocessing.grpc.SemanticUnitsInline.newBuilder()
-                            .setPayload(ByteString.copyFrom(semanticUnitsInline.payload))
-                            .setCodec(semanticUnitsInline.codec != null ? semanticUnitsInline.codec : "")
-                            .setUnitCount(semanticUnitsInline.unitCount)
-                            .setSha256(semanticUnitsInline.sha256 != null ? semanticUnitsInline.sha256 : "")
-                            .build()
-                    );
-                } else if (semanticUnitsRef != null
-                    && semanticUnitsRef.refId != null
-                    && !semanticUnitsRef.refId.isBlank()) {
-                    requestBuilder.setSemanticUnitsRef(
-                        com.mvp.videoprocessing.grpc.SemanticUnitsRef.newBuilder()
-                            .setRefId(semanticUnitsRef.refId)
-                            .setTaskId(semanticUnitsRef.taskId != null ? semanticUnitsRef.taskId : "")
-                            .setOutputDir(semanticUnitsRef.outputDir != null ? semanticUnitsRef.outputDir : "")
-                            .setUnitCount(semanticUnitsRef.unitCount)
-                            .setSchemaVersion(semanticUnitsRef.schemaVersion != null ? semanticUnitsRef.schemaVersion : "")
-                            .setFingerprint(semanticUnitsRef.fingerprint != null ? semanticUnitsRef.fingerprint : "")
-                            .build()
-                    );
-                }
-                
-                AssembleResponse response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .assembleRichText(requestBuilder.build());
-                
-                AssembleResult result = new AssembleResult();
-                result.success = response.getSuccess();
-                result.markdownPath = response.getMarkdownPath();
-                result.jsonPath = response.getJsonPath();
-                result.errorMsg = response.getErrorMsg();
-                
-                if (response.hasStats()) {
-                    AssembleStats stats = response.getStats();
-                    result.totalSections = stats.getTotalSections();
-                    result.videoClipsCount = stats.getVideoClipsCount();
-                    result.screenshotsCount = stats.getScreenshotsCount();
-                }
-                
-                return result;
-                
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] AssembleRichText failed: {}", taskId, e.getStatus());
-                AssembleResult result = new AssembleResult();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
+        try {
+            logger.info("[{}] Calling AssembleRichText (Phase2B)", taskId);
+
+            AssembleRequest request = AssembleRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath)
+                .setScreenshotsDir(screenshotsDir)
+                .setClipsDir(clipsDir)
+                .setOutputDir(outputDir)
+                .setTitle(title)
+                .build();
+            AssembleRequest.Builder requestBuilder = request.toBuilder();
+            if (semanticUnitsInline != null
+                && semanticUnitsInline.payload != null
+                && semanticUnitsInline.payload.length > 0) {
+                requestBuilder.setSemanticUnitsInline(
+                    com.mvp.videoprocessing.grpc.SemanticUnitsInline.newBuilder()
+                        .setPayload(ByteString.copyFrom(semanticUnitsInline.payload))
+                        .setCodec(semanticUnitsInline.codec != null ? semanticUnitsInline.codec : "")
+                        .setUnitCount(semanticUnitsInline.unitCount)
+                        .setSha256(semanticUnitsInline.sha256 != null ? semanticUnitsInline.sha256 : "")
+                        .build()
+                );
+            } else if (semanticUnitsRef != null
+                && semanticUnitsRef.refId != null
+                && !semanticUnitsRef.refId.isBlank()) {
+                requestBuilder.setSemanticUnitsRef(
+                    com.mvp.videoprocessing.grpc.SemanticUnitsRef.newBuilder()
+                        .setRefId(semanticUnitsRef.refId)
+                        .setTaskId(semanticUnitsRef.taskId != null ? semanticUnitsRef.taskId : "")
+                        .setOutputDir(semanticUnitsRef.outputDir != null ? semanticUnitsRef.outputDir : "")
+                        .setUnitCount(semanticUnitsRef.unitCount)
+                        .setSchemaVersion(semanticUnitsRef.schemaVersion != null ? semanticUnitsRef.schemaVersion : "")
+                        .setFingerprint(semanticUnitsRef.fingerprint != null ? semanticUnitsRef.fingerprint : "")
+                        .build()
+                );
             }
-        });
+
+            AssembleResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .assembleRichText(requestBuilder.build());
+
+            AssembleResult result = new AssembleResult();
+            result.success = response.getSuccess();
+            result.markdownPath = response.getMarkdownPath();
+            result.jsonPath = response.getJsonPath();
+            result.errorMsg = response.getErrorMsg();
+
+            if (response.hasStats()) {
+                AssembleStats stats = response.getStats();
+                result.totalSections = stats.getTotalSections();
+                result.videoClipsCount = stats.getVideoClipsCount();
+                result.screenshotsCount = stats.getScreenshotsCount();
+            }
+
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] AssembleRichText failed: {}", taskId, e.getStatus());
+            AssembleResult result = new AssembleResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
     }
     
     // ========== 健康检查 ==========
@@ -557,89 +778,89 @@ public class PythonGrpcClient {
      * @param resultConsumer 结果回调 (每完成一个 Unit 回调一次)
      * @return CompletableFuture<Boolean> 任务是否启动成功
      */
-    public CompletableFuture<Boolean> validateCVBatchStreaming(
-            String taskId, String videoPath, List<SemanticUnitInput> units, int timeoutSec, 
+    public boolean validateCVBatchStreamingBlocking(
+            String taskId, String videoPath, List<SemanticUnitInput> units, int timeoutSec,
             java.util.function.Consumer<CVValidationUnitResult> resultConsumer) {
-        
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] ValidateCVBatch Streaming: {} units", taskId, units.size());
-                
-                CVValidationRequest.Builder requestBuilder = CVValidationRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath);
-                
-                for (SemanticUnitInput unit : units) {
-                    requestBuilder.addSemanticUnits(
-                        SemanticUnitForCV.newBuilder()
-                            .setUnitId(unit.unitId)
-                            .setStartSec(unit.startSec)
-                            .setEndSec(unit.endSec)
-                            .setKnowledgeType(unit.knowledgeType != null ? unit.knowledgeType : "")
-                            .build()
-                    );
-                }
 
-                // 🚀 调用流式 gRPC (Blocking Stub 返回 Iterator)
-                java.util.Iterator<CVValidationResponse> responseIterator = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .validateCVBatch(requestBuilder.build());
+        try {
+            logger.info("[{}] ValidateCVBatch Streaming: {} units", taskId, units.size());
 
-                // 🚀 迭代流式结果
-                while (responseIterator.hasNext()) {
-                    CVValidationResponse response = responseIterator.next();
-                    if (!response.getSuccess()) {
-                        logger.error("[{}] Streaming response error: {}", taskId, response.getErrorMsg());
-                        continue;
-                    }
+            CVValidationRequest.Builder requestBuilder = CVValidationRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath);
 
-                    for (com.mvp.videoprocessing.grpc.CVValidationResult pbResult : response.getResultsList()) {
-                        CVValidationUnitResult unitResult = new CVValidationUnitResult();
-                        unitResult.unitId = pbResult.getUnitId();
-                        
-                        // 转换 stable islands
-                        for (com.mvp.videoprocessing.grpc.StableIsland si : pbResult.getStableIslandsList()) {
-                            StableIslandResult islandResult = new StableIslandResult();
-                            islandResult.startSec = si.getStartSec();
-                            islandResult.endSec = si.getEndSec();
-                            islandResult.midSec = si.getMidSec();
-                            islandResult.durationSec = si.getDurationSec();
-                            unitResult.stableIslands.add(islandResult);
-                        }
-                        
-                        // 转换 action segments
-                        for (com.mvp.videoprocessing.grpc.ActionSegment as : pbResult.getActionSegmentsList()) {
-                            ActionSegmentResult segResult = new ActionSegmentResult();
-                            segResult.startSec = as.getStartSec();
-                            segResult.endSec = as.getEndSec();
-                            segResult.actionType = as.getActionType();
-                            
-                            for (com.mvp.videoprocessing.grpc.StableIsland internalSi : as.getInternalStableIslandsList()) {
-                                StableIslandResult internalIsland = new StableIslandResult();
-                                internalIsland.startSec = internalSi.getStartSec();
-                                internalIsland.endSec = internalSi.getEndSec();
-                                internalIsland.midSec = internalSi.getMidSec();
-                                internalIsland.durationSec = internalSi.getDurationSec();
-                                segResult.internalStableIslands.add(internalIsland);
-                            }
-                            unitResult.actionSegments.add(segResult);
-                        }
-                        
-                        // 🚀 立即通知 Java
-                        if (resultConsumer != null) {
-                            resultConsumer.accept(unitResult);
-                        }
-                    }
-                }
-                
-                logger.info("[{}] ValidateCVBatch Streaming completed", taskId);
-                return true;
-                
-            } catch (Exception e) {
-                logger.error("[{}] ValidateCVBatch Streaming failed: {}", taskId, e.getMessage());
-                return false;
+            for (SemanticUnitInput unit : units) {
+                requestBuilder.addSemanticUnits(
+                    SemanticUnitForCV.newBuilder()
+                        .setUnitId(unit.unitId)
+                        .setStartSec(unit.startSec)
+                        .setEndSec(unit.endSec)
+                        .setKnowledgeType(unit.knowledgeType != null ? unit.knowledgeType : "")
+                        .build()
+                );
             }
-        });
+
+            java.util.Iterator<CVValidationResponse> responseIterator = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .validateCVBatch(requestBuilder.build());
+
+            while (responseIterator.hasNext()) {
+                CVValidationResponse response = responseIterator.next();
+                if (!response.getSuccess()) {
+                    logger.error("[{}] Streaming response error: {}", taskId, response.getErrorMsg());
+                    continue;
+                }
+
+                for (com.mvp.videoprocessing.grpc.CVValidationResult pbResult : response.getResultsList()) {
+                    CVValidationUnitResult unitResult = new CVValidationUnitResult();
+                    unitResult.unitId = pbResult.getUnitId();
+
+                    for (com.mvp.videoprocessing.grpc.StableIsland si : pbResult.getStableIslandsList()) {
+                        StableIslandResult islandResult = new StableIslandResult();
+                        islandResult.startSec = si.getStartSec();
+                        islandResult.endSec = si.getEndSec();
+                        islandResult.midSec = si.getMidSec();
+                        islandResult.durationSec = si.getDurationSec();
+                        unitResult.stableIslands.add(islandResult);
+                    }
+
+                    for (com.mvp.videoprocessing.grpc.ActionSegment as : pbResult.getActionSegmentsList()) {
+                        ActionSegmentResult segResult = new ActionSegmentResult();
+                        segResult.startSec = as.getStartSec();
+                        segResult.endSec = as.getEndSec();
+                        segResult.actionType = as.getActionType();
+
+                        for (com.mvp.videoprocessing.grpc.StableIsland internalSi : as.getInternalStableIslandsList()) {
+                            StableIslandResult internalIsland = new StableIslandResult();
+                            internalIsland.startSec = internalSi.getStartSec();
+                            internalIsland.endSec = internalSi.getEndSec();
+                            internalIsland.midSec = internalSi.getMidSec();
+                            internalIsland.durationSec = internalSi.getDurationSec();
+                            segResult.internalStableIslands.add(internalIsland);
+                        }
+                        unitResult.actionSegments.add(segResult);
+                    }
+
+                    if (resultConsumer != null) {
+                        resultConsumer.accept(unitResult);
+                    }
+                }
+            }
+
+            logger.info("[{}] ValidateCVBatch Streaming completed", taskId);
+            return true;
+        } catch (Exception e) {
+            logger.error("[{}] ValidateCVBatch Streaming failed: {}", taskId, e.getMessage());
+            return false;
+        }
+    }
+
+    public CompletableFuture<Boolean> validateCVBatchStreaming(
+            String taskId, String videoPath, List<SemanticUnitInput> units, int timeoutSec,
+            java.util.function.Consumer<CVValidationUnitResult> resultConsumer) {
+        return CompletableFuture.supplyAsync(
+            () -> validateCVBatchStreamingBlocking(taskId, videoPath, units, timeoutSec, resultConsumer)
+        );
     }
 
     // ========== 🚀 V3: Phase2A - Step 2: Knowledge Classification ==========
@@ -673,76 +894,68 @@ public class PythonGrpcClient {
          public String errorMsg;
     }
     
+    public ClassificationBatchResult classifyKnowledgeBatch(
+            String taskId, List<ClassificationInput> units, String step2Path, int timeoutSec) {
+        try {
+            logger.info("[{}] ClassifyKnowledgeBatch: {} units", taskId, units.size());
+
+            KnowledgeClassificationRequest.Builder requestBuilder = KnowledgeClassificationRequest.newBuilder()
+                .setTaskId(taskId)
+                .setStep2Path(step2Path != null ? step2Path : "");
+
+            for (ClassificationInput unit : units) {
+                SemanticUnitForClassification.Builder unitBuilder = SemanticUnitForClassification.newBuilder()
+                    .setUnitId(unit.unitId)
+                    .setTitle(unit.title != null ? unit.title : "")
+                    .setText(unit.text != null ? unit.text : "");
+
+                for (ActionSegmentResult as : unit.actionUnits) {
+                    unitBuilder.addActionUnits(
+                        ActionUnitForClassification.newBuilder()
+                            .setId(as.id)
+                            .setStartSec(as.startSec)
+                            .setEndSec(as.endSec)
+                            .build()
+                    );
+                }
+
+                requestBuilder.addUnits(unitBuilder.build());
+            }
+
+            KnowledgeClassificationResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .classifyKnowledgeBatch(requestBuilder.build());
+
+            ClassificationBatchResult result = new ClassificationBatchResult();
+            result.success = response.getSuccess();
+            result.errorMsg = response.getErrorMsg();
+
+            for (KnowledgeClassificationResult r : response.getResultsList()) {
+                KnowledgeResultItem item = new KnowledgeResultItem();
+                item.unitId = r.getUnitId();
+                item.actionId = r.getActionId();
+                item.knowledgeType = r.getKnowledgeType();
+                item.confidence = r.getConfidence();
+                item.keyEvidence = r.getKeyEvidence();
+                item.reasoning = r.getReasoning();
+                result.results.add(item);
+            }
+
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] ClassifyKnowledgeBatch failed: {}", taskId, e.getStatus());
+            ClassificationBatchResult result = new ClassificationBatchResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public CompletableFuture<ClassificationBatchResult> classifyKnowledgeBatchAsync(
             String taskId, List<ClassificationInput> units, String step2Path, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] ClassifyKnowledgeBatch: {} units", taskId, units.size());
-                
-                KnowledgeClassificationRequest.Builder requestBuilder = KnowledgeClassificationRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setStep2Path(step2Path != null ? step2Path : "");  // 🔑 传递 Step 2 路径
-                    
-                for (ClassificationInput unit : units) {
-                    SemanticUnitForClassification.Builder unitBuilder = SemanticUnitForClassification.newBuilder()
-                        .setUnitId(unit.unitId)
-                        .setTitle(unit.title != null ? unit.title : "")
-                        .setText(unit.text != null ? unit.text : "");
-                        
-                    for (ActionSegmentResult as : unit.actionUnits) {
-                        // We map ActionSegmentResult to ActionUnitForClassification
-                        // Note: ActionSegmentResult doesn't have ID, but we need ID for matching. 
-                        // Assuming inputs come with ID or we rely on index?
-                        // Proto ActionUnitForClassification has 'id'. 
-                        // In ValidateCV, we received ActionSegments without explicit ID field in Java DTO, 
-                        // but Proto ActionSegment didn't have ID either. 
-                        // Wait, ValidateCV returns ActionSegment which has no ID. logic relies on structure.
-                        // But KnowledgeClassification needs ActionID to map back.
-                        // We should probably add 'id' to ActionSegmentResult or assume index matches.
-                        // Let's use a hash or temporary ID if needed, or assume caller provides it.
-                        // Actually, CV results are "ActionSegments". We can assign them IDs (1, 2, 3...) when creating this input.
-                        unitBuilder.addActionUnits(
-                            ActionUnitForClassification.newBuilder()
-                                .setId(as.id) // TODO: Caller should set this if needed. For now 0.
-                                .setStartSec(as.startSec)
-                                .setEndSec(as.endSec)
-                                .build()
-                        );
-                    }
-                    
-                    // ❌ Removed: Subtitle transmission - Classifier reads directly from step2_path
-                    
-                    requestBuilder.addUnits(unitBuilder.build());
-                }
-                
-                KnowledgeClassificationResponse response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .classifyKnowledgeBatch(requestBuilder.build());
-                
-                ClassificationBatchResult result = new ClassificationBatchResult();
-                result.success = response.getSuccess();
-                result.errorMsg = response.getErrorMsg();
-                
-                for (KnowledgeClassificationResult r : response.getResultsList()) {
-                    KnowledgeResultItem item = new KnowledgeResultItem();
-                    item.unitId = r.getUnitId();
-                    item.actionId = r.getActionId();
-                    item.knowledgeType = r.getKnowledgeType();
-                    item.confidence = r.getConfidence();
-                    item.keyEvidence = r.getKeyEvidence();
-                    item.reasoning = r.getReasoning();
-                    result.results.add(item);
-                }
-                
-                return result;
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] ClassifyKnowledgeBatch failed: {}", taskId, e.getStatus());
-                ClassificationBatchResult result = new ClassificationBatchResult();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
-            }
-        });
+        return CompletableFuture.supplyAsync(
+            () -> classifyKnowledgeBatch(taskId, units, step2Path, timeoutSec)
+        );
     }
 
     // ========== 🚀 V3: Phase2A - Step 3: Material Request Generation ==========
@@ -780,135 +993,138 @@ public class PythonGrpcClient {
         public String errorMsg;
     }
 
+    public MaterialGenerationResult generateMaterialRequests(
+            String taskId, List<MaterialGenerationInput> units, String videoPath, int timeoutSec) {
+         try {
+            logger.info("[{}] GenerateMaterialRequests: {} units", taskId, units.size());
+
+            GenerateMaterialRequestsRequest.Builder requestBuilder = GenerateMaterialRequestsRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath);
+
+            for (MaterialGenerationInput unit : units) {
+                SemanticUnitForMaterialGeneration.Builder unitBuilder = SemanticUnitForMaterialGeneration.newBuilder()
+                        .setUnitId(unit.unitId)
+                        .setKnowledgeType(unit.knowledgeType != null ? unit.knowledgeType : "")
+                        .setStartSec(unit.startSec)
+                        .setEndSec(unit.endSec)
+                        .setFullText(unit.fullText != null ? unit.fullText : "");
+
+                if (unit.actionUnits != null) {
+                    final Set<String> coarseUnitTypes = new HashSet<>(Arrays.asList(
+                        "abstract", "process", "concrete", "configuration", "deduction", "practical", "scan", "scanning"
+                    ));
+                    final String unitKt = unit.knowledgeType != null ? unit.knowledgeType.trim() : "";
+                    int missingCnt = 0;
+                    int cvLikeCnt = 0;
+                    int defaultLikeCnt = 0;
+                    String example = "";
+
+                    for (ActionSegmentResult as : unit.actionUnits) {
+                        final String kt = as.actionType != null ? as.actionType.trim() : "";
+                        final String ktLower = kt.toLowerCase(Locale.ROOT);
+                        final boolean isMissing = kt.isEmpty()
+                            || "unknown".equals(ktLower) || "knowledge".equals(ktLower)
+                            || "none".equals(ktLower) || "null".equals(ktLower);
+                        final boolean isCvLike = ktLower.matches("^k\\d+_.*")
+                            || ktLower.contains("operation") || ktLower.contains("click")
+                            || ktLower.contains("drag") || ktLower.contains("scroll")
+                            || ktLower.contains("mouse") || ktLower.contains("keyboard");
+                        final boolean isDefaultLike = !unitKt.isEmpty()
+                            && kt.equals(unitKt)
+                            && coarseUnitTypes.contains(unitKt.toLowerCase(Locale.ROOT));
+
+                        if (isMissing) {
+                            missingCnt++;
+                        } else if (isCvLike) {
+                            cvLikeCnt++;
+                        } else if (isDefaultLike) {
+                            defaultLikeCnt++;
+                        }
+
+                        if ((isMissing || isCvLike || isDefaultLike) && example.isEmpty()) {
+                            example = String.format(
+                                "action_id=%d, kt=%s, start=%.2f, end=%.2f",
+                                as.id, kt, as.startSec, as.endSec
+                            );
+                        }
+                        unitBuilder.addActionUnits(
+                            ActionUnitForMaterialGeneration.newBuilder()
+                                .setId(as.id)
+                                .setStartSec(as.startSec)
+                                .setEndSec(as.endSec)
+                                .setKnowledgeType(kt)
+                                .build()
+                        );
+                    }
+
+                    if (missingCnt > 0 || cvLikeCnt > 0 || defaultLikeCnt > 0) {
+                        logger.warn(
+                            "[{}] 上游 knowledge_type 缺失/疑似 CV actionType: unit={}, actions={}, missing={}, cv_like={}, default_like={}, unit_kt={}, example=({})",
+                            taskId, unit.unitId, unit.actionUnits.size(), missingCnt, cvLikeCnt, defaultLikeCnt, unitKt, example
+                        );
+                    }
+                }
+
+                if (unit.stableIslands != null) {
+                    for (StableIslandResult si : unit.stableIslands) {
+                        unitBuilder.addStableIslands(
+                            com.mvp.videoprocessing.grpc.StableIsland.newBuilder()
+                                .setStartSec(si.startSec)
+                                .setEndSec(si.endSec)
+                                .setMidSec(si.midSec)
+                                .setDurationSec(si.durationSec)
+                                .build()
+                        );
+                    }
+                }
+
+                requestBuilder.addUnits(unitBuilder.build());
+            }
+
+            GenerateMaterialRequestsResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .generateMaterialRequests(requestBuilder.build());
+
+            MaterialGenerationResult result = new MaterialGenerationResult();
+            result.success = response.getSuccess();
+            result.errorMsg = response.getErrorMsg();
+
+             for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
+                ScreenshotRequestDTO r = new ScreenshotRequestDTO();
+                r.screenshotId = req.getScreenshotId();
+                r.timestampSec = req.getTimestampSec();
+                r.label = req.getLabel();
+                r.semanticUnitId = req.getSemanticUnitId();
+                result.screenshotRequests.add(r);
+            }
+
+            for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
+                ClipRequestDTO r = new ClipRequestDTO();
+                r.clipId = req.getClipId();
+                r.startSec = req.getStartSec();
+                r.endSec = req.getEndSec();
+                r.knowledgeType = req.getKnowledgeType();
+                r.semanticUnitId = req.getSemanticUnitId();
+                r.segments = buildClipSegments(req.getSegmentsList());
+                result.clipRequests.add(r);
+            }
+
+            return result;
+         } catch (StatusRuntimeException e) {
+            logger.error("[{}] GenerateMaterialRequests failed: {}", taskId, e.getStatus());
+            MaterialGenerationResult result = new MaterialGenerationResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public CompletableFuture<MaterialGenerationResult> generateMaterialRequestsAsync(
             String taskId, List<MaterialGenerationInput> units, String videoPath, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-             try {
-                logger.info("[{}] GenerateMaterialRequests: {} units", taskId, units.size());
-                
-                GenerateMaterialRequestsRequest.Builder requestBuilder = GenerateMaterialRequestsRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath);
-                    
-                for (MaterialGenerationInput unit : units) {
-                    SemanticUnitForMaterialGeneration.Builder unitBuilder = SemanticUnitForMaterialGeneration.newBuilder()
-                            .setUnitId(unit.unitId)
-                            .setKnowledgeType(unit.knowledgeType != null ? unit.knowledgeType : "")
-                            .setStartSec(unit.startSec)
-                            .setEndSec(unit.endSec)
-                            .setFullText(unit.fullText != null ? unit.fullText : "");
-                    
-                    if (unit.actionUnits != null) {
-                        // 💥 断链探针：上游 knowledge_type 缺失/疑似 CV actionType（用于定位默认值/字段错用）
-                        final Set<String> coarseUnitTypes = new HashSet<>(Arrays.asList(
-                            "abstract", "process", "concrete", "configuration", "deduction", "practical", "scan", "scanning"
-                        ));
-                        final String unitKt = unit.knowledgeType != null ? unit.knowledgeType.trim() : "";
-                        int missingCnt = 0;
-                        int cvLikeCnt = 0;
-                        int defaultLikeCnt = 0;
-                        String example = "";
-
-                        for (ActionSegmentResult as : unit.actionUnits) {
-                            final String kt = as.actionType != null ? as.actionType.trim() : "";
-                            final String ktLower = kt.toLowerCase(Locale.ROOT);
-                            final boolean isMissing = kt.isEmpty()
-                                || "unknown".equals(ktLower) || "knowledge".equals(ktLower)
-                                || "none".equals(ktLower) || "null".equals(ktLower);
-                            final boolean isCvLike = ktLower.matches("^k\\d+_.*")
-                                || ktLower.contains("operation") || ktLower.contains("click")
-                                || ktLower.contains("drag") || ktLower.contains("scroll")
-                                || ktLower.contains("mouse") || ktLower.contains("keyboard");
-                            final boolean isDefaultLike = !unitKt.isEmpty()
-                                && kt.equals(unitKt)
-                                && coarseUnitTypes.contains(unitKt.toLowerCase(Locale.ROOT));
-
-                            if (isMissing) {
-                                missingCnt++;
-                            } else if (isCvLike) {
-                                cvLikeCnt++;
-                            } else if (isDefaultLike) {
-                                defaultLikeCnt++;
-                            }
-
-                            if ((isMissing || isCvLike || isDefaultLike) && example.isEmpty()) {
-                                example = String.format(
-                                    "action_id=%d, kt=%s, start=%.2f, end=%.2f",
-                                    as.id, kt, as.startSec, as.endSec
-                                );
-                            }
-                            unitBuilder.addActionUnits(
-                                ActionUnitForMaterialGeneration.newBuilder()
-                                    .setId(as.id)
-                                    .setStartSec(as.startSec)
-                                    .setEndSec(as.endSec)
-                                    .setKnowledgeType(kt)
-                                    .build()
-                            );
-                        }
-
-                        if (missingCnt > 0 || cvLikeCnt > 0 || defaultLikeCnt > 0) {
-                            logger.warn(
-                                "[{}] 上游 knowledge_type 缺失/疑似 CV actionType: unit={}, actions={}, missing={}, cv_like={}, default_like={}, unit_kt={}, example=({})",
-                                taskId, unit.unitId, unit.actionUnits.size(), missingCnt, cvLikeCnt, defaultLikeCnt, unitKt, example
-                            );
-                        }
-                    }
-                    
-                    // 🚀 添加稳定岛数据
-                    if (unit.stableIslands != null) {
-                        for (StableIslandResult si : unit.stableIslands) {
-                            unitBuilder.addStableIslands(
-                                com.mvp.videoprocessing.grpc.StableIsland.newBuilder()
-                                    .setStartSec(si.startSec)
-                                    .setEndSec(si.endSec)
-                                    .setMidSec(si.midSec)
-                                    .setDurationSec(si.durationSec)
-                                    .build()
-                            );
-                        }
-                    }
-                    
-                    requestBuilder.addUnits(unitBuilder.build());
-                }
-                
-                GenerateMaterialRequestsResponse response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .generateMaterialRequests(requestBuilder.build());
-                    
-                MaterialGenerationResult result = new MaterialGenerationResult();
-                result.success = response.getSuccess();
-                result.errorMsg = response.getErrorMsg();
-                
-                 for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
-                    ScreenshotRequestDTO r = new ScreenshotRequestDTO();
-                    r.screenshotId = req.getScreenshotId();
-                    r.timestampSec = req.getTimestampSec();
-                    r.label = req.getLabel();
-                    r.semanticUnitId = req.getSemanticUnitId();
-                    result.screenshotRequests.add(r);
-                }
-                
-                for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
-                    ClipRequestDTO r = new ClipRequestDTO();
-                    r.clipId = req.getClipId();
-                    r.startSec = req.getStartSec();
-                    r.endSec = req.getEndSec();
-                    r.knowledgeType = req.getKnowledgeType();
-                    r.semanticUnitId = req.getSemanticUnitId();
-                    r.segments = buildClipSegments(req.getSegmentsList());
-                    result.clipRequests.add(r);
-                }
-                
-                return result;
-             } catch (StatusRuntimeException e) {
-                logger.error("[{}] GenerateMaterialRequests failed: {}", taskId, e.getStatus());
-                MaterialGenerationResult result = new MaterialGenerationResult();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
-            }
-        });
+        return CompletableFuture.supplyAsync(
+            () -> generateMaterialRequests(taskId, units, videoPath, timeoutSec)
+        );
     }
 
 
@@ -938,97 +1154,99 @@ public class PythonGrpcClient {
      * @param timeoutSec 超时秒数
      * @return CompletableFuture<VLAnalysisResult>
      */
+    public VLAnalysisResult analyzeWithVL(
+            String taskId, String videoPath, AnalyzeResult analyzeResult,
+            String outputDir, int timeoutSec) {
+        try {
+            logger.info("[{}] Calling AnalyzeWithVL: {}", taskId, videoPath);
+
+            VLAnalysisRequest.Builder requestBuilder = VLAnalysisRequest.newBuilder()
+                .setTaskId(taskId)
+                .setVideoPath(videoPath)
+                .setOutputDir(outputDir);
+            if (analyzeResult != null
+                && analyzeResult.semanticUnitsInline != null
+                && analyzeResult.semanticUnitsInline.payload != null
+                && analyzeResult.semanticUnitsInline.payload.length > 0) {
+                SemanticUnitsInlineDTO inline = analyzeResult.semanticUnitsInline;
+                requestBuilder.setSemanticUnitsInline(
+                    com.mvp.videoprocessing.grpc.SemanticUnitsInline.newBuilder()
+                        .setPayload(ByteString.copyFrom(inline.payload))
+                        .setCodec(inline.codec != null ? inline.codec : "")
+                        .setUnitCount(inline.unitCount)
+                        .setSha256(inline.sha256 != null ? inline.sha256 : "")
+                        .build()
+                );
+            } else if (analyzeResult != null
+                && analyzeResult.semanticUnitsRef != null
+                && analyzeResult.semanticUnitsRef.refId != null
+                && !analyzeResult.semanticUnitsRef.refId.isBlank()) {
+                SemanticUnitsRefDTO ref = analyzeResult.semanticUnitsRef;
+                requestBuilder.setSemanticUnitsRef(
+                    com.mvp.videoprocessing.grpc.SemanticUnitsRef.newBuilder()
+                        .setRefId(ref.refId)
+                        .setTaskId(ref.taskId != null ? ref.taskId : "")
+                        .setOutputDir(ref.outputDir != null ? ref.outputDir : "")
+                        .setUnitCount(ref.unitCount)
+                        .setSchemaVersion(ref.schemaVersion != null ? ref.schemaVersion : "")
+                        .setFingerprint(ref.fingerprint != null ? ref.fingerprint : "")
+                        .build()
+                );
+            }
+
+            VLAnalysisResponse response = blockingStub
+                .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                .analyzeWithVL(requestBuilder.build());
+
+            VLAnalysisResult result = new VLAnalysisResult();
+            result.success = response.getSuccess();
+            result.vlEnabled = response.getVlEnabled();
+            result.usedFallback = response.getUsedFallback();
+            result.unitsAnalyzed = response.getUnitsAnalyzed();
+            result.vlClipsGenerated = response.getVlClipsGenerated();
+            result.vlScreenshotsGenerated = response.getVlScreenshotsGenerated();
+            result.errorMsg = response.getErrorMsg();
+
+            for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
+                ScreenshotRequestDTO r = new ScreenshotRequestDTO();
+                r.screenshotId = req.getScreenshotId();
+                r.timestampSec = req.getTimestampSec();
+                r.label = req.getLabel();
+                r.semanticUnitId = req.getSemanticUnitId();
+                result.screenshotRequests.add(r);
+            }
+
+            for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
+                ClipRequestDTO r = new ClipRequestDTO();
+                r.clipId = req.getClipId();
+                r.startSec = req.getStartSec();
+                r.endSec = req.getEndSec();
+                r.knowledgeType = req.getKnowledgeType();
+                r.semanticUnitId = req.getSemanticUnitId();
+                r.segments = buildClipSegments(req.getSegmentsList());
+                result.clipRequests.add(r);
+            }
+
+            logger.info("[{}] AnalyzeWithVL completed: vlEnabled={}, usedFallback={}, screenshots={}, clips={}",
+                taskId, result.vlEnabled, result.usedFallback,
+                result.screenshotRequests.size(), result.clipRequests.size());
+
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
+            VLAnalysisResult result = new VLAnalysisResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public CompletableFuture<VLAnalysisResult> analyzeWithVLAsync(
             String taskId, String videoPath, AnalyzeResult analyzeResult,
             String outputDir, int timeoutSec) {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                logger.info("[{}] Calling AnalyzeWithVL: {}", taskId, videoPath);
-
-                VLAnalysisRequest.Builder requestBuilder = VLAnalysisRequest.newBuilder()
-                    .setTaskId(taskId)
-                    .setVideoPath(videoPath)
-                    .setOutputDir(outputDir)
-                    ;
-                if (analyzeResult != null
-                    && analyzeResult.semanticUnitsInline != null
-                    && analyzeResult.semanticUnitsInline.payload != null
-                    && analyzeResult.semanticUnitsInline.payload.length > 0) {
-                    SemanticUnitsInlineDTO inline = analyzeResult.semanticUnitsInline;
-                    requestBuilder.setSemanticUnitsInline(
-                        com.mvp.videoprocessing.grpc.SemanticUnitsInline.newBuilder()
-                            .setPayload(ByteString.copyFrom(inline.payload))
-                            .setCodec(inline.codec != null ? inline.codec : "")
-                            .setUnitCount(inline.unitCount)
-                            .setSha256(inline.sha256 != null ? inline.sha256 : "")
-                            .build()
-                    );
-                } else if (analyzeResult != null
-                    && analyzeResult.semanticUnitsRef != null
-                    && analyzeResult.semanticUnitsRef.refId != null
-                    && !analyzeResult.semanticUnitsRef.refId.isBlank()) {
-                    SemanticUnitsRefDTO ref = analyzeResult.semanticUnitsRef;
-                    requestBuilder.setSemanticUnitsRef(
-                        com.mvp.videoprocessing.grpc.SemanticUnitsRef.newBuilder()
-                            .setRefId(ref.refId)
-                            .setTaskId(ref.taskId != null ? ref.taskId : "")
-                            .setOutputDir(ref.outputDir != null ? ref.outputDir : "")
-                            .setUnitCount(ref.unitCount)
-                            .setSchemaVersion(ref.schemaVersion != null ? ref.schemaVersion : "")
-                            .setFingerprint(ref.fingerprint != null ? ref.fingerprint : "")
-                            .build()
-                    );
-                }
-                
-                VLAnalysisResponse response = blockingStub
-                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
-                    .analyzeWithVL(requestBuilder.build());
-                
-                VLAnalysisResult result = new VLAnalysisResult();
-                result.success = response.getSuccess();
-                result.vlEnabled = response.getVlEnabled();
-                result.usedFallback = response.getUsedFallback();
-                result.unitsAnalyzed = response.getUnitsAnalyzed();
-                result.vlClipsGenerated = response.getVlClipsGenerated();
-                result.vlScreenshotsGenerated = response.getVlScreenshotsGenerated();
-                result.errorMsg = response.getErrorMsg();
-                
-                // 转换截图请求
-                for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
-                    ScreenshotRequestDTO r = new ScreenshotRequestDTO();
-                    r.screenshotId = req.getScreenshotId();
-                    r.timestampSec = req.getTimestampSec();
-                    r.label = req.getLabel();
-                    r.semanticUnitId = req.getSemanticUnitId();
-                    result.screenshotRequests.add(r);
-                }
-                
-                // 转换片段请求
-                for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
-                    ClipRequestDTO r = new ClipRequestDTO();
-                    r.clipId = req.getClipId();
-                    r.startSec = req.getStartSec();
-                    r.endSec = req.getEndSec();
-                    r.knowledgeType = req.getKnowledgeType();
-                    r.semanticUnitId = req.getSemanticUnitId();
-                    r.segments = buildClipSegments(req.getSegmentsList());
-                    result.clipRequests.add(r);
-                }
-                
-                logger.info("[{}] AnalyzeWithVL completed: vlEnabled={}, usedFallback={}, screenshots={}, clips={}",
-                    taskId, result.vlEnabled, result.usedFallback, 
-                    result.screenshotRequests.size(), result.clipRequests.size());
-                
-                return result;
-                
-            } catch (StatusRuntimeException e) {
-                logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
-                VLAnalysisResult result = new VLAnalysisResult();
-                result.success = false;
-                result.errorMsg = statusDescriptionOrCode(e);
-                return result;
-            }
-        });
+        return CompletableFuture.supplyAsync(
+            () -> analyzeWithVL(taskId, videoPath, analyzeResult, outputDir, timeoutSec)
+        );
     }
 
     // ========== 🚀 V6: 资源释放 ==========

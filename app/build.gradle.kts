@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    id("org.jetbrains.kotlin.kapt")
 }
 
 android {
@@ -16,7 +17,7 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "MOBILE_API_BASE_URL", "\"http://10.0.2.2:8080/api/mobile\"")
+        buildConfigField("String", "MOBILE_API_BASE_URL", "\"https://botryoidal-lashon-contumaciously.ngrok-free.dev/api/mobile\"")
     }
 
     buildTypes {
@@ -41,12 +42,25 @@ android {
     }
 }
 
+configurations.configureEach {
+    exclude(group = "org.jetbrains", module = "annotations-java5")
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.kotlinx.coroutines.android)
+    implementation(libs.retrofit.core)
+    implementation(libs.retrofit.converter.gson)
+    implementation(libs.okhttp.core)
+    implementation(libs.okhttp.logging)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    kapt(libs.androidx.room.compiler)
     implementation(libs.markwon.core)
     implementation(libs.markwon.html)
     implementation(libs.markwon.linkify)
@@ -55,7 +69,11 @@ dependencies {
     implementation(libs.markwon.ext.latex)
     implementation(libs.markwon.inline.parser)
     implementation(libs.markwon.image.coil)
+    implementation(libs.markwon.syntax.highlight)
     implementation(libs.coil)
+    implementation(libs.coil.compose)
+    implementation(libs.prism4j)
+    kapt(libs.prism4j.bundler)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)

@@ -3,6 +3,263 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-02-24 Android 更新后台发布管理能力落地（受鉴权上传 + 一键发布/回滚）
+- 日期：2026-02-24
+- 触发背景与问题：
+  - 仅有“检查更新 + 下载 APK”接口时，发布新版仍依赖人工上传文件并手改 `latest.json`，易出错且不利于回滚。
+  - 缺少受鉴权的后台发布入口，无法把发布流程收敛为标准化 API。
+- 第一性原理与复用杠杆：
+  - 第一性原理：发布系统最小闭环是“上传产物 -> 生成版本元数据 -> 切换生效版本 -> 可回滚”。
+  - 复用杠杆1：复用现有 `MobileAppUpdateController` 路由边界，不新增独立服务进程。
+  - 复用杠杆2：复用已有 `AndroidAppUpdateService` 的 `latest.json` 读取链路，保证客户端契约不变。
+  - 复用杠杆3：复用 Spring 配置体系，将发布目录、历史文件、鉴权 token 全部外置。
+- 架构决策：
+  - 决策1：新增 `AndroidAppUpdateAdminService`，集中处理上传落盘、SHA-256 计算、版本清单生成、发布历史维护。
+  - 决策2：管理端新增 3 个接口：
+    - `POST /api/mobile/app/update/admin/upload`
+    - `POST /api/mobile/app/update/admin/publish`
+    - `POST /api/mobile/app/update/admin/rollback`
+  - 决策3：管理端接口统一鉴权：`X-Update-Admin-Token` 或 `Authorization: Bearer <token>`。
+  - 决策4：发布历史落盘 `publish-history.json`，无参回滚默认回滚到“当前版本之前最近一次发布版本”。
+- 调用链与决策链变化：
+  - 改造前：
+    - `人工上传 APK + 手工编辑 latest.json`
+  - 改造后：
+    - `Admin -> /admin/upload -> 生成 releases/{version}.json + APK + (可选)发布 latest`
+    - `Admin -> /admin/publish?versionCode=xxx -> latest.json 切换`
+    - `Admin -> /admin/rollback -> 基于 publish-history.json 选择目标并切换 latest.json`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/AndroidAppUpdateAdminService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileAppUpdateController.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/AndroidAppUpdateAdminServiceTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileAppUpdateControllerTest.java`
+  - `docs/architecture/overview.md`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：发布可靠性与可运维性，不以吞吐或时延优化为目标。
+  - 测试方式：编译 + 单测，验证上传发布、历史回滚与鉴权拦截。
+  - 测试数据：见“验证方式”命令结果。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=AndroidAppUpdateAdminServiceTest,AndroidAppUpdateServiceTest,MobileAppUpdateControllerTest" test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-24 Android 端应用内更新后端能力落地（版本检查 + APK 下发）
+- 日期：2026-02-24
+- 触发背景与问题：
+  - Android 端需要在应用内完成“检查新版本 -> 下载 APK -> 触发系统安装”，后端缺少标准化更新接口。
+  - 版本发布信息此前依赖人工沟通，客户端无法基于策略字段（如强制更新）自动决策。
+- 第一性原理与复用杠杆：
+  - 第一性原理：客户端更新流程本质是“版本决策接口 + 可下载二进制”，两者都应由后端单一事实源驱动。
+  - 复用杠杆1：复用现有 `/api/mobile/**` 控制器边界，不新增独立网关或旁路服务。
+  - 复用杠杆2：复用已有文件流式返回模式（`InputStreamResource` + 响应头），避免重建下载链路。
+  - 复用杠杆3：复用 `application.properties` 配置体系，让发布清单路径、下载基址、端点路径均可配置。
+- 架构决策：
+  - 决策1：新增 `MobileAppUpdateController`，统一提供 `GET /api/mobile/app/update/check` 与 `GET /api/mobile/app/update/apk`。
+  - 决策2：新增 `AndroidAppUpdateService` 作为版本策略与清单解析层，控制器仅做入参校验和响应封装。
+  - 决策3：发布清单默认落盘 `var/app-updates/android/latest.json`，支持字段：`versionCode/versionName/minSupportedVersionCode/forceUpdate/apkFile/downloadUrl/sha256/fileSizeBytes/releaseNotes`。
+  - 决策4：APK 下载路径增加越界防护（相对路径必须落在 manifest 同目录），避免路径穿越风险。
+- 调用链与决策链变化：
+  - 改造前：
+    - Android 端无统一更新接口，无法从后端读取版本决策与下载地址。
+  - 改造后：
+    - `Android App -> /api/mobile/app/update/check -> AndroidAppUpdateService(load manifest + compare version) -> {hasUpdate, forceUpdate, downloadUrl}`
+    - `Android App -> /api/mobile/app/update/apk -> AndroidAppUpdateService(resolve local apk) -> stream apk bytes`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileAppUpdateController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/AndroidAppUpdateService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/AndroidAppUpdateServiceTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileAppUpdateControllerTest.java`
+  - `docs/architecture/overview.md`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：补齐更新能力，不以吞吐或时延优化为目标。
+  - 测试方式：编译校验 + 单元测试覆盖版本比较与下载路径防护。
+  - 测试数据：见“验证方式”命令结果。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=AndroidAppUpdateServiceTest,MobileAppUpdateControllerTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-24 任务级软看门狗第一阶段落地（进展租约 + strike + 子步骤重启优先）
+- 日期：2026-02-24
+- 触发背景与问题：
+  - 任务时长分布跨度大（分钟到小时），固定超时容易误伤长任务，无法满足“尽量成功”目标。
+  - 下载阶段已有租约看门狗，但任务总流程缺少统一的“进展租约 + strike 决策”收敛层。
+- 第一性原理与复用杠杆：
+  - 第一性原理：长任务治理应优先基于“是否有持续进展”，而不是“绝对耗时”。
+  - 复用杠杆1：复用 `VideoProcessingOrchestrator.updateProgress` 作为软看门狗的进展信号入口。
+  - 复用杠杆2：复用 `TaskProcessingWorker` 现有取消与失败收敛路径，不新增新的任务状态机。
+  - 复用杠杆3：复用下载看门狗的经验，将“无进展”拆分为 `idle strike -> 重启 -> 最终失败` 决策链。
+- 架构决策：
+  - 决策1：在 `TaskProcessingWorker` 新增任务级软看门狗，按进展信号计算动态 idle 窗口（`min/max + p95*multiplier`）。
+  - 决策2：无进展时优先触发“子步骤重启”策略（在 worker 层重启尝试），达到 strike 上限后失败收敛。
+  - 决策3：增加任务级硬上限 `video.task.watchdog.max-total-seconds`（默认 8h）作为保险丝。
+  - 决策4：所有看门狗行为通过统一配置项暴露，默认值对齐“成功优先”策略。
+- 调用链与决策链变化：
+  - 改造前：
+    - `TaskProcessingWorker -> processVideo(单次执行) -> 成功/失败`
+  - 改造后：
+    - `TaskProcessingWorker -> 软看门狗监控(progress lease) -> idle strike`
+    - `idle strike(未达上限) -> 子步骤重启尝试(带 backoff)`
+    - `idle strike 达上限 或 总时长超限 -> 失败收敛`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-23 移动端长耗时任务体验改造（前台服务后台化 + 阶段文案同步 + 可取消链路）
+- 日期：2026-02-23
+- 触发背景与问题：
+  - 移动端点击“开始提取/生成”后，提交动作与页面前台生命周期强耦合，用户切后台时缺少稳定的后台持续执行保障。
+  - 任务等待阶段缺少可感知的阶段文案，容易出现“只显示处理中”的黑盒焦虑。
+  - 取消能力在移动端链路缺失，无法实现“停止后续处理但保留历史”的交互语义。
+- 第一性原理与复用杠杆：
+  - 第一性原理：长任务体验的核心是“执行与前台解耦 + 进度可解释 + 用户可控”。
+  - 复用杠杆1：复用现有 `/api/mobile/tasks` 列表契约中的 `progress/statusMessage` 作为 UI 展示主数据源。
+  - 复用杠杆2：复用后端 `VideoProcessingOrchestrator.updateProgress` 作为统一阶段同步入口，避免前端重复猜测。
+  - 复用杠杆3：复用现有 `TaskQueueManager` 与 `TaskProcessingWorker`，只增强取消状态机与收敛路径，不重建调度器。
+- 架构决策：
+  - 决策1：Android 端采用 `Foreground Service` 承载“提交 + 轮询 + 通知进度”，确保 App 退后台后任务跟踪不断线。
+  - 决策2：新增 `TaskSubmissionRegistry` 作为 App 内状态总线，统一驱动骨架屏、悬浮胶囊、调度中心面板与顶部完成 Banner。
+  - 决策3：后端移动接口补齐 `GET /api/mobile/tasks/{taskId}` 与 `DELETE /api/mobile/tasks/{taskId}`，为移动端轮询与取消提供直连端点。
+  - 决策4：`TaskQueueManager` 取消逻辑改为“队列中立即移除、处理中标记取消并由 worker finalize 收敛”，避免取消后继续推进后续步骤。
+  - 决策5：`VideoProcessingOrchestrator.updateProgress` 内统一阶段文案标准化，前端优先消费后端语义化 `statusMessage`。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Compose onClick -> 前台协程 submit/upload -> 15s 轮询列表`
+    - 取消入口缺失，状态语义不完整。
+  - 改造后：
+    - `Compose onClick -> TaskSubmissionForegroundService -> submit -> poll /tasks/{id} -> setProgress 通知 + Registry`
+    - `UI <- Registry + /tasks list`（骨架、阶段文案、胶囊、调度中心、Banner、闪烁）
+    - `UI cancel -> /api/mobile/tasks/{id} DELETE -> Queue/Worker 收敛停止`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskSubmissionForegroundService.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskSubmissionRegistry.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `app/src/main/AndroidManifest.xml`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-02-23 Java-Python 交互链路性能改造（批量分类 + 同步调用收敛 + 热路径日志降噪）
+- 日期：2026-02-23
+- 触发背景与问题：
+  - Java 编排主链路在多个阶段采用 `CompletableFuture + blockingStub + get/join`，存在“异步外壳 + 同步等待”的线程切换开销。
+  - Legacy 链路在 CV 回调内按单元触发 `ClassifyKnowledgeBatch`，导致大量小 RPC 与重复字幕缓存冷启动。
+  - Python `GenerateMaterialRequests` 热循环内存在 `info` 级别逐 action 日志，增加 IO 与格式化开销。
+- 第一性原理与复用杠杆：
+  - 第一性原理：跨语言边界的性能核心是“减少往返次数 + 减少无效线程切换 + 避免热路径高频 IO”。
+  - 复用杠杆1：复用现有 `KnowledgeClassificationOrchestrator.classifyParallel` 的 token-aware batching，不新增协议字段。
+  - 复用杠杆2：复用 `PythonGrpcClient` 既有 request/response DTO，仅新增同步入口并保留异步兼容包装。
+  - 复用杠杆3：复用现有日志体系，仅调整日志级别与判定条件，不改日志链路。
+- 架构决策：
+  - 决策1：`executeHybridAnalysis` 从“CV 每完成一个 unit 立即分类”改为“CV 全批完成后统一批量分类”。
+  - 决策2：Java 主流程改为直接调用 gRPC 同步方法，异步方法仅作为兼容层包装，避免主链路 `get/join` 阻塞壳层。
+  - 决策3：Python 分类链路仅在 `step2_path` 变化时清理字幕缓存，避免批量请求期间重复冷启动。
+  - 决策4：`GenerateMaterialRequests` action 循环日志从 `info` 降级为 `debug` 且受日志级别保护。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Java processVideo -> grpcClient.*Async().get()/join()`
+    - `CV callback -> classifyBatchAsync(per unit)`（高频小请求）
+  - 改造后：
+    - `Java processVideo -> grpcClient.*(blocking direct call)`
+    - `CV all done -> classifyParallel(batch)`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/KnowledgeClassificationOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CVValidationOrchestrator.java`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+- 性能对比数据：
+  - 对比目标：
+    - 减少 Java 侧无效线程切换与阻塞等待壳层。
+    - 降低分类阶段 RPC 调用次数与字幕缓存重复失效。
+    - 降低 Python 热路径日志 IO。
+  - 测试方式：
+    - 静态链路核对：确认主链路调用从 `*Async().get/join` 收敛到同步方法。
+    - 编译/回归：Java 编译与 Python 关键单测。
+    - 分类调用次数估算：按 batching 参数（每批最多 5 units 或 4000 chars）估算。
+  - 测试数据：
+    - Java 编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - Python 路由单测：`$env:PYTHONPATH='D:\\videoToMarkdownTest2'; pytest services/python_grpc/src/common/utils/tests/test_deepseek_model_router.py -q` 通过（3 passed）。
+    - 分类调用次数（估算）：
+      - 改造前：近似 `N` 次（按 unit 触发）。
+      - 改造后：近似 `ceil(N/5)` 次（按 token-aware batch，字符阈值未触发时）。
+      - 示例：`N=50` 时由 `50` 次降至约 `10` 次，调用次数下降约 `80%`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `$env:PYTHONPATH='D:\\videoToMarkdownTest2'; pytest services/python_grpc/src/common/utils/tests/test_deepseek_model_router.py -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-23 Java-Python 交互链路性能改造（二期：语义载荷去重复编码 + 下载监控增量化 + 作用域写盘等待 + 并发参数外置）
+- 日期：2026-02-23
+- 触发背景与问题：
+  - 下载阶段 watchdog 每轮轮询都做 `Files.walk` 全量递归，目录体量变大时心跳检测成本偏高。
+  - 异步写盘 `flush` 为全局阻塞，A 任务等待字幕/Stage1 产物时会被 B 任务落盘队列拖慢。
+  - Phase2A 语义单元在缓存后又重复 `json.dumps + gzip` 构建 inline，存在重复编码开销。
+  - Java/Python 并发参数存在硬编码（线程池与 CV worker 上限），扩容/压测场景缺乏配置化调节面。
+- 第一性原理与复用杠杆：
+  - 第一性原理：跨语言链路性能优先做“减少热路径重复工作 + 缩小等待域 + 让并发参数可调可对齐”。
+  - 复用杠杆1：复用既有 `DownloadActivitySnapshot` 机制，改为目录级增量扫描，不新增下载协议。
+  - 复用杠杆2：复用既有异步写盘进程模型，仅补充 `scope_key` 与 pending 计数，不引入新服务组件。
+  - 复用杠杆3：复用 `Phase2A runtime cache`，在缓存条目内增加 inline 预编码字段，避免二次序列化。
+  - 复用杠杆4：复用现有配置体系（Spring `application.properties` + Python 环境变量）外置并发参数。
+- 架构决策：
+  - 决策1（`5`）：下载活性检测改为“目录 mtime + 最小重扫窗口 + 深度受限扫描”混合策略，避免每轮递归全扫描。
+  - 决策2（`6`）：异步写盘新增 `scope_key`，`flush_async_json_writes` 支持按作用域等待，减少跨任务队首阻塞。
+  - 决策3（`3`）：Phase2A 缓存阶段一次性生成 `inline_payload/codec/sha256`，AnalyzeResponse 直接复用缓存编码结果。
+  - 决策4（`8`）：Java 异步线程池参数与 Python CV worker 计算参数全部外置，默认值保持兼容，部署按机器资源调优。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Download watchdog -> per poll Files.walk(all descendants)`
+    - `Stage1 wait -> flush_async_json_writes(global queue)`
+    - `AnalyzeSemanticUnits -> cache semantic_units -> rebuild inline bytes again`
+    - `Executor/Worker sizing -> hard-coded defaults`
+  - 改造后：
+    - `Download watchdog -> incremental per-dir scan (mtime unchanged => reuse snapshot)`
+    - `Stage1 wait -> flush_async_json_writes(scope=output_dir)`
+    - `AnalyzeSemanticUnits -> use cache_entry.inline_payload directly`
+    - `Executor/Worker sizing -> property/env configurable`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/FusionOrchestratorApplication.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/python_grpc/src/common/utils/async_disk_writer.py`
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/common/utils/tests/test_async_disk_writer.py`
+- 性能对比数据：
+  - 对比目标：
+    - 下载活性检测 CPU/IO 开销下降；
+    - Stage1 等待不再受其他任务写盘队列拖累；
+    - Phase2A response 构建减少重复序列化。
+  - 测试方式：
+    - 静态链路核对 + 编译/单测回归。
+    - 复杂度口径对比（轮询扫描与序列化次数）。
+  - 测试数据（口径说明）：
+    - 下载 watchdog 轮询复杂度：
+      - 改造前：`O(轮询次数 × 全量递归文件数)`。
+      - 改造后：目录 mtime 未变化时复用快照（近似 `O(1)`）；变化时 `O(受限深度扫描)`。
+    - Stage1 写盘等待域：
+      - 改造前：等待全局 pending 队列清空。
+      - 改造后：等待 `scope_key=output_dir` 对应 pending 清空。
+    - Phase2A inline 编码次数（单次响应）：
+      - 改造前：`缓存阶段编码 + 回包阶段再次编码`（2 次）。
+      - 改造后：`缓存阶段编码后直接复用`（1 次）。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `$env:PYTHONPATH='D:\\videoToMarkdownTest2'; pytest services/python_grpc/src/common/utils/tests/test_async_disk_writer.py -q`
+  - `python -m py_compile services/python_grpc/src/common/utils/async_disk_writer.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/transcript_pipeline/graph.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-22 Python 侧 DeepSeek-V3.2 模型路由统一（按原配置语义）
 - 日期：2026-02-22
 - 触发背景与问题：
@@ -87,6 +344,39 @@
   - 来源：`https://api-docs.deepseek.com/quick_start/pricing`、`https://api-docs.deepseek.com/guides/reasoning_model`
 - 验证方式：
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-24 合集实时链路升级：按 `collection_id` 订阅 + 路由状态下沉
+- 触发背景：
+  - 详情页实时状态此前基于 `taskId` 动态集合订阅，列表波动时需要频繁重算订阅集合，链路复杂且易出现漏订阅。
+  - `MainActivity` 同时承载任务页与合集页状态，UI 状态与业务动作耦合偏高，结构债持续累积。
+- 第一性原理：
+  - 合集详情页关注的是“合集域内全部任务状态”，订阅粒度应与业务域一致，`collection_id` 是稳定最小上下文。
+  - 视图状态应由可观察状态源统一驱动，Activity 负责路由与组装，不应持有过多可变 UI 状态。
+- 复用杠杆：
+  - 复用现有 `/ws/tasks` 连接与 `taskUpdate` 消息模型，仅扩展 `subscribeCollection/unsubscribeCollection` 动作，不重建新 WS 协议。
+  - 复用既有 `CollectionRepository.findCollectionIdByTaskId(...)`，在 WS 侧增加轻量缓存完成 task->collection 映射。
+  - 复用现有 `CollectionFeatureViewModel/Repository` 调用链，仅替换订阅粒度，不改 Room SSOT 结构。
+- 架构决策：
+  - 决策1：后端 `TaskWebSocketHandler` 新增 `collectionSubscribers`，并在推送 `taskUpdate` 时附带 `collectionId`。
+  - 决策2：Android `CollectionRealtimeClient` 从 taskId 多订阅切换为 collectionId 单主题订阅，集合切换时先退订再订阅。
+  - 决策3：`CollectionFeatureViewModel.openCollectionDetail(...)` 不再持续收集 taskId 集合，仅在进入详情时订阅指定 collection topic。
+  - 决策4：新增 `TaskRouteViewModel` 承载任务页核心 UI 状态（搜索/排序/Composer/路由分段），`MainActivity` 通过 `TaskRoute/CollectionsRoute` 做路由分发。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionRealtimeClient.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureRepository.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 性能对比数据（本次非性能优化）：
+  - 目标：降低订阅抖动与状态耦合复杂度，优先保证实时一致性与架构可维护性。
+  - 测试方式：后端编译回归 + Android 编译链路验证 + 文档编码校验。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - `.\gradlew.bat :app:compileDebugKotlin` 在依赖解析阶段因外部 TLS 握手失败中断（`dl.google.com`），非代码语义错误。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `.\gradlew.bat :app:compileDebugKotlin`
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
 
 ## 2026-02-21 Persona Reading 后置知识卡片流水线（insights_tags -> 复用卡片）
@@ -7762,3 +8052,431 @@
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - `mvn -f services/java-orchestrator/pom.xml "-Dtest=DeepSeekAdvisorServiceTest,PersonaInsightCardServiceTest" test -q`
   - `mvn -f services/java-orchestrator/pom.xml "-Dtest=ProdChainCardQualityRunnerTest" "-Dprod.chain.markdownPath=D:/videoToMarkdownTest2/var/storage/storage/c786a1956e66ba020dfb2ed46a3b0c3c/enhanced_output.md" "-Dprod.chain.userId=prod_chain_quality@semantic" "-Dprod.chain.wait-seconds=180" test -q`
+
+### 2026-02-22 追加：Persona Reading 卡片改为同步确保 + 读取接口缺失即生成
+- 触发背景：
+  - 阅读器端在首轮展示 `persona_reading` 后立刻点击术语，可能因卡片仍在异步生成而出现 404 或空内容。
+  - 业务要求改为“先确保卡片可读，再返回渲染数据”，并且并发场景避免重复生成。
+- 架构决策：
+  - 决策1：`appendPersonalizedReading` 从“触发异步生成”改为“同步确保卡片就绪”。
+    - 调用链：`MobileMarkdownController.appendPersonalizedReading -> PersonaInsightCardService.generateSync`。
+    - `generateSync` 复用现有生成逻辑，不另起新生成链，避免重复造轮子。
+  - 决策2：统一乐观锁入口，控制并发重复生成。
+    - 在 `PersonaInsightCardService` 复用 `optimisticInFlightTokens + generationLocks`。
+    - 同 token 并发请求由锁串行化，避免重复调用 LLM。
+  - 决策3：卡片读取接口增加同步兜底。
+    - `MobileCardController.getCardByTitle` 读取不到卡片时，直接调用既有生成能力同步产卡并返回 markdown。
+    - 标题级 in-flight map + 短轮询等待，减少同标题并发下的重复请求与空窗期。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+- 性能对比数据（本次非性能优化）：
+  - 目标：保证可用性一致性（同步可读）而非吞吐提升。
+  - 测试方式：编译回归 + 文档编码校验。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - 卡片生成路径在并发下通过乐观锁避免重复写入（逻辑验证）。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-23 Android 阅读器交互链路降压：拖拽同步更新 + 渲染幂等缓存
+- 触发背景：
+  - Android 阅读器在段落横向轻扫和快速滚动时出现明显卡顿，主因是手势高频状态直接驱动 `AndroidView.update` 重逻辑。
+- 第一性原理：
+  - 交互帧级状态（位移）必须与重渲染职责解耦。手势阶段只做轻量状态更新，重渲染只在内容/样式发生实质变化时执行。
+- 复用杠杆：
+  - 复用现有 `TopographyParagraph` 手势入口与 `MarkdownParagraph` 渲染链路，不新增渲染框架与第三方依赖。
+  - 复用已有 `InsightTapContext` 作为缓存载体，扩展字段实现幂等判断，避免重复造状态容器。
+  - 复用现有 `MarkdownTypefaceResolver`，在同一入口新增缓存而非引入新的字体层。
+- 架构决策：
+  - 决策1：`offsetX` 改为 `mutableFloatStateOf`，拖拽 move 回调同步更新，不再每帧起协程。
+  - 决策2：保留收尾动画能力，新增 `animateOffsetXTo(...)` 仅用于 `onDragEnd/onDragCancel` 与菜单动作回弹。
+  - 决策3：`MarkdownParagraph.update` 引入 fast-skip 与增量更新策略：
+    - 当 markdown/样式/选区/术语/宽度均未变化时直接返回；
+    - `markwon.setMarkdown`、`applyMediaLayout`、`resolveInsightTermRanges`、`applySelectionStyle` 改为条件触发。
+  - 决策4：`applySelectionStyle` 在“无高亮”或“媒体段”场景清理旧 overlay，避免残留 span。
+  - 决策5：`MarkdownTypefaceResolver` 增加 `weightedCache/bundledCache`，降低高频 update 的字体构造成本。
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MarkdownTypefaceResolver.kt`
+  - `docs/architecture/error-fixes.md`
+- 性能对比数据（路径级审计）：
+  - 测试方式：
+    - 基于代码路径审计（手势回调与 `AndroidView.update` 执行链）对比修复前后高频路径。
+    - 编译回归验证改动可用性。
+  - 测试数据：
+    - 手势 move 路径协程启动点：`1 -> 0`（`onHorizontalDrag` 中移除 `scope.launch + snapTo`）。
+    - `resolveInsightTermRanges` 调用策略：由“每次 update 调用”改为“`source/terms` 变化时调用”。
+    - `applyMediaLayout` 调用策略：由“每次 update 调用”改为“markdown 变化时调用（其余复用缓存）”。
+    - `applySelectionStyle` 调用策略：由“每次 update 调用”改为“markdown/source/terms/selection 变化时调用”。
+  - 对比结论：
+    - 手势高频阶段主线程工作量明显收敛，重渲染链路从“帧级触发”收敛为“数据变更触发”，符合移动端流畅度预算。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-23 任务列表重命名链路升级：左滑就地编辑 + 元数据双写同步
+- 触发背景：
+  - 任务列表重命名需要支持移动端高频操作场景：不弹窗、原地改名、失焦即保存。
+  - 任务标题存在多来源读取（`mobile_task_meta.json`、`video_meta.json`、metrics/fallback），单点写入会导致来源不一致。
+- 第一性原理：
+  - 标题编辑链路要同时满足“低交互成本”和“数据一致性”：
+    - 交互层：让用户在上下文中直接修改，减少模式切换；
+    - 数据层：所有标题主来源必须同步更新，避免后续回退读路径产生反直觉显示。
+- 复用杠杆：
+  - 复用现有 `MainActivity` 任务列表状态机与 `HttpMobileTaskApi` 网络层，不新增独立重命名模块。
+  - 复用后端 `PUT /api/mobile/tasks/{taskId}/meta` 契约，仅扩展其写入职责到 `video_meta.json`。
+  - 复用现有 `ObjectMapper` + 文件原子替换写策略，避免重造文件存储基础设施。
+- 架构决策：
+  - 决策1：前端任务项新增 `SwipeRenameTaskListItem`，采用“左滑露出菜单 + 原位 `BasicTextField` 编辑”。
+  - 决策2：进入编辑态时，非编辑项统一降透明度并叠加黑色弱遮罩，强化视觉焦点。
+  - 决策3：保存触发统一收口为 `IME Done` 与 `Focus Lost`，防止多个保存入口行为漂移。
+  - 决策4：后端在接收 `taskTitle` 更新时同步写入 `video_meta.json.title`，并使用 `tmp + atomic move` 防损坏。
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `docs/architecture/error-fixes.md`
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin`（受外部 Maven TLS 握手问题阻塞依赖下载）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（受当前工作区无关编译错误阻塞）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-23 视频元信息探测链路升级：新增 RESTFul 接口 + gRPC 无下载探测
+- 触发背景：
+  - 现有后端仅支持“提交下载任务后再拿到部分元信息”，缺少“仅探测视频元信息（不下载文件）”的标准接口。
+  - Bilibili 多 P/合集场景需要明确返回：是否合集、总集数、每集标题、当前链接对应第几集与该集标题。
+- 第一性原理：
+  - 链接探测应当与下载解耦：元信息读取是“低成本决策输入”，下载是“高成本执行动作”，两者职责应分离。
+  - 分P识别应优先保留原始链接语义（如 `p=2`），避免过早规范化导致上下文丢失。
+- 复用杠杆：
+  - 复用 `resolve_share_link` 既有分享链接解析链路，避免重复造轮子。
+  - 复用 `VideoProcessor` 的 yt-dlp 鉴权/代理配置，只新增 `probe_video_info` 能力，不引入新下载器实现。
+  - 复用 Java `PythonGrpcClient` 与 `VideoProcessingController` 既有调用链，最小增量扩展 RPC 和 REST 入口。
+- 架构决策：
+  - 决策1：在 `video_processing.proto` 新增 `GetVideoInfo` RPC（单独请求/响应模型），明确“只探测不下载”语义。
+  - 决策2：Python gRPC 层新增 `GetVideoInfo` 实现，统一输出 `platform/title/duration/episodes/currentEpisode`。
+  - 决策3：Java 后端新增 `/api/video-info`（GET/POST）RESTFul 接口，作为外部调用统一入口。
+  - 决策4：请求入参保留原始 URL 文本用于分P识别；仅在 BV 号输入时做最小规范化到 Bilibili URL。
+  - 决策5：Bilibili 任务编码键升级为 `BV[_p]`，当存在分P时统一编码为 `BV_n`，避免不同分集复用同一任务目录。
+- 调用链变化：
+  - 改造前：`Client -> /api/tasks -> DownloadVideo(下载) -> 回读元信息`
+  - 改造后：`Client -> /api/video-info -> GetVideoInfo(探测，不下载) -> 直接返回元信息`
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `contracts/gen/python/video_processing_pb2.py`
+  - `contracts/gen/python/video_processing_pb2_grpc.py`
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_get_video_info.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/VideoProcessingControllerVideoInfoTest.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `python -m pytest services/python_grpc/src/server/tests/test_get_video_info.py -q`
+
+### 2026-02-23 合集任务关联升级：SQLite 持久化 + 批量提交接口
+- 触发背景：
+  - `/api/video-info` 已能识别 `isCollection/episodes[]`，但移动端任务仍按“单任务离散”展示，合集内各集没有可追踪关联。
+  - 需要在已有任务链路中增加合集维度，并补齐 `POST /api/mobile/collections/{collectionId}/submit-batch` 以支持按集批量入队。
+- 第一性原理：
+  - 合集关系是“任务编排元数据”，应与任务执行状态解耦持久化，避免仅依赖内存队列导致关联丢失。
+  - 批量提交不应新建独立执行通道，必须复用既有 `TaskQueueManager.submitTask`，确保排队、优先级与限流策略一致。
+- 复用杠杆：
+  - 复用 `VideoProcessingController.queryVideoInfoInternal` 既有探测调用链，只在探测成功后增量落库合集信息。
+  - 复用 `MobileMarkdownController` 的单任务提交主链路（参数归一化、优先级解析、队列提交），批量接口仅做循环编排。
+  - 复用 `TaskView -> toListItem` 列表组装出口，统一注入 `collectionId/episodeNo` 等字段，避免新增并行视图模型。
+- 架构决策：
+  - 决策1：最小化引入 SQLite，新增 `video_collections` 与 `collection_episodes` 两张表（含唯一约束与 task 索引），不迁移既有任务状态存储。
+  - 决策2：新增 `CollectionRepository` 作为合集关系仓储，收口 `upsertCollection/linkTaskToEpisode/findCollectionIdByTaskId/listEpisodes` 等能力。
+  - 决策3：`/api/video-info` 在识别到合集后立即 UPSERT 合集与分集元数据，并回传 `collectionId` 供前端提交任务时透传。
+  - 决策4：`/api/mobile/tasks/submit` 扩展可选参数 `collectionId + episodeNo`，提交后回写 `collection_episodes.task_id`。
+  - 决策5：新增 `GET /api/mobile/collections` 与 `POST /api/mobile/collections/{collectionId}/submit-batch`，分别提供合集聚合视图与批量入队。
+- 调用链变化：
+  - 改造前：`Client -> /api/video-info (仅返回合集字段) -> /api/mobile/tasks/submit (无合集上下文)`
+  - 改造后：`Client -> /api/video-info (落库合集) -> /api/mobile/tasks/submit 或 /api/mobile/collections/{id}/submit-batch -> linkTaskToEpisode`
+- 已落地改动：
+  - `services/java-orchestrator/pom.xml`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/DatabaseInitializer.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CollectionRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/CollectionRepositoryTest.java`
+- 性能对比数据（本次非性能优化）：
+  - 目标：补齐合集一致性能力，不以吞吐提升为目标。
+  - 测试方式：编译回归 + 仓储单测回归。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - `mvn -f services/java-orchestrator/pom.xml -Dtest=CollectionRepositoryTest test -q` 通过。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=CollectionRepositoryTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-23 词级交互升级：tokenLike/tokenAnnotations 元数据契约 + 阅读器词级锚定批注
+- 触发背景：
+  - 阅读器已支持段落级收藏/删除/批注，但缺少词级“喜欢”和词级“批注”持久化能力。
+  - 用户要求词级状态在重开文章后可恢复，且段落级批注面板中可汇总展示该段词级批注。
+- 第一性原理：
+  - 词级状态属于“阅读标注元数据”，必须与 markdown 正文解耦，统一挂载在任务 meta 中。
+  - 词级交互必须锚定到词位置（start/end），否则无法做到稳定恢复、样式重建与精确回显。
+- 复用杠杆：
+  - 复用现有 `/api/mobile/tasks/{taskId}/meta` GET/PUT 链路，不新建并行接口。
+  - 复用 `SemanticTopographyReader.scheduleMetaSync` 的快照同步机制，增量加入 token 级字段。
+  - 复用 `applySelectionStyle` 的 span 叠加渲染能力，扩展词级喜欢下划线与词级批注指示样式。
+- 架构决策：
+  - 决策1：在任务 meta 新增 `tokenLike` 与 `tokenAnnotations` 两个字段。
+  - 决策2：后端 `NoteMeta` 与 `TaskMetaUpdateRequest` 同步扩展，读写/清洗逻辑与 favorites/comments 同层处理。
+  - 决策3：Android 合约 `MobileTaskMetaPayload/MobileTaskMetaUpdateRequest` 同步扩展，读取与提交双向对齐。
+  - 决策4：词级 key 采用 `blockId::start::end`，保证词级锚定、恢复和跨会话一致性。
+- 调用链变化：
+  - 改造前：`Reader -> scheduleMetaSync(favorites/deleted/comments) -> /meta`
+  - 改造后：`Reader -> scheduleMetaSync(favorites/deleted/comments/tokenLike/tokenAnnotations) -> /meta`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 性能对比数据（本次非性能优化）：
+  - 目标：补齐词级元数据与交互闭环，不以吞吐提升为目标。
+  - 测试方式：Android/Java 编译回归。
+  - 测试数据：
+    - `.\\gradlew.bat :app:compileDebugKotlin` 通过。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 验证方式：
+  - `.\\gradlew.bat :app:compileDebugKotlin`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-24 移动端合集工作流升级：探测先行 + 分集批量提交 + 合集管理实时透传
+- 触发背景：
+  - 原移动端仅支持“输入 URL 后直接提交单任务”，无法在提交前探测合集、筛选分集，也缺少合集维度的可视化管理与详情追踪。
+  - 后端已具备 `/api/video-info`、`/api/mobile/collections`、`/api/mobile/collections/{collectionId}/submit-batch` 能力，但前端未接入完整调用链。
+- 第一性原理：
+  - 视频处理是高耗时异步链路，用户决策必须前置到探测阶段，避免“盲提交”造成队列浪费与信息不透明。
+  - 合集是“组级状态 + 分集状态”的双层模型，必须用本地单一数据源承载，避免页面切换后状态抖动与重复请求。
+- 复用杠杆：
+  - 复用既有任务主列表和 `SemanticTopographyReader` 阅读入口，不重建阅读链路。
+  - 复用后端 `ws/tasks` 长连接任务更新通道，按合集内 taskId 批量订阅实现近实时分集状态刷新。
+  - 复用已落地后端合集持久化接口，只在 Android 侧补齐探测、选择、提交与展示编排。
+- 架构决策：
+  - 决策1：新增 `CollectionFeatureViewModel + StateFlow` 作为合集工作流状态中枢，收敛探测、提交、合集列表、详情与事件通知。
+  - 决策2：数据访问层引入 `Retrofit` 封装合集/探测 API，引入 `Room` 作为合集与分集状态 SSOT，UI 仅消费 Flow。
+  - 决策3：提交入口改为“先探测再提交”：
+    - URL 输入支持剪贴板气泡一键粘贴；
+    - 点击解析或回车触发探测；
+    - 探测中展示骨架屏与按钮 Loading；
+    - 探测成功后以全屏 Bottom Sheet 展示单集或合集分支。
+  - 决策4：合集批量提交遵循“可选分集”策略，支持全选/反选、分集勾选、底部已选统计与批量提交按钮。
+  - 决策5：新增合集管理页（堆叠卡片）与详情页（沉浸式头部 + 分集状态列表），状态分为未提交/排队/解析中/可阅读/失败并支持失败重试。
+- 调用链变化：
+  - 改造前：`输入 URL -> 直接 submit -> 任务列表轮询`
+  - 改造后：`输入 URL -> probe(video-info) -> 单集开始处理 或 合集分集选择 -> submit-batch -> Room Flow + WebSocket taskUpdate 驱动详情状态`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureDatabase.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureRepository.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionRealtimeClient.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/build.gradle.kts`
+  - `gradle/libs.versions.toml`
+- 性能对比数据（本次非性能优化）：
+  - 目标：提升决策透明度与可控性，不以吞吐提升为主目标。
+  - 测试方式：代码链路核对 + 构建回归。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - `.\\gradlew.bat :app:compileDebugKotlin` 受外部 Maven TLS 握手约束，新增依赖无法在当前环境下载，未完成本地编译闭环。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `.\\gradlew.bat :app:compileDebugKotlin`（依赖下载受网络 TLS 环境影响）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-23 阅读器交互链路二次收敛：长按选词优先、横滑误触收敛、加粗即时刷新
+- 触发背景：
+  - 在词级交互上线后，仍出现“长按菜单不稳定弹出、横滑误触偏高、加粗视觉反馈偶发延迟”的体验问题。
+- 第一性原理：
+  - 阅读场景的主路径是“竖向滚动 + 长按选词”，横向手势应是次级能力，必须通过意图判定与生命周期互斥保证主路径优先。
+  - 词级样式反馈必须做到“操作即反馈”，否则会破坏用户对可逆操作（加粗/取消）的心智模型。
+- 复用杠杆：
+  - 复用现有 `MarkdownParagraph` 的原生 `ActionMode` 菜单链路，不新建自定义选词系统。
+  - 复用段落横滑框架，仅调整“武装判定算法与阈值”，避免重写手势通道。
+  - 复用现有 span 叠加渲染逻辑，仅补充同对象刷新触发。
+- 架构决策：
+  - 决策1：将 `ActionMode` 生命周期显式上抛为 `onSelectionModeChanged`，由段落层统一控制手势互斥。
+  - 决策2：横滑判定从“单帧增量”升级为“累计位移 + 主导比”模型，降低滚动噪声误判。
+  - 决策3：保留二段式删除机制，提升武装门槛并在 selection mode 下强制禁用横滑。
+  - 决策4：在 span 同对象复用路径显式 `invalidate`，保障加粗/取消加粗即时可见。
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `docs/architecture/error-fixes.md`
+- 性能对比数据（本次非性能优化）：
+  - 目标：降低误触与交互竞争，不以吞吐或耗时为优化目标。
+  - 测试方式：Android/Java 编译回归 + 手势与选词链路逻辑核对。
+  - 测试数据：
+    - `.\\gradlew.bat :app:compileDebugKotlin` 通过。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 验证方式：
+  - `.\\gradlew.bat :app:compileDebugKotlin`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-24 词级渲染链路修正：加粗可见性 + 虚线下划线 + fallback 锚点下移
+- 触发背景：
+  - 用户侧反馈选词“加粗/取消加粗”仅弹 toast 无可见变化，同时喜欢下划线与词级批注锚点在部分场景存在视觉偏差。
+- 第一性原理：
+  - 词级样式属于“内容渲染结果”，必须由完整 `text/layout/draw` 链路驱动，不能仅依赖局部重绘。
+  - 样式表达需要跨字体栈稳定，单一 `fakeBold` 在不同设备上可见性不一致。
+- 复用杠杆：
+  - 复用现有 `applySelectionStyle(...)`、`ReaderBoldSpan`、`ReaderLikedUnderlineSpan` 与 fallback 锚点，不引入新渲染组件。
+- 架构决策：
+  - 决策1：取消 `ToggleBold` 的强制 refresh version 机制，回到状态驱动渲染。
+  - 决策2：`applySelectionStyle(...)` 始终采用 `SpannableStringBuilder` 新实例赋值，确保 `LineBackgroundSpan` 参与完整绘制。
+  - 决策3：`ReaderBoldSpan` 采用 `Typeface.BOLD + fakeBold` 双保险提升字体可见性一致性。
+  - 决策4：喜欢样式引入 `DashPathEffect`，对齐“细虚线”视觉语义。
+  - 决策5：fallback 锚点下移（`halfLine=0.9f * textSize`），降低词级批注遮挡文本概率。
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `docs/architecture/error-fixes.md`
+- 性能对比数据（本次非性能优化）：
+  - 目标：修复可见性与交互一致性，不以吞吐为目标。
+  - 测试方式：Java 编译回归 + Android 渲染链路静态核对。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - Android 构建因外部 Maven/TLS 握手问题在依赖解析阶段失败，不属于本次代码逻辑回归。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-24 视频探测链路升级：透传平台原始封面 URL
+- 触发背景：
+  - 视频探测 `GetVideoInfo` 仅返回标题/时长/分集信息，缺少平台原始封面，导致移动端无法基于探测结果展示封面。
+- 第一性原理：
+  - 封面属于“元信息”而非“素材加工结果”，应在探测阶段一次性返回，避免后续链路重复抓取。
+  - 封面能力必须沿契约链路完整透传：`proto -> Python gRPC -> Java gRPC client -> REST payload`。
+- 复用杠杆：
+  - 复用 `yt-dlp` 探测结果中的 `thumbnail/thumbnails`，不新增下载或抽帧步骤。
+  - 复用既有 `GetVideoInfo` 返回组装流程，仅扩展字段，不改主流程分支。
+- 架构决策：
+  - 决策1：在 `VideoInfoResponse` 增加顶层 `cover_url`，用于当前视频/当前分集的主封面展示。
+  - 决策2：在 `EpisodeInfo` 增加 `episode_cover_url`，保留分集维度封面。
+  - 决策3：封面选取策略优先“当前分集封面”，其次“视频顶层封面”；兼容 `thumbnail`、`thumbnails[]` 与 `//` 协议相对 URL。
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_get_video_info.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/VideoProcessingControllerVideoInfoTest.java`
+- 性能对比数据（本次非性能优化）：
+  - 目标：提升元信息完整性，不以吞吐/时延为优化目标。
+  - 测试方式：协议编译回归 + Python 语法校验 + 文档编码校验。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_get_video_info.py` 通过。
+    - `pytest services/python_grpc/src/server/tests/test_get_video_info.py -vv` 在当前环境 `collected 0 items / 1 skipped`（依赖不可用导致跳过）。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `pytest services/python_grpc/src/server/tests/test_get_video_info.py -vv`
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_get_video_info.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-24 看门狗链路升级：全流程 Python 结构化信号 + Java 软硬判定解耦
+- 触发背景：
+  - 任务时长跨度大（分钟级到小时级），原有“文案变化/进度浮动”判断容易误把保活信号当作真实进展，导致无进展阶段难以及时重启或失败。
+- 第一性原理：
+  - 看门狗判断应依赖“结构化可计算信号”，而非自然语言文案。
+  - `soft` 信号本质是 lease/alive，不应重置“无进展计数”；`hard` 信号才代表阶段推进。
+- 复用杠杆：
+  - 复用现有 `WATCHDOG_SIGNAL|{json}` 通道与 worker 侧 `TaskWatchdog` 状态机，不重写任务执行编排。
+  - 复用 Stage1 既有心跳文件桥接能力，并扩展为任务级桥接组件。
+- 架构决策：
+  - 决策1：Python 新增独立组件 `TaskWatchdogSignalWriter`，统一产出 `task_watchdog_heartbeat.json`，覆盖 `Download/Transcribe/Phase2A/Phase2B`。
+  - 决策2：Stage1 继续保留专用心跳文件，但补 `signal_type` 字段，软心跳明确标记 `soft`。
+  - 决策3：Java 新增 `TaskProgressWatchdogBridge`，按阶段轮询任务级心跳并转发结构化信号。
+  - 决策4：`TaskWatchdog` 仅将 `hard` 信号计为强进展；`soft` 信号只用于活性展示，不重置 idle strike。
+  - 决策5：`WatchdogSignalCodec` 从固定 Stage1 文案升级为按 `stage/checkpoint` 的结构化展示。
+- 已落地改动：
+  - `services/python_grpc/src/server/watchdog_signal_writer.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/watchdog/TaskProgressWatchdogBridge.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/watchdog/Stage1WatchdogBridge.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdog.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/WatchdogSignalCodec.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 性能对比数据（本次属于稳定性/可判定性优化）：
+  - 测试方式：Python 语法检查 + Java 编译回归。
+  - 测试数据：
+    - `python -X utf8 -m py_compile services/python_grpc/src/server/watchdog_signal_writer.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/transcript_pipeline/graph.py` 通过。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 对比说明：
+    - 本次不以吞吐/时延为优化目标，重点是减少“软信号误判为进展”带来的重启/失败策略失真。
+- 验证方式：
+  - `python -X utf8 -m py_compile services/python_grpc/src/server/watchdog_signal_writer.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/transcript_pipeline/graph.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+### 2026-02-24 看门狗传输层升级：文件轮询兜底 + gRPC server-streaming 主通道
+- 触发背景：
+  - 文件轮询方案在长任务下存在扫描延迟与目录依赖，且跨阶段信号统一消费能力不足，难以支撑“软/硬信号全程推送”。
+- 第一性原理：
+  - 看门狗的核心是“低延迟、结构化、可断点续读”的进展信号传输。
+  - 传输层应与业务处理解耦，编排层只消费标准化事件，不直接依赖文件系统时序。
+- 复用杠杆：
+  - 复用既有 `WATCHDOG_SIGNAL|{json}` 解码链路（`WatchdogSignalCodec` + `TaskWatchdog`）。
+  - 复用既有 `TaskProgressWatchdogBridge` 组件边界，仅替换其数据来源策略。
+  - 复用 Python 端现有 Stage1/Stage2 心跳写入点，不改业务阶段主流程。
+- 架构决策：
+  - 决策1：在 `video_processing.proto` 增加 `StreamTaskWatchdogSignals`（server-streaming）与结构化事件消息。
+  - 决策2：Python 新增进程内 `TaskWatchdogSignalHub`，由 `TaskWatchdogSignalWriter` 与 Stage1 心跳统一发布 `stream_seq` 事件。
+  - 决策3：Java `TaskProgressWatchdogBridge` 升级为“gRPC stream 优先 + 文件轮询兜底”双通道策略，并支持按阶段过滤。
+  - 决策4：`VideoProcessingOrchestrator` 阶段监听统一切换到 `TaskProgressWatchdogBridge`（download/transcribe/stage1/phase2a/phase2b）。
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `services/python_grpc/src/server/watchdog_signal_writer.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/watchdog/TaskProgressWatchdogBridge.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 性能对比数据（本次属于可观测性/稳定性优化）：
+  - 测试方式：Python 语法校验 + Java 编译回归 + 文档编码校验。
+  - 测试数据：
+    - `python -X utf8 -m py_compile services/python_grpc/src/server/watchdog_signal_writer.py services/python_grpc/src/server/grpc_service_impl.py` 通过。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 由用户本地执行通过。
+    - `python -X utf8 tools/architecture/check_docs_encoding.py` 待本次提交前复核。
+  - 对比说明：
+    - 本次目标是降低“轮询延迟/信号误判”风险，不以吞吐或时延压测为主。
+- 验证方式：
+  - `python -X utf8 -m py_compile services/python_grpc/src/server/watchdog_signal_writer.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+### 2026-02-24 Android 阅读器词级“喜欢”能力下线（保留批注/加粗/搜索）
+- 触发背景：
+  - 用户要求删除 token 级“喜欢”功能，避免选词菜单出现无关操作并降低交互复杂度。
+- 第一性原理：
+  - 词级操作应保持最小闭环，只保留“理解与表达”主路径（复制、加粗、批注、搜索）。
+  - 下线功能优先做“入口移除 + 渲染停用 + 写入停用”，避免残留状态继续放大系统复杂度。
+- 复用杠杆：
+  - 复用现有 `SelectionContextAction` 与 `ActionMode` 菜单链路，仅移除菜单入口，不重建选词框架。
+  - 复用既有 `MobileTaskMetaUpdateRequest` 契约，客户端将 `tokenLike` 固定为空，避免后端接口分叉。
+  - 复用当前词级批注与加粗渲染通道，保持其余交互不变。
+- 架构决策：
+  - 决策1：移除 Android 选词 ActionMode 中的“喜欢”菜单项。
+  - 决策2：词级渲染输入中的 liked 集合固定为空，不再展示喜欢下划线。
+  - 决策3：meta 同步请求中的 `tokenLike` 固定发送空 map，停止产生新的 tokenLike 数据。
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+- 性能对比数据（本次非性能优化）：
+  - 目标：降低交互复杂度与维护面，不以吞吐或时延为优化目标。
+  - 测试方式：Android Kotlin 编译回归 + 文档编码校验。
+  - 测试数据：
+    - `.\\gradlew.bat :app:compileDebugKotlin`（待本次改动后执行）。
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`（待本次改动后执行）。
+- 验证方式：
+  - `.\\gradlew.bat :app:compileDebugKotlin`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`

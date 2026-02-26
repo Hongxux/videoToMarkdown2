@@ -2384,7 +2384,13 @@
                     panel.hidden = true;
                     return;
                 }
-                const response = await fetch(`${config.apiBase}/cards/concept/${encodeURIComponent(storageTitle)}/backlinks`);
+                const runtimeContext = typeof config.getContext === 'function' ? (config.getContext() || {}) : {};
+                const query = new URLSearchParams();
+                if (runtimeContext && runtimeContext.taskId) {
+                    query.set('taskId', String(runtimeContext.taskId));
+                }
+                const endpoint = `${config.apiBase}/cards/concept/${encodeURIComponent(storageTitle)}/backlinks${query.toString() ? `?${query.toString()}` : ''}`;
+                const response = await fetch(endpoint);
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
                 }
@@ -3324,6 +3330,13 @@
                 const query = new URLSearchParams();
                 query.set('isContextDependent', String(contextInfo.isContextDependent));
                 query.set('type', contextInfo.type);
+                const runtimeContext = typeof config.getContext === 'function' ? (config.getContext() || {}) : {};
+                if (runtimeContext && runtimeContext.taskId) {
+                    query.set('sourceTaskId', String(runtimeContext.taskId));
+                }
+                if (runtimeContext && runtimeContext.path) {
+                    query.set('sourcePath', String(runtimeContext.path));
+                }
                 const endpoint = `${config.apiBase}/cards/concept/${encodeURIComponent(storageTitle)}?${query.toString()}`;
                 const response = await fetch(endpoint, {
                     method: 'POST',
@@ -3435,7 +3448,13 @@
                 if (!storageTitle) {
                     return { exists: false, markdown: '' };
                 }
-                const response = await fetch(`${config.apiBase}/cards/concept/${encodeURIComponent(storageTitle)}`);
+                const runtimeContext = typeof config.getContext === 'function' ? (config.getContext() || {}) : {};
+                const query = new URLSearchParams();
+                if (runtimeContext && runtimeContext.taskId) {
+                    query.set('taskId', String(runtimeContext.taskId));
+                }
+                const endpoint = `${config.apiBase}/cards/concept/${encodeURIComponent(storageTitle)}${query.toString() ? `?${query.toString()}` : ''}`;
+                const response = await fetch(endpoint);
                 if (response.status === 404) {
                     return { exists: false, markdown: '' };
                 }

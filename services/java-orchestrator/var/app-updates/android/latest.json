@@ -1,0 +1,11 @@
+{
+  "versionCode" : 100,
+  "versionName" : "1.0",
+  "minSupportedVersionCode" : 100,
+  "forceUpdate" : false,
+  "apkFile" : "releases/apk/videoToMarkdown-100-1.0.apk",
+  "sha256" : "9dcdfa3592073ef0742f86daf4ce220db8e919279c4d961bc7bcb86433509317",
+  "fileSizeBytes" : 12851220,
+  "publishedAt" : "2026-02-25T04:07:41.114982700Z",
+  "releaseNotes" : "首发版本"
+}

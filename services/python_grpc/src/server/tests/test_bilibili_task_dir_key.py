@@ -27,7 +27,12 @@ def test_extract_bilibili_video_id_from_query_params():
     assert impl._extract_bilibili_video_id(url) == "bv1ab411c7de"
 
 
-def test_build_task_dir_encoding_source_prefers_bilibili_video_id():
+def test_build_task_dir_encoding_source_prefers_bilibili_video_id_with_episode_suffix():
+    url = "https://m.bilibili.com/video/BV1ab411c7de?share_source=copy_web&p=2"
+    assert impl._build_task_dir_encoding_source(url) == "BV1ab411c7de_2"
+
+
+def test_build_task_dir_encoding_source_without_episode_keeps_plain_video_id():
     url = "https://m.bilibili.com/video/BV1ab411c7de?share_source=copy_web"
     assert impl._build_task_dir_encoding_source(url) == "BV1ab411c7de"
 

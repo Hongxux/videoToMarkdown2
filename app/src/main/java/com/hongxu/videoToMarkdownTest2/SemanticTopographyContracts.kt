@@ -101,9 +101,8 @@ data class TokenSelection(
  */
 data class TokenInsightCard(
     val token: String,
-    val contextualize: String,
-    val firstPrinciple: String,
-    val industryHorizon: String
+    val title: String,
+    val markdown: String
 )
 
 /**
@@ -115,6 +114,8 @@ data class MobileTaskMetaPayload(
     val favorites: Map<String, Boolean>,
     val deleted: Map<String, Boolean>,
     val comments: Map<String, List<String>>,
+    val tokenLike: Map<String, Boolean>,
+    val tokenAnnotations: Map<String, String>,
     val taskTitle: String
 )
 
@@ -126,7 +127,9 @@ data class MobileTaskMetaUpdateRequest(
     val taskTitle: String?,
     val favorites: Map<String, Boolean>,
     val deleted: Map<String, Boolean>,
-    val comments: Map<String, List<String>>
+    val comments: Map<String, List<String>>,
+    val tokenLike: Map<String, Boolean>,
+    val tokenAnnotations: Map<String, String>
 )
 
 /**
@@ -238,6 +241,22 @@ class HttpMobileMarkdownMetaApi(
                         }
                         if (arr.length() > 0) {
                             put(key, arr)
+                        }
+                    }
+                })
+                put("tokenLike", JSONObject().apply {
+                    request.tokenLike.forEach { (key, value) ->
+                        if (key.isNotBlank() && value) {
+                            put(key, true)
+                        }
+                    }
+                })
+                put("tokenAnnotations", JSONObject().apply {
+                    request.tokenAnnotations.forEach { (key, value) ->
+                        val normalizedKey = key.trim()
+                        val normalizedValue = value.trim()
+                        if (normalizedKey.isNotBlank() && normalizedValue.isNotBlank()) {
+                            put(normalizedKey, normalizedValue)
                         }
                     }
                 })
@@ -410,52 +429,157 @@ class HttpMobileMarkdownTelemetryApi(
         sequence: Long
     ) {
         withContext(Dispatchers.IO) {
+            val globalIngestUrl = resolveGlobalTelemetryIngestUrl()
+            val globalIngestBody = buildGlobalIngestBody(
+                taskId = taskId,
+                pathHint = pathHint,
+                events = events,
+                reason = reason,
+                sequence = sequence
+            )
             val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
-            val url = URL("$apiBaseUrl/tasks/$encodedTask/telemetry")
-            val body = JSONObject().apply {
-                put("path", pathHint ?: "")
-                put("events", JSONArray().apply {
-                    events.forEach { event ->
-                        put(JSONObject().apply {
-                            put("nodeId", event.nodeId)
-                            put("eventType", event.eventType)
-                            put("relevanceScore", event.relevanceScore)
-                            put("timestampMs", event.timestampMs)
-                            put("payload", JSONObject().apply {
-                                event.payload.forEach { (k, v) ->
-                                    put(k, v)
-                                }
-                            })
-                        })
-                    }
-                })
-            }.toString()
+            val taskScopedUrl = URL("$apiBaseUrl/tasks/$encodedTask/telemetry")
+            val taskScopedBody = buildTaskScopedBody(pathHint = pathHint, events = events)
 
-            val connection = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 8_000
-                readTimeout = 8_000
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "application/json")
-            }
-            try {
-                OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
-                    writer.write(body)
-                }
-                val code = connection.responseCode
-                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-                val text = stream?.use {
-                    BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
-                }.orEmpty()
-                if (code !in 200..299) {
-                    throw IllegalStateException(
-                        "HTTP $code: $text (reason=$reason, seq=$sequence, taskId=$taskId)"
+            var globalFailure: Exception? = null
+            if (globalIngestUrl != null) {
+                runCatching {
+                    sendJsonRequest(
+                        url = globalIngestUrl,
+                        body = globalIngestBody,
+                        reason = reason,
+                        sequence = sequence,
+                        taskId = taskId,
+                        endpointTag = "global_telemetry_ingest"
+                    )
+                }.onFailure { error ->
+                    globalFailure = error as? Exception ?: IllegalStateException(
+                        error.message ?: "global ingest failed",
+                        error
+                    )
+                    Log.w(
+                        TAG,
+                        "Global telemetry ingest failed, fallback to task endpoint: reason=$reason, seq=$sequence, taskId=$taskId",
+                        error
                     )
                 }
-            } finally {
-                connection.disconnect()
             }
+            if (globalIngestUrl == null || globalFailure != null) {
+                try {
+                    sendJsonRequest(
+                        url = taskScopedUrl,
+                        body = taskScopedBody,
+                        reason = reason,
+                        sequence = sequence,
+                        taskId = taskId,
+                        endpointTag = "task_scoped_telemetry"
+                    )
+                } catch (error: Exception) {
+                    globalFailure?.let { error.addSuppressed(it) }
+                    throw error
+                }
+            }
+        }
+    }
+
+    private fun buildTaskScopedBody(
+        pathHint: String?,
+        events: List<MobileTelemetryEvent>
+    ): String {
+        return JSONObject().apply {
+            put("path", pathHint ?: "")
+            put("events", buildTelemetryEventsJson(events))
+        }.toString()
+    }
+
+    private fun buildGlobalIngestBody(
+        taskId: String,
+        pathHint: String?,
+        events: List<MobileTelemetryEvent>,
+        reason: String,
+        sequence: Long
+    ): String {
+        return JSONObject().apply {
+            put("taskId", taskId)
+            put("path", pathHint ?: "")
+            put("flushReason", reason)
+            put("batchSeq", sequence)
+            put("batchSize", events.size)
+            put("events", buildTelemetryEventsJson(events))
+        }.toString()
+    }
+
+    private fun buildTelemetryEventsJson(events: List<MobileTelemetryEvent>): JSONArray {
+        return JSONArray().apply {
+            events.forEach { event ->
+                put(JSONObject().apply {
+                    put("nodeId", event.nodeId)
+                    put("eventType", event.eventType)
+                    put("relevanceScore", event.relevanceScore)
+                    put("timestampMs", event.timestampMs)
+                    put("payload", JSONObject().apply {
+                        event.payload.forEach { (k, v) ->
+                            put(k, v)
+                        }
+                    })
+                })
+            }
+        }
+    }
+
+    private fun resolveGlobalTelemetryIngestUrl(): URL? {
+        val normalizedBase = apiBaseUrl.trim().trimEnd('/')
+        if (normalizedBase.isEmpty()) {
+            return null
+        }
+        val normalizedApiRoot = when {
+            normalizedBase.endsWith("/api/mobile") -> {
+                normalizedBase.removeSuffix("/mobile")
+            }
+            normalizedBase.endsWith("/mobile") -> {
+                normalizedBase.removeSuffix("/mobile")
+            }
+            else -> {
+                return null
+            }
+        }
+        return runCatching {
+            URL("$normalizedApiRoot/telemetry/ingest")
+        }.getOrNull()
+    }
+
+    private fun sendJsonRequest(
+        url: URL,
+        body: String,
+        reason: String,
+        sequence: Long,
+        taskId: String,
+        endpointTag: String
+    ) {
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = 8_000
+            readTimeout = 8_000
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json")
+            setRequestProperty("Accept", "application/json")
+        }
+        try {
+            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
+                writer.write(body)
+            }
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.use {
+                BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+            }.orEmpty()
+            if (code !in 200..299) {
+                throw IllegalStateException(
+                    "HTTP $code: $text (endpoint=$endpointTag, reason=$reason, seq=$sequence, taskId=$taskId)"
+                )
+            }
+        } finally {
+            connection.disconnect()
         }
     }
 }
@@ -480,6 +604,8 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
     val favoritesObj = root.optJSONObject("favorites") ?: JSONObject()
     val deletedObj = root.optJSONObject("deleted") ?: JSONObject()
     val commentsObj = root.optJSONObject("comments") ?: JSONObject()
+    val tokenLikeObj = root.optJSONObject("tokenLike") ?: JSONObject()
+    val tokenAnnotationsObj = root.optJSONObject("tokenAnnotations") ?: JSONObject()
 
     val favorites = LinkedHashMap<String, Boolean>()
     val favoriteIter = favoritesObj.keys()
@@ -529,12 +655,36 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
         }
     }
 
+    val tokenLike = LinkedHashMap<String, Boolean>()
+    val tokenLikeIter = tokenLikeObj.keys()
+    while (tokenLikeIter.hasNext()) {
+        val key = tokenLikeIter.next()
+        if (key.isNotBlank() && tokenLikeObj.optBoolean(key, false)) {
+            tokenLike[key] = true
+        }
+    }
+
+    val tokenAnnotations = LinkedHashMap<String, String>()
+    val tokenAnnotationIter = tokenAnnotationsObj.keys()
+    while (tokenAnnotationIter.hasNext()) {
+        val key = tokenAnnotationIter.next()
+        if (key.isBlank()) {
+            continue
+        }
+        val value = tokenAnnotationsObj.optString(key).trim()
+        if (value.isNotBlank()) {
+            tokenAnnotations[key] = value
+        }
+    }
+
     return MobileTaskMetaPayload(
         taskId = root.optString("taskId"),
         pathKey = root.optString("pathKey"),
         favorites = favorites,
         deleted = deleted,
         comments = comments,
+        tokenLike = tokenLike,
+        tokenAnnotations = tokenAnnotations,
         taskTitle = root.optString("taskTitle")
     )
 }
@@ -568,9 +718,24 @@ fun parseSemanticNodesFromPayload(payloadText: String): List<SemanticNode> {
 
 private fun parseSemanticNode(node: JSONObject): SemanticNode {
     val id = node.optStringByAlias("node_id", "nodeId", "id") ?: ""
-    val text = node.optStringByAlias("text", "raw_markdown", "rawMarkdown") ?: ""
+    val text = node.optRawStringByAlias(
+        "text",
+        "raw_markdown",
+        "rawMarkdown",
+        "markdown",
+        "content_markdown",
+        "contentMarkdown"
+    ) ?: ""
     val type = node.optStringByAlias("type", "node_type", "nodeType") ?: "paragraph"
-    val originalMarkdown = node.optStringByAlias("original_markdown", "originalMarkdown", "raw_markdown", "rawMarkdown")
+    val originalMarkdown = node.optRawStringByAlias(
+        "original_markdown",
+        "originalMarkdown",
+        "raw_markdown",
+        "rawMarkdown",
+        "markdown",
+        "content_markdown",
+        "contentMarkdown"
+    )
     val relevanceScore = node.optFloatByAlias("relevance_score", "relevanceScore") ?: 0f
     val bridgeText = node.optStringByAlias("bridge_text", "bridgeText")
     val reasoning = node.optStringByAlias("reasoning")
@@ -607,6 +772,19 @@ private fun JSONObject.optStringByAlias(vararg aliases: String): String? {
         }
         val value = optString(key).trim()
         if (value.isNotBlank()) {
+            return value
+        }
+    }
+    return null
+}
+
+private fun JSONObject.optRawStringByAlias(vararg aliases: String): String? {
+    aliases.forEach { key ->
+        if (!has(key)) {
+            return@forEach
+        }
+        val value = optString(key)
+        if (value.isNotEmpty()) {
             return value
         }
     }

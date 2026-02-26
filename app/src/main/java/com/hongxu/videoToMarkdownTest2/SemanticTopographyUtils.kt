@@ -86,42 +86,12 @@ private fun isTokenChar(value: Char): Boolean {
     return value.isLetterOrDigit() || value == '_' || (value.code in 0x4E00..0x9FFF)
 }
 
-fun parseTokenInsightCard(
-    token: String,
-    nativePayload: String?
-): TokenInsightCard {
-    val parsed = runCatching {
-        val json = JSONObject(nativePayload.orEmpty())
-        TokenInsightCard(
-            token = token,
-            contextualize = json.optString("contextualize"),
-            firstPrinciple = json.optString("first_principle"),
-            industryHorizon = json.optString("industry_horizon")
-        )
-    }.getOrNull()
-
-    if (parsed != null &&
-        parsed.contextualize.isNotBlank() &&
-        parsed.firstPrinciple.isNotBlank() &&
-        parsed.industryHorizon.isNotBlank()
-    ) {
-        return parsed
-    }
-
-    return TokenInsightCard(
-        token = token,
-        contextualize = "In this context, \"$token\" carries key semantic weight and changes reading intent.",
-        firstPrinciple = "From first principles, \"$token\" compresses complex meaning and reduces cognitive jumps.",
-        industryHorizon = "In practice, \"$token\" can map to observable metrics or operational decisions."
-    )
-}
-
 suspend fun autoCenterItem(
     listState: LazyListState,
     itemIndex: Int,
     centerRatio: Float
 ) {
-    val ratio = centerRatio.coerceIn(0.35f, 0.65f)
+    val ratio = centerRatio.coerceIn(0.15f, 0.65f)
     val firstLookup = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == itemIndex }
     if (firstLookup == null) {
         listState.animateScrollToItem(itemIndex)

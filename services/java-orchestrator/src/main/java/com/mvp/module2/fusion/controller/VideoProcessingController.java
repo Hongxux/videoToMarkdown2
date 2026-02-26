@@ -2,9 +2,11 @@ package com.mvp.module2.fusion.controller;
 
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.common.VideoInputNormalizer;
+import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.resilience.ResilientGrpcClient;
 import com.mvp.module2.fusion.resilience.CircuitBreaker;
+import com.mvp.module2.fusion.service.CollectionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,6 +25,8 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.Locale;
+import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -53,12 +57,21 @@ public class VideoProcessingController {
 
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
+
+    @Value("${grpc.python.timeout-seconds:300}")
+    private int grpcTimeoutSeconds;
     
     @Autowired
     private TaskQueueManager taskQueueManager;
     
     @Autowired
     private ResilientGrpcClient grpcClient;
+
+    @Autowired
+    private PythonGrpcClient pythonGrpcClient;
+
+    @Autowired(required = false)
+    private CollectionRepository collectionRepository;
     
     /**
      * 提交新任务
@@ -159,6 +172,24 @@ public class VideoProcessingController {
                 "message", UserFacingErrorMapper.busyMessage()
             ));
         }
+    }
+
+    @GetMapping({"/video-info", "/mobile/video-info"})
+    public ResponseEntity<Map<String, Object>> getVideoInfo(
+            @RequestParam("videoInput") String videoInput
+    ) {
+        return queryVideoInfoInternal(videoInput);
+    }
+
+    @PostMapping({"/video-info", "/mobile/video-info"})
+    public ResponseEntity<Map<String, Object>> getVideoInfoByPost(@RequestBody VideoInfoRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "request body cannot be empty"
+            ));
+        }
+        return queryVideoInfoInternal(request.videoInput);
     }
     
     /**
@@ -299,8 +330,163 @@ public class VideoProcessingController {
         public String priority; // 已废弃：前台不再暴露，服务端将忽略客户端传值
     }
 
+    public static class VideoInfoRequest {
+        public String videoInput;
+    }
+
     private String normalizeVideoInput(String rawVideoInput) {
         return VideoInputNormalizer.normalizeVideoInput(rawVideoInput);
+    }
+
+    private ResponseEntity<Map<String, Object>> queryVideoInfoInternal(String rawVideoInput) {
+        String rawInput = rawVideoInput != null ? rawVideoInput.trim() : "";
+        if (rawInput.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "videoInput 不能为空"
+            ));
+        }
+
+        String normalizedInput = normalizeVideoInput(rawInput);
+        String probeInput = chooseVideoInfoProbeInput(rawInput, normalizedInput);
+        String taskId = "VI_" + System.currentTimeMillis();
+
+        PythonGrpcClient.VideoInfoResult result = pythonGrpcClient.getVideoInfo(
+            taskId,
+            probeInput,
+            Math.max(30, grpcTimeoutSeconds)
+        );
+
+        if (result == null || !result.success) {
+            String detail = result != null ? result.errorMsg : "empty grpc response";
+            logger.warn("GetVideoInfo failed: raw={} normalized={} probe={} err={}", rawInput, normalizedInput, probeInput, detail);
+            return ResponseEntity.status(502).body(Map.of(
+                "success", false,
+                "message", UserFacingErrorMapper.busyMessage(),
+                "detail", detail != null ? detail : ""
+            ));
+        }
+
+        List<Map<String, Object>> episodes = new ArrayList<>();
+        List<String> episodeTitles = new ArrayList<>();
+        if (result.episodes != null) {
+            for (PythonGrpcClient.EpisodeInfo episode : result.episodes) {
+                if (episode == null) {
+                    continue;
+                }
+                String title = episode.title != null ? episode.title : "";
+                episodes.add(Map.of(
+                    "index", episode.index,
+                    "title", title,
+                    "durationSec", episode.durationSec,
+                    "episodeUrl", episode.episodeUrl != null ? episode.episodeUrl : "",
+                    "episodeCoverUrl", episode.episodeCoverUrl != null ? episode.episodeCoverUrl : ""
+                ));
+                episodeTitles.add(title);
+            }
+        }
+        String collectionId = buildCollectionId(result.sourcePlatform, result.canonicalId);
+        if (result.isCollection && !collectionId.isEmpty()) {
+            persistCollectionInfo(collectionId, result);
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("rawInput", rawInput);
+        payload.put("normalizedVideoInput", normalizedInput);
+        payload.put("probeInput", probeInput);
+        payload.put("platform", result.sourcePlatform != null ? result.sourcePlatform : "");
+        payload.put("resolvedUrl", result.resolvedUrl != null ? result.resolvedUrl : "");
+        payload.put("canonicalId", result.canonicalId != null ? result.canonicalId : "");
+        payload.put("collectionId", collectionId);
+        payload.put("rawEncodingKey", buildRawEncodingKey(result));
+        payload.put("title", result.videoTitle != null ? result.videoTitle : "");
+        payload.put("durationSec", result.durationSec);
+        payload.put("isCollection", result.isCollection);
+        payload.put("totalEpisodes", result.totalEpisodes);
+        payload.put("currentEpisodeIndex", result.currentEpisodeIndex);
+        payload.put("currentEpisodeTitle", result.currentEpisodeTitle != null ? result.currentEpisodeTitle : "");
+        payload.put("episodes", episodes);
+        payload.put("episodeTitles", episodeTitles);
+        payload.put("coverUrl", result.coverUrl != null ? result.coverUrl : "");
+        payload.put("contentType", result.contentType != null ? result.contentType : "");
+        payload.put("linkResolver", result.linkResolver != null ? result.linkResolver : "");
+        return ResponseEntity.ok(payload);
+    }
+
+    private void persistCollectionInfo(String collectionId, PythonGrpcClient.VideoInfoResult result) {
+        if (collectionRepository == null || result == null) {
+            return;
+        }
+        try {
+            List<CollectionRepository.EpisodeInput> episodeInputs = new ArrayList<>();
+            if (result.episodes != null) {
+                for (PythonGrpcClient.EpisodeInfo episode : result.episodes) {
+                    if (episode == null) {
+                        continue;
+                    }
+                    int episodeNo = episode.index > 0 ? episode.index : episodeInputs.size() + 1;
+                    episodeInputs.add(new CollectionRepository.EpisodeInput(
+                            episodeNo,
+                            episode.title,
+                            episode.episodeUrl,
+                            episode.durationSec
+                    ));
+                }
+            }
+            int totalEpisodes = result.totalEpisodes > 0 ? result.totalEpisodes : episodeInputs.size();
+            collectionRepository.upsertCollection(
+                    collectionId,
+                    result.sourcePlatform,
+                    result.canonicalId,
+                    result.videoTitle,
+                    totalEpisodes,
+                    result.resolvedUrl,
+                    episodeInputs
+            );
+        } catch (Exception ex) {
+            logger.warn("persist collection info failed: collectionId={} err={}", collectionId, ex.getMessage());
+        }
+    }
+
+    private String buildCollectionId(String platform, String canonicalId) {
+        String normalizedPlatform = platform != null ? platform.trim() : "";
+        String normalizedCanonicalId = canonicalId != null ? canonicalId.trim() : "";
+        if (normalizedPlatform.isEmpty() || normalizedCanonicalId.isEmpty()) {
+            return "";
+        }
+        return normalizedPlatform.toLowerCase(Locale.ROOT) + ":" + normalizedCanonicalId;
+    }
+
+    private String buildRawEncodingKey(PythonGrpcClient.VideoInfoResult result) {
+        if (result == null) {
+            return "";
+        }
+        String canonicalId = result.canonicalId != null ? result.canonicalId.trim() : "";
+        if (canonicalId.isEmpty()) {
+            return "";
+        }
+        String platform = result.sourcePlatform != null ? result.sourcePlatform.trim() : "";
+        if (!"bilibili".equalsIgnoreCase(platform)) {
+            return canonicalId;
+        }
+        if (result.currentEpisodeIndex > 0) {
+            return canonicalId + "_" + result.currentEpisodeIndex;
+        }
+        return canonicalId;
+    }
+
+    private String chooseVideoInfoProbeInput(String rawInput, String normalizedInput) {
+        String raw = rawInput != null ? rawInput.trim() : "";
+        String normalized = normalizedInput != null ? normalizedInput.trim() : "";
+        String lowerRaw = raw.toLowerCase(Locale.ROOT);
+        if (lowerRaw.contains("http://") || lowerRaw.contains("https://")) {
+            return raw;
+        }
+        if (!normalized.isEmpty()) {
+            return normalized;
+        }
+        return raw;
     }
 
     private TaskQueueManager.Priority resolvePriority(String normalizedUserId, String rawPriority) {

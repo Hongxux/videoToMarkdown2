@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -143,6 +144,7 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
     class _VideoProcessorStub:
         def __init__(self, **kwargs):
             captured["init_kwargs"] = kwargs
+            self.last_video_title = ""
 
         def download(self, url: str, output_dir: str, filename: str) -> str:
             captured["download_call"] = {
@@ -150,6 +152,7 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
                 "output_dir": output_dir,
                 "filename": filename,
             }
+            self.last_video_title = "测试下载器标题"
             output_path = Path(output_dir) / f"{filename}.mp4"
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_bytes(b"video")
@@ -201,6 +204,7 @@ def test_download_video_passes_cookie_options_to_video_processor(monkeypatch, tm
     assert captured["init_kwargs"]["external_downloader"] == "aria2c"
     assert captured["init_kwargs"]["external_downloader_args"] == ["--split=4"]
     assert captured["download_call"]["filename"] == "video"
+    assert response.video_title == "测试下载器标题"
 
 
 def test_download_video_routes_douyin_url_to_douyin_downloader(monkeypatch, tmp_path):
@@ -256,3 +260,132 @@ def test_download_video_routes_douyin_url_to_douyin_downloader(monkeypatch, tmp_
     assert call_log["video_processor_init_count"] == 0
     assert call_log["douyin_call"]["video_url"] == request.video_url
     assert call_log["douyin_call"]["video_filename"] == "video"
+
+
+def test_download_video_recovers_title_from_douyin_runtime_meta(monkeypatch, tmp_path):
+    class _VideoProcessorShouldNotRun:
+        def __init__(self, **_kwargs):
+            raise AssertionError("VideoProcessor should not be initialized for douyin url")
+
+    async def _resolve_share_link_stub(raw_text: str, timeout_ms: int = 45000):
+        return types.SimpleNamespace(
+            extracted_url=raw_text,
+            resolved_url=raw_text,
+            platform="douyin",
+            canonical_id="7466666666666666666",
+            resolver="canonical-no-redirect",
+            title="",
+            title_source="",
+            title_confidence=0.0,
+            content_type="video",
+        )
+
+    async def _douyin_downloader_stub(*, task_id: str, video_url: str, task_dir: str, video_filename: str = "video") -> str:
+        output_path = Path(task_dir) / f"{video_filename}.mp4"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"douyin-video")
+        (Path(task_dir) / "douyin_runtime_meta.json").write_text(
+            json.dumps(
+                {
+                    "title": "抖音真实标题",
+                    "author": "测试作者",
+                    "video_url": "https://aweme.snssdk.com/fake.mp4",
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return str(output_path)
+
+    class _ServicerStub:
+        def __init__(self):
+            self.config = {"video": {}}
+
+        def _cache_metrics_begin(self, *_args, **_kwargs):
+            return None
+
+        def _increment_tasks(self):
+            return None
+
+        def _decrement_tasks(self):
+            return None
+
+        def _get_video_duration(self, _video_path: str) -> float:
+            return 1.8
+
+    monkeypatch.setattr(impl, "VideoProcessor", _VideoProcessorShouldNotRun)
+    monkeypatch.setattr(impl, "resolve_share_link", _resolve_share_link_stub)
+    monkeypatch.setattr(impl, "_download_video_with_douyin_downloader", _douyin_downloader_stub)
+    monkeypatch.setattr(impl, "_get_primary_storage_root", lambda: str(tmp_path))
+
+    request = types.SimpleNamespace(
+        task_id="task-download-douyin-title-fallback",
+        video_url="https://www.douyin.com/video/7466666666666666666",
+        output_dir="",
+    )
+    response = asyncio.run(impl._VideoProcessingServicerCore.DownloadVideo(_ServicerStub(), request, None))
+
+    assert response.success is True
+    assert response.video_title == "抖音真实标题"
+    assert "downloader-runtime-meta" in response.link_resolver
+
+
+def test_download_video_preserves_bilibili_episode_query_for_batch_collection(monkeypatch, tmp_path):
+    captured = {}
+
+    class _VideoProcessorStub:
+        def __init__(self, **_kwargs):
+            self.last_video_title = ""
+
+        def download(self, url: str, output_dir: str, filename: str) -> str:
+            captured["download_url"] = url
+            output_path = Path(output_dir) / f"{filename}.mp4"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"video")
+            return str(output_path)
+
+    async def _resolve_share_link_stub(raw_text: str, timeout_ms: int = 45000):
+        _ = timeout_ms
+        _ = raw_text
+        return types.SimpleNamespace(
+            extracted_url="https://www.bilibili.com/video/BV1n9CwYoEro?spm_id_from=333.788.videopod.episodes&p=2",
+            resolved_url="https://www.bilibili.com/video/BV1n9CwYoEro",
+            platform="bilibili",
+            canonical_id="BV1n9CwYoEro",
+            resolver="canonical-no-redirect",
+            title="",
+            title_source="",
+            title_confidence=0.0,
+            content_type="video",
+        )
+
+    class _ServicerStub:
+        def __init__(self):
+            self.config = {"video": {}}
+
+        def _cache_metrics_begin(self, *_args, **_kwargs):
+            return None
+
+        def _increment_tasks(self):
+            return None
+
+        def _decrement_tasks(self):
+            return None
+
+        def _get_video_duration(self, _video_path: str) -> float:
+            return 2.0
+
+    monkeypatch.setattr(impl, "VideoProcessor", _VideoProcessorStub)
+    monkeypatch.setattr(impl, "resolve_share_link", _resolve_share_link_stub)
+    monkeypatch.setattr(impl, "_get_primary_storage_root", lambda: str(tmp_path))
+
+    request = types.SimpleNamespace(
+        task_id="task-download-bilibili-episode-query",
+        video_url="https://www.bilibili.com/video/BV1n9CwYoEro?p=2",
+        output_dir="",
+    )
+    response = asyncio.run(impl._VideoProcessingServicerCore.DownloadVideo(_ServicerStub(), request, None))
+
+    assert response.success is True
+    assert "p=2" in captured["download_url"]
+    assert "p=2" in response.resolved_url

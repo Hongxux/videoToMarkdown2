@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,9 +24,15 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -41,19 +48,18 @@ public class PersonaInsightCardService {
     private static final String TASK_INSIGHT_DIR = "insight_cards";
     private static final String TASK_INDEX_FILE = "insight_cards_index.json";
     private static final String TASK_INTERACTION_FILE = "llm_interactions.ndjson";
-    private static final String TASK_CARD_SNAPSHOT_DIR = "cards";
     private static final int DEFAULT_MAX_CONTEXT_CHARS = 240;
     private static final int DEFAULT_MAX_TAGS = 48;
     private static final int DEFAULT_MAX_RELATED_TAGS = 8;
     private static final int DEFAULT_MAX_SNIPPETS = 3;
+    private static final int CARD_GENERATION_CONCURRENCY = 64;
     private static final String SECTION_CONTEXTUAL = "## 语境化解释";
     private static final String SECTION_DEPTH = "## 深度";
     private static final String SECTION_BREADTH = "## 广度";
-    private static final String SECTION_LLM_RAW_OUTPUT = "## LLM原始输出";
     private static final String SECTION_CONTEXT_SNAPSHOT_PREFIX = "### 语境快照@";
     private static final List<String> LEGACY_CARD_MARKERS = List.of(
-            "## 璇",
-            "### 璇",
+            "## 语",
+            "### 语",
             "LLM原始",
             "证据片段"
     );
@@ -79,9 +85,6 @@ public class PersonaInsightCardService {
     @Value("${telemetry.persona-reading.insight-cards.regenerate-on-legacy-marker:true}")
     private boolean regenerateOnLegacyMarker;
 
-    @Value("${telemetry.persona-reading.insight-cards.max-inflight:72}")
-    private int maxInflight;
-
     @Value("${telemetry.persona-reading.insight-cards.batch-max-terms:8}")
     private int batchMaxTerms;
 
@@ -97,7 +100,20 @@ public class PersonaInsightCardService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Object writeLock = new Object();
     private final Map<String, Object> generationLocks = new ConcurrentHashMap<>();
+    private final Map<String, String> optimisticInFlightTokens = new ConcurrentHashMap<>();
     private final Object llmPermitLock = new Object();
+    private final AtomicInteger cardGenerationThreadIndex = new AtomicInteger(1);
+    private final ExecutorService cardGenerationExecutor = Executors.newFixedThreadPool(
+            CARD_GENERATION_CONCURRENCY,
+            runnable -> {
+                Thread thread = new Thread(
+                        runnable,
+                        "InsightCardGen-" + cardGenerationThreadIndex.getAndIncrement()
+                );
+                thread.setDaemon(true);
+                return thread;
+            }
+    );
     private volatile Semaphore llmPermitSemaphore;
 
     @Async("taskExecutor")
@@ -106,6 +122,38 @@ public class PersonaInsightCardService {
             String userId,
             Path markdownPath,
             List<Map<String, Object>> personalizedNodes
+    ) {
+        generateWithOptimisticLock(taskId, userId, markdownPath, personalizedNodes, true);
+    }
+
+    public void generateSync(
+            String taskId,
+            String userId,
+            Path markdownPath,
+            List<Map<String, Object>> personalizedNodes
+    ) {
+        generateWithOptimisticLock(taskId, userId, markdownPath, personalizedNodes, false);
+    }
+
+    @PreDestroy
+    public void shutdownExecutor() {
+        cardGenerationExecutor.shutdown();
+        try {
+            if (!cardGenerationExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                cardGenerationExecutor.shutdownNow();
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            cardGenerationExecutor.shutdownNow();
+        }
+    }
+
+    private void generateWithOptimisticLock(
+            String taskId,
+            String userId,
+            Path markdownPath,
+            List<Map<String, Object>> personalizedNodes,
+            boolean skipWhenSameTokenInFlight
     ) {
         if (!enabled || personalizedNodes == null || personalizedNodes.isEmpty()) {
             return;
@@ -116,6 +164,13 @@ public class PersonaInsightCardService {
         String safeTaskId = normalizeSegment(taskId, "unknown_task");
         String safeUser = normalizeSegment(userId, "anonymous");
         String lockKey = safeTaskId + "|" + (markdownPath == null ? "" : markdownPath.toAbsolutePath().normalize());
+        String optimisticToken = buildOptimisticToken(markdownPath, personalizedNodes);
+        String currentInFlightToken = optimisticInFlightTokens.putIfAbsent(lockKey, optimisticToken);
+        if (skipWhenSameTokenInFlight
+                && currentInFlightToken != null
+                && currentInFlightToken.equals(optimisticToken)) {
+            return;
+        }
         Object lock = generationLocks.computeIfAbsent(lockKey, key -> new Object());
         try {
             synchronized (lock) {
@@ -125,6 +180,9 @@ public class PersonaInsightCardService {
             logger.warn("persona insight cards generation failed: taskId={} err={}", safeTaskId, ex.getMessage());
         } finally {
             generationLocks.remove(lockKey, lock);
+            if (currentInFlightToken == null) {
+                optimisticInFlightTokens.remove(lockKey, optimisticToken);
+            }
         }
     }
 
@@ -162,7 +220,6 @@ public class PersonaInsightCardService {
         }
         Path workDir = resolveWorkDirectory(taskRoot);
         Files.createDirectories(workDir);
-        Files.createDirectories(workDir.resolve(TASK_CARD_SNAPSHOT_DIR));
 
         LinkedHashMap<String, TagContext> contexts = collectTagContexts(personalizedNodes);
         if (contexts.isEmpty()) {
@@ -178,39 +235,52 @@ public class PersonaInsightCardService {
 
         String articleKey = buildArticleKey(taskRoot, markdownPath);
         String fingerprint = buildFingerprint(articleKey, tagContexts);
+        boolean allCardsReady = areAllCardsPresent(tagContexts);
         Path indexPath = resolveIndexPath(taskRoot);
         Map<String, Object> existingIndex = readIndexIfExists(indexPath);
         String existingFingerprint = String.valueOf(existingIndex.getOrDefault("fingerprint", ""));
-        if (fingerprint.equals(existingFingerprint)) {
+        if (fingerprint.equals(existingFingerprint) && allCardsReady) {
             return;
         }
 
         Map<String, DeepSeekAdvisorService.StructuredAdviceResult> batchAdviceByCanonical = buildBatchAdviceByCanonicalKey(tagContexts);
-        List<Map<String, Object>> resultEntries = new ArrayList<>();
-        for (TagContext context : tagContexts) {
-            DeepSeekAdvisorService.StructuredAdviceResult prefetchedAdvice = batchAdviceByCanonical.get(context.canonicalKey);
-            InsightCardResult cardResult = upsertCardForTag(
-                    taskId,
-                    userKey,
-                    articleKey,
-                    context,
-                    workDir,
-                    prefetchedAdvice
+        List<CompletableFuture<IndexedInsightCardEntry>> futures = new ArrayList<>();
+        for (int index = 0; index < tagContexts.size(); index += 1) {
+            final int entryIndex = index;
+            final TagContext context = tagContexts.get(index);
+            final DeepSeekAdvisorService.StructuredAdviceResult prefetchedAdvice = batchAdviceByCanonical.get(context.canonicalKey);
+            futures.add(
+                    CompletableFuture
+                            .supplyAsync(
+                                    () -> buildInsightCardEntry(
+                                            taskId,
+                                            userKey,
+                                            articleKey,
+                                            workDir,
+                                            context,
+                                            prefetchedAdvice,
+                                            entryIndex
+                                    ),
+                                    cardGenerationExecutor
+                            )
+                            .exceptionally(ex -> {
+                                logger.warn(
+                                        "insight card async generation failed: taskId={} tag={} err={}",
+                                        taskId,
+                                        context.tag,
+                                        ex.getMessage()
+                                );
+                                return null;
+                            })
             );
-            if (cardResult == null) {
-                continue;
-            }
-            Map<String, Object> line = new LinkedHashMap<>();
-            line.put("tag", context.tag);
-            line.put("cardTitle", cardResult.cardTitle);
-            line.put("cardPath", cardResult.cardPath);
-            line.put("source", cardResult.source);
-            line.put("generatedAt", cardResult.generatedAt);
-            line.put("nodeIds", new ArrayList<>(context.nodeIds));
-            line.put("relatedTags", new ArrayList<>(context.relatedTags));
-            line.put("snapshotPath", cardResult.snapshotPath);
-            resultEntries.add(line);
         }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        List<Map<String, Object>> resultEntries = futures.stream()
+                .map(CompletableFuture::join)
+                .filter(Objects::nonNull)
+                .sorted(Comparator.comparingInt(item -> item.index))
+                .map(item -> item.entry)
+                .toList();
 
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("taskId", taskId);
@@ -222,6 +292,58 @@ public class PersonaInsightCardService {
         root.put("count", resultEntries.size());
         root.put("items", resultEntries);
         persistJsonAtomically(indexPath, root);
+    }
+
+    private IndexedInsightCardEntry buildInsightCardEntry(
+            String taskId,
+            String userKey,
+            String articleKey,
+            Path workDir,
+            TagContext context,
+            DeepSeekAdvisorService.StructuredAdviceResult prefetchedAdvice,
+            int index
+    ) {
+        InsightCardResult cardResult = upsertCardForTag(
+                taskId,
+                userKey,
+                articleKey,
+                context,
+                workDir,
+                prefetchedAdvice
+        );
+        if (cardResult == null) {
+            return null;
+        }
+        Map<String, Object> line = new LinkedHashMap<>();
+        line.put("tag", context.tag);
+        line.put("cardTitle", cardResult.cardTitle);
+        line.put("cardPath", cardResult.cardPath);
+        line.put("source", cardResult.source);
+        line.put("generatedAt", cardResult.generatedAt);
+        line.put("nodeIds", new ArrayList<>(context.nodeIds));
+        line.put("relatedTags", new ArrayList<>(context.relatedTags));
+        line.put("snapshotPath", cardResult.snapshotPath);
+        return new IndexedInsightCardEntry(index, line);
+    }
+
+    private boolean areAllCardsPresent(List<TagContext> contexts) {
+        if (contexts == null || contexts.isEmpty()) {
+            return true;
+        }
+        for (TagContext context : contexts) {
+            if (context == null || !StringUtils.hasText(context.tag)) {
+                continue;
+            }
+            try {
+                CardStorageService.CardReadResult result = cardStorageService.readCard(context.tag);
+                if (result == null || !result.exists || !StringUtils.hasText(result.markdown)) {
+                    return false;
+                }
+            } catch (Exception ex) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private InsightCardResult upsertCardForTag(
@@ -309,7 +431,7 @@ public class PersonaInsightCardService {
                     llmTrace.put("status", "FALLBACK");
                     llmTrace.put("error", llmEx.getMessage());
                 }
-                targetMarkdown = buildInitialCardBodyFromJson(context, sections, articleSection, llmRaw);
+                targetMarkdown = buildInitialCardBodyFromJson(context, sections, articleSection);
             }
 
             CardStorageService.CardWriteOptions options = new CardStorageService.CardWriteOptions();
@@ -319,16 +441,7 @@ public class PersonaInsightCardService {
             options.sourceTaskId = taskId;
             options.sourcePath = articleKey;
             CardStorageService.CardSaveResult saved = cardStorageService.saveCard(context.tag, targetMarkdown, options);
-            String snapshotPath = persistTaskSnapshot(
-                    workDir,
-                    context.tag,
-                    saved,
-                    targetMarkdown,
-                    llmRaw,
-                    llmRequestPayloadJson,
-                    llmResponseBodyJson,
-                    source
-            );
+            String snapshotPath = "";
 
             llmTrace.put("status", llmTrace.getOrDefault("status", "SKIPPED_REUSED"));
             llmTrace.put("cardTitle", saved.title);
@@ -1039,8 +1152,7 @@ public class PersonaInsightCardService {
     private String buildInitialCardBodyFromJson(
             TagContext context,
             StructuredAdviceSections sections,
-            String articleSection,
-            String llmRaw
+            String articleSection
     ) {
         StringBuilder builder = new StringBuilder();
         builder.append(SECTION_CONTEXTUAL).append('\n');
@@ -1053,13 +1165,6 @@ public class PersonaInsightCardService {
         builder.append(renderOrderedLines(sections.breadth, 1));
         builder.append('\n');
         builder.append(articleSection).append('\n');
-        if (StringUtils.hasText(llmRaw)) {
-            builder.append('\n');
-            builder.append(SECTION_LLM_RAW_OUTPUT).append('\n');
-            builder.append("```json").append('\n');
-            builder.append(llmRaw).append('\n');
-            builder.append("```").append('\n');
-        }
         return builder.toString().trim();
     }
 
@@ -1130,7 +1235,7 @@ public class PersonaInsightCardService {
             return false;
         }
         return currentBody.contains(SECTION_CONTEXT_SNAPSHOT_PREFIX + articleKey)
-                || (currentBody.contains("### 璇") && currentBody.contains(articleKey));
+                || (currentBody.contains("### 语") && currentBody.contains(articleKey));
     }
 
     private boolean shouldRegenerateExistingCard(String currentBody) {
@@ -1170,67 +1275,6 @@ public class PersonaInsightCardService {
         return String.join(" ", links);
     }
 
-    private String persistTaskSnapshot(
-            Path workDir,
-            String tag,
-            CardStorageService.CardSaveResult saved,
-            String targetMarkdown,
-            String llmRaw,
-            String llmRequestPayloadJson,
-            String llmResponseBodyJson,
-            String source
-    ) {
-        try {
-            Path dir = workDir.resolve(TASK_CARD_SNAPSHOT_DIR).normalize();
-            Files.createDirectories(dir);
-            String safeName = normalizeSegment(tag, "term");
-            Path target = dir.resolve(safeName + ".md").normalize();
-            if (!target.startsWith(dir)) {
-                throw new IllegalStateException("invalid insight snapshot path");
-            }
-            StringBuilder builder = new StringBuilder();
-            builder.append("# ").append(tag).append('\n');
-            builder.append('\n');
-            builder.append("- card_title: ").append(saved.title).append('\n');
-            builder.append("- card_path: ").append(saved.path != null ? saved.path.toString() : "").append('\n');
-            builder.append("- source: ").append(source).append('\n');
-            builder.append("- updated_at: ").append(saved.updatedAt).append('\n');
-            builder.append('\n');
-            String normalizedCardBody = stripContextSnapshotSections(String.valueOf(targetMarkdown == null ? "" : targetMarkdown).trim());
-            if (StringUtils.hasText(normalizedCardBody)) {
-                builder.append(normalizedCardBody).append('\n');
-            }
-            appendJsonSection(builder, "LLM原始请求Payload", llmRequestPayloadJson);
-            appendJsonSection(builder, "LLM原始响应Body", llmResponseBodyJson);
-            appendJsonSection(builder, "LLM原始输出Content", llmRaw);
-            synchronized (writeLock) {
-                Files.writeString(
-                        target,
-                        builder.toString(),
-                        StandardCharsets.UTF_8,
-                        StandardOpenOption.CREATE,
-                        StandardOpenOption.WRITE,
-                        StandardOpenOption.TRUNCATE_EXISTING
-                );
-            }
-            return target.toString();
-        } catch (Exception ex) {
-            return "";
-        }
-    }
-
-    private void appendJsonSection(StringBuilder builder, String title, String rawJson) {
-        String value = String.valueOf(rawJson == null ? "" : rawJson).trim();
-        if (!StringUtils.hasText(value)) {
-            return;
-        }
-        builder.append('\n');
-        builder.append("## ").append(title).append('\n');
-        builder.append("```json").append('\n');
-        builder.append(value).append('\n');
-        builder.append("```").append('\n');
-    }
-
     private String stripContextSnapshotSections(String markdown) {
         String text = String.valueOf(markdown == null ? "" : markdown)
                 .replace("\r\n", "\n")
@@ -1242,7 +1286,7 @@ public class PersonaInsightCardService {
         StringBuilder builder = new StringBuilder();
         boolean skipping = false;
         for (String line : lines) {
-            if (line.startsWith(SECTION_CONTEXT_SNAPSHOT_PREFIX) || line.startsWith("### 璇")) {
+            if (line.startsWith(SECTION_CONTEXT_SNAPSHOT_PREFIX) || line.startsWith("### 语")) {
                 skipping = true;
                 continue;
             }
@@ -1330,6 +1374,27 @@ public class PersonaInsightCardService {
             builder.append(String.join(",", context.nodeIds)).append(':');
             builder.append(String.join(",", context.snippets)).append(':');
             builder.append(String.join("||", context.contextBlocks)).append('|');
+        }
+        return Integer.toHexString(builder.toString().hashCode());
+    }
+
+    private String buildOptimisticToken(Path markdownPath, List<Map<String, Object>> personalizedNodes) {
+        String markdownKey = markdownPath == null ? "" : markdownPath.toAbsolutePath().normalize().toString();
+        LinkedHashMap<String, TagContext> contexts = collectTagContexts(personalizedNodes);
+        if (contexts.isEmpty()) {
+            return Integer.toHexString((markdownKey + "|empty").hashCode());
+        }
+        int limit = Math.max(1, maxTags > 0 ? maxTags : DEFAULT_MAX_TAGS);
+        List<String> tags = contexts.values().stream()
+                .map(context -> context.canonicalKey)
+                .filter(StringUtils::hasText)
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .limit(limit)
+                .toList();
+        StringBuilder builder = new StringBuilder();
+        builder.append(markdownKey).append('|');
+        for (String tag : tags) {
+            builder.append(tag).append('|');
         }
         return Integer.toHexString(builder.toString().hashCode());
     }
@@ -1500,7 +1565,7 @@ public class PersonaInsightCardService {
         }
         synchronized (llmPermitLock) {
             if (llmPermitSemaphore == null) {
-                llmPermitSemaphore = new Semaphore(Math.max(1, maxInflight), true);
+                llmPermitSemaphore = new Semaphore(CARD_GENERATION_CONCURRENCY, true);
             }
             return llmPermitSemaphore;
         }
@@ -1561,6 +1626,16 @@ public class PersonaInsightCardService {
             this.source = source;
             this.generatedAt = generatedAt;
             this.snapshotPath = snapshotPath;
+        }
+    }
+
+    private static class IndexedInsightCardEntry {
+        private final int index;
+        private final Map<String, Object> entry;
+
+        private IndexedInsightCardEntry(int index, Map<String, Object> entry) {
+            this.index = index;
+            this.entry = entry;
         }
     }
 }

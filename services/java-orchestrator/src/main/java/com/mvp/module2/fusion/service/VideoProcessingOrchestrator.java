@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient.*;
+import com.mvp.module2.fusion.service.watchdog.TaskProgressWatchdogBridge;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -109,6 +110,9 @@ public class VideoProcessingOrchestrator {
     
     @Autowired
     private ModuleConfigService configService;
+
+    @Autowired
+    private TaskProgressWatchdogBridge taskProgressWatchdogBridge;
     
     // ????
     private final ConcurrentHashMap<String, TaskContext> activeTasks = new ConcurrentHashMap<>();
@@ -141,6 +145,12 @@ public class VideoProcessingOrchestrator {
 
     @Value("${video.download.poll-interval-seconds:5}")
     private int downloadPollIntervalSec;
+
+    @Value("${video.download.watchdog-scan-depth:2}")
+    private int downloadWatchdogScanDepth;
+
+    @Value("${video.download.watchdog-min-rescan-ms:1000}")
+    private long downloadWatchdogMinRescanMs;
     
     // ???? (Functional Interface)
     @FunctionalInterface
@@ -181,6 +191,7 @@ public class VideoProcessingOrchestrator {
         String metricsOutputDir = outputDir;
         String metricsVideoPath = videoUrl;
         String metricsInputVideoUrl = videoUrl;
+        String metricsVideoTitle = "";
         Map<String, Long> stageTimingsMs = new LinkedHashMap<>();
         Map<String, Object> flowFlags = new LinkedHashMap<>();
 
@@ -268,20 +279,48 @@ public class VideoProcessingOrchestrator {
             }
 
             DynamicTimeoutCalculator.TimeoutConfig timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
+            TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
+                (progress, message) -> updateProgress(taskId, progress, message);
 
             updateProgress(taskId, 0.15, "语音转录中...");
             long transcribeStart = System.currentTimeMillis();
-            TranscribeResult tr = grpcClient.transcribeVideoAsync(taskId, videoPath, "auto", timeouts.getTranscribeTimeoutSec())
-                .get(timeouts.getTranscribeTimeoutSec() + 60, TimeUnit.SECONDS);
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle transcribeMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "transcribe", taskSignalEmitter);
+            TranscribeResult tr;
+            try {
+                tr = grpcClient.transcribeVideo(
+                    taskId,
+                    videoPath,
+                    "auto",
+                    timeouts.getTranscribeTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, transcribeMonitor, taskSignalEmitter);
+            }
             if (!tr.success) {
                 throw new RuntimeException("Transcribe failed: " + tr.errorMsg);
             }
             stageTimingsMs.put("transcribe", System.currentTimeMillis() - transcribeStart);
 
-            updateProgress(taskId, 0.25, "Stage1 文本结构化...");
+            updateProgress(taskId, 0.25, "文本结构化...");
             long stage1Start = System.currentTimeMillis();
-            Stage1Result s1 = grpcClient.processStage1Async(taskId, videoPath, tr.subtitlePath, outputDir, 6, timeouts.getStage1TimeoutSec())
-                .get(timeouts.getStage1TimeoutSec() + 60, TimeUnit.SECONDS);
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle stage1Monitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "stage1", taskSignalEmitter);
+            Stage1Result s1;
+            try {
+                s1 = grpcClient.processStage1(
+                    taskId,
+                    videoPath,
+                    tr.subtitlePath,
+                    outputDir,
+                    6,
+                    timeouts.getStage1TimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, stage1Monitor, taskSignalEmitter);
+            }
             if (!s1.success) {
                 throw new RuntimeException("Stage1 failed: " + s1.errorMsg);
             }
@@ -289,21 +328,29 @@ public class VideoProcessingOrchestrator {
 
             updateProgress(taskId, 0.35, "语义分割...");
             long phase2aStart = System.currentTimeMillis();
-            AnalyzeResult ar = grpcClient.analyzeSemanticUnitsAsync(
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle phase2aMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2a", taskSignalEmitter);
+            AnalyzeResult ar;
+            try {
+                ar = grpcClient.analyzeSemanticUnits(
                     taskId,
                     videoPath,
                     s1.step2JsonPath,
                     s1.step6JsonPath,
                     s1.sentenceTimestampsPath,
                     outputDir,
-                    timeouts.getPhase2aTimeoutSec())
-                .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
+                    timeouts.getPhase2aTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, phase2aMonitor, taskSignalEmitter);
+            }
             if (!ar.success) {
                 throw new RuntimeException("Phase2A failed: " + ar.errorMsg);
             }
             stageTimingsMs.put("phase2a_segmentation", System.currentTimeMillis() - phase2aStart);
 
-            updateProgress(taskId, 0.40, "语义分割LLM调用完成...");
+            updateProgress(taskId, 0.40, "语义分割完成...");
 
             ExtractionRequests materialRequests = null;
             JavaCVFFmpegService.ExtractionResult extractRes;
@@ -326,7 +373,7 @@ public class VideoProcessingOrchestrator {
 
             long legacyAnalysisStart = System.currentTimeMillis();
             if (materialRequests == null) {
-                updateProgress(taskId, 0.45, "执行级联并行分析 (CV/LLM Legacy)...");
+                updateProgress(taskId, 0.45, "执行级联并行分析...");
                 materialRequests = runLegacyAnalysis(taskId, videoPath, ar, s1, outputDir, timeouts);
                 usedLegacyFlow = true;
             }
@@ -365,7 +412,13 @@ public class VideoProcessingOrchestrator {
             updateProgress(taskId, 0.90, "生成最终文档...");
             long assembleStart = System.currentTimeMillis();
             String title = resolveDocumentTitle(downloadResult, outputDir, videoPath);
-            AssembleResult assembleRes = grpcClient.assembleRichTextAsync(
+            metricsVideoTitle = title;
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle phase2bMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2b", taskSignalEmitter);
+            AssembleResult assembleRes;
+            try {
+                assembleRes = grpcClient.assembleRichText(
                     taskId,
                     videoPath,
                     ar,
@@ -373,8 +426,11 @@ public class VideoProcessingOrchestrator {
                     outputDir + "/assets",
                     outputDir,
                     title,
-                    timeouts.getPhase2bTimeoutSec())
-                .get(timeouts.getPhase2bTimeoutSec() + 60, TimeUnit.SECONDS);
+                    timeouts.getPhase2bTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, phase2bMonitor, taskSignalEmitter);
+            }
 
             if (!assembleRes.success) {
                 throw new RuntimeException("Assemble failed: " + assembleRes.errorMsg);
@@ -411,6 +467,7 @@ public class VideoProcessingOrchestrator {
                     metricsOutputDir,
                     metricsVideoPath,
                     metricsInputVideoUrl,
+                    metricsVideoTitle,
                     result,
                     stageTimingsMs,
                     flowFlags
@@ -442,6 +499,7 @@ public class VideoProcessingOrchestrator {
             String outputDir,
             String videoPath,
             String inputVideoUrl,
+            String videoTitle,
             ProcessingResult result,
             Map<String, Long> stageTimingsMs,
             Map<String, Object> flowFlags
@@ -465,6 +523,7 @@ public class VideoProcessingOrchestrator {
             payload.put("success", result != null && result.success);
             payload.put("error_message", result != null ? (result.errorMessage != null ? result.errorMessage : "") : "");
             payload.put("input_video_url", inputVideoUrl != null ? inputVideoUrl : "");
+            payload.put("video_title", videoTitle != null ? videoTitle : "");
             payload.put("video_path", videoPath != null ? videoPath : "");
             payload.put("output_dir", outputDir);
             payload.put("result_markdown_path", result != null ? (result.markdownPath != null ? result.markdownPath : "") : "");
@@ -1460,8 +1519,45 @@ public class VideoProcessingOrchestrator {
     // Classifier now reads subtitles directly from step2_path
     
     private void updateProgress(String taskId, double progress, String message) {
-        if (progressCallback != null) progressCallback.onProgress(taskId, progress, message);
-        logger.info("[{}] {} ({}%)", taskId, message, (int)(progress * 100));
+        String normalizedMessage = normalizeProgressMessage(progress, message);
+        if (progressCallback != null) {
+            progressCallback.onProgress(taskId, progress, normalizedMessage);
+        }
+        logger.info("[{}] {} ({}%)", taskId, normalizedMessage, (int)(progress * 100));
+    }
+
+    /**
+     * 统一进度文案，保证移动端能拿到可感知的阶段语义。
+     * 优先保留有意义的后端原文案，缺失或过于笼统时按进度段补齐。
+     */
+    private String normalizeProgressMessage(double progress, String rawMessage) {
+        String message = rawMessage != null ? rawMessage.trim() : "";
+        if (!message.isEmpty() && !isGenericProgressMessage(message)) {
+            return message;
+        }
+        if (progress <= 0.10) {
+            return "正在上传视频...";
+        }
+        if (progress <= 0.28) {
+            return "正在提取音频片段...";
+        }
+        if (progress <= 0.82) {
+            return "AI正在深度思考（预计1分钟）...";
+        }
+        if (progress < 0.99) {
+            return "正在进行Markdown排版...";
+        }
+        return "正在完成结果收尾...";
+    }
+
+    private boolean isGenericProgressMessage(String message) {
+        String lower = message.toLowerCase(Locale.ROOT);
+        return lower.equals("processing")
+                || lower.equals("running")
+                || lower.equals("queued")
+                || lower.equals("pending")
+                || message.equals("处理中")
+                || message.equals("排队中");
     }
 
     private DownloadResult waitForDownloadWithLease(
@@ -1473,6 +1569,12 @@ public class VideoProcessingOrchestrator {
             int hardTimeoutSec,
             int idleTimeoutSec,
             int pollIntervalSec) {
+        String heartbeatOutputDir = firstNonBlank(predictedDownloadDir, outputDir);
+        TaskProgressWatchdogBridge.SignalEmitter signalEmitter =
+            (progress, message) -> updateProgress(taskId, progress, message);
+        taskProgressWatchdogBridge.resetTask(taskId);
+        TaskProgressWatchdogBridge.MonitorHandle downloadMonitor =
+            taskProgressWatchdogBridge.startMonitor(taskId, heartbeatOutputDir, "download", signalEmitter);
         CompletableFuture<DownloadResult> downloadFuture = grpcClient.downloadVideoAsync(
             taskId,
             videoUrl,
@@ -1483,63 +1585,66 @@ public class VideoProcessingOrchestrator {
         long hardDeadlineAt = startAt + TimeUnit.SECONDS.toMillis(hardTimeoutSec);
         long idleDeadlineAt = startAt + TimeUnit.SECONDS.toMillis(idleTimeoutSec);
         List<String> watchDirs = buildDownloadWatchDirs(outputDir, predictedDownloadDir);
-        DownloadActivitySnapshot lastActivity = observeDownloadActivity(watchDirs);
+        DownloadActivitySnapshot lastActivity = observeDownloadActivity(watchDirs, null, startAt);
         long nextLeaseLogAt = 0L;
-
-        while (true) {
-            try {
-                return downloadFuture.get(pollIntervalSec, TimeUnit.SECONDS);
-            } catch (TimeoutException ignored) {
-                long now = System.currentTimeMillis();
-                DownloadActivitySnapshot observedActivity = observeDownloadActivity(watchDirs);
-                if (observedActivity.isChangedFrom(lastActivity)) {
-                    lastActivity = observedActivity;
-                    idleDeadlineAt = now + TimeUnit.SECONDS.toMillis(idleTimeoutSec);
-                    if (now >= nextLeaseLogAt) {
-                        logger.info(
-                            "[{}] Download lease renewed: bytes={}, files={}, latest_mtime={}, watch_dirs={}, hard_timeout={}s, idle_timeout={}s",
-                            taskId,
-                            observedActivity.totalBytes,
-                            observedActivity.fileCount,
-                            observedActivity.latestModifiedMs,
-                            String.join(" | ", watchDirs),
-                            hardTimeoutSec,
-                            idleTimeoutSec
-                        );
-                        nextLeaseLogAt = now + TimeUnit.SECONDS.toMillis(30);
+        try {
+            while (true) {
+                try {
+                    return downloadFuture.get(pollIntervalSec, TimeUnit.SECONDS);
+                } catch (TimeoutException ignored) {
+                    long now = System.currentTimeMillis();
+                    DownloadActivitySnapshot observedActivity = observeDownloadActivity(watchDirs, lastActivity, now);
+                    if (observedActivity.isChangedFrom(lastActivity)) {
+                        lastActivity = observedActivity;
+                        idleDeadlineAt = now + TimeUnit.SECONDS.toMillis(idleTimeoutSec);
+                        if (now >= nextLeaseLogAt) {
+                            logger.info(
+                                "[{}] Download lease renewed: bytes={}, files={}, latest_mtime={}, watch_dirs={}, hard_timeout={}s, idle_timeout={}s",
+                                taskId,
+                                observedActivity.totalBytes,
+                                observedActivity.fileCount,
+                                observedActivity.latestModifiedMs,
+                                String.join(" | ", watchDirs),
+                                hardTimeoutSec,
+                                idleTimeoutSec
+                            );
+                            nextLeaseLogAt = now + TimeUnit.SECONDS.toMillis(30);
+                        }
                     }
-                }
-                if (now >= hardDeadlineAt) {
-                    downloadFuture.cancel(true);
+                    if (now >= hardDeadlineAt) {
+                        downloadFuture.cancel(true);
+                        throw new RuntimeException(
+                            String.format("Download hard timeout exceeded (%ds)", hardTimeoutSec)
+                        );
+                    }
+                    if (now >= idleDeadlineAt) {
+                        downloadFuture.cancel(true);
+                        throw new RuntimeException(
+                            String.format(
+                                "Download idle timeout exceeded (%ds without file activity in dirs: %s; bytes=%d, files=%d, latest_mtime=%d)",
+                                idleTimeoutSec,
+                                watchDirs.isEmpty() ? "(none)" : String.join(" | ", watchDirs),
+                                lastActivity.totalBytes,
+                                lastActivity.fileCount,
+                                lastActivity.latestModifiedMs
+                            )
+                        );
+                    }
+                } catch (InterruptedException interruptedError) {
+                    Thread.currentThread().interrupt();
                     throw new RuntimeException(
-                        String.format("Download hard timeout exceeded (%ds)", hardTimeoutSec)
+                        "Download stage interrupted while waiting for Python worker response",
+                        interruptedError
+                    );
+                } catch (ExecutionException executionError) {
+                    throw new RuntimeException(
+                        "Download stage execution failed: " + extractThrowableMessage(executionError),
+                        executionError
                     );
                 }
-                if (now >= idleDeadlineAt) {
-                    downloadFuture.cancel(true);
-                    throw new RuntimeException(
-                        String.format(
-                            "Download idle timeout exceeded (%ds without file activity in dirs: %s; bytes=%d, files=%d, latest_mtime=%d)",
-                            idleTimeoutSec,
-                            watchDirs.isEmpty() ? "(none)" : String.join(" | ", watchDirs),
-                            lastActivity.totalBytes,
-                            lastActivity.fileCount,
-                            lastActivity.latestModifiedMs
-                        )
-                    );
-                }
-            } catch (InterruptedException interruptedError) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException(
-                    "Download stage interrupted while waiting for Python worker response",
-                    interruptedError
-                );
-            } catch (ExecutionException executionError) {
-                throw new RuntimeException(
-                    "Download stage execution failed: " + extractThrowableMessage(executionError),
-                    executionError
-                );
             }
+        } finally {
+            taskProgressWatchdogBridge.stopMonitor(taskId, downloadMonitor, signalEmitter);
         }
     }
 
@@ -1569,6 +1674,10 @@ public class VideoProcessingOrchestrator {
     private String buildDownloadTaskDirSource(String videoUrl) {
         String bilibiliVideoId = extractBilibiliVideoId(videoUrl);
         if (bilibiliVideoId != null && !bilibiliVideoId.isBlank()) {
+            Integer bilibiliEpisodeIndex = extractBilibiliEpisodeIndex(videoUrl);
+            if (bilibiliEpisodeIndex != null && bilibiliEpisodeIndex > 0) {
+                return bilibiliVideoId + "_" + bilibiliEpisodeIndex;
+            }
             return bilibiliVideoId;
         }
         return videoUrl == null ? "" : videoUrl;
@@ -1627,6 +1736,33 @@ public class VideoProcessingOrchestrator {
             || normalized.endsWith(".bilibili.com")
             || normalized.equals("b23.tv")
             || normalized.endsWith(".b23.tv");
+    }
+
+    private Integer extractBilibiliEpisodeIndex(String videoUrl) {
+        if (videoUrl == null || videoUrl.isBlank()) {
+            return null;
+        }
+        try {
+            URI parsed = URI.create(videoUrl);
+            if (!isBilibiliHost(parsed.getHost())) {
+                return null;
+            }
+            Map<String, String> query = parseQueryParams(parsed.getRawQuery());
+            String rawEpisode = query.getOrDefault("p", "");
+            if (rawEpisode.isBlank()) {
+                rawEpisode = query.getOrDefault("P", "");
+            }
+            if (rawEpisode.isBlank()) {
+                return null;
+            }
+            int value = Integer.parseInt(rawEpisode);
+            if (value > 0) {
+                return value;
+            }
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private Map<String, String> parseQueryParams(String rawQuery) {
@@ -1719,13 +1855,20 @@ public class VideoProcessingOrchestrator {
         return new ArrayList<>(watchDirs);
     }
 
-    private DownloadActivitySnapshot observeDownloadActivity(List<String> watchDirs) {
+    private DownloadActivitySnapshot observeDownloadActivity(
+            List<String> watchDirs,
+            DownloadActivitySnapshot previous,
+            long nowMs) {
+        if (watchDirs == null || watchDirs.isEmpty()) {
+            return new DownloadActivitySnapshot(0L, 0L, 0L, new LinkedHashMap<>());
+        }
+        Map<String, DownloadDirActivity> perDir = new LinkedHashMap<>();
         long totalBytes = 0L;
         long fileCount = 0L;
         long latestModifiedMs = 0L;
-        if (watchDirs == null || watchDirs.isEmpty()) {
-            return new DownloadActivitySnapshot(totalBytes, fileCount, latestModifiedMs);
-        }
+        int scanDepth = Math.max(1, downloadWatchdogScanDepth);
+        long minRescanMs = Math.max(200L, downloadWatchdogMinRescanMs);
+
         for (String dirPath : watchDirs) {
             if (dirPath == null || dirPath.isBlank()) {
                 continue;
@@ -1735,42 +1878,120 @@ public class VideoProcessingOrchestrator {
                 if (!Files.isDirectory(dir)) {
                     continue;
                 }
-                try (Stream<Path> stream = Files.walk(dir)) {
+                String dirKey = dir.toString();
+                DownloadDirActivity oldDir = previous != null ? previous.perDir.get(dirKey) : null;
+                long dirMtime = safeReadLastModifiedMillis(dir);
+
+                if (oldDir != null) {
+                    boolean withinRescanWindow = nowMs - oldDir.scannedAtMs < minRescanMs;
+                    boolean directoryUnchanged = dirMtime > 0L
+                        && dirMtime == oldDir.directoryModifiedMs;
+                    if (withinRescanWindow || directoryUnchanged) {
+                        DownloadDirActivity reused = oldDir.withScannedAt(nowMs);
+                        perDir.put(dirKey, reused);
+                        totalBytes += reused.totalBytes;
+                        fileCount += reused.fileCount;
+                        latestModifiedMs = Math.max(latestModifiedMs, reused.latestModifiedMs);
+                        continue;
+                    }
+                }
+
+                long dirBytes = 0L;
+                long dirFiles = 0L;
+                long dirLatestModifiedMs = Math.max(0L, dirMtime);
+                try (Stream<Path> stream = Files.walk(dir, scanDepth)) {
                     Iterator<Path> iterator = stream.iterator();
                     while (iterator.hasNext()) {
                         Path file = iterator.next();
                         if (!Files.isRegularFile(file)) {
                             continue;
                         }
-                        fileCount += 1L;
+                        dirFiles += 1L;
                         try {
-                            totalBytes += Math.max(0L, Files.size(file));
+                            dirBytes += Math.max(0L, Files.size(file));
                         } catch (Exception ignored) {
                             // 单文件大小读取失败不影响整体活性检测
                         }
-                        try {
-                            latestModifiedMs = Math.max(latestModifiedMs, Files.getLastModifiedTime(file).toMillis());
-                        } catch (Exception ignored) {
-                            // 单文件 mtime 读取失败不影响整体活性检测
-                        }
+                        long fileMtime = safeReadLastModifiedMillis(file);
+                        dirLatestModifiedMs = Math.max(dirLatestModifiedMs, fileMtime);
                     }
                 }
+
+                DownloadDirActivity current = new DownloadDirActivity(
+                    dirBytes,
+                    dirFiles,
+                    dirLatestModifiedMs,
+                    Math.max(0L, dirMtime),
+                    nowMs
+                );
+                perDir.put(dirKey, current);
+                totalBytes += current.totalBytes;
+                fileCount += current.fileCount;
+                latestModifiedMs = Math.max(latestModifiedMs, current.latestModifiedMs);
             } catch (Exception ignored) {
                 // 目录不可访问时忽略，继续监控其余目录
             }
         }
-        return new DownloadActivitySnapshot(totalBytes, fileCount, latestModifiedMs);
+        return new DownloadActivitySnapshot(totalBytes, fileCount, latestModifiedMs, perDir);
+    }
+
+    private long safeReadLastModifiedMillis(Path path) {
+        if (path == null) {
+            return 0L;
+        }
+        try {
+            return Math.max(0L, Files.getLastModifiedTime(path).toMillis());
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private static final class DownloadDirActivity {
+        private final long totalBytes;
+        private final long fileCount;
+        private final long latestModifiedMs;
+        private final long directoryModifiedMs;
+        private final long scannedAtMs;
+
+        private DownloadDirActivity(
+                long totalBytes,
+                long fileCount,
+                long latestModifiedMs,
+                long directoryModifiedMs,
+                long scannedAtMs) {
+            this.totalBytes = totalBytes;
+            this.fileCount = fileCount;
+            this.latestModifiedMs = latestModifiedMs;
+            this.directoryModifiedMs = directoryModifiedMs;
+            this.scannedAtMs = scannedAtMs;
+        }
+
+        private DownloadDirActivity withScannedAt(long scannedAtMs) {
+            return new DownloadDirActivity(
+                totalBytes,
+                fileCount,
+                latestModifiedMs,
+                directoryModifiedMs,
+                scannedAtMs
+            );
+        }
     }
 
     private static final class DownloadActivitySnapshot {
         private final long totalBytes;
         private final long fileCount;
         private final long latestModifiedMs;
+        private final Map<String, DownloadDirActivity> perDir;
 
-        private DownloadActivitySnapshot(long totalBytes, long fileCount, long latestModifiedMs) {
+        private DownloadActivitySnapshot(
+                long totalBytes,
+                long fileCount,
+                long latestModifiedMs,
+                Map<String, DownloadDirActivity> perDir) {
             this.totalBytes = totalBytes;
             this.fileCount = fileCount;
             this.latestModifiedMs = latestModifiedMs;
+            this.perDir = perDir != null ? perDir : Collections.emptyMap();
         }
 
         private boolean isChangedFrom(DownloadActivitySnapshot previous) {
@@ -1860,10 +2081,13 @@ public class VideoProcessingOrchestrator {
     private ExtractionRequests tryVLAnalysis(String taskId, String videoPath, AnalyzeResult ar, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) {
         updateProgress(taskId, 0.40, "执行 VL 视觉语言模型分析...");
         try {
-            VLAnalysisResult vlResult = grpcClient.analyzeWithVLAsync(
-                taskId, videoPath, ar, outputDir, 
-                timeouts.getPhase2aTimeoutSec())
-                .get(timeouts.getPhase2aTimeoutSec() + 60, TimeUnit.SECONDS);
+            VLAnalysisResult vlResult = grpcClient.analyzeWithVL(
+                taskId,
+                videoPath,
+                ar,
+                outputDir,
+                timeouts.getPhase2aTimeoutSec()
+            );
 
             if (vlResult.success && vlResult.vlEnabled && !vlResult.usedFallback) {
                 logger.info("[{}] VL Analysis Success! Skipping legacy flow.", taskId);
@@ -1911,7 +2135,7 @@ public class VideoProcessingOrchestrator {
         // 3. Generate Material Requests
         updateProgress(taskId, 0.70, "生成素材清单...");
         List<MaterialGenerationInput> matInputs = convertToMatInputs(unitsList, analysisResults.cvResults);
-        MaterialGenerationResult matRes = grpcClient.generateMaterialRequestsAsync(taskId, matInputs, videoPath, 600).get(10, TimeUnit.MINUTES);
+        MaterialGenerationResult matRes = grpcClient.generateMaterialRequests(taskId, matInputs, videoPath, 600);
         if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
 
         // 4. Merge Requests
@@ -1954,8 +2178,7 @@ public class VideoProcessingOrchestrator {
         updateProgress(taskId, 0.45, "执行级联并行分析 (CV/CF 混合调度)...");
         
         Map<String, CVValidationUnitResult> cvResults = new ConcurrentHashMap<>();
-        List<KnowledgeResultItem> classResults = Collections.synchronizedList(new ArrayList<>());
-        List<CompletableFuture<?>> allFutures = Collections.synchronizedList(new ArrayList<>());
+        List<KnowledgeResultItem> classResults = new ArrayList<>();
         List<CompletableFuture<Boolean>> cvFuturesList = new ArrayList<>();
 
         // A. Convert ALL units to CV Inputs & Sort
@@ -1990,23 +2213,6 @@ public class VideoProcessingOrchestrator {
             if (!allInputs.isEmpty()) {
                 List<CompletableFuture<Boolean>> cvFutures = cvOrchestrator.validateBatchesAsync(taskId, videoPath, allInputs, outputDir, unitResult -> {
                     cvResults.put(unitResult.unitId, unitResult);
-                    
-                    // Immediate Classification Chain
-                    List<Map<String, Object>> unitToClassify = unitsList.stream()
-                        .filter(u -> unitResult.unitId.equals((String)u.get("unit_id")))
-                        .collect(Collectors.toList());
-
-                    if (!unitToClassify.isEmpty()) {
-                        List<ClassificationInput> classInputs = convertToClassInputs(unitToClassify, cvResults);
-                        CompletableFuture<Void> classFuture = knowledgeOrchestrator.classifyBatchAsync(taskId, classInputs, step2JsonPath)
-                            .thenAccept(classBatchRes -> {
-                                if (classBatchRes.success && classBatchRes.results != null) {
-                                    classResults.addAll(classBatchRes.results);
-                                    logger.info("[{}] Incremental classification done for: {}", taskId, unitResult.unitId);
-                                }
-                            });
-                        allFutures.add(classFuture);
-                    }
                 });
                 if (cvFutures != null) cvFuturesList.addAll(cvFutures);
             }
@@ -2015,14 +2221,17 @@ public class VideoProcessingOrchestrator {
                 CompletableFuture.allOf(cvFuturesList.toArray(new CompletableFuture[0])).join();
             }
 
-            // Wait for all classification tasks
-            while (true) {
-                CompletableFuture<?>[] pending;
-                synchronized(allFutures) {
-                    pending = allFutures.stream().filter(f -> !f.isDone()).toArray(CompletableFuture[]::new);
+            if (!cvResults.isEmpty()) {
+                List<ClassificationInput> classInputs = convertToClassInputs(unitsList, cvResults);
+                List<KnowledgeResultItem> batchRes = knowledgeOrchestrator.classifyParallel(
+                    taskId,
+                    classInputs,
+                    step2JsonPath,
+                    outputDir
+                );
+                if (batchRes != null && !batchRes.isEmpty()) {
+                    classResults.addAll(batchRes);
                 }
-                if (pending.length == 0) break;
-                CompletableFuture.allOf(pending).join();
             }
         } else if (!classCacheHit) {
             // CV Hit but Class Miss

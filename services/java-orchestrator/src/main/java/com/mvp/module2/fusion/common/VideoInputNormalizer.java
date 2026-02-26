@@ -120,7 +120,12 @@ public final class VideoInputNormalizer {
         String lower = normalizedUrl.toLowerCase(Locale.ROOT);
         Matcher matcher = BV_PATTERN.matcher(normalizedUrl);
         if (lower.contains("bilibili.com") && matcher.find()) {
-            return "https://www.bilibili.com/video/" + keepBvIdOriginalCase(matcher.group());
+            String canonical = "https://www.bilibili.com/video/" + keepBvIdOriginalCase(matcher.group());
+            int episodeIndex = extractPositiveIntQueryParam(normalizedUrl, "p");
+            if (episodeIndex > 0) {
+                return canonical + "?p=" + episodeIndex;
+            }
+            return canonical;
         }
         return normalizedUrl;
     }
@@ -131,5 +136,41 @@ public final class VideoInputNormalizer {
         }
         // 保留用户输入中的 BV 原始大小写，避免因大小写改写导致平台提取失败。
         return rawBvId;
+    }
+
+    private static int extractPositiveIntQueryParam(String rawUrl, String keyName) {
+        if (rawUrl == null || rawUrl.isBlank() || keyName == null || keyName.isBlank()) {
+            return 0;
+        }
+        try {
+            URI uri = URI.create(rawUrl);
+            String query = uri.getRawQuery();
+            if (query == null || query.isBlank()) {
+                return 0;
+            }
+            String[] pairs = query.split("&");
+            for (String pair : pairs) {
+                if (pair == null || pair.isBlank()) {
+                    continue;
+                }
+                int equalsAt = pair.indexOf('=');
+                String rawKey = equalsAt >= 0 ? pair.substring(0, equalsAt) : pair;
+                String rawValue = equalsAt >= 0 ? pair.substring(equalsAt + 1) : "";
+                if (!keyName.equalsIgnoreCase(rawKey)) {
+                    continue;
+                }
+                try {
+                    int value = Integer.parseInt(rawValue);
+                    if (value > 0) {
+                        return value;
+                    }
+                } catch (NumberFormatException ignored) {
+                    return 0;
+                }
+            }
+            return 0;
+        } catch (Exception ignored) {
+            return 0;
+        }
     }
 }

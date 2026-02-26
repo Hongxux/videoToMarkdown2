@@ -6,72 +6,61 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * 多用户任务队列管理器
- * 
- * 功能：
- * 1. 优先级队列（VIP用户优先）
- * 2. 公平调度（防止单用户独占）
- * 3. 并发控制（限制同时处理任务数）
- * 4. 任务状态跟踪
+ * 多用户任务队列管理器。
+ * 目标是提供可观测、可取消、可并发限流的任务状态机。
  */
 @Component
 public class TaskQueueManager {
-    
+
     private static final Logger logger = LoggerFactory.getLogger(TaskQueueManager.class);
-    
-    // 优先级队列
+
     private final PriorityBlockingQueue<TaskEntry> taskQueue;
-    
-    // 任务状态存储
-    private final ConcurrentHashMap<String, TaskEntry> allTasks = new ConcurrentHashMap<>();
-    
-    // 用户任务计数器（用于公平调度）
-    private final ConcurrentHashMap<String, AtomicInteger> userTaskCounts = new ConcurrentHashMap<>();
-    
-    // 全局任务ID生成器
+    private final Map<String, TaskEntry> allTasks = new HashMap<>();
+    private final Map<String, AtomicInteger> userTaskCounts = new HashMap<>();
     private final AtomicLong taskIdGenerator = new AtomicLong(0);
-    
-    // 并发控制
     private final Semaphore processingSlots;
     private final int maxConcurrentTasks;
-    
-    // 处理线程池
     private final ExecutorService executorService;
-    
-    /**
-     * 任务优先级
-     */
+
     public enum Priority {
         LOW(0),
         NORMAL(1),
         HIGH(2),
         VIP(3);
-        
+
         private final int value;
-        Priority(int value) { this.value = value; }
-        public int getValue() { return value; }
+
+        Priority(int value) {
+            this.value = value;
+        }
+
+        public int getValue() {
+            return value;
+        }
     }
-    
-    /**
-     * 任务状态
-     */
+
     public enum TaskStatus {
-        QUEUED,         // 排队中
-        PROCESSING,     // 处理中
-        COMPLETED,      // 已完成
-        FAILED,         // 失败
-        CANCELLED       // 已取消
+        QUEUED,
+        PROCESSING,
+        COMPLETED,
+        FAILED,
+        CANCELLED
     }
-    
-    /**
-     * 任务条目
-     */
+
     public static class TaskEntry implements Comparable<TaskEntry> {
         public String taskId;
         public String userId;
@@ -86,38 +75,33 @@ public class TaskQueueManager {
         public String statusMessage;
         public String resultPath;
         public String errorMessage;
-        
-        // 用于优先级队列排序
+        public boolean resourcesReleased;
+
         @Override
         public int compareTo(TaskEntry other) {
-            // 1. 优先级高的优先
             int priorityCompare = Integer.compare(other.priority.getValue(), this.priority.getValue());
-            if (priorityCompare != 0) return priorityCompare;
-            
-            // 2. 创建时间早的优先
+            if (priorityCompare != 0) {
+                return priorityCompare;
+            }
             return this.createdAt.compareTo(other.createdAt);
         }
     }
-    
+
     public TaskQueueManager() {
-        this(4); // 默认最多4个并发任务
+        this(4);
     }
-    
+
     public TaskQueueManager(int maxConcurrentTasks) {
         this.maxConcurrentTasks = maxConcurrentTasks;
         this.processingSlots = new Semaphore(maxConcurrentTasks);
         this.taskQueue = new PriorityBlockingQueue<>();
         this.executorService = Executors.newFixedThreadPool(maxConcurrentTasks);
-        
         logger.info("TaskQueueManager initialized with {} concurrent slots", maxConcurrentTasks);
     }
-    
-    /**
-     * 提交新任务
-     */
-    public TaskEntry submitTask(String userId, String videoUrl, String outputDir, Priority priority) {
+
+    public synchronized TaskEntry submitTask(String userId, String videoUrl, String outputDir, Priority priority) {
         String taskId = generateTaskId();
-        
+
         TaskEntry entry = new TaskEntry();
         entry.taskId = taskId;
         entry.userId = userId;
@@ -128,120 +112,140 @@ public class TaskQueueManager {
         entry.createdAt = Instant.now();
         entry.progress = 0.0;
         entry.statusMessage = "排队中";
-        
-        // 记录任务
+        entry.resourcesReleased = false;
+
         allTasks.put(taskId, entry);
         taskQueue.offer(entry);
-        
-        // 更新用户任务计数
-        userTaskCounts.computeIfAbsent(userId, k -> new AtomicInteger(0)).incrementAndGet();
-        
+        userTaskCounts.computeIfAbsent(userId, key -> new AtomicInteger(0)).incrementAndGet();
+
         logger.info("Task submitted: {} by user {} (priority={})", taskId, userId, priority);
-        
         return entry;
     }
-    
-    /**
-     * 获取下一个待处理任务
-     */
+
     public TaskEntry pollNextTask(long timeout, TimeUnit unit) throws InterruptedException {
-        // 获取处理槽
-        if (processingSlots.tryAcquire(timeout, unit)) {
-            TaskEntry task = taskQueue.poll(timeout, unit);
-            if (task != null) {
-                task.status = TaskStatus.PROCESSING;
-                task.startedAt = Instant.now();
-                task.statusMessage = "处理中";
-                return task;
-            } else {
-                processingSlots.release();
-            }
+        if (!processingSlots.tryAcquire(timeout, unit)) {
+            return null;
         }
-        return null;
-    }
-    
-    /**
-     * 标记任务完成
-     */
-    public void completeTask(String taskId, String resultPath) {
-        TaskEntry task = allTasks.get(taskId);
-        if (task != null) {
-            task.status = TaskStatus.COMPLETED;
-            task.completedAt = Instant.now();
-            task.progress = 1.0;
-            task.statusMessage = "处理完成";
-            task.resultPath = resultPath;
-            
+        TaskEntry task = taskQueue.poll(timeout, unit);
+        if (task == null) {
             processingSlots.release();
-            decrementUserTaskCount(task.userId);
-            
-            logger.info("Task completed: {} ({}ms)", taskId, 
-                task.completedAt.toEpochMilli() - task.startedAt.toEpochMilli());
+            return null;
         }
+        if (task.status == TaskStatus.CANCELLED) {
+            releaseTaskResources(task);
+            return null;
+        }
+        task.status = TaskStatus.PROCESSING;
+        task.startedAt = Instant.now();
+        task.statusMessage = "处理中";
+        return task;
     }
-    
-    /**
-     * 标记任务失败
-     */
-    public void failTask(String taskId, String errorMessage) {
+
+    public synchronized void completeTask(String taskId, String resultPath) {
         TaskEntry task = allTasks.get(taskId);
-        if (task != null) {
-            String userMessage = UserFacingErrorMapper.toUserMessage(errorMessage);
-            task.status = TaskStatus.FAILED;
+        if (task == null) {
+            return;
+        }
+        if (task.status == TaskStatus.CANCELLED) {
+            logger.info("Skip completion because task already cancelled: {}", taskId);
+            releaseTaskResources(task);
+            return;
+        }
+        task.status = TaskStatus.COMPLETED;
+        task.completedAt = Instant.now();
+        task.progress = 1.0;
+        task.statusMessage = "处理完成";
+        task.resultPath = resultPath;
+        releaseTaskResources(task);
+
+        long elapsedMs = task.startedAt != null
+                ? task.completedAt.toEpochMilli() - task.startedAt.toEpochMilli()
+                : -1L;
+        logger.info("Task completed: {} ({}ms)", taskId, elapsedMs);
+    }
+
+    public synchronized void failTask(String taskId, String errorMessage) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return;
+        }
+        if (task.status == TaskStatus.CANCELLED) {
+            logger.info("Skip failure because task already cancelled: {}", taskId);
+            releaseTaskResources(task);
+            return;
+        }
+        String userMessage = UserFacingErrorMapper.toUserMessage(errorMessage);
+        task.status = TaskStatus.FAILED;
+        task.completedAt = Instant.now();
+        task.statusMessage = userMessage;
+        task.errorMessage = userMessage;
+        releaseTaskResources(task);
+
+        logger.error("Task failed: {} - rawError={}, userMessage={}", taskId, errorMessage, userMessage);
+    }
+
+    /**
+     * 取消策略：
+     * 队列中任务立即移除；
+     * 处理中任务标记为 CANCELLED，由 worker 在安全点收敛并 finalize。
+     */
+    public synchronized boolean cancelTask(String taskId) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return false;
+        }
+        if (task.status != TaskStatus.QUEUED && task.status != TaskStatus.PROCESSING) {
+            return false;
+        }
+        TaskStatus previousStatus = task.status;
+        if (previousStatus == TaskStatus.QUEUED) {
+            taskQueue.remove(task);
+        }
+        task.status = TaskStatus.CANCELLED;
+        task.completedAt = Instant.now();
+        task.statusMessage = "任务已取消，后续步骤已暂停";
+        task.errorMessage = null;
+
+        if (previousStatus == TaskStatus.QUEUED) {
+            releaseTaskResources(task);
+        }
+
+        logger.info("Task cancelled: {}", taskId);
+        return true;
+    }
+
+    public synchronized void finalizeCancelledTask(String taskId) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null || task.status != TaskStatus.CANCELLED) {
+            return;
+        }
+        if (task.completedAt == null) {
             task.completedAt = Instant.now();
-            task.statusMessage = userMessage;
-            task.errorMessage = userMessage;
-            
-            processingSlots.release();
-            decrementUserTaskCount(task.userId);
-            
-            logger.error("Task failed: {} - rawError={}, userMessage={}", taskId, errorMessage, userMessage);
         }
+        task.statusMessage = "任务已取消，处理已停止";
+        releaseTaskResources(task);
+        logger.info("Task cancellation finalized: {}", taskId);
     }
-    
-    /**
-     * 取消任务
-     */
-    public boolean cancelTask(String taskId) {
+
+    public synchronized boolean isTaskCancelled(String taskId) {
         TaskEntry task = allTasks.get(taskId);
-        if (task != null && (task.status == TaskStatus.QUEUED || task.status == TaskStatus.PROCESSING)) {
-            task.status = TaskStatus.CANCELLED;
-            task.completedAt = Instant.now();
-            task.statusMessage = "已取消";
-            
-            if (task.status == TaskStatus.PROCESSING) {
-                processingSlots.release();
-            }
-            decrementUserTaskCount(task.userId);
-            
-            logger.info("Task cancelled: {}", taskId);
-            return true;
-        }
-        return false;
+        return task != null && task.status == TaskStatus.CANCELLED;
     }
-    
-    /**
-     * 更新任务进度
-     */
-    public void updateProgress(String taskId, double progress, String message) {
+
+    public synchronized void updateProgress(String taskId, double progress, String message) {
         TaskEntry task = allTasks.get(taskId);
-        if (task != null) {
-            task.progress = progress;
-            task.statusMessage = message;
+        if (task == null || task.status == TaskStatus.CANCELLED) {
+            return;
         }
+        task.progress = progress;
+        task.statusMessage = message;
     }
-    
-    /**
-     * 获取任务状态
-     */
-    public TaskEntry getTask(String taskId) {
+
+    public synchronized TaskEntry getTask(String taskId) {
         return allTasks.get(taskId);
     }
-    
-    /**
-     * 获取用户的所有任务
-     */
-    public List<TaskEntry> getUserTasks(String userId) {
+
+    public synchronized List<TaskEntry> getUserTasks(String userId) {
         List<TaskEntry> tasks = new ArrayList<>();
         for (TaskEntry task : allTasks.values()) {
             if (userId.equals(task.userId)) {
@@ -252,88 +256,77 @@ public class TaskQueueManager {
         return tasks;
     }
 
-    /**
-     * 获取所有任务（按创建时间倒序）。
-     * 用于移动端任务列表展示，避免前端必须知道 userId。
-     */
-    public List<TaskEntry> getAllTasks() {
+    public synchronized List<TaskEntry> getAllTasks() {
         List<TaskEntry> tasks = new ArrayList<>(allTasks.values());
         tasks.sort((a, b) -> b.createdAt.compareTo(a.createdAt));
         return tasks;
     }
-    
-    /**
-     * 获取队列统计
-     */
-    public Map<String, Object> getQueueStats() {
+
+    public synchronized Map<String, Object> getQueueStats() {
         Map<String, Object> stats = new HashMap<>();
         stats.put("queueSize", taskQueue.size());
         stats.put("processingCount", maxConcurrentTasks - processingSlots.availablePermits());
         stats.put("maxConcurrent", maxConcurrentTasks);
         stats.put("totalTasks", allTasks.size());
-        
-        // 状态分布
+
         Map<TaskStatus, Long> statusCounts = new HashMap<>();
         for (TaskEntry task : allTasks.values()) {
             statusCounts.merge(task.status, 1L, Long::sum);
         }
         stats.put("statusDistribution", statusCounts);
-        
         return stats;
     }
-    
-    /**
-     * 生成任务ID
-     */
-    private String generateTaskId() {
-        return String.format("VT_%d_%d", 
-            System.currentTimeMillis(), 
-            taskIdGenerator.incrementAndGet());
-    }
-    
-    /**
-     * 减少用户任务计数
-     */
-    private void decrementUserTaskCount(String userId) {
-        AtomicInteger count = userTaskCounts.get(userId);
-        if (count != null) {
-            count.decrementAndGet();
-        }
-    }
-    
-    /**
-     * 清理过期任务
-     */
-    public int cleanupExpiredTasks(long maxAgeHours) {
+
+    public synchronized int cleanupExpiredTasks(long maxAgeHours) {
         Instant cutoff = Instant.now().minusSeconds(maxAgeHours * 3600);
         int removed = 0;
-        
-        Iterator<Map.Entry<String, TaskEntry>> it = allTasks.entrySet().iterator();
-        while (it.hasNext()) {
-            TaskEntry task = it.next().getValue();
+        Iterator<Map.Entry<String, TaskEntry>> iterator = allTasks.entrySet().iterator();
+        while (iterator.hasNext()) {
+            TaskEntry task = iterator.next().getValue();
             if (task.completedAt != null && task.completedAt.isBefore(cutoff)) {
-                it.remove();
-                removed++;
+                iterator.remove();
+                removed += 1;
             }
         }
-        
         if (removed > 0) {
             logger.info("Cleaned up {} expired tasks", removed);
         }
         return removed;
     }
-    
-    /**
-     * 关闭队列管理器
-     */
+
     public void shutdown() {
         executorService.shutdown();
         try {
             if (!executorService.awaitTermination(30, TimeUnit.SECONDS)) {
                 executorService.shutdownNow();
             }
-        } catch (InterruptedException e) {
+        } catch (InterruptedException interruptedError) {
+            Thread.currentThread().interrupt();
             executorService.shutdownNow();
         }
+    }
+
+    private String generateTaskId() {
+        return String.format("VT_%d_%d", System.currentTimeMillis(), taskIdGenerator.incrementAndGet());
+    }
+
+    private void decrementUserTaskCount(String userId) {
+        AtomicInteger count = userTaskCounts.get(userId);
+        if (count == null) {
+            return;
+        }
+        int updated = count.decrementAndGet();
+        if (updated <= 0) {
+            userTaskCounts.remove(userId);
+        }
+    }
+
+    private void releaseTaskResources(TaskEntry task) {
+        if (task == null || task.resourcesReleased) {
+            return;
+        }
+        task.resourcesReleased = true;
+        processingSlots.release();
+        decrementUserTaskCount(task.userId);
     }
 }

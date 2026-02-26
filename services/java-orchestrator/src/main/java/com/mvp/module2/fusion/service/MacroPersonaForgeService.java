@@ -358,6 +358,7 @@ public class MacroPersonaForgeService {
         base.put("evolution_verdict", "初始画像已建立。");
         base.put("surface_context", defaultSurfaceContext());
         base.put("deep_soul_matrix", buildDeepSoulMatrixFromDimensions(dims));
+        base.put("negative_anchors", defaultNegativeAnchors());
         return base;
     }
 
@@ -388,6 +389,7 @@ public class MacroPersonaForgeService {
         profile.put("evolution_verdict", String.valueOf(source.getOrDefault("evolution_verdict", "画像已更新。")));
         profile.put("surface_context", extractSurfaceContext(source, fallback));
         profile.put("deep_soul_matrix", extractDeepSoulMatrix(source, fallback, dims));
+        profile.put("negative_anchors", extractNegativeAnchors(source, fallback));
         return profile;
     }
 
@@ -452,7 +454,7 @@ public class MacroPersonaForgeService {
 
     private List<String> dimensionSourceAliases(String id) {
         return switch (id) {
-            case "technical_depth" -> List.of("technical_depth", "tech_depth");
+            case "technical_depth" -> List.of("technical_depth", "tech_depth", "domain_hardcore_tendency");
             case "product_philosophy" -> List.of("product_philosophy", "commercial_acumen", "emotional_resonance");
             case "execution_pragmatism" -> List.of("execution_pragmatism", "pragmatism", "execution_bias");
             case "abstraction_preference" -> List.of("abstraction_preference", "first_principle", "system_thinking");
@@ -501,6 +503,41 @@ public class MacroPersonaForgeService {
         return surface;
     }
 
+    private Map<String, Object> extractNegativeAnchors(Map<String, Object> source, Map<String, Object> fallback) {
+        Map<String, Object> anchors = parseNegativeAnchors(source.get("negative_anchors"));
+        if (!anchors.isEmpty()) {
+            return anchors;
+        }
+        if (fallback != null && fallback != source) {
+            anchors = parseNegativeAnchors(fallback.get("negative_anchors"));
+            if (!anchors.isEmpty()) {
+                return anchors;
+            }
+        }
+        return defaultNegativeAnchors();
+    }
+
+    private Map<String, Object> parseNegativeAnchors(Object raw) {
+        if (!(raw instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        List<String> rejected = normalizeStringList(
+                firstNonNull(
+                        readByNormalizedKey(map, "rejected_concepts"),
+                        readByNormalizedKey(map, "rejectedConcepts")
+                )
+        );
+        Map<String, Object> anchors = new LinkedHashMap<>();
+        anchors.put("rejected_concepts", rejected);
+        return anchors;
+    }
+
+    private Map<String, Object> defaultNegativeAnchors() {
+        Map<String, Object> anchors = new LinkedHashMap<>();
+        anchors.put("rejected_concepts", List.of());
+        return anchors;
+    }
+
     private Map<String, Object> extractDeepSoulMatrix(
             Map<String, Object> source,
             Map<String, Object> fallback,
@@ -525,16 +562,34 @@ public class MacroPersonaForgeService {
         }
         Map<String, Object> deep = new LinkedHashMap<>();
         for (String key : DEEP_MATRIX_KEYS) {
-            Object entry = readByNormalizedKey(map, key);
+            Object entry = null;
+            for (String alias : deepMatrixAliases(key)) {
+                entry = readByNormalizedKey(map, alias);
+                if (entry != null) {
+                    break;
+                }
+            }
             if (entry instanceof Map<?, ?> metric) {
                 Map<String, Object> normalized = new LinkedHashMap<>();
                 normalized.put("score", Math.max(0, Math.min(100, readInt(metric.get("score"), DEFAULT_SCORE))));
                 String desc = valueToString(metric.get("description")).trim();
                 normalized.put("description", desc.isBlank() ? "该维度保持中性评估。" : desc);
                 deep.put(key, normalized);
+            } else if (entry != null) {
+                Map<String, Object> normalized = new LinkedHashMap<>();
+                normalized.put("score", Math.max(0, Math.min(100, readInt(entry, DEFAULT_SCORE))));
+                normalized.put("description", "该维度保持中性评估。");
+                deep.put(key, normalized);
             }
         }
         return deep;
+    }
+
+    private List<String> deepMatrixAliases(String deepKey) {
+        return switch (deepKey) {
+            case "tech_depth" -> List.of("tech_depth", "domain_hardcore_tendency", "technical_depth");
+            default -> List.of(deepKey);
+        };
     }
 
     private Map<String, Object> buildDeepSoulMatrixFromDimensions(List<Map<String, Object>> dims) {

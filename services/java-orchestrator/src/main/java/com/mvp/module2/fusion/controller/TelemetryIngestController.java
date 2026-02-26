@@ -66,9 +66,47 @@ public class TelemetryIngestController {
     private static final Set<String> HOT_EVENT_TYPES = Set.of(
             "paragraph_resonance_double_tap",
             "paragraph_mark_deleted_by_swipe",
+            "paragraph_mark_deleted_by_swipe_confirmed",
             "note_saved",
+            "lexical_card_opened",
+            "selection_action_search_card",
+            "insight_term_tapped",
+            "lexical_token_selected",
+            "selection_action_copy",
+            "selection_action_like",
+            "selection_action_unlike",
+            "selection_action_bold",
+            "selection_action_unbold",
+            "selection_action_annotate",
+            "paragraph_restore_deleted_by_swipe",
+            "paragraph_mark_deleted_armed",
+            "paragraph_comment_affordance_triggered",
+            "noise_capsule_expanded"
+    );
+    private static final Set<String> TOKEN_LEVEL_EVENTS = Set.of(
+            "lexical_token_selected",
+            "selection_action_copy",
+            "selection_action_like",
+            "selection_action_unlike",
+            "selection_action_bold",
+            "selection_action_unbold",
+            "selection_action_annotate",
+            "selection_action_search_card",
+            "insight_term_tapped",
             "lexical_card_opened"
     );
+    private static final List<String> TOKEN_FOCUS_KEYS = List.of(
+            "focusText",
+            "focus_text",
+            "selectedText",
+            "selected_text",
+            "token",
+            "term",
+            "keyword"
+    );
+    private static final int MAX_FOCUS_TEXT_CHARS = 80;
+    private static final int LOCAL_CONTEXT_WINDOW_CHARS = 72;
+    private static final int MAX_LOCAL_CONTEXT_CHARS = 220;
 
     @Value("${telemetry.ingest.file:var/telemetry/mobile_reader_telemetry.ndjson}")
     private String telemetryIngestFile;
@@ -143,6 +181,16 @@ public class TelemetryIngestController {
                 hotRecord.put("nodeText", nodeContext.nodeText);
                 hotRecord.put("nodeMarkdownSnippet", nodeContext.markdownSnippet);
                 hotRecord.put("contextMarkdownPath", markdownContext != null ? markdownContext.markdownPath.toString() : "");
+                boolean isTokenLevel = TOKEN_LEVEL_EVENTS.contains(eventType);
+                TokenContextResolution tokenContext = isTokenLevel
+                        ? resolveTokenContext(eventType, payload, nodeContext)
+                        : TokenContextResolution.empty();
+                hotRecord.put("isTokenLevel", isTokenLevel);
+                hotRecord.put("focusText", tokenContext.focusText);
+                hotRecord.put("focusSource", tokenContext.focusSource);
+                hotRecord.put("tokenType", tokenContext.tokenType);
+                hotRecord.put("localContext", tokenContext.localContext);
+                hotRecord.put("localContextFound", tokenContext.found);
                 hotRecords.add(hotRecord);
                 if (!nodeContext.found) {
                     unresolvedHotContextCount += 1;
@@ -394,6 +442,107 @@ public class TelemetryIngestController {
             }
         }
         return null;
+    }
+
+    private TokenContextResolution resolveTokenContext(
+            String eventType,
+            Map<String, String> payload,
+            NodeContextResolution nodeContext
+    ) {
+        String focusText = extractTokenFocus(payload);
+        String tokenType = inferTokenType(eventType, payload);
+        if (focusText == null) {
+            String fallbackContext = trimToEmpty(extractPayloadContext(payload));
+            return new TokenContextResolution(false, "", "", tokenType, fallbackContext);
+        }
+        String localContext = buildLocalContextWindow(focusText, nodeContext, payload);
+        String source = resolveFocusSource(payload);
+        return new TokenContextResolution(true, focusText, source, tokenType, localContext);
+    }
+
+    private String extractTokenFocus(Map<String, String> payload) {
+        if (payload == null || payload.isEmpty()) {
+            return null;
+        }
+        for (String key : TOKEN_FOCUS_KEYS) {
+            String value = normalizeFocusText(payload.get(key));
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String resolveFocusSource(Map<String, String> payload) {
+        if (payload == null || payload.isEmpty()) {
+            return "unknown";
+        }
+        for (String key : TOKEN_FOCUS_KEYS) {
+            if (trimToNull(payload.get(key)) != null) {
+                return key;
+            }
+        }
+        return "unknown";
+    }
+
+    private String inferTokenType(String eventType, Map<String, String> payload) {
+        String source = trimToEmpty(payload != null ? payload.get("source") : "");
+        if ("insight_terms".equalsIgnoreCase(source)) {
+            return "insight_term";
+        }
+        String normalized = trimToEmpty(eventType).toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("selection_action_")) {
+            return "selection";
+        }
+        if ("lexical_card_opened".equals(normalized)) {
+            return "lexical_card";
+        }
+        return "token";
+    }
+
+    private String buildLocalContextWindow(
+            String focusText,
+            NodeContextResolution nodeContext,
+            Map<String, String> payload
+    ) {
+        String sourceText = firstNonBlank(
+                nodeContext != null ? nodeContext.nodeText : "",
+                nodeContext != null ? nodeContext.markdownSnippet : "",
+                extractPayloadContext(payload)
+        );
+        if (sourceText.isEmpty()) {
+            return focusText;
+        }
+        int index = indexOfIgnoreCase(sourceText, focusText);
+        if (index < 0) {
+            return trimToMax(sourceText, MAX_LOCAL_CONTEXT_CHARS);
+        }
+        int start = Math.max(0, index - LOCAL_CONTEXT_WINDOW_CHARS);
+        int end = Math.min(sourceText.length(), index + focusText.length() + LOCAL_CONTEXT_WINDOW_CHARS);
+        return trimToMax(sourceText.substring(start, end), MAX_LOCAL_CONTEXT_CHARS);
+    }
+
+    private int indexOfIgnoreCase(String source, String target) {
+        if (source == null || target == null) {
+            return -1;
+        }
+        String normalizedSource = source.toLowerCase(Locale.ROOT);
+        String normalizedTarget = target.toLowerCase(Locale.ROOT);
+        return normalizedSource.indexOf(normalizedTarget);
+    }
+
+    private String normalizeFocusText(String raw) {
+        String text = trimToNull(raw);
+        if (text == null) {
+            return null;
+        }
+        String compact = text.replaceAll("\\s+", " ").trim();
+        if (compact.isEmpty()) {
+            return null;
+        }
+        return compact.length() <= MAX_FOCUS_TEXT_CHARS
+                ? compact
+                : compact.substring(0, MAX_FOCUS_TEXT_CHARS).trim();
     }
 
     private MarkdownContext resolveMarkdownContext(String taskId, String pathHint) {
@@ -670,6 +819,30 @@ public class TelemetryIngestController {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
+    private String firstNonBlank(String... values) {
+        if (values == null || values.length == 0) {
+            return "";
+        }
+        for (String value : values) {
+            String normalized = trimToNull(value);
+            if (normalized != null) {
+                return normalized;
+            }
+        }
+        return "";
+    }
+
+    private String trimToMax(String value, int maxChars) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim();
+        if (normalized.length() <= maxChars) {
+            return normalized;
+        }
+        return normalized.substring(0, maxChars).trim();
+    }
+
     private String trimToEmpty(String value) {
         return value == null ? "" : value.trim();
     }
@@ -690,6 +863,32 @@ public class TelemetryIngestController {
         public Double relevanceScore;
         public Long timestampMs;
         public Map<String, Object> payload;
+    }
+
+    private static class TokenContextResolution {
+        private final boolean found;
+        private final String focusText;
+        private final String focusSource;
+        private final String tokenType;
+        private final String localContext;
+
+        private TokenContextResolution(
+                boolean found,
+                String focusText,
+                String focusSource,
+                String tokenType,
+                String localContext
+        ) {
+            this.found = found;
+            this.focusText = focusText != null ? focusText : "";
+            this.focusSource = focusSource != null ? focusSource : "";
+            this.tokenType = tokenType != null ? tokenType : "";
+            this.localContext = localContext != null ? localContext : "";
+        }
+
+        private static TokenContextResolution empty() {
+            return new TokenContextResolution(false, "", "", "", "");
+        }
     }
 
     private static class MarkdownContext {

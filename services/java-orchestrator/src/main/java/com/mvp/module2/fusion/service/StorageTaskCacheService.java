@@ -47,6 +47,7 @@ public class StorageTaskCacheService {
     
     // 缓存数据
     private final Map<String, CachedTask> taskCache = new ConcurrentHashMap<>();
+    private final Map<String, String> taskIdToStorageKey = new ConcurrentHashMap<>();
     private final AtomicLong lastRefreshTime = new AtomicLong(0);
     private final AtomicBoolean isRefeshing = new AtomicBoolean(false);
     private Path resolvedStorageRoot;
@@ -89,6 +90,41 @@ public class StorageTaskCacheService {
      */
     public Optional<CachedTask> getTask(String storageKey) {
         return Optional.ofNullable(taskCache.get(storageKey));
+    }
+
+    /**
+     * 根据 taskId 获取单个任务视图（用于 taskId 与存储目录名不一致的场景）
+     */
+    public Optional<CachedTask> getTaskByTaskId(String taskId) {
+        String normalizedTaskId = trimToNull(taskId);
+        if (normalizedTaskId == null) {
+            return Optional.empty();
+        }
+
+        String indexedStorageKey = taskIdToStorageKey.get(normalizedTaskId);
+        if (indexedStorageKey != null) {
+            CachedTask indexedTask = taskCache.get(indexedStorageKey);
+            if (indexedTask != null) {
+                return Optional.of(indexedTask);
+            }
+            taskIdToStorageKey.remove(normalizedTaskId);
+        }
+
+        for (CachedTask task : taskCache.values()) {
+            if (task == null) {
+                continue;
+            }
+            String cachedTaskId = trimToNull(task.taskId);
+            if (cachedTaskId == null || !cachedTaskId.equals(normalizedTaskId)) {
+                continue;
+            }
+            String storageKey = trimToNull(task.storageKey);
+            if (storageKey != null) {
+                taskIdToStorageKey.put(normalizedTaskId, storageKey);
+            }
+            return Optional.of(task);
+        }
+        return Optional.empty();
     }
 
     /**
@@ -145,6 +181,7 @@ public class StorageTaskCacheService {
         
         // 清理已删除的目录
         taskCache.keySet().removeIf(key -> !Files.exists(resolvedStorageRoot.resolve(key)));
+        rebuildTaskIdIndex();
         
         lastRefreshTime.set(System.currentTimeMillis());
         logger.debug("存储任务缓存已刷新，当前任务数: {}", taskCache.size());
@@ -168,6 +205,7 @@ public class StorageTaskCacheService {
 
         CachedTask newTask = new CachedTask();
         newTask.storageKey = key;
+        newTask.taskId = metadata.taskId;
         newTask.taskRootDir = taskDir;
         newTask.title = deriveStorageTitle(taskDir, metadata);
         String sourceVideoUrl = firstNonBlank(metadata.inputVideoUrl, metadata.videoPath);
@@ -198,6 +236,20 @@ public class StorageTaskCacheService {
         }
         
         taskCache.put(key, newTask);
+    }
+
+    private void rebuildTaskIdIndex() {
+        taskIdToStorageKey.clear();
+        for (CachedTask task : taskCache.values()) {
+            if (task == null) {
+                continue;
+            }
+            String taskId = trimToNull(task.taskId);
+            String storageKey = trimToNull(task.storageKey);
+            if (taskId != null && storageKey != null) {
+                taskIdToStorageKey.put(taskId, storageKey);
+            }
+        }
     }
     
     // --- 辅助逻辑 (从 Controller 迁移并优化) ---
@@ -234,6 +286,7 @@ public class StorageTaskCacheService {
 
     private StorageMetadata readStorageMetadata(Path taskDir) {
         StorageMetadata metadata = new StorageMetadata();
+        metadata.videoTitle = readVideoMetaTitle(taskDir);
         Path metricsPath = taskDir.resolve("intermediates/task_metrics_latest.json");
         if (Files.isRegularFile(metricsPath)) {
             try {
@@ -244,6 +297,16 @@ public class StorageTaskCacheService {
                 }
                 if (root.has("generated_at")) metadata.generatedAt = parseInstant(root.get("generated_at").asText());
                 metadata.inputVideoUrl = resolveInputVideoUrl(root);
+                metadata.videoTitle = firstNonBlank(
+                        metadata.videoTitle,
+                        jsonText(root, "video_title"),
+                        jsonText(root, "document_title"),
+                        jsonText(root, "title")
+                );
+                metadata.taskId = firstNonBlank(
+                        jsonText(root, "task_id"),
+                        jsonText(root, "taskId")
+                );
                 if (root.has("video_path")) metadata.videoPath = trimToNull(root.get("video_path").asText());
                 if (root.has("result_markdown_path")) metadata.resultMarkdownPath = trimToNull(root.get("result_markdown_path").asText());
             } catch (Exception e) {
@@ -251,6 +314,25 @@ public class StorageTaskCacheService {
             }
         }
         return metadata;
+    }
+
+    private String readVideoMetaTitle(Path taskDir) {
+        if (taskDir == null) {
+            return null;
+        }
+        Path videoMetaPath = taskDir.resolve("video_meta.json");
+        if (!Files.isRegularFile(videoMetaPath)) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(videoMetaPath.toFile());
+            if (root == null) {
+                return null;
+            }
+            return trimToNull(root.path("title").asText(null));
+        } catch (Exception ignored) {
+            return null;
+        }
     }
     
     private ResolvedMarkdown resolveMarkdownInDirectorySafe(Path searchRoot, String preferredPath) {
@@ -294,6 +376,10 @@ public class StorageTaskCacheService {
     }
 
     private String deriveStorageTitle(Path taskDir, StorageMetadata meta) {
+        String metricsTitle = trimToNull(meta.videoTitle);
+        if (metricsTitle != null) {
+            return metricsTitle;
+        }
         String sourceVideoUrl = firstNonBlank(meta.inputVideoUrl, meta.videoPath);
         return TaskDisplayNameResolver.resolveTaskDisplayTitle(sourceVideoUrl, taskDir.getFileName().toString());
     }
@@ -346,6 +432,7 @@ public class StorageTaskCacheService {
     
     public static class CachedTask {
         public String storageKey;
+        public String taskId;
         public String title;
         public String videoUrl;
         public String status;
@@ -384,10 +471,12 @@ public class StorageTaskCacheService {
     }
     
     private static class StorageMetadata {
+        String taskId;
         boolean hasSuccessFlag;
         boolean success;
         Instant generatedAt;
         String inputVideoUrl;
+        String videoTitle;
         String videoPath;
         String resultMarkdownPath;
     }

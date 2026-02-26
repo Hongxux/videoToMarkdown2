@@ -51,6 +51,12 @@ flowchart LR
     - `static/lib/mobile-performance-utils.js`：双帧调度、JSON Worker 解析池、滚动动效绑定器。
     - `static/lib/mobile-highlight-engine.js`：概念高亮引擎（术语索引、视口增量调度、主线程分帧执行）。
     - `static/lib/mobile-highlight-worker.js`：概念高亮匹配 Worker（超大词库场景的可选下沉通道）。
+- 移动端 Android 更新能力：`controller/MobileAppUpdateController` + `service/AndroidAppUpdateService` + `service/AndroidAppUpdateAdminService`
+  - 版本检查：`GET /api/mobile/app/update/check`，输入 `versionCode/versionName`，返回 `hasUpdate/forceUpdate/downloadUrl` 等字段。
+  - APK 下载：`GET /api/mobile/app/update/apk`，按 manifest 解析本地 APK 并流式返回，支持 DownloadManager 直连下载。
+  - 发布清单：默认读取 `var/app-updates/android/latest.json`，后端通过配置项统一管理下载基址与端点路径。
+  - 发布后台：`POST /api/mobile/app/update/admin/upload` 支持上传 APK 并自动生成版本清单，`POST /api/mobile/app/update/admin/publish` 一键切换 latest，`POST /api/mobile/app/update/admin/rollback` 一键回滚。
+  - 鉴权模型：管理端接口统一校验 `X-Update-Admin-Token`（或 `Authorization: Bearer`），token 由后端配置项注入。
 - 企业微信消息入口（Python）
   - 启动入口：`apps/wecom-bot/main.py`
   - 服务实现：`services/python_grpc/src/apps/bot/wecom_bot.py`
@@ -80,6 +86,8 @@ flowchart LR
 7. 企业微信消息链路中，`wecom_bot` 复用 Java REST 接口提交任务并轮询状态，按 `QUEUED/RUNNING/RETRYING/SUCCEEDED/FAILED_FINAL` 回传个人聊天。
 8. 静态页面入口统一为 `/` -> `index.html`（主页面本体）；历史路径 `/mobile-markdown.html` 由服务端重定向兼容到 `index.html`。页面通过 `/api/mobile/tasks` 罗列任务（含内存任务与磁盘历史任务），按任务维度读取 markdown 与资源文件进行渲染。
 9. 阅读视图支持 Obsidian 式概念卡片：前端在渲染后调用 `/api/mobile/cards/titles` 拉取全量标题，再通过 `/api/mobile/cards/titles/candidates` 按上下文获取 Top-K 高亮候选；长按/点击术语后通过 `/api/mobile/cards/concept/{title}`（兼容 `/api/mobile/cards/{title}`）读写概念卡片，并可通过 `/api/mobile/cards/ai-advice` 获取顾问式建议。新增 `/api/mobile/cards/thought` 用于将 `> [!TEAR]` 思考块按锚点直接插入原文，概念与思考两条保存路径统一返回 `targetType/targetPath/locator/revision`，用于前端保存后定位反馈。卡片文件采用 YAML Frontmatter（`title/created/tags/type`）+ 纯正文，避免 UI 反向链接信息污染数据层；反向链接由软件在运行时动态计算展示，或仅在导出阶段按需写入。
+10. Android 端可通过 `/api/mobile/app/update/check` 获取最新版本策略与下载地址，并通过 `/api/mobile/app/update/apk` 拉取 APK；后端版本决策由发布清单驱动，便于 CI 发布流程自动切换最新版本。
+11. 管理端可通过 `/api/mobile/app/update/admin/upload` 上传 APK 并生成版本发布清单，随后一键调用 `/publish` 切换 `latest.json`，或调用 `/rollback` 回滚到历史版本，发布历史落盘在 `var/app-updates/android/publish-history.json`。
 
 ## 6. 接口清单（2026-02-18）
 - REST（Java）
@@ -97,6 +105,11 @@ flowchart LR
   - `/api/mobile/tasks/{taskId}/markdown`（PUT：保存编辑后的 Markdown 内容）
   - `/api/mobile/tasks/{taskId}/markdown/by-path`
   - `/api/mobile/tasks/{taskId}/asset?path=...`
+  - `/api/mobile/app/update/check`
+  - `/api/mobile/app/update/apk`
+  - `/api/mobile/app/update/admin/upload`
+  - `/api/mobile/app/update/admin/publish`
+  - `/api/mobile/app/update/admin/rollback`
   - `/api/mobile/cards/titles`
   - `/api/mobile/cards/titles/candidates`（POST：按上下文返回 Top-K 概念候选词）
   - `/api/mobile/cards/{title}`（兼容读写入口）

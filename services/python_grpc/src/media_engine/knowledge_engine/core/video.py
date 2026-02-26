@@ -85,6 +85,28 @@ class VideoProcessor(BaseProcessor):
         self._cookie_export_error: Optional[str] = None
         self._last_explicit_probe_error: Optional[str] = None
         self._last_m3u8_probe_error: Optional[str] = None
+        self._last_video_title: str = ""
+
+    @property
+    def last_video_title(self) -> str:
+        return str(self._last_video_title or "").strip()
+
+    def _capture_title_from_info_dict(self, info: Any) -> None:
+        if not isinstance(info, dict):
+            return
+        candidates = []
+        candidates.append(info.get("title"))
+        first_entry = None
+        entries = info.get("entries")
+        if isinstance(entries, list) and entries:
+            first_entry = entries[0]
+        if isinstance(first_entry, dict):
+            candidates.append(first_entry.get("title"))
+        for raw in candidates:
+            title = " ".join(str(raw or "").split()).strip()
+            if title:
+                self._last_video_title = title
+                return
 
     def _get_format_candidates(self) -> Tuple[str, ...]:
         """
@@ -631,6 +653,7 @@ class VideoProcessor(BaseProcessor):
         输出参数：
         - 字符串结果。"""
         os.makedirs(output_dir, exist_ok=True)
+        self._last_video_title = ""
         # yt-dlp 的 template 不包含扩展名，它会自动添加
         output_template = os.path.join(output_dir, f"{filename}.%(ext)s")
         
@@ -912,6 +935,7 @@ class VideoProcessor(BaseProcessor):
         输出参数：
         - 无（仅产生副作用，如日志/写盘/状态更新）。"""
         if d['status'] == 'downloading':
+            self._capture_title_from_info_dict(d.get("info_dict"))
             # 计算百分比
             try:
                 p = d.get('_percent_str', '0%').replace('%','')
@@ -922,7 +946,36 @@ class VideoProcessor(BaseProcessor):
             except:
                 pass
         elif d['status'] == 'finished':
+            self._capture_title_from_info_dict(d.get("info_dict"))
             self.emit_progress("download", 0.9, "下载完成，正在合并...")
+
+    def probe_video_info(self, url: str) -> Dict[str, Any]:
+        """
+        执行逻辑：
+        1) 用 yt-dlp 仅探测元信息，不执行下载。
+        2) 返回原始 info_dict 供上层组装平台/分集结构。
+        实现方式：yt_dlp.YoutubeDL.extract_info(download=False)。
+        核心价值：复用现有鉴权与代理配置，避免重复实现站点解析逻辑。
+        输入参数：
+        - url: 视频链接（类型：str）。
+        输出参数：
+        - dict：yt-dlp 的元信息字典，失败时抛出异常。"""
+        probe_opts: Dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": 30,
+            "retries": 5,
+            "skip_download": True,
+            "extract_flat": False,
+        }
+        probe_opts.update(self._build_auth_options())
+
+        with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        if not isinstance(info, dict):
+            return {}
+        self._capture_title_from_info_dict(info)
+        return info
     
     def detect_playlist(self, url: str) -> bool:
         """

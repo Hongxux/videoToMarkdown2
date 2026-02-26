@@ -94,9 +94,33 @@ def extract_bilibili_video_id(video_url: str) -> str:
     return ""
 
 
+def extract_bilibili_episode_index(video_url: str) -> int:
+    if not video_url:
+        return 0
+    try:
+        parsed = urlparse(video_url)
+    except Exception:
+        return 0
+    if not is_bilibili_host(parsed.netloc):
+        return 0
+
+    query = parse_qs(parsed.query or "", keep_blank_values=True)
+    raw_values = query.get("p") or query.get("P") or []
+    for raw_value in raw_values:
+        try:
+            value = int(str(raw_value).strip())
+        except Exception:
+            continue
+        if value > 0:
+            return value
+    return 0
+
+
 def build_task_dir_encoding_source(video_url: str) -> str:
     bilibili_video_id = extract_bilibili_video_id(video_url)
     if bilibili_video_id:
+        episode_index = extract_bilibili_episode_index(video_url)
+        if episode_index > 0:
+            return f"{bilibili_video_id}_{episode_index}"
         return bilibili_video_id
     return str(video_url or "")
-

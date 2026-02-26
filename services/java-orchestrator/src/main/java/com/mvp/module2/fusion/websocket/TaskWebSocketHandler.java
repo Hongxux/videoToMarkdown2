@@ -1,78 +1,79 @@
 package com.mvp.module2.fusion.websocket;
 
-import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mvp.module2.fusion.queue.TaskQueueManager;
+import com.mvp.module2.fusion.service.CollectionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.web.socket.*;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * WebSocket 处理器
- * 
- * 功能：
- * 1. 管理客户端连接
- * 2. 推送任务状态更新
- * 3. 接收客户端命令（取消任务等）
- */
 @Component
 public class TaskWebSocketHandler extends TextWebSocketHandler {
-    
+
     private static final Logger logger = LoggerFactory.getLogger(TaskWebSocketHandler.class);
-    
-    // 用户会话映射：userId -> session
+
     private final ConcurrentHashMap<String, WebSocketSession> userSessions = new ConcurrentHashMap<>();
-    
-    // 任务订阅映射：taskId -> sessions
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> taskSubscribers = new ConcurrentHashMap<>();
-    
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> taskSubscribers =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> collectionSubscribers =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> taskCollectionCache = new ConcurrentHashMap<>();
+
     @Autowired
     private TaskQueueManager taskQueueManager;
-    
+
+    @Autowired(required = false)
+    private CollectionRepository collectionRepository;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
-    
+
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         String userId = getUserIdFromSession(session);
-        if (userId != null) {
-            userSessions.put(userId, session);
-            logger.info("WebSocket connected: user={}, session={}", userId, session.getId());
-        }
+        userSessions.put(userId, session);
+        logger.info("WebSocket connected: user={}, session={}", userId, session.getId());
     }
-    
+
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String userId = getUserIdFromSession(session);
-        if (userId != null) {
-            userSessions.remove(userId);
-            
-            // 清理该用户的任务订阅
-            for (ConcurrentHashMap<String, WebSocketSession> subscribers : taskSubscribers.values()) {
-                subscribers.remove(session.getId());
-            }
-            
-            logger.info("WebSocket disconnected: user={}", userId);
-        }
+        userSessions.remove(userId);
+        removeSessionFromSubscribers(taskSubscribers, session.getId());
+        removeSessionFromSubscribers(collectionSubscribers, session.getId());
+        logger.info("WebSocket disconnected: user={}", userId);
     }
-    
+
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
         try {
             Map<String, Object> payload = objectMapper.readValue(message.getPayload(), Map.class);
-            String action = (String) payload.get("action");
-            
+            String action = normalizeText((String) payload.get("action"));
+            if (action.isEmpty()) {
+                logger.warn("Unknown action: {}", payload.get("action"));
+                return;
+            }
             switch (action) {
                 case "subscribe":
                     handleSubscribe(session, payload);
                     break;
                 case "unsubscribe":
                     handleUnsubscribe(session, payload);
+                    break;
+                case "subscribeCollection":
+                    handleSubscribeCollection(session, payload);
+                    break;
+                case "unsubscribeCollection":
+                    handleUnsubscribeCollection(session, payload);
                     break;
                 case "cancel":
                     handleCancel(session, payload);
@@ -83,157 +84,237 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                 default:
                     logger.warn("Unknown action: {}", action);
             }
-        } catch (Exception e) {
-            logger.error("Error handling message", e);
+        } catch (Exception error) {
+            logger.error("Error handling message", error);
         }
     }
-    
-    /**
-     * 处理订阅请求
-     */
+
     private void handleSubscribe(WebSocketSession session, Map<String, Object> payload) {
-        String taskId = (String) payload.get("taskId");
-        if (taskId != null) {
-            taskSubscribers.computeIfAbsent(taskId, k -> new ConcurrentHashMap<>())
-                .put(session.getId(), session);
-            
-            // 立即发送当前状态
-            TaskQueueManager.TaskEntry task = taskQueueManager.getTask(taskId);
-            if (task != null) {
-                sendTaskUpdate(session, task);
-            }
-            
-            logger.debug("Session {} subscribed to task {}", session.getId(), taskId);
+        String taskId = normalizeText((String) payload.get("taskId"));
+        if (taskId.isEmpty()) {
+            return;
         }
+        taskSubscribers.computeIfAbsent(taskId, k -> new ConcurrentHashMap<>()).put(session.getId(), session);
+        TaskQueueManager.TaskEntry task = taskQueueManager.getTask(taskId);
+        if (task != null) {
+            sendTaskUpdate(session, task, resolveCollectionId(taskId));
+        }
+        logger.debug("Session {} subscribed to task {}", session.getId(), taskId);
     }
-    
-    /**
-     * 处理取消订阅请求
-     */
+
     private void handleUnsubscribe(WebSocketSession session, Map<String, Object> payload) {
-        String taskId = (String) payload.get("taskId");
-        if (taskId != null) {
-            ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(taskId);
-            if (subscribers != null) {
-                subscribers.remove(session.getId());
-            }
+        String taskId = normalizeText((String) payload.get("taskId"));
+        if (taskId.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(taskId);
+        if (subscribers == null) {
+            return;
+        }
+        subscribers.remove(session.getId());
+        if (subscribers.isEmpty()) {
+            taskSubscribers.remove(taskId, subscribers);
         }
     }
-    
-    /**
-     * 处理取消任务请求
-     */
+
+    private void handleSubscribeCollection(WebSocketSession session, Map<String, Object> payload) {
+        String collectionId = normalizeText((String) payload.get("collectionId"));
+        if (collectionId.isEmpty()) {
+            return;
+        }
+        collectionSubscribers.computeIfAbsent(collectionId, k -> new ConcurrentHashMap<>())
+                .put(session.getId(), session);
+        logger.debug("Session {} subscribed to collection {}", session.getId(), collectionId);
+    }
+
+    private void handleUnsubscribeCollection(WebSocketSession session, Map<String, Object> payload) {
+        String collectionId = normalizeText((String) payload.get("collectionId"));
+        if (collectionId.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> subscribers = collectionSubscribers.get(collectionId);
+        if (subscribers == null) {
+            return;
+        }
+        subscribers.remove(session.getId());
+        if (subscribers.isEmpty()) {
+            collectionSubscribers.remove(collectionId, subscribers);
+        }
+    }
+
     private void handleCancel(WebSocketSession session, Map<String, Object> payload) {
-        String taskId = (String) payload.get("taskId");
-        if (taskId != null) {
-            boolean cancelled = taskQueueManager.cancelTask(taskId);
-            sendMessage(session, Map.of(
+        String taskId = normalizeText((String) payload.get("taskId"));
+        if (taskId.isEmpty()) {
+            return;
+        }
+        boolean cancelled = taskQueueManager.cancelTask(taskId);
+        sendMessage(session, Map.of(
                 "type", "cancelResult",
                 "taskId", taskId,
                 "success", cancelled
-            ));
-        }
+        ));
     }
-    
-    /**
-     * 广播任务状态更新
-     */
+
     public void broadcastTaskUpdate(TaskQueueManager.TaskEntry task) {
-        // 1. 推送给订阅该任务的所有会话
+        String collectionId = resolveCollectionId(task.taskId);
         ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(task.taskId);
         if (subscribers != null) {
             for (WebSocketSession session : subscribers.values()) {
-                sendTaskUpdate(session, task);
+                sendTaskUpdate(session, task, collectionId);
             }
         }
-        
-        // 2. 推送给任务所属用户
+
+        if (!collectionId.isEmpty()) {
+            ConcurrentHashMap<String, WebSocketSession> collectionSessions = collectionSubscribers.get(collectionId);
+            if (collectionSessions != null) {
+                for (WebSocketSession session : collectionSessions.values()) {
+                    sendTaskUpdate(session, task, collectionId);
+                }
+            }
+        }
+
         WebSocketSession userSession = userSessions.get(task.userId);
         if (userSession != null && userSession.isOpen()) {
-            sendTaskUpdate(userSession, task);
+            sendTaskUpdate(userSession, task, collectionId);
         }
     }
-    
-    /**
-     * 广播任务状态更新 (使用参数)
-     */
+
     public void broadcastTaskUpdate(String taskId, String status, double progress, String message, String resultPath) {
-        Map<String, Object> update = Map.of(
-            "type", "taskUpdate",
-            "taskId", taskId,
-            "status", status,
-            "progress", progress,
-            "message", message != null ? message : "",
-            "resultPath", resultPath != null ? resultPath : ""
+        String normalizedTaskId = normalizeText(taskId);
+        String collectionId = resolveCollectionId(normalizedTaskId);
+        Map<String, Object> update = buildTaskUpdatePayload(
+                normalizedTaskId,
+                status,
+                progress,
+                message,
+                resultPath,
+                "",
+                collectionId
         );
-        
-        // 广播给所有订阅者
-        ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(taskId);
+
+        ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(normalizedTaskId);
         if (subscribers != null) {
             for (WebSocketSession session : subscribers.values()) {
                 sendMessage(session, update);
             }
         }
-        
-        // 广播给所有连接的用户（简化处理）
+
+        if (!collectionId.isEmpty()) {
+            ConcurrentHashMap<String, WebSocketSession> collectionSessions = collectionSubscribers.get(collectionId);
+            if (collectionSessions != null) {
+                for (WebSocketSession session : collectionSessions.values()) {
+                    sendMessage(session, update);
+                }
+            }
+        }
+
         for (WebSocketSession session : userSessions.values()) {
             if (session.isOpen()) {
                 sendMessage(session, update);
             }
         }
     }
-    
-    /**
-     * 发送任务状态更新
-     */
-    private void sendTaskUpdate(WebSocketSession session, TaskQueueManager.TaskEntry task) {
-        Map<String, Object> update = Map.of(
-            "type", "taskUpdate",
-            "taskId", task.taskId,
-            "status", task.status.name(),
-            "progress", task.progress,
-            "message", task.statusMessage != null ? task.statusMessage : "",
-            "resultPath", task.resultPath != null ? task.resultPath : "",
-            "errorMessage", task.errorMessage != null ? task.errorMessage : ""
+
+    private void sendTaskUpdate(WebSocketSession session, TaskQueueManager.TaskEntry task, String collectionId) {
+        Map<String, Object> update = buildTaskUpdatePayload(
+                task.taskId,
+                task.status.name(),
+                task.progress,
+                task.statusMessage,
+                task.resultPath,
+                task.errorMessage,
+                collectionId
         );
         sendMessage(session, update);
     }
-    
-    /**
-     * 发送消息 (同步以避免并发写入)
-     */
+
+    private Map<String, Object> buildTaskUpdatePayload(
+            String taskId,
+            String status,
+            double progress,
+            String message,
+            String resultPath,
+            String errorMessage,
+            String collectionId
+    ) {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "taskUpdate");
+        payload.put("taskId", taskId != null ? taskId : "");
+        payload.put("status", status != null ? status : "");
+        payload.put("progress", progress);
+        payload.put("message", message != null ? message : "");
+        payload.put("resultPath", resultPath != null ? resultPath : "");
+        payload.put("errorMessage", errorMessage != null ? errorMessage : "");
+        if (!collectionId.isEmpty()) {
+            payload.put("collectionId", collectionId);
+        }
+        return payload;
+    }
+
     private synchronized void sendMessage(WebSocketSession session, Map<String, Object> payload) {
-        if (session.isOpen()) {
-            try {
-                String json = objectMapper.writeValueAsString(payload);
-                session.sendMessage(new TextMessage(json));
-            } catch (IOException e) {
-                logger.error("Error sending message", e);
+        if (!session.isOpen()) {
+            return;
+        }
+        try {
+            String json = objectMapper.writeValueAsString(payload);
+            session.sendMessage(new TextMessage(json));
+        } catch (IOException error) {
+            logger.error("Error sending message", error);
+        }
+    }
+
+    private void removeSessionFromSubscribers(
+            ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> subscribersByTopic,
+            String sessionId
+    ) {
+        for (Map.Entry<String, ConcurrentHashMap<String, WebSocketSession>> entry : subscribersByTopic.entrySet()) {
+            ConcurrentHashMap<String, WebSocketSession> subscribers = entry.getValue();
+            subscribers.remove(sessionId);
+            if (subscribers.isEmpty()) {
+                subscribersByTopic.remove(entry.getKey(), subscribers);
             }
         }
     }
-    
-    /**
-     * 从会话中获取用户ID
-     */
+
+    private String resolveCollectionId(String taskId) {
+        String normalizedTaskId = normalizeText(taskId);
+        if (normalizedTaskId.isEmpty()) {
+            return "";
+        }
+        String cached = taskCollectionCache.get(normalizedTaskId);
+        if (cached != null) {
+            return cached;
+        }
+        if (collectionRepository == null) {
+            return "";
+        }
+        String collectionId = collectionRepository.findCollectionIdByTaskId(normalizedTaskId).orElse("");
+        if (!collectionId.isEmpty()) {
+            taskCollectionCache.put(normalizedTaskId, collectionId);
+        }
+        return collectionId;
+    }
+
+    private String normalizeText(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.trim();
+    }
+
     private String getUserIdFromSession(WebSocketSession session) {
-        // 从URI参数或header中获取用户ID
-        // 例如: ws://localhost:8080/ws?userId=xxx
-        String query = session.getUri().getQuery();
-        if (query != null) {
-            for (String param : query.split("&")) {
-                String[] pair = param.split("=");
-                if (pair.length == 2 && "userId".equals(pair[0])) {
-                    return pair[1];
-                }
+        if (session.getUri() == null || session.getUri().getQuery() == null) {
+            return session.getId();
+        }
+        for (String param : session.getUri().getQuery().split("&")) {
+            String[] pair = param.split("=");
+            if (pair.length == 2 && "userId".equals(pair[0])) {
+                return pair[1];
             }
         }
-        return session.getId(); // fallback
+        return session.getId();
     }
-    
-    /**
-     * 获取当前连接数
-     */
+
     public int getConnectionCount() {
         return userSessions.size();
     }

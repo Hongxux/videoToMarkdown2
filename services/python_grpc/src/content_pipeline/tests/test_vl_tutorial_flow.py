@@ -224,6 +224,20 @@ def test_generator_reads_skip_post_draw_processing_flag():
     assert generator.tutorial_keyframe_skip_post_draw_processing is True
 
 
+def test_generator_disables_grid_anchor_by_default():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+    assert generator.tutorial_grid_anchor_enabled is False
+
+
 def test_vl_analyze_clips_batch_preserves_order_and_exceptions(monkeypatch):
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
 

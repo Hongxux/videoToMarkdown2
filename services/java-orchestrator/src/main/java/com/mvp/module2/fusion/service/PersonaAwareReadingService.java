@@ -182,7 +182,7 @@ public class PersonaAwareReadingService {
             return cached;
         }
 
-        Map<String, Object> persona = loadPersona(userKey);
+        Map<String, Object> persona = normalizePersonaForPrompt(loadPersona(userKey));
         List<ParagraphNode> nodes = parseMarkdownNodes(markdownText);
         List<Map<String, Object>> outputNodes;
         String source = "heuristic";
@@ -716,11 +716,15 @@ public class PersonaAwareReadingService {
             } else {
                 NodeChunk tail = chunks.get(chunks.size() - 1);
                 List<String> mergedIds = new ArrayList<>(tail.nodeIds);
-                StringBuilder mergedText = new StringBuilder(String.valueOf(tail.chunkText == null ? "" : tail.chunkText).trim());
+                String tailChunkText = String.valueOf(tail.chunkText == null ? "" : tail.chunkText);
+                StringBuilder mergedText = new StringBuilder();
+                if (StringUtils.hasText(tailChunkText)) {
+                    mergedText.append(tailChunkText);
+                }
                 for (ParagraphNode node : buffer) {
                     mergedIds.add(node.nodeId);
-                    String text = String.valueOf(node.rawMarkdown == null ? "" : node.rawMarkdown).trim();
-                    if (!text.isEmpty()) {
+                    String text = String.valueOf(node.rawMarkdown == null ? "" : node.rawMarkdown);
+                    if (StringUtils.hasText(text)) {
                         if (mergedText.length() > 0) {
                             mergedText.append("\n\n");
                         }
@@ -801,8 +805,8 @@ public class PersonaAwareReadingService {
                 continue;
             }
             ids.add(node.nodeId);
-            String raw = String.valueOf(node.rawMarkdown == null ? "" : node.rawMarkdown).trim();
-            if (!raw.isEmpty()) {
+            String raw = String.valueOf(node.rawMarkdown == null ? "" : node.rawMarkdown);
+            if (StringUtils.hasText(raw)) {
                 if (text.length() > 0) {
                     text.append("\n\n");
                 }
@@ -940,8 +944,8 @@ public class PersonaAwareReadingService {
                 }
             }
 
-            String raw = joinLines(lines, start, endExclusive).trim();
-            if (!raw.isEmpty()) {
+            String raw = joinLines(lines, start, endExclusive);
+            if (StringUtils.hasText(raw)) {
                 ParagraphNode node = new ParagraphNode();
                 node.nodeId = "p-" + (order + 1);
                 node.order = order;
@@ -1047,11 +1051,107 @@ public class PersonaAwareReadingService {
         surface.put("profession", List.of());
         surface.put("skillset", List.of());
         surface.put("current_challenges", List.of());
+        Map<String, Object> negativeAnchors = new LinkedHashMap<>();
+        negativeAnchors.put("rejected_concepts", List.of());
         Map<String, Object> profile = new LinkedHashMap<>();
         profile.put("surface_context", surface);
         profile.put("deep_soul_matrix", Map.of());
         profile.put("evolution_verdict", "默认画像：尚无足够行为信号。");
+        profile.put("negative_anchors", negativeAnchors);
         return profile;
+    }
+
+    private Map<String, Object> normalizePersonaForPrompt(Map<String, Object> rawPersona) {
+        Map<String, Object> persona = new LinkedHashMap<>();
+        if (rawPersona != null) {
+            persona.putAll(rawPersona);
+        }
+        persona.put("surface_context", normalizePersonaSurfaceContext(persona.get("surface_context")));
+        if (!(persona.get("deep_soul_matrix") instanceof Map<?, ?>)) {
+            persona.put("deep_soul_matrix", Map.of());
+        }
+        if (!StringUtils.hasText(String.valueOf(persona.getOrDefault("evolution_verdict", "")))) {
+            persona.put("evolution_verdict", "默认画像：尚无足够行为信号。");
+        }
+        persona.put("negative_anchors", normalizePersonaNegativeAnchors(persona.get("negative_anchors")));
+        return persona;
+    }
+
+    private Map<String, Object> normalizePersonaSurfaceContext(Object raw) {
+        Map<String, Object> surface = new LinkedHashMap<>();
+        if (raw instanceof Map<?, ?> map) {
+            surface.put("profession", normalizePersonaStringList(readByNormalizedKey(map, "profession")));
+            surface.put("skillset", normalizePersonaStringList(readByNormalizedKey(map, "skillset")));
+            Object challengesRaw = firstNonNull(
+                    readByNormalizedKey(map, "current_challenges"),
+                    readByNormalizedKey(map, "challenges")
+            );
+            surface.put("current_challenges", normalizePersonaStringList(challengesRaw));
+            return surface;
+        }
+        surface.put("profession", List.of());
+        surface.put("skillset", List.of());
+        surface.put("current_challenges", List.of());
+        return surface;
+    }
+
+    private Map<String, Object> normalizePersonaNegativeAnchors(Object raw) {
+        Map<String, Object> anchors = new LinkedHashMap<>();
+        if (raw instanceof Map<?, ?> map) {
+            Object rejectedRaw = firstNonNull(
+                    readByNormalizedKey(map, "rejected_concepts"),
+                    readByNormalizedKey(map, "rejectedConcepts")
+            );
+            anchors.put("rejected_concepts", normalizePersonaStringList(rejectedRaw));
+            return anchors;
+        }
+        anchors.put("rejected_concepts", List.of());
+        return anchors;
+    }
+
+    private List<String> normalizePersonaStringList(Object raw) {
+        List<String> output = new ArrayList<>();
+        if (raw instanceof List<?> list) {
+            for (Object item : list) {
+                String text = String.valueOf(item == null ? "" : item).trim();
+                if (!text.isEmpty()) {
+                    output.add(text);
+                }
+            }
+            return output;
+        }
+        String text = String.valueOf(raw == null ? "" : raw).trim();
+        if (!text.isEmpty()) {
+            output.add(text);
+        }
+        return output;
+    }
+
+    private Object firstNonNull(Object first, Object second) {
+        return first != null ? first : second;
+    }
+
+    private Object readByNormalizedKey(Map<?, ?> source, String targetKey) {
+        if (source == null || source.isEmpty()) {
+            return null;
+        }
+        if (source.containsKey(targetKey)) {
+            return source.get(targetKey);
+        }
+        String normalizedTarget = normalizeKey(targetKey);
+        for (Map.Entry<?, ?> entry : source.entrySet()) {
+            if (normalizedTarget.equals(normalizeKey(String.valueOf(entry.getKey())))) {
+                return entry.getValue();
+            }
+        }
+        return null;
+    }
+
+    private String normalizeKey(String key) {
+        if (key == null) {
+            return "";
+        }
+        return key.replaceAll("[\\s_\\-]", "").toLowerCase(Locale.ROOT);
     }
 
     private Path resolveCachePath(String taskId, String userKey, Path markdownPath) {

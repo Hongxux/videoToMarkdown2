@@ -237,9 +237,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 from concurrent import futures
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Callable, Optional, List, Dict, Any, Tuple
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import url2pathname
 import yaml
 
@@ -303,17 +303,24 @@ from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selecto
 from services.python_grpc.src.content_pipeline.infra.llm.llm_client import AdaptiveConcurrencyLimiter
 from .douyin_download import (
     download_video_with_douyin_downloader as _download_video_with_douyin_downloader,
+    probe_douyin_video_info as _probe_douyin_video_info,
 )
 from .download_service import run_download_flow
 from .platform_rules import (
     build_task_dir_encoding_source as _build_task_dir_encoding_source_from_rules,
     extract_bilibili_video_id as _extract_bilibili_video_id_from_rules,
+    extract_douyin_aweme_ref as _extract_douyin_aweme_ref_from_rules,
     is_bilibili_host as _is_bilibili_host_from_rules,
     is_douyin_host as _is_douyin_host_from_rules,
     is_douyin_url as _is_douyin_url_from_rules,
 )
 from .share_link_resolver import resolve_share_link
 from .vl_report_writer import VLReportWriter
+from .watchdog_signal_writer import (
+    TaskWatchdogSignalWriter,
+    publish_watchdog_signal,
+    read_watchdog_signals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -874,6 +881,12 @@ def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
     return extracted or None
 
 
+def _extract_douyin_canonical_id(video_url: str) -> str:
+    """从抖音 URL 中提取 aweme ID 作为 canonical_id。"""
+    kind, aweme_id = _extract_douyin_aweme_ref_from_rules(video_url)
+    return aweme_id or ""
+
+
 def _build_task_dir_encoding_source(video_url: str) -> str:
     return _build_task_dir_encoding_source_from_rules(video_url)
 
@@ -882,6 +895,202 @@ def _normalize_video_title(raw_title: str) -> str:
     """归一化视频标题，去除首尾空白和重复空格。"""
     title = re.sub(r"\s+", " ", str(raw_title or "")).strip()
     return title
+
+
+def _first_non_blank(*values: Optional[str]) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_cover_url(raw_url: Any) -> str:
+    candidate = str(raw_url or "").strip()
+    if not candidate:
+        return ""
+    if candidate.startswith("//"):
+        candidate = f"https:{candidate}"
+    if _is_http_url(candidate):
+        return candidate
+    return ""
+
+
+def _extract_cover_url(info: Any) -> str:
+    if not isinstance(info, dict):
+        return ""
+
+    direct_url = _first_non_blank(
+        info.get("thumbnail"),
+        info.get("cover"),
+        info.get("cover_url"),
+        info.get("poster"),
+        info.get("pic"),
+    )
+    normalized_direct_url = _normalize_cover_url(direct_url)
+    if normalized_direct_url:
+        return normalized_direct_url
+
+    thumbnails = info.get("thumbnails")
+    if isinstance(thumbnails, list):
+        for item in reversed(thumbnails):
+            if isinstance(item, dict):
+                url = _first_non_blank(item.get("url"), item.get("src"), item.get("thumbnail"))
+            else:
+                url = str(item or "").strip()
+            normalized_url = _normalize_cover_url(url)
+            if normalized_url:
+                return normalized_url
+    return ""
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _extract_first_http_url(raw_text: str) -> str:
+    text = str(raw_text or "").strip()
+    if not text:
+        return ""
+    match = re.search(r"(https?://[^\s]+)", text, flags=re.IGNORECASE)
+    if not match:
+        return text if _is_http_url(text) else ""
+    candidate = str(match.group(1) or "").strip()
+    trailing_punctuation = "\"'`()[]{}<>，。！？；:,.!?;"
+    while candidate and candidate[-1] in trailing_punctuation:
+        candidate = candidate[:-1]
+    return candidate.strip()
+
+
+def _normalize_video_probe_input(raw_video_input: str) -> str:
+    value = str(raw_video_input or "").strip()
+    if not value:
+        return ""
+    if _is_http_url(value):
+        return value
+    bv_match = re.search(r"(?i)\b(BV[0-9A-Za-z]{10})\b", value)
+    if bv_match:
+        return f"https://www.bilibili.com/video/{bv_match.group(1)}"
+    return value
+
+
+def _extract_episode_index_from_url(candidate_url: str) -> int:
+    url = str(candidate_url or "").strip()
+    if not _is_http_url(url):
+        return 0
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return 0
+    query_values = parse_qs(parsed.query or "")
+    raw_episode_values = query_values.get("p") or query_values.get("P") or []
+    for raw_value in raw_episode_values:
+        value = _safe_int(raw_value, 0)
+        if value > 0:
+            return value
+    return 0
+
+
+def _detect_source_platform(url: str) -> str:
+    if not _is_http_url(url):
+        return ""
+    try:
+        host = urlparse(url).netloc
+    except Exception:
+        return ""
+    if _is_bilibili_host(host):
+        return "bilibili"
+    if _is_douyin_host(host):
+        return "douyin"
+    return "unknown"
+
+
+def _infer_video_info_content_type(platform: str, resolved_url: str) -> str:
+    normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform == "bilibili":
+        return "video"
+    if normalized_platform == "douyin":
+        lower_url = str(resolved_url or "").lower()
+        if "/note/" in lower_url:
+            return "note"
+        if "/video/" in lower_url:
+            return "video"
+    return "unknown"
+
+
+def _build_episode_candidates(info: Dict[str, Any]) -> List[Dict[str, Any]]:
+    entries = info.get("entries")
+    if not isinstance(entries, list):
+        return []
+
+    episodes: List[Dict[str, Any]] = []
+    used_indexes = set()
+    for index, entry in enumerate(entries, 1):
+        if not isinstance(entry, dict):
+            continue
+        episode_index = _safe_int(entry.get("playlist_index"), 0)
+        if episode_index <= 0:
+            episode_index = index
+        if episode_index <= 0 or episode_index in used_indexes:
+            continue
+
+        title = _normalize_video_title(
+            entry.get("title")
+            or entry.get("episode")
+            or entry.get("part")
+            or f"第{episode_index}集"
+        )
+        episode_url = _first_non_blank(entry.get("webpage_url"), entry.get("url"))
+        episodes.append(
+            {
+                "index": episode_index,
+                "title": title,
+                "duration_sec": _safe_float(entry.get("duration"), 0.0),
+                "episode_url": episode_url,
+                "episode_cover_url": _extract_cover_url(entry),
+            }
+        )
+        used_indexes.add(episode_index)
+
+    episodes.sort(key=lambda item: item["index"])
+    return episodes
+
+
+def _resolve_current_episode_index(
+    *,
+    requested_episode_index: int,
+    info: Dict[str, Any],
+    episodes: List[Dict[str, Any]],
+    total_episodes: int,
+) -> int:
+    if requested_episode_index > 0:
+        if total_episodes <= 0 or requested_episode_index <= total_episodes:
+            return requested_episode_index
+        return 0
+
+    info_index = _safe_int(info.get("playlist_index"), 0)
+    if info_index <= 0:
+        requested_entries = info.get("requested_entries")
+        if isinstance(requested_entries, list) and requested_entries:
+            info_index = _safe_int(requested_entries[0], 0)
+    if info_index > 0 and (total_episodes <= 0 or info_index <= total_episodes):
+        return info_index
+
+    if total_episodes == 1:
+        return 1
+    if not episodes:
+        return 0
+    return 1
 
 
 def _write_video_meta_file(
@@ -1752,6 +1961,122 @@ class GlobalResourceManager:
             logger.info("🧹 All CV validators cleaned up")
 
 
+class Stage1HeartbeatWriter:
+    """Stage1 结构化心跳写盘器。"""
+
+    STEP_INDEX = {
+        "step1_validate": 1,
+        "step2_correction": 2,
+        "step3_merge": 3,
+        "step3_5_translate": 4,
+        "step4_clean_local": 5,
+        "step5_6_dedup_merge": 6,
+        "step6_merge_cross": 6,
+    }
+
+    def __init__(self, task_id: str, output_dir: str, max_step: int) -> None:
+        self._task_id = str(task_id or "")
+        self._output_dir = str(output_dir or "")
+        self._max_step = max(1, int(max_step or 1))
+        self._seq = 0
+        self._lock = threading.Lock()
+        self._path = os.path.join(self._output_dir, "intermediates", "stage1_watchdog_heartbeat.json")
+        os.makedirs(os.path.dirname(self._path), exist_ok=True)
+
+    @property
+    def path(self) -> str:
+        return self._path
+
+    def _step_to_completed(self, step_name: str) -> int:
+        raw = str(step_name or "").strip()
+        if raw.isdigit():
+            return max(0, min(int(raw), self._max_step))
+        value = self.STEP_INDEX.get(raw, 0)
+        return max(0, min(int(value), self._max_step))
+
+    def emit(
+        self,
+        *,
+        status: str,
+        checkpoint: str,
+        completed: int,
+        pending: Optional[int] = None,
+        signal_type: str = "hard",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        safe_completed = max(0, min(int(completed), self._max_step))
+        safe_pending = (
+            max(0, int(pending))
+            if pending is not None
+            else max(0, self._max_step - safe_completed)
+        )
+        safe_pending = max(0, min(safe_pending, self._max_step))
+        safe_status = str(status or "running").strip().lower() or "running"
+        safe_checkpoint = str(checkpoint or "unknown").strip() or "unknown"
+        safe_signal_type = str(signal_type or "hard").strip().lower() or "hard"
+        if safe_signal_type not in {"hard", "soft"}:
+            safe_signal_type = "hard"
+        payload: Dict[str, Any] = {
+            "schema": "stage_watchdog.v1",
+            "source": "python_stage1_heartbeat",
+            "stage": "stage1",
+            "task_id": self._task_id,
+            "status": safe_status,
+            "completed": safe_completed,
+            "pending": safe_pending,
+            "checkpoint": safe_checkpoint,
+            "signal_type": safe_signal_type,
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                if key not in payload and isinstance(value, (str, int, float, bool)):
+                    payload[key] = value
+        with self._lock:
+            self._seq += 1
+            payload["seq"] = self._seq
+            published_payload = publish_watchdog_signal(payload)
+            if isinstance(published_payload, dict):
+                try:
+                    payload["stream_seq"] = max(0, int(published_payload.get("stream_seq", 0)))
+                except Exception:
+                    payload["stream_seq"] = 0
+            tmp_path = f"{self._path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as file:
+                json.dump(payload, file, ensure_ascii=False)
+            os.replace(tmp_path, self._path)
+
+    def emit_from_event(self, event: Dict[str, Any]) -> None:
+        if not isinstance(event, dict):
+            return
+        checkpoint = str(
+            event.get("checkpoint")
+            or event.get("step_name")
+            or event.get("event")
+            or "unknown"
+        ).strip()
+        status = str(event.get("status") or "running").strip().lower() or "running"
+        completed_raw = event.get("completed", 0)
+        pending_raw = event.get("pending")
+        try:
+            completed = int(completed_raw)
+        except Exception:
+            completed = self._step_to_completed(str(completed_raw))
+        pending: Optional[int]
+        try:
+            pending = int(pending_raw) if pending_raw is not None else None
+        except Exception:
+            pending = None
+        signal_type = str(event.get("signal_type") or "hard").strip().lower() or "hard"
+        self.emit(
+            status=status,
+            checkpoint=checkpoint,
+            completed=completed,
+            pending=pending,
+            signal_type=signal_type,
+        )
+
+
 class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServiceServicer):
     """
     类说明：gRPC 服务实现，承载视频处理各阶段的编排与调度。
@@ -1822,16 +2147,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         # 策略: 至少保留 4GB 给系统，剩余内存每 3GB 允许一个 Worker (Windows Spawn 模式开销大)
         mem = psutil.virtual_memory()
         available_ram_gb = mem.transferable if hasattr(mem, 'transferable') else mem.available / (1024**3)
-        # 保底 1 个, 上限 8 个 (或 CPU 核心数-1)
+        # 保底/硬上限改为可配置，避免不同机器用同一组硬编码参数。
+        reserved_ram_gb = max(0.0, _to_float(os.getenv("MODULE2_CV_WORKER_RESERVED_RAM_GB", "4"), 4.0))
+        ram_per_worker_gb = max(0.2, _to_float(os.getenv("MODULE2_CV_WORKER_RAM_PER_GB", "1.5"), 1.5))
+        worker_min = max(1, _to_int(os.getenv("MODULE2_CV_WORKER_MIN", "1"), 1))
+        hard_cap = max(1, _to_int(os.getenv("MODULE2_CV_WORKER_HARD_CAP", "6"), 6))
+        # 保底 1 个，默认上限 6 个（可通过环境变量提升）
         cpu_cores = multiprocessing.cpu_count()
-        # [User Request] 1.5GB per worker
-        max_workers_by_ram = max(1, int((available_ram_gb - 4) / 1.5))
-        # 🚀 OOM Fix: Force max workers to 4 on Windows to prevent PageFile overflow
-        HARD_CAP = 6
-        self.cv_worker_count = min(max(1, cpu_cores-1), max_workers_by_ram, HARD_CAP)
+        estimated_by_ram = int((available_ram_gb - reserved_ram_gb) / ram_per_worker_gb)
+        max_workers_by_ram = max(worker_min, estimated_by_ram)
+        self.cv_worker_count = min(max(worker_min, cpu_cores - 1), max_workers_by_ram, hard_cap)
         logger.info(
             f"🚀 CV ProcessPool Config: {self.cv_worker_count} workers "
-            f"(Limit by RAM: {max_workers_by_ram}, CPU: {cpu_cores}, HardCap: {HARD_CAP})"
+            f"(Limit by RAM: {max_workers_by_ram}, CPU: {cpu_cores}, HardCap: {hard_cap}, "
+            f"reserve_ram_gb={reserved_ram_gb}, ram_per_worker_gb={ram_per_worker_gb})"
         )
 
         
@@ -1943,14 +2272,23 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             return None
 
         normalized_path = os.path.abspath(str(semantic_units_path or "").strip()) if semantic_units_path else ""
-        payload_text = json.dumps(
+        canonical_bytes = json.dumps(
             semantic_units,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             default=str,
-        )
-        fingerprint = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+        ).encode("utf-8")
+        fingerprint = hashlib.sha256(canonical_bytes).hexdigest()
+        compressed_bytes = gzip.compress(canonical_bytes)
+        if len(compressed_bytes) < len(canonical_bytes):
+            inline_payload = compressed_bytes
+            inline_codec = "json-utf8-gzip"
+        else:
+            inline_payload = canonical_bytes
+            inline_codec = "json-utf8"
+        inline_sha256 = hashlib.sha256(inline_payload).hexdigest()
+
         ref_id = f"{(task_id or 'phase2a')}_{uuid.uuid4().hex}"
         cache_entry = {
             "semantic_units_path": normalized_path,
@@ -1961,6 +2299,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             "unit_count": len(semantic_units),
             "schema_version": "phase2a.v1",
             "fingerprint": fingerprint,
+            "inline_payload": inline_payload,
+            "inline_codec": inline_codec,
+            "inline_sha256": inline_sha256,
         }
         with self._phase2a_runtime_cache_lock:
             previous = self._phase2a_runtime_cache.get(normalized_output_dir)
@@ -1978,12 +2319,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             normalized_path,
             ref_id,
         )
-        return copy.deepcopy(cache_entry)
+        return {
+            "semantic_units_path": normalized_path,
+            "output_dir": normalized_output_dir,
+            "task_id": str(task_id or "").strip(),
+            "ref_id": ref_id,
+            "unit_count": len(semantic_units),
+            "schema_version": "phase2a.v1",
+            "fingerprint": fingerprint,
+            "inline_payload": inline_payload,
+            "inline_codec": inline_codec,
+            "inline_sha256": inline_sha256,
+        }
 
     def _get_phase2a_runtime_semantic_units(
         self,
         output_dir: str,
         semantic_units_path: str = "",
+        deep_copy: bool = True,
     ) -> Optional[List[Dict[str, Any]]]:
         """读取 Phase2A 语义单元运行态缓存；未命中返回 None。"""
         normalized_output_dir = os.path.abspath(str(output_dir or "").strip())
@@ -2005,12 +2358,18 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             logger.info(
                 "Phase2A runtime cache path mismatch tolerated: output_dir=%s, request=%s, cached=%s",
                 normalized_output_dir,
-                normalized_requested_path,
-                cached_path,
+                    normalized_requested_path,
+                    cached_path,
             )
-        return copy.deepcopy(cached_units)
+        if deep_copy:
+            return copy.deepcopy(cached_units)
+        return cached_units
 
-    def _get_phase2a_runtime_cache_entry_by_ref(self, ref_id: str) -> Optional[Dict[str, Any]]:
+    def _get_phase2a_runtime_cache_entry_by_ref(
+        self,
+        ref_id: str,
+        deep_copy: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         """按 ref_id 读取 Phase2A 缓存条目；未命中返回 None。"""
         normalized_ref_id = str(ref_id or "").strip()
         if not normalized_ref_id:
@@ -2019,7 +2378,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             entry = self._phase2a_ref_cache.get(normalized_ref_id)
             if entry is None:
                 return None
-            return copy.deepcopy(entry)
+            if deep_copy:
+                return copy.deepcopy(entry)
+            return entry
 
     def _iter_semantic_unit_nodes(self, data: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         """遍历语义单元节点并附带分组元信息。"""
@@ -2057,15 +2418,26 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
     def _build_semantic_units_inline_message(
         self,
         semantic_units: Optional[List[Dict[str, Any]]],
+        cache_entry: Optional[Dict[str, Any]] = None,
     ) -> video_processing_pb2.SemanticUnitsInline:
         """将语义单元编码为 inline protobuf（优先 gzip 以降低传输体积）。"""
         inline_msg = video_processing_pb2.SemanticUnitsInline()
+        if isinstance(cache_entry, dict):
+            cached_payload = bytes(cache_entry.get("inline_payload") or b"")
+            if cached_payload:
+                inline_msg.payload = cached_payload
+                inline_msg.codec = str(cache_entry.get("inline_codec", "") or "json-utf8")
+                inline_msg.unit_count = int(cache_entry.get("unit_count", 0) or 0)
+                inline_msg.sha256 = str(cache_entry.get("inline_sha256", "") or hashlib.sha256(cached_payload).hexdigest())
+                return inline_msg
+
         if not isinstance(semantic_units, list):
             return inline_msg
 
         raw_bytes = json.dumps(
             semantic_units,
             ensure_ascii=False,
+            sort_keys=True,
             separators=(",", ":"),
             default=str,
         ).encode("utf-8")
@@ -2155,6 +2527,71 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             active_tasks=self._active_tasks,
             status=status
         )
+
+    async def StreamTaskWatchdogSignals(self, request, context):
+        task_id = str(getattr(request, "task_id", "") or "").strip()
+        if not task_id:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "task_id is required")
+
+        stage_filter = str(getattr(request, "stage", "") or "").strip().lower()
+        from_stream_seq_raw = getattr(request, "from_stream_seq", 0)
+        idle_timeout_raw = getattr(request, "idle_timeout_sec", 0)
+        try:
+            cursor = max(0, int(from_stream_seq_raw))
+        except Exception:
+            cursor = 0
+        try:
+            idle_timeout_sec = max(5, int(idle_timeout_raw))
+        except Exception:
+            idle_timeout_sec = 30
+
+        def _safe_int(value: Any, fallback: int = 0) -> int:
+            try:
+                return max(0, int(value))
+            except Exception:
+                return max(0, int(fallback))
+
+        last_event_at = time.monotonic()
+        while True:
+            events = read_watchdog_signals(
+                task_id=task_id,
+                from_stream_seq=cursor,
+                stage=stage_filter or None,
+                limit=128,
+            )
+            if events:
+                for event in events:
+                    stream_seq = _safe_int(event.get("stream_seq", 0), 0)
+                    cursor = max(cursor, stream_seq)
+                    status = str(event.get("status") or "running").strip().lower() or "running"
+                    signal_type = str(event.get("signal_type") or "hard").strip().lower() or "hard"
+                    if signal_type not in {"hard", "soft"}:
+                        signal_type = "hard"
+                    payload = video_processing_pb2.WatchdogSignalEvent(
+                        schema=str(event.get("schema") or "task_watchdog.v1"),
+                        source=str(event.get("source") or "python_watchdog"),
+                        task_id=str(event.get("task_id") or task_id),
+                        stage=str(event.get("stage") or "unknown"),
+                        status=status,
+                        checkpoint=str(event.get("checkpoint") or "unknown"),
+                        completed=_safe_int(event.get("completed", 0), 0),
+                        pending=_safe_int(event.get("pending", 0), 0),
+                        seq=_safe_int(event.get("seq", 0), 0),
+                        stream_seq=stream_seq,
+                        updated_at_ms=_safe_int(event.get("updated_at_ms", 0), 0),
+                        signal_type=signal_type,
+                    )
+                    yield payload
+                    last_event_at = time.monotonic()
+                    if stage_filter and status in {"completed", "failed"}:
+                        return
+                continue
+
+            if time.monotonic() - last_event_at >= idle_timeout_sec:
+                return
+
+            await asyncio.sleep(0.5)
+
     async def DownloadVideo(self, request, context):
         """
         执行逻辑：
@@ -2165,11 +2602,44 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         task_id = request.task_id
         self._cache_metrics_begin(task_id, "DownloadVideo")
         raw_video_input = str(request.video_url or "")
+        predicted_output_dir = ""
+        try:
+            task_source = _build_task_dir_encoding_source(raw_video_input)
+            task_hash = hashlib.md5(task_source.encode("utf-8")).hexdigest()
+            predicted_output_dir = os.path.join(_get_primary_storage_root(), task_hash)
+        except Exception:
+            predicted_output_dir = str(request.output_dir or "").strip()
+        download_watchdog = None
+        if predicted_output_dir:
+            try:
+                download_watchdog = TaskWatchdogSignalWriter(
+                    task_id=task_id,
+                    output_dir=predicted_output_dir,
+                    stage="download",
+                    total_steps=3,
+                )
+                download_watchdog.emit(
+                    status="running",
+                    checkpoint="download_prepare",
+                    completed=0,
+                    pending=3,
+                    signal_type="hard",
+                )
+            except Exception as watchdog_error:
+                logger.warning(f"[{task_id}] Download watchdog init failed: {watchdog_error}")
 
         logger.info(f"[{task_id}] DownloadVideo: {raw_video_input}")
 
         try:
             self._increment_tasks()
+            if download_watchdog is not None:
+                download_watchdog.emit(
+                    status="running",
+                    checkpoint="download_flow_start",
+                    completed=1,
+                    pending=2,
+                    signal_type="hard",
+                )
             flow_result = await run_download_flow(
                 task_id=task_id,
                 raw_video_input=raw_video_input,
@@ -2185,6 +2655,25 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 write_video_meta_file=_write_video_meta_file,
                 logger=logger,
             )
+            if download_watchdog is not None:
+                if flow_result.success:
+                    download_watchdog.emit(
+                        status="completed",
+                        checkpoint="download_response_ready",
+                        completed=3,
+                        pending=0,
+                        signal_type="hard",
+                        extra={"content_type": str(flow_result.content_type or "unknown")},
+                    )
+                else:
+                    download_watchdog.emit(
+                        status="failed",
+                        checkpoint="download_failed",
+                        completed=1,
+                        pending=2,
+                        signal_type="hard",
+                        extra={"error": str(flow_result.error_msg or "")[:200]},
+                    )
 
             return video_processing_pb2.DownloadResponse(
                 success=flow_result.success,
@@ -2201,6 +2690,18 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             )
         except Exception as e:
             logger.error(f"[{task_id}] DownloadVideo failed: {e}")
+            if download_watchdog is not None:
+                try:
+                    download_watchdog.emit(
+                        status="failed",
+                        checkpoint="download_exception",
+                        completed=1,
+                        pending=2,
+                        signal_type="hard",
+                        extra={"error": str(e)[:200]},
+                    )
+                except Exception as watchdog_error:
+                    logger.warning(f"[{task_id}] Download watchdog emit failed: {watchdog_error}")
             return video_processing_pb2.DownloadResponse(
                 success=False,
                 video_path="",
@@ -2213,6 +2714,232 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 canonical_id="",
                 link_resolver="",
                 content_type="unknown",
+            )
+        finally:
+            self._decrement_tasks()
+
+    async def GetVideoInfo(self, request, context):
+        """
+        执行逻辑：
+        1) 解析分享文本/BV/URL，统一得到待探测链接与平台信息。
+        2) 复用 VideoProcessor 仅探测元信息，不下载视频文件。
+        3) 组装合集与分集结构，返回给 Java 侧 REST API。
+        """
+        task_id = str(request.task_id or f"video-info-{int(time.time() * 1000)}")
+        self._cache_metrics_begin(task_id, "GetVideoInfo")
+        raw_video_input = str(request.video_input or "").strip()
+
+        if not raw_video_input:
+            return video_processing_pb2.VideoInfoResponse(
+                success=False,
+                error_msg="video_input cannot be empty",
+                raw_input="",
+                resolved_url="",
+                source_platform="unknown",
+                canonical_id="",
+                video_title="",
+                duration_sec=0.0,
+                is_collection=False,
+                total_episodes=0,
+                current_episode_index=0,
+                current_episode_title="",
+                episodes=[],
+                link_resolver="",
+                content_type="unknown",
+                cover_url="",
+            )
+
+        logger.info(f"[{task_id}] GetVideoInfo: {raw_video_input}")
+
+        normalized_input = _normalize_video_probe_input(raw_video_input)
+        requested_episode_index = _extract_episode_index_from_url(_extract_first_http_url(raw_video_input))
+
+        resolved_url = _extract_first_http_url(normalized_input)
+        if not resolved_url and _is_http_url(normalized_input):
+            resolved_url = normalized_input
+
+        extracted_url = _extract_first_http_url(normalized_input)
+        source_platform = _detect_source_platform(resolved_url)
+        canonical_id = ""
+        if source_platform == "bilibili":
+            canonical_id = _extract_bilibili_video_id(resolved_url) or ""
+        elif source_platform == "douyin":
+            canonical_id = _extract_douyin_canonical_id(resolved_url)
+        link_resolver = "fallback-input"
+        content_type = _infer_video_info_content_type(source_platform, resolved_url)
+
+        probe_url = _first_non_blank(extracted_url, resolved_url)
+
+        try:
+            self._increment_tasks()
+
+            try:
+                resolved_share = await resolve_share_link(normalized_input)
+                extracted_url = _first_non_blank(getattr(resolved_share, "extracted_url", ""), extracted_url)
+                resolved_url = _first_non_blank(getattr(resolved_share, "resolved_url", ""), resolved_url)
+                source_platform = _first_non_blank(getattr(resolved_share, "platform", ""), source_platform)
+                canonical_id = _first_non_blank(getattr(resolved_share, "canonical_id", ""), canonical_id)
+                link_resolver = _first_non_blank(getattr(resolved_share, "resolver", ""), link_resolver)
+                content_type = _first_non_blank(
+                    getattr(resolved_share, "content_type", ""),
+                    _infer_video_info_content_type(source_platform, resolved_url),
+                )
+            except Exception as resolve_error:
+                logger.warning(f"[{task_id}] GetVideoInfo resolve_share_link fallback: {resolve_error}")
+                if not content_type:
+                    content_type = _infer_video_info_content_type(source_platform, resolved_url)
+
+            if source_platform == "bilibili":
+                probe_url = _first_non_blank(extracted_url, resolved_url, probe_url)
+            else:
+                probe_url = _first_non_blank(resolved_url, extracted_url, probe_url)
+
+            if requested_episode_index <= 0:
+                requested_episode_index = _extract_episode_index_from_url(extracted_url)
+            if requested_episode_index <= 0:
+                requested_episode_index = _extract_episode_index_from_url(resolved_url)
+
+            if not _is_http_url(probe_url):
+                raise ValueError("invalid video input: cannot resolve HTTP URL")
+
+            download_options = _load_download_video_options(self.config)
+            info = None
+
+            # 抖音优先走浏览器探测（yt-dlp 需要 cookies 易失败）
+            if source_platform == "douyin":
+                try:
+                    logger.info(f"[{task_id}] GetVideoInfo: Douyin detected, using browser probe for {probe_url}")
+                    info = await _probe_douyin_video_info(video_url=probe_url, timeout_ms=30000)
+                except Exception as douyin_probe_err:
+                    logger.warning(f"[{task_id}] GetVideoInfo: Douyin browser probe failed, falling back to yt-dlp: {douyin_probe_err}")
+
+            # 非抖音或抖音浏览器探测失败时走 yt-dlp
+            if not isinstance(info, dict) or not info:
+                video_processor = VideoProcessor(**download_options)
+                info = await asyncio.to_thread(video_processor.probe_video_info, probe_url)
+
+            if not isinstance(info, dict) or not info:
+                raise RuntimeError("video info probe returned empty payload")
+
+            episodes = _build_episode_candidates(info)
+            total_episodes = len(episodes)
+            if total_episodes <= 0:
+                total_episodes = max(
+                    _safe_int(info.get("playlist_count"), 0),
+                    _safe_int(info.get("n_entries"), 0),
+                )
+            if total_episodes <= 0:
+                total_episodes = 1
+
+            current_episode_index = _resolve_current_episode_index(
+                requested_episode_index=requested_episode_index,
+                info=info,
+                episodes=episodes,
+                total_episodes=total_episodes,
+            )
+
+            video_title = _normalize_video_title(
+                info.get("title")
+                or info.get("fulltitle")
+                or getattr(video_processor, "last_video_title", "")
+            )
+            duration_sec = _safe_float(info.get("duration"), 0.0)
+            current_episode_title = ""
+            cover_url = _extract_cover_url(info)
+
+            selected_episode: Optional[Dict[str, Any]] = None
+            if episodes and current_episode_index > 0:
+                for item in episodes:
+                    if item.get("index") == current_episode_index:
+                        selected_episode = item
+                        break
+                if selected_episode is None and 1 <= current_episode_index <= len(episodes):
+                    selected_episode = episodes[current_episode_index - 1]
+
+            if selected_episode is not None:
+                current_episode_title = _normalize_video_title(selected_episode.get("title"))
+                selected_duration = _safe_float(selected_episode.get("duration_sec"), 0.0)
+                if selected_duration > 0:
+                    duration_sec = selected_duration
+                selected_cover_url = _first_non_blank(selected_episode.get("episode_cover_url"))
+                if selected_cover_url:
+                    cover_url = selected_cover_url
+
+            if not video_title and episodes:
+                if total_episodes == 1:
+                    video_title = _normalize_video_title(episodes[0].get("title"))
+                else:
+                    video_title = _normalize_video_title(info.get("playlist_title") or "")
+
+            if not current_episode_title:
+                if total_episodes == 1 and episodes:
+                    current_episode_title = _normalize_video_title(episodes[0].get("title"))
+                else:
+                    current_episode_title = video_title
+
+            if current_episode_index <= 0 and total_episodes == 1:
+                current_episode_index = 1
+
+            if not canonical_id:
+                if source_platform == "bilibili":
+                    canonical_id = _first_non_blank(
+                        _extract_bilibili_video_id(resolved_url) or "",
+                        _extract_bilibili_video_id(probe_url) or "",
+                    )
+                elif source_platform == "douyin":
+                    canonical_id = _first_non_blank(
+                        _extract_douyin_canonical_id(resolved_url),
+                        _extract_douyin_canonical_id(probe_url),
+                    )
+
+            episode_items = [
+                video_processing_pb2.EpisodeInfo(
+                    index=_safe_int(item.get("index"), 0),
+                    title=_normalize_video_title(item.get("title")),
+                    duration_sec=_safe_float(item.get("duration_sec"), 0.0),
+                    episode_url=_first_non_blank(item.get("episode_url")),
+                    episode_cover_url=_first_non_blank(item.get("episode_cover_url")),
+                )
+                for item in episodes
+            ]
+
+            return video_processing_pb2.VideoInfoResponse(
+                success=True,
+                error_msg="",
+                raw_input=raw_video_input,
+                resolved_url=_first_non_blank(resolved_url, probe_url),
+                source_platform=_first_non_blank(source_platform, "unknown"),
+                canonical_id=canonical_id,
+                video_title=video_title,
+                duration_sec=duration_sec,
+                is_collection=total_episodes > 1,
+                total_episodes=total_episodes,
+                current_episode_index=current_episode_index,
+                current_episode_title=current_episode_title,
+                episodes=episode_items,
+                link_resolver=link_resolver,
+                content_type=_first_non_blank(content_type, "unknown"),
+                cover_url=cover_url,
+            )
+        except Exception as exc:
+            logger.error(f"[{task_id}] GetVideoInfo failed: {exc}")
+            return video_processing_pb2.VideoInfoResponse(
+                success=False,
+                error_msg=str(exc),
+                raw_input=raw_video_input,
+                resolved_url=_first_non_blank(resolved_url, probe_url),
+                source_platform=_first_non_blank(source_platform, "unknown"),
+                canonical_id=canonical_id,
+                video_title="",
+                duration_sec=0.0,
+                is_collection=False,
+                total_episodes=0,
+                current_episode_index=0,
+                current_episode_title="",
+                episodes=[],
+                link_resolver=link_resolver,
+                content_type=_first_non_blank(content_type, "unknown"),
+                cover_url="",
             )
         finally:
             self._decrement_tasks()
@@ -2254,6 +2981,54 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         fingerprint_language = language_for_fingerprint(requested_language)
         
         logger.info(f"[{task_id}] TranscribeVideo: {video_path} (language={fingerprint_language})")
+        transcribe_watchdog: Optional[TaskWatchdogSignalWriter] = None
+        soft_heartbeat_stop = threading.Event()
+        soft_heartbeat_thread: Optional[threading.Thread] = None
+        soft_heartbeat_lock = threading.Lock()
+        soft_heartbeat_state: Dict[str, Any] = {
+            "status": "running",
+            "checkpoint": "transcribe_prepare",
+            "completed": 0,
+            "pending": 1,
+        }
+
+        def _emit_transcribe_soft_heartbeat_loop() -> None:
+            interval_sec = max(
+                5.0,
+                float(_to_int(os.getenv("TRANSCRIBE_SOFT_HEARTBEAT_SEC", 20), 20)),
+            )
+            while not soft_heartbeat_stop.wait(interval_sec):
+                if transcribe_watchdog is None:
+                    continue
+                try:
+                    with soft_heartbeat_lock:
+                        snapshot = dict(soft_heartbeat_state)
+                    transcribe_watchdog.emit(
+                        status=str(snapshot.get("status") or "running"),
+                        checkpoint=str(snapshot.get("checkpoint") or "transcribe_pending"),
+                        completed=int(snapshot.get("completed", 0)),
+                        pending=int(snapshot.get("pending", 1)),
+                        signal_type="soft",
+                    )
+                except Exception as heartbeat_error:
+                    logger.warning(f"[{task_id}] Transcribe soft heartbeat emit failed: {heartbeat_error}")
+
+        def _update_transcribe_soft_state(
+            *,
+            status: Optional[str] = None,
+            checkpoint: Optional[str] = None,
+            completed: Optional[int] = None,
+            pending: Optional[int] = None,
+        ) -> None:
+            with soft_heartbeat_lock:
+                if status is not None:
+                    soft_heartbeat_state["status"] = str(status).strip().lower() or "running"
+                if checkpoint is not None:
+                    soft_heartbeat_state["checkpoint"] = str(checkpoint).strip() or "unknown"
+                if completed is not None:
+                    soft_heartbeat_state["completed"] = max(0, int(completed))
+                if pending is not None:
+                    soft_heartbeat_state["pending"] = max(0, int(pending))
         
         try:
             self._increment_tasks()
@@ -2263,6 +3038,25 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
             # 确保目录存在
             os.makedirs(output_dir, exist_ok=True)
+            transcribe_watchdog = TaskWatchdogSignalWriter(
+                task_id=task_id,
+                output_dir=output_dir,
+                stage="transcribe",
+                total_steps=1,
+            )
+            transcribe_watchdog.emit(
+                status="running",
+                checkpoint="transcribe_prepare",
+                completed=0,
+                pending=1,
+                signal_type="hard",
+            )
+            soft_heartbeat_thread = threading.Thread(
+                target=_emit_transcribe_soft_heartbeat_loop,
+                name=f"transcribe-soft-heartbeat-{task_id}",
+                daemon=True,
+            )
+            soft_heartbeat_thread.start()
             
             # 🔑 检查是否已存在字幕文件（缓存复用）
             subtitle_path = os.path.join(output_dir, "subtitles.txt")
@@ -2284,6 +3078,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     with open(subtitle_path, "r", encoding="utf-8") as f:
                         subtitle_text = f.read()
                     reused = True
+                    _update_transcribe_soft_state(
+                        status="completed",
+                        checkpoint="transcribe_reused",
+                        completed=1,
+                        pending=0,
+                    )
+                    transcribe_watchdog.emit(
+                        status="completed",
+                        checkpoint="transcribe_reused",
+                        completed=1,
+                        pending=0,
+                        signal_type="hard",
+                    )
                     logger.info(f"[{task_id}] ✅ Reusing existing subtitles: {subtitle_path}")
                     self._append_resume_report(
                         output_dir=output_dir,
@@ -2311,18 +3118,44 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 # 兼容旧行为：未开启复用控制时沿用文件存在即复用
                 with open(subtitle_path, "r", encoding="utf-8") as f:
                     subtitle_text = f.read()
+                _update_transcribe_soft_state(
+                    status="completed",
+                    checkpoint="transcribe_reused_legacy",
+                    completed=1,
+                    pending=0,
+                )
+                transcribe_watchdog.emit(
+                    status="completed",
+                    checkpoint="transcribe_reused_legacy",
+                    completed=1,
+                    pending=0,
+                    signal_type="hard",
+                )
                 logger.info(f"[{task_id}] ✅ Reusing existing subtitles: {subtitle_path}")
             elif not reused:
                 # 🔑 使用全局单例 Transcriber
                 transcriber = self.resources.transcriber
                 if not transcriber:
                     raise RuntimeError("Global Transcriber not initialized")
+                _update_transcribe_soft_state(
+                    status="running",
+                    checkpoint="transcribe_engine_running",
+                    completed=0,
+                    pending=1,
+                )
+                transcribe_watchdog.emit(
+                    status="running",
+                    checkpoint="transcribe_engine_running",
+                    completed=0,
+                    pending=1,
+                    signal_type="hard",
+                )
                 
                 # transcribe 是异步方法
                 subtitle_text = await transcriber.transcribe(video_path, language=whisper_language)
                 
                 # 🔑 保存字幕文件为 subtitles.txt（异步写盘进程，不阻塞主流程）
-                enqueue_text_write(subtitle_path, subtitle_text)
+                enqueue_text_write(subtitle_path, subtitle_text, scope_key=output_dir)
 
                 _write_resource_meta(
                     subtitle_path,
@@ -2330,6 +3163,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     input_fingerprint=reuse_fingerprint,
                     dependencies={},
                     priority=False,
+                )
+                _update_transcribe_soft_state(
+                    status="completed",
+                    checkpoint="transcribe_persist_queued",
+                    completed=1,
+                    pending=0,
+                )
+                transcribe_watchdog.emit(
+                    status="completed",
+                    checkpoint="transcribe_persist_queued",
+                    completed=1,
+                    pending=0,
+                    signal_type="hard",
                 )
 
                 logger.info(f"[{task_id}] Subtitles queued to async writer: {subtitle_path}")
@@ -2344,6 +3190,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
         except Exception as e:
             logger.error(f"[{task_id}] TranscribeVideo failed: {e}")
+            if transcribe_watchdog is not None:
+                try:
+                    _update_transcribe_soft_state(
+                        status="failed",
+                        checkpoint="transcribe_failed",
+                        completed=0,
+                        pending=1,
+                    )
+                    transcribe_watchdog.emit(
+                        status="failed",
+                        checkpoint="transcribe_failed",
+                        completed=0,
+                        pending=1,
+                        signal_type="hard",
+                        extra={"error": str(e)[:200]},
+                    )
+                except Exception as heartbeat_error:
+                    logger.warning(f"[{task_id}] Transcribe watchdog emit failed: {heartbeat_error}")
             return video_processing_pb2.TranscribeResponse(
                 success=False,
                 subtitle_path="",
@@ -2352,6 +3216,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
+            soft_heartbeat_stop.set()
+            if soft_heartbeat_thread is not None and soft_heartbeat_thread.is_alive():
+                soft_heartbeat_thread.join(timeout=2.0)
             self._decrement_tasks()
     
     async def ProcessStage1(self, request, context):
@@ -2384,6 +3251,73 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         
         # 确保目录存在
         os.makedirs(intermediates_dir, exist_ok=True)
+        stage1_heartbeat = Stage1HeartbeatWriter(task_id=task_id, output_dir=output_dir, max_step=max_step)
+        stage1_heartbeat.emit(
+            status="running",
+            checkpoint="pipeline_prepare",
+            completed=0,
+            pending=max_step,
+        )
+        soft_heartbeat_interval_sec = max(
+            5.0,
+            float(_to_int(os.getenv("STAGE1_SOFT_HEARTBEAT_SEC", 20), 20)),
+        )
+        soft_heartbeat_lock = threading.Lock()
+        soft_heartbeat_state: Dict[str, Any] = {
+            "status": "running",
+            "checkpoint": "pipeline_prepare",
+            "completed": 0,
+            "pending": max_step,
+        }
+        soft_heartbeat_stop = threading.Event()
+
+        def _update_soft_heartbeat_state(event: Optional[Dict[str, Any]] = None) -> None:
+            if not isinstance(event, dict):
+                return
+            status = str(event.get("status") or "running").strip().lower() or "running"
+            checkpoint = str(
+                event.get("checkpoint")
+                or event.get("step_name")
+                or event.get("event")
+                or "unknown"
+            ).strip()
+            completed_raw = event.get("completed", soft_heartbeat_state.get("completed", 0))
+            pending_raw = event.get("pending", soft_heartbeat_state.get("pending", max_step))
+            try:
+                completed = int(completed_raw)
+            except Exception:
+                completed = int(soft_heartbeat_state.get("completed", 0))
+            try:
+                pending = int(pending_raw)
+            except Exception:
+                pending = int(soft_heartbeat_state.get("pending", max_step))
+            with soft_heartbeat_lock:
+                soft_heartbeat_state["status"] = status
+                soft_heartbeat_state["checkpoint"] = checkpoint or "unknown"
+                soft_heartbeat_state["completed"] = max(0, completed)
+                soft_heartbeat_state["pending"] = max(0, pending)
+
+        def _stage1_soft_heartbeat_loop() -> None:
+            while not soft_heartbeat_stop.wait(soft_heartbeat_interval_sec):
+                try:
+                    with soft_heartbeat_lock:
+                        snapshot = dict(soft_heartbeat_state)
+                    stage1_heartbeat.emit(
+                        status=str(snapshot.get("status") or "running"),
+                        checkpoint=str(snapshot.get("checkpoint") or "pipeline_pending"),
+                        completed=int(snapshot.get("completed", 0)),
+                        pending=int(snapshot.get("pending", max_step)),
+                        signal_type="soft",
+                    )
+                except Exception as soft_heartbeat_error:
+                    logger.warning(f"[{task_id}] Stage1 soft heartbeat emit failed: {soft_heartbeat_error}")
+
+        soft_heartbeat_thread = threading.Thread(
+            target=_stage1_soft_heartbeat_loop,
+            name=f"stage1-soft-heartbeat-{task_id}",
+            daemon=True,
+        )
+        soft_heartbeat_thread.start()
         
         # 输出文件路径
         step2_path = os.path.join(intermediates_dir, "step2_correction_output.json")
@@ -2408,7 +3342,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     1.0,
                     float(_to_int(os.getenv("TRANSCRIPT_ASYNC_SUBTITLE_WAIT_SEC", 15), 15)),
                 )
-                flushed = flush_async_json_writes(timeout_sec=subtitle_wait_sec)
+                flushed = flush_async_json_writes(timeout_sec=subtitle_wait_sec, scope_key=output_dir)
                 subtitle_ready = os.path.exists(subtitle_path) and os.path.getsize(subtitle_path) > 0
                 if subtitle_ready:
                     logger.info(
@@ -2548,6 +3482,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             stage1_final_state: Dict[str, Any] = {}
             if reused_stage1:
+                _update_soft_heartbeat_state(
+                    {
+                        "status": "completed",
+                        "checkpoint": "reused_stage1_outputs",
+                        "completed": max_step,
+                        "pending": 0,
+                    }
+                )
+                stage1_heartbeat.emit(
+                    status="completed",
+                    checkpoint="reused_stage1_outputs",
+                    completed=max_step,
+                    pending=0,
+                )
                 logger.info(f"[{task_id}] ✅ Reusing existing Stage1 outputs")
             else:
                 if os.path.exists(step2_path) and os.path.exists(step6_path) and need_sentence_ts:
@@ -2565,6 +3513,10 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"[{task_id}] Stage1 partial reuse hit: resume_from={resume_from_step}, "
                         f"resume_fields={sorted(resume_state.keys())}"
                     )
+                def _stage1_progress_callback(event: Dict[str, Any]) -> None:
+                    _update_soft_heartbeat_state(event)
+                    stage1_heartbeat.emit_from_event(event)
+
                 stage1_final_state = await run_pipeline(
                    video_path=video_path,
                    subtitle_path=subtitle_path,
@@ -2576,10 +3528,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                        "step3_5_translate",
                        "step4_clean_local",
                        "step5_6_dedup_merge",
-                   ],
-                   resume_state=resume_state or None,
-                   resume_from_step=resume_from_step or None,
-                )
+                    ],
+                    resume_state=resume_state or None,
+                    resume_from_step=resume_from_step or None,
+                    progress_callback=_stage1_progress_callback,
+                 )
 
                 # Stage1 step2~step6 产物改为异步落盘后，这里只在关键文件未就绪时等待。
                 required_outputs = [step2_path, step6_path]
@@ -2593,7 +3546,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         1.0,
                         float(_to_int(os.getenv("TRANSCRIPT_ASYNC_STAGE1_PERSIST_WAIT_SEC", 30), 30)),
                     )
-                    flushed = flush_async_json_writes(timeout_sec=persist_wait_sec)
+                    flushed = flush_async_json_writes(timeout_sec=persist_wait_sec, scope_key=output_dir)
                     pending_required = [
                         path
                         for path in required_outputs
@@ -2656,7 +3609,22 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             else:
                 logger.warning(f"[{task_id}] sentence_timestamps.json not found at {local_sentence_ts}")
                 sentence_timestamps_path = inter_sentence_ts if os.path.exists(inter_sentence_ts) else ""
-            
+
+            stage1_heartbeat.emit(
+                status="completed",
+                checkpoint="stage1_response_ready",
+                completed=max_step,
+                pending=0,
+            )
+            _update_soft_heartbeat_state(
+                {
+                    "status": "completed",
+                    "checkpoint": "stage1_response_ready",
+                    "completed": max_step,
+                    "pending": 0,
+                }
+            )
+              
             return video_processing_pb2.Stage1Response(
                 success=True,
                 step2_json_path=step2_path,
@@ -2667,6 +3635,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
         except Exception as e:
             logger.error(f"[{task_id}] ProcessStage1 failed: {e}")
+            try:
+                _update_soft_heartbeat_state(
+                    {
+                        "status": "failed",
+                        "checkpoint": "stage1_failed",
+                        "completed": 0,
+                        "pending": max_step,
+                    }
+                )
+                stage1_heartbeat.emit(
+                    status="failed",
+                    checkpoint="stage1_failed",
+                    completed=0,
+                    pending=max_step,
+                    extra={"error": str(e)[:200]},
+                )
+            except Exception as heartbeat_error:
+                logger.warning(f"[{task_id}] Stage1 heartbeat write failed: {heartbeat_error}")
             return video_processing_pb2.Stage1Response(
                 success=False,
                 step2_json_path="",
@@ -2675,6 +3661,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
+            soft_heartbeat_stop.set()
+            if soft_heartbeat_thread.is_alive():
+                soft_heartbeat_thread.join(timeout=2.0)
             self._decrement_tasks()
     
     async def AnalyzeSemanticUnits(self, request, context):
@@ -2720,9 +3709,73 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     sentence_timestamps_path = ""
         
         logger.info(f"[{task_id}] AnalyzeSemanticUnits (Phase2A), output_dir={output_dir}")
+        analyze_watchdog = TaskWatchdogSignalWriter(
+            task_id=task_id,
+            output_dir=output_dir,
+            stage="phase2a",
+            total_steps=3,
+        )
+        analyze_soft_stop = threading.Event()
+        analyze_soft_thread: Optional[threading.Thread] = None
+        analyze_soft_lock = threading.Lock()
+        analyze_soft_state: Dict[str, Any] = {
+            "status": "running",
+            "checkpoint": "phase2a_prepare",
+            "completed": 0,
+            "pending": 3,
+        }
+
+        def _emit_analyze_soft_loop() -> None:
+            interval_sec = max(
+                5.0,
+                float(_to_int(os.getenv("PHASE2A_SOFT_HEARTBEAT_SEC", 20), 20)),
+            )
+            while not analyze_soft_stop.wait(interval_sec):
+                try:
+                    with analyze_soft_lock:
+                        snapshot = dict(analyze_soft_state)
+                    analyze_watchdog.emit(
+                        status=str(snapshot.get("status") or "running"),
+                        checkpoint=str(snapshot.get("checkpoint") or "phase2a_pending"),
+                        completed=int(snapshot.get("completed", 0)),
+                        pending=int(snapshot.get("pending", 3)),
+                        signal_type="soft",
+                    )
+                except Exception as soft_error:
+                    logger.warning(f"[{task_id}] Phase2A soft heartbeat emit failed: {soft_error}")
+
+        def _update_analyze_soft_state(
+            *,
+            status: Optional[str] = None,
+            checkpoint: Optional[str] = None,
+            completed: Optional[int] = None,
+            pending: Optional[int] = None,
+        ) -> None:
+            with analyze_soft_lock:
+                if status is not None:
+                    analyze_soft_state["status"] = str(status).strip().lower() or "running"
+                if checkpoint is not None:
+                    analyze_soft_state["checkpoint"] = str(checkpoint).strip() or "unknown"
+                if completed is not None:
+                    analyze_soft_state["completed"] = max(0, int(completed))
+                if pending is not None:
+                    analyze_soft_state["pending"] = max(0, int(pending))
         
         try:
             self._increment_tasks()
+            analyze_watchdog.emit(
+                status="running",
+                checkpoint="phase2a_prepare",
+                completed=0,
+                pending=3,
+                signal_type="hard",
+            )
+            analyze_soft_thread = threading.Thread(
+                target=_emit_analyze_soft_loop,
+                name=f"phase2a-soft-heartbeat-{task_id}",
+                daemon=True,
+            )
+            analyze_soft_thread.start()
 
             phase2a_fp = _build_input_fingerprint(
                 video_path,
@@ -2765,6 +3818,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 semantic_units_payload = self._get_phase2a_runtime_semantic_units(
                     output_dir=output_dir,
                     semantic_units_path=semantic_units_path,
+                    deep_copy=False,
                 )
                 if semantic_units_payload is None:
                     try:
@@ -2799,8 +3853,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         )
                     )
                     response.semantic_units_inline.CopyFrom(
-                        self._build_semantic_units_inline_message(semantic_units_payload)
+                        self._build_semantic_units_inline_message(
+                            semantic_units_payload,
+                            cache_entry=cache_entry,
+                        )
                     )
+                _update_analyze_soft_state(
+                    status="completed",
+                    checkpoint="phase2a_reused_ready",
+                    completed=3,
+                    pending=0,
+                )
+                analyze_watchdog.emit(
+                    status="completed",
+                    checkpoint="phase2a_reused_ready",
+                    completed=3,
+                    pending=0,
+                    signal_type="hard",
+                )
                 return response
 
             if phase2a_reuse_enabled and not reuse_candidate_path:
@@ -2856,6 +3926,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 pipeline.segmenter = shared_segmenter
 
             logger.info(f"[{task_id}] Phase2A segmentation-only mode enabled: skip material request generation")
+            _update_analyze_soft_state(
+                status="running",
+                checkpoint="phase2a_segmentation_running",
+                completed=1,
+                pending=2,
+            )
+            analyze_watchdog.emit(
+                status="running",
+                checkpoint="phase2a_segmentation_running",
+                completed=1,
+                pending=2,
+                signal_type="hard",
+            )
             semantic_units_path = await pipeline.analyze_segmentation_only()
             runtime_semantic_units = getattr(pipeline, "latest_phase2a_semantic_units_payload", None)
             cache_entry = None
@@ -2863,7 +3946,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 # 兜底：如果 pipeline 未暴露内存 payload，则尝试在本次请求内同步回读一次最新落盘结果。
                 # 目的：尽量保证 AnalyzeResponse 携带 inline/ref，进一步降低 Java->Python 路径依赖。
                 try:
-                    flush_async_json_writes(timeout_sec=10.0)
+                    flush_async_json_writes(timeout_sec=10.0, scope_key=output_dir)
                     runtime_semantic_units = self._load_semantic_units_from_json_path(semantic_units_path)
                     logger.info(
                         f"[{task_id}] Phase2A runtime payload recovered from json path: "
@@ -2918,13 +4001,46 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     )
                 )
                 response.semantic_units_inline.CopyFrom(
-                    self._build_semantic_units_inline_message(runtime_semantic_units)
+                    self._build_semantic_units_inline_message(
+                        runtime_semantic_units,
+                        cache_entry=cache_entry,
+                    )
                 )
+            _update_analyze_soft_state(
+                status="completed",
+                checkpoint="phase2a_response_ready",
+                completed=3,
+                pending=0,
+            )
+            analyze_watchdog.emit(
+                status="completed",
+                checkpoint="phase2a_response_ready",
+                completed=3,
+                pending=0,
+                signal_type="hard",
+            )
             return response
             
         except Exception as e:
             logger.error(f"[{task_id}] AnalyzeSemanticUnits failed: {e}")
             logger.exception(e)  # Log full traceback
+            try:
+                _update_analyze_soft_state(
+                    status="failed",
+                    checkpoint="phase2a_failed",
+                    completed=1,
+                    pending=2,
+                )
+                analyze_watchdog.emit(
+                    status="failed",
+                    checkpoint="phase2a_failed",
+                    completed=1,
+                    pending=2,
+                    signal_type="hard",
+                    extra={"error": str(e)[:200]},
+                )
+            except Exception as heartbeat_error:
+                logger.warning(f"[{task_id}] Phase2A watchdog emit failed: {heartbeat_error}")
             return video_processing_pb2.AnalyzeResponse(
                 success=False,
                 screenshot_requests=[],
@@ -2932,6 +4048,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
+            analyze_soft_stop.set()
+            if analyze_soft_thread is not None and analyze_soft_thread.is_alive():
+                analyze_soft_thread.join(timeout=2.0)
             self._decrement_tasks()
 
     async def ClassifyKnowledgeBatch(self, request, context):
@@ -2966,11 +4085,15 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             
             # 🔑 设置当前任务的 Step 2 路径（动态更新）
             if hasattr(request, 'step2_path') and request.step2_path:
-                classifier.step2_path = request.step2_path
-                classifier._all_subtitles_cache = None  # 清除缓存
-                subtitle_repo = getattr(classifier, 'subtitle_repo', None)
-                if subtitle_repo is not None and hasattr(subtitle_repo, 'set_paths'):
-                    subtitle_repo.set_paths(step2_path=request.step2_path, clear_cache=True)
+                incoming_step2_path = request.step2_path
+                previous_step2_path = getattr(classifier, 'step2_path', "")
+                path_changed = str(previous_step2_path or "") != str(incoming_step2_path or "")
+                classifier.step2_path = incoming_step2_path
+                if path_changed:
+                    classifier._all_subtitles_cache = None  # 仅路径变更时清缓存，避免批量分类重复冷启动
+                    subtitle_repo = getattr(classifier, 'subtitle_repo', None)
+                    if subtitle_repo is not None and hasattr(subtitle_repo, 'set_paths'):
+                        subtitle_repo.set_paths(step2_path=incoming_step2_path, clear_cache=True)
             
             # 🚀 DeepSeek 并发探测：AIMD 动态逼近吞吐上限
             limiter = self._classify_concurrency_limiter
@@ -3244,8 +4367,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         "knowledge_type": au.knowledge_type,
                         "stable_islands": []  # 稍后填充
                     })
-                    logger.info("======GenerateMaterialRequests开始进行转换======")
-                    logger.info(f"Action Unit: start_sec={au.start_sec}, end_sec={au.end_sec}, knowledge_type={au.knowledge_type}")
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "GenerateMaterialRequests action_unit: start_sec=%.3f end_sec=%.3f knowledge_type=%s",
+                            au.start_sec,
+                            au.end_sec,
+                            au.knowledge_type,
+                        )
                 
                 # 🚀 关键修复: 从 proto 提取 stable_islands
                 stable_islands = []
@@ -3708,6 +4836,58 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         logger.info(f"  → clips_dir: {clips_dir}")
         logger.info(f"  → output_dir: {output_dir}")
 
+        assemble_watchdog = TaskWatchdogSignalWriter(
+            task_id=task_id,
+            output_dir=output_dir,
+            stage="phase2b",
+            total_steps=3,
+        )
+        assemble_soft_stop = threading.Event()
+        assemble_soft_thread: Optional[threading.Thread] = None
+        assemble_soft_lock = threading.Lock()
+        assemble_soft_state: Dict[str, Any] = {
+            "status": "running",
+            "checkpoint": "phase2b_prepare",
+            "completed": 0,
+            "pending": 3,
+        }
+
+        def _emit_assemble_soft_loop() -> None:
+            interval_sec = max(
+                5.0,
+                float(_to_int(os.getenv("PHASE2B_SOFT_HEARTBEAT_SEC", 20), 20)),
+            )
+            while not assemble_soft_stop.wait(interval_sec):
+                try:
+                    with assemble_soft_lock:
+                        snapshot = dict(assemble_soft_state)
+                    assemble_watchdog.emit(
+                        status=str(snapshot.get("status") or "running"),
+                        checkpoint=str(snapshot.get("checkpoint") or "phase2b_pending"),
+                        completed=int(snapshot.get("completed", 0)),
+                        pending=int(snapshot.get("pending", 3)),
+                        signal_type="soft",
+                    )
+                except Exception as soft_error:
+                    logger.warning(f"[{task_id}] Phase2B soft heartbeat emit failed: {soft_error}")
+
+        def _update_assemble_soft_state(
+            *,
+            status: Optional[str] = None,
+            checkpoint: Optional[str] = None,
+            completed: Optional[int] = None,
+            pending: Optional[int] = None,
+        ) -> None:
+            with assemble_soft_lock:
+                if status is not None:
+                    assemble_soft_state["status"] = str(status).strip().lower() or "running"
+                if checkpoint is not None:
+                    assemble_soft_state["checkpoint"] = str(checkpoint).strip() or "unknown"
+                if completed is not None:
+                    assemble_soft_state["completed"] = max(0, int(completed))
+                if pending is not None:
+                    assemble_soft_state["pending"] = max(0, int(pending))
+
         from services.python_grpc.src.content_pipeline.infra.llm.deepseek_audit import (
             build_phase2b_audit_context,
             push_deepseek_audit_context,
@@ -3717,6 +4897,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         try:
             self._increment_tasks()
+            assemble_watchdog.emit(
+                status="running",
+                checkpoint="phase2b_prepare",
+                completed=0,
+                pending=3,
+                signal_type="hard",
+            )
+            assemble_soft_thread = threading.Thread(
+                target=_emit_assemble_soft_loop,
+                name=f"phase2b-soft-heartbeat-{task_id}",
+                daemon=True,
+            )
+            assemble_soft_thread.start()
 
             audit_context = build_phase2b_audit_context(
                 output_dir=output_dir,
@@ -3728,6 +4921,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             semantic_units_payload: List[Dict[str, Any]] = []
             if semantic_source_case == "semantic_units_inline":
                 semantic_units_payload = self._decode_semantic_units_inline_message(request.semantic_units_inline)
+                _update_assemble_soft_state(
+                    status="running",
+                    checkpoint="phase2b_semantic_inline_ready",
+                    completed=1,
+                    pending=2,
+                )
+                assemble_watchdog.emit(
+                    status="running",
+                    checkpoint="phase2b_semantic_inline_ready",
+                    completed=1,
+                    pending=2,
+                    signal_type="hard",
+                )
                 logger.info(
                     f"[{task_id}] AssembleRichText loaded semantic units from inline payload: units={len(semantic_units_payload)}"
                 )
@@ -3735,7 +4941,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 ref_id = str(request.semantic_units_ref.ref_id or "").strip()
                 ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
                 if isinstance(ref_entry, dict):
-                    semantic_units_payload = list(ref_entry.get("semantic_units", []) or [])
+                    semantic_units_payload = ref_entry.get("semantic_units", []) or []
+                    _update_assemble_soft_state(
+                        status="running",
+                        checkpoint="phase2b_semantic_ref_ready",
+                        completed=1,
+                        pending=2,
+                    )
+                    assemble_watchdog.emit(
+                        status="running",
+                        checkpoint="phase2b_semantic_ref_ready",
+                        completed=1,
+                        pending=2,
+                        signal_type="hard",
+                    )
                     logger.info(
                         f"[{task_id}] AssembleRichText loaded semantic units from ref cache: "
                         f"ref_id={ref_id}, units={len(semantic_units_payload)}"
@@ -3752,6 +4971,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 )
                 if runtime_semantic_units is not None:
                     semantic_units_payload = runtime_semantic_units
+                    _update_assemble_soft_state(
+                        status="running",
+                        checkpoint="phase2b_semantic_runtime_ready",
+                        completed=1,
+                        pending=2,
+                    )
+                    assemble_watchdog.emit(
+                        status="running",
+                        checkpoint="phase2b_semantic_runtime_ready",
+                        completed=1,
+                        pending=2,
+                        signal_type="hard",
+                    )
                     logger.info(
                         f"[{task_id}] AssembleRichText loaded semantic units from runtime cache: "
                         f"units={len(semantic_units_payload)}"
@@ -3774,6 +5006,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             if not materialized_semantic_units_path:
                 raise FileNotFoundError("semantic_units source missing: neither inline/ref/runtime available")
+            _update_assemble_soft_state(
+                status="running",
+                checkpoint="phase2b_materialized_ready",
+                completed=2,
+                pending=1,
+            )
+            assemble_watchdog.emit(
+                status="running",
+                checkpoint="phase2b_materialized_ready",
+                completed=2,
+                pending=1,
+                signal_type="hard",
+            )
 
             # 🔑 创建 RichTextPipeline
             # 注意: Phase2B 主要使用 semantic_units_json，step2/step6 在 Phase2A 已处理
@@ -3802,6 +5047,19 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 text_only_count=0,
                 vision_validated_count=0
             )
+            _update_assemble_soft_state(
+                status="completed",
+                checkpoint="phase2b_response_ready",
+                completed=3,
+                pending=0,
+            )
+            assemble_watchdog.emit(
+                status="completed",
+                checkpoint="phase2b_response_ready",
+                completed=3,
+                pending=0,
+                signal_type="hard",
+            )
             
             return video_processing_pb2.AssembleResponse(
                 success=True,
@@ -3815,6 +5073,23 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             import traceback # Import traceback for detailed error logging
             logger.error(f"[{task_id}] AssembleRichText failed: {e}")
             logger.error(traceback.format_exc()) # Log full traceback
+            try:
+                _update_assemble_soft_state(
+                    status="failed",
+                    checkpoint="phase2b_failed",
+                    completed=2,
+                    pending=1,
+                )
+                assemble_watchdog.emit(
+                    status="failed",
+                    checkpoint="phase2b_failed",
+                    completed=2,
+                    pending=1,
+                    signal_type="hard",
+                    extra={"error": str(e)[:200]},
+                )
+            except Exception as heartbeat_error:
+                logger.warning(f"[{task_id}] Phase2B watchdog emit failed: {heartbeat_error}")
             return video_processing_pb2.AssembleResponse(
                 success=False,
                 markdown_path="",
@@ -3823,6 +5098,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
+            assemble_soft_stop.set()
+            if assemble_soft_thread is not None and assemble_soft_thread.is_alive():
+                assemble_soft_thread.join(timeout=2.0)
             if audit_token is not None:
                 try:
                     pop_deepseek_audit_context(audit_token)
@@ -5280,7 +6558,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 ref_id = str(request.semantic_units_ref.ref_id or "").strip()
                 ref_entry = self._get_phase2a_runtime_cache_entry_by_ref(ref_id)
                 if isinstance(ref_entry, dict):
-                    semantic_units = list(ref_entry.get("semantic_units", []) or [])
+                    semantic_units = ref_entry.get("semantic_units", []) or []
                     data = semantic_units
                     ref_semantic_units_path = str(ref_entry.get("semantic_units_path", "") or "").strip()
                     if ref_semantic_units_path:
@@ -5317,7 +6595,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     selected_path = next((path for path in candidate_paths if os.path.exists(path)), "")
                     if not selected_path:
                         # 异步写盘场景下，先做一次有限等待 flush，再尝试候选路径。
-                        flush_async_json_writes(timeout_sec=10.0)
+                        flush_async_json_writes(timeout_sec=10.0, scope_key=output_dir)
                         selected_path = next((path for path in candidate_paths if os.path.exists(path)), "")
 
                     if not selected_path:
@@ -6010,7 +7288,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 else:
                     vl_result = await vl_task
                     if not vl_result.success:
-                        logger.warning(f"[{task_id}] VL 鍒嗘瀽澶辫触锛岄渶瑕佸洖閫€: {vl_result.error_msg}")
+                        logger.warning(f"[{task_id}] VL 分析失败，需要回退: {vl_result.error_msg}")
                         _persist_task_token_report({
                             "status": "fallback",
                             "vl_enabled": True,
