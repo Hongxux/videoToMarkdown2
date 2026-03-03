@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.queue;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -98,6 +99,11 @@ public class TaskQueueManager {
         }
     }
 
+    public TaskQueueManager() {
+        this(1);
+    }
+
+    @Autowired
     public TaskQueueManager(@Value("${task.queue.max-concurrent:1}") int configuredMaxConcurrentTasks) {
         this.maxConcurrentTasks = Math.max(1, configuredMaxConcurrentTasks);
         this.processingSlots = new Semaphore(this.maxConcurrentTasks);

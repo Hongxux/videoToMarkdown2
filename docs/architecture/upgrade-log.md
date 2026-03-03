@@ -8779,6 +8779,31 @@
   - 对比说明：
     - 本次新增每语义单元一次 DeepSeek 后处理调用，目标是提升教学文本完整性；额外时延与 token 成本主要随语义单元数增长，单元内步骤通过一次批量返回完成，后续可按 `vl_arg_postprocess` 配置进行限流或开关治理。
 
+### 2026-03-03 多任务执行策略切换：全局串行（单任务在跑）
+- 触发背景：
+  - 用户明确要求“多任务串行执行”，避免多个视频任务同时占用 CPU/内存/显卡资源，优先保证单任务稳定性与可预期性。
+- 第一性原理：
+  - 任务级并发控制的本质是“全链路资源争用治理”；当系统目标从吞吐优先切换为稳定优先时，应把并发上限收敛到 1。
+  - 并发策略应由单一配置源驱动，避免“队列并发”和“worker 线程池并发”出现不一致导致的隐性并发。
+- 复用杠杆：
+  - 复用现有 `TaskQueueManager` 的 `Semaphore` 并发闸门，无需重写队列模型。
+  - 复用现有配置键 `task.queue.max-concurrent`，避免新增配置项与迁移成本。
+  - 复用现有 `TaskProcessingWorker` 分发链路，仅让线程池并发与队列并发保持同源一致。
+- 架构决策：
+  - 决策1：`TaskQueueManager` 构造函数改为读取 `task.queue.max-concurrent`，并做 `Math.max(1, configured)` 防误配钳制。
+  - 决策2：`TaskProcessingWorker` 的 `workerPool` 并发改为读取同一配置，确保执行层与队列层一致。
+  - 决策3：`application.properties` 默认并发从 `4` 下调为 `1`，当前系统默认为串行处理。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+- 性能对比数据（本次为执行策略切换，非性能优化）：
+  - 测试方式：Java 编译校验（保证改动可构建），并通过统一配置键验证串行约束生效路径。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 对比说明：
+    - 吞吐会低于并发模式，但任务间资源竞争显著下降；适用于“稳定性优先”场景。若后续需要恢复并发，只需调高 `task.queue.max-concurrent`。
+
 ### 2026-02-26 Android 自动更新改为可配置开关（默认关闭）
 - 触发背景：
   - 当前自动更新会在启动/恢复时自动检查，需改为可配置能力，且默认关闭，避免在未准备好发布链路时误触发升级。
