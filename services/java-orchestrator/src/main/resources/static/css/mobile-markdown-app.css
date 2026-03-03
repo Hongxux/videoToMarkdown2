@@ -892,10 +892,17 @@ button:active:not(:disabled),
 .markdown-body blockquote {
     margin: 0.8rem 0;
     border-left: 0;
-    background: #eff6ff;
-    padding: 8px 12px;
+    background: transparent !important;
+    background-color: transparent !important;
+    background-image: none !important;
+    color: #000000 !important;
+    padding: 10px 12px;
     border-radius: var(--token-radius-2xs);
-    box-shadow: inset 4px 0 0 #93c5fd;
+    box-shadow: inset 4px 0 0 #60a5fa;
+}
+
+.markdown-body blockquote :is(p, li, strong, em, code, a) {
+    color: inherit !important;
 }
 
 .markdown-body img,
@@ -903,13 +910,109 @@ button:active:not(:disabled),
     max-width: 100%;
     display: block;
     border-radius: var(--radius);
-    margin: 16px 0;
+    margin: var(--content-paragraph-gap) 0;
     border: 0;
     box-shadow: 0 12px 32px -8px rgba(37, 99, 235, 0.15);
 }
 
 .markdown-body img {
+    margin: 0;
     cursor: zoom-in;
+    box-shadow: none;
+}
+
+.markdown-body .md-image-shell {
+    --md-image-aspect-ratio: 16 / 9;
+    position: relative;
+    display: block;
+    width: 100%;
+    margin: var(--content-paragraph-gap) 0;
+    border-radius: var(--radius);
+    overflow: hidden;
+    background: linear-gradient(140deg, rgba(226, 232, 240, 0.92) 0%, rgba(203, 213, 225, 0.86) 100%);
+    aspect-ratio: var(--md-image-aspect-ratio);
+    min-height: clamp(132px, 34vw, 248px);
+    max-height: min(68vh, 620px);
+    box-shadow: 0 12px 32px -8px rgba(37, 99, 235, 0.15);
+    isolation: isolate;
+}
+
+.markdown-body .md-image-shell > img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    border-radius: inherit;
+    opacity: 0;
+    transition: opacity 180ms ease;
+}
+
+.markdown-body .md-image-shell::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(102deg, rgba(226, 232, 240, 0.18) 8%, rgba(148, 163, 184, 0.52) 48%, rgba(226, 232, 240, 0.2) 86%);
+    background-size: 220% 100%;
+    animation: mdImageShellShimmer 1.25s ease-in-out infinite;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.markdown-body .md-image-shell::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 26px;
+    height: 26px;
+    margin: -13px 0 0 -13px;
+    border-radius: 999px;
+    border: 2px solid rgba(59, 130, 246, 0.24);
+    border-top-color: rgba(37, 99, 235, 0.9);
+    animation: mdImageShellSpin 780ms linear infinite;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.markdown-body .md-image-shell.is-loaded {
+    min-height: 0;
+}
+
+.markdown-body .md-image-shell.is-loaded > img {
+    opacity: 1;
+}
+
+.markdown-body .md-image-shell:is(.is-loaded, .is-error)::before,
+.markdown-body .md-image-shell:is(.is-loaded, .is-error)::after {
+    opacity: 0;
+    transition: opacity 140ms ease;
+}
+
+.markdown-body .md-image-shell.is-error::before {
+    opacity: 1;
+    background: radial-gradient(circle at center, rgba(226, 232, 240, 0.9) 0%, rgba(148, 163, 184, 0.82) 100%);
+    animation: none;
+}
+
+.markdown-body :is(p, li, blockquote, td, th) > .md-image-shell:only-child,
+.markdown-body :is(p, li, blockquote, td, th) > a:only-child > .md-image-shell:only-child {
+    margin: 0;
+}
+
+@keyframes mdImageShellShimmer {
+    0% {
+        background-position: 100% 0;
+    }
+    100% {
+        background-position: -105% 0;
+    }
+}
+
+@keyframes mdImageShellSpin {
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 /* [COMP-IMMERSIVE-VIDEO] 视频沉浸壳：控件按需浮现，默认把“播放器 UI”退到背景。 */
@@ -1070,6 +1173,220 @@ button:active:not(:disabled),
     background: linear-gradient(108deg, rgba(254, 240, 138, 0.3) 0%, rgba(250, 204, 21, 0.26) 54%, rgba(254, 240, 138, 0.2) 100%);
     box-shadow: inset 0 0 0 1px var(--favorite-border), 0 3px 10px var(--favorite-glow);
     animation: highlightPulse 260ms ease-out;
+}
+
+.markdown-body .md-block-node {
+    --md-block-indent-level: 0;
+    --md-block-indent-step: 12px;
+    --md-block-indent-max: 96px;
+    margin-left: min(calc(var(--md-block-indent-level) * var(--md-block-indent-step)), var(--md-block-indent-max));
+    transition: margin-left 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.markdown-body .md-block-node.md-block-favorite {
+    border-radius: var(--token-radius-sm);
+    color: #062f52;
+    font-weight: 800;
+}
+
+.markdown-body :is(p, li, blockquote, td, th).md-block-node.md-block-favorite {
+    font-size: 1.12em;
+}
+
+.markdown-body .md-block-node.md-block-commented {
+    box-shadow: inset 3px 0 0 rgba(59, 130, 246, 0.45);
+}
+
+.markdown-body .md-comment-toggle {
+    width: 100%;
+    margin: 6px 0 10px;
+    padding: 6px 2px 0;
+    border: 0;
+    border-top: 1px dashed rgba(37, 99, 235, 0.5);
+    background: transparent;
+    color: #1d4ed8;
+    text-align: left;
+    cursor: pointer;
+    display: grid;
+    gap: 2px;
+}
+
+.markdown-body .md-comment-toggle-main {
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.markdown-body .md-comment-toggle-sub {
+    font-size: 11px;
+    color: #64748b;
+    line-height: 1.35;
+}
+
+.markdown-body .md-comment-toggle.is-expanded .md-comment-toggle-main {
+    color: #0f3f8a;
+}
+
+.markdown-body .md-block-comment-panel {
+    margin: 0 0 14px;
+    border: 1px solid rgba(148, 163, 184, 0.34);
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+    overflow: hidden;
+}
+
+.markdown-body .md-block-comment-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+    background: linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+}
+
+.markdown-body .md-block-comment-panel-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #0f172a;
+}
+
+.markdown-body .md-block-comment-panel-body {
+    display: grid;
+    gap: 10px;
+    padding: 10px 12px 12px;
+}
+
+.markdown-body .md-comment-thread {
+    display: grid;
+    gap: 8px;
+}
+
+.markdown-body .md-comment-thread-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #334155;
+}
+
+.markdown-body .md-comment-card-list {
+    display: grid;
+    gap: 6px;
+}
+
+.markdown-body .md-comment-card {
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 9px;
+    background: #ffffff;
+    padding: 7px 9px;
+    display: grid;
+    gap: 4px;
+}
+
+.markdown-body .md-comment-card-head {
+    font-size: 11px;
+    color: #64748b;
+    font-weight: 600;
+}
+
+.markdown-body .md-comment-card-body {
+    font-size: 13px;
+    line-height: 1.55;
+    color: #0f172a;
+    word-break: break-word;
+}
+
+.markdown-body .md-comment-empty {
+    font-size: 12px;
+    color: #64748b;
+    padding: 8px 2px;
+}
+
+.markdown-body .md-comment-compose-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: end;
+}
+
+.markdown-body .md-comment-input {
+    width: 100%;
+    min-height: 68px;
+    max-height: 180px;
+    resize: vertical;
+    border: 1px solid rgba(148, 163, 184, 0.4);
+    border-radius: 9px;
+    background: #ffffff;
+    color: #0f172a;
+    padding: 8px 9px;
+    font-size: 13px;
+    line-height: 1.45;
+    font-family: inherit;
+}
+
+.markdown-body .md-comment-input:focus {
+    outline: none;
+    border-color: rgba(37, 99, 235, 0.72);
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16);
+}
+
+.markdown-body .md-comment-send-btn {
+    min-height: 34px;
+    border-radius: 8px;
+    padding: 0 12px;
+    font-size: 12px;
+    align-self: end;
+}
+
+.markdown-body .md-token-comment-thread-list {
+    display: grid;
+    gap: 8px;
+}
+
+.markdown-body .md-token-comment-thread {
+    border: 1px solid rgba(148, 163, 184, 0.24);
+    border-radius: 9px;
+    background: #f8fafc;
+    padding: 8px;
+    display: grid;
+    gap: 8px;
+}
+
+.markdown-body .md-token-comment-thread.is-focused {
+    border-color: rgba(37, 99, 235, 0.5);
+    box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.24);
+}
+
+.markdown-body .md-token-comment-thread-head {
+    display: grid;
+    gap: 2px;
+}
+
+.markdown-body .md-token-comment-thread-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #1d4ed8;
+}
+
+.markdown-body .md-token-comment-thread-quote {
+    font-size: 12px;
+    color: #334155;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+.markdown-body .md-token-like-range {
+    font-weight: 800;
+    color: #062f52;
+    font-size: 1.12em;
+    line-height: inherit;
+}
+
+.markdown-body .md-token-comment-range {
+    background: rgba(59, 130, 246, 0.14);
+    border-bottom: 2px dashed rgba(37, 99, 235, 0.58);
+    border-radius: 3px;
+    cursor: pointer;
 }
 
 .markdown-body .highlight-flash,
@@ -1806,8 +2123,11 @@ button:active:not(:disabled),
     }
 
     .markdown-body blockquote {
-        background: #1d2d45;
-        box-shadow: inset 4px 0 0 #5da3ff;
+        background: transparent !important;
+        background-color: transparent !important;
+        background-image: none !important;
+        box-shadow: inset 4px 0 0 #7db4ff;
+        color: #000000 !important;
     }
 
     .markdown-body table th,
@@ -1826,6 +2146,101 @@ button:active:not(:disabled),
     .markdown-body .md-favorite-line,
     .paragraph-card.is-highlighted {
         box-shadow: inset 0 0 0 1px var(--favorite-border), 0 3px 10px var(--favorite-glow);
+    }
+
+    .markdown-body .md-block-node.md-block-favorite {
+        color: #6f9ce2;
+    }
+
+    .markdown-body .md-token-like-range {
+        color: #6f9ce2;
+    }
+
+    .markdown-body .md-token-comment-range {
+        background: rgba(96, 165, 250, 0.18);
+        border-bottom-color: rgba(147, 197, 253, 0.74);
+    }
+
+    .markdown-body .md-block-node.md-block-commented {
+        box-shadow: inset 3px 0 0 rgba(147, 197, 253, 0.58);
+    }
+
+    .markdown-body .md-comment-toggle {
+        border-top-color: rgba(147, 197, 253, 0.74);
+        color: #9cc5ff;
+    }
+
+    .markdown-body .md-comment-toggle-sub {
+        color: #8ea1bb;
+    }
+
+    .markdown-body .md-comment-toggle.is-expanded .md-comment-toggle-main {
+        color: #c1daff;
+    }
+
+    .markdown-body .md-block-comment-panel {
+        border-color: rgba(94, 120, 160, 0.44);
+        background: #131c2a;
+        box-shadow: 0 12px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .markdown-body .md-block-comment-panel-head {
+        border-bottom-color: rgba(94, 120, 160, 0.36);
+        background: linear-gradient(180deg, #1a2535 0%, #172131 100%);
+    }
+
+    .markdown-body .md-block-comment-panel-title {
+        color: #dbe8ff;
+    }
+
+    .markdown-body .md-comment-thread-title {
+        color: #b7c8e2;
+    }
+
+    .markdown-body .md-comment-card {
+        border-color: rgba(94, 120, 160, 0.42);
+        background: #1a2535;
+    }
+
+    .markdown-body .md-comment-card-head {
+        color: #8ea1bb;
+    }
+
+    .markdown-body .md-comment-card-body {
+        color: #e2e8f0;
+    }
+
+    .markdown-body .md-comment-empty {
+        color: #8ea1bb;
+    }
+
+    .markdown-body .md-comment-input {
+        border-color: rgba(94, 120, 160, 0.52);
+        background: #111927;
+        color: #e2e8f0;
+    }
+
+    .markdown-body .md-comment-input:focus {
+        border-color: rgba(147, 197, 253, 0.72);
+        box-shadow: 0 0 0 2px rgba(147, 197, 253, 0.18);
+    }
+
+    .markdown-body .md-token-comment-thread {
+        border-color: rgba(94, 120, 160, 0.42);
+        background: #162132;
+    }
+
+    .markdown-body .md-token-comment-thread.is-focused {
+        border-color: rgba(147, 197, 253, 0.66);
+        box-shadow: 0 0 0 1px rgba(147, 197, 253, 0.3);
+    }
+
+    .markdown-body .md-token-comment-thread-title {
+        color: #9cc5ff;
+    }
+
+    .markdown-body .md-token-comment-thread-quote {
+        color: #c8d5ea;
     }
 
     .paragraph-note {

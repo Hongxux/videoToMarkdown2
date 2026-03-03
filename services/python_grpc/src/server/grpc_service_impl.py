@@ -321,6 +321,7 @@ from .watchdog_signal_writer import (
     publish_watchdog_signal,
     read_watchdog_signals,
 )
+from .book_pdf_extractor import extract_book_pdf_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -1120,6 +1121,41 @@ def _write_video_meta_file(
         "generated_at": datetime.now().isoformat(),
     }
     meta_path = os.path.join(task_dir, "video_meta.json")
+    with open(meta_path, "w", encoding="utf-8") as file_obj:
+        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+
+
+def _upsert_video_meta_topic_fields(
+    *,
+    task_dir: str,
+    domain: str,
+    main_topic: str,
+) -> None:
+    normalized_task_dir = str(task_dir or "").strip()
+    if not normalized_task_dir:
+        return
+
+    normalized_domain = str(domain or "").strip()
+    normalized_main_topic = str(main_topic or "").strip()
+    if not normalized_domain and not normalized_main_topic:
+        return
+
+    meta_path = os.path.join(normalized_task_dir, "video_meta.json")
+    payload: Dict[str, Any] = {}
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as file_obj:
+                loaded = json.load(file_obj)
+            if isinstance(loaded, dict):
+                payload = dict(loaded)
+        except Exception as exc:
+            logger.warning(f"Failed to read existing video_meta.json from {meta_path}: {exc}")
+
+    if normalized_domain:
+        payload["domain"] = normalized_domain
+    if normalized_main_topic:
+        payload["main_topic"] = normalized_main_topic
+
     with open(meta_path, "w", encoding="utf-8") as file_obj:
         json.dump(payload, file_obj, ensure_ascii=False, indent=2)
 
@@ -3610,6 +3646,22 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 logger.warning(f"[{task_id}] sentence_timestamps.json not found at {local_sentence_ts}")
                 sentence_timestamps_path = inter_sentence_ts if os.path.exists(inter_sentence_ts) else ""
 
+            stage1_domain = str((stage1_final_state or {}).get("domain", "") or "").strip()
+            stage1_main_topic = str((stage1_final_state or {}).get("main_topic", "") or "").strip()
+            if not stage1_domain:
+                stage1_domain = str((resume_state or {}).get("domain", "") or "").strip()
+            if not stage1_main_topic:
+                stage1_main_topic = str((resume_state or {}).get("main_topic", "") or "").strip()
+            if stage1_domain or stage1_main_topic:
+                try:
+                    _upsert_video_meta_topic_fields(
+                        task_dir=output_dir,
+                        domain=stage1_domain,
+                        main_topic=stage1_main_topic,
+                    )
+                except Exception as topic_meta_error:
+                    logger.warning(f"[{task_id}] Failed to update video_meta domain/main_topic: {topic_meta_error}")
+
             stage1_heartbeat.emit(
                 status="completed",
                 checkpoint="stage1_response_ready",
@@ -5112,6 +5164,53 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             self._write_cache_metrics(output_dir, task_id, "AssembleRichText")
             self._cleanup_non_priority_resources(output_dir, task_id)
             self._decrement_tasks()
+
+    async def ExtractBookPdf(self, request, context):
+        """按指定页码范围抽取 PDF，优先 MinerU，失败回退 PyMuPDF。"""
+        task_id = str(getattr(request, "task_id", "") or "book_pdf_extract").strip() or "book_pdf_extract"
+        try:
+            self._increment_tasks()
+            timeout_seconds = max(60, _to_int(os.getenv("BOOK_PDF_EXTRACT_TIMEOUT_SEC", "300"), 300))
+            result = extract_book_pdf_markdown(
+                task_id=task_id,
+                pdf_path=str(getattr(request, "pdf_path", "") or ""),
+                output_dir=str(getattr(request, "output_dir", "") or ""),
+                start_page=int(getattr(request, "start_page", 0) or 0),
+                end_page=int(getattr(request, "end_page", 0) or 0),
+                image_dir=str(getattr(request, "image_dir", "") or ""),
+                output_root=str(getattr(request, "output_root", "") or ""),
+                section_id=str(getattr(request, "section_id", "") or ""),
+                prefer_mineru=bool(getattr(request, "prefer_mineru", True)),
+                timeout_seconds=timeout_seconds,
+            )
+            return video_processing_pb2.ExtractBookPdfResponse(
+                success=bool(result.success),
+                markdown=result.markdown or "",
+                markdown_path=result.markdown_path or "",
+                extractor=result.extractor or "",
+                image_count=int(result.image_count),
+                table_count=int(result.table_count),
+                code_block_count=int(result.code_block_count),
+                formula_block_count=int(result.formula_block_count),
+                error_msg=result.error_msg or "",
+                image_paths=list(result.image_paths or []),
+            )
+        except Exception as error:
+            logger.error(f"[{task_id}] ExtractBookPdf failed: {error}")
+            logger.error(traceback.format_exc())
+            return video_processing_pb2.ExtractBookPdfResponse(
+                success=False,
+                markdown="",
+                markdown_path="",
+                extractor="unknown",
+                image_count=0,
+                table_count=0,
+                code_block_count=0,
+                formula_block_count=0,
+                error_msg=str(error),
+            )
+        finally:
+            self._decrement_tasks()
     
     def _get_video_duration(self, video_path: str) -> float:
         """
@@ -6501,9 +6600,103 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}, "
             f"semantic_source={semantic_source_case or 'runtime_or_empty'}"
         )
+
+        vl_watchdog: Optional[TaskWatchdogSignalWriter] = None
+        try:
+            vl_watchdog = TaskWatchdogSignalWriter(
+                task_id=task_id,
+                output_dir=output_dir,
+                stage="analysis_extraction",
+                total_steps=1,
+            )
+        except Exception as watchdog_init_error:
+            logger.warning(f"[{task_id}] AnalyzeWithVL watchdog init failed: {watchdog_init_error}")
+
+        vl_heartbeat_stop = threading.Event()
+        vl_heartbeat_thread: Optional[threading.Thread] = None
+        vl_heartbeat_lock = threading.Lock()
+        vl_heartbeat_state: Dict[str, Any] = {
+            "status": "running",
+            "checkpoint": "analyze_with_vl_start",
+            "completed": 0,
+            "pending": 1,
+        }
+        vl_budget_seconds = 1
+        vl_started_at_sec = 0.0
+
+        def _update_vl_heartbeat_state(
+            *,
+            status: Optional[str] = None,
+            checkpoint: Optional[str] = None,
+            completed: Optional[int] = None,
+            pending: Optional[int] = None,
+        ) -> None:
+            with vl_heartbeat_lock:
+                if status is not None:
+                    vl_heartbeat_state["status"] = str(status).strip().lower() or "running"
+                if checkpoint is not None:
+                    vl_heartbeat_state["checkpoint"] = str(checkpoint).strip() or "unknown"
+                if completed is not None:
+                    vl_heartbeat_state["completed"] = max(0, int(completed))
+                if pending is not None:
+                    vl_heartbeat_state["pending"] = max(0, int(pending))
+
+        def _emit_vl_heartbeat(signal_type: str = "hard") -> None:
+            if vl_watchdog is None:
+                return
+            try:
+                with vl_heartbeat_lock:
+                    snapshot = dict(vl_heartbeat_state)
+                vl_watchdog.emit(
+                    status=str(snapshot.get("status", "running")),
+                    checkpoint=str(snapshot.get("checkpoint", "unknown")),
+                    completed=max(0, int(snapshot.get("completed", 0))),
+                    pending=max(0, int(snapshot.get("pending", 0))),
+                    signal_type=signal_type,
+                    extra={
+                        "source": "python_vl_heartbeat",
+                        "vl_budget_seconds": int(max(1, vl_budget_seconds)),
+                    },
+                )
+            except Exception as heartbeat_error:
+                logger.warning(f"[{task_id}] AnalyzeWithVL heartbeat emit failed: {heartbeat_error}")
+
+        def _emit_vl_hard_heartbeat_loop() -> None:
+            nonlocal vl_budget_seconds, vl_started_at_sec
+            interval_sec = max(
+                5.0,
+                float(_to_int(os.getenv("VL_ANALYSIS_HARD_HEARTBEAT_SEC", "15"), 15)),
+            )
+            while not vl_heartbeat_stop.wait(interval_sec):
+                try:
+                    if vl_started_at_sec > 0.0 and vl_budget_seconds > 0:
+                        elapsed_sec = max(0, int(time.time() - vl_started_at_sec))
+                        elapsed_sec = min(vl_budget_seconds, elapsed_sec)
+                        _update_vl_heartbeat_state(
+                            status="running",
+                            checkpoint="vl_running",
+                            completed=max(1, elapsed_sec),
+                            pending=max(0, vl_budget_seconds - elapsed_sec),
+                        )
+                    _emit_vl_heartbeat(signal_type="hard")
+                except Exception as heartbeat_error:
+                    logger.warning(f"[{task_id}] AnalyzeWithVL heartbeat loop failed: {heartbeat_error}")
         
         try:
             self._increment_tasks()
+            _update_vl_heartbeat_state(
+                status="running",
+                checkpoint="analyze_with_vl_started",
+                completed=0,
+                pending=1,
+            )
+            _emit_vl_heartbeat(signal_type="hard")
+            vl_heartbeat_thread = threading.Thread(
+                target=_emit_vl_hard_heartbeat_loop,
+                name=f"vl-hard-heartbeat-{task_id}",
+                daemon=True,
+            )
+            vl_heartbeat_thread.start()
             
             # 加载 VL 配置
             from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
@@ -6538,6 +6731,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     "merged_screenshots": [],
                     "merged_clips": [],
                 })
+                _update_vl_heartbeat_state(
+                    status="completed",
+                    checkpoint="vl_disabled",
+                    completed=1,
+                    pending=0,
+                )
+                _emit_vl_heartbeat(signal_type="hard")
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
                     vl_enabled=False,
@@ -6618,6 +6818,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     semantic_units=semantic_units,
                     task_id=task_id,
                 )
+
+            _update_vl_heartbeat_state(
+                status="running",
+                checkpoint="semantic_units_ready",
+                completed=0,
+                pending=max(1, len(semantic_units)),
+            )
+            _emit_vl_heartbeat(signal_type="hard")
             
             if not semantic_units:
                 logger.warning(f"[{task_id}] 无语义单元，跳过 VL 分析")
@@ -6645,6 +6853,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     "merged_screenshots": [],
                     "merged_clips": [],
                 })
+                _update_vl_heartbeat_state(
+                    status="completed",
+                    checkpoint="no_semantic_units",
+                    completed=1,
+                    pending=0,
+                )
+                _emit_vl_heartbeat(signal_type="hard")
                 return video_processing_pb2.VLAnalysisResponse(
                     success=True,
                     vl_enabled=True,
@@ -6913,6 +7128,33 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 f"unknown={routing_stats['unknown']}"
             )
 
+            vl_budget_multiplier = max(
+                1.0,
+                _safe_float(routing_cfg.get("vl_watchdog_budget_multiplier", 3.0), 3.0),
+            )
+            vl_total_duration_sec = 0.0
+            for vl_unit in vl_units:
+                start_sec = _safe_float(vl_unit.get("start_sec", 0.0))
+                end_sec = _safe_float(vl_unit.get("end_sec", start_sec))
+                effective_duration_sec = _safe_float(vl_unit.get("_routing_effective_duration_sec", -1.0), -1.0)
+                if effective_duration_sec > 0.0:
+                    vl_total_duration_sec += effective_duration_sec
+                elif end_sec > start_sec:
+                    vl_total_duration_sec += (end_sec - start_sec)
+            vl_budget_seconds = max(1, int(vl_total_duration_sec * vl_budget_multiplier + 0.999))
+            _update_vl_heartbeat_state(
+                status="running",
+                checkpoint="routing_ready" if vl_units else "routing_no_vl_units",
+                completed=0 if vl_units else 1,
+                pending=vl_budget_seconds if vl_units else 0,
+            )
+            _emit_vl_heartbeat(signal_type="hard")
+            logger.info(
+                f"[{task_id}] VL heartbeat budget: vl_units={len(vl_units)}, "
+                f"total_duration={vl_total_duration_sec:.2f}s, multiplier={vl_budget_multiplier:.2f}x, "
+                f"budget={vl_budget_seconds}s"
+            )
+
             # ==================================================================
             # 预启动 VL 任务（与路由侧截图并行，形成 IO/Compute 重叠）
             # ==================================================================
@@ -6923,6 +7165,14 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 vl_t0 = time.perf_counter()
                 generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
                 vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
+                vl_started_at_sec = time.time()
+                _update_vl_heartbeat_state(
+                    status="running",
+                    checkpoint="vl_running",
+                    completed=min(1, vl_budget_seconds),
+                    pending=max(0, vl_budget_seconds - min(1, vl_budget_seconds)),
+                )
+                _emit_vl_heartbeat(signal_type="hard")
 
             # ==================================================================
             # 路由侧：截图选择（concrete + process<=20s）
@@ -7166,6 +7416,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             ok, err = _consume_vl_result(vl_result)
                             if not ok:
                                 logger.warning(f"[{task_id}] VL 分析失败，提前回退: {err}")
+                                _update_vl_heartbeat_state(
+                                    status="fallback",
+                                    checkpoint="vl_failed_early",
+                                    completed=max(1, vl_budget_seconds),
+                                    pending=0,
+                                )
+                                _emit_vl_heartbeat(signal_type="hard")
                                 _persist_task_token_report({
                                     "status": "fallback",
                                     "vl_enabled": True,
@@ -7289,6 +7546,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     vl_result = await vl_task
                     if not vl_result.success:
                         logger.warning(f"[{task_id}] VL 分析失败，需要回退: {vl_result.error_msg}")
+                        _update_vl_heartbeat_state(
+                            status="fallback",
+                            checkpoint="vl_failed",
+                            completed=max(1, vl_budget_seconds),
+                            pending=0,
+                        )
+                        _emit_vl_heartbeat(signal_type="hard")
                         _persist_task_token_report({
                             "status": "fallback",
                             "vl_enabled": True,
@@ -7560,6 +7824,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "merged_screenshots": merged_screenshots,
                 "merged_clips": merged_clips,
             })
+            _update_vl_heartbeat_state(
+                status="completed",
+                checkpoint="vl_response_ready",
+                completed=max(1, vl_budget_seconds),
+                pending=0,
+            )
+            _emit_vl_heartbeat(signal_type="hard")
 
             return video_processing_pb2.VLAnalysisResponse(
                 success=True,
@@ -7575,6 +7846,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         except Exception as e:
             logger.error(f"[{task_id}] AnalyzeWithVL 异常: {e}", exc_info=True)
+            _update_vl_heartbeat_state(
+                status="failed",
+                checkpoint="vl_exception",
+                completed=max(1, vl_budget_seconds),
+                pending=0,
+            )
+            _emit_vl_heartbeat(signal_type="hard")
             _persist_task_token_report({
                 "status": "exception",
                 "vl_enabled": True,
@@ -7608,6 +7886,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=str(e)
             )
         finally:
+            vl_heartbeat_stop.set()
+            if vl_heartbeat_thread is not None and vl_heartbeat_thread.is_alive():
+                vl_heartbeat_thread.join(timeout=2.0)
             self._decrement_tasks()
 
     async def _validation_release_cv_resources_impl(self, request, context):

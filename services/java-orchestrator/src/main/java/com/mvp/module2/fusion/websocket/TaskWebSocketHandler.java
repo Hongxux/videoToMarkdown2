@@ -13,6 +13,8 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,10 +24,13 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskWebSocketHandler.class);
 
-    private final ConcurrentHashMap<String, WebSocketSession> userSessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> userSessions =
+            new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> taskSubscribers =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> collectionSubscribers =
+            new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> phase2bSubscribers =
             new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> taskCollectionCache = new ConcurrentHashMap<>();
 
@@ -40,16 +45,17 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         String userId = getUserIdFromSession(session);
-        userSessions.put(userId, session);
+        userSessions.computeIfAbsent(userId, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
         logger.info("WebSocket connected: user={}, session={}", userId, session.getId());
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String userId = getUserIdFromSession(session);
-        userSessions.remove(userId);
+        removeSessionFromUserSessions(userId, session.getId());
         removeSessionFromSubscribers(taskSubscribers, session.getId());
         removeSessionFromSubscribers(collectionSubscribers, session.getId());
+        removeSessionFromSubscribers(phase2bSubscribers, session.getId());
         logger.info("WebSocket disconnected: user={}", userId);
     }
 
@@ -77,6 +83,12 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                     break;
                 case "cancel":
                     handleCancel(session, payload);
+                    break;
+                case "subscribePhase2b":
+                    handleSubscribePhase2b(session, payload);
+                    break;
+                case "unsubscribePhase2b":
+                    handleUnsubscribePhase2b(session, payload);
                     break;
                 case "ping":
                     sendMessage(session, Map.of("type", "pong"));
@@ -155,6 +167,115 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         ));
     }
 
+    private void handleSubscribePhase2b(WebSocketSession session, Map<String, Object> payload) {
+        String channel = normalizeText((String) payload.get("channel"));
+        if (channel.isEmpty()) {
+            return;
+        }
+        phase2bSubscribers.computeIfAbsent(channel, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
+        logger.debug("Session {} subscribed to phase2b channel {}", session.getId(), channel);
+    }
+
+    private void handleUnsubscribePhase2b(WebSocketSession session, Map<String, Object> payload) {
+        String channel = normalizeText((String) payload.get("channel"));
+        if (channel.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> subscribers = phase2bSubscribers.get(channel);
+        if (subscribers == null) {
+            return;
+        }
+        subscribers.remove(session.getId());
+        if (subscribers.isEmpty()) {
+            phase2bSubscribers.remove(channel, subscribers);
+        }
+    }
+
+    public void broadcastPhase2bProgress(
+            String channel,
+            String requestId,
+            String status,
+            String message,
+            boolean done,
+            boolean success
+    ) {
+        String normalizedChannel = normalizeText(channel);
+        if (normalizedChannel.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> subscribers = phase2bSubscribers.get(normalizedChannel);
+        if (subscribers == null || subscribers.isEmpty()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "phase2bProgress");
+        payload.put("channel", normalizedChannel);
+        payload.put("requestId", normalizeText(requestId));
+        payload.put("status", normalizeText(status));
+        payload.put("message", message != null ? message : "");
+        payload.put("done", done);
+        payload.put("success", success);
+        payload.put("updatedAt", System.currentTimeMillis());
+        for (WebSocketSession session : subscribers.values()) {
+            sendMessage(session, payload);
+        }
+    }
+
+    public void broadcastPhase2bMarkdownChunk(
+            String channel,
+            String requestId,
+            String chunk,
+            int chunkIndex,
+            boolean done
+    ) {
+        String normalizedChannel = normalizeText(channel);
+        if (normalizedChannel.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> subscribers = phase2bSubscribers.get(normalizedChannel);
+        if (subscribers == null || subscribers.isEmpty()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "phase2bMarkdownChunk");
+        payload.put("channel", normalizedChannel);
+        payload.put("requestId", normalizeText(requestId));
+        payload.put("chunk", chunk != null ? chunk : "");
+        payload.put("chunkIndex", Math.max(0, chunkIndex));
+        payload.put("done", done);
+        payload.put("updatedAt", System.currentTimeMillis());
+        for (WebSocketSession session : subscribers.values()) {
+            sendMessage(session, payload);
+        }
+    }
+
+    public void broadcastPhase2bMarkdownFinal(
+            String channel,
+            String requestId,
+            String markdown,
+            int finalChunkIndex
+    ) {
+        String normalizedChannel = normalizeText(channel);
+        if (normalizedChannel.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> subscribers = phase2bSubscribers.get(normalizedChannel);
+        if (subscribers == null || subscribers.isEmpty()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "phase2bMarkdownFinal");
+        payload.put("channel", normalizedChannel);
+        payload.put("requestId", normalizeText(requestId));
+        payload.put("markdown", markdown != null ? markdown : "");
+        payload.put("chunkIndex", Math.max(0, finalChunkIndex));
+        payload.put("done", true);
+        payload.put("updatedAt", System.currentTimeMillis());
+        for (WebSocketSession session : subscribers.values()) {
+            sendMessage(session, payload);
+        }
+    }
+
     public void broadcastTaskUpdate(TaskQueueManager.TaskEntry task) {
         String collectionId = resolveCollectionId(task.taskId);
         ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(task.taskId);
@@ -172,11 +293,7 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                 }
             }
         }
-
-        WebSocketSession userSession = userSessions.get(task.userId);
-        if (userSession != null && userSession.isOpen()) {
-            sendTaskUpdate(userSession, task, collectionId);
-        }
+        sendTaskUpdateToUserSessions(task.userId, task, collectionId);
     }
 
     public void broadcastTaskUpdate(String taskId, String status, double progress, String message, String resultPath) {
@@ -207,11 +324,9 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                 }
             }
         }
-
-        for (WebSocketSession session : userSessions.values()) {
-            if (session.isOpen()) {
-                sendMessage(session, update);
-            }
+        TaskQueueManager.TaskEntry ownerTask = taskQueueManager.getTask(normalizedTaskId);
+        if (ownerTask != null) {
+            sendPayloadToUserSessions(ownerTask.userId, update);
         }
     }
 
@@ -263,6 +378,38 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    private void sendPayloadToUserSessions(String userId, Map<String, Object> payload) {
+        String normalizedUserId = normalizeText(userId);
+        if (normalizedUserId.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> sessions = userSessions.get(normalizedUserId);
+        if (sessions == null) {
+            return;
+        }
+        for (WebSocketSession session : sessions.values()) {
+            sendMessage(session, payload);
+        }
+    }
+
+    private void sendTaskUpdateToUserSessions(
+            String userId,
+            TaskQueueManager.TaskEntry task,
+            String collectionId
+    ) {
+        String normalizedUserId = normalizeText(userId);
+        if (normalizedUserId.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> sessions = userSessions.get(normalizedUserId);
+        if (sessions == null) {
+            return;
+        }
+        for (WebSocketSession session : sessions.values()) {
+            sendTaskUpdate(session, task, collectionId);
+        }
+    }
+
     private void removeSessionFromSubscribers(
             ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> subscribersByTopic,
             String sessionId
@@ -273,6 +420,21 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             if (subscribers.isEmpty()) {
                 subscribersByTopic.remove(entry.getKey(), subscribers);
             }
+        }
+    }
+
+    private void removeSessionFromUserSessions(String userId, String sessionId) {
+        String normalizedUserId = normalizeText(userId);
+        if (normalizedUserId.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<String, WebSocketSession> sessions = userSessions.get(normalizedUserId);
+        if (sessions == null) {
+            return;
+        }
+        sessions.remove(sessionId);
+        if (sessions.isEmpty()) {
+            userSessions.remove(normalizedUserId, sessions);
         }
     }
 
@@ -307,15 +469,34 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
             return session.getId();
         }
         for (String param : session.getUri().getQuery().split("&")) {
-            String[] pair = param.split("=");
-            if (pair.length == 2 && "userId".equals(pair[0])) {
-                return pair[1];
+            String[] pair = param.split("=", 2);
+            if (pair.length != 2) {
+                continue;
+            }
+            String key = safeDecodeQueryParam(pair[0]);
+            if ("userId".equals(key)) {
+                String value = normalizeText(safeDecodeQueryParam(pair[1]));
+                if (!value.isEmpty()) {
+                    return value;
+                }
             }
         }
         return session.getId();
     }
 
+    private String safeDecodeQueryParam(String rawValue) {
+        try {
+            return URLDecoder.decode(rawValue, StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+            return rawValue != null ? rawValue : "";
+        }
+    }
+
     public int getConnectionCount() {
-        return userSessions.size();
+        int total = 0;
+        for (ConcurrentHashMap<String, WebSocketSession> sessions : userSessions.values()) {
+            total += sessions.size();
+        }
+        return total;
     }
 }

@@ -119,7 +119,7 @@
         if (isLinkIssue) {
             return {
                 reason: 'link_issue',
-                message: '这个链接我们还读不懂。检查一下地址，再交给我们。',
+                message: '这个链接暂时无法处理，试试换一条？',
                 highlightLink: true,
                 allowRetry: false,
                 rawMessage: rawMessage,
@@ -130,7 +130,7 @@
         if (isNetwork || isBusy) {
             return {
                 reason: isNetwork ? 'network' : 'busy',
-                message: '连接断了一下，我们没能抓住那个视频。',
+                message: '网络有点不稳定，请再试一次。',
                 highlightLink: false,
                 allowRetry: true,
                 rawMessage: rawMessage,
@@ -138,9 +138,13 @@
                 httpStatus: status,
             };
         }
+        var unknownMessage = textOrEmpty(normalizedMessage) || textOrEmpty(rawMessage);
+        if (!unknownMessage) {
+            unknownMessage = '这次处理没成功，请再试一次。';
+        }
         return {
             reason: 'unknown',
-            message: '我们没能抓住那个视频。请再试一次。',
+            message: unknownMessage,
             highlightLink: false,
             allowRetry: true,
             rawMessage: rawMessage,

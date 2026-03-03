@@ -31,6 +31,10 @@
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
         <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-yaml</artifactId>
         </dependency>
@@ -87,6 +91,16 @@
             <artifactId>guava</artifactId>
             <version>32.1.2-jre</version>
         </dependency>
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>2.0.31</version>
+        </dependency>
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.17.2</version>
+        </dependency>
         
         <!-- JavaCV - FFmpeg JNI Bindings (常驻进程，避免每次spawn) -->
         <dependency>
@@ -123,6 +137,7 @@
                 <artifactId>spring-boot-maven-plugin</artifactId>
                 <configuration>
                     <!-- 更换为未被占用的端口，比如 9002 -->
+                    <mainClass>com.mvp.module2.fusion.FusionOrchestratorApplication</mainClass>
                     <jmxPort>9002</jmxPort>
                 </configuration>
             </plugin>

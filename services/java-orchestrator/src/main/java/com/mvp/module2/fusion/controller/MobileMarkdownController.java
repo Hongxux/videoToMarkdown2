@@ -11,6 +11,9 @@ import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
 import com.mvp.module2.fusion.service.CollectionRepository;
+import com.mvp.module2.fusion.service.FileTransferService;
+import com.mvp.module2.fusion.service.FileReuseService;
+import com.mvp.module2.fusion.service.VideoMetaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -36,12 +39,16 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.multipart.MultipartException;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.BufferedReader;
+import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.FileVisitResult;
@@ -64,7 +71,10 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.HashSet;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.stream.Stream;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -84,8 +94,14 @@ public class MobileMarkdownController {
     private static final String TELEMETRY_FILE_NAME = "mobile_task_telemetry.ndjson";
     private static final String META_DEFAULT_NOTE_KEY = "__default__";
     private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
-    private static final Set<String> ALLOWED_VIDEO_EXTENSIONS = Set.of(".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v");
+    private static final Pattern MARKDOWN_LINK_PATTERN = Pattern.compile("(!?\\[[^\\]]*])\\(([^)\\s]+)([^)]*)\\)");
+    private static final Pattern BOOK_SELECTOR_PATTERN = Pattern.compile("c(\\d+)s(\\d+)(?:t(\\d+))?", Pattern.CASE_INSENSITIVE);
+    private static final Set<String> ALLOWED_UPLOAD_EXTENSIONS = Set.of(
+            ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
+            ".txt", ".md", ".pdf", ".epub"
+    );
     private static final long MAX_UPLOAD_FILE_BYTES = 2L * 1024L * 1024L * 1024L;
+    private static final Pattern SAFE_UPLOAD_ID_PATTERN = Pattern.compile("^[A-Za-z0-9_-]{8,96}$");
 
     @Autowired
     private TaskQueueManager taskQueueManager;
@@ -105,6 +121,14 @@ public class MobileMarkdownController {
     @Autowired(required = false)
     private CollectionRepository collectionRepository;
 
+    @Autowired(required = false)
+    private FileReuseService fileReuseService;
+
+    @Autowired
+    private FileTransferService fileTransferService;
+
+    private VideoMetaService videoMetaService = new VideoMetaService();
+
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
 
@@ -112,6 +136,14 @@ public class MobileMarkdownController {
     private int mobileVideoInfoTimeoutSeconds;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Autowired(required = false)
+    public void setVideoMetaService(VideoMetaService videoMetaService) {
+        if (videoMetaService != null) {
+            this.videoMetaService = videoMetaService;
+        }
+    }
+
     @GetMapping("/tasks")
     public ResponseEntity<Map<String, Object>> listTasks(
             @RequestParam(value = "page", defaultValue = "0") int page,
@@ -132,6 +164,7 @@ public class MobileMarkdownController {
         for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
             finalViewList.add(fromCachedTask(cached));
         }
+        finalViewList = deduplicateTaskViews(finalViewList);
         finalViewList.sort(Comparator.comparingLong(this::bestTimestamp).reversed());
         Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
 
@@ -183,6 +216,13 @@ public class MobileMarkdownController {
 
         String normalizedUserId = normalizeUserId(request.userId);
         TaskQueueManager.Priority priority = resolvePriority(normalizedUserId, request.priority);
+        TaskQueueManager.BookProcessingOptions bookOptions = buildBookProcessingOptions(
+                request.chapterSelector,
+                request.sectionSelector,
+                request.splitByChapter,
+                request.splitBySection,
+                request.pageOffset
+        );
         String lockedTitle = resolveSubmissionTaskTitle(request.videoUrl, normalizedVideoInput);
         logger.info("Mobile task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
         TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
@@ -190,7 +230,8 @@ public class MobileMarkdownController {
                 normalizedVideoInput,
                 normalizeOutputDir(request.outputDir),
                 priority,
-                lockedTitle
+                lockedTitle,
+                bookOptions
         );
         linkCollectionEpisodeIfNecessary(request.collectionId, request.episodeNo, task.taskId);
 
@@ -364,59 +405,438 @@ public class MobileMarkdownController {
     }
 
     @PostMapping(value = "/tasks/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public ResponseEntity<Map<String, Object>> submitUploadTaskFromMobile(
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> submitUploadTaskFromMobile(
             @RequestParam("videoFile") MultipartFile videoFile,
             @RequestParam(value = "userId", required = false) String userId,
             @RequestParam(value = "outputDir", required = false) String outputDir,
-            @RequestParam(value = "priority", required = false) String priority
+            @RequestParam(value = "priority", required = false) String priority,
+            @RequestParam(value = "chapterSelector", required = false) String chapterSelector,
+            @RequestParam(value = "sectionSelector", required = false) String sectionSelector,
+            @RequestParam(value = "splitByChapter", required = false) Boolean splitByChapter,
+            @RequestParam(value = "splitBySection", required = false) Boolean splitBySection,
+            @RequestParam(value = "pageOffset", required = false) Integer pageOffset,
+            @RequestParam(value = "probeOnly", required = false) Boolean probeOnly,
+            @RequestParam(value = "fileMd5", required = false) String fileMd5,
+            @RequestParam(value = "fileExt", required = false) String fileExt
     ) {
         if (videoFile == null || videoFile.isEmpty()) {
-            return ResponseEntity.badRequest().body(Map.of(
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
                     "success", false,
                     "message", "videoFile cannot be empty"
-            ));
+            )));
         }
         if (videoFile.getSize() > MAX_UPLOAD_FILE_BYTES) {
-            return ResponseEntity.badRequest().body(Map.of(
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
                     "success", false,
                     "message", "uploaded file is too large; current limit is 2048MB"
-            ));
+            )));
         }
 
         String safeFileName = sanitizeUploadFileName(videoFile.getOriginalFilename());
-        if (!hasSupportedVideoExtension(safeFileName)) {
-            return ResponseEntity.badRequest().body(Map.of(
+        if (!hasSupportedUploadExtension(safeFileName)) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "message", "supported video formats: mp4/mov/mkv/avi/webm/m4v"
-            ));
+                    "message", "supported formats: mp4/mov/mkv/avi/webm/m4v/txt/md/pdf/epub"
+            )));
         }
 
         String normalizedUserId = normalizeUserId(userId);
         TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, priority);
-
-        try {
-            Path savedVideoPath = persistUploadedVideo(videoFile, safeFileName);
-            TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+        Optional<FileReuseService.FileFingerprint> fingerprintOpt =
+                resolveFileFingerprint(fileMd5, fileExt, safeFileName);
+        Optional<Path> reusedPathOpt = findReusableUploadPath(fingerprintOpt);
+        if (reusedPathOpt.isPresent()) {
+            return CompletableFuture.completedFuture(buildUploadSubmissionResponse(
+                    reusedPathOpt.get(),
+                    safeFileName,
                     normalizedUserId,
-                    savedVideoPath.toString(),
-                    normalizeOutputDir(outputDir),
-                    taskPriority
-            );
+                    outputDir,
+                    taskPriority,
+                    chapterSelector,
+                    sectionSelector,
+                    splitByChapter,
+                    splitBySection,
+                    pageOffset,
+                    probeOnly,
+                    fingerprintOpt,
+                    true
+            ));
+        }
+
+        return fileTransferService
+                .persistMultipartWithUniqueNameAsync(uploadDir, safeFileName, videoFile)
+                .thenApply(savedVideoPath -> {
+                    recordUploadedFileMetadata(savedVideoPath, safeFileName, videoFile.getSize(), fingerprintOpt);
+                    return buildUploadSubmissionResponse(
+                            savedVideoPath,
+                            safeFileName,
+                            normalizedUserId,
+                            outputDir,
+                            taskPriority,
+                            chapterSelector,
+                            sectionSelector,
+                            splitByChapter,
+                            splitBySection,
+                            pageOffset,
+                            probeOnly,
+                            fingerprintOpt,
+                            false
+                    );
+                })
+                .exceptionally(error -> {
+                    Throwable root = unwrapCompletionError(error);
+                    logger.error("mobile upload video persistence failed", root);
+                    return ResponseEntity.status(503).body(Map.of(
+                            "success", false,
+                            "message", UserFacingErrorMapper.busyMessage()
+                    ));
+                });
+    }
+
+    @PostMapping(value = "/tasks/upload/reuse-check", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> checkUploadFileReuse(
+            @RequestBody(required = false) UploadReuseCheckRequest request
+    ) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "request body cannot be empty"
+            ));
+        }
+        String safeFileName = sanitizeUploadFileName(request.fileName);
+        Optional<FileReuseService.FileFingerprint> fingerprintOpt =
+                resolveFileFingerprint(request.fileMd5, request.fileExt, safeFileName);
+        if (fingerprintOpt.isEmpty()) {
             return ResponseEntity.ok(Map.of(
                     "success", true,
-                    "taskId", task.taskId,
-                    "status", task.status.name(),
-                    "normalizedVideoUrl", savedVideoPath.toString(),
-                    "uploadedFileName", safeFileName,
-                    "message", "video uploaded; task submitted and queued"
+                    "reused", false,
+                    "message", "fingerprint missing or invalid"
             ));
+        }
+        Optional<Path> reusedPathOpt = findReusableUploadPath(fingerprintOpt);
+        if (reusedPathOpt.isEmpty()) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("reused", false);
+            payload.put("fileMd5", fingerprintOpt.get().md5());
+            payload.put("fileExt", fingerprintOpt.get().fileExt());
+            payload.put("message", "reuse candidate not found");
+            return ResponseEntity.ok(payload);
+        }
+
+        boolean autoSubmit = !Boolean.FALSE.equals(request.autoSubmit);
+        if (!autoSubmit) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("reused", true);
+            payload.put("normalizedVideoUrl", reusedPathOpt.get().toString());
+            payload.put("uploadedFileName", safeFileName);
+            payload.put("fileMd5", fingerprintOpt.get().md5());
+            payload.put("fileExt", fingerprintOpt.get().fileExt());
+            payload.put("message", "reusable file located");
+            return ResponseEntity.ok(payload);
+        }
+
+        String normalizedUserId = normalizeUserId(request.userId);
+        TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, request.priority);
+        return buildUploadSubmissionResponse(
+                reusedPathOpt.get(),
+                safeFileName,
+                normalizedUserId,
+                request.outputDir,
+                taskPriority,
+                request.chapterSelector,
+                request.sectionSelector,
+                request.splitByChapter,
+                request.splitBySection,
+                request.pageOffset,
+                request.probeOnly,
+                fingerprintOpt,
+                true
+        );
+    }
+
+    @PostMapping(value = "/tasks/upload/chunk", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public CompletableFuture<ResponseEntity<Map<String, Object>>> uploadTaskFileChunk(
+            @RequestParam("uploadId") String uploadId,
+            @RequestParam("chunkIndex") Integer chunkIndex,
+            @RequestParam("totalChunks") Integer totalChunks,
+            @RequestParam(value = "totalFileSize", required = false) Long totalFileSize,
+            @RequestParam("fileName") String fileName,
+            @RequestParam(value = "chunkSha256", required = false) String chunkSha256,
+            @RequestParam("chunkFile") MultipartFile chunkFile
+    ) {
+        if (chunkFile == null || chunkFile.isEmpty()) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "chunkFile cannot be empty"
+            )));
+        }
+        int normalizedChunkIndex = chunkIndex == null ? -1 : chunkIndex;
+        int normalizedTotalChunks = totalChunks == null ? -1 : totalChunks;
+        if (normalizedChunkIndex < 0 || normalizedTotalChunks <= 0 || normalizedChunkIndex >= normalizedTotalChunks) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "invalid chunk index or totalChunks"
+            )));
+        }
+        String normalizedUploadId = normalizeUploadId(uploadId);
+        String safeFileName = sanitizeUploadFileName(fileName);
+        if (!hasSupportedUploadExtension(safeFileName)) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "supported formats: mp4/mov/mkv/avi/webm/m4v/txt/md/pdf/epub"
+            )));
+        }
+        long normalizedTotalFileSize = totalFileSize == null ? -1L : totalFileSize;
+        if (normalizedTotalFileSize > MAX_UPLOAD_FILE_BYTES) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "uploaded file is too large; current limit is 2048MB"
+            )));
+        }
+
+        try {
+            Path uploadRootPath = resolveUploadRoot();
+            return fileTransferService
+                    .writeChunkAsync(
+                            uploadRootPath,
+                            normalizedUploadId,
+                            safeFileName,
+                            normalizedTotalChunks,
+                            normalizedTotalFileSize,
+                            normalizedChunkIndex,
+                            chunkFile,
+                            chunkSha256
+                    )
+                    .thenApply(result -> {
+                        Map<String, Object> payload = new LinkedHashMap<>();
+                        payload.put("success", true);
+                        payload.put("uploadId", normalizedUploadId);
+                        payload.put("chunkIndex", normalizedChunkIndex);
+                        payload.put("uploadedChunks", result.uploadedChunks.size());
+                        payload.put("totalChunks", normalizedTotalChunks);
+                        payload.put("chunkSha256", result.chunkSha256);
+                        payload.put("chunkSizeBytes", result.chunkSizeBytes);
+                        payload.put("message", "chunk uploaded");
+                        return ResponseEntity.ok(payload);
+                    })
+                    .exceptionally(error -> mapChunkTransferError(
+                            error,
+                            normalizedUploadId,
+                            normalizedChunkIndex,
+                            "chunk upload persistence failed"
+                    ));
         } catch (IOException e) {
-            logger.error("mobile upload video persistence failed", e);
+            logger.error("chunk upload persistence failed: uploadId={} chunkIndex={}", normalizedUploadId, normalizedChunkIndex, e);
+            return CompletableFuture.completedFuture(ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", UserFacingErrorMapper.busyMessage()
+            )));
+        }
+    }
+
+    @GetMapping("/tasks/upload/chunk/status")
+    public ResponseEntity<Map<String, Object>> queryUploadChunkStatus(
+            @RequestParam("uploadId") String uploadId
+    ) {
+        String normalizedUploadId = normalizeUploadId(uploadId);
+        try {
+            Path uploadRootPath = resolveUploadRoot();
+            FileTransferService.ChunkSessionStatus status = fileTransferService.readChunkStatus(uploadRootPath, normalizedUploadId);
+            if (!status.exists) {
+                return ResponseEntity.ok(Map.of(
+                        "success", true,
+                        "exists", false,
+                        "uploadId", normalizedUploadId,
+                        "uploadedChunks", List.of()
+                ));
+            }
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("exists", true);
+            payload.put("uploadId", normalizedUploadId);
+            payload.put("uploadedChunks", status.uploadedChunks);
+            payload.put("uploadedCount", status.uploadedChunks.size());
+            if (status.meta != null) {
+                payload.put("totalChunks", status.meta.totalChunks);
+                payload.put("safeFileName", status.meta.safeFileName);
+                payload.put("totalFileSize", status.meta.totalFileSize);
+            }
+            return ResponseEntity.ok(payload);
+        } catch (IOException e) {
+            logger.warn("query chunk status failed: uploadId={} err={}", normalizedUploadId, e.getMessage());
             return ResponseEntity.status(503).body(Map.of(
                     "success", false,
                     "message", UserFacingErrorMapper.busyMessage()
             ));
         }
+    }
+
+    @PostMapping(value = "/tasks/upload/chunk/complete", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public CompletableFuture<ResponseEntity<?>> completeChunkUpload(
+            @RequestBody ChunkUploadCompleteRequest request
+    ) {
+        if (request == null || !StringUtils.hasText(request.uploadId)) {
+            return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "uploadId cannot be empty"
+            )));
+        }
+        String normalizedUploadId = normalizeUploadId(request.uploadId);
+        String normalizedUserId = normalizeUserId(request.userId);
+        TaskQueueManager.Priority taskPriority = resolvePriority(normalizedUserId, request.priority);
+
+        final Path uploadRootPath;
+        try {
+            uploadRootPath = resolveUploadRoot();
+        } catch (IOException e) {
+            logger.error("resolve upload root failed for chunk complete: uploadId={}", normalizedUploadId, e);
+            return CompletableFuture.completedFuture(ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", UserFacingErrorMapper.busyMessage()
+            )));
+        }
+
+        return fileTransferService
+                .readChunkStatusAsync(uploadRootPath, normalizedUploadId)
+                .thenCompose(status -> {
+                    if (!status.exists) {
+                        return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                                "success", false,
+                                "message", "chunk session not found"
+                        )));
+                    }
+                    if (status.meta == null || !StringUtils.hasText(status.meta.safeFileName) || status.meta.totalChunks <= 0) {
+                        return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                                "success", false,
+                                "message", "chunk session metadata missing"
+                        )));
+                    }
+
+                    Optional<FileReuseService.FileFingerprint> fingerprintOpt =
+                            resolveFileFingerprint(request.fileMd5, request.fileExt, status.meta.safeFileName);
+                    Optional<Path> reusedPathOpt = findReusableUploadPath(fingerprintOpt);
+                    if (reusedPathOpt.isPresent()) {
+                        fileTransferService.cleanupChunkSessionQuietly(uploadRootPath, normalizedUploadId);
+                        ResponseEntity<Map<String, Object>> response = buildUploadSubmissionResponse(
+                                reusedPathOpt.get(),
+                                status.meta.safeFileName,
+                                normalizedUserId,
+                                request.outputDir,
+                                taskPriority,
+                                request.chapterSelector,
+                                request.sectionSelector,
+                                request.splitByChapter,
+                                request.splitBySection,
+                                request.pageOffset,
+                                request.probeOnly,
+                                fingerprintOpt,
+                                true
+                        );
+                        return CompletableFuture.completedFuture(response);
+                    }
+
+                    if (status.meta.totalFileSize > MAX_UPLOAD_FILE_BYTES) {
+                        return CompletableFuture.completedFuture(ResponseEntity.badRequest().body(Map.of(
+                                "success", false,
+                                "message", "uploaded file is too large; current limit is 2048MB"
+                        )));
+                    }
+
+                    return fileTransferService
+                            .mergeChunkSessionAsync(uploadRootPath, normalizedUploadId)
+                            .thenApply(mergeResult -> {
+                                recordUploadedFileMetadata(
+                                        mergeResult.mergedPath,
+                                        status.meta.safeFileName,
+                                        status.meta.totalFileSize,
+                                        fingerprintOpt
+                                );
+                                ResponseEntity<Map<String, Object>> response = buildUploadSubmissionResponse(
+                                        mergeResult.mergedPath,
+                                        status.meta.safeFileName,
+                                        normalizedUserId,
+                                        request.outputDir,
+                                        taskPriority,
+                                        request.chapterSelector,
+                                        request.sectionSelector,
+                                        request.splitByChapter,
+                                        request.splitBySection,
+                                        request.pageOffset,
+                                        request.probeOnly,
+                                        fingerprintOpt,
+                                        false
+                                );
+                                fileTransferService.cleanupChunkSessionQuietly(uploadRootPath, normalizedUploadId);
+                                return response;
+                            });
+                })
+                .exceptionally(error -> {
+                    Throwable root = unwrapCompletionError(error);
+                    if (root instanceof IllegalArgumentException) {
+                        Map<String, Object> payload = new LinkedHashMap<>();
+                        payload.put("success", false);
+                        payload.put("message", root.getMessage() != null ? root.getMessage() : "invalid chunk upload request");
+                        return ResponseEntity.badRequest().body(payload);
+                    }
+                    logger.error("complete chunk upload failed: uploadId={}", normalizedUploadId, root);
+                    Map<String, Object> payload = new LinkedHashMap<>();
+                    payload.put("success", false);
+                    payload.put("message", UserFacingErrorMapper.busyMessage());
+                    return ResponseEntity.status(503).body(payload);
+                })
+                .thenApply(response -> (ResponseEntity<?>) response);
+    }
+
+    @org.springframework.web.bind.annotation.ExceptionHandler(MultipartException.class)
+    public ResponseEntity<Map<String, Object>> handleMultipartUploadException(MultipartException ex) {
+        Throwable root = ex;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        if (root instanceof EOFException) {
+            logger.warn("multipart upload interrupted by client connection: {}", root.toString());
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", "上传连接中断，请重试（已支持断点续传）",
+                    "errorCode", "UPLOAD_STREAM_INTERRUPTED"
+            ));
+        }
+        logger.warn("multipart parse failed: {}", ex.getMessage());
+        return ResponseEntity.badRequest().body(Map.of(
+                "success", false,
+                "message", "上传数据格式异常，请重试",
+                "errorCode", "UPLOAD_MULTIPART_INVALID"
+        ));
+    }
+
+    private ResponseEntity<Map<String, Object>> mapChunkTransferError(
+            Throwable error,
+            String uploadId,
+            int chunkIndex,
+            String logMessage
+    ) {
+        Throwable root = unwrapCompletionError(error);
+        if (root instanceof IllegalArgumentException) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "success", false,
+                    "message", root.getMessage() != null ? root.getMessage() : "invalid chunk upload request"
+            ));
+        }
+        logger.error("{}: uploadId={} chunkIndex={}", logMessage, uploadId, chunkIndex, root);
+        return ResponseEntity.status(503).body(Map.of(
+                "success", false,
+                "message", UserFacingErrorMapper.busyMessage()
+        ));
+    }
+
+    private Throwable unwrapCompletionError(Throwable error) {
+        Throwable current = error;
+        while (current instanceof CompletionException && current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current != null ? current : new RuntimeException("unknown transfer error");
     }
 
     @GetMapping("/tasks/{taskId}/markdown")
@@ -453,6 +873,9 @@ public class MobileMarkdownController {
             response.put("markdownPath", resolved.markdownPath.toString());
             response.put("baseDir", resolved.baseDir.toString());
             response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
+            TocMetadata tocMetadata = resolveTaskTocMetadata(task, resolved.markdownPath);
+            response.put("contentType", tocMetadata.contentType);
+            response.put("bookSectionTree", tocMetadata.bookSectionTree);
             appendOrWarmupPersonalizedReading(
                     response,
                     task.taskId,
@@ -518,6 +941,9 @@ public class MobileMarkdownController {
             response.put("markdownPath", target.toString());
             response.put("baseDir", resolved.baseDir.toString());
             response.put("assetEndpointTemplate", "/api/mobile/tasks/" + task.taskId + "/asset?path={path}");
+            TocMetadata tocMetadata = resolveTaskTocMetadata(task, target);
+            response.put("contentType", tocMetadata.contentType);
+            response.put("bookSectionTree", tocMetadata.bookSectionTree);
             appendOrWarmupPersonalizedReading(
                     response,
                     task.taskId,
@@ -740,6 +1166,7 @@ public class MobileMarkdownController {
         payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
         payload.put("tokenLike", noteMeta.tokenLike != null ? noteMeta.tokenLike : Map.of());
         payload.put("tokenAnnotations", noteMeta.tokenAnnotations != null ? sanitizeTokenAnnotations(noteMeta.tokenAnnotations) : Map.of());
+        payload.put("anchors", noteMeta.anchors != null ? sanitizeAnchors(noteMeta.anchors) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         return ResponseEntity.ok(payload);
     }
@@ -785,11 +1212,15 @@ public class MobileMarkdownController {
         if (request != null && request.tokenAnnotations != null) {
             noteMeta.tokenAnnotations = new LinkedHashMap<>(sanitizeTokenAnnotations(request.tokenAnnotations));
         }
+        if (request != null && request.anchors != null) {
+            noteMeta.anchors = new LinkedHashMap<>(sanitizeAnchors(request.anchors));
+        }
         if ((noteMeta.favorites == null || noteMeta.favorites.isEmpty())
                 && (noteMeta.deleted == null || noteMeta.deleted.isEmpty())
                 && (noteMeta.comments == null || noteMeta.comments.isEmpty())
                 && (noteMeta.tokenLike == null || noteMeta.tokenLike.isEmpty())
-                && (noteMeta.tokenAnnotations == null || noteMeta.tokenAnnotations.isEmpty())) {
+                && (noteMeta.tokenAnnotations == null || noteMeta.tokenAnnotations.isEmpty())
+                && (noteMeta.anchors == null || noteMeta.anchors.isEmpty())) {
             meta.notesByMarkdown.remove(noteKey);
         } else {
             meta.notesByMarkdown.put(noteKey, noteMeta);
@@ -819,9 +1250,480 @@ public class MobileMarkdownController {
         payload.put("comments", noteMeta.comments != null ? sanitizeComments(noteMeta.comments) : Map.of());
         payload.put("tokenLike", noteMeta.tokenLike != null ? noteMeta.tokenLike : Map.of());
         payload.put("tokenAnnotations", noteMeta.tokenAnnotations != null ? sanitizeTokenAnnotations(noteMeta.tokenAnnotations) : Map.of());
+        payload.put("anchors", noteMeta.anchors != null ? sanitizeAnchors(noteMeta.anchors) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         payload.put("updatedAt", Instant.now().toString());
         return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/anchors/{anchorId}/mount", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> mountAnchorResources(
+            @PathVariable String taskId,
+            @PathVariable String anchorId,
+            @RequestParam(value = "path", required = false) String rawPath,
+            @RequestParam(value = "files", required = false) MultipartFile[] files,
+            @RequestParam(value = "relativePaths", required = false) List<String> relativePaths,
+            @RequestParam(value = "mainNotePath", required = false) String rawMainNotePath
+    ) {
+        String normalizedAnchorId = trimToNullSafe(anchorId);
+        if (normalizedAnchorId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorId cannot be empty"));
+        }
+        if (files == null || files.length == 0) {
+            return ResponseEntity.badRequest().body(Map.of("message", "missing upload files"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String safeAnchorDirName = sanitizeAnchorDirectoryName(normalizedAnchorId);
+        String revisionId = buildAnchorRevisionId();
+        String relativeRevisionDir = "thinking/anchor_" + safeAnchorDirName + "/rev_" + revisionId;
+        Path revisionDir = taskRoot.resolve(relativeRevisionDir).normalize();
+        if (!revisionDir.startsWith(taskRoot)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal anchor mount path"));
+        }
+
+        List<String> savedRelativePaths = new ArrayList<>();
+        List<Map<String, Object>> savedFilePayload = new ArrayList<>();
+        List<FileTransferService.BatchTransferItem> transferBatch = new ArrayList<>();
+        List<MultipartFile> transferSourceFiles = new ArrayList<>();
+        long totalBytes = 0L;
+        try {
+            Files.createDirectories(revisionDir);
+            for (int index = 0; index < files.length; index++) {
+                MultipartFile file = files[index];
+                if (file == null || file.isEmpty()) {
+                    continue;
+                }
+                String requestedRelative = (relativePaths != null && index < relativePaths.size())
+                        ? relativePaths.get(index)
+                        : null;
+                String normalizedRelative = normalizeMountedRelativePath(requestedRelative, file.getOriginalFilename());
+                if (normalizedRelative == null) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "message", "illegal relative path in uploaded files",
+                            "fileIndex", index
+                    ));
+                }
+                Path target = revisionDir.resolve(normalizedRelative).normalize();
+                if (!target.startsWith(revisionDir)) {
+                    return ResponseEntity.badRequest().body(Map.of(
+                            "message", "illegal target path in uploaded files",
+                            "fileIndex", index
+                    ));
+                }
+                if (target.getParent() != null) {
+                    Files.createDirectories(target.getParent());
+                }
+                transferBatch.add(new FileTransferService.BatchTransferItem(target, file));
+                transferSourceFiles.add(file);
+                savedRelativePaths.add(normalizedRelative);
+            }
+            List<Path> persistedPaths = fileTransferService.persistMultipartBatchAsync(taskRoot, transferBatch).join();
+            for (int index = 0; index < persistedPaths.size() && index < savedRelativePaths.size(); index++) {
+                Path target = persistedPaths.get(index);
+                MultipartFile sourceFile = transferSourceFiles.get(index);
+                String normalizedRelative = savedRelativePaths.get(index);
+                long fileSize = Files.size(target);
+                totalBytes += fileSize;
+                Map<String, Object> oneFilePayload = new LinkedHashMap<>();
+                oneFilePayload.put("path", relativeRevisionDir + "/" + normalizedRelative);
+                oneFilePayload.put("name", sourceFile.getOriginalFilename() != null ? sourceFile.getOriginalFilename() : target.getFileName().toString());
+                oneFilePayload.put("size", fileSize);
+                oneFilePayload.put("contentType", sourceFile.getContentType() != null ? sourceFile.getContentType() : "");
+                savedFilePayload.add(oneFilePayload);
+            }
+        } catch (Exception ex) {
+            logger.warn("mount anchor files failed: taskId={} anchorId={} err={}", taskId, normalizedAnchorId, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "write anchor files failed"));
+        }
+
+        if (savedRelativePaths.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "all uploaded files are empty"));
+        }
+
+        String selectedNoteRelative = resolveMainNoteRelativePath(rawMainNotePath, savedRelativePaths);
+        String notePath = selectedNoteRelative != null ? relativeRevisionDir + "/" + selectedNoteRelative : "";
+        String noteKey = normalizeMetaNoteKey(taskRoot, rawPath);
+        Instant now = Instant.now();
+
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+        Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(normalizedAnchorId));
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+
+        Map<String, Object> revisionPayload = new LinkedHashMap<>();
+        revisionPayload.put("revisionId", revisionId);
+        revisionPayload.put("createdAt", now.toString());
+        revisionPayload.put("relativeDir", relativeRevisionDir);
+        if (!notePath.isBlank()) {
+            revisionPayload.put("notePath", notePath);
+        }
+        revisionPayload.put("fileCount", savedFilePayload.size());
+        revisionPayload.put("totalBytes", totalBytes);
+        revisionPayload.put("files", savedFilePayload);
+        revisions.add(revisionPayload);
+
+        anchorRecord.put("status", !notePath.isBlank() ? "mounted" : "files_uploaded");
+        if (!notePath.isBlank()) {
+            anchorRecord.put("mountedPath", notePath);
+        }
+        anchorRecord.put("mountedRevisionId", revisionId);
+        anchorRecord.put("updatedAt", now.toString());
+        anchorRecord.put("revisions", revisions);
+        anchors.put(normalizedAnchorId, anchorRecord);
+        noteMeta.anchors = anchors;
+        meta.notesByMarkdown.put(noteKey, noteMeta);
+
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("pathKey", noteKey);
+        payload.put("anchorId", normalizedAnchorId);
+        payload.put("anchor", anchorRecord);
+        payload.put("revision", revisionPayload);
+        payload.put("updatedAt", now.toString());
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/anchors/{anchorId}/sync", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> syncAnchorResources(
+            @PathVariable String taskId,
+            @PathVariable String anchorId,
+            @RequestBody AnchorSyncRequest request
+    ) {
+        String normalizedAnchorId = trimToNullSafe(anchorId);
+        if (normalizedAnchorId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorId cannot be empty"));
+        }
+        if (request == null || request.operations == null || request.operations.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "missing sync operations"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request.path);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+        Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(normalizedAnchorId));
+        if (anchorRecord.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("message", "anchor not found"));
+        }
+
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+        Map<String, Object> latestRevision = revisions.isEmpty() ? Map.of() : revisions.get(revisions.size() - 1);
+        String revisionRelativeDir = stringValueOrNull(latestRevision.get("relativeDir"));
+        if (revisionRelativeDir == null) {
+            String mountedPath = stringValueOrNull(anchorRecord.get("mountedPath"));
+            if (mountedPath != null) {
+                Path mountedParent = Paths.get(mountedPath).normalize().getParent();
+                if (mountedParent != null) {
+                    revisionRelativeDir = normalizeMountedRelativePath(mountedParent.toString().replace('\\', '/'), null);
+                }
+            }
+        }
+        if (revisionRelativeDir == null) {
+            return ResponseEntity.status(400).body(Map.of("message", "anchor has no mounted revision directory"));
+        }
+        String normalizedRevisionRelativeDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+        if (normalizedRevisionRelativeDir == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal revision directory"));
+        }
+        Path revisionDir = taskRoot.resolve(normalizedRevisionRelativeDir).normalize();
+        if (!revisionDir.startsWith(taskRoot)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal revision directory"));
+        }
+        try {
+            Files.createDirectories(revisionDir);
+        } catch (IOException ex) {
+            logger.warn("prepare anchor revision directory failed: taskId={} anchorId={} dir={} err={}",
+                    taskId, normalizedAnchorId, revisionDir, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "prepare anchor revision directory failed"));
+        }
+
+        List<Map<String, Object>> touchedFiles = new ArrayList<>();
+        int upsertCount = 0;
+        int deleteCount = 0;
+        long totalBytes = 0L;
+        for (int index = 0; index < request.operations.size(); index++) {
+            AnchorSyncOperation op = request.operations.get(index);
+            if (op == null) {
+                continue;
+            }
+            String opType = trimToNullSafe(op.op);
+            String normalizedRelativePath = normalizeMountedRelativePath(op.relativePath, null);
+            if (normalizedRelativePath == null) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "message", "illegal relative path in sync operations",
+                        "opIndex", index
+                ));
+            }
+            Path target = revisionDir.resolve(normalizedRelativePath).normalize();
+            if (!target.startsWith(revisionDir)) {
+                return ResponseEntity.badRequest().body(Map.of(
+                        "message", "sync target path out of revision directory",
+                        "opIndex", index
+                ));
+            }
+
+            String lowerOp = opType == null ? "" : opType.toLowerCase(Locale.ROOT);
+            boolean isDelete = "delete".equals(lowerOp) || "remove".equals(lowerOp);
+            boolean isUpsert = "add".equals(lowerOp)
+                    || "replace".equals(lowerOp)
+                    || "upsert".equals(lowerOp)
+                    || "create".equals(lowerOp)
+                    || "new".equals(lowerOp)
+                    || "update".equals(lowerOp);
+            if (!isDelete && !isUpsert) {
+                continue;
+            }
+
+            try {
+                if (isDelete) {
+                    boolean deleted = Files.deleteIfExists(target);
+                    if (deleted) {
+                        deleteCount += 1;
+                    }
+                    Map<String, Object> one = new LinkedHashMap<>();
+                    one.put("path", normalizedRevisionRelativeDir + "/" + normalizedRelativePath);
+                    one.put("name", target.getFileName().toString());
+                    one.put("size", 0L);
+                    one.put("contentType", "application/x-delete");
+                    touchedFiles.add(one);
+                    continue;
+                }
+
+                if (target.getParent() != null) {
+                    Files.createDirectories(target.getParent());
+                }
+                String content = op.content != null ? op.content : "";
+                Files.writeString(
+                        target,
+                        content,
+                        StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE
+                );
+                long fileSize = Files.size(target);
+                totalBytes += fileSize;
+                upsertCount += 1;
+                Map<String, Object> one = new LinkedHashMap<>();
+                one.put("path", normalizedRevisionRelativeDir + "/" + normalizedRelativePath);
+                one.put("name", target.getFileName().toString());
+                one.put("size", fileSize);
+                one.put("contentType", "text/markdown");
+                touchedFiles.add(one);
+            } catch (Exception ex) {
+                logger.warn("apply anchor sync op failed: taskId={} anchorId={} opIndex={} op={} path={} err={}",
+                        taskId, normalizedAnchorId, index, lowerOp, normalizedRelativePath, ex.getMessage());
+                return ResponseEntity.status(500).body(Map.of(
+                        "message", "apply sync operation failed",
+                        "opIndex", index
+                ));
+            }
+        }
+
+        if (upsertCount == 0 && deleteCount == 0) {
+            return ResponseEntity.badRequest().body(Map.of("message", "no valid sync operations"));
+        }
+
+        String mountedPath = stringValueOrNull(anchorRecord.get("mountedPath"));
+        String selectedMainRelative = normalizeMountedRelativePath(request.mainNotePath, null);
+        String resolvedMainRelative = null;
+        if (selectedMainRelative != null) {
+            Path selectedMainTarget = revisionDir.resolve(selectedMainRelative).normalize();
+            if (!selectedMainTarget.startsWith(revisionDir)) {
+                return ResponseEntity.badRequest().body(Map.of("message", "main note path out of revision directory"));
+            }
+            if (Files.isRegularFile(selectedMainTarget) && isMarkdownFile(selectedMainRelative)) {
+                resolvedMainRelative = selectedMainRelative;
+            }
+        }
+        if (resolvedMainRelative == null) {
+            String normalizedMountedPath = normalizeMountedRelativePath(mountedPath, null);
+            String revisionPrefix = normalizedRevisionRelativeDir + "/";
+            if (normalizedMountedPath != null && normalizedMountedPath.startsWith(revisionPrefix)) {
+                String currentMainRelative = normalizedMountedPath.substring(revisionPrefix.length());
+                Path currentMainTarget = revisionDir.resolve(currentMainRelative).normalize();
+                if (currentMainTarget.startsWith(revisionDir)
+                        && Files.isRegularFile(currentMainTarget)
+                        && isMarkdownFile(currentMainRelative)) {
+                    resolvedMainRelative = currentMainRelative;
+                }
+            }
+        }
+        if (resolvedMainRelative == null) {
+            resolvedMainRelative = findFirstMarkdownRelativePath(revisionDir);
+        }
+        if (resolvedMainRelative != null) {
+            mountedPath = normalizedRevisionRelativeDir + "/" + resolvedMainRelative;
+        } else {
+            mountedPath = null;
+        }
+
+        Instant now = Instant.now();
+        String syncRevisionId = buildAnchorRevisionId();
+        Map<String, Object> revisionPayload = new LinkedHashMap<>();
+        revisionPayload.put("revisionId", syncRevisionId);
+        revisionPayload.put("createdAt", now.toString());
+        revisionPayload.put("relativeDir", normalizedRevisionRelativeDir);
+        if (mountedPath != null && !mountedPath.isBlank()) {
+            revisionPayload.put("notePath", mountedPath);
+        }
+        revisionPayload.put("fileCount", touchedFiles.size());
+        revisionPayload.put("totalBytes", totalBytes);
+        revisionPayload.put("files", touchedFiles);
+        revisions.add(revisionPayload);
+
+        if (mountedPath != null && !mountedPath.isBlank()) {
+            anchorRecord.put("mountedPath", mountedPath);
+            anchorRecord.put("status", "mounted");
+        } else {
+            anchorRecord.put("status", "files_uploaded");
+        }
+        anchorRecord.put("mountedRevisionId", syncRevisionId);
+        anchorRecord.put("updatedAt", now.toString());
+        anchorRecord.put("revisions", revisions);
+        anchors.put(normalizedAnchorId, anchorRecord);
+        noteMeta.anchors = anchors;
+        meta.notesByMarkdown.put(noteKey, noteMeta);
+
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("pathKey", noteKey);
+        payload.put("anchorId", normalizedAnchorId);
+        payload.put("anchor", anchorRecord);
+        payload.put("revision", revisionPayload);
+        payload.put("upsertCount", upsertCount);
+        payload.put("deleteCount", deleteCount);
+        payload.put("updatedAt", now.toString());
+        return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping("/tasks/{taskId}/anchors/{anchorId}/mounted")
+    public ResponseEntity<?> getMountedAnchorNote(
+            @PathVariable String taskId,
+            @PathVariable String anchorId,
+            @RequestParam(value = "path", required = false) String rawPath,
+            @RequestParam(value = "notePath", required = false) String rawNotePath
+    ) {
+        String normalizedAnchorId = trimToNullSafe(anchorId);
+        if (normalizedAnchorId == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorId cannot be empty"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, rawPath);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+        Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(normalizedAnchorId));
+        if (anchorRecord.isEmpty()) {
+            return ResponseEntity.status(404).body(Map.of("message", "anchor not found"));
+        }
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+        Map<String, Object> latestRevision = revisions.isEmpty() ? Map.of() : revisions.get(revisions.size() - 1);
+
+        String entryNotePath = stringValueOrNull(latestRevision.get("notePath"));
+        if (entryNotePath == null) {
+            entryNotePath = stringValueOrNull(anchorRecord.get("mountedPath"));
+        }
+        if (entryNotePath == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "mounted markdown not found"));
+        }
+        String revisionRelativeDir = stringValueOrNull(latestRevision.get("relativeDir"));
+        if (revisionRelativeDir == null) {
+            Path entryPath = Paths.get(entryNotePath).normalize();
+            Path entryParent = entryPath.getParent();
+            if (entryParent != null) {
+                revisionRelativeDir = entryParent.toString().replace('\\', '/');
+            }
+        }
+        String notePath = resolveMountedReadNotePath(rawNotePath, entryNotePath, revisionRelativeDir);
+        if (notePath == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "illegal mounted note path"));
+        }
+        Path target = taskRoot.resolve(notePath).normalize();
+        if (!target.startsWith(taskRoot) || !Files.isRegularFile(target)) {
+            return ResponseEntity.status(404).body(Map.of("message", "mounted markdown file missing"));
+        }
+        if (revisionRelativeDir != null && !revisionRelativeDir.isBlank()) {
+            String normalizedRevisionRelativeDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+            if (normalizedRevisionRelativeDir != null) {
+                Path revisionDir = taskRoot.resolve(normalizedRevisionRelativeDir).normalize();
+                if (revisionDir.startsWith(taskRoot) && !target.startsWith(revisionDir)) {
+                    return ResponseEntity.badRequest().body(Map.of("message", "mounted note path out of revision"));
+                }
+            }
+        }
+
+        try {
+            String rawMarkdown = Files.readString(target, StandardCharsets.UTF_8);
+            String baseRelativeDir = "";
+            if (target.getParent() != null) {
+                baseRelativeDir = taskRoot.relativize(target.getParent()).toString().replace('\\', '/');
+            }
+            String renderedMarkdown = rewriteMountedMarkdownAssetLinks(rawMarkdown, task.taskId, baseRelativeDir);
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("pathKey", noteKey);
+            payload.put("anchorId", normalizedAnchorId);
+            payload.put("anchor", anchorRecord);
+            payload.put("latestRevision", latestRevision);
+            payload.put("entryNotePath", entryNotePath);
+            payload.put("notePath", notePath);
+            payload.put("assetBasePath", baseRelativeDir != null ? baseRelativeDir : "");
+            payload.put("markdown", renderedMarkdown);
+            payload.put("rawMarkdown", rawMarkdown);
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        } catch (Exception ex) {
+            logger.warn("read mounted anchor note failed: taskId={} anchorId={} path={} err={}",
+                    taskId, normalizedAnchorId, notePath, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read mounted markdown failed"));
+        }
     }
 
     @PostMapping(value = "/tasks/{taskId}/telemetry", consumes = MediaType.APPLICATION_JSON_VALUE)
@@ -1064,6 +1966,8 @@ public class MobileMarkdownController {
         item.put("storageKey", task.storageKey != null ? task.storageKey : "");
         item.put("progress", task.progress);
         item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
+        item.put("domain", task.domain != null ? task.domain : "");
+        item.put("mainTopic", task.mainTopic != null ? task.mainTopic : "");
         item.put("collectionId", task.collectionId != null ? task.collectionId : "");
         item.put("episodeNo", task.episodeNo);
         item.put("episodeTitle", task.episodeTitle != null ? task.episodeTitle : "");
@@ -1388,7 +2292,12 @@ public class MobileMarkdownController {
 
     private TaskView fromCachedTask(com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached) {
         TaskView view = new TaskView();
-        view.taskId = STORAGE_TASK_PREFIX + cached.storageKey;
+        String cachedTaskId = trimToNullSafe(cached.taskId);
+        if (cachedTaskId != null) {
+            view.taskId = cachedTaskId;
+        } else {
+            view.taskId = STORAGE_TASK_PREFIX + cached.storageKey;
+        }
         view.storageKey = cached.storageKey;
         view.storageTask = true;
         view.title = cached.title;
@@ -1598,6 +2507,11 @@ public class MobileMarkdownController {
                 } else {
                     entry.getValue().tokenAnnotations = new LinkedHashMap<>(sanitizeTokenAnnotations(entry.getValue().tokenAnnotations));
                 }
+                if (entry.getValue().anchors == null) {
+                    entry.getValue().anchors = new LinkedHashMap<>();
+                } else {
+                    entry.getValue().anchors = new LinkedHashMap<>(sanitizeAnchors(entry.getValue().anchors));
+                }
             }
             return loaded;
         } catch (Exception ex) {
@@ -1652,7 +2566,7 @@ public class MobileMarkdownController {
         }
         try {
             Files.createDirectories(taskRoot);
-            ObjectNode root = loadVideoMetaNode(videoMetaPath);
+            ObjectNode root = videoMetaService.readOrCreateNode(taskRoot);
             if (title == null || title.isBlank()) {
                 root.remove("title");
             } else {
@@ -1673,25 +2587,6 @@ public class MobileMarkdownController {
             }
             logger.warn("write video metadata title failed: {} err={}", videoMetaPath, ex.getMessage());
             return false;
-        }
-    }
-
-    private ObjectNode loadVideoMetaNode(Path videoMetaPath) {
-        if (videoMetaPath == null || !Files.isRegularFile(videoMetaPath)) {
-            return objectMapper.createObjectNode();
-        }
-        try {
-            if (Files.size(videoMetaPath) == 0L) {
-                return objectMapper.createObjectNode();
-            }
-            JsonNode loaded = objectMapper.readTree(videoMetaPath.toFile());
-            if (loaded instanceof ObjectNode) {
-                return (ObjectNode) loaded;
-            }
-            return objectMapper.createObjectNode();
-        } catch (Exception ex) {
-            logger.warn("read video metadata failed: {} err={}", videoMetaPath, ex.getMessage());
-            return objectMapper.createObjectNode();
         }
     }
 
@@ -1801,6 +2696,429 @@ public class MobileMarkdownController {
             }
         }
         return output;
+    }
+
+    private Map<String, Object> sanitizeAnchors(Map<String, ?> input) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        if (input == null) {
+            return output;
+        }
+        for (Map.Entry<String, ?> entry : input.entrySet()) {
+            String anchorId = trimToNullSafe(entry.getKey());
+            if (anchorId == null) {
+                continue;
+            }
+            Map<String, Object> sanitized = sanitizeSingleAnchorData(entry.getValue());
+            if (!sanitized.isEmpty()) {
+                output.put(anchorId, sanitized);
+            }
+        }
+        return output;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> sanitizeSingleAnchorData(Object rawValue) {
+        if (!(rawValue instanceof Map<?, ?> rawMap)) {
+            return new LinkedHashMap<>();
+        }
+        Map<String, Object> value = (Map<String, Object>) rawMap;
+        Map<String, Object> output = new LinkedHashMap<>();
+
+        String blockId = stringValueOrNull(value.get("blockId"));
+        if (blockId != null) {
+            output.put("blockId", blockId);
+        }
+        Integer startIndex = nonNegativeIntOrNull(
+                value.containsKey("startIndex") ? value.get("startIndex") : value.get("start")
+        );
+        Integer endIndex = nonNegativeIntOrNull(
+                value.containsKey("endIndex") ? value.get("endIndex") : value.get("end")
+        );
+        if (startIndex != null) {
+            output.put("startIndex", startIndex);
+        }
+        if (endIndex != null) {
+            output.put("endIndex", endIndex);
+        }
+
+        String quote = stringValueOrNull(value.get("quote"));
+        if (quote == null) {
+            quote = stringValueOrNull(value.get("token"));
+        }
+        if (quote != null) {
+            output.put("quote", quote);
+        }
+        String contextQuote = stringValueOrNull(value.get("contextQuote"));
+        if (contextQuote == null) {
+            contextQuote = stringValueOrNull(value.get("quoteSnapshot"));
+        }
+        if (contextQuote != null) {
+            output.put("contextQuote", contextQuote);
+        }
+        String anchorHint = stringValueOrNull(value.get("anchorHint"));
+        if (anchorHint == null) {
+            anchorHint = stringValueOrNull(value.get("hint"));
+        }
+        if (anchorHint != null) {
+            output.put("anchorHint", anchorHint);
+        }
+
+        String mountedPath = stringValueOrNull(value.get("mountedPath"));
+        if (mountedPath != null) {
+            output.put("mountedPath", mountedPath);
+        }
+        String mountedRevisionId = stringValueOrNull(value.get("mountedRevisionId"));
+        if (mountedRevisionId != null) {
+            output.put("mountedRevisionId", mountedRevisionId);
+        }
+        String updatedAt = normalizeIsoInstant(value.get("updatedAt"));
+        if (updatedAt != null) {
+            output.put("updatedAt", updatedAt);
+        }
+        String mountedAt = normalizeIsoInstant(value.get("mountedAt"));
+        if (mountedAt != null) {
+            output.put("mountedAt", mountedAt);
+        }
+
+        List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(value.get("revisions"));
+        if (!revisions.isEmpty()) {
+            output.put("revisions", revisions);
+            Map<String, Object> latest = revisions.get(revisions.size() - 1);
+            if (!output.containsKey("mountedPath")) {
+                String latestNotePath = stringValueOrNull(latest.get("notePath"));
+                if (latestNotePath != null) {
+                    output.put("mountedPath", latestNotePath);
+                }
+            }
+            if (!output.containsKey("mountedRevisionId")) {
+                String latestRevisionId = stringValueOrNull(latest.get("revisionId"));
+                if (latestRevisionId != null) {
+                    output.put("mountedRevisionId", latestRevisionId);
+                }
+            }
+        }
+
+        boolean hasMountedPath = output.containsKey("mountedPath");
+        String status = normalizeAnchorStatus(value.get("status"), hasMountedPath);
+        output.put("status", status);
+        return output;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeAnchorRevisionList(Object rawValue) {
+        List<Map<String, Object>> output = new ArrayList<>();
+        if (!(rawValue instanceof List<?> rawList)) {
+            return output;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> one = sanitizeAnchorRevisionEntry((Map<String, Object>) rawMap);
+            if (!one.isEmpty()) {
+                output.add(one);
+            }
+        }
+        return output;
+    }
+
+    private Map<String, Object> sanitizeAnchorRevisionEntry(Map<String, Object> rawMap) {
+        Map<String, Object> output = new LinkedHashMap<>();
+        String revisionId = stringValueOrNull(rawMap.get("revisionId"));
+        if (revisionId == null) {
+            revisionId = stringValueOrNull(rawMap.get("revision"));
+        }
+        if (revisionId != null) {
+            output.put("revisionId", revisionId);
+        }
+        String createdAt = normalizeIsoInstant(rawMap.get("createdAt"));
+        if (createdAt != null) {
+            output.put("createdAt", createdAt);
+        }
+        String relativeDir = stringValueOrNull(rawMap.get("relativeDir"));
+        if (relativeDir != null) {
+            output.put("relativeDir", relativeDir);
+        }
+        String notePath = stringValueOrNull(rawMap.get("notePath"));
+        if (notePath != null) {
+            output.put("notePath", notePath);
+        }
+        Integer fileCount = nonNegativeIntOrNull(rawMap.get("fileCount"));
+        if (fileCount != null) {
+            output.put("fileCount", fileCount);
+        }
+        Long totalBytes = nonNegativeLongOrNull(rawMap.get("totalBytes"));
+        if (totalBytes != null) {
+            output.put("totalBytes", totalBytes);
+        }
+        List<Map<String, Object>> files = sanitizeAnchorRevisionFiles(rawMap.get("files"));
+        if (!files.isEmpty()) {
+            output.put("files", files);
+        }
+        return output;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> sanitizeAnchorRevisionFiles(Object rawValue) {
+        List<Map<String, Object>> output = new ArrayList<>();
+        if (!(rawValue instanceof List<?> rawList)) {
+            return output;
+        }
+        for (Object item : rawList) {
+            if (!(item instanceof Map<?, ?> rawMap)) {
+                continue;
+            }
+            Map<String, Object> source = (Map<String, Object>) rawMap;
+            String path = stringValueOrNull(source.get("path"));
+            if (path == null) {
+                continue;
+            }
+            Map<String, Object> fileItem = new LinkedHashMap<>();
+            fileItem.put("path", path);
+            String name = stringValueOrNull(source.get("name"));
+            if (name != null) {
+                fileItem.put("name", name);
+            }
+            Long size = nonNegativeLongOrNull(source.get("size"));
+            if (size != null) {
+                fileItem.put("size", size);
+            }
+            String contentType = stringValueOrNull(source.get("contentType"));
+            if (contentType != null) {
+                fileItem.put("contentType", contentType);
+            }
+            output.add(fileItem);
+        }
+        return output;
+    }
+
+    private String normalizeAnchorStatus(Object rawStatus, boolean hasMountedPath) {
+        String normalized = stringValueOrNull(rawStatus);
+        if (normalized == null) {
+            return hasMountedPath ? "mounted" : "pending";
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if ("mounted".equals(lower) || "pending".equals(lower) || "files_uploaded".equals(lower)) {
+            return lower;
+        }
+        return hasMountedPath ? "mounted" : "pending";
+    }
+
+    private String normalizeIsoInstant(Object rawValue) {
+        String value = stringValueOrNull(rawValue);
+        if (value == null) {
+            return null;
+        }
+        Instant parsed = parseInstantSafe(value);
+        return parsed != null ? parsed.toString() : null;
+    }
+
+    private Integer nonNegativeIntOrNull(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        try {
+            Integer parsed;
+            if (rawValue instanceof Number number) {
+                parsed = number.intValue();
+            } else {
+                parsed = Integer.parseInt(String.valueOf(rawValue).trim());
+            }
+            return parsed >= 0 ? parsed : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private Long nonNegativeLongOrNull(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        try {
+            Long parsed;
+            if (rawValue instanceof Number number) {
+                parsed = number.longValue();
+            } else {
+                parsed = Long.parseLong(String.valueOf(rawValue).trim());
+            }
+            return parsed >= 0 ? parsed : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String stringValueOrNull(Object rawValue) {
+        if (rawValue == null) {
+            return null;
+        }
+        String value = String.valueOf(rawValue).trim();
+        return value.isEmpty() ? null : value;
+    }
+
+    private String sanitizeAnchorDirectoryName(String anchorId) {
+        String normalized = anchorId == null ? "" : anchorId.trim();
+        if (normalized.isEmpty()) {
+            return "unknown";
+        }
+        String replaced = UNSAFE_FILENAME_CHARS.matcher(normalized).replaceAll("_");
+        if (replaced.isBlank()) {
+            return "unknown";
+        }
+        return replaced.length() > 96 ? replaced.substring(0, 96) : replaced;
+    }
+
+    private String buildAnchorRevisionId() {
+        String timePart = String.valueOf(System.currentTimeMillis());
+        String uuidPart = UUID.randomUUID().toString().replace("-", "").substring(0, 10);
+        return timePart + "_" + uuidPart;
+    }
+
+    private String normalizeMountedRelativePath(String rawPath, String fallbackName) {
+        String candidate = rawPath != null ? rawPath : fallbackName;
+        if (candidate == null || candidate.isBlank()) {
+            return null;
+        }
+        String decoded = URLDecoder.decode(candidate, StandardCharsets.UTF_8).trim().replace('\\', '/');
+        while (decoded.startsWith("/")) {
+            decoded = decoded.substring(1);
+        }
+        if (decoded.isBlank()) {
+            return null;
+        }
+        Path normalized;
+        try {
+            normalized = Paths.get(decoded).normalize();
+        } catch (Exception ex) {
+            return null;
+        }
+        if (normalized.isAbsolute()) {
+            return null;
+        }
+        String normalizedPath = normalized.toString().replace('\\', '/');
+        if (normalizedPath.isBlank() || normalizedPath.equals(".")
+                || normalizedPath.startsWith("..")
+                || normalizedPath.contains("/../")) {
+            return null;
+        }
+        return normalizedPath;
+    }
+
+    private String resolveMainNoteRelativePath(String rawMainNotePath, List<String> uploadedRelativePaths) {
+        if (uploadedRelativePaths == null || uploadedRelativePaths.isEmpty()) {
+            return null;
+        }
+        if (rawMainNotePath != null && !rawMainNotePath.isBlank()) {
+            String normalized = normalizeMountedRelativePath(rawMainNotePath, null);
+            if (normalized != null && uploadedRelativePaths.contains(normalized) && isMarkdownFile(normalized)) {
+                return normalized;
+            }
+        }
+        for (String onePath : uploadedRelativePaths) {
+            if (isMarkdownFile(onePath)) {
+                return onePath;
+            }
+        }
+        return null;
+    }
+
+    private String findFirstMarkdownRelativePath(Path revisionDir) {
+        if (revisionDir == null || !Files.isDirectory(revisionDir)) {
+            return null;
+        }
+        try (Stream<Path> stream = Files.walk(revisionDir)) {
+            Optional<String> found = stream
+                    .filter(Files::isRegularFile)
+                    .map(path -> revisionDir.relativize(path).toString().replace('\\', '/'))
+                    .filter(this::isMarkdownFile)
+                    .sorted()
+                    .findFirst();
+            return found.orElse(null);
+        } catch (IOException ex) {
+            logger.warn("scan revision markdown failed: dir={} err={}", revisionDir, ex.getMessage());
+            return null;
+        }
+    }
+
+    private String resolveMountedReadNotePath(String rawNotePath, String entryNotePath, String revisionRelativeDir) {
+        String normalizedEntry = normalizeMountedRelativePath(entryNotePath, null);
+        if (rawNotePath == null || rawNotePath.isBlank()) {
+            return normalizedEntry;
+        }
+        String normalizedRequested = normalizeMountedRelativePath(rawNotePath, null);
+        if (normalizedRequested == null) {
+            return null;
+        }
+        String normalizedRevisionDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+        if (normalizedRevisionDir != null && !normalizedRevisionDir.isBlank()) {
+            if (!normalizedRequested.equals(normalizedRevisionDir)
+                    && !normalizedRequested.startsWith(normalizedRevisionDir + "/")) {
+                normalizedRequested = normalizeMountedRelativePath(
+                        normalizedRevisionDir + "/" + normalizedRequested,
+                        null
+                );
+            }
+        }
+        if (normalizedRequested == null || !isMarkdownFile(normalizedRequested)) {
+            return null;
+        }
+        return normalizedRequested;
+    }
+
+    private String rewriteMountedMarkdownAssetLinks(String markdown, String taskId, String baseRelativeDir) {
+        if (markdown == null || markdown.isBlank() || taskId == null || taskId.isBlank()) {
+            return markdown != null ? markdown : "";
+        }
+        String normalizedBase = "";
+        if (baseRelativeDir != null && !baseRelativeDir.isBlank()) {
+            String normalized = normalizeMountedRelativePath(baseRelativeDir, null);
+            if (normalized != null) {
+                normalizedBase = normalized;
+            }
+        }
+        Matcher matcher = MARKDOWN_LINK_PATTERN.matcher(markdown);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String originalUrl = matcher.group(2);
+            String rewrittenUrl = rewriteMountedResourceUrl(taskId, normalizedBase, originalUrl);
+            if (rewrittenUrl == null) {
+                matcher.appendReplacement(buffer, Matcher.quoteReplacement(matcher.group(0)));
+                continue;
+            }
+            String replacement = matcher.group(1) + "(" + rewrittenUrl + matcher.group(3) + ")";
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
+    }
+
+    private String rewriteMountedResourceUrl(String taskId, String baseRelativeDir, String rawUrl) {
+        String url = stringValueOrNull(rawUrl);
+        if (url == null) {
+            return null;
+        }
+        String lower = url.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("http://")
+                || lower.startsWith("https://")
+                || lower.startsWith("data:")
+                || lower.startsWith("blob:")
+                || lower.startsWith("mailto:")
+                || lower.startsWith("tel:")
+                || lower.startsWith("#")
+                || lower.startsWith("/api/mobile/tasks/")) {
+            return null;
+        }
+        String normalizedPath = normalizeMountedRelativePath(url, null);
+        if (normalizedPath == null) {
+            return null;
+        }
+        String fullRelativePath = normalizedPath;
+        if (baseRelativeDir != null && !baseRelativeDir.isBlank()) {
+            fullRelativePath = baseRelativeDir + "/" + normalizedPath;
+        }
+        return "/api/mobile/tasks/"
+                + URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+                + "/asset?path="
+                + URLEncoder.encode(fullRelativePath, StandardCharsets.UTF_8);
     }
 
     private Map<String, String> sanitizeTelemetryPayload(Map<String, ?> input) {
@@ -1957,6 +3275,64 @@ public class MobileMarkdownController {
         return 10;
     }
 
+    private List<TaskView> deduplicateTaskViews(List<TaskView> input) {
+        if (input == null || input.isEmpty()) {
+            return List.of();
+        }
+        Map<String, TaskView> deduplicated = new LinkedHashMap<>();
+        int anonymousSeq = 0;
+        for (TaskView candidate : input) {
+            if (candidate == null) {
+                continue;
+            }
+            String key = trimToNullSafe(candidate.taskId);
+            if (key == null) {
+                key = "__anonymous__" + (++anonymousSeq);
+            }
+            TaskView existing = deduplicated.get(key);
+            if (existing == null) {
+                deduplicated.put(key, candidate);
+                continue;
+            }
+            deduplicated.put(key, choosePreferredTaskView(existing, candidate));
+        }
+        return new ArrayList<>(deduplicated.values());
+    }
+
+    private TaskView choosePreferredTaskView(TaskView existing, TaskView candidate) {
+        boolean existingRuntimeProcessing = existing.runtimeTask != null && isRunningStatus(existing.status);
+        boolean candidateRuntimeProcessing = candidate.runtimeTask != null && isRunningStatus(candidate.status);
+        if (existingRuntimeProcessing != candidateRuntimeProcessing) {
+            return existingRuntimeProcessing ? existing : candidate;
+        }
+        if (existing.markdownAvailable != candidate.markdownAvailable) {
+            return existing.markdownAvailable ? existing : candidate;
+        }
+        long existingTs = bestTimestamp(existing);
+        long candidateTs = bestTimestamp(candidate);
+        if (candidateTs > existingTs) {
+            return candidate;
+        }
+        if (existingTs > candidateTs) {
+            return existing;
+        }
+        if (candidate.runtimeTask != null && existing.runtimeTask == null) {
+            return candidate;
+        }
+        return existing;
+    }
+
+    private boolean isRunningStatus(String rawStatus) {
+        if (rawStatus == null || rawStatus.isBlank()) {
+            return false;
+        }
+        String status = rawStatus.trim().toUpperCase(Locale.ROOT);
+        return "QUEUED".equals(status)
+                || "PENDING".equals(status)
+                || "PROCESSING".equals(status)
+                || "RUNNING".equals(status);
+    }
+
     private long safeLastModifiedMillis(Path path) {
         try {
             return Files.getLastModifiedTime(path).toMillis();
@@ -2033,6 +3409,364 @@ public class MobileMarkdownController {
         }
         if (meta.lastOpenedAt != null && !meta.lastOpenedAt.isBlank()) {
             view.lastOpenedAt = parseInstantSafe(meta.lastOpenedAt);
+        }
+        applyTaskDomainAndTopicFromVideoMeta(view, root);
+    }
+
+    private void applyTaskDomainAndTopicFromVideoMeta(TaskView view, Path taskRoot) {
+        if (view == null || taskRoot == null) {
+            return;
+        }
+        VideoMetaService.VideoMetaSnapshot snapshot = videoMetaService.read(taskRoot);
+        if (snapshot.domain != null) {
+            view.domain = snapshot.domain;
+        }
+        if (snapshot.mainTopic != null) {
+            view.mainTopic = snapshot.mainTopic;
+        }
+    }
+
+    private TocMetadata resolveTaskTocMetadata(TaskView task, Path markdownPath) {
+        String contentType = null;
+        List<Map<String, Object>> bookSectionTree = new ArrayList<>();
+        Path taskRoot = resolveTaskRootForToc(task);
+        if (taskRoot != null) {
+            ObjectNode videoMetaRoot = videoMetaService.readOrCreateNode(taskRoot);
+            contentType = normalizeContentTypeToken(readVideoMetaContentType(videoMetaRoot));
+            bookSectionTree = readBookSectionTreeFromVideoMeta(videoMetaRoot);
+            if (bookSectionTree.isEmpty()) {
+                bookSectionTree = readBookSectionTreeFromSemanticUnits(taskRoot);
+            }
+            if ((contentType == null || contentType.isBlank()) && !bookSectionTree.isEmpty()) {
+                contentType = "book";
+            }
+        }
+        if (contentType == null || contentType.isBlank()) {
+            contentType = inferTaskContentType(task, markdownPath);
+        }
+        if (contentType == null || contentType.isBlank()) {
+            contentType = "unknown";
+        }
+        return new TocMetadata(contentType, bookSectionTree);
+    }
+
+    private Path resolveTaskRootForToc(TaskView task) {
+        try {
+            return resolveTaskRootDir(task);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String readVideoMetaContentType(ObjectNode videoMetaRoot) {
+        if (videoMetaRoot == null) {
+            return null;
+        }
+        String contentType = trimToNullSafe(videoMetaRoot.path("contentType").asText(null));
+        if (contentType == null) {
+            contentType = trimToNullSafe(videoMetaRoot.path("content_type").asText(null));
+        }
+        if (contentType == null) {
+            contentType = trimToNullSafe(videoMetaRoot.path("platform").asText(null));
+        }
+        return contentType;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> readBookSectionTreeFromVideoMeta(ObjectNode videoMetaRoot) {
+        if (videoMetaRoot == null) {
+            return new ArrayList<>();
+        }
+        JsonNode treeNode = videoMetaRoot.get("bookSectionTree");
+        if (treeNode == null || !treeNode.isArray()) {
+            treeNode = videoMetaRoot.get("book_section_tree");
+        }
+        if (treeNode == null || !treeNode.isArray()) {
+            return new ArrayList<>();
+        }
+        try {
+            Object converted = objectMapper.convertValue(treeNode, Object.class);
+            if (!(converted instanceof List<?> rawList)) {
+                return new ArrayList<>();
+            }
+            List<Map<String, Object>> output = new ArrayList<>();
+            for (Object one : rawList) {
+                if (one instanceof Map<?, ?> rawMap) {
+                    output.add(new LinkedHashMap<>((Map<String, Object>) rawMap));
+                }
+            }
+            return output;
+        } catch (Exception ex) {
+            logger.debug("parse bookSectionTree from video_meta failed: {}", ex.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private List<Map<String, Object>> readBookSectionTreeFromSemanticUnits(Path taskRoot) {
+        if (taskRoot == null) {
+            return new ArrayList<>();
+        }
+        Path metadataPath = taskRoot.resolve("book_semantic_units.json").normalize();
+        if (!metadataPath.startsWith(taskRoot) || !Files.isRegularFile(metadataPath)) {
+            return new ArrayList<>();
+        }
+        try {
+            JsonNode rootNode = objectMapper.readTree(metadataPath.toFile());
+            JsonNode unitsNode = rootNode.path("semantic_units");
+            if (!unitsNode.isArray()) {
+                return new ArrayList<>();
+            }
+            List<Map<String, Object>> episodes = new ArrayList<>();
+            for (JsonNode unit : unitsNode) {
+                if (unit == null || !unit.isObject()) {
+                    continue;
+                }
+                int episodeNo = episodes.size() + 1;
+                Integer chapterIndexRaw = parseIntegerNode(unit.get("chapter_index"));
+                Integer sectionIndexRaw = parseIntegerNode(unit.get("section_index"));
+                Integer startPageRaw = parseIntegerNode(unit.get("start_page"));
+                Integer endPageRaw = parseIntegerNode(unit.get("end_page"));
+                String sectionSelector = trimToNullSafe(unit.path("section_selector").asText(null));
+
+                int chapterIndex = chapterIndexRaw != null ? chapterIndexRaw : 0;
+                int sectionIndex = sectionIndexRaw != null ? sectionIndexRaw : 0;
+                int subSectionIndex = parseSubSectionIndexFromSelector(sectionSelector);
+                int startPage = startPageRaw != null ? startPageRaw : -1;
+                int endPage = endPageRaw != null ? endPageRaw : startPage;
+                if (startPage > 0 && endPage > 0 && endPage < startPage) {
+                    endPage = startPage;
+                }
+
+                Map<String, Object> episode = new LinkedHashMap<>();
+                episode.put("index", episodeNo);
+                episode.put("chapterIndex", chapterIndex);
+                episode.put("sectionIndex", sectionIndex);
+                episode.put("subSectionIndex", subSectionIndex > 0 ? subSectionIndex : 1);
+                episode.put("chapterTitle", unit.path("chapter_title").asText(""));
+                episode.put("title", unit.path("section_title").asText(""));
+                episode.put("outlineIndex", buildBookOutlineIndex(chapterIndex, sectionIndex, subSectionIndex, episodeNo));
+                episode.put("startPage", startPage);
+                episode.put("endPage", endPage);
+                if (sectionSelector != null) {
+                    episode.put("sectionSelector", sectionSelector);
+                }
+                episodes.add(episode);
+            }
+            return buildBookSectionTreeFromEpisodes(episodes);
+        } catch (Exception ex) {
+            logger.debug("parse book_semantic_units.json failed: path={} err={}", metadataPath, ex.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+    private List<Map<String, Object>> buildBookSectionTreeFromEpisodes(List<Map<String, Object>> episodes) {
+        Map<String, Map<String, Object>> chapterMap = new LinkedHashMap<>();
+        Map<String, Map<String, Object>> sectionMap = new LinkedHashMap<>();
+        List<Map<String, Object>> tree = new ArrayList<>();
+        if (episodes == null) {
+            return tree;
+        }
+        for (Map<String, Object> episode : episodes) {
+            if (episode == null) {
+                continue;
+            }
+            int episodeNo = intValueOrFallback(episode.get("index"), tree.size() + 1);
+            int chapterIndex = intValueOrFallback(episode.get("chapterIndex"), 0);
+            int sectionIndex = intValueOrFallback(episode.get("sectionIndex"), 0);
+            int subSectionIndex = Math.max(1, intValueOrFallback(episode.get("subSectionIndex"), 1));
+            int startPage = intValueOrFallback(episode.get("startPage"), -1);
+            int endPage = intValueOrFallback(episode.get("endPage"), startPage);
+            if (startPage > 0 && endPage > 0 && endPage < startPage) {
+                endPage = startPage;
+            }
+            String chapterTitle = stringValueOrNull(episode.get("chapterTitle"));
+            if (chapterTitle == null) {
+                chapterTitle = chapterIndex > 0 ? ("Chapter " + chapterIndex) : "Chapter";
+            }
+            String sectionTitle = stringValueOrNull(episode.get("title"));
+            if (sectionTitle == null) {
+                sectionTitle = sectionIndex > 0 ? ("Section " + sectionIndex) : ("Section " + episodeNo);
+            }
+            String chapterKey = chapterIndex > 0 ? ("c" + chapterIndex) : ("c_fallback_" + episodeNo);
+            String sectionKey = chapterKey + "_s" + Math.max(1, sectionIndex);
+
+            Map<String, Object> chapterNode = chapterMap.get(chapterKey);
+            if (chapterNode == null) {
+                chapterNode = new LinkedHashMap<>();
+                chapterNode.put("nodeType", "chapter");
+                chapterNode.put("chapterIndex", chapterIndex);
+                chapterNode.put("title", chapterTitle);
+                chapterNode.put("children", new ArrayList<Map<String, Object>>());
+                chapterMap.put(chapterKey, chapterNode);
+                tree.add(chapterNode);
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> chapterChildren = (List<Map<String, Object>>) chapterNode.get("children");
+            Map<String, Object> sectionNode = sectionMap.get(sectionKey);
+            if (sectionNode == null) {
+                sectionNode = new LinkedHashMap<>();
+                sectionNode.put("nodeType", "section");
+                sectionNode.put("chapterIndex", chapterIndex);
+                sectionNode.put("sectionIndex", sectionIndex);
+                sectionNode.put("title", sectionTitle);
+                sectionNode.put("children", new ArrayList<Map<String, Object>>());
+                sectionMap.put(sectionKey, sectionNode);
+                chapterChildren.add(sectionNode);
+            }
+
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> sectionChildren = (List<Map<String, Object>>) sectionNode.get("children");
+            Map<String, Object> leafNode = new LinkedHashMap<>();
+            leafNode.put("nodeType", "leaf");
+            leafNode.put("episodeNo", Math.max(1, episodeNo));
+            leafNode.put("chapterIndex", chapterIndex);
+            leafNode.put("sectionIndex", sectionIndex);
+            leafNode.put("subSectionIndex", subSectionIndex);
+            String outlineIndex = stringValueOrNull(episode.get("outlineIndex"));
+            leafNode.put("outlineIndex", outlineIndex != null ? outlineIndex : buildBookOutlineIndex(chapterIndex, sectionIndex, subSectionIndex, episodeNo));
+            leafNode.put("title", sectionTitle);
+            leafNode.put("startPage", startPage);
+            leafNode.put("endPage", endPage);
+            String sectionSelector = stringValueOrNull(episode.get("sectionSelector"));
+            if (sectionSelector != null) {
+                leafNode.put("sectionSelector", sectionSelector);
+            }
+            sectionChildren.add(leafNode);
+        }
+        return tree;
+    }
+
+    private String inferTaskContentType(TaskView task, Path markdownPath) {
+        List<String> candidates = new ArrayList<>();
+        if (task != null) {
+            candidates.add(task.videoUrl);
+            candidates.add(task.resultPath);
+            if (task.markdownPath != null) {
+                candidates.add(task.markdownPath.toString());
+            }
+            candidates.add(task.title);
+        }
+        if (markdownPath != null) {
+            candidates.add(markdownPath.toString());
+        }
+        for (String candidate : candidates) {
+            String inferred = inferContentTypeFromTextCandidate(candidate);
+            if (inferred != null) {
+                return inferred;
+            }
+        }
+        return null;
+    }
+
+    private String inferContentTypeFromTextCandidate(String rawCandidate) {
+        String text = trimToNullSafe(rawCandidate);
+        if (text == null) {
+            return null;
+        }
+        String lower = text.toLowerCase(Locale.ROOT);
+        if (lower.matches(".*\\.pdf(?:$|[?#\\s]).*")) {
+            return "pdf";
+        }
+        if (lower.matches(".*\\.epub(?:$|[?#\\s]).*")) {
+            return "epub";
+        }
+        if (lower.matches(".*\\.(md|markdown|txt)(?:$|[?#\\s]).*")) {
+            return "document";
+        }
+        if (lower.matches(".*\\.(mp4|mov|mkv|avi|webm|m4v)(?:$|[?#\\s]).*")) {
+            return "video";
+        }
+        if (lower.contains("ebook") || lower.contains(" book ")) {
+            return "book";
+        }
+        return null;
+    }
+
+    private String normalizeContentTypeToken(String rawContentType) {
+        String normalized = trimToNullSafe(rawContentType);
+        if (normalized == null) {
+            return null;
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if (lower.contains("pdf")) {
+            return "pdf";
+        }
+        if (lower.contains("epub")) {
+            return "epub";
+        }
+        if (lower.contains("book")) {
+            return "book";
+        }
+        if (lower.contains("markdown") || lower.contains("text") || lower.contains("document")) {
+            return "document";
+        }
+        if (lower.contains("video")) {
+            return "video";
+        }
+        return lower;
+    }
+
+    private Integer parseIntegerNode(JsonNode valueNode) {
+        if (valueNode == null || valueNode.isNull()) {
+            return null;
+        }
+        try {
+            if (valueNode.isNumber()) {
+                return valueNode.intValue();
+            }
+            String text = trimToNullSafe(valueNode.asText(null));
+            if (text == null) {
+                return null;
+            }
+            return Integer.parseInt(text);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private int parseSubSectionIndexFromSelector(String selector) {
+        String normalized = trimToNullSafe(selector);
+        if (normalized == null) {
+            return -1;
+        }
+        Matcher matcher = BOOK_SELECTOR_PATTERN.matcher(normalized);
+        if (!matcher.find()) {
+            return -1;
+        }
+        String subSectionText = trimToNullSafe(matcher.group(3));
+        if (subSectionText == null) {
+            return 1;
+        }
+        try {
+            int parsed = Integer.parseInt(subSectionText);
+            return parsed > 0 ? parsed : -1;
+        } catch (Exception ignored) {
+            return -1;
+        }
+    }
+
+    private String buildBookOutlineIndex(int chapterIndex, int sectionIndex, int subSectionIndex, int fallbackIndex) {
+        if (chapterIndex > 0 && sectionIndex > 0 && subSectionIndex > 0) {
+            return chapterIndex + "." + sectionIndex + "." + subSectionIndex;
+        }
+        if (chapterIndex > 0 && sectionIndex > 0) {
+            return chapterIndex + "." + sectionIndex;
+        }
+        return String.valueOf(Math.max(1, fallbackIndex));
+    }
+
+    private int intValueOrFallback(Object rawValue, int fallback) {
+        if (rawValue == null) {
+            return fallback;
+        }
+        try {
+            if (rawValue instanceof Number number) {
+                return number.intValue();
+            }
+            return Integer.parseInt(String.valueOf(rawValue).trim());
+        } catch (Exception ignored) {
+            return fallback;
         }
     }
 
@@ -2170,6 +3904,148 @@ public class MobileMarkdownController {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
+    private ResponseEntity<Map<String, Object>> buildUploadSubmissionResponse(
+            Path savedVideoPath,
+            String safeFileName,
+            String normalizedUserId,
+            String outputDir,
+            TaskQueueManager.Priority taskPriority,
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset,
+            Boolean probeOnly,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt,
+            boolean reusedUpload
+    ) {
+        if (Boolean.TRUE.equals(probeOnly)) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("probeOnly", true);
+            payload.put("reused", reusedUpload);
+            payload.put("normalizedVideoUrl", savedVideoPath.toString());
+            payload.put("uploadedFileName", safeFileName);
+            payload.put("message", reusedUpload ? "file reused for probe" : "file uploaded for probe");
+            appendFingerprintPayload(payload, fingerprintOpt);
+            appendProbeCachePayload(payload, fingerprintOpt);
+            return ResponseEntity.ok(payload);
+        }
+
+        TaskQueueManager.BookProcessingOptions bookOptions = buildBookProcessingOptions(
+                chapterSelector,
+                sectionSelector,
+                splitByChapter,
+                splitBySection,
+                pageOffset
+        );
+        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+                normalizedUserId,
+                savedVideoPath.toString(),
+                normalizeOutputDir(outputDir),
+                taskPriority,
+                null,
+                bookOptions
+        );
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("reused", reusedUpload);
+        payload.put("taskId", task.taskId);
+        payload.put("status", task.status.name());
+        payload.put("normalizedVideoUrl", savedVideoPath.toString());
+        payload.put("uploadedFileName", safeFileName);
+        payload.put("message", reusedUpload
+                ? "file reused; task submitted and queued"
+                : "video uploaded; task submitted and queued");
+        appendFingerprintPayload(payload, fingerprintOpt);
+        return ResponseEntity.ok(payload);
+    }
+
+    private Optional<FileReuseService.FileFingerprint> resolveFileFingerprint(
+            String rawMd5,
+            String rawExt,
+            String fallbackFileName
+    ) {
+        if (fileReuseService == null) {
+            return Optional.empty();
+        }
+        return fileReuseService.normalizeFingerprint(rawMd5, rawExt, fallbackFileName);
+    }
+
+    private Optional<Path> findReusableUploadPath(Optional<FileReuseService.FileFingerprint> fingerprintOpt) {
+        if (fileReuseService == null || fingerprintOpt == null || fingerprintOpt.isEmpty()) {
+            return Optional.empty();
+        }
+        return fileReuseService.findReusablePath(fingerprintOpt.get());
+    }
+
+    private void recordUploadedFileMetadata(
+            Path filePath,
+            String safeFileName,
+            long fileSize,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt
+    ) {
+        if (fileReuseService == null || filePath == null) {
+            return;
+        }
+        Long normalizedSize = fileSize >= 0 ? fileSize : null;
+        if (fingerprintOpt != null && fingerprintOpt.isPresent()) {
+            fileReuseService.recordUploadedFile(fingerprintOpt.get(), filePath, normalizedSize, safeFileName);
+            return;
+        }
+        fileReuseService.recordUploadedFileAsync(filePath, safeFileName, normalizedSize);
+    }
+
+    private void appendFingerprintPayload(
+            Map<String, Object> payload,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt
+    ) {
+        if (payload == null || fingerprintOpt == null || fingerprintOpt.isEmpty()) {
+            return;
+        }
+        payload.put("fileMd5", fingerprintOpt.get().md5());
+        payload.put("fileExt", fingerprintOpt.get().fileExt());
+    }
+
+    private void appendProbeCachePayload(
+            Map<String, Object> payload,
+            Optional<FileReuseService.FileFingerprint> fingerprintOpt
+    ) {
+        if (payload == null || fileReuseService == null || fingerprintOpt == null || fingerprintOpt.isEmpty()) {
+            return;
+        }
+        Optional<Map<String, Object>> probePayloadOpt = fileReuseService.findProbePayload(fingerprintOpt.get());
+        if (probePayloadOpt.isEmpty()) {
+            payload.put("probeCacheHit", false);
+            return;
+        }
+        payload.put("probeCacheHit", true);
+        payload.put("probePayload", probePayloadOpt.get());
+    }
+
+    private TaskQueueManager.BookProcessingOptions buildBookProcessingOptions(
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset
+    ) {
+        String normalizedChapterSelector = trimToNullSafe(chapterSelector);
+        String normalizedSectionSelector = trimToNullSafe(sectionSelector);
+        if (normalizedChapterSelector == null && normalizedSectionSelector == null
+                && splitByChapter == null && splitBySection == null
+                && pageOffset == null) {
+            return null;
+        }
+        TaskQueueManager.BookProcessingOptions options = new TaskQueueManager.BookProcessingOptions();
+        options.chapterSelector = normalizedChapterSelector;
+        options.sectionSelector = normalizedSectionSelector;
+        options.splitByChapter = splitByChapter;
+        options.splitBySection = splitBySection;
+        options.pageOffset = pageOffset;
+        return options;
+    }
+
     private String sanitizeUploadFileName(String rawFileName) {
         String baseName = "uploaded_video.mp4";
         if (StringUtils.hasText(rawFileName)) {
@@ -2193,9 +4069,9 @@ public class MobileMarkdownController {
         return sanitized;
     }
 
-    private boolean hasSupportedVideoExtension(String fileName) {
+    private boolean hasSupportedUploadExtension(String fileName) {
         String lower = fileName.toLowerCase(Locale.ROOT);
-        for (String ext : ALLOWED_VIDEO_EXTENSIONS) {
+        for (String ext : ALLOWED_UPLOAD_EXTENSIONS) {
             if (lower.endsWith(ext)) {
                 return true;
             }
@@ -2203,18 +4079,12 @@ public class MobileMarkdownController {
         return false;
     }
 
-    private Path persistUploadedVideo(MultipartFile videoFile, String safeFileName) throws IOException {
-        Path uploadRootPath = resolveUploadRoot();
-        String uniquePrefix = Instant.now().toEpochMilli() + "_"
-                + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        Path targetPath = uploadRootPath.resolve(uniquePrefix + "_" + safeFileName).toAbsolutePath().normalize();
-        if (!targetPath.startsWith(uploadRootPath)) {
-            throw new IOException("illegal upload path");
+    private String normalizeUploadId(String rawUploadId) {
+        String normalized = rawUploadId == null ? "" : rawUploadId.trim();
+        if (!SAFE_UPLOAD_ID_PATTERN.matcher(normalized).matches()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "invalid uploadId");
         }
-        try (InputStream inputStream = videoFile.getInputStream()) {
-            Files.copy(inputStream, targetPath, StandardCopyOption.REPLACE_EXISTING);
-        }
-        return targetPath;
+        return normalized;
     }
 
     private Path resolveUploadRoot() throws IOException {
@@ -2287,6 +4157,16 @@ public class MobileMarkdownController {
         }
     }
 
+    private static class TocMetadata {
+        private final String contentType;
+        private final List<Map<String, Object>> bookSectionTree;
+
+        private TocMetadata(String contentType, List<Map<String, Object>> bookSectionTree) {
+            this.contentType = contentType != null ? contentType : "unknown";
+            this.bookSectionTree = bookSectionTree != null ? bookSectionTree : List.of();
+        }
+    }
+
     private static class StorageMetadata {
         private boolean hasSuccessFlag;
         private boolean success;
@@ -2310,6 +4190,7 @@ public class MobileMarkdownController {
         public Map<String, Object> comments = new LinkedHashMap<>();
         public Map<String, Boolean> tokenLike = new LinkedHashMap<>();
         public Map<String, Object> tokenAnnotations = new LinkedHashMap<>();
+        public Map<String, Object> anchors = new LinkedHashMap<>();
     }
 
     public static class MarkdownUpdateRequest {
@@ -2325,6 +4206,19 @@ public class MobileMarkdownController {
         public Map<String, Object> comments;
         public Map<String, Boolean> tokenLike;
         public Map<String, Object> tokenAnnotations;
+        public Map<String, Object> anchors;
+    }
+
+    public static class AnchorSyncRequest {
+        public String path;
+        public String mainNotePath;
+        public List<AnchorSyncOperation> operations;
+    }
+
+    public static class AnchorSyncOperation {
+        public String op;
+        public String relativePath;
+        public String content;
     }
 
     public static class TaskTelemetryIngestRequest {
@@ -2347,6 +4241,43 @@ public class MobileMarkdownController {
         public String priority;
         public String collectionId;
         public Integer episodeNo;
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+    }
+
+    public static class ChunkUploadCompleteRequest {
+        public String uploadId;
+        public String userId;
+        public String outputDir;
+        public String priority;
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+        public Boolean probeOnly;
+        public String fileMd5;
+        public String fileExt;
+    }
+
+    public static class UploadReuseCheckRequest {
+        public String userId;
+        public String outputDir;
+        public String priority;
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+        public Boolean probeOnly;
+        public String fileName;
+        public Long fileSize;
+        public String fileMd5;
+        public String fileExt;
+        public Boolean autoSubmit;
     }
 
     public static class CollectionBatchSubmitRequest {
@@ -2373,6 +4304,8 @@ public class MobileMarkdownController {
         private String storageKey;
         private Path taskRootDir;
         private String statusMessage;
+        private String domain;
+        private String mainTopic;
         private double progress;
         private TaskEntry runtimeTask;
         private String collectionId;

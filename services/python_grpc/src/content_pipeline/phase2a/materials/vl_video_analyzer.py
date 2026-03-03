@@ -39,6 +39,7 @@ from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 from services.python_grpc.src.content_pipeline.common.utils.id_utils import build_unit_relative_asset_id
+from services.python_grpc.src.content_pipeline.common.utils import json_payload_repair
 
 logger = logging.getLogger(__name__)
 
@@ -1674,20 +1675,16 @@ class VLVideoAnalyzer:
         normalized_mode = self._normalize_analysis_mode(analysis_mode)
         json_str = self._extract_json_candidate(content)
 
-        data = None
+        data: Optional[Any] = None
         last_err: Optional[Exception] = None
-        for attempt in range(3):
-            try:
-                data = json.loads(json_str)
-                break
-            except json.JSONDecodeError as e:
-                last_err = e
-                # 去除尾随逗号等常见 JSON 错误
-                json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)
-                # 修复 key_evidence 字段的转义异常
-                json_str = self._repair_key_evidence_field(json_str)
-                if attempt == 2:
-                    break
+
+        data, last_err = self._parse_json_payload(json_str)
+        if data is None:
+            salvaged_items, salvaged_err = self._extract_salvaged_json_objects(json_str)
+            if salvaged_items:
+                data = salvaged_items
+            elif salvaged_err is not None:
+                last_err = salvaged_err
 
         if data is None:
             finish_hint = f", finish_reason={finish_reason}" if finish_reason else ""
@@ -1965,6 +1962,39 @@ class VLVideoAnalyzer:
                     return s[: i + 1]
 
         return None
+
+    def _parse_json_payload(self, text: str) -> tuple[Optional[Any], Optional[Exception]]:
+        return json_payload_repair.parse_json_payload(
+            text,
+            extra_repairers=[self._repair_key_evidence_field],
+        )
+
+    def _build_json_parse_candidates(self, text: str) -> List[str]:
+        return json_payload_repair.build_json_parse_candidates(
+            text,
+            extra_repairers=[self._repair_key_evidence_field],
+        )
+
+    def _extract_salvaged_json_objects(self, text: str) -> tuple[List[Dict[str, Any]], Optional[Exception]]:
+        return json_payload_repair.extract_salvaged_json_objects(
+            text,
+            extra_repairers=[self._repair_key_evidence_field],
+        )
+
+    def _extract_top_level_objects(self, text: str) -> List[str]:
+        return json_payload_repair.extract_top_level_objects(text)
+
+    def _normalize_jsonish_text(self, text: str) -> str:
+        return json_payload_repair.normalize_jsonish_text(text)
+
+    def _escape_control_chars_in_strings(self, text: str) -> str:
+        return json_payload_repair.escape_control_chars_in_strings(text)
+
+    def _remove_trailing_commas(self, text: str) -> str:
+        return json_payload_repair.remove_trailing_commas(text)
+
+    def _repair_unclosed_json(self, text: str) -> str:
+        return json_payload_repair.repair_unclosed_json(text)
 
     def _repair_key_evidence_field(self, json_str: str) -> str:
         """

@@ -3,6 +3,199 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-02-28 QUIC/BBR 网关化发布基线（Cloudflare + Caddy/Nginx + Linux 内核）
+- 日期：2026-02-28
+- 触发背景与问题：
+  - 当前发布链路为 `docker-compose` 直出 `8080`，缺少统一网关，无法在入口层启用 QUIC/HTTP3。
+  - 大文件上传的稳定性不仅依赖应用层分片，还依赖传输层 keepalive、拥塞控制、缓冲区与 UDP 跟踪超时。
+- 第一性原理与复用杠杆：
+  - 第一性原理：端到端吞吐与稳定性由“入口协议能力 + 中间链路稳定 + 应用重试粒度”共同决定，任何单层优化都不足以闭环。
+  - 复用杠杆1：复用现有 `docker-compose.yml`，以 overlay 方式增量接入网关，不重写发布脚本主链。
+  - 复用杠杆2：复用现有移动端分片契约，网络层只做承载优化，不变更业务协议。
+  - 复用杠杆3：复用 Linux `sysctl` 标准机制，参数外置可回滚，不侵入业务代码。
+- 架构决策：
+  - 决策1：新增 Caddy 与 Nginx 两套网关配置，默认推荐 Caddy 作为 QUIC/HTTP3 首选。
+  - 决策2：新增 Linux BBR/传输参数脚本，统一管理 `bbr + fq + keepalive + rmem/wmem + conntrack udp timeout`。
+  - 决策3：新增验证脚本，统一检查 `HTTP/3 握手、443 tcp/udp 监听、BBR 生效`。
+  - 决策4：补充 Cloudflare 对齐清单（Full Strict、HTTP/3、API 缓存绕过）作为公网入口基线。
+- 调用链与决策链变化：
+  - 改造前：`Client -> Java(8080)`
+  - 改造后（推荐）：`Client -> Cloudflare(h3) -> Caddy/Nginx(443 tcp+udp) -> Java(8080)`
+- 已落地改动：
+  - `deploy/gateway/caddy/Caddyfile`
+  - `deploy/gateway/nginx/nginx.conf`
+  - `deploy/docker/docker-compose.gateway.caddy.yml`
+  - `deploy/docker/docker-compose.gateway.nginx.yml`
+  - `scripts/release/linux_enable_bbr.sh`
+  - `scripts/release/linux_verify_transport.sh`
+  - `docs/runbooks/quic-bbr-rollout.md`
+- 性能对比数据：
+  - 对比目标：入口协议从 `h2/h1` 升级到 `h3`，并降低长连接中断与拥塞回退概率。
+  - 测试方式：
+    - 协议验证：`curl -I --http3 https://<domain>`
+    - 端口验证：`ss -lntup | grep :443`
+    - 拥塞控制验证：`sysctl net.ipv4.tcp_congestion_control` 与 `ss -tin | grep bbr`
+  - 测试数据（本次为配置落地验证）：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过
+    - 运行期脚本输出用于确认参数生效，业务压测数据待下一轮灰度回传。
+- 验证方式：
+  - `bash scripts/release/linux_enable_bbr.sh`
+  - `bash scripts/release/linux_verify_transport.sh <domain>`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-28 文件传输链路统一抽象（分片校验 + 断点续传 + 异步传输）
+- 日期：2026-02-28
+- 触发背景与问题：
+  - 文件传输能力分散在 `MobileMarkdownController`、`VideoProcessingController`、`AndroidAppUpdateAdminService`，存在重复实现与策略漂移。
+  - 移动端分片上传虽有断点续传骨架，但缺少“每个分片独立校验”的强约束，失败定位与重传粒度不够明确。
+  - 上传写盘路径存在同步阻塞与实现不统一问题，缺乏统一并发上限与缓冲区配置。
+- 第一性原理与复用杠杆：
+  - 第一性原理：传输稳定性来自“统一协议 + 最小失败域 + 可观测参数化”，而不是在多处粘贴上传逻辑。
+  - 复用杠杆1：复用现有 `taskExecutor` 线程池作为异步传输执行器，不新增并行框架。
+  - 复用杠杆2：复用现有 `uploadId/chunkIndex/totalChunks` 契约，补齐分片 SHA-256 校验字段，保持前后端演进兼容。
+  - 复用杠杆3：复用现有文件复用能力（`FileReuseService`），在 chunk complete 阶段继续走原有“复用优先”决策。
+- 架构决策：
+  - 决策1：新增统一工具服务 `FileTransferService`，集中承载普通上传、分片写入、分片状态查询、分片合并、会话清理。
+  - 决策2：分片写入改为流式读写（buffer 分块），并支持 `chunkSha256` 独立校验；单分片校验失败仅拒绝当前分片并触发该分片重传。
+  - 决策3：文件传输引入并发闸门（`file.transfer.max-concurrent`）与缓冲区配置（`file.transfer.copy-buffer-bytes`），避免高并发下资源失控。
+  - 决策4：移动端上传主链路改为 `CompletableFuture` 异步传输入口，减少请求线程阻塞。
+  - 决策5：锚点挂载文件改为批量写入入口（batch transfer），避免多文件场景频繁创建/销毁传输任务。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Controller(local copy/chunk merge) -> Task submit`
+    - `Admin upload(Files.copy) -> release manifest`
+  - 改造后：
+    - `Controller -> FileTransferService(async or sync stream transfer + chunk checksum) -> Task submit`
+    - `AndroidAppUpdateAdminService -> FileTransferService -> release manifest`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/FileTransferService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/AndroidAppUpdateAdminService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+- 性能对比数据：
+  - 对比目标：降低大文件上传内存峰值，控制并发写盘抖动，并在分片失败时将重传范围收敛到单分片。
+  - 测试方式：编译校验 + 分片 API 行为回归（含 checksum mismatch 场景）+ 多文件锚点挂载写入链路回归。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+    - 运行期配置新增：`file.transfer.max-concurrent=8`、`file.transfer.copy-buffer-bytes=65536`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-26 Insight Cards 契约收敛（四段落盘 + 单词条请求）
+- 日期：2026-02-26
+- 触发背景与问题：
+  - `deepseek-advisor` 结构化提示词已固定四段输出（`background/contextual_explanations/depth/breadth`），但卡片落盘模板仍是三段，导致成品结构与提示词契约不一致。
+  - 术语解释链路仍保留 batch 语义单元组包请求，不符合当前“一个 `insights_tags` 一次请求”的稳定性要求。
+- 第一性原理与复用杠杆：
+  - 第一性原理：结构化契约要可靠，必须在“模型输出 -> Java 解析 -> Markdown 落盘”三层保持同构；任何一层字段缺失都会破坏终态质量。
+  - 复用杠杆1：复用现有 `DeepSeekAdvisorService.requestStructuredAdvice` 单词条协议，不新增新接口。
+  - 复用杠杆2：复用现有 `StructuredAdviceSections` 作为统一中间模型，只扩展字段，不重建渲染链路。
+  - 复用杠杆3：复用 `shouldRegenerateExistingCard` 再生策略，让历史三段卡片自动进入重建而非离线批修。
+- 架构决策：
+  - 决策1：`PersonaInsightCardService` 卡片模板升级为四段，新增 `## 背景知识`，落盘顺序固定为“背景知识 -> 语境化解释 -> 深度 -> 广度”。
+  - 决策1.1：移除 `### 语境快照@...` 正文追加逻辑，避免卡片内容偏离结构化解释主契约。
+  - 决策2：`StructuredAdviceSections` 增加 `background` 字段，并在 `sectionsFromAdvice/parseAdviceSectionsFromJson` 双入口保持四段映射。
+  - 决策3：下线 batch 组包调用路径，统一改为 `single_term` 请求，提升词条级可观测性和问题定位精度。
+  - 决策4：新增缺失段落默认补全策略，保证任何情况下都输出完整四段 Markdown 结构。
+- 调用链与决策链变化：
+  - 改造前：
+    - `collectTagContexts -> (可选 batch 组包) -> sections(contextual/depth/breadth) -> 3段 Markdown`
+  - 改造后：
+    - `collectTagContexts -> single_term requestStructuredAdvice(逐词条) -> sections(background/contextual/depth/breadth) -> 4段 Markdown`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/PersonaInsightCardServiceTest.java`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：契约一致性与链路可追踪性提升，不以吞吐/时延压测为主要目标。
+  - 测试方式：编译校验 + 结构化段落渲染回归用例。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-26 Android 任务状态同步链路升级（移除轮询，改为服务端主动推送）
+- 日期：2026-02-26
+- 触发背景与问题：
+  - Android 端任务状态依赖持续轮询，前后台切换期间容易出现状态延迟和完成通知不稳定。
+  - WebSocket 已存在，但后端曾走“全连接广播”路径，无法严格保证只推送到提交任务的设备。
+- 第一性原理与复用杠杆：
+  - 第一性原理：任务完成通知要可靠，必须具备“提交身份可追踪 + 状态通道可定向 + 客户端仅在生命周期关键点拉全量”的最小闭环。
+  - 复用杠杆1：复用现有后端 `/ws/tasks` 与 `TaskWebSocketHandler`，不新建推送协议。
+  - 复用杠杆2：复用 `TaskQueueManager` 的 `task.userId` 作为推送路由键，不引入新状态存储。
+  - 复用杠杆3：复用 Android 端现有 `TaskCompletionNotifier` 与前台服务机制，仅替换状态来源（轮询 -> WebSocket）。
+- 架构决策：
+  - 决策1：后端 WebSocket 推送改为“任务 owner 定向推送 + 显式订阅者推送”，移除面向全部连接的状态广播。
+  - 决策2：Android 端新增安装级稳定 `userId`（持久化），并在任务提交与 WebSocket 建联时统一使用同一身份。
+  - 决策3：前台提交服务改为等待 WebSocket 终态（`COMPLETED/FAILED/CANCELLED`），移除周期性 `GET /tasks/{id}` 轮询循环。
+  - 决策4：主界面移除定时任务刷新，仅保留“应用启动”和“`ON_RESUME` 回前台”两次全量拉取，运行中依赖推送增量更新。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Android submit -> REST submit -> ForegroundService 轮询 /tasks/{id} -> 本地通知`
+    - `MainActivity 周期 listTasks 轮询`
+  - 改造后：
+    - `Android submit(userId) -> REST submit -> Backend processing -> WebSocket taskUpdate(owner userId) -> Android 本地通知`
+    - `MainActivity: launch/resume listTasks + WebSocket 增量更新`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileClientIdentity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskSubmissionForegroundService.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskRealtimeClient.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionRealtimeClient.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureRepository.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：状态同步可靠性与消息定向准确性提升，不以吞吐/时延压测为目标。
+  - 测试方式：编译校验 + 生命周期行为验证（启动、回前台、后台提交任务完成）。
+  - 测试数据：见“验证方式”命令结果。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `.\gradlew :app:compileDebugKotlin`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-02-26 视频/书籍统一任务链路升级（`txt/pdf/epub` -> Markdown）
+- 日期：2026-02-26
+- 触发背景与问题：
+  - 原有编排链路以视频为中心，书籍类输入（`txt/pdf/epub`）无法进入统一任务队列，导致入口能力不一致、监控口径分裂。
+  - 业务目标要求书籍也产出 Markdown，并在首版直接按 `abstract` 单元建模，同时可按章节/小节拆分输出。
+- 第一性原理与复用杠杆：
+  - 第一性原理：输入媒介（视频/书籍）不同，但“任务状态机、队列调度、结果落盘、监控上报”应复用同一控制平面。
+  - 复用杠杆1：复用 `TaskQueueManager` 现有队列与状态机，不新增并行队列系统。
+  - 复用杠杆2：复用 `TaskProcessingWorker -> VideoProcessingOrchestrator` 调度链，仅在 orchestrator 内做输入类型分流。
+  - 复用杠杆3：复用既有任务指标写入 `writeTaskMetricsReport`，仅增加 `flow_flags` 标识书籍路径。
+- 架构决策：
+  - 决策1：`VideoProcessingOrchestrator` 新增 `BookProcessingOptions` 与 `processVideo(..., bookOptions)` 重载，通过扩展名/参数判断进入书籍分支。
+  - 决策2：新增 `BookMarkdownService`，负责 `txt/pdf/epub` 解析、图片/表格提取、章节筛选、Markdown 组装、`abstract` 语义单元元数据输出。
+  - 决策3：控制器层放开上传白名单（`txt/pdf/epub`），并将 `chapterSelector/splitByChapter/splitBySection` 透传到任务对象与 worker。
+  - 决策4：保持视频原链路不变，书籍仅跳过视频专属阶段（转写/Phase2A/素材提取）并复用同一任务完成与监控口径。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Controller(upload/url) -> TaskQueue(video-only) -> Worker -> Orchestrator(video pipeline) -> Markdown`
+  - 改造后：
+    - `Controller(upload/url: video|book) -> TaskQueue(shared) -> Worker -> Orchestrator`
+    - `video -> 原视频 pipeline`
+    - `book(txt/pdf/epub) -> BookMarkdownService -> book.md + book_semantic_units.json`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/pom.xml`
+- 性能对比数据（本次非性能优化）：
+  - 对比目标：能力统一与链路复用，不以吞吐/时延优化为目标。
+  - 测试方式：编译校验，验证新旧链路可同时编译通过且无接口签名冲突。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-26 Persona Reading 契约收敛（完整下线 `bridge_text`）
 - 日期：2026-02-26
 - 触发背景与问题：
@@ -8585,3 +8778,1113 @@
     - 手工最小运行验证（调用 `_postprocess_unit_main_operations`）通过，断言 `raw_response_json` 与 `clip_requests` 的 `main_operation` 已被增强结果回写。
   - 对比说明：
     - 本次新增每语义单元一次 DeepSeek 后处理调用，目标是提升教学文本完整性；额外时延与 token 成本主要随语义单元数增长，单元内步骤通过一次批量返回完成，后续可按 `vl_arg_postprocess` 配置进行限流或开关治理。
+
+### 2026-02-26 Android 自动更新改为可配置开关（默认关闭）
+- 触发背景：
+  - 当前自动更新会在启动/恢复时自动检查，需改为可配置能力，且默认关闭，避免在未准备好发布链路时误触发升级。
+- 第一性原理：
+  - 升级机制属于“策略能力”，应通过配置开关治理，而非写死在运行路径里。
+  - 默认值应选择最保守策略（关闭），由环境按需显式打开。
+- 复用杠杆：
+  - 复用既有 `BuildConfig` 配置注入机制，不新增运行时配置中心。
+  - 复用现有 `runAutoUpdateCheck` 调度点（launch/resume/monitor），仅在入口统一短路。
+- 架构决策：
+  - 决策1：新增 `BuildConfig.MOBILE_AUTO_UPDATE_ENABLED` 构建配置，默认 `false`。
+  - 决策2：在 `MainActivity` 内以单一开关控制：
+    - `MobileAppAutoUpdateManager` 是否实例化；
+    - 自动检查/监控循环是否执行；
+    - 强制升级拦截页是否激活。
+  - 决策3：关闭开关时清理更新 UI 状态，避免遗留“下载中/拦截”假状态。
+- 已落地改动：
+  - `app/build.gradle.kts`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 性能对比数据：
+  - 测试方式：Android Kotlin 编译回归。
+  - 测试数据：
+    - `.\\gradlew.bat :app:compileDebugKotlin` 通过。
+  - 对比说明：
+    - 关闭自动更新时可减少启动阶段一次网络检查与后续监控轮询，降低后台网络与电量消耗。
+
+### 2026-02-26 书籍页码偏移链路升级（Probe/提交/执行全链路透传）
+- 触发背景：
+  - 书内页码与 PDF 真实页码存在偏移，导致“按章节/小节页码切片提取”可能偏到错误页段。
+  - 需要让偏移能力同时作用于“章节探测页码”和“后续按 selector 的定向提取”。
+- 第一性原理：
+  - 页码偏移属于“定位参数”，必须在同一任务上下文中保持一致；探测与执行若使用不同偏移，系统将失去可预期性。
+  - 优先复用现有章节/小节 selector 与页码范围切片逻辑，不引入新队列或新执行分支。
+- 复用杠杆：
+  - 复用现有书籍统一入口 `BookMarkdownService`，仅扩展 `BookProcessingOptions`。
+  - 复用既有 `TaskQueueManager -> TaskProcessingWorker -> VideoProcessingOrchestrator` 书籍参数传递链，不新增调度模型。
+  - 复用既有 `/api/video-info`（含 `/api/mobile/video-info`）探测端点，仅增加可选偏移参数与回传字段。
+- 架构决策：
+  - 决策1：新增 `pageOffset` 参数，贯穿 controller、queue、worker、orchestrator、service。
+  - 决策2：PDF 结构映射策略：
+    - `outline`：默认使用真实 PDF 页码；若传入 `pageOffset`，对章节/小节页码统一平移。
+    - `toc`：优先使用手动 `pageOffset`，否则使用自动估算 offset。
+  - 决策3：Probe 结果补充 `detectedPageOffset`、`appliedPageOffset`、`pageMapStrategy`，供前端显式展示与调参。
+  - 决策4：Android 提交 DTO 增加 `pageOffset` 透传能力，后续 UI 可直接接入。
+- 调用链变化：
+  - `VideoProcessingController/MobileMarkdownController` 接收 `pageOffset`
+  - `TaskQueueManager.BookProcessingOptions.pageOffset`
+  - `TaskProcessingWorker -> VideoProcessingOrchestrator -> BookMarkdownService`
+  - `BookMarkdownService.probeBook(sourcePath, pageOffset)` 与 `processBook(... options.pageOffset)`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureRepository.kt`
+- 性能与效果对比（基于 `Distributed_Systems_4.pdf`）：
+  - 测试方式：
+    - 章节探测：`mvn -f services/java-orchestrator/pom.xml -Dtest=BookMarkdownServiceProbeManualTest test -q`
+    - 定向提取验证：临时 Java Runner（仅执行 selector 对应页段）
+  - 测试数据：
+    - Probe：`totalPages=685`，`chapterCount=10`，`sectionCount=58`，`pageMapStrategy=outline`
+    - 选择 `sectionSelector=c1s1`（`startPage=15`,`endPage=16`）执行定向提取：
+      - 输出 `semantic_units=1`
+      - 提取图片越界数 `0`（仅允许落在目标页段）
+    - 手动偏移 `pageOffset=8` 后，同一 selector 探测起始页从 `15 -> 23`（偏移生效）
+    - 章节级抽取示例（chapter=2）生成 Markdown 图片引用 `16` 处，验证图片进入最终 Markdown。
+
+### 2026-02-26 锚点跨端挂载链路升级（Android 标记 + Web 多文件挂载 + append-only revision）
+- 触发背景：
+  - 需要把移动端碎片化阅读中的“选词标记”与 Web 端系统化笔记挂载打通，形成同一锚点在双端可追踪、可回看、可沉淀的闭环。
+  - 约束已明确：锚点主坐标以 `blockId + start/end` 为准；Web 端支持多文件直传（含目录）和拖拽；挂载历史只允许追加 revision。
+- 第一性原理：
+  - 锚点本质是“稳定坐标 + 语义引用 + 演进历史”的三元组，坐标用于定位，引用用于跨渲染降级匹配，历史用于可追溯。
+  - 资源挂载属于版本化资产，不应覆盖旧稿；因此 revision 必须 append-only，确保每次挂载均可回放与审计。
+- 复用杠杆：
+  - 复用既有任务元数据链路 `/api/mobile/tasks/{taskId}/meta` 与 `TaskMetaUpdateRequest`，仅扩展 `anchors` 字段，不新建并行元数据系统。
+  - 复用既有资产读取端点 `/api/mobile/tasks/{taskId}/asset`，挂载资源落盘到任务根目录下 `thinking/anchor_{id}/rev_{revision}/`，避免新增静态资源服务。
+  - 复用 Android 既有选词 ActionMode、Meta 同步与 telemetry 上报链，新增锚点动作而非重写阅读器交互框架。
+- 架构决策：
+  - 决策1：锚点键统一为 `blockId::start::end`，后端元数据中新增 `anchors: Map<String, AnchorData>`。
+  - 决策2：新增挂载接口 `POST /api/mobile/tasks/{taskId}/anchors/{anchorId}/mount`，支持 `multipart/form-data` 多文件上传与目录相对路径透传（`relativePaths`）。
+  - 决策3：revision 只追加不覆盖，后端在 `anchors[anchorId].revisions[]` 末尾追加新记录，并维护 `mountedPath/mountedRevisionId/status` 快照字段。
+  - 决策4：新增读取接口 `GET /api/mobile/tasks/{taskId}/anchors/{anchorId}/mounted`，返回最新挂载笔记内容，并将相对资源链接重写为 `/asset` 可访问路径，支持双端内嵌阅读。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 关键交互升级：
+  - Android：
+    - 选词菜单新增“标记锚点”，触发触觉反馈与提示文案。
+    - 锚点样式区分状态：待挂载（蓝色虚线下划线）/已挂载（蓝色实线下划线 + 状态指示）。
+    - 点击已挂载锚点可拉起底部抽屉查看挂载 Markdown，并上报 `mounted_note_opened`。
+  - Web：
+    - 正文渲染时按锚点引用文本高亮可点击区域，点击后右侧挂载面板展开。
+    - 挂载面板支持拖拽上传、目录上传（`webkitdirectory`）和多文件直传，保存后写入新 revision。
+    - 挂载成功后上报 `note_mounted`，并可即时预览最新挂载内容。
+- 验证与结果：
+  - 后端编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - Android 编译：`.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - 性能对比数据（本次为功能增强，非吞吐优化）：
+    - 测试方式：静态编译回归 + 交互链路手工验证（锚点标记、挂载上传、挂载预览）。
+    - 对比说明：新增开销主要为上传时文件写入与一次 mounted 内容读取，常规阅读渲染路径维持原有复杂度。
+
+### 2026-02-26 追加：挂载入口 md 显式指定 + Android Wikilink 渐进式阅读栈
+- 触发背景：
+  - Android 端点击已挂载锚点后，需要先进入 Web 指定的入口 `md`，再支持 Obsidian 风格 `[[wikilink]]` 深跳。
+  - 移动端深跳链路若缺少上下文导航，用户容易在 `A -> B -> C` 的跳转中失去定位。
+- 第一性原理：
+  - “入口文件”是挂载资产的语义起点，必须由用户显式指定，不能靠“首个 markdown 文件”隐式猜测。
+  - 深度阅读必须把“查看”和“导航状态”分离：内容可递进，路径必须可见（面包屑/回退/回根）。
+- 复用杠杆：
+  - 复用现有挂载接口 `POST /api/mobile/tasks/{taskId}/anchors/{anchorId}/mount` 的 `mainNotePath` 字段，不新建上传协议。
+  - 复用现有 mounted 读取接口 `GET .../mounted`，仅增量扩展 `notePath` 参数以支持指定子笔记读取。
+  - 复用 Android 既有 `ModalBottomSheet + Markwon` 渲染栈，在其上追加 Wikilink 解析与导航状态机。
+- 架构决策：
+  - 决策1：Web 挂载面板新增“入口 Markdown”下拉选择，上传时将选中值透传为 `mainNotePath`。
+  - 决策2：`GET .../mounted` 新增 `notePath`，并强制校验目标文件在当前 revision 目录边界内，防止越级读取。
+  - 决策3：Android 挂载阅读采用“底部抽屉预览 + 可切换全屏 + 面包屑导航 + 回根按钮 + 左缘滑返回上层”。
+  - 决策4：Wikilink 渲染采用“语法壳隐藏（`[[ ]]` -> 自定义 link）+ 已存在/Ghost 双态样式 + 点击触觉反馈”。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+- 验证与结果：
+  - Android 编译：`.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - 后端编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 性能对比数据（本次为交互能力扩展）：
+    - 测试方式：编译回归 + 手工链路验证（入口 md 指定、锚点打开、Wikilink 深跳、面包屑回退、回根）。
+    - 对比说明：新增开销主要集中在“按 `notePath` 读取 mounted markdown”与“Wikilink span 重写”，不影响主阅读流的非挂载场景。
+
+### 2026-02-26 书籍增强链路接入（Markdown 结构保护 + 条件翻译 + Phase2A/Phase2B）
+- 触发背景：
+  - `pdf/txt/md/epub` 在按章/节选择范围后，需要进入统一增强链路：翻译（英文条件触发）-> 语义分割 -> 结构化组装。
+  - 图/表/代码/公式等富文本在 LLM 处理时容易被破坏或漂移，需要工程化保护与回填机制。
+- 第一性原理：
+  - 富文本不是纯字符串，必须先“结构保护再文本处理”，否则任何翻译或结构化调用都有高概率破坏标记与相对位置。
+  - 书籍与视频应复用同一任务队列与监控口径，但在编排策略上保持分支隔离，避免互相污染失败面。
+- 复用杠杆：
+  - 复用现有 `BookMarkdownService` 的章节/小节探测与范围提取能力作为书籍事实源，不重建抽取链路。
+  - 复用现有 gRPC 接口 `AnalyzeSemanticUnits`/`AssembleRichText`，通过合成 `step2/step6/sentence_timestamps` 适配输入契约。
+  - 复用现有 `VideoProcessingOrchestrator.processBook(...)` 监控与指标上报框架，仅增加增强阶段标记与时延分桶。
+- 架构决策：
+  - 决策1：新增 `BookEnhancedPipelineService`，实现“占位保护 -> 条件翻译 -> Phase2A -> Phase2B -> 占位回填”的三明治层。
+  - 决策2：`VideoProcessingOrchestrator` 在 `BookMarkdownService` 成功后尝试增强，失败自动降级回原 `book.md/book_semantic_units.json`，不阻塞主任务成功态。
+  - 决策3：翻译仅在英文占比与英文字符数阈值达标时触发，并要求 `[[SYS_MEDIA_*]]/[[SYS_INLINE_*]]` 占位符严格保序。
+  - 决策4：增强链路埋点进入现有 `stageTimingsMs/flowFlags`，新增 `book_enhanced_*` 维度用于与视频任务区分观测。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookEnhancedPipelineService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/BookMarkdownProtectionUtilsTest.java`
+- 验证与结果：
+  - 编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 单测：受当前沙箱 Maven 本地仓库路径权限限制，`mvn ... test` 未能在本环境完成（需在可写 `~/.m2` 环境复验）。
+  - 性能对比数据（本次以架构增强为主）：
+    - 测试方式：静态编译回归 + 代码路径核对（书籍抽取/增强/降级分支）。
+    - 对比说明：新增阶段主要是一次 Markdown 保护/恢复与两次 gRPC 调用，原书籍抽取耗时模型未改变；失败时自动回落至旧链路。
+
+### 2026-02-27 书籍条件翻译判定修正（取消最小英文字符门槛）
+- 触发背景：
+  - 现有“英文字符数 + 英文占比”规则会误伤短英文行，且不符合“中英混排优先保留原文”的阅读期望。
+- 第一性原理：
+  - 是否翻译应优先由“语种混合上下文”决定，而不是由字符长度阈值决定。
+  - 中英混排段落常包含术语锚点与上下文约束，贸然翻译容易破坏语义定位。
+- 架构决策：
+  - 决策1：移除 `min-english-letters` 与 `english-threshold` 在书籍增强链路中的触发逻辑。
+  - 决策2：新增 `book.enhanced-pipeline.translation.skip-mixed-zh-en`（默认 `true`）：
+    - 纯英文段落：触发翻译；
+    - 中英混排段落：跳过翻译；
+    - 纯中文段落：跳过翻译。
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookEnhancedPipelineService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/BookEnhancedPipelineServiceLanguageGateTest.java`
+- 验证与结果：
+  - 编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 单测：`mvn -f services/java-orchestrator/pom.xml -Dtest=BookEnhancedPipelineServiceLanguageGateTest,BookMarkdownProtectionUtilsTest test -q` 通过。
+
+### 2026-02-27 书籍 PDF 抽取增强链路（Python 微服务 + MinerU 优先 + 按页切片）
+- 触发背景：
+  - 现有 `BookMarkdownService` 仅使用 Java PDFBox 提取，遇到表格/代码块/公式时结构保真度不足。
+  - 需求要求在章/节范围已确定后，避免全量 PDF 抽取，按页码切片后提取并保留图片在 Markdown 中的相对位置。
+- 第一性原理：
+  - 页码范围选择已经在 Java 侧完成，最小重构成本方案是“Java 决定范围 + Python 执行抽取 + Java 回落兜底”。
+  - OCR/版面理解能力可替换为策略插件，核心链路必须保持“可观测 + 可回退”。
+- 架构决策：
+  - 决策1：扩展 gRPC 协议 `ExtractBookPdf`，新增 `ExtractBookPdfRequest/Response`，输入为 `pdf_path + start/end_page + output_root + image_dir`。
+  - 决策2：Python 侧新增 `book_pdf_extractor.py`：
+    - 先按页码切片子 PDF（避免全量提取）；
+    - 优先调用 MinerU CLI（`magic-pdf`）；
+    - MinerU 不可用或失败时自动回退 PyMuPDF；
+    - 返回带图片路径重写后的 Markdown 与统计信息（图片/表格/代码块/公式计数）。
+  - 决策3：Java `BookMarkdownService` 新增策略开关：
+    - `book.pdf.extractor.strategy=auto|mineru|pdfbox`；
+    - `auto/mineru` 下优先走 gRPC 抽取，失败回退 PDFBox；
+    - `pdfbox` 下保持旧行为不变。
+  - 决策4：`BookMarkdownService` 支持 `section.markdownBody` 直写路径，避免二次解析破坏图片/文本相对顺序；写文件阶段按目标 Markdown 位置重写图片相对路径。
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/BookMarkdownServiceGrpcExtractorTest.java`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+- 验证与结果：
+  - 编译：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 手工回归：
+    - `mvn -f services/java-orchestrator/pom.xml -Dtest=BookMarkdownServiceSectionExtractManualTest test -q` 通过（`Distributed_Systems_4.pdf`，页码偏移与章内图片插入校验通过）。
+    - 直接调用 Python 抽取器（`start_page=23,end_page=24`）成功输出：
+      - `extractor=pymupdf`（当前环境未检测到 `magic-pdf` CLI，触发自动回退）；
+      - 输出文件：`var/tmp_book_mineru_probe_ds4/intermediates/book_pdf_extract/c1s1-p0023-0024-pymupdf.md`。
+  - 性能对比数据（本次以链路能力增强为主）：
+    - 测试方式：对同一本书仅抽取 2 页范围（23-24）验证“按范围切片”生效；
+    - 对比说明：新链路避免了整本 PDF 全量抽取，范围抽取时间与页数线性相关；MinerU 缺失时自动回退，不阻塞主任务完成。
+
+### 2026-02-27 书籍 PDF 抽取链路补充（MinerU 新 CLI + Hybrid 优先 + Markdown LLM 过滤）
+- 触发背景：
+  - `mineru` 2.x 环境下主命令从 `magic-pdf` 迁移为 `mineru`，旧探测逻辑命中率低，导致链路容易回退到 `PyMuPDF`。
+  - OCR 产出的 Markdown 在公式闭合、代码缩进、OCR 形近字上仍有噪声，需要在回传 Java 前增加轻量校对层。
+- 第一性原理与复用杠杆：
+  - 第一性原理：抽取质量增强应放在 Python 侧“最后一公里”，并保持失败可回退，不影响 Java 编排主链路稳定性。
+  - 复用杠杆1：复用现有 `ExtractBookPdf` gRPC 协议，不新增服务接口。
+  - 复用杠杆2：复用既有 `BookMarkdownService -> PythonGrpcClient` 路径，仅增强 Python 提取实现与返回前处理。
+  - 复用杠杆3：复用 DeepSeek Chat API 调用模式，增加最小配置项而非引入新模型网关。
+- 架构决策：
+  - 决策1：`book_pdf_extractor.py` 增强 CLI 探测，按以下优先级匹配：
+    - `MINERU_BIN` / `MAGIC_PDF_BIN` 环境变量；
+    - `mineru`、`magic-pdf`、`magic_pdf`；
+    - 当前解释器 `Scripts/` 目录下对应可执行文件。
+  - 决策2：MinerU 新 CLI 调用策略改为“Hybrid 优先，Pipeline 回退”：
+    - 优先 `-b hybrid-auto-engine -m txt`；
+    - 失败后回退 `-b pipeline -m txt/auto`；
+    - 支持 `--source local/huggingface/modelscope` 组合尝试。
+  - 决策3：新增模型自检与按需下载：
+    - 本地模型缺失时自动探测 `mineru-models-download`；
+    - 调用 `mineru-models-download -s huggingface -m pipeline` 完成权重准备。
+  - 决策4：在 Python 返回 Java 前新增 Markdown 过滤层（`deepseek-chat`）：
+    - Prompt 固定为“学术文档与代码校对专家”，仅修复公式、代码缩进、OCR 明显错字；
+    - 同时接入图片标记保护：先 `[[SYS_MEDIA_xxx]]` 占位，再恢复；若标记数量/拓扑变化则回退原文；
+    - MinerU 与 PyMuPDF 两条抽取分支均执行该后处理，保持行为一致。
+  - 决策5：全部能力均可通过环境变量开关配置，确保可灰度、可快速回滚。
+- 已落地改动：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+- 性能对比数据（本次包含增量过滤开销测量）：
+  - 测试方式：
+    - 样本：`var/Distributed_Systems_4.pdf`；
+    - 范围：`start_page=23, end_page=24`；
+    - 执行命令：`conda run -n whisper_env python -X utf8 var/tmp_extract_check.py`；
+    - 对照组：`BOOK_PDF_MARKDOWN_LLM_FILTER_ENABLED=0`；
+    - 实验组：`BOOK_PDF_MARKDOWN_LLM_FILTER_ENABLED=1`（默认）。
+  - 测试数据：
+    - 对照组：`success=True`，`extractor=mineru`，`elapsed_sec=56.904`，`markdown_len=5374`。
+    - 实验组：`success=True`，`extractor=mineru`，`elapsed_sec=88.053`，`markdown_len=5393`。
+    - 增量开销：`+31.149s`（该样本约 `+54.7%`），主要来自 LLM 网络调用。
+  - 对比结论：
+    - Hybrid + Pipeline 回退已稳定命中 `mineru`；
+    - LLM 过滤显著提升文本可读性潜力，但增加可观时延，建议在生产按章节大小/优先级做开关分层。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）
+
+### 2026-02-27 书籍抽取增强补充（Hybrid 代码框矢量回填 + LLM 分块并发保序）
+- 触发背景：
+  - 书籍 PDF 的 OCR 代码块在缩进与字符精度上仍存在偏差，且长章节单次调用 LLM 过滤延迟偏高。
+  - 业务要求“按段分块并发降低时延”，并且必须保证代码块/表格/公式不被切断。
+- 第一性原理与复用杠杆：
+  - 第一性原理：代码块应优先使用 PDF 矢量文本，不应依赖 OCR 二次识别；LLM 过滤应按结构原子块分段并保持输出顺序。
+  - 复用杠杆1：复用 MinerU `*_middle.json` 的版面结构输出，不新增探测接口。
+  - 复用杠杆2：复用现有 `extract_book_pdf_markdown -> _extract_with_mineru` 主链路，只在 Python 内部插入增强步骤。
+  - 复用杠杆3：复用原 `deepseek-chat` 过滤 prompt，不改 Java 侧协议与调用契约。
+- 架构决策：
+  - 决策1：在 MinerU 抽取成功后，新增“代码块矢量回填”阶段：
+    - 从 `*_middle.json` 抽取 `type=code/program/...` 的 bbox；
+    - 使用 PyMuPDF 对应页 `clip(bbox)` 提取矢量文本；
+    - 按顺序回填到 Markdown fenced code block 内容。
+  - 决策2：LLM 过滤改为“原子块分段 + 并发请求 + 保序拼接”：
+    - 分段器将 Markdown 拆为不可切分单元（代码块、表格块、公式块、普通段落）；
+    - chunk 组装时不跨单元切分，保证代码块/表格/公式不会被拆断；
+    - 通过线程池并发调用 LLM，最后按 chunk 索引顺序回拼。
+  - 决策3：图片标记保护仍保持在 chunk 级执行（mask -> LLM -> restore），若拓扑变化则回退原 chunk。
+  - 决策4：新增可配置项：
+    - `BOOK_PDF_MINERU_VECTOR_CODE_REFILL_ENABLED`（默认 true）；
+    - `BOOK_PDF_MINERU_CODE_BBOX_TYPES`（默认 `code,program,programming,listing,pseudocode,algorithm,source_code`）；
+    - `BOOK_PDF_MINERU_CODE_BBOX_PADDING`（默认 `1.5`）；
+    - `BOOK_PDF_MARKDOWN_LLM_FILTER_CHUNK_MAX_CHARS`（默认 `6000`）；
+    - `BOOK_PDF_MARKDOWN_LLM_FILTER_MAX_WORKERS`（默认 `4`）。
+- 调用链与决策链变化：
+  - 改造前：
+    - `MinerU markdown -> 图片路径重写 -> 单次 LLM 过滤 -> 输出`
+  - 改造后：
+    - `MinerU markdown + middle.json -> 代码 bbox 矢量回填 -> 图片路径重写 -> 原子块分段并发 LLM -> 保序拼接输出`
+- 已落地改动：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+- 性能对比数据（本次以长文本 LLM 过滤时延优化与结构稳定为目标）：
+  - 测试方式：
+    - 功能回归：`pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`；
+    - 手工抽取：`Distributed_Systems_4.pdf` 的 23-24 页，`prefer_mineru=true`。
+  - 测试数据：
+    - 功能测试：新增后单测通过 `9 passed`（覆盖分块原子性、并发保序、bbox 矢量回填）。
+    - 手工抽取：`success=True`，`extractor=mineru`，`elapsed=81.24s`（当前样本无代码框，回填阶段自动跳过）。
+  - 对比说明：
+    - 与 2 页样本的历史基线（88.053s）相比，本次时延在网络波动范围内无回退；
+    - 长章节场景的核心收益来自“可并发 chunk”，具体端到端增益需在更长文本样本上继续压测。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）
+
+### 2026-02-27 Web 书籍上传改为“先探测章节，再按选择提交”
+- 触发背景：
+  - Web 端上传 PDF 后直接入队，无法进入章节选择，导致书籍范围处理能力仅在 URL 探测入口可用。
+- 第一性原理与复用杠杆：
+  - 第一性原理：章节选择属于“提交前决策”，必须在任务入队前完成，才能避免全量处理浪费。
+  - 复用杠杆1：复用既有 `/api/mobile/video-info` 书籍探测能力与 probe sheet UI。
+  - 复用杠杆2：复用既有 `/api/mobile/tasks/submit` 的 `sectionSelector + splitByChapter + splitBySection` 提交契约。
+  - 复用杠杆3：复用既有上传落盘逻辑，仅补“只上传不入队”模式，不新增独立上传服务。
+- 架构决策：
+  - 决策1：`/tasks/upload` 增加 `probeOnly` 可选参数（移动端与桌面端控制器同时支持）。
+  - 决策2：前端在上传 `pdf/txt/md/epub` 时走两阶段：
+    - 阶段A：`tasks/upload(probeOnly=true)` 获取落盘路径；
+    - 阶段B：`video-info` 探测章节并弹出选择；用户确认后再调用 `tasks/submit` 入队。
+  - 决策3：`video-info` 探测请求支持透传 `pageOffset`，保证 PDF 逻辑页与物理页偏移在探测阶段生效。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Web 上传文件 -> /api/mobile/tasks/upload -> 立即入队`
+  - 改造后：
+    - `Web 上传书籍文件 -> /api/mobile/tasks/upload(probeOnly=true) -> /api/mobile/video-info -> probe sheet 选择 -> /api/mobile/tasks/submit`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）
+
+### 2026-02-27 Android 任务入口改造：Bottom Sheet + 剪贴板药丸 + ShareIntent 快速投递
+- 触发背景：
+  - 旧方案使用展开式 FAB，入口层级深、拇指区操作路径长；
+  - 剪贴板检测会直接打断并展开输入层，不够“被动唤起”；
+  - 外部 App 分享到本应用仍缺少 `ACTION_SEND` 一步投递链路。
+- 第一性原理与复用杠杆：
+  - 第一性原理：移动端高频操作应在屏幕下半区完成，减少跨区移动与模态跳转。
+  - 复用杠杆1：复用 `TaskRouteViewModel` 的 `composerExpanded + composerMode` 状态，不新建第二套入口状态机。
+  - 复用杠杆2：复用既有 `TaskSubmissionForegroundService` 后台投递能力，新增入口不新增提交后端接口。
+  - 复用杠杆3：复用 `inspectClipboardForTaskCandidate` 的候选识别能力，仅改呈现与触发策略。
+- 架构决策：
+  - 决策1：保留底角 `+` 作为唯一主动入口，但交互体从“浮层展开卡片”重构为 `ModalBottomSheet`。
+  - 决策2：Bottom Sheet 内采用三态内容机：
+    - `MENU`：并排两块大卡片（粘贴视频链接 / 上传本地文档）；
+    - `URL`：链接输入 + 探测入口；
+    - `UPLOAD`：文件选择 + 当前上传进度反馈。
+  - 决策3：剪贴板命中后不再强制展开抽屉，改为顶部动态药丸提供“立即生成 / 稍后”。
+  - 决策4：`MainActivity` 增加 `ACTION_SEND` 接收，分享拉起时进入“快速投递路由”，自动投递后自动关闭返回来源 App。
+- 调用链与决策链变化：
+  - 改造前：
+    - `点击 FAB -> 展开式悬浮菜单 -> URL/上传入口`
+    - `剪贴板命中 -> 强制展开 URL 面板`
+    - `外部分享 -> 无统一投递入口`
+  - 改造后：
+    - `点击 FAB -> ModalBottomSheet(MENU) -> URL/UPLOAD 子流程`
+    - `剪贴板命中 -> 顶部动态药丸 -> 一键后台投递`
+    - `外部分享 -> MainActivity(ACTION_SEND) -> 快速投递路由 -> 自动返回`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/AndroidManifest.xml`
+  - `app/src/main/res/values/themes.xml`
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）
+
+### 2026-02-28 Android 自动更新链路升级：后台柔性更新 + 分块下载 + 断点续传 + 异步安装触发
+- 触发背景：
+  - Android 端已有自动更新检查与安装触发能力，但下载链路依赖系统 `DownloadManager` 单任务模型，缺少“应用进程级可控分块策略”与“可观测的分块续传进度”。
+  - 业务目标要求：开启当前 Android 自动更新，并将下载与安装触发拆为后台异步链路，在不阻塞主阅读/提交流程的前提下完成版本升级。
+- 第一性原理与复用杠杆：
+  - 第一性原理：
+    - 大文件升级链路必须同时满足三点：`可恢复（断点续传）`、`可观测（进度可回读）`、`可中断后继续（后台任务托管）`。
+  - 复用杠杆1：
+    - 复用后端 `GET /api/mobile/app/update/apk` 已具备的 `Range` 响应能力，客户端不新增升级协议。
+  - 复用杠杆2：
+    - 复用现有 `check -> download -> install` 决策链与 `sha256` 校验字段，仅替换下载执行器与状态存储。
+  - 复用杠杆3：
+    - 复用已有强更拦截 UI（`ForceUpdateBlockingRoute`）与安装器触发逻辑，不重写更新交互页面。
+- 架构决策：
+  - 决策1：Android 自动更新默认开关改为开启（`MOBILE_AUTO_UPDATE_ENABLED` 默认为 `true`，仍支持 Gradle 属性覆盖）。
+  - 决策2：下载执行层从 `DownloadManager` 切换为 `WorkManager + CoroutineWorker`，统一由后台异步任务托管。
+  - 决策3：下载器实现采用“分块并行 + 分片文件落盘 + 合并校验”策略：
+    - 默认 `2MB/chunk`；
+    - 默认最多 `4` 并行分块；
+    - 进程重启后通过分片文件长度继续续传；
+    - 分块参数支持配置覆盖（`mobileAppUpdateChunkSizeMb/mobileAppUpdateMaxParallelChunks/mobileAppUpdateMinChunkedDownloadMb`）。
+  - 决策4：更新状态从管理器内聚改为共享状态仓（`MobileAppUpdateStateStore`），打通 `Manager/Worker` 的进度与完成态同步。
+  - 决策5：安装触发保持异步化并引入显式安装入口：
+    - 下载在后台执行；
+    - App 侧在轮询/恢复时输出 `ReadyToInstall` 状态，不自动弹安装器；
+    - 用户点击 “Install now” 后再调用安装触发，符合柔性更新体验。
+  - 决策6：强更拦截页支持 `installReady` 分支，在阻塞态下也提供显式 “Install Now” 按钮。
+- 调用链与决策链变化：
+  - 改造前：
+    - `MainActivity runAutoUpdateCheck -> MobileAppAutoUpdateManager -> DownloadManager enqueue/query -> 下载完成后安装`
+  - 改造后：
+    - `MainActivity runAutoUpdateCheck -> MobileAppAutoUpdateManager -> enqueue Unique Work`
+    - `MobileAppUpdateDownloadWorker -> MobileAppUpdateChunkDownloader(分块+续传) -> StateStore(progress/ready)`
+    - `MainActivity monitor/resume -> Manager 读取 Work/ready 状态 -> 返回 ReadyToInstall`
+    - `用户点击 Install now -> promptInstallReadyUpdate -> 触发安装器`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppAutoUpdateManager.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppUpdateDownloadWorker.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppUpdateChunkDownloader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppUpdateStateStore.kt`
+  - `app/build.gradle.kts`
+  - `gradle/libs.versions.toml`
+  - `app/src/main/AndroidManifest.xml`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileAppUpdateControllerTest.java`
+- 性能与可靠性对比数据：
+  - 测试方式：
+    - 编译回归：`./gradlew :app:compileDebugKotlin --no-daemon`。
+    - 服务端编译回归：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+    - 下载恢复仿真口径：按 `2MB/chunk`，中断后仅重传未完成分块。
+  - 测试数据（仿真）：
+    - 样本A：`120MB` 升级包在约 `80%` 中断
+      - 单任务整包重下：重传 `120MB`
+      - 分块续传：重传约 `24MB`
+    - 样本B：`220MB` 升级包在约 `55%` 中断
+      - 单任务整包重下：重传 `220MB`
+      - 分块续传：重传约 `99MB`
+  - 对比说明：
+    - 分块续传将“中断后的重传体积”收敛到未完成区间，显著降低抖动网络场景下的重复下载成本。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin --no-daemon`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+### 2026-02-27 Web 书籍 Probe 目录升级：x.x.x 独立标题 + 树状可折叠 + 实际起始页联动页码
+- 触发背景：
+  - 书籍探测左侧目录仍以平铺列表展示，无法按章/节层次折叠。
+  - `x.x.x` 叶子条目在部分场景复用了上层标题，用户无法直接辨识每个叶子节点自身语义。
+  - “实际起始页”调整后，左侧叶子页码未形成稳定联动感知。
+- 第一性原理与复用杠杆：
+  - 第一性原理：章节选择应遵循“结构先行、语义直达”，先有树状结构，再做叶子级操作。
+  - 复用杠杆1：复用后端 `bookSectionTree + episodes(outlineIndex/startPage/endPage)`，不新增探测接口。
+  - 复用杠杆2：复用既有 `toggle-episode/focus-episode` 行为与提交契约（`sectionSelector`），仅替换渲染层。
+  - 复用杠杆3：复用既有 `confirmedStartPage` 状态，统一驱动页码显示偏移。
+- 架构决策：
+  - 决策1：Probe 左侧在 Book 场景切换为树渲染：
+    - chapter 节点
+    - section 节点
+    - leaf 节点（`x.x.x`）
+  - 决策2：树节点折叠状态由 `state.taskProbe.collapsedTreeKeys` 维护，生命周期绑定当前探测弹层。
+  - 决策3：叶子标题优先使用叶子自身标题（`buildBookEpisodeTitleText`），不再回落到 `x.x` 组标题语义。
+  - 决策4：通过 `resolveProbeDisplayPageShift` 计算“确认起始页 - 探测起始页”的显示偏移，并在 `getProbeEpisodeRange` 统一生效。
+- 调用链与决策链变化：
+  - 改造前：
+    - `book episodes(flat) -> 左侧平铺列表 -> 逐项勾选`
+  - 改造后：
+    - `bookSectionTree/episodes -> 左侧树状目录(可折叠) -> x.x.x 叶子勾选/定位 -> 提交`
+    - `confirmedStartPage 变化 -> getProbeEpisodeRange 统一偏移 -> 叶子页码同步刷新`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 手工回归：
+    - 左侧目录为树状且可折叠；
+    - `x.x.x` 叶子显示自身标题；
+    - 调整“实际起始页”后，叶子页码实时联动刷新。
+
+### 2026-02-27 Web 书籍上传链路升级：2MB 分片上传 + 断点续传 + 章节编号可读化
+- 触发背景：
+  - Web 端上传大 PDF 时频繁出现连接中断，服务端抛出 `MultipartException -> EOFException`，前端卡在“上传中”无后续触发。
+  - 书籍探测结果已支持叶子章节，但前端展示仍存在内部 selector 语义（如 `c2s1` 体系）与用户认知不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：大文件上传必须“可恢复、可观测、可中断后继续”，避免单次传输失败导致全量重传。
+  - 复用杠杆1：复用已落地的后端分片接口契约：
+    - `POST /api/mobile/tasks/upload/chunk`
+    - `GET /api/mobile/tasks/upload/chunk/status`
+    - `POST /api/mobile/tasks/upload/chunk/complete`
+  - 复用杠杆2：复用既有 `probeOnly -> video-info -> probe sheet -> tasks/submit` 决策链，不新增提交接口。
+  - 复用杠杆3：复用后端 `sectionSelector` 提交协议，仅调整前端展示层为 `outlineIndex(x.y.z)`。
+- 架构决策：
+  - 决策1：`submitTaskFromMobileForm` 文件分支统一切换到 `uploadMaterialFileInChunks(...)`，默认 `2MB/chunk`。
+  - 决策2：前端通过 `localStorage + uploadId + status 接口` 实现断点续传，重复上传仅补传缺失分片。
+  - 决策3：上传完成由 `chunk/complete` 汇总返回，书籍场景继续走现有探测确认链路。
+  - 决策4：探测面板章节前缀优先展示 `outlineIndex`（如 `2.1.1`），不再展示内部 selector 语义。
+  - 决策5：提交 `sectionSelector` 前做去重，避免重复叶子选择导致冗余参数。
+- 调用链与决策链变化：
+  - 改造前：
+    - `Web 上传文件 -> /api/mobile/tasks/upload(单请求 multipart) -> 成功后继续`
+  - 改造后：
+    - `Web 上传文件 -> chunk/status -> chunk(循环补传) -> chunk/complete -> (书籍)video-info/probe sheet -> submit`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 性能对比数据（可靠性与重传成本）：
+  - 测试方式：
+    - 编译回归：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+    - 分片恢复场景：以 `2MB/chunk` 进行断点续传仿真，比较中断后重传体积。
+  - 测试数据（仿真）：
+    - 样本A：`400MB` 文件在 `75%` 处中断
+      - 单请求上传：重传 `400MB`
+      - 分片续传：重传约 `100MB`
+    - 样本B：`180MB` 文件在 `90%` 处中断
+      - 单请求上传：重传 `180MB`
+      - 分片续传：重传约 `18MB`
+  - 对比说明：
+    - 分片方案显著降低网络抖动下的重传体积，提升大文件上传成功率；服务端仍复用既有任务提交语义。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+### 2026-02-27 Android 书籍 Probe 交互补齐：章节目录与 PDF 预览联动 + 实际起始页确认
+- 触发背景：
+  - 书籍探测结果已包含“检测起始页 + 章节目录”，但 Android 端仅能列表勾选，缺少“目录点击跳页 + 预览确认”闭环。
+  - 业务要求上传书籍后在入队前完成“实际起始页确认 + 章节选择”，再触发书籍分析链路。
+- 第一性原理与复用杠杆：
+  - 第一性原理：书籍处理的关键决策应前置到任务提交前，避免错误页码导致后续整链路返工。
+  - 复用杠杆1：复用既有 `video-info` 返回的 `detectedStartPage/confirmedStartPage/startPage/endPage` 字段，不新增探测协议。
+  - 复用杠杆2：复用既有 `sectionSelector + splitByChapter + splitBySection + pageOffset` 提交契约，不新增任务接口。
+  - 复用杠杆3：复用本地文件上传后持有的 `Uri` 作为 PDF 预览源，不引入额外文件分发链路。
+- 架构决策：
+  - 决策1：`CollectionFeatureViewModel` 新增 `probePreviewDocumentUri` 会话状态，绑定当前探测弹层生命周期。
+  - 决策2：上传探测链路写入本地 `Uri`；URL 探测链路显式清空，避免跨会话串预览源。
+  - 决策3：`CollectionProbeResultContent` 书籍分支改为分栏：
+    - 左侧章节目录（可折叠、可勾选、点击章节定位）；
+    - 右侧 PDF 页预览（上一页/下一页、设为实际起始页）。
+  - 决策4：章节点击同步更新预览页，确认起始页后仍由既有 `pageOffset = confirmedStartPage - 1` 规则提交，不改后端处理链。
+- 调用链与决策链变化：
+  - 改造前：
+    - `上传(probeOnly) -> video-info -> 章节列表勾选 -> submit`
+  - 改造后：
+    - `上传(probeOnly) -> video-info -> 目录点击联动 PDF 预览 -> 确认/调整实际起始页 + 章节选择 -> submit`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（若失败，需区分本次改动与既有编译阻断）
+
+### 2026-02-27 Android 阅读器媒体渲染链升级：Obsidian Embed 兼容 + 图片灯箱 + 内嵌视频
+- 触发背景：
+  - Android 阅读器对 `![[...]]` 和相对媒体路径缺少预处理，导致图片/视频片段显示 raw markdown；
+  - Web 端 `index.html` 已有媒体预处理与交互能力，端间体验不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：渲染前应先完成“语义归一化”（媒体语法 -> 可渲染结构），再交给渲染引擎。
+  - 复用杠杆1：复用既有后端资产网关 `GET /api/mobile/tasks/{taskId}/asset?path=...`，不新增资源服务。
+  - 复用杠杆2：复用现有 `SemanticTopographyReader -> TopographyParagraph` 渲染链路，在段落层注入媒体增强。
+  - 复用杠杆3：复用现有 telemetry 上报通道，直接记录媒体交互事件。
+- 架构决策：
+  - 决策1：在 Android 段落渲染前新增媒体预处理器 `rewriteReaderMarkdownMedia(...)`，兼容：
+    - Obsidian embed：`![[...]]`
+    - markdown 图片：`![](...)`
+    - HTML video：`<video src=...>`
+    - 相对链接重写为任务资产 URL。
+  - 决策2：媒体展示采用“文本与媒体分离渲染”：
+    - 文本继续走 `Markwon + TextView`；
+    - 图片走 `InlineImageGallery + ReaderImageLightbox`；
+    - 视频走 `InlineVideoList + InlineVideoPlayer(VideoView)`。
+  - 决策3：放大交互与 Web 对齐目标：
+    - 图片点击放大；
+    - 支持双指缩放；
+    - 支持上滑收起。
+- 调用链与决策链变化：
+  - 改造前：
+    - `task markdown -> Markwon(setMarkdown) -> 部分媒体语法原样暴露`
+  - 改造后：
+    - `task markdown -> rewriteReaderMarkdownMedia -> 文本(markwon) + 图片灯箱 + 内嵌视频`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 性能对比数据（本次以功能一致性修复为主，记录基础回归数据）：
+  - 测试方式：
+    - 编译回归：`.\gradlew.bat :app:compileDebugKotlin -q`
+    - 手工场景：加载含 `![[png]] + ![[mp4]]` 的任务 markdown，执行图片放大/收起与视频播放交互。
+  - 测试数据：
+    - 编译结果：通过（0 编译错误）。
+    - 交互结果：图片与视频不再显示 raw markdown，图片放大与视频内嵌播放可用。
+  - 对比说明：
+    - 该次升级目标为功能修复与跨端一致性，不以吞吐/时延优化为主；未观察到功能级回退。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）
+
+### 2026-02-28 书籍 Probe 升级：TOC 优先 x.x.x 目录 + Outline 起始页自动估计 + Episodes 语义统一
+- 触发背景：
+  - 现网书籍探测在 `outline` 策略下只产出二级 section，前端通过“按页拆 leaf”模拟 `x.x.x`，导致目录语义错误。
+  - `totalEpisodes` 与 `episodes.length` 语义不一致（一个是 section 数，一个是 leaf 数），前端读取后出现冲突。
+  - 用户需要优先读取 PDF 前几页目录（如 9~15 页）生成真实 `x.x.x + 标题 + 起止页`。
+- 第一性原理与复用杠杆：
+  - 第一性原理：目录层级应来源于书籍显式结构（TOC/Outline），不能用页面切片伪造。
+  - 复用杠杆1：复用 `BookMarkdownService.parsePdfTocEntries(...)` 的目录识别链路，在 probe 阶段补齐三级叶子。
+  - 复用杠杆2：复用既有 `sectionSelector(cXsYtZ)` 选择器协议，不新增提交接口。
+  - 复用杠杆3：复用既有 `video-info/mobile-video-info` 响应结构，只扩展 `bookLeafSections` 并统一 `totalEpisodes` 语义。
+- 架构决策：
+  - 决策1：在 `BookMarkdownService` 中新增 TOC 数字标题解析（`TOC_NUMERIC_TITLE_PATTERN`），区分 1/2/3 级目录并产出 `leafSections`。
+  - 决策2：`outline` 路径不再用“每页拆 leaf”，改为优先使用 TOC 叶子目录构建 `episodes`。
+  - 决策3：`outline` 的“实际起始页”改为自动估计（基于首个锚定 section 页码），并保留用户手动偏移覆盖。
+  - 决策4：`VideoProcessingController` 的书籍 payload 统一 `totalEpisodes = episodes.size()`，新增 `bookLeafSectionCount` 便于前端对齐。
+  - 决策5：TOC 叶子与 `outline` section 的映射改为“按页码区间对齐真实 section selector”，避免 `cXsYtZ` 选中后无法回放到后端处理。
+- 调用链与决策链变化：
+  - 改造前：
+    - `probeBook -> sections(x.x) -> controller 按页拆 leaf -> episodes(x.x.x)`（伪三级）
+  - 改造后：
+    - `probeBook -> TOC leafSections(x.x.x) + outline sections -> controller 直接构建 episodes`（真三级）
+- 性能与数据对比（同一 PDF：`Distributed_Systems_4.pdf`）：
+  - 改造前（伪三级）：
+    - `bookSectionCount=58`，`episodes.length=659`（按页拆分）
+  - 改造后（TOC 三级）：
+    - `bookSectionCount=58`，`bookLeafSectionCount=154`，`episodes.length=154`
+  - 对比说明：
+    - 目录项数量更贴近书籍目录语义，减少无效 leaf，前端树展示与用户选择成本下降。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 临时探测验证类：
+    - `TmpBookProbeVerify`：验证 `leafSections` 与 `detectedOffset/appliedOffset`
+    - `TmpControllerProbeVerify`：验证 payload 中 `totalEpisodes == episodes.length` 且 `episodes` 来源于 TOC 叶子
+
+### 2026-02-28 Mobile Markdown API 契约升级：显式返回 `contentType` 与 `bookSectionTree`
+- 触发背景：
+  - Web 阅读器左侧 TOC 已支持“任务类型切换 + 深层节点懒渲染”，但任务类型判断仍依赖路径/扩展名启发式，稳定性不足。
+  - 需要把“是否书籍任务”的决策权前移到后端，避免前端猜测导致模式抖动。
+- 第一性原理与复用杠杆：
+  - 第一性原理：界面模式切换应依赖服务端显式语义字段，而不是客户端弱推断。
+  - 复用杠杆1：复用既有 `video_meta.json` 作为任务元信息源，优先读取 `contentType` 与 `bookSectionTree`。
+  - 复用杠杆2：复用既有 `book_semantic_units.json`，在缺少 `bookSectionTree` 时由后端回退构建树结构，不新增文件格式。
+  - 复用杠杆3：复用现有 `/api/mobile/tasks/{taskId}/markdown` 与 `/markdown/by-path` 接口，不新增路由。
+- 架构决策：
+  - 决策1：两个 markdown 读取接口统一注入 `contentType`、`bookSectionTree` 字段，前端优先信任该契约。
+  - 决策2：TOC 元信息解析策略为：
+    - `video_meta.json`（优先） -> `book_semantic_units.json`（回退） -> 文件路径推断（兜底）。
+  - 决策3：`bookSectionTree` 回退构建保持 chapter/section/leaf 三层结构，兼容现有前端树渲染逻辑。
+  - 决策4：在任务产物写入阶段直接持久化 TOC 元信息到 `video_meta.json`：
+    - 视频任务写入 `contentType=video` 并清理历史 `bookSectionTree`；
+    - 书籍任务由 `BookMarkdownService` 直接产出 `bookSectionTree`，由 orchestrator 落盘。
+- 调用链与决策链变化：
+  - 改造前：
+    - `markdown response -> 前端基于路径/扩展名推断是否 TOC 模式`
+    - 书籍目录树主要在读取接口中临时回退构建。
+  - 改造后：
+    - `任务执行成功 -> video_meta.json 落盘 contentType/bookSectionTree -> markdown response 直读`
+    - `markdown response(contentType + bookSectionTree) -> 前端显式判定 TOC 模式，启发式仅作兜底`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoMetaService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+### 2026-02-28 Web/Android 上传链路升级：`MD5 + 后缀` 文件复用 + Probe 结果复用
+- 触发背景：
+  - Web 端与 Android 端都支持本地文件上传，但重复上传同一文件时仍会走完整传输与重复探测，导致时间与带宽浪费。
+  - 书籍 Probe 场景（尤其 `pdf/txt/md/epub`）重复调用频繁，现网缺少“按文件指纹复用探测结果”的统一契约。
+- 第一性原理与复用杠杆：
+  - 第一性原理：上传链路的核心目标是“同一内容只处理一次”，上传与探测都应该以稳定内容指纹作为决策锚点。
+  - 复用杠杆1：复用既有 SQLite 持久层（`collections.db`），增量扩展 `file_metadata/file_probe_cache`，不新建外部缓存系统。
+  - 复用杠杆2：复用既有移动端分片接口（`/tasks/upload/chunk*`）和现有任务提交状态机（`TaskQueueManager`）。
+  - 复用杠杆3：复用既有 `/api/video-info` 探测入口，通过可选 `fileMd5/fileExt` 扩展实现探测缓存命中，不新增探测路由。
+- 架构决策：
+  - 决策1：新增 `FileReuseRepository + FileReuseService` 统一承载文件指纹归一化、复用命中、Probe 缓存读写与异步 MD5 回填。
+  - 决策2：移动上传链路新增 `POST /api/mobile/tasks/upload/reuse-check`：
+    - 命中复用时可直接返回 `probeOnly` 或直接入队结果（`autoSubmit=true`）。
+    - 未命中时保持原链路，不改变客户端提交语义。
+  - 决策3：`MobileMarkdownController` 与 `VideoProcessingController` 上传接口增加可选 `fileMd5/fileExt` 参数：
+    - 命中 `file_metadata` 时直接复用物理文件路径；
+    - 未命中时按原逻辑上传，并写入（或异步回填）指纹元数据。
+  - 决策4：`VideoProcessingController` 的 `video-info/mobile-video-info` 增加 Probe 缓存层：
+    - 先查 `file_probe_cache(fileMd5,fileExt)`；
+    - 未命中再走 gRPC/BookProbe；
+    - 成功后回写缓存，后续同指纹直接复用。
+  - 决策5：Web 与 Android 客户端统一在上传前准备指纹：
+    - Web：`2MB` 分片基础上通过 Worker 计算 `MD5`，先走 `reuse-check`，未命中再进入分片上传，并采用并发 worker 池（默认 `3`，可通过参数覆盖）发送 chunk；
+    - Android：本地流式 `MD5` 计算后先走 `reuse-check`，未命中再 multipart 上传。
+- 调用链与决策链变化：
+  - 改造前：
+    - `客户端上传 -> 服务端落盘 -> (probeOnly) video-info -> 探测`
+    - 相同文件重复上传仍全量传输，Probe 重复执行。
+  - 改造后：
+    - `客户端计算 fileMd5/fileExt -> reuse-check`
+    - `命中: 直接复用物理文件(可直接返回 probePayload 或直接入队)`
+    - `未命中: 原上传链路 -> 落盘后写入 file_metadata -> video-info 命中/写入 file_probe_cache`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/DatabaseInitializer.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/FileReuseRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/FileReuseService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-upload-md5-worker.js`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/VideoProcessingControllerVideoInfoTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerUploadReuseTest.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+- 性能对比数据（上传与探测复用收益）：
+  - 测试方式：
+    - 链路仿真：同一文件重复上传两次，比较“首次上传 + 第二次上传”总耗时与传输体积。
+    - 探测仿真：同一 `fileMd5+fileExt` 连续调用 `video-info` 两次，比较第二次是否命中 `probeCacheHit=true`。
+  - 测试数据（仿真口径）：
+    - 样本A：`700MB` 视频，重复上传第2次
+      - 改造前：重复上传约 `700MB`，并重复探测
+      - 改造后：上传体积约 `0MB`（reuse-check 直返），探测可直接命中缓存
+    - 样本B：`120MB` PDF，重复上传第2次（`probeOnly`）
+      - 改造前：重复上传约 `120MB` + 重复 Probe
+      - 改造后：上传体积约 `0MB`，若存在 `file_probe_cache` 则直接返回探测结果
+  - 对比说明：
+    - 在重复文件占比高的场景，收益主要来自“零重传 + 零重复探测”，并显著降低服务端无效 I/O。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=VideoProcessingControllerVideoInfoTest,MobileMarkdownControllerUploadReuseTest,MobileMarkdownControllerSubmissionTitleTest" test -q`（通过）
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）
+
+## 2026-02-28 Web 端 Block/Token 交互对齐（增量）
+- 升级目标：
+  - 在不引入全量富文本编辑器重构的前提下，让 Web 阅读页具备 Android 对齐的核心交互：`block 化映射`、`缩进偏移`、`block 双击加粗`、`token 选区加粗/评论`。
+- 架构决策：
+  - 决策1：保持现有 Markdown 渲染链路（`markdown-it -> HTML`）不变，仅在渲染后增加“语义块装饰层”：
+    - 新增 `splitMarkdownIntoSemanticBlocks`，按 heading/blockquote/list/code fence/paragraph 规则生成语义块；
+    - 渲染后通过 `data-line` 反查将语义块映射到 DOM 节点，注入 `data-block-id` 与缩进层级样式变量。
+  - 决策2：元数据沿用后端已有 `meta` 合同，不新增后端接口：
+    - 扩展 Web 侧 `paragraphMeta` 结构，统一读写 `favorites/comments/deleted/tokenLike/tokenAnnotations/anchors`；
+    - token 元数据 key 统一为 `blockId::start::end`，对齐 Android 的 key 语义。
+  - 决策3：交互采用“轻量浮层 + 装饰渲染”方案：
+    - 选区后弹出浮层（加粗/评论）；
+    - token 装饰通过 Range 包裹 span 渲染，避免引入大体量编辑框架对现有页面结构造成冲击。
+- 调用链变化：
+  - 改造前：
+    - `Markdown 渲染 -> 行级高亮/便签`
+    - token 级别没有可持久化加粗/评论交互。
+  - 改造后：
+    - `Markdown 渲染 -> 语义块映射 -> block 样式/交互装饰`
+    - `选区 -> 浮层动作 -> tokenLike/tokenAnnotations -> 背景同步到 /tasks/{taskId}/meta`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+- 验证方式：
+  - `node` 语法编译检查（`index.html` 内联脚本）通过
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 交互补充：`block 双击`增加双击抑制窗口，拦截单击选区浮层误弹，确保双击直达块级加粗/评论流程。
+
+## 2026-02-28 Web 端锚点右栏 Obsidian 卡片编辑（增量）
+- 升级目标：
+  - 在不新增后端接口的前提下，把右侧锚点挂载区升级为“本地优先 + 卡片化 Markdown 编辑”。
+  - 保留既有拖拽/选择文件上传链路，并增加“云图标按钮”用于显式上传当前本地卡片到云端 revision。
+- 架构决策：
+  - 决策1：前端本地持久化采用 `localStorage` 分桶（`taskId + pathHint + anchorId`）：
+    - 每个锚点维护多张本地 Markdown 卡片（id/title/content/fileName/updatedAt）；
+    - 切换锚点时先持久化当前编辑卡片，再恢复目标锚点卡片状态。
+  - 决策2：上传链路复用现有 `POST /api/mobile/tasks/{taskId}/anchors/{anchorId}/mount`：
+    - 传统发送按钮继续走“附件 + 文本生成 md”；
+    - 云图标按钮把当前激活卡片序列化为 `.md` 文件，作为 `extraPending` 直接挂载，不清空本地编辑内容。
+  - 决策3：拖拽/文件选择 `.md` 双写策略：
+    - 仍加入 `pending` 附件队列；
+    - 同时读取文本写入本地卡片池，实现“本地复用再上传”。
+- 调用链变化：
+  - 改造前：
+    - `锚点选择 -> quick note 文本 + 附件 -> mount`
+  - 改造后：
+    - `锚点选择 -> 本地卡片池恢复 -> 卡片编辑`
+    - `云图标上传当前卡片 -> mount(extraPending md)` 或 `发送按钮 -> mount(附件+输入文本)`
+    - `.md 拖拽/选择 -> pending + 本地卡片池`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+- 验证方式：
+  - `node` 语法检查（`mobile-anchor-panel.js`）通过
+  - `node` 检查（`index.html` 内联脚本）通过
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-02-28 Web 端锚点右栏 Obsidian 工作区化 + Vditor IR 编辑器（增量）
+- 升级目标：
+  - 右栏编辑区从「textarea + 预览片段」升级为更贴近 Obsidian 的工作区形态：内容区优先、上下文可收起、命令入口可渐进暴露。
+  - 引入 `Vditor` 即时渲染模式（`ir`），保留本地卡片池、增量同步、云端挂载按钮与拖拽上传链路。
+- 复用杠杆：
+  - 杠杆1：复用既有 `anchor` 本地卡片数据模型（`localNotesByAnchor` + `sync` 增量接口）作为编辑器数据源，不改后端合同。
+  - 杠杆2：复用既有右栏事件链（`selectAnchor -> persist -> mount/sync`），仅在编辑器读写入口增加抽象层（Vditor/textarea 双通道）。
+  - 杠杆3：复用既有 `renderObsidianKnowledgePanels`/`Graph` 面板能力，通过工作区容器重新编排，不重写领域逻辑。
+- 架构决策：
+  - 决策1：新增编辑器能力层 `readEditorValue/writeEditorValue/focusEditorInput`，隔离 UI 框架切换对业务链路的影响。
+  - 决策2：Vditor 采用本地优先加载（`/lib/vditor/index.min.js` + `/lib/vditor/index.css`），并保留 CDN 回退，避免离线/弱网环境不可用。
+  - 决策3：右栏工作区采用「Header + Toolbar + Workbench + Statusbar」分层：
+    - Header：`Ctx/Focus/Cmd` 快捷动作；
+    - Workbench：左侧编辑主区 + 右侧上下文面板（Backlinks/Missing/Tags）；
+    - Statusbar：当前文档、词数、字符数、模式。
+  - 决策4：命令入口采用轻量 command menu（`Ctrl/Cmd+P`）渐进暴露高频动作（新建、切换上下文、聚焦、图谱、云端上传）。
+- 调用链变化：
+  - 改造前：
+    - `textarea(input/blur) -> persist -> local sync/mount`
+  - 改造后：
+    - `Vditor(IR) input/blur -> 同步回 textarea -> 复用既有 persist -> local sync/mount`
+    - `Header/Cmd 动作 -> workspace 状态切换（focus/context）-> 不改变挂载接口与数据结构`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/vditor/index.min.js`
+  - `services/java-orchestrator/src/main/resources/static/lib/vditor/index.css`
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 兼容与回滚：
+  - 若 Vditor 资源加载失败，自动回退到原生 textarea，不阻断右栏挂载链路。
+  - 回滚时仅需回退 `mobile-anchor-panel.js` 与 `lib/vditor/*`，后端接口与元数据结构无需回退。
+
+## 2026-03-02 Phase2B 多源输入重构（知乎/掘金链接 + 图片拓扑保护 + WS增量回显）
+- 升级目标：
+  - 在不新增独立“链接模式”的前提下，复用 Phase2B 原输入框，支持知乎/掘金链接与文本/文件混合输入。
+  - 后端直接调用 `scripts/playwright_batch_to_md.py` 抽取文章 Markdown 与图片资产，并纳入结构化重写链路。
+  - 参考书籍增强链路，增加图片标记拓扑保护，确保结构化后图片相对顺序与相对位置稳定。
+  - 将长耗时结果改为 WebSocket 阶段进度 + Markdown chunk 增量回显，降低等待黑箱感。
+- 复用杠杆：
+  - 杠杆1：复用既有 `POST /api/mobile/cards/phase2b/structured-markdown` 接口，不新增链接专用提交按钮。
+  - 杠杆2：复用 `TaskWebSocketHandler` 的 channel 订阅模型，扩展 `phase2bProgress` 与 `phase2bMarkdownChunk` 事件。
+  - 杠杆3：复用 `DeepSeekAdvisorService` 的 Phase2B Prompt 装配能力，仅增加 `blend_system.md` 与 blend 模式入口。
+  - 杠杆4：复用书籍增强“token 保护/恢复”思路，在 Java 侧新增图片拓扑校验与回退。
+- 架构决策：
+  - 决策1：新增 `Phase2bArticleLinkService`，负责：
+    - 识别并归一化知乎/掘金链接；
+    - 以 `ProcessBuilder` 调用 `playwright_batch_to_md.py`；
+    - 解析批处理 summary + `result.json`，回收 `title/site/markdown/imagePaths`。
+  - 决策2：`MobileCardController` 在 Phase2B 主链路中引入双输入流拼装：
+    - 输入流A：参考信源正文（抓取后的 Markdown）；
+    - 输入流B：用户指令；
+    - 通过 blend 模式调用模型，保证“用户指令优先，参考正文取证”。
+  - 决策3：新增 `Phase2bImageTopologyGuard`：
+    - LLM 前：掩码图片标记为 `[[PHASE2B_MEDIA_*]]`；
+    - LLM 后：严格校验 token 数量+顺序+唯一性；
+    - 校验失败时触发安全回退，避免图片路径或相对位置静默漂移。
+  - 决策4：前端 `mobile-anchor-panel.js` 增加：
+    - 文章链接胶囊混合输入（链接与文本/文件共存）；
+    - WS chunk 增量渲染（处理中可边生成边预览）；
+    - 收起状态下完成轻提示（toast + 轻提示音）。
+- 调用链变化：
+  - 改造前：
+    - `输入文本 -> Phase2B 请求 -> 一次性返回 Markdown`
+  - 改造后：
+    - `输入文本/链接/文件 -> 链接抽取脚本 -> 双输入流拼装 -> 图片拓扑掩码 -> Phase2B -> token恢复 -> WS chunk回显 + HTTP最终结果`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/Phase2bArticleLinkService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/Phase2bImageTopologyGuard.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/main/resources/prompts/ai-structrued/blend_system.md`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+- 体验与性能观测（本地开发环境，单请求样本）：
+  - 测试方式：
+    - 通过浏览器触发 Phase2B 链接混合请求，观察 WS 首帧进度与首段 chunk 到达时间；
+    - 使用控制台网络面板确认请求生命周期与 UI 可见反馈时间。
+  - 测试数据（样本）：
+    - 旧链路：用户在结果返回前仅见单一骨架态，首个可见业务反馈约等于总耗时（>10s）。
+    - 新链路：`accepted` 进度在提交后 <1s 可见，首段 markdown chunk 可在最终响应前到达，等待过程可感知阶段流转。
+  - 结论：
+    - 该升级主要提升“等待可解释性与可视化连续性”，不是降低模型绝对耗时。
+
+## 2026-03-02 Android 阅读器图片链路回归 TextView 渲染（弃用独立图片 block）
+- 升级目标：
+  - 用户明确要求图片不再由独立 block/gallery 承载，而是直接在 `TextView + Markwon` 内按 Markdown 语义渲染。
+  - 强化 `![]()` 资源地址重写稳定性，确保图片资源可达。
+- 复用杠杆：
+  - 杠杆1：复用现有 `buildReaderMarkwon(...)` 配置中的 `CoilImagesPlugin.create(context)`，不新增图片加载链路。
+  - 杠杆2：复用既有 `resolveReaderMediaUrl(...)` 媒体地址归一化能力，避免重复造 URL 解析轮子。
+  - 杠杆3：复用 `MarkdownParagraph -> markwon.setMarkdown(textView, markdown)` 的渲染入口，避免双渲染体系并存。
+- 架构决策：
+  - 决策1：停用 `inlineImages -> InlineImageGallery` 注入路径，图片统一交给 TextView 中的 Markwon 渲染。
+  - 决策2：`rewriteReaderMarkdownMedia(...)` 在处理 `![]()` 时仅改写 destination，不再抽取为独立图片列表。
+  - 决策3：为 `![]()` 增加 target 解析/重建能力（destination + suffix），兼容 `<...>` 包裹地址与 title 后缀。
+- 调用链变化：
+  - 改造前：
+    - `markdown -> rewrite(抽取 images) -> MarkdownParagraph(TextView) + InlineImageGallery(独立 block)`
+  - 改造后：
+    - `markdown -> rewrite(保留 ![] 仅改 URL) -> MarkdownParagraph(TextView/Markwon)` 
+- 已落地文件：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `docs/architecture/error-fixes.md`
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）
+  - 文档编码检查：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）
+    - `python -X utf8 tools/architecture/check_docs_encoding.py --check-mojibake`（通过）
+- 风险与回滚：
+  - 风险：
+    - 复杂 `![]()` 写法（尤其带非常规括号嵌套）可能仍需补充样例覆盖。
+  - 回滚：
+    - 可临时恢复旧 `MARKDOWN_IMAGE_INLINE_PATTERN`，但保持 TextView 渲染主链路不变，避免重新引入独立 block 承载。
+
+## 2026-03-02 Android TextView 图片点击放大交互桥接
+- 升级目标：
+  - 在保持 `TextView + Markwon` 渲染主链路不变的前提下，恢复图片“点击放大”交互能力。
+- 复用杠杆：
+  - 杠杆1：复用既有 `ReaderImageLightbox` 组件与缩放/滑动关闭交互。
+  - 杠杆2：复用 `MarkdownParagraph` 统一手势分发入口，不新增独立手势层。
+  - 杠杆3：复用既有图片预览遥测事件，保持数据口径一致。
+- 架构决策：
+  - 决策1：在单击确认阶段优先探测图片 span（`AsyncDrawable`/`ImageSpan`），命中后短路普通词条点击。
+  - 决策2：通过 span/drawable 的 `getDestination()` 提取图片 URL，并回调 `onInlineImageTap` 打开 Lightbox。
+  - 决策3：图片点击后短暂抑制原生文本选区，避免触摸冲突。
+- 调用链变化：
+  - 改造前：
+    - `TextView single tap -> token/insight tap`
+  - 改造后：
+    - `TextView single tap -> image span hit ? open lightbox : token/insight tap`
+- 已落地文件：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `docs/architecture/error-fixes.md`
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）
+- 风险与回滚：
+  - 风险：
+    - 某些设备上 span 反射接口差异可能导致 destination 获取失败。
+  - 回滚：
+    - 可临时降级为仅支持 `AsyncDrawable` 分支，保留基础点击逻辑。
+
+## 2026-03-02 Android 任务提交接入知乎/掘金文章链路
+- 升级目标：
+  - Android 任务提交窗口支持直接粘贴知乎/掘金链接。
+  - 链接任务在后端自动调用 `scripts/playwright_batch_to_md.py` 抽取 Markdown 与图片资源。
+  - 抽取结果复用现有书籍处理链路，进入 `BookMarkdownService -> BookEnhancedPipelineService`，避免新增并行“文章专线”。
+- 复用杠杆：
+  - 杠杆1：复用 `Phase2bArticleLinkService` 现有链接归一化与 Playwright 批量抽取能力，不重复造抓取轮子。
+  - 杠杆2：复用 `VideoProcessingOrchestrator.processBook(...)` 现有书籍增强主链，统一增强策略与产物结构。
+  - 杠杆3：复用 `/api/mobile/video-info` 探测入口与 Android 既有「解析 -> 提交」交互，不新增提交协议。
+- 架构决策：
+  - 决策1：在 `VideoProcessingOrchestrator` 增加“文章链接识别分支”：
+    - 命中知乎/掘金时先抽取文章；
+    - 将 markdown 与图片安全复制到 `storage/article_link/{taskId}`；
+    - 再按本地 `.md` 书籍源继续执行书籍增强链路。
+  - 决策2：在 `VideoProcessingController` 的 `video-info` 探测中新增文章 probe：
+    - 通过 `Phase2bArticleLinkService.normalizeSupportedLinks/prefetchLinkMetadata` 返回可提交 payload；
+    - `contentType` 对齐为 `book`，确保 Android 端无需新增分支即可提交。
+  - 决策3：Android `MainActivity` 扩展剪贴板可识别域名：
+    - 从仅 `bilibili/douyin` 扩展到 `zhihu/juejin`，保证粘贴后可触发快速提交提示。
+- 调用链变化：
+  - 改造前：
+    - `知乎/掘金 URL -> 按视频流处理 -> 下载/探测失败`
+  - 改造后：
+    - `知乎/掘金 URL -> Phase2bArticleLinkService 抽取 -> 本地 md+图片 -> processBook -> book enhanced`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/Phase2bArticleLinkService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/VideoProcessingControllerVideoInfoTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/VideoProcessingOrchestratorTitleResolutionTest.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=VideoProcessingControllerVideoInfoTest,VideoProcessingOrchestratorTitleResolutionTest" test -q`（通过）
+  - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）
+- 性能与体验说明：
+  - 本次核心收益是“链路打通与失败路径收敛”，非算力级加速改造。
+  - 体验对比：
+    - 改造前：知乎/掘金链接在提交/探测阶段容易失败，无法进入增强链路；
+    - 改造后：链接可被识别为书籍型输入并进入统一增强链路，任务可持续推进。
+
+## 2026-03-03 VL 分析阶段 watchdog 强信号预算升级（2x -> 3x，优先预处理有效时长）
+- 日期：2026-03-03
+- 升级目标：
+  - 将 VL 分析阶段强信号预算从 `2x` 提升到 `3x`，减少长片段/慢模型场景下的误降级。
+  - 预算基准优先使用“预处理后的有效时长”，避免原始时长高估或低估导致心跳预算偏差。
+- 第一性原理与复用杠杆：
+  - 第一性原理：watchdog 关注的是“持续可证伪的进展信号”，预算过短会导致信号提前耗尽，即使任务仍在真实推进也会被判空转。
+  - 复用杠杆1：复用既有 `TaskWatchdog` 强信号判定逻辑，不改 watchdog 核心状态机。
+  - 复用杠杆2：复用 `analysis_extraction` 阶段桥接，不新增阶段枚举或监控线程模型。
+  - 复用杠杆3：复用 VL 路由预处理产物 `_routing_effective_duration_sec`，避免重复计算视频有效区间。
+- 架构决策：
+  - 决策1：Java 侧 `AnalyzeWithVL` 调用超时改为 `max(base_timeout, ceil(sum_vl_segment * 3.0))`。
+  - 决策2：Python 侧 VL 心跳预算改为 `ceil(vl_total_duration * multiplier)`，默认 `multiplier=3.0`，可由 `vl_watchdog_budget_multiplier` 覆盖。
+  - 决策3：Python 预算时长优先采用 `_routing_effective_duration_sec`，无该字段时回退 `end_sec-start_sec`。
+- 调用链变化：
+  - 改造前：`VL timeout/workload budget = 2x 原始VL单元时长`
+  - 改造后：`VL timeout/workload budget = 3x（优先预处理有效时长）`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+- 对比数据与测试方式：
+  - 对比公式：
+    - 旧：`budget = ceil(duration * 2.0)`
+    - 新：`budget = ceil(duration * 3.0)`
+  - 示例数据（同一 VL 总时长 81.2s）：
+    - 旧预算：`163s`
+    - 新预算：`244s`
+    - 预算增加：`+81s`（+49.7%）
+  - 测试方式：
+    - 代码语法与编译校验。
+    - 运行期日志校验 `VL timeout resolved ... multiplier=3.00x` 与 `VL heartbeat budget ... multiplier=3.00x`。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-03 watchdog 强信号策略升级（analysis_extraction / phase2a 将心跳计入强信号）
+- 日期：2026-03-03
+- 升级目标：
+  - 在 `analysis_extraction` 与 `phase2a` 两个长耗时 LLM 阶段，将结构化心跳（soft/hard）直接计入强信号，避免“进度条长时间不动”导致误判中断。
+- 第一性原理与复用杠杆：
+  - 第一性原理：对于外部 LLM 阻塞调用，真实进展往往无法连续映射为进度值变化；应以“任务仍存活并持续产出心跳”作为阶段活性证据。
+  - 复用杠杆1：复用 `TaskWatchdog` 现有状态机与 idle-strike 机制，不改重启/失败决策链。
+  - 复用杠杆2：复用 `TaskProgressWatchdogBridge` 与 Python 心跳写盘/流式上报能力，不新增通信通道。
+  - 复用杠杆3：通过配置项控制阶段白名单，避免硬编码策略扩散。
+- 架构决策：
+  - 决策1：新增配置 `video.task.watchdog.heartbeat-strong-stages`，默认值 `analysis_extraction,phase2a`。
+  - 决策2：当信号所属阶段命中白名单时，`TaskWatchdog` 将该结构化心跳直接认定为强信号。
+  - 决策3：非白名单阶段保持原规则（仍以 hard 信号字段推进与进度变化为主）。
+- 调用链变化：
+  - 改造前：`长耗时 LLM 调用 -> 进度长时间不变 -> idle strike -> interrupt`
+  - 改造后：`长耗时 LLM 调用 -> 周期性心跳 -> 强信号续命 -> 避免误中断`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdog.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdogFactory.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+- 对比数据与测试方式：
+  - 对比口径：同样 watchdog 配置下，观察长耗时阶段是否仍触发 `Thread interrupted` 误降级。
+  - 测试方式：编译校验 + 运行日志核对（是否持续出现阶段心跳并不触发 idle strike）。
+  - 本次数据：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-03 JSON 容错解析链路复用重构（VL + KnowledgeClassifier）
+- 日期：2026-03-03
+- 目标：
+  - 把 `vl_video_analyzer` 与 `knowledge_classifier` 中重复的 JSON 容错解析逻辑抽取为共享组件，降低分叉维护成本。
+- 改动摘要：
+  - 新增共享工具：`services/python_grpc/src/content_pipeline/common/utils/json_payload_repair.py`。
+  - `VLVideoAnalyzer` 的 `_parse_json_payload/_build_json_parse_candidates/_extract_salvaged_json_objects` 等方法改为复用共享工具，保留 `key_evidence` 专项修复钩子。
+  - `KnowledgeClassifier` 的 `_extract_top_level_objects/_repair_unclosed_json/_escape_control_chars_in_strings/_remove_trailing_commas` 改为复用共享工具；`_loads_jsonish` 改为统一走共享解析入口后再回退 `ast.literal_eval`。
+- 复用收益：
+  - 避免两处独立演进导致的容错策略漂移。
+  - 新增容错规则可单点扩展，并由两个调用方同步受益。
+- 验证：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_json_payload_repair.py`（通过，3/3）
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_parse.py`（通过，11/11）
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "tutorial_schema_parse or unescaped_newlines_in_main_operation or salvages_truncated_array"`（通过，3/3）
+  - `python -m py_compile services/python_grpc/src/content_pipeline/common/utils/json_payload_repair.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/phase2a/segmentation/knowledge_classifier.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 风险与回滚：
+  - 风险：共享工具若引入缺陷，会同时影响 VL 与分类链路。
+  - 回滚：可将两个调用方恢复到各自本地实现，或逐步保留共享工具但回退单个方法绑定。
+
+## 2026-03-03 watchdog 与 LLM 调用协同策略升级（任务级回调隔离 + 强心跳阶段扩展）
+- 日期：2026-03-03
+- 升级目标：
+  - 避免长耗时 LLM 调用期间被 watchdog 提前中断，优先使用 LLM/gRPC 自身超时机制。
+  - 消除并发任务下进度回调“单槽覆盖”导致的心跳丢失。
+- 第一性原理与复用杠杆：
+  - 第一性原理：watchdog 的核心职责是识别“无活性任务”，不应在存在稳定心跳时强制中断业务线程。
+  - 复用杠杆1：复用 `TaskWatchdog` 现有状态机与 RESTART/FAIL 决策链，不重写 watchdog 框架。
+  - 复用杠杆2：复用 `WATCHDOG_SIGNAL` 结构化心跳协议，仅扩展强信号阶段配置。
+  - 复用杠杆3：复用现有 `TaskProcessingWorker -> VideoProcessingOrchestrator` 调用链，仅把回调绑定从全局改为 task 级。
+- 架构决策：
+  - 决策1：`VideoProcessingOrchestrator` 进度回调改为 `taskId -> callback` 映射，保留全局回调作为兜底。
+  - 决策2：`TaskProcessingWorker` 注册 task 级回调并在 `finally` 清理，杜绝并发覆盖与泄漏。
+  - 决策3：watchdog 触发 `RESTART` 且阶段命中强心跳白名单时，不再 `interrupt` 业务线程，仅记录决策并等待调用方超时返回。
+  - 决策4：`video.task.watchdog.heartbeat-strong-stages` 默认从 `analysis_extraction,phase2a` 扩展为 `stage1,phase2a,analysis_extraction,phase2b`。
+- 调用链变化：
+  - 改造前：
+    - `TaskA setProgressCallback -> TaskB setProgressCallback -> TaskA 回调被覆盖 -> watchdog 误判空转 -> interrupt`
+  - 改造后：
+    - `TaskA setProgressCallback(taskA) + TaskB setProgressCallback(taskB) -> 各自上报心跳`
+    - `强心跳阶段 RESTART -> defer interrupt -> 由 LLM/gRPC deadline 兜底`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdog.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdogFactory.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `docs/architecture/error-fixes.md`
+- 对比数据与测试方式：
+  - 对比维度（稳定性）：
+    - 旧链路：并发任务共享单一回调槽位，存在覆盖风险。
+    - 新链路：回调槽位按 `taskId` 隔离，理论覆盖风险降为 0（同 taskId 覆盖除外）。
+  - 对比维度（中断策略）：
+    - 旧链路：强制 `interrupt`，阻塞 gRPC 调用直接返回 `CANCELLED: Thread interrupted`。
+    - 新链路：强心跳阶段 `RESTART` 仅记录决策，不强制中断，由下游超时策略决定返回时机。
+  - 测试方式：
+    - 编译校验：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+    - 运行日志校验：观察 `Watchdog restart deferred for heartbeat-strong stage` 与 `Thread interrupted` 是否脱钩。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-03 JSON 容错解析链路复用扩展（transcript_pipeline: DeepSeek + Vision）
+- 日期：2026-03-03
+- 升级目标：
+  - 将 `transcript_pipeline` 中分散的 JSON 修复逻辑统一接入共享组件 `json_payload_repair`，降低重复维护与规则漂移风险。
+- 第一性原理与复用杠杆：
+  - 第一性原理：JSON 容错属于横切能力，应集中实现并通过可插拔修复器承接业务特例，而非在每个客户端重复手写。
+  - 复用杠杆1：复用已有共享工具 `services/python_grpc/src/content_pipeline/common/utils/json_payload_repair.py` 的解析候选与修复链。
+  - 复用杠杆2：保留 `DeepSeekClient._load_json_with_repair` 与 `ERNIEVisionClient._repair_json` 方法签名作为兼容层，避免调用方改造扩散。
+  - 复用杠杆3：复用现有 transcript 单测框架，增量补充 vision 解析回归用例。
+- 架构决策：
+  - 决策1：`DeepSeekClient._load_json_with_repair` 改为委托 `parse_json_payload`，并保留本地缺逗号修复逻辑作为 `extra_repairers`。
+  - 决策2：`ERNIEVisionClient.complete_json` 与 `validate_frame` 统一走 `_extract_json_content + _load_json_with_repair` 链路。
+  - 决策3：解析失败时保持原有异常语义（`complete_json` 抛 `ValueError`，`validate_frame` 返回带 `error` 的兜底结构）。
+- 调用链变化：
+  - 改造前：`LLM 返回 -> json.loads -> 本地修补(各自实现) -> 失败`
+  - 改造后：`LLM 返回 -> 提取 JSON 片段 -> 共享 parse_json_payload(含候选修复链) -> 业务特例修复器 -> 结果/失败语义`
+- 已落地文件：
+  - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - `services/python_grpc/src/transcript_pipeline/llm/vision.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`
+- 验证方式：
+  - `python -m pytest -q services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`（通过，6/6）
+  - `python -m pytest -q services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`（通过，4/4）
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/llm/deepseek.py services/python_grpc/src/transcript_pipeline/llm/vision.py services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）

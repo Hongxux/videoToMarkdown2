@@ -11,26 +11,99 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StreamUtils;
 import org.springframework.util.StringUtils;
 
+import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.ConnectException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 @Service
 public class DeepSeekAdvisorService {
 
     private static final Logger logger = LoggerFactory.getLogger(DeepSeekAdvisorService.class);
     private static final String PROMPT_TEMPLATE_CONTEXT_EMPTY = "（无）";
+    private static final int STRUCTURED_RETRY_MAX_ATTEMPTS = 3;
+    private static final long NETWORK_RETRY_INITIAL_BACKOFF_MS = 500L;
+    private static final long NETWORK_RETRY_MAX_BACKOFF_MS = 4000L;
+    private static final String[] SECTION_KEYS_BACKGROUND = {
+            "background", "bg", "background_knowledge", "背景", "背景知识"
+    };
+    private static final String[] SECTION_KEYS_CONTEXTUAL = {
+            "contextual_explanations", "contextualExplanations", "contextual", "context", "语境化", "语境解释"
+    };
+    private static final String[] SECTION_KEYS_DEPTH = {
+            "depth", "deep", "principles", "mechanism", "deep_analysis", "深度"
+    };
+    private static final String[] SECTION_KEYS_BREADTH = {
+            "breadth", "width", "cross_domain", "industry", "crossDomain", "广度"
+    };
+    private static final String[] TERM_KEYS = {
+            "term", "tag", "keyword", "insight_tag", "insightTerm", "insight_term", "name", "title", "术语", "概念"
+    };
+    private static final List<String> WRAPPER_KEYS = List.of(
+            "result",
+            "results",
+            "output",
+            "outputs",
+            "data",
+            "payload",
+            "response",
+            "responses",
+            "answer",
+            "answers",
+            "advice",
+            "analysis",
+            "structured",
+            "content",
+            "json",
+            "item",
+            "items"
+    );
+    private static final List<String> LIST_CONTAINER_KEYS = List.of(
+            "items",
+            "results",
+            "outputs",
+            "list",
+            "entries",
+            "records",
+            "rows"
+    );
+    private static final List<String> STRING_LIST_OBJECT_KEYS = List.of(
+            "lines",
+            "items",
+            "list",
+            "bullets",
+            "points",
+            "sentences",
+            "entries",
+            "values"
+    );
+    private static final List<String> STRING_VALUE_OBJECT_KEYS = List.of(
+            "text",
+            "content",
+            "value",
+            "line",
+            "sentence",
+            "desc",
+            "description"
+    );
 
     private static final String DEFAULT_SYSTEM_PROMPT = String.join("\n",
             "你是阅读场景下的语境解释助手。",
@@ -128,6 +201,25 @@ public class DeepSeekAdvisorService {
             "- background/contextual_explanations/depth/breadth 四个数组都必须存在，且每个数组 1~3 条短句",
             "- 仅输出 JSON，不得输出其他文本"
     );
+    private static final String DEFAULT_PHASE2B_STRUCTURED_SYSTEM_PROMPT = String.join("\n",
+            "你是文本结构化助手。",
+            "请将输入的一段或多段文字，整理为清晰、逻辑严密的 Markdown 文本，适配 Obsidian 知识笔记。",
+            "仅基于给定文本改写，不补充外部事实。",
+            "直接输出 Markdown，不输出 JSON 或代码块。"
+    );
+    private static final String DEFAULT_PHASE2B_STRUCTURED_USER_PROMPT = String.join("\n",
+            "## 原始文本",
+            "{body_text}",
+            "",
+            "请输出结构化 Markdown。"
+    );
+    private static final String DEFAULT_PHASE2B_BLEND_SYSTEM_PROMPT = String.join("\n",
+            "你是多源融合重写助手。",
+            "你会收到两个输入流：输入流A是参考信源正文，输入流B是用户指令。",
+            "你必须严格执行输入流B中的用户指令，并在需要时引用输入流A中的证据。",
+            "若输入流A包含图片 Markdown 标记（如 ![...](...) 或 ![[...]]），必须保持其顺序和相对位置，不得改写路径。",
+            "输出必须是结构化 Markdown，不输出 JSON 或代码块。"
+    );
 
     @Value("${deepseek.advisor.enabled:true}")
     private boolean advisorEnabled;
@@ -138,11 +230,17 @@ public class DeepSeekAdvisorService {
     @Value("${deepseek.advisor.model:deepseek-reasoner}")
     private String advisorModel;
 
-    @Value("${deepseek.advisor.timeout-seconds:60}")
+    @Value("${deepseek.advisor.timeout-seconds:240}")
     private int timeoutSeconds;
+
+    @Value("${deepseek.advisor.connect-timeout-seconds:20}")
+    private int connectTimeoutSeconds;
 
     @Value("${deepseek.advisor.structured-max-tokens:8000}")
     private int structuredMaxTokens;
+
+    @Value("${deepseek.advisor.phase2b-max-tokens:8000}")
+    private int phase2bMaxTokens;
 
     @Value("${DEEPSEEK_API_KEY:}")
     private String apiKey;
@@ -159,10 +257,18 @@ public class DeepSeekAdvisorService {
     @Value("${deepseek.advisor.prompt.structured-user-resource:classpath:prompts/deepseek-advisor/structured-user-zh.txt}")
     private Resource structuredUserPromptResource;
 
+    @Value("${deepseek.advisor.prompt.phase2b-structured-system-resource:classpath:prompts/ai-structrued/structured_system.md}")
+    private Resource phase2bStructuredSystemPromptResource;
+
+    @Value("${deepseek.advisor.prompt.phase2b-structured-user-resource:classpath:prompts/ai-structrued/structured_user.md}")
+    private Resource phase2bStructuredUserPromptResource;
+
+    @Value("${deepseek.advisor.prompt.phase2b-blend-system-resource:classpath:prompts/ai-structrued/blend_system.md}")
+    private Resource phase2bBlendSystemPromptResource;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
-    private final HttpClient httpClient = HttpClient.newBuilder()
-            .connectTimeout(Duration.ofSeconds(8))
-            .build();
+    private final Object httpClientLock = new Object();
+    private volatile HttpClient httpClient;
     private final Map<String, String> promptTemplateCache = new ConcurrentHashMap<>();
 
     public AdviceResult requestAdvice(String term, String context, boolean contextDependent) {
@@ -259,6 +365,77 @@ public class DeepSeekAdvisorService {
                 callResult.requestPayloadJson,
                 callResult.responseBodyJson
         );
+    }
+
+    public String requestPhase2bStructuredMarkdown(String bodyText, String filterRequirement) {
+        return requestPhase2bStructuredMarkdown(bodyText, filterRequirement, false);
+    }
+
+    public String requestPhase2bStructuredMarkdown(String bodyText, String filterRequirement, boolean blendMode) {
+        String safeBody = String.valueOf(bodyText == null ? "" : bodyText).trim();
+        if (safeBody.isEmpty()) {
+            throw new IllegalArgumentException("bodyText cannot be empty");
+        }
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
+        }
+        String systemPrompt = buildPhase2bStructuredSystemPrompt();
+        String userPrompt = buildPhase2bStructuredUserPrompt(safeBody);
+        DeepSeekCallResult callResult;
+        try {
+            callResult = callStructuredWithRetry(
+                    systemPrompt,
+                    userPrompt,
+                    Math.max(512, phase2bMaxTokens),
+                    false
+            );
+        } catch (Exception ex) {
+            throw new IllegalStateException("DeepSeek phase2b call failed: " + ex.getMessage(), ex);
+        }
+        String raw = String.valueOf(callResult.content == null ? "" : callResult.content).trim();
+        if (!StringUtils.hasText(raw)) {
+            throw new IllegalStateException("DeepSeek phase2b returned empty");
+        }
+        return raw;
+    }
+
+    public String requestPhase2bStructuredMarkdownStreamed(
+            String bodyText,
+            String filterRequirement,
+            boolean blendMode,
+            Consumer<String> onDelta
+    ) {
+        String safeBody = String.valueOf(bodyText == null ? "" : bodyText).trim();
+        if (safeBody.isEmpty()) {
+            throw new IllegalArgumentException("bodyText cannot be empty");
+        }
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
+        }
+        String systemPrompt = buildPhase2bStructuredSystemPrompt();
+        String userPrompt = buildPhase2bStructuredUserPrompt(safeBody);
+        String raw;
+        try {
+            raw = callDeepSeekWithPromptsStreamed(
+                    systemPrompt,
+                    userPrompt,
+                    0.2,
+                    Math.max(512, phase2bMaxTokens),
+                    onDelta
+            );
+        } catch (Exception ex) {
+            throw new IllegalStateException("DeepSeek phase2b stream call failed: " + ex.getMessage(), ex);
+        }
+        if (!StringUtils.hasText(raw)) {
+            throw new IllegalStateException("DeepSeek phase2b stream returned empty");
+        }
+        return raw.trim();
     }
 
     public Map<String, StructuredAdviceResult> requestStructuredAdviceBatch(
@@ -370,9 +547,17 @@ public class DeepSeekAdvisorService {
         int attempt = 0;
         int currentMaxTokens = Math.max(256, initialMaxTokens);
         DeepSeekCallResult lastResult = new DeepSeekCallResult("", "", "", "");
-        while (attempt < 3) {
+        while (attempt < STRUCTURED_RETRY_MAX_ATTEMPTS) {
             attempt += 1;
-            lastResult = callDeepSeekWithPromptsDetailed(systemPrompt, userPrompt, 0.2, currentMaxTokens, forceJsonObject);
+            try {
+                lastResult = callDeepSeekWithPromptsDetailed(systemPrompt, userPrompt, 0.2, currentMaxTokens, forceJsonObject);
+            } catch (Exception ex) {
+                if (!isRetryableNetworkException(ex) || attempt >= STRUCTURED_RETRY_MAX_ATTEMPTS) {
+                    throw ex;
+                }
+                sleepBeforeRetry(attempt, ex);
+                continue;
+            }
             if (!isFinishReasonLength(lastResult.finishReason)) {
                 return lastResult;
             }
@@ -383,6 +568,42 @@ public class DeepSeekAdvisorService {
             currentMaxTokens = next;
         }
         return lastResult;
+    }
+
+    private boolean isRetryableNetworkException(Throwable ex) {
+        Throwable cursor = ex;
+        while (cursor != null) {
+            if (cursor instanceof HttpTimeoutException || cursor instanceof ConnectException) {
+                return true;
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
+    }
+
+    private void sleepBeforeRetry(int attempt, Exception ex) {
+        int safeAttempt = Math.max(1, attempt);
+        int shift = Math.min(20, safeAttempt - 1);
+        long multiplier = 1L << shift;
+        long delayMs = NETWORK_RETRY_INITIAL_BACKOFF_MS * multiplier;
+        if (delayMs < 0 || delayMs > NETWORK_RETRY_MAX_BACKOFF_MS) {
+            delayMs = NETWORK_RETRY_MAX_BACKOFF_MS;
+        }
+        if (delayMs <= 0) {
+            return;
+        }
+        logger.warn(
+                "DeepSeek advisor transient network error, retrying: attempt={} delayMs={} err={}",
+                safeAttempt,
+                delayMs,
+                ex.getMessage()
+        );
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("deepseek advisor retry interrupted", interrupted);
+        }
     }
 
     private boolean isFinishReasonLength(String finishReason) {
@@ -440,7 +661,7 @@ public class DeepSeekAdvisorService {
                 .header("Authorization", "Bearer " + apiKey.trim())
                 .POST(HttpRequest.BodyPublishers.ofString(payloadJson))
                 .build();
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response = resolveHttpClient().send(request, HttpResponse.BodyHandlers.ofString());
         String responseBody = String.valueOf(response.body() == null ? "" : response.body());
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             throw new IllegalStateException("DeepSeek HTTP " + response.statusCode() + ": " + summarizeResponseBody(responseBody));
@@ -454,6 +675,120 @@ public class DeepSeekAdvisorService {
         String content = choices.get(0).path("message").path("content").asText("");
         String finishReason = choices.get(0).path("finish_reason").asText("");
         return new DeepSeekCallResult(content, payloadJson, responseBody, finishReason);
+    }
+
+    private String callDeepSeekWithPromptsStreamed(
+            String systemPrompt,
+            String userPrompt,
+            double temperature,
+            int maxTokens,
+            Consumer<String> onDelta
+    ) throws Exception {
+        String endpoint = normalizeDeepSeekBaseUrl(advisorBaseUrl);
+        String resolvedModel = DeepSeekModelRouter.resolveModel(advisorModel);
+        if (!StringUtils.hasText(resolvedModel)) {
+            throw new IllegalStateException("deepseek.advisor.model is empty");
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("model", resolvedModel);
+        payload.put("temperature", temperature);
+        payload.put("max_tokens", maxTokens);
+        payload.put("stream", true);
+        payload.put("messages", List.of(
+                Map.of("role", "system", "content", String.valueOf(systemPrompt == null ? "" : systemPrompt)),
+                Map.of("role", "user", "content", String.valueOf(userPrompt == null ? "" : userPrompt))
+        ));
+        String payloadJson = objectMapper.writeValueAsString(payload);
+
+        HttpRequest request = HttpRequest.newBuilder(URI.create(endpoint + "/chat/completions"))
+                .timeout(Duration.ofSeconds(Math.max(60, timeoutSeconds)))
+                .header("Content-Type", "application/json")
+                .header("Accept", "text/event-stream")
+                .header("Authorization", "Bearer " + apiKey.trim())
+                .POST(HttpRequest.BodyPublishers.ofString(payloadJson))
+                .build();
+
+        HttpResponse<InputStream> response = resolveHttpClient().send(request, HttpResponse.BodyHandlers.ofInputStream());
+        if (response.statusCode() < 200 || response.statusCode() >= 300) {
+            String responseBody;
+            try (InputStream errorStream = response.body()) {
+                responseBody = StreamUtils.copyToString(errorStream, StandardCharsets.UTF_8);
+            }
+            throw new IllegalStateException("DeepSeek HTTP " + response.statusCode() + ": " + summarizeResponseBody(responseBody));
+        }
+
+        StringBuilder aggregated = new StringBuilder();
+        String finishReason = "";
+        try (InputStream bodyStream = response.body();
+             BufferedReader reader = new BufferedReader(new InputStreamReader(bodyStream, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String trimmed = String.valueOf(line).trim();
+                if (!StringUtils.hasText(trimmed) || !trimmed.startsWith("data:")) {
+                    continue;
+                }
+                String data = trimmed.substring(5).trim();
+                if (!StringUtils.hasText(data)) {
+                    continue;
+                }
+                if ("[DONE]".equals(data)) {
+                    break;
+                }
+                JsonNode chunkRoot;
+                try {
+                    chunkRoot = objectMapper.readTree(data);
+                } catch (Exception ignored) {
+                    continue;
+                }
+                JsonNode choices = chunkRoot.path("choices");
+                if (!choices.isArray() || choices.isEmpty()) {
+                    continue;
+                }
+                JsonNode first = choices.get(0);
+                String delta = first.path("delta").path("content").asText("");
+                if (StringUtils.hasText(delta)) {
+                    aggregated.append(delta);
+                    if (onDelta != null) {
+                        try {
+                            onDelta.accept(delta);
+                        } catch (Exception callbackError) {
+                            logger.warn("DeepSeek phase2b stream callback failed: {}", callbackError.getMessage());
+                        }
+                    }
+                }
+                String nextFinishReason = first.path("finish_reason").asText("");
+                if (StringUtils.hasText(nextFinishReason)) {
+                    finishReason = nextFinishReason;
+                }
+            }
+        }
+        if (!StringUtils.hasText(aggregated.toString()) && isFinishReasonLength(finishReason)) {
+            throw new IllegalStateException("DeepSeek phase2b stream truncated by token length");
+        }
+        return aggregated.toString();
+    }
+
+    private HttpClient resolveHttpClient() {
+        HttpClient client = httpClient;
+        if (client != null) {
+            return client;
+        }
+        synchronized (httpClientLock) {
+            if (httpClient == null) {
+                httpClient = HttpClient.newBuilder()
+                        .connectTimeout(Duration.ofSeconds(resolveConnectTimeoutSeconds()))
+                        .build();
+            }
+            return httpClient;
+        }
+    }
+
+    private int resolveConnectTimeoutSeconds() {
+        int value = connectTimeoutSeconds;
+        if (value <= 0) {
+            return 1;
+        }
+        return Math.min(value, 120);
     }
 
     private String normalizeDeepSeekBaseUrl(String rawBaseUrl) {
@@ -538,6 +873,26 @@ public class DeepSeekAdvisorService {
         return applyTemplate(DEFAULT_STRUCTURED_BATCH_USER_PROMPT, values);
     }
 
+    private String buildPhase2bStructuredSystemPrompt() {
+        return loadPromptTemplate(
+                "phase2b_structured_system",
+                phase2bStructuredSystemPromptResource,
+                DEFAULT_PHASE2B_STRUCTURED_SYSTEM_PROMPT
+        );
+    }
+
+    private String buildPhase2bBlendSystemPrompt() {
+        return loadPromptTemplate(
+                "phase2b_blend_system",
+                phase2bBlendSystemPromptResource,
+                DEFAULT_PHASE2B_BLEND_SYSTEM_PROMPT
+        );
+    }
+
+    private String buildPhase2bStructuredUserPrompt(String bodyText) {
+        return String.valueOf(bodyText == null ? "" : bodyText).trim();
+    }
+
     private String renderTermsBlock(List<String> terms) {
         if (terms == null || terms.isEmpty()) {
             return "";
@@ -558,29 +913,22 @@ public class DeepSeekAdvisorService {
         if (!StringUtils.hasText(text)) {
             return StructuredAdviceResult.empty("structured-empty", text);
         }
-        String json = extractJsonObject(text);
-        if (!StringUtils.hasText(json)) {
-            return StructuredAdviceResult.empty("structured-no-json", text);
+        boolean foundJsonCandidate = false;
+        for (JsonNode node : parseJsonNodeCandidates(text)) {
+            foundJsonCandidate = true;
+            StructuredAdviceResult parsed = parseStructuredAdviceFromNode(node, text);
+            if (parsed != null && parsed.hasContent()) {
+                return parsed;
+            }
         }
-        try {
-            Map<String, Object> root = objectMapper.readValue(
-                    json,
-                    new TypeReference<Map<String, Object>>() {}
-            );
-            List<String> background = normalizeStringList(root.get("background"));
-            List<String> contextual = normalizeStringList(root.get("contextual_explanations"));
-            if (contextual.isEmpty()) {
-                contextual = normalizeStringList(root.get("contextualExplanations"));
-            }
-            List<String> depth = normalizeStringList(root.get("depth"));
-            List<String> breadth = normalizeStringList(root.get("breadth"));
-            if (breadth.isEmpty()) {
-                breadth = normalizeStringList(root.get("width"));
-            }
+        List<String> background = parseLooseArrayByKey(text, SECTION_KEYS_BACKGROUND);
+        List<String> contextual = parseLooseArrayByKey(text, SECTION_KEYS_CONTEXTUAL);
+        List<String> depth = parseLooseArrayByKey(text, SECTION_KEYS_DEPTH);
+        List<String> breadth = parseLooseArrayByKey(text, SECTION_KEYS_BREADTH);
+        if (!background.isEmpty() || !contextual.isEmpty() || !depth.isEmpty() || !breadth.isEmpty()) {
             return new StructuredAdviceResult(background, contextual, depth, breadth, "deepseek", text, "", "");
-        } catch (Exception ex) {
-            return StructuredAdviceResult.empty("structured-parse-error", text);
         }
+        return StructuredAdviceResult.empty(foundJsonCandidate ? "structured-parse-error" : "structured-no-json", text);
     }
 
     private Map<String, StructuredAdviceResult> parseStructuredAdviceBatch(
@@ -592,49 +940,19 @@ public class DeepSeekAdvisorService {
         if (!StringUtils.hasText(text)) {
             return Map.of();
         }
-        String json = extractJsonObject(text);
-        if (!StringUtils.hasText(json)) {
-            return Map.of();
-        }
-        try {
-            Map<String, Object> root = objectMapper.readValue(
-                    json,
-                    new TypeReference<Map<String, Object>>() {}
+        LinkedHashMap<String, StructuredAdviceResult> output = new LinkedHashMap<>();
+        for (JsonNode node : parseJsonNodeCandidates(text)) {
+            collectBatchStructuredAdvice(
+                    output,
+                    node,
+                    "",
+                    text,
+                    requestPayloadJson,
+                    responseBodyJson,
+                    0
             );
-            Object items = root.get("items");
-            if (!(items instanceof List<?> list) || list.isEmpty()) {
-                return Map.of();
-            }
-            LinkedHashMap<String, StructuredAdviceResult> output = new LinkedHashMap<>();
-            for (Object item : list) {
-                if (!(item instanceof Map<?, ?> rawMap) || rawMap.isEmpty()) {
-                    continue;
-                }
-                String term = normalizeTerm(String.valueOf(readAlias(rawMap, "term", "tag", "keyword", "insight_tag")));
-                if (!StringUtils.hasText(term)) {
-                    continue;
-                }
-                List<String> background = normalizeStringList(readAlias(rawMap, "background", "bg"));
-                List<String> contextual = normalizeStringList(readAlias(rawMap, "contextual_explanations", "contextualExplanations"));
-                List<String> depth = normalizeStringList(readAlias(rawMap, "depth", "deep", "principles", "mechanism"));
-                List<String> breadth = normalizeStringList(readAlias(rawMap, "breadth", "width", "cross_domain", "industry"));
-                output.put(
-                        normalizeTermKey(term),
-                        StructuredAdviceResult.deepseek(
-                                background,
-                                contextual,
-                                depth,
-                                breadth,
-                                text,
-                                requestPayloadJson,
-                                responseBodyJson
-                        )
-                );
-            }
-            return output;
-        } catch (Exception ex) {
-            return Map.of();
         }
+        return output;
     }
 
     private Object readAlias(Map<?, ?> source, String... aliases) {
@@ -737,24 +1055,574 @@ public class DeepSeekAdvisorService {
         return output;
     }
 
-    private String extractJsonObject(String text) {
-        int start = text.indexOf('{');
-        if (start < 0) {
+    private StructuredAdviceResult parseStructuredAdviceFromNode(JsonNode rootNode, String rawText) {
+        JsonNode sectionNode = resolveSectionCarrierNode(rootNode, 0);
+        if (sectionNode == null || !sectionNode.isObject()) {
             return null;
         }
-        int depth = 0;
-        for (int i = start; i < text.length(); i += 1) {
-            char ch = text.charAt(i);
-            if (ch == '{') {
-                depth += 1;
-            } else if (ch == '}') {
-                depth -= 1;
-                if (depth == 0) {
-                    return text.substring(start, i + 1);
+        List<String> background = readNodeListByAlias(sectionNode, SECTION_KEYS_BACKGROUND);
+        List<String> contextual = readNodeListByAlias(sectionNode, SECTION_KEYS_CONTEXTUAL);
+        List<String> depth = readNodeListByAlias(sectionNode, SECTION_KEYS_DEPTH);
+        List<String> breadth = readNodeListByAlias(sectionNode, SECTION_KEYS_BREADTH);
+        StructuredAdviceResult parsed = new StructuredAdviceResult(
+                background,
+                contextual,
+                depth,
+                breadth,
+                "deepseek",
+                rawText,
+                "",
+                ""
+        );
+        return parsed.hasContent() ? parsed : null;
+    }
+
+    private void collectBatchStructuredAdvice(
+            Map<String, StructuredAdviceResult> output,
+            JsonNode node,
+            String termHint,
+            String rawText,
+            String requestPayloadJson,
+            String responseBodyJson,
+            int depth
+    ) {
+        if (output == null || node == null || node.isNull() || depth > 6) {
+            return;
+        }
+        if (node.isTextual()) {
+            String nestedRaw = String.valueOf(node.asText("")).trim();
+            if (!StringUtils.hasText(nestedRaw) || (!nestedRaw.contains("{") && !nestedRaw.contains("["))) {
+                return;
+            }
+            for (JsonNode nested : parseJsonNodeCandidates(nestedRaw)) {
+                collectBatchStructuredAdvice(
+                        output,
+                        nested,
+                        termHint,
+                        rawText,
+                        requestPayloadJson,
+                        responseBodyJson,
+                        depth + 1
+                );
+            }
+            return;
+        }
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                collectBatchStructuredAdvice(
+                        output,
+                        item,
+                        termHint,
+                        rawText,
+                        requestPayloadJson,
+                        responseBodyJson,
+                        depth + 1
+                );
+            }
+            return;
+        }
+        if (!node.isObject()) {
+            return;
+        }
+        StructuredAdviceResult itemResult = parseStructuredAdviceFromNode(node, rawText);
+        String term = readNodeTextByAlias(node, TERM_KEYS);
+        if (!StringUtils.hasText(term)) {
+            term = normalizeTerm(termHint);
+        }
+        if (itemResult != null && itemResult.hasContent() && StringUtils.hasText(term)) {
+            output.putIfAbsent(
+                    normalizeTermKey(term),
+                    StructuredAdviceResult.deepseek(
+                            itemResult.background,
+                            itemResult.contextualExplanations,
+                            itemResult.depth,
+                            itemResult.breadth,
+                            rawText,
+                            requestPayloadJson,
+                            responseBodyJson
+                    )
+            );
+        }
+
+        for (String alias : LIST_CONTAINER_KEYS) {
+            JsonNode listNode = findNodeByAliases(node, alias);
+            if (listNode == null || listNode.isNull()) {
+                continue;
+            }
+            collectBatchStructuredAdvice(
+                    output,
+                    listNode,
+                    termHint,
+                    rawText,
+                    requestPayloadJson,
+                    responseBodyJson,
+                    depth + 1
+            );
+        }
+        for (String alias : WRAPPER_KEYS) {
+            JsonNode wrapped = findNodeByAliases(node, alias);
+            if (wrapped == null || wrapped.isNull()) {
+                continue;
+            }
+            collectBatchStructuredAdvice(
+                    output,
+                    wrapped,
+                    termHint,
+                    rawText,
+                    requestPayloadJson,
+                    responseBodyJson,
+                    depth + 1
+            );
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry == null) {
+                continue;
+            }
+            String key = normalizeTerm(entry.getKey());
+            JsonNode value = entry.getValue();
+            if (value == null || value.isNull()) {
+                continue;
+            }
+            String nextHint = isWrapperKey(key) ? termHint : key;
+            collectBatchStructuredAdvice(
+                    output,
+                    value,
+                    nextHint,
+                    rawText,
+                    requestPayloadJson,
+                    responseBodyJson,
+                    depth + 1
+            );
+        }
+    }
+
+    private JsonNode resolveSectionCarrierNode(JsonNode node, int depth) {
+        if (node == null || node.isNull() || depth > 6) {
+            return null;
+        }
+        if (node.isTextual()) {
+            String nestedRaw = String.valueOf(node.asText("")).trim();
+            if (!StringUtils.hasText(nestedRaw) || (!nestedRaw.contains("{") && !nestedRaw.contains("["))) {
+                return null;
+            }
+            for (JsonNode nested : parseJsonNodeCandidates(nestedRaw)) {
+                JsonNode resolved = resolveSectionCarrierNode(nested, depth + 1);
+                if (resolved != null) {
+                    return resolved;
+                }
+            }
+            return null;
+        }
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                JsonNode resolved = resolveSectionCarrierNode(item, depth + 1);
+                if (resolved != null) {
+                    return resolved;
+                }
+            }
+            return null;
+        }
+        if (!node.isObject()) {
+            return null;
+        }
+        if (containsSectionKey(node)) {
+            return node;
+        }
+
+        for (String alias : WRAPPER_KEYS) {
+            JsonNode wrapped = findNodeByAliases(node, alias);
+            if (wrapped == null || wrapped.isNull()) {
+                continue;
+            }
+            JsonNode resolved = resolveSectionCarrierNode(wrapped, depth + 1);
+            if (resolved != null) {
+                return resolved;
+            }
+        }
+
+        Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry == null || entry.getValue() == null || entry.getValue().isNull()) {
+                continue;
+            }
+            JsonNode resolved = resolveSectionCarrierNode(entry.getValue(), depth + 1);
+            if (resolved != null) {
+                return resolved;
+            }
+        }
+        return null;
+    }
+
+    private boolean containsSectionKey(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return false;
+        }
+        return findNodeByAliases(node, SECTION_KEYS_BACKGROUND) != null
+                || findNodeByAliases(node, SECTION_KEYS_CONTEXTUAL) != null
+                || findNodeByAliases(node, SECTION_KEYS_DEPTH) != null
+                || findNodeByAliases(node, SECTION_KEYS_BREADTH) != null;
+    }
+
+    private JsonNode findNodeByAliases(JsonNode source, String... aliases) {
+        if (source == null || !source.isObject() || aliases == null || aliases.length == 0) {
+            return null;
+        }
+        for (String alias : aliases) {
+            if (!StringUtils.hasText(alias)) {
+                continue;
+            }
+            JsonNode direct = source.get(alias);
+            if (direct != null) {
+                return direct;
+            }
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = source.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            if (entry == null || !StringUtils.hasText(entry.getKey())) {
+                continue;
+            }
+            for (String alias : aliases) {
+                if (StringUtils.hasText(alias) && entry.getKey().equalsIgnoreCase(alias)) {
+                    return entry.getValue();
                 }
             }
         }
         return null;
+    }
+
+    private String readNodeTextByAlias(JsonNode source, String... aliases) {
+        JsonNode node = findNodeByAliases(source, aliases);
+        if (node == null || node.isNull()) {
+            return "";
+        }
+        return normalizeTerm(node.asText(""));
+    }
+
+    private List<String> readNodeListByAlias(JsonNode source, String... aliases) {
+        JsonNode node = findNodeByAliases(source, aliases);
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        return normalizeStringListFromJsonNode(node);
+    }
+
+    private List<String> normalizeStringListFromJsonNode(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return List.of();
+        }
+        List<String> output = new ArrayList<>();
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                if (output.size() >= 3) {
+                    break;
+                }
+                if (item == null || item.isNull()) {
+                    continue;
+                }
+                if (item.isTextual() || item.isNumber() || item.isBoolean()) {
+                    appendStringLine(output, item.asText(""));
+                    continue;
+                }
+                if (item.isObject()) {
+                    List<String> nested = normalizeStringListFromJsonNode(item);
+                    for (String line : nested) {
+                        appendStringLine(output, line);
+                        if (output.size() >= 3) {
+                            break;
+                        }
+                    }
+                }
+            }
+            return output;
+        }
+        if (node.isTextual()) {
+            return normalizeStringList(node.asText(""));
+        }
+        if (node.isObject()) {
+            for (String key : STRING_LIST_OBJECT_KEYS) {
+                JsonNode listNode = findNodeByAliases(node, key);
+                if (listNode == null || listNode.isNull() || listNode == node) {
+                    continue;
+                }
+                List<String> nested = normalizeStringListFromJsonNode(listNode);
+                if (!nested.isEmpty()) {
+                    return nested;
+                }
+            }
+            for (String key : STRING_VALUE_OBJECT_KEYS) {
+                String text = readNodeTextByAlias(node, key);
+                if (StringUtils.hasText(text)) {
+                    return List.of(trimContext(text));
+                }
+            }
+            return List.of();
+        }
+        appendStringLine(output, node.asText(""));
+        return output;
+    }
+
+    private void appendStringLine(List<String> output, String rawLine) {
+        if (output == null || output.size() >= 3) {
+            return;
+        }
+        String line = trimContext(String.valueOf(rawLine == null ? "" : rawLine));
+        if (!StringUtils.hasText(line)) {
+            return;
+        }
+        output.add(line);
+    }
+
+    private List<JsonNode> parseJsonNodeCandidates(String rawText) {
+        String text = String.valueOf(rawText == null ? "" : rawText).trim();
+        if (!StringUtils.hasText(text)) {
+            return List.of();
+        }
+        LinkedHashSet<String> candidates = extractJsonCandidates(text);
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        List<JsonNode> output = new ArrayList<>();
+        for (String candidate : candidates) {
+            try {
+                output.add(objectMapper.readTree(candidate));
+            } catch (Exception ignored) {
+                // noop
+            }
+        }
+        return output;
+    }
+
+    private LinkedHashSet<String> extractJsonCandidates(String rawText) {
+        LinkedHashSet<String> candidates = new LinkedHashSet<>();
+        String text = String.valueOf(rawText == null ? "" : rawText).trim();
+        if (!StringUtils.hasText(text)) {
+            return candidates;
+        }
+        addJsonCandidate(candidates, text);
+        collectBalancedJsonCandidates(candidates, text);
+        String stripped = stripJsonFence(text);
+        if (!stripped.equals(text)) {
+            addJsonCandidate(candidates, stripped);
+            collectBalancedJsonCandidates(candidates, stripped);
+        }
+        return candidates;
+    }
+
+    private void addJsonCandidate(LinkedHashSet<String> candidates, String candidate) {
+        if (candidates == null) {
+            return;
+        }
+        String text = String.valueOf(candidate == null ? "" : candidate).trim();
+        if (!StringUtils.hasText(text)) {
+            return;
+        }
+        boolean objectLike = text.startsWith("{") && text.endsWith("}");
+        boolean arrayLike = text.startsWith("[") && text.endsWith("]");
+        if (objectLike || arrayLike) {
+            candidates.add(text);
+        }
+    }
+
+    private void collectBalancedJsonCandidates(LinkedHashSet<String> candidates, String text) {
+        if (candidates == null || !StringUtils.hasText(text)) {
+            return;
+        }
+        String source = String.valueOf(text);
+        ArrayDeque<Character> stack = new ArrayDeque<>();
+        boolean inString = false;
+        boolean escaped = false;
+        int start = -1;
+        for (int index = 0; index < source.length(); index += 1) {
+            char ch = source.charAt(index);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (ch == '{' || ch == '[') {
+                if (stack.isEmpty()) {
+                    start = index;
+                }
+                stack.push(ch);
+                continue;
+            }
+            if (ch == '}' || ch == ']') {
+                if (stack.isEmpty()) {
+                    start = -1;
+                    continue;
+                }
+                char open = stack.pop();
+                boolean matched = (open == '{' && ch == '}') || (open == '[' && ch == ']');
+                if (!matched) {
+                    stack.clear();
+                    start = -1;
+                    continue;
+                }
+                if (stack.isEmpty() && start >= 0) {
+                    String candidate = source.substring(start, index + 1).trim();
+                    addJsonCandidate(candidates, candidate);
+                    start = -1;
+                }
+            }
+        }
+    }
+
+    private String stripJsonFence(String text) {
+        String value = String.valueOf(text == null ? "" : text).trim();
+        if (!StringUtils.hasText(value)) {
+            return "";
+        }
+        if (value.startsWith("```")) {
+            int firstBreak = value.indexOf('\n');
+            if (firstBreak >= 0) {
+                value = value.substring(firstBreak + 1).trim();
+            }
+        }
+        if (value.endsWith("```")) {
+            value = value.substring(0, value.length() - 3).trim();
+        }
+        return value;
+    }
+
+    private List<String> parseLooseArrayByKey(String text, String... keys) {
+        if (!StringUtils.hasText(text) || keys == null || keys.length == 0) {
+            return List.of();
+        }
+        for (String key : keys) {
+            if (!StringUtils.hasText(key)) {
+                continue;
+            }
+            String quotedKey = "\"" + key + "\"";
+            int keyStart = text.indexOf(quotedKey);
+            if (keyStart < 0) {
+                continue;
+            }
+            int bracketStart = text.indexOf('[', keyStart + quotedKey.length());
+            if (bracketStart < 0) {
+                continue;
+            }
+            String arrayContent = extractArrayContentLoose(text, bracketStart);
+            List<String> lines = extractQuotedStrings(arrayContent);
+            if (!lines.isEmpty()) {
+                return lines;
+            }
+        }
+        return List.of();
+    }
+
+    private String extractArrayContentLoose(String text, int bracketStart) {
+        if (!StringUtils.hasText(text) || bracketStart < 0 || bracketStart >= text.length()) {
+            return "";
+        }
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        StringBuilder builder = new StringBuilder();
+        for (int index = bracketStart; index < text.length(); index += 1) {
+            char ch = text.charAt(index);
+            builder.append(ch);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') {
+                inString = !inString;
+                continue;
+            }
+            if (inString) {
+                continue;
+            }
+            if (ch == '[') {
+                depth += 1;
+            } else if (ch == ']') {
+                depth -= 1;
+                if (depth == 0) {
+                    return builder.toString();
+                }
+            }
+        }
+        return builder.toString();
+    }
+
+    private List<String> extractQuotedStrings(String text) {
+        if (!StringUtils.hasText(text)) {
+            return List.of();
+        }
+        List<String> output = new ArrayList<>();
+        int index = 0;
+        while (index < text.length() && output.size() < 3) {
+            int start = text.indexOf('"', index);
+            if (start < 0) {
+                break;
+            }
+            StringBuilder builder = new StringBuilder();
+            boolean escaped = false;
+            int cursor = start + 1;
+            while (cursor < text.length()) {
+                char ch = text.charAt(cursor);
+                if (escaped) {
+                    if (ch == 'n' || ch == 'r' || ch == 't') {
+                        builder.append(' ');
+                    } else {
+                        builder.append(ch);
+                    }
+                    escaped = false;
+                    cursor += 1;
+                    continue;
+                }
+                if (ch == '\\') {
+                    escaped = true;
+                    cursor += 1;
+                    continue;
+                }
+                if (ch == '"') {
+                    break;
+                }
+                builder.append(ch);
+                cursor += 1;
+            }
+            if (cursor >= text.length()) {
+                break;
+            }
+            String line = trimContext(builder.toString());
+            if (StringUtils.hasText(line)) {
+                output.add(line);
+            }
+            index = cursor + 1;
+        }
+        return output;
+    }
+
+    private boolean isWrapperKey(String key) {
+        String normalized = normalizeTerm(key).toLowerCase(Locale.ROOT);
+        if (!StringUtils.hasText(normalized)) {
+            return true;
+        }
+        for (String wrapper : WRAPPER_KEYS) {
+            if (normalized.equals(wrapper.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String loadPromptTemplate(String cacheKey, Resource resource, String defaultTemplate) {

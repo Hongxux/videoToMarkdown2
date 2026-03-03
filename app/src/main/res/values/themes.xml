@@ -2,4 +2,12 @@
 <resources>
 
     <style name="Theme.VideoToMarkdownTest2" parent="android:Theme.Material.Light.NoActionBar" />
+
+    <style name="Theme.VideoToMarkdownTest2.ShareOverlay" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowIsFloating">false</item>
+    </style>
 </resources>

@@ -141,7 +141,7 @@ public class TaskProcessingWorker {
             String outputDir = task.outputDir != null ? task.outputDir : "./output/" + task.taskId;
             TaskWatchdog watchdog = taskWatchdogFactory.create(task.taskId);
 
-            orchestrator.setProgressCallback((taskId, progress, message) -> {
+            orchestrator.setProgressCallback(task.taskId, (taskId, progress, message) -> {
                 if (!task.taskId.equals(taskId)) {
                     return;
                 }
@@ -181,6 +181,8 @@ public class TaskProcessingWorker {
             String userMessage = UserFacingErrorMapper.toUserMessage(rawError);
             taskQueueManager.failTask(task.taskId, rawError);
             webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, userMessage, null);
+        } finally {
+            orchestrator.clearProgressCallback(task.taskId);
         }
     }
 
@@ -227,7 +229,12 @@ public class TaskProcessingWorker {
             TaskWatchdog watchdog
     ) throws Exception {
         if (!watchdog.enabled()) {
-            return orchestrator.processVideo(task.taskId, task.videoUrl, outputDir);
+            return orchestrator.processVideo(
+                    task.taskId,
+                    task.videoUrl,
+                    outputDir,
+                    buildBookProcessingOptions(task)
+            );
         }
         Thread ownerThread = Thread.currentThread();
         AtomicReference<TaskWatchdog.Decision> decisionRef = new AtomicReference<>(TaskWatchdog.Decision.none());
@@ -261,6 +268,15 @@ public class TaskProcessingWorker {
                         null
                 );
             }
+            if (decision.action() == TaskWatchdog.Action.RESTART
+                    && !watchdog.shouldInterruptOnRestart(decision.stage())) {
+                logger.info(
+                        "[{}] Watchdog restart deferred for heartbeat-strong stage: stage={}",
+                        task.taskId,
+                        decision.stage()
+                );
+                return;
+            }
             ownerThread.interrupt();
         }, watchdog.pollIntervalMs(), watchdog.pollIntervalMs(), TimeUnit.MILLISECONDS);
 
@@ -273,7 +289,12 @@ public class TaskProcessingWorker {
                 decisionRef.set(TaskWatchdog.Decision.none());
                 try {
                     VideoProcessingOrchestrator.ProcessingResult result =
-                            orchestrator.processVideo(task.taskId, task.videoUrl, outputDir);
+                            orchestrator.processVideo(
+                                    task.taskId,
+                                    task.videoUrl,
+                                    outputDir,
+                                    buildBookProcessingOptions(task)
+                            );
                     TaskWatchdog.Decision decision = decisionRef.getAndSet(TaskWatchdog.Decision.none());
                     if (result != null && result.success) {
                         return result;
@@ -331,6 +352,26 @@ public class TaskProcessingWorker {
         if (Thread.currentThread().isInterrupted()) {
             Thread.interrupted();
         }
+    }
+
+    private VideoProcessingOrchestrator.BookProcessingOptions buildBookProcessingOptions(TaskEntry task) {
+        if (task == null || task.bookOptions == null) {
+            return null;
+        }
+        VideoProcessingOrchestrator.BookProcessingOptions options = new VideoProcessingOrchestrator.BookProcessingOptions();
+        options.chapterSelector = task.bookOptions.chapterSelector;
+        options.sectionSelector = task.bookOptions.sectionSelector;
+        options.splitByChapter = task.bookOptions.splitByChapter;
+        options.splitBySection = task.bookOptions.splitBySection;
+        options.pageOffset = task.bookOptions.pageOffset;
+        if ((options.chapterSelector == null || options.chapterSelector.isBlank())
+                && (options.sectionSelector == null || options.sectionSelector.isBlank())
+                && options.splitByChapter == null
+                && options.splitBySection == null
+                && options.pageOffset == null) {
+            return null;
+        }
+        return options;
     }
 
     private void finalizeCancelled(TaskEntry task, String message) {

@@ -20,6 +20,7 @@ import httpx
 
 from .client import LLMClient, LLMConfig, LLMResponse
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
+from services.python_grpc.src.content_pipeline.common.utils import json_payload_repair
 
 logger = logging.getLogger(__name__)
 _T = TypeVar("_T")
@@ -121,12 +122,23 @@ class _AsyncInFlightDeduper:
         self._lock = asyncio.Lock()
         self._inflight: Dict[str, asyncio.Future] = {}
 
+    @staticmethod
+    def _drain_future_exception(fut: asyncio.Future) -> None:
+        """避免 leader 失败且无 follower 时触发 Future 未读取异常告警。"""
+        try:
+            fut.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
     async def run(self, key: str, fn: Callable[[], Awaitable[_T]]) -> _T:
         loop = asyncio.get_running_loop()
         async with self._lock:
             fut = self._inflight.get(key)
             if fut is None:
                 fut = loop.create_future()
+                fut.add_done_callback(self._drain_future_exception)
                 self._inflight[key] = fut
                 leader = True
             else:
@@ -492,49 +504,36 @@ class DeepSeekClient(LLMClient):
         return text[start:].strip()
 
     def _load_json_with_repair(self, content: str) -> Any:
-        candidate = content
-        last_error: Optional[json.JSONDecodeError] = None
+        parsed, last_error = json_payload_repair.parse_json_payload(
+            content,
+            extra_repairers=[self._repair_json],
+        )
+        if parsed is not None:
+            return parsed
 
-        for _ in range(3):
-            try:
-                return json.loads(candidate)
-            except json.JSONDecodeError as error:
-                last_error = error
-                repaired = self._repair_json(candidate, error)
-                if not repaired or repaired == candidate:
-                    break
-                candidate = repaired
-
-        if last_error is not None:
+        if isinstance(last_error, json.JSONDecodeError):
             raise last_error
+        if last_error is not None:
+            raise json.JSONDecodeError(str(last_error), content, 0)
         raise json.JSONDecodeError("Invalid JSON", content, 0)
 
-    def _repair_json(self, content: str, error: json.JSONDecodeError) -> str:
-        repaired = content.strip()
-
-        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+    def _repair_json(self, content: str, error: Optional[json.JSONDecodeError] = None) -> str:
+        repaired = str(content or "").strip()
         repaired = re.sub(r"}\s*{", "},{", repaired)
         repaired = re.sub(r"]\s*\[", "],[", repaired)
+        repaired = re.sub(
+            r'("(?:(?:\\.)|[^"\\])*")\s+(?="[^"\\]+"\s*:)',
+            r"\1, ",
+            repaired,
+        )
 
-        if "Expecting ',' delimiter" in error.msg and 0 <= error.pos < len(repaired):
+        if error is not None and "Expecting ',' delimiter" in error.msg and 0 <= error.pos < len(repaired):
             token = repaired[error.pos]
             if token in {'"', "{", "["}:
                 repaired = repaired[: error.pos] + "," + repaired[error.pos :]
 
-        open_braces = repaired.count("{")
-        close_braces = repaired.count("}")
-        if open_braces > close_braces:
-            repaired += "}" * (open_braces - close_braces)
-
-        open_brackets = repaired.count("[")
-        close_brackets = repaired.count("]")
-        if open_brackets > close_brackets:
-            repaired += "]" * (open_brackets - close_brackets)
-
-        quote_count = len(re.findall(r'(?<!\\)"', repaired))
-        if quote_count % 2 != 0:
-            repaired += '"'
-
+        repaired = json_payload_repair.normalize_jsonish_text(repaired)
+        repaired = json_payload_repair.repair_unclosed_json(repaired)
         return repaired
 
     async def complete_batch(

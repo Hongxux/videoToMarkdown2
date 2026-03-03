@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 import time
@@ -11,6 +12,68 @@ def _to_non_negative_int(value: Any, fallback: int = 0) -> int:
         return max(0, int(value))
     except Exception:
         return max(0, int(fallback))
+
+
+logger = logging.getLogger(__name__)
+
+_HEARTBEAT_WRITE_RETRY_COUNT = max(
+    1,
+    _to_non_negative_int(os.getenv("WATCHDOG_HEARTBEAT_WRITE_RETRY_COUNT", 6), 6),
+)
+_HEARTBEAT_WRITE_RETRY_MS = max(
+    5,
+    _to_non_negative_int(os.getenv("WATCHDOG_HEARTBEAT_WRITE_RETRY_MS", 25), 25),
+)
+
+
+def _remove_file_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return
+    except Exception:
+        return
+
+
+def persist_watchdog_payload(path: str, payload: Dict[str, Any]) -> Optional[str]:
+    """
+    以最佳努力方式持久化 watchdog 心跳文件。
+    优先原子替换，失败后重试并最终降级为直接覆盖写入。
+    """
+    target_path = os.path.abspath(str(path or "").strip())
+    if not target_path:
+        return "target path is empty"
+    parent_dir = os.path.dirname(target_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+
+    last_error: Optional[Exception] = None
+    for attempt in range(_HEARTBEAT_WRITE_RETRY_COUNT):
+        tmp_path = (
+            f"{target_path}.tmp.{os.getpid()}."
+            f"{threading.get_ident()}."
+            f"{time.time_ns()}"
+        )
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as file:
+                json.dump(payload, file, ensure_ascii=False)
+            os.replace(tmp_path, target_path)
+            return None
+        except Exception as error:
+            last_error = error
+            _remove_file_quietly(tmp_path)
+            if attempt + 1 < _HEARTBEAT_WRITE_RETRY_COUNT:
+                delay_sec = (_HEARTBEAT_WRITE_RETRY_MS * (attempt + 1)) / 1000.0
+                time.sleep(delay_sec)
+
+    try:
+        with open(target_path, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False)
+        return None
+    except Exception as fallback_error:
+        if last_error is None:
+            return str(fallback_error)
+        return f"atomic_write_error={last_error}; fallback_write_error={fallback_error}"
 
 
 class _TaskSignalBuffer:
@@ -142,10 +205,29 @@ class TaskWatchdogSignalWriter:
         self._lock = threading.Lock()
         self._path = os.path.join(self._output_dir, "intermediates", self.HEARTBEAT_FILE)
         os.makedirs(os.path.dirname(self._path), exist_ok=True)
+        self._last_persist_error_message = ""
+        self._last_persist_error_at_ms = 0
 
     @property
     def path(self) -> str:
         return self._path
+
+    def _log_persist_error(self, *, checkpoint: str, error_message: str) -> None:
+        now_ms = int(time.time() * 1000)
+        if (
+            error_message == self._last_persist_error_message
+            and now_ms - self._last_persist_error_at_ms < 10_000
+        ):
+            return
+        self._last_persist_error_message = error_message
+        self._last_persist_error_at_ms = now_ms
+        logger.warning(
+            "[%s] Task watchdog heartbeat persist degraded: stage=%s checkpoint=%s error=%s",
+            self._task_id,
+            self._stage,
+            checkpoint,
+            error_message,
+        )
 
     def emit(
         self,
@@ -195,7 +277,9 @@ class TaskWatchdogSignalWriter:
             published_payload = publish_watchdog_signal(payload)
             if isinstance(published_payload, dict):
                 payload["stream_seq"] = _to_non_negative_int(published_payload.get("stream_seq"), 0)
-            tmp_path = f"{self._path}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as file:
-                json.dump(payload, file, ensure_ascii=False)
-            os.replace(tmp_path, self._path)
+            persist_error = persist_watchdog_payload(self._path, payload)
+            if persist_error:
+                self._log_persist_error(
+                    checkpoint=safe_checkpoint,
+                    error_message=persist_error,
+                )

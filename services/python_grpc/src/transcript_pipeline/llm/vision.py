@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .client import LLMClient, LLMConfig, LLMResponse
+from services.python_grpc.src.content_pipeline.common.utils import json_payload_repair
 
 
 class ERNIEVisionClient(LLMClient):
@@ -363,75 +364,46 @@ class ERNIEVisionClient(LLMClient):
         - 结构化结果字典（包含关键字段信息）。"""
         response = await self.complete(prompt, system_prompt, **kwargs)
         
-        content = response.content.strip()
-        if "```json" in content:
-            start = content.find("```json") + 7
-            end = content.find("```", start)
-            content = content[start:end].strip()
-        elif "```" in content:
-            start = content.find("```") + 3
-            end = content.find("```", start)
-            content = content[start:end].strip()
-            
+        content = self._extract_json_content(response.content)
         try:
-            parsed = json.loads(content)
+            parsed = self._load_json_with_repair(content)
             return parsed, response
         except json.JSONDecodeError as e:
-            # 尝试修复 JSON
-            repaired = self._repair_json(content)
-            if repaired:
-                try:
-                    parsed = json.loads(repaired)
-                    return parsed, response
-                except json.JSONDecodeError:
-                    pass
-            
             raise ValueError(f"Failed to parse JSON: {e}\nContent: {content[:500]}")
     
+    def _extract_json_content(self, content: str) -> str:
+        text = str(content or "").strip()
+        if "```json" in text:
+            start = text.find("```json") + 7
+            end = text.find("```", start)
+            if end != -1:
+                text = text[start:end].strip()
+        elif "```" in text:
+            start = text.find("```") + 3
+            end = text.find("```", start)
+            if end != -1:
+                text = text[start:end].strip()
+        return text
+
+    def _load_json_with_repair(self, content: str) -> Any:
+        parsed, last_error = json_payload_repair.parse_json_payload(
+            content,
+            extra_repairers=[self._repair_json],
+        )
+        if parsed is not None:
+            return parsed
+        if isinstance(last_error, json.JSONDecodeError):
+            raise last_error
+        if last_error is not None:
+            raise json.JSONDecodeError(str(last_error), content, 0)
+        raise json.JSONDecodeError("Invalid JSON", content, 0)
+
     def _repair_json(self, content: str) -> Optional[str]:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过JSON 解析/序列化实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：open_braces > close_braces
-        - 条件：open_brackets > close_brackets
-        - 条件：content.endswith(',}')
-        依据来源（证据链）：
-        - 输入参数：content。
-        输入参数：
-        - content: 文本内容（类型：str）。
-        输出参数：
-        - 函数计算/封装后的结果对象。"""
-        # 1. 修复缺失的结尾大括号
-        open_braces = content.count('{')
-        close_braces = content.count('}')
-        if open_braces > close_braces:
-            content = content + '}' * (open_braces - close_braces)
-        
-        # 2. 修复缺失的结尾方括号
-        open_brackets = content.count('[')
-        close_brackets = content.count(']')
-        if open_brackets > close_brackets:
-            content = content + ']' * (open_brackets - close_brackets)
-        
-        # 3. 移除末尾的逗号（在对象或数组结束前）
-        content = content.rstrip()
-        if content.endswith(',}'):
-            content = content[:-2] + '}'
-        if content.endswith(',]'):
-            content = content[:-2] + ']'
-        
-        # 4. 修复未闭合的字符串（简单情况）
-        # 检查引号是否配对
-        quote_count = content.count('"') - content.count('\\"')
-        if quote_count % 2 != 0:
-            # 如果引号数量为奇数，尝试在末尾添加引号
-            content = content + '"'
-        
-        return content
+        if not content:
+            return None
+        repaired = json_payload_repair.normalize_jsonish_text(content)
+        repaired = json_payload_repair.repair_unclosed_json(repaired)
+        return repaired
     
     async def validate_frame(
         self,
@@ -490,14 +462,10 @@ class ERNIEVisionClient(LLMClient):
         response = await self.complete_with_image(prompt, image_path)
         
         # 解析响应
-        content = response.content.strip()
-        if "```json" in content:
-            start = content.find("```json") + 7
-            end = content.find("```", start)
-            content = content[start:end].strip()
-            
+        content = self._extract_json_content(response.content)
         try:
-            result = json.loads(content)
+            parsed_result = self._load_json_with_repair(content)
+            result = parsed_result if isinstance(parsed_result, dict) else {"answers": [], "error": "Failed to parse response"}
         except json.JSONDecodeError:
             result = {"answers": [], "error": "Failed to parse response"}
         

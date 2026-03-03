@@ -321,6 +321,7 @@ public class TaskProgressWatchdogBridge {
             case "transcribe" -> new StageRange(0.14d, 0.25d);
             case "stage1" -> new StageRange(0.25d, 0.35d);
             case "phase2a" -> new StageRange(0.35d, 0.45d);
+            case "analysis_extraction" -> new StageRange(0.40d, 0.80d);
             case "phase2b" -> new StageRange(0.90d, 0.98d);
             case "finalize" -> new StageRange(0.98d, 0.995d);
             default -> new StageRange(0.30d, 0.70d);

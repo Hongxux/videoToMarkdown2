@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -42,6 +43,9 @@ public class AndroidAppUpdateAdminService {
     @Value("${mobile.app.update.android.publish-history-path:var/app-updates/android/publish-history.json}")
     private String androidPublishHistoryPath;
 
+    @Autowired
+    private FileTransferService fileTransferService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public synchronized UploadReleaseResult uploadRelease(
@@ -77,7 +81,7 @@ public class AndroidAppUpdateAdminService {
             throw new IllegalArgumentException("APK 存储路径越界");
         }
 
-        Files.copy(apkFile.getInputStream(), targetApkPath, StandardCopyOption.REPLACE_EXISTING);
+        fileTransferService.persistMultipartToPath(releaseApkDir, targetApkPath, apkFile);
         long fileSizeBytes = Files.size(targetApkPath);
         String sha256 = sha256Hex(targetApkPath);
         String publishedAt = Instant.now().toString();

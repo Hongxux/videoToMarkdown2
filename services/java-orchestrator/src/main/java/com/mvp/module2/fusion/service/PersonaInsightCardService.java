@@ -42,6 +42,9 @@ public class PersonaInsightCardService {
 
     private static final Pattern UNSAFE_PATH_SEGMENT = Pattern.compile("[^\\p{L}\\p{N}._-]");
     private static final Pattern LINE_BREAK_PATTERN = Pattern.compile("[\\r\\n]+");
+    private static final Pattern SEMANTIC_LABEL_PATTERN = Pattern.compile(
+            "^(\\s*(?:[-*+]\\s+|\\d+\\.\\s+)?)((?:【[^】]{1,48}】|[\\p{L}\\p{N}\\u4E00-\\u9FFF_\\-()/（）·]{2,48})[：:])(\\s*)(.+)$"
+    );
     private static final String STORAGE_TASK_PREFIX = "storage:";
     private static final String TASK_META_FILE_NAME = "mobile_task_meta.json";
     private static final String TASK_CACHE_DIR = ".mobile_persona_cache";
@@ -52,11 +55,10 @@ public class PersonaInsightCardService {
     private static final int DEFAULT_MAX_TAGS = 48;
     private static final int DEFAULT_MAX_RELATED_TAGS = 8;
     private static final int DEFAULT_MAX_SNIPPETS = 3;
-    private static final int CARD_GENERATION_CONCURRENCY = 64;
+    private static final String SECTION_BACKGROUND = "## 背景知识";
     private static final String SECTION_CONTEXTUAL = "## 语境化解释";
     private static final String SECTION_DEPTH = "## 深度";
     private static final String SECTION_BREADTH = "## 广度";
-    private static final String SECTION_CONTEXT_SNAPSHOT_PREFIX = "### 语境快照@";
     private static final List<String> LEGACY_CARD_MARKERS = List.of(
             "## 语",
             "### 语",
@@ -85,8 +87,8 @@ public class PersonaInsightCardService {
     @Value("${telemetry.persona-reading.insight-cards.regenerate-on-legacy-marker:true}")
     private boolean regenerateOnLegacyMarker;
 
-    @Value("${telemetry.persona-reading.insight-cards.batch-max-terms:8}")
-    private int batchMaxTerms;
+    @Value("${telemetry.persona-reading.insight-cards.max-inflight:64}")
+    private int cardGenerationMaxInflight;
 
     @Autowired(required = false)
     private DeepSeekAdvisorService deepSeekAdvisorService;
@@ -102,18 +104,9 @@ public class PersonaInsightCardService {
     private final Map<String, Object> generationLocks = new ConcurrentHashMap<>();
     private final Map<String, String> optimisticInFlightTokens = new ConcurrentHashMap<>();
     private final Object llmPermitLock = new Object();
+    private final Object cardGenerationExecutorLock = new Object();
     private final AtomicInteger cardGenerationThreadIndex = new AtomicInteger(1);
-    private final ExecutorService cardGenerationExecutor = Executors.newFixedThreadPool(
-            CARD_GENERATION_CONCURRENCY,
-            runnable -> {
-                Thread thread = new Thread(
-                        runnable,
-                        "InsightCardGen-" + cardGenerationThreadIndex.getAndIncrement()
-                );
-                thread.setDaemon(true);
-                return thread;
-            }
-    );
+    private volatile ExecutorService cardGenerationExecutor;
     private volatile Semaphore llmPermitSemaphore;
 
     @Async("taskExecutor")
@@ -137,14 +130,20 @@ public class PersonaInsightCardService {
 
     @PreDestroy
     public void shutdownExecutor() {
-        cardGenerationExecutor.shutdown();
+        ExecutorService executor = cardGenerationExecutor;
+        if (executor == null) {
+            return;
+        }
+        executor.shutdown();
         try {
-            if (!cardGenerationExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                cardGenerationExecutor.shutdownNow();
+            if (!executor.awaitTermination(5, TimeUnit.SECONDS)) {
+                executor.shutdownNow();
             }
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
-            cardGenerationExecutor.shutdownNow();
+            executor.shutdownNow();
+        } finally {
+            cardGenerationExecutor = null;
         }
     }
 
@@ -243,25 +242,23 @@ public class PersonaInsightCardService {
             return;
         }
 
-        Map<String, DeepSeekAdvisorService.StructuredAdviceResult> batchAdviceByCanonical = buildBatchAdviceByCanonicalKey(tagContexts);
+        ExecutorService executor = resolveCardGenerationExecutor();
         List<CompletableFuture<IndexedInsightCardEntry>> futures = new ArrayList<>();
         for (int index = 0; index < tagContexts.size(); index += 1) {
             final int entryIndex = index;
             final TagContext context = tagContexts.get(index);
-            final DeepSeekAdvisorService.StructuredAdviceResult prefetchedAdvice = batchAdviceByCanonical.get(context.canonicalKey);
             futures.add(
                     CompletableFuture
                             .supplyAsync(
                                     () -> buildInsightCardEntry(
                                             taskId,
                                             userKey,
-                                            articleKey,
-                                            workDir,
-                                            context,
-                                            prefetchedAdvice,
-                                            entryIndex
+                                    articleKey,
+                                    workDir,
+                                    context,
+                                    entryIndex
                                     ),
-                                    cardGenerationExecutor
+                                    executor
                             )
                             .exceptionally(ex -> {
                                 logger.warn(
@@ -300,7 +297,6 @@ public class PersonaInsightCardService {
             String articleKey,
             Path workDir,
             TagContext context,
-            DeepSeekAdvisorService.StructuredAdviceResult prefetchedAdvice,
             int index
     ) {
         InsightCardResult cardResult = upsertCardForTag(
@@ -308,8 +304,7 @@ public class PersonaInsightCardService {
                 userKey,
                 articleKey,
                 context,
-                workDir,
-                prefetchedAdvice
+                workDir
         );
         if (cardResult == null) {
             return null;
@@ -351,8 +346,7 @@ public class PersonaInsightCardService {
             String userKey,
             String articleKey,
             TagContext context,
-            Path workDir,
-            DeepSeekAdvisorService.StructuredAdviceResult prefetchedAdvice
+            Path workDir
     ) {
         Instant startedAt = Instant.now();
         Map<String, Object> llmTrace = new LinkedHashMap<>();
@@ -366,8 +360,6 @@ public class PersonaInsightCardService {
         try {
             CardStorageService.CardReadResult existing = cardStorageService.readCard(context.tag);
             String contextualLine = buildContextualLine(context);
-            String relatedWikilinks = renderRelatedWikilinks(context.relatedTags);
-            String articleSection = buildArticleSectionStable(articleKey, context, contextualLine, relatedWikilinks);
 
             String source = "reused";
             String llmRaw = "";
@@ -378,48 +370,38 @@ public class PersonaInsightCardService {
             boolean shouldRegenerate = existing.exists && shouldRegenerateExistingCard(currentBody);
 
             if (existing.exists && !shouldRegenerate) {
-                if (containsContextSnapshotForArticle(currentBody, articleKey)) {
-                    targetMarkdown = currentBody;
-                } else {
-                    targetMarkdown = appendSection(currentBody, articleSection);
-                }
+                targetMarkdown = currentBody;
             } else {
                 source = existing.exists ? "regenerated" : "generated";
                 String contextBlock = context.primaryContextBlock();
                 String contextExample = context.primaryReason();
                 StructuredAdviceSections sections;
                 try {
-                    DeepSeekAdvisorService.StructuredAdviceResult advice = null;
-                    boolean usedBatchAdvice = false;
-                    if (prefetchedAdvice != null && prefetchedAdvice.hasContent()) {
-                        advice = prefetchedAdvice;
-                        usedBatchAdvice = true;
+                    DeepSeekAdvisorService.StructuredAdviceResult advice;
+                    acquireLlmPermit();
+                    try {
+                        advice = deepSeekAdvisorService.requestStructuredAdvice(
+                                context.tag,
+                                contextBlock,
+                                contextExample,
+                                true
+                        );
+                    } finally {
+                        releaseLlmPermit();
                     }
-                    if (advice == null) {
-                        acquireLlmPermit();
-                        try {
-                            advice = deepSeekAdvisorService.requestStructuredAdvice(
-                                    context.tag,
-                                    contextBlock,
-                                    contextExample,
-                                    true
-                            );
-                        } finally {
-                            releaseLlmPermit();
-                        }
-                    }
-                    llmTrace.put("llmMode", usedBatchAdvice ? "batch_shared_prompt" : "single_term");
+                    llmTrace.put("llmMode", "single_term");
                     llmRaw = String.valueOf(advice.raw == null ? "" : advice.raw).trim();
                     llmRequestPayloadJson = String.valueOf(advice.requestPayloadJson == null ? "" : advice.requestPayloadJson).trim();
                     llmResponseBodyJson = String.valueOf(advice.responseBodyJson == null ? "" : advice.responseBodyJson).trim();
                     source = StringUtils.hasText(advice.source) ? advice.source : source;
-                    if (usedBatchAdvice && "deepseek".equalsIgnoreCase(source)) {
-                        source = "deepseek-batch";
-                    }
                     sections = sectionsFromAdvice(advice);
-                    if (sections.contextual.isEmpty() && sections.depth.isEmpty() && sections.breadth.isEmpty()) {
+                    if (sections.background.isEmpty()
+                            && sections.contextual.isEmpty()
+                            && sections.depth.isEmpty()
+                            && sections.breadth.isEmpty()) {
                         sections = parseAdviceSectionsFromJson(llmRaw, contextualLine);
                     }
+                    sections = fillMissingSectionDefaults(sections, contextualLine);
                     llmTrace.put("status", "OK");
                     llmTrace.put("source", source);
                     llmTrace.put("llmRaw", llmRaw);
@@ -431,7 +413,7 @@ public class PersonaInsightCardService {
                     llmTrace.put("status", "FALLBACK");
                     llmTrace.put("error", llmEx.getMessage());
                 }
-                targetMarkdown = buildInitialCardBodyFromJson(context, sections, articleSection);
+                targetMarkdown = buildInitialCardBodyFromJson(sections);
             }
 
             CardStorageService.CardWriteOptions options = new CardStorageService.CardWriteOptions();
@@ -535,208 +517,6 @@ public class PersonaInsightCardService {
             }
         }
         return contexts;
-    }
-
-    private Map<String, DeepSeekAdvisorService.StructuredAdviceResult> buildBatchAdviceByCanonicalKey(List<TagContext> tagContexts) {
-        LinkedHashMap<String, DeepSeekAdvisorService.StructuredAdviceResult> output = new LinkedHashMap<>();
-        if (deepSeekAdvisorService == null || tagContexts == null || tagContexts.size() < 2) {
-            return output;
-        }
-        LinkedHashMap<String, List<TagContext>> grouped = groupTagContextsByNodeSignature(tagContexts);
-        int maxTermsPerBatch = Math.max(2, batchMaxTerms > 0 ? batchMaxTerms : 8);
-        for (Map.Entry<String, List<TagContext>> entry : grouped.entrySet()) {
-            List<TagContext> group = entry.getValue();
-            if (group == null || group.size() < 2) {
-                continue;
-            }
-            for (int start = 0; start < group.size(); start += maxTermsPerBatch) {
-                int end = Math.min(group.size(), start + maxTermsPerBatch);
-                List<TagContext> batchGroup = group.subList(start, end);
-                if (batchGroup.size() < 2) {
-                    continue;
-                }
-                List<String> terms = new ArrayList<>();
-                for (TagContext context : batchGroup) {
-                    if (context == null || !StringUtils.hasText(context.tag)) {
-                        continue;
-                    }
-                    if (!containsIgnoreCase(terms, context.tag)) {
-                        terms.add(context.tag);
-                    }
-                }
-                if (terms.size() < 2) {
-                    continue;
-                }
-                String sharedContext = buildSharedContextForGroup(batchGroup);
-                String sharedExample = buildSharedAnchorForGroup(batchGroup);
-                try {
-                    Map<String, DeepSeekAdvisorService.StructuredAdviceResult> adviceByTerm;
-                    acquireLlmPermit();
-                    try {
-                        adviceByTerm = deepSeekAdvisorService.requestStructuredAdviceBatch(
-                                terms,
-                                sharedContext,
-                                sharedExample,
-                                true
-                        );
-                    } finally {
-                        releaseLlmPermit();
-                    }
-                    for (TagContext context : batchGroup) {
-                        if (context == null || !StringUtils.hasText(context.canonicalKey)) {
-                            continue;
-                        }
-                        DeepSeekAdvisorService.StructuredAdviceResult advice = resolveAdviceByTerm(adviceByTerm, context.tag);
-                        if (advice != null && advice.hasContent()) {
-                            output.put(context.canonicalKey, advice);
-                        }
-                    }
-                } catch (Exception ex) {
-                    logger.warn(
-                            "batch structured advice failed: nodeSignature={} terms={} err={}",
-                            entry.getKey(),
-                            terms.size(),
-                            ex.getMessage()
-                    );
-                }
-            }
-        }
-        return output;
-    }
-
-    private LinkedHashMap<String, List<TagContext>> groupTagContextsByNodeSignature(List<TagContext> contexts) {
-        LinkedHashMap<String, List<TagContext>> grouped = new LinkedHashMap<>();
-        if (contexts == null || contexts.isEmpty()) {
-            return grouped;
-        }
-        for (TagContext context : contexts) {
-            if (context == null || !StringUtils.hasText(context.tag)) {
-                continue;
-            }
-            String signature = nodeSignatureForContext(context);
-            grouped.computeIfAbsent(signature, key -> new ArrayList<>()).add(context);
-        }
-        return grouped;
-    }
-
-    private String nodeSignatureForContext(TagContext context) {
-        if (context == null || context.nodeIds.isEmpty()) {
-            return "single:" + (context == null ? "" : context.canonicalKey);
-        }
-        List<String> nodeIds = new ArrayList<>();
-        for (String nodeId : context.nodeIds) {
-            String normalized = trimText(nodeId, 64);
-            if (StringUtils.hasText(normalized) && !containsIgnoreCase(nodeIds, normalized)) {
-                nodeIds.add(normalized);
-            }
-        }
-        if (nodeIds.isEmpty()) {
-            return "single:" + context.canonicalKey;
-        }
-        nodeIds.sort(String.CASE_INSENSITIVE_ORDER);
-        return "nodes:" + String.join("|", nodeIds);
-    }
-
-    private String buildSharedContextForGroup(List<TagContext> group) {
-        if (group == null || group.isEmpty()) {
-            return "";
-        }
-        int contextCap = Math.max(1, Math.min(6, Math.max(1, maxSnippets > 0 ? maxSnippets : DEFAULT_MAX_SNIPPETS) * 2));
-        int maxChars = Math.max(360, (maxContextChars <= 0 ? DEFAULT_MAX_CONTEXT_CHARS : maxContextChars) * 3);
-        LinkedHashSet<String> blocks = new LinkedHashSet<>();
-        for (TagContext context : group) {
-            if (context == null) {
-                continue;
-            }
-            String block = context.primaryContextBlock();
-            if (!StringUtils.hasText(block)) {
-                block = context.primarySnippet();
-            }
-            block = trimText(block, maxChars);
-            if (!StringUtils.hasText(block)) {
-                continue;
-            }
-            blocks.add(block);
-            if (blocks.size() >= contextCap) {
-                break;
-            }
-        }
-        if (blocks.isEmpty()) {
-            return "";
-        }
-        StringBuilder builder = new StringBuilder();
-        int index = 0;
-        for (String block : blocks) {
-            if (index > 0) {
-                builder.append('\n').append('\n').append("---").append('\n').append('\n');
-            }
-            builder.append(block);
-            index += 1;
-        }
-        return builder.toString().trim();
-    }
-
-    private String buildSharedAnchorForGroup(List<TagContext> group) {
-        if (group == null || group.isEmpty()) {
-            return "";
-        }
-        LinkedHashSet<String> anchors = new LinkedHashSet<>();
-        int anchorCap = 4;
-        for (TagContext context : group) {
-            if (context == null) {
-                continue;
-            }
-            String reason = trimText(context.primaryReason(), 180);
-            if (!StringUtils.hasText(reason)) {
-                continue;
-            }
-            anchors.add(reason);
-            if (anchors.size() >= anchorCap) {
-                break;
-            }
-        }
-        if (anchors.isEmpty()) {
-            for (TagContext context : group) {
-                if (context == null) {
-                    continue;
-                }
-                String snippet = trimText(context.primarySnippet(), 120);
-                if (!StringUtils.hasText(snippet)) {
-                    continue;
-                }
-                anchors.add(snippet);
-                if (anchors.size() >= anchorCap) {
-                    break;
-                }
-            }
-        }
-        if (anchors.isEmpty()) {
-            return "";
-        }
-        return String.join("；", anchors);
-    }
-
-    private DeepSeekAdvisorService.StructuredAdviceResult resolveAdviceByTerm(
-            Map<String, DeepSeekAdvisorService.StructuredAdviceResult> adviceByTerm,
-            String term
-    ) {
-        if (adviceByTerm == null || adviceByTerm.isEmpty() || !StringUtils.hasText(term)) {
-            return null;
-        }
-        DeepSeekAdvisorService.StructuredAdviceResult direct = adviceByTerm.get(term);
-        if (direct != null) {
-            return direct;
-        }
-        String candidate = trimText(term, 96);
-        for (Map.Entry<String, DeepSeekAdvisorService.StructuredAdviceResult> entry : adviceByTerm.entrySet()) {
-            if (entry == null || !StringUtils.hasText(entry.getKey())) {
-                continue;
-            }
-            if (entry.getKey().equalsIgnoreCase(candidate)) {
-                return entry.getValue();
-            }
-        }
-        return null;
     }
 
     private List<String> filterTagsFromRawMarkdown(List<String> tags, String rawMarkdown) {
@@ -906,6 +686,7 @@ public class PersonaInsightCardService {
         StructuredAdviceSections sections = new StructuredAdviceSections();
         String normalized = stripJsonFence(String.valueOf(rawAdvice == null ? "" : rawAdvice).trim());
         if (!StringUtils.hasText(normalized)) {
+            sections.background.add("该术语对应当前主题的关键背景约束与问题起点。");
             sections.contextual.add(trimText(fallbackContextLine, 220));
             sections.depth.add("该术语涉及底层约束、机制与反馈回路。");
             sections.breadth.add("该术语可映射到跨场景的工程与产品协同问题。");
@@ -919,6 +700,12 @@ public class PersonaInsightCardService {
             Map<String, Object> root = objectMapper.readValue(
                     json,
                     new TypeReference<Map<String, Object>>() {}
+            );
+            sections.background = parseJsonListFromRoot(
+                    root,
+                    "background",
+                    "bg",
+                    "background_knowledge"
             );
             sections.contextual = parseJsonListFromRoot(
                     root,
@@ -942,14 +729,22 @@ public class PersonaInsightCardService {
                     "industry"
             );
         } catch (Exception ex) {
+            sections.background = parseLooseArrayByKey(normalized, "background", "bg", "background_knowledge");
             sections.contextual = parseLooseArrayByKey(normalized, "contextual_explanations", "contextualExplanations");
             sections.depth = parseLooseArrayByKey(normalized, "depth", "deep", "principles", "mechanism");
             sections.breadth = parseLooseArrayByKey(normalized, "breadth", "width", "cross_domain", "industry");
-            if (sections.contextual.isEmpty() && sections.depth.isEmpty() && sections.breadth.isEmpty()) {
+            if (sections.background.isEmpty()
+                    && sections.contextual.isEmpty()
+                    && sections.depth.isEmpty()
+                    && sections.breadth.isEmpty()) {
+                sections.background = List.of("该术语对应当前主题的关键背景约束与问题起点。");
                 sections.contextual = List.of(trimText(fallbackContextLine, 220));
                 sections.depth = List.of("模型返回非结构化 JSON，已回退默认解释。");
                 sections.breadth = List.of("建议检查 structured prompt 与模型输出格式。");
             }
+        }
+        if (sections.background.isEmpty()) {
+            sections.background = List.of("该术语对应当前主题的关键背景约束与问题起点。");
         }
         if (sections.contextual.isEmpty()) {
             sections.contextual = List.of(trimText(fallbackContextLine, 220));
@@ -968,10 +763,28 @@ public class PersonaInsightCardService {
         if (advice == null) {
             return sections;
         }
+        sections.background = normalizeAdviceLines(advice.background);
         sections.contextual = normalizeAdviceLines(advice.contextualExplanations);
         sections.depth = normalizeAdviceLines(advice.depth);
         sections.breadth = normalizeAdviceLines(advice.breadth);
         return sections;
+    }
+
+    private StructuredAdviceSections fillMissingSectionDefaults(StructuredAdviceSections sections, String fallbackContextLine) {
+        StructuredAdviceSections resolved = sections != null ? sections : new StructuredAdviceSections();
+        if (resolved.background == null || resolved.background.isEmpty()) {
+            resolved.background = List.of("该术语对应当前主题的关键背景约束与问题起点。");
+        }
+        if (resolved.contextual == null || resolved.contextual.isEmpty()) {
+            resolved.contextual = List.of(trimText(fallbackContextLine, 220));
+        }
+        if (resolved.depth == null || resolved.depth.isEmpty()) {
+            resolved.depth = List.of("该术语涉及底层约束、机制与反馈回路。");
+        }
+        if (resolved.breadth == null || resolved.breadth.isEmpty()) {
+            resolved.breadth = List.of("该术语可映射到跨场景的工程与产品协同问题。");
+        }
+        return resolved;
     }
 
     private List<String> normalizeAdviceLines(List<String> rawLines) {
@@ -980,7 +793,7 @@ public class PersonaInsightCardService {
         }
         List<String> output = new ArrayList<>();
         for (String line : rawLines) {
-            String text = trimText(String.valueOf(line == null ? "" : line), 320);
+            String text = normalizeMarkdownSectionText(String.valueOf(line == null ? "" : line), 1600);
             if (!StringUtils.hasText(text)) {
                 continue;
             }
@@ -1084,14 +897,18 @@ public class PersonaInsightCardService {
             String unescaped = raw
                     .replace("\\\\", "\\")
                     .replace("\\\"", "\"")
-                    .replace("\\n", " ")
-                    .replace("\\r", " ")
-                    .replace("\\t", " ")
+                    .replace("\\n", "\n")
+                    .replace("\\r", "\n")
+                    .replace("\\t", "    ")
                     .trim();
             if (!StringUtils.hasText(unescaped)) {
                 continue;
             }
-            output.add(trimText(unescaped, 320));
+            String normalized = normalizeMarkdownSectionText(unescaped, 1600);
+            if (!StringUtils.hasText(normalized)) {
+                continue;
+            }
+            output.add(normalized);
             if (output.size() >= 6) {
                 break;
             }
@@ -1111,7 +928,7 @@ public class PersonaInsightCardService {
             List<String> output = new ArrayList<>();
             if (raw instanceof List<?> list) {
                 for (Object item : list) {
-                    String line = trimText(String.valueOf(item == null ? "" : item), 320);
+                    String line = normalizeMarkdownSectionText(String.valueOf(item == null ? "" : item), 1600);
                     if (StringUtils.hasText(line)) {
                         output.add(line);
                     }
@@ -1121,7 +938,7 @@ public class PersonaInsightCardService {
                 }
                 return output;
             }
-            String single = trimText(String.valueOf(raw == null ? "" : raw), 320);
+            String single = normalizeMarkdownSectionText(String.valueOf(raw == null ? "" : raw), 1600);
             if (StringUtils.hasText(single)) {
                 return List.of(single);
             }
@@ -1149,12 +966,11 @@ public class PersonaInsightCardService {
         return null;
     }
 
-    private String buildInitialCardBodyFromJson(
-            TagContext context,
-            StructuredAdviceSections sections,
-            String articleSection
-    ) {
+    private String buildInitialCardBodyFromJson(StructuredAdviceSections sections) {
         StringBuilder builder = new StringBuilder();
+        builder.append(SECTION_BACKGROUND).append('\n');
+        builder.append(renderOrderedLines(sections.background, 1));
+        builder.append('\n');
         builder.append(SECTION_CONTEXTUAL).append('\n');
         builder.append(renderOrderedLines(sections.contextual, 1));
         builder.append('\n');
@@ -1163,8 +979,6 @@ public class PersonaInsightCardService {
         builder.append('\n');
         builder.append(SECTION_BREADTH).append('\n');
         builder.append(renderOrderedLines(sections.breadth, 1));
-        builder.append('\n');
-        builder.append(articleSection).append('\n');
         return builder.toString().trim();
     }
 
@@ -1175,67 +989,125 @@ public class PersonaInsightCardService {
         int cursor = Math.max(1, startIndex);
         StringBuilder builder = new StringBuilder();
         for (String line : lines) {
-            String item = trimText(String.valueOf(line == null ? "" : line), 320);
+            String item = normalizeMarkdownSectionText(String.valueOf(line == null ? "" : line), 1600);
             if (!StringUtils.hasText(item)) {
                 continue;
             }
-            builder.append(cursor).append(". ").append(item).append('\n');
+            String renderedItem = renderOrderedItem(cursor, item);
+            if (!StringUtils.hasText(renderedItem)) {
+                continue;
+            }
+            builder.append(renderedItem).append('\n');
             cursor += 1;
         }
         return builder.toString();
     }
 
-    private String buildArticleSectionStable(
-            String articleKey,
-            TagContext context,
-            String contextualLine,
-            String relatedWikilinks
-    ) {
+    private String renderOrderedItem(int index, String item) {
+        String normalized = String.valueOf(item == null ? "" : item)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .trim();
+        if (!StringUtils.hasText(normalized)) {
+            return "";
+        }
+        String[] lines = normalized.split("\n", -1);
         StringBuilder builder = new StringBuilder();
-        builder.append(SECTION_CONTEXT_SNAPSHOT_PREFIX).append(articleKey).append('\n');
-        builder.append("- 在此语境下：").append(trimText(contextualLine, 220)).append('\n');
-        if (!context.nodeIds.isEmpty()) {
-            builder.append("- 命中节点：").append(String.join(", ", context.nodeIds)).append('\n');
-        }
-        if (!context.snippets.isEmpty()) {
-            builder.append("- 片段：").append('\n');
-            int count = 0;
-            for (String snippet : context.snippets) {
-                if (count >= Math.max(1, maxSnippets > 0 ? maxSnippets : DEFAULT_MAX_SNIPPETS)) {
-                    break;
-                }
-                builder.append("  - ").append(trimText(snippet, maxContextChars <= 0 ? DEFAULT_MAX_CONTEXT_CHARS : maxContextChars)).append('\n');
-                count += 1;
+        builder.append(index).append(". ").append(lines[0].stripLeading());
+        for (int lineIndex = 1; lineIndex < lines.length; lineIndex += 1) {
+            builder.append('\n');
+            String line = lines[lineIndex];
+            String continuation = String.valueOf(line == null ? "" : line).stripLeading();
+            if (StringUtils.hasText(continuation)) {
+                builder.append("    ").append(continuation);
             }
-        }
-        if (StringUtils.hasText(relatedWikilinks)) {
-            builder.append("- 关联概念：").append(relatedWikilinks).append('\n');
         }
         return builder.toString().trim();
     }
 
-    // legacy text parser removed; structured parser: parseAdviceSectionsFromJson.
-    private String appendSection(String existing, String section) {
-        String base = String.valueOf(existing == null ? "" : existing).trim();
-        String extra = String.valueOf(section == null ? "" : section).trim();
-        if (!StringUtils.hasText(extra)) {
-            return base;
+    private String normalizeMarkdownSectionText(String raw, int maxLength) {
+        String normalized = String.valueOf(raw == null ? "" : raw)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replace('\u0000', ' ')
+                .trim();
+        if (!StringUtils.hasText(normalized)) {
+            return "";
         }
-        if (!StringUtils.hasText(base)) {
-            return extra;
+        StringBuilder builder = new StringBuilder();
+        boolean previousBlank = false;
+        boolean previousTableRow = false;
+        for (String segment : normalized.split("\n", -1)) {
+            String line = String.valueOf(segment == null ? "" : segment)
+                    .replace('\t', ' ')
+                    .stripTrailing();
+            if (!StringUtils.hasText(line.trim())) {
+                if (builder.length() > 0 && !previousBlank) {
+                    builder.append('\n');
+                }
+                previousBlank = true;
+                previousTableRow = false;
+                continue;
+            }
+            boolean tableRow = isMarkdownTableRow(line);
+            if (tableRow && builder.length() > 0 && !previousBlank && !previousTableRow) {
+                builder.append('\n');
+                previousBlank = true;
+            }
+            if (builder.length() > 0) {
+                builder.append('\n');
+            }
+            builder.append(emphasizeSemanticLabel(line));
+            previousBlank = false;
+            previousTableRow = tableRow;
         }
-        if (base.contains(extra)) {
-            return base;
+        String value = builder.toString().trim();
+        if (!StringUtils.hasText(value)) {
+            return "";
         }
-        return base + "\n\n" + extra;
+        int safeMaxLength = maxLength > 0 ? maxLength : 1600;
+        if (value.length() <= safeMaxLength) {
+            return value;
+        }
+        return value.substring(0, safeMaxLength).trim();
     }
 
-    private boolean containsContextSnapshotForArticle(String currentBody, String articleKey) {
-        if (!StringUtils.hasText(currentBody) || !StringUtils.hasText(articleKey)) {
+    private boolean isMarkdownTableRow(String rawLine) {
+        String trimmed = String.valueOf(rawLine == null ? "" : rawLine).trim();
+        if (!StringUtils.hasText(trimmed)) {
             return false;
         }
-        return currentBody.contains(SECTION_CONTEXT_SNAPSHOT_PREFIX + articleKey)
-                || (currentBody.contains("### 语") && currentBody.contains(articleKey));
+        if (!trimmed.startsWith("|")) {
+            return false;
+        }
+        return trimmed.indexOf('|', 1) > 1;
+    }
+
+    private String emphasizeSemanticLabel(String rawLine) {
+        String line = String.valueOf(rawLine == null ? "" : rawLine);
+        if (!StringUtils.hasText(line)) {
+            return "";
+        }
+        String trimmed = line.trim();
+        if (!StringUtils.hasText(trimmed)
+                || trimmed.startsWith("|")
+                || trimmed.contains("://")
+                || trimmed.startsWith("**")) {
+            return line;
+        }
+        Matcher matcher = SEMANTIC_LABEL_PATTERN.matcher(line);
+        if (!matcher.matches()) {
+            return line;
+        }
+        String prefix = matcher.group(1);
+        String label = matcher.group(2);
+        String spacing = matcher.group(3);
+        String body = matcher.group(4);
+        if (label.contains("**")) {
+            return line;
+        }
+        String gap = StringUtils.hasText(spacing) ? spacing : " ";
+        return prefix + "**" + label + "**" + gap + body;
     }
 
     private boolean shouldRegenerateExistingCard(String currentBody) {
@@ -1253,55 +1125,9 @@ public class PersonaInsightCardService {
             }
         }
         return !currentBody.contains(SECTION_CONTEXTUAL)
+                || !currentBody.contains(SECTION_BACKGROUND)
                 || !currentBody.contains(SECTION_DEPTH)
                 || !currentBody.contains(SECTION_BREADTH);
-    }
-
-    private String renderRelatedWikilinks(Set<String> relatedTags) {
-        if (relatedTags == null || relatedTags.isEmpty()) {
-            return "";
-        }
-        List<String> links = new ArrayList<>();
-        int cap = Math.max(1, maxRelatedTags > 0 ? maxRelatedTags : DEFAULT_MAX_RELATED_TAGS);
-        for (String related : relatedTags) {
-            if (!StringUtils.hasText(related)) {
-                continue;
-            }
-            links.add("[[" + related.trim() + "]]");
-            if (links.size() >= cap) {
-                break;
-            }
-        }
-        return String.join(" ", links);
-    }
-
-    private String stripContextSnapshotSections(String markdown) {
-        String text = String.valueOf(markdown == null ? "" : markdown)
-                .replace("\r\n", "\n")
-                .replace('\r', '\n');
-        if (!StringUtils.hasText(text)) {
-            return "";
-        }
-        String[] lines = text.split("\n", -1);
-        StringBuilder builder = new StringBuilder();
-        boolean skipping = false;
-        for (String line : lines) {
-            if (line.startsWith(SECTION_CONTEXT_SNAPSHOT_PREFIX) || line.startsWith("### 语")) {
-                skipping = true;
-                continue;
-            }
-            if (skipping && line.startsWith("### ")) {
-                skipping = false;
-            }
-            if (skipping) {
-                continue;
-            }
-            if (builder.length() > 0) {
-                builder.append('\n');
-            }
-            builder.append(line);
-        }
-        return builder.toString().trim();
     }
 
     private void persistTaskInteraction(Path workDir, Map<String, Object> trace) {
@@ -1565,10 +1391,42 @@ public class PersonaInsightCardService {
         }
         synchronized (llmPermitLock) {
             if (llmPermitSemaphore == null) {
-                llmPermitSemaphore = new Semaphore(CARD_GENERATION_CONCURRENCY, true);
+                llmPermitSemaphore = new Semaphore(resolveCardGenerationConcurrency(), true);
             }
             return llmPermitSemaphore;
         }
+    }
+
+    private ExecutorService resolveCardGenerationExecutor() {
+        ExecutorService executor = cardGenerationExecutor;
+        if (executor != null && !executor.isShutdown()) {
+            return executor;
+        }
+        synchronized (cardGenerationExecutorLock) {
+            if (cardGenerationExecutor == null || cardGenerationExecutor.isShutdown()) {
+                int concurrency = resolveCardGenerationConcurrency();
+                cardGenerationExecutor = Executors.newFixedThreadPool(
+                        concurrency,
+                        runnable -> {
+                            Thread thread = new Thread(
+                                    runnable,
+                                    "InsightCardGen-" + cardGenerationThreadIndex.getAndIncrement()
+                            );
+                            thread.setDaemon(true);
+                            return thread;
+                        }
+                );
+            }
+            return cardGenerationExecutor;
+        }
+    }
+
+    private int resolveCardGenerationConcurrency() {
+        int value = cardGenerationMaxInflight;
+        if (value <= 0) {
+            return 1;
+        }
+        return Math.min(value, 256);
     }
 
     private static class TagContext {
@@ -1608,6 +1466,7 @@ public class PersonaInsightCardService {
     }
 
     private static class StructuredAdviceSections {
+        private List<String> background = new ArrayList<>();
         private List<String> contextual = new ArrayList<>();
         private List<String> depth = new ArrayList<>();
         private List<String> breadth = new ArrayList<>();

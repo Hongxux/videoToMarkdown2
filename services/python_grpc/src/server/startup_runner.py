@@ -10,10 +10,12 @@ import logging
 from multiprocessing import freeze_support
 
 from services.python_grpc.src.common.logging import configure_pipeline_logging
+from services.python_grpc.src.server.runtime_env import patch_pydantic_generic_origin_compat
 
 
 async def serve(host: str = "0.0.0.0", port: int = 50051):
     """兼容导出：延迟导入并调用当前服务实现。"""
+    patch_pydantic_generic_origin_compat()
     from .service import serve as current_serve
 
     return await current_serve(host=host, port=port)

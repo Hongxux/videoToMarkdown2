@@ -5,6 +5,26 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 
+val mobileAutoUpdateEnabled = (findProperty("mobileAutoUpdateEnabled") as String?)
+    ?.trim()
+    ?.let { it.equals("true", ignoreCase = true) }
+    ?: true
+val mobileAppUpdateChunkSizeMb = (findProperty("mobileAppUpdateChunkSizeMb") as String?)
+    ?.trim()
+    ?.toIntOrNull()
+    ?.coerceAtLeast(1)
+    ?: 2
+val mobileAppUpdateMaxParallelChunks = (findProperty("mobileAppUpdateMaxParallelChunks") as String?)
+    ?.trim()
+    ?.toIntOrNull()
+    ?.coerceIn(1, 8)
+    ?: 4
+val mobileAppUpdateMinChunkedDownloadMb = (findProperty("mobileAppUpdateMinChunkedDownloadMb") as String?)
+    ?.trim()
+    ?.toIntOrNull()
+    ?.coerceAtLeast(2)
+    ?: 4
+
 android {
     namespace = "com.hongxu.videoToMarkdownTest2"
     compileSdk = 35
@@ -13,11 +33,27 @@ android {
         applicationId = "com.hongxu.videoToMarkdownTest2"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 4
+        versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MOBILE_API_BASE_URL", "\"https://botryoidal-lashon-contumaciously.ngrok-free.dev/api/mobile\"")
+        buildConfigField("boolean", "MOBILE_AUTO_UPDATE_ENABLED", mobileAutoUpdateEnabled.toString())
+        buildConfigField(
+            "long",
+            "MOBILE_APP_UPDATE_CHUNK_SIZE_BYTES",
+            "${mobileAppUpdateChunkSizeMb.toLong() * 1024L * 1024L}L"
+        )
+        buildConfigField(
+            "int",
+            "MOBILE_APP_UPDATE_MAX_PARALLEL_CHUNKS",
+            mobileAppUpdateMaxParallelChunks.toString()
+        )
+        buildConfigField(
+            "long",
+            "MOBILE_APP_UPDATE_MIN_CHUNKED_DOWNLOAD_BYTES",
+            "${mobileAppUpdateMinChunkedDownloadMb.toLong() * 1024L * 1024L}L"
+        )
     }
 
     buildTypes {
@@ -54,6 +90,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.retrofit.core)
     implementation(libs.retrofit.converter.gson)

@@ -46,12 +46,14 @@ class CollectionFeatureRepository(
     context: Context,
     private val apiBaseUrl: String
 ) {
+    private val mobileUserId = MobileClientIdentity.resolveUserId(context.applicationContext)
     private val database = CollectionFeatureDatabase.getInstance(context)
     private val dao = database.collectionDao()
     private val api = CollectionApiFactory.create(apiBaseUrl)
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val realtimeClient = CollectionRealtimeClient(
         wsEndpoint = CollectionApiFactory.toWebSocketUrl(apiBaseUrl),
+        userId = mobileUserId,
         onTaskUpdate = { taskId, status, statusMessage ->
             repositoryScope.launch {
                 dao.updateEpisodeStatusByTaskId(
@@ -105,27 +107,38 @@ class CollectionFeatureRepository(
         return dao.findCollection(collectionId)
     }
 
-    suspend fun probeVideoInfo(videoInput: String): VideoProbeResult {
+    suspend fun probeVideoInfo(videoInput: String, pageOffset: Int? = null): VideoProbeResult {
         return try {
-            api.probeVideoInfoMobile(videoInput).toDomain()
+            api.probeVideoInfoMobile(videoInput, pageOffset).toDomain()
         } catch (error: HttpException) {
             if (error.code() != 404) {
                 throw error
             }
-            api.probeVideoInfoLegacy(videoInput).toDomain()
+            api.probeVideoInfoLegacy(videoInput, pageOffset).toDomain()
         }
     }
 
     suspend fun submitSingleTask(
         videoUrl: String,
         collectionId: String? = null,
-        episodeNo: Int? = null
+        episodeNo: Int? = null,
+        chapterSelector: String? = null,
+        sectionSelector: String? = null,
+        splitByChapter: Boolean? = null,
+        splitBySection: Boolean? = null,
+        pageOffset: Int? = null
     ): MobileTaskSubmitResponseDto {
         return api.submitTask(
             MobileTaskSubmitRequestDto(
                 videoUrl = videoUrl,
                 collectionId = collectionId?.takeIf { it.isNotBlank() },
-                episodeNo = episodeNo
+                episodeNo = episodeNo,
+                userId = mobileUserId,
+                chapterSelector = chapterSelector?.takeIf { it.isNotBlank() },
+                sectionSelector = sectionSelector?.takeIf { it.isNotBlank() },
+                splitByChapter = splitByChapter,
+                splitBySection = splitBySection,
+                pageOffset = pageOffset
             )
         )
     }
@@ -172,7 +185,7 @@ class CollectionFeatureRepository(
     suspend fun submitCollectionBatch(
         collectionId: String,
         episodeNos: List<Int>,
-        userId: String? = null,
+        userId: String? = mobileUserId,
         outputDir: String? = null
     ): CollectionBatchSubmitResult {
         val response = api.submitBatch(

@@ -5,6 +5,7 @@ import android.app.Application
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.ContextWrapper
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Typeface
 import android.net.Uri
@@ -12,6 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -21,10 +23,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -39,6 +39,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -52,17 +54,23 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -90,10 +98,12 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -129,7 +139,9 @@ import io.noties.markwon.syntax.Prism4jThemeDarkula
 import io.noties.markwon.syntax.SyntaxHighlightPlugin
 import io.noties.prism4j.Prism4j
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -137,6 +149,7 @@ import kotlinx.coroutines.sync.Mutex
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -149,7 +162,6 @@ private data class TaskReaderSession(
 )
 
 internal enum class TaskComposerMode {
-    MENU,
     URL
 }
 
@@ -175,8 +187,9 @@ internal data class TaskRouteUiState(
     val taskSortField: TaskSortField = TaskSortField.LAST_OPENED,
     val taskSortOrder: SortOrder = SortOrder.DESC,
     val videoUrlInput: String = "",
+    val bookPageOffsetInput: String = "",
     val composerExpanded: Boolean = false,
-    val composerMode: TaskComposerMode = TaskComposerMode.MENU,
+    val composerMode: TaskComposerMode = TaskComposerMode.URL,
     val dispatchCenterExpanded: Boolean = false,
     val homeSection: HomeSection = HomeSection.TASKS
 )
@@ -211,6 +224,10 @@ class TaskRouteViewModel : ViewModel() {
         _uiState.update { state -> state.copy(videoUrlInput = value) }
     }
 
+    fun setBookPageOffsetInput(value: String) {
+        _uiState.update { state -> state.copy(bookPageOffsetInput = value) }
+    }
+
     fun setComposerExpanded(expanded: Boolean) {
         _uiState.update { state -> state.copy(composerExpanded = expanded) }
     }
@@ -234,8 +251,6 @@ class TaskRouteViewModel : ViewModel() {
     }
 }
 
-private const val BACKGROUND_TASK_REFRESH_INTERVAL_MS = 15_000L
-private const val ACTIVE_TASK_REFRESH_INTERVAL_MS = 5_000L
 private const val CLIPBOARD_TASK_PROMPT_PREFS = "clipboard_task_prompt"
 private const val CLIPBOARD_TASK_PROMPT_KEY = "last_prompted_url"
 private const val READER_SCROLL_POSITION_PREFS = "reader_scroll_position"
@@ -243,14 +258,24 @@ private const val READER_SCROLL_SAVE_OFFSET_DELTA_PX = 96
 private const val TASK_FLASH_DURATION_MS = 10_000L
 private const val SUBMISSION_MODE_URL = "url"
 private const val SUBMISSION_MODE_UPLOAD = "upload"
+private const val BACKEND_PROCESSING_HINT_WORK_PREFIX = "backend-running-task-"
 private val TASK_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 private val CLIPBOARD_URL_PATTERN = Regex("""https?://[^\s]+""", RegexOption.IGNORE_CASE)
-private val CLIPBOARD_SUPPORTED_HOST_SUFFIXES = setOf(
+private val DOUYIN_HOST_SUFFIXES = setOf(
     "douyin.com",
-    "iesdouyin.com",
+    "iesdouyin.com"
+)
+private val BILIBILI_HOST_SUFFIXES = setOf(
     "bilibili.com",
     "b23.tv",
     "bili2233.cn"
+)
+private val ZHIHU_HOST_SUFFIXES = setOf(
+    "zhihu.com",
+    "zhuanlan.zhihu.com"
+)
+private val JUEJIN_HOST_SUFFIXES = setOf(
+    "juejin.cn"
 )
 
 private data class ClipboardTaskCandidate(
@@ -258,9 +283,45 @@ private data class ClipboardTaskCandidate(
     val displayUrl: String
 )
 
+private data class ShareIntentPayload(
+    val videoUrl: String?,
+    val uploadUri: Uri?
+)
+
+private data class NotificationTaskOpenRequest(
+    val taskId: String,
+    val taskTitle: String
+)
+
+private enum class ShareDispatchStage {
+    RECEIVED,
+    PROCESSING,
+    QUEUED,
+    FAILED
+}
+
+private data class ShareDispatchState(
+    val stage: ShareDispatchStage,
+    val message: String
+)
+
+private data class ShareIntentPreview(
+    val sourceName: String,
+    val sourceBadge: String,
+    val sourceBadgeColor: Color,
+    val title: String,
+    val subtitle: String,
+    val rawContent: String
+)
+
 private data class TaskReaderScrollPosition(
     val firstVisibleItemIndex: Int,
     val firstVisibleItemScrollOffset: Int
+)
+
+private data class ReaderScrollSnapshot(
+    val taskId: String,
+    val position: TaskReaderScrollPosition
 )
 
 private class TaskReaderScrollPositionStore(
@@ -294,7 +355,7 @@ private class TaskReaderScrollPositionStore(
         return restored
     }
 
-    fun save(taskId: String, position: TaskReaderScrollPosition) {
+    fun save(taskId: String, position: TaskReaderScrollPosition, sync: Boolean = false) {
         val normalizedTaskId = taskId.trim()
         if (normalizedTaskId.isEmpty()) {
             return
@@ -308,10 +369,14 @@ private class TaskReaderScrollPositionStore(
             return
         }
         memoryCache[normalizedTaskId] = normalizedPosition
-        preferences.edit()
+        val editor = preferences.edit()
             .putInt(buildIndexKey(normalizedTaskId), normalizedPosition.firstVisibleItemIndex)
             .putInt(buildOffsetKey(normalizedTaskId), normalizedPosition.firstVisibleItemScrollOffset)
-            .apply()
+        if (sync) {
+            editor.commit()
+        } else {
+            editor.apply()
+        }
     }
 
     private fun buildIndexKey(taskId: String): String {
@@ -360,24 +425,553 @@ private class ClipboardPromptHistory(
 }
 
 class MainActivity : ComponentActivity() {
+    private val shareIntentEvents = MutableSharedFlow<ShareIntentPayload>(extraBufferCapacity = 4)
+    private val notificationTaskOpenEvents = MutableSharedFlow<NotificationTaskOpenRequest>(extraBufferCapacity = 4)
+
     override fun onCreate(savedInstanceState: Bundle?) {
+        val initialSharePayload = parseShareIntentPayload(intent)
+        val initialNotificationTaskOpenRequest = parseNotificationTaskOpenRequest(intent)
+        if (initialSharePayload != null) {
+            setTheme(R.style.Theme_VideoToMarkdownTest2_ShareOverlay)
+        }
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             VideoToMarkdownTest2Theme {
-                MobileTaskApp()
+                MobileTaskApp(
+                    initialSharePayload = initialSharePayload,
+                    shareIntentEvents = shareIntentEvents,
+                    initialNotificationTaskOpenRequest = initialNotificationTaskOpenRequest,
+                    notificationTaskOpenEvents = notificationTaskOpenEvents
+                )
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        parseShareIntentPayload(intent)?.let { payload ->
+            shareIntentEvents.tryEmit(payload)
+        }
+        parseNotificationTaskOpenRequest(intent)?.let { request ->
+            notificationTaskOpenEvents.tryEmit(request)
+        }
+    }
+}
+
+private fun parseShareIntentPayload(intent: Intent?): ShareIntentPayload? {
+    if (intent == null || intent.action != Intent.ACTION_SEND) {
+        return null
+    }
+    val textPayload = intent.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+    val sharedUrl = CLIPBOARD_URL_PATTERN.find(textPayload)
+        ?.value
+        ?.let(::sanitizeClipboardToken)
+        ?.let(::normalizeClipboardUrl)
+    val sharedUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+    } else {
+        @Suppress("DEPRECATION")
+        intent.getParcelableExtra(Intent.EXTRA_STREAM)
+    }
+    if (sharedUrl.isNullOrBlank() && sharedUri == null) {
+        return null
+    }
+    return ShareIntentPayload(
+        videoUrl = sharedUrl,
+        uploadUri = sharedUri
+    )
+}
+
+private fun parseNotificationTaskOpenRequest(intent: Intent?): NotificationTaskOpenRequest? {
+    if (intent == null) {
+        return null
+    }
+    val taskId = intent.getStringExtra("task_id")?.trim().orEmpty()
+    if (taskId.isEmpty()) {
+        return null
+    }
+    val taskTitle = intent.getStringExtra("task_title")?.trim().orEmpty()
+    return NotificationTaskOpenRequest(
+        taskId = taskId,
+        taskTitle = taskTitle
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ShareIntentDispatchRoute(
+    payload: ShareIntentPayload,
+    state: ShareDispatchState?,
+    onClose: () -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val effectiveState = state ?: ShareDispatchState(
+        stage = ShareDispatchStage.RECEIVED,
+        message = "已接收分享内容，正在准备投递..."
+    )
+    val preview = remember(payload.videoUrl, payload.uploadUri) {
+        resolveShareIntentPreview(payload)
+    }
+    val autoCloseProgress by animateFloatAsState(
+        targetValue = if (effectiveState.stage == ShareDispatchStage.QUEUED) 1f else 0f,
+        animationSpec = tween(durationMillis = 3_000),
+        label = "share_auto_close_progress"
+    )
+    val successScale by animateFloatAsState(
+        targetValue = if (effectiveState.stage == ShareDispatchStage.QUEUED) 1f else 0.72f,
+        animationSpec = tween(durationMillis = 260),
+        label = "share_success_scale"
+    )
+    val successAlpha by animateFloatAsState(
+        targetValue = if (effectiveState.stage == ShareDispatchStage.QUEUED) 1f else 0f,
+        animationSpec = tween(durationMillis = 240),
+        label = "share_success_alpha"
+    )
+    LaunchedEffect(effectiveState.stage) {
+        if (effectiveState.stage == ShareDispatchStage.QUEUED) {
+            delay(3_000)
+            onClose()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.26f))
+    ) {
+        ModalBottomSheet(
+            onDismissRequest = {},
+            sheetState = sheetState,
+            dragHandle = null
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 18.dp, vertical = 18.dp)
+                    .navigationBarsPadding(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(
+                            text = "快速投递",
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = "已识别来源并开始分发任务",
+                            color = Color(0xFF667085)
+                        )
+                    }
+                    Card(
+                        shape = RoundedCornerShape(999.dp),
+                        colors = CardDefaults.cardColors(containerColor = preview.sourceBadgeColor.copy(alpha = 0.14f))
+                    ) {
+                        Text(
+                            text = preview.sourceName,
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            color = preview.sourceBadgeColor,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+                ShareIntentPreviewCard(preview = preview)
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC))
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "投递进度",
+                            color = Color(0xFF344054),
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        ShareDispatchStepItem(
+                            label = "📥 已接收",
+                            status = resolveShareStepStatus(effectiveState.stage, step = 0)
+                        )
+                        ShareDispatchStepItem(
+                            label = "⚙️ 处理中",
+                            status = resolveShareStepStatus(effectiveState.stage, step = 1)
+                        )
+                        ShareDispatchStepItem(
+                            label = "📦 已入队",
+                            status = resolveShareStepStatus(effectiveState.stage, step = 2)
+                        )
+                        Text(
+                            text = effectiveState.message,
+                            color = if (effectiveState.stage == ShareDispatchStage.FAILED) {
+                                Color(0xFFB42318)
+                            } else {
+                                Color(0xFF175CD3)
+                            },
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = resolveShareWaitHint(effectiveState.stage),
+                            color = Color(0xFF667085),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+                if (effectiveState.stage == ShareDispatchStage.QUEUED) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFEAFBF0))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = "✓",
+                                    color = Color(0xFF12B76A),
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 30.sp,
+                                    modifier = Modifier.graphicsLayer {
+                                        scaleX = successScale
+                                        scaleY = successScale
+                                        alpha = successAlpha
+                                    }
+                                )
+                                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                    Text(
+                                        text = "投递成功，任务已进入后台队列",
+                                        color = Color(0xFF067647),
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = "3 秒后自动返回原应用",
+                                        color = Color(0xFF067647)
+                                    )
+                                }
+                            }
+                            LinearProgressIndicator(
+                                progress = autoCloseProgress,
+                                modifier = Modifier.fillMaxWidth(),
+                                color = Color(0xFF12B76A),
+                                trackColor = Color(0xFFB7EACF)
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (effectiveState.stage == ShareDispatchStage.FAILED) {
+                            "投递失败，请手动返回并重试"
+                        } else {
+                            "如需立即返回，可手动关闭"
+                        },
+                        color = Color(0xFF475467),
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = onClose) {
+                        Text("关闭")
+                    }
+                }
             }
         }
     }
 }
 
+private enum class ShareStepStatus {
+    WAITING,
+    ACTIVE,
+    DONE,
+    ERROR
+}
+
+private fun resolveShareStepStatus(stage: ShareDispatchStage, step: Int): ShareStepStatus {
+    return when (stage) {
+        ShareDispatchStage.RECEIVED -> when (step) {
+            0 -> ShareStepStatus.ACTIVE
+            else -> ShareStepStatus.WAITING
+        }
+
+        ShareDispatchStage.PROCESSING -> when (step) {
+            0 -> ShareStepStatus.DONE
+            1 -> ShareStepStatus.ACTIVE
+            else -> ShareStepStatus.WAITING
+        }
+
+        ShareDispatchStage.QUEUED -> when (step) {
+            0, 1 -> ShareStepStatus.DONE
+            else -> ShareStepStatus.ACTIVE
+        }
+
+        ShareDispatchStage.FAILED -> when (step) {
+            0 -> ShareStepStatus.DONE
+            1 -> ShareStepStatus.ERROR
+            else -> ShareStepStatus.WAITING
+        }
+    }
+}
+
+private fun resolveShareWaitHint(stage: ShareDispatchStage): String {
+    return when (stage) {
+        ShareDispatchStage.RECEIVED -> "预计等待 < 1 秒，正在建立投递请求。"
+        ShareDispatchStage.PROCESSING -> "预计等待 2-6 秒。当前正在立即处理，繁忙时会自动排队。"
+        ShareDispatchStage.QUEUED -> "投递已完成，后台将继续处理，无需停留等待。"
+        ShareDispatchStage.FAILED -> "未进入队列，请返回原应用后重新分享。"
+    }
+}
+
 @Composable
-private fun MobileTaskApp() {
+private fun ShareDispatchStepItem(
+    label: String,
+    status: ShareStepStatus
+) {
+    val containerColor = when (status) {
+        ShareStepStatus.ACTIVE -> Color(0xFFEFF8FF)
+        ShareStepStatus.DONE -> Color(0xFFEAFBF0)
+        ShareStepStatus.ERROR -> Color(0xFFFEE4E2)
+        ShareStepStatus.WAITING -> Color(0xFFF2F4F7)
+    }
+    val textColor = when (status) {
+        ShareStepStatus.ACTIVE -> Color(0xFF175CD3)
+        ShareStepStatus.DONE -> Color(0xFF067647)
+        ShareStepStatus.ERROR -> Color(0xFFB42318)
+        ShareStepStatus.WAITING -> Color(0xFF667085)
+    }
+    val statusSymbol = when (status) {
+        ShareStepStatus.DONE -> "✓"
+        ShareStepStatus.ACTIVE -> "•"
+        ShareStepStatus.ERROR -> "!"
+        ShareStepStatus.WAITING -> "○"
+    }
+    Card(
+        shape = RoundedCornerShape(10.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = statusSymbol,
+                color = textColor,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = label,
+                color = textColor,
+                fontWeight = FontWeight.Medium
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShareIntentPreviewCard(preview: ShareIntentPreview) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFEEF4FF))
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(preview.sourceBadgeColor),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = preview.sourceBadge,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Text(
+                    text = preview.title,
+                    color = Color(0xFF1D2939),
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = preview.subtitle,
+                    color = Color(0xFF475467),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = preview.rawContent,
+                    color = Color(0xFF667085),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+    }
+}
+
+private fun resolveShareIntentPreview(payload: ShareIntentPayload): ShareIntentPreview {
+    val sharedUrl = payload.videoUrl?.trim().orEmpty()
+    if (sharedUrl.isNotEmpty()) {
+        val uri = runCatching { Uri.parse(sharedUrl) }.getOrNull()
+        val host = uri?.host?.trim().orEmpty()
+        val sourceName: String
+        val sourceBadge: String
+        val sourceColor: Color
+        when {
+            isBilibiliHost(host) -> {
+                sourceName = "B站"
+                sourceBadge = "B"
+                sourceColor = Color(0xFFFB7299)
+            }
+
+            isDouyinHost(host) -> {
+                sourceName = "抖音"
+                sourceBadge = "抖"
+                sourceColor = Color(0xFF111827)
+            }
+
+            isZhihuHost(host) -> {
+                sourceName = "Zhihu"
+                sourceBadge = "Zh"
+                sourceColor = Color(0xFF1772F6)
+            }
+
+            isJuejinHost(host) -> {
+                sourceName = "Juejin"
+                sourceBadge = "J"
+                sourceColor = Color(0xFF1E80FF)
+            }
+
+            else -> {
+                sourceName = "网页链接"
+                sourceBadge = "链"
+                sourceColor = Color(0xFF175CD3)
+            }
+        }
+        return ShareIntentPreview(
+            sourceName = sourceName,
+            sourceBadge = sourceBadge,
+            sourceBadgeColor = sourceColor,
+            title = resolveSharePreviewTitleFromUrl(sharedUrl),
+            subtitle = host.ifBlank { "外部应用分享" },
+            rawContent = sharedUrl
+        )
+    }
+    val uriText = payload.uploadUri?.toString().orEmpty()
+    val localName = payload.uploadUri?.lastPathSegment
+        ?.substringAfterLast('/')
+        ?.takeUnless { it.isBlank() }
+        ?: "本地视频文件"
+    return ShareIntentPreview(
+        sourceName = "本地文件",
+        sourceBadge = "本",
+        sourceBadgeColor = Color(0xFF16A34A),
+        title = localName,
+        subtitle = "来自系统分享",
+        rawContent = uriText.ifBlank { "content://..." }
+    )
+}
+
+private fun resolveSharePreviewTitleFromUrl(videoUrl: String): String {
+    val uri = runCatching { Uri.parse(videoUrl) }.getOrNull() ?: return "视频链接"
+    val queryTitle = runCatching { uri.getQueryParameter("title") }.getOrNull()?.trim().orEmpty()
+    if (queryTitle.isNotEmpty()) {
+        return queryTitle
+    }
+    val lastSegment = uri.lastPathSegment?.trim().orEmpty()
+    if (lastSegment.isNotEmpty()) {
+        return lastSegment
+    }
+    return uri.host?.trim()?.takeUnless { it.isBlank() } ?: "视频链接"
+}
+
+@Composable
+private fun ClipboardQuickActionPill(
+    candidateUrl: String,
+    onGenerateNow: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFEAF4FF))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "检测到刚复制的视频链接",
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFF175CD3)
+            )
+            Text(
+                text = candidateUrl,
+                color = Color(0xFF344054),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onGenerateNow) {
+                    Text("立即生成")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("稍后")
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MobileTaskApp(
+    initialSharePayload: ShareIntentPayload? = null,
+    shareIntentEvents: SharedFlow<ShareIntentPayload>? = null,
+    initialNotificationTaskOpenRequest: NotificationTaskOpenRequest? = null,
+    notificationTaskOpenEvents: SharedFlow<NotificationTaskOpenRequest>? = null
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
     val apiBaseUrl = BuildConfig.MOBILE_API_BASE_URL
+    val mobileUserId = remember(context) {
+        MobileClientIdentity.resolveUserId(context.applicationContext)
+    }
+    val autoUpdateEnabled = BuildConfig.MOBILE_AUTO_UPDATE_ENABLED
     val application = remember(context) { context.applicationContext as Application }
     val taskRouteViewModel: TaskRouteViewModel = viewModel(
         factory = remember {
@@ -403,19 +997,20 @@ private fun MobileTaskApp() {
 
     val renderConfig = remember(context) { MarkdownReaderRenderConfigLoader.load(context) }
     val activeSubmissionHintMap by TaskSubmissionRegistry.activeHints.collectAsState(initial = emptyMap())
-    val activeSubmissionHints = remember(activeSubmissionHintMap) {
-        activeSubmissionHintMap.values.sortedByDescending { it.running }
-    }
-    val taskApi = remember(apiBaseUrl) { HttpMobileTaskApi(apiBaseUrl) }
+    val taskApi = remember(apiBaseUrl, mobileUserId) { HttpMobileTaskApi(apiBaseUrl, mobileUserId) }
     val metaApi = remember(apiBaseUrl) { HttpMobileMarkdownMetaApi(apiBaseUrl) }
     val telemetryApi = remember(apiBaseUrl) { HttpMobileMarkdownTelemetryApi(apiBaseUrl) }
     val cardApi = remember(apiBaseUrl) { HttpMobileConceptCardApi(apiBaseUrl) }
     val footprintRepo = remember(context) { ReadingFootprintRepository(context.applicationContext) }
-    val appUpdateManager = remember(context, apiBaseUrl) {
-        MobileAppAutoUpdateManager(
-            context = context.applicationContext,
-            apiBaseUrl = apiBaseUrl
-        )
+    val appUpdateManager = remember(context, apiBaseUrl, autoUpdateEnabled) {
+        if (autoUpdateEnabled) {
+            MobileAppAutoUpdateManager(
+                context = context.applicationContext,
+                apiBaseUrl = apiBaseUrl
+            )
+        } else {
+            null
+        }
     }
     val markwon = remember(context, renderConfig) { buildReaderMarkwon(context, renderConfig) }
     val taskCompletionNotifier = remember(context) {
@@ -431,6 +1026,8 @@ private fun MobileTaskApp() {
     val refreshMutex = remember { Mutex() }
     val probeState by collectionViewModel.probeState.collectAsState()
     val selectedProbeEpisodeNos by collectionViewModel.selectedEpisodeNos.collectAsState()
+    val confirmedProbeStartPage by collectionViewModel.confirmedStartPage.collectAsState()
+    val probePreviewDocumentUri by collectionViewModel.probePreviewDocumentUri.collectAsState()
     val collectionCards by collectionViewModel.collections.collectAsState()
     val detailCollection by collectionViewModel.detailCollection.collectAsState()
     val detailEpisodes by collectionViewModel.detailEpisodes.collectAsState()
@@ -438,6 +1035,7 @@ private fun MobileTaskApp() {
     val taskRouteUiState by taskRouteViewModel.uiState.collectAsState()
 
     var tasks by remember { mutableStateOf<List<MobileTaskListItem>>(emptyList()) }
+    var backendProcessingTasks by remember { mutableStateOf<List<MobileTaskListItem>>(emptyList()) }
     var preparedSessions by remember { mutableStateOf<Map<String, TaskReaderSession>>(emptyMap()) }
     var taskStatusSnapshot by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var listLoading by remember { mutableStateOf(false) }
@@ -449,43 +1047,141 @@ private fun MobileTaskApp() {
     var autoUpdateDownloadInProgress by remember { mutableStateOf(false) }
     var autoUpdateProgressPercent by remember { mutableStateOf<Int?>(null) }
     var autoUpdateStatusText by remember { mutableStateOf("") }
+    var autoUpdateReadyToInstall by remember { mutableStateOf(false) }
+    var autoUpdateReadyVersionCode by remember { mutableStateOf(0) }
+    var autoUpdateReadyVersionName by remember { mutableStateOf("") }
     var editingTaskId by remember { mutableStateOf<String?>(null) }
     var editingTaskTitleValue by remember { mutableStateOf(TextFieldValue("")) }
     var revealedTaskId by remember { mutableStateOf<String?>(null) }
     var renameSavingTaskId by remember { mutableStateOf<String?>(null) }
     var readerSession by remember { mutableStateOf<TaskReaderSession?>(null) }
+    var readerScrollSnapshot by remember { mutableStateOf<ReaderScrollSnapshot?>(null) }
     var readerChromeVisible by remember { mutableStateOf(true) }
     var clipboardCandidate by remember { mutableStateOf<ClipboardTaskCandidate?>(null) }
+    var shareDispatchState by remember { mutableStateOf<ShareDispatchState?>(null) }
+    var currentSharePayload by remember(initialSharePayload) { mutableStateOf(initialSharePayload) }
+    var pendingNotificationTaskOpenRequest by remember(initialNotificationTaskOpenRequest) {
+        mutableStateOf(initialNotificationTaskOpenRequest)
+    }
+    var pendingUploadSubmissionId by remember { mutableStateOf<String?>(null) }
     var completionBanner by remember { mutableStateOf<CompletionBannerState?>(null) }
     var flashingTaskDeadlines by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var uiClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    val processingTasksForSkeleton = remember(tasks, backendProcessingTasks) {
+        deduplicateTasksByTaskId(
+            buildList {
+                addAll(tasks.filter { task -> isProcessingStatus(task.status) })
+                addAll(backendProcessingTasks)
+            }
+        )
+    }
+    val backendProcessingHints = remember(processingTasksForSkeleton, activeSubmissionHintMap) {
+        val trackedTaskIds = activeSubmissionHintMap.values.mapNotNull { hint ->
+            hint.taskId?.trim()?.takeIf { it.isNotEmpty() }
+        }.toHashSet()
+        processingTasksForSkeleton.asSequence()
+            .filter { task -> task.taskId !in trackedTaskIds }
+            .map { task ->
+                val progressPercent = when {
+                    task.progress <= 0.0 -> null
+                    task.progress <= 1.0 -> (task.progress * 100.0).roundToInt().coerceIn(0, 100)
+                    task.progress <= 100.0 -> task.progress.roundToInt().coerceIn(0, 100)
+                    else -> 100
+                }
+                ActiveSubmissionHint(
+                    workId = "$BACKEND_PROCESSING_HINT_WORK_PREFIX${task.taskId}",
+                    taskId = task.taskId,
+                    title = resolveTaskDisplayName(task),
+                    phaseText = resolveTaskPhaseText(
+                        status = task.status,
+                        statusMessage = task.statusMessage,
+                        progress = task.progress
+                    ),
+                    progressPercent = progressPercent,
+                    running = true,
+                    failed = false,
+                    failedMessage = ""
+                )
+            }
+            .toList()
+    }
+    val activeSubmissionHints = remember(activeSubmissionHintMap, backendProcessingHints) {
+        val merged = mutableListOf<ActiveSubmissionHint>()
+        val seenTaskIds = hashSetOf<String>()
+        activeSubmissionHintMap.values
+            .sortedWith(
+                compareByDescending<ActiveSubmissionHint> { it.running }
+                    .thenBy { it.workId }
+            )
+            .forEach { hint ->
+                merged += hint
+                hint.taskId?.trim()?.takeIf { it.isNotEmpty() }?.let(seenTaskIds::add)
+            }
+        backendProcessingHints.forEach { hint ->
+            val taskId = hint.taskId?.trim().orEmpty()
+            if (taskId.isNotEmpty() && taskId in seenTaskIds) {
+                return@forEach
+            }
+            merged += hint
+            if (taskId.isNotEmpty()) {
+                seenTaskIds += taskId
+            }
+        }
+        merged
+    }
+    val activeSubmissionTaskIds = remember(activeSubmissionHints) {
+        activeSubmissionHints.mapNotNull { hint ->
+            hint.taskId?.trim()?.takeIf { it.isNotEmpty() }
+        }.toSet()
+    }
+    val runningTaskCount = remember(processingTasksForSkeleton, activeSubmissionHints) {
+        val runningTaskIds = processingTasksForSkeleton.asSequence()
+            .map { task -> task.taskId }
+            .toMutableSet()
+        var pendingHintsWithoutTaskId = 0
+        activeSubmissionHints.forEach { hint ->
+            val taskId = hint.taskId?.trim().orEmpty()
+            if (taskId.isNotEmpty()) {
+                runningTaskIds += taskId
+            } else {
+                pendingHintsWithoutTaskId += 1
+            }
+        }
+        runningTaskIds.size + pendingHintsWithoutTaskId
+    }
+    val dispatchCenterRunningTasks = remember(processingTasksForSkeleton, activeSubmissionTaskIds) {
+        processingTasksForSkeleton.asSequence()
+            .filter { task -> task.taskId !in activeSubmissionTaskIds }
+            .take(6)
+            .toList()
+    }
     val taskSearchQuery = taskRouteUiState.taskSearchQuery
     val taskSortField = taskRouteUiState.taskSortField
     val taskSortOrder = taskRouteUiState.taskSortOrder
     val videoUrlInput = taskRouteUiState.videoUrlInput
+    val bookPageOffsetInput = taskRouteUiState.bookPageOffsetInput
     val composerExpanded = taskRouteUiState.composerExpanded
     val composerMode = taskRouteUiState.composerMode
     val dispatchCenterExpanded = taskRouteUiState.dispatchCenterExpanded
     val homeSection = taskRouteUiState.homeSection
     val hostActivity = remember(context) { context.findHostActivity() }
+    val composerBottomSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+    val pendingUploadHint = remember(activeSubmissionHintMap, pendingUploadSubmissionId) {
+        pendingUploadSubmissionId?.let { submissionId -> activeSubmissionHintMap[submissionId] }
+    }
+    val isShareQuickDispatchMode = currentSharePayload != null
     val hasRunningWork = remember(activeSubmissionHints) {
         activeSubmissionHints.any { it.running }
     }
-    val hasBackendProcessing = remember(tasks) {
-        tasks.any { isProcessingStatus(it.status) }
+    val hasBackendProcessing = remember(processingTasksForSkeleton) {
+        processingTasksForSkeleton.isNotEmpty()
     }
-    val preferActiveRefresh = hasRunningWork || hasBackendProcessing
-    val fabRotation by animateFloatAsState(
-        targetValue = if (composerExpanded) 45f else 0f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioLowBouncy,
-            stiffness = Spring.StiffnessMediumLow
-        ),
-        label = "fab-plus-rotation"
-    )
 
     LaunchedEffect(readerSession?.taskId) {
         readerChromeVisible = true
+        if (readerSession == null) {
+            readerScrollSnapshot = null
+        }
     }
 
     LaunchedEffect(hostActivity, readerSession != null, readerChromeVisible) {
@@ -507,21 +1203,66 @@ private fun MobileTaskApp() {
         }
     }
 
+    suspend fun warmUpCompletedTaskSession(taskId: String, fallbackTitle: String) {
+        val normalizedTaskId = taskId.trim()
+        if (normalizedTaskId.isEmpty()) {
+            return
+        }
+        if (preparedSessions.containsKey(normalizedTaskId)) {
+            return
+        }
+        val fallbackTask = tasks.firstOrNull { task -> task.taskId == normalizedTaskId }
+            ?: MobileTaskListItem(
+                taskId = normalizedTaskId,
+                title = fallbackTitle.ifBlank { normalizedTaskId },
+                status = "COMPLETED",
+                progress = 1.0,
+                statusMessage = "",
+                domain = "",
+                mainTopic = "",
+                markdownAvailable = true,
+                createdAt = Instant.now().toString(),
+                lastOpenedAt = ""
+            )
+        runCatching {
+            taskApi.loadTaskMarkdown(normalizedTaskId)
+        }.onSuccess { payload ->
+            val session = buildReaderSessionFromPayload(fallbackTask, payload) ?: return@onSuccess
+            preparedSessions = preparedSessions + (normalizedTaskId to session)
+            if (tasks.none { task -> task.taskId == normalizedTaskId }) {
+                tasks = listOf(
+                    fallbackTask.copy(
+                        title = session.title.ifBlank { fallbackTask.title },
+                        markdownAvailable = true
+                    )
+                ) + tasks
+            }
+        }
+    }
+
     suspend fun refreshTasks(showLoading: Boolean = true) {
         if (!refreshMutex.tryLock()) {
             return
         }
         if (showLoading) {
             listLoading = true
-            actionMessage = "Refreshing tasks..."
+            actionMessage = "正在刷新..."
         }
         try {
             runCatching {
-                taskApi.listTasks(onlyMultiSegment = true)
-            }.onSuccess { loaded ->
+                val visibleTasks = deduplicateTasksByTaskId(
+                    taskApi.listTasks(onlyMultiSegment = true)
+                )
+                val processingTasks = deduplicateTasksByTaskId(
+                    taskApi.listTasks(onlyMultiSegment = false)
+                        .filter { task -> isProcessingStatus(task.status) }
+                )
+                visibleTasks to processingTasks
+            }.onSuccess { (loaded, runningLoaded) ->
                 val ids = loaded.map { it.taskId }.toSet()
                 preparedSessions = preparedSessions.filterKeys { it in ids }
                 tasks = loaded
+                backendProcessingTasks = runningLoaded
                 if (editingTaskId != null && editingTaskId !in ids) {
                     editingTaskId = null
                     editingTaskTitleValue = TextFieldValue("")
@@ -544,6 +1285,12 @@ private fun MobileTaskApp() {
                         flashingTaskDeadlines = flashingTaskDeadlines + (
                             task.taskId to (System.currentTimeMillis() + TASK_FLASH_DURATION_MS)
                             )
+                        scope.launch {
+                            warmUpCompletedTaskSession(
+                                taskId = task.taskId,
+                                fallbackTitle = task.title.ifBlank { task.taskId }
+                            )
+                        }
                     }
                 }
                 taskStatusSnapshot = loaded.associate { it.taskId to it.status }
@@ -553,7 +1300,7 @@ private fun MobileTaskApp() {
                 }
             }.onFailure { error ->
                 if (showLoading) {
-                    actionMessage = "Failed to load tasks: ${error.message ?: "unknown"}"
+                    actionMessage = "加载失败，请稍后重试"
                 }
             }
         } finally {
@@ -562,6 +1309,101 @@ private fun MobileTaskApp() {
             }
             refreshMutex.unlock()
         }
+    }
+
+    fun applyRealtimeTaskUpdate(update: TaskRealtimeUpdate) {
+        val normalizedTaskId = update.taskId.trim()
+        if (normalizedTaskId.isEmpty()) {
+            return
+        }
+        val normalizedStatus = update.status.trim().ifEmpty { "PROCESSING" }
+        val normalizedMessage = update.message.ifBlank { update.errorMessage }.trim()
+        val normalizedProgress = when {
+            update.progress <= 0.0 -> 0.0
+            update.progress <= 1.0 -> update.progress
+            update.progress <= 100.0 -> (update.progress / 100.0)
+            else -> 1.0
+        }
+        val previousStatus = taskStatusSnapshot[normalizedTaskId]
+
+        var foundExisting = false
+        tasks = tasks.map { task ->
+            if (task.taskId != normalizedTaskId) {
+                return@map task
+            }
+            foundExisting = true
+            task.copy(
+                status = normalizedStatus,
+                progress = normalizedProgress.coerceIn(0.0, 1.0),
+                statusMessage = normalizedMessage,
+                markdownAvailable = task.markdownAvailable || isCompletedStatus(normalizedStatus)
+            )
+        }
+        if (!foundExisting) {
+            backendProcessingTasks = deduplicateTasksByTaskId(
+                listOf(
+                MobileTaskListItem(
+                    taskId = normalizedTaskId,
+                    title = normalizedTaskId,
+                    status = normalizedStatus,
+                    progress = normalizedProgress.coerceIn(0.0, 1.0),
+                    statusMessage = normalizedMessage,
+                    domain = "",
+                    mainTopic = "",
+                    markdownAvailable = isCompletedStatus(normalizedStatus),
+                    createdAt = Instant.now().toString(),
+                    lastOpenedAt = ""
+                )
+                ) + backendProcessingTasks
+            )
+        }
+        if (
+            isCompletedStatus(normalizedStatus) ||
+            isFailedStatus(normalizedStatus) ||
+            normalizedStatus.equals("CANCELLED", ignoreCase = true) ||
+            normalizedStatus.equals("CANCELED", ignoreCase = true)
+        ) {
+            backendProcessingTasks = backendProcessingTasks.filter { task ->
+                task.taskId != normalizedTaskId
+            }
+        }
+        tasks = deduplicateTasksByTaskId(tasks)
+
+        if (isTaskNewlyCompleted(normalizedStatus, previousStatus)) {
+            val taskTitle = tasks.firstOrNull { it.taskId == normalizedTaskId }?.title
+                ?.ifBlank { normalizedTaskId }
+                ?: normalizedTaskId
+            taskCompletionNotifier.notifyTaskCompleted(
+                taskId = normalizedTaskId,
+                taskTitle = taskTitle
+            )
+            completionBanner = CompletionBannerState(
+                taskId = normalizedTaskId,
+                title = taskTitle
+            )
+            flashingTaskDeadlines = flashingTaskDeadlines + (
+                normalizedTaskId to (System.currentTimeMillis() + TASK_FLASH_DURATION_MS)
+                )
+            scope.launch {
+                warmUpCompletedTaskSession(
+                    taskId = normalizedTaskId,
+                    fallbackTitle = taskTitle
+                )
+            }
+        }
+        taskStatusSnapshot = taskStatusSnapshot + (normalizedTaskId to normalizedStatus)
+    }
+
+    val taskRealtimeClient = remember(apiBaseUrl, mobileUserId) {
+        TaskRealtimeClient(
+            wsEndpoint = CollectionApiFactory.toWebSocketUrl(apiBaseUrl),
+            userId = mobileUserId,
+            onTaskUpdate = { update ->
+                scope.launch {
+                    applyRealtimeTaskUpdate(update)
+                }
+            }
+        )
     }
 
     fun updateLastOpenedAt(taskId: String, lastOpenedAt: String) {
@@ -603,7 +1445,7 @@ private fun MobileTaskApp() {
         if (cached != null) {
             readerSession = cached
             taskRouteViewModel.setComposerExpanded(false)
-            taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
+            taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
             recordTaskOpened(task.taskId)
             actionMessage = ""
             actionLoading = false
@@ -621,7 +1463,7 @@ private fun MobileTaskApp() {
             preparedSessions = preparedSessions + (task.taskId to session)
             readerSession = session
             taskRouteViewModel.setComposerExpanded(false)
-            taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
+            taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
             recordTaskOpened(task.taskId)
             // 记录阅读足迹：打开文章
             scope.launch {
@@ -655,6 +1497,8 @@ private fun MobileTaskApp() {
             status = "COMPLETED",
             progress = 1.0,
             statusMessage = "",
+            domain = "",
+            mainTopic = "",
             markdownAvailable = true,
             createdAt = Instant.now().toString(),
             lastOpenedAt = ""
@@ -710,7 +1554,7 @@ private fun MobileTaskApp() {
         editingTaskTitleValue = TextFieldValue("")
         revealedTaskId = null
         if (draftTitle.isEmpty()) {
-            actionMessage = "Title cannot be empty."
+            actionMessage = "标题不能为空"
             return
         }
         val currentTitle = resolveTaskDisplayName(targetTask).trim()
@@ -722,7 +1566,7 @@ private fun MobileTaskApp() {
         }
 
         renameSavingTaskId = targetTaskId
-        actionMessage = "Saving title..."
+        actionMessage = "正在保存标题..."
         runCatching {
             taskApi.renameTaskTitle(taskId = targetTaskId, title = draftTitle)
         }.onSuccess { serverTitle ->
@@ -730,7 +1574,7 @@ private fun MobileTaskApp() {
             syncTaskTitleLocally(targetTaskId, finalTitle)
             actionMessage = ""
         }.onFailure { error ->
-            actionMessage = "Rename failed: ${error.message ?: "unknown"}"
+            actionMessage = "重命名失败，请稍后重试"
         }
         renameSavingTaskId = null
     }
@@ -747,6 +1591,11 @@ private fun MobileTaskApp() {
         }
         sortTasks(filtered, taskSortField, taskSortOrder)
     }
+    val visibleTaskCards = remember(filteredAndSortedTasks, activeSubmissionTaskIds) {
+        filteredAndSortedTasks.filterNot { task ->
+            isProcessingStatus(task.status) && task.taskId in activeSubmissionTaskIds
+        }
+    }
 
     fun inspectClipboardForTaskCandidate() {
         if (readerSession != null || clipboardCandidate != null) {
@@ -758,8 +1607,6 @@ private fun MobileTaskApp() {
         )
         if (candidate != null) {
             clipboardCandidate = candidate
-            taskRouteViewModel.setComposerExpanded(true)
-            taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
         }
     }
 
@@ -772,9 +1619,24 @@ private fun MobileTaskApp() {
         }
     }
 
-    suspend fun runAutoUpdateCheck(trigger: String) {
-        when (val updateAction = appUpdateManager.checkAndAutoUpdate()) {
+    fun updateReadyInstallTarget(versionCode: Int, versionName: String) {
+        if (versionCode > 0) {
+            autoUpdateReadyVersionCode = versionCode
+        }
+        if (versionName.isNotBlank()) {
+            autoUpdateReadyVersionName = versionName
+        }
+    }
+
+    fun applyAutoUpdateAction(
+        updateAction: MobileAppAutoUpdateManager.AutoUpdateAction,
+        trigger: String
+    ) {
+        when (updateAction) {
             is MobileAppAutoUpdateManager.AutoUpdateAction.DownloadStarted -> {
+                autoUpdateReadyToInstall = false
+                autoUpdateReadyVersionCode = 0
+                autoUpdateReadyVersionName = ""
                 autoUpdateDownloadInProgress = true
                 autoUpdateProgressPercent = 0
                 autoUpdateStatusText = "Downloading ${updateAction.versionName} (0%)"
@@ -783,27 +1645,57 @@ private fun MobileTaskApp() {
                 actionMessage = "Detected new version ${updateAction.versionName}, auto download started."
             }
 
+            is MobileAppAutoUpdateManager.AutoUpdateAction.DownloadInProgress -> {
+                autoUpdateReadyToInstall = false
+                autoUpdateReadyVersionCode = 0
+                autoUpdateReadyVersionName = ""
+                val progressText = updateAction.progressPercent?.let { "$it%" } ?: "preparing"
+                autoUpdateDownloadInProgress = true
+                autoUpdateProgressPercent = updateAction.progressPercent
+                autoUpdateStatusText = "Downloading ${updateAction.versionName} ($progressText)"
+                forceUpdateRequired = updateAction.forceUpdate
+                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
+                actionMessage = autoUpdateStatusText
+            }
+
+            is MobileAppAutoUpdateManager.AutoUpdateAction.ReadyToInstall -> {
+                autoUpdateDownloadInProgress = false
+                autoUpdateProgressPercent = 100
+                autoUpdateReadyToInstall = true
+                updateReadyInstallTarget(updateAction.versionCode, updateAction.versionName)
+                autoUpdateStatusText = "Version ${updateAction.versionName} is ready. Tap Install now."
+                forceUpdateRequired = updateAction.forceUpdate
+                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
+                actionMessage = "Version ${updateAction.versionName} downloaded. Tap Install now to continue."
+            }
+
             is MobileAppAutoUpdateManager.AutoUpdateAction.InstallPrompted -> {
                 autoUpdateDownloadInProgress = false
                 autoUpdateProgressPercent = 100
-                autoUpdateStatusText = "Package ready. Opening installer for ${updateAction.versionName}."
+                autoUpdateReadyToInstall = true
+                updateReadyInstallTarget(updateAction.versionCode, updateAction.versionName)
+                autoUpdateStatusText = "Installer opened for ${updateAction.versionName}."
                 forceUpdateRequired = updateAction.forceUpdate
                 updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
-                actionMessage = "Version ${updateAction.versionName} downloaded. Opening installer."
+                actionMessage = "Installer opened for ${updateAction.versionName}."
             }
 
             is MobileAppAutoUpdateManager.AutoUpdateAction.InstallPermissionRequired -> {
                 autoUpdateDownloadInProgress = false
                 autoUpdateProgressPercent = 100
+                autoUpdateReadyToInstall = true
+                updateReadyInstallTarget(updateAction.versionCode, updateAction.versionName)
                 autoUpdateStatusText = "Install permission required for ${updateAction.versionName}."
                 forceUpdateRequired = updateAction.forceUpdate
                 updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
-                actionMessage = "Allow unknown app installs to continue upgrade to ${updateAction.versionName}."
+                actionMessage = "Allow unknown app installs, then tap Install now again."
             }
 
             is MobileAppAutoUpdateManager.AutoUpdateAction.Failed -> {
                 autoUpdateDownloadInProgress = false
-                autoUpdateProgressPercent = null
+                if (!autoUpdateReadyToInstall) {
+                    autoUpdateProgressPercent = null
+                }
                 if (updateAction.forceUpdate || forceUpdateRequired) {
                     forceUpdateRequired = true
                     updateForceUpdateTarget(
@@ -811,7 +1703,10 @@ private fun MobileTaskApp() {
                         updateAction.versionName.ifBlank { forceUpdateVersionName }
                     )
                     autoUpdateStatusText = "Mandatory update failed: ${updateAction.message}"
-                    actionMessage = "Auto update check failed: ${updateAction.message}"
+                    actionMessage = "Update flow failed: ${updateAction.message}"
+                } else if (autoUpdateReadyToInstall) {
+                    autoUpdateStatusText = "Install failed: ${updateAction.message}. Tap Install now to retry."
+                    actionMessage = "Install failed: ${updateAction.message}"
                 } else if (trigger == "launch" || trigger == "resume") {
                     autoUpdateStatusText = ""
                     actionMessage = "Auto update check failed: ${updateAction.message}"
@@ -825,18 +1720,29 @@ private fun MobileTaskApp() {
                 autoUpdateDownloadInProgress = false
                 autoUpdateProgressPercent = null
                 autoUpdateStatusText = ""
-            }
-
-            is MobileAppAutoUpdateManager.AutoUpdateAction.DownloadInProgress -> {
-                val progressText = updateAction.progressPercent?.let { "$it%" } ?: "preparing"
-                autoUpdateDownloadInProgress = true
-                autoUpdateProgressPercent = updateAction.progressPercent
-                autoUpdateStatusText = "Downloading ${updateAction.versionName} ($progressText)"
-                forceUpdateRequired = updateAction.forceUpdate
-                updateForceUpdateTarget(updateAction.versionCode, updateAction.versionName)
-                actionMessage = autoUpdateStatusText
+                autoUpdateReadyToInstall = false
+                autoUpdateReadyVersionCode = 0
+                autoUpdateReadyVersionName = ""
             }
         }
+    }
+
+    suspend fun runAutoUpdateCheck(trigger: String) {
+        if (!autoUpdateEnabled) {
+            applyAutoUpdateAction(MobileAppAutoUpdateManager.AutoUpdateAction.NoOp, trigger)
+            return
+        }
+        val manager = appUpdateManager ?: return
+        applyAutoUpdateAction(manager.checkAndAutoUpdate(), trigger)
+    }
+
+    suspend fun runAutoUpdateInstall(trigger: String) {
+        if (!autoUpdateEnabled) {
+            applyAutoUpdateAction(MobileAppAutoUpdateManager.AutoUpdateAction.NoOp, trigger)
+            return
+        }
+        val manager = appUpdateManager ?: return
+        applyAutoUpdateAction(manager.promptInstallReadyUpdate(), trigger)
     }
 
     fun enqueueSubmissionWork(
@@ -844,11 +1750,11 @@ private fun MobileTaskApp() {
         preferredTitle: String,
         videoUrl: String? = null,
         uploadUri: Uri? = null
-    ) {
+    ): String? {
         val submissionId = UUID.randomUUID().toString()
         when (mode) {
             SUBMISSION_MODE_UPLOAD -> {
-                val uri = uploadUri ?: return
+                val uri = uploadUri ?: return null
                 TaskSubmissionForegroundService.startUploadSubmission(
                     context = context.applicationContext,
                     submissionId = submissionId,
@@ -860,7 +1766,7 @@ private fun MobileTaskApp() {
             else -> {
                 val normalizedUrl = videoUrl.orEmpty().trim()
                 if (normalizedUrl.isBlank()) {
-                    return
+                    return null
                 }
                 TaskSubmissionForegroundService.startUrlSubmission(
                     context = context.applicationContext,
@@ -870,6 +1776,52 @@ private fun MobileTaskApp() {
                 )
             }
         }
+        return submissionId
+    }
+
+    fun dispatchSharePayload(payload: ShareIntentPayload): Boolean {
+        val sharedUrl = payload.videoUrl?.trim().orEmpty()
+        if (sharedUrl.isNotEmpty()) {
+            val submissionId = enqueueSubmissionWork(
+                mode = SUBMISSION_MODE_URL,
+                preferredTitle = deriveSubmissionTitleFromUrl(sharedUrl),
+                videoUrl = sharedUrl
+            ) ?: return false
+            actionMessage = "链接任务已投递到后台队列。"
+            clipboardCandidate = null
+            pendingUploadSubmissionId = null
+            shareDispatchState = ShareDispatchState(
+                stage = ShareDispatchStage.PROCESSING,
+                message = "正在投递任务，马上进入后台队列。"
+            )
+            taskRouteViewModel.setComposerExpanded(false)
+            taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+            clipboardPromptHistory.markPrompted(sharedUrl)
+            return submissionId.isNotBlank()
+        }
+        val sharedUri = payload.uploadUri ?: return false
+        runCatching {
+            context.contentResolver.takePersistableUriPermission(
+                sharedUri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION
+            )
+        }
+        val preferredTitle = resolveSubmissionTitleFromUri(
+            contentResolver = context.contentResolver,
+            uri = sharedUri
+        )
+        val submissionId = enqueueSubmissionWork(
+            mode = SUBMISSION_MODE_UPLOAD,
+            preferredTitle = preferredTitle,
+            uploadUri = sharedUri
+        ) ?: return false
+        pendingUploadSubmissionId = submissionId
+        actionMessage = "文件任务已投递到后台队列。"
+        shareDispatchState = ShareDispatchState(
+            stage = ShareDispatchStage.PROCESSING,
+            message = "正在投递任务，马上进入后台队列。"
+        )
+        return true
     }
 
     fun cancelTaskFromUi(taskId: String) {
@@ -879,16 +1831,16 @@ private fun MobileTaskApp() {
         }
         scope.launch {
             actionLoading = true
-            actionMessage = "Cancelling ${compactTaskId(normalizedTaskId)}..."
+            actionMessage = "正在取消..."
             runCatching {
                 taskApi.cancelTask(normalizedTaskId)
             }.onSuccess { result ->
                 actionMessage = result.message.ifBlank {
-                    if (result.success) "Task cancelled." else "Task cannot be cancelled."
+                    if (result.success) "任务已取消" else "该任务无法取消"
                 }
                 refreshTasks(showLoading = false)
             }.onFailure { error ->
-                actionMessage = "Cancel failed: ${error.message ?: "unknown"}"
+                actionMessage = "取消失败，请稍后重试"
             }
             actionLoading = false
         }
@@ -898,7 +1850,7 @@ private fun MobileTaskApp() {
         contract = ActivityResultContracts.RequestPermission()
     ) { }
 
-    val pickVideoLauncher = rememberLauncherForActivityResult(
+    val pickDocumentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri == null) {
@@ -910,24 +1862,128 @@ private fun MobileTaskApp() {
                 android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         }
-        val preferredTitle = resolveSubmissionTitleFromUri(
-            contentResolver = context.contentResolver,
-            uri = uri
-        )
-        enqueueSubmissionWork(
-            mode = SUBMISSION_MODE_UPLOAD,
-            preferredTitle = preferredTitle,
-            uploadUri = uri
-        )
-        actionMessage = "任务已开始，已转入后台队列。你可以继续浏览其他页面。"
-        taskRouteViewModel.setComposerExpanded(false)
-        taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
         scope.launch {
-            refreshTasks(showLoading = false)
+            val normalizedOffsetText = bookPageOffsetInput.trim()
+            val pageOffset = if (normalizedOffsetText.isEmpty()) {
+                null
+            } else {
+                normalizedOffsetText.toIntOrNull()
+            }
+            if (normalizedOffsetText.isNotEmpty() && pageOffset == null) {
+                actionMessage = "页码偏移必须是整数，例如 12 或 -12"
+                return@launch
+            }
+            actionLoading = true
+            actionMessage = "正在上传书籍并探测目录..."
+            runCatching {
+                taskApi.uploadVideoFile(
+                    contentResolver = context.contentResolver,
+                    uri = uri,
+                    probeOnly = true
+                )
+            }.onSuccess { uploadResult ->
+                if (!uploadResult.success) {
+                    actionMessage = uploadResult.message.ifBlank { "上传失败，请重试" }
+                    return@onSuccess
+                }
+                val probeInput = uploadResult.normalizedVideoUrl.trim()
+                if (probeInput.isBlank()) {
+                    actionMessage = "上传成功，但未返回可探测的文件路径"
+                    return@onSuccess
+                }
+                pendingUploadSubmissionId = null
+                taskRouteViewModel.setVideoUrlInput(probeInput)
+                taskRouteViewModel.setComposerExpanded(true)
+                taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+                collectionViewModel.setProbePreviewDocumentUri(uri.toString())
+                collectionViewModel.probeVideoInput(probeInput, pageOffset)
+                actionMessage = "已完成探测，请确认实际起始页与章节后再提交。"
+            }.onFailure { error ->
+                actionMessage = "上传探测失败: ${error.message ?: "unknown"}"
+            }
+            actionLoading = false
         }
     }
 
+    fun cancelSubmissionHintFromUi(hint: ActiveSubmissionHint) {
+        val taskId = hint.taskId?.trim().orEmpty()
+        if (hint.workId.startsWith(BACKEND_PROCESSING_HINT_WORK_PREFIX) && taskId.isNotEmpty()) {
+            cancelTaskFromUi(taskId)
+            return
+        }
+        TaskSubmissionForegroundService.cancelSubmission(
+            context.applicationContext,
+            hint.workId
+        )
+    }
+
+    LaunchedEffect(shareIntentEvents) {
+        shareIntentEvents?.collect { payload ->
+            currentSharePayload = payload
+            shareDispatchState = null
+        }
+    }
+
+    LaunchedEffect(notificationTaskOpenEvents) {
+        notificationTaskOpenEvents?.collect { request ->
+            pendingNotificationTaskOpenRequest = request
+        }
+    }
+
+    LaunchedEffect(pendingNotificationTaskOpenRequest?.taskId) {
+        val request = pendingNotificationTaskOpenRequest ?: return@LaunchedEffect
+        pendingNotificationTaskOpenRequest = null
+        val normalizedTaskId = request.taskId.trim()
+        if (normalizedTaskId.isEmpty()) {
+            return@LaunchedEffect
+        }
+        taskRouteViewModel.setHomeSection(HomeSection.TASKS)
+        taskRouteViewModel.setComposerExpanded(false)
+        taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+        refreshTasks(showLoading = false)
+        warmUpCompletedTaskSession(
+            taskId = normalizedTaskId,
+            fallbackTitle = request.taskTitle.ifBlank { normalizedTaskId }
+        )
+        openTaskById(
+            taskId = normalizedTaskId,
+            fallbackTitle = request.taskTitle.ifBlank { normalizedTaskId }
+        )
+    }
+
+    LaunchedEffect(
+        isShareQuickDispatchMode,
+        currentSharePayload?.videoUrl,
+        currentSharePayload?.uploadUri,
+        shareDispatchState
+    ) {
+        if (!isShareQuickDispatchMode) {
+            return@LaunchedEffect
+        }
+        val payload = currentSharePayload ?: return@LaunchedEffect
+        if (shareDispatchState != null) {
+            return@LaunchedEffect
+        }
+        val dispatched = dispatchSharePayload(payload)
+        if (!dispatched) {
+            shareDispatchState = ShareDispatchState(
+                stage = ShareDispatchStage.FAILED,
+                message = "任务投递失败，请返回后重试。"
+            )
+            return@LaunchedEffect
+        }
+        scope.launch { refreshTasks(showLoading = false) }
+        delay(520)
+        shareDispatchState = ShareDispatchState(
+            stage = ShareDispatchStage.QUEUED,
+            message = "任务已进入后台队列。"
+        )
+    }
+
     LaunchedEffect(Unit) {
+        if (isShareQuickDispatchMode) {
+            return@LaunchedEffect
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(
                 context,
@@ -943,25 +1999,12 @@ private fun MobileTaskApp() {
     }
 
     LaunchedEffect(autoUpdateDownloadInProgress) {
-        if (!autoUpdateDownloadInProgress) {
+        if (!autoUpdateEnabled || !autoUpdateDownloadInProgress) {
             return@LaunchedEffect
         }
         while (autoUpdateDownloadInProgress) {
             delay(1_000)
             runAutoUpdateCheck(trigger = "monitor")
-        }
-    }
-
-    LaunchedEffect(preferActiveRefresh) {
-        while (true) {
-            delay(
-                if (preferActiveRefresh) {
-                    ACTIVE_TASK_REFRESH_INTERVAL_MS
-                } else {
-                    BACKGROUND_TASK_REFRESH_INTERVAL_MS
-                }
-            )
-            refreshTasks(showLoading = false)
         }
     }
 
@@ -994,6 +2037,14 @@ private fun MobileTaskApp() {
 
                 SubmissionEventType.SUCCEEDED -> {
                     actionMessage = "任务已完成，点击卡片可立即查看。"
+                    if (!event.taskId.isNullOrBlank()) {
+                        scope.launch {
+                            warmUpCompletedTaskSession(
+                                taskId = event.taskId,
+                                fallbackTitle = event.title.orEmpty().ifBlank { event.taskId }
+                            )
+                        }
+                    }
                 }
 
                 SubmissionEventType.FAILED -> {
@@ -1012,13 +2063,34 @@ private fun MobileTaskApp() {
         }
     }
 
+    fun openComposer() {
+        val pendingCandidate = clipboardCandidate
+        if (pendingCandidate != null && videoUrlInput.isBlank()) {
+            taskRouteViewModel.setVideoUrlInput(pendingCandidate.normalizedUrl)
+            clipboardPromptHistory.markPrompted(pendingCandidate.normalizedUrl)
+        }
+        taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+        taskRouteViewModel.setComposerExpanded(true)
+    }
+
     fun triggerVideoProbe() {
         val normalized = videoUrlInput.trim()
         if (normalized.isEmpty()) {
             actionMessage = "请先输入链接"
             return
         }
-        collectionViewModel.probeVideoInput(normalized)
+        val normalizedOffsetText = bookPageOffsetInput.trim()
+        val pageOffset = if (normalizedOffsetText.isEmpty()) {
+            null
+        } else {
+            normalizedOffsetText.toIntOrNull()
+        }
+        if (normalizedOffsetText.isNotEmpty() && pageOffset == null) {
+            actionMessage = "页码偏移必须是整数，例如：8 或 -12"
+            return
+        }
+        collectionViewModel.setProbePreviewDocumentUri(null)
+        collectionViewModel.probeVideoInput(normalized, pageOffset)
     }
 
     LaunchedEffect(Unit) {
@@ -1030,8 +2102,19 @@ private fun MobileTaskApp() {
 
                 is CollectionUiEvent.SingleTaskSubmitted -> {
                     actionMessage = event.message
+                    // 将已提交的 taskId 注册到后台服务监控
+                    // 使 Probe 路径也能获得骨架卡片、进度通知和完成通知
+                    val trackingId = java.util.UUID.randomUUID().toString()
+                    TaskSubmissionForegroundService.startTaskTracking(
+                        context = context.applicationContext,
+                        submissionId = trackingId,
+                        taskId = event.taskId,
+                        title = event.title
+                    )
                     scope.launch { refreshTasks(showLoading = false) }
-                    snackbarHostState.showSnackbar("视频任务已提交：${compactTaskId(event.taskId)}")
+                    snackbarHostState.showSnackbar(
+                        "《${event.title.take(20)}》已提交，后台处理中"
+                    )
                 }
 
                 is CollectionUiEvent.BatchSubmitted -> {
@@ -1047,13 +2130,6 @@ private fun MobileTaskApp() {
         }
     }
 
-    LaunchedEffect(probeState) {
-        if (probeState is ProbeUiState.Success) {
-            taskRouteViewModel.setComposerExpanded(false)
-            taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
-        }
-    }
-
     LaunchedEffect(completionBanner?.taskId) {
         val banner = completionBanner ?: return@LaunchedEffect
         delay(8_000)
@@ -1062,29 +2138,64 @@ private fun MobileTaskApp() {
         }
     }
 
-    DisposableEffect(lifecycleOwner, readerSession) {
-        val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                inspectClipboardForTaskCandidate()
-                scope.launch {
-                    refreshTasks(showLoading = false)
-                    runAutoUpdateCheck(trigger = "resume")
+    DisposableEffect(lifecycleOwner, readerSession, taskRealtimeClient, isShareQuickDispatchMode) {
+        if (isShareQuickDispatchMode) {
+            onDispose {}
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_START -> {
+                        taskRealtimeClient.connect()
+                    }
+
+                    Lifecycle.Event.ON_RESUME -> {
+                        inspectClipboardForTaskCandidate()
+                        scope.launch {
+                            refreshTasks(showLoading = false)
+                            runAutoUpdateCheck(trigger = "resume")
+                        }
+                    }
+
+                    Lifecycle.Event.ON_STOP -> {
+                        val activeSession = readerSession
+                        if (activeSession != null) {
+                            val snapshot = readerScrollSnapshot
+                            if (snapshot != null && snapshot.taskId == activeSession.taskId) {
+                                readerScrollPositionStore.save(
+                                    taskId = activeSession.taskId,
+                                    position = snapshot.position,
+                                    sync = true
+                                )
+                            }
+                        }
+                        taskRealtimeClient.disconnect()
+                    }
+
+                    else -> {}
                 }
             }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose {
-            lifecycleOwner.lifecycle.removeObserver(observer)
+            lifecycleOwner.lifecycle.addObserver(observer)
+            taskRealtimeClient.connect()
+            onDispose {
+                taskRealtimeClient.disconnect()
+                lifecycleOwner.lifecycle.removeObserver(observer)
+            }
         }
     }
 
-    if (forceUpdateRequired) {
+    if (autoUpdateEnabled && forceUpdateRequired) {
         ForceUpdateBlockingRoute(
             versionName = forceUpdateVersionName,
             versionCode = forceUpdateVersionCode,
             statusText = autoUpdateStatusText,
             downloading = autoUpdateDownloadInProgress,
             progressPercent = autoUpdateProgressPercent,
+            installReady = autoUpdateReadyToInstall,
+            onInstallNow = {
+                scope.launch {
+                    runAutoUpdateInstall(trigger = "force_install_now")
+                }
+            },
             onRetryUpdate = {
                 scope.launch {
                     runAutoUpdateCheck(trigger = "force_manual")
@@ -1094,8 +2205,24 @@ private fun MobileTaskApp() {
         return
     }
 
+    if (isShareQuickDispatchMode) {
+        val payload = currentSharePayload ?: return
+        ShareIntentDispatchRoute(
+            payload = payload,
+            state = shareDispatchState,
+            onClose = {
+                currentSharePayload = null
+                hostActivity?.finish()
+            }
+        )
+        return
+    }
+
     if (readerSession != null) {
         val session = readerSession ?: return
+        BackHandler {
+            readerSession = null
+        }
         val savedReaderScrollPosition = remember(session.taskId) {
             readerScrollPositionStore.load(session.taskId)
         }
@@ -1118,10 +2245,23 @@ private fun MobileTaskApp() {
         var checkpointReaderScrollPosition by remember(session.taskId) {
             mutableStateOf(initialReaderScrollPosition)
         }
+        LaunchedEffect(session.taskId, initialReaderScrollPosition) {
+            readerScrollSnapshot = ReaderScrollSnapshot(
+                taskId = session.taskId,
+                position = initialReaderScrollPosition
+            )
+        }
 
         DisposableEffect(session.taskId) {
             onDispose {
-                readerScrollPositionStore.save(session.taskId, latestReaderScrollPosition)
+                readerScrollPositionStore.save(
+                    taskId = session.taskId,
+                    position = latestReaderScrollPosition,
+                    sync = true
+                )
+                if (readerScrollSnapshot?.taskId == session.taskId) {
+                    readerScrollSnapshot = null
+                }
             }
         }
 
@@ -1148,7 +2288,16 @@ private fun MobileTaskApp() {
                                 .padding(horizontal = 8.dp, vertical = 8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            TextButton(onClick = { readerSession = null }) {
+                            TextButton(
+                                onClick = {
+                                    readerScrollPositionStore.save(
+                                        taskId = session.taskId,
+                                        position = latestReaderScrollPosition,
+                                        sync = true
+                                    )
+                                    readerSession = null
+                                }
+                            ) {
                                 Text("Back")
                             }
                             Text(
@@ -1169,6 +2318,7 @@ private fun MobileTaskApp() {
                         renderConfig = renderConfig,
                         modifier = Modifier.fillMaxSize(),
                         taskId = session.taskId,
+                        apiBaseUrl = apiBaseUrl,
                         pathHint = session.pathHint,
                         metaApi = metaApi,
                         telemetryApi = telemetryApi,
@@ -1180,7 +2330,8 @@ private fun MobileTaskApp() {
                                 readerChromeVisible = false
                             }
                         },
-                        onScrollUp = {
+                        onScrollUp = {},
+                        onBlankTap = {
                             if (!readerChromeVisible) {
                                 readerChromeVisible = true
                             }
@@ -1192,6 +2343,10 @@ private fun MobileTaskApp() {
                                 firstVisibleItemScrollOffset = offset.coerceAtLeast(0)
                             )
                             latestReaderScrollPosition = normalizedPosition
+                            readerScrollSnapshot = ReaderScrollSnapshot(
+                                taskId = session.taskId,
+                                position = normalizedPosition
+                            )
                             val indexChanged = normalizedPosition.firstVisibleItemIndex !=
                                 checkpointReaderScrollPosition.firstVisibleItemIndex
                             val offsetDelta = kotlin.math.abs(
@@ -1264,6 +2419,36 @@ private fun MobileTaskApp() {
                                         }
                                     }
                                 }
+                                "anchor_created" -> {
+                                    scope.launch {
+                                        runCatching {
+                                            footprintRepo.recordTokenDoubleClick(
+                                                taskId = session.taskId,
+                                                taskTitle = title,
+                                                blockId = telemetryEvent.nodeId,
+                                                token = telemetryEvent.payload["quote"].orEmpty()
+                                                    .ifBlank { telemetryEvent.payload["token"].orEmpty() },
+                                                tokenStart = telemetryEvent.payload["start"]?.toIntOrNull() ?: -1,
+                                                tokenEnd = telemetryEvent.payload["end"]?.toIntOrNull() ?: -1,
+                                                scrollIndex = scrollIdx
+                                            )
+                                        }
+                                    }
+                                }
+                                "mounted_note_opened" -> {
+                                    scope.launch {
+                                        runCatching {
+                                            footprintRepo.recordAnnotationAdded(
+                                                taskId = session.taskId,
+                                                taskTitle = title,
+                                                blockId = telemetryEvent.nodeId,
+                                                annotationText = telemetryEvent.payload["quote"].orEmpty()
+                                                    .ifBlank { telemetryEvent.payload["anchorId"].orEmpty() },
+                                                scrollIndex = scrollIdx
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     )
@@ -1283,7 +2468,7 @@ private fun MobileTaskApp() {
                     )
                 }
 
-                val readerActiveTaskCount = tasks.count { isProcessingStatus(it.status) } + activeSubmissionHints.size
+                val readerActiveTaskCount = runningTaskCount
                 AnimatedVisibility(
                     visible = readerActiveTaskCount > 0,
                     modifier = Modifier
@@ -1294,6 +2479,11 @@ private fun MobileTaskApp() {
                 ) {
                     Card(
                         modifier = Modifier.clickable {
+                            readerScrollPositionStore.save(
+                                taskId = session.taskId,
+                                position = latestReaderScrollPosition,
+                                sync = true
+                            )
                             readerSession = null
                             taskRouteViewModel.setDispatchCenterExpanded(true)
                         },
@@ -1312,7 +2502,7 @@ private fun MobileTaskApp() {
                                 color = Color.White
                             )
                             Text(
-                                text = "鍚庡彴浠诲姟 $readerActiveTaskCount",
+                                text = "后台任务 $readerActiveTaskCount",
                                 color = Color.White
                             )
                         }
@@ -1365,13 +2555,18 @@ private fun MobileTaskApp() {
     TaskRoute {
         Surface(modifier = Modifier.fillMaxSize()) {
             Box(modifier = Modifier.fillMaxSize()) {
-                LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
+                PullToRefreshBox(
+                    isRefreshing = listLoading,
+                    onRefresh = { scope.launch { refreshTasks(showLoading = true) } },
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .statusBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
                 item {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -1379,7 +2574,7 @@ private fun MobileTaskApp() {
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
-                            text = "Task Library",
+                            text = "我的任务",
                             fontWeight = FontWeight.SemiBold
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -1410,8 +2605,8 @@ private fun MobileTaskApp() {
                         onValueChange = { taskRouteViewModel.setTaskSearchQuery(it) },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
-                        label = { Text("Search task") },
-                        placeholder = { Text("Search by title or task ID") },
+                        label = { Text("搜索任务") },
+                        placeholder = { Text("按标题搜索") },
                         enabled = !actionLoading
                     )
                 }
@@ -1428,7 +2623,7 @@ private fun MobileTaskApp() {
                             },
                             enabled = !actionLoading
                         ) {
-                            Text("Sort: ${taskSortFieldLabel(taskSortField)}")
+                            Text("排序：${taskSortFieldLabel(taskSortField)}")
                         }
                         TextButton(
                             onClick = {
@@ -1436,14 +2631,14 @@ private fun MobileTaskApp() {
                             },
                             enabled = !actionLoading
                         ) {
-                            Text("Order: ${if (taskSortOrder == SortOrder.DESC) "Desc" else "Asc"}")
+                            Text("顺序：${if (taskSortOrder == SortOrder.DESC) "最新" else "最旧"}")
                         }
                     }
                 }
 
                 item {
                     Text(
-                        text = "Showing ${filteredAndSortedTasks.size} / ${tasks.size}",
+                        text = "显示 ${visibleTaskCards.size} / ${tasks.size} 条",
                         color = Color(0xFF667085)
                     )
                 }
@@ -1452,25 +2647,13 @@ private fun MobileTaskApp() {
                     items(activeSubmissionHints, key = { "submission-${it.workId}" }) { hint ->
                         BackgroundSubmissionSkeletonCard(
                             hint = hint,
-                            onCancel = {
-                                if (hint.taskId.isNullOrBlank()) {
-                                    TaskSubmissionForegroundService.cancelSubmission(
-                                        context.applicationContext,
-                                        hint.workId
-                                    )
-                                } else {
-                                    TaskSubmissionForegroundService.cancelSubmission(
-                                        context.applicationContext,
-                                        hint.workId
-                                    )
-                                }
-                            },
+                            onCancel = { cancelSubmissionHintFromUi(hint) },
                             enabled = !actionLoading
                         )
                     }
                 }
 
-                if (!listLoading && filteredAndSortedTasks.isEmpty() && activeSubmissionHints.isEmpty()) {
+                if (!listLoading && visibleTaskCards.isEmpty() && activeSubmissionHints.isEmpty()) {
                     item {
                         Text(
                             text = if (taskSearchQuery.isBlank()) {
@@ -1484,7 +2667,7 @@ private fun MobileTaskApp() {
                     }
                 }
 
-                items(filteredAndSortedTasks, key = { it.taskId }) { task ->
+                items(visibleTaskCards, key = { it.taskId }) { task ->
                     val flashDeadline = flashingTaskDeadlines[task.taskId] ?: 0L
                     val shouldFlash = flashDeadline > uiClockMs
                     val flashTransition = androidx.compose.animation.core.rememberInfiniteTransition(
@@ -1542,70 +2725,129 @@ private fun MobileTaskApp() {
                         }
                     )
                 }
-            }
+                    }
+                }
 
-            AnimatedVisibility(
-                visible = composerExpanded,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(horizontal = 16.dp, vertical = 96.dp),
-                enter = fadeIn(animationSpec = tween(durationMillis = 180)) +
-                    slideInVertically(
-                        animationSpec = tween(durationMillis = 220),
-                        initialOffsetY = { it / 2 }
-                    ),
-                exit = fadeOut(animationSpec = tween(durationMillis = 140)) +
-                    slideOutVertically(
-                        animationSpec = tween(durationMillis = 180),
-                        targetOffsetY = { it / 2 }
-                    )
-            ) {
-                Card(
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                if (composerExpanded) {
+                    ModalBottomSheet(
+                        onDismissRequest = {
+                            taskRouteViewModel.setComposerExpanded(false)
+                            taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+                        },
+                        sheetState = composerBottomSheetState
                     ) {
-                        if (composerMode == TaskComposerMode.URL) {
-                            val probeLoading = probeState is ProbeUiState.Loading
-                            val probeError = (probeState as? ProbeUiState.Error)?.message
-                            val pendingCandidate = clipboardCandidate
-                            if (pendingCandidate != null) {
-                                ClipboardPasteBubble(
-                                    candidateUrl = pendingCandidate.displayUrl,
-                                    enabled = !actionLoading && !probeLoading,
-                                    onPaste = {
-                                        taskRouteViewModel.setVideoUrlInput(pendingCandidate.normalizedUrl)
-                                        clipboardPromptHistory.markPrompted(pendingCandidate.normalizedUrl)
-                                        clipboardCandidate = null
-                                    },
-                                    onDismiss = {
-                                        clipboardPromptHistory.markPrompted(pendingCandidate.normalizedUrl)
-                                        clipboardCandidate = null
-                                    }
+                        val probeLoading = probeState is ProbeUiState.Loading
+                        val probeError = (probeState as? ProbeUiState.Error)?.message
+                        val pendingCandidate = clipboardCandidate
+                        val uploadHint = pendingUploadHint
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 320.dp)
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .navigationBarsPadding(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "添加新内容",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            if (pendingCandidate != null && videoUrlInput == pendingCandidate.normalizedUrl) {
+                                Text(
+                                    text = "已自动读取剪贴板链接",
+                                    color = Color(0xFF175CD3),
+                                    style = MaterialTheme.typography.bodySmall
                                 )
                             }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.Bottom
+                            ) {
+                                OutlinedTextField(
+                                    value = videoUrlInput,
+                                    onValueChange = { taskRouteViewModel.setVideoUrlInput(it) },
+                                    modifier = Modifier.weight(1f),
+                                    singleLine = true,
+                                    label = { Text("B站 / 抖音 / 书籍链接") },
+                                    placeholder = { Text("粘贴链接，或点击右侧上传文件") },
+                                    enabled = !actionLoading && !probeLoading,
+                                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                                    keyboardActions = KeyboardActions(
+                                        onSearch = { triggerVideoProbe() },
+                                        onDone = { triggerVideoProbe() }
+                                    )
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                IconButton(
+                                    onClick = {
+                                        pickDocumentLauncher.launch(
+                                            arrayOf(
+                                                "application/pdf",
+                                                "application/epub+zip",
+                                                "application/octet-stream"
+                                            )
+                                        )
+                                    },
+                                    enabled = !actionLoading
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Add,
+                                        contentDescription = "上传文件"
+                                    )
+                                }
+                            }
                             OutlinedTextField(
-                                value = videoUrlInput,
-                                onValueChange = { taskRouteViewModel.setVideoUrlInput(it) },
+                                value = bookPageOffsetInput,
+                                onValueChange = { taskRouteViewModel.setBookPageOffsetInput(it) },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
-                                label = { Text("Video URL") },
-                                placeholder = { Text("粘贴链接后点击解析，或按回车") },
+                                label = { Text("兼ebook页码偏移（可选）") },
+                                placeholder = { Text("书页号 + 偏移 = PDF页码，如：8 或 -12") },
                                 enabled = !actionLoading && !probeLoading,
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                keyboardActions = KeyboardActions(
-                                    onSearch = {
-                                        triggerVideoProbe()
-                                    },
-                                    onDone = {
-                                        triggerVideoProbe()
-                                    }
+                                keyboardOptions = KeyboardOptions(
+                                    imeAction = ImeAction.Done,
+                                    keyboardType = KeyboardType.Text
                                 )
                             )
+                            if (uploadHint != null) {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = Color(0xFFFFF9DB))
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = uploadHint.title,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = uploadHint.phaseText,
+                                            color = Color(0xFF475467),
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        val percent = uploadHint.progressPercent?.coerceIn(0, 100)
+                                        if (percent != null) {
+                                            LinearProgressIndicator(
+                                                progress = { percent / 100f },
+                                                modifier = Modifier.fillMaxWidth()
+                                            )
+                                            Text(
+                                                text = "进度 $percent%",
+                                                color = Color(0xFF667085)
+                                            )
+                                        } else {
+                                            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                                        }
+                                    }
+                                }
+                            }
                             AnimatedVisibility(visible = probeLoading) {
                                 ProbeDetectingSkeleton()
                             }
@@ -1615,71 +2857,66 @@ private fun MobileTaskApp() {
                                     color = Color(0xFFB42318)
                                 )
                             }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.End
+                            Button(
+                                onClick = { triggerVideoProbe() },
+                                enabled = !actionLoading && !probeLoading,
+                                modifier = Modifier.fillMaxWidth()
                             ) {
-                                TextButton(
-                                    onClick = { taskRouteViewModel.setComposerMode(TaskComposerMode.MENU) },
-                                    enabled = !actionLoading
-                                ) {
-                                    Text("Back")
+                                if (probeLoading) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(16.dp),
+                                        strokeWidth = 2.dp,
+                                        color = Color.White
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
                                 }
-                                Button(
-                                    onClick = {
-                                        triggerVideoProbe()
-                                    },
-                                    enabled = !actionLoading && !probeLoading
-                                ) {
-                                    if (probeLoading) {
-                                        CircularProgressIndicator(
-                                            modifier = Modifier.size(16.dp),
-                                            strokeWidth = 2.dp,
-                                            color = Color.White
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                    }
-                                    Text("解析")
-                                }
-                            }
-                        } else {
-                            Text(
-                                text = "Create Task",
-                                fontWeight = FontWeight.SemiBold
-                            )
-                            Text(
-                                text = "Paste a video URL or upload a file when needed.",
-                                color = Color(0xFF667085)
-                            )
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                TextButton(
-                                    onClick = { taskRouteViewModel.setComposerMode(TaskComposerMode.URL) },
-                                    enabled = !actionLoading
-                                ) {
-                                    Text("Paste URL")
-                                }
-                                Button(
-                                    onClick = {
-                                        taskRouteViewModel.setComposerExpanded(false)
-                                        taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
-                                        pickVideoLauncher.launch(arrayOf("video/*"))
-                                    },
-                                    enabled = !actionLoading
-                                ) {
-                                    Text("Upload Video")
-                                }
-                                TextButton(
-                                    onClick = { scope.launch { refreshTasks() } },
-                                    enabled = !actionLoading
-                                ) {
-                                    Text("Refresh")
-                                }
+                                Text("解析并开始")
                             }
                         }
                     }
+                }
+
+            AnimatedVisibility(
+                visible = clipboardCandidate != null && !composerExpanded,
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                enter = fadeIn(animationSpec = tween(durationMillis = 180)) +
+                    slideInVertically(
+                        animationSpec = tween(durationMillis = 200),
+                        initialOffsetY = { -it / 2 }
+                    ),
+                exit = fadeOut(animationSpec = tween(durationMillis = 140)) +
+                    slideOutVertically(
+                        animationSpec = tween(durationMillis = 160),
+                        targetOffsetY = { -it }
+                    )
+            ) {
+                val candidate = clipboardCandidate
+                if (candidate != null) {
+                    ClipboardQuickActionPill(
+                        candidateUrl = candidate.displayUrl,
+                        onGenerateNow = {
+                            val submissionId = enqueueSubmissionWork(
+                                mode = SUBMISSION_MODE_URL,
+                                preferredTitle = deriveSubmissionTitleFromUrl(candidate.normalizedUrl),
+                                videoUrl = candidate.normalizedUrl
+                            )
+                            if (submissionId == null) {
+                                actionMessage = "无法提交链接任务，请稍后重试。"
+                                return@ClipboardQuickActionPill
+                            }
+                            clipboardPromptHistory.markPrompted(candidate.normalizedUrl)
+                            clipboardCandidate = null
+                            actionMessage = "链接任务已进入后台队列。"
+                            scope.launch { refreshTasks(showLoading = false) }
+                        },
+                        onDismiss = {
+                            clipboardPromptHistory.markPrompted(candidate.normalizedUrl)
+                            clipboardCandidate = null
+                        }
+                    )
                 }
             }
 
@@ -1707,9 +2944,11 @@ private fun MobileTaskApp() {
                             .fillMaxWidth()
                             .clickable(enabled = !actionLoading) {
                                 completionBanner = null
-                                val target = tasks.firstOrNull { it.taskId == banner.taskId }
-                                if (target != null) {
-                                    scope.launch { openTask(target) }
+                                scope.launch {
+                                    openTaskById(
+                                        taskId = banner.taskId,
+                                        fallbackTitle = banner.title
+                                    )
                                 }
                             },
                         colors = androidx.compose.material3.CardDefaults.cardColors(
@@ -1727,7 +2966,7 @@ private fun MobileTaskApp() {
                 }
             }
 
-            val activeTaskCount = tasks.count { isProcessingStatus(it.status) } + activeSubmissionHints.size
+            val activeTaskCount = runningTaskCount
             AnimatedVisibility(
                 visible = activeTaskCount > 0,
                 modifier = Modifier
@@ -1753,7 +2992,7 @@ private fun MobileTaskApp() {
                             color = Color.White
                         )
                         Text(
-                            text = "浠诲姟璋冨害涓績 $activeTaskCount",
+                            text = "任务调度中心 $activeTaskCount",
                             color = Color.White,
                             fontWeight = FontWeight.Medium
                         )
@@ -1784,7 +3023,7 @@ private fun MobileTaskApp() {
                             .padding(horizontal = 14.dp, vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text("浠诲姟璋冨害涓績", fontWeight = FontWeight.SemiBold)
+                        Text("任务调度中心", fontWeight = FontWeight.SemiBold)
                         activeSubmissionHints.forEach { hint ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1811,25 +3050,13 @@ private fun MobileTaskApp() {
                                 }
                                 TextButton(
                                     enabled = !actionLoading,
-                                    onClick = {
-                                        if (hint.taskId.isNullOrBlank()) {
-                                            TaskSubmissionForegroundService.cancelSubmission(
-                                                context.applicationContext,
-                                                hint.workId
-                                            )
-                                        } else {
-                                            TaskSubmissionForegroundService.cancelSubmission(
-                                                context.applicationContext,
-                                                hint.workId
-                                            )
-                                        }
-                                    }
+                                    onClick = { cancelSubmissionHintFromUi(hint) }
                                 ) {
                                     Text("取消")
                                 }
                             }
                         }
-                        tasks.filter { isProcessingStatus(it.status) }.take(6).forEach { runningTask ->
+                        dispatchCenterRunningTasks.forEach { runningTask ->
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -1874,6 +3101,7 @@ private fun MobileTaskApp() {
                     listLoading ||
                     actionMessage.isNotBlank() ||
                     autoUpdateDownloadInProgress ||
+                    (!forceUpdateRequired && autoUpdateReadyToInstall) ||
                     (!forceUpdateRequired && autoUpdateStatusText.isNotBlank()),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
@@ -1898,7 +3126,7 @@ private fun MobileTaskApp() {
                             text = if (actionLoading || listLoading) {
                                 if (listLoading) "正在刷新任务列表..." else "正在与后端同步任务状态..."
                             } else {
-                                actionMessage
+                                actionMessage.ifBlank { autoUpdateStatusText }
                             },
                             color = Color(0xFF475467),
                             maxLines = 2,
@@ -1920,6 +3148,26 @@ private fun MobileTaskApp() {
                                 color = Color(0xFF475467)
                             )
                         }
+                        if (!forceUpdateRequired && autoUpdateReadyToInstall) {
+                            val readyVersionText = when {
+                                autoUpdateReadyVersionName.isNotBlank() && autoUpdateReadyVersionCode > 0 -> {
+                                    "${autoUpdateReadyVersionName} (${autoUpdateReadyVersionCode})"
+                                }
+                                autoUpdateReadyVersionName.isNotBlank() -> autoUpdateReadyVersionName
+                                autoUpdateReadyVersionCode > 0 -> "version ${autoUpdateReadyVersionCode}"
+                                else -> "latest version"
+                            }
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        runAutoUpdateInstall(trigger = "soft_install_now")
+                                    }
+                                },
+                                enabled = !actionLoading
+                            ) {
+                                Text("Install $readyVersionText Now")
+                            }
+                        }
                     }
                 }
             }
@@ -1929,10 +3177,9 @@ private fun MobileTaskApp() {
                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                     if (composerExpanded) {
                         taskRouteViewModel.setComposerExpanded(false)
-                        taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
+                        taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
                     } else {
-                        taskRouteViewModel.setComposerExpanded(true)
-                        taskRouteViewModel.setComposerMode(TaskComposerMode.MENU)
+                        openComposer()
                     }
                 },
                 modifier = Modifier
@@ -1941,10 +3188,7 @@ private fun MobileTaskApp() {
             ) {
                 Icon(
                     imageVector = Icons.Filled.Add,
-                    contentDescription = if (composerExpanded) "Close composer" else "Open composer",
-                    modifier = Modifier.graphicsLayer {
-                        rotationZ = fabRotation
-                    }
+                    contentDescription = if (composerExpanded) "关闭任务抽屉" else "打开任务抽屉"
                 )
             }
 
@@ -1960,6 +3204,8 @@ private fun MobileTaskApp() {
                 ProbeResultBottomSheet(
                     probeResult = probeSuccess.result,
                     selectedEpisodeNos = selectedProbeEpisodeNos,
+                    confirmedStartPage = confirmedProbeStartPage,
+                    previewDocumentUri = probePreviewDocumentUri,
                     submitting = probeSubmitInProgress,
                     onDismiss = { collectionViewModel.clearProbeResult() },
                     onSubmitSingle = { collectionViewModel.submitDetectedSingleVideo() },
@@ -1968,6 +3214,9 @@ private fun MobileTaskApp() {
                     onInvertSelection = { collectionViewModel.invertEpisodeSelection() },
                     onToggleEpisode = { episodeNo ->
                         collectionViewModel.toggleEpisodeSelection(episodeNo)
+                    },
+                    onConfirmedStartPageChange = { startPage ->
+                        collectionViewModel.updateConfirmedStartPage(startPage)
                     }
                 )
             }
@@ -1989,6 +3238,8 @@ private fun ForceUpdateBlockingRoute(
     statusText: String,
     downloading: Boolean,
     progressPercent: Int?,
+    installReady: Boolean,
+    onInstallNow: () -> Unit,
     onRetryUpdate: () -> Unit
 ) {
     val normalizedVersionName = versionName.trim().ifEmpty { "latest" }
@@ -2045,17 +3296,37 @@ private fun ForceUpdateBlockingRoute(
                     }
                 }
             }
-            Button(
-                onClick = onRetryUpdate,
-                enabled = !downloading
-            ) {
-                Text(
-                    text = if (downloading) {
-                        "Downloading..."
-                    } else {
-                        "Retry Update"
-                    }
-                )
+            if (installReady) {
+                Button(
+                    onClick = onInstallNow
+                ) {
+                    Text("Install Now")
+                }
+                TextButton(
+                    onClick = onRetryUpdate,
+                    enabled = !downloading
+                ) {
+                    Text(
+                        text = if (downloading) {
+                            "Downloading..."
+                        } else {
+                            "Recheck Update"
+                        }
+                    )
+                }
+            } else {
+                Button(
+                    onClick = onRetryUpdate,
+                    enabled = !downloading
+                ) {
+                    Text(
+                        text = if (downloading) {
+                            "Downloading..."
+                        } else {
+                            "Retry Update"
+                        }
+                    )
+                }
             }
         }
     }
@@ -2469,6 +3740,22 @@ private fun SwipeRenameTaskListItem(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                if (task.domain.isNotBlank()) {
+                    Text(
+                        text = "Domain: ${task.domain.trim()}",
+                        color = Color(0xFF344054),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                if (task.mainTopic.isNotBlank()) {
+                    Text(
+                        text = "Topic: ${task.mainTopic.trim()}",
+                        color = Color(0xFF344054),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
                 if (task.statusMessage.isNotBlank()) {
                     Text(
                         text = phaseText,
@@ -2546,8 +3833,33 @@ private fun normalizeClipboardUrl(rawUrl: String): String? {
 }
 
 private fun isClipboardSupportedHost(host: String): Boolean {
+    return isBilibiliHost(host) || isDouyinHost(host) || isZhihuHost(host) || isJuejinHost(host)
+}
+
+private fun isBilibiliHost(host: String): Boolean {
     val normalized = host.lowercase()
-    return CLIPBOARD_SUPPORTED_HOST_SUFFIXES.any { suffix ->
+    return BILIBILI_HOST_SUFFIXES.any { suffix ->
+        normalized == suffix || normalized.endsWith(".$suffix")
+    }
+}
+
+private fun isDouyinHost(host: String): Boolean {
+    val normalized = host.lowercase()
+    return DOUYIN_HOST_SUFFIXES.any { suffix ->
+        normalized == suffix || normalized.endsWith(".$suffix")
+    }
+}
+
+private fun isZhihuHost(host: String): Boolean {
+    val normalized = host.lowercase()
+    return ZHIHU_HOST_SUFFIXES.any { suffix ->
+        normalized == suffix || normalized.endsWith(".$suffix")
+    }
+}
+
+private fun isJuejinHost(host: String): Boolean {
+    val normalized = host.lowercase()
+    return JUEJIN_HOST_SUFFIXES.any { suffix ->
         normalized == suffix || normalized.endsWith(".$suffix")
     }
 }
@@ -2575,20 +3887,10 @@ private fun buildReaderSessionFromPayload(
         parseSemanticNodesFromPayload(payload.rawPayload)
     }.getOrDefault(emptyList())
 
-    val markdownParts = splitMarkdownParagraphs(payload.markdown)
-    val nodes = when {
-        parsedNodes.size >= 2 -> parsedNodes
-        markdownParts.size >= 2 -> buildNodesFromMarkdownParts(
-            markdownParts = markdownParts,
-            templateNodes = parsedNodes
-        )
-        parsedNodes.isNotEmpty() -> parsedNodes
-        markdownParts.isNotEmpty() -> buildNodesFromMarkdownParts(
-            markdownParts = markdownParts,
-            templateNodes = emptyList()
-        )
-        else -> return null
-    }
+    val nodes = buildSingleNodeForReader(
+        markdown = payload.markdown,
+        parsedNodes = parsedNodes
+    ) ?: return null
 
     val sanitizedNodes = sanitizeNodesForReader(nodes)
 
@@ -2600,35 +3902,48 @@ private fun buildReaderSessionFromPayload(
     )
 }
 
-private fun splitMarkdownParagraphs(markdown: String): List<String> {
-    return markdown
-        .split(Regex("\\n\\s*\\n+"))
-        .map { it.trimEnd() }
-        .filter { it.isNotBlank() }
-}
-
-private fun buildNodesFromMarkdownParts(
-    markdownParts: List<String>,
-    templateNodes: List<SemanticNode>
-): List<SemanticNode> {
-    val canReuseTemplateByIndex = templateNodes.isNotEmpty() &&
-        kotlin.math.abs(templateNodes.size - markdownParts.size) <= 2
-    return markdownParts.mapIndexed { index, markdown ->
-        val template = if (canReuseTemplateByIndex) templateNodes.getOrNull(index) else null
-        if (template != null) {
-            template.copy(
-                text = markdown,
-                originalMarkdown = markdown
-            )
-        } else {
-            SemanticNode(
-                id = "md_${index + 1}",
-                text = markdown,
-                originalMarkdown = markdown,
-                relevanceScore = (1f - index * 0.02f).coerceAtLeast(0.45f)
-            )
+private fun buildSingleNodeForReader(
+    markdown: String,
+    parsedNodes: List<SemanticNode>
+): List<SemanticNode>? {
+    val normalizedMarkdown = markdown
+        .replace("\r\n", "\n")
+    val normalizedMarkdownHasContent = normalizedMarkdown.any { ch -> !ch.isWhitespace() }
+    val fallbackMarkdown = parsedNodes
+        .mapNotNull { node ->
+            val body = (node.originalMarkdown ?: node.text)
+                .replace("\r\n", "\n")
+            if (body.any { ch -> !ch.isWhitespace() }) body else null
         }
+        .joinToString("\n\n")
+    val mergedMarkdown = if (normalizedMarkdownHasContent) {
+        normalizedMarkdown
+    } else {
+        fallbackMarkdown
     }
+    if (mergedMarkdown.isBlank()) {
+        return null
+    }
+
+    val mergedInsightTerms = parsedNodes
+        .flatMap { node -> node.resolvedInsightTerms() }
+        .map { token -> token.trim() }
+        .filter { token -> token.isNotBlank() }
+        .distinct()
+    val mergedReasoning = parsedNodes
+        .firstNotNullOfOrNull { node -> node.reasoning?.takeIf { it.isNotBlank() } }
+
+    val singleNode = SemanticNode(
+        id = "md_root",
+        text = mergedMarkdown,
+        type = "paragraph",
+        originalMarkdown = mergedMarkdown,
+        relevanceScore = 1f,
+        reasoning = mergedReasoning,
+        insightTerms = mergedInsightTerms,
+        insightsTags = emptyList()
+    )
+    return listOf(singleNode)
 }
 
 private fun sanitizeNodesForReader(nodes: List<SemanticNode>): List<SemanticNode> {
@@ -2775,6 +4090,47 @@ private fun sortTasks(
     }
     val sorted = tasks.sortedWith(comparator)
     return if (sortOrder == SortOrder.DESC) sorted.reversed() else sorted
+}
+
+private fun deduplicateTasksByTaskId(tasks: List<MobileTaskListItem>): List<MobileTaskListItem> {
+    if (tasks.size <= 1) {
+        return tasks
+    }
+    val deduplicated = LinkedHashMap<String, MobileTaskListItem>(tasks.size)
+    tasks.forEach { task ->
+        val taskId = task.taskId.trim()
+        if (taskId.isEmpty()) {
+            return@forEach
+        }
+        val existing = deduplicated[taskId]
+        deduplicated[taskId] = if (existing == null) {
+            task
+        } else {
+            choosePreferredTaskSnapshot(existing, task)
+        }
+    }
+    return deduplicated.values.toList()
+}
+
+private fun choosePreferredTaskSnapshot(
+    existing: MobileTaskListItem,
+    candidate: MobileTaskListItem
+): MobileTaskListItem {
+    val existingProcessing = isProcessingStatus(existing.status)
+    val candidateProcessing = isProcessingStatus(candidate.status)
+    if (existingProcessing != candidateProcessing) {
+        return if (existingProcessing) existing else candidate
+    }
+    if (existing.markdownAvailable != candidate.markdownAvailable) {
+        return if (existing.markdownAvailable) existing else candidate
+    }
+    val existingTimestamp = parseTaskInstant(existing.lastOpenedAt)?.toEpochMilli()
+        ?: parseTaskInstant(existing.createdAt)?.toEpochMilli()
+        ?: Long.MIN_VALUE
+    val candidateTimestamp = parseTaskInstant(candidate.lastOpenedAt)?.toEpochMilli()
+        ?: parseTaskInstant(candidate.createdAt)?.toEpochMilli()
+        ?: Long.MIN_VALUE
+    return if (candidateTimestamp > existingTimestamp) candidate else existing
 }
 
 private fun parseTaskInstant(raw: String): Instant? {

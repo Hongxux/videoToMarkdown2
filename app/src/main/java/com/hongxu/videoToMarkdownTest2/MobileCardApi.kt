@@ -25,14 +25,35 @@ class HttpMobileConceptCardApi(
                 return@withContext null
             }
             val encodedTerm = encodePathSegment(normalizedTerm)
-            val url = URL("$apiBaseUrl/cards/$encodedTerm")
-            val connection = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 10_000
-                readTimeout = 15_000
-                setRequestProperty("Accept", "application/json")
+            val encodedQuery = URLEncoder.encode(normalizedTerm, StandardCharsets.UTF_8)
+            val endpoints = listOf(
+                URL("$apiBaseUrl/cards?term=$encodedQuery"),
+                URL("$apiBaseUrl/cards/$encodedTerm")
+            )
+            var lastFailure: Throwable? = null
+            for ((index, url) in endpoints.withIndex()) {
+                val connection = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 10_000
+                    readTimeout = 15_000
+                    setRequestProperty("Accept", "application/json")
+                }
+                val result = runCatching {
+                    connection.useCardPayload(normalizedTerm)
+                }
+                if (result.isSuccess) {
+                    val card = result.getOrNull()
+                    if (card != null || index == endpoints.lastIndex) {
+                        return@withContext card
+                    }
+                    continue
+                }
+                lastFailure = result.exceptionOrNull()
+                if (index == endpoints.lastIndex) {
+                    throw (lastFailure ?: IllegalStateException("Card loading failed"))
+                }
             }
-            connection.useCardPayload(normalizedTerm)
+            throw (lastFailure ?: IllegalStateException("Card loading failed"))
         }
     }
 

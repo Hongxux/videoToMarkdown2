@@ -33,7 +33,7 @@ sealed interface ProbeUiState {
 
 sealed interface CollectionUiEvent {
     data class Snackbar(val message: String) : CollectionUiEvent
-    data class SingleTaskSubmitted(val taskId: String, val message: String) : CollectionUiEvent
+    data class SingleTaskSubmitted(val taskId: String, val title: String, val message: String) : CollectionUiEvent
     data class BatchSubmitted(
         val collectionId: String,
         val collectionTitle: String,
@@ -59,6 +59,12 @@ class CollectionFeatureViewModel(
 
     private val _selectedEpisodeNos = MutableStateFlow<Set<Int>>(emptySet())
     val selectedEpisodeNos: StateFlow<Set<Int>> = _selectedEpisodeNos.asStateFlow()
+
+    private val _confirmedStartPage = MutableStateFlow<Int?>(null)
+    val confirmedStartPage: StateFlow<Int?> = _confirmedStartPage.asStateFlow()
+
+    private val _probePreviewDocumentUri = MutableStateFlow<String?>(null)
+    val probePreviewDocumentUri: StateFlow<String?> = _probePreviewDocumentUri.asStateFlow()
 
     private val _collectionDetailId = MutableStateFlow<String?>(null)
     val collectionDetailId: StateFlow<String?> = _collectionDetailId.asStateFlow()
@@ -86,6 +92,7 @@ class CollectionFeatureViewModel(
 
     private var realtimeCollectionJob: Job? = null
     private var probeJob: Job? = null
+    private var lastProbePageOffset: Int? = null
 
     init {
         refreshCollections()
@@ -105,17 +112,18 @@ class CollectionFeatureViewModel(
         }
     }
 
-    fun probeVideoInput(rawInput: String) {
+    fun probeVideoInput(rawInput: String, pageOffset: Int? = null) {
         val normalized = rawInput.trim()
         if (normalized.isEmpty()) {
             _probeState.value = ProbeUiState.Error("请输入视频链接")
             return
         }
+        lastProbePageOffset = pageOffset
         probeJob?.cancel()
         _probeState.value = ProbeUiState.Loading(normalized)
         probeJob = probeScope.launch {
             runCatching {
-                repository.probeVideoInfo(normalized)
+                repository.probeVideoInfo(normalized, pageOffset)
             }.onSuccess { result ->
                 if (!result.success) {
                     _probeState.value = ProbeUiState.Error("探测失败，请稍后重试")
@@ -135,6 +143,11 @@ class CollectionFeatureViewModel(
                     emptySet()
                 }
                 _selectedEpisodeNos.value = defaultSelected
+                _confirmedStartPage.value = if (result.contentType.equals("book", ignoreCase = true)) {
+                    resolveDefaultConfirmedStartPage(result)
+                } else {
+                    null
+                }
                 _probeState.value = ProbeUiState.Success(result)
                 notifyProbeFinishedIfBackground(
                     input = normalized,
@@ -181,6 +194,26 @@ class CollectionFeatureViewModel(
     fun clearProbeResult() {
         _probeState.value = ProbeUiState.Idle
         _selectedEpisodeNos.value = emptySet()
+        _confirmedStartPage.value = null
+        _probePreviewDocumentUri.value = null
+        lastProbePageOffset = null
+    }
+
+    fun setProbePreviewDocumentUri(uri: String?) {
+        val normalized = uri?.trim().orEmpty()
+        _probePreviewDocumentUri.value = normalized.takeIf { it.isNotEmpty() }
+    }
+
+    fun updateConfirmedStartPage(page: Int?) {
+        val state = _probeState.value as? ProbeUiState.Success ?: return
+        if (!state.result.contentType.equals("book", ignoreCase = true)) {
+            _confirmedStartPage.value = null
+            return
+        }
+        _confirmedStartPage.value = normalizeStartPage(
+            candidate = page,
+            totalPages = state.result.totalPages
+        )
     }
 
     fun toggleEpisodeSelection(episodeNo: Int) {
@@ -238,6 +271,7 @@ class CollectionFeatureViewModel(
                 _events.tryEmit(
                     CollectionUiEvent.SingleTaskSubmitted(
                         taskId = response.taskId,
+                        title = result.title.ifBlank { response.taskId },
                         message = response.message.ifBlank { "任务已提交" }
                     )
                 )
@@ -255,13 +289,78 @@ class CollectionFeatureViewModel(
     fun submitDetectedCollectionBatch() {
         val state = _probeState.value as? ProbeUiState.Success ?: return
         val result = state.result
-        if (!result.isCollection || result.collectionId.isBlank()) {
-            _events.tryEmit(CollectionUiEvent.Snackbar("当前不是可批量提交的合集"))
-            return
-        }
         val selected = _selectedEpisodeNos.value.sorted()
         if (selected.isEmpty()) {
             _events.tryEmit(CollectionUiEvent.Snackbar("请先选择要提交的分集"))
+            return
+        }
+
+        if (result.contentType.equals("book", ignoreCase = true)) {
+            val selectorTokens = result.episodes
+                .filter { selected.contains(it.episodeNo) }
+                .mapNotNull { episode ->
+                    episode.sectionSelector.takeIf { it.isNotBlank() }
+                        ?: episode.episodeNo.takeIf { it > 0 }?.toString()
+                }
+            if (selectorTokens.isEmpty()) {
+                _events.tryEmit(CollectionUiEvent.Snackbar("章节选择为空，请重新选择"))
+                return
+            }
+            val submitUrl = result.resolvedUrl.ifBlank {
+                result.episodes.firstOrNull()?.episodeUrl.orEmpty()
+            }
+            if (submitUrl.isBlank()) {
+                _events.tryEmit(CollectionUiEvent.Snackbar("书籍文件路径为空"))
+                return
+            }
+            viewModelScope.launch {
+                _submitInProgress.value = true
+                val resolvedStartPage = normalizeStartPage(
+                    candidate = _confirmedStartPage.value,
+                    totalPages = result.totalPages
+                )
+                val resolvedPageOffset = resolvedStartPage?.let { (it - 1).coerceAtLeast(0) }
+                    ?: result.appliedPageOffset
+                    ?: lastProbePageOffset
+                runCatching {
+                    repository.submitSingleTask(
+                        videoUrl = submitUrl,
+                        sectionSelector = selectorTokens.joinToString(","),
+                        splitByChapter = true,
+                        splitBySection = true,
+                        pageOffset = resolvedPageOffset
+                    )
+                }.onSuccess { response ->
+                    if (!response.success || response.taskId.isBlank()) {
+                        _events.tryEmit(
+                            CollectionUiEvent.Snackbar(
+                                response.message.ifBlank { "书籍提交失败，请重试" }
+                            )
+                        )
+                        return@onSuccess
+                    }
+                    clearProbeResult()
+                    _events.tryEmit(
+                        CollectionUiEvent.SingleTaskSubmitted(
+                            taskId = response.taskId,
+                            title = result.title.ifBlank { response.taskId },
+                            message = response.message.ifBlank { "书籍任务已提交" }
+                        )
+                    )
+                    refreshCollections()
+                }.onFailure { error ->
+                    _events.tryEmit(
+                        CollectionUiEvent.Snackbar("书籍提交失败：${error.message ?: "unknown"}")
+                    )
+                }.also {
+                    _submitInProgress.value = false
+                }
+            }
+            return
+        }
+
+        if (!result.isCollection || result.collectionId.isBlank()) {
+            _events.tryEmit(CollectionUiEvent.Snackbar("当前不是可批量提交的合集"))
             return
         }
         viewModelScope.launch {
@@ -284,7 +383,7 @@ class CollectionFeatureViewModel(
                 refreshCollections()
             }.onFailure { error ->
                 _events.tryEmit(
-                    CollectionUiEvent.Snackbar("合集提交失败：${error.message ?: "unknown"}")
+                    CollectionUiEvent.Snackbar("合集批量提交失败：${error.message ?: "unknown"}")
                 )
             }.also {
                 _submitInProgress.value = false
@@ -347,9 +446,33 @@ class CollectionFeatureViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        _confirmedStartPage.value = null
+        _probePreviewDocumentUri.value = null
+        lastProbePageOffset = null
         probeJob?.cancel()
         probeScope.cancel()
         repository.stopRealtime()
+    }
+
+    private fun resolveDefaultConfirmedStartPage(result: VideoProbeResult): Int {
+        val preferred = result.confirmedStartPage
+            ?: result.detectedStartPage
+            ?: result.appliedPageOffset?.let { it + 1 }
+            ?: result.episodes.firstNotNullOfOrNull { episode -> episode.startPage }
+            ?: 1
+        return normalizeStartPage(preferred, result.totalPages) ?: 1
+    }
+
+    private fun normalizeStartPage(candidate: Int?, totalPages: Int): Int? {
+        val raw = candidate ?: return null
+        if (raw <= 0) {
+            return null
+        }
+        return if (totalPages > 0) {
+            raw.coerceIn(1, totalPages)
+        } else {
+            raw
+        }
     }
 }
 

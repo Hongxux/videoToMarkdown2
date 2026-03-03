@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import inspect
 import site
 import sys
 from typing import Iterable, List
@@ -62,6 +63,45 @@ def safe_print(message: str) -> None:
     except UnicodeEncodeError:
         text = str(message or "").encode("ascii", "backslashreplace").decode("ascii")
         print(text, flush=True)
+
+
+def patch_pydantic_generic_origin_compat() -> bool:
+    """
+    执行逻辑：
+    1) 检测 pydantic_core.model_schema 是否支持 generic_origin 参数。
+    2) 若不支持，则注入兼容包装函数并忽略该参数，避免版本错配导致启动期崩溃。
+    核心价值：将“环境包错配”从硬失败降级为可观测告警，保证服务可启动。
+    """
+    try:
+        from pydantic_core import core_schema
+    except Exception:
+        return False
+
+    try:
+        signature = inspect.signature(core_schema.model_schema)
+    except Exception:
+        return False
+
+    if "generic_origin" in signature.parameters:
+        return False
+
+    original_model_schema = core_schema.model_schema
+
+    def _compat_model_schema(
+        cls,
+        schema,
+        *,
+        generic_origin=None,
+        **kwargs,
+    ):
+        _ = generic_origin
+        return original_model_schema(cls, schema, **kwargs)
+
+    core_schema.model_schema = _compat_model_schema
+    safe_print(
+        "[BOOT] Applied pydantic_core compatibility shim: model_schema(generic_origin) -> ignored"
+    )
+    return True
 
 
 def log_boot_step(message: str, enabled: bool) -> None:

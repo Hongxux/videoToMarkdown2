@@ -6,11 +6,11 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
-import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 class CollectionRealtimeClient(
     private val wsEndpoint: String,
+    private val userId: String,
     private val onTaskUpdate: (taskId: String, status: String, statusMessage: String?) -> Unit
 ) {
     private val okHttpClient = OkHttpClient.Builder().build()
@@ -29,7 +29,7 @@ class CollectionRealtimeClient(
         }
         if (webSocket == null) {
             val request = Request.Builder()
-                .url("$wsEndpoint?userId=android_collection_${UUID.randomUUID()}")
+                .url("$wsEndpoint?userId=${userId.trim()}")
                 .build()
             webSocket = okHttpClient.newWebSocket(request, createListener())
             return

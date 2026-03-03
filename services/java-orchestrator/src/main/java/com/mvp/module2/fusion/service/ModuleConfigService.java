@@ -18,6 +18,7 @@ public class ModuleConfigService {
     
     private boolean vlEnabled = false;
     private String vlModelName = "";
+    private double vlProcessDurationThresholdSec = 20.0;
     private double ffmpegTimeoutMultiplier = 1.0;
     private int ffmpegTimeoutMinSec = 0;
     private int ffmpegTimeoutMaxSec = 0;
@@ -37,6 +38,11 @@ public class ModuleConfigService {
     public String getVLModelName() {
         refreshIfNeeded();
         return vlModelName != null ? vlModelName : "";
+    }
+
+    public double getVLProcessDurationThresholdSec() {
+        refreshIfNeeded();
+        return vlProcessDurationThresholdSec;
     }
 
     public int getFfmpegTimeoutMinSec() {
@@ -65,10 +71,20 @@ public class ModuleConfigService {
                 if (!vlNode.isMissingNode()) {
                     this.vlEnabled = vlNode.path("enabled").asBoolean(false);
                     this.vlModelName = vlNode.path("api").path("model").asText("");
-                    logger.info("Refreshed VL Config: file={}, enabled={}", configFile.getAbsolutePath(), this.vlEnabled);
+                    this.vlProcessDurationThresholdSec = vlNode
+                        .path("routing")
+                        .path("process_duration_threshold_sec")
+                        .asDouble(20.0);
+                    logger.info(
+                        "Refreshed VL Config: file={}, enabled={}, process_duration_threshold_sec={}",
+                        configFile.getAbsolutePath(),
+                        this.vlEnabled,
+                        this.vlProcessDurationThresholdSec
+                    );
                 } else {
                     this.vlEnabled = false;
                     this.vlModelName = "";
+                    this.vlProcessDurationThresholdSec = 20.0;
                     logger.warn("vl_material_generation node missing in config: {}", configFile.getAbsolutePath());
                 }
 
@@ -86,6 +102,7 @@ public class ModuleConfigService {
                 logger.warn("module2_config.yaml not found, defaulting VL to false");
                 this.vlEnabled = false;
                 this.vlModelName = "";
+                this.vlProcessDurationThresholdSec = 20.0;
                 this.ffmpegTimeoutMultiplier = 1.0;
                 this.ffmpegTimeoutMinSec = 0;
                 this.ffmpegTimeoutMaxSec = 0;
@@ -94,6 +111,7 @@ public class ModuleConfigService {
             logger.error("Failed to read module2_config.yaml: {}", e.getMessage());
             this.vlEnabled = false;
             this.vlModelName = "";
+            this.vlProcessDurationThresholdSec = 20.0;
             this.ffmpegTimeoutMultiplier = 1.0;
             this.ffmpegTimeoutMinSec = 0;
             this.ffmpegTimeoutMaxSec = 0;

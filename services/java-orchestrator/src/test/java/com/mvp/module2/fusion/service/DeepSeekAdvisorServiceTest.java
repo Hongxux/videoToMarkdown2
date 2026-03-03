@@ -69,6 +69,31 @@ class DeepSeekAdvisorServiceTest {
     }
 
     @Test
+    void shouldParseStructuredAdviceFromWrappedJsonPayload() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        Method method = DeepSeekAdvisorService.class.getDeclaredMethod("parseStructuredAdvice", String.class);
+        method.setAccessible(true);
+
+        String raw = "以下为结构化结果：```json\n"
+                + "{"
+                + "\"result\":{"
+                + "\"background\":[\"包装背景\"],"
+                + "\"contextual_explanations\":[\"包装语境\"],"
+                + "\"depth\":[\"包装深度\"],"
+                + "\"breadth\":[\"包装广度\"]"
+                + "}"
+                + "}\n"
+                + "```";
+        DeepSeekAdvisorService.StructuredAdviceResult result =
+                (DeepSeekAdvisorService.StructuredAdviceResult) method.invoke(service, raw);
+
+        assertEquals(List.of("包装背景"), result.background);
+        assertEquals(List.of("包装语境"), result.contextualExplanations);
+        assertEquals(List.of("包装深度"), result.depth);
+        assertEquals(List.of("包装广度"), result.breadth);
+    }
+
+    @Test
     void shouldParseStructuredBatchBackgroundField() throws Exception {
         DeepSeekAdvisorService service = new DeepSeekAdvisorService();
         Method method = DeepSeekAdvisorService.class.getDeclaredMethod(
@@ -99,6 +124,41 @@ class DeepSeekAdvisorServiceTest {
         assertEquals(List.of("语境批量"), entropy.contextualExplanations);
         assertEquals(List.of("深度批量"), entropy.depth);
         assertEquals(List.of("广度批量"), entropy.breadth);
+    }
+
+    @Test
+    void shouldParseStructuredBatchWhenItemsWrappedByDataNode() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        Method method = DeepSeekAdvisorService.class.getDeclaredMethod(
+                "parseStructuredAdviceBatch",
+                String.class,
+                String.class,
+                String.class
+        );
+        method.setAccessible(true);
+
+        String raw = "{"
+                + "\"data\":{"
+                + "\"items\":[{"
+                + "\"term\":\"Entropy\","
+                + "\"background\":[\"嵌套背景\"],"
+                + "\"contextual_explanations\":[\"嵌套语境\"],"
+                + "\"depth\":[\"嵌套深度\"],"
+                + "\"breadth\":[\"嵌套广度\"]"
+                + "}]"
+                + "}"
+                + "}";
+
+        @SuppressWarnings("unchecked")
+        Map<String, DeepSeekAdvisorService.StructuredAdviceResult> result =
+                (Map<String, DeepSeekAdvisorService.StructuredAdviceResult>) method.invoke(service, raw, "", "");
+
+        DeepSeekAdvisorService.StructuredAdviceResult entropy = result.get("entropy");
+        assertNotNull(entropy);
+        assertEquals(List.of("嵌套背景"), entropy.background);
+        assertEquals(List.of("嵌套语境"), entropy.contextualExplanations);
+        assertEquals(List.of("嵌套深度"), entropy.depth);
+        assertEquals(List.of("嵌套广度"), entropy.breadth);
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {

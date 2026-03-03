@@ -3,15 +3,16 @@
 """
 
 import asyncio
+import inspect
 import json
 import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.graph import END, StateGraph
+if TYPE_CHECKING:
+    from langgraph.graph import StateGraph
 
 from .checkpoint import STEP_INDEX_MAP, SQLiteCheckpointer, generate_thread_id
 from .monitoring.logger import setup_logging
@@ -19,6 +20,90 @@ from .monitoring.metrics import MetricsCollector
 from .monitoring.tracer import PipelineTracer
 from .nodes import step1_node, step2_node, step3_node, step3_5_node, step4_node, step5_6_node
 from .state import PipelineState, create_initial_state
+
+_LANGGRAPH_END_SYMBOL = None
+_LANGGRAPH_STATE_GRAPH_CLASS = None
+_PYDANTIC_MODEL_SCHEMA_PATCHED = False
+
+
+def _patch_pydantic_model_schema_for_generic_origin() -> bool:
+    global _PYDANTIC_MODEL_SCHEMA_PATCHED
+    if _PYDANTIC_MODEL_SCHEMA_PATCHED:
+        return True
+    try:
+        from pydantic_core import core_schema
+    except Exception:
+        return False
+
+    try:
+        signature = inspect.signature(core_schema.model_schema)
+    except Exception:
+        return False
+
+    if "generic_origin" in signature.parameters:
+        _PYDANTIC_MODEL_SCHEMA_PATCHED = True
+        return True
+
+    original_model_schema = core_schema.model_schema
+
+    def _compat_model_schema(
+        cls: Any,
+        schema: Any,
+        *,
+        generic_origin: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        _ = generic_origin
+        return original_model_schema(cls, schema, **kwargs)
+
+    core_schema.model_schema = _compat_model_schema
+    _PYDANTIC_MODEL_SCHEMA_PATCHED = True
+    logging.getLogger("stage1_pipeline").warning(
+        "Applied pydantic_core.model_schema compatibility shim: generic_origin is ignored."
+    )
+    return True
+
+
+def _is_generic_origin_mismatch(import_error: Exception) -> bool:
+    return "generic_origin" in str(import_error)
+
+
+def _load_langgraph_symbols() -> tuple[Any, Any]:
+    global _LANGGRAPH_END_SYMBOL
+    global _LANGGRAPH_STATE_GRAPH_CLASS
+    if _LANGGRAPH_END_SYMBOL is not None and _LANGGRAPH_STATE_GRAPH_CLASS is not None:
+        return _LANGGRAPH_END_SYMBOL, _LANGGRAPH_STATE_GRAPH_CLASS
+
+    try:
+        from langgraph.graph import END as end_symbol
+        from langgraph.graph import StateGraph as state_graph_class
+    except TypeError as import_error:
+        if not _is_generic_origin_mismatch(import_error):
+            raise
+        if not _patch_pydantic_model_schema_for_generic_origin():
+            raise RuntimeError(
+                "Failed to patch pydantic compatibility for langgraph import."
+            ) from import_error
+        from langgraph.graph import END as end_symbol
+        from langgraph.graph import StateGraph as state_graph_class
+
+    _LANGGRAPH_END_SYMBOL = end_symbol
+    _LANGGRAPH_STATE_GRAPH_CLASS = state_graph_class
+    return end_symbol, state_graph_class
+
+
+def _load_memory_saver_class() -> Any:
+    try:
+        from langgraph.checkpoint.memory import MemorySaver
+    except TypeError as import_error:
+        if not _is_generic_origin_mismatch(import_error):
+            raise
+        if not _patch_pydantic_model_schema_for_generic_origin():
+            raise RuntimeError(
+                "Failed to patch pydantic compatibility for MemorySaver import."
+            ) from import_error
+        from langgraph.checkpoint.memory import MemorySaver
+    return MemorySaver
 
 
 class StepOutputConfig:
@@ -280,13 +365,14 @@ def create_pipeline_graph(
     output_config: Optional[StepOutputConfig] = None,
     max_step: int = 6,
     progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-) -> StateGraph:
+) -> "StateGraph":
     """方法说明：create_pipeline_graph 核心方法。
     执行步骤：
     1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
     2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
     3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-    graph = StateGraph(PipelineState)
+    end_symbol, state_graph_class = _load_langgraph_symbols()
+    graph = state_graph_class(PipelineState)
 
     def add_node(name: str, func):
         if sqlite_checkpointer or output_config:
@@ -317,7 +403,7 @@ def create_pipeline_graph(
     graph.add_conditional_edges(
         "step1_validate",
         should_continue_after_step1,
-        {"step2_correction": "step2_correction", "end": END},
+        {"step2_correction": "step2_correction", "end": end_symbol},
     )
 
     terminal_step = None
@@ -340,12 +426,12 @@ def create_pipeline_graph(
         ("step3_merge", "step3_5_translate"),
         ("step3_5_translate", "step4_clean_local"),
         ("step4_clean_local", "step5_6_dedup_merge"),
-        ("step5_6_dedup_merge", END),
+        ("step5_6_dedup_merge", end_symbol),
     ]
 
     if terminal_step:
         edges = [
-            (src, END if src == terminal_step else dst)
+            (src, end_symbol if src == terminal_step else dst)
             for src, dst in edges
             if STEP_NAME_TO_NUMBER.get(src, 0) <= max_step
         ]
@@ -416,7 +502,17 @@ async def run_pipeline(
         sqlite_checkpointer.start_run(thread_id, video_path, subtitle_path, output_dir)
         main_logger.info(f"Metadata tracking enabled: {db_path}")
 
-    checkpointer = MemorySaver() if enable_checkpoints else None
+    checkpointer = None
+    if enable_checkpoints:
+        try:
+            # 仅在启用内存检查点时加载该依赖，避免无关场景被第三方版本冲突阻塞启动。
+            memory_saver_class = _load_memory_saver_class()
+            checkpointer = memory_saver_class()
+        except Exception as import_error:
+            raise RuntimeError(
+                "Failed to initialize in-memory checkpointer. "
+                "Please verify langgraph/langchain/pydantic dependency compatibility."
+            ) from import_error
     if checkpointer:
         main_logger.info("Memory checkpoints enabled")
     else:

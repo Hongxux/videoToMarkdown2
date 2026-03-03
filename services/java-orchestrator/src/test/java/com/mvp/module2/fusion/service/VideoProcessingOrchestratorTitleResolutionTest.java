@@ -2,15 +2,22 @@ package com.mvp.module2.fusion.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient.DownloadResult;
+import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class VideoProcessingOrchestratorTitleResolutionTest {
 
@@ -94,6 +101,22 @@ class VideoProcessingOrchestratorTitleResolutionTest {
         assertEquals("BV1n9CwYoEro_2", actual);
     }
 
+    @Test
+    void shouldProcessAsBookShouldReturnTrueForSupportedArticleLink() throws Exception {
+        VideoProcessingOrchestrator orchestrator = new VideoProcessingOrchestrator();
+        Phase2bArticleLinkService linkService = mock(Phase2bArticleLinkService.class);
+        when(linkService.normalizeSupportedLinks(any())).thenReturn(List.of("https://juejin.cn/post/7390000000000000001"));
+        injectField(orchestrator, "phase2bArticleLinkService", linkService);
+
+        boolean actual = invokeShouldProcessAsBook(
+                orchestrator,
+                "https://juejin.cn/post/7390000000000000001",
+                null
+        );
+
+        assertTrue(actual);
+    }
+
     private String invokeResolveDocumentTitle(
         VideoProcessingOrchestrator orchestrator,
         DownloadResult downloadResult,
@@ -120,5 +143,25 @@ class VideoProcessingOrchestratorTitleResolutionTest {
         );
         method.setAccessible(true);
         return (String) method.invoke(orchestrator, videoUrl);
+    }
+
+    private boolean invokeShouldProcessAsBook(
+            VideoProcessingOrchestrator orchestrator,
+            String source,
+            VideoProcessingOrchestrator.BookProcessingOptions options
+    ) throws Exception {
+        Method method = VideoProcessingOrchestrator.class.getDeclaredMethod(
+                "shouldProcessAsBook",
+                String.class,
+                VideoProcessingOrchestrator.BookProcessingOptions.class
+        );
+        method.setAccessible(true);
+        return (boolean) method.invoke(orchestrator, source, options);
+    }
+
+    private void injectField(Object target, String fieldName, Object value) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
     }
 }

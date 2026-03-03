@@ -192,3 +192,18 @@ flowchart LR
   - 上下文齐全时优先按业务语义负载换算有效 token；
   - 上下文缺失时回退 prompt token 估算；
   - 仍保留配置级开关实现快速回滚。
+
+## 14. 2026-02-26 书籍增强链路（范围选择后）
+- 书籍输入（`pdf/txt/md/epub`）在章节/小节范围确定后，进入增强链路：
+  - `BookMarkdownService.processBook(...)` 先产出基础 `book.md + book_semantic_units.json`；
+  - `BookEnhancedPipelineService.enhanceBook(...)` 执行：
+    - Markdown 结构保护（图片/表格/代码/公式占位）；
+    - 英文段落条件翻译（保留 `[[SYS_MEDIA_*]]` 与 `[[SYS_INLINE_*]]` 占位符）；
+    - 生成合成 `step2/step6/sentence_timestamps` 并调用 `AnalyzeSemanticUnits`；
+    - 调用 `AssembleRichText` 后回填占位符，产出 `book_enhanced.md`。
+- 编排与降级策略：
+  - `VideoProcessingOrchestrator.processBook(...)` 在基础抽取成功后尝试增强；
+  - 若增强失败，自动回退到基础书籍输出，不影响任务成功与队列吞吐。
+- 观测口径：
+  - 继续复用统一任务队列与任务指标上报；
+  - 新增 `book_enhanced_*` 的 stage/flag 维度区分书籍增强链路。

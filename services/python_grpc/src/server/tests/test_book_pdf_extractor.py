@@ -1,0 +1,275 @@
+from pathlib import Path
+import json
+import sys
+
+import fitz
+
+import services.python_grpc.src.server.book_pdf_extractor as extractor_mod
+from services.python_grpc.src.server.book_pdf_extractor import (
+    _build_mineru_runtime_env,
+    _discover_mineru_cli,
+    _maybe_refine_markdown_with_llm,
+    _refill_mineru_code_blocks_with_vector_text,
+    _split_markdown_into_llm_chunks,
+    extract_book_pdf_markdown,
+)
+
+
+def _build_sample_pdf(pdf_path: Path) -> None:
+    doc = fitz.open()
+    try:
+        page1 = doc.new_page()
+        page1.insert_text((72, 72), "Chapter 1")
+        page1.insert_text((72, 100), "This is page one.")
+        page1.insert_text((72, 130), "| ColA | ColB |")
+        page1.insert_text((72, 155), "| --- | --- |")
+        page1.insert_text((72, 180), "| 1 | 2 |")
+
+        page2 = doc.new_page()
+        page2.insert_text((72, 72), "Chapter 2")
+        page2.insert_text((72, 100), "This is page two only.")
+
+        doc.save(pdf_path)
+    finally:
+        doc.close()
+
+
+def _build_code_pdf(pdf_path: Path) -> None:
+    doc = fitz.open()
+    try:
+        page = doc.new_page()
+        page.insert_text((72, 72), "def hello(name):", fontname="courier", fontsize=11)
+        page.insert_text((72, 88), "    if name is None:", fontname="courier", fontsize=11)
+        page.insert_text((72, 104), "        return ''", fontname="courier", fontsize=11)
+        page.insert_text((72, 120), "    return f\"hi {name}\"", fontname="courier", fontsize=11)
+        doc.save(pdf_path)
+    finally:
+        doc.close()
+
+
+def test_extract_book_pdf_markdown_uses_page_slice_and_fallback(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "sample.pdf"
+    _build_sample_pdf(pdf_path)
+
+    output_dir = tmp_path / "out"
+    result = extract_book_pdf_markdown(
+        task_id="test_book_pdf_slice",
+        pdf_path=str(pdf_path),
+        output_dir=str(output_dir),
+        start_page=1,
+        end_page=1,
+        image_dir=str(output_dir / "assets" / "book_images"),
+        output_root=str(output_dir),
+        section_id="c1s1",
+        prefer_mineru=False,
+        timeout_seconds=120,
+    )
+
+    assert result.success
+    assert result.extractor == "pymupdf"
+    assert "This is page one." in result.markdown
+    assert "This is page two only." not in result.markdown
+    assert result.markdown_path
+    assert Path(result.markdown_path).is_file()
+
+
+def test_extract_book_pdf_markdown_rejects_invalid_page_range(tmp_path: Path) -> None:
+    pdf_path = tmp_path / "sample.pdf"
+    _build_sample_pdf(pdf_path)
+
+    output_dir = tmp_path / "out2"
+    result = extract_book_pdf_markdown(
+        task_id="test_invalid_range",
+        pdf_path=str(pdf_path),
+        output_dir=str(output_dir),
+        start_page=9,
+        end_page=10,
+        image_dir=str(output_dir / "assets" / "book_images"),
+        output_root=str(output_dir),
+        section_id="c9s9",
+        prefer_mineru=False,
+        timeout_seconds=120,
+    )
+
+    assert not result.success
+    assert "out of range" in (result.error_msg or "").lower()
+
+
+def test_discover_mineru_cli_finds_script_near_python(monkeypatch, tmp_path: Path) -> None:
+    fake_python = tmp_path / "python" / "python.exe"
+    fake_python.parent.mkdir(parents=True, exist_ok=True)
+    fake_python.write_text("", encoding="utf-8")
+
+    fake_magic = fake_python.parent / "Scripts" / "magic-pdf.exe"
+    fake_magic.parent.mkdir(parents=True, exist_ok=True)
+    fake_magic.write_text("", encoding="utf-8")
+
+    monkeypatch.setenv("MAGIC_PDF_BIN", "")
+    monkeypatch.setattr("services.python_grpc.src.server.book_pdf_extractor.shutil.which", lambda _: None)
+    monkeypatch.setattr(sys, "executable", str(fake_python))
+
+    resolved = _discover_mineru_cli()
+    assert resolved == str(fake_magic)
+
+
+def test_build_mineru_runtime_env_writes_config(tmp_path: Path) -> None:
+    env = _build_mineru_runtime_env(tmp_path)
+    config_path = Path(env["MINERU_TOOLS_CONFIG_JSON"])
+    assert config_path.is_file()
+    assert (tmp_path / "intermediates" / "book_mineru_runtime" / "models").is_dir()
+
+
+def test_maybe_refine_markdown_with_llm_keeps_image_marker(monkeypatch) -> None:
+    source_markdown = "line-1\n![image-1](assets/book_images/a.png)\nline-2"
+
+    monkeypatch.setenv("BOOK_PDF_MARKDOWN_LLM_FILTER_ENABLED", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dummy-key")
+    monkeypatch.setenv("BOOK_PDF_MARKDOWN_LLM_FILTER_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(
+        extractor_mod,
+        "_mask_image_markers",
+        lambda _: ("line-1\n[[SYS_MEDIA_TOKEN_001]]\nline-2", {"[[SYS_MEDIA_TOKEN_001]]": "![image-1](assets/book_images/a.png)"}),
+    )
+
+    class _DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "line-1\n[[SYS_MEDIA_TOKEN_001]]\nline-2-fixed"
+                        }
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(
+        extractor_mod.requests,
+        "post",
+        lambda *args, **kwargs: _DummyResponse(),
+    )
+
+    refined = _maybe_refine_markdown_with_llm(task_id="t1", markdown=source_markdown)
+    assert "![image-1](assets/book_images/a.png)" in refined
+    assert "line-2-fixed" in refined
+
+
+def test_maybe_refine_markdown_with_llm_fallback_when_token_lost(monkeypatch) -> None:
+    source_markdown = "line-1\n![image-1](assets/book_images/a.png)\nline-2"
+
+    monkeypatch.setenv("BOOK_PDF_MARKDOWN_LLM_FILTER_ENABLED", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dummy-key")
+    monkeypatch.setattr(
+        extractor_mod,
+        "_mask_image_markers",
+        lambda _: ("line-1\n[[SYS_MEDIA_TOKEN_001]]\nline-2", {"[[SYS_MEDIA_TOKEN_001]]": "![image-1](assets/book_images/a.png)"}),
+    )
+
+    class _DummyResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "line-1\nline-2-fixed"}}]}
+
+    monkeypatch.setattr(
+        extractor_mod.requests,
+        "post",
+        lambda *args, **kwargs: _DummyResponse(),
+    )
+
+    refined = _maybe_refine_markdown_with_llm(task_id="t2", markdown=source_markdown)
+    assert refined == source_markdown
+
+
+def test_split_markdown_into_llm_chunks_keeps_code_table_formula_atomic() -> None:
+    markdown = (
+        "paragraph-a line-1\nparagraph-a line-2\n\n"
+        "```python\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "```\n\n"
+        "| colA | colB |\n"
+        "| --- | --- |\n"
+        "| 1 | 2 |\n\n"
+        "$$\n"
+        "E = mc^2\n"
+        "$$\n\n"
+        "paragraph-b line-1\n"
+    )
+    code_block = "```python\ndef add(a, b):\n    return a + b\n```"
+    table_block = "| colA | colB |\n| --- | --- |\n| 1 | 2 |"
+    formula_block = "$$\nE = mc^2\n$$"
+
+    chunks = _split_markdown_into_llm_chunks(markdown=markdown, chunk_max_chars=60)
+
+    assert len(chunks) >= 2
+    assert any(code_block in chunk for chunk in chunks)
+    assert any(table_block in chunk for chunk in chunks)
+    assert any(formula_block in chunk for chunk in chunks)
+    assert "".join(chunks) == markdown
+
+
+def test_maybe_refine_markdown_with_llm_chunk_parallel_keeps_order(monkeypatch) -> None:
+    source_markdown = (
+        "paragraph-a line-1\nparagraph-a line-2\n\n"
+        "paragraph-b line-1\nparagraph-b line-2\n\n"
+        "paragraph-c line-1\nparagraph-c line-2\n\n"
+        "paragraph-d line-1\nparagraph-d line-2\n"
+    )
+    monkeypatch.setenv("BOOK_PDF_MARKDOWN_LLM_FILTER_ENABLED", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "dummy-key")
+    monkeypatch.setenv("BOOK_PDF_MARKDOWN_LLM_FILTER_CHUNK_MAX_CHARS", "50")
+    monkeypatch.setenv("BOOK_PDF_MARKDOWN_LLM_FILTER_MAX_WORKERS", "4")
+
+    def _fake_refine(*args, **kwargs):
+        chunk_index = kwargs.get("chunk_index")
+        if chunk_index is None:
+            chunk_index = args[1]
+        chunk_text = kwargs.get("chunk_text")
+        if chunk_text is None:
+            chunk_text = args[2]
+        return f"[chunk-{chunk_index}]{chunk_text}"
+
+    monkeypatch.setattr(extractor_mod, "_refine_markdown_chunk_with_llm", _fake_refine)
+    chunks = _split_markdown_into_llm_chunks(source_markdown, chunk_max_chars=50)
+
+    refined = _maybe_refine_markdown_with_llm(task_id="t3", markdown=source_markdown)
+    expected = "".join(f"[chunk-{idx}]{chunk}" for idx, chunk in enumerate(chunks))
+    assert refined == expected
+
+
+def test_refill_mineru_code_blocks_with_vector_text(tmp_path: Path) -> None:
+    sliced_pdf = tmp_path / "sliced.pdf"
+    _build_code_pdf(sliced_pdf)
+
+    middle_json = tmp_path / "sliced_middle.json"
+    payload = {
+        "pdf_info": [
+            {
+                "page_idx": 0,
+                "para_blocks": [
+                    {
+                        "type": "code",
+                        "bbox": [60, 60, 360, 132],
+                    }
+                ],
+            }
+        ]
+    }
+    middle_json.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    source_markdown = "before\n\n```python\nbad ocr text\n```\n\nafter\n"
+    refined = _refill_mineru_code_blocks_with_vector_text(
+        task_id="code-refill",
+        markdown=source_markdown,
+        middle_json_path=middle_json,
+        sliced_pdf_path=sliced_pdf,
+    )
+
+    assert "bad ocr text" not in refined
+    assert "def hello(name):" in refined
+    assert "return f\"hi {name}\"" in refined

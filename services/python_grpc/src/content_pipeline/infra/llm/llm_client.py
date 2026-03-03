@@ -201,6 +201,16 @@ class _AsyncInFlightDeduper:
         self._lock = asyncio.Lock()
         self._inflight: Dict[str, asyncio.Future] = {}
 
+    @staticmethod
+    def _drain_future_exception(fut: asyncio.Future) -> None:
+        """避免 leader 失败且无 follower 时触发 'Future exception was never retrieved'。"""
+        try:
+            fut.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+
     async def run(self, key: str, fn: Callable[[], Awaitable[T]]) -> T:
         """方法说明：_AsyncInFlightDeduper.run 核心方法。
         执行步骤：
@@ -212,6 +222,7 @@ class _AsyncInFlightDeduper:
             fut = self._inflight.get(key)
             if fut is None:
                 fut = loop.create_future()
+                fut.add_done_callback(self._drain_future_exception)
                 self._inflight[key] = fut
                 leader = True
             else:

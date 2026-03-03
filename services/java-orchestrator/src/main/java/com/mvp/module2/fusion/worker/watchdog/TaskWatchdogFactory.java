@@ -6,7 +6,10 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 @Component
 public class TaskWatchdogFactory {
@@ -39,6 +42,9 @@ public class TaskWatchdogFactory {
     @Value("${video.task.watchdog.restart-backoff-seconds:60,180,420}")
     private String watchdogRestartBackoffSeconds;
 
+    @Value("${video.task.watchdog.heartbeat-strong-stages:stage1,phase2a,analysis_extraction,phase2b}")
+    private String watchdogHeartbeatStrongStages;
+
     public TaskWatchdog create(String taskId) {
         if (!taskWatchdogEnabled) {
             return TaskWatchdog.disabled(taskId);
@@ -51,6 +57,7 @@ public class TaskWatchdogFactory {
         int idleWindowMaxSec = Math.max(idleWindowMinSec, watchdogIdleWindowMaxSec);
         double idleMultiplier = watchdogIdleWindowMultiplier > 0 ? watchdogIdleWindowMultiplier : 3.0d;
         List<Long> restartBackoffMs = parseBackoffMs(watchdogRestartBackoffSeconds);
+        Set<String> heartbeatStrongStages = parseStageSet(watchdogHeartbeatStrongStages);
         return TaskWatchdog.enabled(
                 taskId,
                 maxTotal,
@@ -60,7 +67,8 @@ public class TaskWatchdogFactory {
                 idleWindowMinSec,
                 idleWindowMaxSec,
                 idleMultiplier,
-                restartBackoffMs
+                restartBackoffMs,
+                heartbeatStrongStages
         );
     }
 
@@ -91,5 +99,23 @@ public class TaskWatchdogFactory {
             result.add(60_000L);
         }
         return result;
+    }
+
+    private Set<String> parseStageSet(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return Set.of();
+        }
+        Set<String> result = new LinkedHashSet<>();
+        String[] parts = raw.split(",");
+        for (String part : parts) {
+            String token = part == null ? "" : part.trim().toLowerCase(Locale.ROOT);
+            if (!token.isBlank()) {
+                result.add(token);
+            }
+        }
+        if (result.isEmpty()) {
+            return Set.of();
+        }
+        return Set.copyOf(result);
     }
 }

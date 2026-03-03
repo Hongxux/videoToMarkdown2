@@ -61,12 +61,21 @@ public class TaskQueueManager {
         CANCELLED
     }
 
+    public static class BookProcessingOptions {
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+    }
+
     public static class TaskEntry implements Comparable<TaskEntry> {
         public String taskId;
         public String userId;
         public String videoUrl;
         public String title;
         public String outputDir;
+        public BookProcessingOptions bookOptions;
         public Priority priority;
         public TaskStatus status;
         public Instant createdAt;
@@ -131,6 +140,19 @@ public class TaskQueueManager {
         userTaskCounts.computeIfAbsent(userId, key -> new AtomicInteger(0)).incrementAndGet();
 
         logger.info("Task submitted: {} by user {} (priority={})", taskId, userId, priority);
+        return entry;
+    }
+
+    public synchronized TaskEntry submitTask(
+            String userId,
+            String videoUrl,
+            String outputDir,
+            Priority priority,
+            String preferredTitle,
+            BookProcessingOptions bookOptions
+    ) {
+        TaskEntry entry = submitTask(userId, videoUrl, outputDir, priority, preferredTitle);
+        entry.bookOptions = normalizeBookOptions(bookOptions);
         return entry;
     }
 
@@ -348,5 +370,25 @@ public class TaskQueueManager {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private BookProcessingOptions normalizeBookOptions(BookProcessingOptions rawOptions) {
+        if (rawOptions == null) {
+            return null;
+        }
+        BookProcessingOptions normalized = new BookProcessingOptions();
+        normalized.chapterSelector = normalizeOptionalText(rawOptions.chapterSelector);
+        normalized.sectionSelector = normalizeOptionalText(rawOptions.sectionSelector);
+        normalized.splitByChapter = rawOptions.splitByChapter;
+        normalized.splitBySection = rawOptions.splitBySection;
+        normalized.pageOffset = rawOptions.pageOffset;
+        if (normalized.chapterSelector == null
+                && normalized.sectionSelector == null
+                && normalized.splitByChapter == null
+                && normalized.splitBySection == null
+                && normalized.pageOffset == null) {
+            return null;
+        }
+        return normalized;
     }
 }

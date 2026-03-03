@@ -424,6 +424,70 @@ def test_tutorial_schema_parse_and_normalize():
     assert normalized[0]["should_type"] == ""
 
 
+def test_tutorial_schema_parse_handles_unescaped_newlines_in_main_operation():
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    content = """
+[
+  {
+    "step_id": 1,
+    "step_description": "Open settings",
+    "step_type": "MAIN_FLOW",
+    "main_operation": "Line 1
+Line 2
+[KEYFRAME_1]",
+    "clip_start_sec": 0.0,
+    "clip_end_sec": 7.0,
+    "instructional_keyframe_timestamp": [6.2]
+  }
+]
+""".strip()
+
+    results, normalized = analyzer._parse_response_with_payload(
+        content,
+        analysis_mode="tutorial_stepwise",
+    )
+
+    assert len(results) == 1
+    assert results[0].step_id == 1
+    assert results[0].main_operation == ["Line 1\nLine 2\n[KEYFRAME_1]"]
+    assert normalized[0]["main_operation"] == ["Line 1\nLine 2\n[KEYFRAME_1]"]
+
+
+def test_tutorial_schema_parse_salvages_truncated_array():
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    content = """
+[
+  {
+    "step_id": 1,
+    "step_description": "Open settings",
+    "step_type": "MAIN_FLOW",
+    "main_operation": "click settings",
+    "clip_start_sec": 0.0,
+    "clip_end_sec": 7.0,
+    "instructional_keyframe_timestamp": [6.2]
+  },
+  {
+    "step_id": 2,
+    "step_description": "Change port",
+    "step_type": "MAIN_FLOW",
+    "main_operation": "update port and save",
+    "clip_start_sec": 7.0,
+    "clip_end_sec": 13.0,
+    "instructional_keyframe_timestamp": [12.2]
+  }
+""".strip()
+
+    results, normalized = analyzer._parse_response_with_payload(
+        content,
+        analysis_mode="tutorial_stepwise",
+    )
+
+    assert len(results) == 2
+    assert [item.step_id for item in results] == [1, 2]
+    assert [item.step_description for item in results] == ["Open settings", "Change port"]
+    assert [item["step_description"] for item in normalized] == ["Open settings", "Change port"]
+
+
 def test_tutorial_schema_preserves_no_needed_video_and_should_type_override():
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
     payload = [

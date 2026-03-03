@@ -1,0 +1,19 @@
+services:
+  gateway-caddy:
+    image: caddy:2.8-alpine
+    container_name: v2m-gateway-caddy
+    restart: unless-stopped
+    depends_on:
+      - java-orchestrator
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/gateway/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

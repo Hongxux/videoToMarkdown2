@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -44,6 +45,7 @@ public class StorageTaskCacheService {
     private String configuredStorageRoot;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private VideoMetaService videoMetaService = new VideoMetaService();
     
     // 缓存数据
     private final Map<String, CachedTask> taskCache = new ConcurrentHashMap<>();
@@ -56,6 +58,16 @@ public class StorageTaskCacheService {
     public void init() {
         resolvedStorageRoot = resolveStorageRoot();
         refreshCacheAsync(); // 启动时立即预热
+    }
+
+    /**
+     * 获取历史任务列表（支持分页）
+     */
+    @Autowired(required = false)
+    public void setVideoMetaService(VideoMetaService videoMetaService) {
+        if (videoMetaService != null) {
+            this.videoMetaService = videoMetaService;
+        }
     }
 
     /**
@@ -286,7 +298,7 @@ public class StorageTaskCacheService {
 
     private StorageMetadata readStorageMetadata(Path taskDir) {
         StorageMetadata metadata = new StorageMetadata();
-        metadata.videoTitle = readVideoMetaTitle(taskDir);
+        metadata.videoTitle = videoMetaService.readTitle(taskDir);
         Path metricsPath = taskDir.resolve("intermediates/task_metrics_latest.json");
         if (Files.isRegularFile(metricsPath)) {
             try {
@@ -316,25 +328,6 @@ public class StorageTaskCacheService {
         return metadata;
     }
 
-    private String readVideoMetaTitle(Path taskDir) {
-        if (taskDir == null) {
-            return null;
-        }
-        Path videoMetaPath = taskDir.resolve("video_meta.json");
-        if (!Files.isRegularFile(videoMetaPath)) {
-            return null;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(videoMetaPath.toFile());
-            if (root == null) {
-                return null;
-            }
-            return trimToNull(root.path("title").asText(null));
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-    
     private ResolvedMarkdown resolveMarkdownInDirectorySafe(Path searchRoot, String preferredPath) {
         try {
             if (preferredPath != null && !preferredPath.isBlank()) {

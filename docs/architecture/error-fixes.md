@@ -13,6 +13,421 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-03-02 Android 任务提交后骨架丢失、列表重复与通知直达失败
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 用户提交任务后可看到处理中骨架，但退出并重新进入 App 后骨架消失，无法感知后台仍在处理。
+  - 提交一个任务、完成一个任务时，任务列表可能出现重复卡片（逻辑上同一任务出现两份快照）。
+  - 任务完成通知点击后，App 未必直接进入对应文章，存在“进了首页但没打开目标任务”的断链体验。
+  - 影响范围：Android 任务列表、任务调度中心、任务完成通知点击链路。
+- 触发条件：
+  - `refreshTasks` 仅请求 `onlyMultiSegment=true` 时，后端运行中的任务快照会被过滤掉。
+  - 运行态任务源与存储态任务源并行返回，且历史数据中存在 `storage:` 前缀 taskId 与真实 taskId 并存。
+  - `MainActivity` 未消费通知 `Intent` 中的 `task_id`/`task_title`，仅处理分享意图。
+- 根因定位：
+  - 骨架状态来源单一，依赖进程内 `TaskSubmissionRegistry`，未在冷启动/重进时从后端重建“正在处理”视图。
+  - 任务去重链路不完整：服务端与客户端都存在“同任务不同标识快照”并存窗口，且旧实时分支会把未知任务直接注入主列表。
+  - 通知点击链路缺少“先预热会话、再按 taskId 打开文章”的闭环流程。
+- 修复措施：
+  - Android `MainActivity.kt`：
+    - `refreshTasks` 改为双路拉取：可见列表用 `onlyMultiSegment=true`，处理中集合用 `onlyMultiSegment=false` 并按运行态状态过滤。
+    - 新增 `backendProcessingTasks` 与 `processingTasksForSkeleton`，将后端运行态与前台提交态合并后渲染骨架，支持重进恢复。
+    - 清理旧实时注入路径：未知任务更新仅写入 `backendProcessingTasks`，终态后从该集合移除，避免主列表污染。
+    - 新增 `warmUpCompletedTaskSession(taskId, fallbackTitle)`，在任务完成事件与通知点击链路预热 Markdown 会话并补齐缺失任务卡片。
+    - 新增通知深链处理：解析 `task_id`/`task_title`，收到事件后自动切到任务页、刷新任务、预热会话并 `openTaskById` 直达文章。
+  - Android `TaskCompletionNotifier.kt`：
+    - 完成通知 `PendingIntent` 新增 `task_title` extra，保证冷启动场景具备兜底标题。
+  - Android `MobileTaskApi.kt`：
+    - 新增 `deduplicateTaskSnapshots`，通过规范化 taskId（去除 `storage:` 前缀）进行客户端快照去重。
+  - 服务端 `MobileMarkdownController.java`：
+    - `fromCachedTask` 优先使用 `cached.taskId`，减少 `storage:<key>` 与真实 taskId 的分叉。
+    - `listTasks` 出口新增 `deduplicateTaskViews`，在服务端先做一次任务视图去重。
+- 验证方式：
+  - 编译校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - `./gradlew :app:compileDebugKotlin --no-daemon` 通过（本地内存受限时可配合 `GRADLE_OPTS=-Xmx768m`）。
+  - 手工回归：
+    - 提交任务后立即显示骨架；重启 App 后骨架仍存在，直到任务终态。
+    - 提交与完成阶段任务列表不再出现同一任务重复卡片。
+    - 点击完成通知后可直接进入对应文章阅读页。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加冷启动场景回归：模拟“任务处理中 -> 杀进程 -> 重进”并断言骨架恢复。
+    - 增加重复快照回归：构造 runtime/storage 同 taskId 或 `storage:` 前缀混合快照，断言列表仅保留一条。
+    - 增加通知深链回归：模拟通知点击后断言目标 `taskId` 被打开且阅读会话已就绪。
+  - 监控：
+    - 对 `/api/mobile/tasks` 返回中“同 canonical taskId 多条”增加统计，观察去重前后基线变化。
+    - 记录通知点击到文章打开的耗时与失败率，建立告警阈值。
+  - 校验：
+    - 统一约定 taskId 规范化规则（服务端与客户端一致处理 `storage:` 前缀）。
+    - 任何任务列表入口必须经过去重函数，禁止直接渲染原始快照集合。
+  - 回滚：
+    - 若深链流程出现回归，可先保留通知跳转到任务页并禁用自动打开，再逐步恢复“预热+直达”链路。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskCompletionNotifier.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `GET /api/mobile/tasks`
+- 复盘要点：
+  - “处理中骨架”属于可恢复状态，不应只依赖进程内内存态。
+  - 去重必须在服务端与客户端双层兜底，才能抵御历史数据与多源并发快照。
+  - 通知深链要闭环到具体任务会话，否则只能做到“回到 App”而非“直达内容”。
+
+## 2026-03-02 Phase2B 悬浮框骨架动画提前触发（未提交即进入处理中）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 用户点击打开 Phase2B 悬浮框后，在尚未提交文本到后端前，界面就可能进入骨架加载动画。
+  - 影响范围：移动端右侧编辑区 Phase2B 悬浮入口，导致用户误判“已经在请求后端”。
+- 触发条件：
+  - `phase2b.processing` 残留为 `true` 或与当前请求序列未严格绑定时，打开面板/输入框聚焦会直接走 `processing` 渲染分支。
+- 根因定位：
+  - UI 渲染、模式切换与禁用态判断主要依赖 `phase2b.processing` 布尔值，而不是“当前请求是否真的在途”。
+  - 缺少对 `requestSeq` 与在途请求序列的一致性约束，导致状态可见性与真实网络请求不同步。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - 引入并贯通“请求在途”判定：`isPhase2bRequestInFlight()`（`processing && inFlightRequestSeq === requestSeq`）。
+  - `renderPhase2bFloatingUi`、`setPhase2bExpanded`、输入框 `focus` 事件统一改为基于 `isPhase2bRequestInFlight()` 决定 `processing` 视图与禁用态。
+  - `submitPhase2bContent` 在提交时写入 `inFlightRequestSeq=requestSeq`，成功/失败/finally 均清理在途序列，防止残留状态污染下一次打开。
+  - `resetPhase2bForContextChange` 增加 `inFlightRequestSeq=0`，切换上下文时强制清空在途态。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 手工验证：打开悬浮框但不提交时不显示骨架；点击提交后到后端返回前显示骨架；返回后恢复结果/输入视图。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端状态机回归用例，覆盖“打开未提交”“提交中”“成功/失败返回”“上下文切换重置”四类时序。
+  - 监控：
+    - 记录 Phase2B 请求开始/结束与 UI mode 切换埋点，校验 `processing` 可见时段是否与真实请求区间一致。
+  - 校验：
+    - 约定所有“处理中 UI”必须由请求在途判定驱动，避免单布尔值直接控制跨阶段渲染。
+  - 回滚：
+    - 如出现状态判定回归，可临时回退至仅提交按钮触发处理态，同时保留 `inFlightRequestSeq` 清理逻辑。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `POST /api/mobile/cards/phase2b/structured-markdown`
+- 复盘要点：
+  - UI 状态必须与真实异步请求生命周期绑定，避免“视觉处理中”与“网络未发生”错位。
+  - 对并发/重入请求，应以请求序列号作为单一事实来源，防止历史状态污染当前交互。
+
+## 2026-03-02 移动端 Anchor 增量同步接口 400（pending 锚点误同步）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 移动端出现 `POST /api/mobile/tasks/{taskId}/anchors/{anchorId}/sync 400`。
+  - 典型请求：`/api/mobile/tasks/storage:d945c2ed367b063a04c7dbdd4ca1e733/anchors/web-16-1v35jdp::24::27/sync`。
+  - 影响范围：锚点处于 `pending`（未挂载）时，前端预览区会提示同步失败，产生可见噪声日志与无效请求。
+- 触发条件：
+  - 增量同步任务会遍历 `runtime.localNotesByAnchor` 中全部锚点。
+  - 当锚点尚未挂载、`mobile_task_meta.json` 中既无 `mountedPath` 也无 `revisions.relativeDir` 时，仍触发 `/sync`。
+- 根因定位：
+  - 后端 `MobileMarkdownController.syncAnchorResources` 依赖 revision 目录；找不到时按契约返回 `400 anchor has no mounted revision directory`。
+  - 前端 `syncAnchorLocalNotesIncremental` 缺失“锚点是否具备同步前置条件”的守卫，导致向后端发送语义无效请求。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - 新增 `canIncrementalSyncAnchor(anchorId)`：
+    - 优先复用现有 `normalizeRevisionDir(anchor)` 判断是否存在可用 revision 目录；
+    - 若无 revision 目录，再判断 `mountedPath` 是否存在。
+  - 新增 `localSyncDirtyByAnchor` 脏锚点集合，改为“按变更触发同步”：
+    - 编辑区内容未变化时，不再每 20s 全量遍历锚点触发同步；
+    - 仅在本地笔记内容/文件路径变更时标记锚点为 dirty，并在定时器中同步 dirty 锚点。
+  - 在 `syncAnchorLocalNotesIncremental` 发请求前增加守卫，不满足条件直接跳过，不再发送 `/sync`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 本地核对 `var/storage/storage/d945c2ed367b063a04c7dbdd4ca1e733/mobile_task_meta.json`，目标锚点为 `status: pending` 且无挂载目录；修复后不再对该锚点发起 `/sync`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端回归用例，覆盖 `pending`、`files_uploaded`、`mounted` 三态下的增量同步触发条件。
+  - 监控：
+    - 对 `/api/mobile/tasks/*/anchors/*/sync` 的 `4xx` 比例按错误消息分桶统计，设置异常阈值告警。
+  - 校验：
+    - 统一复用 `canIncrementalSyncAnchor` 作为增量同步前置校验，避免各处重复拼条件。
+  - 回滚：
+    - 如出现“该同步却被跳过”的回归，可先临时降级为后端 no-op（返回 200 + 明确 message），再迭代前端判定逻辑。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `POST /api/mobile/tasks/{taskId}/anchors/{anchorId}/sync`
+- 复盘要点：
+  - 增量任务必须先校验资源前置条件，再发起副作用请求。
+  - “本地有草稿”不等于“服务端已建 revision 目录”，两者属于不同状态机阶段。
+
+## 2026-02-28 Android Probe/合集界面文案乱码（CollectionFeatureUi）
+- 日期：2026-02-28
+- 现象与影响范围：
+  - Android `CollectionFeatureUi` 的 Probe 骨架提示、时长标签、合集进度标签、分集处理中兜底文案出现明显乱码，用户可见。
+  - 受影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`。
+- 触发条件：
+  - 打开 Probe 结果页或合集分集状态页时，渲染到被污染的字符串字面量。
+- 根因定位：
+  - 源码中存在已污染的字符串常量（并非终端显示编码问题），导致 Compose 直接渲染乱码文本。
+  - 同时有两处字符串插值语法被污染（`?{...}` / `?${...}`），放大了可见异常。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+  - 替换 4 处乱码文案为可读文本，并修复被污染的字符串插值语法：
+    - Probe 骨架提示文案；
+    - `Duration` 标签；
+    - 合集 `Progress x/y` 标签；
+    - 分集处理中兜底提示文案。
+- 验证方式：
+  - `.\gradlew :app:compileDebugKotlin --no-daemon` 通过。
+  - 规则扫描：不再命中该文件中的乱码特征词与异常 `?{` / `?${` 模式。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 UI 文案巡检脚本，对 Android 源码中的高风险乱码模式做提交前检查。
+  - 监控：
+    - 增加前端文案异常上报入口，收集“不可读字符”关键词样本。
+  - 校验：
+    - 统一使用 UTF-8（无 BOM）保存 Android 源码，禁止通过系统默认编码批量改写。
+  - 回滚：
+    - 如出现文案回归，优先回滚 `CollectionFeatureUi.kt` 对应字符串块，再做增量修复。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+- 复盘要点：
+  - “终端显示乱码”和“源码字面量已污染”是两类问题，必须通过源码定位和界面复现双向确认。
+  - 对用户可见文案，语义正确性和编码正确性都应纳入同一条发布门禁。
+
+## 2026-02-28 Insight Cards 卡片 Markdown 结构被压平
+- 日期：2026-02-28
+- 现象与影响范围：
+  - `var/cards/*.md` 中部分 insight cards 虽然包含四段标题，但段落内列表、子列表、表格被折叠为单行，Markdown 语义丢失。
+  - 典型表现：`1. ... 1. ... 2. ...` 连续出现在同一行，`|---|---|` 与表头同行，渲染器无法识别为合法表格。
+  - 受影响路径：`PersonaInsightCardService` 的结构化结果解析与 Markdown 渲染链路。
+- 触发条件：
+  - LLM 结构化结果字符串元素包含 `\n`（例如分层列表、Markdown 表格、段内换行）时。
+- 根因定位：
+  - `PersonaInsightCardService.trimText` 会把换行统一替换为空格，属于“单行文本清洗”函数。
+  - 该函数被误用于卡片正文链路（`normalizeAdviceLines`、`parseJsonListFromRoot`、`extractQuotedStrings`、`renderOrderedLines`），导致 Markdown 结构在落盘前被压平。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - 新增 `normalizeMarkdownSectionText`，仅用于卡片四段正文，保留换行并压缩连续空行。
+  - 新增 `renderOrderedItem`，将多行条目按 Markdown 有序列表续行缩进输出，续行统一为 4 空格缩进。
+  - 新增语义标签加粗收敛：命中“标签+冒号”模式（如 `被动消费闭环：`）时，自动规范为 `**被动消费闭环：**`。
+  - 新增表格前空行收敛：命中 Markdown 表格行（`|...|`）时，若前一行为非空，自动补一行空行，确保表格块稳定渲染。
+  - 将正文链路中的 `trimText(..., 320)` 替换为 `normalizeMarkdownSectionText(..., 1600)`，覆盖解析与渲染两个阶段。
+  - 文件：`services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/structured-system-zh.txt`
+  - 文件：`services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/structured-user-zh.txt`
+  - 提示词新增硬约束：语义标签必须加粗；所有 `\n` 续行必须以 4 个空格开头；表格前必须有空行。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/PersonaInsightCardServiceTest.java`
+  - 新增回归测试 `shouldPreserveMarkdownLineBreaksFromStructuredAdvice`，校验 `\n` 不被折叠为空格。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留“多行 markdown 节点 -> 落盘仍含换行”回归测试，覆盖列表与子列表场景。
+  - 监控：
+    - 在卡片质量巡检中增加“疑似单行压平”检测（例如同一行同时出现多个编号列表起始符或表格分隔符）。
+  - 校验：
+    - 约束：`trimText` 仅用于 ID/标签/摘要等单行字段，卡片正文必须走保留换行的清洗函数。
+  - 回滚：
+    - 若新清洗策略导致异常，可临时回滚到旧渲染函数，但保留新增测试用于快速复现与再修复。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/PersonaInsightCardServiceTest.java`
+  - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/structured-system-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/deepseek-advisor/structured-user-zh.txt`
+- 复盘要点：
+  - “文本清洗函数”必须按字段语义分层，正文与标识字段不能复用同一清洗策略。
+  - LLM 输出稳定并不代表成品稳定，渲染前的一次错误标准化就足以破坏最终可读性。
+
+## 2026-02-28 Android 提交任务后闪退（前台服务权限缺失）
+- 日期：2026-02-28
+- 现象与影响范围：
+  - Android 端在“Probe 成功后提交任务”路径中，点击提交后应用立即闪退。
+  - 影响路径：`CollectionUiEvent.SingleTaskSubmitted -> TaskSubmissionForegroundService.startTaskTracking -> startForegroundService`。
+- 触发条件：
+  - App `targetSdk=35`，服务声明了 `foregroundServiceType="dataSync"`，但 Manifest 未声明 `FOREGROUND_SERVICE_DATA_SYNC`。
+  - Probe 提交分支新增了后台追踪与完成通知能力后，开始稳定触发该前台服务启动路径。
+- 根因定位：
+  - Android 14+ 对前台服务类型权限做强约束；`dataSync` 类型缺少对应权限时，`startForegroundService` 会抛 `SecurityException`，未被兜底即导致进程崩溃。
+  - “完成任务通知”本身不是直接崩溃点，但它引入了新的服务启动链路，使该权限缺失从“潜在问题”变为“高频实触发问题”。
+- 修复措施：
+  - 文件：`app/src/main/AndroidManifest.xml`
+  - 新增权限：`android.permission.FOREGROUND_SERVICE_DATA_SYNC`。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskSubmissionForegroundService.kt`
+  - 在 `startServiceCompat` 增加启动异常兜底：
+    - 捕获 `SecurityException` 与 `ForegroundServiceStartNotAllowedException` 等启动异常；
+    - 记录错误日志并发出 `SubmissionEventType.FAILED`，避免再次直接闪退，确保 UI 能收到失败反馈。
+- 验证方式：
+  - `.\gradlew :app:compileDebugKotlin --no-daemon` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“Probe 提交后启动后台追踪服务”的冒烟用例，覆盖 Android 14+ 设备。
+  - 监控：
+    - 统计 `TaskSubmissionService` 启动失败日志与 `SubmissionEventType.FAILED` 中“服务启动失败”占比。
+  - 校验：
+    - 新增前台服务改动检查项：凡声明 `foregroundServiceType` 必须同时核对类型权限。
+  - 回滚：
+    - 若服务启动链路异常升高，可临时关闭 Probe 路径的 `startTaskTracking` 调用，保留任务提交主链路。
+- 相关文件/接口：
+  - `app/src/main/AndroidManifest.xml`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskSubmissionForegroundService.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 复盘要点：
+  - Android 14+ 前台服务权限已从“建议声明”升级为“运行时硬约束”，必须与服务类型一一对应。
+  - 新增通知/追踪能力时，要同步审计其引入的系统级权限与生命周期约束，避免“功能增强触发稳定崩溃”。
+
+## 2026-02-26 insight cards 卡片结构与发送模式偏离提示词契约
+- 日期：2026-02-26
+- 现象与影响范围：
+  - 部分概念卡片正文只包含 `语境化解释/深度/广度` 三段，缺失 prompt 契约要求的 `background` 对应段落。
+  - 术语解释链路存在 batch 组包请求路径，导致“一个 `insights_tags` 一次请求”的预期被破坏。
+  - 受影响路径：`PersonaInsightCardService` 卡片生成与落盘链路。
+- 触发条件：
+  - LLM 结构化结果进入 `sectionsFromAdvice` 后，服务仅消费了 `contextual/depth/breadth` 三段并直接渲染 Markdown。
+  - 任务内多术语时，`buildBatchAdviceByCanonicalKey` 触发按语义单元组包请求。
+- 根因定位：
+  - 协议收敛不完整：prompt 已升级为四段 JSON，但落盘模板与字段映射未同步升级。
+  - 调用链分叉：存在单词条调用与批量调用双轨，未与当前业务约束统一。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - 新增 `## 背景知识` 段落常量，并在渲染模板中按 `背景知识 -> 语境化解释 -> 深度 -> 广度` 四段完整落盘。
+  - 移除 `### 语境快照@...` 追加逻辑，卡片正文仅保留四段核心解释，不再拼接语境快照块。
+  - `StructuredAdviceSections` 增加 `background` 字段，`sectionsFromAdvice` 与 `parseAdviceSectionsFromJson` 同步解析四段。
+  - 新增 `fillMissingSectionDefaults`，对任一缺失段落补默认语句，避免生成空章节。
+  - 下线 batch 预取链路：移除 `buildBatchAdviceByCanonicalKey` 及相关分组/匹配方法，统一改为单词条 `requestStructuredAdvice` 调用。
+  - `shouldRegenerateExistingCard` 新增 `SECTION_BACKGROUND` 校验，旧三段卡片会自动进入重建路径。
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+  - 标注 insight cards 已固定 single-term 模式（不再使用 batch 语义单元请求）。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 新增 `PersonaInsightCardServiceTest` 回归：校验四段解析与 `## 背景知识` 渲染存在性。
+  - 监控：
+    - 增加卡片内容结构巡检，统计缺失四段标题的卡片比例。
+  - 校验：
+    - 每次 prompt 契约升级必须同步对齐“解析字段映射 + Markdown 模板段落”，并执行回归样本检查。
+  - 回滚：
+    - 如新模板产生异常，可仅回滚到旧模板渲染，但保持单词条调用模式不回退为 batch。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/PersonaInsightCardService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/PersonaInsightCardServiceTest.java`
+- 复盘要点：
+  - 提示词契约变更必须端到端收敛到“解析层 + 落盘层 + 调用层”，否则会出现“模型正确、成品错误”。
+  - 术语卡片属于高可解释链路，单词条请求比组包请求更可追踪、更便于定位质量问题。
+
+## 2026-02-26 insights cards 结构化 JSON 解析误判导致 fallback
+- 日期：2026-02-26
+- 现象与影响范围：
+  - `deepseek-advisor` 提示词升级后，模型返回内容虽然语义完整，但在 Java 侧偶发被标记为 `deepseek-parse-empty` 或进入 `heuristic_fallback` 分支。
+  - 受影响路径：`PersonaInsightCardService -> DeepSeekAdvisorService` 的 insights cards 生成链路（单词条与批量词条）。
+- 触发条件：
+  - 模型返回 JSON 存在包装层（如 `result`、`data.items`）、代码围栏包裹、或批量对象层级与历史模板略有差异时。
+  - 旧解析逻辑只取“首个对象+固定层级”，对包装层和多形态结构容错不足。
+- 根因定位：
+  - `DeepSeekAdvisorService.parseStructuredAdvice*` 以固定 schema 和单层对象读取为主，遇到结构轻微漂移时直接判空。
+  - 解析失败后虽然下游有弱兜底，但会污染 source 标签并放大 fallback 比例，影响观测与稳定性。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - 新增多候选 JSON 提取（支持 fenced 文本、平衡括号提取、字符串转义场景）。
+  - 新增结构化节点递归解包（`result/data/payload/items/...`）并统一别名读取 section 字段。
+  - 批量解析新增对 `data.items`、term->object 映射、嵌套文本 JSON 的兼容，减少 `deepseek-batch-parse-empty`。
+  - 新增宽松数组抽取兜底，仅在标准 JSON 失败后启用，避免直接落空。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekAdvisorServiceTest.java`
+  - 补充包装层与嵌套批量结构的回归测试用例。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=DeepSeekAdvisorServiceTest test -q` 未通过，失败原因为仓库内既有测试源码缺失依赖/类型导致 testCompile 阶段失败（与本次改动无直接关系）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 持续增加“包装层 JSON + 批量嵌套 + 文本内 JSON”样本到 `DeepSeekAdvisorServiceTest`，避免回归到固定层级解析。
+  - 监控：
+    - 对 `source in (deepseek-parse-empty, deepseek-batch-parse-empty, heuristic_fallback)` 做比例监控，按任务和词条分桶。
+  - 校验：
+    - 提示词升级时，必须同步执行“结构化返回样本回放”脚本并验证解析命中率。
+  - 回滚：
+    - 如线上异常升高，可临时退回旧提示词模板，同时保留新解析兼容逻辑不回滚。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekAdvisorServiceTest.java`
+- 复盘要点：
+  - LLM 结构化输出的“语义稳定”不等于“形态稳定”，解析器必须按协议语义容错，而不是按单一路径硬匹配。
+  - fallback 不是常态路径；一旦频率升高，需要优先排查解析契约而不是继续堆叠提示词强约束。
+
+## 2026-02-26 Android 任务完成通知依赖轮询导致延迟/漏通知
+- 日期：2026-02-26
+- 现象与影响范围：
+  - Android 端任务状态长期依赖轮询，应用前后台切换或连接抖动时，任务完成通知存在延迟甚至漏发。
+  - 受影响路径：任务提交前台服务、任务列表实时状态刷新、同设备多任务并发提交场景。
+- 触发条件：
+  - 提交后持续轮询中断（进程调度、网络抖动、生命周期切换）。
+  - 后端 WebSocket 路径未按任务 owner 做严格定向，存在广播语义不一致。
+- 根因定位：
+  - 客户端层面：任务提交服务通过 `GET /tasks/{id}` 周期轮询等待终态，不是事件驱动。
+  - 服务端层面：`TaskWebSocketHandler` 的一条推送分支走“全连接广播”，与“提交设备定向”目标不一致。
+  - 身份层面：设备侧提交与 WebSocket 建联未强制复用同一稳定 `userId`，无法稳定路由到提交者。
+- 修复措施：
+  - 后端：
+    - `TaskWebSocketHandler` 改为“owner userId 定向 + 订阅者推送”，移除全量广播路径。
+    - 用户连接池从单 session 升级为同 user 多 session，避免新连接覆盖旧连接。
+  - Android：
+    - 新增 `MobileClientIdentity`，提供安装级稳定 `userId`，提交与 WebSocket 统一使用。
+    - `TaskSubmissionForegroundService` 改为 WebSocket 订阅任务终态，移除轮询循环。
+    - `MainActivity` 移除周期刷新，仅保留启动与 `ON_RESUME` 拉取；运行中由 `TaskRealtimeClient` 接收增量状态。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `.\gradlew :app:compileDebugKotlin`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“提交 -> WebSocket 收到 COMPLETED -> 本地通知触发”的端到端回归场景。
+    - 增加“同一 user 多连接”覆盖用例，避免连接覆盖导致丢推送。
+  - 监控：
+    - 记录 `taskUpdate(status=COMPLETED)` 推送计数与 Android 端通知计数，做端到端对账。
+  - 校验：
+    - 新增规则：任务状态同步链路优先事件驱动，禁止引入常驻轮询作为主路径。
+  - 回滚：
+    - 若实时链路异常，可临时回退为“启动/回前台拉取 + 提交服务单次快照兜底”，不恢复周期轮询。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileClientIdentity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskSubmissionForegroundService.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/TaskRealtimeClient.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `WS /ws/tasks`
+- 复盘要点：
+  - 任务完成通知属于“事件问题”而非“查询问题”，主链路必须是可路由的主动推送。
+  - 设备身份不稳定时，任何定向推送方案都会退化成广播或漏达。
+
+## 2026-02-26 Android `insights_tags` 点击后请求 200 但卡片不弹层
+- 日期：2026-02-26
+- 现象与影响范围：
+  - Android 端点击 `insights_tags` 后，`/api/mobile/cards/...` 返回 `200`，但概念卡片浮层未展示，用户误判为“请求成功但功能失效”。
+  - 受影响路径：语义阅读器中的术语点击建卡链路（`insight_term_tapped`）。
+- 触发条件：
+  - 打开语义阅读器并点击任一 `insights_tags` 术语。
+  - 前端浮层首次渲染时 `viewportSize` 尚未完成测量（初始 `IntSize.Zero`）。
+- 根因定位：
+  - `FloatingCardBubbleOverlay` 在计算气泡位置时依赖 `viewportSize`，但在 `viewportSize == 0` 时直接 `return`；同时尺寸更新又依赖该函数内部 `onSizeChanged`，形成“先返回导致永远无法测量”的死锁式渲染路径。
+  - 中文词条本身不是协议层根因：客户端已使用 UTF-8 URL 编码；但路径式中文在代理/日志链路中可出现可读性偏差，增加排查噪声。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 调整浮层渲染顺序：先无条件挂载全屏容器收集尺寸，再在尺寸就绪后计算 placement，避免提前返回阻断测量回路。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - 新增 `GET /api/mobile/cards?term=...` 查询参数入口，兼容非 ASCII 词条请求。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileCardApi.kt`
+  - Android 客户端改为优先调用 query 参数入口，失败后回退旧路径式入口，保障新旧服务端兼容。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 在当前工作区失败（已有未合入改动触发 `TaskProcessingWorker` 的 `BookProcessingOptions` 符号缺失），非本次改动直接引入。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：补充浮层首帧展示回归用例，覆盖“首次点击 + 尺寸尚未测量”场景。
+  - 监控：为卡片链路补充 `tap/open_success/open_failed` 前后计数，监测“200 但 UI 未展示”异常比例。
+  - 校验：新增 UI 评审规则，禁止在依赖 `onSizeChanged` 的组件中于测量前直接终止渲染。
+  - 回滚：若 query 参数入口兼容出现问题，可临时回退到路径式入口，不影响已修复的浮层测量逻辑。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileCardApi.kt`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+  - `GET /api/mobile/cards?term=...`
+  - `GET /api/mobile/cards/{title}`
+- 复盘要点：
+  - UI 渲染链路中，任何依赖布局测量的逻辑都必须避免“测量前提前返回”，否则极易出现请求成功但视图永不出现的假死体验。
+  - 协议层对中文等非 ASCII 词条应提供 query 参数兜底，降低代理层与日志链路对排障效率的干扰。
+
 ## 2026-02-26 Telemetry HOT 漏采与 Token 焦点词丢失
 - 日期：2026-02-26
 - 现象与影响范围：
@@ -5185,3 +5600,1371 @@
   - 回滚：
     - 若出现误触升高，可仅回调双击抑制窗口参数，保留“清理选区 + 下划线末尾叠加”两项修复。
 
+## 2026-02-26 Android APK 自动更新下载 failed code=1008（ERROR_CANNOT_RESUME）
+- 日期：2026-02-26
+- 现象与影响范围：
+  - Android 端自动更新在网络抖动或后台切换后，下载任务偶发失败并上报 `failed code=1008`。
+  - 用户侧表现为下载进度中断后无法继续，强制升级场景会卡在拦截页。
+- 根因定位：
+  - 服务端 `GET /api/mobile/app/update/apk` 仅返回整包 `200`，虽然声明了 `Accept-Ranges: bytes`，但未真正处理 `Range` 请求并返回 `206 + Content-Range`。
+  - `DownloadManager` 恢复下载依赖标准 Range 语义；服务端不支持时，系统会触发 `ERROR_CANNOT_RESUME(1008)`。
+  - 客户端此前对 `1008` 仅做失败上报，没有自动恢复下载任务。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileAppUpdateController.java`
+  - 为 `/api/mobile/app/update/apk` 增加 `Range` 请求处理：
+    - 解析请求头 `Range`；
+    - 返回 `206 Partial Content`、`Content-Range`、分段 `contentLength`；
+    - 保留异常场景回退整包 `200` 响应。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppAutoUpdateManager.kt`
+  - 增加 `1008` 自动恢复策略：
+    - 持久化 pending 下载的 `downloadUrl` 与恢复尝试次数；
+    - 命中 `ERROR_CANNOT_RESUME` 时自动清理旧任务并重建下载；
+    - 设置恢复次数上限，避免无限重试。
+- 验证结果：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `.\gradlew.bat :app:compileDebugKotlin` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增补更新链路回归：模拟下载中断后再次请求，断言服务端返回 `206` 且客户端下载可恢复。
+  - 监控：
+    - 在 Android 侧埋点 `DownloadManager` 失败码分布，重点跟踪 `1008` 占比趋势。
+  - 校验：
+    - 发布前检查清单加入“APK 下载端点 Range 兼容性”探测（`Range: bytes=0-0`）。
+  - 回滚：
+    - 若分段实现引入兼容问题，可临时回退为整包下载，同时保留客户端自动重建下载策略兜底。
+
+## 2026-02-26 Android 自动更新“无法判断已是最新版本”（发布版本号与 APK 内置版本不一致）
+- 日期：2026-02-26
+- 现象与影响范围：
+  - Android 端更新后仍可能持续触发更新检查，用户体感为“系统没有正确判断自己已是最新版本”。
+  - 影响自动更新主链路：`/api/mobile/app/update/check` 比较的是客户端真实安装包版本，而不是发布脚本传参版本。
+- 根因定位：
+  - 发布时把 `versionCode=3/versionName=1.0.3` 写入了服务端发布清单，但上传 APK（`app-debug.apk`）内部仍是 `versionCode=1/versionName=1.0`。
+  - `output-metadata.json` 显示包内版本与发布清单不一致，导致客户端上报当前版本后与服务端“最新版本”长期不一致。
+- 修复措施：
+  - 文件：`app/build.gradle.kts`
+  - 将 `defaultConfig.versionCode/versionName` 对齐为 `3/1.0.3`，重新构建 `app-debug.apk`。
+  - 使用 `scripts/release/release_and_verify_android_update.ps1` 覆盖上传并发布同版本 `3/1.0.3`，保证发布清单与 APK 内置版本一致。
+- 验证结果：
+  - `app/build/outputs/apk/debug/output-metadata.json` 校验通过：`versionCode=3`、`versionName=1.0.3`。
+  - 发布脚本校验通过：
+    - 旧客户端（`versionCode=2`）返回 `hasUpdate=true`；
+    - 当前客户端（`versionCode=3`）返回 `hasUpdate=false`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 发布前新增“APK 内置版本与发布参数一致性”校验步骤（至少读取 `output-metadata.json`）。
+  - 监控：
+    - 统计 `/check` 请求中的 `currentVersionCode` 分布；若长期低于 `latestVersionCode` 且安装量异常，触发发布告警。
+  - 校验：
+    - 发布 SOP 强制先构建目标 APK，再上传；禁止对“旧构建产物”仅改发布参数直接发布。
+  - 回滚：
+    - 若错误发布已生效，可在同一 `versionCode` 下覆盖上传正确 APK 并重新发布，或回滚到上一个稳定版本。
+
+## 2026-02-26 Android 阅读器返回任务列表后再次打开未精准回位
+- 日期：2026-02-26
+- 现象与影响范围：
+  - 在阅读页滚动后，点击返回任务列表或将应用切到后台，再次打开同一任务时，阅读位置偶发回到较早位置或顶部。
+  - 影响 Android 端阅读连续性，用户需要手动重新定位。
+- 根因定位：
+  - 阅读位置虽然在滚动中有增量写入，但关键生命周期时机（`ON_STOP` / 组件 `onDispose`）缺少“同步落盘”兜底，极端情况下最后一段位置可能未持久化。
+  - 系统 Back 未统一回到任务列表，导致退出路径不一致，进一步放大了位置保存时机的不确定性。
+  - 阅读器退出前未强制回传 `LazyListState` 当前值，存在“最后一帧滚动位置未进入上层保存链路”的窗口。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - 新增 `ReaderScrollSnapshot`，在阅读过程中持续维护“当前任务 + 最新位置”快照。
+  - 为 `TaskReaderScrollPositionStore.save` 增加 `sync` 参数：
+    - 高频滚动保存继续使用 `apply()`；
+    - 在 `ON_STOP`、阅读页退出、显式返回列表等关键路径使用 `commit()` 同步落盘。
+  - 新增阅读态 `BackHandler`，系统 Back 统一退回任务列表，确保退出路径与保存逻辑一致。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 新增生命周期兜底回调：在 `ON_STOP` 与 `onDispose` 主动上报 `listState` 当前 `index/offset`，确保最后一帧位置进入保存链路。
+- 验证结果：
+  - `.\gradlew :app:compileDebugKotlin` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加阅读恢复回归用例，覆盖“滚动 -> 返回列表 -> 再次点开”和“滚动 -> 后台 -> 回前台 -> 再次点开”。
+  - 监控：
+    - 补充阅读器埋点，记录恢复前后 `index/offset` 差值分布，及时发现回位偏差回归。
+  - 校验：
+    - 评审清单加入“关键生命周期是否同步持久化”检查项，避免仅依赖异步写入。
+  - 回滚：
+    - 若同步写入引发性能问题，可临时保留 `BackHandler` 与状态快照逻辑，仅将 `commit()` 路径缩减到 `onDispose` 单点兜底。
+
+## 2026-02-26 书籍章节按页码切片时偏移导致抽取错页
+- 日期：2026-02-26
+- 现象与影响范围：
+  - 书内目录页码与 PDF 实际页码存在固定偏差时，按章节/小节 selector 进行页码切片会抽取到错误页段。
+  - 影响 Probe 页码展示、移动端章节选择后的定向抽取准确性，以及最终 Markdown 内容对应关系。
+- 根因定位：
+  - 仅有 TOC 自动估算 offset 兜底，没有提供“外部可控的手动偏移参数”。
+  - 偏移信息未在 controller -> queue -> worker -> orchestrator -> service 全链路透传，导致探测与执行无法保证同一页码映射语义。
+- 修复措施：
+  - 新增 `pageOffset` 可选参数，并在以下链路全量透传：
+    - `VideoProcessingController`、`MobileMarkdownController`（提交接口 + 上传接口 + Probe 接口）
+    - `TaskQueueManager.BookProcessingOptions`
+    - `TaskProcessingWorker`
+    - `VideoProcessingOrchestrator`
+    - `BookMarkdownService`
+  - `BookMarkdownService` 偏移策略修复：
+    - `outline`：默认真实 PDF 页码；传入 `pageOffset` 时统一平移章节/小节页码。
+    - `toc`：优先手动 `pageOffset`，否则自动估算 offset。
+  - Probe 响应新增：
+    - `detectedPageOffset`
+    - `appliedPageOffset`
+    - `pageMapStrategy`
+  - Android DTO/Repository 新增 `pageOffset` 透传字段，保证移动端后续 UI 可直接接入。
+- 验证结果：
+  - 编译验证：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+    - `.\\gradlew.bat :app:compileDebugKotlin` 通过。
+  - `Distributed_Systems_4.pdf` 实测：
+    - Probe：`totalPages=685`、`chapterCount=10`、`sectionCount=58`、`pageMapStrategy=outline`。
+    - 选择 `c1s1`（15-16 页）定向抽取：`semantic_units=1`，图片越界数 `0`。
+    - 手动偏移 `pageOffset=8` 后，同 selector 起始页由 `15` 变为 `23`（偏移生效）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加书籍 Probe/执行一致性回归：同一 selector 在 Probe 与执行元数据中的页码范围必须一致。
+    - 增加手动偏移回归：固定样本校验 `startPage/endPage` 偏移量等于配置值。
+  - 监控：
+    - 在任务 flow flags 中记录 `book_page_offset` 与映射策略，便于定位错页问题。
+  - 校验：
+    - Android/服务端评审清单新增“页码语义（书内页 vs PDF 页）”确认项，避免前后端理解偏差。
+  - 回滚：
+    - 若偏移策略引发异常，可将 `pageOffset` 置空回退到原有自动估算路径（TOC）或原始 outline 页码。
+
+## 2026-02-27 书籍 PDF 抽取链路长期回退到 PyMuPDF（MinerU 可执行/模型/依赖错配）
+- 日期：2026-02-27
+- 现象与影响范围：
+  - 书籍 PDF 章节定向抽取在 `prefer_mineru=true` 下仍频繁显示 `extractor=pymupdf`，导致代码块/公式/表格保真度下降。
+  - 在部分环境出现 MinerU 运行失败，日志包含 CLI 不可用、运行期依赖异常或模型缺失，影响书籍 Markdown 输出质量与稳定性。
+- 触发条件：
+  - 环境升级到 MinerU 2.x 后，旧逻辑只探测 `magic-pdf`，未优先识别 `mineru`。
+  - 本地缺少 pipeline 模型权重时直接调用 MinerU。
+  - 依赖版本不一致（例如 `pydantic` 与 `pydantic_core` 不匹配）导致 CLI 启动异常。
+- 根因定位：
+  - 可执行探测策略落后：未覆盖 `mineru` 新命令与解释器 `Scripts` 目录。
+  - 模型准备缺失：链路没有在运行前做模型存在性检查与自动下载。
+  - 环境一致性缺少防护：依赖错配时只有失败日志，没有自愈与明确降级诊断。
+- 修复措施：
+  - 环境修复：
+    - 安装并对齐 `mineru[all]==2.7.6`、`magic-pdf[full]==1.3.12`、`pycocotools`。
+    - 执行 `mineru-models-download -s huggingface -m pipeline`，准备本地 pipeline 权重。
+  - 代码修复（`services/python_grpc/src/server/book_pdf_extractor.py`）：
+    - 扩展 `_discover_mineru_cli()`：支持 `MINERU_BIN`、`mineru`、`magic-pdf`，并自动探测当前解释器 `Scripts` 路径。
+    - 新增 `_ensure_mineru_pipeline_models()`：模型缺失时自动尝试下载。
+    - MinerU 命令改为 Hybrid 优先（`hybrid-auto-engine`），失败后回退 `pipeline`。
+    - 保持 PyMuPDF 兜底不变，确保任务可完成。
+  - 质量增强修复：
+    - 在回传 Java 前增加 `deepseek-chat` Markdown 过滤层，修复公式/代码缩进/OCR 明显错字；
+    - 增加图片标记保护与拓扑校验，异常时回退原文，避免插图错位。
+  - 测试补齐（`services/python_grpc/src/server/tests/test_book_pdf_extractor.py`）：
+    - CLI 探测、runtime config、图片标记保护与破坏回退等用例。
+- 验证结果：
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`：通过（6 passed）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+  - 手工抽取 `Distributed_Systems_4.pdf`（23-24 页）：
+    - `success=True`，`extractor=mineru`，输出 `.../c1s1-p0023-0024-mineru*.md`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 新增“CLI 探测 + 模型准备 + 回退路径”回归用例，防止后续版本升级再退化。
+  - 监控：
+    - 按任务记录 `extractor` 命中比例（`mineru` vs `pymupdf`），`pymupdf` 异常升高触发告警。
+    - 记录 LLM 过滤成功率、回退率、耗时分布，识别质量收益与时延成本。
+  - 校验：
+    - 部署前执行 `mineru --help` 与 `mineru-models-download --help` 自检，并确认 `~/mineru.json` 中模型目录可用。
+  - 回滚：
+    - 可通过 `BOOK_PDF_MARKDOWN_LLM_FILTER_ENABLED=false` 关闭 LLM 过滤；
+    - 或将抽取策略切回 `pdfbox`/保留 PyMuPDF 兜底，避免阻断主链路。
+- 相关文件/接口：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `ExtractBookPdf`（gRPC）
+- 复盘要点：
+  - 第三方 CLI 工具升级时，必须将“命令探测 + 依赖一致性 + 模型就绪”作为同一可靠性单元治理。
+  - 书籍链路中的 LLM 后处理必须有“结构保护 + 失败回退”双保险，不能直接替换原文。
+
+## 2026-02-27 Java gRPC 连 `localhost` 命中 IPv6 回环导致 Python 服务拒绝连接
+- 日期：2026-02-27
+- 现象与影响范围：
+  - 书籍 PDF 抽取调用 `ExtractBookPdf` 时出现：
+    - `Status{code=UNAVAILABLE, description=io exception, cause=... Connection refused ... localhost/[::1]:50051}`。
+  - 影响路径：`BookMarkdownService -> PythonGrpcClient.extractBookPdf -> gRPC`，触发回退到 PDFBox。
+- 触发条件：
+  - Java 配置 `grpc.python.host=localhost`；
+  - 运行环境优先解析到 `::1`（IPv6 loopback）；
+  - Python gRPC 服务仅在 IPv4 回环/`0.0.0.0` 监听，未监听 `::1`。
+- 根因定位：
+  - 客户端地址解析与服务端监听协议族不一致（IPv6 vs IPv4）。
+  - 配置默认值使用 `localhost`，在不同 OS/网络栈上解析结果不稳定。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - `grpc.python.host` 默认从 `localhost` 改为 `127.0.0.1`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 新增 host 归一化：`localhost/::1/[::1] -> 127.0.0.1`；
+    - channel 初始化统一使用归一化后的 host。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 运行态验证：连接目标应显示为 `127.0.0.1:50051`，不再出现 `localhost/[::1]:50051`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 `PythonGrpcClient` host 归一化单测（`localhost`、`::1`、`[::1]`、`127.0.0.1`）。
+  - 监控：
+    - 统计 gRPC `UNAVAILABLE` 比例，并细分 `Connection refused` 与 `Deadline exceeded`。
+  - 校验：
+    - 环境上线前执行 `netstat -ano | findstr 50051`，确认 Python 端已监听。
+  - 回滚：
+    - 若需回滚，仅恢复 `grpc.python.host` 配置；客户端归一化逻辑可保留，不影响外部 host 配置。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `ExtractBookPdf`（gRPC）
+- 复盘要点：
+  - “localhost 可达”不是稳定假设，跨语言本地通信应固定 loopback 协议族或做归一化。
+
+## 2026-02-27 MinerU 模型下载仅走 HuggingFace 导致 SSL EOF 反复告警
+- 日期：2026-02-27
+- 现象与影响范围：
+  - 日志持续出现 `mineru model bootstrap failed`，错误为 HuggingFace SSL EOF / MaxRetryError。
+  - 影响路径：`book_pdf_extractor._ensure_mineru_pipeline_models`，导致每个任务都重复尝试下载并拉长耗时。
+- 触发条件：
+  - 网络链路对 HuggingFace 不稳定；
+  - bootstrap 固定 `-s huggingface`，无备用源；
+  - 失败后无冷却机制，任务间重复触发下载。
+- 根因定位：
+  - 模型下载源单点依赖；
+  - 重试策略只在单次命令内部，缺少任务级失败节流。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/book_pdf_extractor.py`
+  - 下载源升级为多源回退：
+    - `BOOK_PDF_MINERU_MODEL_BOOTSTRAP_SOURCES`（默认 `huggingface,modelscope`）。
+  - 提取命令源候选扩展：
+    - `BOOK_PDF_MINERU_FALLBACK_SOURCES`（默认 `huggingface,modelscope`）。
+  - 新增失败冷却：
+    - `BOOK_PDF_MINERU_MODEL_BOOTSTRAP_COOLDOWN_SEC`（默认 `900` 秒），冷却期内跳过重复 bootstrap。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q` 通过（9 passed）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加“下载源切换 + 冷却生效”单测，确保失败时不会频繁重试。
+  - 监控：
+    - 统计 `mineru model bootstrap failed` 次数及 source 维度分布。
+  - 校验：
+    - 部署前手工验证 `mineru-models-download -s modelscope -m pipeline` 可达性。
+  - 回滚：
+    - 可通过 `BOOK_PDF_MINERU_MODEL_BOOTSTRAP_SOURCES=huggingface` 恢复单源策略。
+- 相关文件/接口：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+- 复盘要点：
+  - 模型下载链路必须默认具备多源能力与失败节流，否则会在任务高峰期放大抖动。
+
+## 2026-02-27 Web 上传 PDF 未先探测章节，导致无法按章节选择提交
+- 日期：2026-02-27
+- 现象与影响范围：
+  - Web 端上传 PDF 后直接入队处理，没有出现章节探测弹窗。
+  - 用户无法在提交前选择“章/节范围”，只能全量处理，偏离书籍链路预期。
+  - 影响路径：`index.html submitTaskFromMobileForm(上传分支) -> /api/mobile/tasks/upload`。
+- 触发条件：
+  - 上传入口命中 `selectedMaterialFile` 分支时，前端固定执行“上传即提交”。
+  - 后端 `/api/mobile/tasks/upload` 与 `/api/tasks/upload` 均不支持“仅上传不入队”。
+- 根因定位：
+  - 书籍 URL 链路已经具备 `video-info -> probe sheet -> tasks/submit`，但上传链路与该决策链脱节。
+  - 上传接口缺少 `probeOnly` 能力，前端无法在拿到落盘路径后先调用 `/video-info` 进行章节探测。
+- 修复措施：
+  - 前端文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 新增 `isBookFileLike(file)`，识别 `pdf/txt/md/epub` 上传文件。
+    - `probeVideoInputForTask(videoInput, options)` 支持透传 `pageOffset`。
+    - 上传书籍文件时改为：
+      - `POST /api/mobile/tasks/upload`（`probeOnly=true`）先落盘；
+      - 再调用 `GET /api/mobile/video-info` 探测章节；
+      - 弹出 probe sheet 让用户选择章/节；
+      - 最终由 `submitFromTaskProbeSelection` 提交 `sectionSelector` 到 `/api/mobile/tasks/submit`。
+  - 后端文件：
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+    - 两处 `/tasks/upload` 增加可选参数 `probeOnly`，为 `true` 时仅落盘并返回 `normalizedVideoUrl`，不入队。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 手工链路验证：
+    - 上传 PDF -> 返回“正在上传并探测章节...”
+    - 出现章节选择弹窗（含页码区间）
+    - 选择后提交 -> 任务入队并按选择范围处理。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Web E2E：上传 PDF 需先出现 probe sheet，再允许提交任务。
+    - 增加控制器单测：`probeOnly=true` 时响应应无 `taskId` 且不触发 `submitTask`。
+  - 监控：
+    - 增加埋点：`upload_probe_only_count`、`book_probe_sheet_open_count`、`book_submit_with_section_selector_count`。
+  - 校验：
+    - 发布前回归 `pdf/txt/md/epub` 上传链路，确保都可进入章节探测（无章节时给出单项兜底）。
+  - 回滚：
+    - 前端可临时关闭书籍上传探测开关，回退到上传即提交；后端 `probeOnly` 保留不影响旧逻辑。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `POST /api/mobile/tasks/upload`、`GET /api/mobile/video-info`、`POST /api/mobile/tasks/submit`
+- 复盘要点：
+  - “上传链路”和“URL 链路”必须共享同一决策链（先探测再提交），否则书籍范围选择能力会在入口切换时丢失。
+
+## 2026-02-27 Android Markdown 阅读器将图片/视频片段显示为 raw markdown
+- 日期：2026-02-27
+- 现象与影响范围：
+  - Android 端阅读器中出现 `![[...]]`、相对路径 `![](...)`、`<video ...>` 时，部分内容以原始 markdown 文本展示或无法交互。
+  - Web `index.html` 可正常渲染并支持媒体交互，但 Android 端体验明显退化。
+  - 影响路径：`/api/mobile/tasks/{taskId}/markdown -> MainActivity -> SemanticTopographyReader -> TopographyParagraph`。
+- 触发条件：
+  - 任务 markdown 含 Obsidian embed 语法（如 `![[xx.png]]`、`![[xx.mp4]]`）或相对资源路径。
+  - Android 渲染链路直接将原文交给 Markwon，缺少 Web 端的媒体预处理与资源 URL 改写步骤。
+- 根因定位：
+  - **渲染能力差异**：Web 端在渲染前会执行 `![[...]]` 语法改写和资源链接重写；Android 端无等价预处理。
+  - **媒体组件缺失**：Android 端未提供段落级内嵌视频播放器与图片灯箱放大交互。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - 在段落渲染前新增 `rewriteReaderMarkdownMedia(...)`：
+    - 识别并处理 `![[...]]`、markdown 图片、HTML video、相对链接；
+    - 将相对路径改写为 `/api/mobile/tasks/{taskId}/asset?path=...`；
+    - 提取图片/视频为结构化媒体项，正文保留可读文本。
+  - 新增段落级媒体组件：
+    - `InlineImageGallery`：展示图片并支持点击放大；
+    - `ReaderImageLightbox`：支持双指缩放、上滑收起；
+    - `InlineVideoList + InlineVideoPlayer`：内嵌视频播放（`VideoView + MediaController`）。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+    - 透传 `apiBaseUrl` 给 `SemanticTopographyReader`，保证媒体 URL 构造与当前环境一致。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q` 通过。
+  - 手工验证：
+    - 含 `![[*.png]]`、`![[*.mp4]]` 的任务在 Android 端不再显示 raw markdown；
+    - 图片可点击放大，支持双指缩放与上滑收起；
+    - 视频片段在段落中可内嵌播放并暂停。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加阅读器渲染回归样例：`![[image]]`、`![[video]]`、相对路径图片/视频、`<video src>`。
+  - 监控：
+    - 新增埋点：`inline_image_preview_opened/closed`、`inline_video_started/paused/completed/error`。
+  - 校验：
+    - 发版前必须对比同一 markdown 在 Web 与 Android 的媒体可视化一致性。
+  - 回滚：
+    - 可临时关闭段落媒体增强，仅保留 markdown 文本渲染（保底不崩溃）。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `GET /api/mobile/tasks/{taskId}/markdown`
+  - `GET /api/mobile/tasks/{taskId}/asset?path=...`
+- 复盘要点：
+  - 跨端阅读器必须共享同一“媒体语法适配 + 资源路径重写”决策链，避免 Web 与 Android 语义漂移。
+
+## 2026-02-27 Web 大文件上传触发 Multipart EOF，导致探测链路中断
+- 日期：2026-02-27
+- 现象与影响范围：
+  - 前端上传大文件后长期停留“文件上传中，稍等一下”，无后续探测弹窗或任务提交反馈。
+  - 服务端出现 `MultipartException: Failed to parse multipart servlet request`，根因 `java.io.EOFException`。
+  - 影响路径：`index.html submitTaskFromMobileForm(文件分支) -> /api/mobile/tasks/upload(单请求 multipart)`。
+- 触发条件：
+  - 文件体积较大，网络抖动或浏览器连接中断时，单次 multipart 请求在服务端解析阶段提前 EOF。
+  - 前端上传链路未接入断点续传，失败后只能全量重传，且无稳定恢复路径。
+- 根因定位：
+  - 上传链路仍依赖“单请求整文件”模型，和已落地分片接口能力脱节。
+  - 章节探测依赖上传成功后的后续流程，上传失败时探测链路完全不触发。
+- 修复措施：
+  - 前端文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - `submitTaskFromMobileForm` 文件分支切换为 `uploadMaterialFileInChunks(...)`。
+    - 分片大小固定 `2MB`，通过 `uploadId + /chunk/status + localStorage` 实现断点续传。
+    - 上传完成统一走 `/api/mobile/tasks/upload/chunk/complete`，书籍场景继续执行 `video-info -> probe sheet`。
+    - 章节展示前缀改为 `outlineIndex`（如 `2.1.1`），不暴露内部 selector；提交 selector 前做去重。
+  - 后端文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 已有分片接口承接前端调用，维持 `probeOnly` 与既有任务提交契约。
+    - 上传持久化使用 `transferTo(File)`，并对 `MultipartException/EOF` 输出可读错误语义。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Web 上传 E2E：模拟中断后继续上传，应仅补传缺失分片并成功触发探测弹窗。
+    - 增加控制器用例：`chunk/status -> chunk -> chunk/complete` 全链路回归，覆盖重复分片与缺失分片场景。
+  - 监控：
+    - 增加分片指标：`chunk_upload_started/completed/failed`、`chunk_resume_hit_count`、`multipart_eof_count`。
+  - 校验：
+    - 发布前回归 `pdf/txt/md/epub` 上传 + 章节探测 + 提交链路。
+  - 回滚：
+    - 可临时切回旧上传入口（不建议长期），后端分片接口保留不影响既有提交逻辑。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `POST /api/mobile/tasks/upload/chunk`
+  - `GET /api/mobile/tasks/upload/chunk/status`
+  - `POST /api/mobile/tasks/upload/chunk/complete`
+- 复盘要点：
+  - 大文件上传链路必须与“可恢复传输”能力同构，否则书籍探测与范围选择等上层业务能力会被底层网络波动直接熔断。
+
+## 2026-02-27 Web 上传入口偶发未发起请求（新旧提交桥接分叉）
+- 日期：2026-02-27
+- 现象与影响范围：
+  - 用户在前端选择文件后，偶发出现“未看到 upload 请求发出”的现象。
+  - 部分会话点击提交后直接失败提示，Network 面板缺少预期 `/api/mobile/tasks/upload/chunk` 请求。
+  - 影响路径：`index.html` 提交按钮/文件选择回调的桥接入口。
+- 触发条件：
+  - 页面同时保留旧 `mobileUploadInlineSubmit` 与新 `handleMobileSubmitClick` 两套入口。
+  - 入口分支依赖全局函数覆盖顺序，出现时序波动时可能走到旧/空路径。
+- 根因定位：
+  - 新旧上传入口并存导致调用链不单一，按钮与文件变更事件在个别场景未稳定命中新分片提交函数。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 提交按钮 `onclick` 改为优先直连 `handleMobileSubmitClick`，仅在缺失时回退旧入口。
+  - 文件选择 `onchange` 改为优先直连 `handleMobileVideoFileSelected`，仅在缺失时回退旧入口。
+  - 旧 `mobileUploadInlineSubmit` 增加前置委托：若存在 `submitTaskFromMobileForm`，直接转到现代提交流程。
+  - `handleMobileVideoFileSelected` 明确返回 `true`，避免事件链误判。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 手工验证：选择文件后应稳定看到 `/api/mobile/tasks/upload/chunk/status` 与 `/api/mobile/tasks/upload/chunk` 请求。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端冒烟：点击提交与文件选择都必须触发同一提交函数。
+  - 监控：
+    - 增加前端埋点：`submit_click_entry`、`submit_file_change_entry`、`submit_chunk_request_started`。
+  - 校验：
+    - 发布前在 DevTools 验证按钮点击与文件变更两条路径均命中新分片接口。
+  - 回滚：
+    - 若新桥接异常，可临时保留回退分支，但必须确保回退入口仍委托现代提交流程。
+- 复盘要点：
+  - 前端提交入口必须“单一职责、单一路径”；桥接层允许回退，但不能并行维护两套业务提交实现。
+
+## 2026-02-27 前端 API 基址解析异常导致“未发请求即失败”
+- 日期：2026-02-27
+- 现象与影响范围：
+  - 用户点击上传后直接提示失败，但 Network 面板看不到预期上传请求。
+  - 典型症状为未知错误文案，无法判断是“请求未发出”还是“后端拒绝”。
+- 触发条件：
+  - 运行环境的 `window.location.origin` 为 `null` 或异常值时，前端拼出的 API 地址不可用。
+  - 旧桥接入口与新入口对 API 基址计算不一致，放大了偶发失败概率。
+- 根因定位：
+  - 前端基址构造硬编码依赖 `window.location.origin`，未对 `null/空值` 做降级。
+  - 未知错误被统一文案吞并，掩盖了“请求阶段失败”的真实上下文。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 新增统一基址解析：
+    - `resolveApiBaseUrl()`（主链路）
+    - `resolveLegacyApiBase()`（旧桥接）
+    - 对 `origin=null` 场景降级到相对地址 `/api/mobile`，并支持 `window.__MOBILE_API_BASE` 显式覆盖。
+  - 在分片关键阶段补充上下文错误：
+    - `分片请求失败（chunk=x/y）`
+    - `分片完成请求失败`
+  - 在 `submitTaskFromMobileForm` 失败处输出结构化 `console.error` 上下文（`message/serverMessage/httpStatus/taskApiBase`）。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-submit-feedback.js`
+    - 未知错误文案改为优先展示原始/归一化信息，避免一律“这次处理没成功”。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 手工验证：失败时至少可看到具体阶段错误，且 API 基址可在控制台定位。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端单测：`origin='null'` 时 API 基址应回退 `/api/mobile`。
+  - 监控：
+    - 增加前端埋点：`submit_fail_stage`（status/chunk/complete）。
+  - 校验：
+    - 发布前检查 DevTools 中 `taskApiBase` 是否与实际部署地址一致。
+  - 回滚：
+    - 若显式基址策略异常，可临时仅保留相对路径 `/api/mobile`。
+- 复盘要点：
+  - 基础网络层（API 基址）属于系统性杠杆，必须统一解析与回退策略，否则上层上传、探测、提交都会失真。
+
+## 2026-02-27 Android Markdown 图片占位过大且暴露 raw 路径
+- 日期：2026-02-27
+- 现象与影响范围：
+  - Android 阅读器中，部分 markdown 图片块占位偏大，连续图片时会显著拉长段落高度。
+  - 图片区域出现“轻触图片可放大...”提示，干扰阅读。
+  - 当 markdown 的 `alt` 文本携带原始路径/URL 时，界面会直接展示 raw 路径字符串。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - 图片组件未做“可见区域触发请求”，同一段落内图片会在进入组合后立即请求，导致资源加载与布局压力集中。
+  - 图片高度缺少上限约束，遇到纵向大图时占位明显。
+  - 图片标题直接透传 `alt`，缺少“路径型文本”净化策略。
+  - 交互提示文案硬编码在图片列表底部，无法按阅读场景静默展示。
+- 修复措施：
+  - 为 `InlineImageGallery` 增加可见性门控：
+    - 基于 `onGloballyPositioned + boundsInWindow` 判断是否进入视口预加载区；
+    - 未进入视口前仅渲染轻量占位，进入后才创建 `ImageRequest`（懒加载）。
+  - 收紧图片占位：
+    - 图片展示高度改为 `heightIn(min = 88.dp, max = 240.dp)`；
+    - 画廊间距由 `10.dp` 调整为 `8.dp`，减少块间冗余空白。
+  - 增加标题净化函数：
+    - 新增 `sanitizeInlineImageLabel` 与 `looksLikeRawPathOrUrl`；
+    - `alt` 呈现为路径/URL 时不再原样展示，避免暴露 raw 路径。
+  - 移除“轻触图片可放大，双指缩放后上滑可收起”提示文案。
+  - 同日二次优化（交互与布局）：
+    - 多图场景从竖向堆叠改为横向滑动浏览（分页式切换），降低长文中的垂直空间占用。
+    - 图片显示高度改为“按屏幕高度自适应”：
+      - `minImageHeight = screenHeightDp * 0.07`（约束在 `46dp~72dp`）
+      - `maxImageHeight = screenHeightDp * 0.14`（约束在 `90dp~180dp`，且至少比最小高度大 `24dp`）
+      - 未加载占位高度与 `minImageHeight` 保持一致。
+    - 预加载策略从“接近可视区”调整为“可视区外提前一屏量级”，并在真实网络加载期间显示转圈动画。
+  - 同日三次优化（占位与文本稳定性）：
+    - `HorizontalPager` 增加显式高度边界，避免在列表项内出现近全屏空白占位：
+      - `heightIn(min = minImageHeight + 8.dp, max = maxImageHeight + 44.dp)`。
+    - 图片标题限制为单行省略，避免超长标题把卡片高度意外撑大。
+    - 文本渲染半截问题修复：
+      - `applyReaderTextLayoutPolicy` 将 `isFallbackLineSpacing` 设为 `true`，允许回退字体按真实字形高度排版；
+      - `ReaderParagraphLineHeightSpan` 改为“仅扩张不压缩”行高策略，避免字形在行高收缩时被裁切。
+  - 同日四次优化（图片节点高度真正自适应）：
+    - 图片卡片新增“基于真实宽高比”的高度计算：
+      - 在 `AsyncImage.onSuccess` 读取 `drawable.intrinsicWidth/intrinsicHeight`；
+      - 按当前卡片宽度计算目标高度 `height = width * (h / w)`；
+      - 高度仅做边界约束（`minImageHeight~maxImageHeight`），不再使用固定区间直接撑布局。
+    - 多图横滑容器高度改为“跟随当前页图片高度”：
+      - `HorizontalPager` 高度动态绑定当前页 `frameHeight + 标题区`；
+      - 解决“图片本身不大但节点占位近全屏”的问题。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin --quiet` 通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Android UI 回归样例：多图长文、超长 `alt`、路径型 `alt`、滚动进入视口后触发加载。
+  - 监控：
+    - 保留现有图片预览埋点，补充统计“图片首次加载时点与可见性”用于验证懒加载效果。
+  - 校验：
+    - 发版前检查阅读器中不再出现 raw 路径文本与放大提示文案。
+  - 回滚：
+    - 可回滚到旧版 `InlineImageGallery`（同步移除懒加载门控代码）以快速止损。
+
+## 2026-02-28 书籍 Probe 目录粒度与起始页偏移双重偏差
+- 日期：2026-02-28
+- 现象与影响范围：
+  - 书籍探测在 `outline` 策略下仅产出二级 section，前端通过“每页切 leaf”伪造 `x.x.x`，目录语义与真实目录不一致。
+  - `totalEpisodes` 与 `episodes.length` 语义不一致，前端读取后产生冲突。
+  - 部分 PDF 的 offset 自动估计会误命中 TOC 页文本，导致异常偏移并扭曲页码映射。
+- 根因定位：
+  - 后端 `probe` 链路缺少 TOC 三级目录的一等结构，controller 只能按页扩展 section。
+  - `estimatePdfPageOffset` 从第 1 页开始检索章节标题，容易在目录页自命中。
+  - TOC 数字编号与 outline 的 `cXsY` 索引体系存在偏移（如 Preface），未做映射对齐。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - 新增 TOC 数字标题解析（`TOC_NUMERIC_TITLE_PATTERN`），`BookProbeResult` 增加 `leafSections`。
+  - `parsePdfTocEntries` 记录 `sourcePageNo`，offset 估计从 TOC 页之后开始搜索，避免目录页自命中。
+  - `outline` 策略下自动估计起始页（首个锚定 section），并保留手动 `pageOffset` 覆盖。
+  - TOC 叶子条目按页码区间映射到真实 outline section，生成可回放的 `sectionSelector(cXsYtZ)`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `episodes` 构建改为优先使用 `probe.leafSections`，移除按页拆分兜底路径。
+  - 统一 `totalEpisodes = episodes.size()`，新增 `bookLeafSections` 与 `bookLeafSectionCount`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 探测结果验证（`Distributed_Systems_4.pdf`）：
+    - `totalEpisodes == episodes.length == 154`
+    - `bookSectionCount = 58`
+    - `bookLeafSectionCount = 154`
+    - `detectedStartPage = 15`，`confirmedStartPage = 15`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 PDF probe 回归：验证 `episodes` 来源于 TOC 叶子，禁止按页拆分回退。
+    - 增加 offset 回归：目录页命中场景下 offset 不得出现极端异常值。
+  - 监控：
+    - 记录 `pageMapStrategy/detectedPageOffset/appliedPageOffset/bookLeafSectionCount` 指标用于诊断。
+  - 校验：
+    - 发布前校验 `totalEpisodes == episodes.length`，并抽样比对 `sectionSelector` 可用于后端筛选。
+  - 回滚：
+    - 若 TOC 叶子映射异常，可临时回退到 section 级 episodes（单 section 单 leaf），禁止恢复每页拆分模式。
+
+## 2026-02-28 PDF 首尾页越界正文未裁剪
+- 日期：2026-02-28
+- 现象与影响范围：
+  - Web 端为 PDF 任务选择 `startPage/endPage` 后，后端虽按 `sectionSelector` 提取叶子段落，但首尾页仍会携带 `x.x.x ~ y.y.y` 之外的正文。
+  - 在增强链路里会把边界页越界内容一并送入后续处理，导致摘要与分段结果偏离用户选择范围。
+  - 影响文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`。
+- 根因定位：
+  - PDF gRPC 抽取以页级文本块为主，叶子边界（`cXsYtZ`）与页面天然不是一一对齐关系。
+  - 旧实现只做“选中哪些叶子”的筛选，没有在首叶/尾叶 Markdown 到达后做锚点裁剪。
+  - 图片路径使用 gRPC 返回列表优先，未与裁剪后 Markdown 引用做交叉过滤。
+- 修复措施：
+  - 在 `BookMarkdownService` 增加叶子选择器标准化与有序解析：
+    - 支持 `c1s2t3`、`1.2.3` 以及同 section 的 leaf range 规范化。
+    - 构建 leaf 顺序与标题索引，用于定位首叶起始锚点与尾叶“下一个叶子”结束锚点。
+  - 在 gRPC Markdown 落盘前新增边界裁剪：
+    - `trimMarkdownByLeafAnchorWindow` 先按首叶标题截掉前缀，再按尾叶后继标题截掉后缀。
+  - 调整 `normalizeGrpcImagePaths`：
+    - 当 Markdown 被裁剪后，仅保留仍被 Markdown 引用的图片路径，避免越界图片残留。
+  - 新增测试：
+    - `BookMarkdownServiceGrpcExtractorTest.trimMarkdownByLeafAnchorWindowKeepsOnlySelectedLeafRange`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（当前仓存在既有编译阻塞：`MobileMarkdownController` 缺失 `TocMetadata/resolveTaskTocMetadata`，与本修复无关）。
+  - 逻辑验证：新增单测覆盖“首尾锚点裁剪”主路径。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加端到端回归：选择跨页叶子区间时，断言首尾页不包含越界标题块。
+  - 监控：
+    - 抽样记录 `sectionSelector/startAnchor/endAnchor` 与裁剪前后字符数，便于快速定位误裁剪。
+  - 校验：
+    - 发布前抽查 2 组 PDF：一组“首尾同页”，一组“尾页存在下一个标题”。
+  - 回滚：
+    - 若锚点裁剪命中异常，可暂时关闭边界裁剪，仅保留 selector 级筛选并保留日志定位。
+
+## 2026-02-28 BookMarkdownService 启动期正则初始化崩溃
+- 日期：2026-02-28
+- 现象与影响范围：
+  - 服务启动阶段 `videoProcessingController` 注入 `bookMarkdownService` 失败。
+  - 根因堆栈显示 `BookMarkdownService.<clinit>` 抛出 `PatternSyntaxException: Unclosed character class`。
+  - 影响所有依赖书籍探测/解析链路的接口，应用无法完成启动。
+- 根因定位：
+  - `BookMarkdownService` 顶部 `CHAPTER_PATTERN/SECTION_PATTERN` 的正则字符串发生乱码污染。
+  - 污染后的字符类 `[...]` 未闭合，导致 `Pattern.compile(...)` 在类加载阶段直接异常。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - 将 `CHAPTER_PATTERN/SECTION_PATTERN` 重写为 Unicode 转义形式，避免依赖本地编码显示：
+    - `\\u7b2c`（第）、`\\u7ae0`（章）、`\\u8282`（节）等关键字采用转义字面量。
+    - 保留英文章节识别分支 `(?i)(chapter|part)\\s+\\d+`。
+  - 保证新正则不包含破损字符类，类初始化可稳定通过。
+- 验证方式：
+  - 重新编译：
+    - `javac -encoding UTF-8 -cp <classpath> -d services/java-orchestrator/target/classes BookMarkdownService.java VideoProcessingController.java`
+  - 运行时初始化验证：
+    - 临时类实例化 `new BookMarkdownService()` 输出 `BOOK_SERVICE_INIT_OK`。
+  - 文档编码校验：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py` 通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加一个轻量启动前检查（或单测）仅触发 `BookMarkdownService` 类加载，防止静态常量回归。
+  - 监控：
+    - 启动日志增加关键字告警：`PatternSyntaxException`、`BookMarkdownService.<clinit>`。
+  - 校验：
+    - 涉及中文正则编辑时优先使用 Unicode 转义，避免本地终端编码差异引入隐患。
+  - 回滚：
+    - 若再次出现启动异常，可临时回退到最近可启动版本的正则定义并保留探测链路其他改动。
+
+## 2026-02-28 Web 端 Local Note Graph 弹窗遮挡主界面
+- 日期：2026-02-28
+- 现象与影响范围：
+  - Web 端右栏进入阅读后，`Local Note Graph` 遮罩层在未点击 Graph 按钮时出现，覆盖主界面导致无法继续操作。
+  - 影响锚点挂载、右栏编辑、快捷键等所有需要点击的交互。
+- 根因定位：
+  - 图谱弹窗样式使用了固定 `display:grid`，与 `hidden` 属性组合时在部分时序下未被正确隐藏。
+  - 初始化阶段未做“强制隐藏兜底”，历史状态/重渲染后存在遮罩残留窗口。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - 明确增加 `.anchor-obsidian-graph-modal[hidden] { display: none !important; }`。
+  - 关闭函数 `closeObsidianGraphModal()` 增强为三重兜底：
+    - `hidden = true`
+    - `aria-hidden = true`
+    - `style.display = 'none'`
+  - 打开时显式反向设置：
+    - `hidden = false`
+    - `aria-hidden = false`
+    - `style.display = 'grid'`
+  - 初始化后无条件执行一次隐藏兜底，避免首次进入被旧状态覆盖。
+  - 增加 `Esc` 关闭、点击遮罩关闭，降低遮挡恢复成本。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`（通过）
+  - 手工回归：
+    - 首次进入右栏默认不显示图谱遮罩；
+    - 点击 Graph 才出现；
+    - 点击 Close / 遮罩空白处 / Esc 均可关闭；
+    - 关闭后可继续正常点击挂载与编辑交互。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端用例：弹窗创建后默认 `hidden` 且计算样式 `display:none`。
+  - 监控：
+    - UI 错误日志增加图谱弹窗 open/close 状态采样，便于定位遮罩滞留。
+  - 校验：
+    - 所有 modal 组件统一遵循 `hidden + aria-hidden + display` 三态一致性规则。
+  - 回滚：
+    - 若后续图谱交互出现异常，可临时关闭 Graph 按钮入口，不影响右栏主编辑能力。
+
+## 2026-03-02 Markdown block 首次渲染宽度被压窄
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 内容页中部分语义 block 在首次渲染后被明显压窄，视觉上接近“一行仅容纳一个字”。
+  - 受影响文件：
+    - `services/java-orchestrator/src/main/resources/static/index.html`
+    - `services/java-orchestrator/src/main/resources/static/css/mobile-markdown-app.css`
+- 根因定位：
+  - 旧逻辑把 `block.indentLevel` 直接映射到 `.md-block-node` 的 `margin-left`，且没有上限保护。
+  - `indentLevel` 源于原始 Markdown 首行前导空白；当原文存在异常前导空格（如 OCR 产物或粘贴文本），普通段落也会得到过大的左缩进。
+  - 结果是 block 实际可用行宽被大幅挤压，首屏渲染时出现“极窄列”。
+- 修复措施：
+  - 新增 `resolveSemanticBlockVisualIndentLevel(block)`：
+    - 仅 `list_item` / `list_continuation` / `blockquote` 允许缩进；
+    - 其它类型统一按 `0` 处理，避免误缩进普通段落；
+    - 缩进层级增加上限 `SEMANTIC_BLOCK_MAX_INDENT_LEVEL = 8`。
+  - CSS 增加兜底上限：
+    - `.md-block-node` 新增 `--md-block-indent-max: 96px`；
+    - `margin-left` 改为 `min(calculated, max)`，防止任何异常值继续压窄 block。
+- 验证方式：
+  - 手工回归：
+    - 使用包含异常前导空白的 Markdown 内容，首次渲染后 block 宽度恢复为正常正文宽度；
+    - 嵌套列表与引用仍保留可感知的层级缩进。
+  - 构建校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+  - 文档编码校验：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 补充前端回归用例：输入“普通段落带异常前导空白”时，渲染后 `.md-block-node` 不得出现超大左缩进。
+  - 监控：
+    - 在语义块装饰阶段采样异常缩进值（例如 `indentLevel > 8`）计数，便于定位数据源异常。
+  - 校验：
+    - 代码评审要求“缩进映射必须有类型白名单 + 上限钳制”。
+  - 回滚：
+    - 若后续发现列表视觉层级不够，可只调大 `--md-block-indent-max` 或 `SEMANTIC_BLOCK_MAX_INDENT_LEVEL`，无需回退整套逻辑。
+
+## 2026-03-02 Android 阅读器 block 首次渲染极窄（触摸后恢复）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - Android App 的 Markdown 阅读器中，部分 block 首次进入页面时宽度异常变窄，接近“一行仅容纳一个字”。
+  - 用户触摸后触发一次重渲染，宽度可能恢复正常，表现为“首帧异常、交互后恢复”。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - `SubcomposeAnchorLayout` 以前景首次测量宽度作为最终布局宽度；当首帧 `AndroidView(TextView)` 出现 `wrap-content` 测量结果时，父布局会被反向收窄。
+  - `TextView` 未显式声明 `MATCH_PARENT` 宽度，首帧在部分设备/时序下会短暂走到内容驱动测量，形成窄列。
+  - 触摸后重渲染会再次触发布局测量，因而出现“恢复正常”的现象。
+- 修复措施：
+  - `SubcomposeAnchorLayout` 在宽度有界时，强制前景使用父约束的确定宽度测量（`minWidth=maxWidth=constraints.maxWidth`），并以该宽度作为布局宽度。
+  - `MarkdownParagraph` 内 `TextView` 增加显式布局参数：
+    - `layoutParams = MATCH_PARENT x WRAP_CONTENT`
+    - `setHorizontallyScrolling(false)`
+    - `isSingleLine = false`
+    - `maxLines = Int.MAX_VALUE`
+  - 目标是让首帧宽度确定且与父容器一致，不再依赖交互后的二次测量纠偏。
+- 验证方式：
+  - 编译检查：`./gradlew :app:compileDebugKotlin -q`（当前分支存在既有阻塞：`MainActivity.kt` 中 `warmUpCompletedTaskSession` 未解析，非本次改动引入）。
+  - 手工回归建议：
+    - 冷启动进入阅读器，确认首次渲染不出现窄列；
+    - 不触摸直接观察列表滚动进入的新 block，宽度应稳定；
+    - 触摸前后宽度不应发生“由窄变宽”跳变。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 UI 回归：断言 `TopographyParagraph` 首帧宽度接近父容器宽度，不低于阈值（例如父宽的 0.8）。
+  - 监控：
+    - 采集阅读器段落首帧宽度与父宽比值（抽样），低于阈值时记录诊断日志。
+  - 校验：
+    - 自定义 `SubcomposeLayout` 禁止用“首次子项测量宽度”直接决定父宽，除非明确是内容包裹场景。
+  - 回滚：
+    - 如新约束影响特殊窄栏场景，可仅回滚 `SubcomposeAnchorLayout` 的强制等宽测量，保留 `TextView MATCH_PARENT` 兜底。
+
+## 2026-03-02 Phase2B 链接重构链路中图片相对位置漂移风险
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 在 Phase2B 使用外部文章（知乎/掘金）重构时，模型可能改写或移动图片 Markdown 标记，导致输出中图片相对顺序发生漂移。
+  - 影响文件：
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/Phase2bImageTopologyGuard.java`
+    - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+- 根因定位：
+  - 旧链路直接把整段 markdown 交给模型，图片标记与正文在同一自由重写空间内，缺少拓扑约束与恢复校验。
+  - 当输入包含多张图片时，模型存在“合并段落/重排列表/删除重复元素”的行为倾向，可能误伤图片 token。
+- 修复措施：
+  - 新增 `Phase2bImageTopologyGuard`：
+    - LLM 前将图片标记掩码为稳定 token；
+    - LLM 后校验 token 拓扑（数量、顺序、唯一性）；
+    - 校验失败时启用安全回退，避免错误图片布局进入最终结果。
+  - Controller 增加“post_processing”阶段，显式执行恢复与回退，并通过响应字段 `imageTopologyFallback` 暴露保护状态。
+  - 前端保留实时 markdown 预览，便于用户在回退发生时即时发现并继续编辑。
+- 验证方式：
+  - 编译校验：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+  - 前端脚本校验：`node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`。
+  - 手工回归建议：
+    - 输入包含多张图片的知乎/掘金链接，验证输出中图片顺序与参考正文一致；
+    - 人为构造“模型改写图片 token”场景，验证回退分支可触发且不丢图。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加单测：覆盖“token 全量命中”和“token 缺失/乱序”两类场景。
+  - 监控：
+    - 记录 `imageTopologyFallback` 触发次数，作为模型输出稳定性指标。
+  - 校验：
+    - 所有引入 LLM 重写的 markdown 链路，若含媒体标记，必须先做 token 保护再回填。
+  - 回滚：
+    - 若新保护逻辑引入兼容问题，可临时关闭 blend 输入，仅保留纯文本 Phase2B，不影响基础提交能力。
+
+## 2026-03-02 Android 内联图片 block 高度与图片实际占高不一致
+- 日期：2026-03-02
+- 现象与影响范围：
+  - Android 阅读器中，部分内联图片显示为“图片外层 block 高度明显大于图片真实占高”，出现额外留白。
+  - 多图分页场景更明显：图片区域高度与实际图像高度不严格一致，滚动时会看到高度跳变或空白底。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - 旧逻辑会把图片按宽高比推导出的目标高度做 `coerceIn(min, max)` 裁剪，导致容器高度不是图片真实等比高度。
+  - 旧实现将高度更新绑定在 `onSuccess + cardWidth` 的同一时序窗口；当图片先成功、宽度后可用时，高度可能停留在占位值。
+  - 多图 `HorizontalPager` 额外叠加了固定高度补偿（`+12.dp` 以及强制区间钳制），进一步放大了“容器高度 > 图片实际占高”的偏差。
+  - caption 文本与图片区共用一个 card，高度语义耦合，视觉上会被误判为“图片 block 比图片本体更高”。
+- 修复措施：
+  - 重写 `InlineImagePageCard`：
+    - 以 `imageAspectRatio(宽/高)` 作为单一几何来源；
+    - 以 `cardWidth / imageAspectRatio` 推导图片目标高度，不做上下限裁剪；
+    - 高度回传改为“可重算状态驱动”，不依赖单次加载回调时序。
+  - 重写 `InlineImageGallery`：
+    - 多图 pager 高度仅绑定当前页图片区高度，不再混入 caption 高度补偿；
+    - caption 从 card 中拆出为独立文本块，图片 block 只承载图片本体。
+  - 内联图片保持 `ContentScale.FillWidth`，并使用 `fillMaxSize` 占满已按比例确定的图片区。
+- 验证方式：
+  - 构建校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+    - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - 手工回归建议：
+    - 单图（横图/竖图/超长图）检查是否仍出现容器内留白；
+    - 多图分页左右切换时，当前页图片高度应与图片真实占高一致；
+    - 带 `alt` 文本图片确认仅文本区域额外占高，图片区域本身不出现补偿空白。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Compose UI 回归：断言图片容器高度与按宽高比计算高度误差在 1dp 内。
+  - 监控：
+    - 采样记录图片 intrinsic 比例与最终 frameHeight，发现异常偏差时输出诊断日志。
+  - 校验：
+    - 评审规则中新增“媒体容器不得对等比目标高度进行隐式补偿钳制（除非明确产品需求）”。
+  - 回滚：
+    - 若后续出现长图占高过大影响阅读，可仅恢复“产品级显示上限”配置，并保持图片 block 与实际图片高度一致的主逻辑不变。
+
+## 2026-03-02 Android 阅读器 block 首帧窄列残留（首次布局未就绪导致探测漏掉）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - Android 阅读器中，部分 Markdown block 首次进入页面时仍可能出现“宽度仅容纳一个字”的窄列表现。
+  - 用户触摸后触发交互重排，宽度恢复正常，表现为“首帧异常、交互后恢复”。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 触发条件：
+  - `AndroidView.update` 首次执行时，`TextView` 与父容器宽度尚未稳定（`width=0` 或 `parent.width=0`）。
+  - 首次探测逻辑提前返回后，没有在布局稳定后自动补一次探测与纠偏。
+- 根因定位：
+  - 现有窄列纠偏函数 `probeAndRepairNarrowFirstLayout` 在首帧宽度未就绪时直接 `return`，导致“该次渲染窗口”错过纠偏机会。
+  - 后续只有在用户交互触发重渲染时才会再次进入探测流程，因此出现“点击后恢复”的时序型缺陷。
+  - `MarkdownParagraph` 的 `AndroidView.update` 存在 `canFastSkip` 快路径；当命中快路径时会提前返回，导致窄列探测被跳过。
+  - 纠偏动作原先只触发 `textView.requestLayout()`，在父布局已被收窄时，父层未必同步重测。
+  - 对部分异常 Markdown（尤其深层列表/异常缩进）场景，`LeadingMarginSpan` 可能占用过大行宽，导致可用内容宽度逼近 0。
+  - `TopographyParagraph` 的 `block.indentLevel` 直接换算为外层 `padding(start)` 且无上限，异常缩进会在 Compose 层先把段落容器压窄。
+- 修复措施：
+  - 新增“一次性 layout 完成探测”机制：
+    - 对首帧未就绪的 `TextView` 绑定 `OnLayoutChangeListener`；
+    - 仅在 `attached` 后再注册探测，避免离屏/预取阶段反复重试造成滚动卡顿；
+    - 当 `TextView.width` 与 `parent.width` 首次同时可用时立即触发探测并自动解绑监听；
+    - 目标是把纠偏触发点从“依赖后续交互重组”升级为“布局稳定即触发”。
+  - 快路径兜底：
+    - 在 `canFastSkip` 分支返回前补跑 `probeAndRepairNarrowFirstLayout`；
+    - 防止“内容没变但布局异常”场景被快路径吞掉探测与纠偏。
+  - 新增 `LeadingMarginSpan` 紧急裁剪兜底：
+    - 当探测到 `contentWidth<=0` 或 leading margin 明显超过阈值时，移除超限 `LeadingMarginSpan` 后重排；
+    - 优先保证正文可读宽度，避免出现“每行仅露一个字”的极端显示。
+  - 新增“缩进源头钳制”：
+    - 渲染前对 `readerMarkdown` 做列表缩进规范化，按配置上限约束列表层级；
+    - `TopographyParagraph` 对 `block.indentLevel` 做上限钳制后再计算外层 `padding(start)`。
+  - 新增“探测降频”：
+    - 为窄列探测引入宽度签名，`canFastSkip` 分支仅在宽度签名变化或未就绪时触发探测；
+    - 避免每次快速更新都重复扫描 span，降低滚动卡顿风险。
+  - 增强纠偏动作：
+    - 纠偏时同时触发父容器与 `TextView` 的 `requestLayout()`，并保持 `invalidate()`。
+  - 调整修复标记复位策略：
+    - 当宽度恢复到正常区间时，自动清理“已修复”标记，确保后续真实异常仍可再次触发纠偏。
+- 验证方式：
+  - 构建校验：
+    - `.\gradlew.bat :app:compileDebugKotlin -q`（通过）。
+  - 手工回归建议：
+    - 冷启动进入阅读器后，不触摸直接观察首屏与后续滚入 block，确认不再出现“首帧窄列”；
+    - 触摸前后同一 block 宽度不应出现“由窄变宽”跳变。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 UI 回归场景：模拟首帧 `AndroidView` 宽度延迟可用，断言最终宽度比例不低于父容器阈值。
+  - 监控：
+    - 保留 `ReaderLayoutProbe` 采样日志，重点关注 `touchedAgoMs=Long.MAX_VALUE` 的首帧告警占比。
+  - 校验：
+    - 涉及 `AndroidView + 自定义 Layout` 的首帧渲染链路，禁止“未就绪直接返回且不补偿”的测量逻辑。
+  - 回滚：
+    - 若补偿机制引入兼容问题，可先仅保留“父子同时 requestLayout”修复，回退重试次数配置。
+
+## 2026-03-02 Android 内联图片 block 固定高度策略调整（按屏幕 1/4）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 内联图片在部分机型上仍被反馈“占据过大”，需要避免因图片比例差异导致的高度波动。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - 仅使用固定常量高度（如 `160.dp`）虽然能抑制超高图片，但在不同屏幕尺寸下一致性不足，体验不统一。
+- 修复措施：
+  - 将图片承载 block 高度改为随屏幕动态计算：
+    - `fixedImageBlockHeight = (configuration.screenHeightDp * 0.25f).dp`
+  - 单图与多图 `HorizontalPager` 统一使用该高度，确保“同设备固定、跨设备按屏幕比例缩放”。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 补充 UI 回归：在小屏与大屏设备上断言图片 block 高度分别接近 `screenHeight * 0.25`。
+  - 校验：
+    - 图片承载层的高度策略必须集中在单一变量，禁止散落硬编码常量。
+  - 回滚：
+    - 若后续需要更紧凑显示，可将比例从 `0.25` 下调到配置值（例如 `0.22`），无需改动布局结构。
+
+## 2026-03-02 Android 内联图片改为“图片直出承载”方案（移除 block 容器）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 在固定高度 block 方案下，图片虽然可控，但用户仍感知到“容器感过强”，并要求不要再由 block 承载图片。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - `Card + 固定高度 + Pager` 的组合天然是“容器优先”，视觉上即使图片本体缩放正确，也会被理解为“外层 block 在决定图片呈现”。
+  - 多图分页的统一高度约束会放大这种容器感，难以满足“图片自身承载、按原图比例展示”的预期。
+- 修复措施：
+  - 移除“block 承载”路径：
+    - 去掉 `HorizontalPager` 与固定高度 block；
+    - 去掉 `Card` 对图片的承载职责。
+  - 改为“图片直出流”：
+    - `InlineImageGallery` 改为按顺序逐张渲染图片；
+    - 每张图片独立懒加载、独立点击预览，不再受统一分页高度约束。
+  - 保持原图比例展示：
+    - 加载成功后读取图片 intrinsic 宽高，按 `width/height` 更新 `aspectRatio`；
+    - 图片使用 `ContentScale.Fit`，确保图片完整可见。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 UI 回归：多图场景断言每张图片高度由自身宽高比决定，不依赖统一容器高度。
+  - 校验：
+    - 媒体展示组件评审时区分“图片本体渲染”和“外层容器装饰”，禁止容器逻辑反向控制图片几何。
+  - 回滚：
+    - 若后续确认需要恢复分页交互，可仅恢复横向翻页手势层，不恢复固定高度容器策略。
+
+## 2026-03-02 Markdown `![]()` 资源地址重写增强（保障 TextView 内图片可达）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 用户确认图片应直接在 `TextView + Markwon` 中渲染后，若 `![]()` 内资源地址未被稳定改写为可访问 URL，图片会出现加载失败或空白占位。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - 旧版 `MARKDOWN_IMAGE_INLINE_PATTERN` 对 `![]()` 的 destination 匹配过窄（默认不支持包含空白与角括号包裹写法）。
+  - 重写时仅简单拼接 `resolvedUrl + suffix`，对“destination + title 后缀”拆分不稳定，存在错改/漏改风险。
+- 修复措施：
+  - 将 `![]()` 匹配调整为“捕获整段 target”：
+    - `MARKDOWN_IMAGE_INLINE_PATTERN = Regex(\"!\\\\[([^\\\\]]*)]\\\\(([^)]*)\\\\)\")`
+  - 新增 `parseMarkdownLinkTarget(rawTarget)`：
+    - 识别 `<...>` 包裹 destination；
+    - 分离 destination 与 title/后缀，避免后缀参与 URL 解析。
+  - 新增 `buildMarkdownLinkTarget(destination, suffix)`：
+    - destination 按规则重建（必要时角括号包裹）；
+    - 与原 suffix 合并，保证 Markdown 语义不丢失。
+  - `rewriteReaderMarkdownMedia` 中 `ReaderMediaKind.IMAGE` 分支统一走上述解析/重建流程，再调用 `resolveReaderMediaUrl` 回写目标地址。
+  - 同步移除 `InlineImageGallery` 注入路径，确保图片仅通过 `markwon.setMarkdown(textView, markdown)` 在 TextView 内渲染。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - 文档编码检查：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`（通过）。
+    - `python -X utf8 tools/architecture/check_docs_encoding.py --check-mojibake`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Markdown 解析回归样例：
+      - `![a](relative/path.png)`
+      - `![a](<relative path with spaces.png>)`
+      - `![a](relative/path.png \"title\")`
+    - 断言重写后 destination 可达，suffix 保持不变。
+  - 校验：
+    - 所有图片 URL 改写必须经过“解析 destination + 重建 target”流程，禁止直接字符串拼接。
+  - 回滚：
+    - 若新解析对极端写法兼容性异常，可临时降级为“仅解析不含 suffix 的标准写法”，并保留 TextView 渲染主链路。
+
+## 2026-03-02 TextView 内图片支持点击放大（Markwon span 点击桥接）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 图片已能在 `TextView + Markwon` 中渲染，但点击图片无法放大，用户交互回路中断。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - 现有 `MarkdownParagraph` 触摸链路优先处理词条点击与双击，但未把图片 span 作为可点击目标识别。
+  - Markwon 图片渲染为 span（如 `AsyncDrawable` / `ImageSpan`），默认不会触发现有 `ReaderImageLightbox`。
+- 修复措施：
+  - 在 `MarkdownParagraph.onSingleTapConfirmed` 增加“先探测图片 span”分支：
+    - 命中图片 span 时直接触发 `onInlineImageTap`；
+    - 并短暂抑制原生选区，避免图片点击与文本选区冲突。
+  - 新增图片 span 解析工具：
+    - `resolveTappedInlineImage(...)`
+    - `isImageRenderSpan(...)`
+    - `resolveImageUrlFromSpan(...)`
+    - 通过反射优先读取 span/drawable 的 `getDestination()` 提取真实 URL。
+  - 恢复并复用既有 lightbox 打开遥测链路：
+    - `inline_image_preview_opened`
+    - `inline_image_preview_closed`
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - 手工回归建议：
+    - 点击正文内图片，确认弹出 `ReaderImageLightbox`；
+    - 双指缩放与上滑关闭交互正常；
+    - 普通词条点击与双击加粗不受影响。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加手势回归：图片单击优先于词条点击，且不触发文本选区。
+  - 监控：
+    - 跟踪 `inline_image_preview_opened/closed` 事件比率，识别点击命中异常。
+  - 校验：
+    - 所有 `TextView + Markwon` 图片渲染场景需同时具备“可达 URL + 可点击交互”双条件。
+  - 回滚：
+    - 若特定设备反射读取 destination 兼容性异常，可临时仅保留 `AsyncDrawable` 分支并记录机型白名单。
+
+## 2026-03-02 下线 JNI 词法桥接（移除 native 加载与调用）
+- 日期：2026-03-02
+- 现象与影响范围：
+  - Android 运行日志持续出现 JNI 相关错误：
+    - `dlopen failed: library "liblexical_onnx_bridge.so" not found`
+    - `No implementation found for ... LexicalNativeBridge.segmentAt(...)`
+  - 该错误会污染日志并干扰排障，且用户已明确不再需要 JNI 分词能力。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyContracts.kt`。
+- 根因定位：
+  - `LexicalNativeBridge` 仍保留 `System.loadLibrary("lexical_onnx_bridge")` 与 `external` 方法声明。
+  - 当 APK 未打包对应 `.so` 时，运行期会触发 native 加载失败与符号查找失败。
+- 修复措施：
+  - 将 `LexicalNativeBridge` 改为“纯 Kotlin 空实现”：
+    - 删除 native 动态库加载逻辑；
+    - 删除 `external` 声明；
+    - `segmentAt(...)` 与 `explainToken(...)` 固定返回 `null`，统一走现有 Kotlin 回退链路。
+  - 增加一次性信息日志：`JNI lexical bridge disabled`，仅用于确认该路径已显式下线。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - 手工日志回归建议：
+    - 启动 App 并触发词条点击，确认不再出现 `dlopen failed` 与 `No implementation found`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 `LexicalNativeBridge` 单元测试，断言 `segmentAt/explainToken` 在无 native 环境稳定返回 `null`。
+  - 监控：
+    - 启动阶段日志巡检增加 JNI 关键字告警（`dlopen failed`、`No implementation found`）。
+  - 校验：
+    - 每次词法能力演进需明确选择“纯 Kotlin”或“JNI 能力已随 APK 打包”，禁止混合中间态。
+  - 回滚：
+    - 若未来需要恢复 JNI，需同时提交 `.so` 打包链路、ABI 校验与启动时可用性探测，再恢复 native 调用。
+
+## 2026-03-02 Android 阅读器单字竖排（width=0/parentWidth=0 首帧时序）确定性修复
+- 日期：2026-03-02
+- 现象与影响范围：
+  - 部分段落首次进入可视区域时出现“单字竖排”，即每行仅能看到一个字，交互后才可能恢复。
+  - 日志显示异常窗口内存在 `width=0` 与 `parentWidth=0` 的首帧时序。
+  - 影响文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`。
+- 根因定位：
+  - `AndroidView(TextView)` 在容器宽度未稳定时就进入正文渲染链路，会把 0 宽时序带入布局状态。
+  - 旧实现依赖“探测+重试”补救，修复触发点不确定，且在列表滚动中会带来额外抖动与性能开销。
+- 修复措施：
+  - 段落渲染门控：
+    - `MarkdownParagraph` 使用 `onSizeChanged` 记录 Compose 侧稳定宽度；
+    - 在 `AndroidView.update` 中统一计算 `stableWidthPx=max(layoutWidthPx,parentWidth,textView.width)`；
+    - 当 `stableWidthPx<=0` 时不执行 `markwon.setMarkdown` 与后续样式链路，仅写入一个最小占位文本（`NBSP`）保持段落高度不塌陷。
+  - 宽度确定化：
+    - 在宽度稳定后，显式同步 `TextView minWidth/maxWidth` 到 `stableWidthPx`，保证文本布局基于确定宽度。
+  - 去除抖动路径：
+    - 主链路移除窄列探测调用，不再依赖 probe/retry/requestLayout 的后验修复。
+  - 媒体 inset 同步优化：
+    - `applyMediaContainerInset` 新增 `preferredWidthPx`，不再用 `post` 等待宽度，改为稳定宽度直接计算。
+- 验证方式：
+  - `./gradlew :app:compileDebugKotlin -q`（通过）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+  - 手工回归建议：
+    - 冷启动直接进入阅读器并滚动首屏，确认不再出现“每行单字竖排”；
+    - 不触摸情况下观察新进入视口段落，宽度应一次成型，不依赖点击恢复。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 UI 回归：模拟首帧宽度未就绪场景，断言 `stableWidthPx<=0` 时不触发正文渲染，宽度就绪后一次渲染成功。
+  - 监控：
+    - 保留轻量日志采样 `stableWidthPx` 与渲染触发次数，识别是否仍存在 0 宽渲染。
+  - 校验：
+    - `AndroidView` 文本渲染链路统一遵循“宽度就绪后再渲染”原则，禁止在 0 宽阶段写入布局状态。
+  - 回滚：
+    - 若后续发现极端场景内容未及时出现，可先回退 `minWidth/maxWidth` 的强制同步，保留 `stableWidthPx` 门控与占位高度策略。
+
+## 2026-03-03 Python 异步去重器误报 `Future exception was never retrieved` 修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 主流程日志出现重复错误：
+    - `Future exception was never retrieved`
+    - `future: <Future finished exception=APIConnectionError('Connection error.')>`
+  - 该问题会放大错误噪声，干扰真实失败定位，尤其在网络抖动场景下频繁出现。
+  - 影响文件：
+    - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - `services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+- 根因定位：
+  - 两处 `singleflight` 去重器都采用 `create_future + set_exception` 向 follower 广播 leader 失败。
+  - 当某次请求没有 follower（只有 leader）时，内部 `Future` 的异常没有被任何 `await` 消费，触发 asyncio 的未读取异常告警。
+- 修复措施：
+  - 在去重器内部 `Future` 创建后统一挂载 `add_done_callback`。
+  - 回调中显式读取 `fut.exception()`（并处理 `CancelledError`），保证“无 follower 场景”也会消费异常状态。
+  - 保持业务语义不变：leader 仍然向调用方抛出原始异常，follower 仍可收到同一异常广播。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/llm/deepseek.py`
+  - 自定义最小复现脚本验证 “leader 失败 + 无 follower” 场景不再产生 `Future exception was never retrieved` 噪声日志。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 为去重器补充回归用例：覆盖“无 follower 的 leader 失败”与“有 follower 的异常广播”两条路径。
+  - 监控：
+    - 在日志平台增加关键字告警统计：`Future exception was never retrieved`，用于追踪回归。
+  - 校验：
+    - 所有 `create_future + set_exception` 场景必须保证异常被消费（`await` 或 done callback）。
+  - 回滚：
+    - 若回调路径引入副作用，可临时回滚到旧逻辑并关闭 inflight dedup 开关，优先保障主链路可用性。
+
+## 2026-03-03 Python gRPC 启动签名冲突 + Java `spring-boot:start` 假超时联动修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - Python gRPC 服务启动阶段直接崩溃，报错：
+    - `TypeError: model_schema() got an unexpected keyword argument 'generic_origin'`
+    - 进一步出现 `with_default_schema() got an unexpected keyword argument 'default_factory_takes_data'`
+  - Java `mvn spring-boot:start` 表层报错为 30 秒超时，但真实启动失败原因为 Bean 创建异常，日志关键报错：
+    - `MetricsClientInstruments.newClientMetricsMeters(...)`
+    - `Counter$Builder.withRegistry(...)` 方法不存在（Micrometer 版本签名不匹配）
+  - 影响文件：
+    - `apps/grpc-server/main.py`
+    - `services/python_grpc/src/server/runtime_env.py`
+    - `services/python_grpc/src/server/startup_runner.py`
+    - `services/python_grpc/src/server/dependency_check.py`
+    - `services/python_grpc/src/transcript_pipeline/graph.py`
+    - `services/java-orchestrator/src/main/resources/application.properties`
+- 根因定位：
+  - Python：
+    - `whisper_env` 内存在 `pydantic` 与 `pydantic_core` 签名级错配，导致任何基于 Pydantic v2 schema 构建的路径均可能在导入期崩溃。
+    - Stage1 pipeline 在模块导入期就触发 `langgraph` 相关导入，放大了启动期失败面。
+  - Java：
+    - `grpc-client-spring-boot-starter` 的 metrics 自动装配路径与当前 `micrometer-core 1.11.5` 方法签名不兼容。
+    - Spring Boot Maven 插件因此在等待应用 ready 时超时，形成“超时假象”。
+- 修复措施：
+  - Python：
+    - 将 Stage1 pipeline 的 `langgraph`/`MemorySaver` 导入改为按需加载，减少无关场景的启动阻断。
+    - 在启动链增加 `pydantic_core` 兼容补丁：若检测到旧签名，则在启动期注入兼容包装并打印显式日志。
+    - 依赖预检新增 `pydantic_core schema` 签名校验，提前暴露环境错配。
+    - 在 `whisper_env` 执行强制重装，恢复 `pydantic 2.12.5 + pydantic_core 2.41.5` 一致组合。
+  - Java：
+    - 在 `application.properties` 显式排除 `GrpcClientMetricAutoConfiguration`，绕开不兼容 metrics 自动装配分支，保留核心业务调用链。
+- 验证方式：
+  - Python 语法校验：
+    - `python -m py_compile apps/grpc-server/main.py services/python_grpc/src/server/runtime_env.py services/python_grpc/src/server/startup_runner.py services/python_grpc/src/server/dependency_check.py services/python_grpc/src/transcript_pipeline/graph.py`
+  - Java 编译校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 进程与端口验证：
+    - 启动 `run_server.ps1` 后，`50051` 监听成功。
+    - 启动 `mvn spring-boot:start -f "d:\videoToMarkdownTest2\services\java-orchestrator\pom.xml"` 后，`8080` 与 `9002` 监听成功。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 将 `--check-deps` 作为发布前固定检查项，新增“pydantic-core 关键签名一致性”门禁。
+  - 监控：
+    - 重点监控启动日志关键字：
+      - `generic_origin`
+      - `default_factory_takes_data`
+      - `GrpcClientMetricAutoConfiguration`
+      - `withRegistry`
+  - 校验：
+    - Python 环境必须保证 `pydantic` 与 `pydantic_core` 成对升级/降级，禁止半升级。
+    - Java 侧遇到 `spring-boot:start` 超时时，必须先回看应用日志中的首个 Bean 创建异常，禁止直接将超时当根因。
+  - 回滚：
+    - Python：可临时移除兼容补丁并回退到已验证镜像环境。
+    - Java：若需恢复 gRPC metrics，先完成依赖版本矩阵对齐，再取消 auto-config 排除。
+
+## 2026-03-03 Windows 下 watchdog 心跳写盘 `WinError 5` 导致转写任务误失败修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 转写日志出现：
+    - `TranscribeVideo failed: [WinError 5] 拒绝访问 ... task_watchdog_heartbeat.json.tmp -> task_watchdog_heartbeat.json`
+    - `Transcribe watchdog emit failed ...`
+  - 影响范围：
+    - `task_watchdog_heartbeat.json`
+    - `stage1_watchdog_heartbeat.json`
+    - 当心跳写盘异常冒泡时，会误伤主链路，使业务 RPC 被标记为失败。
+- 根因定位：
+  - 心跳写盘采用固定临时文件名 `*.json.tmp`，并在 Windows 上执行 `os.replace`。
+  - 当文件被并发读写或句柄短暂占用时，`os.replace` 可能抛 `PermissionError(WinError 5)`。
+  - 旧实现将该异常直接向上抛出，导致“可观测性写盘故障”升级成“主业务失败”。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/watchdog_signal_writer.py`
+    - 新增 `persist_watchdog_payload(...)`：
+      - 原子写盘改为“唯一 tmp 文件名（pid + thread_id + time_ns）”；
+      - `os.replace` 失败后按配置重试；
+      - 重试仍失败时降级为直接覆盖写入；
+      - 返回错误字符串而不是抛异常，避免打断主流程。
+    - `TaskWatchdogSignalWriter.emit(...)` 改为最佳努力写盘，失败仅告警且做 10 秒同错节流。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - `Stage1HeartbeatWriter.emit(...)` 复用 `persist_watchdog_payload(...)`；
+    - 写盘失败仅告警并节流，不再抛异常影响 Stage1/Transcribe 主链路。
+  - 测试：
+    - 新增 `services/python_grpc/src/server/tests/test_watchdog_signal_writer.py`
+      - 覆盖“前两次 replace 失败、后续重试成功”；
+      - 覆盖“持久化失败时 emit 仍不中断并继续发布流事件”。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_watchdog_signal_writer.py -q`（通过，2 passed）。
+  - `python -m py_compile services/python_grpc/src/server/watchdog_signal_writer.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_watchdog_signal_writer.py`（通过）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留上述两条 watchdog 写盘回归测试，纳入发布前最小回归集。
+  - 监控：
+    - 监控日志关键字：
+      - `watchdog heartbeat persist degraded`
+      - `WinError 5`
+  - 校验：
+    - 所有“非关键可观测性写盘”必须采用最佳努力策略，禁止直接影响主业务返回。
+  - 回滚：
+    - 若后续写盘节流影响排障信息密度，可回退节流窗口但保持“不抛出到主链路”的边界不变。
+
+## 2026-03-03 VL 分析阶段强信号预算不足导致 Thread interrupted 降级
+- 日期：2026-03-03
+- 现象与影响范围：
+  - Java 侧日志出现 `AnalyzeWithVL failed: Status{code=CANCELLED, description=Thread interrupted}`。
+  - 随后进入 `Proceeding to Legacy Flow (Fallback or VL failed)`，出现 `ValidateCVBatch Start: N units` 的 legacy 调度。
+  - 影响范围：VL 优先链路稳定性、`analysis_extraction` 阶段完成率、端到端耗时。
+- 触发条件：
+  - VL 长片段分析期间，强信号预算按 `2x` 计算偏紧，模型与 I/O 抖动时更容易耗尽预算。
+  - 预算耗尽后强信号增量不足，watchdog 累计 idle strike，触发 owner thread interrupt。
+- 根因定位：
+  - “有心跳”不等于“有强进展”：watchdog 只在 hard signal 且结构化字段前进时重置 idle 计时。
+  - 旧预算按 `2x` 且按原始时长估算，未优先使用路由预处理后的有效时长，导致预算与实际工作量失配。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - VL 调用 workload 超时乘数从 `2.0` 升级为 `3.0`。
+    - 增加日志字段 `multiplier`，便于运行期快速定位预算策略。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - VL 心跳预算从 `2x` 调整为默认 `3x`。
+    - 预算基准优先使用 `_routing_effective_duration_sec`（预处理有效时长），缺失时回退原始区间时长。
+    - 新增日志输出预算乘数，便于核对策略是否生效。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 运行期日志核对：
+    - `VL timeout resolved ... multiplier=3.00x`
+    - `VL heartbeat budget ... multiplier=3.00x`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 VL 长片段集成回归，覆盖“低并发 + 慢模型 + 长视频”场景，验证无误降级。
+  - 监控：
+    - 增加关键日志告警：`Thread interrupted`、`Proceeding to Legacy Flow`、`idle strikes exhausted`。
+  - 校验：
+    - 每次调整 VL 路由或预处理策略时，必须同步校验预算基准是否仍与实际工作量一致。
+  - 回滚：
+    - 若出现预算过宽导致任务拖尾，可优先通过 `vl_watchdog_budget_multiplier` 小幅下调，不直接回退到 `2x`。
+
+## 2026-03-03 phase2a / analysis_extraction 长耗时 LLM 调用因进度停滞被误判空转
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 在 `phase2a` 语义合并与 `analysis_extraction`（VL）阶段，任务可能长时间无显式进度增长。
+  - watchdog 将其判定为空转后触发线程中断，导致 `AnalyzeWithVL ... Thread interrupted` 并回退 legacy。
+  - 影响范围：长视频、慢模型、外部 API 抖动场景的稳定性。
+- 触发条件：
+  - 阶段内存在长阻塞 LLM 调用，进度百分比和结构化字段短时不变化。
+  - 旧强信号规则偏重“进度/字段推进”，对阶段活性心跳利用不足。
+- 根因定位：
+  - 强信号判定与“长阻塞调用”的物理特性不匹配：任务还活着，但进度语义短时不可见。
+  - `phase2a` 存在 soft 心跳，旧规则下 soft 不计强信号，导致误判窗口扩大。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdog.java`
+    - 增加阶段白名单判定：命中阶段时，结构化心跳（soft/hard）直接计入强信号。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdogFactory.java`
+    - 增加配置注入与解析：`video.task.watchdog.heartbeat-strong-stages`。
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - 默认配置为：`analysis_extraction,phase2a`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 运行期日志验证：
+    - 长耗时阶段持续有心跳时，不再出现 watchdog idle-strike 误触发中断。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加长耗时 LLM 模拟回归，覆盖“进度不变但心跳持续”的场景。
+  - 监控：
+    - 监控 `idle strike`、`Thread interrupted`、`Proceeding to Legacy Flow` 关键日志。
+  - 校验：
+    - 若新增其他长阻塞阶段，需评估是否纳入 `heartbeat-strong-stages` 白名单。
+  - 回滚：
+    - 可通过配置移除阶段白名单，回退到原有强信号判定，不需代码回滚。
+
+## 2026-03-03 Watchdog 中断被误判为 VL 失败导致误降级修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 日志连续出现：
+    - `AnalyzeWithVL failed: Status{code=CANCELLED, description=Thread interrupted ...}`
+    - `VL Analysis fallback reason: Thread interrupted`
+    - `Proceeding to Legacy Flow (Fallback or VL failed).`
+  - 实际结果是 watchdog 控制面触发了重启中断，但业务层把它当作普通 VL 失败，直接降级到 Legacy，导致“看起来像 VL 又失败一次”。
+- 根因定位：
+  - `TaskProcessingWorker.runWithWatchdog` 在判定 `RESTART/FAIL` 时会执行 `ownerThread.interrupt()`。
+  - Java gRPC 阻塞调用 `analyzeWithVL` 被中断后返回 `CANCELLED + Thread interrupted`。
+  - 旧逻辑中 `PythonGrpcClient.analyzeWithVL` 仅返回 `success=false`，`VideoProcessingOrchestrator.tryVLAnalysis` 把所有失败统一视作 fallback，返回 `null`，从而触发 Legacy 分支。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 在 `VLAnalysisResult` 新增 `interrupted` 标记。
+    - 在 `analyzeWithVL` 捕获 `StatusRuntimeException` 时识别 `CANCELLED + interrupted`（包含 `InterruptedException` cause 或 description 命中），并设置 `interrupted=true`，同时恢复线程中断位。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - `tryVLAnalysis` 新增中断态判定：若 `vlResult.interrupted=true`，立即抛出中断异常，终止当前 attempt，不再走 Legacy fallback。
+    - catch 分支对中断类异常改为继续上抛，让 watchdog 的重启/失败策略接管，而不是吞掉后误降级。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 运行期日志预期：
+    - 触发 watchdog 时，不再直接出现“Proceeding to Legacy Flow”作为中断后的默认路径。
+    - 出现重启路径日志（同 task + stage restart/backoff）并进入下一 attempt。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 `AnalyzeWithVL` 中断场景回归（模拟 `CANCELLED + Thread interrupted`），断言不会走 Legacy fallback。
+  - 监控：
+    - 关键日志联动监控：
+      - `AnalyzeWithVL interrupted`
+      - `Task watchdog idle strike`
+      - `Proceeding to Legacy Flow`
+    - 将“中断后立即 fallback”设为异常模式告警。
+  - 校验：
+    - 所有 gRPC 失败分支需区分“控制面中断”和“业务失败”，禁止混用同一 fallback 语义。
+  - 回滚：
+    - 若需临时恢复旧行为，可移除 `interrupted` 分流判断；但会恢复误降级风险，不建议长期使用。
+
+## 2026-03-03 VL 教程步骤 JSON 解析在 `main_operation` 多行文本下失败修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 日志反复出现：`JSON parse failed: Unterminated string ... finish_reason=stop`，随后触发 `VL API call failed (attempt n/3)`。
+  - 常见触发样例为 `main_operation` 内含多行文本/代码块，模型返回字符串中出现未转义换行，或数组尾部被截断。
+  - 影响范围：`tutorial_stepwise` 输出解析稳定性、重试次数、整体耗时和成功率。
+- 根因定位：
+  - 旧解析链仅覆盖“尾随逗号 + key_evidence 特例修复”，未覆盖“字符串内控制字符未转义”和“截断 JSON 自动闭合”。
+  - 当模型返回 `finish_reason=stop` 但内容存在格式缺陷时，会被直接判定为不可解析并进入重试。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 将 `_parse_response_with_payload` 的解析入口升级为容错链：`_parse_json_payload`。
+    - 新增容错步骤：`_escape_control_chars_in_strings`、`_remove_trailing_commas`、`_repair_unclosed_json`。
+    - 新增截断回收：`_extract_top_level_objects` + `_extract_salvaged_json_objects`，在数组尾部截断时尽可能保留已完成对象。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增回归用例：未转义换行场景可解析。
+    - 新增回归用例：截断数组场景可回收完整 step 对象。
+- 验证方式：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "unescaped_newlines_in_main_operation or salvages_truncated_array"`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 将上述两条解析回归纳入发布前最小用例集，覆盖“未转义换行”和“尾部截断”。
+  - 监控：
+    - 监控关键字：`JSON parse failed: Unterminated string`、`VL API call failed`、`finish_reason=stop`。
+  - 校验：
+    - 任何新增 tutorial schema 字段时，必须通过容错解析链校验，避免只在严格 JSON 下验证。
+  - 回滚：
+    - 若容错链引发误解析，可先关闭“截断对象回收”分支，仅保留控制字符转义与尾逗号修复。
+
+## 2026-03-03 Stage1 LLM 调用被 watchdog 中断（`CANCELLED: Thread interrupted`）修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 任务日志出现连续链路：
+    - `TaskWatchdog ... attempt_1 ...`
+    - `ProcessStage1 failed: Status{code=CANCELLED, description=Thread interrupted ...}`
+    - `Pipeline Failed ... Stage1 failed: Thread interrupted`
+  - 影响范围：
+    - 并发任务场景下，部分任务会因为进度回调被覆盖而“失去心跳可见性”。
+    - Stage1/Phase2B 的长耗时 LLM 调用在 soft 心跳持续但进度不变时，可能被误判为空转并触发中断。
+- 根因定位：
+  - 根因1：`VideoProcessingOrchestrator` 仅维护单一 `progressCallback` 字段，多个任务并发时后注册回调覆盖先注册回调，导致被覆盖任务不再上报进度到 watchdog。
+  - 根因2：`video.task.watchdog.heartbeat-strong-stages` 仅包含 `analysis_extraction,phase2a`，`stage1/phase2b` 的 soft 心跳不能续命。
+  - 根因3：watchdog 在 `RESTART` 决策时直接 `interrupt` 业务线程，gRPC 阻塞调用立即以 `CANCELLED` 返回，绕开 LLM/服务端自身超时链路。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 新增按 `taskId` 维度的进度回调注册表（`taskProgressCallbacks`），并提供 `setProgressCallback(taskId, callback)` 与 `clearProgressCallback(taskId)`。
+    - `updateProgress` 改为优先路由 task 级回调，避免并发覆盖。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 改为注册 task 级回调，并在 `finally` 中清理回调，避免回调泄漏。
+    - watchdog `RESTART` 命中强心跳阶段时改为“记录重启决策但不打断线程”，让 LLM/gRPC 自身超时先发挥作用。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdog.java`
+    - 新增 `shouldInterruptOnRestart(stage)`，统一封装“是否允许 watchdog 主动中断”判定。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdogFactory.java`
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - 扩展强心跳阶段默认值为：`stage1,phase2a,analysis_extraction,phase2b`。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 运行期预期日志：
+    - 强心跳阶段出现 watchdog 重启判定时，不再立即出现 `ProcessStage1 ... Thread interrupted`。
+    - 同时可见：`Watchdog restart deferred for heartbeat-strong stage: stage=...`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加并发双任务回归，断言两个任务均持续收到各自 `WATCHDOG_SIGNAL`（无回调覆盖）。
+    - 增加 Stage1 长耗时模拟，断言 soft 心跳持续时不会触发线程中断。
+  - 监控：
+    - 监控关键日志组合：`attempt_`、`Watchdog restart deferred`、`CANCELLED: Thread interrupted`。
+    - 若出现“deferred 后仍快速 cancelled”，标记为异常模式并触发告警。
+  - 校验：
+    - 新增长耗时 LLM 阶段时，必须评估并更新 `heartbeat-strong-stages`。
+    - 所有任务级回调注册点必须有对应清理逻辑（`finally`）。
+  - 回滚：
+    - 可先回滚配置项 `video.task.watchdog.heartbeat-strong-stages` 到旧值以缩小影响面。
+    - 如需回退代码，可恢复单回调模型与中断策略，但会重新引入并发覆盖和误中断风险。

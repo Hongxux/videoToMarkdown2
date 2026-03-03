@@ -20,17 +20,21 @@ def _bootstrap_repo_root() -> None:
 
 _bootstrap_repo_root()
 
-from services.python_grpc.src.server.runtime_env import sanitize_user_site_packages
+from services.python_grpc.src.server.runtime_env import (
+    patch_pydantic_generic_origin_compat,
+    sanitize_user_site_packages,
+)
 
 sanitize_user_site_packages()
-
-from services.python_grpc.src.common.logging import configure_pipeline_logging
-from services.python_grpc.src.server.dependency_check import run_dependency_check
-from services.python_grpc.src.server import serve
-from services.python_grpc.src.server.startup_flags import parse_startup_flags
+patch_pydantic_generic_origin_compat()
 
 
 def main() -> None:
+    from services.python_grpc.src.common.logging import configure_pipeline_logging
+    from services.python_grpc.src.server import serve
+    from services.python_grpc.src.server.dependency_check import run_dependency_check
+    from services.python_grpc.src.server.startup_flags import parse_startup_flags
+
     freeze_support()
     startup_flags = parse_startup_flags(default_debug_imports=False)
     if startup_flags.debug_imports:

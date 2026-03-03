@@ -1,15 +1,23 @@
 package com.mvp.module2.fusion.controller;
 
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
+import com.mvp.module2.fusion.service.FileReuseService;
+import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 
 import java.lang.reflect.Field;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class VideoProcessingControllerVideoInfoTest {
 
@@ -81,6 +89,76 @@ class VideoProcessingControllerVideoInfoTest {
         ResponseEntity<Map<String, Object>> response = controller.getVideoInfoByPost(request);
 
         assertEquals(400, response.getStatusCode().value());
+    }
+
+    @Test
+    void postVideoInfoShouldPreferCachedProbePayloadWhenFingerprintPresent() throws Exception {
+        VideoProcessingController controller = new VideoProcessingController();
+        PythonGrpcClient.VideoInfoResult result = new PythonGrpcClient.VideoInfoResult();
+        result.success = true;
+        StubPythonGrpcClient stubGrpc = new StubPythonGrpcClient(result);
+
+        FileReuseService reuseService = mock(FileReuseService.class);
+        FileReuseService.FileFingerprint fingerprint =
+                new FileReuseService.FileFingerprint("d41d8cd98f00b204e9800998ecf8427e", ".mp4");
+        when(reuseService.normalizeFingerprint(any(), any(), any())).thenReturn(Optional.of(fingerprint));
+        Map<String, Object> cached = new LinkedHashMap<>();
+        cached.put("success", true);
+        cached.put("title", "cached-probe-title");
+        when(reuseService.findProbePayload(any())).thenReturn(Optional.of(cached));
+
+        injectField(controller, "pythonGrpcClient", stubGrpc);
+        injectField(controller, "fileReuseService", reuseService);
+        injectField(controller, "grpcTimeoutSeconds", 120);
+
+        VideoProcessingController.VideoInfoRequest request = new VideoProcessingController.VideoInfoRequest();
+        request.videoInput = "D:\\videoToMarkdownTest2\\var\\uploads\\cached.mp4";
+        request.fileMd5 = "d41d8cd98f00b204e9800998ecf8427e";
+        request.fileExt = ".mp4";
+
+        ResponseEntity<Map<String, Object>> response = controller.getVideoInfoByPost(request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertTrue(response.getBody() != null);
+        Map<String, Object> payload = response.getBody();
+        assertEquals("cached-probe-title", payload.get("title"));
+        assertEquals(true, payload.get("probeCacheHit"));
+        assertEquals("d41d8cd98f00b204e9800998ecf8427e", payload.get("fileMd5"));
+        assertEquals(".mp4", payload.get("fileExt"));
+        assertEquals(null, stubGrpc.lastVideoInput);
+    }
+
+    @Test
+    void postVideoInfoShouldProbeZhihuLinkWithoutGrpcCall() throws Exception {
+        VideoProcessingController controller = new VideoProcessingController();
+        StubPythonGrpcClient stubGrpc = new StubPythonGrpcClient(new PythonGrpcClient.VideoInfoResult());
+        Phase2bArticleLinkService linkService = mock(Phase2bArticleLinkService.class);
+        when(linkService.normalizeSupportedLinks(any())).thenReturn(List.of("https://zhuanlan.zhihu.com/p/123456"));
+        when(linkService.prefetchLinkMetadata(any())).thenReturn(
+                List.of(new Phase2bArticleLinkService.LinkMetadata(
+                        "https://zhuanlan.zhihu.com/p/123456",
+                        "zhihu",
+                        "Zhihu Article Title",
+                        "resolved"
+                ))
+        );
+
+        injectField(controller, "pythonGrpcClient", stubGrpc);
+        injectField(controller, "phase2bArticleLinkService", linkService);
+
+        VideoProcessingController.VideoInfoRequest request = new VideoProcessingController.VideoInfoRequest();
+        request.videoInput = "https://zhuanlan.zhihu.com/p/123456?utm_source=clipboard";
+
+        ResponseEntity<Map<String, Object>> response = controller.getVideoInfoByPost(request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNull(stubGrpc.lastVideoInput);
+        assertTrue(response.getBody() != null);
+        Map<String, Object> payload = response.getBody();
+        assertEquals(true, payload.get("success"));
+        assertEquals("book", payload.get("contentType"));
+        assertEquals("https://zhuanlan.zhihu.com/p/123456", payload.get("resolvedUrl"));
+        assertEquals("Zhihu Article Title", payload.get("title"));
     }
 
     private static void injectField(Object target, String fieldName, Object value) throws Exception {

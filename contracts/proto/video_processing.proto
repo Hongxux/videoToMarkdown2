@@ -39,6 +39,9 @@ service VideoProcessingService {
     
     // 步骤6: Module2 Phase2B - Vision AI验证 + 富文本组装 (使用外部截图)
     rpc AssembleRichText(AssembleRequest) returns (AssembleResponse);
+
+    // Book PDF extraction (Python, MinerU preferred with fallback)
+    rpc ExtractBookPdf(ExtractBookPdfRequest) returns (ExtractBookPdfResponse);
     
     // 🚀 V3: CV验证批量并行处理 (Java编排调用 - 流式返回)
     rpc ValidateCVBatch(CVValidationRequest) returns (stream CVValidationResponse);
@@ -261,6 +264,35 @@ message AssembleStats {
 // ==========================================
 // 🚀 V3: CV验证批量并行处理
 // ==========================================
+
+// ==========================================
+// Book PDF extraction (MinerU preferred)
+// ==========================================
+
+message ExtractBookPdfRequest {
+    string task_id = 1;
+    string pdf_path = 2;
+    string output_dir = 3;
+    int32 start_page = 4;   // 1-based physical page index (inclusive)
+    int32 end_page = 5;     // 1-based physical page index (inclusive)
+    string image_dir = 6;   // absolute dir where extracted images should be placed
+    string output_root = 7; // absolute root used to compute markdown relative links
+    string section_id = 8;  // optional: chapter/section selector key
+    bool prefer_mineru = 9;
+}
+
+message ExtractBookPdfResponse {
+    bool success = 1;
+    string markdown = 2;
+    string markdown_path = 3;
+    string extractor = 4;   // mineru|pymupdf|unknown
+    int32 image_count = 5;
+    int32 table_count = 6;
+    int32 code_block_count = 7;
+    int32 formula_block_count = 8;
+    string error_msg = 9;
+    repeated string image_paths = 10;
+}
 
 message CVValidationRequest {
     string task_id = 1;                             // 任务唯一ID

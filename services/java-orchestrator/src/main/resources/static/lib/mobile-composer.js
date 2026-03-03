@@ -17,6 +17,9 @@
         var submitTaskFromMobileForm = typeof opts.submitTaskFromMobileForm === 'function'
             ? opts.submitTaskFromMobileForm
             : function () { return Promise.resolve(false); };
+        var onFileSelected = typeof opts.onFileSelected === 'function'
+            ? opts.onFileSelected
+            : null;
 
         var elementIds = Object.assign({
             surfaceId: 'mobileSourceSurface',
@@ -56,15 +59,15 @@
         function applyComposerCopy() {
             var inputNode = getInputNode();
             if (inputNode) {
-                inputNode.setAttribute('placeholder', copyText('inputPlaceholder', '粘贴链接，回车即开始；也可拖入视频'));
+                inputNode.setAttribute('placeholder', copyText('inputPlaceholder', '粘贴一个 B 站或抖音链接，我来帮你整理'));
             }
             var shellNode = getElement(elementIds.surfaceId);
             if (shellNode) {
-                shellNode.setAttribute('aria-label', copyText('sourceAriaLabel', '灵感入口，支持粘贴链接与拖拽上传视频'));
+                shellNode.setAttribute('aria-label', copyText('sourceAriaLabel', '素材入口，可粘贴 B 站或抖音链接并快速整理'));
             }
             var surfaceCopyNode = getElement(elementIds.surfaceCopyId);
             if (surfaceCopyNode) {
-                surfaceCopyNode.textContent = copyText('surfacePrompt', '把一个视频变成故事草稿');
+                surfaceCopyNode.textContent = copyText('surfacePrompt', '支持拖入 PDF/TXT/MD/EPUB，也可点击回形针上传');
             }
         }
 
@@ -136,7 +139,7 @@
                 inputNode.classList.toggle('is-link-suspect', shouldHighlightLink && normalizedType === 'error');
             }
             if (!inputNode) return;
-            var fallback = copyText('inputPlaceholder', '粘贴链接，回车即开始；也可拖入视频');
+            var fallback = copyText('inputPlaceholder', '粘贴一个 B 站或抖音链接，我来帮你整理');
             var nextHint = tipMessage;
             if (!nextHint) {
                 nextHint = fallback;
@@ -229,15 +232,68 @@
             }
         }
 
+        function buildSubmitErrorFeedback(error, hasFile) {
+            return (global.MobileSubmitFeedback && typeof global.MobileSubmitFeedback.classifySubmitError === 'function')
+                ? global.MobileSubmitFeedback.classifySubmitError({
+                    error: error,
+                    hasFile: !!hasFile,
+                }, {
+                    normalizeErrorMessage: normalizeErrorMessage,
+                    busyMessage: userBusyMessage,
+                })
+                : {
+                    message: normalizeErrorMessage(error, { fallback: userBusyMessage }),
+                    highlightLink: false,
+                    allowRetry: true,
+                };
+        }
+
+        function handleSubmitFailure(error, hasFile, retrySource) {
+            var feedback = buildSubmitErrorFeedback(error, hasFile);
+            setTaskSubmitTip(feedback.message, 'error', {
+                highlightLink: !!feedback.highlightLink,
+                onRetry: function () {
+                    return submitTaskFromMobileForm({ source: retrySource || 'manual-retry' });
+                },
+                actionLabel: '重试',
+            });
+            triggerComposerLaunchFx('error');
+        }
+
         function handleMobileVideoFileSelected(inputEl) {
             var selected = inputEl && inputEl.files && inputEl.files.length > 0
                 ? inputEl.files[0]
                 : null;
             if (!selected) {
+                if (onFileSelected) {
+                    try {
+                        onFileSelected(null, inputEl);
+                    } catch (_onFileClearError) {
+                        // ignore callback errors
+                    }
+                }
                 setTaskSubmitTip(uiCopy.composerIdleTip);
                 return;
             }
-            setTaskSubmitTip(copyText('uploadingTip', '正在上传视频...'));
+            var decision = null;
+            if (onFileSelected) {
+                try {
+                    decision = onFileSelected(selected, inputEl) || null;
+                } catch (_callbackError) {
+                    decision = null;
+                }
+            }
+            var shouldAutoSubmit = !(decision && decision.autoSubmit === false);
+            var tipMessage = (decision && typeof decision.tip === 'string' && decision.tip.trim())
+                ? decision.tip.trim()
+                : copyText('uploadingTip', '正在上传文件...');
+            setTaskSubmitTip(tipMessage);
+            if (!shouldAutoSubmit) {
+                return;
+            }
+            triggerComposerAutoSubmit('file-selected').catch(function (error) {
+                handleSubmitFailure(error, true, 'file-retry');
+            });
         }
 
         function openMobileUploadPicker(event) {
@@ -261,33 +317,13 @@
             submitTaskFromMobileForm().catch(function (error) {
                 var fileInput = getFileInputNode();
                 var hasFile = !!(fileInput && fileInput.files && fileInput.files.length > 0);
-                var feedback = (global.MobileSubmitFeedback && typeof global.MobileSubmitFeedback.classifySubmitError === 'function')
-                    ? global.MobileSubmitFeedback.classifySubmitError({
-                        error: error,
-                        hasFile: hasFile,
-                    }, {
-                        normalizeErrorMessage: normalizeErrorMessage,
-                        busyMessage: userBusyMessage,
-                    })
-                    : {
-                        message: normalizeErrorMessage(error, { fallback: userBusyMessage }),
-                        highlightLink: false,
-                        allowRetry: true,
-                    };
-                setTaskSubmitTip(feedback.message, 'error', {
-                    highlightLink: !!feedback.highlightLink,
-                    onRetry: function () {
-                        return submitTaskFromMobileForm({ source: 'manual-retry' });
-                    },
-                    actionLabel: '重试',
-                });
-                triggerComposerLaunchFx('error');
+                handleSubmitFailure(error, hasFile, 'manual-retry');
             });
             return false;
         }
 
-        // 做什么：把 Enter / 粘贴 / blur 自动提交绑定在一处。
-        // 为什么：减少页面层重复绑定逻辑，避免后续改防抖阈值时漏改。
+        // 做什么：把 Enter 提交绑定在一处。
+        // 为什么：保持与 Android 一致的显式提交节奏，避免粘贴/失焦即触发。
         // 取舍：使用 data 标记防止重复绑定，简单可靠但不做复杂解绑。
         function bindInputAutoSubmit(inputNode) {
             if (!inputNode) return;
@@ -297,18 +333,11 @@
             if (inputNode.dataset) {
                 inputNode.dataset.composerAutoSubmitBound = '1';
             }
-            inputNode.addEventListener('keydown', async function (event) {
+            inputNode.addEventListener('keydown', function (event) {
                 if (event.key !== 'Enter') return;
-                event.preventDefault();
-                await triggerComposerAutoSubmit('enter');
-            });
-            inputNode.addEventListener('paste', function () {
-                global.setTimeout(function () {
-                    triggerComposerAutoSubmit('paste').catch(function () {});
-                }, 36);
-            });
-            inputNode.addEventListener('blur', async function () {
-                await triggerComposerAutoSubmit('blur');
+                if (event.isComposing) return;
+                if (event.shiftKey) return;
+                handleMobileSubmitClick(event);
             });
         }
 

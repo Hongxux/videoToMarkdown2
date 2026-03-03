@@ -5,9 +5,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 public final class TaskWatchdog {
     private final boolean enabled;
@@ -21,6 +23,7 @@ public final class TaskWatchdog {
     private final long idleWindowMaxMs;
     private final double idleWindowMultiplier;
     private final List<Long> restartBackoffMs;
+    private final Set<String> heartbeatStrongStages;
 
     private final Deque<Long> progressIntervalsMs = new ArrayDeque<>();
     private final Map<String, Integer> stageRestartCounts = new HashMap<>();
@@ -45,7 +48,8 @@ public final class TaskWatchdog {
             int idleWindowMinSec,
             int idleWindowMaxSec,
             double idleWindowMultiplier,
-            List<Long> restartBackoffMs
+            List<Long> restartBackoffMs,
+            Set<String> heartbeatStrongStages
     ) {
         this.enabled = enabled;
         this.taskId = taskId;
@@ -60,6 +64,7 @@ public final class TaskWatchdog {
         this.restartBackoffMs = restartBackoffMs != null && !restartBackoffMs.isEmpty()
                 ? new ArrayList<>(restartBackoffMs)
                 : List.of(60_000L);
+        this.heartbeatStrongStages = normalizeStageSet(heartbeatStrongStages);
         this.lastStrongProgressAtMs = this.startedAtMs;
         this.idleStrikes = 0;
         this.lastProgress = -1.0d;
@@ -73,7 +78,7 @@ public final class TaskWatchdog {
     }
 
     public static TaskWatchdog disabled(String taskId) {
-        return new TaskWatchdog(false, taskId, 1, 1, 0, 1, 1, 1, 1.0d, List.of(1000L));
+        return new TaskWatchdog(false, taskId, 1, 1, 0, 1, 1, 1, 1.0d, List.of(1000L), Set.of());
     }
 
     public static TaskWatchdog enabled(
@@ -85,7 +90,8 @@ public final class TaskWatchdog {
             int idleWindowMinSec,
             int idleWindowMaxSec,
             double idleWindowMultiplier,
-            List<Long> restartBackoffMs
+            List<Long> restartBackoffMs,
+            Set<String> heartbeatStrongStages
     ) {
         return new TaskWatchdog(
                 true,
@@ -97,7 +103,8 @@ public final class TaskWatchdog {
                 idleWindowMinSec,
                 idleWindowMaxSec,
                 idleWindowMultiplier,
-                restartBackoffMs
+                restartBackoffMs,
+                heartbeatStrongStages
         );
     }
 
@@ -111,6 +118,11 @@ public final class TaskWatchdog {
 
     public int maxRestartPerStage() {
         return maxRestartPerStage;
+    }
+
+    public boolean shouldInterruptOnRestart(String stage) {
+        String token = normalizeTokenValue(stage);
+        return token.isBlank() || !heartbeatStrongStages.contains(token);
     }
 
     public synchronized void onAttemptStart(int attemptNo) {
@@ -165,11 +177,15 @@ public final class TaskWatchdog {
         if (signal == null) {
             return false;
         }
+        String stage = normalizeToken(signal.stage());
+        String previous = normalizeToken(previousStage);
+        String effectiveStage = stage.isBlank() ? previous : stage;
+        if (isHeartbeatStrongStage(effectiveStage)) {
+            return true;
+        }
         if (!signal.isHard()) {
             return false;
         }
-        String stage = normalizeToken(signal.stage());
-        String previous = normalizeToken(previousStage);
         if (!stage.isBlank() && !stage.equals(previous)) {
             return true;
         }
@@ -220,6 +236,31 @@ public final class TaskWatchdog {
     }
 
     private String normalizeToken(String value) {
+        return normalizeTokenValue(value);
+    }
+
+    private boolean isHeartbeatStrongStage(String stage) {
+        return !stage.isBlank() && heartbeatStrongStages.contains(stage);
+    }
+
+    private Set<String> normalizeStageSet(Set<String> rawStages) {
+        if (rawStages == null || rawStages.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> normalized = new LinkedHashSet<>();
+        for (String stage : rawStages) {
+            String token = normalizeTokenValue(stage);
+            if (!token.isBlank()) {
+                normalized.add(token);
+            }
+        }
+        if (normalized.isEmpty()) {
+            return Set.of();
+        }
+        return Set.copyOf(normalized);
+    }
+
+    private static String normalizeTokenValue(String value) {
         if (value == null) {
             return "";
         }

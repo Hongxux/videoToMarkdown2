@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.io.File;
 import java.io.BufferedReader;
@@ -40,26 +41,24 @@ import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
 /**
- * ??????? (V3 Parallel)
- * 
- * ?????????
- * 1. ?????????????
- * 2. Stage1??????????
- * 3. Phase2A???????????
- * 4. ??????? VL????? Legacy(CV + LLM)?
- * 5. ???????????????
- * 6. Phase2B??????????
- * 
- * ????????????????????????????
- * 
- * 
+ * 视频处理编排器（V3 并行版）。
+ *
+ * 主流程：
+ * 1. 下载或准备输入视频。
+ * 2. 执行 Stage1，生成基础结构化数据。
+ * 3. 执行 Phase2A，产出语义单元分析结果。
+ * 4. 优先尝试 VL；若失败或回退则走 Legacy（CV + LLM）链路。
+ * 5. 提取截图与片段素材。
+ * 6. 执行 Phase2B，组装富文本与 Markdown。
+ *
+ * 该类负责跨阶段编排、超时控制、缓存复用和进度上报。
  */
 @Service
 public class VideoProcessingOrchestrator {
     
     private static final Logger logger = LoggerFactory.getLogger(VideoProcessingOrchestrator.class);
 
-    // ????????????
+    // 素材提取请求容器：同时承载请求列表与可复用的异步提取任务。
     private static class ExtractionRequests {
         List<JavaCVFFmpegService.ScreenshotRequest> screenshotRequests;
         List<JavaCVFFmpegService.ClipRequest> clipRequests;
@@ -82,7 +81,7 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    // ????CV ?????????
+    // 核心分析结果容器：包含 CV 验证结果与知识分类结果。
     private static class AnalysisResults {
         Map<String, CVValidationUnitResult> cvResults;
         List<KnowledgeResultItem> classResults;
@@ -92,12 +91,24 @@ public class VideoProcessingOrchestrator {
             this.classResults = cls != null ? cls : new ArrayList<>();
         }
     }
+
+    private static class ArticleBookSource {
+        String requestedUrl;
+        String finalUrl;
+        String siteType;
+        String title;
+        String markdownPath;
+        String outputDir;
+        int imageCount;
+        int copiedImageCount;
+    }
     
     @Autowired
     private PythonGrpcClient grpcClient;
     
+    // 通过 JNI/进程方式调度 FFmpeg 能力，负责截图与切片提取。
     @Autowired
-    private JavaCVFFmpegService ffmpegService;  // ?? JNI ??????????
+    private JavaCVFFmpegService ffmpegService;
     
     @Autowired
     private DynamicTimeoutCalculator timeoutCalculator;
@@ -113,11 +124,29 @@ public class VideoProcessingOrchestrator {
 
     @Autowired
     private TaskProgressWatchdogBridge taskProgressWatchdogBridge;
+
+    @Autowired
+    private BookMarkdownService bookMarkdownService;
+
+    @Autowired(required = false)
+    private BookEnhancedPipelineService bookEnhancedPipelineService;
+
+    @Autowired(required = false)
+    private Phase2bArticleLinkService phase2bArticleLinkService;
+
+    private VideoMetaService videoMetaService = new VideoMetaService();
     
-    // ????
+    // 运行时任务上下文缓存。
     private final ConcurrentHashMap<String, TaskContext> activeTasks = new ConcurrentHashMap<>();
     private final AtomicInteger taskCounter = new AtomicInteger(0);
     private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Autowired(required = false)
+    public void setVideoMetaService(VideoMetaService videoMetaService) {
+        if (videoMetaService != null) {
+            this.videoMetaService = videoMetaService;
+        }
+    }
 
     // LLM pricing (USD / 1M tokens)
     private static final double QWEN3_VL_PLUS_INPUT_PER_M = 1.50d;
@@ -133,6 +162,10 @@ public class VideoProcessingOrchestrator {
         Pattern.compile("BV[0-9A-Za-z]{10}", Pattern.CASE_INSENSITIVE);
     private static final Pattern BILIBILI_AV_PATTERN =
         Pattern.compile("(?:^|[^0-9A-Za-z])av(\\d{1,20})(?:$|[^0-9A-Za-z])", Pattern.CASE_INSENSITIVE);
+    private static final Set<String> BOOK_FILE_EXTENSIONS = Set.of(".txt", ".md", ".pdf", ".epub");
+    private static final double DEFAULT_VL_PROCESS_DURATION_THRESHOLD_SEC = 20.0d;
+    private static final double VL_ANALYZE_WORKLOAD_TIMEOUT_MULTIPLIER = 3.0d;
+    private static final int MIN_VL_ANALYZE_TIMEOUT_SEC = 120;
 
     @Value("${video.download.grpc-deadline-seconds:1800}")
     private int downloadGrpcDeadlineSec;
@@ -152,13 +185,35 @@ public class VideoProcessingOrchestrator {
     @Value("${video.download.watchdog-min-rescan-ms:1000}")
     private long downloadWatchdogMinRescanMs;
     
-    // ???? (Functional Interface)
+    // 进度回调接口（函数式接口）。
     @FunctionalInterface
     public interface ProgressCallback {
         void onProgress(String taskId, double progress, String message);
     }
-    private ProgressCallback progressCallback;
-    public void setProgressCallback(ProgressCallback callback) { this.progressCallback = callback; }
+    private volatile ProgressCallback progressCallback;
+    private final ConcurrentHashMap<String, ProgressCallback> taskProgressCallbacks = new ConcurrentHashMap<>();
+
+    public void setProgressCallback(ProgressCallback callback) {
+        this.progressCallback = callback;
+    }
+
+    public void setProgressCallback(String taskId, ProgressCallback callback) {
+        if (taskId == null || taskId.isBlank()) {
+            return;
+        }
+        if (callback == null) {
+            taskProgressCallbacks.remove(taskId);
+            return;
+        }
+        taskProgressCallbacks.put(taskId, callback);
+    }
+
+    public void clearProgressCallback(String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            return;
+        }
+        taskProgressCallbacks.remove(taskId);
+    }
     
     // --- Context Classes ---
     public static class ProcessingResult {
@@ -171,7 +226,7 @@ public class VideoProcessingOrchestrator {
     }
     
     /**
-     * ?????
+     * 任务上下文。
      */
     public static class TaskContext {
         public String taskId;
@@ -181,10 +236,34 @@ public class VideoProcessingOrchestrator {
         public long startTime;
     }
 
+    public static class BookProcessingOptions {
+        public String chapterSelector;
+        public String sectionSelector;
+        public Boolean splitByChapter;
+        public Boolean splitBySection;
+        public Integer pageOffset;
+    }
+
     /**
-     * ?????????
+     * 视频处理入口。
      */
     public ProcessingResult processVideo(String taskId, String videoUrl, String outputDir) {
+        return processVideo(taskId, videoUrl, outputDir, null);
+    }
+
+    public ProcessingResult processVideo(
+            String taskId,
+            String videoUrl,
+            String outputDir,
+            BookProcessingOptions bookOptions
+    ) {
+        if (shouldProcessAsBook(videoUrl, bookOptions)) {
+            return processBook(taskId, videoUrl, outputDir, bookOptions);
+        }
+        return processVideoInternal(taskId, videoUrl, outputDir);
+    }
+
+    private ProcessingResult processVideoInternal(String taskId, String videoUrl, String outputDir) {
         ProcessingResult result = new ProcessingResult();
         result.taskId = taskId;
         long startTime = System.currentTimeMillis();
@@ -209,7 +288,7 @@ public class VideoProcessingOrchestrator {
                 assertLocalVideoExists(videoUrl, videoPath);
                 outputDir = resolveOutputDirForLocalVideo(videoPath);
                 new File(outputDir).mkdirs();
-                logger.info("[{}] 统一本地任务输出目录 -> {}", taskId, outputDir);
+                logger.info("[{}] 本地视频路径校验通过，输出目录已准备 -> {}", taskId, outputDir);
 
                 videoPath = ensureLocalVideoInStorage(videoPath, outputDir);
                 videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
@@ -282,7 +361,7 @@ public class VideoProcessingOrchestrator {
             TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
                 (progress, message) -> updateProgress(taskId, progress, message);
 
-            updateProgress(taskId, 0.15, "语音转录中...");
+            updateProgress(taskId, 0.15, "正在进行语音转写...");
             long transcribeStart = System.currentTimeMillis();
             taskProgressWatchdogBridge.resetTask(taskId);
             TaskProgressWatchdogBridge.MonitorHandle transcribeMonitor =
@@ -303,7 +382,7 @@ public class VideoProcessingOrchestrator {
             }
             stageTimingsMs.put("transcribe", System.currentTimeMillis() - transcribeStart);
 
-            updateProgress(taskId, 0.25, "文本结构化...");
+            updateProgress(taskId, 0.25, "正在执行阶段一处理...");
             long stage1Start = System.currentTimeMillis();
             taskProgressWatchdogBridge.resetTask(taskId);
             TaskProgressWatchdogBridge.MonitorHandle stage1Monitor =
@@ -326,7 +405,7 @@ public class VideoProcessingOrchestrator {
             }
             stageTimingsMs.put("stage1", System.currentTimeMillis() - stage1Start);
 
-            updateProgress(taskId, 0.35, "语义分割...");
+            updateProgress(taskId, 0.35, "正在进行语义单元分析...");
             long phase2aStart = System.currentTimeMillis();
             taskProgressWatchdogBridge.resetTask(taskId);
             TaskProgressWatchdogBridge.MonitorHandle phase2aMonitor =
@@ -350,7 +429,7 @@ public class VideoProcessingOrchestrator {
             }
             stageTimingsMs.put("phase2a_segmentation", System.currentTimeMillis() - phase2aStart);
 
-            updateProgress(taskId, 0.40, "语义分割完成...");
+            updateProgress(taskId, 0.40, "正在规划素材提取方案...");
 
             ExtractionRequests materialRequests = null;
             JavaCVFFmpegService.ExtractionResult extractRes;
@@ -373,14 +452,14 @@ public class VideoProcessingOrchestrator {
 
             long legacyAnalysisStart = System.currentTimeMillis();
             if (materialRequests == null) {
-                updateProgress(taskId, 0.45, "执行级联并行分析...");
+                updateProgress(taskId, 0.45, "正在执行回退分析流程...");
                 materialRequests = runLegacyAnalysis(taskId, videoPath, ar, s1, outputDir, timeouts);
                 usedLegacyFlow = true;
             }
             stageTimingsMs.put("analysis_legacy", System.currentTimeMillis() - legacyAnalysisStart);
             stageTimingsMs.put("analysis_total", System.currentTimeMillis() - analysisTotalStart);
 
-            updateProgress(taskId, 0.80, "执行素材提取...");
+            updateProgress(taskId, 0.80, "正在提取截图与片段素材...");
             long extractionStart = System.currentTimeMillis();
             int ffmpegTimeoutSec = calculateFfmpegTimeoutSec(taskId, videoDuration, materialRequests, timeouts);
             if (materialRequests.extractionFuture == null) {
@@ -409,7 +488,7 @@ public class VideoProcessingOrchestrator {
             }
             stageTimingsMs.put("extract_assets", System.currentTimeMillis() - extractionStart);
 
-            updateProgress(taskId, 0.90, "生成最终文档...");
+            updateProgress(taskId, 0.90, "正在组装富文本与 Markdown...");
             long assembleStart = System.currentTimeMillis();
             String title = resolveDocumentTitle(downloadResult, outputDir, videoPath);
             metricsVideoTitle = title;
@@ -440,7 +519,8 @@ public class VideoProcessingOrchestrator {
             result.success = true;
             result.markdownPath = assembleRes.markdownPath;
             result.jsonPath = assembleRes.jsonPath;
-            logger.info("✅ Pipeline Complete: {}", taskId);
+            persistTaskTocMetadata(outputDir, "video", List.of());
+            logger.info("Pipeline Complete: {}", taskId);
 
             flowFlags.put("downloaded_from_url", downloadedFromUrl);
             if (downloadResult != null) {
@@ -452,7 +532,7 @@ public class VideoProcessingOrchestrator {
 
         } catch (Exception e) {
             String normalizedError = extractThrowableMessage(e);
-            logger.error("❌ Pipeline Failed: {} - {}", taskId, normalizedError, e);
+            logger.error("Pipeline Failed: {} - {}", taskId, normalizedError, e);
             result.success = false;
             result.errorMessage = normalizedError;
 
@@ -475,6 +555,561 @@ public class VideoProcessingOrchestrator {
         }
         return result;
     }
+
+    private ProcessingResult processBook(
+            String taskId,
+            String sourceUrl,
+            String outputDir,
+            BookProcessingOptions bookOptions
+    ) {
+        ProcessingResult result = new ProcessingResult();
+        result.taskId = taskId;
+        long startTime = System.currentTimeMillis();
+        String metricsOutputDir = outputDir;
+        String metricsVideoPath = sourceUrl;
+        String metricsInputVideoUrl = sourceUrl;
+        String metricsVideoTitle = "";
+        Map<String, Long> stageTimingsMs = new LinkedHashMap<>();
+        Map<String, Object> flowFlags = new LinkedHashMap<>();
+
+        try {
+            String sourcePath = sourceUrl;
+            boolean downloadedFromUrl = false;
+            DownloadResult downloadResult = null;
+            ArticleBookSource articleSource = null;
+
+            long articleExtractStart = System.currentTimeMillis();
+            if (isHttpUrl(sourceUrl)) {
+                articleSource = prepareBookSourceFromArticleLink(taskId, sourceUrl);
+                if (articleSource != null) {
+                    sourcePath = articleSource.markdownPath;
+                    outputDir = articleSource.outputDir;
+                    downloadedFromUrl = true;
+                    metricsVideoPath = sourcePath;
+                    metricsOutputDir = outputDir;
+                    if (StringUtils.hasText(articleSource.title)) {
+                        metricsVideoTitle = articleSource.title;
+                    }
+                    flowFlags.put("article_link_enabled", true);
+                    flowFlags.put("article_link_requested_url", firstNonBlank(articleSource.requestedUrl, sourceUrl));
+                    flowFlags.put("article_link_final_url", firstNonBlank(articleSource.finalUrl, articleSource.requestedUrl));
+                    flowFlags.put("article_link_site", firstNonBlank(articleSource.siteType, "unknown"));
+                    flowFlags.put("article_link_image_count", articleSource.imageCount);
+                    flowFlags.put("article_link_copied_image_count", articleSource.copiedImageCount);
+                }
+            }
+            if (articleSource != null) {
+                stageTimingsMs.put("extract_article_link", System.currentTimeMillis() - articleExtractStart);
+                stageTimingsMs.put("prepare_local_video", 0L);
+                stageTimingsMs.put("download_video", 0L);
+            } else {
+                flowFlags.put("article_link_enabled", false);
+                long localPrepareStart = System.currentTimeMillis();
+                if (!isHttpUrl(sourceUrl)) {
+                    sourcePath = normalizeLocalVideoPath(sourceUrl);
+                    assertLocalVideoExists(sourceUrl, sourcePath);
+                    outputDir = resolveOutputDirForLocalVideo(sourcePath);
+                    new File(outputDir).mkdirs();
+                    sourcePath = ensureLocalVideoInStorage(sourcePath, outputDir);
+                }
+                stageTimingsMs.put("prepare_local_video", System.currentTimeMillis() - localPrepareStart);
+                metricsVideoPath = sourcePath;
+                metricsOutputDir = outputDir;
+
+                long downloadStart = System.currentTimeMillis();
+                try {
+                    if (isHttpUrl(sourceUrl)) {
+                        int downloadTimeoutSec = normalizePositive(downloadGrpcDeadlineSec, 1800);
+                        int hardTimeoutSec = Math.max(downloadTimeoutSec, normalizePositive(downloadHardTimeoutSec, 1800));
+                        int idleTimeoutSec = normalizePositive(downloadIdleTimeoutSec, 120);
+                        int pollIntervalSec = Math.min(
+                                normalizePositive(downloadPollIntervalSec, 5),
+                                Math.max(1, idleTimeoutSec)
+                        );
+                        String predictedDownloadDir = resolvePredictedDownloadWatchDir(sourceUrl, outputDir);
+                        updateProgress(taskId, 0.05, "Downloading source file...");
+                        DownloadResult dl = waitForDownloadWithLease(
+                                taskId,
+                                sourceUrl,
+                                outputDir,
+                                predictedDownloadDir,
+                                downloadTimeoutSec,
+                                hardTimeoutSec,
+                                idleTimeoutSec,
+                                pollIntervalSec
+                        );
+                        if (!dl.success) {
+                            throw new RuntimeException(
+                                    "Download failed: " + firstNonBlank(
+                                            dl.errorMsg,
+                                            "python worker returned unsuccessful download response without details"
+                                    )
+                            );
+                        }
+                        downloadedFromUrl = true;
+                        downloadResult = dl;
+                        sourcePath = dl.videoPath;
+                        outputDir = new File(sourcePath).getParentFile().getAbsolutePath();
+                        new File(outputDir).mkdirs();
+                        metricsVideoPath = sourcePath;
+                        metricsOutputDir = outputDir;
+                    }
+                } finally {
+                    stageTimingsMs.put("download_video", System.currentTimeMillis() - downloadStart);
+                }
+            }
+
+            if (!isBookPath(sourcePath)) {
+                throw new IllegalArgumentException("Book format not supported for source: " + sourcePath);
+            }
+
+            updateProgress(taskId, 0.20, "Extracting book content...");
+            long bookFlowStart = System.currentTimeMillis();
+            BookMarkdownService.BookProcessingResult bookResult = bookMarkdownService.processBook(
+                    taskId,
+                    sourcePath,
+                    outputDir,
+                    toBookServiceOptions(bookOptions)
+            );
+            stageTimingsMs.put("book_extract_markdown", System.currentTimeMillis() - bookFlowStart);
+            if (!bookResult.success) {
+                throw new RuntimeException(
+                        "Book processing failed: " + firstNonBlank(
+                                bookResult.errorMessage,
+                                "unknown error from BookMarkdownService"
+                        )
+                );
+            }
+
+            BookEnhancedPipelineService.EnhancedResult enhancedResult = null;
+            boolean enhancedApplied = false;
+            boolean enhancedEnabled = bookEnhancedPipelineService != null && bookEnhancedPipelineService.isEnabled();
+            flowFlags.put("book_enhanced_enabled", enhancedEnabled);
+            if (enhancedEnabled) {
+                updateProgress(taskId, 0.60, "Enhancing book content...");
+                long enhancedStart = System.currentTimeMillis();
+                enhancedResult = bookEnhancedPipelineService.enhanceBook(
+                        taskId,
+                        sourcePath,
+                        outputDir,
+                        bookResult
+                );
+                stageTimingsMs.put("book_enhanced_pipeline", System.currentTimeMillis() - enhancedStart);
+                if (enhancedResult != null && enhancedResult.stageTimingsMs != null) {
+                    for (Map.Entry<String, Long> stageEntry : enhancedResult.stageTimingsMs.entrySet()) {
+                        String key = stageEntry.getKey();
+                        Long value = stageEntry.getValue();
+                        if (key == null || key.isBlank() || value == null) {
+                            continue;
+                        }
+                        stageTimingsMs.put("book_enhanced_" + key, value);
+                    }
+                }
+                if (enhancedResult != null) {
+                    flowFlags.put("book_enhanced_translation_attempted", enhancedResult.translationAttempted);
+                    flowFlags.put("book_enhanced_translation_applied", enhancedResult.translationApplied);
+                    flowFlags.put("book_enhanced_translated_blocks", enhancedResult.translatedBlockCount);
+                    flowFlags.put("book_enhanced_protected_blocks", enhancedResult.protectedBlockCount);
+                    flowFlags.put("book_enhanced_unit_count", enhancedResult.phase2SemanticUnitCount);
+                }
+                if (enhancedResult != null
+                        && enhancedResult.success
+                        && enhancedResult.enhancementApplied
+                        && enhancedResult.markdownPath != null
+                        && !enhancedResult.markdownPath.isBlank()) {
+                    enhancedApplied = true;
+                    result.markdownPath = enhancedResult.markdownPath;
+                    result.jsonPath = firstNonBlank(enhancedResult.jsonPath, bookResult.metadataPath);
+                } else {
+                    flowFlags.put("book_enhanced_fallback_reason", firstNonBlank(
+                            enhancedResult != null ? enhancedResult.errorMessage : null,
+                            "enhanced_result_unavailable"
+                    ));
+                }
+            }
+
+            updateProgress(taskId, 0.95, "Finalizing markdown...");
+            result.success = true;
+            if (!enhancedApplied) {
+                result.markdownPath = bookResult.markdownPath;
+                result.jsonPath = bookResult.metadataPath;
+            }
+            persistTaskTocMetadata(
+                    outputDir,
+                    firstNonBlank(bookResult.contentType, "book"),
+                    bookResult.bookSectionTree != null ? bookResult.bookSectionTree : List.of()
+            );
+            if (!StringUtils.hasText(metricsVideoTitle)) {
+                metricsVideoTitle = stripExtensionSafe(new File(sourcePath).getName());
+            }
+
+            flowFlags.put("downloaded_from_url", downloadedFromUrl);
+            if (downloadResult != null) {
+                flowFlags.put("download_content_type", firstNonBlank(downloadResult.contentType, "unknown"));
+                flowFlags.put("download_source_platform", firstNonBlank(downloadResult.sourcePlatform, "unknown"));
+            }
+            flowFlags.put("used_vl_flow", false);
+            flowFlags.put("used_legacy_flow", false);
+            flowFlags.put("used_book_flow", true);
+            flowFlags.put("book_enhanced_applied", enhancedApplied);
+            flowFlags.put("book_split_by_chapter", bookOptions == null || bookOptions.splitByChapter == null || bookOptions.splitByChapter);
+            flowFlags.put("book_split_by_section", bookOptions != null && Boolean.TRUE.equals(bookOptions.splitBySection));
+            if (bookOptions != null && bookOptions.chapterSelector != null && !bookOptions.chapterSelector.isBlank()) {
+                flowFlags.put("book_chapter_selector", bookOptions.chapterSelector.trim());
+            }
+            if (bookOptions != null && bookOptions.sectionSelector != null && !bookOptions.sectionSelector.isBlank()) {
+                flowFlags.put("book_section_selector", bookOptions.sectionSelector.trim());
+            }
+            if (bookOptions != null && bookOptions.pageOffset != null) {
+                flowFlags.put("book_page_offset", bookOptions.pageOffset);
+            }
+        } catch (Exception error) {
+            String normalizedError = extractThrowableMessage(error);
+            logger.error("[{}] Book pipeline failed: {}", taskId, normalizedError, error);
+            result.success = false;
+            result.errorMessage = normalizedError;
+
+            flowFlags.putIfAbsent("downloaded_from_url", false);
+            flowFlags.putIfAbsent("used_vl_flow", false);
+            flowFlags.putIfAbsent("used_legacy_flow", false);
+            flowFlags.putIfAbsent("used_book_flow", true);
+        } finally {
+            result.processingTimeMs = System.currentTimeMillis() - startTime;
+            stageTimingsMs.put("total_pipeline", result.processingTimeMs);
+            writeTaskMetricsReport(
+                    taskId,
+                    metricsOutputDir,
+                    metricsVideoPath,
+                    metricsInputVideoUrl,
+                    metricsVideoTitle,
+                    result,
+                    stageTimingsMs,
+                    flowFlags
+            );
+        }
+        return result;
+    }
+
+    private BookMarkdownService.BookProcessingOptions toBookServiceOptions(BookProcessingOptions raw) {
+        if (raw == null) {
+            return null;
+        }
+        BookMarkdownService.BookProcessingOptions options = new BookMarkdownService.BookProcessingOptions();
+        options.chapterSelector = raw.chapterSelector;
+        options.sectionSelector = raw.sectionSelector;
+        options.splitByChapter = raw.splitByChapter;
+        options.splitBySection = raw.splitBySection;
+        options.pageOffset = raw.pageOffset;
+        if ((options.chapterSelector == null || options.chapterSelector.isBlank())
+                && (options.sectionSelector == null || options.sectionSelector.isBlank())
+                && options.splitByChapter == null
+                && options.splitBySection == null
+                && options.pageOffset == null) {
+            return null;
+        }
+        return options;
+    }
+
+    private boolean shouldProcessAsBook(String source, BookProcessingOptions options) {
+        if (options != null
+                && ((options.chapterSelector != null && !options.chapterSelector.isBlank())
+                || (options.sectionSelector != null && !options.sectionSelector.isBlank())
+                || options.splitByChapter != null
+                || options.splitBySection != null
+                || options.pageOffset != null)) {
+            return true;
+        }
+        if (source == null || source.isBlank()) {
+            return false;
+        }
+        if (isHttpUrl(source)) {
+            return isBookPathFromUrl(source) || isSupportedArticleLink(source);
+        }
+        return isBookPath(normalizeLocalVideoPath(source));
+    }
+
+    private boolean isBookPathFromUrl(String sourceUrl) {
+        try {
+            URI uri = URI.create(sourceUrl);
+            return isBookPath(uri.getPath());
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private boolean isBookPath(String pathLike) {
+        if (pathLike == null || pathLike.isBlank()) {
+            return false;
+        }
+        String lower = pathLike.toLowerCase(Locale.ROOT);
+        for (String extension : BOOK_FILE_EXTENSIONS) {
+            if (lower.endsWith(extension)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isSupportedArticleLink(String sourceUrl) {
+        if (phase2bArticleLinkService == null || !isHttpUrl(sourceUrl)) {
+            return false;
+        }
+        try {
+            List<String> normalizedLinks = phase2bArticleLinkService.normalizeSupportedLinks(List.of(sourceUrl));
+            return normalizedLinks != null && !normalizedLinks.isEmpty();
+        } catch (Exception error) {
+            logger.debug("normalize article link failed: source={} err={}", sourceUrl, error.getMessage());
+            return false;
+        }
+    }
+
+    private ArticleBookSource prepareBookSourceFromArticleLink(
+            String taskId,
+            String sourceUrl
+    ) throws IOException {
+        if (!isSupportedArticleLink(sourceUrl) || phase2bArticleLinkService == null) {
+            return null;
+        }
+        List<String> normalizedLinks = phase2bArticleLinkService.normalizeSupportedLinks(List.of(sourceUrl));
+        if (normalizedLinks == null || normalizedLinks.isEmpty()) {
+            return null;
+        }
+        String normalizedLink = normalizedLinks.get(0);
+        updateProgress(taskId, 0.05, "Extracting article content...");
+        Phase2bArticleLinkService.LinkBatchExtractionResult extraction =
+                phase2bArticleLinkService.extractArticlesForBook(List.of(normalizedLink));
+        if (extraction == null || extraction.articles == null || extraction.articles.isEmpty()) {
+            String failureDetail = extraction == null || extraction.failures == null
+                    ? "empty extraction result"
+                    : String.join(" | ", extraction.failures);
+            throw new IllegalStateException("article extraction failed: " + firstNonBlank(failureDetail, "empty result"));
+        }
+        Phase2bArticleLinkService.ExtractedLinkArticle article = extraction.articles.get(0);
+        if (article == null || !StringUtils.hasText(article.markdown)) {
+            throw new IllegalStateException("article markdown is empty");
+        }
+        String safeTaskId = StringUtils.hasText(taskId) ? taskId.trim() : ("article_" + System.currentTimeMillis());
+        Path taskSourceRoot = resolveStorageRoot().resolve("article_link").resolve(safeTaskId).toAbsolutePath().normalize();
+        Files.createDirectories(taskSourceRoot);
+        Path taskAssetsRoot = taskSourceRoot.resolve("assets").toAbsolutePath().normalize();
+        Files.createDirectories(taskAssetsRoot);
+
+        Path articleOutputDir = resolveArticleOutputDir(article.pageOutputDir);
+        if (StringUtils.hasText(article.pageOutputDir) && articleOutputDir == null) {
+            throw new IllegalStateException("article extractor output dir not found: " + article.pageOutputDir);
+        }
+        List<String> imageCandidates = collectArticleImageCandidates(article);
+        int copiedCount = copyArticleAssets(articleOutputDir, taskAssetsRoot, imageCandidates);
+        if (!imageCandidates.isEmpty() && copiedCount <= 0) {
+            logger.warn(
+                    "[{}] article images detected but none copied, outputDir={} imageCandidates={}",
+                    safeTaskId,
+                    firstNonBlank(article.pageOutputDir, "(empty)"),
+                    imageCandidates.size()
+            );
+        }
+
+        String markdownForBook = rewriteArticleMarkdownAssetPaths(article.markdown, imageCandidates, "assets");
+        Path markdownPath = taskSourceRoot.resolve("article_source.md");
+        Files.writeString(markdownPath, markdownForBook, StandardCharsets.UTF_8);
+        if (!Files.isRegularFile(markdownPath) || !Files.isReadable(markdownPath)) {
+            throw new IllegalStateException("persisted article markdown is not readable: " + markdownPath);
+        }
+        String persistedMarkdown = Files.readString(markdownPath, StandardCharsets.UTF_8);
+        if (!StringUtils.hasText(persistedMarkdown)) {
+            throw new IllegalStateException("persisted article markdown is empty: " + markdownPath);
+        }
+
+        ArticleBookSource prepared = new ArticleBookSource();
+        prepared.requestedUrl = firstNonBlank(article.requestedUrl, normalizedLink);
+        prepared.finalUrl = firstNonBlank(article.finalUrl, prepared.requestedUrl);
+        prepared.siteType = firstNonBlank(article.siteType, "unknown");
+        prepared.title = firstNonBlank(article.title, stripExtensionSafe(markdownPath.getFileName().toString()));
+        prepared.markdownPath = markdownPath.toString();
+        prepared.outputDir = taskSourceRoot.toString();
+        prepared.imageCount = imageCandidates.size();
+        prepared.copiedImageCount = copiedCount;
+        logger.info(
+                "[{}] Prepared article link source: requested={} final={} site={} images={}/{} output={}",
+                safeTaskId,
+                prepared.requestedUrl,
+                prepared.finalUrl,
+                prepared.siteType,
+                copiedCount,
+                imageCandidates.size(),
+                taskSourceRoot
+        );
+        return prepared;
+    }
+
+    private Path resolveArticleOutputDir(String rawOutputDir) {
+        if (!StringUtils.hasText(rawOutputDir)) {
+            return null;
+        }
+        try {
+            Path candidate = Paths.get(rawOutputDir.trim());
+            Path absolute = candidate.toAbsolutePath().normalize();
+            if (!Files.isDirectory(absolute)) {
+                return null;
+            }
+            return absolute;
+        } catch (Exception error) {
+            logger.warn("resolve article output dir failed: path={} err={}", rawOutputDir, error.getMessage());
+            return null;
+        }
+    }
+
+    private List<String> collectArticleImageCandidates(Phase2bArticleLinkService.ExtractedLinkArticle article) {
+        if (article == null) {
+            return List.of();
+        }
+        LinkedHashSet<String> dedup = new LinkedHashSet<>();
+        if (article.imageRelativePaths != null) {
+            for (String rawPath : article.imageRelativePaths) {
+                String normalized = normalizeArticleAssetRelativePath(rawPath);
+                if (StringUtils.hasText(normalized)) {
+                    dedup.add(normalized);
+                }
+            }
+        }
+        Pattern markdownImagePattern = Pattern.compile("!\\[[^\\]]*\\]\\(([^)]+)\\)");
+        Matcher matcher = markdownImagePattern.matcher(String.valueOf(article.markdown == null ? "" : article.markdown));
+        while (matcher.find()) {
+            String rawRef = String.valueOf(matcher.group(1) == null ? "" : matcher.group(1)).trim();
+            if (rawRef.startsWith("<") && rawRef.endsWith(">") && rawRef.length() > 2) {
+                rawRef = rawRef.substring(1, rawRef.length() - 1).trim();
+            }
+            int spaceAt = rawRef.indexOf(' ');
+            if (spaceAt > 0) {
+                rawRef = rawRef.substring(0, spaceAt);
+            }
+            String normalized = normalizeArticleAssetRelativePath(rawRef);
+            if (StringUtils.hasText(normalized)) {
+                dedup.add(normalized);
+            }
+        }
+        return new ArrayList<>(dedup);
+    }
+
+    private String normalizeArticleAssetRelativePath(String rawPath) {
+        String normalized = firstNonBlank(rawPath, "")
+                .replace('\\', '/')
+                .trim();
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        normalized = normalized.replaceAll("/+", "/");
+        if (!StringUtils.hasText(normalized)) {
+            return "";
+        }
+        if (normalized.startsWith("http://") || normalized.startsWith("https://")) {
+            return "";
+        }
+        if (normalized.startsWith("data:")) {
+            return "";
+        }
+        return normalized;
+    }
+
+    private String rewriteArticleMarkdownAssetPaths(
+            String markdown,
+            List<String> relativePaths,
+            String targetPrefix
+    ) {
+        String rewritten = String.valueOf(markdown == null ? "" : markdown);
+        if (!StringUtils.hasText(rewritten) || relativePaths == null || relativePaths.isEmpty()) {
+            return rewritten;
+        }
+        String normalizedPrefix = normalizeArticleAssetRelativePath(firstNonBlank(targetPrefix, ""));
+        if (!StringUtils.hasText(normalizedPrefix)) {
+            return rewritten;
+        }
+        for (String rawPath : relativePaths) {
+            String normalizedPath = normalizeArticleAssetRelativePath(rawPath);
+            if (!StringUtils.hasText(normalizedPath)) {
+                continue;
+            }
+            String targetPath = normalizeArticleAssetRelativePath(normalizedPrefix + "/" + normalizedPath);
+            if (!StringUtils.hasText(targetPath)) {
+                continue;
+            }
+            rewritten = rewritten.replace("(" + normalizedPath + ")", "(" + targetPath + ")");
+            rewritten = rewritten.replace("(./" + normalizedPath + ")", "(" + targetPath + ")");
+            rewritten = rewritten.replace("=\"" + normalizedPath + "\"", "=\"" + targetPath + "\"");
+            rewritten = rewritten.replace("=\"./" + normalizedPath + "\"", "=\"" + targetPath + "\"");
+            rewritten = rewritten.replace("='" + normalizedPath + "'", "='" + targetPath + "'");
+            rewritten = rewritten.replace("='./" + normalizedPath + "'", "='" + targetPath + "'");
+        }
+        return rewritten;
+    }
+
+    private int copyArticleAssets(Path sourceRoot, Path targetRoot, List<String> relativePaths) {
+        if (sourceRoot == null || targetRoot == null || relativePaths == null || relativePaths.isEmpty()) {
+            return 0;
+        }
+        int copiedCount = 0;
+        for (String relativePathRaw : relativePaths) {
+            String normalizedRel = normalizeArticleAssetRelativePath(relativePathRaw);
+            if (!StringUtils.hasText(normalizedRel)) {
+                continue;
+            }
+            final Path relPath;
+            try {
+                relPath = Paths.get(normalizedRel).normalize();
+            } catch (Exception ignored) {
+                continue;
+            }
+            if (relPath.isAbsolute() || relPath.startsWith("..")) {
+                logger.warn("skip unsafe article asset path: {}", normalizedRel);
+                continue;
+            }
+            Path sourcePath = sourceRoot.resolve(relPath).toAbsolutePath().normalize();
+            if (!sourcePath.startsWith(sourceRoot)) {
+                logger.warn("skip escaped article source asset path: {}", sourcePath);
+                continue;
+            }
+            if (!Files.isRegularFile(sourcePath)) {
+                logger.debug("article asset missing on extractor output: {}", sourcePath);
+                continue;
+            }
+            Path targetPath = targetRoot.resolve(relPath).toAbsolutePath().normalize();
+            if (!targetPath.startsWith(targetRoot)) {
+                logger.warn("skip escaped article target asset path: {}", targetPath);
+                continue;
+            }
+            try {
+                Path parent = targetPath.getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
+                Files.copy(sourcePath, targetPath, StandardCopyOption.REPLACE_EXISTING);
+                copiedCount += 1;
+            } catch (Exception error) {
+                logger.warn(
+                        "copy article asset failed: source={} target={} err={}",
+                        sourcePath,
+                        targetPath,
+                        error.getMessage()
+                );
+            }
+        }
+        return copiedCount;
+    }
+
+    private String stripExtensionSafe(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        int dotAt = value.lastIndexOf('.');
+        if (dotAt <= 0) {
+            return value;
+        }
+        return value.substring(0, dotAt);
+    }
+
     private static class VLTokenUsage {
         long inputTokens;
         long outputTokens;
@@ -798,7 +1433,7 @@ public class VideoProcessingOrchestrator {
         return Math.round(cost * 1_000_000d) / 1_000_000d;
     }
 
-    // --- OutputDir ???? ---
+    // --- OutputDir 相关策略 ---
     private int calculateFfmpegTimeoutSec(
             String taskId,
             double videoDurationSec,
@@ -818,7 +1453,7 @@ public class VideoProcessingOrchestrator {
             }
         }
 
-        // ????????????? seek/??/??????????????????
+        // 经验估算：截图 seek/解码 与片段切分/编码是主要成本来源。
         double seekAndImageCostSec = screenshotCount * 0.8;
         double clipInitCostSec = clipCount * 2.0;
         double clipEncodeCostSec = totalClipDurationSec * 1.6;
@@ -874,7 +1509,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private String normalizeLocalVideoPath(String videoUrl) {
-        // ???? file:// ???????????????? hash ??
+        // 支持 file:// 输入，统一转为绝对路径，确保后续 hash 稳定。
         try {
             if (videoUrl != null && videoUrl.toLowerCase(Locale.ROOT).startsWith("file://")) {
                 return Paths.get(URI.create(videoUrl)).toAbsolutePath().normalize().toString();
@@ -893,7 +1528,7 @@ public class VideoProcessingOrchestrator {
                 return absVideoPath.getParent().toString();
             }
         } catch (Exception e) {
-            // ??????? hash ??????????
+            // 路径解析失败时，回退到基于规范化路径的 hash 目录策略。
         }
 
         String normalized = normalizePathForHash(videoPath);
@@ -902,7 +1537,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private String ensureLocalVideoInStorage(String videoPath, String outputDir) {
-        // ???????/???? storage/{hash}????????????
+        // 将本地视频放入 storage/{hash} 目录，确保后续链路有稳定输入位置。
         try {
             Path source = Paths.get(videoPath).toAbsolutePath().normalize();
             if (!Files.exists(source) || !Files.isRegularFile(source)) {
@@ -927,7 +1562,7 @@ public class VideoProcessingOrchestrator {
                 logger.info("Linked local video into storage: {}", target);
                 return target.toString();
             } catch (Exception linkError) {
-                // ????????????????????????
+                // 硬链接失败时回退为复制，兼容跨磁盘与权限受限场景。
             }
 
             Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
@@ -941,7 +1576,8 @@ public class VideoProcessingOrchestrator {
     }
 
     /**
-     * 閸︺劏绻橀崗?FFmpeg / Python 闂冭埖顔岄崜宥呬粵閺堫剙婀撮弬鍥︽绾剚鐗庢宀嬬礉闁灝鍘ら垾婊€鍚夌捄顖氱窞閳ユ繄鈹涢柅蹇撳煂閸氬海鐢婚柧鎹愮熅閵?
+     * 校验本地视频路径是否真实存在且为文件。
+     * 这样可以在进入 FFmpeg/Python 阶段之前提前失败，避免在下游链路才暴露路径问题。
      */
     private void assertLocalVideoExists(String rawInput, String normalizedPath) {
         if (normalizedPath == null || normalizedPath.isBlank()) {
@@ -961,7 +1597,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private Path resolveStorageRoot() {
-        // ????????? storage??? Java/Python ??????
+        // 统一 storage 根目录，保证 Java/Python 使用同一份素材空间。
         Path repoRoot = resolveRepoRoot();
         Path storageRoot = repoRoot.resolve("storage").toAbsolutePath().normalize();
         try {
@@ -973,7 +1609,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private Path resolveRepoRoot() {
-        // ????????????????????????
+        // 从当前工作目录逐级上探仓库根目录，兼容服务子目录启动。
 
         Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
         for (int i = 0; i < 6; i++) {
@@ -997,7 +1633,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private String normalizePathForHash(String path) {
-        // ?? hash ??????????? Java/Python ??????
+        // 统一路径归一化规则，确保 Java/Python 生成一致的 hash。
         String abs = new File(path).getAbsolutePath();
         String normalized = abs.replace('/', File.separatorChar);
         if (File.separatorChar == '\\') {
@@ -1020,13 +1656,13 @@ public class VideoProcessingOrchestrator {
         }
     }
 
-    // --- 缂佽京濮靛妤冩嫚闁垮婀撮柛姘墕閼?---
+    // --- 截图请求合并：优先保留生成阶段的新请求，并补齐 Phase2A 的缺失项 ---
     private List<JavaCVFFmpegService.ScreenshotRequest> mergeScreenshotRequests(
             List<PythonGrpcClient.ScreenshotRequest> phase2aRequests,
             List<PythonGrpcClient.ScreenshotRequestDTO> generatedRequests) {
-        // ??????????? Phase2A ??????????????
-        // ?????generatedRequests ?????????????/ID ?????????
-        // ???? ID ???? generated ???????????
+        // 合并截图请求时保留 Phase2A 的兜底能力。
+        // 优先采用 generatedRequests 的时间窗和标识，避免覆盖更精细结果。
+        // 若 key 已存在则以 generated 为准，仅补齐缺失项。
         Map<String, JavaCVFFmpegService.ScreenshotRequest> merged = new LinkedHashMap<>();
         appendScreenshotRequestsFromDtoPreferNew(merged, generatedRequests);
         appendScreenshotRequestsIfAbsent(merged, phase2aRequests);
@@ -1094,9 +1730,9 @@ public class VideoProcessingOrchestrator {
     private List<JavaCVFFmpegService.ClipRequest> mergeClipRequests(
             List<PythonGrpcClient.ClipRequest> phase2aRequests,
             List<PythonGrpcClient.ClipRequestDTO> generatedRequests) {
-        // ??????????? Phase2A ????????????
-        // ?????generatedRequests ????????????????????
-        // ???? clipId ???? generated ?????????? FFmpeg ??
+        // 合并切片请求时保留 Phase2A 的兜底能力。
+        // 优先采用 generatedRequests，尽量保留更精确的切片区间。
+        // 若 clipId 冲突，默认保留 generated 结果以保证 FFmpeg 输入一致。
         Map<String, JavaCVFFmpegService.ClipRequest> merged = new LinkedHashMap<>();
         appendClipRequestsFromDtoPreferNew(merged, generatedRequests);
         appendClipRequestsIfAbsent(merged, phase2aRequests);
@@ -1202,7 +1838,7 @@ public class VideoProcessingOrchestrator {
     }
 
     private void ensureActionIds(List<ActionSegmentResult> actions) {
-        // ?? action_id???/??????????????
+        // 统一 action_id：保证每个 action 都有唯一且稳定的编号。
         if (actions == null || actions.isEmpty()) return;
         Set<Integer> used = new HashSet<>();
         int nextId = 1;
@@ -1240,7 +1876,10 @@ public class VideoProcessingOrchestrator {
         String t = kType.toLowerCase();
         // CV Types: Process, Practical (heavy CV)
         // CF Types: Explanation, Abstract, Configuration, Deduction (light CF)
-        return t.contains("process") || t.contains("practical") || t.contains("过程") || t.contains("实操");
+        return t.contains("process")
+                || t.contains("practical")
+                || t.contains("\u8fc7\u7a0b")
+                || t.contains("\u5b9e\u64cd");
     }
     
     private List<ClassificationInput> convertToClassInputs(List<Map<String, Object>> units, Map<String, CVValidationUnitResult> cvResults) {
@@ -1279,7 +1918,7 @@ public class VideoProcessingOrchestrator {
                 }
             }
             
-            // ?? action_id???? action ???????????????
+            // 统一 action_id，保证后续分类映射与写回键值稳定。
             ensureActionIds(in.actionUnits);
             // Removed: Subtitle mapping - Classifier reads directly from Step 2
             
@@ -1297,10 +1936,10 @@ public class VideoProcessingOrchestrator {
             in.knowledgeType = (String) u.getOrDefault("knowledge_type", "");
             in.fullText = (String) u.getOrDefault("full_text", u.getOrDefault("text", ""));
             
-            // ???? action_units ??????????????????????
+            // 优先读取语义单元内的 action_units 作为素材生成输入。
             List<Map<String, Object>> unitActions = (List<Map<String, Object>>) u.get("action_units");
             if (unitActions != null && !unitActions.isEmpty()) {
-                // 闁活収鍘藉Λ鈺勭疀濡ゅ绐楅悗瑙勭煯缂?JSON -> Java 闁哄嫷鍨伴幆渚€骞忛崹顔肩厒 action_units.knowledge_type
+                // JSON -> Java 的 Map 反序列化后，action_units.knowledge_type 可能为 null，需显式兜底。
                 Object firstKt = unitActions.get(0).get("knowledge_type");
                 logger.info("[{}] MatInputs from semantic_units: unit={}, actions={}, first_kt={}",
                     "MaterialGen", uid, unitActions.size(), firstKt);
@@ -1311,14 +1950,14 @@ public class VideoProcessingOrchestrator {
                     as.endSec = parseDouble(au.get("end_sec"), 0.0);
                     String kt = au.get("knowledge_type") != null ? au.get("knowledge_type").toString() : "";
                     String fallback = in.knowledgeType != null ? in.knowledgeType : "";
-                    // ???? action_type ???????knowledge????????
+                    // 若 action_type 缺失，则回退到单元层 knowledge_type。
                     as.actionType = !kt.isEmpty() ? kt : fallback;
                     in.actionUnits.add(as);
                 }
             } else if (cvResults.containsKey(uid)) {
                 logger.info("[{}] MatInputs fallback to CV actionSegments: unit={}, actions=0",
                     "MaterialGen", uid);
-                // ????? action_units ?????? CV ????????????
+                // 当 action_units 缺失时，回退到 CV 识别出的 action segments。
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.actionSegments != null) {
                     for (ActionSegmentResult as : cvRes.actionSegments) {
@@ -1330,14 +1969,14 @@ public class VideoProcessingOrchestrator {
                 }
             }
 
-            // ????????????????????
+            // 继承 CV 输出的稳定区间信息，供后续素材阶段使用。
             if (cvResults.containsKey(uid)) {
                 CVValidationUnitResult cvRes = cvResults.get(uid);
                 if (cvRes.stableIslands != null) {
                     in.stableIslands.addAll(cvRes.stableIslands);
                 }
             }
-            // ?? action_id????????????????
+            // 最终再次归一化 action_id，避免合并后出现重复或缺号。
             ensureActionIds(in.actionUnits);
             return in;
         }).collect(Collectors.toList());
@@ -1378,7 +2017,7 @@ public class VideoProcessingOrchestrator {
                         actionMap.put("id", as.id);
                         
                         // 2. Apply Knowledge Type to this specific action
-                        // ???? knowledge_type ???????????????
+                        // 默认先写入单元级 knowledge_type，再按 action 级结果覆盖。
                         String unitKt = unit.get("knowledge_type") != null ? unit.get("knowledge_type").toString() : "";
                         actionMap.put("knowledge_type", unitKt);
 
@@ -1511,7 +2150,7 @@ public class VideoProcessingOrchestrator {
         if (inline != null) {
             analyzeResult.semanticUnitsInline = inline;
         }
-        // 鐠囶厺绠熼崘鍛啇瀹歌尪顫?Java 娓氀勬纯閺傚府绱濋弮?ref 閹稿洤鎮滈惃鍕Ц閺冄呭閺堫剛绱︾€涙﹫绱濋棁鈧稉璇插З婢惰鲸鏅ラ柆鍨帳鐠囶垳鏁ら妴?
+        // inline 载荷更新后主动清空 ref，避免序列化时出现双源数据不一致。
         analyzeResult.semanticUnitsRef = null;
     }
     
@@ -1520,15 +2159,26 @@ public class VideoProcessingOrchestrator {
     
     private void updateProgress(String taskId, double progress, String message) {
         String normalizedMessage = normalizeProgressMessage(progress, message);
-        if (progressCallback != null) {
-            progressCallback.onProgress(taskId, progress, normalizedMessage);
+        ProgressCallback callback = resolveProgressCallback(taskId);
+        if (callback != null) {
+            callback.onProgress(taskId, progress, normalizedMessage);
         }
         logger.info("[{}] {} ({}%)", taskId, normalizedMessage, (int)(progress * 100));
     }
 
+    private ProgressCallback resolveProgressCallback(String taskId) {
+        if (taskId != null && !taskId.isBlank()) {
+            ProgressCallback callback = taskProgressCallbacks.get(taskId);
+            if (callback != null) {
+                return callback;
+            }
+        }
+        return progressCallback;
+    }
+
     /**
-     * 统一进度文案，保证移动端能拿到可感知的阶段语义。
-     * 优先保留有意义的后端原文案，缺失或过于笼统时按进度段补齐。
+     * 规范化进度文案：优先使用上游传入的非通用消息。
+     * 当上游为空或只给出通用状态时，按进度区间回落到可读的默认提示。
      */
     private String normalizeProgressMessage(double progress, String rawMessage) {
         String message = rawMessage != null ? rawMessage.trim() : "";
@@ -1536,18 +2186,18 @@ public class VideoProcessingOrchestrator {
             return message;
         }
         if (progress <= 0.10) {
-            return "正在上传视频...";
+            return "正在初始化任务...";
         }
         if (progress <= 0.28) {
-            return "正在提取音频片段...";
+            return "正在处理转写与基础结构...";
         }
         if (progress <= 0.82) {
-            return "AI正在深度思考（预计1分钟）...";
+            return "正在执行 AI 分析与素材生成...";
         }
         if (progress < 0.99) {
-            return "正在进行Markdown排版...";
+            return "正在组装 Markdown 文档...";
         }
-        return "正在完成结果收尾...";
+        return "处理即将完成...";
     }
 
     private boolean isGenericProgressMessage(String message) {
@@ -1556,8 +2206,8 @@ public class VideoProcessingOrchestrator {
                 || lower.equals("running")
                 || lower.equals("queued")
                 || lower.equals("pending")
-                || message.equals("处理中")
-                || message.equals("排队中");
+                || message.equals("\u5904\u7406\u4e2d")
+                || message.equals("\u6392\u961f\u4e2d");
     }
 
     private DownloadResult waitForDownloadWithLease(
@@ -1812,16 +2462,27 @@ public class VideoProcessingOrchestrator {
             return "";
         }
         try {
-            Path metaPath = Paths.get(outputDir, "video_meta.json");
-            if (!Files.exists(metaPath)) {
-                return "";
-            }
-            JsonNode root = objectMapper.readTree(metaPath.toFile());
-            String title = root.path("title").asText("");
-            return title == null ? "" : title.trim();
+            String title = videoMetaService.readTitle(Paths.get(outputDir));
+            return title == null ? "" : title;
         } catch (Exception e) {
             logger.warn("Failed to read video_meta.json title: {}", e.getMessage());
             return "";
+        }
+    }
+
+    private void persistTaskTocMetadata(String outputDir, String contentType, List<Map<String, Object>> bookSectionTree) {
+        if (outputDir == null || outputDir.isBlank()) {
+            return;
+        }
+        try {
+            Path taskRoot = Paths.get(outputDir).toAbsolutePath().normalize();
+            List<Map<String, Object>> safeTree = bookSectionTree != null ? bookSectionTree : List.of();
+            boolean updated = videoMetaService.writeTocMetadata(taskRoot, contentType, safeTree);
+            if (!updated) {
+                logger.warn("Skip writing toc metadata because task root is invalid: outputDir={}", outputDir);
+            }
+        } catch (Exception ex) {
+            logger.warn("Persist task toc metadata failed: outputDir={} err={}", outputDir, ex.getMessage());
         }
     }
 
@@ -1910,7 +2571,7 @@ public class VideoProcessingOrchestrator {
                         try {
                             dirBytes += Math.max(0L, Files.size(file));
                         } catch (Exception ignored) {
-                            // 单文件大小读取失败不影响整体活性检测
+                            // 单文件读取失败不影响整体统计，继续扫描其余文件。
                         }
                         long fileMtime = safeReadLastModifiedMillis(file);
                         dirLatestModifiedMs = Math.max(dirLatestModifiedMs, fileMtime);
@@ -1929,7 +2590,7 @@ public class VideoProcessingOrchestrator {
                 fileCount += current.fileCount;
                 latestModifiedMs = Math.max(latestModifiedMs, current.latestModifiedMs);
             } catch (Exception ignored) {
-                // 目录不可访问时忽略，继续监控其余目录
+                // 目录不可读或遍历失败时跳过，避免阻断下载活跃度探测。
             }
         }
         return new DownloadActivitySnapshot(totalBytes, fileCount, latestModifiedMs, perDir);
@@ -2015,6 +2676,39 @@ public class VideoProcessingOrchestrator {
         return fallback;
     }
 
+    private boolean isInterruptedVLResult(VLAnalysisResult vlResult) {
+        if (vlResult == null) {
+            return false;
+        }
+        if (vlResult.interrupted) {
+            return true;
+        }
+        String error = vlResult.errorMsg;
+        if (error == null || error.isBlank()) {
+            return false;
+        }
+        String normalized = error.toLowerCase(Locale.ROOT);
+        return normalized.contains("thread interrupted") || normalized.contains("interrupted");
+    }
+
+    private boolean isInterruptedFailure(Throwable throwable) {
+        if (throwable == null) {
+            return false;
+        }
+        if (throwable instanceof InterruptedException || throwable instanceof CancellationException) {
+            return true;
+        }
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        String message = extractThrowableMessage(throwable);
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("thread interrupted") || normalized.contains("interrupted");
+    }
+
     private String extractThrowableMessage(Throwable throwable) {
         if (throwable == null) {
             return "Pipeline failed with unknown error";
@@ -2073,41 +2767,156 @@ public class VideoProcessingOrchestrator {
         return list;
     }
 
+    private int resolveVLAnalyzeTimeoutSec(
+            String taskId,
+            AnalyzeResult analyzeResult,
+            DynamicTimeoutCalculator.TimeoutConfig timeouts
+    ) {
+        int baseTimeoutSec = Math.max(
+            MIN_VL_ANALYZE_TIMEOUT_SEC,
+            timeouts != null ? timeouts.getPhase2aTimeoutSec() : 0
+        );
+        double processThresholdSec = DEFAULT_VL_PROCESS_DURATION_THRESHOLD_SEC;
+        if (configService != null) {
+            processThresholdSec = Math.max(0.0d, configService.getVLProcessDurationThresholdSec());
+        }
+
+        double estimatedVLSegmentDurationSec = estimateVLSegmentDurationSec(analyzeResult, processThresholdSec);
+        int workloadTimeoutSec = (int) Math.ceil(
+            Math.max(0.0d, estimatedVLSegmentDurationSec) * VL_ANALYZE_WORKLOAD_TIMEOUT_MULTIPLIER
+        );
+        int resolvedTimeoutSec = Math.max(baseTimeoutSec, workloadTimeoutSec);
+
+        logger.info(
+            "[{}] VL timeout resolved: base={}s, workload={}s (sum_vl_segment={}s, threshold={}s, multiplier={}x), final={}s",
+            taskId,
+            baseTimeoutSec,
+            workloadTimeoutSec,
+            String.format(Locale.ROOT, "%.2f", estimatedVLSegmentDurationSec),
+            String.format(Locale.ROOT, "%.2f", processThresholdSec),
+            String.format(Locale.ROOT, "%.2f", VL_ANALYZE_WORKLOAD_TIMEOUT_MULTIPLIER),
+            resolvedTimeoutSec
+        );
+        return resolvedTimeoutSec;
+    }
+
+    private double estimateVLSegmentDurationSec(AnalyzeResult analyzeResult, double processThresholdSec) {
+        if (analyzeResult == null) {
+            return 0.0d;
+        }
+        try {
+            JsonNode rootNode = loadSemanticUnitsRoot(analyzeResult);
+            List<JsonNode> unitNodes = extractSemanticUnitNodes(rootNode);
+            if (unitNodes.isEmpty()) {
+                return 0.0d;
+            }
+            double totalDurationSec = 0.0d;
+            for (JsonNode unitNode : unitNodes) {
+                if (unitNode == null || !unitNode.isObject()) {
+                    continue;
+                }
+                String knowledgeType = unitNode.path("knowledge_type").asText("");
+                if (!isProcessKnowledgeTypeForVL(knowledgeType)) {
+                    continue;
+                }
+                double durationSec = readDurationSecFromUnitNode(unitNode);
+                if (durationSec > processThresholdSec) {
+                    totalDurationSec += durationSec;
+                }
+            }
+            return totalDurationSec;
+        } catch (Exception estimateError) {
+            logger.warn("Failed to estimate VL segment duration from semantic units: {}", estimateError.getMessage());
+            return 0.0d;
+        }
+    }
+
+    private List<JsonNode> extractSemanticUnitNodes(JsonNode rootNode) {
+        if (rootNode == null || rootNode.isNull()) {
+            return Collections.emptyList();
+        }
+        List<JsonNode> nodes = new ArrayList<>();
+        if (rootNode.isArray()) {
+            rootNode.forEach(nodes::add);
+            return nodes;
+        }
+        JsonNode semanticUnitsNode = rootNode.path("semantic_units");
+        if (semanticUnitsNode.isArray()) {
+            semanticUnitsNode.forEach(nodes::add);
+        }
+        return nodes;
+    }
+
+    private boolean isProcessKnowledgeTypeForVL(String knowledgeType) {
+        String normalized = knowledgeType == null ? "" : knowledgeType.trim().toLowerCase(Locale.ROOT);
+        if (normalized.isBlank()) {
+            return true;
+        }
+        return normalized.contains("process")
+            || normalized.contains("practical")
+            || normalized.contains("过程")
+            || normalized.contains("流程")
+            || normalized.contains("操作")
+            || normalized.contains("实操");
+    }
+
+    private double readDurationSecFromUnitNode(JsonNode unitNode) {
+        double startSec = parseDouble(unitNode.path("start_sec").asText(null), 0.0d);
+        double endSec = parseDouble(unitNode.path("end_sec").asText(null), startSec);
+        if (endSec <= startSec) {
+            double fallbackStart = parseDouble(unitNode.path("timestamp_start").asText(null), startSec);
+            double fallbackEnd = parseDouble(unitNode.path("timestamp_end").asText(null), endSec);
+            startSec = fallbackStart;
+            endSec = fallbackEnd;
+        }
+        return Math.max(0.0d, endSec - startSec);
+    }
+
     // --- Extracted Methods ---
 
     /**
-     * ???? VL ??????????????????? null ????
+     * 尝试执行 VL 分析链路；若失败或触发回退策略则返回 null。
      */
     private ExtractionRequests tryVLAnalysis(String taskId, String videoPath, AnalyzeResult ar, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) {
         updateProgress(taskId, 0.40, "执行 VL 视觉语言模型分析...");
+        int vlTimeoutSec = resolveVLAnalyzeTimeoutSec(taskId, ar, timeouts);
+        TaskProgressWatchdogBridge.SignalEmitter analysisSignalEmitter =
+            (progress, message) -> updateProgress(taskId, progress, message);
+        taskProgressWatchdogBridge.resetTask(taskId);
+        TaskProgressWatchdogBridge.MonitorHandle vlMonitor =
+            taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "analysis_extraction", analysisSignalEmitter);
         try {
             VLAnalysisResult vlResult = grpcClient.analyzeWithVL(
                 taskId,
                 videoPath,
                 ar,
                 outputDir,
-                timeouts.getPhase2aTimeoutSec()
+                vlTimeoutSec
             );
+            if (isInterruptedVLResult(vlResult)) {
+                String reason = firstNonBlank(vlResult.errorMsg, "VL analysis interrupted");
+                throw new RuntimeException("VL analysis interrupted: " + reason);
+            }
 
             if (vlResult.success && vlResult.vlEnabled && !vlResult.usedFallback) {
                 logger.info("[{}] VL Analysis Success! Skipping legacy flow.", taskId);
                 List<JavaCVFFmpegService.ScreenshotRequest> screenshots = convertScreenshotRequests(vlResult.screenshotRequests);
                 List<JavaCVFFmpegService.ClipRequest> clips = convertClipRequests(vlResult.clipRequests);
                 return startExtractionPipeline(taskId, videoPath, outputDir, screenshots, clips, 0);
-            } else {
-                logger.warn("[{}] VL Analysis fallback reason: {}", taskId, vlResult.errorMsg);
             }
+            logger.warn("[{}] VL Analysis fallback reason: {}", taskId, vlResult.errorMsg);
         } catch (Exception e) {
-            logger.error("[{}] VL Analysis failed with exception", taskId, e);
+            if (isInterruptedFailure(e)) {
+                throw e instanceof RuntimeException ? (RuntimeException) e : new RuntimeException(e);
+            }
+            logger.error("[{}] VL Analysis failed with exception (timeout={}s)", taskId, vlTimeoutSec, e);
+        } finally {
+            taskProgressWatchdogBridge.stopMonitor(taskId, vlMonitor, analysisSignalEmitter);
         }
         return null;
     }
-
-    /**
-     * ?????????CV/LLM ?? -> ???? -> ??????
-     */
     private ExtractionRequests runLegacyAnalysis(String taskId, String videoPath, AnalyzeResult ar, Stage1Result s1, String outputDir, DynamicTimeoutCalculator.TimeoutConfig timeouts) throws Exception {
-        // Load Semantic Units閿涙矮绮庢担璺ㄦ暏 AnalyzeResponse 閸愬懓浠堟潪鍊熷祹閿涘牆宕楃拋顔煎嚒缁夊娅庣捄顖氱窞鐎涙顔岄敍?
+        // 加载 Semantic Units，兼容 AnalyzeResponse 的数组结构与对象包装结构。
         JsonNode rootNode = loadSemanticUnitsRoot(ar);
         
         final boolean originallyArray = rootNode.isArray();
@@ -2124,7 +2933,7 @@ public class VideoProcessingOrchestrator {
         }
 
         // 1. Execute Core Analysis (CV Validation + Knowledge Classification)
-        // ?????????????
+        // 执行核心分析（CV 校验 + 知识分类）。
         AnalysisResults analysisResults = executeHybridAnalysis(taskId, videoPath, unitsList, s1.step2JsonPath, outputDir);
 
         // 2. Merge & Update
@@ -2133,7 +2942,7 @@ public class VideoProcessingOrchestrator {
         updateAnalyzeResultInlinePayload(ar, updatedRoot, unitsList.size());
 
         // 3. Generate Material Requests
-        updateProgress(taskId, 0.70, "生成素材清单...");
+        updateProgress(taskId, 0.70, "正在生成素材提取请求...");
         List<MaterialGenerationInput> matInputs = convertToMatInputs(unitsList, analysisResults.cvResults);
         MaterialGenerationResult matRes = grpcClient.generateMaterialRequests(taskId, matInputs, videoPath, 600);
         if (!matRes.success) throw new RuntimeException("Material Gen failed: " + matRes.errorMsg);
@@ -2172,10 +2981,10 @@ public class VideoProcessingOrchestrator {
     }
 
     /**
-     * ???????????????????????
+     * 执行混合分析流程：并行 CV 校验、知识分类与缓存复用。
      */
     private AnalysisResults executeHybridAnalysis(String taskId, String videoPath, List<Map<String, Object>> unitsList, String step2JsonPath, String outputDir) {
-        updateProgress(taskId, 0.45, "执行级联并行分析 (CV/CF 混合调度)...");
+        updateProgress(taskId, 0.45, "正在执行分阶段分析（CV/CF 并行）...");
         
         Map<String, CVValidationUnitResult> cvResults = new ConcurrentHashMap<>();
         List<KnowledgeResultItem> classResults = new ArrayList<>();
@@ -2249,7 +3058,7 @@ public class VideoProcessingOrchestrator {
             knowledgeOrchestrator.saveCache(taskId, classResults, classInputsForCache, step2JsonPath, outputDir);
         }
         
-        logger.info("✅ Staged Analysis done. CV: {}, Class: {}", cvResults.size(), classResults.size());
+        logger.info("Staged analysis done. CV: {}, Class: {}", cvResults.size(), classResults.size());
         return new AnalysisResults(cvResults, classResults);
     }
 }

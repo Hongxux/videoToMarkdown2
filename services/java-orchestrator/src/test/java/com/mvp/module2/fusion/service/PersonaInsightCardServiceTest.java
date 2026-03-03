@@ -12,6 +12,7 @@ import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PersonaInsightCardServiceTest {
@@ -49,6 +50,90 @@ class PersonaInsightCardServiceTest {
         assertTrue(nodeIds.contains("n-1"));
     }
 
+    @Test
+    void shouldParseBackgroundContextualDepthBreadthFromStructuredJson() throws Exception {
+        PersonaInsightCardService service = new PersonaInsightCardService();
+        Method parseMethod = PersonaInsightCardService.class.getDeclaredMethod(
+                "parseAdviceSectionsFromJson",
+                String.class,
+                String.class
+        );
+        parseMethod.setAccessible(true);
+
+        String raw = "{"
+                + "\"background\":[\"背景一\"],"
+                + "\"contextual_explanations\":[\"语境一\"],"
+                + "\"depth\":[\"深度一\"],"
+                + "\"breadth\":[\"广度一\"]"
+                + "}";
+        Object sections = parseMethod.invoke(service, raw, "fallback");
+        assertNotNull(sections);
+
+        assertEquals(List.of("背景一"), readListField(sections, "background"));
+        assertEquals(List.of("语境一"), readListField(sections, "contextual"));
+        assertEquals(List.of("深度一"), readListField(sections, "depth"));
+        assertEquals(List.of("广度一"), readListField(sections, "breadth"));
+    }
+
+    @Test
+    void shouldRenderMarkdownWithBackgroundSection() throws Exception {
+        PersonaInsightCardService service = new PersonaInsightCardService();
+        Method parseMethod = PersonaInsightCardService.class.getDeclaredMethod(
+                "parseAdviceSectionsFromJson",
+                String.class,
+                String.class
+        );
+        parseMethod.setAccessible(true);
+        Method renderMethod = PersonaInsightCardService.class.getDeclaredMethod(
+                "buildInitialCardBodyFromJson",
+                Class.forName("com.mvp.module2.fusion.service.PersonaInsightCardService$StructuredAdviceSections")
+        );
+        renderMethod.setAccessible(true);
+
+        String raw = "{"
+                + "\"background\":[\"背景段\"],"
+                + "\"contextual_explanations\":[\"语境段\"],"
+                + "\"depth\":[\"深度段\"],"
+                + "\"breadth\":[\"广度段\"]"
+                + "}";
+        Object sections = parseMethod.invoke(service, raw, "fallback");
+        String markdown = (String) renderMethod.invoke(service, sections);
+
+        assertTrue(markdown.contains("## 背景知识"));
+        assertTrue(markdown.contains("## 语境化解释"));
+        assertTrue(markdown.contains("## 深度"));
+        assertTrue(markdown.contains("## 广度"));
+        assertFalse(markdown.contains("### 语境快照@"));
+    }
+
+    @Test
+    void shouldPreserveMarkdownLineBreaksFromStructuredAdvice() throws Exception {
+        PersonaInsightCardService service = new PersonaInsightCardService();
+        Method sectionsMethod = PersonaInsightCardService.class.getDeclaredMethod(
+                "sectionsFromAdvice",
+                DeepSeekAdvisorService.StructuredAdviceResult.class
+        );
+        sectionsMethod.setAccessible(true);
+        Method renderMethod = PersonaInsightCardService.class.getDeclaredMethod(
+                "buildInitialCardBodyFromJson",
+                Class.forName("com.mvp.module2.fusion.service.PersonaInsightCardService$StructuredAdviceSections")
+        );
+        renderMethod.setAccessible(true);
+
+        DeepSeekAdvisorService.StructuredAdviceResult advice = DeepSeekAdvisorService.StructuredAdviceResult.deepseek(
+                List.of("背景主句\n被动消费闭环：观看/阅读时产生理解幻觉\n| 维度 | 说明 |\n|---|---|\n| A | B |\n- 要点A\n- 要点B"),
+                List.of("语境主句"),
+                List.of("深度主句"),
+                List.of("广度主句"),
+                "{}"
+        );
+        Object sections = sectionsMethod.invoke(service, advice);
+        String markdown = (String) renderMethod.invoke(service, sections);
+
+        assertTrue(markdown.contains("1. 背景主句\n    **被动消费闭环：** 观看/阅读时产生理解幻觉\n\n    | 维度 | 说明 |\n    |---|---|\n    | A | B |\n    - 要点A\n    - 要点B"));
+        assertFalse(markdown.contains("背景主句 - 要点A - 要点B"));
+    }
+
     private Map<String, Object> node(String nodeId, String rawMarkdown, List<String> insightsTags) {
         Map<String, Object> row = new LinkedHashMap<>();
         row.put("node_id", nodeId);
@@ -63,5 +148,12 @@ class PersonaInsightCardServiceTest {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);
         return (Set<?>) field.get(target);
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> readListField(Object target, String fieldName) throws Exception {
+        Field field = target.getClass().getDeclaredField(fieldName);
+        field.setAccessible(true);
+        return (List<String>) field.get(target);
     }
 }

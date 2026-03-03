@@ -15,6 +15,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpRange;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.util.StringUtils;
@@ -28,10 +30,13 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
+import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
+import java.util.List;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -89,14 +94,69 @@ public class MobileAppUpdateController {
 
     @GetMapping("/apk")
     public ResponseEntity<?> downloadAndroidApk(
-            @RequestParam(value = "versionCode", required = false) Integer versionCode
+            @RequestParam(value = "versionCode", required = false) Integer versionCode,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader
     ) {
         try {
             ResolvedApk apk = androidAppUpdateService.resolveAndroidApk(versionCode);
+            long fileSizeBytes = apk.fileSizeBytes > 0 ? apk.fileSizeBytes : Files.size(apk.path);
+            if (StringUtils.hasText(rangeHeader)) {
+                try {
+                    List<HttpRange> ranges = HttpRange.parseRanges(rangeHeader);
+                    if (!ranges.isEmpty()) {
+                        HttpRange range = ranges.get(0);
+                        long start = range.getRangeStart(fileSizeBytes);
+                        long end = range.getRangeEnd(fileSizeBytes);
+                        long regionLength = end - start + 1L;
+                        InputStream fileStream = Files.newInputStream(apk.path);
+                        skipFully(fileStream, start);
+                        InputStream bounded = new FilterInputStream(fileStream) {
+                            long remaining = regionLength;
+
+                            @Override
+                            public int read() throws IOException {
+                                if (remaining <= 0L) {
+                                    return -1;
+                                }
+                                int value = super.read();
+                                if (value >= 0) {
+                                    remaining--;
+                                }
+                                return value;
+                            }
+
+                            @Override
+                            public int read(byte[] buffer, int offset, int length) throws IOException {
+                                if (remaining <= 0L) {
+                                    return -1;
+                                }
+                                int nextLength = (int) Math.min((long) length, remaining);
+                                int readCount = super.read(buffer, offset, nextLength);
+                                if (readCount > 0) {
+                                    remaining -= readCount;
+                                }
+                                return readCount;
+                            }
+                        };
+                        Resource rangeResource = new InputStreamResource(bounded);
+                        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                                .contentType(APK_MEDIA_TYPE)
+                                .contentLength(regionLength)
+                                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + fileSizeBytes)
+                                .header(HttpHeaders.CACHE_CONTROL, "no-store")
+                                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + apk.fileName + "\"")
+                                .body(rangeResource);
+                    }
+                } catch (Exception ex) {
+                    logger.warn("range request processing failed, fallback to full apk response: versionCode={} range={} err={}",
+                            versionCode, rangeHeader, ex.getMessage());
+                }
+            }
             Resource resource = new InputStreamResource(Files.newInputStream(apk.path));
             return ResponseEntity.ok()
                     .contentType(APK_MEDIA_TYPE)
-                    .contentLength(apk.fileSizeBytes)
+                    .contentLength(fileSizeBytes)
                     .header(HttpHeaders.ACCEPT_RANGES, "bytes")
                     .header(HttpHeaders.CACHE_CONTROL, "no-store")
                     .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + apk.fileName + "\"")
@@ -111,6 +171,21 @@ public class MobileAppUpdateController {
         } catch (Exception ex) {
             logger.error("download android apk failed unexpectedly", ex);
             return ResponseEntity.status(500).body(Map.of("success", false, "message", "download apk failed"));
+        }
+    }
+
+    private void skipFully(InputStream stream, long bytesToSkip) throws IOException {
+        long remaining = Math.max(0L, bytesToSkip);
+        while (remaining > 0L) {
+            long skipped = stream.skip(remaining);
+            if (skipped > 0L) {
+                remaining -= skipped;
+                continue;
+            }
+            if (stream.read() < 0) {
+                throw new IOException("unexpected end of stream while skipping bytes");
+            }
+            remaining--;
         }
     }
 
@@ -231,6 +306,10 @@ public class MobileAppUpdateController {
     }
 
     private String resolveBaseUrl(HttpServletRequest request) {
+        String forwardedBaseUrl = resolveForwardedBaseUrl(request);
+        if (StringUtils.hasText(forwardedBaseUrl)) {
+            return forwardedBaseUrl;
+        }
         try {
             return ServletUriComponentsBuilder.fromCurrentContextPath().build().toUriString();
         } catch (Exception ex) {
@@ -244,6 +323,50 @@ public class MobileAppUpdateController {
                     || ("https".equalsIgnoreCase(scheme) && port == 443);
             return defaultPort ? scheme + "://" + host : scheme + "://" + host + ":" + port;
         }
+    }
+
+    private String resolveForwardedBaseUrl(HttpServletRequest request) {
+        if (request == null) {
+            return "";
+        }
+        String forwardedProto = firstForwardedToken(request.getHeader("X-Forwarded-Proto"));
+        String forwardedHost = firstForwardedToken(request.getHeader("X-Forwarded-Host"));
+        String forwardedPort = firstForwardedToken(request.getHeader("X-Forwarded-Port"));
+        if (!StringUtils.hasText(forwardedProto) || !StringUtils.hasText(forwardedHost)) {
+            return "";
+        }
+        String scheme = forwardedProto.trim();
+        String host = forwardedHost.trim();
+        if (host.isEmpty()) {
+            return "";
+        }
+        if (!host.contains(":") && StringUtils.hasText(forwardedPort)) {
+            String portText = forwardedPort.trim();
+            if (!portText.isEmpty()) {
+                try {
+                    int port = Integer.parseInt(portText);
+                    boolean defaultPort = ("http".equalsIgnoreCase(scheme) && port == 80)
+                            || ("https".equalsIgnoreCase(scheme) && port == 443);
+                    if (!defaultPort) {
+                        host = host + ":" + port;
+                    }
+                } catch (NumberFormatException ignored) {
+                    // 非法端口直接忽略，回退到 host 原值
+                }
+            }
+        }
+        return scheme + "://" + host;
+    }
+
+    private String firstForwardedToken(String headerValue) {
+        if (!StringUtils.hasText(headerValue)) {
+            return "";
+        }
+        String[] segments = headerValue.split(",");
+        if (segments.length == 0) {
+            return "";
+        }
+        return segments[0].trim();
     }
 
     private AuthCheckResult checkAdminAuth(String tokenHeader, String authorizationHeader) {

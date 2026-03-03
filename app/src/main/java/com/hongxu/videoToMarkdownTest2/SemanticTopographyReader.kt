@@ -4,25 +4,38 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Typeface
+import android.graphics.RectF
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.text.Layout
 import android.text.Selection
+import android.text.method.LinkMovementMethod
 import android.view.HapticFeedbackConstants
 import android.util.LruCache
 import android.text.Spannable
 import android.text.SpannableStringBuilder
 import android.text.Spanned
 import android.text.TextPaint
+import android.text.style.ClickableSpan
 import android.text.style.CharacterStyle
+import android.text.style.ForegroundColorSpan
+import android.text.style.LeadingMarginSpan
 import android.text.style.MetricAffectingSpan
 import android.text.style.StyleSpan
+import android.text.style.URLSpan
 import android.text.style.UpdateAppearance
+import android.util.Log
 import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewGroup
+import android.widget.MediaController
 import android.widget.Toast
 import android.widget.TextView
+import android.widget.VideoView
+import androidx.activity.compose.BackHandler
 import androidx.core.widget.TextViewCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -44,11 +57,14 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.height
@@ -56,9 +72,11 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -73,8 +91,11 @@ import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -103,6 +124,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeJoin
@@ -110,9 +132,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.SubcomposeLayout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -123,8 +147,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -134,6 +160,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import io.noties.markwon.Markwon
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -154,12 +184,14 @@ import kotlin.math.roundToInt
  * 3. 上报阅读交互事件到 telemetry API。
  */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun SemanticTopographyReader(
     nodes: List<SemanticNode>,
     markwon: Markwon,
     renderConfig: MarkdownReaderRenderConfig,
     modifier: Modifier = Modifier,
     taskId: String? = null,
+    apiBaseUrl: String = BuildConfig.MOBILE_API_BASE_URL,
     pathHint: String? = null,
     metaApi: MobileMarkdownMetaApi? = null,
     telemetryApi: MobileMarkdownTelemetryApi? = null,
@@ -170,6 +202,7 @@ fun SemanticTopographyReader(
     onResonance: (String) -> Unit = {},
     onScrollDown: () -> Unit = {},
     onScrollUp: () -> Unit = {},
+    onBlankTap: () -> Unit = {},
     onReadingPositionChanged: (Int, Int) -> Unit = { _, _ -> },
     onGestureEvent: (ParagraphGestureEvent) -> Unit = {},
     onTelemetry: (ReaderTelemetryEvent) -> Unit = {}
@@ -180,6 +213,7 @@ fun SemanticTopographyReader(
     )
     val scope = rememberCoroutineScope()
     val lifecycleOwner = LocalLifecycleOwner.current
+    val haptic = LocalHapticFeedback.current
 
     val favoritesState = remember {
         mutableStateMapOf<String, Boolean>()
@@ -192,6 +226,15 @@ fun SemanticTopographyReader(
     }
     val tokenAnnotationsState = remember {
         mutableStateMapOf<String, String>()
+    }
+    val anchorsState = remember {
+        mutableStateMapOf<String, MobileAnchorData>()
+    }
+    var mountedAnchorPreviewState by remember {
+        mutableStateOf<MountedAnchorPreviewState?>(null)
+    }
+    var mountedAnchorPreviewRequestVersion by remember {
+        mutableIntStateOf(0)
     }
 
     fun emitTelemetry(event: ReaderTelemetryEvent) {
@@ -232,6 +275,25 @@ fun SemanticTopographyReader(
         }
     }
 
+    DisposableEffect(lifecycleOwner, listState, onReadingPositionChanged) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                onReadingPositionChanged(
+                    listState.firstVisibleItemIndex,
+                    listState.firstVisibleItemScrollOffset
+                )
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            onReadingPositionChanged(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset
+            )
+        }
+    }
+
     fun scheduleMetaSync(reason: String) {
         if (taskId.isNullOrBlank() || metaApi == null) {
             return
@@ -247,6 +309,36 @@ fun SemanticTopographyReader(
             .mapValues { it.value.trim() }
             .filterValues { it.isNotBlank() }
             .toMap()
+        val anchorsSnapshot = anchorsState
+            .mapValues { (_, value) ->
+                value.copy(
+                    blockId = value.blockId.trim(),
+                    quote = value.quote.trim(),
+                    contextQuote = value.contextQuote.trim(),
+                    anchorHint = value.anchorHint.trim(),
+                    status = value.status.trim(),
+                    mountedPath = value.mountedPath.trim(),
+                    mountedRevisionId = value.mountedRevisionId.trim(),
+                    updatedAt = value.updatedAt.trim(),
+                    revisions = value.revisions.map { revision ->
+                        revision.copy(
+                            revisionId = revision.revisionId.trim(),
+                            createdAt = revision.createdAt.trim(),
+                            relativeDir = revision.relativeDir.trim(),
+                            notePath = revision.notePath.trim(),
+                            files = revision.files
+                                .map { path -> path.trim() }
+                                .filter { path -> path.isNotBlank() }
+                        )
+                    }
+                )
+            }
+            .filterValues { anchor ->
+                anchor.blockId.isNotBlank() &&
+                    anchor.startIndex >= 0 &&
+                    anchor.endIndex > anchor.startIndex
+            }
+            .toMap()
         scope.launch {
             runCatching {
                 metaApi.updateTaskMeta(
@@ -258,7 +350,8 @@ fun SemanticTopographyReader(
                         deleted = deletedSnapshot,
                         comments = commentsSnapshot,
                         tokenLike = emptyMap(),
-                        tokenAnnotations = tokenAnnotationsSnapshot
+                        tokenAnnotations = tokenAnnotationsSnapshot,
+                        anchors = anchorsSnapshot
                     )
                 )
             }.onSuccess {
@@ -272,7 +365,8 @@ fun SemanticTopographyReader(
                             "favoritesCount" to favoriteSnapshot.size.toString(),
                             "deletedCount" to deletedSnapshot.size.toString(),
                             "commentsCount" to commentsSnapshot.size.toString(),
-                            "tokenAnnotationCount" to tokenAnnotationsSnapshot.size.toString()
+                            "tokenAnnotationCount" to tokenAnnotationsSnapshot.size.toString(),
+                            "anchorCount" to anchorsSnapshot.size.toString()
                         )
                     )
                 )
@@ -298,6 +392,7 @@ fun SemanticTopographyReader(
             commentsState.clear()
             deletedState.clear()
             tokenAnnotationsState.clear()
+            anchorsState.clear()
             return@LaunchedEffect
         }
         runCatching {
@@ -311,6 +406,8 @@ fun SemanticTopographyReader(
             deletedState.putAll(payload.deleted)
             tokenAnnotationsState.clear()
             tokenAnnotationsState.putAll(payload.tokenAnnotations)
+            anchorsState.clear()
+            anchorsState.putAll(payload.anchors)
             emitTelemetry(
                 ReaderTelemetryEvent(
                     nodeId = "global",
@@ -322,7 +419,8 @@ fun SemanticTopographyReader(
                         "favoritesCount" to payload.favorites.size.toString(),
                         "deletedCount" to payload.deleted.size.toString(),
                         "commentsCount" to payload.comments.size.toString(),
-                        "tokenAnnotationCount" to payload.tokenAnnotations.size.toString()
+                        "tokenAnnotationCount" to payload.tokenAnnotations.size.toString(),
+                        "anchorCount" to payload.anchors.size.toString()
                     )
                 )
             )
@@ -399,7 +497,312 @@ fun SemanticTopographyReader(
             groupTokenAnnotationsByBlock(tokenAnnotationsState)
         }
     }
+    val anchorsByBlock by remember {
+        derivedStateOf {
+            groupAnchorsByBlock(anchorsState)
+        }
+    }
     val activeParagraphBoundsBlockId = tokenAnnotationEditorState?.blockId ?: tokenAnnotationBubbleState?.blockId
+
+    fun updateMountedPreviewState(transform: (MountedAnchorPreviewState) -> MountedAnchorPreviewState) {
+        mountedAnchorPreviewState = mountedAnchorPreviewState?.let(transform)
+    }
+
+    fun mergeMountedPreviewFromPayload(
+        current: MountedAnchorPreviewState,
+        payload: MobileMountedAnchorPayload,
+        displayTitle: String,
+        appendToStack: Boolean
+    ): MountedAnchorPreviewState {
+        val normalizedEntry = normalizeMountedNotePath(
+            payload.entryNotePath.ifBlank { current.entryNotePath }
+        )
+        val resolvedNotePath = normalizeMountedNotePath(
+            payload.notePath.ifBlank {
+                payload.entryNotePath.ifBlank {
+                    current.stack.lastOrNull()?.notePath.orEmpty()
+                }
+            }
+        )
+        val resolvedTitle = displayTitle.ifBlank {
+            deriveMountedNoteDisplayTitle(
+                resolvedNotePath.ifBlank { normalizedEntry }
+            )
+        }
+        val document = MountedAnchorDocument(
+            notePath = resolvedNotePath,
+            displayTitle = resolvedTitle,
+            markdown = payload.markdown.ifBlank { payload.rawMarkdown },
+            rawMarkdown = payload.rawMarkdown,
+            isGhost = false,
+            ghostInputPath = ""
+        )
+        val nextStack = if (!appendToStack || current.stack.isEmpty()) {
+            listOf(document)
+        } else {
+            val existingIndex = current.stack.indexOfFirst { item ->
+                normalizeMountedNotePath(item.notePath)
+                    .equals(document.notePath, ignoreCase = true)
+            }
+            if (existingIndex >= 0) {
+                current.stack.take(existingIndex + 1)
+            } else {
+                current.stack + document
+            }
+        }
+        return current.copy(
+            entryNotePath = normalizedEntry.ifBlank { current.entryNotePath },
+            markdownPaths = mergeMountedMarkdownPaths(current.markdownPaths, payload),
+            stack = nextStack,
+            isLoading = false,
+            errorMessage = null
+        )
+    }
+
+    fun fetchMountedAnchorDocument(
+        anchorId: String,
+        requestedNotePath: String?,
+        displayTitle: String,
+        appendToStack: Boolean,
+        fallbackAsGhost: Boolean
+    ) {
+        if (taskId.isNullOrBlank() || metaApi == null) {
+            return
+        }
+        mountedAnchorPreviewRequestVersion += 1
+        val requestVersion = mountedAnchorPreviewRequestVersion
+        updateMountedPreviewState { current ->
+            current.copy(
+                isLoading = true,
+                errorMessage = null
+            )
+        }
+        scope.launch {
+            runCatching {
+                metaApi.fetchMountedAnchorNote(
+                    taskId = taskId,
+                    anchorId = anchorId,
+                    pathHint = pathHint,
+                    notePath = requestedNotePath
+                )
+            }.onSuccess { payload ->
+                if (requestVersion != mountedAnchorPreviewRequestVersion) {
+                    return@onSuccess
+                }
+                mountedAnchorPreviewState = mountedAnchorPreviewState?.let { current ->
+                    mergeMountedPreviewFromPayload(
+                        current = current,
+                        payload = payload,
+                        displayTitle = displayTitle,
+                        appendToStack = appendToStack
+                    )
+                }
+            }.onFailure { error ->
+                if (requestVersion != mountedAnchorPreviewRequestVersion) {
+                    return@onFailure
+                }
+                val message = error.message ?: "加载失败"
+                mountedAnchorPreviewState = mountedAnchorPreviewState?.let { current ->
+                    if (fallbackAsGhost && requestedNotePath != null && isMountedNoteMissingError(message)) {
+                        val ghostPath = normalizeMountedNotePath(requestedNotePath)
+                        val ghostNode = MountedAnchorDocument(
+                            notePath = ghostPath,
+                            displayTitle = displayTitle.ifBlank {
+                                deriveMountedNoteDisplayTitle(ghostPath)
+                            },
+                            markdown = "",
+                            rawMarkdown = "",
+                            isGhost = true,
+                            ghostInputPath = ghostPath
+                        )
+                        val nextStack = if (appendToStack && current.stack.isNotEmpty()) {
+                            current.stack + ghostNode
+                        } else {
+                            listOf(ghostNode)
+                        }
+                        current.copy(
+                            stack = nextStack,
+                            isLoading = false,
+                            errorMessage = null
+                        )
+                    } else {
+                        current.copy(
+                            isLoading = false,
+                            errorMessage = message
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun openMountedAnchorPreview(
+        blockId: String,
+        selection: TokenSelection,
+        anchorData: MobileAnchorData
+    ) {
+        if (taskId.isNullOrBlank() || metaApi == null) {
+            return
+        }
+        val anchorId = buildTokenMetaKey(
+            blockId = blockId,
+            start = selection.start,
+            end = selection.end
+        )
+        val entryPath = normalizeMountedNotePath(anchorData.mountedPath)
+        mountedAnchorPreviewState = MountedAnchorPreviewState(
+            anchorId = anchorId,
+            blockId = blockId,
+            quote = selection.token.trim(),
+            entryNotePath = entryPath,
+            markdownPaths = if (entryPath.isNotBlank()) listOf(entryPath) else emptyList(),
+            stack = emptyList(),
+            isLoading = true,
+            errorMessage = null,
+            isFullscreen = false
+        )
+        emitTelemetry(
+            ReaderTelemetryEvent(
+                nodeId = blockId,
+                eventType = "mounted_note_opened",
+                relevanceScore = 0f,
+                payload = mapOf(
+                    "anchorId" to anchorId,
+                    "start" to selection.start.toString(),
+                    "end" to selection.end.toString(),
+                    "quote" to selection.token.trim(),
+                    "source" to "anchor"
+                )
+            )
+        )
+        fetchMountedAnchorDocument(
+            anchorId = anchorId,
+            requestedNotePath = entryPath.ifBlank { null },
+            displayTitle = deriveMountedNoteDisplayTitle(entryPath),
+            appendToStack = false,
+            fallbackAsGhost = false
+        )
+    }
+
+    fun openMountedWikilink(link: MountedWikilinkTap) {
+        val snapshot = mountedAnchorPreviewState ?: return
+        val normalizedTarget = normalizeMountedNotePath(link.targetNotePath)
+        if (normalizedTarget.isBlank()) {
+            return
+        }
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        val existingIndex = snapshot.stack.indexOfFirst { item ->
+            normalizeMountedNotePath(item.notePath)
+                .equals(normalizedTarget, ignoreCase = true)
+        }
+        if (existingIndex >= 0) {
+            mountedAnchorPreviewState = snapshot.copy(
+                stack = snapshot.stack.take(existingIndex + 1),
+                errorMessage = null
+            )
+            return
+        }
+        if (link.isGhost) {
+            val ghostNode = MountedAnchorDocument(
+                notePath = normalizedTarget,
+                displayTitle = link.displayText.ifBlank {
+                    deriveMountedNoteDisplayTitle(normalizedTarget)
+                },
+                markdown = "",
+                rawMarkdown = "",
+                isGhost = true,
+                ghostInputPath = normalizedTarget
+            )
+            mountedAnchorPreviewState = snapshot.copy(
+                stack = snapshot.stack + ghostNode,
+                isLoading = false,
+                errorMessage = null
+            )
+            return
+        }
+        emitTelemetry(
+            ReaderTelemetryEvent(
+                nodeId = snapshot.blockId,
+                eventType = "mounted_note_opened",
+                relevanceScore = 0f,
+                payload = mapOf(
+                    "anchorId" to snapshot.anchorId,
+                    "quote" to snapshot.quote,
+                    "source" to "wikilink",
+                    "targetNotePath" to normalizedTarget,
+                    "wikilinkTitle" to link.displayText
+                )
+            )
+        )
+        fetchMountedAnchorDocument(
+            anchorId = snapshot.anchorId,
+            requestedNotePath = normalizedTarget,
+            displayTitle = link.displayText,
+            appendToStack = true,
+            fallbackAsGhost = true
+        )
+    }
+
+    fun bindGhostMountedNote(rawPath: String) {
+        val snapshot = mountedAnchorPreviewState ?: return
+        val normalizedTarget = normalizeMountedNotePath(rawPath)
+        if (normalizedTarget.isBlank()) {
+            updateMountedPreviewState { current ->
+                current.copy(errorMessage = "请输入可绑定的 Markdown 路径")
+            }
+            return
+        }
+        mountedAnchorPreviewState = snapshot.copy(
+            stack = if (snapshot.stack.isNotEmpty()) snapshot.stack.dropLast(1) else snapshot.stack,
+            errorMessage = null
+        )
+        fetchMountedAnchorDocument(
+            anchorId = snapshot.anchorId,
+            requestedNotePath = normalizedTarget,
+            displayTitle = deriveMountedNoteDisplayTitle(normalizedTarget),
+            appendToStack = true,
+            fallbackAsGhost = true
+        )
+    }
+
+    fun popMountedPreviewTo(index: Int) {
+        updateMountedPreviewState { current ->
+            if (index < 0 || index >= current.stack.size) {
+                current
+            } else {
+                current.copy(
+                    stack = current.stack.take(index + 1),
+                    errorMessage = null
+                )
+            }
+        }
+    }
+
+    fun popMountedPreviewOneLevel() {
+        updateMountedPreviewState { current ->
+            when {
+                current.stack.size > 1 -> current.copy(
+                    stack = current.stack.dropLast(1),
+                    errorMessage = null
+                )
+                current.isFullscreen -> current.copy(isFullscreen = false)
+                else -> current
+            }
+        }
+    }
+
+    fun backToMountedPreviewRoot() {
+        updateMountedPreviewState { current ->
+            if (current.stack.size <= 1) {
+                current
+            } else {
+                current.copy(
+                    stack = listOf(current.stack.first()),
+                    errorMessage = null
+                )
+            }
+        }
+    }
 
     LaunchedEffect(activeParagraphBoundsBlockId) {
         if (activeParagraphBoundsBlockId == null) {
@@ -565,6 +968,7 @@ fun SemanticTopographyReader(
                         tokenAnnotationBubbleState = null
                         tokenSelections.clear()
                         dismissFloatingBubble(clearSelection = true)
+                        onBlankTap()
                         if (activeCommentBlockId != null) {
                             activeCommentBlockId = null
                             emitTelemetry(
@@ -586,7 +990,8 @@ fun SemanticTopographyReader(
             }
     ) {
         // 将 SemanticNode 按 Markdown 语义块拆分为 SemanticBlock
-        val blocks = remember(nodes) { splitSemanticNodesIntoBlocks(nodes) }
+        val blocks = remember(nodes) { buildSingleMarkdownReaderBlock(nodes) }
+        val blockInteractionEnabled = false
 
         LazyColumn(
             state = listState,
@@ -607,6 +1012,7 @@ fun SemanticTopographyReader(
                 }
             ) { index, block ->
                 val blockTokenAnnotations = tokenAnnotationsByBlock[block.blockId].orEmpty()
+                val blockAnchors = anchorsByBlock[block.blockId].orEmpty()
                 val shouldTrackParagraphBounds = activeParagraphBoundsBlockId == block.blockId
                 TopographyParagraph(
                     block = block,
@@ -614,15 +1020,19 @@ fun SemanticTopographyReader(
                     listState = listState,
                     markwon = markwon,
                     renderConfig = renderConfig,
+                    taskId = taskId,
+                    apiBaseUrl = apiBaseUrl,
                     selection = tokenSelections[block.blockId],
                     overlayRootWindowOffset = overlayRootWindowOffset,
-                    isFavorited = favoritesState[block.blockId] == true,
-                    isMarkedDeleted = deletedState[block.blockId] == true,
-                    existingComments = commentsState[block.blockId].orEmpty(),
+                    isFavorited = false,
+                    isMarkedDeleted = false,
+                    existingComments = emptyList(),
                     likedTokenKeys = emptySet(),
                     tokenAnnotations = blockTokenAnnotations,
-                    isCommentPanelExpanded = activeCommentBlockId == block.blockId,
+                    anchors = blockAnchors,
+                    isCommentPanelExpanded = false,
                     shouldTrackParagraphBounds = shouldTrackParagraphBounds,
+                    enableBlockInteractions = blockInteractionEnabled,
                     onParagraphBoundsChanged = { bounds ->
                         if (bounds == null) {
                             paragraphOverlayBoundsState.remove(block.blockId)
@@ -670,6 +1080,61 @@ fun SemanticTopographyReader(
                         }
                         scheduleMetaSync(reason = "token_annotation_upsert")
                     },
+                    onUpsertAnchor = { tokenSelection, anchorHint ->
+                        val metaKey = buildTokenMetaKey(
+                            blockId = block.blockId,
+                            start = tokenSelection.start,
+                            end = tokenSelection.end
+                        )
+                        val existing = anchorsState[metaKey]
+                        val contextQuote = buildAnchorContextQuoteSnapshot(
+                            blockText = block.plainText,
+                            start = tokenSelection.start,
+                            end = tokenSelection.end
+                        )
+                        val nextAnchorHint = if (anchorHint == null) {
+                            existing?.anchorHint.orEmpty().trim()
+                        } else {
+                            anchorHint.trim()
+                        }
+                        val nextStatus = when {
+                            existing?.status.equals("mounted", ignoreCase = true) -> "mounted"
+                            existing?.status.equals("files_uploaded", ignoreCase = true) -> "files_uploaded"
+                            else -> "pending"
+                        }
+                        anchorsState[metaKey] = MobileAnchorData(
+                            blockId = block.blockId,
+                            startIndex = tokenSelection.start,
+                            endIndex = tokenSelection.end,
+                            quote = tokenSelection.token.trim(),
+                            contextQuote = contextQuote.ifBlank { existing?.contextQuote.orEmpty() },
+                            anchorHint = nextAnchorHint,
+                            status = nextStatus,
+                            mountedPath = existing?.mountedPath.orEmpty(),
+                            mountedRevisionId = existing?.mountedRevisionId.orEmpty(),
+                            updatedAt = java.time.Instant.now().toString(),
+                            revisions = existing?.revisions.orEmpty()
+                        )
+                        scheduleMetaSync(reason = "anchor_marked")
+                    },
+                    onRemoveAnchor = { tokenSelection ->
+                        val metaKey = buildTokenMetaKey(
+                            blockId = block.blockId,
+                            start = tokenSelection.start,
+                            end = tokenSelection.end
+                        )
+                        val removed = anchorsState.remove(metaKey)
+                        if (removed != null) {
+                            scheduleMetaSync(reason = "anchor_removed")
+                        }
+                    },
+                    onRequestOpenMountedAnchor = { selection, anchorData ->
+                        openMountedAnchorPreview(
+                            blockId = block.blockId,
+                            selection = selection,
+                            anchorData = anchorData
+                        )
+                    },
                     onRequestOpenTokenAnnotationEditor = { tokenSelection, anchor ->
                         openTokenAnnotationEditor(
                             blockId = block.blockId,
@@ -684,72 +1149,12 @@ fun SemanticTopographyReader(
                             anchor = anchor
                         )
                     },
-                    onMarkDeleted = {
-                        deletedState[block.blockId] = true
-                        scheduleMetaSync(reason = "mark_deleted")
-                        onMarkDeleted(block.blockId)
-                    },
-                    onRestoreDeleted = {
-                        deletedState.remove(block.blockId)
-                        scheduleMetaSync(reason = "restore_deleted")
-                    },
-                    onResonance = {
-                        if (favoritesState[block.blockId] == true) {
-                            favoritesState.remove(block.blockId)
-                        } else {
-                            favoritesState[block.blockId] = true
-                        }
-                        scheduleMetaSync(reason = "resonance_toggle")
-                        onResonance(block.blockId)
-                    },
-                    onCommentCommitted = { comment ->
-                        val merged = (commentsState[block.blockId].orEmpty() + comment)
-                            .filter { it.isNotBlank() }
-                            .takeLast(30)
-                        if (merged.isEmpty()) {
-                            commentsState.remove(block.blockId)
-                        } else {
-                            commentsState[block.blockId] = merged
-                        }
-                        scheduleMetaSync(reason = "comment")
-                    },
-                    onRequestOpenCommentPanel = { source ->
-                        activeCommentBlockId = block.blockId
-                        val commentPanelCenterRatio = when (source) {
-                            "selection_action_annotate" -> 0.2f
-                            "swipe_right" -> 0.2f
-                            else -> 0.22f
-                        }
-                        scope.launch {
-                            delay(220) // 等面板展开动画完成后再滚动定位
-                            autoCenterItem(
-                                listState = listState,
-                                itemIndex = index,
-                                centerRatio = commentPanelCenterRatio
-                            )
-                        }
-                        emitTelemetry(
-                            ReaderTelemetryEvent(
-                                nodeId = block.blockId,
-                                eventType = "comment_panel_opened",
-                                relevanceScore = block.relevanceScore,
-                                payload = mapOf("source" to source)
-                            )
-                        )
-                    },
-                    onRequestCloseCommentPanel = { source ->
-                        if (activeCommentBlockId == block.blockId) {
-                            activeCommentBlockId = null
-                            emitTelemetry(
-                                ReaderTelemetryEvent(
-                                    nodeId = block.blockId,
-                                    eventType = "comment_panel_closed",
-                                    relevanceScore = block.relevanceScore,
-                                    payload = mapOf("source" to source)
-                                )
-                            )
-                        }
-                    },
+                    onMarkDeleted = {},
+                    onRestoreDeleted = {},
+                    onResonance = {},
+                    onCommentCommitted = { _ -> },
+                    onRequestOpenCommentPanel = { _ -> },
+                    onRequestCloseCommentPanel = { _ -> },
                     onGestureEvent = onGestureEvent,
                     onTelemetry = ::emitTelemetry
                 )
@@ -788,6 +1193,88 @@ fun SemanticTopographyReader(
                 tokenAnnotationBubbleState = null
             }
         )
+        val mountedPreviewState = mountedAnchorPreviewState
+        if (mountedPreviewState != null) {
+            ModalBottomSheet(
+                onDismissRequest = {
+                    mountedAnchorPreviewState = null
+                    mountedAnchorPreviewRequestVersion += 1
+                }
+            ) {
+                MountedAnchorPreviewContent(
+                    state = mountedPreviewState,
+                    markwon = markwon,
+                    isFullscreen = false,
+                    onWikilinkTap = { link ->
+                        openMountedWikilink(link)
+                    },
+                    onJumpToBreadcrumb = { index ->
+                        popMountedPreviewTo(index)
+                    },
+                    onPopOneLevel = {
+                        popMountedPreviewOneLevel()
+                    },
+                    onBackToRoot = {
+                        backToMountedPreviewRoot()
+                    },
+                    onSetFullscreen = { enabled ->
+                        updateMountedPreviewState { current ->
+                            current.copy(isFullscreen = enabled)
+                        }
+                    },
+                    onBindGhostPath = { path ->
+                        bindGhostMountedNote(path)
+                    }
+                )
+            }
+            if (mountedPreviewState.isFullscreen) {
+                BackHandler(enabled = true) {
+                    popMountedPreviewOneLevel()
+                }
+                Dialog(
+                    onDismissRequest = {
+                        updateMountedPreviewState { current ->
+                            current.copy(isFullscreen = false)
+                        }
+                    },
+                    properties = DialogProperties(
+                        usePlatformDefaultWidth = false,
+                        decorFitsSystemWindows = false
+                    )
+                ) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = Color(0xFFF8FAFC)
+                    ) {
+                        MountedAnchorPreviewContent(
+                            state = mountedPreviewState,
+                            markwon = markwon,
+                            isFullscreen = true,
+                            onWikilinkTap = { link ->
+                                openMountedWikilink(link)
+                            },
+                            onJumpToBreadcrumb = { index ->
+                                popMountedPreviewTo(index)
+                            },
+                            onPopOneLevel = {
+                                popMountedPreviewOneLevel()
+                            },
+                            onBackToRoot = {
+                                backToMountedPreviewRoot()
+                            },
+                            onSetFullscreen = { enabled ->
+                                updateMountedPreviewState { current ->
+                                    current.copy(isFullscreen = enabled)
+                                }
+                            },
+                            onBindGhostPath = { path ->
+                                bindGhostMountedNote(path)
+                            }
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -797,6 +1284,7 @@ fun SemanticTopographyReader(
  * 2. 触发段落级手势和埋点上报。
  * 3. 在当前段内渲染 markdown 与强调样式。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TopographyParagraph(
     block: SemanticBlock,
@@ -804,6 +1292,8 @@ private fun TopographyParagraph(
     listState: LazyListState,
     markwon: Markwon,
     renderConfig: MarkdownReaderRenderConfig,
+    taskId: String?,
+    apiBaseUrl: String,
     selection: TokenSelection?,
     overlayRootWindowOffset: Offset,
     isFavorited: Boolean,
@@ -811,13 +1301,18 @@ private fun TopographyParagraph(
     existingComments: List<String>,
     likedTokenKeys: Set<String>,
     tokenAnnotations: Map<String, String>,
+    anchors: Map<String, MobileAnchorData>,
     isCommentPanelExpanded: Boolean,
     shouldTrackParagraphBounds: Boolean,
+    enableBlockInteractions: Boolean,
     onParagraphBoundsChanged: (ParagraphOverlayBounds?) -> Unit,
     onSelectionChanged: (TokenSelection?) -> Unit,
     onInsightTermTapped: (InsightTermTapPayload) -> Unit,
     onToggleTokenLike: (TokenSelection, Boolean) -> Unit,
     onUpsertTokenAnnotation: (TokenSelection, String) -> Unit,
+    onUpsertAnchor: (TokenSelection, String?) -> Unit,
+    onRemoveAnchor: (TokenSelection) -> Unit,
+    onRequestOpenMountedAnchor: (TokenSelection, MobileAnchorData) -> Unit,
     onRequestOpenTokenAnnotationEditor: (TokenSelection, InsightTermAnchor?) -> Unit,
     onRequestOpenTokenAnnotationBubble: (TokenSelection, InsightTermAnchor?) -> Unit,
     onMarkDeleted: () -> Unit,
@@ -831,6 +1326,7 @@ private fun TopographyParagraph(
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val haptic = LocalHapticFeedback.current
     val density = LocalDensity.current
     val view = LocalView.current
@@ -858,6 +1354,15 @@ private fun TopographyParagraph(
     }
     var noteDraft by remember(block.blockId) {
         mutableStateOf("")
+    }
+    var pendingAnchorHintSelection by remember(block.blockId) {
+        mutableStateOf<TokenSelection?>(null)
+    }
+    var pendingAnchorHintDraft by remember(block.blockId) {
+        mutableStateOf("")
+    }
+    var activePreviewImage by remember(block.blockId) {
+        mutableStateOf<InlineImageItem?>(null)
     }
     val paragraphBoundsForOverlayRef = remember(block.blockId) {
         ParagraphBoundsRef()
@@ -928,9 +1433,24 @@ private fun TopographyParagraph(
             nodeType = block.type
         )
     }
-    val readerMarkdown = remember(block.markdown) {
-        block.markdown
+    val rewrittenMedia = remember(block.markdown, taskId, apiBaseUrl) {
+        rewriteReaderMarkdownMedia(
+            markdown = block.markdown,
+            taskId = taskId,
+            apiBaseUrl = apiBaseUrl
+        )
     }
+    val readerMarkdown = rewrittenMedia.markdown
+    val normalizedReaderMarkdown = remember(
+        readerMarkdown,
+        renderConfig.listIndentInputUnitSpaces,
+        renderConfig.listIndentOutputUnitSpaces,
+        renderConfig.listIndentMaxDepth,
+        renderConfig.listIndentTabSpaces
+    ) {
+        readerMarkdown
+    }
+    val inlineVideos = rewrittenMedia.videos
     fun resolveSelectionByRangeKey(rangeKey: String): TokenSelection? {
         val parts = rangeKey.split(':')
         if (parts.size != 2) {
@@ -956,6 +1476,32 @@ private fun TopographyParagraph(
         .keys
         .mapNotNull(::resolveSelectionByRangeKey)
         .sortedBy { it.start }
+    val resolvedAnchorSelections = anchors
+        .mapNotNull { (rangeKey, anchorData) ->
+            val resolved = resolveAnchorSelectionForDisplay(
+                rangeKey = rangeKey,
+                anchorData = anchorData,
+                source = readerText
+            ) ?: return@mapNotNull null
+            ResolvedAnchorSelection(
+                selection = resolved,
+                anchorData = anchorData
+            )
+        }
+        .sortedBy { it.selection.start }
+    val anchorsByDisplayRange = remember(resolvedAnchorSelections) {
+        linkedMapOf<String, MobileAnchorData>().apply {
+            resolvedAnchorSelections.forEach { item ->
+                putIfAbsent(rangeKey(item.selection), item.anchorData)
+            }
+        }
+    }
+    val pendingAnchorSelections = resolvedAnchorSelections
+        .filter { !it.anchorData.status.equals("mounted", ignoreCase = true) }
+        .map { it.selection }
+    val mountedAnchorSelections = resolvedAnchorSelections
+        .filter { it.anchorData.status.equals("mounted", ignoreCase = true) }
+        .map { it.selection }
     val tokenAnnotationItems = tokenAnnotations
         .mapNotNull { (rangeKey, note) ->
             val selection = resolveSelectionByRangeKey(rangeKey) ?: return@mapNotNull null
@@ -1048,7 +1594,17 @@ private fun TopographyParagraph(
         label = "noise-guide-expand-progress"
     )
 
-    val indentPaddingStart = (block.indentLevel * renderConfig.spacingIndentLevelDp).dp
+    val safeBlockIndentLevel = block.indentLevel
+        .coerceIn(0, renderConfig.listIndentMaxDepth.coerceAtLeast(0))
+    val indentPaddingStart = (safeBlockIndentLevel * renderConfig.spacingIndentLevelDp).dp
+    LaunchedEffect(block.blockId, block.indentLevel, safeBlockIndentLevel) {
+        if (safeBlockIndentLevel != block.indentLevel) {
+            Log.w(
+                READER_LAYOUT_LOG_TAG,
+                "block-indent-clamped blockId=${block.blockId} rawIndent=${block.indentLevel} safeIndent=$safeBlockIndentLevel"
+            )
+        }
+    }
 
     DisposableEffect(block.blockId) {
         onDispose {
@@ -1067,13 +1623,15 @@ private fun TopographyParagraph(
             .widthIn(max = 720.dp)
             .onSizeChanged { paragraphWidthPx = max(1, it.width) },
         background = {
-            ParagraphSwipeBackdrop(
-                deleteRevealProgress = deleteRevealProgress,
-                annotateRevealProgress = annotateRevealProgress,
-                hasComments = existingComments.isNotEmpty(),
-                isMarkedDeleted = isMarkedDeleted,
-                isCommentPanelExpanded = isCommentPanelExpanded
-            )
+            if (enableBlockInteractions) {
+                ParagraphSwipeBackdrop(
+                    deleteRevealProgress = deleteRevealProgress,
+                    annotateRevealProgress = annotateRevealProgress,
+                    hasComments = existingComments.isNotEmpty(),
+                    isMarkedDeleted = isMarkedDeleted,
+                    isCommentPanelExpanded = isCommentPanelExpanded
+                )
+            }
         },
         foregroundOffsetX = offsetX.roundToInt(),
         foreground = {
@@ -1141,7 +1699,16 @@ private fun TopographyParagraph(
                             }
                         }
                         .alpha(if (isMarkedDeleted) 0.6f else 1f)
-                        .pointerInput(block.blockId, deleteRevealLimit, annotateRevealLimit, isMarkedDeleted) {
+                        .pointerInput(
+                            enableBlockInteractions,
+                            block.blockId,
+                            deleteRevealLimit,
+                            annotateRevealLimit,
+                            isMarkedDeleted
+                        ) {
+                            if (!enableBlockInteractions) {
+                                return@pointerInput
+                            }
                             detectHorizontalDragGestures(
                                 onDragStart = {
                                     hasHapticPlayedForSwipeCommit = false
@@ -1358,7 +1925,7 @@ private fun TopographyParagraph(
                                 .padding(bottom = 5.dp)
                         )
                     }
-                    Box(modifier = Modifier.padding(top = headingInnerTopPadding)) {
+                    Column(modifier = Modifier.padding(top = headingInnerTopPadding)) {
                         val showNoiseDetails = !useNoiseCapsule || isNoiseExpanded
                     androidx.compose.animation.AnimatedVisibility(
                         visible = useNoiseCapsule && !isNoiseExpanded,
@@ -1491,7 +2058,7 @@ private fun TopographyParagraph(
                                         }
                                 ) {
                                     MarkdownParagraph(
-                                        markdown = readerMarkdown,
+                                        markdown = normalizedReaderMarkdown,
                                         plainText = readerText,
                                         markwon = markwon,
                                         renderConfig = renderConfig,
@@ -1500,6 +2067,9 @@ private fun TopographyParagraph(
                                         lineSpacingMultiplier = lineSpacingMultiplier,
                                         textColor = textColor,
                                         fontWeight = if (useNoiseCapsule) FontWeight.Normal else finalFontWeight,
+                                        blockId = block.blockId,
+                                        blockType = block.type,
+                                        blockIndentLevel = safeBlockIndentLevel,
                                         selection = selection,
                                         isFavorited = isFavorited,
                                         overlayRootWindowOffset = overlayRootWindowOffset,
@@ -1507,9 +2077,15 @@ private fun TopographyParagraph(
                                         emphasizedSelections = emphasizedSelections,
                                         likedSelections = likedSelections,
                                         annotatedSelections = annotatedSelections,
+                                        pendingAnchorSelections = pendingAnchorSelections,
+                                        mountedAnchorSelections = mountedAnchorSelections,
                                         modifier = Modifier.fillMaxWidth(),
                                         onSelectionAction = { action, selected, anchor ->
-                                            onSelectionChanged(selected)
+                                            if (action == SelectionContextAction.ToggleBold) {
+                                                onSelectionChanged(null)
+                                            } else {
+                                                onSelectionChanged(selected)
+                                            }
                                             when (action) {
                                                 SelectionContextAction.Copy -> {
                                                     val tokenText = selected.token.trim()
@@ -1554,6 +2130,8 @@ private fun TopographyParagraph(
                                                 }
                                                 SelectionContextAction.ToggleBold -> {
                                                     val emphasizedNow = toggleSelectionEmphasis(selected)
+                                                    textRenderRefreshVersion += 1
+                                                    onSelectionChanged(null)
                                                     Toast.makeText(
                                                         context,
                                                         if (emphasizedNow) "已加粗" else "已取消加粗",
@@ -1571,17 +2149,9 @@ private fun TopographyParagraph(
                                                     )
                                                 }
                                                 SelectionContextAction.Annotate -> {
-                                                    val annotationAnchor = paragraphBoundsForOverlayRef.value
-                                                        ?.toOverlayAnchor()
-                                                        ?: anchor
-                                                    scope.launch {
-                                                        autoCenterItem(
-                                                            listState = listState,
-                                                            itemIndex = index,
-                                                            centerRatio = 0.24f
-                                                        )
-                                                        onRequestOpenTokenAnnotationEditor(selected, annotationAnchor)
-                                                    }
+                                                    val annotationAnchor = anchor
+                                                        ?: paragraphBoundsForOverlayRef.value?.toOverlayAnchor()
+                                                    onRequestOpenTokenAnnotationEditor(selected, annotationAnchor)
                                                     onTelemetry(
                                                         ReaderTelemetryEvent(
                                                             nodeId = block.blockId,
@@ -1618,38 +2188,92 @@ private fun TopographyParagraph(
                                                         )
                                                     )
                                                 }
+                                                SelectionContextAction.MarkAnchor -> {
+                                                    val anchorId = buildTokenMetaKey(
+                                                        blockId = block.blockId,
+                                                        start = selected.start,
+                                                        end = selected.end
+                                                    )
+                                                    val rangeKey = rangeKey(selected)
+                                                    val existingAnchor = anchors[rangeKey]
+                                                    if (existingAnchor != null) {
+                                                        onRemoveAnchor(selected)
+                                                        pendingAnchorHintSelection = null
+                                                        pendingAnchorHintDraft = ""
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        Toast.makeText(
+                                                            context,
+                                                            "锚点已移除",
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                        onTelemetry(
+                                                            ReaderTelemetryEvent(
+                                                                nodeId = block.blockId,
+                                                                eventType = "anchor_removed",
+                                                                relevanceScore = block.relevanceScore,
+                                                                payload = mapOf(
+                                                                    "anchorId" to anchorId,
+                                                                    "blockId" to block.blockId,
+                                                                    "start" to selected.start.toString(),
+                                                                    "end" to selected.end.toString(),
+                                                                    "quote" to selected.token.trim(),
+                                                                    "status_before_remove" to existingAnchor.status.trim()
+                                                                )
+                                                            )
+                                                        )
+                                                    } else {
+                                                        val contextQuote = buildAnchorContextQuoteSnapshot(
+                                                            blockText = readerText,
+                                                            start = selected.start,
+                                                            end = selected.end
+                                                        )
+                                                        onUpsertAnchor(selected, null)
+                                                        pendingAnchorHintDraft = ""
+                                                        pendingAnchorHintSelection = selected
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        Toast.makeText(
+                                                            context,
+                                                            "锚点已标记，可补充一句备忘",
+                                                            Toast.LENGTH_SHORT
+                                                        ).show()
+                                                        onTelemetry(
+                                                            ReaderTelemetryEvent(
+                                                                nodeId = block.blockId,
+                                                                eventType = "anchor_created",
+                                                                relevanceScore = block.relevanceScore,
+                                                                payload = mapOf(
+                                                                    "anchorId" to anchorId,
+                                                                    "blockId" to block.blockId,
+                                                                    "start" to selected.start.toString(),
+                                                                    "end" to selected.end.toString(),
+                                                                    "quote" to selected.token.trim(),
+                                                                    "context_quote" to contextQuote,
+                                                                    "anchor_hint" to pendingAnchorHintDraft.trim()
+                                                                )
+                                                            )
+                                                        )
+                                                    }
+                                                }
                                             }
                                         },
-                                        onTokenSingleTap = { cursor, anchor ->
-                                            val normalizedCursor = normalizeLexicalCursor(
-                                                text = readerText,
-                                                cursor = cursor
-                                            )
-                                            val selection = if (normalizedCursor == null) {
-                                                null
-                                            } else {
-                                                resolveTokenSelection(
-                                                    text = readerText,
-                                                    cursor = normalizedCursor,
-                                                    nativePayload = runCatching {
-                                                        LexicalNativeBridge.segmentAt(readerText, normalizedCursor)
-                                                    }.getOrNull()
-                                                )
-                                            }
+                                        onTokenSingleTap = { selection, anchor ->
                                             if (selection != null) {
+                                                val anchorKey = rangeKey(selection)
+                                                val mountedAnchor = anchorsByDisplayRange[anchorKey]
+                                                    ?: anchors[anchorKey]
+                                                if (mountedAnchor != null &&
+                                                    mountedAnchor.status.equals("mounted", ignoreCase = true)
+                                                ) {
+                                                    onSelectionChanged(null)
+                                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                                    onRequestOpenMountedAnchor(selection, mountedAnchor)
+                                                    return@MarkdownParagraph
+                                                }
                                                 val note = tokenAnnotations[rangeKey(selection)].orEmpty().trim()
                                                 if (note.isNotBlank()) {
-                                                    val annotationAnchor = paragraphBoundsForOverlayRef.value
-                                                        ?.toOverlayAnchor()
-                                                        ?: anchor
-                                                    scope.launch {
-                                                        autoCenterItem(
-                                                            listState = listState,
-                                                            itemIndex = index,
-                                                            centerRatio = 0.28f
-                                                        )
-                                                        onRequestOpenTokenAnnotationBubble(selection, annotationAnchor)
-                                                    }
+                                                    val annotationAnchor = anchor
+                                                        ?: paragraphBoundsForOverlayRef.value?.toOverlayAnchor()
+                                                    onRequestOpenTokenAnnotationBubble(selection, annotationAnchor)
                                                 }
                                                 onSelectionChanged(null)
                                                 haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
@@ -1665,7 +2289,7 @@ private fun TopographyParagraph(
                                                         )
                                                     )
                                                 )
-                                            } else if (existingComments.isNotEmpty()) {
+                                            } else if (enableBlockInteractions && existingComments.isNotEmpty()) {
                                                 onRequestOpenCommentPanel("paragraph_tap_with_comment")
                                             }
                                         },
@@ -1693,7 +2317,21 @@ private fun TopographyParagraph(
                                                 )
                                             }
                                         },
+                                        onInlineImageTap = { image ->
+                                            activePreviewImage = image
+                                            onTelemetry(
+                                                ReaderTelemetryEvent(
+                                                    nodeId = block.blockId,
+                                                    eventType = "inline_image_preview_opened",
+                                                    relevanceScore = block.relevanceScore,
+                                                    payload = mapOf("url" to image.url)
+                                                )
+                                            )
+                                        },
                                         onParagraphDoubleTap = { tapOffset ->
+                                            if (!enableBlockInteractions) {
+                                                return@MarkdownParagraph
+                                            }
                                             rippleCenter = tapOffset
                                             scope.launch {
                                                 rippleProgress.snapTo(0f)
@@ -1733,6 +2371,24 @@ private fun TopographyParagraph(
                                         },
                                     )
                                 }
+                                if (inlineVideos.isNotEmpty()) {
+                                    InlineVideoList(
+                                        videos = inlineVideos,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 12.dp),
+                                        onTelemetry = { eventType, url ->
+                                            onTelemetry(
+                                                ReaderTelemetryEvent(
+                                                    nodeId = block.blockId,
+                                                    eventType = eventType,
+                                                    relevanceScore = block.relevanceScore,
+                                                    payload = mapOf("url" to url)
+                                                )
+                                            )
+                                        }
+                                    )
+                                }
                             }
                             if (useNoiseCapsule && isNoiseExpanded) {
                                 Row(
@@ -1769,7 +2425,23 @@ private fun TopographyParagraph(
                             }
                         }
                     }
-                    if (isMarkedDeleted) {
+                    val previewImage = activePreviewImage
+                    if (previewImage != null) {
+                        ReaderImageLightbox(
+                            image = previewImage,
+                            onDismiss = {
+                                activePreviewImage = null
+                                onTelemetry(
+                                    ReaderTelemetryEvent(
+                                        nodeId = block.blockId,
+                                        eventType = "inline_image_preview_closed",
+                                        relevanceScore = block.relevanceScore
+                                    )
+                                )
+                            }
+                        )
+                    }
+                    if (enableBlockInteractions && isMarkedDeleted) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1794,7 +2466,7 @@ private fun TopographyParagraph(
                         }
                     }
 
-                    if (existingComments.isNotEmpty()) {
+                    if (enableBlockInteractions && existingComments.isNotEmpty()) {
                         CommentUnderlineAffordance(
                             commentsCount = existingComments.size,
                             isExpanded = isCommentPanelExpanded,
@@ -1809,7 +2481,7 @@ private fun TopographyParagraph(
                 }
             }
             androidx.compose.animation.AnimatedVisibility(
-                visible = isCommentPanelExpanded,
+                visible = enableBlockInteractions && isCommentPanelExpanded,
                 enter = fadeIn(animationSpec = tween(durationMillis = 110)) + expandVertically(
                     expandFrom = Alignment.Top,
                     animationSpec = spring(dampingRatio = 0.82f, stiffness = 420f)
@@ -1852,6 +2524,107 @@ private fun TopographyParagraph(
         }
         }
     )
+    val hintSelection = pendingAnchorHintSelection
+    if (hintSelection != null) {
+        ModalBottomSheet(
+            onDismissRequest = {
+                pendingAnchorHintSelection = null
+                pendingAnchorHintDraft = ""
+                keyboardController?.hide()
+            }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "正在为 \"${hintSelection.token.trim()}\" 设立锚点…",
+                    fontSize = 15.sp,
+                    color = Color(0xFF0F172A),
+                    fontWeight = FontWeight.SemiBold
+                )
+                OutlinedTextField(
+                    value = pendingAnchorHintDraft,
+                    onValueChange = { next ->
+                        if (next.contains('\n')) {
+                            val normalized = next.replace('\n', ' ').trim()
+                            onUpsertAnchor(hintSelection, normalized)
+                            onTelemetry(
+                                ReaderTelemetryEvent(
+                                    nodeId = block.blockId,
+                                    eventType = "anchor_hint_updated",
+                                    relevanceScore = block.relevanceScore,
+                                    payload = mapOf(
+                                        "anchorId" to buildTokenMetaKey(
+                                            blockId = block.blockId,
+                                            start = hintSelection.start,
+                                            end = hintSelection.end
+                                        ),
+                                        "anchor_hint" to normalized
+                                    )
+                                )
+                            )
+                            pendingAnchorHintSelection = null
+                            pendingAnchorHintDraft = ""
+                            keyboardController?.hide()
+                            Toast.makeText(context, "锚点备忘已保存", Toast.LENGTH_SHORT).show()
+                        } else {
+                            pendingAnchorHintDraft = next.take(120)
+                        }
+                    },
+                    placeholder = {
+                        Text("一句话记录你此刻的灵感（选填，回车直接保存）")
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(
+                        onClick = {
+                            pendingAnchorHintSelection = null
+                            pendingAnchorHintDraft = ""
+                            keyboardController?.hide()
+                        }
+                    ) {
+                        Text("跳过")
+                    }
+                    TextButton(
+                        onClick = {
+                            val normalized = pendingAnchorHintDraft.trim()
+                            onUpsertAnchor(hintSelection, normalized)
+                            onTelemetry(
+                                ReaderTelemetryEvent(
+                                    nodeId = block.blockId,
+                                    eventType = "anchor_hint_updated",
+                                    relevanceScore = block.relevanceScore,
+                                    payload = mapOf(
+                                        "anchorId" to buildTokenMetaKey(
+                                            blockId = block.blockId,
+                                            start = hintSelection.start,
+                                            end = hintSelection.end
+                                        ),
+                                        "anchor_hint" to normalized
+                                    )
+                                )
+                            )
+                            pendingAnchorHintSelection = null
+                            pendingAnchorHintDraft = ""
+                            keyboardController?.hide()
+                            if (normalized.isNotBlank()) {
+                                Toast.makeText(context, "锚点备忘已保存", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    ) {
+                        Text("保存")
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun copyTextToClipboard(context: Context, text: String): Boolean {
@@ -2034,12 +2807,25 @@ private fun SubcomposeAnchorLayout(
     foreground: @Composable () -> Unit
 ) {
     SubcomposeLayout(modifier = modifier) { constraints ->
+        val hasBoundedWidth = constraints.maxWidth != Constraints.Infinity
+        val foregroundConstraints = if (hasBoundedWidth) {
+            constraints.copy(
+                minWidth = constraints.maxWidth,
+                maxWidth = constraints.maxWidth
+            )
+        } else {
+            constraints
+        }
         val foregroundPlaceables = subcompose("foreground", foreground).map {
-            it.measure(constraints)
+            it.measure(foregroundConstraints)
         }
 
-        val layoutWidth = (foregroundPlaceables.maxOfOrNull { it.width } ?: 0)
-            .coerceIn(constraints.minWidth, constraints.maxWidth)
+        val layoutWidth = if (hasBoundedWidth) {
+            constraints.maxWidth.coerceAtLeast(constraints.minWidth)
+        } else {
+            (foregroundPlaceables.maxOfOrNull { it.width } ?: 0)
+                .coerceAtLeast(constraints.minWidth)
+        }
         // 前景层尺寸以内容尺寸为准，保证滑动底板与正文区域严格对齐。
         val layoutHeight = foregroundPlaceables.sumOf { it.height }
             .coerceIn(constraints.minHeight, constraints.maxHeight)
@@ -2427,23 +3213,25 @@ private fun FloatingCardBubbleOverlay(
     val verticalMarginPx = with(density) { 18.dp.toPx() }
     val anchorGapPx = with(density) { 10.dp.toPx() }
     val tailSizePx = with(density) { 12.dp.toPx() }
-    val placement = remember(state, viewportSize, bubbleSize) {
-        resolveFloatingBubblePlacement(
-            anchor = state.anchor,
-            viewportSize = viewportSize,
-            bubbleSize = bubbleSize,
-            horizontalMarginPx = horizontalMarginPx,
-            verticalMarginPx = verticalMarginPx,
-            anchorGapPx = anchorGapPx,
-            tailSizePx = tailSizePx
-        )
-    } ?: return
-
     Box(
         modifier = Modifier
             .fillMaxSize()
             .onSizeChanged { viewportSize = it }
     ) {
+        val placement = remember(state, viewportSize, bubbleSize) {
+            resolveFloatingBubblePlacement(
+                anchor = state.anchor,
+                viewportSize = viewportSize,
+                bubbleSize = bubbleSize,
+                horizontalMarginPx = horizontalMarginPx,
+                verticalMarginPx = verticalMarginPx,
+                anchorGapPx = anchorGapPx,
+                tailSizePx = tailSizePx
+            )
+        }
+        if (placement == null) {
+            return@Box
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
@@ -2687,16 +3475,19 @@ private fun TokenAnnotationEditorOverlay(
     val paragraphBounds = paragraphBoundsByBlockId[state.blockId]
     val keyboard = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
-    val widthPx = 280f
-    val heightPx = 52f
+    var editorSize by remember(state.blockId, state.selection.start, state.selection.end) {
+        mutableStateOf(IntSize(width = 280, height = 52))
+    }
+    val widthPx = editorSize.width.toFloat().coerceAtLeast(220f)
+    val heightPx = editorSize.height.toFloat().coerceAtLeast(52f)
     val marginPx = 12f
     val fallbackCenterX = (viewportSize.width.toFloat() * 0.5f).coerceAtLeast(marginPx + widthPx / 2f)
-    val targetCenterX = paragraphBounds?.centerX ?: anchor?.centerX ?: fallbackCenterX
+    val targetCenterX = anchor?.centerX ?: paragraphBounds?.centerX ?: fallbackCenterX
     val left = (targetCenterX - widthPx / 2f).coerceIn(
         minimumValue = marginPx,
         maximumValue = (viewportSize.width.toFloat() - widthPx - marginPx).coerceAtLeast(marginPx)
     )
-    val targetBottomY = paragraphBounds?.bottom ?: anchor?.bottomY ?: marginPx
+    val targetBottomY = anchor?.bottomY ?: paragraphBounds?.bottom ?: marginPx
     val top = (targetBottomY + 8f).coerceAtMost(
         (viewportSize.height.toFloat() - heightPx - marginPx).coerceAtLeast(marginPx)
     )
@@ -2728,6 +3519,11 @@ private fun TokenAnnotationEditorOverlay(
                 border = BorderStroke(1.dp, Color(0xFFFBBF24).copy(alpha = 0.65f)),
                 modifier = Modifier
                     .widthIn(min = 220.dp, max = 320.dp)
+                    .onSizeChanged { measured ->
+                        if (measured.width > 0 && measured.height > 0) {
+                            editorSize = measured
+                        }
+                    }
             ) {
                 Row(
                     modifier = Modifier
@@ -2788,12 +3584,12 @@ private fun TokenAnnotationBubbleOverlay(
     val widthPx = 260f
     val marginPx = 12f
     val fallbackCenterX = (viewportSize.width.toFloat() * 0.5f).coerceAtLeast(marginPx + widthPx / 2f)
-    val targetCenterX = paragraphBounds?.centerX ?: anchor?.centerX ?: fallbackCenterX
+    val targetCenterX = anchor?.centerX ?: paragraphBounds?.centerX ?: fallbackCenterX
     val left = (targetCenterX - widthPx / 2f).coerceIn(
         minimumValue = marginPx,
         maximumValue = (viewportSize.width.toFloat() - widthPx - marginPx).coerceAtLeast(marginPx)
     )
-    val targetBottomY = paragraphBounds?.bottom ?: anchor?.bottomY ?: marginPx
+    val targetBottomY = anchor?.bottomY ?: paragraphBounds?.bottom ?: marginPx
     val top = (targetBottomY + 8f).coerceAtMost(
         (viewportSize.height.toFloat() - 64f - marginPx).coerceAtLeast(marginPx)
     )
@@ -2857,6 +3653,82 @@ private fun compactReaderParagraphContent(
 
 private val READER_UNORDERED_LIST_PATTERN = Regex("(?m)^[\\s\\u3000]*(?:[-*+•]\\s+)")
 private val READER_ORDERED_LIST_PATTERN = Regex("(?m)^[\\s\\u3000]*\\d+[\\.\\)\\u3001]\\s+")
+private val READER_LIST_MARKER_PATTERN = Regex("^(?:[-*+]\\s+|\\d+[\\.)]\\s+)")
+private val READER_CODE_FENCE_LINE_PATTERN = Regex("^\\s*(`{3,}|~{3,}).*$")
+
+private fun normalizeReaderListIndentation(
+    markdown: String,
+    renderConfig: MarkdownReaderRenderConfig
+): String {
+    if (markdown.isBlank()) {
+        return markdown
+    }
+    val maxDepth = renderConfig.listIndentMaxDepth.coerceAtLeast(0)
+    if (maxDepth == 0) {
+        return markdown
+    }
+    val inputUnit = renderConfig.listIndentInputUnitSpaces.coerceAtLeast(1)
+    val outputUnit = renderConfig.listIndentOutputUnitSpaces.coerceAtLeast(1)
+    val tabSpaces = renderConfig.listIndentTabSpaces.coerceAtLeast(1)
+    var changed = false
+    var inFence = false
+    var inListContext = false
+    val normalized = markdown.lines().map { rawLine ->
+        val line = expandLeadingTabs(rawLine, tabSpaces)
+        if (line != rawLine) {
+            changed = true
+        }
+        if (READER_CODE_FENCE_LINE_PATTERN.matches(line)) {
+            inFence = !inFence
+            inListContext = false
+            return@map line
+        }
+        if (inFence) {
+            return@map line
+        }
+        val trimmed = line.trimStart()
+        if (trimmed.isBlank()) {
+            inListContext = false
+            return@map line
+        }
+        val leadingSpaces = line.length - trimmed.length
+        val isListLine = READER_LIST_MARKER_PATTERN.containsMatchIn(trimmed)
+        val isContinuation = inListContext && leadingSpaces > 0
+        if (!(isListLine || isContinuation)) {
+            inListContext = false
+            return@map line
+        }
+        inListContext = true
+        val depth = (leadingSpaces / inputUnit).coerceIn(0, maxDepth)
+        val normalizedLeading = depth * outputUnit
+        if (normalizedLeading == leadingSpaces) {
+            return@map line
+        }
+        changed = true
+        " ".repeat(normalizedLeading) + trimmed
+    }
+    return if (changed) normalized.joinToString("\n") else markdown
+}
+
+private fun expandLeadingTabs(line: String, tabSpaces: Int): String {
+    var index = 0
+    while (index < line.length && (line[index] == ' ' || line[index] == '\t')) {
+        index++
+    }
+    if (index == 0 || !line.substring(0, index).contains('\t')) {
+        return line
+    }
+    val builder = StringBuilder(line.length + tabSpaces)
+    line.substring(0, index).forEach { ch ->
+        if (ch == '\t') {
+            builder.append(" ".repeat(tabSpaces))
+        } else {
+            builder.append(ch)
+        }
+    }
+    builder.append(line.substring(index))
+    return builder.toString()
+}
 
 private fun applyReaderParagraphLineSpacing(
     textView: TextView,
@@ -2990,14 +3862,26 @@ private fun applyReaderTextLayoutPolicy(textView: TextView) {
         textView.hyphenationFrequency = Layout.HYPHENATION_FREQUENCY_NONE
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-        textView.isFallbackLineSpacing = false
+        textView.isFallbackLineSpacing = true
     }
 }
 
 private val MARKDOWN_LIST_LINE_PATTERN = Regex("(?m)^\\s*(?:[-*+]\\s+|\\d+[\\.)]\\s+)")
+private val MOUNTED_WIKILINK_PATTERN = Regex("\\[\\[([^\\[\\]]+)\\]\\]")
+private val OBSIDIAN_EMBED_PATTERN = Regex("!\\[\\[([^\\]]+)\\]\\]")
+private val MARKDOWN_IMAGE_INLINE_PATTERN = Regex("!\\[([^\\]]*)]\\(([^)]*)\\)")
+private val HTML_VIDEO_TAG_PATTERN = Regex(
+    "<video\\b[^>]*\\bsrc\\s*=\\s*([\"']?)([^\"'\\s>]+)\\1[^>]*>(?:\\s*</video>)?",
+    RegexOption.IGNORE_CASE
+)
+private val MARKDOWN_LINK_GENERIC_PATTERN = Regex("(?<!!)\\[([^\\]]+)]\\(([^)\\s]+)([^)]*)\\)")
+private val ABSOLUTE_URL_PATTERN = Regex("^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|#).+")
+private val IMAGE_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg")
+private val VIDEO_EXTENSIONS = setOf("mp4", "webm", "mov", "m4v")
 private const val DISABLE_TEXT_IS_NOISE_JUDGMENT = true
 private const val MARKDOWN_CACHE_MAX_ENTRIES = 180
 private const val MARKDOWN_CACHE_MAX_TEXT_LENGTH = 12_000
+private const val READER_LAYOUT_LOG_TAG = "ReaderLayoutProbe"
 private val READER_MARKDOWN_CACHE = object : LruCache<String, CharSequence>(MARKDOWN_CACHE_MAX_ENTRIES) {}
 
 private fun readCachedReaderMarkdown(markdown: String): CharSequence? {
@@ -3024,6 +3908,1337 @@ private fun writeCachedReaderMarkdown(markdown: String, rendered: CharSequence?)
     }
 }
 
+@Composable
+private fun MountedAnchorPreviewContent(
+    state: MountedAnchorPreviewState,
+    markwon: Markwon,
+    isFullscreen: Boolean,
+    onWikilinkTap: (MountedWikilinkTap) -> Unit,
+    onJumpToBreadcrumb: (Int) -> Unit,
+    onPopOneLevel: () -> Unit,
+    onBackToRoot: () -> Unit,
+    onSetFullscreen: (Boolean) -> Unit,
+    onBindGhostPath: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val stack = state.stack
+    val current = stack.lastOrNull()
+    val containerModifier = if (isFullscreen) {
+        Modifier
+            .fillMaxSize()
+            .pointerInput(isFullscreen, stack.size) {
+                val edgeThresholdPx = 24.dp.toPx()
+                val triggerThresholdPx = 92.dp.toPx()
+                var armed = false
+                var distance = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { offset ->
+                        armed = offset.x <= edgeThresholdPx
+                        distance = 0f
+                    },
+                    onHorizontalDrag = { change, dragAmount ->
+                        if (!armed) {
+                            return@detectHorizontalDragGestures
+                        }
+                        distance += dragAmount
+                        if (distance >= triggerThresholdPx) {
+                            onPopOneLevel()
+                            armed = false
+                            distance = 0f
+                        }
+                        change.consume()
+                    },
+                    onDragEnd = {
+                        armed = false
+                        distance = 0f
+                    },
+                    onDragCancel = {
+                        armed = false
+                        distance = 0f
+                    }
+                )
+            }
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp)
+            .padding(bottom = 24.dp)
+    }
+    var ghostDraftPath by remember(current?.notePath, current?.ghostInputPath) {
+        mutableStateOf(current?.ghostInputPath.orEmpty().ifBlank { current?.notePath.orEmpty() })
+    }
+    Column(
+        modifier = containerModifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (isFullscreen) "挂载笔记 · 深度阅读" else "锚点挂载笔记",
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFF0F172A),
+                fontSize = 18.sp
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = {
+                        onSetFullscreen(!isFullscreen)
+                    }
+                ) {
+                    Text(if (isFullscreen) "退出全屏" else "全屏阅读")
+                }
+                if (stack.size > 1) {
+                    TextButton(onClick = onPopOneLevel) {
+                        Text("返回上层")
+                    }
+                }
+            }
+        }
+        if (state.quote.isNotBlank()) {
+            Text(
+                text = "「${state.quote}」",
+                color = Color(0xFF1E3A8A),
+                fontSize = 14.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (stack.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                stack.forEachIndexed { index, item ->
+                    val selected = index == stack.lastIndex
+                    TextButton(
+                        onClick = {
+                            if (!selected) {
+                                onJumpToBreadcrumb(index)
+                            }
+                        },
+                        enabled = !selected
+                    ) {
+                        Text(
+                            text = item.displayTitle,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = if (selected) Color(0xFF1E3A8A) else Color(0xFF475569),
+                            fontSize = 12.sp
+                        )
+                    }
+                    if (index != stack.lastIndex) {
+                        Text(
+                            text = "›",
+                            color = Color(0xFF94A3B8),
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        }
+        if (!current?.notePath.isNullOrBlank()) {
+            Text(
+                text = current?.notePath.orEmpty(),
+                color = Color(0xFF64748B),
+                fontSize = 12.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (state.isLoading) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp
+                )
+                Text(
+                    text = "正在加载挂载笔记...",
+                    color = Color(0xFF334155),
+                    fontSize = 14.sp
+                )
+            }
+            return
+        }
+        if (current == null) {
+            Text(
+                text = "该锚点暂未发现可展示的 Markdown 内容。",
+                color = Color(0xFF64748B),
+                fontSize = 14.sp
+            )
+            return
+        }
+        if (!state.errorMessage.isNullOrBlank()) {
+            Text(
+                text = "加载失败：${state.errorMessage}",
+                color = Color(0xFFB42318),
+                fontSize = 14.sp
+            )
+        }
+        if (current.isGhost) {
+            Text(
+                text = "该双链尚未绑定现有笔记，可立即指定路径尝试绑定。",
+                color = Color(0xFF64748B),
+                fontSize = 13.sp
+            )
+            OutlinedTextField(
+                value = ghostDraftPath,
+                onValueChange = { next ->
+                    ghostDraftPath = next
+                },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("绑定路径（相对 revision 目录）") },
+                singleLine = true
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(
+                    onClick = {
+                        onBindGhostPath(ghostDraftPath)
+                    }
+                ) {
+                    Text("立即绑定")
+                }
+            }
+            if (isFullscreen && stack.size > 2) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    Button(onClick = onBackToRoot) {
+                        Text("返回起始节点")
+                    }
+                }
+            }
+            return
+        }
+        val markdownText = current.markdown.ifBlank { current.rawMarkdown }
+        if (markdownText.isBlank()) {
+            Text(
+                text = "该锚点暂未发现可展示的 Markdown 内容。",
+                color = Color(0xFF64748B),
+                fontSize = 14.sp
+            )
+            return
+        }
+        AndroidView(
+            modifier = if (isFullscreen) {
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(Color(0xFFF8FAFC), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            } else {
+                Modifier
+                    .fillMaxWidth()
+                    .height(420.dp)
+                    .background(Color(0xFFF8FAFC), RoundedCornerShape(14.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            },
+            factory = {
+                TextView(context).apply {
+                    setTextIsSelectable(false)
+                    textSize = 15f
+                    setLineSpacing(0f, 1.3f)
+                }
+            },
+            update = { textView ->
+                renderMountedAnchorDocument(
+                    textView = textView,
+                    markwon = markwon,
+                    markdown = markdownText,
+                    currentNotePath = current.notePath,
+                    markdownPaths = state.markdownPaths,
+                    onWikilinkTap = onWikilinkTap
+                )
+            }
+        )
+        if (isFullscreen && stack.size > 2) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                Button(onClick = onBackToRoot) {
+                    Text("返回起始节点")
+                }
+            }
+        }
+    }
+}
+
+private fun renderMountedAnchorDocument(
+    textView: TextView,
+    markwon: Markwon,
+    markdown: String,
+    currentNotePath: String,
+    markdownPaths: List<String>,
+    onWikilinkTap: (MountedWikilinkTap) -> Unit
+) {
+    val rewritten = rewriteMountedMarkdownWithWikilinks(
+        markdown = markdown,
+        currentNotePath = currentNotePath,
+        markdownPaths = markdownPaths
+    )
+    markwon.setMarkdown(textView, rewritten.markdown)
+    textView.movementMethod = LinkMovementMethod.getInstance()
+    textView.highlightColor = android.graphics.Color.TRANSPARENT
+    val spanned = textView.text as? Spanned ?: return
+    val spannable = SpannableStringBuilder.valueOf(spanned)
+    clearReaderOverlaySpans(spannable)
+    val urlSpans = spannable.getSpans(0, spannable.length, URLSpan::class.java)
+    urlSpans.forEach { span ->
+        val url = span.url ?: return@forEach
+        val wikilink = rewritten.linksByUrl[url] ?: return@forEach
+        val start = spannable.getSpanStart(span)
+        val end = spannable.getSpanEnd(span)
+        if (start < 0 || end <= start) {
+            return@forEach
+        }
+        spannable.removeSpan(span)
+        spannable.setSpan(
+            object : ClickableSpan() {
+                override fun onClick(widget: View) {
+                    onWikilinkTap(wikilink)
+                }
+
+                override fun updateDrawState(ds: TextPaint) {
+                    ds.isUnderlineText = false
+                }
+            },
+            start,
+            end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        if (wikilink.isGhost) {
+            spannable.setSpan(
+                ForegroundColorSpan(0xFF64748B.toInt()),
+                start,
+                end,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            spannable.setSpan(
+                ReaderAnchorUnderlineSpan(
+                    color = 0xFF94A3B8.toInt(),
+                    thicknessPx = 2.2f,
+                    dashed = true
+                ),
+                start,
+                end,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        } else {
+            spannable.setSpan(
+                ReaderWikilinkChipSpan(backgroundColor = 0xFFDDEDE4.toInt()),
+                start,
+                end,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            spannable.setSpan(
+                ForegroundColorSpan(0xFF065F46.toInt()),
+                start,
+                end,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+            spannable.setSpan(
+                StyleSpan(Typeface.BOLD),
+                start,
+                end,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+            )
+        }
+    }
+    textView.text = spannable
+}
+
+private fun rewriteMountedMarkdownWithWikilinks(
+    markdown: String,
+    currentNotePath: String,
+    markdownPaths: List<String>
+): MountedWikilinkRewrite {
+    if (markdown.isBlank()) {
+        return MountedWikilinkRewrite(markdown = markdown, linksByUrl = emptyMap())
+    }
+    val normalizedKnown = markdownPaths
+        .map { path -> normalizeMountedNotePath(path) }
+        .filter { path -> path.isNotBlank() && isMarkdownNotePath(path) }
+        .distinct()
+    val knownPathMap = linkedMapOf<String, String>()
+    normalizedKnown.forEach { onePath ->
+        knownPathMap[onePath.lowercase()] = onePath
+    }
+    val linksByUrl = LinkedHashMap<String, MountedWikilinkTap>()
+    val builder = StringBuilder(markdown.length + 32)
+    var cursor = 0
+    MOUNTED_WIKILINK_PATTERN.findAll(markdown).forEach { match ->
+        builder.append(markdown, cursor, match.range.first)
+        val parsed = parseMountedWikilinkBody(match.groupValues[1])
+        if (parsed.targetPath.isBlank()) {
+            builder.append(match.value)
+            cursor = match.range.last + 1
+            return@forEach
+        }
+        val resolved = resolveMountedWikilinkTarget(
+            rawTargetPath = parsed.targetPath,
+            currentNotePath = currentNotePath,
+            knownPathMap = knownPathMap,
+            knownPaths = normalizedKnown
+        )
+        val displayLabel = parsed.displayText.ifBlank {
+            deriveMountedNoteDisplayTitle(resolved.targetNotePath)
+        }
+        val titleWithMarker = if (resolved.isGhost) {
+            displayLabel
+        } else {
+            "📄 $displayLabel"
+        }
+        val urlKey = "wikilink://mounted/${linksByUrl.size + 1}"
+        linksByUrl[urlKey] = MountedWikilinkTap(
+            displayText = displayLabel,
+            targetNotePath = resolved.targetNotePath,
+            isGhost = resolved.isGhost
+        )
+        builder.append('[')
+            .append(escapeMarkdownLinkLabel(titleWithMarker))
+            .append("](")
+            .append(urlKey)
+            .append(')')
+        cursor = match.range.last + 1
+    }
+    builder.append(markdown.substring(cursor))
+    return MountedWikilinkRewrite(
+        markdown = builder.toString(),
+        linksByUrl = linksByUrl
+    )
+}
+
+private fun parseMountedWikilinkBody(rawBody: String): ParsedMountedWikilink {
+    val trimmed = rawBody.trim()
+    if (trimmed.isBlank()) {
+        return ParsedMountedWikilink(targetPath = "", displayText = "")
+    }
+    val parts = trimmed.split('|', limit = 2)
+    val rawTarget = parts.firstOrNull().orEmpty()
+        .substringBefore('#')
+        .substringBefore('^')
+        .trim()
+    val alias = parts.getOrNull(1).orEmpty().trim()
+    val inferredDisplay = rawTarget
+        .substringAfterLast('/')
+        .substringAfterLast('\\')
+        .substringBeforeLast('.')
+        .ifBlank { rawTarget }
+    return ParsedMountedWikilink(
+        targetPath = rawTarget,
+        displayText = alias.ifBlank { inferredDisplay }
+    )
+}
+
+private fun resolveMountedWikilinkTarget(
+    rawTargetPath: String,
+    currentNotePath: String,
+    knownPathMap: Map<String, String>,
+    knownPaths: List<String>
+): ResolvedMountedWikilink {
+    val normalizedTarget = normalizeMountedNotePath(rawTargetPath)
+    if (normalizedTarget.isBlank()) {
+        return ResolvedMountedWikilink(
+            targetNotePath = "",
+            isGhost = true
+        )
+    }
+    val currentDir = normalizeMountedNotePath(
+        currentNotePath.substringBeforeLast('/', "")
+    )
+    val normalizedCandidates = linkedSetOf<String>()
+    val extensionCandidates = if (isMarkdownNotePath(normalizedTarget)) {
+        listOf(normalizedTarget)
+    } else {
+        listOf("$normalizedTarget.md", "$normalizedTarget.markdown")
+    }
+    extensionCandidates.forEach { candidate ->
+        normalizedCandidates += normalizeMountedNotePath(candidate)
+        if (currentDir.isNotBlank()) {
+            normalizedCandidates += normalizeMountedNotePath("$currentDir/$candidate")
+        }
+    }
+    normalizedCandidates
+        .filter { path -> path.isNotBlank() }
+        .forEach { candidate ->
+            val existing = knownPathMap[candidate.lowercase()]
+            if (!existing.isNullOrBlank()) {
+                return ResolvedMountedWikilink(
+                    targetNotePath = existing,
+                    isGhost = false
+                )
+            }
+        }
+    val expectedStem = normalizedTarget
+        .substringAfterLast('/')
+        .substringBeforeLast('.')
+        .lowercase()
+    val fallbackExisting = knownPaths.firstOrNull { onePath ->
+        onePath.substringAfterLast('/')
+            .substringBeforeLast('.')
+            .lowercase() == expectedStem
+    }
+    if (!fallbackExisting.isNullOrBlank()) {
+        return ResolvedMountedWikilink(
+            targetNotePath = fallbackExisting,
+            isGhost = false
+        )
+    }
+    val fallbackPath = normalizedCandidates.firstOrNull { path ->
+        path.isNotBlank()
+    } ?: if (currentDir.isNotBlank()) {
+        normalizeMountedNotePath("$currentDir/$normalizedTarget.md")
+    } else {
+        normalizeMountedNotePath("$normalizedTarget.md")
+    }
+    return ResolvedMountedWikilink(
+        targetNotePath = fallbackPath,
+        isGhost = true
+    )
+}
+
+private fun escapeMarkdownLinkLabel(label: String): String {
+    return label
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+}
+
+private data class ParsedMarkdownLinkTarget(
+    val destination: String,
+    val suffix: String
+)
+
+private fun parseMarkdownLinkTarget(rawTarget: String): ParsedMarkdownLinkTarget {
+    val trimmed = rawTarget.trim()
+    if (trimmed.isEmpty()) {
+        return ParsedMarkdownLinkTarget("", "")
+    }
+    if (trimmed.startsWith("<")) {
+        val closeIndex = trimmed.indexOf('>')
+        if (closeIndex > 0) {
+            val destination = trimmed.substring(1, closeIndex).trim()
+            val suffix = trimmed.substring(closeIndex + 1)
+            return ParsedMarkdownLinkTarget(destination, suffix)
+        }
+    }
+    val splitIndex = trimmed.indexOfFirst { char -> char.isWhitespace() }
+    return if (splitIndex < 0) {
+        ParsedMarkdownLinkTarget(trimmed, "")
+    } else {
+        ParsedMarkdownLinkTarget(
+            destination = trimmed.substring(0, splitIndex),
+            suffix = trimmed.substring(splitIndex)
+        )
+    }
+}
+
+private fun buildMarkdownLinkTarget(destination: String, suffix: String): String {
+    val normalizedDestination = destination.trim()
+    if (normalizedDestination.isBlank()) {
+        return suffix.trim()
+    }
+    val needsAngleWrap = normalizedDestination.any { char -> char.isWhitespace() } ||
+        normalizedDestination.startsWith("<") ||
+        normalizedDestination.endsWith(">")
+    val encodedDestination = if (needsAngleWrap) {
+        "<$normalizedDestination>"
+    } else {
+        normalizedDestination
+    }
+    return encodedDestination + suffix
+}
+
+private fun mergeMountedMarkdownPaths(
+    existingPaths: List<String>,
+    payload: MobileMountedAnchorPayload
+): List<String> {
+    val merged = LinkedHashSet<String>()
+    fun collect(path: String?) {
+        val normalized = normalizeMountedNotePath(path.orEmpty())
+        if (normalized.isBlank() || !isMarkdownNotePath(normalized)) {
+            return
+        }
+        merged += normalized
+    }
+    existingPaths.forEach { path -> collect(path) }
+    payload.latestRevision?.files?.forEach { path -> collect(path) }
+    collect(payload.latestRevision?.notePath)
+    collect(payload.entryNotePath)
+    collect(payload.notePath)
+    return merged.toList()
+}
+
+private fun deriveMountedNoteDisplayTitle(notePath: String): String {
+    val normalized = normalizeMountedNotePath(notePath)
+    if (normalized.isBlank()) {
+        return "挂载笔记"
+    }
+    val fileName = normalized.substringAfterLast('/')
+    val title = fileName.substringBeforeLast('.')
+    return title.ifBlank { fileName.ifBlank { "挂载笔记" } }
+}
+
+private fun isMountedNoteMissingError(message: String): Boolean {
+    val normalized = message.lowercase()
+    return normalized.contains("http 404") ||
+        normalized.contains("not found") ||
+        normalized.contains("missing")
+}
+
+private fun isMarkdownNotePath(path: String): Boolean {
+    val normalized = path.lowercase()
+    return normalized.endsWith(".md") || normalized.endsWith(".markdown")
+}
+
+private fun normalizeMountedNotePath(rawPath: String): String {
+    val replaced = rawPath.trim().replace('\\', '/')
+    if (replaced.isBlank()) {
+        return ""
+    }
+    if (replaced.contains(":")) {
+        return ""
+    }
+    val segments = replaced
+        .removePrefix("./")
+        .removePrefix("/")
+        .split('/')
+    val stack = mutableListOf<String>()
+    segments.forEach { segment ->
+        when (segment) {
+            "", "." -> Unit
+            ".." -> {
+                if (stack.isNotEmpty()) {
+                    stack.removeLast()
+                }
+            }
+            else -> stack += segment
+        }
+    }
+    return stack.joinToString("/")
+}
+
+private enum class ReaderMediaKind {
+    IMAGE,
+    VIDEO,
+    OTHER
+}
+
+private data class InlineImageItem(
+    val url: String,
+    val alt: String
+)
+
+private data class InlineVideoItem(
+    val url: String,
+    val title: String
+)
+
+private data class ReaderMediaRewriteResult(
+    val markdown: String,
+    val images: List<InlineImageItem>,
+    val videos: List<InlineVideoItem>
+)
+
+private fun rewriteReaderMarkdownMedia(
+    markdown: String,
+    taskId: String?,
+    apiBaseUrl: String
+): ReaderMediaRewriteResult {
+    if (markdown.isBlank()) {
+        return ReaderMediaRewriteResult(
+            markdown = markdown,
+            images = emptyList(),
+            videos = emptyList()
+        )
+    }
+
+    val images = mutableListOf<InlineImageItem>()
+    val videos = mutableListOf<InlineVideoItem>()
+    var rewritten = markdown
+
+    rewritten = OBSIDIAN_EMBED_PATTERN.replace(rewritten) { match ->
+        val rawBody = match.groupValues.getOrNull(1).orEmpty().trim()
+        if (rawBody.isBlank()) {
+            return@replace match.value
+        }
+        val parts = rawBody.split('|', limit = 2)
+        val rawPath = parts.firstOrNull().orEmpty().trim()
+        val alias = parts.getOrNull(1).orEmpty().trim()
+        if (rawPath.isBlank()) {
+            return@replace match.value
+        }
+        val resolvedUrl = resolveReaderMediaUrl(
+            rawUrl = rawPath,
+            taskId = taskId,
+            apiBaseUrl = apiBaseUrl
+        ) ?: rawPath
+        val label = alias
+        when (resolveReaderMediaKind(rawPath)) {
+            ReaderMediaKind.IMAGE -> {
+                val alt = sanitizeInlineImageLabel(
+                    rawLabel = label,
+                    rawUrl = rawPath
+                )
+                "![${escapeMarkdownLinkLabel(alt)}]($resolvedUrl)"
+            }
+
+            ReaderMediaKind.VIDEO -> {
+                videos += InlineVideoItem(
+                    url = resolvedUrl,
+                    title = label
+                )
+                "\n\n"
+            }
+
+            ReaderMediaKind.OTHER -> {
+                "[${escapeMarkdownLinkLabel(label)}]($resolvedUrl)"
+            }
+        }
+    }
+
+    rewritten = HTML_VIDEO_TAG_PATTERN.replace(rewritten) { match ->
+        val rawUrl = match.groupValues.getOrNull(2).orEmpty().trim()
+        if (rawUrl.isBlank()) {
+            return@replace "\n\n"
+        }
+        val resolvedUrl = resolveReaderMediaUrl(
+            rawUrl = rawUrl,
+            taskId = taskId,
+            apiBaseUrl = apiBaseUrl
+        ) ?: rawUrl
+        videos += InlineVideoItem(
+            url = resolvedUrl,
+            title = deriveReaderMediaLabel(rawUrl)
+        )
+        "\n\n"
+    }
+
+    rewritten = MARKDOWN_IMAGE_INLINE_PATTERN.replace(rewritten) { match ->
+        val alt = match.groupValues.getOrNull(1).orEmpty().trim()
+        val parsedTarget = parseMarkdownLinkTarget(
+            match.groupValues.getOrNull(2).orEmpty()
+        )
+        val rawUrl = parsedTarget.destination.trim()
+        if (rawUrl.isBlank()) {
+            return@replace match.value
+        }
+        val resolvedUrl = resolveReaderMediaUrl(
+            rawUrl = rawUrl,
+            taskId = taskId,
+            apiBaseUrl = apiBaseUrl
+        ) ?: rawUrl
+        when (resolveReaderMediaKind(rawUrl)) {
+            ReaderMediaKind.IMAGE -> {
+                val sanitizedAlt = sanitizeInlineImageLabel(
+                    rawLabel = alt,
+                    rawUrl = rawUrl
+                )
+                val rebuiltTarget = buildMarkdownLinkTarget(
+                    destination = resolvedUrl,
+                    suffix = parsedTarget.suffix
+                )
+                "![${escapeMarkdownLinkLabel(sanitizedAlt)}]($rebuiltTarget)"
+            }
+
+            ReaderMediaKind.VIDEO -> {
+                videos += InlineVideoItem(
+                    url = resolvedUrl,
+                    title = alt.ifBlank { deriveReaderMediaLabel(rawUrl) }
+                )
+                "\n\n"
+            }
+
+            ReaderMediaKind.OTHER -> {
+                val rebuiltTarget = buildMarkdownLinkTarget(
+                    destination = resolvedUrl,
+                    suffix = parsedTarget.suffix
+                )
+                "![${escapeMarkdownLinkLabel(alt)}]($rebuiltTarget)"
+            }
+        }
+    }
+
+    rewritten = MARKDOWN_LINK_GENERIC_PATTERN.replace(rewritten) { match ->
+        val label = match.groupValues.getOrNull(1).orEmpty()
+        val rawUrl = match.groupValues.getOrNull(2).orEmpty().trim()
+        if (rawUrl.isBlank()) {
+            return@replace match.value
+        }
+        val resolvedUrl = resolveReaderMediaUrl(
+            rawUrl = rawUrl,
+            taskId = taskId,
+            apiBaseUrl = apiBaseUrl
+        ) ?: rawUrl
+        if (resolveReaderMediaKind(rawUrl) == ReaderMediaKind.VIDEO) {
+            videos += InlineVideoItem(
+                url = resolvedUrl,
+                title = label.trim().ifBlank { deriveReaderMediaLabel(rawUrl) }
+            )
+            "\n\n"
+        } else {
+            val suffix = match.groupValues.getOrNull(3).orEmpty()
+            "[${escapeMarkdownLinkLabel(label)}]($resolvedUrl$suffix)"
+        }
+    }
+
+    val normalized = rewritten
+        .replace("\r\n", "\n")
+        .replace(Regex("\\n{3,}"), "\n\n")
+        .trimEnd()
+
+    return ReaderMediaRewriteResult(
+        markdown = normalized,
+        images = images,
+        videos = videos
+    )
+}
+
+private fun resolveReaderMediaKind(rawPath: String): ReaderMediaKind {
+    val normalized = rawPath
+        .substringBefore('?')
+        .substringBefore('#')
+        .trim()
+        .lowercase()
+    if (normalized.isEmpty()) {
+        return ReaderMediaKind.OTHER
+    }
+    val ext = normalized.substringAfterLast('.', "")
+    return when {
+        ext in IMAGE_EXTENSIONS -> ReaderMediaKind.IMAGE
+        ext in VIDEO_EXTENSIONS -> ReaderMediaKind.VIDEO
+        else -> ReaderMediaKind.OTHER
+    }
+}
+
+private fun deriveReaderMediaLabel(rawPath: String): String {
+    val normalized = rawPath
+        .substringBefore('?')
+        .substringBefore('#')
+        .replace('\\', '/')
+        .trim()
+    if (normalized.isBlank()) {
+        return "媒体资源"
+    }
+    val fileName = normalized.substringAfterLast('/')
+    return fileName
+        .substringBeforeLast('.')
+        .ifBlank { fileName.ifBlank { "媒体资源" } }
+}
+
+private fun sanitizeInlineImageLabel(rawLabel: String, rawUrl: String): String {
+    val trimmed = rawLabel.trim()
+    if (trimmed.isBlank()) {
+        return ""
+    }
+    val derived = deriveReaderMediaLabel(rawUrl).trim()
+    if (derived.isNotBlank() && trimmed.equals(derived, ignoreCase = true)) {
+        return ""
+    }
+    if (looksLikeRawPathOrUrl(trimmed) || looksLikeGeneratedMediaLabel(trimmed)) {
+        return ""
+    }
+    return trimmed
+}
+
+private fun looksLikeRawPathOrUrl(text: String): Boolean {
+    val normalized = text.trim()
+    if (normalized.isBlank()) {
+        return false
+    }
+    val lower = normalized.lowercase()
+    if (ABSOLUTE_URL_PATTERN.matches(normalized) ||
+        lower.startsWith("data:") ||
+        lower.startsWith("blob:") ||
+        lower.startsWith("content:") ||
+        normalized.startsWith("/") ||
+        normalized.startsWith("./") ||
+        normalized.startsWith("../")
+    ) {
+        return true
+    }
+    return normalized.contains('\\') ||
+        normalized.contains('/') ||
+        Regex("^[a-zA-Z]:[/\\\\]").containsMatchIn(normalized)
+}
+
+private fun looksLikeGeneratedMediaLabel(text: String): Boolean {
+    val normalized = text.trim()
+    if (normalized.length !in 4..40) {
+        return false
+    }
+    if (!normalized.any(Char::isDigit)) {
+        return false
+    }
+    if (!(normalized.contains('_') || normalized.contains('-'))) {
+        return false
+    }
+    if (!normalized.all { it.isLetterOrDigit() || it == '_' || it == '-' }) {
+        return false
+    }
+    return true
+}
+
+private fun resolveReaderMediaUrl(
+    rawUrl: String,
+    taskId: String?,
+    apiBaseUrl: String
+): String? {
+    val source = rawUrl.trim()
+    if (source.isBlank()) {
+        return null
+    }
+    val lower = source.lowercase()
+    if (ABSOLUTE_URL_PATTERN.matches(source) ||
+        lower.startsWith("data:") ||
+        lower.startsWith("blob:") ||
+        lower.startsWith("mailto:") ||
+        lower.startsWith("tel:")
+    ) {
+        return source
+    }
+    if (lower.startsWith("/api/mobile/tasks/")) {
+        val origin = resolveReaderApiOrigin(apiBaseUrl)
+        return if (origin.isNotBlank()) origin + source else source
+    }
+    if (source.startsWith("/")) {
+        val origin = resolveReaderApiOrigin(apiBaseUrl)
+        return if (origin.isNotBlank()) origin + source else source
+    }
+    val normalizedTaskId = taskId?.trim().orEmpty()
+    if (normalizedTaskId.isEmpty()) {
+        return source
+    }
+    val normalizedPath = normalizeMountedNotePath(source).ifBlank {
+        source.removePrefix("./").removePrefix("/").trim()
+    }
+    if (normalizedPath.isBlank()) {
+        return source
+    }
+    val base = apiBaseUrl.trim().trimEnd('/')
+    if (base.isBlank()) {
+        return source
+    }
+    return "$base/tasks/${Uri.encode(normalizedTaskId)}/asset?path=${Uri.encode(normalizedPath)}"
+}
+
+private fun resolveReaderApiOrigin(apiBaseUrl: String): String {
+    val normalized = apiBaseUrl.trim()
+    if (normalized.isBlank()) {
+        return ""
+    }
+    return runCatching {
+        val uri = Uri.parse(normalized)
+        val scheme = uri.scheme.orEmpty()
+        val authority = uri.encodedAuthority.orEmpty()
+        if (scheme.isBlank() || authority.isBlank()) {
+            ""
+        } else {
+            "$scheme://$authority"
+        }
+    }.getOrDefault("")
+}
+
+@Composable
+private fun InlineImageGallery(
+    images: List<InlineImageItem>,
+    modifier: Modifier = Modifier,
+    onImageTap: (InlineImageItem) -> Unit
+) {
+    if (images.isEmpty()) {
+        return
+    }
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val configuration = LocalConfiguration.current
+    val viewportHeightPx = remember(configuration, density) {
+        with(density) {
+            configuration.screenHeightDp.dp.toPx()
+        }
+    }
+    val viewportWidthPx = remember(configuration, density) {
+        with(density) {
+            configuration.screenWidthDp.dp.toPx()
+        }
+    }
+    val preloadVerticalPx = remember(viewportHeightPx, density) {
+        max(viewportHeightPx, with(density) { 420.dp.toPx() })
+    }
+    val preloadHorizontalPx = remember(viewportWidthPx, density) {
+        max(viewportWidthPx * 0.65f, with(density) { 220.dp.toPx() })
+    }
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        images.forEachIndexed { index, image ->
+            InlineImagePageCard(
+                image = image,
+                index = index,
+                context = context,
+                viewportWidthPx = viewportWidthPx,
+                viewportHeightPx = viewportHeightPx,
+                preloadHorizontalPx = preloadHorizontalPx,
+                preloadVerticalPx = preloadVerticalPx,
+                onImageTap = onImageTap
+            )
+            InlineImageCaption(
+                caption = image.alt
+            )
+        }
+    }
+}
+
+@Composable
+private fun InlineImagePageCard(
+    image: InlineImageItem,
+    index: Int,
+    context: Context,
+    viewportWidthPx: Float,
+    viewportHeightPx: Float,
+    preloadHorizontalPx: Float,
+    preloadVerticalPx: Float,
+    onImageTap: (InlineImageItem) -> Unit
+) {
+    var shouldLoad by remember(image.url) {
+        mutableStateOf(false)
+    }
+    var isLoading by remember(image.url) {
+        mutableStateOf(false)
+    }
+    var imageAspectRatio by remember(image.url) {
+        mutableFloatStateOf(0f)
+    }
+    val imageFrameModifier = if (imageAspectRatio > 0f) {
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 72.dp)
+            .aspectRatio(imageAspectRatio)
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .height(72.dp)
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onGloballyPositioned { coordinates ->
+                if (shouldLoad) {
+                    return@onGloballyPositioned
+                }
+                val bounds = coordinates.boundsInWindow()
+                val inHorizontalRange = bounds.right >= -preloadHorizontalPx &&
+                    bounds.left <= viewportWidthPx + preloadHorizontalPx
+                val inVerticalRange = bounds.bottom >= -preloadVerticalPx &&
+                    bounds.top <= viewportHeightPx + preloadVerticalPx
+                if (inHorizontalRange && inVerticalRange) {
+                    shouldLoad = true
+                    isLoading = true
+                }
+            }
+            .clickable { onImageTap(image) }
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFFF8FAFC))
+            .then(imageFrameModifier)
+    ) {
+        if (shouldLoad) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(image.url)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = image.alt.ifBlank { "image_${index + 1}" },
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFF8FAFC))
+                    .clip(RoundedCornerShape(10.dp)),
+                onLoading = {
+                    isLoading = true
+                },
+                onSuccess = { state ->
+                    val intrinsicWidth = state.result.drawable.intrinsicWidth
+                    val intrinsicHeight = state.result.drawable.intrinsicHeight
+                    if (intrinsicWidth > 0 && intrinsicHeight > 0) {
+                        val nextAspectRatio = intrinsicWidth.toFloat() / intrinsicHeight.toFloat()
+                        if (abs(nextAspectRatio - imageAspectRatio) > 0.001f) {
+                            imageAspectRatio = nextAspectRatio
+                        }
+                    }
+                    isLoading = false
+                },
+                onError = {
+                    isLoading = false
+                }
+            )
+        }
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFF8FAFC).copy(alpha = 0.72f)),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = Color(0xFF94A3B8)
+                )
+            }
+        }
+        if (!shouldLoad) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFF8FAFC)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = Color(0xFF94A3B8)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineImageCaption(
+    caption: String,
+    modifier: Modifier = Modifier
+) {
+    val trimmedCaption = caption.trim()
+    if (trimmedCaption.isBlank()) {
+        return
+    }
+    Text(
+        text = trimmedCaption,
+        fontSize = 12.sp,
+        color = Color(0xFF475467),
+        maxLines = 2,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier.padding(horizontal = 10.dp, vertical = 2.dp)
+    )
+}
+
+@Composable
+private fun InlineVideoList(
+    videos: List<InlineVideoItem>,
+    modifier: Modifier = Modifier,
+    onTelemetry: (eventType: String, url: String) -> Unit
+) {
+    if (videos.isEmpty()) {
+        return
+    }
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        videos.forEach { video ->
+            if (video.title.isNotBlank()) {
+                Text(
+                    text = video.title,
+                    fontSize = 12.sp,
+                    color = Color(0xFF475467),
+                    modifier = Modifier.padding(start = 2.dp)
+                )
+            }
+            InlineVideoPlayer(
+                video = video,
+                onTelemetry = onTelemetry
+            )
+        }
+    }
+}
+
+@Composable
+private fun InlineVideoPlayer(
+    video: InlineVideoItem,
+    onTelemetry: (eventType: String, url: String) -> Unit
+) {
+    var videoViewRef by remember(video.url) {
+        mutableStateOf<VideoView?>(null)
+    }
+    DisposableEffect(video.url) {
+        onDispose {
+            videoViewRef?.stopPlayback()
+            videoViewRef = null
+        }
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0xFF0B1220)
+        )
+    ) {
+        AndroidView(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 190.dp),
+            factory = { context ->
+                VideoView(context).apply {
+                    setBackgroundColor(android.graphics.Color.BLACK)
+                    val controller = MediaController(context)
+                    controller.setAnchorView(this)
+                    setMediaController(controller)
+                    setOnPreparedListener { player ->
+                        player.isLooping = false
+                        seekTo(1)
+                        onTelemetry("inline_video_prepared", video.url)
+                    }
+                    setOnCompletionListener {
+                        onTelemetry("inline_video_completed", video.url)
+                    }
+                    setOnErrorListener { _, what, extra ->
+                        onTelemetry("inline_video_error", "${video.url}#$what#$extra")
+                        false
+                    }
+                    setOnClickListener {
+                        if (isPlaying) {
+                            pause()
+                            onTelemetry("inline_video_paused", video.url)
+                        } else {
+                            start()
+                            onTelemetry("inline_video_started", video.url)
+                        }
+                    }
+                    tag = video.url
+                    setVideoURI(Uri.parse(video.url))
+                }.also { view ->
+                    videoViewRef = view
+                }
+            },
+            update = { view ->
+                videoViewRef = view
+                val boundUrl = view.tag as? String
+                if (boundUrl != video.url) {
+                    view.stopPlayback()
+                    view.tag = video.url
+                    view.setVideoURI(Uri.parse(video.url))
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun ReaderImageLightbox(
+    image: InlineImageItem,
+    onDismiss: () -> Unit
+) {
+    var scale by remember(image.url) {
+        mutableFloatStateOf(1f)
+    }
+    var panOffset by remember(image.url) {
+        mutableStateOf(Offset.Zero)
+    }
+    var verticalDragOffset by remember(image.url) {
+        mutableFloatStateOf(0f)
+    }
+    val dismissThreshold = with(LocalDensity.current) { 120.dp.toPx() }
+    val context = LocalContext.current
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.94f))
+                .pointerInput(image.url) {
+                    detectTapGestures(onTap = { onDismiss() })
+                }
+        ) {
+            AsyncImage(
+                model = ImageRequest.Builder(context)
+                    .data(image.url)
+                    .crossfade(true)
+                    .build(),
+                contentDescription = image.alt.ifBlank { "preview_image" },
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = panOffset.x
+                        translationY = panOffset.y + verticalDragOffset
+                    }
+                    .pointerInput(image.url) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            val nextScale = (scale * zoom).coerceIn(1f, 4f)
+                            scale = nextScale
+                            panOffset = if (nextScale <= 1.02f) {
+                                Offset.Zero
+                            } else {
+                                panOffset + pan
+                            }
+                        }
+                    }
+                    .pointerInput(image.url, scale) {
+                        detectVerticalDragGestures(
+                            onVerticalDrag = { change, dragAmount ->
+                                if (scale > 1.02f) {
+                                    return@detectVerticalDragGestures
+                                }
+                                verticalDragOffset += dragAmount
+                                change.consume()
+                            },
+                            onDragCancel = {
+                                verticalDragOffset = 0f
+                            },
+                            onDragEnd = {
+                                if (verticalDragOffset <= -dismissThreshold) {
+                                    onDismiss()
+                                } else {
+                                    verticalDragOffset = 0f
+                                }
+                            }
+                        )
+                    }
+            )
+            Text(
+                text = "双指缩放，上滑收起",
+                color = Color.White.copy(alpha = 0.86f),
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 22.dp)
+            )
+        }
+    }
+}
+
 @SuppressLint("ClickableViewAccessibility")
 @Composable
 private fun MarkdownParagraph(
@@ -3036,6 +5251,9 @@ private fun MarkdownParagraph(
     lineSpacingMultiplier: Float,
     textColor: Color,
     fontWeight: FontWeight,
+    blockId: String,
+    blockType: String,
+    blockIndentLevel: Int,
     selection: TokenSelection?,
     isFavorited: Boolean,
     overlayRootWindowOffset: Offset,
@@ -3043,9 +5261,12 @@ private fun MarkdownParagraph(
     emphasizedSelections: List<TokenSelection>,
     likedSelections: List<TokenSelection>,
     annotatedSelections: List<TokenSelection>,
+    pendingAnchorSelections: List<TokenSelection>,
+    mountedAnchorSelections: List<TokenSelection>,
     onSelectionAction: (SelectionContextAction, TokenSelection, InsightTermAnchor?) -> Unit,
-    onTokenSingleTap: (cursor: Int, anchor: InsightTermAnchor?) -> Unit,
+    onTokenSingleTap: (selection: TokenSelection?, anchor: InsightTermAnchor?) -> Unit,
     onInsightTermTap: (tap: InsightTermTapPayload) -> Unit,
+    onInlineImageTap: (InlineImageItem) -> Unit,
     onParagraphDoubleTap: (offset: Offset) -> Unit,
     onSelectionModeChanged: (Boolean) -> Unit,
     modifier: Modifier = Modifier
@@ -3053,14 +5274,29 @@ private fun MarkdownParagraph(
     val latestSelectionAction = androidx.compose.runtime.rememberUpdatedState(onSelectionAction)
     val latestOverlayRootOffset = androidx.compose.runtime.rememberUpdatedState(overlayRootWindowOffset)
     val latestSelectionModeChanged = androidx.compose.runtime.rememberUpdatedState(onSelectionModeChanged)
+    var layoutWidthPx by remember(blockId) {
+        mutableIntStateOf(0)
+    }
     AndroidView(
-        modifier = modifier,
+        modifier = modifier.onSizeChanged { size ->
+            val measured = size.width
+            if (measured > 0 && measured != layoutWidthPx) {
+                layoutWidthPx = measured
+            }
+        },
         factory = { context ->
             val textView = TextView(context).apply {
                 applyReaderTextLayoutPolicy(this)
+                layoutParams = ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+                )
                 setTextIsSelectable(true)
                 applyReaderParagraphLineSpacing(this, lineSpacingMultiplier)
                 letterSpacing = renderConfig.textLetterSpacing
+                setHorizontallyScrolling(false)
+                isSingleLine = false
+                maxLines = Int.MAX_VALUE
                 isLongClickable = true
                 gravity = android.view.Gravity.START or android.view.Gravity.TOP
                 textAlignment = android.view.View.TEXT_ALIGNMENT_GRAVITY
@@ -3078,6 +5314,18 @@ private fun MarkdownParagraph(
                     override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
                         if (textView.hasSelection()) {
                             return false
+                        }
+                        val tappedImage = resolveTappedInlineImage(
+                            textView = textView,
+                            x = e.x,
+                            y = e.y
+                        )
+                        if (tappedImage != null) {
+                            clearNativeTextSelection(textView)
+                            suppressNativeSelectionUntilMs =
+                                SystemClock.uptimeMillis() + ViewConfiguration.getTapTimeout().toLong()
+                            onInlineImageTap(tappedImage)
+                            return true
                         }
                         val cursor = resolveCursorOffset(
                             textView = textView,
@@ -3104,13 +5352,46 @@ private fun MarkdownParagraph(
                             )
                             return true
                         }
-                        val anchor = resolveFallbackAnchor(
+                        val sourceText = textView.text
+                            ?.toString()
+                            .orEmpty()
+                            .ifBlank { plainText }
+                        val normalizedCursor = normalizeLexicalCursor(
+                            text = sourceText,
+                            cursor = cursor
+                        )
+                        val tokenSelection = if (normalizedCursor == null) {
+                            null
+                        } else {
+                            resolveTokenSelection(
+                                text = sourceText,
+                                cursor = normalizedCursor,
+                                nativePayload = LexicalNativeBridge.segmentAt(
+                                    sourceText,
+                                    normalizedCursor
+                                )
+                            )
+                        }
+                        val tokenAnchor = if (tokenSelection == null) {
+                            null
+                        } else {
+                            resolveInsightTermAnchor(
+                                textView = textView,
+                                range = InsightTermRange(
+                                    term = tokenSelection.token,
+                                    start = tokenSelection.start,
+                                    end = tokenSelection.end
+                                ),
+                                rootWindowOffset = latestOverlayRootOffset.value
+                            )
+                        }
+                        val fallbackAnchor = resolveFallbackAnchor(
                             textView = textView,
                             touchX = e.x,
                             touchY = e.y,
                             rootWindowOffset = latestOverlayRootOffset.value
                         )
-                        onTokenSingleTap(cursor, anchor)
+                        onTokenSingleTap(tokenSelection, tokenAnchor ?: fallbackAnchor)
                         return false
                     }
 
@@ -3134,6 +5415,7 @@ private fun MarkdownParagraph(
             val actionBoldId = 2003
             val actionAnnotateId = 2004
             val actionSearchCardId = 2005
+            val actionMarkAnchorId = 2006
             val selectionActionModeCallback = object : android.view.ActionMode.Callback {
                 override fun onCreateActionMode(mode: android.view.ActionMode?, menu: android.view.Menu?): Boolean {
                     val safeMenu = menu ?: return false
@@ -3144,6 +5426,7 @@ private fun MarkdownParagraph(
                     safeMenu.add(0, actionBoldId, 2, "加粗/取消").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
                     safeMenu.add(0, actionAnnotateId, 3, "批注").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
                     safeMenu.add(0, actionSearchCardId, 4, "搜索建卡").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
+                    safeMenu.add(0, actionMarkAnchorId, 5, "标记锚点").setShowAsAction(android.view.MenuItem.SHOW_AS_ACTION_ALWAYS)
                     return true
                 }
 
@@ -3172,6 +5455,7 @@ private fun MarkdownParagraph(
                         actionBoldId -> latestSelectionAction.value(SelectionContextAction.ToggleBold, selected, anchor)
                         actionAnnotateId -> latestSelectionAction.value(SelectionContextAction.Annotate, selected, anchor)
                         actionSearchCardId -> latestSelectionAction.value(SelectionContextAction.SearchCard, selected, anchor)
+                        actionMarkAnchorId -> latestSelectionAction.value(SelectionContextAction.MarkAnchor, selected, anchor)
                         else -> return false
                     }
                     mode?.finish()
@@ -3213,6 +5497,24 @@ private fun MarkdownParagraph(
             if (!textView.isTextSelectable) {
                 textView.setTextIsSelectable(true)
             }
+            // 宽度未稳定时不进行正文渲染，避免在 0 宽首帧写入错误布局状态。
+            val parentWidthNow = (textView.parent as? View)?.width ?: 0
+            val stableWidthPx = max(layoutWidthPx, max(parentWidthNow, textView.width))
+            if (stableWidthPx <= 0) {
+                if (textView.text.isNullOrEmpty()) {
+                    // 宽度未就绪时维持一个最小文本高度，避免段落塌陷为 0 高。
+                    textView.text = "\u00A0"
+                }
+                return@AndroidView
+            }
+            if (textView.minWidth != stableWidthPx) {
+                textView.minWidth = stableWidthPx
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
+                if (textView.maxWidth != stableWidthPx) {
+                    textView.maxWidth = stableWidthPx
+                }
+            }
             val textColorArgb = textColor.toArgbSafe()
             val weight = resolveReaderWeight(fontWeight)
             val textStyleFingerprint = buildReaderTextStyleFingerprint(
@@ -3235,10 +5537,12 @@ private fun MarkdownParagraph(
             val favoriteFingerprint = if (isFavorited) 1 else 0
             val likedFingerprint = likedSelections.hashCode()
             val annotatedFingerprint = annotatedSelections.hashCode()
+            val pendingAnchorFingerprint = pendingAnchorSelections.hashCode()
+            val mountedAnchorFingerprint = mountedAnchorSelections.hashCode()
             val previousContext = textView.tag as? InsightTapContext
             val refreshChanged = previousContext?.renderRefreshVersion != renderRefreshVersion
             val markdownChanged = refreshChanged || previousContext?.renderedMarkdown != markdown || textView.text.isNullOrEmpty()
-            val widthChanged = previousContext?.appliedWidthPx != textView.width
+            val widthChanged = previousContext?.appliedWidthPx != stableWidthPx
             val canFastSkip = previousContext != null &&
                 !markdownChanged &&
                 previousContext.textStyleFingerprint == textStyleFingerprint &&
@@ -3249,6 +5553,8 @@ private fun MarkdownParagraph(
                 previousContext.favoriteFingerprint == favoriteFingerprint &&
                 previousContext.likedFingerprint == likedFingerprint &&
                 previousContext.annotatedFingerprint == annotatedFingerprint &&
+                previousContext.pendingAnchorFingerprint == pendingAnchorFingerprint &&
+                previousContext.mountedAnchorFingerprint == mountedAnchorFingerprint &&
                 !widthChanged
             if (canFastSkip) {
                 return@AndroidView
@@ -3327,6 +5633,8 @@ private fun MarkdownParagraph(
             val favoriteChanged = previousContext?.favoriteFingerprint != favoriteFingerprint
             val likedChanged = previousContext?.likedFingerprint != likedFingerprint
             val annotationChanged = previousContext?.annotatedFingerprint != annotatedFingerprint
+            val pendingAnchorChanged = previousContext?.pendingAnchorFingerprint != pendingAnchorFingerprint
+            val mountedAnchorChanged = previousContext?.mountedAnchorFingerprint != mountedAnchorFingerprint
             val insightRanges = if (!sourceChanged && !termsChanged) {
                 previousContext.ranges
             } else {
@@ -3335,7 +5643,7 @@ private fun MarkdownParagraph(
                     terms = insightTerms
                 )
             }
-            if (markdownChanged || sourceChanged || termsChanged || selectionChanged || emphasisChanged || favoriteChanged || likedChanged || annotationChanged) {
+            if (markdownChanged || sourceChanged || termsChanged || selectionChanged || emphasisChanged || favoriteChanged || likedChanged || annotationChanged || pendingAnchorChanged || mountedAnchorChanged) {
                 applySelectionStyle(
                     textView = textView,
                     selection = selection,
@@ -3343,11 +5651,17 @@ private fun MarkdownParagraph(
                     insightRanges = insightRanges,
                     emphasizedSelections = emphasizedSelections,
                     likedSelections = likedSelections,
-                    annotatedSelections = annotatedSelections
+                    annotatedSelections = annotatedSelections,
+                    pendingAnchorSelections = pendingAnchorSelections,
+                    mountedAnchorSelections = mountedAnchorSelections
                 )
             }
             if (markdownChanged || widthChanged || previousContext?.hasMediaBlocks != hasMediaBlocks) {
-                applyMediaContainerInset(textView, hasMediaBlocks)
+                applyMediaContainerInset(
+                    textView = textView,
+                    hasMediaBlocks = hasMediaBlocks,
+                    preferredWidthPx = stableWidthPx
+                )
             }
             textView.tag = InsightTapContext(
                 ranges = insightRanges,
@@ -3360,10 +5674,12 @@ private fun MarkdownParagraph(
                 favoriteFingerprint = favoriteFingerprint,
                 likedFingerprint = likedFingerprint,
                 annotatedFingerprint = annotatedFingerprint,
+                pendingAnchorFingerprint = pendingAnchorFingerprint,
+                mountedAnchorFingerprint = mountedAnchorFingerprint,
                 textStyleFingerprint = textStyleFingerprint,
                 lineHeightPx = targetLineHeightPx,
                 hasMediaBlocks = hasMediaBlocks,
-                appliedWidthPx = textView.width
+                appliedWidthPx = stableWidthPx
             )
         }
     )
@@ -3374,7 +5690,8 @@ private enum class SelectionContextAction {
     ToggleLike,
     ToggleBold,
     Annotate,
-    SearchCard
+    SearchCard,
+    MarkAnchor
 }
 
 /**
@@ -3388,7 +5705,9 @@ private fun applySelectionStyle(
     insightRanges: List<InsightTermRange>,
     emphasizedSelections: List<TokenSelection>,
     likedSelections: List<TokenSelection>,
-    annotatedSelections: List<TokenSelection>
+    annotatedSelections: List<TokenSelection>,
+    pendingAnchorSelections: List<TokenSelection>,
+    mountedAnchorSelections: List<TokenSelection>
 ) {
     val baseText = textView.text
         ?.takeIf { it.isNotEmpty() }
@@ -3414,8 +5733,31 @@ private fun applySelectionStyle(
             item.end <= source.length &&
             item.start < item.end
     }
-    val hasOverlay = insightRanges.isNotEmpty() || hasSelectionOverlay || hasManualEmphasisOverlay || hasFavoriteOverlay || hasLikedOverlay || hasAnnotationOverlay
+    val hasPendingAnchorOverlay = pendingAnchorSelections.any { item ->
+        item.start >= 0 &&
+            item.end <= source.length &&
+            item.start < item.end
+    }
+    val hasMountedAnchorOverlay = mountedAnchorSelections.any { item ->
+        item.start >= 0 &&
+            item.end <= source.length &&
+            item.start < item.end
+    }
+    val hasOverlay = insightRanges.isNotEmpty()
+        || hasSelectionOverlay
+        || hasManualEmphasisOverlay
+        || hasFavoriteOverlay
+        || hasLikedOverlay
+        || hasAnnotationOverlay
+        || hasPendingAnchorOverlay
+        || hasMountedAnchorOverlay
     val hasMediaSpan = (baseText as? Spanned)?.let(::containsMediaSpan) == true
+    val hasTokenLevelOverlay = hasSelectionOverlay ||
+        hasManualEmphasisOverlay ||
+        hasLikedOverlay ||
+        hasAnnotationOverlay ||
+        hasPendingAnchorOverlay ||
+        hasMountedAnchorOverlay
     val spannable = if (baseText is SpannableStringBuilder) {
         baseText
     } else {
@@ -3424,7 +5766,8 @@ private fun applySelectionStyle(
     val hasExistingOverlay = spannable
         .getSpans(0, spannable.length, ReaderOverlaySpan::class.java)
         .isNotEmpty()
-    if (!hasOverlay || hasMediaSpan) {
+    val shouldSkipOverlayForMedia = hasMediaSpan && !hasTokenLevelOverlay
+    if (!hasOverlay || shouldSkipOverlayForMedia) {
         if (hasExistingOverlay) {
             clearReaderOverlaySpans(spannable)
             textView.text = SpannableStringBuilder(spannable)
@@ -3441,10 +5784,14 @@ private fun applySelectionStyle(
         emptyList()
     }
 
-    val safeInsightRanges = insightRanges.filter { range ->
-        range.start >= 0 &&
-            range.end <= source.length &&
-            range.start < range.end
+    val safeInsightRanges = if (hasMediaSpan) {
+        emptyList()
+    } else {
+        insightRanges.filter { range ->
+            range.start >= 0 &&
+                range.end <= source.length &&
+                range.start < range.end
+        }
     }
     safeInsightRanges.forEach { range ->
         spannable.setSpan(
@@ -3516,6 +5863,46 @@ private fun applySelectionStyle(
         spannable.setSpan(
             ReaderAnnotationBubbleIndicatorSpan(
                 color = 0xFF2B5F7B.toInt()
+            ),
+            range.start,
+            range.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+
+    pendingAnchorSelections.forEach { range ->
+        if (range.start < 0 || range.end > source.length || range.start >= range.end) {
+            return@forEach
+        }
+        spannable.setSpan(
+            ReaderAnchorUnderlineSpan(
+                color = 0xFF1D4ED8.toInt(),
+                thicknessPx = 2.6f,
+                dashed = true
+            ),
+            range.start,
+            range.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+    }
+
+    mountedAnchorSelections.forEach { range ->
+        if (range.start < 0 || range.end > source.length || range.start >= range.end) {
+            return@forEach
+        }
+        spannable.setSpan(
+            ReaderAnchorUnderlineSpan(
+                color = 0xFF155EEF.toInt(),
+                thicknessPx = 2.8f,
+                dashed = false
+            ),
+            range.start,
+            range.end,
+            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+        )
+        spannable.setSpan(
+            ReaderAnchorMountedIndicatorSpan(
+                color = 0xFF155EEF.toInt()
             ),
             range.start,
             range.end,
@@ -3787,27 +6174,24 @@ private fun applyPostMediaIndent(
     )
 }
 
-private fun applyMediaContainerInset(textView: TextView, hasMediaBlocks: Boolean) {
+private fun applyMediaContainerInset(
+    textView: TextView,
+    hasMediaBlocks: Boolean,
+    preferredWidthPx: Int
+) {
     if (!hasMediaBlocks) {
         if (textView.paddingStart != 0 || textView.paddingEnd != 0) {
             textView.setPaddingRelative(0, textView.paddingTop, 0, textView.paddingBottom)
         }
         return
     }
-    fun applyInset() {
-        val width = textView.width
-        if (width <= 0) {
-            return
-        }
-        val inset = (width * 0.05f).roundToInt()
-        if (textView.paddingStart != inset || textView.paddingEnd != inset) {
-            textView.setPaddingRelative(inset, textView.paddingTop, inset, textView.paddingBottom)
-        }
+    val width = if (textView.width > 0) textView.width else preferredWidthPx
+    if (width <= 0) {
+        return
     }
-    if (textView.width <= 0) {
-        textView.post { applyInset() }
-    } else {
-        applyInset()
+    val inset = (width * 0.05f).roundToInt()
+    if (textView.paddingStart != inset || textView.paddingEnd != inset) {
+        textView.setPaddingRelative(inset, textView.paddingTop, inset, textView.paddingBottom)
     }
 }
 
@@ -3934,6 +6318,137 @@ private class ReaderLikedUnderlineSpan(
     }
 }
 
+private class ReaderAnchorUnderlineSpan(
+    private val color: Int,
+    private val thicknessPx: Float,
+    private val dashed: Boolean
+) : android.text.style.LineBackgroundSpan, ReaderOverlaySpan {
+    override fun drawBackground(
+        c: android.graphics.Canvas,
+        p: android.graphics.Paint,
+        left: Int,
+        right: Int,
+        top: Int,
+        baseline: Int,
+        bottom: Int,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        lnum: Int
+    ) {
+        val spanned = text as? Spanned ?: return
+        val spanStart = max(start, spanned.getSpanStart(this))
+        val spanEnd = min(end, spanned.getSpanEnd(this))
+        if (spanStart < 0 || spanEnd <= spanStart) {
+            return
+        }
+        val prefix = text.subSequence(start, spanStart).toString()
+        val segment = text.subSequence(spanStart, spanEnd).toString()
+        val startX = left + p.measureText(prefix)
+        val endX = startX + p.measureText(segment)
+        val oldColor = p.color
+        val oldStrokeWidth = p.strokeWidth
+        val oldStyle = p.style
+        val oldPathEffect = p.pathEffect
+        p.color = color
+        p.strokeWidth = thicknessPx
+        p.style = android.graphics.Paint.Style.STROKE
+        p.pathEffect = if (dashed) {
+            android.graphics.DashPathEffect(floatArrayOf(7f, 4f), 0f)
+        } else {
+            null
+        }
+        val y = baseline + thicknessPx
+        c.drawLine(startX, y, endX, y, p)
+        p.color = oldColor
+        p.strokeWidth = oldStrokeWidth
+        p.style = oldStyle
+        p.pathEffect = oldPathEffect
+    }
+}
+
+private class ReaderAnchorMountedIndicatorSpan(
+    private val color: Int
+) : android.text.style.LineBackgroundSpan, ReaderOverlaySpan {
+    override fun drawBackground(
+        c: android.graphics.Canvas,
+        p: android.graphics.Paint,
+        left: Int,
+        right: Int,
+        top: Int,
+        baseline: Int,
+        bottom: Int,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        lnum: Int
+    ) {
+        val spanned = text as? Spanned ?: return
+        val spanStart = max(start, spanned.getSpanStart(this))
+        val spanEnd = min(end, spanned.getSpanEnd(this))
+        if (spanStart < 0 || spanEnd <= spanStart) {
+            return
+        }
+        val prefix = text.subSequence(start, spanStart).toString()
+        val segment = text.subSequence(spanStart, spanEnd).toString()
+        val startX = left + p.measureText(prefix)
+        val endX = startX + p.measureText(segment)
+        val centerX = (startX + endX) / 2f
+        val radius = 2.4f
+        val oldColor = p.color
+        val oldStyle = p.style
+        p.color = color
+        p.style = android.graphics.Paint.Style.FILL
+        c.drawCircle(centerX, baseline + 6f, radius, p)
+        p.color = oldColor
+        p.style = oldStyle
+    }
+}
+
+private class ReaderWikilinkChipSpan(
+    private val backgroundColor: Int
+) : android.text.style.LineBackgroundSpan, ReaderOverlaySpan {
+    override fun drawBackground(
+        c: android.graphics.Canvas,
+        p: android.graphics.Paint,
+        left: Int,
+        right: Int,
+        top: Int,
+        baseline: Int,
+        bottom: Int,
+        text: CharSequence,
+        start: Int,
+        end: Int,
+        lnum: Int
+    ) {
+        val spanned = text as? Spanned ?: return
+        val spanStart = max(start, spanned.getSpanStart(this))
+        val spanEnd = min(end, spanned.getSpanEnd(this))
+        if (spanStart < 0 || spanEnd <= spanStart) {
+            return
+        }
+        val prefix = text.subSequence(start, spanStart).toString()
+        val segment = text.subSequence(spanStart, spanEnd).toString()
+        val startX = left + p.measureText(prefix)
+        val endX = startX + p.measureText(segment)
+        val horizontalPadding = 10f
+        val verticalInset = 3f
+        val rect = RectF(
+            startX - horizontalPadding,
+            top + verticalInset,
+            endX + horizontalPadding,
+            bottom - verticalInset
+        )
+        val oldColor = p.color
+        val oldStyle = p.style
+        p.color = backgroundColor
+        p.style = android.graphics.Paint.Style.FILL
+        c.drawRoundRect(rect, 11f, 11f, p)
+        p.color = oldColor
+        p.style = oldStyle
+    }
+}
+
 private class ReaderAnnotationBubbleIndicatorSpan(
     private val color: Int
 ) : android.text.style.LineBackgroundSpan, ReaderOverlaySpan {
@@ -3989,12 +6504,18 @@ private class ReaderParagraphLineHeightSpan(
         fm: android.graphics.Paint.FontMetricsInt
     ) {
         val originHeight = fm.descent - fm.ascent
-        if (originHeight <= 0 || targetHeightPx <= 0 || originHeight == targetHeightPx) {
+        if (originHeight <= 0 || targetHeightPx <= 0) {
             return
         }
-        val ratio = targetHeightPx.toFloat() / originHeight.toFloat()
-        fm.descent = (fm.descent * ratio).roundToInt()
-        fm.ascent = fm.descent - targetHeightPx
+        val safeTarget = max(targetHeightPx, originHeight)
+        if (safeTarget == originHeight) {
+            return
+        }
+        val extra = safeTarget - originHeight
+        val addBottom = extra / 2
+        val addTop = extra - addBottom
+        fm.descent += addBottom
+        fm.ascent -= addTop
         fm.bottom = fm.descent
         fm.top = fm.ascent
     }
@@ -4104,6 +6625,8 @@ private data class InsightTapContext(
     val favoriteFingerprint: Int,
     val likedFingerprint: Int,
     val annotatedFingerprint: Int,
+    val pendingAnchorFingerprint: Int,
+    val mountedAnchorFingerprint: Int,
     val textStyleFingerprint: Int,
     val lineHeightPx: Int,
     val hasMediaBlocks: Boolean,
@@ -4157,6 +6680,48 @@ private data class TokenAnnotationBubbleState(
     val selection: TokenSelection,
     val text: String,
     val anchor: InsightTermAnchor?
+)
+
+private data class MountedAnchorDocument(
+    val notePath: String,
+    val displayTitle: String,
+    val markdown: String,
+    val rawMarkdown: String,
+    val isGhost: Boolean,
+    val ghostInputPath: String
+)
+
+private data class MountedWikilinkTap(
+    val displayText: String,
+    val targetNotePath: String,
+    val isGhost: Boolean
+)
+
+private data class MountedWikilinkRewrite(
+    val markdown: String,
+    val linksByUrl: Map<String, MountedWikilinkTap>
+)
+
+private data class ParsedMountedWikilink(
+    val targetPath: String,
+    val displayText: String
+)
+
+private data class ResolvedMountedWikilink(
+    val targetNotePath: String,
+    val isGhost: Boolean
+)
+
+private data class MountedAnchorPreviewState(
+    val anchorId: String,
+    val blockId: String,
+    val quote: String,
+    val entryNotePath: String,
+    val markdownPaths: List<String>,
+    val stack: List<MountedAnchorDocument>,
+    val isLoading: Boolean,
+    val errorMessage: String?,
+    val isFullscreen: Boolean
 )
 
 private fun resolveTappedInsightTerm(
@@ -4299,6 +6864,62 @@ private fun resolveCursorOffset(
     )
 }
 
+private fun resolveTappedInlineImage(
+    textView: TextView,
+    x: Float,
+    y: Float
+): InlineImageItem? {
+    val spanned = textView.text as? Spanned ?: return null
+    val cursor = resolveCursorOffset(textView, x, y) ?: return null
+    val start = (cursor - 1).coerceAtLeast(0)
+    val end = (cursor + 1).coerceAtMost(spanned.length)
+    val spans = spanned.getSpans(start, end, Any::class.java)
+    val imageUrl = spans.firstNotNullOfOrNull { span ->
+        if (!isImageRenderSpan(span)) {
+            return@firstNotNullOfOrNull null
+        }
+        resolveImageUrlFromSpan(span)
+    } ?: return null
+    return InlineImageItem(
+        url = imageUrl,
+        alt = deriveReaderMediaLabel(imageUrl)
+    )
+}
+
+private fun isImageRenderSpan(span: Any): Boolean {
+    val name = span.javaClass.name
+    return (name.contains("AsyncDrawable", ignoreCase = true) ||
+        name.contains("ImageSpan", ignoreCase = true) ||
+        name.contains("Image", ignoreCase = true)) &&
+        !name.contains("Video", ignoreCase = true)
+}
+
+private fun resolveImageUrlFromSpan(span: Any): String? {
+    val directDestination = invokeZeroArgStringGetter(span, "getDestination")
+    if (!directDestination.isNullOrBlank()) {
+        return directDestination
+    }
+    val drawable = invokeZeroArgGetter(span, "getDrawable") ?: return null
+    val drawableDestination = invokeZeroArgStringGetter(drawable, "getDestination")
+    return drawableDestination?.takeIf { value -> value.isNotBlank() }
+}
+
+private fun invokeZeroArgGetter(target: Any, methodName: String): Any? {
+    return runCatching {
+        target.javaClass.methods
+            .firstOrNull { method ->
+                method.name == methodName && method.parameterCount == 0
+            }
+            ?.invoke(target)
+    }.getOrNull()
+}
+
+private fun invokeZeroArgStringGetter(target: Any, methodName: String): String? {
+    val raw = invokeZeroArgGetter(target, methodName) as? String
+    val normalized = raw?.trim().orEmpty()
+    return normalized.takeIf { value -> value.isNotBlank() }
+}
+
 private fun normalizeLexicalCursor(
     text: String,
     cursor: Int
@@ -4351,14 +6972,85 @@ private fun resolveCurrentTextSelection(textView: TextView): TokenSelection? {
     )
 }
 
+private fun buildSingleMarkdownReaderBlock(nodes: List<SemanticNode>): List<SemanticBlock> {
+    if (nodes.isEmpty()) {
+        return emptyList()
+    }
+    val mergedMarkdown = nodes
+        .mapNotNull { node ->
+            val source = (node.originalMarkdown ?: node.text)
+                .replace("\r\n", "\n")
+            source.takeIf { it.any { ch -> !ch.isWhitespace() } }
+        }
+        .joinToString("\n\n")
+    if (mergedMarkdown.isBlank()) {
+        return emptyList()
+    }
+    val mergedInsightTerms = nodes
+        .flatMap { node -> node.resolvedInsightTerms() }
+        .map { token -> token.trim() }
+        .filter { token -> token.isNotBlank() }
+        .distinct()
+    val mergedReasoning = nodes
+        .firstNotNullOfOrNull { node -> node.reasoning?.takeIf { it.isNotBlank() } }
+    return listOf(
+        SemanticBlock(
+            blockId = "md_root",
+            parentNodeId = "md_root",
+            blockIndex = 0,
+            blockCount = 1,
+            markdown = mergedMarkdown,
+            plainText = stripMarkdownToPlainText(mergedMarkdown),
+            indentLevel = 0,
+            type = "paragraph",
+            relevanceScore = 1f,
+            reasoning = mergedReasoning,
+            insightTerms = mergedInsightTerms,
+            insightsTags = emptyList()
+        )
+    )
+}
+
 private data class TokenMetaKey(
     val blockId: String,
     val start: Int,
     val end: Int
 )
 
+private data class ResolvedAnchorSelection(
+    val selection: TokenSelection,
+    val anchorData: MobileAnchorData
+)
+
 private fun buildTokenMetaKey(blockId: String, start: Int, end: Int): String {
     return "$blockId::$start::$end"
+}
+
+private fun buildAnchorContextQuoteSnapshot(
+    blockText: String,
+    start: Int,
+    end: Int,
+    contextRadius: Int = 40
+): String {
+    if (blockText.isBlank()) {
+        return ""
+    }
+    val source = blockText
+    val safeStart = start.coerceIn(0, source.length)
+    val safeEnd = end.coerceIn(safeStart, source.length)
+    if (safeEnd <= safeStart) {
+        return source.replace(Regex("\\s+"), " ").trim().take(120)
+    }
+    val leftStart = (safeStart - contextRadius).coerceAtLeast(0)
+    val rightEnd = (safeEnd + contextRadius).coerceAtMost(source.length)
+    val prefix = if (leftStart > 0) "..." else ""
+    val suffix = if (rightEnd < source.length) "..." else ""
+    val left = source.substring(leftStart, safeStart)
+    val middle = source.substring(safeStart, safeEnd)
+    val right = source.substring(safeEnd, rightEnd)
+    return "$prefix$left【$middle】$right$suffix"
+        .replace(Regex("\\s+"), " ")
+        .trim()
 }
 
 private fun parseTokenMetaKey(rawKey: String): TokenMetaKey? {
@@ -4383,6 +7075,96 @@ private fun parseTokenMetaKey(rawKey: String): TokenMetaKey? {
         blockId = blockId,
         start = start,
         end = end
+    )
+}
+
+private fun parseRangeKey(rawKey: String): Pair<Int, Int>? {
+    val parts = rawKey.split(':')
+    if (parts.size != 2) {
+        return null
+    }
+    val start = parts[0].toIntOrNull() ?: return null
+    val end = parts[1].toIntOrNull() ?: return null
+    if (start < 0 || end <= start) {
+        return null
+    }
+    return start to end
+}
+
+private fun resolveAnchorSelectionForDisplay(
+    rangeKey: String,
+    anchorData: MobileAnchorData,
+    source: String
+): TokenSelection? {
+    val parsedRange = parseRangeKey(rangeKey)
+    val fallbackStart = if (anchorData.startIndex >= 0) anchorData.startIndex else 0
+    val fallbackEnd = if (anchorData.endIndex > fallbackStart) anchorData.endIndex else fallbackStart
+    val start = parsedRange?.first ?: fallbackStart
+    val end = parsedRange?.second ?: fallbackEnd
+    if (start >= 0 && end > start) {
+        if (source.isNotBlank() && end <= source.length) {
+            val selected = source.substring(start, end)
+            if (selected.isNotBlank()) {
+                return TokenSelection(
+                    token = selected,
+                    start = start,
+                    end = end
+                )
+            }
+        }
+        val fallbackToken = anchorData.quote.trim().ifBlank { "anchor" }
+        return TokenSelection(
+            token = fallbackToken,
+            start = start,
+            end = end
+        )
+    }
+    if (source.isBlank()) {
+        return null
+    }
+    val quote = anchorData.quote.trim()
+    if (quote.isBlank()) {
+        return null
+    }
+    return resolveSelectionByQuoteWithHint(
+        source = source,
+        quote = quote,
+        hintStart = start
+    )
+}
+
+private fun resolveSelectionByQuoteWithHint(
+    source: String,
+    quote: String,
+    hintStart: Int
+): TokenSelection? {
+    if (source.isBlank() || quote.isBlank()) {
+        return null
+    }
+    val candidates = mutableListOf<Pair<Int, Int>>()
+    var cursor = 0
+    while (cursor < source.length) {
+        val hit = source.indexOf(quote, startIndex = cursor, ignoreCase = true)
+        if (hit < 0) {
+            break
+        }
+        candidates += hit to (hit + quote.length)
+        cursor = hit + 1
+    }
+    if (candidates.isEmpty()) {
+        return null
+    }
+    val safeHint = hintStart.coerceAtLeast(0)
+    val selected = candidates.minByOrNull { (start, _) ->
+        kotlin.math.abs(start - safeHint)
+    } ?: return null
+    if (selected.second <= selected.first || selected.second > source.length) {
+        return null
+    }
+    return TokenSelection(
+        token = source.substring(selected.first, selected.second),
+        start = selected.first,
+        end = selected.second
     )
 }
 
@@ -4419,6 +7201,31 @@ private fun groupTokenAnnotationsByBlock(
         }
         val byBlock = grouped.getOrPut(parsed.blockId) { linkedMapOf() }
         byBlock["${parsed.start}:${parsed.end}"] = normalized
+    }
+    return grouped
+}
+
+private fun groupAnchorsByBlock(
+    anchorsState: Map<String, MobileAnchorData>
+): Map<String, Map<String, MobileAnchorData>> {
+    if (anchorsState.isEmpty()) {
+        return emptyMap()
+    }
+    val grouped = mutableMapOf<String, MutableMap<String, MobileAnchorData>>()
+    anchorsState.forEach { (metaKey, data) ->
+        val parsed = parseTokenMetaKey(metaKey)
+        val blockId = parsed?.blockId ?: data.blockId.trim()
+        val start = parsed?.start ?: data.startIndex
+        val end = parsed?.end ?: data.endIndex
+        if (blockId.isBlank() || start < 0 || end <= start) {
+            return@forEach
+        }
+        val byBlock = grouped.getOrPut(blockId) { linkedMapOf() }
+        byBlock["$start:$end"] = data.copy(
+            blockId = blockId,
+            startIndex = start,
+            endIndex = end
+        )
     }
     return grouped
 }

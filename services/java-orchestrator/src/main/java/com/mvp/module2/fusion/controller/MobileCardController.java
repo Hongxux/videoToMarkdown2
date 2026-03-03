@@ -2,7 +2,10 @@ package com.mvp.module2.fusion.controller;
 
 import com.mvp.module2.fusion.service.CardStorageService;
 import com.mvp.module2.fusion.service.DeepSeekAdvisorService;
+import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
+import com.mvp.module2.fusion.service.Phase2bImageTopologyGuard;
 import com.mvp.module2.fusion.service.SelectionSyntaxRefineService;
+import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -27,6 +30,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Pattern;
 
 @RestController
@@ -49,6 +53,7 @@ public class MobileCardController {
     private static final Pattern DICTIONARY_LEAD_PATTERN = Pattern.compile(
             "(?i)^(?:#{1,6}\\s*)?.{0,96}(?:是(?:一种|指|指的是)?|通常指|可定义为|又称|缩写|means\\b|refers to\\b|is\\s+(?:a|an|the)\\b)"
     );
+    private static final Pattern PHASE2B_PROGRESS_CHANNEL_PATTERN = Pattern.compile("^[A-Za-z0-9:_\\-.]{6,96}$");
 
     @Autowired
     private CardStorageService cardStorageService;
@@ -59,6 +64,12 @@ public class MobileCardController {
     @Autowired
     private SelectionSyntaxRefineService selectionSyntaxRefineService;
 
+    @Autowired(required = false)
+    private Phase2bArticleLinkService phase2bArticleLinkService;
+
+    @Autowired(required = false)
+    private TaskWebSocketHandler taskWebSocketHandler;
+
     private final Map<String, String> inFlightCardGeneration = new ConcurrentHashMap<>();
 
     @GetMapping("/titles")
@@ -68,6 +79,16 @@ public class MobileCardController {
         payload.put("titles", titles);
         payload.put("count", titles.size());
         return ResponseEntity.ok(payload);
+    }
+
+    @GetMapping
+    public ResponseEntity<?> getCardByTerm(
+            @RequestParam(value = "term", required = false) String term
+    ) {
+        if (!StringUtils.hasText(term)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "term is required"));
+        }
+        return getCardByTitle(term);
     }
 
     @PostMapping("/titles/candidates")
@@ -394,6 +415,313 @@ public class MobileCardController {
         }
     }
 
+    @PostMapping("/phase2b/link-metadata")
+    public ResponseEntity<?> phase2bLinkMetadata(@RequestBody(required = false) Phase2bLinkMetadataRequest request) {
+        List<String> normalizedLinkUrls = normalizePhase2bLinkUrls(request != null ? request.linkUrls : List.of());
+        if (normalizedLinkUrls.isEmpty()) {
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "links", List.of(),
+                    "count", 0
+            ));
+        }
+        List<Map<String, Object>> linksPayload = new ArrayList<>();
+        if (phase2bArticleLinkService != null) {
+            try {
+                List<Phase2bArticleLinkService.LinkMetadata> metadataList =
+                        phase2bArticleLinkService.prefetchLinkMetadata(normalizedLinkUrls);
+                for (Phase2bArticleLinkService.LinkMetadata metadata : metadataList) {
+                    if (metadata == null) {
+                        continue;
+                    }
+                    linksPayload.add(metadata.toPayload());
+                }
+            } catch (Exception error) {
+                logger.warn("phase2b link metadata prefetch failed: err={}", error.getMessage());
+            }
+        }
+        if (linksPayload.isEmpty()) {
+            for (String url : normalizedLinkUrls) {
+                Map<String, Object> item = new LinkedHashMap<>();
+                item.put("url", url);
+                item.put("siteType", inferPhase2bSiteType(url));
+                item.put("title", "");
+                item.put("status", "failed");
+                linksPayload.add(item);
+            }
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("links", linksPayload);
+        payload.put("count", linksPayload.size());
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping("/phase2b/structured-markdown")
+    public ResponseEntity<?> phase2bStructuredMarkdown(@RequestBody(required = false) Phase2bStructuredMarkdownRequest request) {
+        if (request == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "request body is required"));
+        }
+        String progressChannel = normalizePhase2bProgressChannel(request.progressChannel);
+        String progressRequestId = normalizePhase2bProgressRequestId(request.requestId);
+        String bodyText = StringUtils.hasText(request.bodyText)
+                ? request.bodyText
+                : String.valueOf(request.sourceText == null ? "" : request.sourceText);
+        String safeBodyText = String.valueOf(bodyText == null ? "" : bodyText).trim();
+        List<String> normalizedLinkUrls = normalizePhase2bLinkUrls(request.linkUrls);
+        if (!StringUtils.hasText(safeBodyText) && normalizedLinkUrls.isEmpty()) {
+            emitPhase2bProgress(progressChannel, progressRequestId, "failed", "请求内容为空，无法处理", true, false);
+            return ResponseEntity.badRequest().body(Map.of("message", "bodyText or linkUrls is required"));
+        }
+
+        try {
+            emitPhase2bProgress(progressChannel, progressRequestId, "accepted", "请求已接收，开始准备多源重构任务", false, false);
+
+            List<Phase2bArticleLinkService.ExtractedLinkArticle> extractedArticles = List.of();
+            List<String> linkWarnings = new ArrayList<>();
+            if (!normalizedLinkUrls.isEmpty()) {
+                emitPhase2bProgress(progressChannel, progressRequestId, "fetching_reference", "正在抓取知乎/掘金文章文本...", false, false);
+                Phase2bArticleLinkService.LinkBatchExtractionResult extraction = extractPhase2bArticles(normalizedLinkUrls);
+                extractedArticles = extraction.articles;
+                if (extraction.failures != null && !extraction.failures.isEmpty()) {
+                    linkWarnings.addAll(extraction.failures);
+                }
+                if (extraction.ignoredLinks != null && !extraction.ignoredLinks.isEmpty()) {
+                    linkWarnings.add("未抓取成功: " + String.join(", ", extraction.ignoredLinks));
+                }
+                emitPhase2bProgress(progressChannel, progressRequestId, "cleaning_data", "正在剔除噪音与清洗数据...", false, false);
+            }
+
+            String userInstruction = StringUtils.hasText(safeBodyText)
+                    ? safeBodyText
+                    : "请基于参考信源提炼结构化 Markdown，保留关键论据、结论和执行建议。";
+            boolean blendMode = extractedArticles != null && !extractedArticles.isEmpty();
+            if (!blendMode && !normalizedLinkUrls.isEmpty() && !StringUtils.hasText(safeBodyText)) {
+                throw new IllegalStateException("链接抓取失败，且没有可用文本输入");
+            }
+            String llmSourceText = blendMode
+                    ? buildPhase2bBlendSourceText(extractedArticles, userInstruction)
+                    : userInstruction;
+            if (blendMode) {
+                emitPhase2bProgress(progressChannel, progressRequestId, "semantic_fusion", "语义网络构建中，准备融合您的额外观点...", false, false);
+            }
+
+            Phase2bImageTopologyGuard.MaskResult imageMask = Phase2bImageTopologyGuard.maskImageMarkers(llmSourceText);
+            AtomicInteger chunkIndex = new AtomicInteger(0);
+            emitPhase2bProgress(progressChannel, progressRequestId, "phase2b_deep", "Phase2B 深度重构中...", false, false);
+            String rawMarkdown = deepSeekAdvisorService.requestPhase2bStructuredMarkdownStreamed(
+                    imageMask.getMaskedMarkdown(),
+                    "",
+                    blendMode,
+                    (delta) -> emitPhase2bMarkdownDelta(
+                            progressChannel,
+                            progressRequestId,
+                            String.valueOf(delta == null ? "" : delta),
+                            chunkIndex.getAndIncrement()
+                    )
+            );
+            emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在恢复图片拓扑并整理 Markdown...", false, false);
+            String restoredMarkdown = Phase2bImageTopologyGuard.restoreImageMarkers(rawMarkdown, imageMask);
+            boolean topologyFallback = false;
+            if (!StringUtils.hasText(restoredMarkdown)) {
+                topologyFallback = true;
+                restoredMarkdown = Phase2bImageTopologyGuard.restoreOrFallback(rawMarkdown, imageMask, llmSourceText);
+            }
+            String finalMarkdown = StringUtils.hasText(restoredMarkdown) ? restoredMarkdown : rawMarkdown;
+            emitPhase2bMarkdownFinal(progressChannel, progressRequestId, finalMarkdown, chunkIndex.get());
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("markdown", finalMarkdown);
+            payload.put("source", blendMode ? "deepseek.phase2b.blend" : "deepseek.phase2b");
+            payload.put("links", buildPhase2bLinkPayload(extractedArticles));
+            if (!linkWarnings.isEmpty()) {
+                payload.put("linkWarnings", linkWarnings);
+            }
+            if (topologyFallback) {
+                payload.put("imageTopologyFallback", true);
+            }
+            emitPhase2bProgress(
+                    progressChannel,
+                    progressRequestId,
+                    "completed",
+                    topologyFallback ? "结构化完成（已启用图片拓扑保护回退）" : "结构化完成",
+                    true,
+                    true
+            );
+            return ResponseEntity.ok(payload);
+        } catch (IllegalArgumentException ex) {
+            emitPhase2bProgress(progressChannel, progressRequestId, "failed", safePhase2bProgressMessage(ex.getMessage()), true, false);
+            return ResponseEntity.badRequest().body(Map.of("message", ex.getMessage()));
+        } catch (Exception ex) {
+            logger.warn("phase2b structured markdown failed: err={}", ex.getMessage());
+            emitPhase2bProgress(progressChannel, progressRequestId, "failed", "结构化失败，请稍后重试", true, false);
+            return ResponseEntity.status(500).body(Map.of("message", "phase2b structured markdown failed"));
+        }
+    }
+
+    private List<String> normalizePhase2bLinkUrls(List<String> rawLinkUrls) {
+        if (phase2bArticleLinkService == null) {
+            return List.of();
+        }
+        return phase2bArticleLinkService.normalizeSupportedLinks(rawLinkUrls);
+    }
+
+    private Phase2bArticleLinkService.LinkBatchExtractionResult extractPhase2bArticles(List<String> normalizedLinkUrls) {
+        if (phase2bArticleLinkService == null) {
+            throw new IllegalStateException("phase2b link service unavailable");
+        }
+        return phase2bArticleLinkService.extractArticles(normalizedLinkUrls);
+    }
+
+    private String buildPhase2bBlendSourceText(
+            List<Phase2bArticleLinkService.ExtractedLinkArticle> articles,
+            String userInstruction
+    ) {
+        String safeInstruction = String.valueOf(userInstruction == null ? "" : userInstruction).trim();
+        StringBuilder builder = new StringBuilder();
+        builder.append("## 输入流A：参考信源（文章正文）").append('\n');
+        int index = 1;
+        for (Phase2bArticleLinkService.ExtractedLinkArticle article : articles) {
+            if (article == null || !StringUtils.hasText(article.markdown)) {
+                continue;
+            }
+            builder.append('\n');
+            builder.append("### 参考文章 ").append(index).append('\n');
+            builder.append("- 标题：").append(StringUtils.hasText(article.title) ? article.title : "未命名文章").append('\n');
+            builder.append("- 平台：").append(StringUtils.hasText(article.siteType) ? article.siteType : "generic").append('\n');
+            builder.append("- 链接：").append(StringUtils.hasText(article.finalUrl) ? article.finalUrl : article.requestedUrl).append('\n');
+            builder.append('\n');
+            builder.append(article.markdown.trim()).append('\n');
+            index += 1;
+        }
+        builder.append('\n');
+        builder.append("## 输入流B：用户指令（必须严格执行）").append('\n');
+        if (StringUtils.hasText(safeInstruction)) {
+            builder.append(safeInstruction).append('\n');
+        } else {
+            builder.append("请围绕参考文章进行结构化重构，优先输出可执行的学习笔记。").append('\n');
+        }
+        builder.append('\n');
+        builder.append("## 约束").append('\n');
+        builder.append("- 输出保持 Markdown").append('\n');
+        builder.append("- 若出现图片 Markdown 标记，必须保持相对顺序和相对位置，不得改写路径").append('\n');
+        return builder.toString().trim();
+    }
+
+    private List<Map<String, Object>> buildPhase2bLinkPayload(List<Phase2bArticleLinkService.ExtractedLinkArticle> articles) {
+        if (articles == null || articles.isEmpty()) {
+            return List.of();
+        }
+        List<Map<String, Object>> payload = new ArrayList<>();
+        for (Phase2bArticleLinkService.ExtractedLinkArticle article : articles) {
+            if (article == null) {
+                continue;
+            }
+            payload.add(article.toPayload());
+        }
+        return payload;
+    }
+
+    private void emitPhase2bMarkdownDelta(String channel, String requestId, String delta, int chunkIndex) {
+        if (taskWebSocketHandler == null) {
+            return;
+        }
+        String normalizedChannel = normalizePhase2bProgressChannel(channel);
+        if (!StringUtils.hasText(normalizedChannel)) {
+            return;
+        }
+        taskWebSocketHandler.broadcastPhase2bMarkdownChunk(
+                normalizedChannel,
+                normalizePhase2bProgressRequestId(requestId),
+                String.valueOf(delta == null ? "" : delta),
+                Math.max(0, chunkIndex),
+                false
+        );
+    }
+
+    private void emitPhase2bMarkdownFinal(String channel, String requestId, String finalMarkdown, int finalChunkIndex) {
+        if (taskWebSocketHandler == null) {
+            return;
+        }
+        String normalizedChannel = normalizePhase2bProgressChannel(channel);
+        if (!StringUtils.hasText(normalizedChannel)) {
+            return;
+        }
+        taskWebSocketHandler.broadcastPhase2bMarkdownFinal(
+                normalizedChannel,
+                normalizePhase2bProgressRequestId(requestId),
+                String.valueOf(finalMarkdown == null ? "" : finalMarkdown),
+                Math.max(0, finalChunkIndex)
+        );
+    }
+
+    private String inferPhase2bSiteType(String urlLike) {
+        String url = String.valueOf(urlLike == null ? "" : urlLike).trim().toLowerCase(Locale.ROOT);
+        if (url.contains("zhuanlan.zhihu.com") || url.contains("zhihu.com/question/")) {
+            return "zhihu";
+        }
+        if (url.contains("juejin.cn")) {
+            return "juejin";
+        }
+        return "generic";
+    }
+
+    private void emitPhase2bProgress(
+            String channel,
+            String requestId,
+            String status,
+            String message,
+            boolean done,
+            boolean success
+    ) {
+        if (taskWebSocketHandler == null) {
+            return;
+        }
+        String normalizedChannel = normalizePhase2bProgressChannel(channel);
+        if (!StringUtils.hasText(normalizedChannel)) {
+            return;
+        }
+        taskWebSocketHandler.broadcastPhase2bProgress(
+                normalizedChannel,
+                normalizePhase2bProgressRequestId(requestId),
+                String.valueOf(status == null ? "" : status),
+                String.valueOf(message == null ? "" : message),
+                done,
+                success
+        );
+    }
+
+    private String normalizePhase2bProgressChannel(String raw) {
+        String value = String.valueOf(raw == null ? "" : raw).trim();
+        if (!PHASE2B_PROGRESS_CHANNEL_PATTERN.matcher(value).matches()) {
+            return "";
+        }
+        return value;
+    }
+
+    private String normalizePhase2bProgressRequestId(String raw) {
+        String value = String.valueOf(raw == null ? "" : raw).trim();
+        if (value.isEmpty()) {
+            return "";
+        }
+        if (value.length() > 120) {
+            return value.substring(0, 120);
+        }
+        return value;
+    }
+
+    private String safePhase2bProgressMessage(String raw) {
+        String value = String.valueOf(raw == null ? "" : raw).trim();
+        if (value.isEmpty()) {
+            return "请求参数不合法";
+        }
+        if (value.length() > 180) {
+            return value.substring(0, 180);
+        }
+        return value;
+    }
+
     private Map<String, Object> toCardSavePayload(CardStorageService.CardSaveResult result) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
@@ -588,6 +916,19 @@ public class MobileCardController {
         public String currentTerm;
         public int currentStartOffset;
         public int currentEndOffset;
+    }
+
+    public static class Phase2bLinkMetadataRequest {
+        public List<String> linkUrls;
+    }
+
+    public static class Phase2bStructuredMarkdownRequest {
+        public String bodyText;
+        public String sourceText;
+        public String filterRequirement;
+        public String progressChannel;
+        public String requestId;
+        public List<String> linkUrls;
     }
 
     private static class ThoughtQualityCheckResult {

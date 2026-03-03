@@ -1,14 +1,18 @@
 package com.hongxu.videoToMarkdownTest2
 
-import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
-import android.database.Cursor
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import androidx.work.BackoffPolicy
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -21,7 +25,8 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
-import java.security.MessageDigest
+import java.util.UUID
+import java.util.concurrent.TimeUnit
 
 class MobileAppAutoUpdateManager(
     context: Context,
@@ -39,6 +44,12 @@ class MobileAppAutoUpdateManager(
             val versionCode: Int,
             val versionName: String,
             val progressPercent: Int?,
+            val forceUpdate: Boolean
+        ) : AutoUpdateAction()
+
+        data class ReadyToInstall(
+            val versionCode: Int,
+            val versionName: String,
             val forceUpdate: Boolean
         ) : AutoUpdateAction()
 
@@ -64,24 +75,18 @@ class MobileAppAutoUpdateManager(
 
     private val appContext = context.applicationContext
     private val normalizedApiBaseUrl = apiBaseUrl.trim().trimEnd('/')
-    private val downloadManager = appContext.getSystemService(DownloadManager::class.java)
-    private val preferences = appContext.getSharedPreferences(
-        PREFS_APP_UPDATE,
-        Context.MODE_PRIVATE
-    )
+    private val stateStore = MobileAppUpdateStateStore(appContext)
+    private val workManager = WorkManager.getInstance(appContext)
     private val checkMutex = Mutex()
 
     suspend fun checkAndAutoUpdate(): AutoUpdateAction {
         return checkMutex.withLock {
             try {
                 withContext(Dispatchers.IO) {
-                    if (downloadManager == null) {
-                        return@withContext AutoUpdateAction.Failed("download manager unavailable")
-                    }
-                    val currentVersion = readCurrentVersion()
-                    pruneStateByCurrentVersion(currentVersion.versionCode)
+                    val currentVersion = stateStore.readCurrentVersion()
+                    stateStore.pruneStateByCurrentVersion(currentVersion.versionCode)
 
-                    val pending = readPendingDownloadState()
+                    val pending = stateStore.readPendingDownloadState()
                     if (pending != null) {
                         val pendingAction = handlePendingDownload(pending, currentVersion)
                         if (pendingAction !is AutoUpdateAction.NoOp) {
@@ -89,9 +94,9 @@ class MobileAppAutoUpdateManager(
                         }
                     }
 
-                    val readyInstall = readReadyInstallState()
-                    if (readyInstall != null && readyInstall.versionCode > currentVersion.versionCode) {
-                        val readyAction = launchInstallerIfReady(readyInstall)
+                    val ready = stateStore.readReadyInstallState()
+                    if (ready != null && ready.versionCode > currentVersion.versionCode) {
+                        val readyAction = resolveReadyInstallAction(ready)
                         if (readyAction !is AutoUpdateAction.NoOp) {
                             return@withContext readyAction
                         }
@@ -105,26 +110,55 @@ class MobileAppAutoUpdateManager(
                         return@withContext AutoUpdateAction.NoOp
                     }
 
-                    val existingReady = readReadyInstallState()
+                    val existingReady = stateStore.readReadyInstallState()
                     if (existingReady != null && existingReady.versionCode == checkPayload.latestVersionCode) {
-                        val readyAction = launchInstallerIfReady(existingReady)
+                        val readyAction = resolveReadyInstallAction(existingReady)
                         if (readyAction !is AutoUpdateAction.NoOp) {
                             return@withContext readyAction
                         }
                     }
 
-                    val existingPending = readPendingDownloadState()
-                    if (existingPending != null && existingPending.versionCode == checkPayload.latestVersionCode) {
-                        val pendingAction = handlePendingDownload(existingPending, currentVersion)
-                        if (pendingAction !is AutoUpdateAction.NoOp) {
-                            return@withContext pendingAction
+                    val existingPending = stateStore.readPendingDownloadState()
+                    if (existingPending != null) {
+                        if (existingPending.versionCode == checkPayload.latestVersionCode) {
+                            val pendingAction = handlePendingDownload(existingPending, currentVersion)
+                            if (pendingAction !is AutoUpdateAction.NoOp) {
+                                return@withContext pendingAction
+                            }
+                        } else {
+                            cancelPendingDownload(existingPending)
                         }
                     }
 
                     enqueueUpdateDownload(checkPayload)
                 }
             } catch (error: Exception) {
-                AutoUpdateAction.Failed(error.message?.trim().orEmpty().ifEmpty { "check update failed" })
+                AutoUpdateAction.Failed(
+                    error.message
+                        ?.trim()
+                        .orEmpty()
+                        .ifEmpty { "check update failed" }
+                )
+            }
+        }
+    }
+
+    suspend fun promptInstallReadyUpdate(): AutoUpdateAction {
+        return checkMutex.withLock {
+            try {
+                withContext(Dispatchers.IO) {
+                    val currentVersion = stateStore.readCurrentVersion()
+                    stateStore.pruneStateByCurrentVersion(currentVersion.versionCode)
+                    val ready = stateStore.readReadyInstallState() ?: return@withContext AutoUpdateAction.NoOp
+                    launchInstallerIfReady(ready)
+                }
+            } catch (error: Exception) {
+                AutoUpdateAction.Failed(
+                    error.message
+                        ?.trim()
+                        .orEmpty()
+                        .ifEmpty { "install update failed" }
+                )
             }
         }
     }
@@ -134,91 +168,243 @@ class MobileAppAutoUpdateManager(
         currentVersion: AppVersionSnapshot
     ): AutoUpdateAction {
         if (state.versionCode <= currentVersion.versionCode) {
-            clearPendingDownloadState()
+            stateStore.clearPendingDownloadState()
             return AutoUpdateAction.NoOp
         }
-        val snapshot = queryDownloadSnapshot(state.downloadId)
-        if (snapshot == null) {
-            clearPendingDownloadState()
+
+        val workInfo = queryWorkInfoById(state.workerId)
+        if (workInfo == null) {
+            val completedFile = resolveManagedUpdateApkFile(appContext, state.fileName)
+            if (completedFile != null && completedFile.exists() && verifySha256File(completedFile, state.sha256)) {
+                stateStore.clearPendingDownloadState()
+                val readyState = ReadyInstallState(
+                    versionCode = state.versionCode,
+                    versionName = state.versionName,
+                    sha256 = state.sha256,
+                    fileName = state.fileName,
+                    forceUpdate = state.forceUpdate
+                )
+                stateStore.writeReadyInstallState(readyState)
+                return resolveReadyInstallAction(readyState)
+            }
+            stateStore.clearPendingDownloadState()
             return AutoUpdateAction.NoOp
         }
-        return when (snapshot.status) {
-            DownloadManager.STATUS_PENDING,
-            DownloadManager.STATUS_RUNNING,
-            DownloadManager.STATUS_PAUSED -> {
+
+        return when (workInfo.state) {
+            WorkInfo.State.ENQUEUED,
+            WorkInfo.State.RUNNING,
+            WorkInfo.State.BLOCKED -> {
+                val progress = resolveWorkProgress(workInfo, state.progressPercent)
+                if (progress != state.progressPercent) {
+                    stateStore.updatePendingProgress(progress)
+                }
                 AutoUpdateAction.DownloadInProgress(
                     versionCode = state.versionCode,
                     versionName = state.versionName,
-                    progressPercent = snapshot.progressPercent,
+                    progressPercent = progress,
                     forceUpdate = state.forceUpdate
                 )
             }
 
-            DownloadManager.STATUS_FAILED -> {
-                clearPendingDownloadState()
+            WorkInfo.State.SUCCEEDED -> {
+                finalizeCompletedPendingDownload(state)
+            }
+
+            WorkInfo.State.FAILED,
+            WorkInfo.State.CANCELLED -> {
+                stateStore.clearPendingDownloadState()
+                val message = workInfo.outputData
+                    .getString(MobileAppUpdateDownloadWorker.KEY_FAILURE_MESSAGE)
+                    ?.trim()
+                    .orEmpty()
+                    .ifEmpty { "update download failed" }
                 AutoUpdateAction.Failed(
-                    message = "update download failed: code=${snapshot.reason}",
+                    message = message,
                     forceUpdate = state.forceUpdate,
                     versionCode = state.versionCode,
                     versionName = state.versionName
                 )
             }
-
-            DownloadManager.STATUS_SUCCESSFUL -> {
-                val completedFile = resolveDownloadedFile(state, snapshot.localUri)
-                if (completedFile == null || !completedFile.exists()) {
-                    clearPendingDownloadState()
-                    AutoUpdateAction.Failed(
-                        message = "update apk file missing after download",
-                        forceUpdate = state.forceUpdate,
-                        versionCode = state.versionCode,
-                        versionName = state.versionName
-                    )
-                } else if (!verifySha256(completedFile, state.sha256)) {
-                    clearPendingDownloadState()
-                    completedFile.delete()
-                    AutoUpdateAction.Failed(
-                        message = "update apk checksum mismatch",
-                        forceUpdate = state.forceUpdate,
-                        versionCode = state.versionCode,
-                        versionName = state.versionName
-                    )
-                } else {
-                    clearPendingDownloadState()
-                    writeReadyInstallState(
-                        ReadyInstallState(
-                            versionCode = state.versionCode,
-                            versionName = state.versionName,
-                            sha256 = state.sha256,
-                            fileName = state.fileName,
-                            forceUpdate = state.forceUpdate
-                        )
-                    )
-                    launchInstallerIfReady(
-                        ReadyInstallState(
-                            versionCode = state.versionCode,
-                            versionName = state.versionName,
-                            sha256 = state.sha256,
-                            fileName = state.fileName,
-                            forceUpdate = state.forceUpdate
-                        )
-                    )
-                }
-            }
-
-            else -> AutoUpdateAction.NoOp
         }
     }
 
-    private suspend fun launchInstallerIfReady(state: ReadyInstallState): AutoUpdateAction {
-        val apkFile = resolveManagedDownloadFile(state.fileName)
+    private suspend fun finalizeCompletedPendingDownload(state: PendingDownloadState): AutoUpdateAction {
+        val completedFile = resolveManagedUpdateApkFile(appContext, state.fileName)
+        if (completedFile == null || !completedFile.exists()) {
+            stateStore.clearPendingDownloadState()
+            return AutoUpdateAction.Failed(
+                message = "update apk file missing after download",
+                forceUpdate = state.forceUpdate,
+                versionCode = state.versionCode,
+                versionName = state.versionName
+            )
+        }
+        if (!verifySha256File(completedFile, state.sha256)) {
+            stateStore.clearPendingDownloadState()
+            runCatching { completedFile.delete() }
+            return AutoUpdateAction.Failed(
+                message = "update apk checksum mismatch",
+                forceUpdate = state.forceUpdate,
+                versionCode = state.versionCode,
+                versionName = state.versionName
+            )
+        }
+
+        stateStore.clearPendingDownloadState()
+        val readyState = ReadyInstallState(
+            versionCode = state.versionCode,
+            versionName = state.versionName,
+            sha256 = state.sha256,
+            fileName = state.fileName,
+            forceUpdate = state.forceUpdate
+        )
+        stateStore.writeReadyInstallState(readyState)
+        return resolveReadyInstallAction(readyState)
+    }
+
+    private fun resolveWorkProgress(workInfo: WorkInfo, fallbackProgress: Int?): Int? {
+        val value = workInfo.progress.getInt(
+            MobileAppUpdateDownloadWorker.KEY_PROGRESS_PERCENT,
+            MobileAppUpdateStateStore.APP_UPDATE_PROGRESS_UNKNOWN
+        )
+        if (value in 0..100) {
+            return value
+        }
+        return fallbackProgress
+    }
+
+    private fun cancelPendingDownload(state: PendingDownloadState) {
+        val workerId = runCatching { UUID.fromString(state.workerId) }.getOrNull()
+        if (workerId != null) {
+            runCatching { workManager.cancelWorkById(workerId) }
+        }
+        cleanupDownloadArtifacts(state.fileName)
+        stateStore.clearPendingDownloadState()
+    }
+
+    private fun cleanupDownloadArtifacts(fileName: String) {
+        val file = resolveManagedUpdateApkFile(appContext, fileName) ?: return
+        runCatching { if (file.exists()) file.delete() }
+        runCatching {
+            val partDir = File(file.parentFile, "${file.name}.parts")
+            if (partDir.exists()) {
+                partDir.deleteRecursively()
+            }
+        }
+        runCatching {
+            val partial = File(file.parentFile, "${file.name}.partial")
+            if (partial.exists()) {
+                partial.delete()
+            }
+        }
+        runCatching {
+            val merged = File(file.parentFile, "${file.name}.merge")
+            if (merged.exists()) {
+                merged.delete()
+            }
+        }
+    }
+
+    private fun enqueueUpdateDownload(
+        payload: UpdateCheckPayload,
+        targetFileNameOverride: String? = null
+    ): AutoUpdateAction {
+        val parsedUri = runCatching { Uri.parse(payload.downloadUrl) }.getOrNull()
+            ?: return AutoUpdateAction.Failed(
+                message = "invalid update url",
+                forceUpdate = payload.forceUpdate,
+                versionCode = payload.latestVersionCode,
+                versionName = payload.latestVersionName
+            )
+        if (parsedUri.scheme.isNullOrEmpty()) {
+            return AutoUpdateAction.Failed(
+                message = "invalid update url",
+                forceUpdate = payload.forceUpdate,
+                versionCode = payload.latestVersionCode,
+                versionName = payload.latestVersionName
+            )
+        }
+
+        val targetFileName = targetFileNameOverride?.trim().orEmpty().ifBlank {
+            payload.suggestedFileName
+        }.ifBlank {
+            buildManagedApkFileName(payload.latestVersionCode, payload.latestVersionName)
+        }
+
+        val workerInput = MobileAppUpdateDownloadWorker.buildInputData(
+            versionCode = payload.latestVersionCode,
+            versionName = payload.latestVersionName,
+            downloadUrl = payload.downloadUrl,
+            sha256 = payload.sha256,
+            fileName = targetFileName,
+            forceUpdate = payload.forceUpdate
+        )
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+        val workRequest = OneTimeWorkRequestBuilder<MobileAppUpdateDownloadWorker>()
+            .setInputData(workerInput)
+            .setConstraints(constraints)
+            .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
+            .addTag(APP_UPDATE_DOWNLOAD_TAG)
+            .build()
+        workManager.enqueueUniqueWork(
+            APP_UPDATE_DOWNLOAD_UNIQUE_WORK,
+            ExistingWorkPolicy.REPLACE,
+            workRequest
+        )
+        stateStore.writePendingDownloadState(
+            PendingDownloadState(
+                workerId = workRequest.id.toString(),
+                versionCode = payload.latestVersionCode,
+                versionName = payload.latestVersionName,
+                sha256 = payload.sha256,
+                fileName = targetFileName,
+                downloadUrl = payload.downloadUrl,
+                forceUpdate = payload.forceUpdate,
+                progressPercent = null
+            )
+        )
+        return AutoUpdateAction.DownloadStarted(
+            versionCode = payload.latestVersionCode,
+            versionName = payload.latestVersionName,
+            forceUpdate = payload.forceUpdate
+        )
+    }
+
+    private fun resolveReadyInstallAction(state: ReadyInstallState): AutoUpdateAction {
+        val apkFile = resolveManagedUpdateApkFile(appContext, state.fileName)
         if (apkFile == null || !apkFile.exists()) {
-            clearReadyInstallState()
+            stateStore.clearReadyInstallState()
             return AutoUpdateAction.NoOp
         }
-        if (!verifySha256(apkFile, state.sha256)) {
-            clearReadyInstallState()
-            apkFile.delete()
+        if (!verifySha256File(apkFile, state.sha256)) {
+            stateStore.clearReadyInstallState()
+            runCatching { apkFile.delete() }
+            return AutoUpdateAction.Failed(
+                message = "cached update apk checksum mismatch",
+                forceUpdate = state.forceUpdate,
+                versionCode = state.versionCode,
+                versionName = state.versionName
+            )
+        }
+        return AutoUpdateAction.ReadyToInstall(
+            versionCode = state.versionCode,
+            versionName = state.versionName,
+            forceUpdate = state.forceUpdate
+        )
+    }
+
+    private suspend fun launchInstallerIfReady(state: ReadyInstallState): AutoUpdateAction {
+        val apkFile = resolveManagedUpdateApkFile(appContext, state.fileName)
+        if (apkFile == null || !apkFile.exists()) {
+            stateStore.clearReadyInstallState()
+            return AutoUpdateAction.NoOp
+        }
+        if (!verifySha256File(apkFile, state.sha256)) {
+            stateStore.clearReadyInstallState()
+            runCatching { apkFile.delete() }
             return AutoUpdateAction.Failed("cached update apk checksum mismatch")
         }
         return withContext(Dispatchers.Main) {
@@ -243,9 +429,7 @@ class MobileAppAutoUpdateManager(
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
-                runCatching {
-                    appContext.startActivity(installIntent)
-                }.fold(
+                runCatching { appContext.startActivity(installIntent) }.fold(
                     onSuccess = {
                         AutoUpdateAction.InstallPrompted(
                             versionCode = state.versionCode,
@@ -266,67 +450,6 @@ class MobileAppAutoUpdateManager(
                 )
             }
         }
-    }
-
-    private fun enqueueUpdateDownload(payload: UpdateCheckPayload): AutoUpdateAction {
-        val manager = downloadManager ?: return AutoUpdateAction.Failed(
-            message = "download manager unavailable",
-            forceUpdate = payload.forceUpdate,
-            versionCode = payload.latestVersionCode,
-            versionName = payload.latestVersionName
-        )
-        val parsedUri = runCatching { Uri.parse(payload.downloadUrl) }.getOrNull()
-            ?: return AutoUpdateAction.Failed(
-                message = "invalid update url",
-                forceUpdate = payload.forceUpdate,
-                versionCode = payload.latestVersionCode,
-                versionName = payload.latestVersionName
-            )
-        if (parsedUri.scheme.isNullOrEmpty()) {
-            return AutoUpdateAction.Failed(
-                message = "invalid update url",
-                forceUpdate = payload.forceUpdate,
-                versionCode = payload.latestVersionCode,
-                versionName = payload.latestVersionName
-            )
-        }
-        val targetFileName = payload.suggestedFileName.ifBlank {
-            buildManagedApkFileName(payload.latestVersionCode, payload.latestVersionName)
-        }
-        resolveManagedDownloadFile(targetFileName)?.let { existing ->
-            if (existing.exists()) {
-                existing.delete()
-            }
-        }
-        val request = DownloadManager.Request(parsedUri).apply {
-            setMimeType(APK_MIME_TYPE)
-            setTitle("New version ${payload.latestVersionName}")
-            setDescription("Installer will open automatically after download")
-            setAllowedOverMetered(true)
-            setAllowedOverRoaming(true)
-            setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
-            setDestinationInExternalFilesDir(
-                appContext,
-                Environment.DIRECTORY_DOWNLOADS,
-                targetFileName
-            )
-        }
-        val downloadId = manager.enqueue(request)
-        writePendingDownloadState(
-            PendingDownloadState(
-                downloadId = downloadId,
-                versionCode = payload.latestVersionCode,
-                versionName = payload.latestVersionName,
-                sha256 = payload.sha256,
-                fileName = targetFileName,
-                forceUpdate = payload.forceUpdate
-            )
-        )
-        return AutoUpdateAction.DownloadStarted(
-            versionCode = payload.latestVersionCode,
-            versionName = payload.latestVersionName,
-            forceUpdate = payload.forceUpdate
-        )
     }
 
     private fun fetchUpdateCheckPayload(
@@ -380,54 +503,9 @@ class MobileAppAutoUpdateManager(
         }
     }
 
-    private fun queryDownloadSnapshot(downloadId: Long): DownloadSnapshot? {
-        val manager = downloadManager ?: return null
-        val cursor = manager.query(DownloadManager.Query().setFilterById(downloadId)) ?: return null
-        cursor.use { row ->
-            if (!row.moveToFirst()) {
-                return null
-            }
-            val status = row.readInt(DownloadManager.COLUMN_STATUS, DownloadManager.STATUS_FAILED)
-            val reason = row.readInt(DownloadManager.COLUMN_REASON, 0)
-            val soFar = row.readLong(DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR, -1L)
-            val total = row.readLong(DownloadManager.COLUMN_TOTAL_SIZE_BYTES, -1L)
-            val localUri = row.readString(DownloadManager.COLUMN_LOCAL_URI)
-            val progressPercent = if (soFar >= 0L && total > 0L) {
-                ((soFar * 100L) / total).toInt().coerceIn(0, 100)
-            } else {
-                null
-            }
-            return DownloadSnapshot(
-                status = status,
-                reason = reason,
-                localUri = localUri,
-                progressPercent = progressPercent
-            )
-        }
-    }
-
-    private fun resolveDownloadedFile(
-        pendingState: PendingDownloadState,
-        localUri: String?
-    ): File? {
-        val managed = resolveManagedDownloadFile(pendingState.fileName)
-        if (managed != null && managed.exists()) {
-            return managed
-        }
-        if (localUri.isNullOrBlank()) {
-            return null
-        }
-        val parsed = runCatching { Uri.parse(localUri) }.getOrNull() ?: return null
-        if (parsed.scheme.equals("file", ignoreCase = true)) {
-            val path = parsed.path ?: return null
-            return File(path)
-        }
-        return null
-    }
-
-    private fun resolveManagedDownloadFile(fileName: String): File? {
-        val root = appContext.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: return null
-        return File(root, fileName)
+    private fun queryWorkInfoById(workerId: String): WorkInfo? {
+        val uuid = runCatching { UUID.fromString(workerId.trim()) }.getOrNull() ?: return null
+        return runCatching { workManager.getWorkInfoById(uuid).get() }.getOrNull()
     }
 
     private fun parseFileNameFromUrl(downloadUrl: String): String {
@@ -452,139 +530,6 @@ class MobileAppAutoUpdateManager(
         return "videoToMarkdown-$versionCode-$safeVersionName.apk"
     }
 
-    private fun verifySha256(apkFile: File, expectedSha256: String): Boolean {
-        val expected = expectedSha256.trim().lowercase()
-        if (expected.isEmpty()) {
-            return true
-        }
-        val actual = sha256Hex(apkFile)
-        return expected == actual
-    }
-
-    private fun sha256Hex(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-            while (true) {
-                val read = input.read(buffer)
-                if (read <= 0) {
-                    break
-                }
-                digest.update(buffer, 0, read)
-            }
-        }
-        val hash = digest.digest()
-        val builder = StringBuilder(hash.size * 2)
-        hash.forEach { byte ->
-            val value = byte.toInt() and 0xFF
-            val hex = value.toString(16)
-            if (hex.length == 1) {
-                builder.append('0')
-            }
-            builder.append(hex)
-        }
-        return builder.toString()
-    }
-
-    private fun pruneStateByCurrentVersion(currentVersionCode: Int) {
-        val pending = readPendingDownloadState()
-        if (pending != null && pending.versionCode <= currentVersionCode) {
-            clearPendingDownloadState()
-        }
-        val ready = readReadyInstallState()
-        if (ready != null && ready.versionCode <= currentVersionCode) {
-            clearReadyInstallState()
-        }
-    }
-
-    private fun readCurrentVersion(): AppVersionSnapshot {
-        val packageInfo = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
-        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            packageInfo.longVersionCode.toInt()
-        } else {
-            @Suppress("DEPRECATION")
-            packageInfo.versionCode
-        }
-        val versionName = packageInfo.versionName?.trim().orEmpty().ifEmpty { versionCode.toString() }
-        return AppVersionSnapshot(versionCode = versionCode, versionName = versionName)
-    }
-
-    private fun readPendingDownloadState(): PendingDownloadState? {
-        val downloadId = preferences.getLong(KEY_PENDING_DOWNLOAD_ID, -1L)
-        val versionCode = preferences.getInt(KEY_PENDING_VERSION_CODE, -1)
-        val versionName = preferences.getString(KEY_PENDING_VERSION_NAME, "")?.trim().orEmpty()
-        val fileName = preferences.getString(KEY_PENDING_FILE_NAME, "")?.trim().orEmpty()
-        if (downloadId <= 0L || versionCode <= 0 || versionName.isEmpty() || fileName.isEmpty()) {
-            return null
-        }
-        return PendingDownloadState(
-            downloadId = downloadId,
-            versionCode = versionCode,
-            versionName = versionName,
-            sha256 = preferences.getString(KEY_PENDING_SHA256, "")?.trim().orEmpty(),
-            fileName = fileName,
-            forceUpdate = preferences.getBoolean(KEY_PENDING_FORCE_UPDATE, false)
-        )
-    }
-
-    private fun writePendingDownloadState(state: PendingDownloadState) {
-        preferences.edit()
-            .putLong(KEY_PENDING_DOWNLOAD_ID, state.downloadId)
-            .putInt(KEY_PENDING_VERSION_CODE, state.versionCode)
-            .putString(KEY_PENDING_VERSION_NAME, state.versionName)
-            .putString(KEY_PENDING_SHA256, state.sha256)
-            .putString(KEY_PENDING_FILE_NAME, state.fileName)
-            .putBoolean(KEY_PENDING_FORCE_UPDATE, state.forceUpdate)
-            .apply()
-    }
-
-    private fun clearPendingDownloadState() {
-        preferences.edit()
-            .remove(KEY_PENDING_DOWNLOAD_ID)
-            .remove(KEY_PENDING_VERSION_CODE)
-            .remove(KEY_PENDING_VERSION_NAME)
-            .remove(KEY_PENDING_SHA256)
-            .remove(KEY_PENDING_FILE_NAME)
-            .remove(KEY_PENDING_FORCE_UPDATE)
-            .apply()
-    }
-
-    private fun readReadyInstallState(): ReadyInstallState? {
-        val versionCode = preferences.getInt(KEY_READY_VERSION_CODE, -1)
-        val versionName = preferences.getString(KEY_READY_VERSION_NAME, "")?.trim().orEmpty()
-        val fileName = preferences.getString(KEY_READY_FILE_NAME, "")?.trim().orEmpty()
-        if (versionCode <= 0 || versionName.isEmpty() || fileName.isEmpty()) {
-            return null
-        }
-        return ReadyInstallState(
-            versionCode = versionCode,
-            versionName = versionName,
-            sha256 = preferences.getString(KEY_READY_SHA256, "")?.trim().orEmpty(),
-            fileName = fileName,
-            forceUpdate = preferences.getBoolean(KEY_READY_FORCE_UPDATE, false)
-        )
-    }
-
-    private fun writeReadyInstallState(state: ReadyInstallState) {
-        preferences.edit()
-            .putInt(KEY_READY_VERSION_CODE, state.versionCode)
-            .putString(KEY_READY_VERSION_NAME, state.versionName)
-            .putString(KEY_READY_SHA256, state.sha256)
-            .putString(KEY_READY_FILE_NAME, state.fileName)
-            .putBoolean(KEY_READY_FORCE_UPDATE, state.forceUpdate)
-            .apply()
-    }
-
-    private fun clearReadyInstallState() {
-        preferences.edit()
-            .remove(KEY_READY_VERSION_CODE)
-            .remove(KEY_READY_VERSION_NAME)
-            .remove(KEY_READY_SHA256)
-            .remove(KEY_READY_FILE_NAME)
-            .remove(KEY_READY_FORCE_UPDATE)
-            .apply()
-    }
-
     private data class UpdateCheckPayload(
         val hasUpdate: Boolean,
         val latestVersionCode: Int,
@@ -595,86 +540,19 @@ class MobileAppAutoUpdateManager(
         val forceUpdate: Boolean
     )
 
-    private data class DownloadSnapshot(
-        val status: Int,
-        val reason: Int,
-        val localUri: String?,
-        val progressPercent: Int?
-    )
-
-    private data class PendingDownloadState(
-        val downloadId: Long,
-        val versionCode: Int,
-        val versionName: String,
-        val sha256: String,
-        val fileName: String,
-        val forceUpdate: Boolean
-    )
-
-    private data class ReadyInstallState(
-        val versionCode: Int,
-        val versionName: String,
-        val sha256: String,
-        val fileName: String,
-        val forceUpdate: Boolean
-    )
-
-    private data class AppVersionSnapshot(
-        val versionCode: Int,
-        val versionName: String
-    )
-
     companion object {
-        private const val PREFS_APP_UPDATE = "mobile_app_auto_update"
-        private const val KEY_PENDING_DOWNLOAD_ID = "pending_download_id"
-        private const val KEY_PENDING_VERSION_CODE = "pending_version_code"
-        private const val KEY_PENDING_VERSION_NAME = "pending_version_name"
-        private const val KEY_PENDING_SHA256 = "pending_sha256"
-        private const val KEY_PENDING_FILE_NAME = "pending_file_name"
-        private const val KEY_PENDING_FORCE_UPDATE = "pending_force_update"
-        private const val KEY_READY_VERSION_CODE = "ready_version_code"
-        private const val KEY_READY_VERSION_NAME = "ready_version_name"
-        private const val KEY_READY_SHA256 = "ready_sha256"
-        private const val KEY_READY_FILE_NAME = "ready_file_name"
-        private const val KEY_READY_FORCE_UPDATE = "ready_force_update"
+        private const val APP_UPDATE_DOWNLOAD_UNIQUE_WORK = "mobile_app_auto_update_download"
+        private const val APP_UPDATE_DOWNLOAD_TAG = "mobile_app_auto_update"
         private const val APK_SUFFIX = ".apk"
         private const val APK_MIME_TYPE = "application/vnd.android.package-archive"
         private val ILLEGAL_FILE_NAME_CHARS = Regex("[^0-9A-Za-z._-]")
     }
 }
 
-private fun Cursor.readInt(columnName: String, defaultValue: Int): Int {
-    val columnIndex = getColumnIndex(columnName)
-    if (columnIndex < 0) {
-        return defaultValue
-    }
-    return getInt(columnIndex)
-}
-
-private fun Cursor.readLong(columnName: String, defaultValue: Long): Long {
-    val columnIndex = getColumnIndex(columnName)
-    if (columnIndex < 0) {
-        return defaultValue
-    }
-    return getLong(columnIndex)
-}
-
-private fun Cursor.readString(columnName: String): String? {
-    val columnIndex = getColumnIndex(columnName)
-    if (columnIndex < 0 || isNull(columnIndex)) {
-        return null
-    }
-    return getString(columnIndex)
-}
-
 private inline fun <T> HttpURLConnection.useJsonPayload(parse: (JSONObject) -> T): T {
     try {
         val statusCode = responseCode
-        val stream = if (statusCode in 200..299) {
-            inputStream
-        } else {
-            errorStream
-        }
+        val stream = if (statusCode in 200..299) inputStream else errorStream
         val responseText = stream?.use {
             BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
         }.orEmpty()

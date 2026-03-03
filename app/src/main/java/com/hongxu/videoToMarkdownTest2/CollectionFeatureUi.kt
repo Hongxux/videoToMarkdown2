@@ -1,11 +1,17 @@
 package com.hongxu.videoToMarkdownTest2
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.net.Uri
+import android.os.ParcelFileDescriptor
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +37,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -38,14 +45,24 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 import kotlin.math.roundToInt
 
 @Composable
@@ -66,7 +83,7 @@ fun ClipboardPasteBubble(
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                text = "检测到剪贴板链接",
+                text = "Detected clipboard link",
                 fontWeight = FontWeight.SemiBold,
                 color = Color(0xFF175CD3)
             )
@@ -78,10 +95,10 @@ fun ClipboardPasteBubble(
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = onPaste, enabled = enabled) {
-                    Text("一键粘贴")
+                    Text("Paste")
                 }
                 TextButton(onClick = onDismiss, enabled = enabled) {
-                    Text("忽略")
+                    Text("Ignore")
                 }
             }
         }
@@ -111,7 +128,7 @@ fun ProbeDetectingSkeleton() {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text(
-                text = "正在探测视频信息，请稍候...",
+                text = "Analyzing video metadata and chapter structure, this may take a moment...",
                 color = Color(0xFF344054),
                 fontWeight = FontWeight.Medium
             )
@@ -138,13 +155,16 @@ fun ProbeDetectingSkeleton() {
 fun ProbeResultBottomSheet(
     probeResult: VideoProbeResult,
     selectedEpisodeNos: Set<Int>,
+    confirmedStartPage: Int?,
+    previewDocumentUri: String?,
     submitting: Boolean,
     onDismiss: () -> Unit,
     onSubmitSingle: () -> Unit,
     onSubmitCollection: () -> Unit,
     onSelectAll: () -> Unit,
     onInvertSelection: () -> Unit,
-    onToggleEpisode: (Int) -> Unit
+    onToggleEpisode: (Int) -> Unit,
+    onConfirmedStartPageChange: (Int?) -> Unit
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -160,11 +180,14 @@ fun ProbeResultBottomSheet(
             CollectionProbeResultContent(
                 probeResult = probeResult,
                 selectedEpisodeNos = selectedEpisodeNos,
+                confirmedStartPage = confirmedStartPage,
+                previewDocumentUri = previewDocumentUri,
                 submitting = submitting,
                 onSubmitCollection = onSubmitCollection,
                 onSelectAll = onSelectAll,
                 onInvertSelection = onInvertSelection,
-                onToggleEpisode = onToggleEpisode
+                onToggleEpisode = onToggleEpisode,
+                onConfirmedStartPageChange = onConfirmedStartPageChange
             )
         }
     }
@@ -194,7 +217,7 @@ private fun SingleVideoProbeResultContent(
                 )
         ) {
             Text(
-                text = probeResult.title.ifBlank { "未命名视频" },
+                text = probeResult.title.ifBlank { "Untitled video" },
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .padding(14.dp),
@@ -204,9 +227,8 @@ private fun SingleVideoProbeResultContent(
                 overflow = TextOverflow.Ellipsis
             )
         }
-        Text("平台：${probeResult.platform.ifBlank { "未知" }}", color = Color(0xFF475467))
-        Text("UP主：暂未返回", color = Color(0xFF475467))
-        Text("时长：${formatDuration(probeResult.durationSec)}", color = Color(0xFF475467))
+        Text("Platform: ${probeResult.platform.ifBlank { "Unknown" }}", color = Color(0xFF475467))
+        Text("Duration: ${formatDuration(probeResult.durationSec)}", color = Color(0xFF475467))
         Button(
             onClick = onSubmit,
             enabled = !submitting,
@@ -220,7 +242,7 @@ private fun SingleVideoProbeResultContent(
                 )
                 Spacer(modifier = Modifier.width(8.dp))
             }
-            Text("开始处理")
+            Text("Start processing")
         }
     }
 }
@@ -229,12 +251,38 @@ private fun SingleVideoProbeResultContent(
 private fun CollectionProbeResultContent(
     probeResult: VideoProbeResult,
     selectedEpisodeNos: Set<Int>,
+    confirmedStartPage: Int?,
+    previewDocumentUri: String?,
     submitting: Boolean,
     onSubmitCollection: () -> Unit,
     onSelectAll: () -> Unit,
     onInvertSelection: () -> Unit,
-    onToggleEpisode: (Int) -> Unit
+    onToggleEpisode: (Int) -> Unit,
+    onConfirmedStartPageChange: (Int?) -> Unit
 ) {
+    val isBook = probeResult.contentType.equals("book", ignoreCase = true)
+    val chapterGroups = remember(probeResult.episodes) {
+        if (isBook) buildBookChapterGroups(probeResult.episodes) else emptyList()
+    }
+    val chapterExpandedState = remember(probeResult.collectionId, probeResult.episodes) {
+        mutableStateMapOf<String, Boolean>()
+    }
+    val focusedEpisodeNoState = remember(probeResult.collectionId, probeResult.episodes) {
+        mutableStateOf<Int?>(null)
+    }
+    val previewPageState = remember(probeResult.collectionId, probeResult.episodes, confirmedStartPage) {
+        mutableStateOf(resolveInitialBookPreviewPage(probeResult, confirmedStartPage))
+    }
+    val resolvedTotalPages = remember(probeResult.totalPages, probeResult.episodes) {
+        if (probeResult.totalPages > 0) {
+            probeResult.totalPages
+        } else {
+            probeResult.episodes.maxOfOrNull { episode ->
+                maxOf(episode.startPage ?: 0, episode.endPage ?: 0)
+            }?.takeIf { it > 0 } ?: 0
+        }
+    }
+
     Column(modifier = Modifier.fillMaxWidth()) {
         Box(
             modifier = Modifier
@@ -257,6 +305,7 @@ private fun CollectionProbeResultContent(
                     .padding(horizontal = 16.dp, vertical = 14.dp)
             )
         }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -265,7 +314,7 @@ private fun CollectionProbeResultContent(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "共探测到 ${probeResult.episodes.size} 集",
+                text = "Detected ${probeResult.episodes.size} ${if (isBook) "sections" else "episodes"}",
                 fontWeight = FontWeight.SemiBold
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -275,58 +324,253 @@ private fun CollectionProbeResultContent(
                         if (it) onSelectAll() else onInvertSelection()
                     }
                 )
-                Text("全选/反选")
+                Text("Select all / invert")
             }
         }
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(380.dp)
-                .padding(horizontal = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            items(probeResult.episodes, key = { episode -> episode.episodeNo }) { episode ->
-                val checked = selectedEpisodeNos.contains(episode.episodeNo)
-                Card(
+
+        if (isBook) {
+            val appliedOffset = probeResult.appliedPageOffset?.toString() ?: "auto"
+            val detectedStart = probeResult.detectedStartPage ?: 1
+            Text(
+                text = "PDF pages: ${probeResult.totalPages} | detected start: $detectedStart | offset: $appliedOffset",
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = Color(0xFF667085),
+                style = MaterialTheme.typography.bodySmall
+            )
+            OutlinedTextField(
+                value = confirmedStartPage?.toString().orEmpty(),
+                onValueChange = { raw ->
+                    val normalized = raw.trim()
+                    if (normalized.isEmpty()) {
+                        onConfirmedStartPageChange(null)
+                        return@OutlinedTextField
+                    }
+                    val parsed = normalized.toIntOrNull() ?: return@OutlinedTextField
+                    val normalizedPage = normalizeBookPage(parsed, resolvedTotalPages)
+                    onConfirmedStartPageChange(normalizedPage)
+                    previewPageState.value = normalizedPage
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                singleLine = true,
+                label = { Text("Actual start page") },
+                placeholder = { Text("e.g. 13") },
+                enabled = !submitting
+            )
+        }
+
+        if (isBook) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(430.dp)
+                    .padding(horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                LazyColumn(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onToggleEpisode(episode.episodeNo) },
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (checked) Color(0xFFEFF8FF) else Color(0xFFFFFFFF)
-                    )
+                        .weight(1f)
+                        .fillMaxSize(),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Row(
+                    items(chapterGroups, key = { group -> group.key }) { group ->
+                        val expanded = chapterExpandedState[group.key] != false
+                        val selectedInChapter = group.sections.count { selectedEpisodeNos.contains(it.episodeNo) }
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { chapterExpandedState[group.key] = !expanded }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (expanded) "v" else ">",
+                                    color = Color(0xFF475467),
+                                    modifier = Modifier.width(20.dp)
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = group.title,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "selected $selectedInChapter / ${group.sections.size}",
+                                        color = Color(0xFF667085),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                                Checkbox(
+                                    checked = group.sections.isNotEmpty() && selectedInChapter == group.sections.size,
+                                    onCheckedChange = { checked ->
+                                        for (section in group.sections) {
+                                            val selected = selectedEpisodeNos.contains(section.episodeNo)
+                                            if (checked && !selected) {
+                                                onToggleEpisode(section.episodeNo)
+                                            } else if (!checked && selected) {
+                                                onToggleEpisode(section.episodeNo)
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(visible = expanded) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 10.dp, end = 8.dp, bottom = 8.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                for (episode in group.sections) {
+                                    val checked = selectedEpisodeNos.contains(episode.episodeNo)
+                                    val focused = focusedEpisodeNoState.value != null && focusedEpisodeNoState.value == episode.episodeNo
+                                    val codeLabel = if (episode.chapterIndex > 0 && episode.sectionIndex > 0) {
+                                        "C${episode.chapterIndex}.S${episode.sectionIndex}"
+                                    } else {
+                                        "S${episode.episodeNo}"
+                                    }
+                                    val startPage = episode.startPage
+                                    val endPage = episode.endPage
+                                    val metaLabel = when {
+                                        startPage != null && endPage != null && endPage >= startPage -> "p$startPage-$endPage"
+                                        startPage != null -> "from p$startPage"
+                                        else -> "page pending"
+                                    }
+                                    Card(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                focusedEpisodeNoState.value = episode.episodeNo
+                                                previewPageState.value = resolveEpisodePreviewPage(
+                                                    episode = episode,
+                                                    fallbackPage = previewPageState.value,
+                                                    totalPages = resolvedTotalPages
+                                                )
+                                            },
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = when {
+                                                focused -> Color(0xFFD8ECFF)
+                                                checked -> Color(0xFFEFF8FF)
+                                                else -> Color(0xFFFFFFFF)
+                                            }
+                                        )
+                                    ) {
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = codeLabel,
+                                                modifier = Modifier.width(68.dp),
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = Color(0xFF175CD3)
+                                            )
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = episode.title.ifBlank { "Untitled section" },
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = metaLabel,
+                                                    color = Color(0xFF667085),
+                                                    style = MaterialTheme.typography.bodySmall
+                                                )
+                                            }
+                                            Checkbox(
+                                                checked = checked,
+                                                onCheckedChange = { onToggleEpisode(episode.episodeNo) }
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                BookPdfPreviewPane(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize(),
+                    previewDocumentUri = previewDocumentUri,
+                    fallbackResolvedUrl = probeResult.resolvedUrl,
+                    previewPage = previewPageState.value,
+                    totalPagesHint = resolvedTotalPages,
+                    submitting = submitting,
+                    onPreviewPageChange = { page ->
+                        previewPageState.value = normalizeBookPage(page, resolvedTotalPages)
+                    },
+                    onUseCurrentPageAsConfirmedStart = {
+                        onConfirmedStartPageChange(previewPageState.value)
+                    }
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(380.dp)
+                    .padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(probeResult.episodes, key = { episode -> episode.episodeNo }) { episode ->
+                    val checked = selectedEpisodeNos.contains(episode.episodeNo)
+                    val codeLabel = "P${episode.episodeNo}"
+                    val titleLabel = episode.title.ifBlank { "Untitled video" }
+                    val metaLabel = formatDuration(episode.durationSec)
+                    Card(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "P${episode.episodeNo}",
-                            modifier = Modifier.width(44.dp),
-                            fontWeight = FontWeight.SemiBold,
-                            color = Color(0xFF175CD3)
+                            .clickable { onToggleEpisode(episode.episodeNo) },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (checked) Color(0xFFEFF8FF) else Color(0xFFFFFFFF)
                         )
-                        Column(modifier = Modifier.weight(1f)) {
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = episode.title.ifBlank { "未命名分集" },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                text = codeLabel,
+                                modifier = Modifier.width(64.dp),
+                                fontWeight = FontWeight.SemiBold,
+                                color = Color(0xFF175CD3)
                             )
-                            Text(
-                                text = formatDuration(episode.durationSec),
-                                color = Color(0xFF667085),
-                                style = MaterialTheme.typography.bodySmall
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = titleLabel,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = metaLabel,
+                                    color = Color(0xFF667085),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Checkbox(
+                                checked = checked,
+                                onCheckedChange = { onToggleEpisode(episode.episodeNo) }
                             )
                         }
-                        Checkbox(
-                            checked = checked,
-                            onCheckedChange = { onToggleEpisode(episode.episodeNo) }
-                        )
                     }
                 }
             }
         }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -336,7 +580,7 @@ private fun CollectionProbeResultContent(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "已选 ${selectedEpisodeNos.size} 集",
+                text = "Selected ${selectedEpisodeNos.size} ${if (isBook) "sections" else "episodes"}",
                 color = Color.White,
                 fontWeight = FontWeight.Medium
             )
@@ -349,13 +593,332 @@ private fun CollectionProbeResultContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                 }
-                Text("提交合集")
+                Text(if (isBook) "Submit book task" else "Submit collection")
             }
         }
         Spacer(modifier = Modifier.height(18.dp))
     }
 }
 
+private data class PdfPreviewRenderResult(
+    val bitmap: Bitmap?,
+    val pageNo: Int,
+    val pageCount: Int,
+    val errorMessage: String?
+)
+
+@Composable
+private fun BookPdfPreviewPane(
+    modifier: Modifier,
+    previewDocumentUri: String?,
+    fallbackResolvedUrl: String,
+    previewPage: Int,
+    totalPagesHint: Int,
+    submitting: Boolean,
+    onPreviewPageChange: (Int) -> Unit,
+    onUseCurrentPageAsConfirmedStart: () -> Unit
+) {
+    val context = LocalContext.current
+    val previewSource = remember(previewDocumentUri, fallbackResolvedUrl) {
+        val local = previewDocumentUri?.trim().orEmpty()
+        if (local.isNotEmpty()) {
+            local
+        } else {
+            fallbackResolvedUrl.trim()
+        }
+    }
+    val renderResult by produceState(
+        initialValue = PdfPreviewRenderResult(
+            bitmap = null,
+            pageNo = normalizeBookPage(previewPage, totalPagesHint),
+            pageCount = totalPagesHint,
+            errorMessage = null
+        ),
+        key1 = previewSource,
+        key2 = previewPage
+    ) {
+        value = renderPdfPreviewPage(
+            context = context,
+            previewSource = previewSource,
+            requestedPage = previewPage,
+            totalPagesHint = totalPagesHint
+        )
+    }
+    val resolvedPageCount = if (renderResult.pageCount > 0) renderResult.pageCount else totalPagesHint
+    val safePage = normalizeBookPage(renderResult.pageNo, resolvedPageCount)
+
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(
+                    onClick = { onPreviewPageChange(safePage - 1) },
+                    enabled = !submitting && safePage > 1
+                ) {
+                    Text("Prev")
+                }
+                Text(
+                    text = if (resolvedPageCount > 0) "Page $safePage/$resolvedPageCount" else "Page $safePage",
+                    modifier = Modifier.weight(1f),
+                    color = Color(0xFF344054),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                OutlinedButton(
+                    onClick = { onPreviewPageChange(safePage + 1) },
+                    enabled = !submitting && (resolvedPageCount <= 0 || safePage < resolvedPageCount)
+                ) {
+                    Text("Next")
+                }
+            }
+
+            OutlinedButton(
+                onClick = onUseCurrentPageAsConfirmedStart,
+                enabled = !submitting,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Use current page as actual start")
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .background(Color(0xFFE4E7EC), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                val bitmap = renderResult.bitmap
+                val errorMessage = renderResult.errorMessage
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "PDF preview page",
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(6.dp),
+                        contentScale = ContentScale.Fit
+                    )
+                } else if (errorMessage.isNullOrBlank()) {
+                    CircularProgressIndicator()
+                } else {
+                    Text(
+                        text = errorMessage,
+                        color = Color(0xFF667085),
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+private suspend fun renderPdfPreviewPage(
+    context: Context,
+    previewSource: String,
+    requestedPage: Int,
+    totalPagesHint: Int
+): PdfPreviewRenderResult {
+    return withContext(Dispatchers.IO) {
+        val source = previewSource.trim()
+        if (source.isEmpty()) {
+            return@withContext PdfPreviewRenderResult(
+                bitmap = null,
+                pageNo = normalizeBookPage(requestedPage, totalPagesHint),
+                pageCount = totalPagesHint,
+                errorMessage = "Preview source is empty"
+            )
+        }
+
+        var descriptor: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+        var page: PdfRenderer.Page? = null
+        try {
+            descriptor = openPdfDescriptor(context, source)
+            if (descriptor == null) {
+                return@withContext PdfPreviewRenderResult(
+                    bitmap = null,
+                    pageNo = normalizeBookPage(requestedPage, totalPagesHint),
+                    pageCount = totalPagesHint,
+                    errorMessage = "Preview is available for uploaded local PDF only"
+                )
+            }
+            renderer = PdfRenderer(descriptor)
+            val pageCount = renderer.pageCount
+            if (pageCount <= 0) {
+                return@withContext PdfPreviewRenderResult(
+                    bitmap = null,
+                    pageNo = normalizeBookPage(requestedPage, totalPagesHint),
+                    pageCount = totalPagesHint,
+                    errorMessage = "No pages detected"
+                )
+            }
+            val safePageNo = normalizeBookPage(requestedPage, pageCount)
+            page = renderer.openPage(safePageNo - 1)
+            val targetWidth = (page.width * 2).coerceIn(640, 2200)
+            val targetHeight = (page.height * targetWidth.toFloat() / page.width.toFloat())
+                .roundToInt()
+                .coerceAtLeast(1)
+            val bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+            bitmap.eraseColor(android.graphics.Color.WHITE)
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            PdfPreviewRenderResult(
+                bitmap = bitmap,
+                pageNo = safePageNo,
+                pageCount = pageCount,
+                errorMessage = null
+            )
+        } catch (error: Exception) {
+            PdfPreviewRenderResult(
+                bitmap = null,
+                pageNo = normalizeBookPage(requestedPage, totalPagesHint),
+                pageCount = totalPagesHint,
+                errorMessage = error.message ?: "Failed to render PDF preview"
+            )
+        } finally {
+            try {
+                page?.close()
+            } catch (_: Exception) {
+            }
+            try {
+                renderer?.close()
+            } catch (_: Exception) {
+            }
+            try {
+                descriptor?.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+}
+
+private fun openPdfDescriptor(context: Context, source: String): ParcelFileDescriptor? {
+    return try {
+        when {
+            source.startsWith("content://", ignoreCase = true) -> {
+                context.contentResolver.openFileDescriptor(Uri.parse(source), "r")
+            }
+
+            source.startsWith("file://", ignoreCase = true) -> {
+                val path = Uri.parse(source).path ?: return null
+                val file = File(path)
+                if (!file.exists() || file.isDirectory) {
+                    null
+                } else {
+                    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                }
+            }
+
+            source.startsWith("/") || Regex("^[a-zA-Z]:\\\\").containsMatchIn(source) -> {
+                val normalizedPath = source.replace('\\', File.separatorChar)
+                val file = File(normalizedPath)
+                if (!file.exists() || file.isDirectory) {
+                    null
+                } else {
+                    ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+                }
+            }
+
+            else -> null
+        }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun resolveInitialBookPreviewPage(result: VideoProbeResult, confirmedStartPage: Int?): Int {
+    val candidate = confirmedStartPage
+        ?: result.confirmedStartPage
+        ?: result.detectedStartPage
+        ?: result.appliedPageOffset?.let { it + 1 }
+        ?: result.episodes.firstNotNullOfOrNull { episode -> episode.startPage }
+        ?: 1
+    return normalizeBookPage(candidate, result.totalPages)
+}
+
+private fun resolveEpisodePreviewPage(
+    episode: VideoProbeEpisode,
+    fallbackPage: Int,
+    totalPages: Int
+): Int {
+    val candidate = episode.startPage ?: episode.endPage ?: fallbackPage
+    return normalizeBookPage(candidate, totalPages)
+}
+
+private fun normalizeBookPage(candidate: Int?, totalPages: Int): Int {
+    val safe = (candidate ?: 1).coerceAtLeast(1)
+    return if (totalPages > 0) {
+        safe.coerceIn(1, totalPages)
+    } else {
+        safe
+    }
+}
+private data class BookChapterGroup(
+    val key: String,
+    val title: String,
+    val sections: List<VideoProbeEpisode>
+)
+
+private fun buildBookChapterGroups(episodes: List<VideoProbeEpisode>): List<BookChapterGroup> {
+    if (episodes.isEmpty()) {
+        return emptyList()
+    }
+    data class MutableChapter(
+        val chapterIndex: Int,
+        var chapterTitle: String,
+        val sections: MutableList<VideoProbeEpisode>
+    )
+    val grouped = LinkedHashMap<String, MutableChapter>()
+    for (episode in episodes) {
+        val chapterIndex = episode.chapterIndex.takeIf { it > 0 } ?: 0
+        val defaultChapterTitle = if (chapterIndex > 0) {
+            "Chapter $chapterIndex"
+        } else {
+            "Ungrouped Sections"
+        }
+        val rawChapterTitle = episode.chapterTitle.trim()
+        val chapterTitle = if (rawChapterTitle.isBlank()) defaultChapterTitle else rawChapterTitle
+        val key = if (chapterIndex > 0) {
+            "chapter-$chapterIndex"
+        } else {
+            "chapter-unknown-${chapterTitle.lowercase()}"
+        }
+        val chapter = grouped.getOrPut(key) {
+            MutableChapter(
+                chapterIndex = chapterIndex,
+                chapterTitle = chapterTitle,
+                sections = mutableListOf()
+            )
+        }
+        if (chapter.chapterTitle.isBlank()) {
+            chapter.chapterTitle = chapterTitle
+        }
+        chapter.sections.add(episode)
+    }
+    return grouped.entries.map { entry ->
+        val chapter = entry.value
+        val displayTitle = if (chapter.chapterIndex > 0) {
+            "C${chapter.chapterIndex} ${chapter.chapterTitle}"
+        } else {
+            chapter.chapterTitle
+        }
+        BookChapterGroup(
+            key = entry.key,
+            title = displayTitle,
+            sections = chapter.sections.toList()
+        )
+    }
+}
 @Composable
 fun CollectionHubScreen(
     collections: List<CollectionCardUi>,
@@ -408,18 +971,18 @@ private fun CollectionStackedList(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 TextButton(onClick = onBack) {
-                    Text("返回任务")
+                    Text("Back to tasks")
                 }
-                Text("合集管理", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
+                Text("Collection Manager", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleLarge)
                 TextButton(onClick = onRefresh) {
-                    Text("刷新")
+                    Text("Refresh")
                 }
             }
         }
         if (collections.isEmpty()) {
             item {
                 Text(
-                    text = "暂无合集，先去探测并提交一个合集。",
+                    text = "No collections yet. Probe and submit one first.",
                     color = Color(0xFF667085)
                 )
             }
@@ -488,7 +1051,7 @@ private fun StackedCollectionCard(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${card.totalEpisodes}个视频 · 已提交${card.submittedCount}个",
+                            text = "${card.totalEpisodes} videos | submitted ${card.submittedCount}",
                             color = Color(0xFF667085)
                         )
                     }
@@ -538,7 +1101,7 @@ private fun CollectionDetailScreen(
                         .align(Alignment.TopStart)
                         .padding(top = 16.dp, start = 8.dp)
                 ) {
-                    Text("返回", color = Color.White)
+                    Text("Back", color = Color.White)
                 }
                 Column(
                     modifier = Modifier
@@ -554,7 +1117,7 @@ private fun CollectionDetailScreen(
                         overflow = TextOverflow.Ellipsis
                     )
                     Text(
-                        text = "完成 ${collection.completedCount}/${collection.totalEpisodes}",
+                        text = "Progress ${collection.completedCount}/${collection.totalEpisodes}",
                         color = Color(0xFFD0D5DD)
                     )
                 }
@@ -594,7 +1157,7 @@ private fun EpisodeStatusCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "第${episode.episodeNo}集",
+                    text = "E${episode.episodeNo}",
                     color = Color(0xFF175CD3),
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.width(64.dp)
@@ -621,13 +1184,13 @@ private fun EpisodeStatusCard(
                                 }
                             }
                         ) {
-                            Text("阅读")
+                            Text("Read")
                         }
                     }
 
                     EpisodeDisplayStatus.FAILED -> {
                         OutlinedButton(onClick = onRetry) {
-                            Text("重试", color = Color(0xFFB42318))
+                            Text("Retry", color = Color(0xFFB42318))
                         }
                     }
 
@@ -668,7 +1231,7 @@ private fun EpisodeStatusCard(
                     )
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                     Text(
-                        text = episode.statusMessage ?: "正在解析中，请稍候...",
+                        text = episode.statusMessage ?: "Processing in background, status will update automatically...",
                         color = Color(0xFF475467),
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -676,7 +1239,7 @@ private fun EpisodeStatusCard(
             }
             AnimatedVisibility(visible = episode.displayStatus == EpisodeDisplayStatus.FAILED) {
                 Text(
-                    text = episode.statusMessage ?: "解析失败，请重试",
+                    text = episode.statusMessage ?: "Processing failed, please retry",
                     color = Color(0xFFB42318),
                     style = MaterialTheme.typography.bodySmall
                 )
@@ -687,11 +1250,11 @@ private fun EpisodeStatusCard(
 
 private fun statusLabel(status: EpisodeDisplayStatus): String {
     return when (status) {
-        EpisodeDisplayStatus.IDLE -> "未提交"
-        EpisodeDisplayStatus.QUEUED -> "排队中"
-        EpisodeDisplayStatus.PROCESSING -> "解析中"
-        EpisodeDisplayStatus.READY -> "可阅读"
-        EpisodeDisplayStatus.FAILED -> "失败"
+        EpisodeDisplayStatus.IDLE -> "Not submitted"
+        EpisodeDisplayStatus.QUEUED -> "Queued"
+        EpisodeDisplayStatus.PROCESSING -> "Processing"
+        EpisodeDisplayStatus.READY -> "Ready"
+        EpisodeDisplayStatus.FAILED -> "Failed"
     }
 }
 

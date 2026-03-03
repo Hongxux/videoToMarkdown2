@@ -23,6 +23,7 @@ from services.python_grpc.src.config_paths import resolve_video_config_path
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt, render_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
+from services.python_grpc.src.content_pipeline.common.utils import json_payload_repair
 from services.python_grpc.src.content_pipeline.shared.subtitle.subtitle_repository import SubtitleRepository
 # 🚀 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
 import asyncio
@@ -850,78 +851,25 @@ ID: {item['id']}
 
     @staticmethod
     def _extract_top_level_objects(text: str) -> List[str]:
-        """
-        做什么：从文本中抽取顶层 JSON 对象片段（{...}）。
-        为什么：批量数组整体解析失败时，逐对象解析可最大化保留有效结果。
-        权衡：只抽取顶层对象；若文本里包含与 JSON 无关的大括号，可能引入噪声对象。
-        """
-        if not text:
-            return []
-        objs: List[str] = []
-        depth = 0
-        start_idx: Optional[int] = None
-        in_str = False
-        quote = ""
-        escape = False
-
-        for i, ch in enumerate(text):
-            if in_str:
-                if escape:
-                    escape = False
-                    continue
-                if ch == "\\":
-                    escape = True
-                    continue
-                if ch == quote:
-                    in_str = False
-                    quote = ""
-                continue
-
-            if ch in {"\"", "'"}:
-                in_str = True
-                quote = ch
-                continue
-            if ch == "{":
-                if depth == 0:
-                    start_idx = i
-                depth += 1
-                continue
-            if ch == "}" and depth > 0:
-                depth -= 1
-                if depth == 0 and start_idx is not None:
-                    seg = text[start_idx : i + 1].strip()
-                    if seg:
-                        objs.append(seg)
-                    start_idx = None
-        return objs
+        return json_payload_repair.extract_top_level_objects(text)
 
     def _loads_jsonish(self, text: str) -> Any:
-        """
-        做什么：以“尽量不丢结果”为目标解析 JSON/类 JSON 文本。
-        为什么：LLM 输出常见偏差包括：尾随逗号、中文标点、代码围栏、字符串中包含未转义换行等。
-        权衡：会对文本做最小必要修复；若输出本身语义错误则仍会解析失败并回退。
-        """
         if text is None:
             return None
         raw = str(text).strip().lstrip("\ufeff")
         if not raw:
             return None
 
-        # 1) 先尝试严格 JSON
-        try:
-            return json.loads(raw)
-        except Exception:
-            pass
+        parsed, _ = json_payload_repair.parse_json_payload(raw)
+        if parsed is not None:
+            return parsed
 
-        # 2) 尝试最小修复后再用 json.loads
         normalized = self._normalize_jsonish_text(raw)
         if normalized and normalized != raw:
-            try:
-                return json.loads(normalized)
-            except Exception:
-                pass
+            parsed_normalized, _ = json_payload_repair.parse_json_payload(normalized)
+            if parsed_normalized is not None:
+                return parsed_normalized
 
-        # 3) 尝试修复“输出被截断”的场景（缺少结尾引号/括号）
         repair_candidates: List[str] = []
         for candidate in (raw, normalized):
             if not candidate:
@@ -930,12 +878,10 @@ ID: {item['id']}
             if not repaired or repaired == candidate or repaired in repair_candidates:
                 continue
             repair_candidates.append(repaired)
-            try:
-                return json.loads(repaired)
-            except Exception:
-                pass
+            parsed_repaired, _ = json_payload_repair.parse_json_payload(repaired)
+            if parsed_repaired is not None:
+                return parsed_repaired
 
-        # 4) 再尝试 Python literal（兼容单引号/尾随逗号/True/False/None）
         for candidate in (raw, normalized, *repair_candidates):
             if not candidate:
                 continue
@@ -1042,71 +988,7 @@ ID: {item['id']}
 
     @staticmethod
     def _repair_unclosed_json(text: str) -> str:
-        """
-        做什么：尽量修复被截断的 JSON 文本（未闭合字符串/括号）。
-        为什么：LLM 批量输出偶发截断时，整批结果会因语法不完整而丢失。
-        权衡：只做最小闭合修复，不猜测缺失字段语义。
-        """
-        if not text:
-            return ""
-
-        # 仅保留首个 JSON 起点之后的内容，避免前缀说明文本干扰解析
-        start_idx = -1
-        for i, ch in enumerate(text):
-            if ch in {"[", "{"}:
-                start_idx = i
-                break
-        if start_idx < 0:
-            return text
-
-        src = text[start_idx:].strip()
-        if not src:
-            return ""
-
-        out: List[str] = []
-        stack: List[str] = []
-        in_str = False
-        quote = ""
-        escape = False
-
-        for ch in src:
-            out.append(ch)
-            if in_str:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == quote:
-                    in_str = False
-                    quote = ""
-                continue
-
-            if ch in {"\"", "'"}:
-                in_str = True
-                quote = ch
-                continue
-
-            if ch in {"[", "{"}:
-                stack.append(ch)
-                continue
-
-            if ch in {"]", "}"} and stack:
-                top = stack[-1]
-                if (top == "[" and ch == "]") or (top == "{" and ch == "}"):
-                    stack.pop()
-
-        # 若字符串以反斜杠结尾，先补一个反斜杠再闭合引号，避免形成非法转义
-        if in_str and quote:
-            if escape:
-                out.append("\\")
-            out.append(quote)
-
-        while stack:
-            top = stack.pop()
-            out.append("]" if top == "[" else "}")
-
-        repaired = "".join(out)
-        return KnowledgeClassifier._remove_trailing_commas(repaired)
+        return json_payload_repair.repair_unclosed_json(text)
 
     @staticmethod
     def _replace_outside_strings(text: str, mapping: Dict[str, str]) -> str:
@@ -1144,102 +1026,11 @@ ID: {item['id']}
 
     @staticmethod
     def _escape_control_chars_in_strings(text: str) -> str:
-        """方法说明：KnowledgeClassifier._escape_control_chars_in_strings 工具方法。
-        执行步骤：
-        1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
-        2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
-        3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-        if not text:
-            return ""
-        out: List[str] = []
-        in_str = False
-        quote = ""
-        escape = False
-        for ch in text:
-            if in_str:
-                if escape:
-                    out.append(ch)
-                    escape = False
-                    continue
-                if ch == "\\":
-                    out.append(ch)
-                    escape = True
-                    continue
-                if ch == quote:
-                    out.append(ch)
-                    in_str = False
-                    quote = ""
-                    continue
-                code = ord(ch)
-                if code < 0x20:
-                    if ch == "\n":
-                        out.append("\\n")
-                    elif ch == "\r":
-                        out.append("\\r")
-                    elif ch == "\t":
-                        out.append("\\t")
-                    else:
-                        out.append(f"\\u{code:04x}")
-                else:
-                    out.append(ch)
-                continue
-
-            if ch in {"\"", "'"}:
-                in_str = True
-                quote = ch
-                out.append(ch)
-                continue
-            out.append(ch)
-        return "".join(out)
+        return json_payload_repair.escape_control_chars_in_strings(text)
 
     @staticmethod
     def _remove_trailing_commas(text: str) -> str:
-        """方法说明：KnowledgeClassifier._remove_trailing_commas 工具方法。
-        执行步骤：
-        1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
-        2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
-        3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-        if not text:
-            return ""
-        out: List[str] = []
-        i = 0
-        in_str = False
-        quote = ""
-        escape = False
-
-        while i < len(text):
-            ch = text[i]
-            if in_str:
-                out.append(ch)
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == quote:
-                    in_str = False
-                    quote = ""
-                i += 1
-                continue
-
-            if ch in {"\"", "'"}:
-                in_str = True
-                quote = ch
-                out.append(ch)
-                i += 1
-                continue
-
-            if ch == ",":
-                j = i + 1
-                while j < len(text) and text[j] in {" ", "\t", "\r", "\n"}:
-                    j += 1
-                if j < len(text) and text[j] in {"}", "]"}:
-                    i += 1
-                    continue
-
-            out.append(ch)
-            i += 1
-
-        return "".join(out)
+        return json_payload_repair.remove_trailing_commas(text)
 
     @staticmethod
     def _normalize_batch_index(val: Any) -> Optional[int]:

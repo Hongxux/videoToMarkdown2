@@ -104,6 +104,51 @@ data class TokenInsightCard(
 )
 
 /**
+ * 锚点 revision：仅追加，不覆盖历史。
+ */
+data class MobileAnchorRevision(
+    val revisionId: String,
+    val createdAt: String,
+    val relativeDir: String,
+    val notePath: String,
+    val fileCount: Int,
+    val totalBytes: Long,
+    val files: List<String> = emptyList()
+)
+
+/**
+ * 锚点元数据：主坐标以 blockId + start/end 为准。
+ */
+data class MobileAnchorData(
+    val blockId: String,
+    val startIndex: Int,
+    val endIndex: Int,
+    val quote: String,
+    val contextQuote: String = "",
+    val anchorHint: String = "",
+    val status: String,
+    val mountedPath: String,
+    val mountedRevisionId: String,
+    val updatedAt: String,
+    val revisions: List<MobileAnchorRevision>
+)
+
+/**
+ * 已挂载锚点笔记读取模型。
+ */
+data class MobileMountedAnchorPayload(
+    val taskId: String,
+    val pathKey: String,
+    val anchorId: String,
+    val entryNotePath: String,
+    val notePath: String,
+    val assetBasePath: String,
+    val markdown: String,
+    val rawMarkdown: String,
+    val latestRevision: MobileAnchorRevision?
+)
+
+/**
  * 与 java-orchestrator 的 /api/mobile/tasks/{taskId}/meta 契约对齐。
  */
 data class MobileTaskMetaPayload(
@@ -114,6 +159,7 @@ data class MobileTaskMetaPayload(
     val comments: Map<String, List<String>>,
     val tokenLike: Map<String, Boolean>,
     val tokenAnnotations: Map<String, String>,
+    val anchors: Map<String, MobileAnchorData>,
     val taskTitle: String
 )
 
@@ -127,7 +173,8 @@ data class MobileTaskMetaUpdateRequest(
     val deleted: Map<String, Boolean>,
     val comments: Map<String, List<String>>,
     val tokenLike: Map<String, Boolean>,
-    val tokenAnnotations: Map<String, String>
+    val tokenAnnotations: Map<String, String>,
+    val anchors: Map<String, MobileAnchorData>
 )
 
 /**
@@ -148,6 +195,13 @@ interface MobileMarkdownMetaApi {
     suspend fun fetchTaskMeta(taskId: String, pathHint: String?): MobileTaskMetaPayload
 
     suspend fun updateTaskMeta(taskId: String, request: MobileTaskMetaUpdateRequest): MobileTaskMetaPayload
+
+    suspend fun fetchMountedAnchorNote(
+        taskId: String,
+        anchorId: String,
+        pathHint: String?,
+        notePath: String? = null
+    ): MobileMountedAnchorPayload
 }
 
 /**
@@ -258,6 +312,83 @@ class HttpMobileMarkdownMetaApi(
                         }
                     }
                 })
+                put("anchors", JSONObject().apply {
+                    request.anchors.forEach { (anchorId, anchorData) ->
+                        val normalizedId = anchorId.trim()
+                        if (normalizedId.isBlank()) {
+                            return@forEach
+                        }
+                        val payload = JSONObject().apply {
+                            put("blockId", anchorData.blockId)
+                            put("startIndex", anchorData.startIndex)
+                            put("endIndex", anchorData.endIndex)
+                            if (anchorData.quote.isNotBlank()) {
+                                put("quote", anchorData.quote.trim())
+                            }
+                            if (anchorData.contextQuote.isNotBlank()) {
+                                put("contextQuote", anchorData.contextQuote.trim())
+                            }
+                            if (anchorData.anchorHint.isNotBlank()) {
+                                put("anchorHint", anchorData.anchorHint.trim())
+                            }
+                            if (anchorData.status.isNotBlank()) {
+                                put("status", anchorData.status.trim())
+                            }
+                            if (anchorData.mountedPath.isNotBlank()) {
+                                put("mountedPath", anchorData.mountedPath.trim())
+                            }
+                            if (anchorData.mountedRevisionId.isNotBlank()) {
+                                put("mountedRevisionId", anchorData.mountedRevisionId.trim())
+                            }
+                            if (anchorData.updatedAt.isNotBlank()) {
+                                put("updatedAt", anchorData.updatedAt.trim())
+                            }
+                            if (anchorData.revisions.isNotEmpty()) {
+                                val revisionsArray = JSONArray()
+                                anchorData.revisions.forEach { revision ->
+                                    revisionsArray.put(JSONObject().apply {
+                                        if (revision.revisionId.isNotBlank()) {
+                                            put("revisionId", revision.revisionId.trim())
+                                        }
+                                        if (revision.createdAt.isNotBlank()) {
+                                            put("createdAt", revision.createdAt.trim())
+                                        }
+                                        if (revision.relativeDir.isNotBlank()) {
+                                            put("relativeDir", revision.relativeDir.trim())
+                                        }
+                                        if (revision.notePath.isNotBlank()) {
+                                            put("notePath", revision.notePath.trim())
+                                        }
+                                        if (revision.fileCount >= 0) {
+                                            put("fileCount", revision.fileCount)
+                                        }
+                                        if (revision.totalBytes >= 0L) {
+                                            put("totalBytes", revision.totalBytes)
+                                        }
+                                        if (revision.files.isNotEmpty()) {
+                                            val filesArray = JSONArray()
+                                            revision.files.forEach { onePath ->
+                                                val normalizedPath = onePath.trim()
+                                                if (normalizedPath.isNotBlank()) {
+                                                    filesArray.put(
+                                                        JSONObject().apply {
+                                                            put("path", normalizedPath)
+                                                        }
+                                                    )
+                                                }
+                                            }
+                                            if (filesArray.length() > 0) {
+                                                put("files", filesArray)
+                                            }
+                                        }
+                                    })
+                                }
+                                put("revisions", revisionsArray)
+                            }
+                        }
+                        put(normalizedId, payload)
+                    }
+                })
             }.toString()
 
             val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -273,6 +404,47 @@ class HttpMobileMarkdownMetaApi(
                 writer.write(body)
             }
             connection.useAndReadPayload()
+        }
+    }
+
+    override suspend fun fetchMountedAnchorNote(
+        taskId: String,
+        anchorId: String,
+        pathHint: String?,
+        notePath: String?
+    ): MobileMountedAnchorPayload {
+        return withContext(Dispatchers.IO) {
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val encodedAnchor = URLEncoder.encode(anchorId, StandardCharsets.UTF_8)
+            val queryItems = buildList {
+                if (!pathHint.isNullOrBlank()) {
+                    add("path=" + URLEncoder.encode(pathHint, StandardCharsets.UTF_8))
+                }
+                if (!notePath.isNullOrBlank()) {
+                    add("notePath=" + URLEncoder.encode(notePath, StandardCharsets.UTF_8))
+                }
+            }
+            val query = if (queryItems.isNotEmpty()) "?" + queryItems.joinToString("&") else ""
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/anchors/$encodedAnchor/mounted$query")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 8_000
+                readTimeout = 8_000
+                setRequestProperty("Accept", "application/json")
+            }
+            try {
+                val code = connection.responseCode
+                val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+                val text = stream?.use {
+                    BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+                }.orEmpty()
+                if (code !in 200..299) {
+                    throw IllegalStateException("HTTP $code: $text")
+                }
+                parseMountedAnchorPayload(text)
+            } finally {
+                connection.disconnect()
+            }
         }
     }
 
@@ -586,15 +758,27 @@ class HttpMobileMarkdownTelemetryApi(
  * JNI 桥接对象。
  */
 object LexicalNativeBridge {
-    init {
-        runCatching {
-            System.loadLibrary("lexical_onnx_bridge")
+    private const val LOG_TAG = "LexicalNativeBridge"
+    @Volatile
+    private var disableNoticeLogged: Boolean = false
+
+    private fun logDisabledOnce(api: String) {
+        if (disableNoticeLogged) {
+            return
         }
+        disableNoticeLogged = true
+        Log.i(LOG_TAG, "JNI lexical bridge disabled, skip native api=$api")
     }
 
-    external fun segmentAt(text: String, cursor: Int): String?
+    fun segmentAt(text: String, cursor: Int): String? {
+        logDisabledOnce("segmentAt")
+        return null
+    }
 
-    external fun explainToken(token: String, context: String): String?
+    fun explainToken(token: String, context: String): String? {
+        logDisabledOnce("explainToken")
+        return null
+    }
 }
 
 private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
@@ -604,6 +788,7 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
     val commentsObj = root.optJSONObject("comments") ?: JSONObject()
     val tokenLikeObj = root.optJSONObject("tokenLike") ?: JSONObject()
     val tokenAnnotationsObj = root.optJSONObject("tokenAnnotations") ?: JSONObject()
+    val anchorsObj = root.optJSONObject("anchors") ?: JSONObject()
 
     val favorites = LinkedHashMap<String, Boolean>()
     val favoriteIter = favoritesObj.keys()
@@ -675,6 +860,61 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
         }
     }
 
+    val anchors = LinkedHashMap<String, MobileAnchorData>()
+    val anchorIter = anchorsObj.keys()
+    while (anchorIter.hasNext()) {
+        val anchorId = anchorIter.next().trim()
+        if (anchorId.isBlank()) {
+            continue
+        }
+        val anchorObj = anchorsObj.optJSONObject(anchorId) ?: continue
+        val blockId = anchorObj.optString("blockId").trim()
+        val startIndex = anchorObj.optInt("startIndex", -1)
+            .takeIf { it >= 0 }
+            ?: anchorObj.optInt("start", -1).takeIf { it >= 0 }
+            ?: continue
+        val endIndex = anchorObj.optInt("endIndex", -1)
+            .takeIf { it > startIndex }
+            ?: anchorObj.optInt("end", -1).takeIf { it > startIndex }
+            ?: continue
+        val revisions = buildList {
+            val revisionArray = anchorObj.optJSONArray("revisions")
+            if (revisionArray != null) {
+                for (i in 0 until revisionArray.length()) {
+                    val revisionObj = revisionArray.optJSONObject(i) ?: continue
+                    add(
+                        MobileAnchorRevision(
+                            revisionId = revisionObj.optString("revisionId").trim(),
+                            createdAt = revisionObj.optString("createdAt").trim(),
+                            relativeDir = revisionObj.optString("relativeDir").trim(),
+                            notePath = revisionObj.optString("notePath").trim(),
+                            fileCount = revisionObj.optInt("fileCount", -1).coerceAtLeast(-1),
+                            totalBytes = revisionObj.optLong("totalBytes", -1L).coerceAtLeast(-1L),
+                            files = parseRevisionFiles(revisionObj)
+                        )
+                    )
+                }
+            }
+        }
+        anchors[anchorId] = MobileAnchorData(
+            blockId = blockId,
+            startIndex = startIndex,
+            endIndex = endIndex,
+            quote = anchorObj.optString("quote").trim(),
+            contextQuote = anchorObj.optString("contextQuote")
+                .trim()
+                .ifBlank { anchorObj.optString("quoteSnapshot").trim() },
+            anchorHint = anchorObj.optString("anchorHint")
+                .trim()
+                .ifBlank { anchorObj.optString("hint").trim() },
+            status = anchorObj.optString("status").trim(),
+            mountedPath = anchorObj.optString("mountedPath").trim(),
+            mountedRevisionId = anchorObj.optString("mountedRevisionId").trim(),
+            updatedAt = anchorObj.optString("updatedAt").trim(),
+            revisions = revisions
+        )
+    }
+
     return MobileTaskMetaPayload(
         taskId = root.optString("taskId"),
         pathKey = root.optString("pathKey"),
@@ -683,8 +923,51 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
         comments = comments,
         tokenLike = tokenLike,
         tokenAnnotations = tokenAnnotations,
+        anchors = anchors,
         taskTitle = root.optString("taskTitle")
     )
+}
+
+private fun parseMountedAnchorPayload(text: String): MobileMountedAnchorPayload {
+    val root = JSONObject(if (text.isBlank()) "{}" else text)
+    val latestRevisionObj = root.optJSONObject("latestRevision")
+    val latestRevision = if (latestRevisionObj != null) {
+        MobileAnchorRevision(
+            revisionId = latestRevisionObj.optString("revisionId").trim(),
+            createdAt = latestRevisionObj.optString("createdAt").trim(),
+            relativeDir = latestRevisionObj.optString("relativeDir").trim(),
+            notePath = latestRevisionObj.optString("notePath").trim(),
+            fileCount = latestRevisionObj.optInt("fileCount", -1).coerceAtLeast(-1),
+            totalBytes = latestRevisionObj.optLong("totalBytes", -1L).coerceAtLeast(-1L),
+            files = parseRevisionFiles(latestRevisionObj)
+        )
+    } else {
+        null
+    }
+    return MobileMountedAnchorPayload(
+        taskId = root.optString("taskId"),
+        pathKey = root.optString("pathKey"),
+        anchorId = root.optString("anchorId"),
+        entryNotePath = root.optString("entryNotePath"),
+        notePath = root.optString("notePath"),
+        assetBasePath = root.optString("assetBasePath"),
+        markdown = root.optString("markdown"),
+        rawMarkdown = root.optString("rawMarkdown"),
+        latestRevision = latestRevision
+    )
+}
+
+private fun parseRevisionFiles(revisionObj: JSONObject): List<String> {
+    val filesArray = revisionObj.optJSONArray("files") ?: return emptyList()
+    return buildList {
+        for (i in 0 until filesArray.length()) {
+            val fileObj = filesArray.optJSONObject(i) ?: continue
+            val path = fileObj.optString("path").trim()
+            if (path.isNotBlank()) {
+                add(path)
+            }
+        }
+    }
 }
 
 /**

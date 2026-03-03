@@ -75,6 +75,31 @@ public class DatabaseInitializer {
                         )
                         """);
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_episode_task ON collection_episodes(task_id)");
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS file_metadata (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            file_md5 TEXT NOT NULL,
+                            file_ext TEXT NOT NULL,
+                            file_path TEXT NOT NULL,
+                            file_size INTEGER,
+                            original_file_name TEXT,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            UNIQUE(file_md5, file_ext)
+                        )
+                        """);
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_file_metadata_path ON file_metadata(file_path)");
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS file_probe_cache (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            file_md5 TEXT NOT NULL,
+                            file_ext TEXT NOT NULL,
+                            probe_payload TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            UNIQUE(file_md5, file_ext)
+                        )
+                        """);
                 logger.info("collection schema initialized");
             }
         };

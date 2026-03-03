@@ -18,18 +18,31 @@ data class VideoProbeEpisode(
     val episodeNo: Int,
     val title: String,
     val durationSec: Double?,
-    val episodeUrl: String
+    val episodeUrl: String,
+    val chapterIndex: Int,
+    val sectionIndex: Int,
+    val chapterTitle: String,
+    val startPage: Int?,
+    val endPage: Int?,
+    val sectionSelector: String
 )
 
 data class VideoProbeResult(
     val success: Boolean,
     val title: String,
+    val contentType: String,
     val platform: String,
     val resolvedUrl: String,
     val canonicalId: String,
     val collectionId: String,
     val isCollection: Boolean,
     val totalEpisodes: Int,
+    val totalPages: Int,
+    val detectedPageOffset: Int?,
+    val appliedPageOffset: Int?,
+    val detectedStartPage: Int?,
+    val confirmedStartPage: Int?,
+    val pageMapStrategy: String,
     val durationSec: Double?,
     val episodes: List<VideoProbeEpisode>
 )
@@ -80,10 +93,16 @@ data class CollectionBatchSkippedItem(
 
 interface CollectionRetrofitApi {
     @GET("/api/mobile/video-info")
-    suspend fun probeVideoInfoMobile(@Query("videoInput") videoInput: String): VideoProbeResponseDto
+    suspend fun probeVideoInfoMobile(
+        @Query("videoInput") videoInput: String,
+        @Query("pageOffset") pageOffset: Int? = null
+    ): VideoProbeResponseDto
 
     @GET("/api/video-info")
-    suspend fun probeVideoInfoLegacy(@Query("videoInput") videoInput: String): VideoProbeResponseDto
+    suspend fun probeVideoInfoLegacy(
+        @Query("videoInput") videoInput: String,
+        @Query("pageOffset") pageOffset: Int? = null
+    ): VideoProbeResponseDto
 
     @POST("/api/mobile/tasks/submit")
     suspend fun submitTask(@Body request: MobileTaskSubmitRequestDto): MobileTaskSubmitResponseDto
@@ -108,7 +127,17 @@ data class MobileTaskSubmitRequestDto(
     @SerializedName("userId")
     val userId: String? = null,
     @SerializedName("outputDir")
-    val outputDir: String? = null
+    val outputDir: String? = null,
+    @SerializedName("chapterSelector")
+    val chapterSelector: String? = null,
+    @SerializedName("sectionSelector")
+    val sectionSelector: String? = null,
+    @SerializedName("splitByChapter")
+    val splitByChapter: Boolean? = null,
+    @SerializedName("splitBySection")
+    val splitBySection: Boolean? = null,
+    @SerializedName("pageOffset")
+    val pageOffset: Int? = null
 )
 
 data class MobileTaskSubmitResponseDto(
@@ -136,6 +165,8 @@ data class VideoProbeResponseDto(
     val success: Boolean = false,
     @SerializedName("title")
     val title: String = "",
+    @SerializedName("contentType")
+    val contentType: String = "",
     @SerializedName("platform")
     val platform: String = "",
     @SerializedName("resolvedUrl")
@@ -148,6 +179,18 @@ data class VideoProbeResponseDto(
     val isCollection: Boolean = false,
     @SerializedName("totalEpisodes")
     val totalEpisodes: Int = 0,
+    @SerializedName("totalPages")
+    val totalPages: Int = 0,
+    @SerializedName("detectedPageOffset")
+    val detectedPageOffset: Int? = null,
+    @SerializedName("appliedPageOffset")
+    val appliedPageOffset: Int? = null,
+    @SerializedName("detectedStartPage")
+    val detectedStartPage: Int? = null,
+    @SerializedName("confirmedStartPage")
+    val confirmedStartPage: Int? = null,
+    @SerializedName("pageMapStrategy")
+    val pageMapStrategy: String = "",
     @SerializedName("durationSec")
     val durationSec: Double? = null,
     @SerializedName("episodes")
@@ -162,7 +205,19 @@ data class VideoProbeEpisodeDto(
     @SerializedName("durationSec")
     val durationSec: Double? = null,
     @SerializedName("episodeUrl")
-    val episodeUrl: String = ""
+    val episodeUrl: String = "",
+    @SerializedName("chapterIndex")
+    val chapterIndex: Int = 0,
+    @SerializedName("sectionIndex")
+    val sectionIndex: Int = 0,
+    @SerializedName("chapterTitle")
+    val chapterTitle: String = "",
+    @SerializedName("startPage")
+    val startPage: Int? = null,
+    @SerializedName("endPage")
+    val endPage: Int? = null,
+    @SerializedName("sectionSelector")
+    val sectionSelector: String = ""
 )
 
 data class CollectionListResponseDto(
@@ -306,19 +361,32 @@ fun VideoProbeResponseDto.toDomain(): VideoProbeResult {
     return VideoProbeResult(
         success = success,
         title = title,
+        contentType = contentType,
         platform = platform,
         resolvedUrl = resolvedUrl,
         canonicalId = canonicalId,
         collectionId = collectionId,
         isCollection = isCollection,
         totalEpisodes = totalEpisodes,
+        totalPages = totalPages,
+        detectedPageOffset = detectedPageOffset,
+        appliedPageOffset = appliedPageOffset,
+        detectedStartPage = detectedStartPage,
+        confirmedStartPage = confirmedStartPage,
+        pageMapStrategy = pageMapStrategy,
         durationSec = durationSec,
         episodes = episodes.map { episode ->
             VideoProbeEpisode(
                 episodeNo = episode.index,
                 title = episode.title,
                 durationSec = episode.durationSec,
-                episodeUrl = episode.episodeUrl
+                episodeUrl = episode.episodeUrl,
+                chapterIndex = episode.chapterIndex,
+                sectionIndex = episode.sectionIndex,
+                chapterTitle = episode.chapterTitle,
+                startPage = episode.startPage,
+                endPage = episode.endPage,
+                sectionSelector = episode.sectionSelector
             )
         }
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import os
 import re
 import sys
@@ -127,6 +128,39 @@ def _check_preprocess_dependency_versions() -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_pydantic_core_schema_compatibility() -> tuple[bool, str]:
+    """
+    Validate critical pydantic-core function signatures expected by current pydantic code.
+    This catches partially-upgraded/corrupted environments before server startup crashes.
+    """
+    try:
+        from pydantic_core import core_schema
+    except Exception as exc:
+        return False, f"pydantic_core import failed: {exc}"
+
+    try:
+        model_schema_sig = inspect.signature(core_schema.model_schema)
+    except Exception as exc:
+        return False, f"inspect model_schema failed: {exc}"
+    if "generic_origin" not in model_schema_sig.parameters:
+        return False, (
+            "pydantic_core.model_schema missing parameter 'generic_origin' "
+            f"(actual: {model_schema_sig})"
+        )
+
+    try:
+        with_default_sig = inspect.signature(core_schema.with_default_schema)
+    except Exception as exc:
+        return False, f"inspect with_default_schema failed: {exc}"
+    if "default_factory_takes_data" not in with_default_sig.parameters:
+        return False, (
+            "pydantic_core.with_default_schema missing parameter 'default_factory_takes_data' "
+            f"(actual: {with_default_sig})"
+        )
+
+    return True, "ok"
+
+
 def run_dependency_check(debug_imports: bool = False) -> int:
     """Run startup dependency preflight; return 0 for pass and 2 for failure."""
     _prepare_preflight_paths()
@@ -145,6 +179,7 @@ def run_dependency_check(debug_imports: bool = False) -> int:
     ]
 
     feature_checks: list[tuple[str, Callable[[], tuple[bool, str]]]] = [
+        ("pydantic_core_schema_compatibility", _check_pydantic_core_schema_compatibility),
         ("preprocess_dependency_versions", _check_preprocess_dependency_versions),
         ("ppstructure_preprocess", _check_ppstructure_importable),
         ("paddlex_layout_fallback", _check_paddlex_importable),

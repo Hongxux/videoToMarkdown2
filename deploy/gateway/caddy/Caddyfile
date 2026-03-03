@@ -1,0 +1,20 @@
+{
+    # 全局运维邮箱：用于证书申请告警
+    email ops@example.com
+}
+
+# 将 example.com 替换为你的真实域名
+example.com {
+    encode zstd gzip
+
+    # Caddy 默认支持 HTTP/1.1 + HTTP/2 + HTTP/3（QUIC）
+    reverse_proxy java-orchestrator:8080 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+        header_up X-Forwarded-For {remote}
+        transport http {
+            keepalive 60s
+            versions 1.1 2
+        }
+    }
+}

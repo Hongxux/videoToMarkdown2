@@ -38,7 +38,7 @@ public class PythonGrpcClient {
     
     private static final Logger logger = LoggerFactory.getLogger(PythonGrpcClient.class);
     
-    @Value("${grpc.python.host:localhost}")
+    @Value("${grpc.python.host:127.0.0.1}")
     private String pythonHost;
     
     @Value("${grpc.python.port:50051}")
@@ -64,9 +64,10 @@ public class PythonGrpcClient {
     
     @PostConstruct
     public void init() {
-        logger.info("Initializing Python gRPC client: {}:{}", pythonHost, pythonPort);
+        String resolvedHost = resolveGrpcHost(pythonHost);
+        logger.info("Initializing Python gRPC client: {}:{} (configuredHost={})", resolvedHost, pythonPort, pythonHost);
 
-        ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forAddress(pythonHost, pythonPort)
+        ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forAddress(resolvedHost, pythonPort)
             .usePlaintext()  // 开发环境使用明文
             .maxInboundMessageSize(100 * 1024 * 1024);  // 100MB
         if (grpcKeepaliveEnabled) {
@@ -91,6 +92,18 @@ public class PythonGrpcClient {
         blockingStub = VideoProcessingServiceGrpc.newBlockingStub(channel);
         
         logger.info("Python gRPC client initialized");
+    }
+
+    private String resolveGrpcHost(String rawHost) {
+        String normalized = rawHost != null ? rawHost.trim() : "";
+        if (normalized.isEmpty()) {
+            return "127.0.0.1";
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if ("localhost".equals(lower) || "::1".equals(lower) || "[::1]".equals(lower)) {
+            return "127.0.0.1";
+        }
+        return normalized;
     }
     
     @PreDestroy
@@ -706,6 +719,77 @@ public class PythonGrpcClient {
     
     // ========== 健康检查 ==========
     
+    public static class ExtractBookPdfResult {
+        public boolean success;
+        public String markdown;
+        public String markdownPath;
+        public String extractor;
+        public int imageCount;
+        public int tableCount;
+        public int codeBlockCount;
+        public int formulaBlockCount;
+        public String errorMsg;
+        public List<String> imagePaths = new ArrayList<>();
+    }
+
+    public ExtractBookPdfResult extractBookPdf(
+            String taskId,
+            String pdfPath,
+            String outputDir,
+            int startPage,
+            int endPage,
+            String imageDir,
+            String outputRoot,
+            String sectionId,
+            boolean preferMineru,
+            int timeoutSec
+    ) {
+        try {
+            logger.info(
+                    "[{}] Calling ExtractBookPdf, pages={}~{}, sectionId={}, preferMineru={}",
+                    taskId,
+                    startPage,
+                    endPage,
+                    sectionId,
+                    preferMineru
+            );
+            ExtractBookPdfRequest request = ExtractBookPdfRequest.newBuilder()
+                    .setTaskId(taskId != null ? taskId : "")
+                    .setPdfPath(pdfPath != null ? pdfPath : "")
+                    .setOutputDir(outputDir != null ? outputDir : "")
+                    .setStartPage(Math.max(1, startPage))
+                    .setEndPage(Math.max(1, endPage))
+                    .setImageDir(imageDir != null ? imageDir : "")
+                    .setOutputRoot(outputRoot != null ? outputRoot : "")
+                    .setSectionId(sectionId != null ? sectionId : "")
+                    .setPreferMineru(preferMineru)
+                    .build();
+
+            ExtractBookPdfResponse response = blockingStub
+                    .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                    .extractBookPdf(request);
+
+            ExtractBookPdfResult result = new ExtractBookPdfResult();
+            result.success = response.getSuccess();
+            result.markdown = response.getMarkdown();
+            result.markdownPath = response.getMarkdownPath();
+            result.extractor = response.getExtractor();
+            result.imageCount = response.getImageCount();
+            result.tableCount = response.getTableCount();
+            result.codeBlockCount = response.getCodeBlockCount();
+            result.formulaBlockCount = response.getFormulaBlockCount();
+            result.errorMsg = response.getErrorMsg();
+            result.imagePaths = new ArrayList<>(response.getImagePathsList());
+            return result;
+        } catch (StatusRuntimeException e) {
+            logger.error("[{}] ExtractBookPdf failed: {}", taskId, e.getStatus());
+            ExtractBookPdfResult result = new ExtractBookPdfResult();
+            result.success = false;
+            result.errorMsg = statusDescriptionOrCode(e);
+            return result;
+        }
+    }
+
     public boolean healthCheck() {
         try {
             if (blockingStub == null) return false;
@@ -1134,6 +1218,7 @@ public class PythonGrpcClient {
         public boolean success;
         public boolean vlEnabled;
         public boolean usedFallback;
+        public boolean interrupted;
         public List<ScreenshotRequestDTO> screenshotRequests = new ArrayList<>();
         public List<ClipRequestDTO> clipRequests = new ArrayList<>();
         public int unitsAnalyzed;
@@ -1202,6 +1287,7 @@ public class PythonGrpcClient {
             result.success = response.getSuccess();
             result.vlEnabled = response.getVlEnabled();
             result.usedFallback = response.getUsedFallback();
+            result.interrupted = false;
             result.unitsAnalyzed = response.getUnitsAnalyzed();
             result.vlClipsGenerated = response.getVlClipsGenerated();
             result.vlScreenshotsGenerated = response.getVlScreenshotsGenerated();
@@ -1233,9 +1319,16 @@ public class PythonGrpcClient {
 
             return result;
         } catch (StatusRuntimeException e) {
-            logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
+            boolean interrupted = isInterruptedCancellation(e);
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+                logger.warn("[{}] AnalyzeWithVL interrupted: {}", taskId, e.getStatus());
+            } else {
+                logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
+            }
             VLAnalysisResult result = new VLAnalysisResult();
             result.success = false;
+            result.interrupted = interrupted;
             result.errorMsg = statusDescriptionOrCode(e);
             return result;
         }
@@ -1301,6 +1394,29 @@ public class PythonGrpcClient {
         }
         return "gRPC status=" + e.getStatus().getCode().name();
     }
+
+    private boolean isInterruptedCancellation(StatusRuntimeException error) {
+        if (error == null || error.getStatus() == null) {
+            return false;
+        }
+        if (error.getStatus().getCode() != Status.Code.CANCELLED) {
+            return false;
+        }
+        Throwable cause = error.getCause();
+        while (cause != null) {
+            if (cause instanceof InterruptedException) {
+                return true;
+            }
+            cause = cause.getCause();
+        }
+        String description = error.getStatus().getDescription();
+        if (description == null || description.isBlank()) {
+            return false;
+        }
+        String normalized = description.toLowerCase(Locale.ROOT);
+        return normalized.contains("interrupted");
+    }
+
     private List<ClipSegment> buildClipSegments(List<com.mvp.videoprocessing.grpc.ClipSegment> segments) {
         List<ClipSegment> results = new ArrayList<>();
         if (segments == null || segments.isEmpty()) {

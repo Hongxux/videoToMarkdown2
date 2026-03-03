@@ -76,12 +76,37 @@ class MobileAppUpdateControllerTest {
         );
         injectField(controller, "androidAppUpdateService", stubService);
 
-        ResponseEntity<?> response = controller.downloadAndroidApk(120);
+        ResponseEntity<?> response = controller.downloadAndroidApk(120, null);
 
         assertEquals(200, response.getStatusCode().value());
         assertEquals("application/vnd.android.package-archive", response.getHeaders().getContentType().toString());
         assertEquals("bytes", response.getHeaders().getFirst(HttpHeaders.ACCEPT_RANGES));
         assertTrue(response.getHeaders().getFirst(HttpHeaders.CONTENT_DISPOSITION).contains("attachment;"));
+    }
+
+    @Test
+    void downloadAndroidApkShouldSupportRangeRequest() throws Exception {
+        MobileAppUpdateController controller = new MobileAppUpdateController();
+        StubAndroidAppUpdateService stubService = new StubAndroidAppUpdateService();
+
+        Path apkPath = tempDir.resolve("videoToMarkdown-1.2.0.apk");
+        Files.write(apkPath, "abcdef".getBytes(StandardCharsets.UTF_8));
+        stubService.apk = new AndroidAppUpdateService.ResolvedApk(
+                apkPath,
+                apkPath.getFileName().toString(),
+                120,
+                "1.2.0",
+                "sha",
+                Files.size(apkPath)
+        );
+        injectField(controller, "androidAppUpdateService", stubService);
+
+        ResponseEntity<?> response = controller.downloadAndroidApk(120, "bytes=1-3");
+
+        assertEquals(206, response.getStatusCode().value());
+        assertEquals("bytes", response.getHeaders().getFirst(HttpHeaders.ACCEPT_RANGES));
+        assertEquals("bytes 1-3/6", response.getHeaders().getFirst(HttpHeaders.CONTENT_RANGE));
+        assertEquals(3L, response.getHeaders().getContentLength());
     }
 
     @Test
