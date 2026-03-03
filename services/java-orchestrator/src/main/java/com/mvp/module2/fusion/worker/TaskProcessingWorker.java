@@ -16,6 +16,7 @@ import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -59,6 +60,9 @@ public class TaskProcessingWorker {
     @Autowired
     private WatchdogSignalCodec watchdogSignalCodec;
 
+    @Value("${task.queue.max-concurrent:1}")
+    private int configuredWorkerConcurrency;
+
     private ExecutorService workerPool;
     private ScheduledExecutorService watchdogScheduler;
     private volatile boolean running = true;
@@ -66,7 +70,8 @@ public class TaskProcessingWorker {
 
     @PostConstruct
     public void start() {
-        workerPool = Executors.newFixedThreadPool(4, runnable -> {
+        int workerConcurrency = Math.max(1, configuredWorkerConcurrency);
+        workerPool = Executors.newFixedThreadPool(workerConcurrency, runnable -> {
             Thread thread = new Thread(runnable, "TaskWorker-" + System.currentTimeMillis());
             thread.setDaemon(true);
             return thread;
@@ -82,7 +87,11 @@ public class TaskProcessingWorker {
         dispatcherThread.setDaemon(true);
         dispatcherThread.start();
 
-        logger.info("TaskProcessingWorker started");
+        logger.info(
+                "TaskProcessingWorker started with concurrency {} (configured={})",
+                workerConcurrency,
+                configuredWorkerConcurrency
+        );
     }
 
     @PreDestroy
