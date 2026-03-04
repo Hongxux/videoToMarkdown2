@@ -191,7 +191,7 @@ class VLMaterialGenerator:
         # 2) 采用“stable 核心剔除 + 1s 边缘保留”，在节省成本与保留上下文之间平衡銆?
         # 3) 若预处理失败，自动回退原始片段，保证主流程可用性銆?
         self.pre_vl_pruning_config = config.get("pre_vl_static_pruning", {})
-        self.pre_vl_pruning_enabled = bool(self.pre_vl_pruning_config.get("enabled", True))
+        self.pre_vl_pruning_enabled = bool(self.pre_vl_pruning_config.get("enabled", False))
         self.pre_vl_only_process = bool(self.pre_vl_pruning_config.get("only_process", True))
         self.pre_vl_min_unit_duration_sec = float(self.pre_vl_pruning_config.get("min_unit_duration_sec", 10.0))
         self.pre_vl_keep_edge_sec = float(self.pre_vl_pruning_config.get("keep_edge_sec", 1.0))
@@ -4367,10 +4367,19 @@ class VLMaterialGenerator:
                     parsed_item.should_type = "concrete"
                 except Exception:
                     continue
+            for ss_item in analysis_result.screenshot_requests:
+                ss_item["knowledge_type"] = "concrete"
+                ss_item["_skip_cv_optimization"] = True
             logger.info(
                 "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
                 unit_id,
             )
+
+        self._annotate_screenshot_requests_with_unit_context(
+            screenshot_requests=analysis_result.screenshot_requests,
+            semantic_unit=semantic_unit,
+            analysis_mode=meta.get("analysis_mode", getattr(analysis_result, "analysis_mode", "default")),
+        )
 
         usage = getattr(analysis_result, "token_usage", {}) or {}
         prompt_actual = int(usage.get("prompt_tokens", 0) or 0)
@@ -5155,12 +5164,21 @@ class VLMaterialGenerator:
                                 parsed_item.should_type = "concrete"
                             except Exception:
                                 continue
+                        for ss_item in analysis_result.screenshot_requests:
+                            ss_item["knowledge_type"] = "concrete"
+                            ss_item["_skip_cv_optimization"] = True
                         logger.info(
                             "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
                             unit_id,
                         )
 
                     # 汇鎬?token 使用与基线估绠?
+                    self._annotate_screenshot_requests_with_unit_context(
+                        screenshot_requests=analysis_result.screenshot_requests,
+                        semantic_unit=semantic_unit,
+                        analysis_mode=meta.get("analysis_mode", getattr(analysis_result, "analysis_mode", "default")),
+                    )
+
                     usage = getattr(analysis_result, "token_usage", {}) or {}
                     prompt_actual = int(usage.get("prompt_tokens", 0) or 0)
                     completion_actual = int(usage.get("completion_tokens", 0) or 0)
@@ -5354,11 +5372,10 @@ class VLMaterialGenerator:
         try:
             if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
                 logger.info(f"开始批閲?CV 优化 {len(all_screenshot_requests)} 个截图请姹?..")
-                optimized_screenshots = await self._optimize_screenshots_parallel(
+                all_screenshot_requests = await self._apply_screenshot_optimization_with_bypass(
                     video_path=video_path,
-                    screenshot_requests=all_screenshot_requests
+                    screenshot_requests=all_screenshot_requests,
                 )
-                all_screenshot_requests = optimized_screenshots
 
             if all_screenshot_requests:
                 all_screenshot_requests = self._dedupe_incremental_legacy_drop_tail_screenshots(
@@ -5541,6 +5558,122 @@ class VLMaterialGenerator:
     ) -> List[Dict[str, Any]]:
         """??? `flow_ops`??????????"""
         return await optimize_screenshots_batch_mode(self, video_path, screenshot_requests)
+
+    def _annotate_screenshot_requests_with_unit_context(
+        self,
+        *,
+        screenshot_requests: List[Dict[str, Any]],
+        semantic_unit: Dict[str, Any],
+        analysis_mode: str,
+    ) -> None:
+        """补齐截图请求上下文，确保 concrete 能稳定旁路 CV 评分。"""
+        if not screenshot_requests:
+            return
+
+        normalized_mode = str(analysis_mode or "").strip().lower() or "default"
+        unit_knowledge_type = self._normalize_should_type(
+            (semantic_unit or {}).get("knowledge_type", "")
+        )
+
+        for item in screenshot_requests:
+            if not isinstance(item, dict):
+                continue
+
+            request_mode = str(item.get("analysis_mode", "") or "").strip().lower()
+            item["analysis_mode"] = request_mode or normalized_mode
+
+            request_knowledge_type = self._normalize_should_type(item.get("knowledge_type", ""))
+            if unit_knowledge_type and not request_knowledge_type:
+                item["knowledge_type"] = unit_knowledge_type
+                request_knowledge_type = unit_knowledge_type
+
+            if request_knowledge_type == "concrete" or item.get("analysis_mode") in {"concrete", "concrete_focus"}:
+                item["_skip_cv_optimization"] = True
+
+    def _should_bypass_screenshot_cv_optimization(self, request: Dict[str, Any]) -> bool:
+        """
+        concrete 截图保持 VL 时间戳直出，不参与后续 CV 评分优化。
+        这样可以避免 concrete 单元在截图阶段再次引入长尾延迟。
+        """
+        if not isinstance(request, dict):
+            return False
+        if bool(request.get("_skip_cv_optimization", False)):
+            return True
+
+        analysis_mode = str(request.get("analysis_mode", "") or "").strip().lower()
+        if analysis_mode in {"concrete", "concrete_focus"}:
+            return True
+
+        knowledge_type = self._normalize_should_type(request.get("knowledge_type", ""))
+        if knowledge_type == "concrete":
+            return True
+
+        screenshot_id = str(request.get("screenshot_id", "") or "").strip().lower()
+        if "_ss_concrete_seg_" in screenshot_id:
+            return True
+
+        label = str(request.get("label", "") or "").strip().lower()
+        return label.startswith("concrete_segment_")
+
+    async def _apply_screenshot_optimization_with_bypass(
+        self,
+        *,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        对截图优化增加“concrete 直出”旁路策略：
+        - concrete 请求：直接保留 VL 时间戳；
+        - 其他请求：继续走既有 CV 优化链路。
+        """
+        if not screenshot_requests:
+            return []
+        if not self.screenshot_config.get("enabled", True):
+            return screenshot_requests
+
+        optimize_indices: List[int] = []
+        optimize_requests: List[Dict[str, Any]] = []
+        bypass_count = 0
+        for index, request in enumerate(screenshot_requests):
+            if self._should_bypass_screenshot_cv_optimization(request):
+                bypass_count += 1
+                continue
+            optimize_indices.append(index)
+            optimize_requests.append(request)
+
+        if not optimize_requests:
+            logger.info(
+                "[VL] screenshot CV optimize bypassed: concrete/direct=%s, optimize=0",
+                bypass_count,
+            )
+            return screenshot_requests
+
+        logger.info(
+            "[VL] screenshot CV optimize start: total=%s, optimize=%s, bypass=%s",
+            len(screenshot_requests),
+            len(optimize_requests),
+            bypass_count,
+        )
+        optimized_requests = await self._optimize_screenshots_parallel(
+            video_path=video_path,
+            screenshot_requests=optimize_requests,
+        )
+        if len(optimized_requests) != len(optimize_indices):
+            logger.warning(
+                "[VL] screenshot optimize size mismatch: expected=%s, actual=%s; fallback to original for overflow",
+                len(optimize_indices),
+                len(optimized_requests),
+            )
+
+        merged_requests: List[Dict[str, Any]] = list(screenshot_requests)
+        optimized_cursor = 0
+        for index in optimize_indices:
+            if optimized_cursor < len(optimized_requests):
+                merged_requests[index] = optimized_requests[optimized_cursor]
+                optimized_cursor += 1
+            else:
+                break
+        return merged_requests
 
     def _is_legacy_action_drop_tail_screenshot_request(self, request: Dict[str, Any]) -> bool:
         """判断请求是否属于 process 静态主导降级分支的 drop-tail 截图。"""

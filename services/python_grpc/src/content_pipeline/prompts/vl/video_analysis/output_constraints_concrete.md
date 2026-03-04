@@ -32,11 +32,11 @@
     "instructional_keyframes": [
       {
         "timestamp_sec": 12.5,
-        "frame_reason": "原有直连数据库逻辑图"
+        "frame_reason": "原有直连数据库逻辑图且无遮挡"
       },
       {
         "timestamp_sec": 28.0,
-        "frame_reason": "引入 Redis 全新架构图"
+        "frame_reason": "引入 Redis 全新架构图且关键信息没有被讲者无遮挡"
       }
     ]
   }

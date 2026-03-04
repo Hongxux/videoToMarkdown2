@@ -31,6 +31,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -68,6 +69,9 @@ public class TaskProcessingWorker {
     @Value("${task.queue.max-concurrent:1}")
     private int configuredWorkerConcurrency;
 
+    @Value("${task.pipeline.io-concurrency:1}")
+    private int configuredIoConcurrency;
+
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
 
@@ -82,12 +86,15 @@ public class TaskProcessingWorker {
 
     private ExecutorService workerPool;
     private ScheduledExecutorService watchdogScheduler;
+    private Semaphore ioSemaphore;
     private volatile boolean running = true;
     private Thread dispatcherThread;
 
     @PostConstruct
     public void start() {
         int workerConcurrency = Math.max(1, configuredWorkerConcurrency);
+        int ioConcurrency = Math.max(1, configuredIoConcurrency);
+        ioSemaphore = new Semaphore(ioConcurrency);
         workerPool = Executors.newFixedThreadPool(workerConcurrency, runnable -> {
             Thread thread = new Thread(runnable, "TaskWorker-" + System.currentTimeMillis());
             thread.setDaemon(true);
@@ -105,9 +112,11 @@ public class TaskProcessingWorker {
         dispatcherThread.start();
 
         logger.info(
-                "TaskProcessingWorker started with concurrency {} (configured={})",
+                "TaskProcessingWorker started with workerConcurrency={} (configured={}), ioConcurrency={} (configured={})",
                 workerConcurrency,
-                configuredWorkerConcurrency
+                configuredWorkerConcurrency,
+                ioConcurrency,
+                configuredIoConcurrency
         );
     }
 
@@ -258,12 +267,7 @@ public class TaskProcessingWorker {
             TaskWatchdog watchdog
     ) throws Exception {
         if (!watchdog.enabled()) {
-            return orchestrator.processVideo(
-                    task.taskId,
-                    task.videoUrl,
-                    outputDir,
-                    buildBookProcessingOptions(task)
-            );
+            return executeTaskPipeline(task, outputDir);
         }
         Thread ownerThread = Thread.currentThread();
         AtomicReference<TaskWatchdog.Decision> decisionRef = new AtomicReference<>(TaskWatchdog.Decision.none());
@@ -318,13 +322,7 @@ public class TaskProcessingWorker {
                 watchdog.onAttemptStart(attempt);
                 decisionRef.set(TaskWatchdog.Decision.none());
                 try {
-                    VideoProcessingOrchestrator.ProcessingResult result =
-                            orchestrator.processVideo(
-                                    task.taskId,
-                                    task.videoUrl,
-                                    outputDir,
-                                    buildBookProcessingOptions(task)
-                            );
+                    VideoProcessingOrchestrator.ProcessingResult result = executeTaskPipeline(task, outputDir);
                     TaskWatchdog.Decision decision = decisionRef.getAndSet(TaskWatchdog.Decision.none());
                     if (result != null && result.success) {
                         return result;
@@ -370,6 +368,55 @@ public class TaskProcessingWorker {
             }
         } finally {
             watcher.cancel(true);
+        }
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeTaskPipeline(
+            TaskEntry task,
+            String outputDir
+    ) throws Exception {
+        VideoProcessingOrchestrator.BookProcessingOptions bookOptions = buildBookProcessingOptions(task);
+        if (orchestrator.shouldRunBookPipeline(task.videoUrl, bookOptions)) {
+            return orchestrator.processVideo(
+                    task.taskId,
+                    task.videoUrl,
+                    outputDir,
+                    bookOptions
+            );
+        }
+        VideoProcessingOrchestrator.IOPhaseResult ioResult =
+                executeVideoIOPhaseWithPermit(task.taskId, task.videoUrl, outputDir);
+        return orchestrator.processVideoLLMPhase(task.taskId, ioResult);
+    }
+
+    private VideoProcessingOrchestrator.IOPhaseResult executeVideoIOPhaseWithPermit(
+            String taskId,
+            String videoUrl,
+            String outputDir
+    ) throws Exception {
+        Semaphore semaphore = ioSemaphore;
+        boolean permitAcquired = false;
+        if (semaphore != null) {
+            acquireIoPhasePermit(taskId, semaphore);
+            permitAcquired = true;
+        }
+        try {
+            return orchestrator.processVideoIOPhase(taskId, videoUrl, outputDir);
+        } finally {
+            if (permitAcquired) {
+                semaphore.release();
+            }
+        }
+    }
+
+    private void acquireIoPhasePermit(String taskId, Semaphore semaphore) throws InterruptedException {
+        while (true) {
+            if (taskQueueManager != null && taskQueueManager.isTaskCancelled(taskId)) {
+                throw new CancellationException("task cancelled while waiting for io phase permit");
+            }
+            if (semaphore.tryAcquire(500, TimeUnit.MILLISECONDS)) {
+                return;
+            }
         }
     }
 

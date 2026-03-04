@@ -9124,6 +9124,22 @@
         return String(map[matchedTaskId] && map[matchedTaskId].collectionTitle || '').trim();
     }
 
+    function resolveParentCollectionIdByCollectionId(collectionIdRaw) {
+        const collectionId = normalizeCollectionId(collectionIdRaw);
+        if (!collectionId) {
+            return '';
+        }
+        const runtimeParents = state.taskCollectionRuntime && state.taskCollectionRuntime.collectionParents
+            ? state.taskCollectionRuntime.collectionParents
+            : {};
+        const fromRuntime = normalizeCollectionId(runtimeParents[collectionId]);
+        if (fromRuntime) {
+            return fromRuntime;
+        }
+        const meta = normalizeTaskManualCollectionMeta(state.taskManualCollectionMeta);
+        return normalizeCollectionId(meta.collectionParents && meta.collectionParents[collectionId]);
+    }
+
     function resolveTaskSubmitTargetCollectionId() {
         const select = document.getElementById('taskSubmitCollectionSelect');
         const runtimeTitles = state.taskCollectionRuntime && state.taskCollectionRuntime.collectionTitles
@@ -9612,12 +9628,8 @@
         });
     }
 
-    function assignTaskIdsToCollection(taskIdsRaw, collectionIdRaw, collectionTitleRaw) {
+    function moveTaskIdsToCollectionContext(taskIdsRaw, collectionIdRaw, collectionTitleRaw) {
         const collectionId = normalizeCollectionId(collectionIdRaw);
-        const collectionTitle = String(collectionTitleRaw || '').trim() || TASK_COLLECTION_DEFAULT_TITLE;
-        if (!collectionId) {
-            return [];
-        }
         const availableTaskIdSet = new Set(
             (Array.isArray(state.tasks) ? state.tasks : [])
                 .map((task) => normalizeTaskId(task && task.taskId))
@@ -9632,17 +9644,47 @@
         const nextMap = {
             ...normalizeTaskManualCollectionMap(state.taskManualCollections),
         };
+        let changed = false;
+        const collectionTitle = collectionId
+            ? (String(collectionTitleRaw || '').trim() || resolveTaskCollectionTitleById(collectionId) || TASK_COLLECTION_DEFAULT_TITLE)
+            : '';
         taskIds.forEach((taskId) => {
+            const prev = nextMap[taskId];
+            if (!collectionId) {
+                if (prev) {
+                    delete nextMap[taskId];
+                    changed = true;
+                }
+                return;
+            }
+            if (normalizeCollectionId(prev && prev.collectionId) === collectionId
+                && String(prev && prev.collectionTitle || '').trim() === collectionTitle) {
+                return;
+            }
             nextMap[taskId] = {
                 collectionId,
                 collectionTitle,
             };
+            changed = true;
         });
+        if (!changed) {
+            return [];
+        }
         state.taskManualCollections = nextMap;
         writeTaskManualCollectionStore(nextMap);
-        setTaskCollectionTitleMeta(collectionId, collectionTitle);
+        if (collectionId) {
+            setTaskCollectionTitleMeta(collectionId, collectionTitle);
+        }
         applyTaskManualCollectionsToStateTasks();
         return taskIds;
+    }
+
+    function assignTaskIdsToCollection(taskIdsRaw, collectionIdRaw, collectionTitleRaw) {
+        const collectionId = normalizeCollectionId(collectionIdRaw);
+        if (!collectionId) {
+            return [];
+        }
+        return moveTaskIdsToCollectionContext(taskIdsRaw, collectionId, collectionTitleRaw);
     }
 
     function mergeTaskIdsIntoCollection(taskIdsRaw, options = {}) {
@@ -9650,6 +9692,7 @@
             .map((taskIdRaw) => normalizeTaskId(taskIdRaw))
             .filter(Boolean)));
         const targetCollectionId = normalizeCollectionId(options.targetCollectionId);
+        const parentCollectionId = normalizeCollectionId(options.parentCollectionId);
         const minRequired = targetCollectionId ? 1 : 2;
         if (taskIds.length < minRequired) {
             return { ok: false, reason: 'insufficient' };
@@ -9669,13 +9712,19 @@
             }
             collectionTitle = String(inputTitle || '').trim() || TASK_COLLECTION_DEFAULT_TITLE;
             collectionId = buildManualTaskCollectionId();
-            setTaskCollectionParentMeta(collectionId, '');
+            const nextParentCollectionId = canSetCollectionParent(collectionId, parentCollectionId)
+                ? parentCollectionId
+                : '';
+            setTaskCollectionParentMeta(collectionId, nextParentCollectionId);
         }
         assignTaskIdsToCollection(taskIds, collectionId, collectionTitle);
         if (!targetCollectionId) {
             state.taskCollectionExpandedById[collectionId] = false;
         } else if (!(collectionId in state.taskCollectionExpandedById)) {
             state.taskCollectionExpandedById[collectionId] = true;
+        }
+        if (parentCollectionId) {
+            state.taskCollectionExpandedById[parentCollectionId] = true;
         }
         const fullCollectionTaskIds = collectTaskIdsByCollectionIdRecursive(collectionId);
         const anchorTaskId = normalizeTaskId(options.anchorTaskId)
@@ -9691,11 +9740,39 @@
         };
     }
 
+    function resolveSingleParentCollectionIdForTaskIds(taskIdsRaw) {
+        const taskIds = Array.from(new Set((Array.isArray(taskIdsRaw) ? taskIdsRaw : [])
+            .map((taskIdRaw) => normalizeTaskId(taskIdRaw))
+            .filter(Boolean)));
+        if (!taskIds.length) {
+            return '';
+        }
+        let candidate = null;
+        for (let i = 0; i < taskIds.length; i += 1) {
+            const oneCollectionId = normalizeCollectionId(resolveTaskCollectionIdByTaskId(taskIds[i]));
+            if (!oneCollectionId) {
+                return '';
+            }
+            if (candidate == null) {
+                candidate = oneCollectionId;
+                continue;
+            }
+            if (candidate !== oneCollectionId) {
+                return '';
+            }
+        }
+        return candidate || '';
+    }
+
     function mergeSelectedTasksIntoCollection(options = {}) {
         const selected = resolveSelectedTaskListEntities();
+        const selectedDirectTaskIds = resolveDirectTaskIdsFromSelectionKeys(selected.selectedKeys);
         let targetCollectionId = normalizeCollectionId(options.targetCollectionId);
+        let createParentCollectionId = '';
         if (!targetCollectionId && selected.collectionIds.length > 0) {
             targetCollectionId = selected.collectionIds[0];
+        } else if (!targetCollectionId) {
+            createParentCollectionId = resolveSingleParentCollectionIdForTaskIds(selectedDirectTaskIds);
         }
         const minRequiredTaskCount = targetCollectionId ? 1 : 2;
         if (selected.selectedKeys.length < 2 || selected.taskIds.length < minRequiredTaskCount) {
@@ -9704,6 +9781,7 @@
         }
         const mergeResult = mergeTaskIdsIntoCollection(selected.taskIds, {
             targetCollectionId,
+            parentCollectionId: createParentCollectionId,
             anchorTaskId: options.anchorTaskId,
         });
         if (!mergeResult.ok) {
@@ -11889,46 +11967,109 @@
         return isStandaloneImageHost(imageNode) ? imageNode : null;
     }
 
-    function resolveStandaloneImageShellFromParagraph(paragraphNode) {
+    function resolveStandaloneImageHostNode(node) {
+        if (!node || !node.nodeType || node.nodeType !== Node.ELEMENT_NODE) {
+            return null;
+        }
+        if (node.classList && node.classList.contains('md-image-shell')) {
+            return node;
+        }
+        if (!node.tagName || node.tagName.toLowerCase() !== 'a') {
+            return null;
+        }
+        if (node.children.length !== 1 || !node.firstElementChild) {
+            return null;
+        }
+        const firstChild = node.firstElementChild;
+        if (!firstChild.classList || !firstChild.classList.contains('md-image-shell')) {
+            return null;
+        }
+        return node;
+    }
+
+    function resolveStandaloneImageHostsFromBlock(blockNode) {
+        if (!blockNode || !blockNode.matches || !blockNode.matches('p, li')) {
+            return null;
+        }
+        const hosts = [];
+        const children = Array.from(blockNode.childNodes || []);
+        for (let i = 0; i < children.length; i += 1) {
+            const child = children[i];
+            if (isWhitespaceTextNode(child)) {
+                continue;
+            }
+            const hostNode = resolveStandaloneImageHostNode(child);
+            if (!hostNode) {
+                return null;
+            }
+            hosts.push(hostNode);
+        }
+        return hosts.length > 0 ? hosts : null;
+    }
+
+    function convertImageOnlyParagraphToFlowRow(paragraphNode) {
         if (!paragraphNode || !paragraphNode.matches || !paragraphNode.matches('p')) {
-            return null;
+            return false;
         }
-        const first = paragraphNode.firstElementChild;
-        if (!first) {
-            return null;
+        const hostNodes = resolveStandaloneImageHostsFromBlock(paragraphNode);
+        if (!hostNodes || hostNodes.length < 2 || !paragraphNode.parentElement) {
+            return false;
         }
-        let shellNode = null;
-        if (first.classList && first.classList.contains('md-image-shell')) {
-            shellNode = first;
-        } else if (
-            first.tagName
-            && first.tagName.toLowerCase() === 'a'
-            && first.children.length === 1
-            && first.firstElementChild
-            && first.firstElementChild.classList
-            && first.firstElementChild.classList.contains('md-image-shell')
-        ) {
-            shellNode = first.firstElementChild;
+        const rowNode = document.createElement('div');
+        rowNode.className = 'md-media-flow-row';
+        hostNodes.forEach((hostNode) => {
+            const cardNode = document.createElement('p');
+            cardNode.appendChild(hostNode);
+            rowNode.appendChild(cardNode);
+        });
+        paragraphNode.parentElement.insertBefore(rowNode, paragraphNode);
+        paragraphNode.remove();
+        return true;
+    }
+
+    function convertImageOnlyListToFlowRow(listNode) {
+        if (!listNode || !listNode.matches || !listNode.matches('ul, ol')) {
+            return false;
         }
-        if (!shellNode) {
-            return null;
+        const items = Array.from(listNode.children || []);
+        if (items.length < 2 || !listNode.parentElement) {
+            return false;
         }
-        if (paragraphNode.children.length !== 1 || paragraphNode.firstElementChild !== first) {
-            return null;
-        }
-        const hasNonWhitespaceText = Array.from(paragraphNode.childNodes).some((child) => {
-            if (child === first) {
+        const hostNodes = [];
+        for (let i = 0; i < items.length; i += 1) {
+            const item = items[i];
+            if (!item || !item.matches || !item.matches('li')) {
                 return false;
             }
-            return !isWhitespaceTextNode(child);
+            const itemHosts = resolveStandaloneImageHostsFromBlock(item);
+            if (!itemHosts || itemHosts.length !== 1) {
+                return false;
+            }
+            hostNodes.push(itemHosts[0]);
+        }
+        const rowNode = document.createElement('div');
+        rowNode.className = 'md-media-flow-row';
+        hostNodes.forEach((hostNode) => {
+            const cardNode = document.createElement('p');
+            cardNode.appendChild(hostNode);
+            rowNode.appendChild(cardNode);
         });
-        return hasNonWhitespaceText ? null : shellNode;
+        listNode.parentElement.insertBefore(rowNode, listNode);
+        listNode.remove();
+        return true;
     }
 
     function enhanceStandaloneImageFlowRows(container) {
         if (!container) {
             return;
         }
+        const directParagraphs = Array.from(container.children || []).filter((node) => (
+            !!node && !!node.matches && node.matches('p')
+        ));
+        directParagraphs.forEach((paragraphNode) => {
+            convertImageOnlyParagraphToFlowRow(paragraphNode);
+        });
+
         const blocks = Array.from(container.children || []);
         let flowRun = [];
         const flushFlowRun = () => {
@@ -11950,11 +12091,21 @@
             flowRun = [];
         };
         blocks.forEach((blockNode) => {
-            if (!blockNode || !blockNode.matches || !blockNode.matches('p')) {
+            if (!blockNode || !blockNode.matches) {
                 flushFlowRun();
                 return;
             }
-            if (!resolveStandaloneImageShellFromParagraph(blockNode)) {
+            if (blockNode.matches('ul, ol')) {
+                convertImageOnlyListToFlowRow(blockNode);
+                flushFlowRun();
+                return;
+            }
+            if (!blockNode.matches('p')) {
+                flushFlowRun();
+                return;
+            }
+            const hostNodes = resolveStandaloneImageHostsFromBlock(blockNode);
+            if (!hostNodes || hostNodes.length !== 1) {
                 flushFlowRun();
                 return;
             }
@@ -17030,17 +17181,47 @@
                     return { changed: false };
                 }
 
+                const targetParsed = parseTaskListSelectionKey(targetSelectionKey);
+                if (!targetParsed) {
+                    return { changed: false };
+                }
+
                 if (mode === 'group') {
-                    const targetParsed = parseTaskListSelectionKey(targetSelectionKey);
-                    if (!targetParsed) {
-                        return { changed: false };
-                    }
                     let targetCollectionId = '';
                     if (targetParsed.kind === 'collection') {
                         targetCollectionId = targetParsed.collectionId;
                     } else if (targetParsed.kind === 'task') {
                         targetCollectionId = resolveTaskCollectionIdByTaskId(targetParsed.taskId);
                     }
+
+                    if (targetParsed.kind === 'task' && targetCollectionId && movingCollectionIds.length === 0) {
+                        const nestedMergeTaskIds = movingDirectTaskIds.slice();
+                        if (!nestedMergeTaskIds.includes(targetParsed.taskId)) {
+                            nestedMergeTaskIds.push(targetParsed.taskId);
+                        }
+                        const canCreateNestedCollection = nestedMergeTaskIds.length >= 2
+                            && nestedMergeTaskIds.every((taskId) => normalizeCollectionId(resolveTaskCollectionIdByTaskId(taskId)) === targetCollectionId);
+                        if (canCreateNestedCollection) {
+                            const nestedMergeResult = mergeTaskIdsIntoCollection(nestedMergeTaskIds, {
+                                targetCollectionId: '',
+                                parentCollectionId: targetCollectionId,
+                                anchorTaskId: targetParsed.taskId,
+                            });
+                            if (nestedMergeResult && nestedMergeResult.ok) {
+                                pruneTaskManualCollectionStoreToTaskIds((state.tasks || []).map((task) => task && task.taskId));
+                                applyTaskManualCollectionsToStateTasks();
+                                const collectionSelectionKey = toCollectionSelectionKey(nestedMergeResult.collectionId);
+                                state.taskListSelectionMode = true;
+                                state.taskListSelectedIds.clear();
+                                state.taskListSelectedIds.add(collectionSelectionKey);
+                                state.taskListSelectionPivotId = collectionSelectionKey;
+                                renderTaskList();
+                                setTaskSummary(`已在合集内创建子合集「${nestedMergeResult.collectionTitle}」`);
+                                return { changed: true };
+                            }
+                        }
+                    }
+
                     if (targetCollectionId) {
                         let changed = false;
                         const targetCollectionTitle = resolveTaskCollectionTitleById(targetCollectionId) || TASK_COLLECTION_DEFAULT_TITLE;
@@ -17115,8 +17296,33 @@
                 if (!changed) {
                     return { changed: false };
                 }
+                let changedCollectionContext = false;
+                const targetContextCollectionId = targetParsed.kind === 'collection'
+                    ? resolveParentCollectionIdByCollectionId(targetParsed.collectionId)
+                    : resolveTaskCollectionIdByTaskId(referenceTaskId);
+                const targetContextCollectionTitle = targetContextCollectionId
+                    ? (resolveTaskCollectionTitleById(targetContextCollectionId) || TASK_COLLECTION_DEFAULT_TITLE)
+                    : '';
+                if (movingDirectTaskIds.length > 0) {
+                    const movedContextTaskIds = moveTaskIdsToCollectionContext(
+                        movingDirectTaskIds,
+                        targetContextCollectionId,
+                        targetContextCollectionTitle
+                    );
+                    if (movedContextTaskIds.length > 0) {
+                        changedCollectionContext = true;
+                    }
+                }
+                if (changedCollectionContext) {
+                    pruneTaskManualCollectionStoreToTaskIds((state.tasks || []).map((task) => task && task.taskId));
+                    applyTaskManualCollectionsToStateTasks();
+                }
                 renderTaskList();
-                setTaskSummary('已调整任务顺序');
+                if (changedCollectionContext && !targetContextCollectionId) {
+                    setTaskSummary('已将任务移出合集并调整顺序');
+                } else {
+                    setTaskSummary('已调整任务顺序');
+                }
                 return { changed: true };
             };
 

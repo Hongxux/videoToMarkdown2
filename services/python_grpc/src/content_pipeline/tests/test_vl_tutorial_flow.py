@@ -2572,3 +2572,68 @@ def test_tutorial_assets_export_uses_parallel_limited_workers(tmp_path, monkeypa
     assert elapsed < 0.12
 
 
+def test_apply_screenshot_optimization_with_bypass_skips_concrete_requests(monkeypatch):
+    config = _build_generator_config()
+    config["screenshot_optimization"]["enabled"] = True
+    generator = VLMaterialGenerator(config)
+
+    captured: Dict[str, Any] = {"requests": []}
+
+    async def _fake_optimize(video_path: str, screenshot_requests: list[Dict[str, Any]]):
+        captured["video_path"] = video_path
+        captured["requests"] = [dict(item) for item in screenshot_requests]
+        optimized: list[Dict[str, Any]] = []
+        for item in screenshot_requests:
+            updated = dict(item)
+            updated["_optimized_by_cv"] = True
+            updated["timestamp_sec"] = float(updated.get("timestamp_sec", 0.0)) + 0.25
+            optimized.append(updated)
+        return optimized
+
+    monkeypatch.setattr(generator, "_optimize_screenshots_parallel", _fake_optimize)
+
+    screenshot_requests = [
+        {
+            "screenshot_id": "SU001/SU001_ss_concrete_seg_01_key_01",
+            "analysis_mode": "concrete",
+            "timestamp_sec": 1.0,
+        },
+        {
+            "screenshot_id": "SU002/SU002_ss_vl_01_01",
+            "analysis_mode": "default",
+            "timestamp_sec": 2.0,
+        },
+        {
+            "screenshot_id": "SU003/SU003_ss_vl_01_01",
+            "analysis_mode": "default",
+            "knowledge_type": "concrete",
+            "timestamp_sec": 3.0,
+        },
+        {
+            "screenshot_id": "SU004/SU004_ss_vl_01_01",
+            "analysis_mode": "default",
+            "_skip_cv_optimization": True,
+            "timestamp_sec": 4.0,
+        },
+    ]
+
+    merged = asyncio.run(
+        generator._apply_screenshot_optimization_with_bypass(
+            video_path="dummy.mp4",
+            screenshot_requests=[dict(item) for item in screenshot_requests],
+        )
+    )
+
+    assert captured["video_path"] == "dummy.mp4"
+    assert len(captured["requests"]) == 1
+    assert captured["requests"][0]["screenshot_id"] == "SU002/SU002_ss_vl_01_01"
+
+    assert len(merged) == 4
+    assert merged[0]["timestamp_sec"] == 1.0
+    assert "_optimized_by_cv" not in merged[0]
+    assert merged[1]["timestamp_sec"] == 2.25
+    assert merged[1]["_optimized_by_cv"] is True
+    assert merged[2]["timestamp_sec"] == 3.0
+    assert "_optimized_by_cv" not in merged[2]
+    assert merged[3]["timestamp_sec"] == 4.0
+    assert "_optimized_by_cv" not in merged[3]

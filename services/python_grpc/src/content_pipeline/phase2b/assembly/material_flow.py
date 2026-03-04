@@ -672,6 +672,7 @@ def apply_external_materials(
     instructional_steps = getattr(unit, "instructional_steps", []) or []
     is_tutorial_stepwise_unit = normalized_kt == "process" and bool(instructional_steps)
     request_has_screenshot = bool(list(getattr(material_requests, "screenshot_requests", []) or []))
+    concrete_ai_vision_enabled = bool(getattr(self, "_phase2b_concrete_ai_vision_enabled", False))
     # 闂佸憡顨呭ú銊︻殽閸モ晝椹抽柡宥庡亝濞堬綁鏌?    # 1) abstract/concrete 婵犳鍠栭鍥╁垝閹捐埖灏庨柣妤€鐗嗛悞濠氭煕閵夆晝鐣洪柣娑欑懅閹风姵绗熸繝鍕€?    # 2) process 婵炴垶鎸哥粔鎾疮閳ь剟鏌涘▎妯圭盎婵犫偓椤忓牊鈷旂€广儱娲悰鎾绘煕閹烘垶顥為柡渚囧櫍閹粙鎮㈤崨濠冪彙闂佹寧绋戦張顒佹櫠瀹ュ瀚?process闂佹寧绋戦悧鍡欌偓鍨耿楠炲繘顢楅崒婊冨綃 process + 闂佸搫瀚崕宕囨閿熺姴绠ｆい蹇撳缁傚牓鎮归崶顒佹暠闁活亙鍗抽弫宥嗗緞閹邦剙骞嬮柣鐘欏倸宓嗛柣娑欑懅閹风姵鎷呯喊妯轰壕?    is_process_degraded_branch = normalized_kt == "process" and not request_has_screenshot
     should_validate_screenshot = normalized_kt in {"abstract", "concrete", "process"}
     allow_clip = normalized_kt == "process"
@@ -683,7 +684,13 @@ def apply_external_materials(
     should_validate_screenshot = (
         normalized_kt in {"abstract", "concrete", "process"}
         and not is_tutorial_stepwise_unit
+        and (normalized_kt != "concrete" or concrete_ai_vision_enabled)
     )
+    if normalized_kt == "concrete" and not concrete_ai_vision_enabled:
+        logger.info(
+            "%s: skip concrete screenshot AI vision/preprocess (disabled by config)",
+            unit.unit_id,
+        )
     allow_unit_dir_screenshot_fallback = not is_tutorial_stepwise_unit
     allow_unit_dir_clip_fallback = not is_tutorial_stepwise_unit
 

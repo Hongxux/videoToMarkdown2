@@ -78,6 +78,7 @@ def test_pre_vl_parallel_mode_resolution_process_auto_and_async():
             "enabled": True,
             "pre_vl_static_pruning": {
                 "enabled": True,
+                "process_stable_detect_enabled": True,
                 "parallel_mode": "process",
                 "parallel_workers": 4,
                 "parallel_hard_cap": 8,
@@ -91,6 +92,7 @@ def test_pre_vl_parallel_mode_resolution_process_auto_and_async():
             "enabled": True,
             "pre_vl_static_pruning": {
                 "enabled": True,
+                "process_stable_detect_enabled": True,
                 "parallel_mode": "auto",
                 "parallel_workers": 4,
                 "parallel_hard_cap": 8,
@@ -107,6 +109,7 @@ def test_pre_vl_parallel_mode_resolution_process_auto_and_async():
             "enabled": True,
             "pre_vl_static_pruning": {
                 "enabled": True,
+                "process_stable_detect_enabled": True,
                 "parallel_mode": "auto",
                 "parallel_workers": 4,
                 "parallel_hard_cap": 8,
@@ -121,6 +124,7 @@ def test_pre_vl_parallel_mode_resolution_process_auto_and_async():
             "enabled": True,
             "pre_vl_static_pruning": {
                 "enabled": True,
+                "process_stable_detect_enabled": True,
                 "parallel_mode": "async",
                 "parallel_workers": 4,
                 "parallel_hard_cap": 8,
@@ -130,6 +134,35 @@ def test_pre_vl_parallel_mode_resolution_process_auto_and_async():
     assert generator_async._should_use_pre_vl_process_mode(worker_count=4) is False
 
 
+def test_pre_vl_process_stable_detect_disabled_by_default():
+    generator_default = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "pre_vl_static_pruning": {
+                "enabled": True,
+                "parallel_mode": "process",
+                "parallel_workers": 4,
+                "parallel_hard_cap": 8,
+            },
+        }
+    )
+    assert generator_default._should_use_pre_vl_process_mode(worker_count=4) is False
+
+    generator_explicit_off = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "pre_vl_static_pruning": {
+                "enabled": True,
+                "process_stable_detect_enabled": False,
+                "parallel_mode": "auto",
+                "parallel_workers": 4,
+                "parallel_hard_cap": 8,
+            },
+        }
+    )
+    assert generator_explicit_off._should_use_pre_vl_process_mode(worker_count=4) is False
+
+
 def test_prepare_pruned_clips_uses_override_stable_intervals(tmp_path, monkeypatch):
     generator = VLMaterialGenerator(
         {
@@ -137,6 +170,7 @@ def test_prepare_pruned_clips_uses_override_stable_intervals(tmp_path, monkeypat
             "pre_vl_static_pruning": {
                 "enabled": True,
                 "only_process": True,
+                "process_stable_detect_enabled": True,
                 "parallel_mode": "process",
                 "parallel_workers": 2,
                 "parallel_hard_cap": 4,
@@ -198,6 +232,7 @@ def test_prepare_pruned_clips_process_mode_fallbacks_on_detect_failure(tmp_path,
             "pre_vl_static_pruning": {
                 "enabled": True,
                 "only_process": True,
+                "process_stable_detect_enabled": True,
                 "parallel_mode": "process",
                 "parallel_workers": 2,
                 "parallel_hard_cap": 4,

@@ -37,6 +37,7 @@ from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import
     _VISION_BG_LOOP,
     get_vision_ai_client,
 )
+from services.python_grpc.src.content_pipeline.rate_limiter import VLRateLimiter
 
 logger = logging.getLogger(__name__)
 _HedgeResultT = TypeVar("_HedgeResultT")
@@ -1036,6 +1037,13 @@ _VL_CONCURRENCY = AdaptiveConcurrencyLimiter(
     decrease_factor=_env_float("MODULE2_VL_CONCURRENCY_DECREASE_FACTOR", 0.5),
     window_size=_env_int("MODULE2_VL_CONCURRENCY_WINDOW_SIZE", 20),
 )
+_VL_RATE_LIMITER = VLRateLimiter(
+    rpm_limit=_env_int("VL_RATE_LIMIT_RPM", 1200),
+    tpm_limit=_env_int("VL_RATE_LIMIT_TPM", 1_000_000),
+)
+_VL_EST_TEXT_CHARS_PER_TOKEN = max(1, _env_int("VL_EST_TEXT_CHARS_PER_TOKEN", 4))
+_VL_EST_TOKENS_PER_MEDIA = max(1, _env_int("VL_EST_TOKENS_PER_MEDIA", 1024))
+_VL_EST_COMPLETION_RATIO = max(0.0, min(1.0, _env_float("VL_EST_COMPLETION_RATIO", 0.4)))
 
 
 def _extract_usage_from_response(response: Any) -> Dict[str, int]:
@@ -1075,6 +1083,56 @@ def _extract_usage_from_response(response: Any) -> Dict[str, int]:
         "completion_tokens": max(0, completion_tokens),
         "total_tokens": max(0, total_tokens),
     }
+
+
+def _estimate_vl_request_tokens(messages: Any, max_tokens: int) -> int:
+    text_chars = 0
+    media_items = 0
+
+    def _consume_content(content: Any) -> None:
+        nonlocal text_chars, media_items
+        if isinstance(content, str):
+            text_chars += len(content)
+            return
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    text_chars += len(item)
+                    continue
+                if not isinstance(item, dict):
+                    text_chars += len(str(item))
+                    continue
+                item_type = str(item.get("type", "") or "").strip().lower()
+                if item_type in {"text", "input_text"}:
+                    text_chars += len(str(item.get("text", "") or ""))
+                    continue
+                if item_type in {"image_url", "input_image", "video_url", "input_video"}:
+                    media_items += 1
+                    continue
+                text_chars += len(json.dumps(item, ensure_ascii=False))
+            return
+        if isinstance(content, dict):
+            text_chars += len(json.dumps(content, ensure_ascii=False))
+            return
+        text_chars += len(str(content))
+
+    if isinstance(messages, list):
+        for message in messages:
+            if isinstance(message, dict):
+                text_chars += len(str(message.get("role", "") or ""))
+                _consume_content(message.get("content"))
+            else:
+                _consume_content(message)
+    else:
+        _consume_content(messages)
+
+    prompt_tokens = max(1, int(math.ceil(float(text_chars) / float(_VL_EST_TEXT_CHARS_PER_TOKEN))))
+    media_tokens = max(0, int(media_items)) * int(_VL_EST_TOKENS_PER_MEDIA)
+    completion_budget = max(0, int(max_tokens))
+    completion_est = int(round(float(completion_budget) * float(_VL_EST_COMPLETION_RATIO)))
+    if completion_budget > 0:
+        completion_est = max(1, completion_est)
+    return max(1, prompt_tokens + media_tokens + completion_est)
 
 
 async def _call_vl_api_once(
@@ -1137,7 +1195,16 @@ async def vl_chat_completion(
 
     async def _do_request() -> VLChatResult:
         acquired = 0
+        estimated_tokens = _estimate_vl_request_tokens(messages, max_tokens)
         try:
+            rpm_wait_sec, tpm_wait_sec = await _VL_RATE_LIMITER.acquire(estimated_tokens)
+            if rpm_wait_sec > 0.0 or tpm_wait_sec > 0.0:
+                logger.info(
+                    "VL rate limiter waited before request: rpm_wait=%.3fs tpm_wait=%.3fs estimated_tokens=%s",
+                    rpm_wait_sec,
+                    tpm_wait_sec,
+                    estimated_tokens,
+                )
             acquired = await _VL_CONCURRENCY.acquire(1)
             content, finish_reason, usage, model_name = await _call_vl_api_once(
                 client=client,

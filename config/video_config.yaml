@@ -190,6 +190,11 @@ content_pipeline:
     # 是否在结构化前，基于图片描述做正文增量补全
     # 默认开启；可被环境变量 MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT 覆盖
     enable_img_desc_text_augment: true  # false 可降低 LLM 调用成本，但描述补全能力下降
+  phase2b:
+    concrete_ai_vision:
+      # concrete 截图在 Phase2B 是否启用 AI Vision 校验（含人物占比预过滤、PP-Structure 预处理）
+      # 默认关闭：直接使用 Phase2A 产出的截图，减少额外视觉耗时
+      enabled: false
   observability:
     llm_trace:
       # 是否启用 Phase2B LLM 调用追踪（逐次落盘 JSONL）

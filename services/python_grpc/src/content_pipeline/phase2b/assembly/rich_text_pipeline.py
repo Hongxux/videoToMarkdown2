@@ -194,6 +194,10 @@ class RichTextPipeline:
         # 图片匹配审计：默认关闭，可通过 config.yaml / 环境变量开启
         self._image_match_audit_enabled = self._load_image_match_audit_switch(default_value=False)
         self._image_match_audit_records: List[Dict[str, Any]] = []
+        # concrete 截图在 Phase2B 默认跳过 AI Vision（含预处理），按配置可开启。
+        self._phase2b_concrete_ai_vision_enabled = self._load_phase2b_concrete_ai_vision_switch(
+            default_value=False
+        )
         
         logger.info(f"Pipeline initialized: {len(self.subtitles)} subtitles, {len(self.paragraphs)} paragraphs")
 
@@ -251,6 +255,27 @@ class RichTextPipeline:
                 logger.warning(f"Failed to load image-match-audit switch from config: {exc}")
 
         env_raw = os.getenv("MODULE2_IMAGE_MATCH_AUDIT_ENABLED")
+        if env_raw is not None and str(env_raw).strip() != "":
+            enabled = self._parse_bool(env_raw, enabled)
+
+        return enabled
+
+    def _load_phase2b_concrete_ai_vision_switch(self, default_value: bool = False) -> bool:
+        enabled = bool(default_value)
+
+        config_path = self._resolve_config_path()
+        if config_path is not None:
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                content_pipeline_cfg = config.get("content_pipeline", {}) if isinstance(config, dict) else {}
+                phase2b_cfg = content_pipeline_cfg.get("phase2b", {}) if isinstance(content_pipeline_cfg, dict) else {}
+                concrete_cfg = phase2b_cfg.get("concrete_ai_vision", {}) if isinstance(phase2b_cfg, dict) else {}
+                enabled = self._parse_bool(concrete_cfg.get("enabled", enabled), enabled)
+            except Exception as exc:
+                logger.warning(f"Failed to load phase2b concrete-ai-vision switch from config: {exc}")
+
+        env_raw = os.getenv("MODULE2_PHASE2B_CONCRETE_AI_VISION_ENABLED")
         if env_raw is not None and str(env_raw).strip() != "":
             enabled = self._parse_bool(env_raw, enabled)
 

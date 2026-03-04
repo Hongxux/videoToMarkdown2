@@ -27,12 +27,14 @@ def _write_dummy_image(path: Path, width: int = 320, height: int = 200) -> None:
 def _build_pipeline(tmp_path: Path) -> RichTextPipeline:
     output_dir = tmp_path / "out"
     output_dir.mkdir(parents=True, exist_ok=True)
-    return RichTextPipeline(
+    pipeline = RichTextPipeline(
         video_path="",
         step2_path="",
         step6_path="",
         output_dir=str(output_dir),
     )
+    pipeline._phase2b_concrete_ai_vision_enabled = True
+    return pipeline
 
 
 def test_extract_structured_screenshots_groups_expected_types(monkeypatch, tmp_path):

@@ -365,8 +365,10 @@ vl_material_generation:
   # 目的：先用 CV 识别 stable 区间，再剔除 stable 核心段，减少 VL 输入冗余与 token 成本。
   # 机制：对 stable 区间保留两侧边缘（keep_edge_sec），仅剔除中间核心段。
   pre_vl_static_pruning:
-    enabled: true
+    enabled: false
     only_process: true
+    # 是否启用“process stable detect”多进程稳定段检测分支（默认关闭）
+    process_stable_detect_enabled: false
     # 并行模式：
     # - auto: 有全局 CV 进程池时走多进程；否则走 async 并发
     # - process: 强制走多进程

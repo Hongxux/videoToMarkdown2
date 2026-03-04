@@ -49,18 +49,22 @@ class TaskProcessingWorkerDownloadRetryTest {
                     "Download stage interrupted while waiting for Python worker response",
                     new InterruptedException("simulated interrupt")
             );
+            VideoProcessingOrchestrator.IOPhaseResult ioPhaseResult = new VideoProcessingOrchestrator.IOPhaseResult();
             VideoProcessingOrchestrator.ProcessingResult success = new VideoProcessingOrchestrator.ProcessingResult();
             success.success = true;
 
-            when(orchestrator.processVideo(eq(task.taskId), eq(task.videoUrl), eq(outputDir), isNull()))
+            when(orchestrator.shouldRunBookPipeline(eq(task.videoUrl), isNull())).thenReturn(false);
+            when(orchestrator.processVideoIOPhase(eq(task.taskId), eq(task.videoUrl), eq(outputDir)))
                     .thenThrow(interruptedFailure)
-                    .thenReturn(success);
+                    .thenReturn(ioPhaseResult);
+            when(orchestrator.processVideoLLMPhase(eq(task.taskId), eq(ioPhaseResult))).thenReturn(success);
 
             VideoProcessingOrchestrator.ProcessingResult result =
                     invokeRunWithWatchdog(worker, task, outputDir, watchdog);
 
             assertTrue(result.success);
-            verify(orchestrator, times(2)).processVideo(eq(task.taskId), eq(task.videoUrl), eq(outputDir), isNull());
+            verify(orchestrator, times(2)).processVideoIOPhase(eq(task.taskId), eq(task.videoUrl), eq(outputDir));
+            verify(orchestrator, times(1)).processVideoLLMPhase(eq(task.taskId), eq(ioPhaseResult));
         } finally {
             scheduler.shutdownNow();
             queueManager.shutdown();
@@ -91,7 +95,8 @@ class TaskProcessingWorkerDownloadRetryTest {
                     "Download stage interrupted while waiting for Python worker response",
                     new InterruptedException("simulated interrupt")
             );
-            when(orchestrator.processVideo(eq(task.taskId), eq(task.videoUrl), eq(outputDir), isNull()))
+            when(orchestrator.shouldRunBookPipeline(eq(task.videoUrl), isNull())).thenReturn(false);
+            when(orchestrator.processVideoIOPhase(eq(task.taskId), eq(task.videoUrl), eq(outputDir)))
                     .thenThrow(interruptedFailure);
 
             RuntimeException thrown = assertThrows(
@@ -100,7 +105,7 @@ class TaskProcessingWorkerDownloadRetryTest {
             );
 
             assertTrue(thrown.getMessage().contains("Download stage interrupted"));
-            verify(orchestrator, times(2)).processVideo(eq(task.taskId), eq(task.videoUrl), eq(outputDir), isNull());
+            verify(orchestrator, times(2)).processVideoIOPhase(eq(task.taskId), eq(task.videoUrl), eq(outputDir));
         } finally {
             scheduler.shutdownNow();
             queueManager.shutdown();

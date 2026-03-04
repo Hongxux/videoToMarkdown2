@@ -1335,17 +1335,17 @@ class VLVideoAnalyzer:
                 )
             return None
 
-        def _extract_temp_url_from_output(output: Any) -> Optional[str]:
+        def _extract_temp_url_from_output(output: Any) -> tuple[Optional[str], str]:
             if not isinstance(output, dict):
-                return None
+                return None, ""
 
             direct_url = str(output.get("url") or "").strip()
             if direct_url:
-                return direct_url
+                return direct_url, "output.url"
 
             uploaded_files = output.get("uploaded_files")
             if not isinstance(uploaded_files, list):
-                return None
+                return None, ""
 
             # 新版 SDK 返回 uploaded_files[].file_id，需要二次 Files.get 拿到可访问 URL。
             for item in uploaded_files:
@@ -1353,7 +1353,7 @@ class VLVideoAnalyzer:
                     continue
                 item_url = str(item.get("url") or "").strip()
                 if item_url:
-                    return item_url
+                    return item_url, "uploaded_files.url"
                 file_id = str(item.get("file_id") or "").strip()
                 if not file_id:
                     continue
@@ -1363,12 +1363,12 @@ class VLVideoAnalyzer:
                 if meta_status == 200 and isinstance(meta_output, dict):
                     meta_url = str(meta_output.get("url") or "").strip()
                     if meta_url:
-                        return meta_url
+                        return meta_url, f"files.get({file_id})"
                 if isinstance(meta_resp, dict) and meta_resp.get("status_code") == 200:
                     meta_url = str(((meta_resp.get("output") or {}).get("url") or "")).strip()
                     if meta_url:
-                        return meta_url
-            return None
+                        return meta_url, f"files.get({file_id})"
+            return None, ""
 
         def _upload() -> Optional[str]:
             dashscope.api_key = self._api_key
@@ -1378,10 +1378,22 @@ class VLVideoAnalyzer:
                 purpose="file-extract"
             )
             status_code = getattr(resp, "status_code", None)
+            request_id = getattr(resp, "request_id", None)
             output = getattr(resp, "output", None)
             if status_code == 200:
-                temp_url = _extract_temp_url_from_output(output)
+                temp_url, url_source = _extract_temp_url_from_output(output)
                 if temp_url:
+                    try:
+                        file_size = Path(video_path).stat().st_size
+                    except Exception:
+                        file_size = 0
+                    logger.info(
+                        "DashScope Files.upload succeeded: video_path=%s, size_bytes=%s, url_source=%s, request_id=%s",
+                        video_path,
+                        file_size,
+                        url_source or "unknown",
+                        request_id or "unknown",
+                    )
                     return temp_url
                 raise RuntimeError(
                     "DashScope Files.upload succeeded but no temporary URL was found in output: "
@@ -1390,8 +1402,19 @@ class VLVideoAnalyzer:
             # 兼容 dict 形式返回
             if isinstance(resp, dict) and resp.get("status_code") == 200:
                 dict_output = resp.get("output") or {}
-                temp_url = _extract_temp_url_from_output(dict_output)
+                temp_url, url_source = _extract_temp_url_from_output(dict_output)
                 if temp_url:
+                    try:
+                        file_size = Path(video_path).stat().st_size
+                    except Exception:
+                        file_size = 0
+                    logger.info(
+                        "DashScope Files.upload(dict) succeeded: video_path=%s, size_bytes=%s, url_source=%s, request_id=%s",
+                        video_path,
+                        file_size,
+                        url_source or "unknown",
+                        resp.get("request_id", "unknown"),
+                    )
                     return temp_url
                 raise RuntimeError(
                     "DashScope Files.upload(dict) succeeded but no temporary URL was found in output: "

@@ -28,6 +28,7 @@ def _build_pipeline(tmp_path):
         step6_path="",
         output_dir=str(output_dir),
     )
+    pipeline._phase2b_concrete_ai_vision_enabled = True
     return pipeline, output_dir
 
 

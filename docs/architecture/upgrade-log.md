@@ -10154,3 +10154,78 @@
   - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
   - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -q`（65 通过，3 失败；失败为当前分支既有断言差异，非本次流式改造新增）
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-04 concrete 截图改为时间戳直出（旁路 CV 多级评分）
+- 日期：2026-03-04
+- 升级目标：
+  - concrete 模式截图请求不再进入 CV 多级评分优化，直接使用 VL 返回时间戳截取。
+  - 保持 process/default 截图仍可走既有优化链路。
+- 第一性原理与复用杠杆：
+  - 第一性原理：concrete 场景的截图目标是“按语义时间点取证”，再次评分会引入额外时延且可能偏移原语义锚点。
+  - 复用杠杆1：复用既有 `_optimize_screenshots_parallel`，仅在入口做请求级旁路分流，不重写优化器。
+  - 复用杠杆2：复用 `analysis_mode/knowledge_type` 与 `screenshot_id` 语义信息识别 concrete 请求。
+  - 复用杠杆3：对 `should_type=concrete` 的默认模式结果打 `_skip_cv_optimization` 标记，统一旁路策略。
+- 架构决策：
+  - 决策1：新增 `_should_bypass_screenshot_cv_optimization` 识别旁路请求（concrete/显式标记/命名约定）。
+  - 决策2：新增 `_apply_screenshot_optimization_with_bypass`，仅对非旁路请求执行 CV 优化并按原顺序回填。
+  - 决策3：`generate` 统一调用旁路包装方法，避免在主流程散落条件分支。
+- 调用链变化：
+  - 改造前：`all_screenshot_requests -> _optimize_screenshots_parallel(全量) -> 输出`
+  - 改造后：`all_screenshot_requests -> bypass 分流(concrete直出) + optimize(非concrete) -> 按原顺序合并 -> 输出`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（优化工作量）：
+  - 测试方式：
+    - 构造 4 条截图请求（1 条 default、3 条 concrete/标记旁路），执行旁路包装方法并记录进入 CV 优化器的请求数。
+  - 测试数据：
+    - 改造前（全量优化）：`4/4` 请求进入 CV 优化。
+    - 改造后（旁路分流）：`1/4` 请求进入 CV 优化。
+  - 结论：
+    - CV 优化工作量下降 `75%`，concrete 截图不再承担多级评分长尾成本。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "apply_screenshot_optimization_with_bypass_skips_concrete_requests"`（通过，`1 passed`）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-04 Pipeline 并行化：串行 IO + 并行 LLM + VL 双桶令牌桶限流
+- 日期：2026-03-04
+- 升级目标：
+  - 保持 `Download/Transcribe/Stage1` 串行，避免 I/O / GPU 抢占导致整体抖动。
+  - 让 `Phase2A/VL/Phase2B` 跨任务并行，提升多任务吞吐。
+  - 将 VL 速率控制从“线程限制”改为“RPM+TPM 双桶限流”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：瓶颈不同的阶段应拆分调度，I/O 瓶颈走信号量，API 瓶颈走速率限流。
+  - 复用杠杆1：复用现有 `TaskProcessingWorker` 线程池，仅新增 `ioSemaphore`，不重建队列系统。
+  - 复用杠杆2：复用现有 `VideoProcessingOrchestrator` 主流程能力，新增 `IOPhaseResult` 承接中间态。
+  - 复用杠杆3：复用现有 `llm_gateway.vl_chat_completion` 统一 VL 出口，接入令牌桶而非在业务层散落限流逻辑。
+- 架构决策：
+  - 决策1：Java 侧拆分 `processVideoIOPhase` 与 `processVideoLLMPhase`，Worker 以“IO 先过闸、LLM 自由并发”执行。
+  - 决策2：新增配置 `task.pipeline.io-concurrency=1`，并将 `task.queue.max-concurrent` 调整到 `4`。
+  - 决策3：Python 侧新增 `content_pipeline/rate_limiter.py`，实现 VL `RPM(1200)` + `TPM(1_000_000)` 双桶限流。
+  - 决策4：在 `llm_gateway.vl_chat_completion` 的实际 API 调用前执行 `await limiter.acquire(estimated_tokens)`。
+- 调用链变化：
+  - 改造前：`TaskWorker -> orchestrator.processVideo(完整串行链路)`
+  - 改造后：`TaskWorker -> ioSemaphore -> processVideoIOPhase -> release -> processVideoLLMPhase`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/python_grpc/src/content_pipeline/rate_limiter.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_rate_limiter.py`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerDownloadRetryTest.java`
+- 性能对比数据（配置级吞吐上限）：
+  - 测试方式：
+    - 对比改造前后并发配置与调度策略，验证 IO 与 LLM 阶段解耦。
+    - 使用定向单测验证下载中断重试、IO 串行/LLM 并行、等待 IO 许可可取消，以及 VL 限流接入不破坏现有行为。
+  - 测试数据：
+    - Worker 并发上限：`1 -> 4`（理论任务并行度提升 `300%`）。
+    - IO 阶段并发上限：保持 `1`（通过 `task.pipeline.io-concurrency=1` 明确锁定）。
+    - VL 速率上限：`1200 RPM + 1,000,000 TPM`（通过双桶令牌桶约束）。
+  - 结论：
+    - 在不放开 IO 争用的前提下，系统具备多任务 LLM 并发能力，且 VL 速率可控。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest="TaskProcessingWorkerDownloadRetryTest,TaskProcessingWorkerUploadCleanupTest,TaskProcessingWorkerIoConcurrencyTest" test -q`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_rate_limiter.py -q`（通过，`10 passed`）
