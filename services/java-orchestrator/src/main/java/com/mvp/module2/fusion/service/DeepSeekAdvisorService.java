@@ -42,6 +42,9 @@ public class DeepSeekAdvisorService {
     private static final int STRUCTURED_RETRY_MAX_ATTEMPTS = 3;
     private static final long NETWORK_RETRY_INITIAL_BACKOFF_MS = 500L;
     private static final long NETWORK_RETRY_MAX_BACKOFF_MS = 4000L;
+    private static final int PHASE2B_RAW_LOG_MAX_LINES = 400;
+    private static final int PHASE2B_RAW_LOG_MAX_LINE_CHARS = 1200;
+    private static final String PHASE2B_CHILD_INDENT = "    ";
     private static final String[] SECTION_KEYS_BACKGROUND = {
             "background", "bg", "background_knowledge", "背景", "背景知识"
     };
@@ -242,6 +245,9 @@ public class DeepSeekAdvisorService {
     @Value("${deepseek.advisor.phase2b-max-tokens:8000}")
     private int phase2bMaxTokens;
 
+    @Value("${deepseek.advisor.phase2b-log-raw-markdown:false}")
+    private boolean phase2bLogRawMarkdown;
+
     @Value("${DEEPSEEK_API_KEY:}")
     private String apiKey;
 
@@ -395,11 +401,13 @@ public class DeepSeekAdvisorService {
         } catch (Exception ex) {
             throw new IllegalStateException("DeepSeek phase2b call failed: " + ex.getMessage(), ex);
         }
-        String raw = String.valueOf(callResult.content == null ? "" : callResult.content).trim();
+        String rawContent = String.valueOf(callResult.content == null ? "" : callResult.content);
+        logPhase2bRawMarkdownIfEnabled("sync", rawContent);
+        String raw = rawContent.trim();
         if (!StringUtils.hasText(raw)) {
             throw new IllegalStateException("DeepSeek phase2b returned empty");
         }
-        return raw;
+        return normalizePhase2bListIndentation(raw);
     }
 
     public String requestPhase2bStructuredMarkdownStreamed(
@@ -432,10 +440,11 @@ public class DeepSeekAdvisorService {
         } catch (Exception ex) {
             throw new IllegalStateException("DeepSeek phase2b stream call failed: " + ex.getMessage(), ex);
         }
+        logPhase2bRawMarkdownIfEnabled("stream", raw);
         if (!StringUtils.hasText(raw)) {
             throw new IllegalStateException("DeepSeek phase2b stream returned empty");
         }
-        return raw.trim();
+        return normalizePhase2bListIndentation(raw.trim());
     }
 
     public Map<String, StructuredAdviceResult> requestStructuredAdviceBatch(
@@ -811,6 +820,183 @@ public class DeepSeekAdvisorService {
             return raw;
         }
         return raw.substring(0, 260) + "...";
+    }
+
+    /**
+     * 兜底修复 Phase2B 列表缩进：若模型只输出 1 空格子级缩进，统一补齐为 4 空格。
+     * 仅处理代码围栏外且“看起来是列表项”的行，避免影响正文与代码块。
+     */
+    private String normalizePhase2bListIndentation(String markdown) {
+        String source = String.valueOf(markdown == null ? "" : markdown);
+        if (!StringUtils.hasText(source)) {
+            return source;
+        }
+        String normalized = source.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        boolean inFence = false;
+        boolean previousLineIsListItem = false;
+        boolean changed = false;
+
+        for (int i = 0; i < lines.length; i += 1) {
+            String line = lines[i];
+            String trimmedLeft = trimLeadingWhitespace(line);
+            if (isFenceLine(trimmedLeft)) {
+                inFence = !inFence;
+                previousLineIsListItem = false;
+                continue;
+            }
+            if (inFence) {
+                continue;
+            }
+            if (trimmedLeft.isEmpty()) {
+                previousLineIsListItem = false;
+                continue;
+            }
+
+            int leadingSpaces = countLeadingSpaces(line);
+            boolean lineIsListItem = isLikelyMarkdownListItem(trimmedLeft);
+            boolean lineIsListContinuation = previousLineIsListItem && leadingSpaces == 1;
+            if (leadingSpaces == 1 && (lineIsListItem || lineIsListContinuation)) {
+                lines[i] = PHASE2B_CHILD_INDENT + line.substring(1);
+                changed = true;
+                trimmedLeft = trimLeadingWhitespace(lines[i]);
+                lineIsListItem = isLikelyMarkdownListItem(trimmedLeft);
+            }
+            previousLineIsListItem = lineIsListItem;
+        }
+
+        if (!changed) {
+            return source;
+        }
+        return String.join("\n", lines);
+    }
+
+    private String trimLeadingWhitespace(String value) {
+        String text = String.valueOf(value == null ? "" : value);
+        int index = 0;
+        while (index < text.length()) {
+            char ch = text.charAt(index);
+            if (ch != ' ' && ch != '\t') {
+                break;
+            }
+            index += 1;
+        }
+        if (index <= 0) {
+            return text;
+        }
+        return text.substring(index);
+    }
+
+    private boolean isFenceLine(String trimmedLeftLine) {
+        String text = String.valueOf(trimmedLeftLine == null ? "" : trimmedLeftLine);
+        return text.startsWith("```") || text.startsWith("~~~");
+    }
+
+    private boolean isLikelyMarkdownListItem(String trimmedLeftLine) {
+        String text = String.valueOf(trimmedLeftLine == null ? "" : trimmedLeftLine);
+        if (text.isEmpty()) {
+            return false;
+        }
+        char first = text.charAt(0);
+        if (first == '-' || first == '+' || first == '*') {
+            return true;
+        }
+        if (!Character.isDigit(first)) {
+            return false;
+        }
+        int index = 1;
+        while (index < text.length() && Character.isDigit(text.charAt(index))) {
+            index += 1;
+        }
+        if (index >= text.length()) {
+            return false;
+        }
+        char separator = text.charAt(index);
+        return separator == '.' || separator == ')';
+    }
+
+    private void logPhase2bRawMarkdownIfEnabled(String mode, String rawMarkdown) {
+        if (!phase2bLogRawMarkdown) {
+            return;
+        }
+        String source = String.valueOf(rawMarkdown == null ? "" : rawMarkdown);
+        String normalized = source.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        int totalLines = lines.length;
+        int emitLines = Math.min(PHASE2B_RAW_LOG_MAX_LINES, totalLines);
+        StringBuilder builder = new StringBuilder(Math.min(131072, normalized.length() + 2048));
+        builder.append("phase2b.llm.raw mode=")
+                .append(String.valueOf(mode == null ? "" : mode))
+                .append(" chars=")
+                .append(source.length())
+                .append(" lines=")
+                .append(totalLines)
+                .append('\n');
+        builder.append("----- RAW BEGIN -----\n");
+        builder.append(normalized);
+        if (!normalized.endsWith("\n")) {
+            builder.append('\n');
+        }
+        builder.append("----- RAW END -----\n");
+        builder.append("----- INDENT PROBE BEGIN -----\n");
+        for (int i = 0; i < emitLines; i += 1) {
+            String line = lines[i];
+            int leadingSpaces = countLeadingSpaces(line);
+            int leadingTabs = countLeadingTabs(line);
+            String visible = line.replace("\t", "\\t").replace(" ", "·");
+            if (visible.length() > PHASE2B_RAW_LOG_MAX_LINE_CHARS) {
+                visible = visible.substring(0, PHASE2B_RAW_LOG_MAX_LINE_CHARS) + "...(truncated)";
+            }
+            builder.append(String.format(
+                    Locale.ROOT,
+                    "%04d sp=%d tab=%d |%s|%n",
+                    i + 1,
+                    leadingSpaces,
+                    leadingTabs,
+                    visible
+            ));
+        }
+        if (emitLines < totalLines) {
+            builder.append("... indent probe truncated at ")
+                    .append(emitLines)
+                    .append(" lines\n");
+        }
+        builder.append("----- INDENT PROBE END -----");
+        logger.info(builder.toString());
+    }
+
+    private int countLeadingSpaces(String line) {
+        String text = String.valueOf(line == null ? "" : line);
+        int count = 0;
+        for (int i = 0; i < text.length(); i += 1) {
+            char ch = text.charAt(i);
+            if (ch == ' ') {
+                count += 1;
+                continue;
+            }
+            if (ch == '\t') {
+                continue;
+            }
+            break;
+        }
+        return count;
+    }
+
+    private int countLeadingTabs(String line) {
+        String text = String.valueOf(line == null ? "" : line);
+        int count = 0;
+        for (int i = 0; i < text.length(); i += 1) {
+            char ch = text.charAt(i);
+            if (ch == '\t') {
+                count += 1;
+                continue;
+            }
+            if (ch == ' ') {
+                continue;
+            }
+            break;
+        }
+        return count;
     }
 
     private String buildSystemPrompt() {

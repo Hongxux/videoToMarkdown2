@@ -5,6 +5,7 @@ VL runtime FFmpeg helpers.
 import asyncio
 import json
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -329,6 +330,91 @@ async def export_keyframe_with_ffmpeg(
         err_msg,
     )
     return False
+
+
+async def export_keyframes_with_ffmpeg_batch(
+    *,
+    video_path: str,
+    keyframes: List[Tuple[float, Path]],
+    logger,
+) -> List[bool]:
+    if not keyframes:
+        return []
+
+    batch_t0 = time.perf_counter()
+    ffmpeg_bin = resolve_ffmpeg_bin() or "ffmpeg"
+    normalized: List[Tuple[float, Path]] = []
+    command: List[str] = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+    ]
+
+    for raw_timestamp, raw_output_path in keyframes:
+        try:
+            timestamp_sec = max(0.0, float(raw_timestamp))
+        except (TypeError, ValueError):
+            timestamp_sec = 0.0
+        output_path = Path(raw_output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        normalized.append((timestamp_sec, output_path))
+
+        command.extend(
+            [
+                "-ss",
+                f"{timestamp_sec:.6f}",
+                "-i",
+                video_path,
+            ]
+        )
+
+    for input_index, (_timestamp_sec, output_path) in enumerate(normalized):
+        command.extend(
+            [
+                "-map",
+                f"{input_index}:v:0",
+                "-frames:v",
+                "1",
+                "-an",
+            ]
+        )
+        if output_path.suffix.lower() in {".jpg", ".jpeg"}:
+            command.extend(["-q:v", "2"])
+        command.append(str(output_path))
+
+    rc, _, stderr = await _run_subprocess(command)
+    if rc != 0:
+        logger.warning(
+            "[VL-Tutorial] keyframe batch export failed: count=%s rc=%s err=%s",
+            len(normalized),
+            rc,
+            stderr[:300],
+        )
+        return [False for _ in normalized]
+
+    results: List[bool] = []
+    for _timestamp_sec, output_path in normalized:
+        ok = output_path.exists() and output_path.stat().st_size > 0
+        results.append(ok)
+
+    if not all(results):
+        failed_files = [normalized[index][1].name for index, ok in enumerate(results) if not ok]
+        logger.warning(
+            "[VL-Tutorial] keyframe batch export partial miss: total=%s failed=%s files=%s",
+            len(normalized),
+            len(failed_files),
+            failed_files[:10],
+        )
+    logger.info(
+        "[VL-Tutorial] keyframe batch export done: count=%s ok=%s ms=%.1f",
+        len(normalized),
+        sum(1 for ok in results if ok),
+        (time.perf_counter() - batch_t0) * 1000.0,
+    )
+
+    return results
 
 
 async def concat_segments_with_ffmpeg(

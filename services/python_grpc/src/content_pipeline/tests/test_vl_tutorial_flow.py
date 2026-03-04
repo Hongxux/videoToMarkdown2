@@ -11,6 +11,7 @@ import json
 import shutil
 from pathlib import Path
 from typing import Any, Dict
+from types import SimpleNamespace
 import time
 import cv2
 import numpy as np
@@ -325,6 +326,115 @@ def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path:
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
     assert any(item.get("type") == "image_url" for item in messages[1]["content"])
+
+
+def test_build_messages_uses_concrete_mode_prompts(monkeypatch):
+    sandbox_dir = Path("tmp_vl_concrete_messages_test")
+    if sandbox_dir.exists():
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+    clip = sandbox_dir / "demo.mp4"
+    clip.write_bytes(b"fake-video")
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+
+    async def _fake_extract(_video_path: str, max_frames: int = 6):
+        _ = max_frames
+        return [{"timestamp_sec": 0.5, "data_uri": "data:image/jpeg;base64,AA=="}]
+
+    monkeypatch.setattr(analyzer, "_extract_keyframes", _fake_extract)
+    try:
+        messages = asyncio.run(analyzer._build_messages(str(clip), analysis_mode="concrete"))
+    finally:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+    assert analyzer._normalize_analysis_mode("concrete_focus") == "concrete"
+    assert len(messages) == 2
+    assert messages[0]["role"] == "system"
+    system_text = str(messages[0]["content"] or "")
+    assert "Analyze concrete visual segments and output JSON only." in system_text
+
+
+def test_parse_response_with_payload_concrete_schema():
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    payload = [
+        {
+            "segment_id": 1,
+            "segment_description": "系统架构总览",
+            "main_content": "> **核心观点**：这是一个示例 [KEYFRAME_1]",
+            "clip_start_sec": 0.0,
+            "clip_end_sec": 9.5,
+            "instructional_keyframes": [
+                {
+                    "timestamp_sec": 4.2,
+                    "frame_reason": "架构图完整出现",
+                }
+            ],
+        }
+    ]
+    results, normalized = analyzer._parse_response_with_payload(
+        json.dumps(payload, ensure_ascii=False),
+        analysis_mode="concrete",
+    )
+    assert len(results) == 1
+    assert results[0].analysis_mode == "concrete"
+    assert results[0].knowledge_type == "concrete"
+    assert results[0].step_id == 1
+    assert results[0].step_description == "系统架构总览"
+    assert results[0].main_operation == ["> **核心观点**：这是一个示例 [KEYFRAME_1]"]
+    assert len(results[0].instructional_keyframes) == 1
+    assert normalized[0]["segment_id"] == 1
+    assert normalized[0]["main_content"] == "> **核心观点**：这是一个示例 [KEYFRAME_1]"
+
+
+def test_postprocess_unit_main_content_updates_raw_json(monkeypatch):
+    generator = VLMaterialGenerator(_build_generator_config())
+    analysis_result = SimpleNamespace(
+        analysis_mode="concrete",
+        raw_response_json=[
+            {
+                "segment_id": 1,
+                "segment_description": "示例片段",
+                "main_content": "原始内容 [KEYFRAME_1]",
+                "instructional_keyframes": [{"timestamp_sec": 1.0, "frame_reason": "a"}],
+            }
+        ],
+    )
+
+    monkeypatch.setattr(
+        generator,
+        "_build_vl_arg_subtitle_context",
+        lambda **kwargs: "字幕上下文",
+    )
+
+    async def _fake_deepseek_complete_text(**kwargs):
+        _ = kwargs
+        return (
+            json.dumps(
+                [
+                    {
+                        "segment_id": 1,
+                        "main_content": "补全后内容 [KEYFRAME_1]",
+                    }
+                ],
+                ensure_ascii=False,
+            ),
+            {},
+            [],
+        )
+
+    monkeypatch.setattr(
+        vl_material_generator_module.llm_gateway,
+        "deepseek_complete_text",
+        _fake_deepseek_complete_text,
+    )
+
+    asyncio.run(
+        generator._postprocess_unit_main_content(
+            analysis_result=analysis_result,
+            semantic_unit={"unit_id": "SU_CONCRETE", "start_sec": 0.0, "end_sec": 10.0},
+            output_dir=".",
+        )
+    )
+    assert analysis_result.raw_response_json[0]["main_content"] == "补全后内容 [KEYFRAME_1]"
 
 
 def test_tutorial_schema_parse_and_normalize():
@@ -1081,6 +1191,98 @@ def test_generate_marks_unit_concrete_when_should_type_concrete(monkeypatch):
     assert semantic_units[0]["_vl_no_needed_video"] is False
 
 
+def test_generate_uses_concrete_mode_override_and_exposes_unit_outputs(monkeypatch):
+    sandbox_dir = Path("tmp_vl_concrete_mode_override_test")
+    if sandbox_dir.exists():
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+    video_path = sandbox_dir / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = sandbox_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    semantic_units = [
+        {
+            "unit_id": "SU_CONCRETE_MODE",
+            "knowledge_type": "concrete",
+            "_vl_analysis_mode_override": "concrete",
+            "mult_steps": False,
+            "start_sec": 0.0,
+            "end_sec": 20.0,
+        }
+    ]
+
+    generator = VLMaterialGenerator(_build_generator_config())
+    generator.vl_arg_postprocess_concrete_enabled = False
+
+    class _ConcreteModeAnalyzer:
+        async def analyze_clip(
+            self,
+            clip_path: str,
+            semantic_unit_start_sec: float,
+            semantic_unit_id: str,
+            extra_prompt: str | None = None,
+            analysis_mode: str = "default",
+        ) -> VLClipAnalysisResponse:
+            _ = (clip_path, extra_prompt)
+            assert analysis_mode == "concrete"
+            result = VLClipAnalysisResponse(success=True, analysis_mode="concrete")
+            result.token_usage = {"prompt_tokens": 8, "completion_tokens": 6, "total_tokens": 14}
+            result.raw_response_json = [
+                {
+                    "segment_id": 1,
+                    "segment_description": "示例片段",
+                    "main_content": "具体讲解内容 [KEYFRAME_1]",
+                    "clip_start_sec": 0.0,
+                    "clip_end_sec": 12.0,
+                    "instructional_keyframes": [
+                        {"timestamp_sec": 3.0, "frame_reason": "关键画面"}
+                    ],
+                }
+            ]
+            result.screenshot_requests = [
+                {
+                    "screenshot_id": f"{semantic_unit_id}/{semantic_unit_id}_ss_001",
+                    "timestamp_sec": semantic_unit_start_sec + 3.0,
+                    "semantic_unit_id": semantic_unit_id,
+                }
+            ]
+            result.clip_requests = []
+            return result
+
+    generator._analyzer = _ConcreteModeAnalyzer()
+
+    clips_dir = sandbox_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = clips_dir / "001_SU_CONCRETE_MODE_demo_0.00-20.00.mp4"
+    clip_file.write_bytes(b"clip")
+
+    async def _fake_split_video_by_semantic_units(video_path, semantic_units, output_dir=None):
+        return str(clips_dir)
+
+    def _fake_find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec):
+        return str(clip_file)
+
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_split_video_by_semantic_units)
+    monkeypatch.setattr(generator, "_find_clip_for_unit", _fake_find_clip_for_unit)
+
+    try:
+        result = asyncio.run(
+            generator.generate(
+                video_path=str(video_path),
+                semantic_units=semantic_units,
+                output_dir=str(output_dir),
+            )
+        )
+    finally:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+    assert result.success is True
+    assert len(result.unit_analysis_outputs) == 1
+    assert result.unit_analysis_outputs[0]["analysis_mode"] == "concrete"
+    assert result.unit_analysis_outputs[0]["raw_response_json"][0]["main_content"] == "具体讲解内容 [KEYFRAME_1]"
+
+
 class _FakeAnalyzer:
     async def analyze_clip(
         self,
@@ -1813,6 +2015,135 @@ def test_analyze_unit_tasks_prefers_batch_entry_when_available():
     assert analyzer.batch_calls[0]["max_inflight"] == 2
     assert analyzer.batch_calls[0]["return_exceptions"] is True
     assert analyzer.single_calls == []
+
+
+def test_analyze_unit_tasks_interleaves_concrete_and_process_dispatch(monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "vl_analysis": {
+                "parallel_workers": 1,
+                "parallel_hard_cap": 1,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    class _BatchAnalyzer:
+        def __init__(self):
+            self.batch_calls = []
+
+        async def analyze_clips_batch(
+            self,
+            *,
+            tasks: list[dict[str, Any]],
+            max_inflight: int | None = None,
+            return_exceptions: bool = True,
+        ) -> list[VLClipAnalysisResponse]:
+            self.batch_calls.append(
+                {
+                    "tasks": tasks,
+                    "max_inflight": max_inflight,
+                    "return_exceptions": return_exceptions,
+                }
+            )
+            return [
+                VLClipAnalysisResponse(
+                    success=True,
+                    error_msg=str(task.get("semantic_unit_id", "") or ""),
+                )
+                for task in tasks
+            ]
+
+    analyzer = _BatchAnalyzer()
+    generator._analyzer = analyzer
+
+    unit_tasks = [
+        {
+            "unit_id": "P1",
+            "start_sec": 0.0,
+            "end_sec": 10.0,
+            "duration": 10.0,
+            "clip_path": "p1.mp4",
+            "analysis_mode": "tutorial_stepwise",
+            "extra_prompt": "p1",
+            "semantic_unit": {"unit_id": "P1", "knowledge_type": "process"},
+        },
+        {
+            "unit_id": "P2",
+            "start_sec": 10.0,
+            "end_sec": 20.0,
+            "duration": 10.0,
+            "clip_path": "p2.mp4",
+            "analysis_mode": "tutorial_stepwise",
+            "extra_prompt": "p2",
+            "semantic_unit": {"unit_id": "P2", "knowledge_type": "process"},
+        },
+        {
+            "unit_id": "C1",
+            "start_sec": 20.0,
+            "end_sec": 30.0,
+            "duration": 10.0,
+            "clip_path": "c1.mp4",
+            "analysis_mode": "concrete",
+            "extra_prompt": None,
+            "semantic_unit": {"unit_id": "C1", "knowledge_type": "concrete"},
+        },
+        {
+            "unit_id": "C2",
+            "start_sec": 30.0,
+            "end_sec": 40.0,
+            "duration": 10.0,
+            "clip_path": "c2.mp4",
+            "analysis_mode": "concrete",
+            "extra_prompt": None,
+            "semantic_unit": {"unit_id": "C2", "knowledge_type": "concrete"},
+        },
+    ]
+    pre_prune_results = [
+        {
+            "applied": False,
+            "clip_path_for_vl": "p1.mp4",
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 10.0)],
+        },
+        {
+            "applied": False,
+            "clip_path_for_vl": "p2.mp4",
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 10.0)],
+        },
+        {
+            "applied": False,
+            "clip_path_for_vl": "c1.mp4",
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 10.0)],
+        },
+        {
+            "applied": False,
+            "clip_path_for_vl": "c2.mp4",
+            "pre_context_prompt": "",
+            "kept_segments": [(0.0, 10.0)],
+        },
+    ]
+
+    analysis_results, task_metadata, pruned_units = asyncio.run(
+        generator._analyze_unit_tasks_in_parallel(
+            unit_tasks=unit_tasks,
+            pre_prune_results=pre_prune_results,
+        )
+    )
+
+    assert pruned_units == 0
+    assert len(analyzer.batch_calls) == 1
+    dispatched_order = [
+        str(task.get("semantic_unit_id", "") or "")
+        for task in analyzer.batch_calls[0]["tasks"]
+    ]
+    assert dispatched_order == ["C1", "P1", "C2", "P2"]
+    assert [str(meta.get("unit_id", "") or "") for meta in task_metadata] == ["P1", "P2", "C1", "C2"]
+    assert [str(item.error_msg) for item in analysis_results] == ["P1", "P2", "C1", "C2"]
 
 
 def test_analyze_unit_tasks_prefers_existing_pruned_clip(tmp_path):

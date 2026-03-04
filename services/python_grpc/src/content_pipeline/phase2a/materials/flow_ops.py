@@ -63,10 +63,6 @@ async def split_video_by_semantic_units(
     if not valid_units:
         raise ValueError("没有可用于 VL 分析的有效语义单元，跳过视频切割")
 
-    # 每次按“待分析子集”重写 JSON，确保切割范围与当前 VL 候选严格一致。
-    with open(semantic_units_json, "w", encoding="utf-8") as f:
-        json.dump(valid_units, f, ensure_ascii=False, indent=2)
-    
     # 查找脚本路径
     project_root = find_repo_root(__file__)
     script_path = project_root / "tools" / "split_video_by_semantic_units.py"
@@ -74,7 +70,20 @@ async def split_video_by_semantic_units(
     if not script_path.exists():
         raise FileNotFoundError(f"视频切割脚本不存在: {script_path}")
     
+    def _collect_missing_units(existing_names: List[str]) -> List[str]:
+        missing_units: List[str] = []
+        for su in valid_units:
+            unit_id = str(su.get("unit_id", "") or "").strip()
+            if not unit_id:
+                continue
+            unit_pattern = re.compile(rf"(?:^|_){re.escape(unit_id)}(?:_|$)", re.IGNORECASE)
+            if not any(unit_pattern.search(name) for name in existing_names):
+                missing_units.append(unit_id)
+        return missing_units
+
     # 检查是否已经切割过（避免重复切割）
+    units_to_split: List[Dict[str, Any]] = list(valid_units)
+    missing_units: List[str] = []
     manifest_path = clips_dir / "manifest.json"
     if manifest_path.exists():
         try:
@@ -86,12 +95,7 @@ async def split_video_by_semantic_units(
                 # 只要当前所需 unit 都存在即可复用，不要求目录中仅包含当前子集。
                 existing_clips = list(clips_dir.glob("*.mp4"))
                 existing_names = [f.name for f in existing_clips]
-                missing_units = []
-                for su in valid_units:
-                    unit_id = su.get("unit_id", "")
-                    unit_pattern = re.compile(rf"(?:^|_){re.escape(str(unit_id))}(?:_|$)", re.IGNORECASE)
-                    if not any(unit_pattern.search(name) for name in existing_names):
-                        missing_units.append(unit_id)
+                missing_units = _collect_missing_units(existing_names)
                 if not missing_units:
                     logger.info(f"复用已存在的 VL 目标视频片段: {clips_dir}")
                     return str(clips_dir)
@@ -102,26 +106,37 @@ async def split_video_by_semantic_units(
     
     # 2. 备用检查：直接检查是否存在对应的 .mp4 文件
     # 如果 manifest 丢失但文件都在，也可以复用
-    if clips_dir.exists():
+    if clips_dir.exists() and not missing_units:
         try:
             existing_clips = list(clips_dir.glob("*.mp4"))
             if len(existing_clips) > 0:
                 # 检查是否所有 unit_id 都有对应的片段
                 existing_names = [f.name for f in existing_clips]
-                missing_units = []
-                for su in valid_units:
-                    unit_id = su.get("unit_id", "")
-                    unit_pattern = re.compile(rf"(?:^|_){re.escape(str(unit_id))}(?:_|$)", re.IGNORECASE)
-                    if not any(unit_pattern.search(name) for name in existing_names):
-                        missing_units.append(unit_id)
+                missing_units = _collect_missing_units(existing_names)
                 
                 if not missing_units:
                     logger.info(f"复用已存在的视频片段 (文件完整性检查通过): {clips_dir}")
                     return str(clips_dir)
                 else:
-                    logger.warning(f"无法复用视频片段，缺失: {len(missing_units)}/{len(semantic_units)} (e.g., {missing_units[:3]})")
+                    logger.warning(f"无法复用视频片段，缺失: {len(missing_units)}/{len(valid_units)} (e.g., {missing_units[:3]})")
         except Exception as e:
             logger.warning(f"文件完整性检查出错: {e}")
+
+    if missing_units and len(missing_units) < len(valid_units):
+        missing_set = {str(unit_id) for unit_id in missing_units if str(unit_id)}
+        units_to_split = [
+            su for su in valid_units
+            if str(su.get("unit_id", "") or "").strip() in missing_set
+        ]
+        logger.info(
+            "检测到增量切片场景，仅切割缺失单元: missing=%s/%s",
+            len(units_to_split),
+            len(valid_units),
+        )
+
+    # 每次按“待分析子集”重写 JSON，确保切割范围与当前 VL 候选严格一致。
+    with open(semantic_units_json, "w", encoding="utf-8") as f:
+        json.dump(units_to_split, f, ensure_ascii=False, indent=2)
     
     # 执行切割命令
     cmd = [

@@ -86,6 +86,7 @@ public class TaskQueueManager {
         public double progress;
         public String statusMessage;
         public String resultPath;
+        public String cleanupSourcePath;
         public String errorMessage;
         public boolean resourcesReleased;
 
@@ -280,6 +281,14 @@ public class TaskQueueManager {
         }
         task.progress = progress;
         task.statusMessage = message;
+    }
+
+    public synchronized void updateCleanupSourcePath(String taskId, String cleanupSourcePath) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return;
+        }
+        task.cleanupSourcePath = normalizeOptionalText(cleanupSourcePath);
     }
 
     public synchronized TaskEntry getTask(String taskId) {

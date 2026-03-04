@@ -19,12 +19,13 @@ import logging
 import asyncio
 import time
 import re
+import inspect
 import functools
 import threading
 from dataclasses import dataclass, field
 from collections import deque
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Callable, Awaitable
 
 from services.python_grpc.src.common.utils.numbers import safe_float
 from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
@@ -43,6 +44,7 @@ from services.python_grpc.src.content_pipeline.infra.runtime.vl_prefetch_utils i
 from services.python_grpc.src.content_pipeline.infra.runtime.vl_ffmpeg_utils import (
     export_clip_asset_with_ffmpeg,
     export_keyframe_with_ffmpeg,
+    export_keyframes_with_ffmpeg_batch,
     concat_segments_with_ffmpeg,
 )
 from services.python_grpc.src.content_pipeline.phase2a.materials.models import VLGenerationResult
@@ -69,6 +71,47 @@ from services.python_grpc.src.content_pipeline.phase2a.materials.flow_ops import
 )
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_GRID_SPATIAL_ANCHOR_KEY = "vl.video_analysis.grid_spatial_anchor"
+_DEFAULT_VL_ARG_STRUCTURED_SYSTEM_KEY = "deepseek.vl_arg.structured.system"
+_DEFAULT_VL_ARG_STRUCTURED_USER_KEY = "deepseek.vl_arg.structured.user"
+_PACKAGE_PROMPT_ROOT = (Path(__file__).resolve().parents[2] / "prompts").resolve()
+_DEFAULT_GRID_SPATIAL_ANCHOR_REL_PATH = "vl/video_analysis/grid_spatial_anchor.md"
+_DEFAULT_VL_ARG_STRUCTURED_SYSTEM_REL_PATH = "deepseek/vl_arg/structured_system.md"
+_DEFAULT_VL_ARG_STRUCTURED_USER_REL_PATH = "deepseek/vl_arg/structured_user.md"
+
+
+def _resolve_prompt_key_attr(attr_name: str, default_key: str) -> str:
+    raw_key = getattr(PromptKeys, attr_name, default_key)
+    if not isinstance(raw_key, str):
+        return default_key
+    normalized_key = raw_key.strip()
+    return normalized_key if normalized_key else default_key
+
+
+def _safe_get_prompt(prompt_key: str, *, fallback: str) -> str:
+    try:
+        return get_prompt(prompt_key, fallback=fallback)
+    except KeyError:
+        logger.warning(
+            "Prompt key is missing in registry, fallback to in-code prompt: key=%s",
+            prompt_key,
+        )
+        return fallback
+
+
+def _load_package_prompt_default(relative_path: str, *, fallback: str) -> str:
+    prompt_path = (_PACKAGE_PROMPT_ROOT / relative_path).resolve()
+    try:
+        if prompt_path.exists() and prompt_path.is_file():
+            return prompt_path.read_text(encoding="utf-8")
+    except Exception as error:
+        logger.warning(
+            "Load package prompt fallback failed: path=%s, error=%s",
+            prompt_path,
+            error,
+        )
+    return fallback
 
 
 @dataclass
@@ -178,7 +221,14 @@ class VLMaterialGenerator:
         except (TypeError, ValueError):
             self.pre_vl_legacy_action_min_dynamic_sec = 0.5
         self.pre_vl_context_text_max_chars = int(self.pre_vl_pruning_config.get("context_text_max_chars", 800))
-        self.pre_vl_parallel_mode = str(self.pre_vl_pruning_config.get("parallel_mode", "auto") or "auto").strip().lower()
+        raw_process_stable_detect_enabled = self.pre_vl_pruning_config.get("process_stable_detect_enabled", False)
+        if isinstance(raw_process_stable_detect_enabled, bool):
+            self.pre_vl_process_stable_detect_enabled = raw_process_stable_detect_enabled
+        else:
+            self.pre_vl_process_stable_detect_enabled = (
+                str(raw_process_stable_detect_enabled or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+            )
+        self.pre_vl_parallel_mode = str(self.pre_vl_pruning_config.get("parallel_mode", "off") or "off").strip().lower()
         self.pre_vl_parallel_workers = self.pre_vl_pruning_config.get("parallel_workers", "auto")
         try:
             self.pre_vl_parallel_hard_cap = max(1, int(self.pre_vl_pruning_config.get("parallel_hard_cap", 8)))
@@ -370,9 +420,16 @@ class VLMaterialGenerator:
             )
         except (TypeError, ValueError):
             self.tutorial_grid_crop_min_border_px = 12
-        self._tutorial_grid_anchor_prompt = get_prompt(
-            PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR,
-            fallback=self._get_default_grid_spatial_anchor_prompt(),
+        tutorial_grid_anchor_key = _resolve_prompt_key_attr(
+            "VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR",
+            _DEFAULT_GRID_SPATIAL_ANCHOR_KEY,
+        )
+        self._tutorial_grid_anchor_prompt = _safe_get_prompt(
+            tutorial_grid_anchor_key,
+            fallback=_load_package_prompt_default(
+                _DEFAULT_GRID_SPATIAL_ANCHOR_REL_PATH,
+                fallback=self._get_default_grid_spatial_anchor_prompt(),
+            ),
         )
         raw_vl_arg_postprocess_config = self.tutorial_mode_config.get("vl_arg_postprocess", {})
         if isinstance(raw_vl_arg_postprocess_config, dict):
@@ -380,6 +437,9 @@ class VLMaterialGenerator:
         else:
             self.vl_arg_postprocess_config = {}
         self.vl_arg_postprocess_enabled = bool(self.vl_arg_postprocess_config.get("enabled", True))
+        self.vl_arg_postprocess_concrete_enabled = bool(
+            self.vl_arg_postprocess_config.get("concrete_enabled", self.vl_arg_postprocess_enabled)
+        )
         self.vl_arg_postprocess_model = str(
             self.vl_arg_postprocess_config.get("model", "deepseek-chat") or "deepseek-chat"
         ).strip() or "deepseek-chat"
@@ -390,6 +450,13 @@ class VLMaterialGenerator:
             )
         except (TypeError, ValueError):
             self.vl_arg_postprocess_max_main_operation_chars = 4000
+        try:
+            self.vl_arg_postprocess_max_main_content_chars = max(
+                400,
+                int(self.vl_arg_postprocess_config.get("max_main_content_chars", 8000)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_max_main_content_chars = 8000
         try:
             self.vl_arg_postprocess_max_context_chars = max(
                 400,
@@ -404,13 +471,27 @@ class VLMaterialGenerator:
             )
         except (TypeError, ValueError):
             self.vl_arg_postprocess_max_subtitle_lines = 120
-        self._vl_arg_structured_system_prompt = get_prompt(
-            PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM,
-            fallback=self._get_default_vl_arg_structured_system_prompt(),
+        vl_arg_structured_system_key = _resolve_prompt_key_attr(
+            "DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM",
+            _DEFAULT_VL_ARG_STRUCTURED_SYSTEM_KEY,
         )
-        self._vl_arg_structured_user_prompt_template = get_prompt(
-            PromptKeys.DEEPSEEK_VL_ARG_STRUCTURED_USER,
-            fallback=self._get_default_vl_arg_structured_user_prompt_template(),
+        self._vl_arg_structured_system_prompt = _safe_get_prompt(
+            vl_arg_structured_system_key,
+            fallback=_load_package_prompt_default(
+                _DEFAULT_VL_ARG_STRUCTURED_SYSTEM_REL_PATH,
+                fallback=self._get_default_vl_arg_structured_system_prompt(),
+            ),
+        )
+        vl_arg_structured_user_key = _resolve_prompt_key_attr(
+            "DEEPSEEK_VL_ARG_STRUCTURED_USER",
+            _DEFAULT_VL_ARG_STRUCTURED_USER_KEY,
+        )
+        self._vl_arg_structured_user_prompt_template = _safe_get_prompt(
+            vl_arg_structured_user_key,
+            fallback=_load_package_prompt_default(
+                _DEFAULT_VL_ARG_STRUCTURED_USER_REL_PATH,
+                fallback=self._get_default_vl_arg_structured_user_prompt_template(),
+            ),
         )
 
         # Control whether multi-step clip requests are merged
@@ -478,29 +559,10 @@ class VLMaterialGenerator:
         """保存VL分析结果到JSON文件"""
         try:
             # 序列化分析结鏋?
-            serialized_results = []
-            for idx, result in enumerate(analysis_results):
-                meta = task_metadata[idx] if idx < len(task_metadata) else {}
-                
-                if isinstance(result, Exception):
-                    serialized_results.append({
-                        "unit_id": meta.get("unit_id", f"task_{idx}"),
-                        "success": False,
-                        "error": str(result),
-                        "metadata": meta
-                    })
-                else:
-                    serialized_results.append({
-                        "unit_id": meta.get("unit_id", f"task_{idx}"),
-                        "success": result.success,
-                        "error_msg": result.error_msg if hasattr(result, 'error_msg') else "",
-                        "analysis_mode": getattr(result, "analysis_mode", "default"),
-                        "raw_response_json": getattr(result, "raw_response_json", []) or [],
-                        "raw_llm_interactions": getattr(result, "raw_llm_interactions", []) or [],
-                        "clip_requests": result.clip_requests if hasattr(result, 'clip_requests') else [],
-                        "screenshot_requests": result.screenshot_requests if hasattr(result, 'screenshot_requests') else [],
-                        "metadata": meta
-                    })
+            serialized_results = self._serialize_unit_analysis_outputs(
+                analysis_results=analysis_results,
+                task_metadata=task_metadata,
+            )
             
             cache_data = {
                 "version": "1.0",
@@ -524,6 +586,46 @@ class VLMaterialGenerator:
         except Exception as e:
             logger.warning(f"保存VL结果缓存失败: {e}")
     
+    def _serialize_unit_analysis_outputs(
+        self,
+        *,
+        analysis_results: List[Any],
+        task_metadata: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        serialized_results: List[Dict[str, Any]] = []
+        for idx, result in enumerate(analysis_results):
+            meta = task_metadata[idx] if idx < len(task_metadata) else {}
+            unit_id = str(meta.get("unit_id", f"task_{idx}") or f"task_{idx}")
+            if isinstance(result, Exception):
+                serialized_results.append(
+                    {
+                        "unit_id": unit_id,
+                        "success": False,
+                        "error": str(result),
+                        "analysis_mode": str(meta.get("analysis_mode", "") or "").strip().lower() or "default",
+                        "raw_response_json": [],
+                        "raw_llm_interactions": [],
+                        "clip_requests": [],
+                        "screenshot_requests": [],
+                        "metadata": meta,
+                    }
+                )
+                continue
+            serialized_results.append(
+                {
+                    "unit_id": unit_id,
+                    "success": bool(getattr(result, "success", False)),
+                    "error_msg": str(getattr(result, "error_msg", "") or ""),
+                    "analysis_mode": str(getattr(result, "analysis_mode", "") or "").strip().lower() or "default",
+                    "raw_response_json": getattr(result, "raw_response_json", []) or [],
+                    "raw_llm_interactions": getattr(result, "raw_llm_interactions", []) or [],
+                    "clip_requests": getattr(result, "clip_requests", []) or [],
+                    "screenshot_requests": getattr(result, "screenshot_requests", []) or [],
+                    "metadata": meta,
+                }
+            )
+        return serialized_results
+
     def _load_vl_results(self, cache_path: Path) -> Optional[Dict[str, Any]]:
         """从JSON文件加载VL分析结果"""
         try:
@@ -675,11 +777,67 @@ class VLMaterialGenerator:
         if no_needed_video:
             semantic_unit["_vl_no_needed_video_reason"] = "vl_no_needed_video_true"
 
+    def _resolve_vl_dispatch_lane(
+        self,
+        *,
+        task_input: Dict[str, Any],
+        task_meta: Dict[str, Any],
+    ) -> str:
+        mode = str(task_input.get("analysis_mode", "") or "").strip().lower()
+        semantic_unit = task_meta.get("semantic_unit", {}) if isinstance(task_meta, dict) else {}
+        knowledge_type = ""
+        if isinstance(semantic_unit, dict):
+            knowledge_type = str(semantic_unit.get("knowledge_type", "") or "").strip().lower()
+
+        if mode == "concrete" or knowledge_type == "concrete":
+            return "concrete"
+        if mode == "tutorial_stepwise" or knowledge_type == "process":
+            return "process"
+        return "default"
+
+    def _build_vl_dispatch_order(
+        self,
+        *,
+        task_inputs: List[Dict[str, Any]],
+        task_metadata: List[Dict[str, Any]],
+    ) -> List[int]:
+        if not task_inputs:
+            return []
+
+        lane_queues: Dict[str, deque] = {
+            "concrete": deque(),
+            "process": deque(),
+            "default": deque(),
+        }
+        for index, task_input in enumerate(task_inputs):
+            task_meta = task_metadata[index] if index < len(task_metadata) else {}
+            lane = self._resolve_vl_dispatch_lane(task_input=task_input, task_meta=task_meta)
+            lane_queues.setdefault(lane, deque()).append(index)
+
+        lane_order = ["concrete", "process", "default"]
+        lane_order.extend(
+            sorted([lane for lane in lane_queues.keys() if lane not in {"concrete", "process", "default"}])
+        )
+
+        dispatch_order: List[int] = []
+        while True:
+            has_item = False
+            for lane in lane_order:
+                queue = lane_queues.get(lane)
+                if not queue:
+                    continue
+                dispatch_order.append(int(queue.popleft()))
+                has_item = True
+            if not has_item:
+                break
+        return dispatch_order
+
     async def _analyze_unit_tasks_in_parallel(
         self,
         *,
         unit_tasks: List[Dict[str, Any]],
         pre_prune_results: List[Dict[str, Any]],
+        on_result: Optional[Callable[[int, Dict[str, Any], Any], Awaitable[None] | None]] = None,
     ) -> Tuple[List[Any], List[Dict[str, Any]], int]:
         """
         按语义单元并行执琛?VL 分析銆?
@@ -749,48 +907,131 @@ class VLMaterialGenerator:
             )
 
         worker_count = self._resolve_vl_parallel_workers(len(task_inputs))
+        dispatch_order = self._build_vl_dispatch_order(
+            task_inputs=task_inputs,
+            task_metadata=task_metadata,
+        )
+        dispatch_inputs = [task_inputs[index] for index in dispatch_order]
         logger.info(
             f"[VL-UnitParallel] start: units={len(task_inputs)}, workers={worker_count}, policy=one-unit-one-api"
         )
+        if dispatch_order:
+            lane_counts: Dict[str, int] = {"concrete": 0, "process": 0, "default": 0}
+            for index in dispatch_order:
+                lane = self._resolve_vl_dispatch_lane(
+                    task_input=task_inputs[index],
+                    task_meta=task_metadata[index] if index < len(task_metadata) else {},
+                )
+                lane_counts[lane] = int(lane_counts.get(lane, 0)) + 1
+            logger.info(
+                "[VL-UnitParallel] dispatch lanes: concrete=%s, process=%s, default=%s",
+                lane_counts.get("concrete", 0),
+                lane_counts.get("process", 0),
+                lane_counts.get("default", 0),
+            )
+
+        analysis_results: List[Any] = [RuntimeError("vl_dispatch_result_missing") for _ in task_inputs]
+        streamed_indexes: set[int] = set()
+
+        async def _emit_stream_result(original_index: int, result_item: Any) -> None:
+            analysis_results[original_index] = result_item
+            if on_result is None:
+                return
+            if original_index in streamed_indexes:
+                return
+            streamed_indexes.add(original_index)
+            try:
+                callback_result = on_result(
+                    original_index,
+                    task_metadata[original_index] if original_index < len(task_metadata) else {},
+                    result_item,
+                )
+                if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                    await callback_result
+            except Exception as callback_error:
+                logger.warning(
+                    "[VL-UnitParallel] on_result callback failed: index=%s, unit=%s, err=%s",
+                    original_index,
+                    (
+                        task_metadata[original_index].get("unit_id", "")
+                        if original_index < len(task_metadata)
+                        else ""
+                    ),
+                    callback_error,
+                )
 
         batch_runner = getattr(self.analyzer, "analyze_clips_batch", None)
         if callable(batch_runner):
-            analysis_results = await batch_runner(
-                tasks=task_inputs,
-                max_inflight=worker_count,
-                return_exceptions=True,
-            )
-            if not isinstance(analysis_results, list):
+            async def _dispatch_result_callback(dispatch_index: int, result_item: Any) -> None:
+                if dispatch_index >= len(dispatch_order):
+                    return
+                original_index = dispatch_order[dispatch_index]
+                await _emit_stream_result(original_index, result_item)
+
+            batch_params: Dict[str, Any] = {
+                "tasks": dispatch_inputs,
+                "max_inflight": worker_count,
+                "return_exceptions": True,
+            }
+            try:
+                if "result_callback" in inspect.signature(batch_runner).parameters:
+                    batch_params["result_callback"] = _dispatch_result_callback
+            except Exception:
+                pass
+
+            dispatch_results = await batch_runner(**batch_params)
+            if not isinstance(dispatch_results, list):
                 raise RuntimeError("analyze_clips_batch returned non-list result")
-            if len(analysis_results) != len(task_inputs):
+            if len(dispatch_results) != len(dispatch_inputs):
                 logger.warning(
                     "[VL-UnitParallel] batch result size mismatch: expected=%s, actual=%s",
-                    len(task_inputs),
-                    len(analysis_results),
+                    len(dispatch_inputs),
+                    len(dispatch_results),
                 )
-                if len(analysis_results) < len(task_inputs):
-                    analysis_results = list(analysis_results) + [
+                if len(dispatch_results) < len(dispatch_inputs):
+                    dispatch_results = list(dispatch_results) + [
                         RuntimeError("vl_batch_result_missing")
-                    ] * (len(task_inputs) - len(analysis_results))
+                    ] * (len(dispatch_inputs) - len(dispatch_results))
                 else:
-                    analysis_results = list(analysis_results)[: len(task_inputs)]
+                    dispatch_results = list(dispatch_results)[: len(dispatch_inputs)]
+
+            for dispatch_index, result_item in enumerate(dispatch_results):
+                if dispatch_index >= len(dispatch_order):
+                    break
+                original_index = dispatch_order[dispatch_index]
+                await _emit_stream_result(original_index, result_item)
         else:
             semaphore = asyncio.Semaphore(worker_count)
 
-            async def _run_single(task_input: Dict[str, Any]):
+            async def _run_single(dispatch_index: int, task_input: Dict[str, Any]) -> Tuple[int, Any]:
                 async with semaphore:
-                    return await self.analyzer.analyze_clip(
-                        clip_path=task_input["clip_path"],
-                        semantic_unit_start_sec=task_input["semantic_unit_start_sec"],
-                        semantic_unit_id=task_input["semantic_unit_id"],
-                        extra_prompt=task_input.get("extra_prompt"),
-                        analysis_mode=task_input.get("analysis_mode", "default"),
-                    )
+                    try:
+                        result_item = await self.analyzer.analyze_clip(
+                            clip_path=task_input["clip_path"],
+                            semantic_unit_start_sec=task_input["semantic_unit_start_sec"],
+                            semantic_unit_id=task_input["semantic_unit_id"],
+                            extra_prompt=task_input.get("extra_prompt"),
+                            analysis_mode=task_input.get("analysis_mode", "default"),
+                        )
+                    except Exception as exc:
+                        result_item = exc
+                return dispatch_index, result_item
 
-            analysis_results = await asyncio.gather(
-                *[_run_single(task_input) for task_input in task_inputs],
-                return_exceptions=True,
-            )
+            pending_dispatch_tasks = [
+                asyncio.create_task(_run_single(dispatch_index, task_input))
+                for dispatch_index, task_input in enumerate(dispatch_inputs)
+            ]
+            try:
+                for done_task in asyncio.as_completed(pending_dispatch_tasks):
+                    dispatch_index, result_item = await done_task
+                    if dispatch_index >= len(dispatch_order):
+                        continue
+                    original_index = dispatch_order[dispatch_index]
+                    await _emit_stream_result(original_index, result_item)
+            finally:
+                for pending_task in pending_dispatch_tasks:
+                    if not pending_task.done():
+                        pending_task.cancel()
         logger.info(
             f"[VL-UnitParallel] done: dispatched={len(task_inputs)}, results={len(analysis_results)}"
         )
@@ -863,6 +1104,9 @@ class VLMaterialGenerator:
         判定 VL 前预处理是否启用多进程稳定段检测銆?        规则锛?        1) worker_count<=1 时不并栾?        2) parallel_mode=async/off/disabled 时关闭；
         3) parallel_mode=process 时强制开启；
         4) parallel_mode=auto 时仅在注鍏?cv_executor 时开启銆?        """
+        if not self.pre_vl_process_stable_detect_enabled:
+            return False
+
         if worker_count <= 1:
             return False
 
@@ -1382,20 +1626,26 @@ class VLMaterialGenerator:
 
     @staticmethod
     def _get_default_vl_arg_structured_system_prompt() -> str:
-        return (
-            "你是教程步骤增强助手。"
-            "请基于语义单元上下文补充 main_operation，使其逻辑清晰、细节完整。"
-            "仅返回补充后的 Markdown 正文，不要返回 JSON。"
+        return _load_package_prompt_default(
+            _DEFAULT_VL_ARG_STRUCTURED_SYSTEM_REL_PATH,
+            fallback=(
+                "You are a tutorial step enhancement assistant.\n"
+                "Enhance main_operation using subtitle context.\n"
+                "Return Markdown only, do not return JSON."
+            ),
         )
 
     @staticmethod
     def _get_default_vl_arg_structured_user_prompt_template() -> str:
-        return (
-            "【原始核心操作(main_operation)】\n"
-            "{{main_operation}}\n\n"
-            "【语义单元字幕上下文】\n"
-            "{{subtitle_context}}\n\n"
-            "请直接输出补充后的 Markdown："
+        return _load_package_prompt_default(
+            _DEFAULT_VL_ARG_STRUCTURED_USER_REL_PATH,
+            fallback=(
+                "[Original main_operation]\n"
+                "{{main_operation}}\n\n"
+                "[Subtitle context]\n"
+                "{{subtitle_context}}\n\n"
+                "Return structured Markdown only."
+            ),
         )
 
     @staticmethod
@@ -1761,15 +2011,241 @@ class VLMaterialGenerator:
             )
 
     @staticmethod
-    def _get_default_grid_spatial_anchor_prompt() -> str:
+    def _build_vl_arg_batch_main_content_text(segment_payloads: List[Dict[str, Any]]) -> str:
+        blocks: List[str] = []
+        for payload in segment_payloads:
+            segment_id = int(safe_float(payload.get("segment_id", 0), 0.0))
+            if segment_id <= 0:
+                continue
+            main_content = str(payload.get("main_content", "") or "").strip()
+            if not main_content:
+                continue
+            blocks.append(f"[SEGMENT_ID={segment_id}]\n{main_content}")
+        return "\n\n".join(blocks).strip()
+
+    def _render_vl_arg_concrete_batch_prompt(
+        self,
+        *,
+        segment_payloads: List[Dict[str, Any]],
+        subtitle_context: str,
+    ) -> str:
+        segment_text = self._build_vl_arg_batch_main_content_text(segment_payloads)
+        if not segment_text:
+            return ""
+        segment_ids = [
+            int(safe_float(item.get("segment_id", 0), 0.0))
+            for item in segment_payloads
+            if int(safe_float(item.get("segment_id", 0), 0.0)) > 0
+        ]
+        valid_segment_ids = ", ".join([str(segment_id) for segment_id in segment_ids])
         return (
-            "You are a visual anchoring assistant.\n"
-            "Locate the target area on this grid-overlaid image.\n"
-            "target_text={target_text}\n"
-            "target_ui_type={target_ui_type}\n"
-            "target_relative_position={target_relative_position}\n"
-            "Return only JSON: "
-            '{"visual_verification":"...", "grid_start":"C4", "grid_end":"E7"}'
+            "你会收到同一语义单元内多个片段的 main_content 草稿，请基于字幕上下文做增量补全。\n"
+            "要求：保持中文 Markdown 结构，不要删除或改写 [KEYFRAME_N] 占位符含义。\n\n"
+            f"[字幕上下文]\n{subtitle_context}\n\n"
+            f"[待补全 main_content]\n{segment_text}\n\n"
+            "请只输出 JSON 数组，每项格式为 "
+            '{"segment_id": <int>, "main_content": "<string>"}'
+            "。\n"
+            "只允许输出以下 segment_id: "
+            f"{valid_segment_ids}"
+        ).strip()
+
+    @staticmethod
+    def _parse_vl_arg_concrete_batch_response(
+        *,
+        text: str,
+        expected_segment_ids: List[int],
+    ) -> Dict[int, str]:
+        expected_ids = {int(item) for item in expected_segment_ids if int(item) > 0}
+        if not expected_ids:
+            return {}
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", raw, flags=re.IGNORECASE)
+        if fenced:
+            raw = str(fenced.group(1) or "").strip()
+        candidates: List[str] = [raw]
+        array_match = re.search(r"\[[\s\S]*\]", raw)
+        if array_match:
+            candidates.append(str(array_match.group(0) or "").strip())
+
+        parsed_items: List[Any] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+            except Exception:
+                continue
+            if isinstance(parsed, list):
+                parsed_items = parsed
+                break
+            if isinstance(parsed, dict):
+                for key in ("segments", "items", "results"):
+                    value = parsed.get(key)
+                    if isinstance(value, list):
+                        parsed_items = value
+                        break
+                if parsed_items:
+                    break
+
+        parsed_by_segment: Dict[int, str] = {}
+        for item in parsed_items:
+            if not isinstance(item, dict):
+                continue
+            segment_id = int(
+                safe_float(
+                    item.get("segment_id", item.get("id", 0)),
+                    0.0,
+                )
+            )
+            if segment_id not in expected_ids:
+                continue
+            main_content = str(item.get("main_content", "") or "").strip()
+            if not main_content:
+                continue
+            parsed_by_segment[segment_id] = main_content
+        return parsed_by_segment
+
+    async def _postprocess_unit_main_content(
+        self,
+        *,
+        analysis_result: Any,
+        semantic_unit: Dict[str, Any],
+        output_dir: str,
+    ) -> None:
+        if not self.vl_arg_postprocess_concrete_enabled:
+            return
+        if not isinstance(semantic_unit, dict):
+            return
+        if str(getattr(analysis_result, "analysis_mode", "") or "").strip().lower() != "concrete":
+            return
+
+        raw_segments = getattr(analysis_result, "raw_response_json", []) or []
+        if not isinstance(raw_segments, list) or not raw_segments:
+            return
+
+        subtitle_context = self._build_vl_arg_subtitle_context(
+            semantic_unit=semantic_unit,
+            output_dir=output_dir,
+        )
+        if not subtitle_context:
+            return
+
+        unit_id = str(semantic_unit.get("unit_id", "") or "").strip() or "UNKNOWN"
+        segment_payloads: List[Dict[str, Any]] = []
+        for index, raw_segment in enumerate(raw_segments, start=1):
+            if not isinstance(raw_segment, dict):
+                continue
+            segment_id = int(
+                safe_float(
+                    raw_segment.get("segment_id", raw_segment.get("id", index)),
+                    float(index),
+                )
+            )
+            if segment_id <= 0:
+                segment_id = index
+            main_content = self._strip_markdown_fence(
+                str(raw_segment.get("main_content", "") or "")
+            )
+            main_content = main_content.strip()
+            if not main_content:
+                continue
+            if len(main_content) > self.vl_arg_postprocess_max_main_content_chars:
+                main_content = (
+                    main_content[: self.vl_arg_postprocess_max_main_content_chars].rstrip() + "..."
+                )
+            segment_payloads.append(
+                {
+                    "segment_id": segment_id,
+                    "main_content": main_content,
+                    "raw_segment": raw_segment,
+                }
+            )
+        if not segment_payloads:
+            return
+
+        prompt = self._render_vl_arg_concrete_batch_prompt(
+            segment_payloads=segment_payloads,
+            subtitle_context=subtitle_context,
+        )
+        if not prompt:
+            return
+
+        segment_ids = [int(item.get("segment_id", 0)) for item in segment_payloads]
+        try:
+            enhanced_text, _metadata, _logprobs = await llm_gateway.deepseek_complete_text(
+                prompt=prompt,
+                system_message=(
+                    "你是视频图文讲义补全助手。"
+                    "请基于字幕上下文增量补全 main_content，并保持 KEYFRAME 占位符映射一致。"
+                    "只返回 JSON 数组。"
+                ),
+                model=self.vl_arg_postprocess_model,
+                hedge_context={
+                    "semantic_unit_id": unit_id,
+                    "segment_ids": segment_ids,
+                    "stage": "vl_arg_main_content_postprocess_batch",
+                },
+            )
+        except Exception as error:
+            logger.warning(
+                "[VL-Arg] concrete main_content postprocess failed: unit=%s, segment_ids=%s, error=%s",
+                unit_id,
+                segment_ids,
+                error,
+            )
+            return
+
+        enhanced_by_segment = self._parse_vl_arg_concrete_batch_response(
+            text=str(enhanced_text or ""),
+            expected_segment_ids=segment_ids,
+        )
+        if not enhanced_by_segment:
+            logger.warning(
+                "[VL-Arg] concrete main_content parse failed: unit=%s, segment_ids=%s, response_preview=%s",
+                unit_id,
+                segment_ids,
+                str(enhanced_text or "")[:240],
+            )
+            return
+
+        updated_segments = 0
+        for payload in segment_payloads:
+            segment_id = int(payload.get("segment_id", 0))
+            if segment_id <= 0:
+                continue
+            raw_segment = payload.get("raw_segment")
+            normalized_enhanced = self._strip_markdown_fence(
+                str(enhanced_by_segment.get(segment_id, "") or "")
+            ).strip()
+            if not normalized_enhanced:
+                continue
+            if isinstance(raw_segment, dict):
+                raw_segment["main_content"] = normalized_enhanced
+            updated_segments += 1
+
+        if updated_segments > 0:
+            logger.info(
+                "[VL-Arg] concrete main_content postprocess done: unit=%s, updated_segments=%s",
+                unit_id,
+                updated_segments,
+            )
+
+    @staticmethod
+    def _get_default_grid_spatial_anchor_prompt() -> str:
+        return _load_package_prompt_default(
+            _DEFAULT_GRID_SPATIAL_ANCHOR_REL_PATH,
+            fallback=(
+                "You are a visual anchoring assistant.\n"
+                "Locate the target area on this grid-overlaid image.\n"
+                "target_text={target_text}\n"
+                "target_ui_type={target_ui_type}\n"
+                "target_relative_position={target_relative_position}\n"
+                "Return only JSON: "
+                '{"visual_verification":"...", "grid_start":"C4", "grid_end":"E7"}'
+            ),
         )
 
     def _render_grid_anchor_prompt(
@@ -2028,6 +2504,42 @@ class VLMaterialGenerator:
             iframe_search_window_sec=self.tutorial_keyframe_iframe_search_window_sec,
             select_sharpest_iframe=self.tutorial_keyframe_select_sharpest_iframe,
         )
+
+    async def _export_keyframes_with_ffmpeg_batch(
+        self,
+        video_path: str,
+        keyframe_jobs: List[Dict[str, Any]],
+    ) -> List[bool]:
+        if not keyframe_jobs:
+            return []
+
+        keyframes: List[Tuple[float, Path]] = []
+        index_map: List[int] = []
+        for index, key_job in enumerate(keyframe_jobs):
+            output_path = key_job.get("output_path")
+            if not output_path:
+                continue
+            keyframes.append(
+                (
+                    safe_float(key_job.get("timestamp_sec", 0.0), 0.0),
+                    Path(output_path),
+                )
+            )
+            index_map.append(index)
+
+        results = [False for _ in keyframe_jobs]
+        if not keyframes:
+            return results
+
+        batch_results = await export_keyframes_with_ffmpeg_batch(
+            video_path=video_path,
+            keyframes=keyframes,
+            logger=logger,
+        )
+        for relative_index, source_index in enumerate(index_map):
+            if relative_index < len(batch_results):
+                results[source_index] = bool(batch_results[relative_index])
+        return results
 
     async def _save_tutorial_assets_for_unit(
         self,
@@ -2428,25 +2940,74 @@ class VLMaterialGenerator:
                 logger.warning(f"[VL-Tutorial] step clip export exception: unit={unit_id}, step={job.get('step_index')}, err={error}")
                 clip_ok = False
 
-            keyframe_tasks: List[asyncio.Task] = []
-            for key_job in job.get("keyframe_jobs", []):
-                keyframe_tasks.append(
-                    asyncio.create_task(
-                        _run_limited(
-                            self._export_keyframe_with_ffmpeg(
-                                video_path=video_path,
-                                timestamp_sec=float(key_job.get("timestamp_sec", 0.0)),
-                                output_path=key_job["output_path"],
+            keyframe_jobs = list(job.get("keyframe_jobs", []) or [])
+            keyframe_results: List[Any] = []
+            used_batch_export = False
+            keyframe_export_t0 = time.perf_counter()
+            can_batch_export = (
+                len(keyframe_jobs) > 1
+                and not bool(self.tutorial_keyframe_select_sharpest_iframe)
+                and float(self.tutorial_keyframe_iframe_search_window_sec) <= 0.0
+            )
+            if keyframe_jobs and can_batch_export:
+                try:
+                    keyframe_results = await _run_limited(
+                        self._export_keyframes_with_ffmpeg_batch(
+                            video_path=video_path,
+                            keyframe_jobs=keyframe_jobs,
+                        )
+                    )
+                    used_batch_export = len(keyframe_results) == len(keyframe_jobs)
+                    if not used_batch_export:
+                        logger.warning(
+                            "[VL-Tutorial] keyframe batch export size mismatch: unit=%s step=%s jobs=%s results=%s",
+                            unit_id,
+                            job.get("step_index"),
+                            len(keyframe_jobs),
+                            len(keyframe_results),
+                        )
+                        keyframe_results = []
+                except Exception as error:
+                    logger.warning(
+                        "[VL-Tutorial] keyframe batch export exception: unit=%s step=%s err=%s",
+                        unit_id,
+                        job.get("step_index"),
+                        error,
+                    )
+                    keyframe_results = []
+
+            if keyframe_jobs and not used_batch_export:
+                keyframe_tasks: List[asyncio.Task] = []
+                for key_job in keyframe_jobs:
+                    keyframe_tasks.append(
+                        asyncio.create_task(
+                            _run_limited(
+                                self._export_keyframe_with_ffmpeg(
+                                    video_path=video_path,
+                                    timestamp_sec=float(key_job.get("timestamp_sec", 0.0)),
+                                    output_path=key_job["output_path"],
+                                )
                             )
                         )
                     )
+                keyframe_results = await asyncio.gather(*keyframe_tasks, return_exceptions=True)
+
+            if keyframe_jobs:
+                keyframe_ok_count = sum(1 for item in keyframe_results if not isinstance(item, Exception) and bool(item))
+                logger.info(
+                    "[VL-Tutorial] keyframe export summary: unit=%s step=%s total=%s ok=%s batch=%s ms=%.1f",
+                    unit_id,
+                    job.get("step_index"),
+                    len(keyframe_jobs),
+                    keyframe_ok_count,
+                    used_batch_export,
+                    (time.perf_counter() - keyframe_export_t0) * 1000.0,
                 )
 
             keyframe_files: List[str] = []
             keyframe_details: List[Dict[str, Any]] = []
-            if keyframe_tasks:
-                keyframe_results = await asyncio.gather(*keyframe_tasks, return_exceptions=True)
-                for key_job, key_result in zip(job.get("keyframe_jobs", []), keyframe_results):
+            if keyframe_results:
+                for key_job, key_result in zip(keyframe_jobs, keyframe_results):
                     if isinstance(key_result, Exception):
                         logger.warning(
                             f"[VL-Tutorial] keyframe export exception: unit={unit_id}, step={job.get('step_index')}, "
@@ -2459,12 +3020,23 @@ class VLMaterialGenerator:
                         target_ui_type = str(key_job.get("target_ui_type", "") or "").strip()
                         target_text = str(key_job.get("target_text", "") or "").strip()
                         target_relative_position = str(key_job.get("target_relative_position", "") or "").strip()
+                        keyframe_post_t0 = time.perf_counter()
                         grid_anchor_meta = await self._apply_grid_anchor_crop_for_keyframe(
                             keyframe_path=key_path,
                             target_text=target_text,
                             target_ui_type=target_ui_type,
                             target_relative_position=target_relative_position,
                         )
+                        keyframe_post_ms = (time.perf_counter() - keyframe_post_t0) * 1000.0
+                        if keyframe_post_ms >= 200.0:
+                            logger.info(
+                                "[VL-Tutorial] keyframe postprocess slow: unit=%s step=%s file=%s ms=%.1f status=%s",
+                                unit_id,
+                                job.get("step_index"),
+                                key_name,
+                                keyframe_post_ms,
+                                str((grid_anchor_meta or {}).get("grid_anchor_status", "")),
+                            )
                         keyframe_files.append(key_name)
                         key_detail: Dict[str, Any] = {
                             "image_file": key_name,
@@ -3701,6 +4273,251 @@ class VLMaterialGenerator:
         )
         return True
 
+    async def _consume_unit_analysis_result_streaming(
+        self,
+        *,
+        result_index: int,
+        analysis_result: Any,
+        meta: Dict[str, Any],
+        legacy_fallback_materials: Dict[str, LegacyFallbackMaterial],
+        all_clip_requests: List[Dict[str, Any]],
+        all_screenshot_requests: List[Dict[str, Any]],
+        token_stats: Dict[str, Any],
+        resolved_output_dir: str,
+        original_video_path: str,
+    ) -> None:
+        unit_id = meta.get("unit_id", f"task_{result_index}")
+
+        if isinstance(analysis_result, Exception):
+            logger.warning(f"语义单元 {unit_id} VL 分析异常: {analysis_result}")
+            self._apply_legacy_fallback_material_if_exists(
+                unit_id=unit_id,
+                fallback_store=legacy_fallback_materials,
+                all_clip_requests=all_clip_requests,
+                all_screenshot_requests=all_screenshot_requests,
+                reason="exception",
+            )
+            return
+
+        if not bool(getattr(analysis_result, "success", False)):
+            logger.warning(
+                f"语义单元 {unit_id} VL 分析失败: {getattr(analysis_result, 'error_msg', '')}"
+            )
+            self._apply_legacy_fallback_material_if_exists(
+                unit_id=unit_id,
+                fallback_store=legacy_fallback_materials,
+                all_clip_requests=all_clip_requests,
+                all_screenshot_requests=all_screenshot_requests,
+                reason="failure",
+            )
+            return
+
+        await self._postprocess_unit_main_operations(
+            analysis_result=analysis_result,
+            semantic_unit=meta.get("semantic_unit", {}),
+            output_dir=resolved_output_dir,
+        )
+        await self._postprocess_unit_main_content(
+            analysis_result=analysis_result,
+            semantic_unit=meta.get("semantic_unit", {}),
+            output_dir=resolved_output_dir,
+        )
+        semantic_unit = meta.get("semantic_unit", {})
+        should_type_override = self._analysis_result_should_type_override(analysis_result)
+        has_no_needed_video = self._analysis_result_has_no_needed_video(analysis_result)
+        if has_no_needed_video:
+            should_type_override = "abstract"
+            token_stats["no_needed_video_units"] += 1
+
+        if should_type_override == "abstract":
+            if not has_no_needed_video:
+                token_stats["should_type_abstract_units"] += 1
+            self._mark_semantic_unit_knowledge_type(
+                semantic_unit,
+                knowledge_type="abstract",
+                reason="vl_no_needed_video_true" if has_no_needed_video else "vl_should_type_abstract",
+                no_needed_video=has_no_needed_video,
+            )
+            analysis_result.clip_requests = []
+            analysis_result.screenshot_requests = []
+            for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
+                try:
+                    parsed_item.knowledge_type = "abstract"
+                    parsed_item.no_needed_video = has_no_needed_video
+                    parsed_item.should_type = "abstract"
+                except Exception:
+                    continue
+            logger.info(
+                "[VL] unit=%s routed as abstract (no_needed_video/should_type); skip clip/screenshot generation",
+                unit_id,
+            )
+        elif should_type_override == "concrete":
+            token_stats["should_type_concrete_units"] += 1
+            self._mark_semantic_unit_knowledge_type(
+                semantic_unit,
+                knowledge_type="concrete",
+                reason="vl_should_type_concrete",
+                no_needed_video=False,
+            )
+            analysis_result.clip_requests = []
+            for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
+                try:
+                    parsed_item.knowledge_type = "concrete"
+                    parsed_item.no_needed_video = False
+                    parsed_item.should_type = "concrete"
+                except Exception:
+                    continue
+            logger.info(
+                "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
+                unit_id,
+            )
+
+        usage = getattr(analysis_result, "token_usage", {}) or {}
+        prompt_actual = int(usage.get("prompt_tokens", 0) or 0)
+        completion_actual = int(usage.get("completion_tokens", 0) or 0)
+        total_actual = int(usage.get("total_tokens", prompt_actual + completion_actual) or 0)
+        token_stats["prompt_tokens_actual"] += prompt_actual
+        token_stats["completion_tokens_actual"] += completion_actual
+        token_stats["total_tokens_actual"] += total_actual
+
+        pre_prune_info = meta.get("pre_prune") or {}
+        kept_segments = pre_prune_info.get("kept_segments") or []
+        unit_duration = safe_float(meta.get("unit_duration", 0.0), 0.0)
+        unit_start_sec = safe_float(meta.get("start_sec", 0.0), 0.0)
+        unit_end_sec = safe_float(meta.get("end_sec", unit_start_sec), unit_start_sec)
+        if unit_end_sec < unit_start_sec:
+            unit_end_sec = unit_start_sec
+
+        if pre_prune_info.get("applied") and kept_segments:
+            kept_duration = sum(max(0.0, e - s) for s, e in kept_segments)
+            if kept_duration > 1e-6 and unit_duration > kept_duration:
+                prompt_per_sec = prompt_actual / kept_duration
+                completion_per_sec = completion_actual / kept_duration
+                prompt_base = int(round(prompt_per_sec * unit_duration))
+                completion_base = int(round(completion_per_sec * unit_duration))
+                total_base = prompt_base + completion_base
+            else:
+                prompt_base = prompt_actual
+                completion_base = completion_actual
+                total_base = total_actual
+        else:
+            prompt_base = prompt_actual
+            completion_base = completion_actual
+            total_base = total_actual
+
+        token_stats["prompt_tokens_baseline_est"] += max(0, prompt_base)
+        token_stats["completion_tokens_baseline_est"] += max(0, completion_base)
+        token_stats["total_tokens_baseline_est"] += max(0, total_base)
+
+        if pre_prune_info.get("applied") and kept_segments:
+            for clip_item in analysis_result.clip_requests:
+                rel_start = safe_float(clip_item.get("start_sec", unit_start_sec), unit_start_sec) - unit_start_sec
+                rel_end = safe_float(clip_item.get("end_sec", unit_start_sec), unit_start_sec) - unit_start_sec
+
+                mapped_rel_segments = self._map_pruned_interval_to_original_segments(
+                    rel_start=rel_start,
+                    rel_end=rel_end,
+                    kept_segments=kept_segments,
+                )
+                abs_segments: List[Dict[str, float]] = []
+                for seg_rel_start, seg_rel_end in mapped_rel_segments:
+                    abs_seg_start = unit_start_sec + seg_rel_start
+                    abs_seg_end = unit_start_sec + seg_rel_end
+                    abs_seg_start = max(unit_start_sec, min(abs_seg_start, unit_end_sec))
+                    abs_seg_end = max(unit_start_sec, min(abs_seg_end, unit_end_sec))
+                    if abs_seg_end - abs_seg_start > 1e-6:
+                        abs_segments.append({
+                            "start_sec": abs_seg_start,
+                            "end_sec": abs_seg_end,
+                        })
+
+                if abs_segments:
+                    abs_start = min(seg["start_sec"] for seg in abs_segments)
+                    abs_end = max(seg["end_sec"] for seg in abs_segments)
+                else:
+                    mapped_rel_start = self._map_pruned_relative_to_original(rel_start, kept_segments)
+                    mapped_rel_end = self._map_pruned_relative_to_original(rel_end, kept_segments)
+                    abs_start = unit_start_sec + mapped_rel_start
+                    abs_end = unit_start_sec + mapped_rel_end
+                    abs_start = max(unit_start_sec, min(abs_start, unit_end_sec))
+                    abs_end = max(unit_start_sec, min(abs_end, unit_end_sec))
+
+                if abs_end < abs_start:
+                    abs_start, abs_end = abs_end, abs_start
+                clip_item["start_sec"] = abs_start
+                clip_item["end_sec"] = abs_end
+                clip_item["segments"] = abs_segments
+
+            for ss_item in analysis_result.screenshot_requests:
+                rel_ts = safe_float(ss_item.get("_relative_timestamp", 0.0), 0.0)
+                mapped_rel_ts = self._map_pruned_relative_to_original(rel_ts, kept_segments)
+                mapped_abs_ts = unit_start_sec + mapped_rel_ts
+                mapped_abs_ts = max(unit_start_sec, min(mapped_abs_ts, unit_end_sec))
+                ss_item["timestamp_sec"] = mapped_abs_ts
+                ss_item["_relative_timestamp"] = mapped_rel_ts
+                ss_item["_pre_pruned"] = True
+        elif pre_prune_info.get("applied"):
+            logger.warning(f"[VL-PrePrune] unit={unit_id} applied but no kept_segments, skip remap")
+
+        for clip_item in analysis_result.clip_requests:
+            clip_start = safe_float(clip_item.get("start_sec", unit_start_sec), unit_start_sec)
+            clip_end = safe_float(clip_item.get("end_sec", unit_start_sec), unit_start_sec)
+            clip_start = max(unit_start_sec, min(clip_start, unit_end_sec))
+            clip_end = max(unit_start_sec, min(clip_end, unit_end_sec))
+            if clip_end < clip_start:
+                clip_start, clip_end = clip_end, clip_start
+            clip_item["start_sec"] = clip_start
+            clip_item["end_sec"] = clip_end
+
+        for ss_item in analysis_result.screenshot_requests:
+            abs_ts = safe_float(ss_item.get("timestamp_sec", unit_start_sec), unit_start_sec)
+            abs_ts = max(unit_start_sec, min(abs_ts, unit_end_sec))
+            ss_item["timestamp_sec"] = abs_ts
+
+        if str(meta.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise":
+            export_from_original = bool(
+                self.tutorial_export_from_original_clip_when_prepruned
+                and pre_prune_info.get("applied")
+                and kept_segments
+            )
+            if export_from_original:
+                tutorial_asset_video_path = str(
+                    meta.get("clip_path")
+                    or meta.get("vl_clip_path")
+                    or original_video_path
+                ).strip() or original_video_path
+                use_relative_ts_for_export = False
+                prefer_screenshot_keyframes = True
+            else:
+                tutorial_asset_video_path = str(
+                    meta.get("vl_clip_path")
+                    or meta.get("clip_path")
+                    or original_video_path
+                ).strip() or original_video_path
+                use_relative_ts_for_export = True
+                prefer_screenshot_keyframes = False
+            await self._save_tutorial_assets_for_unit(
+                video_path=tutorial_asset_video_path,
+                output_dir=resolved_output_dir,
+                unit_id=unit_id,
+                clip_requests=analysis_result.clip_requests,
+                screenshot_requests=analysis_result.screenshot_requests,
+                raw_response_json=getattr(analysis_result, "raw_response_json", []) or [],
+                raw_llm_interactions=getattr(analysis_result, "raw_llm_interactions", []) or [],
+                use_analysis_relative_timestamps=use_relative_ts_for_export,
+                prefer_screenshot_requests_keyframes=prefer_screenshot_keyframes,
+            )
+
+        all_clip_requests.extend(analysis_result.clip_requests)
+        all_screenshot_requests.extend(analysis_result.screenshot_requests)
+        logger.info(
+            "[VL-Streaming] unit consumed: unit=%s, idx=%s, total_clips=%s, total_screenshots=%s",
+            unit_id,
+            result_index,
+            len(all_clip_requests),
+            len(all_screenshot_requests),
+        )
+
     async def _prepare_legacy_action_dispatch_plan(
         self,
         *,
@@ -4048,6 +4865,7 @@ class VLMaterialGenerator:
         # VL分析结果(来自缓存或新分析)
         all_screenshot_requests = []
         all_clip_requests = []
+        unit_analysis_outputs: List[Dict[str, Any]] = []
 
         # 任务绾?token 统计
         token_stats: Dict[str, Any] = {
@@ -4089,6 +4907,7 @@ class VLMaterialGenerator:
                 logger.info("🚀 使用缓存的VL分析结果,跳过VL API调用")
                 all_screenshot_requests = cached_data.get("aggregated_screenshots", [])
                 all_clip_requests = cached_data.get("aggregated_clips", [])
+                unit_analysis_outputs = list(cached_data.get("analysis_results", []) or [])
                 if self.merge_multistep_clip_requests:
                     all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
                 # ⚠️  不直接返鍥?继续执鐲V优化
@@ -4120,7 +4939,15 @@ class VLMaterialGenerator:
                     duration = max(0.0, end_sec - start_sec)
                     extra_prompt = None
                     analysis_mode = "default"
-                    if self._is_tutorial_process_unit(su, duration):
+                    mode_override = str(
+                        su.get("_vl_analysis_mode_override", su.get("vl_analysis_mode_override", ""))
+                        or ""
+                    ).strip().lower()
+                    if mode_override in {"concrete", "concrete_focus"}:
+                        analysis_mode = "concrete"
+                    elif mode_override in {"tutorial", "tutorial_stepwise"}:
+                        analysis_mode = "tutorial_stepwise"
+                    elif self._is_tutorial_process_unit(su, duration):
                         analysis_mode = "tutorial_stepwise"
                         extra_prompt = self._build_tutorial_extra_prompt()
                     
@@ -4213,15 +5040,40 @@ class VLMaterialGenerator:
                 analysis_results: List[Any] = []
                 task_metadata = []
                 pruned_units = 0
+                streamed_result_indexes: set[int] = set()
+
+                async def _on_stream_result(
+                    result_index: int,
+                    meta: Dict[str, Any],
+                    analysis_result: Any,
+                ) -> None:
+                    if result_index in streamed_result_indexes:
+                        return
+                    await self._consume_unit_analysis_result_streaming(
+                        result_index=result_index,
+                        analysis_result=analysis_result,
+                        meta=meta,
+                        legacy_fallback_materials=legacy_fallback_materials,
+                        all_clip_requests=all_clip_requests,
+                        all_screenshot_requests=all_screenshot_requests,
+                        token_stats=token_stats,
+                        resolved_output_dir=resolved_output_dir,
+                        original_video_path=video_path,
+                    )
+                    streamed_result_indexes.add(result_index)
+
                 if vl_unit_tasks:
                     analysis_results, task_metadata, pruned_units = await self._analyze_unit_tasks_in_parallel(
                         unit_tasks=vl_unit_tasks,
                         pre_prune_results=vl_pre_prune_results,
+                        on_result=_on_stream_result,
                     )
                 token_stats["pruned_units"] += pruned_units
                 
                 # 收集所有成功的分析结果
                 for idx, analysis_result in enumerate(analysis_results):
+                    if idx in streamed_result_indexes:
+                        continue
                     meta = task_metadata[idx] if idx < len(task_metadata) else {}
                     unit_id = meta.get("unit_id", f"task_{idx}")
                     
@@ -4249,6 +5101,11 @@ class VLMaterialGenerator:
                         continue
 
                     await self._postprocess_unit_main_operations(
+                        analysis_result=analysis_result,
+                        semantic_unit=meta.get("semantic_unit", {}),
+                        output_dir=resolved_output_dir,
+                    )
+                    await self._postprocess_unit_main_content(
                         analysis_result=analysis_result,
                         semantic_unit=meta.get("semantic_unit", {}),
                         output_dir=resolved_output_dir,
@@ -4472,6 +5329,10 @@ class VLMaterialGenerator:
                     token_stats.get("saved_tokens_est", 0),
                     float(token_stats.get("saved_ratio_est", 0.0)) * 100.0,
                 )
+                unit_analysis_outputs = self._serialize_unit_analysis_outputs(
+                    analysis_results=analysis_results,
+                    task_metadata=task_metadata,
+                )
                 
                 # 保存VL分析原始结果(CV优化鍓?
                 if self.config.get("save_cache", True):
@@ -4509,6 +5370,7 @@ class VLMaterialGenerator:
             result.clip_requests = all_clip_requests
             result.screenshot_requests = all_screenshot_requests
             result.token_stats = token_stats
+            result.unit_analysis_outputs = unit_analysis_outputs
             result.success = True
             
             logger.info(
@@ -5085,4 +5947,5 @@ class VLMaterialGenerator:
                 return True
         
         return True  # 默认回退
+
 

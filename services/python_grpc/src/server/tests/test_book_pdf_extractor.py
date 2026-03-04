@@ -6,7 +6,9 @@ import fitz
 
 import services.python_grpc.src.server.book_pdf_extractor as extractor_mod
 from services.python_grpc.src.server.book_pdf_extractor import (
+    _build_mineru_page_tasks,
     _build_mineru_runtime_env,
+    _decide_mineru_parallel_workers,
     _discover_mineru_cli,
     _maybe_refine_markdown_with_llm,
     _refill_mineru_code_blocks_with_vector_text,
@@ -42,6 +44,18 @@ def _build_code_pdf(pdf_path: Path) -> None:
         page.insert_text((72, 88), "    if name is None:", fontname="courier", fontsize=11)
         page.insert_text((72, 104), "        return ''", fontname="courier", fontsize=11)
         page.insert_text((72, 120), "    return f\"hi {name}\"", fontname="courier", fontsize=11)
+        doc.save(pdf_path)
+    finally:
+        doc.close()
+
+
+def _build_multi_page_pdf(pdf_path: Path, page_count: int) -> None:
+    doc = fitz.open()
+    try:
+        for page_idx in range(page_count):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"Page {page_idx + 1}")
+            page.insert_text((72, 92), "MinerU task split probe")
         doc.save(pdf_path)
     finally:
         doc.close()
@@ -273,3 +287,50 @@ def test_refill_mineru_code_blocks_with_vector_text(tmp_path: Path) -> None:
     assert "bad ocr text" not in refined
     assert "def hello(name):" in refined
     assert "return f\"hi {name}\"" in refined
+
+
+def test_build_mineru_page_tasks_split_pdf_by_batch_size(tmp_path: Path, monkeypatch) -> None:
+    source_pdf = tmp_path / "full.pdf"
+    _build_multi_page_pdf(source_pdf, page_count=4)
+
+    sliced_pdf = tmp_path / "slice.pdf"
+    extractor_mod._slice_pdf(source_pdf, sliced_pdf, 1, 4)
+    monkeypatch.setenv("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", "2")
+
+    tasks = _build_mineru_page_tasks(
+        sliced_pdf_path=sliced_pdf,
+        output_dir=tmp_path / "out",
+        section_id="sec-1",
+        start_page=1,
+        end_page=4,
+    )
+
+    assert [(start, end) for start, end, _ in tasks] == [(1, 2), (3, 4)]
+    assert all(path.is_file() for _, _, path in tasks)
+    with fitz.open(tasks[0][2]) as first_slice:
+        assert first_slice.page_count == 2
+    with fitz.open(tasks[1][2]) as second_slice:
+        assert second_slice.page_count == 2
+
+
+def test_decide_mineru_parallel_workers_honors_manual_override(monkeypatch) -> None:
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKERS", "6")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_MAX", "8")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_MIN", "1")
+
+    workers = _decide_mineru_parallel_workers(task_count=4)
+    assert workers == 4
+
+
+def test_decide_mineru_parallel_workers_limited_by_memory(monkeypatch) -> None:
+    monkeypatch.delenv("BOOK_PDF_MINERU_WORKERS", raising=False)
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_MAX", "12")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_MIN", "1")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_CPU_DIVISOR", "2")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_RESERVED_RAM_GB", "1.0")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_RAM_PER_GB", "1.0")
+    monkeypatch.setattr(extractor_mod.os, "cpu_count", lambda: 16)
+    monkeypatch.setattr(extractor_mod, "_read_available_memory_gb", lambda: 3.6)
+
+    workers = _decide_mineru_parallel_workers(task_count=10)
+    assert workers == 2

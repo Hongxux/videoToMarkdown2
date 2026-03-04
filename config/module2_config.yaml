@@ -316,7 +316,7 @@ vl_material_generation:
   api:
     provider: "dashscope"
     base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    model: "qwen-vl-max-2025-08-13"
+    model: "qwen-vl-max-latest"
     # 鉴权：优先读取 api_key，其次兼容 bearer_token；两者都支持环境变量注入
     bearer_token: ""
     bearer_token_env: ""
@@ -334,7 +334,7 @@ vl_material_generation:
     # data_uri: 强制使用 data-uri (仅适用小文件)
     # dashscope_upload: 强制使用 DashScope File.upload
     # keyframes: 强制使用关键帧抽取（跨平台兜底）
-    video_input_mode: "auto"
+    video_input_mode: "dashscope_upload"
     
     # 关键帧降级参数 (当视频过大无法直接传输时)
     max_input_frames: 6  # 最多抽取6帧

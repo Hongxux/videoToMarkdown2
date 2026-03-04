@@ -29,7 +29,7 @@ import httpx
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
@@ -46,7 +46,8 @@ logger = logging.getLogger(__name__)
 
 _DASHSCOPE_DATA_URI_ITEM_MAX_BYTES = 10 * 1024 * 1024  # 来自 DashScope 400 错误信息
 _DATA_URI_SAFETY_RATIO = 0.90  # 留出协议/编码冗余，避免卡边界导致 400
-_MAX_RAW_BYTES_FOR_BASE64_DATA_URI = int(_DASHSCOPE_DATA_URI_ITEM_MAX_BYTES * 3 / 4 * _DATA_URI_SAFETY_RATIO)
+# 按用户要求放宽 base64 视频回退阈值到 1GB。
+_MAX_RAW_BYTES_FOR_BASE64_DATA_URI = 1024 * 1024 * 1024
 
 
 @dataclass
@@ -110,7 +111,7 @@ class VLVideoAnalyzer:
         self.base_url = str(
             api_config.get("base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1") or ""
         ).strip()
-        default_model = "ernie-4.5-turbo-vl-32k" if self._is_qianfan_endpoint(self.base_url) else "qwen-vl-max-2025-08-13"
+        default_model = "ernie-4.5-turbo-vl-32k" if self._is_qianfan_endpoint(self.base_url) else "qwen-vl-max-latest"
         self.model = str(api_config.get("model", default_model) or "").strip()
         self.provider = str(api_config.get("provider", "") or "").strip().lower()
 
@@ -194,6 +195,10 @@ class VLVideoAnalyzer:
             PromptKeys.VL_VIDEO_ANALYSIS_TUTORIAL_SYSTEM,
             fallback=self._get_tutorial_system_prompt(),
         )
+        self._concrete_system_prompt = get_prompt(
+            PromptKeys.VL_VIDEO_ANALYSIS_CONCRETE_SYSTEM,
+            fallback=self._get_concrete_system_prompt(),
+        )
         self._constraints_default = get_prompt(
             PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_DEFAULT,
             fallback=self._get_builtin_output_constraints_default(),
@@ -201,6 +206,10 @@ class VLVideoAnalyzer:
         self._constraints_tutorial = get_prompt(
             PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_TUTORIAL,
             fallback=self._get_builtin_output_constraints_tutorial(),
+        )
+        self._constraints_concrete = get_prompt(
+            PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_CONCRETE,
+            fallback=self._get_builtin_output_constraints_concrete(),
         )
 
         # Tutorial mode settings for long multi-step process units
@@ -221,6 +230,63 @@ class VLVideoAnalyzer:
     def _is_qianfan_endpoint(base_url: str) -> bool:
         normalized = str(base_url or "").strip().lower()
         return "qianfan.baidubce.com" in normalized or "aistudio.baidu.com" in normalized
+
+    @staticmethod
+    def _safe_json_preview(value: Any, max_len: int = 1200) -> str:
+        try:
+            text = json.dumps(value, ensure_ascii=False, default=str)
+        except Exception:
+            text = str(value)
+        if len(text) > max_len:
+            return text[:max_len] + "...(truncated)"
+        return text
+
+    def _format_exception_detail(self, error: BaseException, *, max_depth: int = 4) -> str:
+        if error is None:
+            return "unknown_error"
+
+        details: List[str] = []
+        seen: set[int] = set()
+        current: Optional[BaseException] = error
+        depth = 0
+        while current is not None and depth < max_depth and id(current) not in seen:
+            seen.add(id(current))
+            line = f"{type(current).__name__}: {current}"
+
+            status_code = getattr(current, "status_code", None)
+            if status_code is not None:
+                line += f" [status_code={status_code}]"
+
+            request_id = getattr(current, "request_id", None)
+            if request_id:
+                line += f" [request_id={request_id}]"
+
+            body = getattr(current, "body", None)
+            if body not in (None, ""):
+                line += f" [body={self._safe_json_preview(body)}]"
+
+            response = getattr(current, "response", None)
+            response_text: Any = None
+            if response is not None:
+                if isinstance(response, dict):
+                    response_text = response.get("text") or response.get("body") or response.get("content")
+                else:
+                    response_text = getattr(response, "text", None)
+                    if response_text is None:
+                        response_text = getattr(response, "content", None)
+            if response_text not in (None, "", b""):
+                if isinstance(response_text, (bytes, bytearray)):
+                    try:
+                        response_text = response_text.decode("utf-8", errors="replace")
+                    except Exception:
+                        response_text = str(response_text)
+                line += f" [response={self._safe_json_preview(str(response_text))}]"
+
+            details.append(line.strip())
+            current = current.__cause__ or current.__context__
+            depth += 1
+
+        return " | caused_by=".join(details) if details else str(error)
 
     def __del__(self):
         """析构时确保资源释放 (注意: 在异步环境中，建议显式调用 close)"""
@@ -244,6 +310,8 @@ class VLVideoAnalyzer:
         mode = str(analysis_mode or "default").strip().lower()
         if mode in {"tutorial", "tutorial_stepwise", "teaching"}:
             return "tutorial_stepwise"
+        if mode in {"concrete", "concrete_focus"}:
+            return "concrete"
         return "default"
 
     def _normalize_step_type(self, value: Any) -> str:
@@ -352,11 +420,29 @@ class VLVideoAnalyzer:
             )
         )
 
+    @staticmethod
+    def _get_builtin_output_constraints_concrete() -> str:
+        return (
+            "\n\n"
+            "[Hard Constraints - Concrete Mode]\n"
+            "1) Output exactly one valid JSON array. No markdown fences and no extra text.\n"
+            "2) Each array item must include: segment_id (Integer), segment_description (String), main_content (String), "
+            "clip_start_sec (Float), clip_end_sec (Float), instructional_keyframes (List[Object]).\n"
+            "3) instructional_keyframes item fields: timestamp_sec (Float), frame_reason (String), "
+            "optional target_ui_type (String), optional target_text (String), "
+            "optional target_relative_position (String), optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
+            "4) Keep all textual fields in Chinese. Do not output reasoning/key_evidence/step_type.\n"
+            "5) main_content must be markdown and use [KEYFRAME_N] placeholders aligned with instructional_keyframes.\n"
+            "6) Use relative clip timestamps (from 0.0). Do not output -1.\n"
+        )
+
     def _get_output_constraints(self, analysis_mode: str = "default") -> str:
         """获取当前分析模式的输出约束提示词。"""
         mode = self._normalize_analysis_mode(analysis_mode)
         if mode == "tutorial_stepwise":
             return getattr(self, "_constraints_tutorial", "") or self._get_builtin_output_constraints_tutorial()
+        if mode == "concrete":
+            return getattr(self, "_constraints_concrete", "") or self._get_builtin_output_constraints_concrete()
         return getattr(self, "_constraints_default", "") or self._get_builtin_output_constraints_default()
 
     def _load_prompt_template(self) -> str:
@@ -542,7 +628,7 @@ class VLVideoAnalyzer:
                     if route_override == "abstract":
                         continue
                     k_type = str(ar.knowledge_type or "").strip("[]() \"'").lower()
-                    should_build_clip = route_override != "concrete"
+                    should_build_clip = normalized_mode != "concrete" and route_override != "concrete"
                     if should_build_clip and k_type not in {"\u8bb2\u89e3\u578b", "explanation", "abstract_explanation"}:
                         default_clip_stem = f"{semantic_unit_id}_clip_vl_{i + 1:03d}"
                         result.clip_requests.append({
@@ -582,8 +668,14 @@ class VLVideoAnalyzer:
                             f"{semantic_unit_id}_ss_step_{step_id:02d}_key_{j + 1:02d}_{action_brief}",
                         )
                         label = f"step_{step_id:02d}:{ar.step_description or action_brief}_keyframe_{j+1}"
-                        if j < len(ar.instructional_keyframes or []):
-                            keyframe_meta = dict(ar.instructional_keyframes[j] or {})
+                    elif normalized_mode == "concrete":
+                        screenshot_id = self._build_unit_relative_asset_id(
+                            semantic_unit_id,
+                            f"{semantic_unit_id}_ss_concrete_seg_{step_id:02d}_key_{j + 1:02d}",
+                        )
+                        label = f"concrete_segment_{step_id:02d}_keyframe_{j+1}"
+                    if j < len(ar.instructional_keyframes or []):
+                        keyframe_meta = dict(ar.instructional_keyframes[j] or {})
 
                     result.screenshot_requests.append({
                         "screenshot_id": screenshot_id,
@@ -618,9 +710,10 @@ class VLVideoAnalyzer:
             )
 
         except Exception as e:
-            logger.error(f"VL analysis failed ({semantic_unit_id}): {e}")
+            error_detail = self._format_exception_detail(e)
+            logger.error(f"VL analysis failed ({semantic_unit_id}): {error_detail}", exc_info=True)
             result.success = False
-            result.error_msg = str(e)
+            result.error_msg = error_detail
             result.raw_llm_interactions = list(getattr(e, "_raw_llm_interactions", []) or [])
 
         return result
@@ -631,6 +724,7 @@ class VLVideoAnalyzer:
         tasks: List[Dict[str, Any]],
         max_inflight: Optional[int] = None,
         return_exceptions: bool = True,
+        result_callback: Optional[Callable[[int, Any], Awaitable[None] | None]] = None,
     ) -> List[Any]:
         """批量分析多个视频片段，按输入顺序返回结果。"""
         if not tasks:
@@ -646,10 +740,10 @@ class VLVideoAnalyzer:
         semaphore = asyncio.Semaphore(resolved_inflight)
         ordered_results: List[Any] = [None] * len(tasks)
 
-        async def _run_single(index: int, task: Dict[str, Any]) -> None:
+        async def _run_single(index: int, task: Dict[str, Any]) -> tuple[int, Any]:
             async with semaphore:
                 try:
-                    ordered_results[index] = await self.analyze_clip(
+                    result_item = await self.analyze_clip(
                         clip_path=str(task.get("clip_path", "") or ""),
                         semantic_unit_start_sec=float(task.get("semantic_unit_start_sec", 0.0) or 0.0),
                         semantic_unit_id=str(task.get("semantic_unit_id", "") or ""),
@@ -658,11 +752,27 @@ class VLVideoAnalyzer:
                     )
                 except Exception as exc:
                     if return_exceptions:
-                        ordered_results[index] = exc
+                        result_item = exc
                     else:
                         raise
+            return index, result_item
 
-        await asyncio.gather(*[_run_single(index, task) for index, task in enumerate(tasks)])
+        inflight_tasks = [
+            asyncio.create_task(_run_single(index, task))
+            for index, task in enumerate(tasks)
+        ]
+        try:
+            for done_task in asyncio.as_completed(inflight_tasks):
+                index, result_item = await done_task
+                ordered_results[index] = result_item
+                if result_callback is not None:
+                    callback_result = result_callback(index, result_item)
+                    if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                        await callback_result
+        finally:
+            for task in inflight_tasks:
+                if not task.done():
+                    task.cancel()
 
         if return_exceptions:
             return [item if item is not None else RuntimeError("empty_batch_result") for item in ordered_results]
@@ -961,6 +1071,11 @@ class VLVideoAnalyzer:
                 return parsed_results, token_usage, raw_json, raw_interactions
 
             except Exception as e:
+                err_detail = self._format_exception_detail(e)
+                try:
+                    setattr(e, "_display_error_detail", err_detail)
+                except Exception:
+                    pass
                 last_error = e
                 raw_interactions.append(
                     {
@@ -976,13 +1091,17 @@ class VLVideoAnalyzer:
                             "video_path": str(video_path or ""),
                             "messages": request_messages_audit,
                         },
-                        "error": str(e),
+                        "error": err_detail,
+                        "error_raw": str(e),
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     }
                 )
                 if attempt < self.max_retries:
                     wait_time = 2 ** attempt
-                    logger.warning(f"VL API call failed (attempt {attempt+1}/{self.max_retries+1}): {e}, wait {wait_time}s")
+                    logger.warning(
+                        f"VL API call failed (attempt {attempt+1}/{self.max_retries+1}): "
+                        f"{err_detail}, wait {wait_time}s"
+                    )
 
                     # 若解析失败，附加更严格约束以提升下次 JSON 成功率。
                     err_str = str(e).lower()
@@ -999,6 +1118,8 @@ class VLVideoAnalyzer:
                     await asyncio.sleep(wait_time)
         if last_error is not None:
             setattr(last_error, "_raw_llm_interactions", raw_interactions)
+            if not getattr(last_error, "_display_error_detail", None):
+                setattr(last_error, "_display_error_detail", self._format_exception_detail(last_error))
         raise last_error
 
     def _get_tutorial_system_prompt(self) -> str:
@@ -1027,6 +1148,17 @@ class VLVideoAnalyzer:
             + self._build_route_rules_en(subject="the step")
         )
 
+    def _get_concrete_system_prompt(self) -> str:
+        if hasattr(self, "_concrete_system_prompt") and self._concrete_system_prompt:
+            return self._concrete_system_prompt
+        return (
+            "You are a concrete-knowledge video analyst.\n"
+            "Focus on extracting visually grounded content and precise keyframe timestamps.\n"
+            "For each segment, provide: segment_id, segment_description, main_content, clip_start_sec, clip_end_sec, instructional_keyframes.\n"
+            "main_content must be markdown in Chinese and include [KEYFRAME_N] placeholders aligned with instructional_keyframes.\n"
+            "Do not output reasoning or extra narration outside JSON.\n"
+        )
+
     async def _build_messages(
         self,
         video_path: str,
@@ -1049,6 +1181,12 @@ class VLVideoAnalyzer:
                 self._get_tutorial_system_prompt()
                 + self._get_output_constraints(normalized_mode)
                 + "\n\n[Task] Split the procedural clip into steps and output stepwise JSON only."
+            )
+        elif normalized_mode == "concrete":
+            system_content = (
+                self._get_concrete_system_prompt()
+                + self._get_output_constraints(normalized_mode)
+                + "\n\n[Task] Analyze concrete visual segments and output JSON only."
             )
         else:
             system_content = (
@@ -1087,8 +1225,20 @@ class VLVideoAnalyzer:
                 ]
 
         # 2) DashScope File.upload 获取临时 URL（需要 dashscope SDK）
+        dashscope_upload_error_detail = ""
         if can_use_dashscope_inline and mode in ("auto", "dashscope_upload"):
-            temp_url = await self._try_get_dashscope_temp_url(video_path)
+            try:
+                temp_url = await self._try_get_dashscope_temp_url(
+                    video_path,
+                    raise_on_failure=False,
+                )
+            except Exception as upload_error:
+                temp_url = None
+                dashscope_upload_error_detail = self._format_exception_detail(upload_error)
+                logger.warning(
+                    "DashScope SDK upload failed, fallback strategy will continue: %s",
+                    dashscope_upload_error_detail,
+                )
             if temp_url:
                 return [
                     {"role": "system", "content": system_content},
@@ -1097,9 +1247,34 @@ class VLVideoAnalyzer:
                         {"type": "text", "text": user_text},
                     ]}
                 ]
+        if mode == "dashscope_upload":
+            if not can_use_dashscope_inline:
+                raise RuntimeError(
+                    f"dashscope_upload mode requires DashScope endpoint, current base_url={self.base_url}"
+                )
 
-        if mode == "dashscope_upload" and not can_use_dashscope_inline:
-            logger.warning("当前 base_url 非 DashScope，跳过 dashscope_upload 模式并降级为关键帧")
+            # DashScope SDK 本地路径直传失败时，退化为 base64 直传
+            if video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
+                video_base64 = self._encode_video_base64(video_path)
+                if video_base64:
+                    return [
+                        {"role": "system", "content": system_content},
+                        {"role": "user", "content": [
+                            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_base64}"}},
+                            {"type": "text", "text": user_text},
+                        ]}
+                    ]
+                raise RuntimeError(
+                    "DashScope SDK upload failed and base64 encode failed: "
+                    f"video_path={video_path}, upload_error={dashscope_upload_error_detail or 'unknown'}"
+                )
+
+            raise RuntimeError(
+                "DashScope SDK upload failed and file is too large for base64 data-uri fallback: "
+                f"video_path={video_path}, size_bytes={video_file_size}, "
+                f"max_bytes={_MAX_RAW_BYTES_FOR_BASE64_DATA_URI}, "
+                f"upload_error={dashscope_upload_error_detail or 'unknown'}"
+            )
 
         # 3) 降级为关键帧（千帆链路默认路径）
         frames = await self._extract_keyframes(video_path, max_frames=self.max_input_frames)
@@ -1127,21 +1302,72 @@ class VLVideoAnalyzer:
             {"role": "user", "content": content_items}
         ]
 
-    async def _try_get_dashscope_temp_url(self, video_path: str) -> Optional[str]:
+    async def _try_get_dashscope_temp_url(
+        self,
+        video_path: str,
+        *,
+        raise_on_failure: bool = False,
+    ) -> Optional[str]:
         """
         使用 DashScope SDK 上传本地文件，获取临时 URL。
 
         如果 dashscope SDK 不存在或上传失败，返回 None（由上层降级到关键帧）。
         """
         if not self._is_dashscope_endpoint(self.base_url):
+            if raise_on_failure:
+                raise RuntimeError(
+                    f"DashScope Files.upload requires DashScope endpoint, current base_url={self.base_url}"
+                )
             return None
         try:
             import dashscope  # type: ignore
         except Exception as e:
-            logger.debug(f"dashscope SDK 不可用，跳过临时 URL 上传: {e}")
+            error_detail = self._format_exception_detail(e)
+            if raise_on_failure:
+                raise RuntimeError(f"dashscope SDK unavailable: {error_detail}") from e
+            logger.debug(f"dashscope SDK unavailable, skip temp URL upload: {error_detail}")
             return None
 
         if not self._api_key:
+            if raise_on_failure:
+                raise RuntimeError(
+                    f"DashScope Files.upload requires api_key, env={self._api_key_env or 'DASHSCOPE_API_KEY'}"
+                )
+            return None
+
+        def _extract_temp_url_from_output(output: Any) -> Optional[str]:
+            if not isinstance(output, dict):
+                return None
+
+            direct_url = str(output.get("url") or "").strip()
+            if direct_url:
+                return direct_url
+
+            uploaded_files = output.get("uploaded_files")
+            if not isinstance(uploaded_files, list):
+                return None
+
+            # 新版 SDK 返回 uploaded_files[].file_id，需要二次 Files.get 拿到可访问 URL。
+            for item in uploaded_files:
+                if not isinstance(item, dict):
+                    continue
+                item_url = str(item.get("url") or "").strip()
+                if item_url:
+                    return item_url
+                file_id = str(item.get("file_id") or "").strip()
+                if not file_id:
+                    continue
+                meta_resp = dashscope.Files.get(file_id=file_id)
+                meta_status = getattr(meta_resp, "status_code", None)
+                meta_output = getattr(meta_resp, "output", None)
+                if meta_status == 200 and isinstance(meta_output, dict):
+                    meta_url = str(meta_output.get("url") or "").strip()
+                    if meta_url:
+                        return meta_url
+                if isinstance(meta_resp, dict) and meta_resp.get("status_code") == 200:
+                    meta_url = str(((meta_resp.get("output") or {}).get("url") or "")).strip()
+                    if meta_url:
+                        return meta_url
             return None
 
         def _upload() -> Optional[str]:
@@ -1153,18 +1379,34 @@ class VLVideoAnalyzer:
             )
             status_code = getattr(resp, "status_code", None)
             output = getattr(resp, "output", None)
-            if status_code == 200 and output and isinstance(output, dict):
-                return output.get("url")
+            if status_code == 200:
+                temp_url = _extract_temp_url_from_output(output)
+                if temp_url:
+                    return temp_url
+                raise RuntimeError(
+                    "DashScope Files.upload succeeded but no temporary URL was found in output: "
+                    f"{self._safe_json_preview(output)}"
+                )
             # 兼容 dict 形式返回
             if isinstance(resp, dict) and resp.get("status_code") == 200:
-                return (resp.get("output") or {}).get("url")
+                dict_output = resp.get("output") or {}
+                temp_url = _extract_temp_url_from_output(dict_output)
+                if temp_url:
+                    return temp_url
+                raise RuntimeError(
+                    "DashScope Files.upload(dict) succeeded but no temporary URL was found in output: "
+                    f"{self._safe_json_preview(dict_output)}"
+                )
             message = getattr(resp, "message", None) or str(resp)
             raise RuntimeError(f"DashScope Files.upload 失败: {message}")
 
         try:
             return await asyncio.to_thread(_upload)
         except Exception as e:
-            logger.warning(f"DashScope 临时 URL 上传失败，降级关键帧: {e}")
+            error_detail = self._format_exception_detail(e)
+            if raise_on_failure:
+                raise RuntimeError(f"DashScope Files.upload failed: {error_detail}") from e
+            logger.warning(f"DashScope temp URL upload failed, fallback to next strategy: {error_detail}")
             return None
     
     def _encode_video_base64(self, video_path: str) -> Optional[str]:
@@ -1711,10 +1953,18 @@ class VLVideoAnalyzer:
             if not isinstance(item, dict):
                 continue
 
-            # 兼容教程 schema 与默认 schema
+            # 兼容教程 schema、默认 schema 与 concrete schema
             step_id = safe_int(item.get("step_id", item.get("id", index + 1)), index + 1)
+            segment_id = safe_int(item.get("segment_id", item.get("id", step_id)), step_id)
             step_description = str(
                 item.get("step_description", item.get("description", item.get("title", ""))) or ""
+            ).strip()
+            segment_description = str(
+                item.get(
+                    "segment_description",
+                    item.get("segment_title", step_description),
+                )
+                or ""
             ).strip()
             step_type = self._normalize_step_type(
                 item.get("step_type", item.get("stepType", item.get("step_category", item.get("type", ""))))
@@ -1751,6 +2001,13 @@ class VLVideoAnalyzer:
             if raw_operation_guidance is None:
                 raw_operation_guidance = item.get("guidance", None)
             operation_guidance = self._normalize_text_list(raw_operation_guidance)
+            main_content = str(
+                item.get(
+                    "main_content",
+                    item.get("content", item.get("markdown_content", "")),
+                )
+                or ""
+            ).strip()
 
             raw_timestamps = item.get("instructional_keyframe_timestamp", None)
             if raw_timestamps is None:
@@ -1780,11 +2037,11 @@ class VLVideoAnalyzer:
             else:
                 key_evidence = str(key_evidence) if key_evidence is not None else ""
 
-            tutorial_like = bool(
+            concrete_like = normalized_mode == "concrete"
+            tutorial_like = (not concrete_like) and bool(
                 ("step_id" in item)
                 or ("step_description" in item)
                 or ("instructional_keyframe_timestamp" in item)
-                or ("instructional_keyframes" in item)
                 or normalized_mode == "tutorial_stepwise"
             )
             has_step_schema = has_step_schema or tutorial_like
@@ -1797,6 +2054,12 @@ class VLVideoAnalyzer:
             if tutorial_like:
                 # 教程模式忽略模型返回的 knowledge_type，仅保留步骤结构
                 knowledge_type = "process"
+            elif concrete_like:
+                knowledge_type = "concrete"
+                if should_type in {"abstract", "concrete"}:
+                    knowledge_type = should_type
+                if no_needed_video:
+                    knowledge_type = "abstract"
             else:
                 if should_type in {"abstract", "concrete"}:
                     knowledge_type = should_type
@@ -1814,13 +2077,13 @@ class VLVideoAnalyzer:
                 clip_start_sec=clip_start_sec,
                 clip_end_sec=clip_end_sec,
                 suggested_screenshoot_timestamps=timestamps,
-                step_id=step_id if tutorial_like else 0,
-                step_description=step_description,
+                step_id=step_id if tutorial_like else (segment_id if concrete_like else 0),
+                step_description=step_description if tutorial_like else segment_description,
                 step_type=step_type if tutorial_like else "MAIN_FLOW",
-                analysis_mode="tutorial_stepwise" if tutorial_like else "default",
+                analysis_mode="tutorial_stepwise" if tutorial_like else ("concrete" if concrete_like else "default"),
                 main_action=main_action if tutorial_like else "",
-                main_operation=main_operation if tutorial_like else [],
-                instructional_keyframes=instructional_keyframes if tutorial_like else [],
+                main_operation=main_operation if tutorial_like else ([main_content] if concrete_like and main_content else []),
+                instructional_keyframes=instructional_keyframes if (tutorial_like or concrete_like) else [],
                 precautions=precautions if tutorial_like else [],
                 step_summary=step_summary if tutorial_like else "",
                 operation_guidance=operation_guidance if tutorial_like else [],
@@ -1844,6 +2107,23 @@ class VLVideoAnalyzer:
                     "instructional_keyframes": instructional_keyframes,
                     "instructional_keyframe_timestamp": timestamps,
                 })
+            elif concrete_like:
+                concrete_payload: Dict[str, Any] = {
+                    "segment_id": segment_id,
+                    "segment_description": segment_description,
+                    "main_content": main_content,
+                    "no_needed_video": bool(no_needed_video),
+                    "should_type": should_type,
+                    "clip_start_sec": clip_start_sec,
+                    "clip_end_sec": clip_end_sec,
+                    "instructional_keyframes": instructional_keyframes,
+                    "instructional_keyframe_timestamp": timestamps,
+                }
+                if precautions:
+                    concrete_payload["precautions"] = precautions
+                if step_summary:
+                    concrete_payload["segment_summary"] = step_summary
+                normalized_payload.append(concrete_payload)
             else:
                 normalized_payload.append({
                     "id": safe_int(item.get("id", index), index),

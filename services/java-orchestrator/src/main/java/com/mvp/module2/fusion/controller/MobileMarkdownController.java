@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.mvp.module2.fusion.common.TaskDisplayNameResolver;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
-import com.mvp.module2.fusion.common.VideoInputNormalizer;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
@@ -787,6 +786,111 @@ public class MobileMarkdownController {
                     return ResponseEntity.status(503).body(payload);
                 })
                 .thenApply(response -> (ResponseEntity<?>) response);
+    }
+
+    @GetMapping("/tasks/upload/probe-asset")
+    public ResponseEntity<?> getUploadProbeAsset(
+            @RequestParam("videoInput") String rawVideoInput,
+            @RequestHeader(value = HttpHeaders.RANGE, required = false) String rangeHeader
+    ) {
+        String normalizedVideoInput = normalizeVideoInput(rawVideoInput);
+        if (!StringUtils.hasText(normalizedVideoInput)) {
+            return ResponseEntity.badRequest().body(Map.of("message", "videoInput cannot be empty"));
+        }
+
+        final Path uploadRootPath;
+        try {
+            uploadRootPath = resolveUploadRoot();
+        } catch (IOException ex) {
+            logger.warn("resolve upload root failed for probe asset: input={} err={}", normalizedVideoInput, ex.getMessage());
+            return ResponseEntity.status(503).body(Map.of("message", UserFacingErrorMapper.busyMessage()));
+        }
+
+        String candidatePath = normalizedVideoInput;
+        if (candidatePath.startsWith("file://")) {
+            candidatePath = candidatePath.substring("file://".length());
+            if (candidatePath.matches("^/[A-Za-z]:/.*")) {
+                candidatePath = candidatePath.substring(1);
+            }
+        }
+
+        final Path target;
+        try {
+            target = Paths.get(candidatePath).toAbsolutePath().normalize();
+        } catch (Exception ex) {
+            return ResponseEntity.badRequest().body(Map.of("message", "invalid probe file path"));
+        }
+        if (!target.startsWith(uploadRootPath)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(Map.of("message", "probe file path is out of upload root"));
+        }
+        if (!Files.exists(target) || !Files.isRegularFile(target)) {
+            return ResponseEntity.status(404).body(Map.of("message", "probe file not found"));
+        }
+        String lowerName = target.getFileName() != null ? target.getFileName().toString().toLowerCase(Locale.ROOT) : "";
+        if (!lowerName.endsWith(".pdf")) {
+            return ResponseEntity.badRequest().body(Map.of("message", "only pdf probe preview is supported"));
+        }
+
+        try {
+            long length = Files.size(target);
+            MediaType mediaType = detectMediaType(target);
+
+            if (rangeHeader != null && !rangeHeader.isBlank()) {
+                try {
+                    List<HttpRange> ranges = HttpRange.parseRanges(rangeHeader);
+                    if (!ranges.isEmpty()) {
+                        HttpRange range = ranges.get(0);
+                        long start = range.getRangeStart(length);
+                        long end = range.getRangeEnd(length);
+                        long regionLength = end - start + 1;
+                        InputStream fileStream = Files.newInputStream(target);
+                        fileStream.skip(start);
+                        InputStream bounded = new java.io.FilterInputStream(fileStream) {
+                            long remaining = regionLength;
+
+                            @Override
+                            public int read() throws IOException {
+                                if (remaining <= 0) return -1;
+                                int b = super.read();
+                                if (b >= 0) remaining--;
+                                return b;
+                            }
+
+                            @Override
+                            public int read(byte[] b, int off, int len) throws IOException {
+                                if (remaining <= 0) return -1;
+                                int n = super.read(b, off, (int) Math.min(len, remaining));
+                                if (n > 0) remaining -= n;
+                                return n;
+                            }
+                        };
+                        Resource rangeResource = new InputStreamResource(bounded);
+                        return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                                .contentType(mediaType)
+                                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                                .header(HttpHeaders.CONTENT_RANGE, "bytes " + start + "-" + end + "/" + length)
+                                .contentLength(regionLength)
+                                .body(rangeResource);
+                    }
+                } catch (Exception ex) {
+                    logger.warn("probe asset range response fallback to full: path={} range={} err={}",
+                            target, rangeHeader, ex.getMessage());
+                }
+            }
+
+            InputStream inputStream = Files.newInputStream(target);
+            Resource resource = new InputStreamResource(inputStream);
+            return ResponseEntity.ok()
+                    .contentType(mediaType)
+                    .contentLength(length)
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .header(HttpHeaders.CACHE_CONTROL, "public, max-age=60")
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + target.getFileName() + "\"")
+                    .body(resource);
+        } catch (IOException ex) {
+            logger.warn("read probe asset failed: path={} err={}", target, ex.getMessage());
+            return ResponseEntity.status(500).body(Map.of("message", "read probe asset failed"));
+        }
     }
 
     @org.springframework.web.bind.annotation.ExceptionHandler(MultipartException.class)
@@ -1627,6 +1731,96 @@ public class MobileMarkdownController {
         payload.put("upsertCount", upsertCount);
         payload.put("deleteCount", deleteCount);
         payload.put("updatedAt", now.toString());
+        return ResponseEntity.ok(payload);
+    }
+
+    @PostMapping(value = "/tasks/{taskId}/anchors/delete", consumes = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<?> deleteAnchorsPermanently(
+            @PathVariable String taskId,
+            @RequestBody AnchorBatchDeleteRequest request
+    ) {
+        List<String> requestedAnchorIds = normalizeAnchorIdList(request != null ? request.anchorIds : null);
+        if (requestedAnchorIds.isEmpty()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "anchorIds cannot be empty"));
+        }
+
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            return ResponseEntity.status(404).body(Map.of("message", "task not found"));
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            return ResponseEntity.status(404).body(Map.of("message", "task directory not found"));
+        }
+
+        String noteKey = normalizeMetaNoteKey(taskRoot, request != null ? request.path : null);
+        TaskMetaFile meta = readTaskMeta(taskRoot);
+        NoteMeta noteMeta = meta.notesByMarkdown.getOrDefault(noteKey, new NoteMeta());
+        Map<String, Object> anchors = sanitizeAnchors(noteMeta.anchors);
+
+        List<String> existingAnchorIds = requestedAnchorIds.stream()
+                .filter(anchors::containsKey)
+                .toList();
+        if (existingAnchorIds.isEmpty()) {
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("success", true);
+            payload.put("taskId", task.taskId);
+            payload.put("pathKey", noteKey);
+            payload.put("deletedCount", 0);
+            payload.put("deletedAnchorIds", List.of());
+            payload.put("missingAnchorIds", requestedAnchorIds);
+            payload.put("deletedFileEntries", 0);
+            payload.put("updatedAt", Instant.now().toString());
+            return ResponseEntity.ok(payload);
+        }
+
+        boolean removeFiles = request == null || request.removeFiles == null || request.removeFiles;
+        int deletedFileEntries = 0;
+        if (removeFiles) {
+            Set<Path> deleteTargets = collectAnchorDeleteTargets(taskRoot, anchors, existingAnchorIds);
+            List<String> failedDeleteTargets = new ArrayList<>();
+            for (Path target : deleteTargets) {
+                try {
+                    deletedFileEntries += deletePathRecursively(target, taskRoot);
+                } catch (IOException ex) {
+                    failedDeleteTargets.add(taskRoot.toAbsolutePath().normalize().relativize(target.toAbsolutePath().normalize()).toString().replace('\\', '/'));
+                    logger.warn("delete anchor storage failed: taskId={} path={} err={}", taskId, target, ex.getMessage());
+                }
+            }
+            if (!failedDeleteTargets.isEmpty()) {
+                return ResponseEntity.status(500).body(Map.of(
+                        "message", "delete anchor storage failed",
+                        "failedPaths", failedDeleteTargets
+                ));
+            }
+        }
+
+        existingAnchorIds.forEach(anchors::remove);
+        noteMeta.anchors = anchors;
+        if (isNoteMetaEmpty(noteMeta)) {
+            meta.notesByMarkdown.remove(noteKey);
+        } else {
+            meta.notesByMarkdown.put(noteKey, noteMeta);
+        }
+        if (!writeTaskMeta(taskRoot, meta)) {
+            return ResponseEntity.status(500).body(Map.of("message", "write task metadata failed"));
+        }
+
+        List<String> missingAnchorIds = requestedAnchorIds.stream()
+                .filter(id -> !existingAnchorIds.contains(id))
+                .toList();
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("pathKey", noteKey);
+        payload.put("deletedCount", existingAnchorIds.size());
+        payload.put("deletedAnchorIds", existingAnchorIds);
+        payload.put("missingAnchorIds", missingAnchorIds);
+        payload.put("deletedFileEntries", deletedFileEntries);
+        payload.put("updatedAt", Instant.now().toString());
         return ResponseEntity.ok(payload);
     }
 
@@ -2621,6 +2815,18 @@ public class MobileMarkdownController {
         return decoded.isBlank() ? META_DEFAULT_NOTE_KEY : decoded;
     }
 
+    private boolean isNoteMetaEmpty(NoteMeta noteMeta) {
+        if (noteMeta == null) {
+            return true;
+        }
+        return (noteMeta.favorites == null || noteMeta.favorites.isEmpty())
+                && (noteMeta.deleted == null || noteMeta.deleted.isEmpty())
+                && (noteMeta.comments == null || noteMeta.comments.isEmpty())
+                && (noteMeta.tokenLike == null || noteMeta.tokenLike.isEmpty())
+                && (noteMeta.tokenAnnotations == null || noteMeta.tokenAnnotations.isEmpty())
+                && (noteMeta.anchors == null || noteMeta.anchors.isEmpty());
+    }
+
     private Map<String, Boolean> sanitizeFavorites(Map<String, Boolean> input) {
         return sanitizeBooleanFlags(input);
     }
@@ -3143,6 +3349,104 @@ public class MobileMarkdownController {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private List<String> normalizeAnchorIdList(List<String> rawAnchorIds) {
+        if (rawAnchorIds == null || rawAnchorIds.isEmpty()) {
+            return List.of();
+        }
+        Set<String> unique = new LinkedHashSet<>();
+        for (String rawAnchorId : rawAnchorIds) {
+            String anchorId = trimToNullSafe(rawAnchorId);
+            if (anchorId != null) {
+                unique.add(anchorId);
+            }
+        }
+        return new ArrayList<>(unique);
+    }
+
+    private Set<Path> collectAnchorDeleteTargets(
+            Path taskRoot,
+            Map<String, Object> anchors,
+            List<String> anchorIds
+    ) {
+        Set<Path> targets = new LinkedHashSet<>();
+        if (taskRoot == null || anchors == null || anchorIds == null || anchorIds.isEmpty()) {
+            return targets;
+        }
+        for (String anchorId : anchorIds) {
+            if (anchorId == null || anchorId.isBlank()) {
+                continue;
+            }
+            String anchorRootRelative = "thinking/anchor_" + sanitizeAnchorDirectoryName(anchorId);
+            String normalizedAnchorRoot = normalizeMountedRelativePath(anchorRootRelative, null);
+            if (normalizedAnchorRoot != null) {
+                Path anchorRoot = taskRoot.resolve(normalizedAnchorRoot).normalize();
+                if (anchorRoot.startsWith(taskRoot)) {
+                    targets.add(anchorRoot);
+                }
+            }
+
+            Map<String, Object> anchorRecord = sanitizeSingleAnchorData(anchors.get(anchorId));
+            List<Map<String, Object>> revisions = sanitizeAnchorRevisionList(anchorRecord.get("revisions"));
+            for (Map<String, Object> revision : revisions) {
+                String revisionRelativeDir = stringValueOrNull(revision.get("relativeDir"));
+                String normalizedRevisionDir = normalizeMountedRelativePath(revisionRelativeDir, null);
+                if (normalizedRevisionDir == null) {
+                    continue;
+                }
+                Path revisionDir = taskRoot.resolve(normalizedRevisionDir).normalize();
+                if (revisionDir.startsWith(taskRoot)) {
+                    targets.add(revisionDir);
+                }
+            }
+
+            String mountedPath = stringValueOrNull(anchorRecord.get("mountedPath"));
+            String normalizedMountedPath = normalizeMountedRelativePath(mountedPath, null);
+            if (normalizedMountedPath != null) {
+                Path mountedFile = taskRoot.resolve(normalizedMountedPath).normalize();
+                if (mountedFile.startsWith(taskRoot)) {
+                    targets.add(mountedFile);
+                }
+            }
+        }
+        return targets;
+    }
+
+    private int deletePathRecursively(Path target, Path taskRoot) throws IOException {
+        if (target == null || taskRoot == null) {
+            return 0;
+        }
+        Path normalizedRoot = taskRoot.toAbsolutePath().normalize();
+        Path normalizedTarget = target.toAbsolutePath().normalize();
+        if (!normalizedTarget.startsWith(normalizedRoot) || !Files.exists(normalizedTarget)) {
+            return 0;
+        }
+        if (Files.isRegularFile(normalizedTarget) || Files.isSymbolicLink(normalizedTarget)) {
+            return Files.deleteIfExists(normalizedTarget) ? 1 : 0;
+        }
+        final int[] deletedCount = {0};
+        Files.walkFileTree(normalizedTarget, new SimpleFileVisitor<>() {
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+                if (Files.deleteIfExists(file)) {
+                    deletedCount[0] += 1;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
+                if (exc != null) {
+                    throw exc;
+                }
+                if (Files.deleteIfExists(dir)) {
+                    deletedCount[0] += 1;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+        });
+        return deletedCount[0];
     }
 
     private List<ExportFileEntry> collectExportEntries(Path taskRoot) throws IOException {
@@ -3833,6 +4137,9 @@ public class MobileMarkdownController {
         if (probeInput == null || probeInput.isBlank()) {
             return null;
         }
+        if (!shouldProbeTitleViaVideoInfo(probeInput)) {
+            return null;
+        }
         int timeoutSec = Math.max(15, mobileVideoInfoTimeoutSeconds);
         String probeTaskId = "MVI_" + UUID.randomUUID();
         try {
@@ -3870,6 +4177,27 @@ public class MobileMarkdownController {
         return raw;
     }
 
+    private boolean shouldProbeTitleViaVideoInfo(String probeInput) {
+        String normalizedProbeInput = trimToNullSafe(probeInput);
+        if (normalizedProbeInput == null) {
+            return false;
+        }
+        String inferredContentType = normalizeContentTypeToken(
+                inferContentTypeFromTextCandidate(normalizedProbeInput)
+        );
+        if ("video".equals(inferredContentType)) {
+            return true;
+        }
+        if ("pdf".equals(inferredContentType)
+                || "epub".equals(inferredContentType)
+                || "document".equals(inferredContentType)
+                || "book".equals(inferredContentType)) {
+            return false;
+        }
+        String lower = normalizedProbeInput.toLowerCase(Locale.ROOT);
+        return lower.contains("http://") || lower.contains("https://");
+    }
+
     private String instantToText(Instant instant) {
         return instant == null ? "" : instant.toString();
     }
@@ -3878,7 +4206,7 @@ public class MobileMarkdownController {
 
 
     private String normalizeVideoInput(String rawVideoInput) {
-        return VideoInputNormalizer.normalizeVideoInput(rawVideoInput);
+        return VideoInputNormalizerBridge.normalizeVideoInput(rawVideoInput);
     }
 
     private TaskQueueManager.Priority resolvePriority(String normalizedUserId, String rawPriority) {
@@ -4119,6 +4447,9 @@ public class MobileMarkdownController {
         if (name.endsWith(".gif")) return MediaType.IMAGE_GIF;
         if (name.endsWith(".webp")) return MediaType.parseMediaType("image/webp");
         if (name.endsWith(".svg")) return MediaType.parseMediaType("image/svg+xml");
+        if (name.endsWith(".pdf")) return MediaType.APPLICATION_PDF;
+        if (name.endsWith(".txt")) return MediaType.TEXT_PLAIN;
+        if (name.endsWith(".epub")) return MediaType.parseMediaType("application/epub+zip");
         if (name.endsWith(".mp4")) return MediaType.parseMediaType("video/mp4");
         if (name.endsWith(".webm")) return MediaType.parseMediaType("video/webm");
         if (name.endsWith(".mov")) return MediaType.parseMediaType("video/quicktime");
@@ -4213,6 +4544,12 @@ public class MobileMarkdownController {
         public String path;
         public String mainNotePath;
         public List<AnchorSyncOperation> operations;
+    }
+
+    public static class AnchorBatchDeleteRequest {
+        public String path;
+        public List<String> anchorIds;
+        public Boolean removeFiles;
     }
 
     public static class AnchorSyncOperation {

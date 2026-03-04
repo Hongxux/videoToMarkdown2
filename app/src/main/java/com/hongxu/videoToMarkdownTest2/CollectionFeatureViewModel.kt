@@ -143,7 +143,7 @@ class CollectionFeatureViewModel(
                     emptySet()
                 }
                 _selectedEpisodeNos.value = defaultSelected
-                _confirmedStartPage.value = if (result.contentType.equals("book", ignoreCase = true)) {
+                _confirmedStartPage.value = if (result.isBookProbeResult()) {
                     resolveDefaultConfirmedStartPage(result)
                 } else {
                     null
@@ -206,7 +206,7 @@ class CollectionFeatureViewModel(
 
     fun updateConfirmedStartPage(page: Int?) {
         val state = _probeState.value as? ProbeUiState.Success ?: return
-        if (!state.result.contentType.equals("book", ignoreCase = true)) {
+        if (!state.result.isBookProbeResult()) {
             _confirmedStartPage.value = null
             return
         }
@@ -295,7 +295,7 @@ class CollectionFeatureViewModel(
             return
         }
 
-        if (result.contentType.equals("book", ignoreCase = true)) {
+        if (result.isBookProbeResult()) {
             val selectorTokens = result.episodes
                 .filter { selected.contains(it.episodeNo) }
                 .mapNotNull { episode ->

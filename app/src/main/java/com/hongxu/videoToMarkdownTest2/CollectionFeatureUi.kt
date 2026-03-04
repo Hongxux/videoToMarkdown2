@@ -260,7 +260,7 @@ private fun CollectionProbeResultContent(
     onToggleEpisode: (Int) -> Unit,
     onConfirmedStartPageChange: (Int?) -> Unit
 ) {
-    val isBook = probeResult.contentType.equals("book", ignoreCase = true)
+    val isBook = probeResult.isBookProbeResult()
     val chapterGroups = remember(probeResult.episodes) {
         if (isBook) buildBookChapterGroups(probeResult.episodes) else emptyList()
     }

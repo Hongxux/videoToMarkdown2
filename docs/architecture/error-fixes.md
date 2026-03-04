@@ -13,6 +13,315 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-03-04 下载阶段等待 Python 响应被中断后直接失败（缺少幂等重试）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 任务在下载阶段偶发失败，异常栈为：
+    - `java.lang.RuntimeException: Download stage interrupted while waiting for Python worker response`
+    - `Caused by: java.lang.InterruptedException`（源自 `CompletableFuture.get(...)`）
+  - 失败点位于 `VideoProcessingOrchestrator.waitForDownloadWithLease`，最终由 `TaskProcessingWorker.runWithWatchdog` 抛出并标记任务失败。
+  - 影响范围：所有走 URL 下载入口的视频/文档任务（`processVideoInternal` 与 `processBook` 的下载分支）。
+- 触发条件：
+  - 下载阶段在等待 Python gRPC 返回期间收到线程中断，且当次 watchdog 决策不是 `RESTART/FAIL`（`decision=NONE`）。
+  - 旧逻辑仅在 watchdog 显式给出 `RESTART` 时重试；对“非 watchdog 决策触发的下载等待中断”会直接失败。
+- 根因定位：
+  - `waitForDownloadWithLease` 将 `InterruptedException` 包装为固定 `RuntimeException` 后上抛。
+  - `runWithWatchdog` 的异常分支未对该固定错误做单独幂等重试处理，导致瞬时中断直接终止任务。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 新增下载中断识别标记：`DOWNLOAD_INTERRUPTED_WAIT_MESSAGE`。
+    - 新增可配置参数：
+      - `video.download.interrupt-retry-max-retries`（默认 `2`）
+      - `video.download.interrupt-retry-backoff-ms`（默认 `1200`）
+    - 在 `runWithWatchdog` 的 `catch (Exception error)` 分支中增加策略：
+      - 当 `decision=NONE` 且错误链命中下载等待中断标记时，执行限次幂等重试（同 taskId、同 input、同 outputDir）。
+      - 退避采用指数回退并封顶 30s，复用 `sleepWithCancelCheck(...)`，确保取消信号仍可及时生效。
+    - 新增辅助方法：
+      - `shouldRetryInterruptedDownload(...)`
+      - `resolveDownloadInterruptRetryBackoffMs(...)`
+      - `containsDownloadInterruptedWaitMarker(...)`
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - 新增默认配置项：
+      - `video.download.interrupt-retry-max-retries=2`
+      - `video.download.interrupt-retry-backoff-ms=1200`
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerDownloadRetryTest.java`
+    - 新增回归测试：
+      - 首次下载中断后自动重试并成功。
+      - 超过重试上限后失败，避免无限重试。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保持 `TaskProcessingWorkerDownloadRetryTest` 作为回归测试，禁止回退到“中断即失败”。
+  - 监控：
+    - 关注日志关键字 `Download wait interrupted unexpectedly, trigger idempotent retry` 的频次与任务成功率关联。
+  - 校验：
+    - 发布前核对 `video.download.interrupt-retry-*` 配置，确认重试次数与退避时长符合当前 SLA。
+  - 回滚：
+    - 紧急情况下可将 `video.download.interrupt-retry-max-retries` 设为 `0`，恢复历史行为。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerDownloadRetryTest.java`
+- 复盘要点：
+  - “可恢复型中断”与“控制面重启/失败决策”必须分层处理：前者做幂等重试，后者遵守 watchdog 决策。
+  - 下载入口的幂等重试应尽量复用既有 task 维度上下文（taskId/输出目录/缓存路径），避免引入重复副作用。
+
+## 2026-03-04 TaskDispatcher 持续误判 OVERLOADED 导致每 5 秒暂停派发
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 日志持续出现 `System overloaded, pause dispatch for 5s`，`TaskDispatcher` 每轮都进入 5 秒休眠。
+  - 机器层面 CPU 约 10%、内存约 50% 时仍触发暂停，任务队列推进明显变慢。
+  - 影响范围：Java 编排层 `TaskProcessingWorker.dispatchLoop` 的任务派发吞吐。
+- 触发条件：
+  - `LoadBasedScheduler` 以 `Runtime.maxMemory() - usedHeap`（JVM 堆余量）作为 `availableMemoryMB` 判定依据。
+  - 当 `-Xmx` 较小或堆使用升高时，`availableMemoryMB < 512` 容易长期成立，即便系统物理内存仍充足。
+- 根因定位：
+  - 过载判定混用了不同层级指标：日志与运维通常观察“机器资源”，而代码实际在关键条件中使用“JVM 堆余量”。
+  - 旧实现 CPU 采样优先 `getSystemLoadAverage()`，该值并非直接 CPU 百分比，跨平台语义不一致，进一步放大了误判与排障成本。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/scheduler/LoadBasedScheduler.java`
+    - CPU 采样统一为 `com.sun.management.OperatingSystemMXBean#getCpuLoad`（百分比）；仅在不可用时回退到 `loadAverage/core` 近似值。
+    - 系统内存采样改为物理内存口径（`getTotalPhysicalMemorySize/getFreePhysicalMemorySize`），`availableMemoryMB` 改为系统可用内存。
+    - 新增 `currentJvmHeapUsage` 指标，保留对 JVM 堆压力的保护（`JVM_HEAP_HIGH_THRESHOLD=90%`）。
+    - 状态切换日志改为同时输出 `CPU/SysMem/JvmHeap/FreeMB`，减少“看起来不高却被判过载”的诊断盲区。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 `LoadBasedScheduler` 单测，覆盖“系统内存充足但 JVM 堆余量低”场景，断言不会仅因堆余量误判系统过载。
+    - 增加 CPU 采样回退路径单测，确保 `getCpuLoad()` 不可用时状态机行为可预期。
+  - 监控：
+    - 监控 `System state changed` 日志中的 `CPU/SysMem/JvmHeap/FreeMB`，并对长时间 `OVERLOADED` 告警。
+  - 校验：
+    - 新增或修改调度阈值时，必须明确指标层级（系统级 vs 进程级）并在文档中写清口径。
+  - 回滚：
+    - 若新口径在特定环境出现误报，可先回滚至旧实现并临时提升 `MIN_AVAILABLE_MEMORY_MB` 判断保护，同时保留新增日志字段以便继续定位。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/scheduler/LoadBasedScheduler.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+- 复盘要点：
+  - “系统是否过载”必须先定义观察层级，再定义阈值；跨层指标直接混用会导致误判和无效限流。
+  - 日志必须输出判定所依赖的完整指标集，否则现场只能看到结果，无法快速复现判断过程。
+
+## 2026-03-04 AnalyzeSemanticUnits 反序列化阶段偶发 NoClassDefFoundError（AnalyzeResponse$Builder）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - `AnalyzeSemanticUnits (Phase2A)` 调用在客户端解码响应阶段失败，日志表现为 `Status{code=CANCELLED, description=Failed to read message., cause=NoClassDefFoundError: AnalyzeResponse$Builder}`。
+  - `BookEnhancedPipelineService` 将增强链路判定为失败并回退到 base result，导致书籍增强结果缺失。
+  - 影响范围：Java 编排层 `PythonGrpcClient.analyzeSemanticUnits` 的响应解析路径。
+- 触发条件：
+  - 运行态存在类加载与构建产物切换窗口（典型表现为运行中触发重编译/清理），首次懒加载 `AnalyzeResponse$Builder` 时类不可用。
+  - gRPC 侧将该类加载异常折叠为 `CANCELLED + Failed to read message`，业务层仅看到通用“读消息失败”。
+- 根因定位：
+  - protobuf 生成类的内部 `Builder` 属于懒加载路径，首次解码时才触发实际加载。
+  - 原实现对“类加载型读消息失败”未做识别与瞬时恢复，导致单次抖动直接触发业务降级。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 在 `init()` 增加 `warmupGrpcResponseBuilders()`，启动阶段提前触发关键响应消息 `newBuilder()`，减少运行中首次懒加载风险。
+    - 将 `AnalyzeResponse -> AnalyzeResult` 映射抽取为 `toAnalyzeResult(...)`，避免重试路径与主路径重复逻辑。
+    - 新增 `isAnalyzeResponseReadFailure(...)`，识别 `CANCELLED + Failed to read message + (NoClassDefFoundError/ClassNotFoundException)` 组合。
+    - 在 `analyzeSemanticUnits(...)` 中对上述故障执行一次幂等重试；重试失败再按原有失败路径返回。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加针对 `AnalyzeSemanticUnits` 的“首次解析失败后单次重试成功”单测（后续补齐，防止回归到无重试行为）。
+  - 监控：
+    - 对日志关键字 `AnalyzeSemanticUnits decode failed, retry once` 建立检索与计数，观测该类故障是否持续出现。
+  - 校验：
+    - 发布前执行一次完整链路回归（含书籍增强路径），确认不会因单次解码抖动触发整体降级。
+  - 回滚：
+    - 若重试策略引入副作用，可回滚到仅预热方案并保留错误识别日志。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `AnalyzeSemanticUnits`（Python gRPC）
+- 复盘要点：
+  - 对 gRPC “Failed to read message” 需要区分网络层/协议层/类加载层，否则业务语义会被过度泛化为“远端失败”。
+  - 对高频核心路径，提前做 protobuf 关键类预热可显著降低懒加载窗口导致的偶发错误。
+
+## 2026-03-04 Web 书籍 Probe 右侧 PDF 预览面板缺失（目录可见但无 PDF 预览）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - Web 端书籍探测弹层左侧目录可正常渲染，但右侧仅有章节摘要，不显示 PDF 预览画布。
+  - 用户无法在提交前执行“Prev/Next 翻页 + Use current page as actual start”操作，起始页确认闭环中断。
+  - 影响范围：`bookProbeSheet` 章节选择与起始页确认链路。
+- 触发条件：
+  - 书籍上传走 `probeOnly` 分支时，返回 `normalizedVideoUrl` 为服务端本地路径（如 `D:\\...\\xxx.pdf`）。
+  - 前端未实现右侧 PDF 预览容器与翻页控制，且浏览器无法直接访问服务端本地文件路径。
+- 根因定位：
+  - 右侧面板实现停留在“文本摘要预览”，没有 PDF 渲染与翻页状态机。
+  - 缺少“本地上传文件路径 -> 安全可访问预览 URL”的后端桥接接口。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 在 `bookProbeSheet` 右侧新增 PDF 预览容器（iframe）、`Prev/Next`、页码状态、`Use current page as actual start` 按钮。
+    - 新增 `resolveBookProbePdfSource`、`buildBookProbePdfPageUrl`，将本地路径映射为后端预览端点并附加 `#page` 定位。
+    - `openBookProbeSheet` 增加 `options.previewSource`，由提交流程传入 `normalizedVideoUrl`。
+    - 选择状态从 `sectionSelector` 切换为叶子唯一 `episode.key`，修复“取消一个小节连带取消其他小节”的串扰。
+    - 树节点新增章节级复选框（chapter/section），支持按章节整组选择/取消。
+    - 新增 PDF 预览尺寸滑杆（220~760px）并持久化到 `localStorage`，支持动态调节预览框大小。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 新增 `GET /api/mobile/tasks/upload/probe-asset?videoInput=...`，仅允许读取 upload root 下 PDF 文件，支持 `Range` 分段响应。
+    - `detectMediaType` 补齐 `.pdf/.txt/.epub`，避免 PDF 预览被错误媒体类型降级。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+  - 手工回归：
+    - 上传 PDF 后进入章节探测弹层，右侧出现 PDF 预览面板；
+    - `Prev/Next` 可切页；
+    - 点击 `Use current page as actual start` 后，起始页偏移输入同步更新；
+    - 提交请求携带更新后的 `pageOffset`。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Web 端书籍 Probe 回归：断言弹层右侧存在 PDF iframe、翻页按钮与“设为实际起始页”按钮。
+  - 监控：
+    - 增加 `probe-asset` 接口 4xx/5xx（特别是 403/404）统计，识别路径越界或文件缺失回归。
+  - 校验：
+    - 书籍 Probe 右侧组件必须满足“目录点击 -> 页码更新 -> 预览跳页 -> 起始页回填”完整链路。
+  - 回滚：
+    - 可回滚到旧版摘要面板；若回滚，需同步隐藏翻页与起始页回填入口，避免假可用状态。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `GET /api/mobile/tasks/upload/probe-asset`
+- 复盘要点：
+  - “有目录但无预览”本质是链路断点：渲染层、预览源转换层、文件服务层必须同时闭环。
+  - 本地路径不能直接暴露给浏览器，必须通过受控端点做路径边界校验与流式分发。
+
+## 2026-03-04 GetVideoInfo 在 Bilibili 连接超时后直接失败（缺少网络降级重试）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - `GetVideoInfo` 在探测 Bilibili 元信息时出现 `Connection to www.bilibili.com timed out (connect timeout=30.0)`，请求直接失败。
+  - 失败时返回原始 `TransportError` 文本，排障信息不足，调用方无法快速判断应切代理、关代理还是重试。
+  - 影响范围：Python gRPC `GetVideoInfo` 的 yt-dlp 探测链路（`VideoProcessor.probe_video_info`）。
+- 触发条件：
+  - 站点连通性抖动、代理出口不稳定、或当前网络出口到目标站点链路异常时，首次探测在 30 秒连接超时后失败。
+  - 旧实现只有单次探测调用，未区分“可恢复网络错误”和“不可恢复业务错误”。
+- 根因定位：
+  - `probe_video_info` 缺少针对网络层错误的分级重试与降级路径（例如代理失败时自动无代理重试、超时时延长 socket_timeout）。
+  - 错误提示仅透传上游异常，未附带“尝试链”和可执行排障建议。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 为元信息探测新增可恢复错误判定：
+      - `_is_network_timeout_error`
+      - `_is_proxy_connection_error`
+      - `_is_retryable_probe_error`
+    - 新增 `_build_probe_error_message`，在失败时输出“故障类型 + 配置建议 + 尝试链 + 原始错误 + URL”。
+    - 将 `probe_video_info` 改为分层探测策略：
+      - `default`（原始配置）
+      - `without_proxy`（仅在配置代理时）
+      - `extended_timeout`（延长超时）
+      - `without_proxy_extended_timeout`（仅在配置代理时）
+    - 仅对网络可恢复错误继续下一轮探测，避免对业务错误盲目重试。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_probe_video_info_retries_without_proxy_on_timeout`：验证代理超时后自动无代理重试成功。
+    - 新增 `test_probe_video_info_timeout_error_has_specific_hint`：验证超时失败时返回可执行提示并包含 `attempts=` 链路。
+- 验证方式：
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py -q`：通过。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 将“代理超时回退无代理”和“持续超时错误提示”纳入核心回归用例，防止后续改动回退为单次探测。
+  - 监控：
+    - 增加/检索关键日志模式：`GetVideoInfo failed`、`timed out`、`attempts=`，按平台（bilibili/douyin）分桶观测。
+  - 校验：
+    - 新增探测策略时必须遵循“仅可恢复错误可重试”，禁止对鉴权错误、链接错误做无界重试。
+  - 回滚：
+    - 如出现重试策略副作用，可先回滚到 `default + without_proxy` 双步策略，保留错误封装能力。
+- 相关文件/接口：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+  - `GetVideoInfo`（Python gRPC）
+- 复盘要点：
+  - 元信息探测属于“弱网络依赖强入口”环节，必须将“重试策略”和“错误语义化”作为同一能力设计，单做其一都无法稳定排障与恢复。
+
+## 2026-03-04 Android 书籍 Probe 右侧预览面板未出现（contentType 误判）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 书籍上传后进入 Probe 结果页时，左侧章节目录可见，但右侧“PDF 预览面板（Prev/Next/设为实际起始页）”未出现。
+  - 用户无法在提交前完成“目录点击联动预览页 + 起始页确认”的闭环，书籍提交体验退化。
+  - 影响范围：Android `CollectionProbeResultContent` 书籍分支及书籍提交流程中的起始页逻辑。
+- 触发条件：
+  - `/api/mobile/video-info` 返回的 `contentType` 为空或不稳定（例如复用/缓存探测回包缺少该字段）时，前端按“非书籍”分支渲染。
+  - 业务数据本身仍包含书籍信号（`totalPages/startPage/endPage/sectionSelector`），但未被当前判定逻辑使用。
+- 根因定位：
+  - UI 与 ViewModel 仅使用 `contentType.equals("book")` 作为书籍判定单一条件，缺少容错回退。
+  - 判定单点失效后，右侧预览面板、实际起始页输入与书籍提交参数链路会同时降级。
+- 修复措施：
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+    - 新增统一判定函数 `VideoProbeResult.isBookProbeResult()`，按以下顺序判定：
+      - `contentType=book`；
+      - `totalPages/detectedStartPage/confirmedStartPage` 等页码信号；
+      - `pageMapStrategy` 书籍映射策略；
+      - `episodes` 中 `sectionSelector/startPage/endPage/chapterIndex/sectionIndex`；
+      - `resolvedUrl/episodeUrl` 的书籍扩展名（`pdf/epub/txt/md`）。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+    - 书籍分支渲染切换为 `probeResult.isBookProbeResult()`，恢复右侧预览面板及其操作入口。
+  - 文件：`app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+    - `confirmedStartPage` 初始化、更新与书籍提交分支统一使用 `isBookProbeResult()`，避免 UI 与提交链路判定漂移。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q`：通过。
+  - 手工回归：
+    - 上传书籍并进入 Probe 结果页，右侧预览面板可见；
+    - `Prev/Next` 可翻页，点击“Use current page as actual start”可回填起始页；
+    - 提交后请求携带书籍分支参数（`sectionSelector/pageOffset`）。
+  - 文档校验：
+    - `python -X utf8 tools/architecture/check_docs_encoding.py`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 Android Probe UI 回归：构造 `contentType=""` 但含书籍页码信号的 payload，断言渲染书籍双栏与右侧预览操作可用。
+    - 增加 ViewModel 回归：在 `contentType` 缺失场景仍走书籍提交分支并生成 `sectionSelector/pageOffset`。
+  - 监控：
+    - 统计 `contentType` 为空但命中 `isBookProbeResult()` 的次数，作为后端契约稳定性告警指标。
+  - 校验：
+    - 书籍/视频分支禁止直接散落字符串判断，统一复用 `isBookProbeResult()`。
+  - 回滚：
+    - 如需临时回退，可恢复 `contentType` 单判定；但需同步回退 UI/提交逻辑，避免分支不一致。
+- 相关文件/接口：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+  - `GET /api/mobile/video-info`
+- 复盘要点：
+  - 面向弱契约字段的分支判定必须采用“显式字段 + 结构信号”双保险，避免单点字段波动导致整段交互失效。
+  - UI 分支与提交分支必须共用同一判定函数，否则会出现“界面显示正确但提交错链路”或反向问题。
+
+## 2026-03-03 Book 选择器正则乱码导致 PDF 任务失败（PatternSyntaxException）
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 书籍管线在 `BookMarkdownService.filterSections` 报错：`PatternSyntaxException: Unclosed character class`，任务终态失败并回传“系统繁忙，请稍后重试”。
+  - 同一批日志中虽然出现 `GetVideoInfo` gRPC `127.0.0.1:50051` 拒绝连接，但该错误仅影响视频信息预探测，不是本次 PDF 任务失败的直接原因。
+  - 影响范围：`sectionSelector/chapterSelector` 解析链路，所有进入 `filterChapters/filterSections` 的书籍任务均有触发风险。
+- 触发条件：
+  - 运行到 `BookMarkdownService` 的选择器分词逻辑时，`split(...)` 使用了已污染的字符类正则字符串。
+  - 当 JVM 编译该正则时，字符类未闭合，直接抛出 `PatternSyntaxException`。
+- 根因定位：
+  - `BookMarkdownService.java` 中两处分隔正则字面量出现编码污染（乱码字符混入字符类），且没有统一常量收口，导致同类规则在多处重复维护。
+  - 重复维护使得一次污染可绕过另一处正常实现，形成“局部可用、关键路径崩溃”的隐蔽故障。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - 新增统一常量：`SELECTOR_TOKEN_SPLIT_REGEX = "[,;\\s\\uFF0C\\uFF1B]+"`。
+  - 将 `filterChapters`、`filterSections`、`parseOrderedLeafSelectors` 三处分词逻辑统一改为 `selector.split(SELECTOR_TOKEN_SPLIT_REGEX)`，移除被污染字面量并消除重复定义。
+- 验证方式：
+  - `rg -P -n "闁|闂|\\x{FFFD}" services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`：不再命中乱码字符。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 selector 解析回归用例，覆盖半角/全角分隔符（`,` `;` `，` `；`）与空白符混合输入。
+  - 监控：
+    - 对任务失败原因按异常类型分桶，单独监控 `PatternSyntaxException` 出现频率并告警。
+  - 校验：
+    - 选择器分隔规则仅允许通过统一常量定义，禁止在业务方法内重复内联正则字面量。
+    - 提交前增加 `rg` 异常字符巡检，防止编码污染字符串进入正则构造路径。
+  - 回滚：
+    - 如后续出现分词兼容性回归，可先回滚到本次修复前版本并保留统一常量改造，再按输入样本逐步扩展分隔符集合。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `POST /api/mobile/tasks`
+- 复盘要点：
+  - 正则字面量属于高脆弱配置，必须集中定义并最小化散布面。
+  - 日志中存在多个错误时，需要先沿调用栈判定“致命路径”与“旁路告警”，避免误治。
+
 ## 2026-03-02 Android 任务提交后骨架丢失、列表重复与通知直达失败
 - 日期：2026-03-02
 - 现象与影响范围：
@@ -6968,3 +7277,398 @@
   - 回滚：
     - 可先回滚配置项 `video.task.watchdog.heartbeat-strong-stages` 到旧值以缩小影响面。
     - 如需回退代码，可恢复单回调模型与中断策略，但会重新引入并发覆盖和误中断风险。
+
+## 2026-03-03 AnalyzeWithVL 因 PromptKeys 常量缺失触发异常修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 日志报错：`AnalyzeWithVL 异常: type object 'PromptKeys' has no attribute 'DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM'`。
+  - 触发位置：`VLMaterialGenerator.__init__` 读取 VL 参数结构化 Prompt 时访问 `PromptKeys` 新增字段。
+  - 影响范围：VL 初始化阶段直接异常，导致 `AnalyzeWithVL` 无法继续执行后续分析链路。
+- 根因定位：
+  - 运行环境存在版本漂移：`vl_material_generator.py` 已引用新常量，但实际加载的 `PromptKeys`/`PROMPT_REGISTRY` 仍可能为旧版本，出现属性或注册项缺失。
+  - 旧实现对 Prompt Key 采用硬依赖访问，缺失即抛异常，缺少向 in-code prompt 的降级保护。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `_resolve_prompt_key_attr`：优先读取 `PromptKeys` 属性，缺失时回退到稳定字符串 key。
+    - 新增 `_safe_get_prompt`：捕获 `get_prompt` 的 `KeyError`（注册项缺失）并直接回退到内置 prompt。
+    - 新增 `_load_package_prompt_default`：默认提示词优先读取 `content_pipeline/prompts` 中当前文件内容，确保 fallback 文案与现行模板一致。
+    - 将 `_get_default_vl_arg_structured_system_prompt`、`_get_default_vl_arg_structured_user_prompt_template`、`_get_default_grid_spatial_anchor_prompt` 切换为“先读文件、再最小兜底”的返回链路。
+    - 将以下加载点切换为兼容读取链路：
+      - `VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR`
+      - `DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM`
+      - `DEEPSEEK_VL_ARG_STRUCTURED_USER`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 新增缺失 PromptKeys 属性/注册项场景的回归测试，断言可稳定回退到 in-code prompt。
+  - 监控：
+    - 监控关键日志：`Prompt key is missing in registry`、`AnalyzeWithVL 异常`。
+  - 校验：
+    - 新增 Prompt Key 时必须同时校验 `PromptKeys` 与 `PROMPT_REGISTRY` 双向完整性，并在发布前执行混合版本回放。
+  - 回滚：
+    - 如需临时恢复强失败策略，可回滚 `_safe_get_prompt`，但需先确保全链路版本强一致，避免再次触发初始化中断。
+
+## 2026-03-03 前端任务提交重复触发（一次点击提交两次）修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 在 `index.html` 的任务提交区，点击“发送”按钮会触发两次提交流程，导致同一素材被重复创建任务。
+  - 影响范围：移动端任务提交入口（`#composerSubmitBtn`）点击路径。
+- 根因定位：
+  - `#composerSubmitBtn` 同时存在两套点击绑定：
+    - 按钮内联 `onclick`（优先调用 `window.handleMobileSubmitClick`，否则回退 `window.mobileUploadInlineSubmit`）。
+    - `bindComposerEnhancements()` 里的 `submitBtn.addEventListener('click', ...)`，并且调用链与内联逻辑一致。
+  - 两套绑定在同一次点击中都会执行，且都进入同一提交流程，形成重复提交。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 删除 `bindComposerEnhancements()` 内针对 `composerSubmitBtn` 的重复 `click` 监听，仅保留现有按钮内联 `onclick` 提交入口，确保单次点击只进入一条提交链路。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 代码级核对：`bindComposerEnhancements()` 中不再注册 `composerSubmitBtn` 的 `click` 监听。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端回归：单击提交按钮时，断言只发起 1 次 `/tasks/submit` 或上传链路请求。
+  - 监控：
+    - 在任务提交入口记录 request-id 与触发源，监控同秒同源重复提交率。
+  - 校验：
+    - 对关键按钮实行“单一绑定源”约束，禁止“内联事件 + addEventListener”并存到同一业务动作。
+  - 回滚：
+    - 若需快速回滚，可恢复 `bindComposerEnhancements()` 点击绑定；但必须同步移除内联 `onclick`，避免重新引入双触发。
+
+## 2026-03-03 书籍提交流程 `short is not defined` 前端异常修复
+- 日期：2026-03-03
+- 现象与影响范围：
+  - 在 `index.html` 的书籍章节探测后提交流程中，点击提交会在前端抛出 `ReferenceError: short is not defined`。
+  - 影响范围：书籍探测弹层预览区域渲染（`book-probe-preview-chip`）及后续提交流程可用性。
+- 根因定位：
+  - `services/java-orchestrator/src/main/resources/static/index.html` 在章节预览 chip 文本中调用了 `short(item.title, 28)`，但全文件不存在 `short` 的定义或引入。
+  - 异常发生在渲染预览阶段，导致流程中断并阻塞用户提交。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 将未定义调用 `short(item.title, 28)` 替换为现有可复用截断函数 `shortAnchorCommentText(item.title, 28)`，复用统一的文本清洗与省略号策略，避免重复造轮子。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - 代码级核对：全文件仅剩 `shortAnchorCommentText` 截断调用，不再存在 `short(` 未定义引用。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端书籍提交流程回归：章节预览渲染后点击提交，断言浏览器控制台无 `ReferenceError` 且请求链路正常发起。
+  - 监控：
+    - 监控前端异常关键字：`short is not defined`、`ReferenceError`，并绑定页面路径与触发动作。
+  - 校验：
+    - 对 `index.html` 增加最小静态检查，发布前扫描未声明函数调用（重点覆盖提交链路相关脚本段）。
+  - 回滚：
+    - 若需回滚，可恢复原调用；但必须同步补齐 `short` 定义，否则会再次触发同类异常。
+
+## 2026-03-04 PDF 任务误触发视频探测（移动端/网页端）修复
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 上传 `pdf/txt/md/epub` 书籍素材后，日志出现 `MVI_* GetVideoInfo ... invalid video input: cannot resolve HTTP URL`。
+  - 影响范围：
+    - 移动端提交接口：`POST /api/mobile/tasks/submit`（任务标题锁定阶段）。
+    - 网页端素材探测接口：`GET|POST /api/video-info`（含 `/api/mobile/video-info` 别名场景）。
+- 根因定位：
+  - 根因1：`MobileMarkdownController.resolveTitleFromVideoInfo()` 在标题预探测时未区分输入类型，书籍本地路径也会直接调用 Python gRPC `GetVideoInfo`。
+  - 根因2：`VideoProcessingController.isBookPathLike()` 仅使用 `endsWith` 判断扩展名，对“`.pdf` 后附加空白/分享文本”的输入识别失败，可能继续落入视频探测分支。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 新增 `shouldProbeTitleViaVideoInfo()`，仅当输入可判定为视频候选时才调用 `pythonGrpcClient.getVideoInfo()`。
+    - 对 `pdf/epub/document/book` 输入在标题锁定阶段直接跳过视频探测，回退到 `TaskDisplayNameResolver`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+    - `isBookPathLike()` 改为正则边界识别（支持扩展名后跟 `?`、`#`、空白和附加文本）。
+    - `chooseVideoInfoProbeInput()` 增加书籍输入优先分支，先返回书籍候选，避免误走 URL 探测链路。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerSubmissionTitleTest.java`
+    - 新增回归：`submitTaskShouldSkipVideoInfoProbeForPdfInput`，断言 PDF 提交不调用 gRPC 探测。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/VideoProcessingControllerVideoInfoTest.java`
+    - 新增回归：`postVideoInfoShouldTreatPdfPathWithTrailingShareTextAsBookInput`，断言该输入按书籍路径处理且不调用 gRPC。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerSubmissionTitleTest,VideoProcessingControllerVideoInfoTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留并扩展“书籍输入不调用 `GetVideoInfo`”断言，覆盖本地路径、`file://` 路径、带附加文本路径。
+  - 监控：
+    - 监控 `MVI_* GetVideoInfo failed` 与 `invalid video input: cannot resolve HTTP URL`，按输入内容类型分桶统计。
+  - 校验：
+    - 变更输入归一化/探测分支时，必须验证 `book/article/video` 三类输入的分流结果，避免跨类回归。
+  - 回滚：
+    - 若需紧急回滚，可先回退 `shouldProbeTitleViaVideoInfo` 与 `isBookPathLike` 相关提交；回滚后需接受 PDF 场景误打视频探测错误日志的副作用。
+
+## 2026-03-04 `/api/video-info` 运行时 `NoClassDefFoundError: VideoInputNormalizer` 修复
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 请求 `GET /api/video-info`（或 `/api/mobile/video-info`）时，`DispatcherServlet` 抛出：
+    - `java.lang.NoClassDefFoundError: com/mvp/module2/fusion/common/VideoInputNormalizer`
+    - 根因链路为 `ClassNotFoundException`，调用点在 `VideoProcessingController.normalizeVideoInput(...)`。
+  - 影响范围：所有依赖输入归一化的 Web/移动端探测入口可能直接 500，无法进入后续书籍/视频分流逻辑。
+- 根因定位：
+  - 运行实例出现 classpath 漂移：控制器已引用 `VideoInputNormalizer`，但实际运行类加载器中该类不可见。
+  - 原实现为“硬依赖静态调用”，一旦类缺失即在入口阶段失败，缺少降级保障。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoInputNormalizerBridge.java`
+    - 新增运行时桥接器：优先调用 `VideoInputNormalizer`；若捕获 `NoClassDefFoundError/ExceptionInInitializerError`，自动切换到内置 fallback 归一化逻辑。
+    - fallback 逻辑覆盖本地路径识别、HTTP 链接提取、BV 号归一化与 B 站 `p` 参数保留，保证核心探测输入语义稳定。
+    - 对缺失异常只做一次 ERROR 级别告警，后续降为 DEBUG，避免日志风暴。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+    - `normalizeVideoInput(...)` 改为调用 `VideoInputNormalizerBridge.normalizeVideoInput(...)`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - `normalizeVideoInput(...)` 同步改为桥接器调用，避免移动端入口同类故障。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml "-Dtest=MobileMarkdownControllerSubmissionTitleTest,VideoProcessingControllerVideoInfoTest" test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加归一化桥接器回归，覆盖 URL/BV/本地路径输入，确保 fallback 行为与主实现保持一致。
+  - 监控：
+    - 监控关键日志：`VideoInputNormalizer is unavailable at runtime, fallback normalizer enabled`；若出现即标记为部署 classpath 异常。
+  - 校验：
+    - 发布前检查 `target/classes/com/mvp/module2/fusion/common/VideoInputNormalizer.class` 与启动 classpath 一致性。
+  - 回滚：
+    - 如需回滚，可恢复控制器对 `VideoInputNormalizer` 直连调用；但会重新引入 classpath 漂移时入口级 500 风险。
+
+## 2026-03-04 Phase2B 结构化 Markdown 子级缩进从 4 空格退化为 1 空格修复
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 用户调用 `POST /api/mobile/cards/phase2b/structured-markdown` 返回 `200`，但结果中子级列表只保留 `1` 个前导空格，未满足“4 空格缩进”规范。
+  - 影响范围：移动端 Phase2B 结果预览与复制文本；当下游渲染器按严格缩进规则解析时，层级可读性下降。
+- 根因定位：
+  - 根因1：LLM 虽收到缩进约束，但输出存在“格式软违约”，会回退到常见 Markdown 习惯（`1` 空格子级缩进）。
+  - 根因2：后端此前缺少“确定性缩进归一化”兜底，导致模型格式漂移直接透传到用户侧。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 在 `requestPhase2bStructuredMarkdown` 与 `requestPhase2bStructuredMarkdownStreamed` 返回前增加 `normalizePhase2bListIndentation(...)`。
+    - 归一化规则：在代码围栏外，若检测到“仅 1 空格前导且为列表项/列表续行”，自动补齐为 `4` 空格缩进。
+    - 保留原始 LLM 输出日志（`phase2b.llm.raw` + `INDENT PROBE`），便于对比“模型原始输出”与“后处理输出”。
+  - 文件：`services/java-orchestrator/src/main/resources/prompts/ai-structrued/structured_system.md`
+    - 增加最高优先级缩进硬约束：嵌套列表必须 `4` 空格，禁止 `1/2/3` 空格与 `Tab`，并要求输出前逐行自检。
+  - 文件：`services/java-orchestrator/src/main/resources/prompts/ai-structrued/blend_system.md`
+    - 同步补充缩进硬约束与自检规则，避免多源融合场景回退到弱格式。
+  - 文件：`services/java-orchestrator/src/main/resources/prompts/ai-structrued/structured_user.md`
+    - 补充用户侧约束提示，强化输出前格式检查信号。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 触发 `POST /api/mobile/cards/phase2b/structured-markdown`，核对日志：
+    - `----- RAW BEGIN ----- ... ----- RAW END -----`
+    - `----- INDENT PROBE BEGIN ----- ... ----- INDENT PROBE END -----`
+  - 预期：后处理后返回文本中，原 `sp=1` 的子级列表行在最终响应里被补齐为 `4` 空格缩进。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 为 Phase2B 增加缩进归一化回归样例：输入含 `1` 空格子级列表时，断言输出统一为 `4` 空格。
+  - 监控：
+    - 监控 `phase2b.llm.raw` 日志中的 `INDENT PROBE`，统计 `sp=1` 行占比，作为模型格式稳定性指标。
+  - 校验：
+    - 每次调整 Phase2B prompt 后，必须抽样检查“模型原始输出 + 归一化结果”两段日志，防止格式回归。
+  - 回滚：
+    - 如需回滚，可临时移除归一化调用；但会重新暴露模型格式漂移，用户侧可能再次出现 1 空格缩进。
+
+## 2026-03-04 书籍章节探测面板：PDF 预览交互与章节联动修复
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 现象1：探测完成后右侧面板未稳定呈现 PDF 预览，部分上传 PDF 被误判为“仅 .pdf 可预览”。
+  - 现象2：右侧预览尺寸只能通过滑杆调整，不符合“拖动调节宽高”的交互要求。
+  - 现象3：预览区下方存在多余摘要与选择 chip 区块，干扰阅读与对照。
+  - 现象4：左侧点击章节/小节时，右侧 PDF 预览未必跳转到对应起始页，只对叶子项聚焦稳定。
+  - 影响范围：`bookProbeSheet` 章节选择与对页校验效率，直接影响书籍提交前的人工确认体验。
+- 根因定位：
+  - 根因1：旧版预览区仍保留滑杆式高度控制逻辑，未实现宽度与高度的拖拽分隔手柄。
+  - 根因2：章节树点击逻辑只覆盖叶子节点聚焦，未给章节/小节行建立“可聚焦到首个后代叶子”的映射。
+  - 根因3：预览渲染函数仍依赖 summary/chips DOM，导致 UI 冗余并增加状态维护复杂度。
+  - 根因4：上传场景默认走服务端路径预览，中间链路可用但不够快，未优先使用浏览器本地文件对象。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+  - 修复1（交互）：移除 `bookProbePreviewSizeRange` 滑杆，新增两个拖拽手柄：
+    - 左右分隔手柄：在章节树与预览区之间拖拽调整预览宽度（支持键盘箭头微调）。
+    - 上下分隔手柄：在 PDF 容器下方拖拽调整预览高度（支持键盘箭头微调）。
+  - 修复2（界面精简）：删除预览区下方 `summary/chips` 区块及其渲染逻辑，只保留必要的标题、页码与 PDF 视图。
+  - 修复3（章节联动）：树节点渲染阶段为章节/小节行注入 `data-tree-focus-key`，点击行时聚焦到首个后代叶子并同步 PDF 页跳转。
+  - 修复4（本地资源优先）：上传 PDF 时创建本地 `blob:` 预览地址并优先用于 iframe；关闭面板后释放 object URL，避免内存泄露。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 手工回归检查点：
+    - 打开探测面板后，拖动左右/上下手柄可实时改变 PDF 预览框宽高。
+    - 左侧点击章节/小节行，右侧 PDF 自动跳到对应章节起始页。
+    - 预览区下方不再显示摘要文本与 chip 列表。
+    - 上传 PDF 场景下优先使用本地 `blob:` 地址预览，关闭面板后 URL 被释放。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端回归用例（或脚本化检查）覆盖：树节点行点击跳页、拖拽宽高边界、本地 blob 预览优先级。
+  - 监控：
+    - 在调试日志中记录预览源类型（`blob/local-proxy/http`）与当前页跳转来源（leaf/tree-row/manual）用于故障定位。
+  - 校验：
+    - 每次变更 `bookProbeSheet` 时执行一次“PDF 上传 + 章节点击 + 拖拽尺寸”三步冒烟。
+  - 回滚：
+    - 如需回滚，可恢复旧滑杆控件与旧预览摘要区；但会回退交互效率并重新引入章节联动不完整问题。
+
+## 2026-03-04 PC Web：单击仍打开阅读，导致无法稳定执行选择/归纳
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 在 PC Web 端，用户单击任务卡后仍会直接进入阅读，抢占了“单击选中、多选、批量操作”的交互路径。
+  - 影响范围：左侧任务列表与锚点索引列表的选择与合集操作（批量删除、归纳、拖放前选择）。
+- 触发条件：
+  - 任务列表 `click` 直接调用 `openTaskForContent`。
+  - 锚点索引虽已改为选择优先，但仍存在全局 click/历史选择路径可能触发 `selectAnchor` 打开阅读。
+  - 浏览器 Service Worker 与静态资源缓存可能让旧脚本继续生效。
+- 根因定位：
+  - “打开阅读”入口未收敛，既有事件层（click）触发，也有函数层（`selectAnchor`）无来源约束触发。
+  - 缓存策略未强制刷新时，用户侧可能继续运行旧版本 JS。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+    - 在 `selectAnchor` 增加来源闸门：仅 `source === index_keyboard_enter` 允许真正打开阅读，其它来源统一降级为“仅选中 + 不打开”。
+    - 索引点击事件增加 `stopPropagation`；`inbox/body` click 不再触发阅读打开。
+    - 拖拽句柄轻点释放行为从“打开”改为“选中”。
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 任务列表 `click` 改为仅聚焦（不打开阅读）。
+    - 新增任务列表 `keydown(Enter)` 触发 `openTaskForContent`，形成“仅 Enter 打开”语义。
+    - 提升前端脚本版本参数，触发浏览器重新拉取新脚本。
+  - 文件：`services/java-orchestrator/src/main/resources/static/sw.js`
+    - `SHELL_CACHE_NAME` 升级到 `mobile-markdown-shell-v6`，淘汰旧离线壳缓存。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-pwa-share-target.js`
+    - Service Worker 注册后主动执行 `registration.update()`，降低旧 SW 长时间驻留概率。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`（通过）
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-pwa-share-target.js`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端交互回归：单击仅选中；`Enter` 才打开；`Shift/Ctrl` 多选不触发打开。
+  - 监控：
+    - 控制台输出锚点面板构建号（`mobile-anchor-panel build=...`），便于现场确认是否命中新版本。
+  - 校验：
+    - 每次改动打开/选择行为时，必须做“点击、双击、Enter、右键、拖拽”五路径冒烟。
+  - 回滚：
+    - 若键盘打开策略需回退，可仅恢复 `taskList click -> openTaskForContent` 与 `selectAnchor` 来源闸门；但会重新引入“点击抢占选择”问题。
+
+## 2026-03-04 Follow-up：任务内锚点面板 Select 菜单位置错误
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 用户在“进入任务后的锚点面板”看到 `Select` 菜单与批量栏，和“任务列表页进行多选”的交互预期冲突。
+  - 影响范围：内容页左侧锚点面板的视觉与操作路径，导致用户对选择入口产生误导。
+- 根因定位：
+  - Select 入口被实现并保留在锚点面板层，而非任务列表层。
+  - 锚点卡片仍渲染 checkbox，进一步放大“入口放错位置”的感知。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - 通过样式强制隐藏锚点面板内的 `#anchorIndexTools` 与 `#anchorCollectionFab`，移除可见 Select 菜单与批量栏。
+  - 文件：`services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+    - `buildAnchorCardHtml` 不再渲染选择 checkbox（`selectControl=''`）。
+    - 取消锚点卡 `is-selected` 视觉态输出（`isSelected=false`），避免残留“多选态”误导。
+- 验证方式：
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 手工验证：进入任务后左侧锚点面板不再出现 Select 菜单、批量栏、checkbox。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加前端冒烟检查：内容页锚点面板不应包含 Select 入口 DOM 的可见状态。
+  - 校验：
+    - 涉及“选择/批量操作”需求时，先明确入口层级（任务列表层 vs 锚点层）再编码，避免交互入口漂移。
+  - 回滚：
+    - 如需恢复锚点层 Select，仅恢复对应样式隐藏规则与锚点卡 checkbox 渲染逻辑即可。
+
+## 2026-03-04 AnalyzeWithVL 重复切片（同一 unit 在路由预处理与正式分析各切一次）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - 在 `semantic_unit_clips_vl` 目录中出现同一语义单元重复切片，例如同区间 `SU006` 同时出现 `001_SU006_...mp4` 和 `003_SU006_...mp4`。
+  - 影响范围：AnalyzeWithVL 的 VL 切片目录；会增加冗余 IO、磁盘占用，并干扰问题排查。
+- 根因定位：
+  - 路由预处理阶段 `preprocess_process_units_for_routing` 会先按 process 子集触发一次切片。
+  - 正式 VL 生成阶段 `generate` 会再按 VL 单元子集触发切片。
+  - 旧实现中，当第二次调用发现“有缺失单元”时会对完整子集再次执行切片，导致已存在单元被再次切割并产出重复文件。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - 在 `split_video_by_semantic_units` 中新增“缺失单元收集”逻辑。
+    - 当已存在片段仅缺部分 unit 时，改为只写入缺失 unit 到 `semantic_units_vl_subset.json` 并执行增量补切，避免对已存在 unit 重切。
+    - 复用判定日志与缺失统计改为基于 `valid_units`，防止误导性计数。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`
+    - 新增回归测试：已有 `SU006` 片段时，再请求 `SU002/SU004/SU006` 只允许补切 `SU002/SU004`。
+    - 同时将测试改为仓库内 sandbox 目录，规避 `tmp_path` 在当前环境的权限问题。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py -q`（通过，`3 passed`）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "build_messages_uses_concrete_mode_prompts or parse_response_with_payload_concrete_schema or postprocess_unit_main_content_updates_raw_json or generate_uses_concrete_mode_override_and_exposes_unit_outputs or test_generate_marks_unit_concrete_when_should_type_concrete"`（通过，`5 passed`）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留并扩展“增量补切”场景用例，覆盖“已有部分片段 + 新增缺失片段”的组合输入。
+  - 监控：
+    - 关注日志关键字：`检测到增量切片场景，仅切割缺失单元`，确认线上行为进入增量路径。
+  - 校验：
+    - 排障时同时核对 `semantic_units_vl_subset.json` 与 `semantic_unit_clips_vl` 的 unit_id 覆盖关系，避免仅看文件序号判断是否重复。
+  - 回滚：
+    - 若需回退，可恢复到“缺失时全量重切”策略；但会重新引入同 unit 重复切片风险。
+
+## 2026-03-04 AnalyzeWithVL 错误可观测性增强（新增 `vl_last_error.json`）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - AnalyzeWithVL 在 VL 失败时主要依赖日志与 `error_msg`，现场排障需要翻长日志，不便于快速定位“哪一段失败、失败链路是什么、最后一次 LLM 错误是什么”。
+  - 影响范围：`services/python_grpc/src/server/grpc_service_impl.py` 的 AnalyzeWithVL 失败出口（`vl_failed_early`、`vl_failed`、`vl_exception`）。
+- 根因定位：
+  - 失败信息虽然存在于运行时对象（如 `unit_analysis_outputs/raw_llm_interactions`），但缺少统一、结构化、可直接读取的错误快照文件。
+  - 仅靠通用报告文件不足以在第一时间聚焦“最近一次失败”的关键上下文。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - 新增 `_persist_vl_last_error(payload)`：将错误快照异步落盘到 `intermediates/vl_last_error.json`。
+    - 新增 `_summarize_vl_unit_failures(...)`：提取失败单元摘要（`unit_id/analysis_mode/error_msg/llm_attempts/last_llm_error`）。
+    - 在三个失败出口统一写入错误快照：
+      - `vl_failed_early`
+      - `vl_failed`
+      - `vl_exception`
+    - 快照内容包含：`task_id`、`vl_model`、`video_path`、`semantic_units_path`、`checkpoint`、`error_msg`、`token_stats`、`result_counts`、`unit_failures`、异常栈（异常分支）。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加 AnalyzeWithVL 失败场景回归：断言 `intermediates/vl_last_error.json` 已落盘且包含 `checkpoint/error_msg`。
+  - 监控：
+    - 关注日志关键字：`queued VL last error snapshot`，确保失败时快照写入链路可见。
+  - 校验：
+    - 现场排障优先查看 `vl_last_error.json`，再回溯 `vl_analysis_output` 与原始日志。
+  - 回滚：
+    - 如需回退可仅移除 `_persist_vl_last_error` 调用，不影响主流程结果正确性，但会降低失败诊断效率。
+
+## 2026-03-04 DashScope 上传“假失败”修复（`uploaded_files.file_id` 兼容）
+- 日期：2026-03-04
+- 现象与影响范围：
+  - AnalyzeWithVL 日志反复出现：
+    - `DashScope SDK upload failed and file is too large for base64 data-uri fallback`
+    - `upload_error=unknown`
+  - 影响范围：`dashscope_upload` 输入模式下的 VL 视频直传链路，导致语义单元批量降级失败。
+- 根因定位：
+  - 线上 DashScope SDK `Files.upload` 返回 `status_code=200`，但 `output` 结构为：
+    - `uploaded_files[].file_id`
+  - 旧实现仅兼容 `output.url`，未处理 `file_id` 路径，导致“上传成功但被判定为失败”。
+  - 上层在 `raise_on_failure=False` 下仅拿到 `None`，最终错误信息退化为 `upload_error=unknown`。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - 在 `_try_get_dashscope_temp_url` 增加 `uploaded_files[].file_id` 解析分支：
+    - `Files.upload` 成功后，若无 `output.url`，则读取 `file_id`。
+    - 调用 `dashscope.Files.get(file_id=...)` 二次解析 `output.url` 作为可访问临时 URL。
+  - 增加上传成功通知日志：
+    - 当成功拿到临时 URL 时，输出 `INFO` 级日志 `DashScope Files.upload succeeded...`。
+    - 日志包含 `video_path`、`size_bytes`、`url_source`、`request_id`，用于快速确认成功并做链路追踪。
+  - 增强异常语义：
+    - 当 `upload` 返回 200 但未拿到 URL 时，抛出包含 `output` 预览的明确错误，而非空泛失败。
+  - 按任务要求将 base64 视频回退阈值调整为 `1GB`：
+    - `_MAX_RAW_BYTES_FOR_BASE64_DATA_URI = 1024 * 1024 * 1024`
+- 验证方式：
+  - 复现实测（同一任务目录）：
+    - `Files.upload` 返回 200 且 `uploaded_files[].file_id` 存在。
+    - `Files.get(file_id)` 返回 200 且 `output.url` 存在。
+    - `_try_get_dashscope_temp_url(..., raise_on_failure=True)` 可获取非空 URL（SU002/SU004 实测通过）。
+    - 日志可见 `DashScope Files.upload succeeded: ...`（包含 request_id 与 url_source）。
+  - 语法与编译：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加上传响应双形态回归用例：`output.url` 与 `uploaded_files[].file_id`。
+  - 监控：
+    - 关注日志关键字：`DashScope Files.upload succeeded but no temporary URL was found in output`。
+  - 校验：
+    - 排障时优先核对 `Files.upload` 原始 `output` 结构，再判断是否真失败。
+  - 回滚：
+    - 如需回滚，仅移除 `file_id -> Files.get` 分支；但会恢复“上传成功被误判失败”风险。

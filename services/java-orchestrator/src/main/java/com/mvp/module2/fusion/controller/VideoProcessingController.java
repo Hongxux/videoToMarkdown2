@@ -1,7 +1,6 @@
 package com.mvp.module2.fusion.controller;
 
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
-import com.mvp.module2.fusion.common.VideoInputNormalizer;
 import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.resilience.ResilientGrpcClient;
@@ -442,7 +441,7 @@ public class VideoProcessingController {
     }
 
     private String normalizeVideoInput(String rawVideoInput) {
-        return VideoInputNormalizer.normalizeVideoInput(rawVideoInput);
+        return VideoInputNormalizerBridge.normalizeVideoInput(rawVideoInput);
     }
 
     private ResponseEntity<Map<String, Object>> queryVideoInfoInternal(
@@ -981,18 +980,10 @@ public class VideoProcessingController {
         if (normalized.isBlank()) {
             return false;
         }
-        int queryAt = normalized.indexOf('?');
-        if (queryAt > 0) {
-            normalized = normalized.substring(0, queryAt);
-        }
-        int fragmentAt = normalized.indexOf('#');
-        if (fragmentAt > 0) {
-            normalized = normalized.substring(0, fragmentAt);
-        }
-        return normalized.endsWith(".pdf")
-                || normalized.endsWith(".txt")
-                || normalized.endsWith(".md")
-                || normalized.endsWith(".epub");
+        return normalized.matches(".*\\.pdf(?:$|[?#\\s]).*")
+                || normalized.matches(".*\\.txt(?:$|[?#\\s]).*")
+                || normalized.matches(".*\\.md(?:$|[?#\\s]).*")
+                || normalized.matches(".*\\.epub(?:$|[?#\\s]).*");
     }
 
     private int asInt(Object value, int fallback) {
@@ -1250,6 +1241,9 @@ public class VideoProcessingController {
     private String chooseVideoInfoProbeInput(String rawInput, String normalizedInput) {
         String raw = rawInput != null ? rawInput.trim() : "";
         String normalized = normalizedInput != null ? normalizedInput.trim() : "";
+        if (!normalized.isEmpty() && isBookPathLike(normalized)) {
+            return normalized;
+        }
         String lowerRaw = raw.toLowerCase(Locale.ROOT);
         if (lowerRaw.contains("http://") || lowerRaw.contains("https://")) {
             return raw;

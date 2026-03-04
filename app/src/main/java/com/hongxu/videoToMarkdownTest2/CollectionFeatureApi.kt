@@ -47,6 +47,48 @@ data class VideoProbeResult(
     val episodes: List<VideoProbeEpisode>
 )
 
+private val BOOK_FILE_EXTENSIONS = setOf(".pdf", ".epub", ".txt", ".md")
+
+fun VideoProbeResult.isBookProbeResult(): Boolean {
+    if (contentType.equals("book", ignoreCase = true)) {
+        return true
+    }
+    if (totalPages > 0 || (detectedStartPage ?: 0) > 0 || (confirmedStartPage ?: 0) > 0) {
+        return true
+    }
+    val normalizedStrategy = pageMapStrategy.trim()
+    if (normalizedStrategy.isNotEmpty()
+        && !normalizedStrategy.equals("none", ignoreCase = true)
+        && !normalizedStrategy.equals("video", ignoreCase = true)
+    ) {
+        return true
+    }
+    val hasBookLikeEpisodeFields = episodes.any { episode ->
+        episode.startPage != null
+            || episode.endPage != null
+            || episode.sectionSelector.isNotBlank()
+            || episode.chapterIndex > 0
+            || episode.sectionIndex > 0
+    }
+    if (hasBookLikeEpisodeFields) {
+        return true
+    }
+    val probeUrls = buildList {
+        add(resolvedUrl)
+        episodes.forEach { episode ->
+            add(episode.episodeUrl)
+        }
+    }
+    return probeUrls.any { rawUrl ->
+        val trimmed = rawUrl.trim()
+        if (trimmed.isEmpty()) {
+            return@any false
+        }
+        val normalized = trimmed.substringBefore('?').substringBefore('#').lowercase(Locale.ROOT)
+        BOOK_FILE_EXTENSIONS.any { ext -> normalized.endsWith(ext) }
+    }
+}
+
 data class MobileCollectionSummary(
     val collectionId: String,
     val title: String,

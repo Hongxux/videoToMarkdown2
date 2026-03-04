@@ -75,6 +75,7 @@ public class BookMarkdownService {
     private static final Pattern PDF_CHAPTER_TITLE_PATTERN = Pattern.compile("^(?i)(chapter|part)\\s+\\d+\\b.*|^\\d+\\s+.+");
     private static final Pattern PDF_SECTION_TITLE_PATTERN = Pattern.compile("^(?i)(\\d+\\.){1,6}\\s*.+|^\\d+\\.\\d+(?:\\.\\d+){0,6}\\s+.+");
     private static final Pattern MARKDOWN_IMAGE_PATTERN = Pattern.compile("!\\[[^\\]]*]\\(([^)]+)\\)");
+    private static final String SELECTOR_TOKEN_SPLIT_REGEX = "[,;\\s\\uFF0C\\uFF1B]+";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Charset GB18030 = Charset.forName("GB18030");
     private static final int PDF_TOC_MAX_SCAN_PAGES = 80;
@@ -1713,7 +1714,7 @@ public class BookMarkdownService {
 
         Set<Integer> selectedIndexes = new LinkedHashSet<>();
         List<String> titleTokens = new ArrayList<>();
-        for (String rawToken : selector.split("[,闁?闁挎稒鐭?")) {
+        for (String rawToken : selector.split(SELECTOR_TOKEN_SPLIT_REGEX)) {
             String token = normalize(rawToken);
             if (token.isBlank()) {
                 continue;
@@ -1889,7 +1890,7 @@ public class BookMarkdownService {
         Set<String> selectedKeys = new LinkedHashSet<>();
         Map<String, Set<Integer>> selectedLeafIndexesByKey = new LinkedHashMap<>();
         List<String> titleTokens = new ArrayList<>();
-        for (String rawToken : selector.split("[,;\\s闁挎稑鐭夌槐鐩?")) {
+        for (String rawToken : selector.split(SELECTOR_TOKEN_SPLIT_REGEX)) {
             String token = normalize(rawToken);
             if (token.isBlank()) {
                 continue;
@@ -2036,7 +2037,7 @@ public class BookMarkdownService {
         if (selector.isBlank()) {
             return ordered;
         }
-        for (String rawToken : selector.split("[,;\\s\\uFF0C\\uFF1B]+")) {
+        for (String rawToken : selector.split(SELECTOR_TOKEN_SPLIT_REGEX)) {
             String token = normalize(rawToken);
             if (token.isBlank()) {
                 continue;

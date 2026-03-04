@@ -53,8 +53,10 @@ class PromptKeys:
 
     VL_VIDEO_ANALYSIS_DEFAULT_USER = "vl.video_analysis.default.user"
     VL_VIDEO_ANALYSIS_TUTORIAL_SYSTEM = "vl.video_analysis.tutorial.system"
+    VL_VIDEO_ANALYSIS_CONCRETE_SYSTEM = "vl.video_analysis.concrete.system"
     VL_VIDEO_ANALYSIS_CONSTRAINTS_DEFAULT = "vl.video_analysis.constraints.default"
     VL_VIDEO_ANALYSIS_CONSTRAINTS_TUTORIAL = "vl.video_analysis.constraints.tutorial"
+    VL_VIDEO_ANALYSIS_CONSTRAINTS_CONCRETE = "vl.video_analysis.constraints.concrete"
     VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR = "vl.video_analysis.grid_spatial_anchor"
 
     DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM = "deepseek.video_clip.motion_value.system"
@@ -179,6 +181,11 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         relative_path="vl/video_analysis/tutorial_system.md",
         description="VL 教程模式 System Prompt",
     ),
+    PromptKeys.VL_VIDEO_ANALYSIS_CONCRETE_SYSTEM: PromptRegistryEntry(
+        key=PromptKeys.VL_VIDEO_ANALYSIS_CONCRETE_SYSTEM,
+        relative_path="vl/video_analysis/concrete_system.md",
+        description="VL concrete 模式 System Prompt",
+    ),
     PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_DEFAULT: PromptRegistryEntry(
         key=PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_DEFAULT,
         relative_path="vl/video_analysis/output_constraints_default.md",
@@ -188,6 +195,11 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         key=PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_TUTORIAL,
         relative_path="vl/video_analysis/output_constraints_tutorial.md",
         description="VL 教程模式输出约束",
+    ),
+    PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_CONCRETE: PromptRegistryEntry(
+        key=PromptKeys.VL_VIDEO_ANALYSIS_CONSTRAINTS_CONCRETE,
+        relative_path="vl/video_analysis/output_constraints_concrete.md",
+        description="VL concrete 模式输出约束",
     ),
 
     PromptKeys.VL_VIDEO_ANALYSIS_GRID_SPATIAL_ANCHOR: PromptRegistryEntry(

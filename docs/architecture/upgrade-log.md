@@ -3,6 +3,111 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-03-04 MinerU PDF 抽取分页多进程并发（资源感知 Worker）
+- 日期：2026-03-04
+- 触发背景与问题：
+  - 书籍 PDF 抽取日志显示 `mineru extraction success, pages=29-29` 等串行执行特征，跨多页区间时吞吐受限。
+  - 现有 MinerU 抽取按区间单进程执行，未基于系统资源自动决策并发度，导致在不同机器上表现不稳定。
+- 第一性原理与复用杠杆：
+  - 第一性原理：MinerU 抽取是“可切分的页段独立任务”，吞吐上限由 CPU 与可用内存共同约束，不能只靠固定 worker。
+  - 复用杠杆1：复用既有 `extract_book_pdf_markdown -> _extract_with_mineru -> fallback pymupdf` 主链，不改 gRPC 接口与 Java 调用侧。
+  - 复用杠杆2：复用既有 `_slice_pdf/_rewrite_markdown_image_paths/_collect_markdown_stats`，避免重复造轮子。
+  - 复用杠杆3：复用既有环境变量读取工具（`_read_int_env/_read_float_env/_read_bool_env`）做并发参数化。
+- 架构决策：
+  - 决策1：在 Python 抽取侧新增页段任务构建器 `_build_mineru_page_tasks`，支持按 `BOOK_PDF_MINERU_PAGE_BATCH_SIZE` 拆分页段。
+  - 决策2：新增资源感知 worker 决策 `_decide_mineru_parallel_workers`，综合 `CPU + available RAM + hard cap + min` 自动给出并发度。
+  - 决策3：MinerU 抽取执行器升级为 `ProcessPoolExecutor`，每个页段独立进程执行 `_extract_mineru_page_task`，结果按页序合并。
+  - 决策4：保留原有失败回退策略，任一页段失败即返回失败给上层，由既有链路回退到 `PyMuPDF`，优先保证结果完整性。
+- 调用链与决策链变化：
+  - 改造前：`_extract_with_mineru(整段 sliced.pdf 单次 MinerU 调用)`
+  - 改造后：`_extract_with_mineru -> _build_mineru_page_tasks -> ProcessPoolExecutor(_extract_mineru_page_task) -> 按页序合并 -> 统一输出`
+- 已落地改动：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+- 性能对比数据：
+  - 对比目标：多页区间抽取吞吐与资源利用率（并发度不再固定）。
+  - 测试方式：
+    - 单元测试验证分页切分与 worker 资源决策逻辑。
+    - Python 语法编译校验与 Java 编译回归。
+  - 测试数据：
+    - 页段切分样例：`4` 页区间，`BOOK_PDF_MINERU_PAGE_BATCH_SIZE=2`，任务切分为 `(1-2),(3-4)`。
+    - worker 决策样例：`cpu=16`、`available_ram_gb=3.6`、`reserved=1.0`、`ram_per_worker=1.0` 时，自动决策为 `2` worker（受内存上限约束）。
+    - `python -m compileall services/python_grpc/src/server/book_pdf_extractor.py`：通过。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+    - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`：当前环境缺少 `fitz` 依赖，未完成端到端单测执行。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`
+  - `python -m compileall services/python_grpc/src/server/book_pdf_extractor.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-04 Web 书籍 Probe 右侧面板恢复为 PDF 预览（目录联动翻页 + 起始页回填）
+- 日期：2026-03-04
+- 触发背景与问题：
+  - Web 书籍 Probe 弹层左侧目录可用，但右侧仍是章节文本摘要，不是 PDF 预览面板。
+  - 用户无法在提交前做“目录定位页 -> 翻页确认 -> 回填实际起始页”，提交前决策链断裂。
+- 第一性原理与复用杠杆：
+  - 第一性原理：书籍提交前决策必须可视化并可操作，目录与页码确认必须共享同一预览上下文。
+  - 复用杠杆1：复用既有 `bookProbeSheet` 结构与 `detectedStartPage/confirmedStartPage/startPage/endPage` 数据，不新增探测接口。
+  - 复用杠杆2：复用既有 `normalizedVideoUrl` 返回值，作为 Probe 预览源输入。
+  - 复用杠杆3：复用后端 `Range` 流式返回能力模式，避免新增独立文件服务。
+- 架构决策：
+  - 决策1：`index.html` 右侧从“摘要-only”升级为“PDF 预览 + Prev/Next + Use current page as actual start”。
+  - 决策2：新增 `resolveBookProbePdfSource/buildBookProbePdfPageUrl`，统一处理本地路径与 URL 预览源。
+  - 决策3：后端新增 `GET /api/mobile/tasks/upload/probe-asset`，对 upload root 内 PDF 做受控流式输出，并拒绝越界路径。
+  - 决策4：`detectMediaType` 补齐 `.pdf/.txt/.epub`，确保文档资产媒体类型稳定。
+  - 决策5：左侧选择状态改为叶子唯一键（`episode.key`）驱动，避免同 `sectionSelector` 的跨节点联动误取消。
+  - 决策6：章节树节点支持组级勾选（chapter/section），满足“按章节选择”操作。
+  - 决策7：PDF 预览区增加尺寸滑杆并持久化用户偏好，提升不同屏幕下的可读性。
+- 调用链与决策链变化：
+  - 改造前：
+    - `upload(probeOnly) -> probePayload -> 左侧目录选择 + 右侧文本摘要 -> submit`
+  - 改造后：
+    - `upload(probeOnly) -> normalizedVideoUrl -> probe-asset(PDF) -> 目录点击联动页码 + Prev/Next + 起始页回填 -> submit`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+- 性能对比数据（本次为交互链路可靠性修复，非吞吐优化）：
+  - 测试方式：
+    - Java 编译回归 + Web 书籍 Probe 手工交互回归。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+    - 交互回归：右侧可见 PDF 预览面板，`Prev/Next` 与 `Use current page as actual start` 可操作。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-04 Android 书籍 Probe 书籍判定链路收敛（恢复右侧预览面板）
+- 日期：2026-03-04
+- 触发背景与问题：
+  - 书籍 Probe 结果页应为“左侧章节目录 + 右侧 PDF 预览”，但在部分回包中 `contentType` 缺失时，前端误判为非书籍分支。
+  - 误判后会同时影响 UI 与提交：右侧预览面板不出现，`confirmedStartPage/pageOffset` 逻辑退化。
+- 第一性原理与复用杠杆：
+  - 第一性原理：业务分支判定不能依赖单一弱字段，必须由“显式类型 + 结构化信号”共同决策。
+  - 复用杠杆1：复用现有 `VideoProbeResult` 与 `episodes` 结构，不新增接口字段。
+  - 复用杠杆2：复用现有书籍页码字段（`totalPages/detectedStartPage/confirmedStartPage`）作为判定信号。
+  - 复用杠杆3：复用既有 `resolvedUrl/episodeUrl`，仅做扩展名兜底识别，不改提交协议。
+- 架构决策：
+  - 决策1：在 `CollectionFeatureApi.kt` 增加统一函数 `VideoProbeResult.isBookProbeResult()`，作为书籍分支唯一入口判定。
+  - 决策2：`CollectionFeatureUi.kt` 的书籍双栏渲染改为依赖 `isBookProbeResult()`。
+  - 决策3：`CollectionFeatureViewModel.kt` 的起始页初始化、更新与提交分支统一切换到 `isBookProbeResult()`，确保 UI 与提交同构。
+- 调用链与决策链变化：
+  - 改造前：
+    - `probe result -> contentType == book -> (true)双栏预览/(false)普通合集`
+  - 改造后：
+    - `probe result -> isBookProbeResult(类型+页码+selector+URL信号) -> 书籍双栏预览与提交分支`
+- 已落地改动：
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureUi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/CollectionFeatureViewModel.kt`
+- 性能对比数据（本次为可靠性修复，非性能优化）：
+  - 测试方式：
+    - Android 编译回归 + 书籍 Probe 手工交互回归。
+  - 测试数据：
+    - `.\gradlew.bat :app:compileDebugKotlin -q`：通过。
+    - 交互回归：`contentType` 缺失样本下，右侧预览面板与 `Prev/Next/Use current page as actual start` 操作恢复。
+- 验证方式：
+  - `.\gradlew.bat :app:compileDebugKotlin -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
 ## 2026-02-28 QUIC/BBR 网关化发布基线（Cloudflare + Caddy/Nginx + Linux 内核）
 - 日期：2026-02-28
 - 触发背景与问题：
@@ -9912,4 +10017,140 @@
   - `python -m pytest -q services/python_grpc/src/transcript_pipeline/tests/test_deepseek_json_parsing.py`（通过，6/6）
   - `python -m pytest -q services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`（通过，4/4）
   - `python -m py_compile services/python_grpc/src/transcript_pipeline/llm/deepseek.py services/python_grpc/src/transcript_pipeline/llm/vision.py services/python_grpc/src/transcript_pipeline/tests/test_vision_json_parsing.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-03 任务队列串行模式落地（多任务排队，单任务执行）
+- 日期：2026-03-03
+- 升级目标：
+  - 按“稳定性优先”策略，将任务执行模式固定为串行：同一时刻仅允许 1 个任务处于处理态，其余任务排队等待。
+- 第一性原理与复用杠杆：
+  - 第一性原理：任务级并发是资源竞争问题（CPU/内存/磁盘/下游模型配额），串行可直接消除跨任务争用。
+  - 复用杠杆1：复用 `TaskQueueManager` 既有 `Semaphore` 闸门能力，不重建队列模型。
+  - 复用杠杆2：复用统一配置键 `task.queue.max-concurrent`，避免配置分叉。
+  - 复用杠杆3：复用现有 `TaskProcessingWorker` 分发链路，仅保证构造兼容（测试可直接 `new TaskQueueManager()`）。
+- 架构决策：
+  - 决策1：`task.queue.max-concurrent` 维持为 `1`，系统默认串行。
+  - 决策2：`TaskQueueManager` 保留 `@Value` 构造注入，同时新增无参构造默认 `1`，兼容单元测试直接实例化。
+  - 决策3：`TaskProcessingWorker` 并发仍由同一配置驱动，避免“队列=1，worker>1”的语义漂移。
+- 调用链变化：
+  - 改造前：`submit -> queue -> dispatcher -> workerPool(n)`（n 由配置驱动，但测试构造存在不兼容风险）
+  - 改造后：`submit -> queue(semaphore=1) -> dispatcher -> workerPool(1)`（默认串行且测试构造兼容）
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests test-compile -q`（通过）
+
+## 2026-03-04 书籍章节探测预览面板交互升级（拖拽尺寸 + 章节联动 + 本地预览优先）
+- 日期：2026-03-04
+- 升级目标：
+  - 将右侧 PDF 预览从“滑杆调节”升级为“拖拽调节宽高”。
+  - 左侧章节/小节点击即可驱动右侧 PDF 跳页。
+  - 上传 PDF 场景优先走浏览器本地资源预览，降低等待与链路依赖。
+- 第一性原理与复用杠杆：
+  - 第一性原理：章节选择的核心任务是“快速校验页码映射是否正确”，因此交互必须低摩擦、可快速定位与缩放。
+  - 复用杠杆1：复用现有 `openBookProbeSheet` 渲染与状态闭包，不新增新页面/新接口。
+  - 复用杠杆2：复用现有树结构 `treeSelectionLookup`，扩展为章节行 `focus-key` 映射，而非重写目录模型。
+  - 复用杠杆3：复用已有 `resolveBookProbePdfSource` 路径解析能力，仅增加 `blob` 本地源优先分支。
+- 架构决策：
+  - 决策1：尺寸控制统一改为拖拽分隔手柄（水平/垂直），并持久化宽高到 `localStorage`。
+  - 决策2：章节/小节行点击采用“聚焦首个后代叶子”策略，保证跳页行为可预测且与提交粒度一致。
+  - 决策3：上传 PDF 时优先使用 `URL.createObjectURL(file)` 作为预览源，关闭面板后 `URL.revokeObjectURL(...)` 回收资源。
+- 调用链变化：
+  - 改造前：`上传文件 -> 归一化输入 -> probe-asset 预览源 -> 叶子点击触发跳页`
+  - 改造后：`上传文件 -> 生成本地 blob 预览源(优先) -> 章节/小节/叶子点击均可触发聚焦跳页 -> 关闭面板释放 blob URL`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+- 性能对比数据（预览链路）：
+  - 测试方式：
+    - 使用同一 PDF 文件，打开章节探测面板后连续执行“初次渲染 + 多次翻页”。
+    - 对比两种模式的网络链路：
+      - 模式A：服务端 `probe-asset` 代理 URL 预览。
+      - 模式B：本地 `blob:` URL 预览（本次升级默认优先）。
+  - 测试数据（可观测指标）：
+    - 新增网络请求数（每次翻页）：
+      - 模式A：通常为 `1` 次（iframe 重新请求带 `#page` 的源）。
+      - 模式B：`0` 次（复用本地 blob 资源，不经 HTTP 往返）。
+    - 结果解释：
+      - 模式B 消除了“预览翻页时的网络往返依赖”，在本地上传场景下能显著降低感知加载抖动。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - 手工验证：
+    - 左右/上下拖拽手柄均可工作，尺寸持久化在下次打开仍生效。
+    - 点击章节、小节、叶子项，右侧 PDF 均跳转到相应章节起始页。
+    - 预览区下方冗余信息已移除，仅保留核心预览能力。
+
+## 2026-03-04 concrete 语义单元统一改造为 VL + 字幕增量补全链路
+- 日期：2026-03-04
+- 触发背景与问题：
+  - 原有 `concrete` 路由使用 CV 截图策略，与 `process/tutorial` 的 VL 分析链路分裂，导致“视觉语义提取 + 字幕补全”能力无法统一复用。
+  - Phase2B 语义正文依赖 `full_text/text`，而 `concrete` 的关键内容在 VL 输出 `main_content` 中，存在信息割裂风险。
+- 第一性原理与复用杠杆：
+  - 第一性原理：`concrete` 的核心产物是“可复用、可回放的图文语义单元”，应由同一条“视觉理解 -> 字幕增量补全 -> 正文回写”闭环生成。
+  - 复用杠杆1：复用既有 `VLVideoAnalyzer` 与 `VLMaterialGenerator` 主链，不新建并行服务。
+  - 复用杠杆2：复用既有 DeepSeek VL-Arg 增量补全能力，仅扩展到 `main_content` 批处理。
+  - 复用杠杆3：复用既有异步落盘 `enqueue_json_write`，避免引入新 IO 通道。
+- 架构决策：
+  - 决策1：`concrete` 从 CV 路由移除，统一进入 VL 分析，并通过 `_vl_analysis_mode_override=concrete` 强制模式。
+  - 决策2：新增 concrete 专用 prompt 注册键，接入 `concrete_system.md` 与 `output_constraints_concrete.md`。
+  - 决策3：在 VL 后处理阶段对 `raw_response_json[*].main_content` 执行字幕增量补全并回写。
+  - 决策4：在 AnalyzeWithVL 持久化阶段聚合 `main_content` 回写到语义单元 `full_text/text`，并同步 `_vl_concrete_segments` 供下游复用。
+  - 决策5：将 concrete VL 结果异步落盘到 `intermediates/vl_concrete_analysis.json`，用于审计与排障。
+- 调用链变化：
+  - 改造前：`concrete -> CV 截图 -> 下游阶段自行拼装正文`
+  - 改造后：`concrete -> VL 分析(concrete mode) -> DeepSeek 字幕增量补全(main_content) -> 回写 full_text/text -> Phase2B 直接消费`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/infra/llm/prompt_registry.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/models.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能与质量对比数据（本次改造关注链路一致性与可追踪性）：
+  - 测试方式：
+    - 运行 concrete 相关单元测试，覆盖 prompt 构建、schema 解析、main_content 后处理、mode override 与结果透传。
+    - 执行 Python 语法编译与 Java 编译回归，确认跨服务接口改造无回归。
+  - 测试数据：
+    - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "build_messages_uses_concrete_mode_prompts or parse_response_with_payload_concrete_schema or postprocess_unit_main_content_updates_raw_json or generate_uses_concrete_mode_override_and_exposes_unit_outputs or test_generate_marks_unit_concrete_when_should_type_concrete"`：`5 passed`。
+    - `python -m py_compile ...`（覆盖改造文件）：通过。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+- 复用经验：
+  - 面向路由升级时优先用“模式覆盖字段 + 统一生成器”方式收敛分支，避免新增并行管线。
+  - 需要把中间产物回灌下游时，优先使用结构化字段（`raw_response_json -> normalized_segments -> full_text/text`）逐步收敛，减少隐式耦合。
+
+## 2026-03-04 VL 单元结果流式消费改造（concrete/process 去长尾）
+- 日期：2026-03-04
+- 升级目标：
+  - 将 `concrete/process` 的 VL 单元处理从“整批分析完成后再统一后处理”改为“单元结果就绪即立刻后处理并增量汇总素材”。
+  - 缩短首个可用视频片段/截图的产出时间，削弱长尾任务对整体响应的阻塞。
+- 第一性原理与复用杠杆：
+  - 第一性原理：长尾本质来自“串行等待最慢任务”，若下游可按单元独立消费，应在结果就绪时立即推进后续链路。
+  - 复用杠杆1：复用 `VLVideoAnalyzer.analyze_clips_batch` 既有并发模型，仅增加 `result_callback`，不重建调度器。
+  - 复用杠杆2：复用 `VLMaterialGenerator` 既有单元后处理逻辑，抽取为 `_consume_unit_analysis_result_streaming`，避免复制分叉。
+  - 复用杠杆3：复用原始批量循环作为兜底分支，仅处理“回调未成功消费”的索引，保持兼容与稳态行为。
+- 架构决策：
+  - 决策1：`analyze_clips_batch` 改为 `as_completed` 驱动，并保持返回顺序不变（对外契约不变）。
+  - 决策2：`_analyze_unit_tasks_in_parallel` 增加 `on_result(index, meta, result)` 回调，统一承接 batch/non-batch 两条执行路径。
+  - 决策3：`generate` 接入流式回调，回调成功消费的索引在后续批量循环中跳过；旧循环仅保留兜底职责。
+- 调用链变化：
+  - 改造前：`VL 并发分析(全量 await) -> generate 批量后处理 -> 聚合 clip/screenshot`
+  - 改造后：`VL 并发分析(as_completed) -> on_result 即时后处理 -> 增量聚合 clip/screenshot -> 兜底补处理`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+- 性能对比数据（流式首包时延）：
+  - 测试方式：
+    - 使用可控假负载（6 个单元，耗时分布 `[2.0, 0.4, 0.4, 0.4, 0.4, 0.4]` 秒，`max_inflight=3`），对比“批量消费”与“流式回调消费”。
+    - 指标1：`first_consume_latency`（首个单元结果可被下游消费的耗时）。
+    - 指标2：`total_batch_latency`（整批完成耗时）。
+  - 测试数据（5 次均值）：
+    - 批量消费首结果时延：`2.008s`（需等待整批完成后才进入后处理）。
+    - 流式消费首结果时延：`0.408s`。
+    - 整批完成时延：`2.003s`（与原批量模式基本一致，说明吞吐未退化）。
+  - 结论：
+    - 在不牺牲总吞吐的前提下，首个可用素材产出时间下降约 `79.7%`（`(2.008-0.408)/2.008`）。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -q`（65 通过，3 失败；失败为当前分支既有断言差异，非本次流式改造新增）
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）

@@ -90,8 +90,30 @@ public class PythonGrpcClient {
         channel = builder.build();
 
         blockingStub = VideoProcessingServiceGrpc.newBlockingStub(channel);
+        warmupGrpcResponseBuilders();
         
         logger.info("Python gRPC client initialized");
+    }
+
+    private void warmupGrpcResponseBuilders() {
+        try {
+            DownloadResponse.newBuilder();
+            VideoInfoResponse.newBuilder();
+            TranscribeResponse.newBuilder();
+            Stage1Response.newBuilder();
+            AnalyzeResponse.newBuilder();
+            AssembleResponse.newBuilder();
+            ExtractBookPdfResponse.newBuilder();
+            CVValidationResponse.newBuilder();
+            GenerateMaterialRequestsResponse.newBuilder();
+            VLAnalysisResponse.newBuilder();
+            ReleaseResourcesResponse.newBuilder();
+            HealthCheckResponse.newBuilder();
+            WatchdogSignalEvent.newBuilder();
+            logger.debug("gRPC protobuf response builders warmed up");
+        } catch (Throwable t) {
+            logger.warn("gRPC protobuf warmup failed, continue with lazy loading: {}", t.toString());
+        }
     }
 
     private String resolveGrpcHost(String rawHost) {
@@ -510,74 +532,94 @@ public class PythonGrpcClient {
             String taskId, String videoPath, String step2JsonPath,
             String step6JsonPath, String sentenceTimestampsPath,
             String outputDir, int timeoutSec) {
+        AnalyzeRequest request = AnalyzeRequest.newBuilder()
+            .setTaskId(taskId)
+            .setVideoPath(videoPath)
+            .setStep2JsonPath(step2JsonPath)
+            .setStep6JsonPath(step6JsonPath)
+            .setSentenceTimestampsPath(sentenceTimestampsPath)
+            .setOutputDir(outputDir)
+            .build();
         try {
             logger.info("[{}] Calling AnalyzeSemanticUnits (Phase2A)", taskId);
-
-            AnalyzeRequest request = AnalyzeRequest.newBuilder()
-                .setTaskId(taskId)
-                .setVideoPath(videoPath)
-                .setStep2JsonPath(step2JsonPath)
-                .setStep6JsonPath(step6JsonPath)
-                .setSentenceTimestampsPath(sentenceTimestampsPath)
-                .setOutputDir(outputDir)
-                .build();
-
             AnalyzeResponse response = blockingStub
                 .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
                 .analyzeSemanticUnits(request);
-
-            AnalyzeResult result = new AnalyzeResult();
-            result.success = response.getSuccess();
-            if (response.hasSemanticUnitsRef()) {
-                com.mvp.videoprocessing.grpc.SemanticUnitsRef ref = response.getSemanticUnitsRef();
-                SemanticUnitsRefDTO dto = new SemanticUnitsRefDTO();
-                dto.refId = ref.getRefId();
-                dto.taskId = ref.getTaskId();
-                dto.outputDir = ref.getOutputDir();
-                dto.unitCount = ref.getUnitCount();
-                dto.schemaVersion = ref.getSchemaVersion();
-                dto.fingerprint = ref.getFingerprint();
-                result.semanticUnitsRef = dto;
-            }
-            if (response.hasSemanticUnitsInline()) {
-                com.mvp.videoprocessing.grpc.SemanticUnitsInline inline = response.getSemanticUnitsInline();
-                SemanticUnitsInlineDTO dto = new SemanticUnitsInlineDTO();
-                dto.payload = inline.getPayload().toByteArray();
-                dto.codec = inline.getCodec();
-                dto.unitCount = inline.getUnitCount();
-                dto.sha256 = inline.getSha256();
-                result.semanticUnitsInline = dto;
-            }
-            result.errorMsg = response.getErrorMsg();
-
-            for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
-                ScreenshotRequest r = new ScreenshotRequest();
-                r.screenshotId = req.getScreenshotId();
-                r.timestampSec = req.getTimestampSec();
-                r.label = req.getLabel();
-                r.semanticUnitId = req.getSemanticUnitId();
-                result.screenshotRequests.add(r);
-            }
-
-            for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
-                ClipRequest r = new ClipRequest();
-                r.clipId = req.getClipId();
-                r.startSec = req.getStartSec();
-                r.endSec = req.getEndSec();
-                r.knowledgeType = req.getKnowledgeType();
-                r.semanticUnitId = req.getSemanticUnitId();
-                r.segments = buildClipSegments(req.getSegmentsList());
-                result.clipRequests.add(r);
-            }
-
-            return result;
+            return toAnalyzeResult(response);
         } catch (StatusRuntimeException e) {
+            if (isAnalyzeResponseReadFailure(e)) {
+                logger.warn(
+                    "[{}] AnalyzeSemanticUnits decode failed, retry once: status={}, cause={}",
+                    taskId,
+                    e.getStatus(),
+                    rootCauseSummary(e)
+                );
+                try {
+                    AnalyzeResponse retryResponse = blockingStub
+                        .withDeadlineAfter(timeoutSec, TimeUnit.SECONDS)
+                        .analyzeSemanticUnits(request);
+                    return toAnalyzeResult(retryResponse);
+                } catch (StatusRuntimeException retryError) {
+                    logger.error("[{}] AnalyzeSemanticUnits retry failed: {}", taskId, retryError.getStatus());
+                    AnalyzeResult result = new AnalyzeResult();
+                    result.success = false;
+                    result.errorMsg = statusDescriptionOrCode(retryError);
+                    return result;
+                }
+            }
             logger.error("[{}] AnalyzeSemanticUnits failed: {}", taskId, e.getStatus());
             AnalyzeResult result = new AnalyzeResult();
             result.success = false;
             result.errorMsg = statusDescriptionOrCode(e);
             return result;
         }
+    }
+
+    private AnalyzeResult toAnalyzeResult(AnalyzeResponse response) {
+        AnalyzeResult result = new AnalyzeResult();
+        result.success = response.getSuccess();
+        if (response.hasSemanticUnitsRef()) {
+            com.mvp.videoprocessing.grpc.SemanticUnitsRef ref = response.getSemanticUnitsRef();
+            SemanticUnitsRefDTO dto = new SemanticUnitsRefDTO();
+            dto.refId = ref.getRefId();
+            dto.taskId = ref.getTaskId();
+            dto.outputDir = ref.getOutputDir();
+            dto.unitCount = ref.getUnitCount();
+            dto.schemaVersion = ref.getSchemaVersion();
+            dto.fingerprint = ref.getFingerprint();
+            result.semanticUnitsRef = dto;
+        }
+        if (response.hasSemanticUnitsInline()) {
+            com.mvp.videoprocessing.grpc.SemanticUnitsInline inline = response.getSemanticUnitsInline();
+            SemanticUnitsInlineDTO dto = new SemanticUnitsInlineDTO();
+            dto.payload = inline.getPayload().toByteArray();
+            dto.codec = inline.getCodec();
+            dto.unitCount = inline.getUnitCount();
+            dto.sha256 = inline.getSha256();
+            result.semanticUnitsInline = dto;
+        }
+        result.errorMsg = response.getErrorMsg();
+
+        for (com.mvp.videoprocessing.grpc.ScreenshotRequest req : response.getScreenshotRequestsList()) {
+            ScreenshotRequest r = new ScreenshotRequest();
+            r.screenshotId = req.getScreenshotId();
+            r.timestampSec = req.getTimestampSec();
+            r.label = req.getLabel();
+            r.semanticUnitId = req.getSemanticUnitId();
+            result.screenshotRequests.add(r);
+        }
+
+        for (com.mvp.videoprocessing.grpc.ClipRequest req : response.getClipRequestsList()) {
+            ClipRequest r = new ClipRequest();
+            r.clipId = req.getClipId();
+            r.startSec = req.getStartSec();
+            r.endSec = req.getEndSec();
+            r.knowledgeType = req.getKnowledgeType();
+            r.semanticUnitId = req.getSemanticUnitId();
+            r.segments = buildClipSegments(req.getSegmentsList());
+            result.clipRequests.add(r);
+        }
+        return result;
     }
 
     public CompletableFuture<AnalyzeResult> analyzeSemanticUnitsAsync(
@@ -1415,6 +1457,49 @@ public class PythonGrpcClient {
         }
         String normalized = description.toLowerCase(Locale.ROOT);
         return normalized.contains("interrupted");
+    }
+
+    private boolean isAnalyzeResponseReadFailure(StatusRuntimeException error) {
+        if (error == null || error.getStatus() == null) {
+            return false;
+        }
+        if (error.getStatus().getCode() != Status.Code.CANCELLED) {
+            return false;
+        }
+        String description = error.getStatus().getDescription();
+        if (description == null || description.isBlank()) {
+            return false;
+        }
+        String normalized = description.toLowerCase(Locale.ROOT);
+        if (!normalized.contains("failed to read message")) {
+            return false;
+        }
+        Throwable cause = error.getCause();
+        while (cause != null) {
+            if (cause instanceof NoClassDefFoundError || cause instanceof ClassNotFoundException) {
+                String message = cause.getMessage();
+                if (message == null || message.contains("AnalyzeResponse$Builder")) {
+                    return true;
+                }
+            }
+            cause = cause.getCause();
+        }
+        return false;
+    }
+
+    private String rootCauseSummary(Throwable error) {
+        if (error == null) {
+            return "none";
+        }
+        Throwable cause = error;
+        while (cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        String message = cause.getMessage();
+        if (message == null || message.isBlank()) {
+            return cause.getClass().getSimpleName();
+        }
+        return cause.getClass().getSimpleName() + ": " + message;
     }
 
     private List<ClipSegment> buildClipSegments(List<com.mvp.videoprocessing.grpc.ClipSegment> segments) {

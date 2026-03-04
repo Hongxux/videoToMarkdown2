@@ -3,6 +3,10 @@
         return;
     }
     window.__mobileAnchorPanelReady = true;
+    const ANCHOR_PANEL_BUILD = '20260304l-enter-only-open';
+    if (typeof console !== 'undefined' && typeof console.info === 'function') {
+        console.info(`[mobile-anchor-panel] build=${ANCHOR_PANEL_BUILD}`);
+    }
 
     const TEXT = Object.freeze({
         noAnchors: '当前页面暂无可挂载锚点',
@@ -58,6 +62,48 @@
         editorActive: false,
         editorDirty: false,
         readerTheme: null,
+        touchMode: false,
+        collectionRootOrder: [],
+        collections: new Map(),
+        collectionByAnchor: new Map(),
+        collectionSeq: 0,
+        selectionMode: false,
+        selectedAnchors: new Set(),
+        selectionPivotAnchorId: '',
+        selectedCollectionTargetId: '',
+        collectionDrag: {
+            sourceType: '',
+            sourceId: '',
+            sourceCollectionId: '',
+            batchAnchorIds: [],
+            hoverTargetType: '',
+            hoverTargetId: '',
+            hoverMode: '',
+            groupReady: false,
+            groupHoldTimer: 0,
+            groupHoldKey: '',
+            groupHoldStartedAt: 0,
+            autoExpandCollectionId: '',
+            autoExpandTimer: 0,
+            autoScrollTimer: 0,
+            autoScrollDelta: 0,
+            longPressTimer: 0,
+            manualPointerId: -1,
+            manualSourceType: '',
+            manualSourceId: '',
+            manualSourceCollectionId: '',
+            manualStartX: 0,
+            manualStartY: 0,
+            manualArmedAt: 0,
+            manualArmed: false,
+            manualDragging: false,
+            manualRequireHold: false,
+            manualHoldReady: false,
+            manualHoldTimer: 0,
+            manualSuppressClickUntil: 0,
+            pulseCollectionId: '',
+            pulseUntil: 0,
+        },
         wikilinkSuggest: {
             open: false,
             anchorId: '',
@@ -129,6 +175,17 @@
     const PHASE2B_PROGRESS_FALLBACK_TEXT = '正在等待后端处理进度...';
     const PHASE2B_ENDPOINT_SUFFIX = '/cards/phase2b/structured-markdown';
     const PHASE2B_LINK_METADATA_ENDPOINT_SUFFIX = '/cards/phase2b/link-metadata';
+    const COLLECTION_GROUP_HOLD_MS = 300;
+    const COLLECTION_GROUP_HOLD_WEB_MS = 500;
+    const COLLECTION_AUTO_EXPAND_MS = 260;
+    const COLLECTION_AUTOSCROLL_THRESHOLD_PX = 56;
+    const COLLECTION_AUTOSCROLL_MAX_STEP = 22;
+    const COLLECTION_AUTOSCROLL_INTERVAL_MS = 18;
+    const COLLECTION_LONG_PRESS_MS = 420;
+    const COLLECTION_WEB_LONG_PRESS_MS = 320;
+    const COLLECTION_PREVIEW_LIMIT = 3;
+    const COLLECTION_CHILD_PREVIEW_LIMIT = 2;
+    const LOCAL_NOTE_SYNC_INTERVAL_MS = 5000;
 
     function t(value) {
         return String(value || '').replace(/[\u200b\u200c\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
@@ -753,6 +810,296 @@
         }
         dispatchTextareaInputEvent();
         return true;
+    }
+
+    function clampEditorOffset(offsetLike, maxLike) {
+        const max = Math.max(0, Number(maxLike) || 0);
+        const offset = Number(offsetLike);
+        if (!Number.isFinite(offset)) {
+            return 0;
+        }
+        return Math.max(0, Math.min(max, Math.floor(offset)));
+    }
+
+    function resolveVditorEditableRoot() {
+        if (!isVditorReady() || !runtime.vditorInstance) {
+            return null;
+        }
+        const core = runtime.vditorInstance.vditor;
+        const mode = typeof runtime.vditorInstance.getCurrentMode === 'function'
+            ? String(runtime.vditorInstance.getCurrentMode() || 'ir')
+            : 'ir';
+        if (core && mode === 'sv' && core.sv && core.sv.element instanceof HTMLElement) {
+            return core.sv.element;
+        }
+        if (core && mode === 'wysiwyg' && core.wysiwyg && core.wysiwyg.element instanceof HTMLElement) {
+            return core.wysiwyg.element;
+        }
+        if (core && core.ir && core.ir.element instanceof HTMLElement) {
+            return core.ir.element;
+        }
+        return document.querySelector('#anchorQuickNoteVditor .vditor-ir');
+    }
+
+    function resolveVditorSelectionOffsets(valueLike) {
+        const value = String(valueLike || '');
+        const max = value.length;
+        const root = resolveVditorEditableRoot();
+        const selection = window.getSelection ? window.getSelection() : null;
+        if (!root || !selection || selection.rangeCount <= 0) {
+            return null;
+        }
+        const range = selection.getRangeAt(0);
+        if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
+            return null;
+        }
+        const startProbe = range.cloneRange();
+        startProbe.selectNodeContents(root);
+        startProbe.setEnd(range.startContainer, range.startOffset);
+        const endProbe = range.cloneRange();
+        endProbe.selectNodeContents(root);
+        endProbe.setEnd(range.endContainer, range.endOffset);
+        const start = clampEditorOffset(String(startProbe.toString() || '').length, max);
+        const endRaw = clampEditorOffset(String(endProbe.toString() || '').length, max);
+        return {
+            start,
+            end: Math.max(start, endRaw),
+        };
+    }
+
+    function readEditorSelectionOffsets(valueLike) {
+        const value = String(valueLike || readEditorValue() || '');
+        const max = value.length;
+        if (isVditorReady()) {
+            const vditorOffsets = resolveVditorSelectionOffsets(value);
+            if (vditorOffsets) {
+                return vditorOffsets;
+            }
+        }
+        const editor = document.getElementById('anchorQuickNoteInput');
+        const startRaw = Number(editor && editor.selectionStart);
+        const endRaw = Number(editor && editor.selectionEnd);
+        const start = clampEditorOffset(Number.isInteger(startRaw) ? startRaw : 0, max);
+        const end = clampEditorOffset(Number.isInteger(endRaw) ? endRaw : start, max);
+        return {
+            start,
+            end: Math.max(start, end),
+        };
+    }
+
+    function resolveVditorPointByOffset(root, offsetLike) {
+        const offset = Math.max(0, Number(offsetLike) || 0);
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+        const textNodes = [];
+        while (walker.nextNode()) {
+            textNodes.push(walker.currentNode);
+        }
+        if (!textNodes.length) {
+            return { node: root, offset: 0 };
+        }
+        let targetNode = textNodes[textNodes.length - 1];
+        let targetOffset = String(targetNode.textContent || '').length;
+        for (let i = 0; i < textNodes.length; i += 1) {
+            const node = textNodes[i];
+            const nodeTextLength = String(node.textContent || '').length;
+            const probe = document.createRange();
+            probe.selectNodeContents(root);
+            probe.setEnd(node, nodeTextLength);
+            const measuredLength = String(probe.toString() || '').length;
+            if (offset > measuredLength) {
+                continue;
+            }
+            let low = 0;
+            let high = nodeTextLength;
+            while (low < high) {
+                const middle = Math.floor((low + high) / 2);
+                const innerProbe = document.createRange();
+                innerProbe.selectNodeContents(root);
+                innerProbe.setEnd(node, middle);
+                const middleLength = String(innerProbe.toString() || '').length;
+                if (middleLength < offset) {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            targetNode = node;
+            targetOffset = low;
+            break;
+        }
+        return { node: targetNode, offset: targetOffset };
+    }
+
+    function setVditorSelectionOffsets(startLike, endLike) {
+        const root = resolveVditorEditableRoot();
+        const selection = window.getSelection ? window.getSelection() : null;
+        if (!root || !selection) {
+            return false;
+        }
+        const start = Math.max(0, Number(startLike) || 0);
+        const end = Math.max(start, Number(endLike) || start);
+        try {
+            const startPoint = resolveVditorPointByOffset(root, start);
+            const endPoint = resolveVditorPointByOffset(root, end);
+            const range = document.createRange();
+            range.setStart(startPoint.node, startPoint.offset);
+            range.setEnd(endPoint.node, endPoint.offset);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            return true;
+        } catch (_e) {
+            return false;
+        }
+    }
+
+    function applyEditorTextMutation(mutator) {
+        if (typeof mutator !== 'function') {
+            return false;
+        }
+        const value = readEditorValue();
+        const selection = readEditorSelectionOffsets(value);
+        const next = mutator({
+            value,
+            start: selection.start,
+            end: selection.end,
+        });
+        if (!next || typeof next.value !== 'string') {
+            return false;
+        }
+        const nextValue = String(next.value || '');
+        const max = nextValue.length;
+        const nextStartRaw = Number(next.start);
+        const nextStart = clampEditorOffset(
+            Number.isInteger(nextStartRaw) ? nextStartRaw : selection.start,
+            max
+        );
+        const nextEndRaw = Number(next.end);
+        const nextEnd = clampEditorOffset(
+            Number.isInteger(nextEndRaw) ? nextEndRaw : nextStart,
+            max
+        );
+        writeEditorValue(nextValue);
+        const editor = document.getElementById('anchorQuickNoteInput');
+        if (editor instanceof HTMLTextAreaElement) {
+            editor.value = nextValue;
+            editor.setSelectionRange(nextStart, Math.max(nextStart, nextEnd));
+        }
+        if (isVditorReady()) {
+            if (runtime.vditorInstance && typeof runtime.vditorInstance.focus === 'function') {
+                runtime.vditorInstance.focus();
+            }
+            setVditorSelectionOffsets(nextStart, Math.max(nextStart, nextEnd));
+        }
+        dispatchTextareaInputEvent();
+        return true;
+    }
+
+    function resolveParagraphRangeByOffset(valueLike, offsetLike) {
+        const value = String(valueLike || '');
+        const max = value.length;
+        if (!max) {
+            return { start: 0, end: 0 };
+        }
+        const offset = clampEditorOffset(offsetLike, max);
+        const lineStart = value.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+        let lineEnd = value.indexOf('\n', offset);
+        if (lineEnd < 0) {
+            lineEnd = max;
+        }
+        const currentLine = value.slice(lineStart, lineEnd).replace(/\r$/, '');
+        if (!currentLine.trim()) {
+            return { start: lineStart, end: lineEnd };
+        }
+        let paragraphStart = lineStart;
+        while (paragraphStart > 0) {
+            const prevLineEnd = paragraphStart - 1;
+            const prevLineStart = value.lastIndexOf('\n', Math.max(0, prevLineEnd - 1)) + 1;
+            const prevLine = value.slice(prevLineStart, prevLineEnd).replace(/\r$/, '');
+            if (!prevLine.trim()) {
+                break;
+            }
+            paragraphStart = prevLineStart;
+        }
+        let paragraphEnd = lineEnd;
+        while (paragraphEnd < max) {
+            const nextLineStart = paragraphEnd + 1;
+            let nextLineEnd = value.indexOf('\n', nextLineStart);
+            if (nextLineEnd < 0) {
+                nextLineEnd = max;
+            }
+            const nextLine = value.slice(nextLineStart, nextLineEnd).replace(/\r$/, '');
+            if (!nextLine.trim()) {
+                break;
+            }
+            paragraphEnd = nextLineEnd;
+        }
+        return {
+            start: paragraphStart,
+            end: paragraphEnd,
+        };
+    }
+
+    function mapParagraphLines(textLike, mapper) {
+        const lines = String(textLike || '').split('\n');
+        if (typeof mapper !== 'function') {
+            return lines.join('\n');
+        }
+        return lines
+            .map((line, index) => mapper(String(line || ''), index, lines.length))
+            .join('\n');
+    }
+
+    function applyParagraphIndentShortcut(outdentLike) {
+        const outdent = !!outdentLike;
+        const indentUnit = '    ';
+        return applyEditorTextMutation(({ value, start }) => {
+            const range = resolveParagraphRangeByOffset(value, start);
+            const paragraph = value.slice(range.start, range.end);
+            const localCaret = Math.max(0, Math.min(paragraph.length, start - range.start));
+            const beforeCaret = paragraph.slice(0, localCaret);
+            const mapper = outdent
+                ? (line) => {
+                    if (line.startsWith('\t')) {
+                        return line.slice(1);
+                    }
+                    return line.replace(/^ {1,4}/, '');
+                }
+                : (line) => `${indentUnit}${line}`;
+            const nextParagraph = mapParagraphLines(paragraph, mapper);
+            const nextBeforeCaret = mapParagraphLines(beforeCaret, mapper);
+            const nextValue = `${value.slice(0, range.start)}${nextParagraph}${value.slice(range.end)}`;
+            const nextCaret = range.start + nextBeforeCaret.length;
+            return {
+                value: nextValue,
+                start: nextCaret,
+                end: nextCaret,
+            };
+        });
+    }
+
+    function applyDeleteParagraphShortcut() {
+        return applyEditorTextMutation(({ value, start }) => {
+            if (!value) {
+                return {
+                    value: '',
+                    start: 0,
+                    end: 0,
+                };
+            }
+            const range = resolveParagraphRangeByOffset(value, start);
+            const left = value.slice(0, range.start).replace(/\n+$/, '');
+            const right = value.slice(range.end).replace(/^\n+/, '');
+            const glue = left && right ? '\n\n' : '';
+            const nextValue = `${left}${glue}${right}`;
+            const nextCaret = left
+                ? (right ? left.length + glue.length : left.length)
+                : 0;
+            return {
+                value: nextValue,
+                start: nextCaret,
+                end: nextCaret,
+            };
+        });
     }
 
     function setObsidianWorkspaceState(options = {}) {
@@ -1487,15 +1834,36 @@
         if (!(panel instanceof HTMLElement)) {
             return;
         }
+        const resolveDefaultDockOffset = () => {
+            const maxX = Math.max(0, panel.clientWidth - dock.offsetWidth);
+            const maxY = Math.max(0, panel.clientHeight - dock.offsetHeight);
+            const rightMargin = Math.max(10, Math.min(24, Math.round(panel.clientWidth * 0.02)));
+            let preferredY = Math.round((panel.clientHeight - dock.offsetHeight) * 0.5);
+            const editorShell = document.getElementById('anchorComposerShell');
+            if (editorShell instanceof HTMLElement) {
+                const panelRect = panel.getBoundingClientRect();
+                const editorRect = editorShell.getBoundingClientRect();
+                if (editorRect.height > 0 && editorRect.width > 0) {
+                    const relativeTop = editorRect.top - panelRect.top;
+                    const editorCenterY = relativeTop + (editorRect.height * 0.5);
+                    preferredY = Math.round(editorCenterY - (dock.offsetHeight * 0.5));
+                }
+            }
+            return {
+                x: Math.min(maxX, Math.max(0, Math.round(maxX - rightMargin))),
+                y: Math.min(maxY, Math.max(0, Math.round(preferredY))),
+            };
+        };
         const phase2b = runtime.phase2b;
         const x = Number(phase2b.moveX);
         const y = Number(phase2b.moveY);
         const hasManualPosition = Number.isFinite(x) && Number.isFinite(y);
         if (!hasManualPosition) {
-            dock.style.left = '';
-            dock.style.top = '';
-            dock.style.right = '';
-            dock.style.bottom = '';
+            const defaultOffset = resolveDefaultDockOffset();
+            dock.style.left = `${defaultOffset.x}px`;
+            dock.style.top = `${defaultOffset.y}px`;
+            dock.style.right = 'auto';
+            dock.style.bottom = 'auto';
             return;
         }
         const maxX = Math.max(0, panel.clientWidth - dock.offsetWidth);
@@ -2256,6 +2624,41 @@
         return normalized.replace(/^.*\//, '').replace(/\.markdown?$/i, '');
     }
 
+    function findLocalNoteByPath(anchorId, notePathLike) {
+        const key = t(anchorId);
+        const notePath = normalizePath(notePathLike);
+        if (!key || !notePath) {
+            return null;
+        }
+        const targetPath = notePath.toLowerCase();
+        const notes = ensureLocalNotes(key);
+        return notes.find((note) => normalizePath(note.fileName).toLowerCase() === targetPath) || null;
+    }
+
+    function ensureActiveLocalNoteByPath(anchorId, notePathLike, options = {}) {
+        const key = t(anchorId);
+        const notePath = normalizePath(notePathLike);
+        if (!key || !notePath || !isMarkdown(notePath)) {
+            return false;
+        }
+        let target = findLocalNoteByPath(key, notePath);
+        if (!target) {
+            upsertLocalNoteFromMarkdownFile(key, notePath, `# ${noteNameFromPath(notePath) || 'Note'}\n\n`);
+            target = findLocalNoteByPath(key, notePath);
+        }
+        if (!target) {
+            return false;
+        }
+        setActiveLocalNoteId(key, target.id);
+        if (options.syncEditor !== false) {
+            renderLocalNoteCards(key);
+            syncEditorFromActiveLocalNote(key);
+            renderObsidianKnowledgePanels(key);
+            refreshObsidianStatusBar(key);
+        }
+        return true;
+    }
+
     function normalizeTagToken(rawTag) {
         const tag = String(rawTag || '').trim().replace(/^#+/, '').trim();
         return tag ? `#${tag}` : '';
@@ -2775,11 +3178,12 @@
         return !!normalizePath(anchor.mountedPath);
     }
 
-    async function syncAnchorLocalNotesIncremental(anchorId) {
+    async function syncAnchorLocalNotesIncremental(anchorId, options = {}) {
         const normalizedAnchorId = t(anchorId);
         if (!normalizedAnchorId || !runtime.ctx.taskId) {
             return;
         }
+        const keepalive = !!(options && options.keepalive);
         if (!canIncrementalSyncAnchor(normalizedAnchorId)) {
             return;
         }
@@ -2800,6 +3204,7 @@
             const resp = await fetch(`${runtime.ctx.apiBase}/tasks/${encodeURIComponent(runtime.ctx.taskId)}/anchors/${encodeURIComponent(normalizedAnchorId)}/sync`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                keepalive,
                 body: JSON.stringify({
                     path: runtime.ctx.pathHint || '',
                     mainNotePath: preferredMainNotePath || '',
@@ -2816,7 +3221,8 @@
         }
     }
 
-    function flushIncrementalLocalNoteSync() {
+    function flushIncrementalLocalNoteSync(options = {}) {
+        const syncOptions = options && typeof options === 'object' ? options : {};
         if (!runtime.ctx.taskId) {
             return;
         }
@@ -2830,7 +3236,7 @@
             return;
         }
         dirtyAnchorIds.forEach((anchorId) => {
-            syncAnchorLocalNotesIncremental(anchorId);
+            syncAnchorLocalNotesIncremental(anchorId, syncOptions);
         });
     }
 
@@ -5591,6 +5997,1417 @@
         `).join('');
     }
 
+    function createRootAnchorEntry(anchorId) {
+        return { kind: 'anchor', id: t(anchorId) };
+    }
+
+    function createRootCollectionEntry(collectionId) {
+        return { kind: 'collection', id: t(collectionId) };
+    }
+
+    function isTouchEnvironment() {
+        const nav = window.navigator || {};
+        return ('ontouchstart' in window) || (Number(nav.maxTouchPoints) > 0) || (Number(nav.msMaxTouchPoints) > 0);
+    }
+
+    function clearCollectionGroupHoldTimer() {
+        if (runtime.collectionDrag.groupHoldTimer) {
+            clearTimeout(runtime.collectionDrag.groupHoldTimer);
+            runtime.collectionDrag.groupHoldTimer = 0;
+        }
+    }
+
+    function clearCollectionLongPressTimer() {
+        if (runtime.collectionDrag.longPressTimer) {
+            clearTimeout(runtime.collectionDrag.longPressTimer);
+            runtime.collectionDrag.longPressTimer = 0;
+        }
+    }
+
+    function clearManualCollectionHoldTimer() {
+        if (runtime.collectionDrag.manualHoldTimer) {
+            clearTimeout(runtime.collectionDrag.manualHoldTimer);
+            runtime.collectionDrag.manualHoldTimer = 0;
+        }
+    }
+
+    function clearCollectionAutoExpandTimer() {
+        if (runtime.collectionDrag.autoExpandTimer) {
+            clearTimeout(runtime.collectionDrag.autoExpandTimer);
+            runtime.collectionDrag.autoExpandTimer = 0;
+        }
+        runtime.collectionDrag.autoExpandCollectionId = '';
+    }
+
+    function scheduleCollectionAutoExpand(collectionIdRaw) {
+        const collectionId = t(collectionIdRaw);
+        if (!collectionId) {
+            clearCollectionAutoExpandTimer();
+            return;
+        }
+        const collection = runtime.collections.get(collectionId);
+        if (!collection || collection.expanded !== false) {
+            clearCollectionAutoExpandTimer();
+            return;
+        }
+        if (runtime.collectionDrag.autoExpandCollectionId === collectionId && runtime.collectionDrag.autoExpandTimer) {
+            return;
+        }
+        clearCollectionAutoExpandTimer();
+        runtime.collectionDrag.autoExpandCollectionId = collectionId;
+        runtime.collectionDrag.autoExpandTimer = window.setTimeout(() => {
+            runtime.collectionDrag.autoExpandTimer = 0;
+            const stillHovering = runtime.collectionDrag.hoverTargetType === 'collection'
+                && runtime.collectionDrag.hoverTargetId === collectionId
+                && runtime.collectionDrag.hoverMode === 'group';
+            if (!stillHovering) {
+                runtime.collectionDrag.autoExpandCollectionId = '';
+                return;
+            }
+            const targetCollection = runtime.collections.get(collectionId);
+            if (!targetCollection) {
+                runtime.collectionDrag.autoExpandCollectionId = '';
+                return;
+            }
+            targetCollection.expanded = true;
+            runtime.collectionDrag.autoExpandCollectionId = '';
+            renderIndex();
+        }, COLLECTION_AUTO_EXPAND_MS);
+    }
+
+    function resolveCollectionAutoScrollContainer() {
+        const panel = document.getElementById('anchorIndexPanel');
+        if (panel instanceof HTMLElement) {
+            return panel;
+        }
+        const list = document.getElementById('anchorIndexList');
+        if (list instanceof HTMLElement) {
+            return list;
+        }
+        return null;
+    }
+
+    function stopCollectionAutoScroll() {
+        if (runtime.collectionDrag.autoScrollTimer) {
+            clearInterval(runtime.collectionDrag.autoScrollTimer);
+            runtime.collectionDrag.autoScrollTimer = 0;
+        }
+        runtime.collectionDrag.autoScrollDelta = 0;
+    }
+
+    function ensureCollectionAutoScroll(deltaY) {
+        const normalizedDelta = Number.isFinite(Number(deltaY)) ? Number(deltaY) : 0;
+        if (!normalizedDelta) {
+            stopCollectionAutoScroll();
+            return;
+        }
+        runtime.collectionDrag.autoScrollDelta = normalizedDelta;
+        if (runtime.collectionDrag.autoScrollTimer) {
+            return;
+        }
+        runtime.collectionDrag.autoScrollTimer = window.setInterval(() => {
+            const container = resolveCollectionAutoScrollContainer();
+            if (!(container instanceof HTMLElement)) {
+                stopCollectionAutoScroll();
+                return;
+            }
+            if (!runtime.collectionDrag.sourceType && !runtime.collectionDrag.manualArmed) {
+                stopCollectionAutoScroll();
+                return;
+            }
+            const topBefore = container.scrollTop;
+            container.scrollTop = topBefore + runtime.collectionDrag.autoScrollDelta;
+            if (container.scrollTop === topBefore) {
+                stopCollectionAutoScroll();
+            }
+        }, COLLECTION_AUTOSCROLL_INTERVAL_MS);
+    }
+
+    function updateCollectionAutoScroll(clientYRaw) {
+        const container = resolveCollectionAutoScrollContainer();
+        if (!(container instanceof HTMLElement)) {
+            stopCollectionAutoScroll();
+            return;
+        }
+        const clientY = Number(clientYRaw);
+        if (!Number.isFinite(clientY)) {
+            stopCollectionAutoScroll();
+            return;
+        }
+        const rect = container.getBoundingClientRect();
+        const threshold = Math.max(18, Math.min(COLLECTION_AUTOSCROLL_THRESHOLD_PX, Math.floor(rect.height * 0.2)));
+        let delta = 0;
+        if (clientY < (rect.top + threshold)) {
+            const ratio = Math.max(0, Math.min(1, (rect.top + threshold - clientY) / threshold));
+            delta = -Math.max(1, Math.round(COLLECTION_AUTOSCROLL_MAX_STEP * ratio));
+        } else if (clientY > (rect.bottom - threshold)) {
+            const ratio = Math.max(0, Math.min(1, (clientY - (rect.bottom - threshold)) / threshold));
+            delta = Math.max(1, Math.round(COLLECTION_AUTOSCROLL_MAX_STEP * ratio));
+        }
+        ensureCollectionAutoScroll(delta);
+    }
+
+    function resetCollectionDragHoverState() {
+        clearCollectionGroupHoldTimer();
+        clearCollectionAutoExpandTimer();
+        runtime.collectionDrag.hoverTargetType = '';
+        runtime.collectionDrag.hoverTargetId = '';
+        runtime.collectionDrag.hoverMode = '';
+        runtime.collectionDrag.groupReady = false;
+        runtime.collectionDrag.groupHoldKey = '';
+        runtime.collectionDrag.groupHoldStartedAt = 0;
+    }
+
+    function resetCollectionDragState() {
+        clearCollectionLongPressTimer();
+        clearManualCollectionHoldTimer();
+        stopCollectionAutoScroll();
+        resetCollectionDragHoverState();
+        runtime.collectionDrag.sourceType = '';
+        runtime.collectionDrag.sourceId = '';
+        runtime.collectionDrag.sourceCollectionId = '';
+        runtime.collectionDrag.batchAnchorIds = [];
+        runtime.collectionDrag.manualPointerId = -1;
+        runtime.collectionDrag.manualSourceType = '';
+        runtime.collectionDrag.manualSourceId = '';
+        runtime.collectionDrag.manualSourceCollectionId = '';
+        runtime.collectionDrag.manualStartX = 0;
+        runtime.collectionDrag.manualStartY = 0;
+        runtime.collectionDrag.manualArmedAt = 0;
+        runtime.collectionDrag.manualArmed = false;
+        runtime.collectionDrag.manualDragging = false;
+        runtime.collectionDrag.manualRequireHold = false;
+        runtime.collectionDrag.manualHoldReady = false;
+    }
+
+    function markCollectionPulse(collectionId) {
+        const normalized = t(collectionId);
+        if (!normalized) {
+            return;
+        }
+        runtime.collectionDrag.pulseCollectionId = normalized;
+        runtime.collectionDrag.pulseUntil = Date.now() + 520;
+        setTimeout(() => {
+            if (runtime.collectionDrag.pulseCollectionId !== normalized) {
+                return;
+            }
+            if (Date.now() >= runtime.collectionDrag.pulseUntil) {
+                runtime.collectionDrag.pulseCollectionId = '';
+                runtime.collectionDrag.pulseUntil = 0;
+                renderIndex();
+            }
+        }, 560);
+    }
+
+    function normalizeCollectionTitle(rawTitle, fallbackAnchorId) {
+        const direct = t(rawTitle);
+        if (direct) {
+            return short(direct, 48);
+        }
+        const fallback = candidateOf(fallbackAnchorId);
+        const firstText = t(fallback && fallback.displayText);
+        if (!firstText) {
+            return 'New Collection';
+        }
+        return short(`Group: ${firstText}`, 48);
+    }
+
+    function rebuildCollectionLookup() {
+        const next = new Map();
+        runtime.collections.forEach((collection, collectionId) => {
+            const normalizedCollectionId = t(collectionId);
+            if (!normalizedCollectionId || !collection || !Array.isArray(collection.anchorIds)) {
+                return;
+            }
+            collection.anchorIds.forEach((anchorIdRaw) => {
+                const anchorId = t(anchorIdRaw);
+                if (!anchorId || next.has(anchorId)) {
+                    return;
+                }
+                next.set(anchorId, normalizedCollectionId);
+            });
+        });
+        runtime.collectionByAnchor = next;
+    }
+
+    function collectionOfAnchor(anchorId) {
+        return t(runtime.collectionByAnchor.get(t(anchorId)) || '');
+    }
+
+    function findRootEntryIndex(kind, id) {
+        const normalizedKind = t(kind);
+        const normalizedId = t(id);
+        if (!normalizedKind || !normalizedId) {
+            return -1;
+        }
+        return (Array.isArray(runtime.collectionRootOrder) ? runtime.collectionRootOrder : [])
+            .findIndex((entry) => entry && entry.kind === normalizedKind && t(entry.id) === normalizedId);
+    }
+
+    function removeRootEntry(kind, id) {
+        const index = findRootEntryIndex(kind, id);
+        if (index < 0) {
+            return -1;
+        }
+        runtime.collectionRootOrder.splice(index, 1);
+        return index;
+    }
+
+    function insertRootEntry(entry, indexHint) {
+        const safeEntry = entry && typeof entry === 'object' ? { kind: t(entry.kind), id: t(entry.id) } : null;
+        if (!safeEntry || !safeEntry.kind || !safeEntry.id) {
+            return -1;
+        }
+        const beforeLength = runtime.collectionRootOrder.length;
+        const index = Number.isFinite(Number(indexHint))
+            ? Math.max(0, Math.min(beforeLength, Number(indexHint)))
+            : beforeLength;
+        runtime.collectionRootOrder.splice(index, 0, safeEntry);
+        return index;
+    }
+
+    function removeAnchorFromCollection(anchorId) {
+        const normalizedAnchorId = t(anchorId);
+        if (!normalizedAnchorId) {
+            return '';
+        }
+        let owner = '';
+        runtime.collections.forEach((collection, collectionId) => {
+            if (owner || !collection || !Array.isArray(collection.anchorIds)) {
+                return;
+            }
+            const idx = collection.anchorIds.indexOf(normalizedAnchorId);
+            if (idx < 0) {
+                return;
+            }
+            collection.anchorIds.splice(idx, 1);
+            owner = t(collectionId);
+        });
+        if (owner) {
+            rebuildCollectionLookup();
+        }
+        return owner;
+    }
+
+    function nextCollectionId() {
+        runtime.collectionSeq += 1;
+        return `collection_${Date.now().toString(36)}_${runtime.collectionSeq.toString(36)}`;
+    }
+
+    function createCollectionRecord(anchorIds, insertIndex, preferredTitle) {
+        const available = new Set(runtime.candidates.map((candidate) => t(candidate.anchorId)).filter(Boolean));
+        const seen = new Set();
+        const normalizedAnchors = (Array.isArray(anchorIds) ? anchorIds : [])
+            .map((id) => t(id))
+            .filter((id) => id && available.has(id) && !seen.has(id) && (seen.add(id) || true));
+        if (normalizedAnchors.length < 2) {
+            return '';
+        }
+        const collectionId = nextCollectionId();
+        runtime.collections.set(collectionId, {
+            id: collectionId,
+            title: normalizeCollectionTitle(preferredTitle, normalizedAnchors[0]),
+            anchorIds: normalizedAnchors,
+            expanded: true,
+        });
+        rebuildCollectionLookup();
+        insertRootEntry(createRootCollectionEntry(collectionId), insertIndex);
+        return collectionId;
+    }
+
+    function cleanupCollectionState() {
+        const toDissolve = [];
+        runtime.collections.forEach((collection, collectionId) => {
+            const seen = new Set();
+            const nextAnchors = (Array.isArray(collection && collection.anchorIds) ? collection.anchorIds : [])
+                .map((id) => t(id))
+                .filter((id) => id && !seen.has(id) && (seen.add(id) || true));
+            collection.anchorIds = nextAnchors;
+            if (nextAnchors.length < 2) {
+                toDissolve.push({ collectionId: t(collectionId), anchorId: nextAnchors[0] || '' });
+            }
+        });
+        if (!toDissolve.length) {
+            rebuildCollectionLookup();
+            return;
+        }
+        toDissolve.forEach(({ collectionId, anchorId }) => {
+            const rootIndex = findRootEntryIndex('collection', collectionId);
+            removeRootEntry('collection', collectionId);
+            runtime.collections.delete(collectionId);
+            if (anchorId) {
+                removeRootEntry('anchor', anchorId);
+                insertRootEntry(createRootAnchorEntry(anchorId), rootIndex >= 0 ? rootIndex : runtime.collectionRootOrder.length);
+            }
+        });
+        rebuildCollectionLookup();
+    }
+
+    function syncCollectionStateWithCandidates() {
+        const available = new Set(runtime.candidates.map((candidate) => t(candidate.anchorId)).filter(Boolean));
+        const collapsedSingles = new Map();
+        const nextCollections = new Map();
+
+        runtime.collections.forEach((collectionRaw, rawCollectionId) => {
+            const collectionId = t(rawCollectionId);
+            if (!collectionId) {
+                return;
+            }
+            const collection = collectionRaw && typeof collectionRaw === 'object' ? collectionRaw : {};
+            const seen = new Set();
+            const anchorIds = (Array.isArray(collection.anchorIds) ? collection.anchorIds : [])
+                .map((id) => t(id))
+                .filter((id) => id && available.has(id) && !seen.has(id) && (seen.add(id) || true));
+            if (anchorIds.length >= 2) {
+                nextCollections.set(collectionId, {
+                    id: collectionId,
+                    title: normalizeCollectionTitle(collection.title, anchorIds[0]),
+                    anchorIds,
+                    expanded: collection.expanded !== false,
+                });
+                return;
+            }
+            if (anchorIds.length === 1) {
+                collapsedSingles.set(collectionId, anchorIds[0]);
+            }
+        });
+        runtime.collections = nextCollections;
+        rebuildCollectionLookup();
+
+        const selectedCollectionTargetId = t(runtime.selectedCollectionTargetId);
+        if (selectedCollectionTargetId && !runtime.collections.has(selectedCollectionTargetId)) {
+            runtime.selectedCollectionTargetId = '';
+        }
+
+        Array.from(runtime.selectedAnchors).forEach((anchorIdRaw) => {
+            const anchorId = t(anchorIdRaw);
+            if (!anchorId || !available.has(anchorId)) {
+                runtime.selectedAnchors.delete(anchorIdRaw);
+            }
+        });
+
+        const nextRoot = [];
+        const seenRootAnchors = new Set();
+        const seenRootCollections = new Set();
+        const pushAnchor = (anchorIdRaw) => {
+            const anchorId = t(anchorIdRaw);
+            if (!anchorId || seenRootAnchors.has(anchorId) || !available.has(anchorId) || runtime.collectionByAnchor.has(anchorId)) {
+                return;
+            }
+            nextRoot.push(createRootAnchorEntry(anchorId));
+            seenRootAnchors.add(anchorId);
+        };
+        const pushCollection = (collectionIdRaw) => {
+            const collectionId = t(collectionIdRaw);
+            if (!collectionId || seenRootCollections.has(collectionId) || !runtime.collections.has(collectionId)) {
+                return;
+            }
+            nextRoot.push(createRootCollectionEntry(collectionId));
+            seenRootCollections.add(collectionId);
+        };
+
+        (Array.isArray(runtime.collectionRootOrder) ? runtime.collectionRootOrder : []).forEach((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return;
+            }
+            if (entry.kind === 'collection') {
+                const collectionId = t(entry.id);
+                if (runtime.collections.has(collectionId)) {
+                    pushCollection(collectionId);
+                    return;
+                }
+                const singleAnchor = collapsedSingles.get(collectionId);
+                if (singleAnchor) {
+                    pushAnchor(singleAnchor);
+                }
+                return;
+            }
+            if (entry.kind === 'anchor') {
+                pushAnchor(entry.id);
+            }
+        });
+
+        runtime.collections.forEach((_collection, collectionId) => {
+            if (!seenRootCollections.has(collectionId)) {
+                pushCollection(collectionId);
+            }
+        });
+        runtime.candidates.forEach((candidate) => {
+            pushAnchor(candidate.anchorId);
+        });
+        runtime.collectionRootOrder = nextRoot;
+    }
+
+    function setSelectionMode(enabled) {
+        runtime.selectionMode = !!enabled;
+        if (!runtime.selectionMode) {
+            runtime.selectedAnchors.clear();
+            runtime.selectionPivotAnchorId = '';
+            runtime.selectedCollectionTargetId = '';
+        }
+        updateCollectionActionBar();
+    }
+
+    function toggleAnchorSelection(anchorId) {
+        const normalizedAnchorId = t(anchorId);
+        if (!normalizedAnchorId) {
+            return false;
+        }
+        if (runtime.selectedAnchors.has(normalizedAnchorId)) {
+            runtime.selectedAnchors.delete(normalizedAnchorId);
+        } else {
+            runtime.selectedAnchors.add(normalizedAnchorId);
+        }
+        runtime.selectionPivotAnchorId = normalizedAnchorId;
+        updateCollectionActionBar();
+        return true;
+    }
+
+    function collectVisibleAnchorOrder() {
+        const ordered = [];
+        runtime.collectionRootOrder.forEach((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return;
+            }
+            if (entry.kind === 'anchor') {
+                const anchorId = t(entry.id);
+                if (anchorId) {
+                    ordered.push(anchorId);
+                }
+                return;
+            }
+            if (entry.kind !== 'collection') {
+                return;
+            }
+            const collection = runtime.collections.get(t(entry.id));
+            if (!collection || !Array.isArray(collection.anchorIds)) {
+                return;
+            }
+            collection.anchorIds.forEach((anchorIdRaw) => {
+                const anchorId = t(anchorIdRaw);
+                if (anchorId) {
+                    ordered.push(anchorId);
+                }
+            });
+        });
+        return ordered;
+    }
+
+    function collectRenderedAnchorOrder() {
+        const list = document.getElementById('anchorIndexList');
+        if (!(list instanceof HTMLElement)) {
+            return collectVisibleAnchorOrder();
+        }
+        const nodes = list.querySelectorAll('[data-source-type="anchor"][data-anchor-id]');
+        const seen = new Set();
+        const ordered = [];
+        for (let i = 0; i < nodes.length; i += 1) {
+            const node = nodes[i];
+            if (!(node instanceof HTMLElement)) {
+                continue;
+            }
+            if (node.closest('[hidden]')) {
+                continue;
+            }
+            const style = window.getComputedStyle(node);
+            if (style.display === 'none' || style.visibility === 'hidden') {
+                continue;
+            }
+            const anchorId = t(node.getAttribute('data-anchor-id'));
+            if (!anchorId || seen.has(anchorId)) {
+                continue;
+            }
+            seen.add(anchorId);
+            ordered.push(anchorId);
+        }
+        return ordered.length ? ordered : collectVisibleAnchorOrder();
+    }
+
+    function selectAnchorRange(anchorIdRaw, options = {}) {
+        const anchorId = t(anchorIdRaw);
+        if (!anchorId) {
+            return false;
+        }
+        const additive = !!options.additive;
+        const pivotAnchorId = t(options.pivotAnchorId || runtime.selectionPivotAnchorId || anchorId);
+        const ordered = collectRenderedAnchorOrder();
+        const startIndex = ordered.indexOf(pivotAnchorId);
+        const endIndex = ordered.indexOf(anchorId);
+        runtime.selectionMode = true;
+        if (!additive) {
+            runtime.selectedAnchors.clear();
+        }
+        if (startIndex < 0 || endIndex < 0) {
+            runtime.selectedAnchors.add(anchorId);
+            runtime.selectionPivotAnchorId = anchorId;
+            updateCollectionActionBar();
+            return true;
+        }
+        const [from, to] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex];
+        for (let i = from; i <= to; i += 1) {
+            const id = t(ordered[i]);
+            if (id) {
+                runtime.selectedAnchors.add(id);
+            }
+        }
+        runtime.selectionPivotAnchorId = anchorId;
+        updateCollectionActionBar();
+        return true;
+    }
+
+    function resolveDraggedAnchorIds(sourceTypeRaw, sourceIdRaw) {
+        const sourceType = t(sourceTypeRaw);
+        if (sourceType !== 'anchor') {
+            return [];
+        }
+        const sourceId = t(sourceIdRaw);
+        const batch = Array.isArray(runtime.collectionDrag.batchAnchorIds)
+            ? runtime.collectionDrag.batchAnchorIds.map((id) => t(id)).filter(Boolean)
+            : [];
+        if (batch.length > 1) {
+            const seen = new Set();
+            return batch.filter((id) => !seen.has(id) && (seen.add(id) || true));
+        }
+        return sourceId ? [sourceId] : [];
+    }
+
+    function collectOrderedCollections() {
+        const ordered = [];
+        const seen = new Set();
+        runtime.collectionRootOrder.forEach((entry) => {
+            if (!entry || entry.kind !== 'collection') {
+                return;
+            }
+            const collectionId = t(entry.id);
+            const collection = runtime.collections.get(collectionId);
+            if (!collection || seen.has(collectionId)) {
+                return;
+            }
+            seen.add(collectionId);
+            ordered.push(collection);
+        });
+        runtime.collections.forEach((collection, collectionIdRaw) => {
+            const collectionId = t(collectionIdRaw);
+            if (!collection || !collectionId || seen.has(collectionId)) {
+                return;
+            }
+            seen.add(collectionId);
+            ordered.push(collection);
+        });
+        return ordered;
+    }
+
+    function groupSelectedAnchors() {
+        const orderedVisible = collectVisibleAnchorOrder();
+        const selectedOrdered = orderedVisible.filter((anchorId) => runtime.selectedAnchors.has(anchorId));
+        if (selectedOrdered.length < 2) {
+            return false;
+        }
+        let insertIndex = runtime.collectionRootOrder.length;
+        selectedOrdered.forEach((anchorId) => {
+            const ownerCollectionId = collectionOfAnchor(anchorId);
+            const rootIndex = ownerCollectionId
+                ? findRootEntryIndex('collection', ownerCollectionId)
+                : findRootEntryIndex('anchor', anchorId);
+            if (rootIndex >= 0) {
+                insertIndex = Math.min(insertIndex, rootIndex);
+            }
+        });
+        if (!Number.isFinite(insertIndex)) {
+            insertIndex = runtime.collectionRootOrder.length;
+        }
+        selectedOrdered.forEach((anchorId) => {
+            removeRootEntry('anchor', anchorId);
+            removeAnchorFromCollection(anchorId);
+        });
+        const createdCollectionId = createCollectionRecord(selectedOrdered, insertIndex, '');
+        cleanupCollectionState();
+        syncCollectionStateWithCandidates();
+        if (createdCollectionId) {
+            markCollectionPulse(createdCollectionId);
+        }
+        runtime.selectedAnchors.clear();
+        runtime.selectionPivotAnchorId = '';
+        runtime.selectionMode = false;
+        runtime.selectedCollectionTargetId = '';
+        updateCollectionActionBar();
+        return !!createdCollectionId;
+    }
+
+    function moveSelectedAnchorsToCollection(targetCollectionIdRaw) {
+        const targetCollectionId = t(targetCollectionIdRaw);
+        const targetCollection = runtime.collections.get(targetCollectionId);
+        if (!targetCollection) {
+            return false;
+        }
+        const orderedVisible = collectVisibleAnchorOrder();
+        const selectedOrdered = orderedVisible.filter((anchorId) => runtime.selectedAnchors.has(anchorId));
+        if (!selectedOrdered.length) {
+            return false;
+        }
+
+        const movingAnchors = selectedOrdered.filter((anchorId) => collectionOfAnchor(anchorId) !== targetCollectionId);
+        if (!movingAnchors.length) {
+            return false;
+        }
+
+        movingAnchors.forEach((anchorId) => {
+            removeRootEntry('anchor', anchorId);
+            removeAnchorFromCollection(anchorId);
+        });
+
+        const seen = new Set((Array.isArray(targetCollection.anchorIds) ? targetCollection.anchorIds : []).map((id) => t(id)).filter(Boolean));
+        movingAnchors.forEach((anchorId) => {
+            if (!seen.has(anchorId)) {
+                seen.add(anchorId);
+                targetCollection.anchorIds.push(anchorId);
+            }
+        });
+        targetCollection.expanded = true;
+
+        cleanupCollectionState();
+        syncCollectionStateWithCandidates();
+        markCollectionPulse(targetCollectionId);
+        runtime.selectedAnchors.clear();
+        runtime.selectionPivotAnchorId = '';
+        runtime.selectionMode = false;
+        runtime.selectedCollectionTargetId = '';
+        updateCollectionActionBar();
+        return true;
+    }
+
+    async function deleteSelectedAnchorsPermanently() {
+        if (!runtime.ctx.taskId) {
+            return false;
+        }
+        const orderedVisible = collectVisibleAnchorOrder();
+        const selectedOrdered = orderedVisible.filter((anchorId) => runtime.selectedAnchors.has(anchorId));
+        const selected = selectedOrdered.length
+            ? selectedOrdered
+            : Array.from(runtime.selectedAnchors).map((anchorIdRaw) => t(anchorIdRaw)).filter(Boolean);
+        if (!selected.length) {
+            return false;
+        }
+        const count = selected.length;
+        const promptText = count === 1
+            ? 'Delete the selected anchor permanently? This will remove anchor metadata and mounted files.'
+            : `Delete ${count} anchors permanently? This will remove anchor metadata and mounted files.`;
+        if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+            const confirmed = window.confirm(promptText);
+            if (!confirmed) {
+                return false;
+            }
+        }
+        try {
+            const response = await fetch(`${runtime.ctx.apiBase}/tasks/${encodeURIComponent(runtime.ctx.taskId)}/anchors/delete`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    path: runtime.ctx.pathHint || '',
+                    anchorIds: selected,
+                    removeFiles: true,
+                }),
+            });
+            const body = await parseResp(response);
+            const deleted = Array.isArray(body && body.deletedAnchorIds)
+                ? body.deletedAnchorIds.map((id) => t(id)).filter(Boolean)
+                : selected;
+            const deletedSet = new Set(deleted);
+            runtime.selectedAnchors.clear();
+            runtime.selectionPivotAnchorId = '';
+            runtime.selectionMode = false;
+            runtime.selectedCollectionTargetId = '';
+            if (runtime.activeId && deletedSet.has(runtime.activeId)) {
+                runtime.activeId = '';
+                setPanel(false);
+                closePanel();
+            }
+            resetCollectionDragState();
+            await fetchMeta(true);
+            setPreview(deleted.length === 1
+                ? 'Anchor deleted permanently.'
+                : `${deleted.length} anchors deleted permanently.`);
+            return true;
+        } catch (error) {
+            setPreview(`Delete failed: ${t(error && error.message)}`);
+            updateCollectionActionBar();
+            return false;
+        }
+    }
+
+    function resolveRootRefFromTarget(targetInfo) {
+        if (!targetInfo || !targetInfo.type || !targetInfo.id) {
+            return null;
+        }
+        if (targetInfo.type === 'collection') {
+            return { kind: 'collection', id: t(targetInfo.id) };
+        }
+        const ownerCollectionId = collectionOfAnchor(targetInfo.id);
+        if (ownerCollectionId) {
+            return { kind: 'collection', id: ownerCollectionId };
+        }
+        return { kind: 'anchor', id: t(targetInfo.id) };
+    }
+
+    function resolveDragSourceRootRef() {
+        const sourceType = t(runtime.collectionDrag.sourceType);
+        const sourceId = t(runtime.collectionDrag.sourceId);
+        if (!sourceType || !sourceId) {
+            return null;
+        }
+        if (sourceType === 'collection') {
+            return { kind: 'collection', id: sourceId };
+        }
+        const ownerCollectionId = collectionOfAnchor(sourceId);
+        if (ownerCollectionId) {
+            return { kind: 'collection', id: ownerCollectionId };
+        }
+        return { kind: 'anchor', id: sourceId };
+    }
+
+    function resolveDropMode(event, targetNode) {
+        if (!targetNode || typeof targetNode.getBoundingClientRect !== 'function') {
+            return 'group';
+        }
+        const rect = targetNode.getBoundingClientRect();
+        const height = Math.max(1, Number(rect.height) || 1);
+        const offsetY = Number(event && event.clientY) - Number(rect.top || 0);
+        const ratio = Math.max(0, Math.min(1, offsetY / height));
+        if (ratio <= 0.25) {
+            return 'before';
+        }
+        if (ratio >= 0.75) {
+            return 'after';
+        }
+        return 'group';
+    }
+
+    function canGroupDrop(sourceType, sourceId, targetInfo) {
+        if (!targetInfo || !targetInfo.type || !targetInfo.id) {
+            return false;
+        }
+        if (sourceType === 'anchor') {
+            const sourceAnchors = resolveDraggedAnchorIds(sourceType, sourceId);
+            if (!sourceAnchors.length) {
+                return false;
+            }
+            const sourceAnchorSet = new Set(sourceAnchors);
+            if (targetInfo.type === 'anchor') {
+                if (sourceAnchorSet.has(t(targetInfo.id))) {
+                    return false;
+                }
+                if (sourceAnchors.length > 1) {
+                    const targetCollectionId = collectionOfAnchor(targetInfo.id);
+                    if (targetCollectionId) {
+                        return sourceAnchors.some((anchorId) => collectionOfAnchor(anchorId) !== targetCollectionId);
+                    }
+                    return true;
+                }
+                const sourceCollectionId = collectionOfAnchor(sourceAnchors[0]);
+                const targetCollectionId = collectionOfAnchor(targetInfo.id);
+                return !(sourceCollectionId && targetCollectionId && sourceCollectionId === targetCollectionId);
+            }
+            if (targetInfo.type === 'collection') {
+                const targetCollectionId = t(targetInfo.id);
+                return sourceAnchors.some((anchorId) => collectionOfAnchor(anchorId) !== targetCollectionId);
+            }
+            return false;
+        }
+        if (sourceType === 'collection') {
+            if (targetInfo.type === 'collection') {
+                return sourceId !== targetInfo.id;
+            }
+            if (targetInfo.type === 'anchor') {
+                const targetCollectionId = collectionOfAnchor(targetInfo.id);
+                return !targetCollectionId || targetCollectionId !== sourceId;
+            }
+        }
+        return false;
+    }
+
+    function canReorderDrop(sourceType, sourceId, targetInfo) {
+        if (!targetInfo || !targetInfo.type || !targetInfo.id) {
+            return false;
+        }
+        const sourceAnchors = resolveDraggedAnchorIds(sourceType, sourceId);
+        if (sourceType === 'anchor' && sourceAnchors.length > 1) {
+            if (targetInfo.type === 'anchor') {
+                return !sourceAnchors.includes(t(targetInfo.id));
+            }
+            return true;
+        }
+        const sourceRootRef = resolveDragSourceRootRef();
+        const targetRootRef = resolveRootRefFromTarget(targetInfo);
+        if (!sourceRootRef || !targetRootRef) {
+            return false;
+        }
+        return !(sourceRootRef.kind === targetRootRef.kind && sourceRootRef.id === targetRootRef.id);
+    }
+
+    function mergeCollections(targetCollectionIdRaw, sourceCollectionIdRaw) {
+        const targetCollectionId = t(targetCollectionIdRaw);
+        const sourceCollectionId = t(sourceCollectionIdRaw);
+        if (!targetCollectionId || !sourceCollectionId || targetCollectionId === sourceCollectionId) {
+            return false;
+        }
+        const targetCollection = runtime.collections.get(targetCollectionId);
+        const sourceCollection = runtime.collections.get(sourceCollectionId);
+        if (!targetCollection || !sourceCollection) {
+            return false;
+        }
+        const seen = new Set(targetCollection.anchorIds);
+        sourceCollection.anchorIds.forEach((anchorIdRaw) => {
+            const anchorId = t(anchorIdRaw);
+            if (!anchorId || seen.has(anchorId)) {
+                return;
+            }
+            seen.add(anchorId);
+            targetCollection.anchorIds.push(anchorId);
+        });
+        targetCollection.expanded = true;
+        runtime.collections.delete(sourceCollectionId);
+        removeRootEntry('collection', sourceCollectionId);
+        cleanupCollectionState();
+        syncCollectionStateWithCandidates();
+        markCollectionPulse(targetCollectionId);
+        return true;
+    }
+
+    function addAnchorToCollection(anchorIdRaw, targetCollectionIdRaw) {
+        const anchorId = t(anchorIdRaw);
+        const targetCollectionId = t(targetCollectionIdRaw);
+        if (!anchorId || !targetCollectionId) {
+            return false;
+        }
+        const targetCollection = runtime.collections.get(targetCollectionId);
+        if (!targetCollection) {
+            return false;
+        }
+        const ownerCollectionId = collectionOfAnchor(anchorId);
+        if (ownerCollectionId === targetCollectionId) {
+            return false;
+        }
+        removeRootEntry('anchor', anchorId);
+        if (ownerCollectionId) {
+            removeAnchorFromCollection(anchorId);
+        }
+        if (!targetCollection.anchorIds.includes(anchorId)) {
+            targetCollection.anchorIds.push(anchorId);
+        }
+        targetCollection.expanded = true;
+        cleanupCollectionState();
+        syncCollectionStateWithCandidates();
+        markCollectionPulse(targetCollectionId);
+        return true;
+    }
+
+    function moveAnchorIdsToCollection(anchorIdsRaw, targetCollectionIdRaw) {
+        const targetCollectionId = t(targetCollectionIdRaw);
+        const targetCollection = runtime.collections.get(targetCollectionId);
+        if (!targetCollection) {
+            return false;
+        }
+        const seenInput = new Set();
+        const anchorIds = (Array.isArray(anchorIdsRaw) ? anchorIdsRaw : [])
+            .map((id) => t(id))
+            .filter((id) => id && !seenInput.has(id) && (seenInput.add(id) || true));
+        if (!anchorIds.length) {
+            return false;
+        }
+        const movingAnchors = anchorIds.filter((anchorId) => collectionOfAnchor(anchorId) !== targetCollectionId);
+        if (!movingAnchors.length) {
+            return false;
+        }
+        movingAnchors.forEach((anchorId) => {
+            removeRootEntry('anchor', anchorId);
+            removeAnchorFromCollection(anchorId);
+        });
+        const seen = new Set((Array.isArray(targetCollection.anchorIds) ? targetCollection.anchorIds : []).map((id) => t(id)).filter(Boolean));
+        movingAnchors.forEach((anchorId) => {
+            if (!seen.has(anchorId)) {
+                seen.add(anchorId);
+                targetCollection.anchorIds.push(anchorId);
+            }
+        });
+        targetCollection.expanded = true;
+        cleanupCollectionState();
+        syncCollectionStateWithCandidates();
+        markCollectionPulse(targetCollectionId);
+        return true;
+    }
+
+    function groupAnchorToAnchor(sourceAnchorIdRaw, targetAnchorIdRaw) {
+        const sourceAnchorId = t(sourceAnchorIdRaw);
+        const targetAnchorId = t(targetAnchorIdRaw);
+        if (!sourceAnchorId || !targetAnchorId || sourceAnchorId === targetAnchorId) {
+            return false;
+        }
+        const sourceCollectionId = collectionOfAnchor(sourceAnchorId);
+        const targetCollectionId = collectionOfAnchor(targetAnchorId);
+        if (sourceCollectionId && targetCollectionId) {
+            if (sourceCollectionId === targetCollectionId) {
+                return false;
+            }
+            return mergeCollections(targetCollectionId, sourceCollectionId);
+        }
+        if (sourceCollectionId && !targetCollectionId) {
+            return addAnchorToCollection(targetAnchorId, sourceCollectionId);
+        }
+        if (!sourceCollectionId && targetCollectionId) {
+            return addAnchorToCollection(sourceAnchorId, targetCollectionId);
+        }
+        let insertIndex = findRootEntryIndex('anchor', targetAnchorId);
+        if (insertIndex < 0) {
+            insertIndex = findRootEntryIndex('anchor', sourceAnchorId);
+        }
+        removeRootEntry('anchor', sourceAnchorId);
+        removeRootEntry('anchor', targetAnchorId);
+        const createdCollectionId = createCollectionRecord([targetAnchorId, sourceAnchorId], insertIndex, '');
+        cleanupCollectionState();
+        syncCollectionStateWithCandidates();
+        if (createdCollectionId) {
+            markCollectionPulse(createdCollectionId);
+            return true;
+        }
+        return false;
+    }
+
+    function groupCollectionToAnchor(sourceCollectionIdRaw, targetAnchorIdRaw) {
+        const sourceCollectionId = t(sourceCollectionIdRaw);
+        const targetAnchorId = t(targetAnchorIdRaw);
+        if (!sourceCollectionId || !targetAnchorId) {
+            return false;
+        }
+        const targetCollectionId = collectionOfAnchor(targetAnchorId);
+        if (targetCollectionId) {
+            if (targetCollectionId === sourceCollectionId) {
+                return false;
+            }
+            return mergeCollections(targetCollectionId, sourceCollectionId);
+        }
+        return addAnchorToCollection(targetAnchorId, sourceCollectionId);
+    }
+
+    function applyGroupDrop(targetInfo) {
+        const sourceType = t(runtime.collectionDrag.sourceType);
+        const sourceId = t(runtime.collectionDrag.sourceId);
+        if (!sourceType || !sourceId || !targetInfo || !targetInfo.type || !targetInfo.id) {
+            return false;
+        }
+        if (sourceType === 'anchor') {
+            const sourceAnchors = resolveDraggedAnchorIds(sourceType, sourceId);
+            if (!sourceAnchors.length) {
+                return false;
+            }
+            if (sourceAnchors.length > 1) {
+                if (targetInfo.type === 'collection') {
+                    return moveAnchorIdsToCollection(sourceAnchors, targetInfo.id);
+                }
+                if (targetInfo.type === 'anchor') {
+                    const targetAnchorId = t(targetInfo.id);
+                    if (!targetAnchorId || sourceAnchors.includes(targetAnchorId)) {
+                        return false;
+                    }
+                    const targetCollectionId = collectionOfAnchor(targetAnchorId);
+                    if (targetCollectionId) {
+                        return moveAnchorIdsToCollection(sourceAnchors, targetCollectionId);
+                    }
+                    const mergedAnchors = [targetAnchorId, ...sourceAnchors];
+                    let insertIndex = runtime.collectionRootOrder.length;
+                    mergedAnchors.forEach((anchorId) => {
+                        const ownerCollectionId = collectionOfAnchor(anchorId);
+                        const rootIndex = ownerCollectionId
+                            ? findRootEntryIndex('collection', ownerCollectionId)
+                            : findRootEntryIndex('anchor', anchorId);
+                        if (rootIndex >= 0) {
+                            insertIndex = Math.min(insertIndex, rootIndex);
+                        }
+                    });
+                    mergedAnchors.forEach((anchorId) => {
+                        removeRootEntry('anchor', anchorId);
+                        removeAnchorFromCollection(anchorId);
+                    });
+                    const createdCollectionId = createCollectionRecord(mergedAnchors, insertIndex, '');
+                    cleanupCollectionState();
+                    syncCollectionStateWithCandidates();
+                    if (createdCollectionId) {
+                        markCollectionPulse(createdCollectionId);
+                        return true;
+                    }
+                    return false;
+                }
+                return false;
+            }
+            if (targetInfo.type === 'anchor') {
+                return groupAnchorToAnchor(sourceId, targetInfo.id);
+            }
+            if (targetInfo.type === 'collection') {
+                return addAnchorToCollection(sourceId, targetInfo.id);
+            }
+            return false;
+        }
+        if (sourceType === 'collection') {
+            if (targetInfo.type === 'collection') {
+                return mergeCollections(targetInfo.id, sourceId);
+            }
+            if (targetInfo.type === 'anchor') {
+                return groupCollectionToAnchor(sourceId, targetInfo.id);
+            }
+        }
+        return false;
+    }
+
+    function applyReorderDrop(targetInfo, mode) {
+        const normalizedMode = mode === 'before' || mode === 'after' ? mode : '';
+        if (!normalizedMode) {
+            return false;
+        }
+        const sourceType = t(runtime.collectionDrag.sourceType);
+        const sourceId = t(runtime.collectionDrag.sourceId);
+        const targetRootRef = resolveRootRefFromTarget(targetInfo);
+        if (!sourceType || !sourceId || !targetRootRef) {
+            return false;
+        }
+
+        if (sourceType === 'anchor') {
+            const sourceAnchors = resolveDraggedAnchorIds(sourceType, sourceId);
+            const anchorsToMove = sourceAnchors.length ? sourceAnchors : [sourceId];
+            anchorsToMove.forEach((anchorId) => {
+                removeRootEntry('anchor', anchorId);
+                removeAnchorFromCollection(anchorId);
+            });
+            const targetIndex = findRootEntryIndex(targetRootRef.kind, targetRootRef.id);
+            let insertIndex = targetIndex < 0 ? runtime.collectionRootOrder.length : targetIndex;
+            if (normalizedMode === 'after') {
+                insertIndex += 1;
+            }
+            anchorsToMove.forEach((anchorId, offset) => {
+                insertRootEntry(createRootAnchorEntry(anchorId), insertIndex + offset);
+            });
+            cleanupCollectionState();
+            syncCollectionStateWithCandidates();
+            return true;
+        }
+
+        if (sourceType === 'collection') {
+            if (!runtime.collections.has(sourceId)) {
+                return false;
+            }
+            removeRootEntry('collection', sourceId);
+            const targetIndex = findRootEntryIndex(targetRootRef.kind, targetRootRef.id);
+            let insertIndex = targetIndex < 0 ? runtime.collectionRootOrder.length : targetIndex;
+            if (normalizedMode === 'after') {
+                insertIndex += 1;
+            }
+            insertRootEntry(createRootCollectionEntry(sourceId), insertIndex);
+            cleanupCollectionState();
+            syncCollectionStateWithCandidates();
+            return true;
+        }
+
+        return false;
+    }
+
+    function applyCollectionDrop(targetInfo, mode) {
+        if (!targetInfo || !mode) {
+            return false;
+        }
+        if (mode === 'group') {
+            if (runtime.touchMode && !runtime.collectionDrag.groupReady) {
+                return false;
+            }
+            return applyGroupDrop(targetInfo);
+        }
+        return applyReorderDrop(targetInfo, mode);
+    }
+
+    function updateCollectionDragHover(targetInfo, mode, groupAllowed) {
+        const drag = runtime.collectionDrag;
+        const normalizedMode = mode === 'before' || mode === 'after' || mode === 'group' ? mode : '';
+        const normalizedTargetType = t(targetInfo && targetInfo.type);
+        const normalizedTargetId = t(targetInfo && targetInfo.id);
+        const nextKey = `${normalizedTargetType}:${normalizedTargetId}:${normalizedMode}`;
+        let changed = false;
+
+        if (normalizedMode === 'group' && groupAllowed) {
+            const now = Date.now();
+            if (drag.groupHoldKey !== nextKey) {
+                clearCollectionGroupHoldTimer();
+                drag.groupHoldKey = nextKey;
+                drag.groupHoldStartedAt = now;
+                drag.groupReady = false;
+                changed = true;
+            }
+            const holdMs = runtime.touchMode
+                ? COLLECTION_GROUP_HOLD_MS
+                : (normalizedTargetType === 'anchor' ? COLLECTION_GROUP_HOLD_WEB_MS : 0);
+            const shouldReady = (runtime.touchMode && drag.manualDragging)
+                || holdMs <= 0
+                || (drag.groupHoldStartedAt > 0 && (now - drag.groupHoldStartedAt) >= holdMs);
+            if (drag.groupReady !== shouldReady) {
+                drag.groupReady = shouldReady;
+                changed = true;
+            }
+            if (normalizedTargetType === 'collection') {
+                scheduleCollectionAutoExpand(normalizedTargetId);
+            } else {
+                clearCollectionAutoExpandTimer();
+            }
+        } else if (drag.groupReady || drag.groupHoldKey || drag.groupHoldTimer || drag.groupHoldStartedAt) {
+            clearCollectionGroupHoldTimer();
+            clearCollectionAutoExpandTimer();
+            drag.groupReady = false;
+            drag.groupHoldKey = '';
+            drag.groupHoldStartedAt = 0;
+            changed = true;
+        } else {
+            clearCollectionAutoExpandTimer();
+        }
+
+        if (drag.hoverTargetType !== normalizedTargetType) {
+            drag.hoverTargetType = normalizedTargetType;
+            changed = true;
+        }
+        if (drag.hoverTargetId !== normalizedTargetId) {
+            drag.hoverTargetId = normalizedTargetId;
+            changed = true;
+        }
+        if (drag.hoverMode !== normalizedMode) {
+            drag.hoverMode = normalizedMode;
+            changed = true;
+        }
+
+        if (changed) {
+            renderIndex();
+        }
+    }
+
+    function updateCollectionActionBar() {
+        const toggleBtn = document.getElementById('anchorCollectionSelectToggle');
+        const fab = document.getElementById('anchorCollectionFab');
+        const countNode = document.getElementById('anchorCollectionSelectedCount');
+        const groupBtn = document.getElementById('anchorCollectionGroupBtn');
+        const moveBtn = document.getElementById('anchorCollectionMoveBtn');
+        const deleteBtn = document.getElementById('anchorCollectionDeleteBtn');
+        const targetSelect = document.getElementById('anchorCollectionTargetSelect');
+        const cancelBtn = document.getElementById('anchorCollectionCancelBtn');
+        const count = runtime.selectedAnchors.size;
+        const orderedCollections = collectOrderedCollections();
+        let selectedCollectionTargetId = t(runtime.selectedCollectionTargetId);
+
+        if (selectedCollectionTargetId && !runtime.collections.has(selectedCollectionTargetId)) {
+            selectedCollectionTargetId = '';
+        }
+        if (!selectedCollectionTargetId && orderedCollections.length && runtime.selectionMode) {
+            selectedCollectionTargetId = t(orderedCollections[0] && orderedCollections[0].id);
+        }
+        runtime.selectedCollectionTargetId = selectedCollectionTargetId;
+
+        if (toggleBtn) {
+            if (toggleBtn.getAttribute('data-label-ready') !== '1') {
+                toggleBtn.textContent = 'Select';
+                toggleBtn.setAttribute('data-label-ready', '1');
+            }
+            toggleBtn.classList.toggle('is-active', !!runtime.selectionMode);
+            toggleBtn.setAttribute('aria-pressed', runtime.selectionMode ? 'true' : 'false');
+        }
+        if (countNode) {
+            countNode.textContent = `${count} selected`;
+        }
+        if (targetSelect) {
+            const optionHtml = orderedCollections.map((collection) => {
+                const collectionId = t(collection && collection.id);
+                if (!collectionId) {
+                    return '';
+                }
+                const anchorIds = Array.isArray(collection.anchorIds) ? collection.anchorIds : [];
+                const title = normalizeCollectionTitle(collection.title, anchorIds[0]);
+                return `<option value="${h(collectionId)}">${h(`${title} (${anchorIds.length})`)}</option>`;
+            }).join('');
+            const nextOptions = `<option value="">Move to...</option>${optionHtml}`;
+            if (targetSelect.innerHTML !== nextOptions) {
+                targetSelect.innerHTML = nextOptions;
+            }
+            targetSelect.value = selectedCollectionTargetId || '';
+            targetSelect.disabled = !runtime.selectionMode || orderedCollections.length <= 0;
+        }
+        if (groupBtn) {
+            if (groupBtn.getAttribute('data-label-ready') !== '1') {
+                groupBtn.textContent = 'Create Collection';
+                groupBtn.setAttribute('data-label-ready', '1');
+            }
+            groupBtn.disabled = count < 2;
+        }
+        if (moveBtn) {
+            if (moveBtn.getAttribute('data-label-ready') !== '1') {
+                moveBtn.textContent = 'Move to Collection';
+                moveBtn.setAttribute('data-label-ready', '1');
+            }
+            const movableCount = selectedCollectionTargetId
+                ? Array.from(runtime.selectedAnchors).filter((anchorIdRaw) => {
+                    const anchorId = t(anchorIdRaw);
+                    return anchorId && collectionOfAnchor(anchorId) !== selectedCollectionTargetId;
+                }).length
+                : 0;
+            moveBtn.disabled = !runtime.selectionMode || !selectedCollectionTargetId || count < 1 || movableCount <= 0;
+        }
+        if (deleteBtn) {
+            if (deleteBtn.getAttribute('data-label-ready') !== '1') {
+                deleteBtn.textContent = 'Delete Permanently';
+                deleteBtn.setAttribute('data-label-ready', '1');
+            }
+            deleteBtn.disabled = !runtime.selectionMode || count < 1;
+        }
+        if (cancelBtn) {
+            if (cancelBtn.getAttribute('data-label-ready') !== '1') {
+                cancelBtn.textContent = 'Cancel';
+                cancelBtn.setAttribute('data-label-ready', '1');
+            }
+            cancelBtn.disabled = !runtime.selectionMode;
+        }
+        if (fab) {
+            fab.hidden = !runtime.selectionMode;
+            fab.classList.toggle('is-visible', !!runtime.selectionMode);
+        }
+    }
+
+    function resolveAnchorBadgeText(candidate) {
+        if (hasMounted(candidate)) {
+            return 'Mounted';
+        }
+        if (candidate && candidate.status === 'files_uploaded') {
+            return 'Files';
+        }
+        return 'Pending';
+    }
+
+    function buildAnchorCardHtml(candidate, options = {}) {
+        if (!candidate || !candidate.anchorId) {
+            return '';
+        }
+        const anchorId = t(candidate.anchorId);
+        const parentCollectionId = t(options.parentCollectionId);
+        const drag = runtime.collectionDrag;
+        const isTarget = drag.hoverTargetType === 'anchor' && drag.hoverTargetId === anchorId;
+        const isGroupTarget = isTarget && drag.hoverMode === 'group' && drag.groupReady;
+        const isGroupPending = isTarget && drag.hoverMode === 'group' && !drag.groupReady;
+        const isInsertBefore = isTarget && drag.hoverMode === 'before';
+        const isInsertAfter = isTarget && drag.hoverMode === 'after';
+        const isBatchDragging = Array.isArray(drag.batchAnchorIds) && drag.batchAnchorIds.includes(anchorId);
+        const isDragging = (drag.sourceType === 'anchor' && drag.sourceId === anchorId) || isBatchDragging;
+        const isSelected = false;
+        const childClass = options.child ? ' is-child' : '';
+        const activeClass = runtime.activeId === anchorId ? ' is-active' : '';
+        const dropClass = isGroupTarget ? ' is-drop-target is-dragover-group' : '';
+        const pendingClass = isGroupPending ? ' is-group-pending' : '';
+        const beforeClass = isInsertBefore ? ' is-insert-before is-dragover-top' : '';
+        const afterClass = isInsertAfter ? ' is-insert-after is-dragover-bottom' : '';
+        const draggingClass = isDragging ? ' is-dragging' : '';
+        const selectedClass = isSelected ? ' is-selected' : '';
+        const badgeText = resolveAnchorBadgeText(candidate);
+        const badgeClass = hasMounted(candidate) ? 'is-mounted' : (candidate.status === 'files_uploaded' ? 'is-files' : 'is-pending');
+        const extractButton = options.child
+            ? `<button class="anchor-collection-action is-inline" type="button" data-collection-action="extract-anchor" data-anchor-id="${h(anchorId)}" data-parent-collection-id="${h(parentCollectionId)}">移出</button>`
+            : '';
+        const selectControl = '';
+        const dragHandle = `<span class="anchor-index-drag-handle" draggable="true" data-source-type="anchor" data-anchor-id="${h(anchorId)}" data-parent-collection-id="${h(parentCollectionId)}" title="Drag">⋮⋮</span>`;
+        return `
+            <div class="anchor-index-item${childClass}${activeClass}${dropClass}${pendingClass}${beforeClass}${afterClass}${draggingClass}${selectedClass}" role="button" tabindex="0" draggable="true" data-dnd-target="item" data-source-type="anchor" data-anchor-id="${h(anchorId)}" data-parent-collection-id="${h(parentCollectionId)}">
+                <span class="anchor-index-item-line">${h(short(candidate.displayText, 72))}</span>
+                <span class="anchor-index-item-meta">
+                    <span>${h(short(candidate.matchText || candidate.displayText, 64))}</span>
+                    <span class="anchor-index-badge ${badgeClass}">${h(badgeText)}</span>
+                </span>
+                <span class="anchor-index-item-tail">
+                    ${selectControl}
+                    ${extractButton}
+                    ${dragHandle}
+                </span>
+            </div>
+        `;
+    }
+
+    function buildCollectionCardHtml(collection) {
+        if (!collection || !collection.id) {
+            return '';
+        }
+        const collectionId = t(collection.id);
+        const expanded = collection.expanded !== false;
+        const drag = runtime.collectionDrag;
+        const isTarget = drag.hoverTargetType === 'collection' && drag.hoverTargetId === collectionId;
+        const isGroupTarget = isTarget && drag.hoverMode === 'group' && drag.groupReady;
+        const isGroupPending = isTarget && drag.hoverMode === 'group' && !drag.groupReady;
+        const isInsertBefore = isTarget && drag.hoverMode === 'before';
+        const isInsertAfter = isTarget && drag.hoverMode === 'after';
+        const isDragging = drag.sourceType === 'collection' && drag.sourceId === collectionId;
+        const pulseActive = drag.pulseCollectionId === collectionId && Date.now() < drag.pulseUntil;
+
+        const previewItems = collection.anchorIds.slice(0, COLLECTION_PREVIEW_LIMIT).map((anchorIdRaw) => {
+            const candidate = candidateOf(anchorIdRaw);
+            const text = short((candidate && candidate.displayText) || anchorIdRaw, 26);
+            return `<span class="anchor-collection-preview-item">${h(text)}</span>`;
+        }).join('');
+        const more = Math.max(0, collection.anchorIds.length - COLLECTION_PREVIEW_LIMIT);
+        const moreHtml = more > 0 ? `<span class="anchor-collection-preview-item is-more">+${more}</span>` : '';
+        const preview = previewItems || '<span class="anchor-collection-preview-item">No preview</span>';
+        const childCards = collection.anchorIds.map((anchorIdRaw) => buildAnchorCardHtml(candidateOf(anchorIdRaw), {
+            child: true,
+            parentCollectionId: collectionId,
+        })).join('');
+        const childPreview = collection.anchorIds.slice(0, COLLECTION_CHILD_PREVIEW_LIMIT).map((anchorIdRaw) => {
+            const candidate = candidateOf(anchorIdRaw);
+            return `<span class="anchor-collection-inline-item">${h(short((candidate && candidate.displayText) || anchorIdRaw, 24))}</span>`;
+        }).join('');
+        return `
+            <section class="anchor-collection-block" data-collection-id="${h(collectionId)}">
+                <div class="anchor-index-item anchor-collection-item${isGroupTarget ? ' is-drop-target is-dragover-group' : ''}${isGroupPending ? ' is-group-pending' : ''}${isInsertBefore ? ' is-insert-before is-dragover-top' : ''}${isInsertAfter ? ' is-insert-after is-dragover-bottom' : ''}${isDragging ? ' is-dragging' : ''}${pulseActive ? ' is-drop-pulse' : ''}" draggable="true" data-dnd-target="item" data-source-type="collection" data-collection-id="${h(collectionId)}">
+                    <div class="anchor-collection-head">
+                        <button class="anchor-collection-toggle${expanded ? ' is-expanded' : ''}" type="button" data-collection-action="toggle" data-collection-id="${h(collectionId)}" aria-label="${expanded ? 'Collapse collection' : 'Expand collection'}">${expanded ? '▾' : '▸'}</button>
+                        <span class="anchor-collection-title" data-collection-id="${h(collectionId)}" data-collection-title="true" contenteditable="false" spellcheck="false">${h(normalizeCollectionTitle(collection.title, collection.anchorIds[0]))}</span>
+                        <span class="anchor-comment-item-count">${h(`${collection.anchorIds.length} 任务`)}</span>
+                        <span class="anchor-index-item-tail">
+                            <button class="anchor-collection-action" type="button" data-collection-action="rename" data-collection-id="${h(collectionId)}">重命名</button>
+                            <button class="anchor-collection-action" type="button" data-collection-action="ungroup" data-collection-id="${h(collectionId)}">解散</button>
+                            <span class="anchor-index-drag-handle" draggable="true" data-source-type="collection" data-collection-id="${h(collectionId)}" title="Drag">⋮⋮</span>
+                        </span>
+                    </div>
+                    <div class="anchor-collection-inline-preview">${childPreview || '<span class="anchor-collection-inline-item">Empty</span>'}</div>
+                    <div class="anchor-collection-preview">${preview}${moreHtml}</div>
+                </div>
+                <div class="anchor-collection-children${expanded ? ' is-expanded' : ''}" ${expanded ? '' : 'hidden'}>
+                    ${childCards}
+                </div>
+            </section>
+        `;
+    }
+
+    function renderIndex() {
+        const list = document.getElementById('anchorIndexList');
+        if (!list) {
+            return;
+        }
+        syncCollectionStateWithCandidates();
+        updateCollectionActionBar();
+        list.classList.toggle('is-selection-mode', !!runtime.selectionMode);
+        if (!runtime.candidates.length) {
+            list.innerHTML = `<div class="empty">${h(TEXT.noAnchors)}</div>`;
+            return;
+        }
+        const html = runtime.collectionRootOrder.map((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return '';
+            }
+            if (entry.kind === 'collection') {
+                return buildCollectionCardHtml(runtime.collections.get(t(entry.id)));
+            }
+            if (entry.kind === 'anchor') {
+                return buildAnchorCardHtml(candidateOf(entry.id), {});
+            }
+            return '';
+        }).join('');
+        list.innerHTML = html || `<div class="empty">${h(TEXT.noAnchors)}</div>`;
+    }
+
     function refreshViews() {
         renderIndex();
         renderInbox();
@@ -5603,6 +7420,14 @@
             runtime.candidates = [];
             runtime.activeId = '';
             runtime.dropId = '';
+            runtime.collectionRootOrder = [];
+            runtime.collections.clear();
+            runtime.collectionByAnchor.clear();
+            runtime.selectedAnchors.clear();
+            runtime.selectionPivotAnchorId = '';
+            runtime.selectionMode = false;
+            runtime.selectedCollectionTargetId = '';
+            resetCollectionDragState();
             runtime.pendingByAnchor.clear();
             runtime.pendingMainByAnchor.clear();
             rebuildCandidates();
@@ -5674,7 +7499,15 @@
             const body = await parseResp(resp);
             if (seq !== runtime.mountedSeq) return null;
             runtime.mountedPayloadByAnchor.set(anchorId, body);
-            if (body.notePath) runtime.mountedNoteByAnchor.set(anchorId, normalizePath(body.notePath));
+            const normalizedMountedPath = normalizePath(
+                toRevisionRelativePath(body.notePath || body.entryNotePath || '', c)
+            );
+            if (normalizedMountedPath) {
+                runtime.mountedNoteByAnchor.set(anchorId, normalizedMountedPath);
+                ensureActiveLocalNoteByPath(anchorId, normalizedMountedPath, {
+                    syncEditor: runtime.activeId === anchorId,
+                });
+            }
             const preview = document.getElementById('anchorPreview');
             if (preview) {
                 const html = window.markdownit
@@ -5766,13 +7599,21 @@
         if (!key) {
             return;
         }
+        const anchor = candidateOf(key) || runtime.anchors.get(key) || null;
+        const preferredMountedPath = normalizePath(
+            toRevisionRelativePath(runtime.mountedNoteByAnchor.get(key) || '', anchor)
+            || toRevisionRelativePath(anchor && anchor.mountedPath || '', anchor)
+        );
+        if (preferredMountedPath) {
+            runtime.pendingMainByAnchor.set(key, preferredMountedPath);
+            return;
+        }
         const notes = ensureLocalNoteFileNames(key);
         const firstNotePath = normalizePath(notes[0] && notes[0].fileName);
         if (firstNotePath) {
             runtime.pendingMainByAnchor.set(key, firstNotePath);
             return;
         }
-        const anchor = candidateOf(key) || runtime.anchors.get(key) || null;
         const fallback = normalizePath(
             toRevisionRelativePath(runtime.mountedNoteByAnchor.get(key) || '', anchor)
             || toRevisionRelativePath(anchor && anchor.mountedPath || '', anchor)
@@ -5814,15 +7655,94 @@
         if (hint) hint.textContent = candidate.anchorHint || TEXT.hintPlaceholder;
     }
 
+    function resolveAnchorScrollTarget(candidate) {
+        if (candidate && candidate.node instanceof HTMLElement) {
+            return candidate.node;
+        }
+        const blockId = t(candidate && candidate.blockId);
+        if (!blockId) {
+            return null;
+        }
+        const body = document.getElementById('markdownBody');
+        if (!(body instanceof HTMLElement)) {
+            return null;
+        }
+        const nodes = body.querySelectorAll('[data-block-id], [data-node-id], [id]');
+        for (let i = 0; i < nodes.length; i += 1) {
+            const node = nodes[i];
+            if (!(node instanceof HTMLElement)) {
+                continue;
+            }
+            const ids = [
+                t(node.getAttribute('data-block-id')),
+                t(node.getAttribute('data-node-id')),
+                t(node.id),
+            ];
+            if (ids.includes(blockId)) {
+                return node;
+            }
+        }
+        return null;
+    }
+
+    function scrollPanelItemIntoView(listId, anchorId) {
+        const normalizedAnchorId = t(anchorId);
+        if (!normalizedAnchorId) {
+            return;
+        }
+        const list = document.getElementById(listId);
+        if (!(list instanceof HTMLElement)) {
+            return;
+        }
+        const node = Array.from(list.querySelectorAll('[data-anchor-id]')).find((item) => {
+            if (!(item instanceof HTMLElement)) {
+                return false;
+            }
+            return t(item.getAttribute('data-anchor-id')) === normalizedAnchorId;
+        });
+        if (node && typeof node.scrollIntoView === 'function') {
+            node.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        }
+    }
+
     function selectAnchor(anchorId, source, scrollIntoView) {
         const c = candidateOf(anchorId);
         if (!c) return;
+        const normalizedSource = t(source) || '';
+        const shouldOpenPanel = normalizedSource === 'index_keyboard_enter'
+            || normalizedSource === 'index_click'
+            || normalizedSource === 'inbox_click';
         if (runtime.activeId && runtime.activeId !== anchorId) {
             persistActiveLocalNoteFromEditor(runtime.activeId, { retitle: true });
         }
         runtime.activeId = anchorId;
+        runtime.selectionPivotAnchorId = anchorId;
+        if (!shouldOpenPanel) {
+            runtime.selectionMode = true;
+            runtime.selectedAnchors.clear();
+            runtime.selectedAnchors.add(anchorId);
+            updateCollectionActionBar();
+            refreshViews();
+            if (scrollIntoView !== false) {
+                const targetNode = resolveAnchorScrollTarget(c);
+                if (targetNode && typeof targetNode.scrollIntoView === 'function') {
+                    targetNode.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                }
+            }
+            scrollPanelItemIntoView('anchorIndexList', anchorId);
+            scrollPanelItemIntoView('anchorInboxList', anchorId);
+            setPanel(false);
+            closePanel();
+            return;
+        }
         openPanel();
         setPanel(true);
+        const preferredMountedPath = normalizePath(
+            toRevisionRelativePath(runtime.mountedNoteByAnchor.get(anchorId) || (c && c.mountedPath) || '', c)
+        );
+        if (preferredMountedPath) {
+            ensureActiveLocalNoteByPath(anchorId, preferredMountedPath, { syncEditor: false });
+        }
         renderContext(c);
         renderPending(anchorId);
         renderLocalNoteCards(anchorId);
@@ -5832,9 +7752,16 @@
             searchInput.value = getLocalNoteFilter(anchorId);
         }
         refreshViews();
-        if (c.node && scrollIntoView !== false) c.node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        if (scrollIntoView !== false) {
+            const targetNode = resolveAnchorScrollTarget(c);
+            if (targetNode && typeof targetNode.scrollIntoView === 'function') {
+                targetNode.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
+        }
+        scrollPanelItemIntoView('anchorIndexList', anchorId);
+        scrollPanelItemIntoView('anchorInboxList', anchorId);
         if (hasMounted(c)) {
-            loadMounted(anchorId, runtime.mountedNoteByAnchor.get(anchorId) || '', source || 'anchor');
+            loadMounted(anchorId, runtime.mountedNoteByAnchor.get(anchorId) || '', normalizedSource || 'anchor');
         } else {
             setPreview(TEXT.choosing);
         }
@@ -5966,6 +7893,13 @@
         const phase2bCanvas = document.getElementById('anchorPhase2bCanvas');
         const phase2bInput = document.getElementById('anchorPhase2bInput');
         const phase2bResizer = document.getElementById('anchorPhase2bResizer');
+        const selectToggleBtn = document.getElementById('anchorCollectionSelectToggle');
+        const collectionFab = document.getElementById('anchorCollectionFab');
+        const groupBtn = document.getElementById('anchorCollectionGroupBtn');
+        const moveBtn = document.getElementById('anchorCollectionMoveBtn');
+        const deleteBtn = document.getElementById('anchorCollectionDeleteBtn');
+        const targetSelect = document.getElementById('anchorCollectionTargetSelect');
+        const cancelSelectionBtn = document.getElementById('anchorCollectionCancelBtn');
         if (!ENABLE_OBSIDIAN_GRAPH) {
             if (graphBtn) {
                 graphBtn.hidden = true;
@@ -6046,9 +7980,1071 @@
             return { importedCount, nonMarkdownCount };
         };
 
-        indexList && indexList.addEventListener('click', (e) => { const id = findId(e.target); if (id) selectAnchor(id, 'index', true); });
-        inboxList && inboxList.addEventListener('click', (e) => { const id = findId(e.target); if (id) selectAnchor(id, 'inbox', true); });
-        body && body.addEventListener('click', (e) => { const id = findId(e.target); if (id) selectAnchor(id, 'highlight', false); });
+        runtime.touchMode = isTouchEnvironment();
+
+        const resolveIndexItemMeta = (target) => {
+            const node = target && target.closest ? target.closest('[data-dnd-target="item"][data-source-type]') : null;
+            if (!node) {
+                return null;
+            }
+            const sourceType = t(node.getAttribute('data-source-type'));
+            if (sourceType === 'anchor') {
+                const anchorId = t(node.getAttribute('data-anchor-id'));
+                if (!anchorId) {
+                    return null;
+                }
+                return {
+                    node,
+                    type: 'anchor',
+                    id: anchorId,
+                    parentCollectionId: t(node.getAttribute('data-parent-collection-id')),
+                };
+            }
+            if (sourceType === 'collection') {
+                const collectionId = t(node.getAttribute('data-collection-id'));
+                if (!collectionId) {
+                    return null;
+                }
+                return {
+                    node,
+                    type: 'collection',
+                    id: collectionId,
+                    parentCollectionId: '',
+                };
+            }
+            return null;
+        };
+
+        const resolveDragSourceMeta = (target) => {
+            const handleNode = target && target.closest ? target.closest('.anchor-index-drag-handle[data-source-type]') : null;
+            if (handleNode) {
+                const sourceType = t(handleNode.getAttribute('data-source-type'));
+                if (sourceType === 'anchor') {
+                    return {
+                        sourceType,
+                        id: t(handleNode.getAttribute('data-anchor-id')),
+                        parentCollectionId: t(handleNode.getAttribute('data-parent-collection-id')),
+                    };
+                }
+                if (sourceType === 'collection') {
+                    return {
+                        sourceType,
+                        id: t(handleNode.getAttribute('data-collection-id')),
+                        parentCollectionId: '',
+                    };
+                }
+            }
+            const itemMeta = resolveIndexItemMeta(target);
+            if (!itemMeta) {
+                return null;
+            }
+            return {
+                sourceType: itemMeta.type,
+                id: itemMeta.id,
+                parentCollectionId: itemMeta.parentCollectionId,
+            };
+        };
+
+        const armManualPointerDrag = (dragMeta, event, options = {}) => {
+            if (!dragMeta || !dragMeta.sourceType || !dragMeta.id || !event) {
+                return;
+            }
+            const requireHold = !!(options && options.requireHold);
+            const holdDuration = Number.isFinite(Number(options && options.holdDurationMs))
+                ? Math.max(0, Number(options.holdDurationMs))
+                : COLLECTION_WEB_LONG_PRESS_MS;
+            clearManualCollectionHoldTimer();
+            runtime.collectionDrag.manualPointerId = Number.isFinite(Number(event.pointerId)) ? Number(event.pointerId) : -1;
+            runtime.collectionDrag.manualSourceType = dragMeta.sourceType;
+            runtime.collectionDrag.manualSourceId = dragMeta.id;
+            runtime.collectionDrag.manualSourceCollectionId = dragMeta.parentCollectionId || collectionOfAnchor(dragMeta.id);
+            runtime.collectionDrag.manualStartX = Number(event.clientX) || 0;
+            runtime.collectionDrag.manualStartY = Number(event.clientY) || 0;
+            runtime.collectionDrag.manualArmedAt = Date.now();
+            runtime.collectionDrag.manualArmed = true;
+            runtime.collectionDrag.manualDragging = false;
+            runtime.collectionDrag.manualRequireHold = requireHold;
+            runtime.collectionDrag.manualHoldReady = !requireHold;
+            runtime.collectionDrag.manualSuppressClickUntil = Math.max(
+                Number(runtime.collectionDrag.manualSuppressClickUntil || 0),
+                Date.now() + 1200,
+            );
+            if (requireHold) {
+                runtime.collectionDrag.manualHoldTimer = window.setTimeout(() => {
+                    runtime.collectionDrag.manualHoldTimer = 0;
+                    if (!runtime.collectionDrag.manualArmed || !runtime.collectionDrag.manualRequireHold) {
+                        return;
+                    }
+                    runtime.collectionDrag.manualHoldReady = true;
+                    beginManualPointerDrag();
+                    runtime.collectionDrag.manualSuppressClickUntil = Date.now() + 320;
+                }, holdDuration);
+            }
+        };
+
+        const beginManualPointerDrag = () => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return false;
+            }
+            if (runtime.collectionDrag.manualRequireHold && !runtime.collectionDrag.manualHoldReady) {
+                return false;
+            }
+            const sourceType = t(runtime.collectionDrag.manualSourceType);
+            const sourceId = t(runtime.collectionDrag.manualSourceId);
+            if (!sourceType || !sourceId) {
+                return false;
+            }
+            runtime.collectionDrag.sourceType = sourceType;
+            runtime.collectionDrag.sourceId = sourceId;
+            runtime.collectionDrag.sourceCollectionId = t(runtime.collectionDrag.manualSourceCollectionId);
+            resetCollectionDragHoverState();
+            runtime.collectionDrag.manualDragging = true;
+            renderIndex();
+            return true;
+        };
+
+        const updateManualPointerDrag = (event) => {
+            if (!runtime.collectionDrag.manualArmed || !event) {
+                return;
+            }
+            if (runtime.collectionDrag.manualRequireHold && !runtime.collectionDrag.manualHoldReady) {
+                const pendingDeltaX = Math.abs((Number(event.clientX) || 0) - runtime.collectionDrag.manualStartX);
+                const pendingDeltaY = Math.abs((Number(event.clientY) || 0) - runtime.collectionDrag.manualStartY);
+                const pendingDistance = Math.max(pendingDeltaX, pendingDeltaY);
+                const elapsed = Date.now() - Number(runtime.collectionDrag.manualArmedAt || 0);
+                if (pendingDistance >= 5 && elapsed >= 140) {
+                    clearManualCollectionHoldTimer();
+                    runtime.collectionDrag.manualHoldReady = true;
+                    beginManualPointerDrag();
+                    runtime.collectionDrag.manualSuppressClickUntil = Date.now() + 220;
+                }
+                if (!runtime.collectionDrag.manualHoldReady) {
+                    return;
+                }
+            }
+            if (!runtime.collectionDrag.manualDragging) {
+                const deltaX = Math.abs((Number(event.clientX) || 0) - runtime.collectionDrag.manualStartX);
+                const deltaY = Math.abs((Number(event.clientY) || 0) - runtime.collectionDrag.manualStartY);
+                if (Math.max(deltaX, deltaY) < 5) {
+                    return;
+                }
+                if (!beginManualPointerDrag()) {
+                    return;
+                }
+            }
+            event.preventDefault();
+            updateCollectionAutoScroll(Number(event.clientY) || 0);
+            const hit = document.elementFromPoint(Number(event.clientX) || 0, Number(event.clientY) || 0);
+            const targetMeta = resolveIndexItemMeta(hit);
+            if (!targetMeta) {
+                resetCollectionDragHoverState();
+                renderIndex();
+                return;
+            }
+            const sourceType = t(runtime.collectionDrag.sourceType);
+            const sourceId = t(runtime.collectionDrag.sourceId);
+            const mode = resolveDropMode(event, targetMeta.node);
+            const groupAllowed = mode === 'group' && canGroupDrop(sourceType, sourceId, targetMeta);
+            const reorderAllowed = mode !== 'group' && canReorderDrop(sourceType, sourceId, targetMeta);
+            if (!groupAllowed && !reorderAllowed) {
+                resetCollectionDragHoverState();
+                renderIndex();
+                return;
+            }
+            updateCollectionDragHover(targetMeta, mode, groupAllowed);
+        };
+
+        const finishManualPointerDrag = () => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            const sourceType = t(runtime.collectionDrag.manualSourceType);
+            const sourceId = t(runtime.collectionDrag.manualSourceId);
+            const shouldCommit = runtime.collectionDrag.manualDragging;
+            const shouldTreatAsTap = !shouldCommit
+                && runtime.collectionDrag.manualRequireHold
+                && !runtime.collectionDrag.manualHoldReady;
+            const shouldRender = shouldCommit
+                || !!runtime.collectionDrag.sourceType
+                || !!runtime.collectionDrag.hoverTargetType
+                || !!runtime.collectionDrag.hoverTargetId
+                || !!runtime.collectionDrag.hoverMode
+                || !!runtime.collectionDrag.groupReady
+                || !!runtime.collectionDrag.groupHoldKey
+                || !!runtime.collectionDrag.groupHoldTimer
+                || !!runtime.collectionDrag.groupHoldStartedAt;
+            const targetInfo = (runtime.collectionDrag.hoverTargetType && runtime.collectionDrag.hoverTargetId)
+                ? { type: runtime.collectionDrag.hoverTargetType, id: runtime.collectionDrag.hoverTargetId }
+                : null;
+            const mode = t(runtime.collectionDrag.hoverMode);
+            if (shouldCommit && targetInfo && (mode === 'before' || mode === 'after' || mode === 'group')) {
+                applyCollectionDrop(targetInfo, mode);
+            }
+            if (shouldTreatAsTap && sourceId) {
+                if (sourceType === 'anchor') {
+                    if (runtime.selectionMode) {
+                        toggleAnchorSelection(sourceId);
+                    } else {
+                        runtime.selectionMode = true;
+                        runtime.selectedAnchors.clear();
+                        runtime.selectedAnchors.add(sourceId);
+                        runtime.selectionPivotAnchorId = sourceId;
+                        updateCollectionActionBar();
+                    }
+                } else if (sourceType === 'collection') {
+                    const tapCollection = runtime.collections.get(sourceId);
+                    if (tapCollection) {
+                        tapCollection.expanded = tapCollection.expanded === false;
+                    }
+                }
+            }
+            if (shouldCommit || runtime.collectionDrag.manualHoldReady || shouldTreatAsTap) {
+                runtime.collectionDrag.manualSuppressClickUntil = Date.now() + 260;
+            }
+            resetCollectionDragState();
+            if (shouldRender && !shouldTreatAsTap) {
+                renderIndex();
+            } else if (shouldTreatAsTap && (sourceType === 'collection' || sourceType === 'anchor')) {
+                renderIndex();
+            }
+        };
+
+        const commitCollectionTitleEdit = (titleNode) => {
+            if (!(titleNode instanceof HTMLElement)) {
+                return;
+            }
+            const collectionId = t(titleNode.getAttribute('data-collection-id'));
+            const collection = runtime.collections.get(collectionId);
+            if (!collection) {
+                renderIndex();
+                return;
+            }
+            collection.title = normalizeCollectionTitle(titleNode.textContent, collection.anchorIds[0]);
+            titleNode.removeAttribute('data-editing');
+            titleNode.setAttribute('contenteditable', 'false');
+            syncCollectionStateWithCandidates();
+            renderIndex();
+        };
+
+        const beginCollectionTitleEdit = (collectionIdRaw) => {
+            const collectionId = t(collectionIdRaw);
+            if (!collectionId) {
+                return;
+            }
+            const escapedCollectionId = (window.CSS && typeof window.CSS.escape === 'function')
+                ? window.CSS.escape(collectionId)
+                : collectionId.replace(/["\\]/g, '\\$&');
+            const titleNode = indexList && indexList.querySelector
+                ? indexList.querySelector(`[data-collection-title="true"][data-collection-id="${escapedCollectionId}"]`)
+                : null;
+            if (!(titleNode instanceof HTMLElement)) {
+                return;
+            }
+            titleNode.setAttribute('contenteditable', 'true');
+            titleNode.setAttribute('data-editing', '1');
+            if (typeof titleNode.focus === 'function') {
+                titleNode.focus();
+            }
+            if (window.getSelection && document.createRange) {
+                const selection = window.getSelection();
+                if (selection) {
+                    const range = document.createRange();
+                    range.selectNodeContents(titleNode);
+                    range.collapse(false);
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+            }
+        };
+
+        const ungroupCollection = (collectionIdRaw) => {
+            const collectionId = t(collectionIdRaw);
+            const collection = runtime.collections.get(collectionId);
+            if (!collection) {
+                return false;
+            }
+            const rootIndex = findRootEntryIndex('collection', collectionId);
+            removeRootEntry('collection', collectionId);
+            runtime.collections.delete(collectionId);
+            collection.anchorIds.forEach((anchorIdRaw, index) => {
+                const anchorId = t(anchorIdRaw);
+                if (!anchorId) {
+                    return;
+                }
+                removeRootEntry('anchor', anchorId);
+                insertRootEntry(createRootAnchorEntry(anchorId), (rootIndex >= 0 ? rootIndex : runtime.collectionRootOrder.length) + index);
+            });
+            cleanupCollectionState();
+            syncCollectionStateWithCandidates();
+            return true;
+        };
+
+        const extractAnchorFromCollection = (anchorIdRaw, parentCollectionIdRaw) => {
+            const anchorId = t(anchorIdRaw);
+            const parentCollectionId = t(parentCollectionIdRaw) || collectionOfAnchor(anchorId);
+            if (!anchorId || !parentCollectionId) {
+                return false;
+            }
+            const collection = runtime.collections.get(parentCollectionId);
+            if (!collection || !Array.isArray(collection.anchorIds)) {
+                return false;
+            }
+            const itemIndex = collection.anchorIds.indexOf(anchorId);
+            if (itemIndex < 0) {
+                return false;
+            }
+            collection.anchorIds.splice(itemIndex, 1);
+            const rootIndex = findRootEntryIndex('collection', parentCollectionId);
+            removeRootEntry('anchor', anchorId);
+            insertRootEntry(createRootAnchorEntry(anchorId), rootIndex >= 0 ? rootIndex + 1 : runtime.collectionRootOrder.length);
+            cleanupCollectionState();
+            syncCollectionStateWithCandidates();
+            return true;
+        };
+
+        const handleCollectionAction = (actionNode) => {
+            const action = t(actionNode && actionNode.getAttribute('data-collection-action'));
+            if (!action) {
+                return false;
+            }
+            if (action === 'toggle') {
+                const collectionId = t(actionNode.getAttribute('data-collection-id'));
+                const collection = runtime.collections.get(collectionId);
+                if (!collection) {
+                    return false;
+                }
+                collection.expanded = collection.expanded === false;
+                renderIndex();
+                return true;
+            }
+            if (action === 'rename') {
+                beginCollectionTitleEdit(actionNode.getAttribute('data-collection-id'));
+                return true;
+            }
+            if (action === 'ungroup') {
+                const done = ungroupCollection(actionNode.getAttribute('data-collection-id'));
+                if (done) {
+                    renderIndex();
+                }
+                return done;
+            }
+            if (action === 'extract-anchor') {
+                const done = extractAnchorFromCollection(
+                    actionNode.getAttribute('data-anchor-id'),
+                    actionNode.getAttribute('data-parent-collection-id'),
+                );
+                if (done) {
+                    renderIndex();
+                }
+                return done;
+            }
+            return false;
+        };
+
+        const resolveOrderedSelectedAnchors = () => {
+            const ordered = collectRenderedAnchorOrder();
+            const selected = ordered.filter((anchorId) => runtime.selectedAnchors.has(anchorId));
+            if (selected.length) {
+                return selected;
+            }
+            return Array.from(runtime.selectedAnchors).map((anchorId) => t(anchorId)).filter(Boolean);
+        };
+
+        const createCollectionDragGhost = (count) => {
+            const safeCount = Math.max(1, Number(count) || 1);
+            const node = document.createElement('div');
+            node.className = 'anchor-collection-drag-ghost';
+            node.innerHTML = `<span class="anchor-collection-drag-ghost-icon">📦</span><span class="anchor-collection-drag-ghost-count">+${safeCount}</span>`;
+            document.body.appendChild(node);
+            return node;
+        };
+
+        const ensureCollectionContextMenu = () => {
+            let menu = document.getElementById('anchorCollectionContextMenu');
+            if (menu instanceof HTMLElement) {
+                return menu;
+            }
+            menu = document.createElement('div');
+            menu.id = 'anchorCollectionContextMenu';
+            menu.className = 'anchor-collection-context-menu';
+            menu.hidden = true;
+            menu.setAttribute('role', 'menu');
+            document.body.appendChild(menu);
+            return menu;
+        };
+
+        const contextMenuNode = ensureCollectionContextMenu();
+        let contextMenuPayload = null;
+
+        const closeCollectionContextMenu = () => {
+            contextMenuPayload = null;
+            if (contextMenuNode) {
+                contextMenuNode.hidden = true;
+                contextMenuNode.innerHTML = '';
+            }
+        };
+
+        const runCollectionContextAction = (actionId, payload) => {
+            const action = t(actionId);
+            const data = payload && typeof payload === 'object' ? payload : {};
+            if (action === 'group_selected') {
+                const done = groupSelectedAnchors();
+                if (done) {
+                    renderIndex();
+                } else {
+                    updateCollectionActionBar();
+                }
+                return;
+            }
+            if (action === 'delete_selected') {
+                deleteSelectedAnchorsPermanently().then((done) => {
+                    if (done) {
+                        renderIndex();
+                    } else {
+                        updateCollectionActionBar();
+                    }
+                });
+                return;
+            }
+            if (action === 'rename_collection') {
+                const collectionId = t(data.collectionId);
+                if (collectionId) {
+                    beginCollectionTitleEdit(collectionId);
+                }
+                return;
+            }
+            if (action === 'ungroup_collection') {
+                const collectionId = t(data.collectionId);
+                if (!collectionId) {
+                    return;
+                }
+                const done = ungroupCollection(collectionId);
+                if (done) {
+                    renderIndex();
+                }
+            }
+        };
+
+        const openCollectionContextMenu = (clientXRaw, clientYRaw, items, payload) => {
+            if (!contextMenuNode) {
+                return;
+            }
+            const actionItems = Array.isArray(items) ? items.filter((item) => item && item.id) : [];
+            if (!actionItems.length) {
+                closeCollectionContextMenu();
+                return;
+            }
+            contextMenuPayload = payload && typeof payload === 'object' ? payload : {};
+            contextMenuNode.innerHTML = actionItems.map((item) => {
+                const disabled = !!item.disabled;
+                const label = t(item.label || item.id);
+                return `<button type="button" class="anchor-collection-context-item" data-context-action="${h(item.id)}" ${disabled ? 'disabled' : ''}>${h(label)}</button>`;
+            }).join('');
+            contextMenuNode.hidden = false;
+            const clientX = Number(clientXRaw) || 0;
+            const clientY = Number(clientYRaw) || 0;
+            const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+            const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+            const menuRect = contextMenuNode.getBoundingClientRect();
+            const left = Math.max(8, Math.min(clientX, Math.max(8, vw - menuRect.width - 8)));
+            const top = Math.max(8, Math.min(clientY, Math.max(8, vh - menuRect.height - 8)));
+            contextMenuNode.style.left = `${left}px`;
+            contextMenuNode.style.top = `${top}px`;
+        };
+
+        contextMenuNode && contextMenuNode.addEventListener('click', (event) => {
+            const item = closestFromEventTarget(event && event.target, '[data-context-action]');
+            if (!(item instanceof HTMLElement)) {
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            const actionId = item.getAttribute('data-context-action');
+            runCollectionContextAction(actionId, contextMenuPayload);
+            closeCollectionContextMenu();
+        });
+
+        document.addEventListener('pointerdown', (event) => {
+            if (!contextMenuNode || contextMenuNode.hidden) {
+                return;
+            }
+            const target = elementFromEventTarget(event && event.target);
+            if (target && contextMenuNode.contains(target)) {
+                return;
+            }
+            closeCollectionContextMenu();
+        }, true);
+        window.addEventListener('resize', closeCollectionContextMenu, { passive: true });
+        window.addEventListener('blur', closeCollectionContextMenu);
+        window.addEventListener('scroll', closeCollectionContextMenu, true);
+
+        if (selectToggleBtn) {
+            selectToggleBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                setSelectionMode(!runtime.selectionMode);
+                renderIndex();
+            });
+        }
+        if (groupBtn) {
+            groupBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                const done = groupSelectedAnchors();
+                if (done) {
+                    renderIndex();
+                } else {
+                    updateCollectionActionBar();
+                }
+            });
+        }
+        if (moveBtn) {
+            moveBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                const done = moveSelectedAnchorsToCollection(runtime.selectedCollectionTargetId);
+                if (done) {
+                    renderIndex();
+                } else {
+                    updateCollectionActionBar();
+                }
+            });
+        }
+        if (deleteBtn) {
+            deleteBtn.addEventListener('click', async (event) => {
+                event.preventDefault();
+                const done = await deleteSelectedAnchorsPermanently();
+                if (done) {
+                    renderIndex();
+                } else {
+                    updateCollectionActionBar();
+                }
+            });
+        }
+        if (targetSelect) {
+            targetSelect.addEventListener('change', (event) => {
+                runtime.selectedCollectionTargetId = t(event && event.target && event.target.value);
+                updateCollectionActionBar();
+            });
+        }
+        if (cancelSelectionBtn) {
+            cancelSelectionBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                setSelectionMode(false);
+                renderIndex();
+            });
+        }
+        if (collectionFab) {
+            updateCollectionActionBar();
+        }
+
+        indexList && indexList.addEventListener('change', (event) => {
+            const checkbox = closestFromEventTarget(event && event.target, 'input[type="checkbox"][data-select-anchor-id]');
+            if (!(checkbox instanceof HTMLInputElement)) {
+                return;
+            }
+            const anchorId = t(checkbox.getAttribute('data-select-anchor-id'));
+            if (!anchorId) {
+                return;
+            }
+            runtime.selectionMode = true;
+            if (checkbox.checked) {
+                runtime.selectedAnchors.add(anchorId);
+                runtime.selectionPivotAnchorId = anchorId;
+            } else {
+                runtime.selectedAnchors.delete(anchorId);
+            }
+            updateCollectionActionBar();
+            renderIndex();
+        });
+
+        indexList && indexList.addEventListener('click', (event) => {
+            event.stopPropagation();
+            if (Date.now() < Number(runtime.collectionDrag.manualSuppressClickUntil || 0)) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            if (runtime.collectionDrag.manualArmed || runtime.collectionDrag.manualDragging || runtime.collectionDrag.manualHoldTimer) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+            }
+            const actionNode = closestFromEventTarget(event && event.target, '[data-collection-action]');
+            if (actionNode) {
+                event.preventDefault();
+                event.stopPropagation();
+                handleCollectionAction(actionNode);
+                return;
+            }
+            if (closestFromEventTarget(event && event.target, '[data-select-anchor-id], [data-select-anchor-label]')) {
+                return;
+            }
+            if (closestFromEventTarget(event && event.target, '.anchor-index-drag-handle')) {
+                return;
+            }
+            const titleNode = closestFromEventTarget(event && event.target, '[data-collection-title="true"][data-editing="1"]');
+            if (titleNode) {
+                return;
+            }
+            const meta = resolveIndexItemMeta(event && event.target);
+            if (!meta) {
+                return;
+            }
+            if (meta.type === 'collection') {
+                const collection = runtime.collections.get(meta.id);
+                if (!collection) {
+                    return;
+                }
+                collection.expanded = collection.expanded === false;
+                renderIndex();
+                return;
+            }
+            const isCommandToggle = !!(event && (event.ctrlKey || event.metaKey));
+            const isRangeSelection = !!(event && event.shiftKey);
+            if (isRangeSelection) {
+                selectAnchorRange(meta.id, { additive: isCommandToggle });
+                renderIndex();
+                return;
+            }
+            if (isCommandToggle) {
+                if (!runtime.selectionMode) {
+                    runtime.selectionMode = true;
+                }
+                toggleAnchorSelection(meta.id);
+                renderIndex();
+                return;
+            }
+            setSelectionMode(false);
+            runtime.selectionPivotAnchorId = meta.id;
+            selectAnchor(meta.id, 'index_click', true);
+        });
+        indexList && indexList.addEventListener('contextmenu', (event) => {
+            const itemMeta = resolveIndexItemMeta(event && event.target);
+            if (!itemMeta) {
+                closeCollectionContextMenu();
+                return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            if (itemMeta.type === 'anchor') {
+                const anchorId = t(itemMeta.id);
+                if (!anchorId) {
+                    closeCollectionContextMenu();
+                    return;
+                }
+                if (!runtime.selectionMode) {
+                    runtime.selectionMode = true;
+                    runtime.selectedAnchors.clear();
+                }
+                if (!runtime.selectedAnchors.has(anchorId)) {
+                    runtime.selectedAnchors.clear();
+                    runtime.selectedAnchors.add(anchorId);
+                }
+                runtime.selectionPivotAnchorId = anchorId;
+                updateCollectionActionBar();
+                renderIndex();
+                openCollectionContextMenu(
+                    Number(event.clientX) || 0,
+                    Number(event.clientY) || 0,
+                    [
+                        {
+                            id: 'group_selected',
+                            label: 'Group into new collection',
+                            disabled: runtime.selectedAnchors.size < 2,
+                        },
+                        {
+                            id: 'delete_selected',
+                            label: 'Delete permanently',
+                            disabled: runtime.selectedAnchors.size < 1,
+                        },
+                    ],
+                    { anchorId },
+                );
+                return;
+            }
+            if (itemMeta.type === 'collection') {
+                const collectionId = t(itemMeta.id);
+                openCollectionContextMenu(
+                    Number(event.clientX) || 0,
+                    Number(event.clientY) || 0,
+                    [
+                        { id: 'rename_collection', label: 'Rename' },
+                        { id: 'ungroup_collection', label: 'Ungroup' },
+                    ],
+                    { collectionId },
+                );
+                return;
+            }
+            closeCollectionContextMenu();
+        });
+
+        indexList && indexList.addEventListener('dblclick', (event) => {
+            const titleNode = closestFromEventTarget(event && event.target, '[data-collection-title="true"]');
+            if (!titleNode) {
+                return;
+            }
+            event.preventDefault();
+            beginCollectionTitleEdit(titleNode.getAttribute('data-collection-id'));
+        });
+
+        indexList && indexList.addEventListener('focusout', (event) => {
+            const titleNode = closestFromEventTarget(event && event.target, '[data-collection-title="true"][data-editing="1"]');
+            if (!titleNode) {
+                return;
+            }
+            commitCollectionTitleEdit(titleNode);
+        });
+
+        indexList && indexList.addEventListener('keydown', (event) => {
+            if (closestFromEventTarget(event && event.target, 'input[type="checkbox"][data-select-anchor-id], select, option')) {
+                return;
+            }
+            const titleNode = closestFromEventTarget(event && event.target, '[data-collection-title="true"]');
+            if (titleNode && titleNode.getAttribute('data-editing') === '1') {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    commitCollectionTitleEdit(titleNode);
+                    return;
+                }
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    renderIndex();
+                    return;
+                }
+                return;
+            }
+
+            if (event.key === 'F2') {
+                const collectionNode = closestFromEventTarget(event && event.target, '[data-source-type="collection"][data-collection-id]');
+                if (!collectionNode) {
+                    return;
+                }
+                event.preventDefault();
+                beginCollectionTitleEdit(collectionNode.getAttribute('data-collection-id'));
+                return;
+            }
+
+            if (event.key !== 'Enter' && event.key !== ' ') {
+                return;
+            }
+            const meta = resolveIndexItemMeta(event && event.target);
+            if (!meta) {
+                return;
+            }
+            event.preventDefault();
+            if (meta.type === 'collection') {
+                const collection = runtime.collections.get(meta.id);
+                if (!collection) {
+                    return;
+                }
+                collection.expanded = collection.expanded === false;
+                renderIndex();
+                return;
+            }
+
+            if (event.key === 'Enter') {
+                setSelectionMode(false);
+                runtime.selectionPivotAnchorId = meta.id;
+                selectAnchor(meta.id, 'index_keyboard_enter', true);
+                return;
+            }
+
+            if (runtime.selectionMode) {
+                toggleAnchorSelection(meta.id);
+                renderIndex();
+                return;
+            }
+            runtime.selectionMode = true;
+            runtime.selectedAnchors.clear();
+            runtime.selectedAnchors.add(meta.id);
+            runtime.selectionPivotAnchorId = meta.id;
+            updateCollectionActionBar();
+            renderIndex();
+        });
+
+        indexList && indexList.addEventListener('pointerdown', (event) => {
+            clearCollectionLongPressTimer();
+            const pointerType = String(event && event.pointerType || '').toLowerCase();
+            if (pointerType && pointerType !== 'mouse' && pointerType !== 'pen') {
+                return;
+            }
+            if (Number(event && event.button) !== 0) {
+                return;
+            }
+            if (runtime.selectionMode) {
+                return;
+            }
+            if (closestFromEventTarget(event && event.target, 'input, textarea, select, button[data-collection-action], a, [data-collection-title="true"][data-editing="1"]')) {
+                return;
+            }
+            const handleNode = closestFromEventTarget(event && event.target, '.anchor-index-drag-handle[data-source-type]');
+            if (!handleNode) {
+                return;
+            }
+            const dragMeta = resolveDragSourceMeta(handleNode);
+            if (!dragMeta || !dragMeta.sourceType || !dragMeta.id) {
+                return;
+            }
+            event.preventDefault();
+            armManualPointerDrag(dragMeta, event, {
+                requireHold: false,
+            });
+        });
+        indexList && indexList.addEventListener('mousedown', (event) => {
+            if (runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (Number(event && event.button) !== 0) {
+                return;
+            }
+            if (runtime.selectionMode) {
+                return;
+            }
+            if (closestFromEventTarget(event && event.target, 'input, textarea, select, button[data-collection-action], a, [data-collection-title="true"][data-editing="1"]')) {
+                return;
+            }
+            const handleNode = closestFromEventTarget(event && event.target, '.anchor-index-drag-handle[data-source-type]');
+            if (!handleNode) {
+                return;
+            }
+            const dragMeta = resolveDragSourceMeta(handleNode);
+            if (!dragMeta || !dragMeta.sourceType || !dragMeta.id) {
+                return;
+            }
+            event.preventDefault();
+            armManualPointerDrag(dragMeta, event, {
+                requireHold: false,
+            });
+        });
+        indexList && indexList.addEventListener('pointermove', (event) => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            updateManualPointerDrag(event);
+        });
+        indexList && indexList.addEventListener('pointerup', (event) => {
+            clearCollectionLongPressTimer();
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            finishManualPointerDrag();
+        });
+        indexList && indexList.addEventListener('pointercancel', (event) => {
+            clearCollectionLongPressTimer();
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            finishManualPointerDrag();
+        });
+        indexList && indexList.addEventListener('pointerleave', (event) => {
+            clearCollectionLongPressTimer();
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            updateManualPointerDrag(event);
+        });
+        window.addEventListener('pointermove', (event) => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            updateManualPointerDrag(event);
+        });
+        window.addEventListener('pointerup', (event) => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            finishManualPointerDrag();
+        });
+        window.addEventListener('pointercancel', (event) => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0 && Number(event.pointerId) !== runtime.collectionDrag.manualPointerId) {
+                return;
+            }
+            finishManualPointerDrag();
+        });
+        window.addEventListener('mousemove', (event) => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0) {
+                return;
+            }
+            updateManualPointerDrag({
+                clientX: Number(event.clientX) || 0,
+                clientY: Number(event.clientY) || 0,
+                preventDefault: () => {
+                    if (event && typeof event.preventDefault === 'function') {
+                        event.preventDefault();
+                    }
+                },
+            });
+        });
+        window.addEventListener('mouseup', () => {
+            if (!runtime.collectionDrag.manualArmed) {
+                return;
+            }
+            if (runtime.collectionDrag.manualPointerId >= 0) {
+                return;
+            }
+            finishManualPointerDrag();
+        });
+
+        indexList && indexList.addEventListener('dragstart', (event) => {
+            clearCollectionLongPressTimer();
+            runtime.collectionDrag.manualArmed = false;
+            runtime.collectionDrag.manualDragging = false;
+            runtime.collectionDrag.manualPointerId = -1;
+            const dragMeta = resolveDragSourceMeta(event && event.target);
+            if (!dragMeta || !dragMeta.sourceType || !dragMeta.id) {
+                return;
+            }
+            runtime.collectionDrag.sourceType = dragMeta.sourceType;
+            runtime.collectionDrag.sourceId = dragMeta.id;
+            runtime.collectionDrag.sourceCollectionId = dragMeta.parentCollectionId || collectionOfAnchor(dragMeta.id);
+            runtime.collectionDrag.batchAnchorIds = [];
+            if (dragMeta.sourceType === 'anchor' && runtime.selectionMode && runtime.selectedAnchors.has(dragMeta.id)) {
+                const selectedAnchors = resolveOrderedSelectedAnchors();
+                if (selectedAnchors.length > 1) {
+                    runtime.collectionDrag.batchAnchorIds = selectedAnchors;
+                }
+            }
+            resetCollectionDragHoverState();
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', `${dragMeta.sourceType}:${dragMeta.id}`);
+                const batchSize = runtime.collectionDrag.batchAnchorIds.length;
+                if (batchSize > 1) {
+                    const ghost = createCollectionDragGhost(batchSize);
+                    event.dataTransfer.setDragImage(ghost, 18, 18);
+                    window.setTimeout(() => {
+                        if (ghost && ghost.parentNode) {
+                            ghost.parentNode.removeChild(ghost);
+                        }
+                    }, 0);
+                }
+            }
+            renderIndex();
+        });
+
+        indexList && indexList.addEventListener('dragover', (event) => {
+            const sourceType = t(runtime.collectionDrag.sourceType);
+            const sourceId = t(runtime.collectionDrag.sourceId);
+            if (!sourceType || !sourceId) {
+                stopCollectionAutoScroll();
+                return;
+            }
+            updateCollectionAutoScroll(Number(event && event.clientY) || 0);
+            const targetMeta = resolveIndexItemMeta(event && event.target);
+            if (!targetMeta) {
+                resetCollectionDragHoverState();
+                renderIndex();
+                return;
+            }
+            const mode = resolveDropMode(event, targetMeta.node);
+            const groupAllowed = mode === 'group' && canGroupDrop(sourceType, sourceId, targetMeta);
+            const reorderAllowed = mode !== 'group' && canReorderDrop(sourceType, sourceId, targetMeta);
+            if (!groupAllowed && !reorderAllowed) {
+                resetCollectionDragHoverState();
+                renderIndex();
+                return;
+            }
+            event.preventDefault();
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = 'move';
+            }
+            updateCollectionDragHover(targetMeta, mode, groupAllowed);
+        });
+
+        indexList && indexList.addEventListener('drop', (event) => {
+            const sourceType = t(runtime.collectionDrag.sourceType);
+            const sourceId = t(runtime.collectionDrag.sourceId);
+            if (!sourceType || !sourceId) {
+                stopCollectionAutoScroll();
+                return;
+            }
+            const targetMeta = resolveIndexItemMeta(event && event.target);
+            if (!targetMeta) {
+                resetCollectionDragState();
+                renderIndex();
+                return;
+            }
+            const mode = runtime.collectionDrag.hoverMode || resolveDropMode(event, targetMeta.node);
+            const groupAllowed = mode === 'group' && canGroupDrop(sourceType, sourceId, targetMeta);
+            const reorderAllowed = mode !== 'group' && canReorderDrop(sourceType, sourceId, targetMeta);
+            if (!groupAllowed && !reorderAllowed) {
+                resetCollectionDragState();
+                renderIndex();
+                return;
+            }
+            event.preventDefault();
+            const applied = applyCollectionDrop(targetMeta, mode);
+            resetCollectionDragState();
+            if (applied) {
+                renderIndex();
+            } else {
+                renderIndex();
+            }
+        });
+
+        indexList && indexList.addEventListener('dragend', () => {
+            if (!runtime.collectionDrag.sourceType && !runtime.collectionDrag.hoverTargetType) {
+                stopCollectionAutoScroll();
+                return;
+            }
+            resetCollectionDragState();
+            renderIndex();
+        });
+
+        indexList && indexList.addEventListener('dragleave', (event) => {
+            if (!runtime.collectionDrag.sourceType) {
+                stopCollectionAutoScroll();
+                return;
+            }
+            const related = event && event.relatedTarget;
+            if (related instanceof Element && indexList.contains(related)) {
+                return;
+            }
+            stopCollectionAutoScroll();
+            resetCollectionDragHoverState();
+            renderIndex();
+        });
+
+        inboxList && inboxList.addEventListener('click', (e) => {
+            const id = findId(e.target);
+            if (!id) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            setSelectionMode(false);
+            runtime.selectionPivotAnchorId = id;
+            selectAnchor(id, 'inbox_click', true);
+        });
+        body && body.addEventListener('click', (e) => {
+            const id = findId(e.target);
+            if (!id) {
+                return;
+            }
+            e.stopPropagation();
+        });
         body && body.addEventListener('mouseover', handlePreviewLinkMouseOver);
         body && body.addEventListener('mouseout', handlePreviewLinkMouseOut);
 
@@ -6733,6 +9729,7 @@
                 renderLocalNoteCards(activeAnchorId);
                 renderLocalNoteLivePreview(activeAnchorId);
                 runtime.editorDirty = false;
+                flushIncrementalLocalNoteSync();
             }
             runtime.editorActive = false;
             setTimeout(() => {
@@ -6842,6 +9839,15 @@
                     return;
                 }
             }
+            if (!e.ctrlKey && !e.metaKey && !e.altKey && keyRaw === 'Tab') {
+                if (!runtime.activeId) {
+                    return;
+                }
+                e.preventDefault();
+                e.stopPropagation();
+                applyParagraphIndentShortcut(!!e.shiftKey);
+                return;
+            }
             if ((!e.ctrlKey && !e.metaKey) || e.altKey) {
                 return;
             }
@@ -6858,6 +9864,12 @@
                 return;
             }
             if (!runtime.activeId) {
+                return;
+            }
+            if (key === 'd') {
+                e.preventDefault();
+                e.stopPropagation();
+                applyDeleteParagraphShortcut();
                 return;
             }
             if (key === 'b') {
@@ -7146,6 +10158,14 @@
             runtime.ctx = next;
             runtime.ctxKey = key;
             runtime.activeId = '';
+            runtime.collectionRootOrder = [];
+            runtime.collections.clear();
+            runtime.collectionByAnchor.clear();
+            runtime.selectedAnchors.clear();
+            runtime.selectionPivotAnchorId = '';
+            runtime.selectionMode = false;
+            runtime.selectedCollectionTargetId = '';
+            resetCollectionDragState();
             runtime.pendingByAnchor.clear();
             runtime.pendingMainByAnchor.clear();
             runtime.mountedPayloadByAnchor.clear();
@@ -7177,10 +10197,19 @@
         if (runtime.syncTimer) clearInterval(runtime.syncTimer);
         runtime.syncTimer = setInterval(() => {
             flushIncrementalLocalNoteSync();
-        }, 20000);
+        }, LOCAL_NOTE_SYNC_INTERVAL_MS);
         setPreview(TEXT.previewEmpty);
+        const flushSyncOnExit = () => {
+            flushIncrementalLocalNoteSync({ keepalive: true });
+        };
+        window.addEventListener('pagehide', flushSyncOnExit);
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                flushSyncOnExit();
+            }
+        });
         window.addEventListener('beforeunload', () => {
-            flushIncrementalLocalNoteSync();
+            flushIncrementalLocalNoteSync({ keepalive: true });
             clearPhase2bProgressState();
             closePhase2bWebSocket();
             if (runtime.ctxTimer) clearInterval(runtime.ctxTimer);

@@ -265,6 +265,7 @@ import video_processing_pb2_grpc
 _boot("[BOOT] import services.python_grpc.src.transcript_pipeline.graph")
 from services.python_grpc.src.transcript_pipeline.graph import run_pipeline
 from services.python_grpc.src.common.utils.async_disk_writer import (
+    enqueue_json_write,
     enqueue_text_write,
     flush_async_json_writes,
 )
@@ -6596,6 +6597,60 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             _sync_vl_report_context()
             return vl_report_writer.persist_analysis_output(payload=payload or {}, vl_model=vl_model_name)
 
+        def _summarize_vl_unit_failures(
+            unit_outputs: Optional[List[Dict[str, Any]]],
+            *,
+            limit: int = 10,
+        ) -> List[Dict[str, Any]]:
+            summarized: List[Dict[str, Any]] = []
+            for item in list(unit_outputs or []):
+                if not isinstance(item, dict):
+                    continue
+                if bool(item.get("success", False)):
+                    continue
+                interactions = list(item.get("raw_llm_interactions", []) or [])
+                last_interaction = interactions[-1] if interactions else {}
+                summarized.append(
+                    {
+                        "unit_id": str(item.get("unit_id", "") or ""),
+                        "analysis_mode": str(item.get("analysis_mode", "") or "").strip().lower(),
+                        "error_msg": str(item.get("error_msg", item.get("error", "")) or ""),
+                        "llm_attempts": len(interactions),
+                        "last_llm_error": str(last_interaction.get("error", "") or ""),
+                    }
+                )
+                if len(summarized) >= max(1, int(limit)):
+                    break
+            return summarized
+
+        def _persist_vl_last_error(payload: dict) -> str:
+            _sync_vl_report_context()
+            try:
+                intermediates_dir = os.path.join(output_dir, "intermediates")
+                os.makedirs(intermediates_dir, exist_ok=True)
+                error_path = os.path.join(intermediates_dir, "vl_last_error.json")
+                error_payload = {
+                    "task_id": task_id,
+                    "generated_at": datetime.now(timezone.utc).isoformat(),
+                    "vl_model": vl_model_name,
+                    "video_path": video_path,
+                    "semantic_units_path": semantic_units_path,
+                }
+                if isinstance(payload, dict):
+                    error_payload.update(payload)
+                enqueue_json_write(
+                    error_path,
+                    error_payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    scope_key=output_dir,
+                )
+                logger.info(f"[{task_id}] queued VL last error snapshot: path={error_path}")
+                return error_path
+            except Exception as persist_error:
+                logger.warning(f"[{task_id}] queue VL last error snapshot failed: {persist_error}")
+                return ""
+
         logger.info(
             f"[{task_id}] AnalyzeWithVL 开始: video={video_path}, units_json={semantic_units_path}, "
             f"semantic_source={semantic_source_case or 'runtime_or_empty'}"
@@ -7062,7 +7117,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     continue
                 if kt == "concrete":
                     routing_stats["concrete"] += 1
-                    cv_screenshot_units.append(unit)
+                    unit["_vl_analysis_mode_override"] = "concrete"
+                    vl_units.append(unit)
                     continue
 
                 # process: 按时长分流
@@ -7161,6 +7217,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             vl_task = None
             vl_t0 = None
             vl_token_stats = {}
+            vl_unit_analysis_outputs: List[Dict[str, Any]] = []
+            vl_failure_snapshot: Dict[str, Any] = {}
             if vl_units:
                 vl_t0 = time.perf_counter()
                 generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
@@ -7175,7 +7233,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 _emit_vl_heartbeat(signal_type="hard")
 
             # ==================================================================
-            # 路由侧：截图选择（concrete + process<=20s）
+            # 路由侧：截图选择（process<=20s）
             # ==================================================================
             vl_screenshot_requests = []
             vl_clip_requests = []
@@ -7186,10 +7244,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 total_units = len(cv_screenshot_units)
 
                 def _consume_vl_result(vl_result):
-                    if not vl_result.success:
-                        return False, vl_result.error_msg
-                    nonlocal vl_token_stats
+                    nonlocal vl_token_stats, vl_unit_analysis_outputs, vl_failure_snapshot
                     vl_token_stats = getattr(vl_result, "token_stats", {}) or {}
+                    vl_unit_analysis_outputs = list(getattr(vl_result, "unit_analysis_outputs", []) or [])
+                    if not vl_result.success:
+                        raw_error_msg = str(getattr(vl_result, "error_msg", "") or "")
+                        vl_failure_snapshot = {
+                            "status": "fallback",
+                            "used_fallback": True,
+                            "error_msg": raw_error_msg,
+                            "token_stats": vl_token_stats,
+                            "unit_failures": _summarize_vl_unit_failures(vl_unit_analysis_outputs),
+                            "unit_analysis_outputs_count": len(vl_unit_analysis_outputs),
+                        }
+                        return False, raw_error_msg
                     vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
                     for ss in vl_result.screenshot_requests:
                         if ss.get("semantic_unit_id", "") in vl_unit_ids:
@@ -7449,8 +7517,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                     "merged_screenshots": list(cv_screenshot_requests) + list(vl_screenshot_requests),
                                     "merged_clips": list(cv_clip_requests) + list(vl_clip_requests),
                                 })
+                                _persist_vl_last_error(
+                                    {
+                                        "status": "fallback",
+                                        "checkpoint": "vl_failed_early",
+                                        "error_msg": err,
+                                        "routing_stats": routing_stats,
+                                        "token_stats": vl_token_stats,
+                                        "result_counts": {
+                                            "semantic_units_total": len(semantic_units),
+                                            "vl_units": len(vl_units),
+                                            "screenshots": len(cv_screenshot_requests) + len(vl_screenshot_requests),
+                                            "clips": len(cv_clip_requests) + len(vl_clip_requests),
+                                        },
+                                        "failure_snapshot": dict(vl_failure_snapshot or {}),
+                                    }
+                                )
                                 return video_processing_pb2.VLAnalysisResponse(
-                                    success=True,
+                                    success=False,
                                     vl_enabled=True,
                                     used_fallback=True,
                                     error_msg=err
@@ -7579,13 +7663,31 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                             "merged_screenshots": list(cv_screenshot_requests) + list(vl_screenshot_requests),
                             "merged_clips": list(cv_clip_requests) + list(vl_clip_requests),
                         })
+                        _persist_vl_last_error(
+                            {
+                                "status": "fallback",
+                                "checkpoint": "vl_failed",
+                                "error_msg": str(vl_result.error_msg or ""),
+                                "routing_stats": routing_stats,
+                                "token_stats": vl_token_stats,
+                                "result_counts": {
+                                    "semantic_units_total": len(semantic_units),
+                                    "vl_units": len(vl_units),
+                                    "screenshots": len(cv_screenshot_requests) + len(vl_screenshot_requests),
+                                    "clips": len(cv_clip_requests) + len(vl_clip_requests),
+                                },
+                                "failure_snapshot": dict(vl_failure_snapshot or {}),
+                                "unit_failures": _summarize_vl_unit_failures(vl_unit_analysis_outputs),
+                            }
+                        )
                         return video_processing_pb2.VLAnalysisResponse(
-                            success=True,
+                            success=False,
                             vl_enabled=True,
                             used_fallback=True,
                             error_msg=vl_result.error_msg
                         )
                     vl_unit_ids = {u.get("unit_id", "") for u in vl_units}
+                    vl_unit_analysis_outputs = list(getattr(vl_result, "unit_analysis_outputs", []) or [])
                     for ss in vl_result.screenshot_requests:
                         if ss.get("semantic_unit_id", "") in vl_unit_ids:
                             vl_screenshot_requests.append(ss)
@@ -7674,6 +7776,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # ==================================================================
             # 🚀 Persistence: Save instructional_steps back to JSON
             # ==================================================================
+            concrete_analysis_records: List[Dict[str, Any]] = []
             try:
                 has_updates = False
                 units_map = {u.get("unit_id"): u for u in semantic_units}
@@ -7775,12 +7878,93 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 if synced_route_override_units > 0:
                     has_updates = True
 
+                updated_concrete_main_content_units = 0
+                if vl_unit_analysis_outputs:
+                    for unit_output in vl_unit_analysis_outputs:
+                        if not isinstance(unit_output, dict):
+                            continue
+                        analysis_mode = str(unit_output.get("analysis_mode", "") or "").strip().lower()
+                        if analysis_mode != "concrete":
+                            continue
+                        unit_id = str(unit_output.get("unit_id", "") or "").strip()
+                        if not unit_id:
+                            continue
+                        raw_segments = unit_output.get("raw_response_json", []) or []
+                        if not isinstance(raw_segments, list):
+                            raw_segments = []
+                        normalized_segments: List[Dict[str, Any]] = []
+                        for index, segment in enumerate(raw_segments, start=1):
+                            if not isinstance(segment, dict):
+                                continue
+                            segment_id = int(
+                                _safe_float(
+                                    segment.get("segment_id", segment.get("id", index)),
+                                    float(index),
+                                )
+                            )
+                            if segment_id <= 0:
+                                segment_id = index
+                            main_content = str(segment.get("main_content", "") or "").strip()
+                            if not main_content:
+                                continue
+                            normalized_segments.append(
+                                {
+                                    "segment_id": segment_id,
+                                    "segment_description": str(
+                                        segment.get(
+                                            "segment_description",
+                                            segment.get("step_description", ""),
+                                        )
+                                        or ""
+                                    ).strip(),
+                                    "main_content": main_content,
+                                    "clip_start_sec": _safe_float(segment.get("clip_start_sec", 0.0), 0.0),
+                                    "clip_end_sec": _safe_float(segment.get("clip_end_sec", 0.0), 0.0),
+                                    "instructional_keyframes": list(segment.get("instructional_keyframes", []) or []),
+                                }
+                            )
+                        normalized_segments.sort(
+                            key=lambda item: int(_safe_float(item.get("segment_id", 0), 0.0))
+                        )
+                        final_main_content = "\n\n".join(
+                            [
+                                str(item.get("main_content", "") or "").strip()
+                                for item in normalized_segments
+                                if str(item.get("main_content", "") or "").strip()
+                            ]
+                        ).strip()
+                        if final_main_content:
+                            if unit_id in units_map and isinstance(units_map[unit_id], dict):
+                                units_map[unit_id]["full_text"] = final_main_content
+                                units_map[unit_id]["text"] = final_main_content
+                                units_map[unit_id]["_vl_concrete_segments"] = normalized_segments
+                            target_node = persist_units_map.get(unit_id)
+                            if isinstance(target_node, dict):
+                                target_node["full_text"] = final_main_content
+                                target_node["text"] = final_main_content
+                                target_node["_vl_concrete_segments"] = normalized_segments
+                            updated_concrete_main_content_units += 1
+                            has_updates = True
+                        concrete_analysis_records.append(
+                            {
+                                "unit_id": unit_id,
+                                "analysis_mode": "concrete",
+                                "raw_response_json": raw_segments,
+                                "normalized_segments": normalized_segments,
+                                "final_main_content": final_main_content,
+                                "clip_requests": list(unit_output.get("clip_requests", []) or []),
+                                "screenshot_requests": list(unit_output.get("screenshot_requests", []) or []),
+                                "raw_llm_interactions": list(unit_output.get("raw_llm_interactions", []) or []),
+                            }
+                        )
+
                 if has_updates:
                     with open(semantic_units_path, "w", encoding="utf-8") as f:
                         json.dump(persist_payload, f, ensure_ascii=False, indent=2)
                     logger.info(
                         f"[{task_id}] Persisted semantic_units updates to {semantic_units_path} "
                         f"(instructional_units={updated_instructional_units}, "
+                        f"concrete_main_content_units={updated_concrete_main_content_units}, "
                         f"route_override_units={synced_route_override_units}, "
                         f"no_needed_video_units={len(no_needed_video_units)}, "
                         f"should_type_abstract_units={len(should_type_abstract_units)}, "
@@ -7789,6 +7973,34 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             except Exception as e:
                 logger.error(f"[{task_id}] Failed to persist instructional_steps: {e}")
+
+            if concrete_analysis_records:
+                try:
+                    intermediates_dir = os.path.join(output_dir, "intermediates")
+                    os.makedirs(intermediates_dir, exist_ok=True)
+                    concrete_analysis_path = os.path.join(intermediates_dir, "vl_concrete_analysis.json")
+                    concrete_analysis_payload = {
+                        "task_id": task_id,
+                        "generated_at": datetime.now(timezone.utc).isoformat(),
+                        "vl_model": vl_model_name,
+                        "unit_count": len(concrete_analysis_records),
+                        "units": concrete_analysis_records,
+                    }
+                    enqueue_json_write(
+                        concrete_analysis_path,
+                        concrete_analysis_payload,
+                        ensure_ascii=False,
+                        indent=2,
+                        scope_key=output_dir,
+                    )
+                    logger.info(
+                        f"[{task_id}] queued concrete VL analysis output: path={concrete_analysis_path}, "
+                        f"units={len(concrete_analysis_records)}"
+                    )
+                except Exception as concrete_persist_error:
+                    logger.warning(
+                        f"[{task_id}] queue concrete VL analysis output failed: {concrete_persist_error}"
+                    )
 
             _persist_task_token_report({
                 "status": "success",
@@ -7845,7 +8057,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             )
 
         except Exception as e:
-            logger.error(f"[{task_id}] AnalyzeWithVL 异常: {e}", exc_info=True)
+            error_detail = str(getattr(e, "_display_error_detail", "") or str(e))
+            logger.error(f"[{task_id}] AnalyzeWithVL 异常: {error_detail}", exc_info=True)
             _update_vl_heartbeat_state(
                 status="failed",
                 checkpoint="vl_exception",
@@ -7858,7 +8071,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "vl_enabled": True,
                 "used_fallback": True,
                 "vl_model": vl_model_name,
-                "error_msg": str(e),
+                "error_msg": error_detail,
                 "routing_stats": {},
                 "token_stats": {},
             })
@@ -7867,7 +8080,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "vl_enabled": True,
                 "used_fallback": True,
                 "vl_model": vl_model_name,
-                "error_msg": str(e),
+                "error_msg": error_detail,
                 "routing_stats": {},
                 "token_stats": {},
                 "result_counts": {
@@ -7879,11 +8092,24 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "merged_screenshots": [],
                 "merged_clips": [],
             })
+            _persist_vl_last_error(
+                {
+                    "status": "exception",
+                    "checkpoint": "vl_exception",
+                    "error_msg": error_detail,
+                    "error_type": type(e).__name__,
+                    "traceback": traceback.format_exc(),
+                    "routing_stats": {},
+                    "token_stats": vl_token_stats,
+                    "failure_snapshot": dict(vl_failure_snapshot or {}),
+                    "unit_failures": _summarize_vl_unit_failures(vl_unit_analysis_outputs),
+                }
+            )
             return video_processing_pb2.VLAnalysisResponse(
                 success=False,
                 vl_enabled=True,
                 used_fallback=True,
-                error_msg=str(e)
+                error_msg=error_detail
             )
         finally:
             vl_heartbeat_stop.set()

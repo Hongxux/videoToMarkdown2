@@ -17,4 +17,4 @@ class VLGenerationResult:
     used_fallback: bool = False
     fallback_reason: str = ""
     token_stats: Dict[str, Any] = field(default_factory=dict)
-
+    unit_analysis_outputs: List[Dict[str, Any]] = field(default_factory=list)

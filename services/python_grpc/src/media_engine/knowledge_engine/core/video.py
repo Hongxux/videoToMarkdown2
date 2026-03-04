@@ -336,11 +336,7 @@ class VideoProcessor(BaseProcessor):
                 f" 原始错误: {raw}"
             )
 
-        proxy_connection_failed = (
-            "unable to connect to proxy" in lower_raw
-            or "proxyerror" in lower_raw
-            or "winerror 10061" in lower_raw
-        )
+        proxy_connection_failed = self._is_proxy_connection_error(err)
         if proxy_connection_failed:
             configured_proxy = self.proxy or "(empty)"
             return (
@@ -443,6 +439,79 @@ class VideoProcessor(BaseProcessor):
             or "bad gateway" in lower_raw
             or "gateway timeout" in lower_raw
         )
+
+    @staticmethod
+    def _is_proxy_connection_error(err: Exception) -> bool:
+        """判断是否为代理连接失败（含端口拒绝和代理握手错误）。"""
+        lower_raw = str(err).lower()
+        return (
+            "unable to connect to proxy" in lower_raw
+            or "proxyerror" in lower_raw
+            or "winerror 10061" in lower_raw
+        )
+
+    @staticmethod
+    def _is_network_timeout_error(err: Exception) -> bool:
+        """判断是否为网络超时（连接或读取超时）。"""
+        lower_raw = str(err).lower()
+        return (
+            "timed out" in lower_raw
+            or "connect timeout" in lower_raw
+            or "read timeout" in lower_raw
+            or "timeout error" in lower_raw
+            or "winerror 10060" in lower_raw
+        )
+
+    def _is_retryable_probe_error(self, err: Exception) -> bool:
+        """判断元信息探测失败是否可重试（仅网络层与代理层错误）。"""
+        return (
+            self._is_network_timeout_error(err)
+            or self._is_proxy_connection_error(err)
+            or self._is_gateway_bad_response_error(err)
+        )
+
+    def _build_probe_error_message(self, *, err: Exception, url: str, attempts: list[str]) -> str:
+        """构建元信息探测失败提示，附带尝试链用于排障。"""
+        raw = str(err)
+        attempts_text = " -> ".join(attempts) if attempts else "default"
+
+        if self._is_network_timeout_error(err):
+            if self.proxy:
+                network_hint = (
+                    f" 当前 proxy 配置: `{self.proxy}`。"
+                    " 请检查代理出口连通性，或临时清空 `video.download_proxy` / `YTDLP_PROXY` 后重试。"
+                )
+            else:
+                network_hint = (
+                    " 当前未配置代理。若运行环境网络出口受限，请配置 `video.download_proxy` "
+                    "或 `YTDLP_PROXY` 后重试。"
+                )
+            return (
+                "yt-dlp 探测视频信息超时（连接站点元数据页失败）。"
+                f"{network_hint}"
+                " 建议先在同一运行环境确认目标链接可访问。"
+                f" 原始错误: {raw} [attempts={attempts_text}] [url={url}]"
+            )
+
+        if self._is_proxy_connection_error(err):
+            configured_proxy = self.proxy or "(empty)"
+            return (
+                "yt-dlp 探测视频信息失败：代理连接异常。"
+                f" 当前 proxy 配置: `{configured_proxy}`。"
+                " 请检查代理进程和端口，或临时清空 `video.download_proxy` / `YTDLP_PROXY` 后重试。"
+                f" 原始错误: {raw} [attempts={attempts_text}] [url={url}]"
+            )
+
+        if self._is_gateway_bad_response_error(err):
+            configured_proxy = self.proxy or "(empty)"
+            return (
+                "yt-dlp 探测视频信息失败：上游返回网关错误（502/503/504）。"
+                f" 当前 proxy 配置: `{configured_proxy}`。"
+                " 请稍后重试，或更换代理出口后重试。"
+                f" 原始错误: {raw} [attempts={attempts_text}] [url={url}]"
+            )
+
+        return f"yt-dlp 探测视频信息失败: {raw} [attempts={attempts_text}] [url={url}]"
 
     @staticmethod
     def _is_bilibili_bvid_extractor_error(err: Exception) -> bool:
@@ -960,7 +1029,7 @@ class VideoProcessor(BaseProcessor):
         - url: 视频链接（类型：str）。
         输出参数：
         - dict：yt-dlp 的元信息字典，失败时抛出异常。"""
-        probe_opts: Dict[str, Any] = {
+        base_probe_opts: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
             "socket_timeout": 30,
@@ -968,14 +1037,46 @@ class VideoProcessor(BaseProcessor):
             "skip_download": True,
             "extract_flat": False,
         }
-        probe_opts.update(self._build_auth_options())
+        auth_opts = self._build_auth_options()
 
-        with yt_dlp.YoutubeDL(probe_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        if not isinstance(info, dict):
-            return {}
-        self._capture_title_from_info_dict(info)
-        return info
+        def _build_probe_options(*, use_proxy: bool, socket_timeout_sec: int) -> Dict[str, Any]:
+            probe_opts = dict(base_probe_opts)
+            probe_opts["socket_timeout"] = socket_timeout_sec
+            if socket_timeout_sec > base_probe_opts["socket_timeout"]:
+                probe_opts["retries"] = max(int(base_probe_opts.get("retries", 1)), 7)
+            probe_opts.update(auth_opts)
+            if not use_proxy:
+                probe_opts.pop("proxy", None)
+            return probe_opts
+
+        attempt_plan: list[tuple[str, bool, int]] = [("default", True, 30), ("extended_timeout", True, 60)]
+        if self.proxy:
+            attempt_plan.insert(1, ("without_proxy", False, 30))
+            attempt_plan.append(("without_proxy_extended_timeout", False, 60))
+
+        last_error: Optional[Exception] = None
+        attempted_labels: list[str] = []
+        for label, use_proxy, socket_timeout_sec in attempt_plan:
+            probe_opts = _build_probe_options(use_proxy=use_proxy, socket_timeout_sec=socket_timeout_sec)
+            try:
+                with yt_dlp.YoutubeDL(probe_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                if not isinstance(info, dict):
+                    return {}
+                self._capture_title_from_info_dict(info)
+                return info
+            except Exception as exc:
+                last_error = exc
+                attempted_labels.append(label)
+                if not self._is_retryable_probe_error(exc):
+                    if not (self.proxy and not use_proxy):
+                        break
+
+        if last_error is not None:
+            raise RuntimeError(
+                self._build_probe_error_message(err=last_error, url=url, attempts=attempted_labels)
+            ) from last_error
+        return {}
     
     def detect_playlist(self, url: str) -> bool:
         """

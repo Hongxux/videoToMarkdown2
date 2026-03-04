@@ -221,8 +221,29 @@ public class VideoProcessingOrchestrator {
         public String taskId;
         public String markdownPath;
         public String jsonPath;
+        public String cleanupSourcePath;
         public String errorMessage;
         public long processingTimeMs;
+    }
+
+    public static class IOPhaseResult {
+        public String taskId;
+        public String videoUrl;
+        public String videoPath;
+        public String outputDir;
+        public double videoDuration;
+        public boolean downloadedFromUrl;
+        public String cleanupSourcePath;
+        public DownloadResult downloadResult;
+        public Stage1Result stage1Result;
+        public DynamicTimeoutCalculator.TimeoutConfig timeouts;
+        public long pipelineStartTimeMs;
+        public String metricsOutputDir;
+        public String metricsVideoPath;
+        public String metricsInputVideoUrl;
+        public String metricsVideoTitle;
+        public Map<String, Long> stageTimingsMs = new LinkedHashMap<>();
+        public Map<String, Object> flowFlags = new LinkedHashMap<>();
     }
     
     /**
@@ -278,6 +299,7 @@ public class VideoProcessingOrchestrator {
             String videoPath = videoUrl;
             double videoDuration = 60;
             boolean downloadedFromUrl = false;
+            String cleanupSourcePath = null;
             DownloadResult downloadResult = null;
             boolean usedVLFlow = false;
             boolean usedLegacyFlow = false;
@@ -343,6 +365,7 @@ public class VideoProcessingOrchestrator {
                         );
                     }
                     videoPath = dl.videoPath;
+                    cleanupSourcePath = dl.videoPath;
                     videoDuration = dl.durationSec;
                     outputDir = new File(videoPath).getParentFile().getAbsolutePath();
                     new File(outputDir).mkdirs();
@@ -519,6 +542,7 @@ public class VideoProcessingOrchestrator {
             result.success = true;
             result.markdownPath = assembleRes.markdownPath;
             result.jsonPath = assembleRes.jsonPath;
+            result.cleanupSourcePath = cleanupSourcePath;
             persistTaskTocMetadata(outputDir, "video", List.of());
             logger.info("Pipeline Complete: {}", taskId);
 
@@ -530,13 +554,394 @@ public class VideoProcessingOrchestrator {
             flowFlags.put("used_vl_flow", usedVLFlow);
             flowFlags.put("used_legacy_flow", usedLegacyFlow);
 
-        } catch (Exception e) {
-            String normalizedError = extractThrowableMessage(e);
+        } catch (Throwable e) {
+            String normalizedError = normalizeThrowableMessage(e, "Video pipeline failed with unknown throwable");
             logger.error("Pipeline Failed: {} - {}", taskId, normalizedError, e);
             result.success = false;
             result.errorMessage = normalizedError;
 
             flowFlags.putIfAbsent("downloaded_from_url", false);
+            flowFlags.putIfAbsent("used_vl_flow", false);
+            flowFlags.putIfAbsent("used_legacy_flow", false);
+        } finally {
+            result.processingTimeMs = System.currentTimeMillis() - startTime;
+            stageTimingsMs.put("total_pipeline", result.processingTimeMs);
+            writeTaskMetricsReport(
+                    taskId,
+                    metricsOutputDir,
+                    metricsVideoPath,
+                    metricsInputVideoUrl,
+                    metricsVideoTitle,
+                    result,
+                    stageTimingsMs,
+                    flowFlags
+            );
+        }
+        return result;
+    }
+
+    public IOPhaseResult processVideoIOPhase(String taskId, String videoUrl, String outputDir) throws Exception {
+        if (shouldProcessAsBook(videoUrl, null)) {
+            throw new IllegalArgumentException("processVideoIOPhase does not support book/article sources");
+        }
+
+        IOPhaseResult ioResult = new IOPhaseResult();
+        ioResult.taskId = taskId;
+        ioResult.videoUrl = videoUrl;
+        ioResult.videoPath = videoUrl;
+        ioResult.outputDir = outputDir;
+        ioResult.videoDuration = 60;
+        ioResult.downloadedFromUrl = false;
+        ioResult.cleanupSourcePath = null;
+        ioResult.downloadResult = null;
+        ioResult.pipelineStartTimeMs = System.currentTimeMillis();
+        ioResult.metricsOutputDir = outputDir;
+        ioResult.metricsVideoPath = videoUrl;
+        ioResult.metricsInputVideoUrl = videoUrl;
+        ioResult.metricsVideoTitle = "";
+
+        try {
+            String videoPath = videoUrl;
+            double videoDuration = 60;
+            boolean downloadedFromUrl = false;
+            String cleanupSourcePath = null;
+            DownloadResult downloadResult = null;
+
+            long localPrepareStart = System.currentTimeMillis();
+            if (!isHttpUrl(videoUrl)) {
+                videoPath = normalizeLocalVideoPath(videoUrl);
+                assertLocalVideoExists(videoUrl, videoPath);
+                outputDir = resolveOutputDirForLocalVideo(videoPath);
+                new File(outputDir).mkdirs();
+                logger.info("[{}] 本地视频路径校验通过，输出目录已准备 -> {}", taskId, outputDir);
+
+                videoPath = ensureLocalVideoInStorage(videoPath, outputDir);
+                videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
+            }
+            ioResult.stageTimingsMs.put("prepare_local_video", System.currentTimeMillis() - localPrepareStart);
+            ioResult.metricsVideoPath = videoPath;
+            ioResult.metricsOutputDir = outputDir;
+
+            long downloadStart = System.currentTimeMillis();
+            try {
+                if (isHttpUrl(videoUrl)) {
+                    int downloadTimeoutSec = normalizePositive(downloadGrpcDeadlineSec, 1800);
+                    int hardTimeoutSec = Math.max(downloadTimeoutSec, normalizePositive(downloadHardTimeoutSec, 1800));
+                    int idleTimeoutSec = normalizePositive(downloadIdleTimeoutSec, 120);
+                    int pollIntervalSec = Math.min(
+                        normalizePositive(downloadPollIntervalSec, 5),
+                        Math.max(1, idleTimeoutSec)
+                    );
+                    String predictedDownloadDir = resolvePredictedDownloadWatchDir(videoUrl, outputDir);
+                    logger.info(
+                        "[{}] Download watchdog targets: request_output_dir={}, predicted_storage_dir={}",
+                        taskId,
+                        firstNonBlank(outputDir, "(empty)"),
+                        firstNonBlank(predictedDownloadDir, "(empty)")
+                    );
+                    updateProgress(taskId, 0.05, "Downloading video...");
+                    DownloadResult dl = waitForDownloadWithLease(
+                        taskId,
+                        videoUrl,
+                        outputDir,
+                        predictedDownloadDir,
+                        downloadTimeoutSec,
+                        hardTimeoutSec,
+                        idleTimeoutSec,
+                        pollIntervalSec
+                    );
+                    if (!dl.success) {
+                        throw new RuntimeException(
+                            "Download failed: " + firstNonBlank(
+                                dl.errorMsg,
+                                "python worker returned unsuccessful download response without details"
+                            )
+                        );
+                    }
+                    downloadedFromUrl = true;
+                    downloadResult = dl;
+                    if (dl.contentType != null && !dl.contentType.isBlank() && !"video".equalsIgnoreCase(dl.contentType)) {
+                        logger.warn(
+                            "[{}] Download content_type={} detected, pipeline keeps video-first path",
+                            taskId,
+                            dl.contentType
+                        );
+                    }
+                    videoPath = dl.videoPath;
+                    cleanupSourcePath = dl.videoPath;
+                    videoDuration = dl.durationSec;
+                    outputDir = new File(videoPath).getParentFile().getAbsolutePath();
+                    new File(outputDir).mkdirs();
+                    ioResult.metricsVideoPath = videoPath;
+                    ioResult.metricsOutputDir = outputDir;
+                }
+            } finally {
+                ioResult.stageTimingsMs.put("download_video", System.currentTimeMillis() - downloadStart);
+            }
+
+            if (videoDuration <= 0) {
+                videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
+            }
+
+            DynamicTimeoutCalculator.TimeoutConfig timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
+            TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
+                (progress, message) -> updateProgress(taskId, progress, message);
+
+            updateProgress(taskId, 0.15, "正在进行语音转写...");
+            long transcribeStart = System.currentTimeMillis();
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle transcribeMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "transcribe", taskSignalEmitter);
+            TranscribeResult tr;
+            try {
+                tr = grpcClient.transcribeVideo(
+                    taskId,
+                    videoPath,
+                    "auto",
+                    timeouts.getTranscribeTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, transcribeMonitor, taskSignalEmitter);
+            }
+            if (!tr.success) {
+                throw new RuntimeException("Transcribe failed: " + tr.errorMsg);
+            }
+            ioResult.stageTimingsMs.put("transcribe", System.currentTimeMillis() - transcribeStart);
+
+            updateProgress(taskId, 0.25, "正在执行阶段一处理...");
+            long stage1Start = System.currentTimeMillis();
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle stage1Monitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "stage1", taskSignalEmitter);
+            Stage1Result s1;
+            try {
+                s1 = grpcClient.processStage1(
+                    taskId,
+                    videoPath,
+                    tr.subtitlePath,
+                    outputDir,
+                    6,
+                    timeouts.getStage1TimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, stage1Monitor, taskSignalEmitter);
+            }
+            if (!s1.success) {
+                throw new RuntimeException("Stage1 failed: " + s1.errorMsg);
+            }
+            ioResult.stageTimingsMs.put("stage1", System.currentTimeMillis() - stage1Start);
+
+            ioResult.videoPath = videoPath;
+            ioResult.outputDir = outputDir;
+            ioResult.videoDuration = videoDuration;
+            ioResult.downloadedFromUrl = downloadedFromUrl;
+            ioResult.cleanupSourcePath = cleanupSourcePath;
+            ioResult.downloadResult = downloadResult;
+            ioResult.stage1Result = s1;
+            ioResult.timeouts = timeouts;
+            return ioResult;
+        } catch (Throwable e) {
+            String normalizedError = normalizeThrowableMessage(e, "Video IO phase failed with unknown throwable");
+            logger.error("Video IO Phase Failed: {} - {}", taskId, normalizedError, e);
+
+            ProcessingResult failed = new ProcessingResult();
+            failed.taskId = taskId;
+            failed.success = false;
+            failed.errorMessage = normalizedError;
+            failed.processingTimeMs = System.currentTimeMillis() - ioResult.pipelineStartTimeMs;
+
+            ioResult.stageTimingsMs.put("total_pipeline", failed.processingTimeMs);
+            ioResult.flowFlags.putIfAbsent("downloaded_from_url", false);
+            ioResult.flowFlags.putIfAbsent("used_vl_flow", false);
+            ioResult.flowFlags.putIfAbsent("used_legacy_flow", false);
+
+            writeTaskMetricsReport(
+                    taskId,
+                    ioResult.metricsOutputDir,
+                    ioResult.metricsVideoPath,
+                    ioResult.metricsInputVideoUrl,
+                    ioResult.metricsVideoTitle,
+                    failed,
+                    ioResult.stageTimingsMs,
+                    ioResult.flowFlags
+            );
+            if (e instanceof Exception exception) {
+                throw exception;
+            }
+            throw new RuntimeException(normalizedError, e);
+        }
+    }
+
+    public ProcessingResult processVideoLLMPhase(String taskId, IOPhaseResult ioResult) {
+        ProcessingResult result = new ProcessingResult();
+        result.taskId = taskId;
+        if (ioResult == null) {
+            result.success = false;
+            result.errorMessage = "IO phase result is required before LLM phase";
+            return result;
+        }
+
+        Map<String, Long> stageTimingsMs = ioResult.stageTimingsMs != null ? ioResult.stageTimingsMs : new LinkedHashMap<>();
+        Map<String, Object> flowFlags = ioResult.flowFlags != null ? ioResult.flowFlags : new LinkedHashMap<>();
+        long startTime = ioResult.pipelineStartTimeMs > 0 ? ioResult.pipelineStartTimeMs : System.currentTimeMillis();
+        String metricsOutputDir = firstNonBlank(ioResult.metricsOutputDir, ioResult.outputDir);
+        String metricsVideoPath = firstNonBlank(ioResult.metricsVideoPath, ioResult.videoPath);
+        String metricsInputVideoUrl = firstNonBlank(ioResult.metricsInputVideoUrl, ioResult.videoUrl);
+        String metricsVideoTitle = firstNonBlank(ioResult.metricsVideoTitle, "");
+
+        boolean usedVLFlow = false;
+        boolean usedLegacyFlow = false;
+        try {
+            if (ioResult.stage1Result == null || !ioResult.stage1Result.success) {
+                throw new IllegalStateException("Stage1 result is invalid for LLM phase");
+            }
+
+            String videoPath = ioResult.videoPath;
+            String outputDir = ioResult.outputDir;
+            double videoDuration = ioResult.videoDuration;
+            Stage1Result s1 = ioResult.stage1Result;
+            DownloadResult downloadResult = ioResult.downloadResult;
+            DynamicTimeoutCalculator.TimeoutConfig timeouts = ioResult.timeouts;
+            if (timeouts == null) {
+                timeouts = timeoutCalculator.calculateTimeouts(Math.max(videoDuration, 1.0d));
+            }
+
+            TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
+                (progress, message) -> updateProgress(taskId, progress, message);
+
+            updateProgress(taskId, 0.35, "正在进行语义单元分析...");
+            long phase2aStart = System.currentTimeMillis();
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle phase2aMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2a", taskSignalEmitter);
+            AnalyzeResult ar;
+            try {
+                ar = grpcClient.analyzeSemanticUnits(
+                    taskId,
+                    videoPath,
+                    s1.step2JsonPath,
+                    s1.step6JsonPath,
+                    s1.sentenceTimestampsPath,
+                    outputDir,
+                    timeouts.getPhase2aTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, phase2aMonitor, taskSignalEmitter);
+            }
+            if (!ar.success) {
+                throw new RuntimeException("Phase2A failed: " + ar.errorMsg);
+            }
+            stageTimingsMs.put("phase2a_segmentation", System.currentTimeMillis() - phase2aStart);
+
+            updateProgress(taskId, 0.40, "正在规划素材提取方案...");
+
+            ExtractionRequests materialRequests = null;
+            JavaCVFFmpegService.ExtractionResult extractRes;
+            long analysisTotalStart = System.currentTimeMillis();
+
+            boolean vlEnabled = configService.isVLEnabled();
+            flowFlags.put("vl_enabled", vlEnabled);
+            long vlAnalysisStart = System.currentTimeMillis();
+            if (vlEnabled) {
+                materialRequests = tryVLAnalysis(taskId, videoPath, ar, outputDir, timeouts);
+                if (materialRequests == null) {
+                    logger.warn("[{}] Proceeding to Legacy Flow (Fallback or VL failed).", taskId);
+                } else {
+                    usedVLFlow = true;
+                }
+            } else {
+                logger.info("[{}] VL disabled in config.", taskId);
+            }
+            stageTimingsMs.put("analysis_vl", System.currentTimeMillis() - vlAnalysisStart);
+
+            long legacyAnalysisStart = System.currentTimeMillis();
+            if (materialRequests == null) {
+                updateProgress(taskId, 0.45, "正在执行回退分析流程...");
+                materialRequests = runLegacyAnalysis(taskId, videoPath, ar, s1, outputDir, timeouts);
+                usedLegacyFlow = true;
+            }
+            stageTimingsMs.put("analysis_legacy", System.currentTimeMillis() - legacyAnalysisStart);
+            stageTimingsMs.put("analysis_total", System.currentTimeMillis() - analysisTotalStart);
+
+            updateProgress(taskId, 0.80, "正在提取截图与片段素材...");
+            long extractionStart = System.currentTimeMillis();
+            int ffmpegTimeoutSec = calculateFfmpegTimeoutSec(taskId, videoDuration, materialRequests, timeouts);
+            if (materialRequests.extractionFuture == null) {
+                materialRequests = startExtractionPipeline(
+                    taskId,
+                    videoPath,
+                    outputDir,
+                    materialRequests.screenshotRequests,
+                    materialRequests.clipRequests,
+                    ffmpegTimeoutSec
+                );
+            }
+            if (materialRequests.extractionFuture != null) {
+                logger.info("[{}] Reusing in-flight extraction future (producer-consumer path)", taskId);
+                extractRes = materialRequests.extractionFuture
+                    .orTimeout(ffmpegTimeoutSec, TimeUnit.SECONDS)
+                    .join();
+            } else {
+                extractRes = ffmpegService.extractAllSync(
+                    videoPath,
+                    outputDir,
+                    materialRequests.screenshotRequests,
+                    materialRequests.clipRequests,
+                    ffmpegTimeoutSec
+                );
+            }
+            stageTimingsMs.put("extract_assets", System.currentTimeMillis() - extractionStart);
+
+            updateProgress(taskId, 0.90, "正在组装富文本与 Markdown...");
+            long assembleStart = System.currentTimeMillis();
+            String title = resolveDocumentTitle(downloadResult, outputDir, videoPath);
+            metricsVideoTitle = title;
+            taskProgressWatchdogBridge.resetTask(taskId);
+            TaskProgressWatchdogBridge.MonitorHandle phase2bMonitor =
+                taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "phase2b", taskSignalEmitter);
+            AssembleResult assembleRes;
+            try {
+                assembleRes = grpcClient.assembleRichText(
+                    taskId,
+                    videoPath,
+                    ar,
+                    outputDir + "/assets",
+                    outputDir + "/assets",
+                    outputDir,
+                    title,
+                    timeouts.getPhase2bTimeoutSec()
+                );
+            } finally {
+                taskProgressWatchdogBridge.stopMonitor(taskId, phase2bMonitor, taskSignalEmitter);
+            }
+
+            if (!assembleRes.success) {
+                throw new RuntimeException("Assemble failed: " + assembleRes.errorMsg);
+            }
+            stageTimingsMs.put("phase2b_assemble", System.currentTimeMillis() - assembleStart);
+
+            result.success = true;
+            result.markdownPath = assembleRes.markdownPath;
+            result.jsonPath = assembleRes.jsonPath;
+            result.cleanupSourcePath = ioResult.cleanupSourcePath;
+            persistTaskTocMetadata(outputDir, "video", List.of());
+            logger.info("Pipeline Complete: {}", taskId);
+
+            flowFlags.put("downloaded_from_url", ioResult.downloadedFromUrl);
+            if (downloadResult != null) {
+                flowFlags.put("download_content_type", firstNonBlank(downloadResult.contentType, "unknown"));
+                flowFlags.put("download_source_platform", firstNonBlank(downloadResult.sourcePlatform, "unknown"));
+            }
+            flowFlags.put("used_vl_flow", usedVLFlow);
+            flowFlags.put("used_legacy_flow", usedLegacyFlow);
+
+        } catch (Throwable e) {
+            String normalizedError = normalizeThrowableMessage(e, "Video LLM phase failed with unknown throwable");
+            logger.error("Pipeline LLM Phase Failed: {} - {}", taskId, normalizedError, e);
+            result.success = false;
+            result.errorMessage = normalizedError;
+
+            flowFlags.putIfAbsent("downloaded_from_url", ioResult.downloadedFromUrl);
             flowFlags.putIfAbsent("used_vl_flow", false);
             flowFlags.putIfAbsent("used_legacy_flow", false);
         } finally {
@@ -575,6 +980,7 @@ public class VideoProcessingOrchestrator {
         try {
             String sourcePath = sourceUrl;
             boolean downloadedFromUrl = false;
+            String cleanupSourcePath = null;
             DownloadResult downloadResult = null;
             ArticleBookSource articleSource = null;
 
@@ -649,6 +1055,7 @@ public class VideoProcessingOrchestrator {
                         downloadedFromUrl = true;
                         downloadResult = dl;
                         sourcePath = dl.videoPath;
+                        cleanupSourcePath = dl.videoPath;
                         outputDir = new File(sourcePath).getParentFile().getAbsolutePath();
                         new File(outputDir).mkdirs();
                         metricsVideoPath = sourcePath;
@@ -730,6 +1137,7 @@ public class VideoProcessingOrchestrator {
 
             updateProgress(taskId, 0.95, "Finalizing markdown...");
             result.success = true;
+            result.cleanupSourcePath = cleanupSourcePath;
             if (!enhancedApplied) {
                 result.markdownPath = bookResult.markdownPath;
                 result.jsonPath = bookResult.metadataPath;
@@ -763,8 +1171,8 @@ public class VideoProcessingOrchestrator {
             if (bookOptions != null && bookOptions.pageOffset != null) {
                 flowFlags.put("book_page_offset", bookOptions.pageOffset);
             }
-        } catch (Exception error) {
-            String normalizedError = extractThrowableMessage(error);
+        } catch (Throwable error) {
+            String normalizedError = normalizeThrowableMessage(error, "Book pipeline failed with unknown throwable");
             logger.error("[{}] Book pipeline failed: {}", taskId, normalizedError, error);
             result.success = false;
             result.errorMessage = normalizedError;
@@ -808,6 +1216,10 @@ public class VideoProcessingOrchestrator {
             return null;
         }
         return options;
+    }
+
+    public boolean shouldRunBookPipeline(String source, BookProcessingOptions options) {
+        return shouldProcessAsBook(source, options);
     }
 
     private boolean shouldProcessAsBook(String source, BookProcessingOptions options) {
@@ -1151,12 +1563,22 @@ public class VideoProcessingOrchestrator {
             VLTokenUsage vlUsage = loadVLTokenUsage(outputDir);
             DeepSeekUsage deepSeekUsage = loadDeepSeekUsage(outputDir);
 
+            boolean success = result != null && result.success;
+            String normalizedErrorMessage = "";
+            if (!success) {
+                String rawErrorMessage = result != null ? result.errorMessage : "";
+                normalizedErrorMessage = ensureNonEmptyErrorMessage(
+                    rawErrorMessage,
+                    "unknown error (error message missing)"
+                );
+            }
+
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("version", "1.0");
             payload.put("generated_at", Instant.now().toString());
             payload.put("task_id", taskId);
-            payload.put("success", result != null && result.success);
-            payload.put("error_message", result != null ? (result.errorMessage != null ? result.errorMessage : "") : "");
+            payload.put("success", success);
+            payload.put("error_message", normalizedErrorMessage);
             payload.put("input_video_url", inputVideoUrl != null ? inputVideoUrl : "");
             payload.put("video_title", videoTitle != null ? videoTitle : "");
             payload.put("video_path", videoPath != null ? videoPath : "");
@@ -2729,6 +3151,22 @@ public class VideoProcessingOrchestrator {
             depth++;
         }
         return fallbackType + " (message unavailable)";
+    }
+
+    private String normalizeThrowableMessage(Throwable throwable, String fallback) {
+        return ensureNonEmptyErrorMessage(extractThrowableMessage(throwable), fallback);
+    }
+
+    private String ensureNonEmptyErrorMessage(String message, String fallback) {
+        String normalizedMessage = message != null ? message.trim() : "";
+        if (!normalizedMessage.isBlank()) {
+            return normalizedMessage;
+        }
+        String normalizedFallback = fallback != null ? fallback.trim() : "";
+        if (!normalizedFallback.isBlank()) {
+            return normalizedFallback;
+        }
+        return "unknown error (empty message)";
     }
 
     public CompletableFuture<ProcessingResult> submitTaskAsync(String videoUrl, String outputDir) {

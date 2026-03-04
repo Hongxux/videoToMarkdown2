@@ -113,7 +113,12 @@
                 }
             };
         targetWindow.addEventListener('load', function () {
-            targetNavigator.serviceWorker.register(swUrl).catch(onError);
+            targetNavigator.serviceWorker.register(swUrl).then(function (registration) {
+                if (registration && typeof registration.update === 'function') {
+                    return registration.update();
+                }
+                return null;
+            }).catch(onError);
         });
         return true;
     }

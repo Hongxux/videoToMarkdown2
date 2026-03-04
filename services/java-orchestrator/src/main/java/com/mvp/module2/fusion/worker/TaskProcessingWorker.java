@@ -19,10 +19,13 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -35,6 +38,8 @@ import java.util.concurrent.atomic.AtomicReference;
 public class TaskProcessingWorker {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskProcessingWorker.class);
+    private static final String DOWNLOAD_INTERRUPTED_WAIT_MESSAGE =
+            "Download stage interrupted while waiting for Python worker response";
 
     @Autowired
     private TaskQueueManager taskQueueManager;
@@ -62,6 +67,18 @@ public class TaskProcessingWorker {
 
     @Value("${task.queue.max-concurrent:1}")
     private int configuredWorkerConcurrency;
+
+    @Value("${task.upload.dir:var/uploads}")
+    private String uploadDir;
+
+    @Value("${task.storage.root:}")
+    private String configuredStorageRoot;
+
+    @Value("${video.download.interrupt-retry-max-retries:2}")
+    private int downloadInterruptRetryMaxRetries;
+
+    @Value("${video.download.interrupt-retry-backoff-ms:1200}")
+    private long downloadInterruptRetryBackoffMs;
 
     private ExecutorService workerPool;
     private ScheduledExecutorService watchdogScheduler;
@@ -177,9 +194,12 @@ public class TaskProcessingWorker {
                 );
             }
 
+            taskQueueManager.updateCleanupSourcePath(task.taskId, result.cleanupSourcePath);
             taskQueueManager.completeTask(task.taskId, result.markdownPath);
             webSocketHandler.broadcastTaskUpdate(task.taskId, "COMPLETED", 1.0, "处理完成", result.markdownPath);
             triggerPersonaArtifactsAfterCompletion(task, result);
+            cleanupUploadedSourceAfterCompletion(task);
+            cleanupDownloadedSourceAfterCompletion(task, result);
             logger.info("Task completed: {} -> {}", task.taskId, result.markdownPath);
         } catch (CancellationException cancelledError) {
             logger.info("Task cancelled during processing: {}", task.taskId);
@@ -291,6 +311,7 @@ public class TaskProcessingWorker {
 
         try {
             int attempt = 0;
+            int downloadInterruptRetryCount = 0;
             while (true) {
                 attempt += 1;
                 clearInterruptFlag();
@@ -326,6 +347,21 @@ public class TaskProcessingWorker {
                     }
                     if (decision.action() == TaskWatchdog.Action.FAIL) {
                         throw new RuntimeException(decision.reason(), error);
+                    }
+                    if (shouldRetryInterruptedDownload(error, downloadInterruptRetryCount + 1)) {
+                        downloadInterruptRetryCount += 1;
+                        long backoffMs = resolveDownloadInterruptRetryBackoffMs(downloadInterruptRetryCount);
+                        logger.warn(
+                                "[{}] Download wait interrupted unexpectedly, trigger idempotent retry {}/{} (attempt={}, backoff={}ms): {}",
+                                task.taskId,
+                                downloadInterruptRetryCount,
+                                Math.max(0, downloadInterruptRetryMaxRetries),
+                                attempt,
+                                backoffMs,
+                                extractThrowableMessage(error)
+                        );
+                        sleepWithCancelCheck(task.taskId, backoffMs);
+                        continue;
                     }
                     throw error;
                 } finally {
@@ -363,6 +399,44 @@ public class TaskProcessingWorker {
         }
     }
 
+    private boolean shouldRetryInterruptedDownload(Throwable error, int nextRetryAttempt) {
+        if (nextRetryAttempt <= 0) {
+            return false;
+        }
+        if (nextRetryAttempt > Math.max(0, downloadInterruptRetryMaxRetries)) {
+            return false;
+        }
+        return containsDownloadInterruptedWaitMarker(error);
+    }
+
+    private long resolveDownloadInterruptRetryBackoffMs(int retryAttempt) {
+        long baseMs = Math.max(0L, downloadInterruptRetryBackoffMs);
+        if (baseMs <= 0L) {
+            return 0L;
+        }
+        int safeAttempt = Math.max(1, retryAttempt);
+        long multiplier = 1L << Math.min(6, safeAttempt - 1);
+        long candidate = baseMs * multiplier;
+        if (candidate < 0L) {
+            return baseMs;
+        }
+        return Math.min(candidate, 30_000L);
+    }
+
+    private boolean containsDownloadInterruptedWaitMarker(Throwable error) {
+        Throwable cursor = error;
+        int depth = 0;
+        while (cursor != null && depth < 10) {
+            String message = cursor.getMessage();
+            if (message != null && message.contains(DOWNLOAD_INTERRUPTED_WAIT_MESSAGE)) {
+                return true;
+            }
+            cursor = cursor.getCause();
+            depth += 1;
+        }
+        return false;
+    }
+
     private VideoProcessingOrchestrator.BookProcessingOptions buildBookProcessingOptions(TaskEntry task) {
         if (task == null || task.bookOptions == null) {
             return null;
@@ -386,6 +460,208 @@ public class TaskProcessingWorker {
     private void finalizeCancelled(TaskEntry task, String message) {
         taskQueueManager.finalizeCancelledTask(task.taskId);
         webSocketHandler.broadcastTaskUpdate(task.taskId, "CANCELLED", task.progress, message, null);
+    }
+
+    private void cleanupUploadedSourceAfterCompletion(TaskEntry task) {
+        if (task == null || task.videoUrl == null || task.videoUrl.isBlank()) {
+            return;
+        }
+        Path uploadRootPath = resolveUploadRootPath();
+        if (uploadRootPath == null) {
+            return;
+        }
+        Path sourcePath = resolveLocalSourcePath(task.videoUrl);
+        if (sourcePath == null) {
+            return;
+        }
+        if (!isUnderPath(sourcePath, uploadRootPath)) {
+            return;
+        }
+        if (hasOtherActiveTaskUsingSameSource(task.taskId, sourcePath)) {
+            logger.info(
+                    "Skip uploaded source cleanup because another active task still references it: taskId={} path={}",
+                    task.taskId,
+                    sourcePath
+            );
+            return;
+        }
+        try {
+            if (!Files.isRegularFile(sourcePath)) {
+                return;
+            }
+            boolean deleted = Files.deleteIfExists(sourcePath);
+            if (deleted) {
+                logger.info("Uploaded source cleaned after completion: taskId={} path={}", task.taskId, sourcePath);
+            }
+        } catch (Exception ex) {
+            logger.warn(
+                    "Uploaded source cleanup failed: taskId={} path={} err={}",
+                    task.taskId,
+                    sourcePath,
+                    ex.getMessage()
+            );
+        }
+    }
+
+    private void cleanupDownloadedSourceAfterCompletion(
+            TaskEntry task,
+            VideoProcessingOrchestrator.ProcessingResult result
+    ) {
+        if (task == null || result == null || result.cleanupSourcePath == null || result.cleanupSourcePath.isBlank()) {
+            return;
+        }
+        Path storageRootPath = resolveStorageRootPath();
+        if (storageRootPath == null) {
+            return;
+        }
+        Path sourcePath = resolveLocalSourcePath(result.cleanupSourcePath);
+        if (sourcePath == null) {
+            return;
+        }
+        if (!isUnderPath(sourcePath, storageRootPath)) {
+            logger.warn(
+                    "Skip downloaded source cleanup because path is outside storage root: taskId={} path={} storageRoot={}",
+                    task.taskId,
+                    sourcePath,
+                    storageRootPath
+            );
+            return;
+        }
+        if (hasOtherActiveTaskUsingSameSource(task.taskId, sourcePath)) {
+            logger.info(
+                    "Skip downloaded source cleanup because another active task still references it: taskId={} path={}",
+                    task.taskId,
+                    sourcePath
+            );
+            return;
+        }
+        try {
+            if (!Files.isRegularFile(sourcePath)) {
+                return;
+            }
+            boolean deleted = Files.deleteIfExists(sourcePath);
+            if (deleted) {
+                logger.info("Downloaded source cleaned after completion: taskId={} path={}", task.taskId, sourcePath);
+            }
+        } catch (Exception ex) {
+            logger.warn(
+                    "Downloaded source cleanup failed: taskId={} path={} err={}",
+                    task.taskId,
+                    sourcePath,
+                    ex.getMessage()
+            );
+        }
+    }
+
+    private Path resolveUploadRootPath() {
+        String configuredUploadDir = uploadDir != null ? uploadDir.trim() : "";
+        if (configuredUploadDir.isBlank()) {
+            return null;
+        }
+        try {
+            return Paths.get(configuredUploadDir).toAbsolutePath().normalize();
+        } catch (InvalidPathException ex) {
+            logger.warn(
+                    "Skip uploaded source cleanup because upload dir is invalid: dir={} err={}",
+                    configuredUploadDir,
+                    ex.getMessage()
+            );
+            return null;
+        }
+    }
+
+    private Path resolveStorageRootPath() {
+        String rawConfiguredStorageRoot = configuredStorageRoot != null ? configuredStorageRoot.trim() : "";
+        if (!rawConfiguredStorageRoot.isBlank()) {
+            try {
+                return Paths.get(rawConfiguredStorageRoot).toAbsolutePath().normalize();
+            } catch (InvalidPathException ex) {
+                logger.warn(
+                        "Skip downloaded source cleanup because storage root is invalid: dir={} err={}",
+                        rawConfiguredStorageRoot,
+                        ex.getMessage()
+                );
+                return null;
+            }
+        }
+        Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (int i = 0; i < 8; i++) {
+            Path candidate = current.resolve("var/storage/storage").toAbsolutePath().normalize();
+            if (Files.isDirectory(candidate)) {
+                return candidate;
+            }
+            Path parent = current.getParent();
+            if (parent == null) {
+                break;
+            }
+            current = parent;
+        }
+        return Paths.get("var/storage/storage").toAbsolutePath().normalize();
+    }
+
+    private Path resolveLocalSourcePath(String rawInput) {
+        if (rawInput == null || rawInput.isBlank()) {
+            return null;
+        }
+        String trimmed = rawInput.trim();
+        if (isHttpUrl(trimmed)) {
+            return null;
+        }
+        String lower = trimmed.toLowerCase();
+        try {
+            if (lower.startsWith("file://")) {
+                return Paths.get(URI.create(trimmed)).toAbsolutePath().normalize();
+            }
+            return Paths.get(trimmed).toAbsolutePath().normalize();
+        } catch (Exception ex) {
+            logger.debug(
+                    "Skip source cleanup for unparsable local input: input={} err={}",
+                    rawInput,
+                    ex.getMessage()
+            );
+            return null;
+        }
+    }
+
+    private boolean hasOtherActiveTaskUsingSameSource(String currentTaskId, Path sourcePath) {
+        if (taskQueueManager == null || sourcePath == null) {
+            return false;
+        }
+        List<TaskEntry> allTasks = taskQueueManager.getAllTasks();
+        for (TaskEntry oneTask : allTasks) {
+            if (oneTask == null || oneTask.taskId == null || oneTask.taskId.equals(currentTaskId)) {
+                continue;
+            }
+            if (oneTask.status != TaskQueueManager.TaskStatus.QUEUED
+                    && oneTask.status != TaskQueueManager.TaskStatus.PROCESSING) {
+                continue;
+            }
+            Path videoUrlPath = resolveLocalSourcePath(oneTask.videoUrl);
+            Path cleanupPath = resolveLocalSourcePath(oneTask.cleanupSourcePath);
+            if (sourcePath.equals(videoUrlPath) || sourcePath.equals(cleanupPath)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isUnderPath(Path targetPath, Path parentPath) {
+        if (targetPath == null || parentPath == null) {
+            return false;
+        }
+        try {
+            return targetPath.startsWith(parentPath);
+        } catch (Exception ex) {
+            return false;
+        }
+    }
+
+    private boolean isHttpUrl(String value) {
+        if (value == null) {
+            return false;
+        }
+        String lower = value.toLowerCase();
+        return lower.startsWith("http://") || lower.startsWith("https://");
     }
 
     private String firstNonBlank(String value, String fallback) {

@@ -2377,13 +2377,15 @@ class MarkdownEnhancer:
             keyframe_embeds: List[str] = []
             for item in keyframe_entries:
                 image_path = ""
+                frame_reason = ""
                 if isinstance(item, dict):
                     image_path = str(item.get("image_path") or item.get("image_file") or "").strip()
+                    frame_reason = str(item.get("frame_reason") or "").strip()
                 elif isinstance(item, str):
                     image_path = str(item).strip()
                 if not image_path:
                     continue
-                embed = self._format_obsidian_embed(image_path)
+                embed = self._format_obsidian_embed(image_path, alias=frame_reason)
                 if embed:
                     keyframe_embeds.append(embed)
 
@@ -2662,7 +2664,7 @@ class MarkdownEnhancer:
 
         return "\n".join(lines)
 
-    def _format_obsidian_embed(self, file_path: str) -> str:
+    def _format_obsidian_embed(self, file_path: str, alias: str = "") -> str:
         """
         生成 Obsidian 嵌入路径，优先使用 Markdown 目录的相对路径。
         """
@@ -2693,6 +2695,12 @@ class MarkdownEnhancer:
             rel_path = _preserve_assets_hierarchy(file_path)
 
         rel_path = rel_path.replace("\\", "/")
+        safe_alias = str(alias or "").strip()
+        if safe_alias:
+            safe_alias = re.sub(r"[\r\n]+", " ", safe_alias)
+            safe_alias = safe_alias.replace("|", "/").replace("[", "(").replace("]", ")").strip()
+        if safe_alias:
+            return f"![[{rel_path}|{safe_alias}]]"
         return f"![[{rel_path}]]"
     
     

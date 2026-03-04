@@ -11,7 +11,10 @@
       - clip_start_sec (Float): 步骤开始时间。
       - clip_end_sec (Float): 步骤结束时间。
       - instructional_keyframes (List[Object]): 该步骤中最重要的截图凭证。必须选取最能代表该步骤结果的瞬间。列表中的第 N 个元素必须严格对应 `main_operation` 里的 `[KEYFRAME_{N}]` 占位符。
-        - timestamp_sec (Float): 关键帧精确相对时间（秒）。
+       - timestamp_sec (Float): 关键帧精确相对时间（秒）。**核心红线：截图在精不在多。** 必须用最少、最清晰的图覆盖最多信息。绝对禁止截取空白界面、被遮挡、被极度放大失去上下文、模糊过渡或被选定反色污染的劣质画面。截图时机要求（优先选定稿）：
+         1. 结果定稿时：配置完全填好或执行出最终反馈的瞬间。
+         2. 状态巨变时：页面成功跳转或关键结果首次稳定呈现的瞬间。
+         3. 行为聚焦时：定稿后被鼠标清晰指示的瞬间。
         - frame_reason (String): 描述这张图证明了什么。用于 Markdown 图注。
         - target_ui_type (String): 目标 UI 元素的具体类型（例如：提交按钮、输入框、下拉菜单栏、侧边栏列表项等）。
         - target_text (String): 目标区域囊括的具体文本内容（必须如实记录画面上的字眼，以便进行后续的 OCR 断言或网格匹配，如："Confirm"、"Proxy"、"File"）。

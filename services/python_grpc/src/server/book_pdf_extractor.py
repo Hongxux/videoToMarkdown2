@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -58,6 +58,16 @@ class _CodeBBoxRegion:
     y0: float
     x1: float
     y1: float
+
+
+@dataclass
+class _MineruSliceExtractResult:
+    success: bool
+    start_page: int
+    end_page: int
+    markdown: str = ""
+    image_paths: List[str] = field(default_factory=list)
+    error_msg: str = ""
 
 
 def extract_book_pdf_markdown(
@@ -188,26 +198,255 @@ def _extract_with_mineru(
     if not mineru_bin:
         return ExtractBookPdfResult(success=False, error_msg="mineru cli not found")
 
-    mineru_output_root = output_dir / "intermediates" / "book_mineru_raw"
+    use_mineru_cli = _is_mineru_cli_binary(mineru_bin)
+    if use_mineru_cli:
+        _ensure_mineru_pipeline_models(task_id=task_id)
+
+    parallel_enabled = _read_bool_env("BOOK_PDF_MINERU_PAGE_PARALLEL_ENABLED", True)
+    mineru_env = os.environ.copy() if use_mineru_cli else _build_mineru_runtime_env(output_dir)
+    try:
+        page_tasks = _build_mineru_page_tasks(
+            sliced_pdf_path=sliced_pdf_path,
+            output_dir=output_dir,
+            section_id=section_id,
+            start_page=start_page,
+            end_page=end_page,
+            parallel_enabled=parallel_enabled,
+        )
+    except Exception as error:
+        return ExtractBookPdfResult(success=False, error_msg=f"build mineru page tasks failed: {error}")
+    if not page_tasks:
+        return ExtractBookPdfResult(success=False, error_msg="mineru page task list is empty")
+
+    worker_count = _decide_mineru_parallel_workers(len(page_tasks)) if parallel_enabled else 1
+    if len(page_tasks) <= 1:
+        worker_count = 1
+
+    logger.info(
+        "[%s] mineru extraction dispatch, pages=%s-%s, tasks=%s, workers=%s, parallel=%s",
+        task_id,
+        start_page,
+        end_page,
+        len(page_tasks),
+        worker_count,
+        parallel_enabled,
+    )
+
+    slice_results: List[_MineruSliceExtractResult] = []
+    if worker_count <= 1:
+        for page_start, page_end, task_pdf_path in page_tasks:
+            result = _extract_mineru_page_task(
+                task_id=task_id,
+                mineru_bin=mineru_bin,
+                use_mineru_cli=use_mineru_cli,
+                mineru_env=mineru_env,
+                sliced_pdf_path=str(task_pdf_path),
+                output_dir=str(output_dir),
+                output_root=str(output_root),
+                image_dir=str(image_dir),
+                section_id=section_id,
+                start_page=page_start,
+                end_page=page_end,
+                timeout_seconds=timeout_seconds,
+            )
+            if not result.success:
+                return ExtractBookPdfResult(
+                    success=False,
+                    error_msg=f"mineru task failed pages={page_start}-{page_end}: {result.error_msg}",
+                )
+            slice_results.append(result)
+    else:
+        try:
+            with ProcessPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {
+                    executor.submit(
+                        _extract_mineru_page_task,
+                        task_id,
+                        mineru_bin,
+                        use_mineru_cli,
+                        mineru_env,
+                        str(task_pdf_path),
+                        str(output_dir),
+                        str(output_root),
+                        str(image_dir),
+                        section_id,
+                        page_start,
+                        page_end,
+                        timeout_seconds,
+                    ): (page_start, page_end)
+                    for page_start, page_end, task_pdf_path in page_tasks
+                }
+                for future in as_completed(future_map):
+                    page_start, page_end = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as error:
+                        return ExtractBookPdfResult(
+                            success=False,
+                            error_msg=f"mineru process failed pages={page_start}-{page_end}: {error}",
+                        )
+                    if not result.success:
+                        return ExtractBookPdfResult(
+                            success=False,
+                            error_msg=f"mineru task failed pages={page_start}-{page_end}: {result.error_msg}",
+                        )
+                    slice_results.append(result)
+        except Exception as error:
+            return ExtractBookPdfResult(success=False, error_msg=f"mineru process pool failed: {error}")
+
+    slice_results = sorted(slice_results, key=lambda item: (item.start_page, item.end_page))
+    merged_markdown_parts = [str(item.markdown or "") for item in slice_results if str(item.markdown or "").strip()]
+    merged_markdown = "\n\n".join(part.rstrip("\n") for part in merged_markdown_parts).strip()
+    if not merged_markdown:
+        return ExtractBookPdfResult(success=False, error_msg="mineru extraction produced empty markdown")
+
+    merged_images: List[str] = []
+    for item in slice_results:
+        for path in item.image_paths:
+            if path not in merged_images:
+                merged_images.append(path)
+
+    refined_markdown = _maybe_refine_markdown_with_llm(task_id=task_id, markdown=merged_markdown)
+    markdown_target = _write_markdown_output(
+        output_dir=output_dir,
+        section_id=section_id,
+        start_page=start_page,
+        end_page=end_page,
+        markdown=refined_markdown,
+        extractor="mineru",
+    )
+    stats = _collect_markdown_stats(refined_markdown)
+    logger.info(
+        "[%s] mineru extraction success, pages=%s-%s, tasks=%s, workers=%s, images=%s, tables=%s, code=%s, formula=%s",
+        task_id,
+        start_page,
+        end_page,
+        len(page_tasks),
+        worker_count,
+        stats[0],
+        stats[1],
+        stats[2],
+        stats[3],
+    )
+    return ExtractBookPdfResult(
+        success=True,
+        markdown=refined_markdown,
+        markdown_path=str(markdown_target),
+        extractor="mineru",
+        image_count=stats[0],
+        table_count=stats[1],
+        code_block_count=stats[2],
+        formula_block_count=stats[3],
+        image_paths=merged_images,
+    )
+
+
+def _build_mineru_page_tasks(
+    sliced_pdf_path: Path,
+    output_dir: Path,
+    section_id: str,
+    start_page: int,
+    end_page: int,
+    parallel_enabled: bool = True,
+) -> List[Tuple[int, int, Path]]:
+    if start_page > end_page:
+        return []
+
+    page_batch_size = max(1, _read_int_env("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", 1))
+    total_pages = end_page - start_page + 1
+    if (not parallel_enabled) or page_batch_size >= total_pages:
+        return [(start_page, end_page, sliced_pdf_path)]
+
+    # 按页段切片，确保每个 MinerU 子进程只处理独立 PDF，避免共享 IO 状态导致互相干扰。
+    task_root = output_dir / "intermediates" / "book_mineru_page_slices"
+    task_root.mkdir(parents=True, exist_ok=True)
+    task_dir = _ensure_unique_dir(
+        task_root / f"{_safe_token(section_id or 'section')}-p{start_page:04d}-{end_page:04d}"
+    )
+
+    tasks: List[Tuple[int, int, Path]] = []
+    cursor = start_page
+    while cursor <= end_page:
+        segment_end = min(end_page, cursor + page_batch_size - 1)
+        local_start = cursor - start_page + 1
+        local_end = segment_end - start_page + 1
+        segment_path = task_dir / f"slice-p{cursor:04d}-{segment_end:04d}.pdf"
+        _slice_pdf(
+            pdf_file=sliced_pdf_path,
+            sliced_pdf_path=segment_path,
+            start_page=local_start,
+            end_page=local_end,
+        )
+        tasks.append((cursor, segment_end, segment_path))
+        cursor = segment_end + 1
+    return tasks
+
+
+def _decide_mineru_parallel_workers(task_count: int) -> int:
+    if task_count <= 1:
+        return 1
+
+    hard_cap = max(1, _read_int_env("BOOK_PDF_MINERU_WORKER_MAX", 8))
+    worker_min = max(1, min(hard_cap, _read_int_env("BOOK_PDF_MINERU_WORKER_MIN", 1)))
+    configured_workers = _read_int_env("BOOK_PDF_MINERU_WORKERS", 0)
+    if configured_workers > 0:
+        return max(worker_min, min(task_count, hard_cap, configured_workers))
+
+    cpu_cores = max(1, int(os.cpu_count() or 1))
+    cpu_divisor = max(1, _read_int_env("BOOK_PDF_MINERU_WORKER_CPU_DIVISOR", 2))
+    cpu_budget = max(1, cpu_cores // cpu_divisor)
+    if cpu_cores >= 4:
+        cpu_budget = max(2, cpu_budget)
+
+    ram_budget = hard_cap
+    available_ram_gb = _read_available_memory_gb()
+    if available_ram_gb is not None:
+        reserved_ram_gb = max(0.0, _read_float_env("BOOK_PDF_MINERU_WORKER_RESERVED_RAM_GB", 2.0))
+        ram_per_worker_gb = max(0.2, _read_float_env("BOOK_PDF_MINERU_WORKER_RAM_PER_GB", 2.0))
+        estimated = int((available_ram_gb - reserved_ram_gb) / ram_per_worker_gb)
+        ram_budget = max(worker_min, estimated)
+
+    return max(worker_min, min(task_count, hard_cap, cpu_budget, ram_budget))
+
+
+def _extract_mineru_page_task(
+    task_id: str,
+    mineru_bin: str,
+    use_mineru_cli: bool,
+    mineru_env: dict,
+    sliced_pdf_path: str,
+    output_dir: str,
+    output_root: str,
+    image_dir: str,
+    section_id: str,
+    start_page: int,
+    end_page: int,
+    timeout_seconds: int,
+) -> _MineruSliceExtractResult:
+    sliced_pdf = Path(str(sliced_pdf_path or "")).expanduser().resolve()
+    resolved_output_dir = Path(str(output_dir or "")).expanduser().resolve()
+    resolved_output_root = Path(str(output_root or "")).expanduser().resolve()
+    resolved_image_dir = Path(str(image_dir or "")).expanduser().resolve()
+    resolved_output_dir.mkdir(parents=True, exist_ok=True)
+    resolved_output_root.mkdir(parents=True, exist_ok=True)
+    resolved_image_dir.mkdir(parents=True, exist_ok=True)
+
+    mineru_output_root = resolved_output_dir / "intermediates" / "book_mineru_raw"
     mineru_output_root.mkdir(parents=True, exist_ok=True)
     mineru_output_dir = _ensure_unique_dir(
         mineru_output_root / f"{_safe_token(section_id or 'section')}-p{start_page:04d}-{end_page:04d}"
     )
-    use_mineru_cli = _is_mineru_cli_binary(mineru_bin)
     if use_mineru_cli:
-        _ensure_mineru_pipeline_models(task_id=task_id)
-        mineru_env = os.environ.copy()
         commands = _build_mineru_cli_commands(
             mineru_bin=mineru_bin,
-            sliced_pdf_path=sliced_pdf_path,
+            sliced_pdf_path=sliced_pdf,
             mineru_output_dir=mineru_output_dir,
         )
     else:
-        mineru_env = _build_mineru_runtime_env(output_dir)
         commands = [
-            [mineru_bin, "-p", str(sliced_pdf_path), "-o", str(mineru_output_dir), "-m", "txt"],
-            [mineru_bin, "-p", str(sliced_pdf_path), "-o", str(mineru_output_dir), "-m", "auto"],
-            [mineru_bin, "-p", str(sliced_pdf_path), "-o", str(mineru_output_dir)],
+            [mineru_bin, "-p", str(sliced_pdf), "-o", str(mineru_output_dir), "-m", "txt"],
+            [mineru_bin, "-p", str(sliced_pdf), "-o", str(mineru_output_dir), "-m", "auto"],
+            [mineru_bin, "-p", str(sliced_pdf), "-o", str(mineru_output_dir)],
         ]
 
     last_error = "mineru execution failed"
@@ -252,50 +491,31 @@ def _extract_with_mineru(
             task_id=task_id,
             markdown=markdown,
             middle_json_path=middle_json_path,
-            sliced_pdf_path=sliced_pdf_path,
+            sliced_pdf_path=sliced_pdf,
         )
         rewritten_markdown, copied_paths = _rewrite_markdown_image_paths(
             markdown=markdown,
             markdown_file=md_path,
-            image_dir=image_dir,
-            output_root=output_root,
+            image_dir=resolved_image_dir,
+            output_root=resolved_output_root,
             section_id=section_id,
             start_page=start_page,
             end_page=end_page,
         )
-        refined_markdown = _maybe_refine_markdown_with_llm(task_id=task_id, markdown=rewritten_markdown)
-        markdown_target = _write_markdown_output(
-            output_dir=output_dir,
-            section_id=section_id,
-            start_page=start_page,
-            end_page=end_page,
-            markdown=refined_markdown,
-            extractor="mineru",
-        )
-        stats = _collect_markdown_stats(refined_markdown)
-        logger.info(
-            "[%s] mineru extraction success, pages=%s-%s, images=%s, tables=%s, code=%s, formula=%s",
-            task_id,
-            start_page,
-            end_page,
-            stats[0],
-            stats[1],
-            stats[2],
-            stats[3],
-        )
-        return ExtractBookPdfResult(
+        return _MineruSliceExtractResult(
             success=True,
-            markdown=refined_markdown,
-            markdown_path=str(markdown_target),
-            extractor="mineru",
-            image_count=stats[0],
-            table_count=stats[1],
-            code_block_count=stats[2],
-            formula_block_count=stats[3],
+            start_page=start_page,
+            end_page=end_page,
+            markdown=rewritten_markdown,
             image_paths=copied_paths,
         )
 
-    return ExtractBookPdfResult(success=False, error_msg=last_error)
+    return _MineruSliceExtractResult(
+        success=False,
+        start_page=start_page,
+        end_page=end_page,
+        error_msg=last_error,
+    )
 
 
 def _discover_mineru_cli() -> str:
@@ -916,6 +1136,16 @@ def _read_float_env(key: str, default: float) -> float:
         return float(raw)
     except Exception:
         return default
+
+
+def _read_available_memory_gb() -> Optional[float]:
+    try:
+        import psutil
+
+        memory = psutil.virtual_memory()
+        return float(memory.available) / float(1024 ** 3)
+    except Exception:
+        return None
 
 
 def _build_mineru_runtime_env(output_dir: Path) -> dict:

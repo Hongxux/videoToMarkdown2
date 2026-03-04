@@ -161,6 +161,23 @@ class VideoProcessingControllerVideoInfoTest {
         assertEquals("Zhihu Article Title", payload.get("title"));
     }
 
+    @Test
+    void postVideoInfoShouldTreatPdfPathWithTrailingShareTextAsBookInput() throws Exception {
+        VideoProcessingController controller = new VideoProcessingController();
+        StubPythonGrpcClient stubGrpc = new StubPythonGrpcClient(new PythonGrpcClient.VideoInfoResult());
+        injectField(controller, "pythonGrpcClient", stubGrpc);
+
+        VideoProcessingController.VideoInfoRequest request = new VideoProcessingController.VideoInfoRequest();
+        request.videoInput = "D:\\videoToMarkdownTest2\\var\\uploads\\Distributed_Systems_4.pdf https://www.bilibili.com/video/BV1ABCDEF123";
+
+        ResponseEntity<Map<String, Object>> response = controller.getVideoInfoByPost(request);
+
+        assertEquals(503, response.getStatusCode().value());
+        assertNull(stubGrpc.lastVideoInput);
+        assertTrue(response.getBody() != null);
+        assertEquals("book probe service unavailable", response.getBody().get("message"));
+    }
+
     private static void injectField(Object target, String fieldName, Object value) throws Exception {
         Field field = target.getClass().getDeclaredField(fieldName);
         field.setAccessible(true);

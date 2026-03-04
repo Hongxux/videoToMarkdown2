@@ -770,3 +770,72 @@ def test_download_bilibili_bvid_extractor_error_without_site_prefix_has_specific
     message = str(exc_info.value)
     assert "bvid" in message.lower()
     assert ("大小写" in message) or ("原始链接" in message)
+
+
+def test_probe_video_info_retries_without_proxy_on_timeout(monkeypatch):
+    class _YoutubeDLProbeTimeoutRetryStub:
+        calls = []
+
+        def __init__(self, opts):
+            self._opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def extract_info(self, _url, download=False):
+            _ = download
+            type(self).calls.append(dict(self._opts))
+            if self._opts.get("proxy"):
+                raise Exception(
+                    "ERROR: [BiliBili] 1Md4y1Q7Yh: Unable to download webpage: "
+                    "(<HTTPSConnection(host='www.bilibili.com', port=443) at 0x1>, "
+                    "'Connection to www.bilibili.com timed out. (connect timeout=30.0)')"
+                )
+            return {"title": "probe-ok", "duration": 12.0}
+
+    _YoutubeDLProbeTimeoutRetryStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLProbeTimeoutRetryStub)
+
+    processor = video_mod.VideoProcessor(proxy="http://127.0.0.1:7897")
+    info = processor.probe_video_info("https://www.bilibili.com/video/BV1n9CwYoEro")
+
+    assert info.get("title") == "probe-ok"
+    assert len(_YoutubeDLProbeTimeoutRetryStub.calls) >= 2
+    first_call = _YoutubeDLProbeTimeoutRetryStub.calls[0]
+    second_call = _YoutubeDLProbeTimeoutRetryStub.calls[1]
+    assert first_call.get("proxy") == "http://127.0.0.1:7897"
+    assert "proxy" not in second_call
+
+
+def test_probe_video_info_timeout_error_has_specific_hint(monkeypatch):
+    class _YoutubeDLProbeAlwaysTimeoutStub:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def extract_info(self, _url, download=False):
+            _ = download
+            raise Exception(
+                "ERROR: [BiliBili] 1Md4y1Q7Yh: Unable to download webpage: "
+                "(<HTTPSConnection(host='www.bilibili.com', port=443) at 0x1>, "
+                "'Connection to www.bilibili.com timed out. (connect timeout=30.0)')"
+            )
+
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLProbeAlwaysTimeoutStub)
+
+    processor = video_mod.VideoProcessor(proxy="http://127.0.0.1:7897")
+    with pytest.raises(RuntimeError) as exc_info:
+        processor.probe_video_info("https://www.bilibili.com/video/BV1n9CwYoEro")
+
+    message = str(exc_info.value)
+    assert "探测视频信息超时" in message
+    assert "YTDLP_PROXY" in message
+    assert "attempts=" in message

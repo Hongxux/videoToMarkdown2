@@ -16,3 +16,9 @@
 - 清晰层次：标题、要点、论据、结论分明
 - 可执行性：尽量产出可落地的学习笔记或行动清单
 - 可读性：段落紧凑，避免冗余重复
+
+## Indentation Hard Constraints (Highest Priority)
+- Every nested list item MUST start with exactly four spaces: `    - ` or `    1. `.
+- NEVER use 1/2/3 spaces or Tab for nested indentation.
+- Self-check before output: if any line matches `^ -`, `^  -`, `^   -`, `^\t-`, `^ \d+\.` or `^\t\d+\.`, rewrite it to 4-space indentation.
+- If indentation cannot be guaranteed, flatten to top-level list instead of emitting invalid indentation.

@@ -320,8 +320,8 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
     assert "click settings" in markdown
     assert "open network tab" in markdown
     assert "[KEYFRAME_1]" not in markdown
-    assert "![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png]]" in markdown
-    assert "![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png]]" in markdown
+    assert "![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png|settings panel visible]]" in markdown
+    assert "![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png|port value saved]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_01_open_settings.mp4]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_02_change_port.mp4]]" in markdown
     assert "> ?? **" not in markdown

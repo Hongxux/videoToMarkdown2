@@ -10,6 +10,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MobileMarkdownControllerSubmissionTitleTest {
@@ -101,6 +102,37 @@ class MobileMarkdownControllerSubmissionTitleTest {
         assertNotNull(task);
         assertEquals("BV1XKIJBSEBJ", task.title);
         assertEquals("BV1XKIJBSEBJ", response.getBody().get("title"));
+    }
+
+    @Test
+    void submitTaskShouldSkipVideoInfoProbeForPdfInput() throws Exception {
+        MobileMarkdownController controller = new MobileMarkdownController();
+        TaskQueueManager queueManager = new TaskQueueManager();
+
+        PythonGrpcClient.VideoInfoResult videoInfo = new PythonGrpcClient.VideoInfoResult();
+        videoInfo.success = true;
+        videoInfo.videoTitle = "Should Not Be Used";
+        videoInfo.canonicalId = "SHOULD_NOT_BE_USED";
+
+        StubPythonGrpcClient stubGrpc = new StubPythonGrpcClient(videoInfo);
+        injectField(controller, "taskQueueManager", queueManager);
+        injectField(controller, "pythonGrpcClient", stubGrpc);
+        injectField(controller, "mobileVideoInfoTimeoutSeconds", 20);
+
+        MobileMarkdownController.TaskSubmitRequest request = new MobileMarkdownController.TaskSubmitRequest();
+        request.userId = "u_001";
+        request.videoUrl = "D:\\videoToMarkdownTest2\\var\\uploads\\book_sample.pdf";
+
+        ResponseEntity<Map<String, Object>> response = controller.submitTaskFromMobile(request);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertTrue(response.getBody() != null);
+        String taskId = String.valueOf(response.getBody().get("taskId"));
+        TaskQueueManager.TaskEntry task = queueManager.getTask(taskId);
+        assertNotNull(task);
+        assertEquals("book_sample.pdf", task.title);
+        assertEquals("book_sample.pdf", response.getBody().get("title"));
+        assertNull(stubGrpc.lastVideoInput);
     }
 
     private static void injectField(Object target, String fieldName, Object value) throws Exception {
