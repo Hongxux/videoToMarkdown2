@@ -1,0 +1,65 @@
+{
+  "version" : "1.0",
+  "generated_at" : "2026-03-05T11:27:18.989054400Z",
+  "task_id" : "VT_1772710038973_2",
+  "success" : false,
+  "error_message" : "Invalid local video path: ### 一、先明确场景与关键定义\n#### 1. 适用场景\nJava多态的核心讨论场景是：**父类引用指向子类对象，调用被重写的实例方法时，JVM会根据对象的“实际类型”而非“静态类型”选择执行的方法版本**（即“运行时多态”）。\n\n#### 2. 关键定义\n- **静态类型**：引用变量声明时的类型（编译期可知）。\n- **实际类型**：引用变量实际指向的对象的类型（运行期确定）。\n- **动态分派**：JVM在运行期根据对象实际类型选择方法版本的过程，是Java多态的核心实现机制。\n\n\n### 二、核心实现原理（基于JVM规范与HotSpot源码）\nJava多态的实现依赖两个核心机制：**方法表（vtable）** 和 **invokevirtual字节码指令**。以下按“类加载”到“方法调用”的完整流程推导：\n\n---\n\n#### 1. 类加载阶段：方法表（vtable）的初始化\n**来源**：《Java虚拟机规范》（JSR 337）、OpenJDK HotSpot源码（`InstanceKlass`类）。\n\n当JVM加载一个类时，会在方法区为该类构建一个**方法表（vtable）**，结构如下：\n- 方法表是一个数组，每个元素存储一个**实例方法的直接引用**（指向方法区中该方法的字节码）。\n- 子类的方法表会**先完整复制父类的方法表**，保证：\n  - 父类中已有的方法，在子类方法表中的**索引位置与父类完全一致**（这是Java单继承带来的优化，避免运行期遍历查找）。\n- 若子类**重写（Override）** 了父类的某个方法：\n  - 用子类方法的直接引用，覆盖方法表中该方法原有的索引位置。\n- 若子类**新增**了方法：\n  - 将新方法的引用添加到方法表的**末尾**（不影响父类方法的索引）。\n\n**示例**：\n```java\nclass Animal {\n    void makeSound() { ... } // 父类方法\n}\nclass Cat extends Animal {\n    @Override\n    void makeSound() { ... } // 重写父类方法\n    void scratch() { ... }   // 子类新增方法\n}\n```\n- `Animal`的vtable：`[makeSound(Animal)]`\n- `Cat`的vtable：`[makeSound(Cat), scratch(Cat)]`（`makeSound`索引与父类一致，但引用被覆盖）\n\n---\n\n#### 2. 运行期：invokevirtual指令的动态分派流程\n**来源**：《Java虚拟机规范》中“方法调用”章节。\n\n当Java代码执行`animal.makeSound()`时，javac会将其编译为`invokevirtual`字节码指令。该指令的执行流程是多态的核心：\n\n1. **解析符号引用**：\n   - `invokevirtual`的操作数是常量池索引，指向一个“方法符号引用”（包含方法名、描述符等）。\n   - JVM先解析该符号引用，确定方法的**名称和描述符**（如`makeSound:()V`）。\n\n2. **确定对象的实际类型**：\n   - 从操作数栈顶弹出**对象引用**（即`animal`变量指向的堆中对象）。\n   - 通过对象头中的**类型指针**（Klass Pointer），找到该对象的**实际类元数据**（在方法区中，如`Cat`的`InstanceKlass`）。\n\n3. **方法表快速定位**：\n   - 由于父类和子类中，相同方法的索引位置一致，JVM无需遍历方法表，直接通过**固定索引**（如`makeSound`在`Animal`和`Cat`的vtable中都是索引0），从实际类的vtable中取出方法引用。\n   - 若实际类未重写该方法（如`Dog extends Animal`但未重写`makeSound`），则vtable中该索引仍指向父类`Animal`的方法引用。\n\n4. **调用目标方法**：\n   - 将对象引用（`this`）和参数压入新的栈帧，跳转到vtable中找到的方法字节码执行。\n\n\n### 三、补充：静态分派 vs 动态分派\n为避免混淆，需明确Java中两种分派机制的区别（基于《深入理解Java虚拟机》）：\n\n| 分派类型 | 依据类型       | 典型场景       | 实现指令       | 确定时机 |\n|----------|----------------|----------------|----------------|----------|\n| 静态分派 | 引用的**静态类型** | 方法重载（Overload） | `invokestatic`/`invokespecial` | 编译期   |\n| 动态分派 | 对象的**实际类型** | 方法重写（Override） | `invokevirtual` | 运行期   |\n\n\n### 四、权威来源说明\n1. **方法表与vtable**：OpenJDK HotSpot源码（`openjdk/hotspot/src/share/vm/oops/instanceKlass.hpp`）中明确定义了`vtable`作为`InstanceKlass`的成员。\n2. **invokevirtual指令**：《Java虚拟机规范（Java SE 8版）》（JSR 337）§6.5.invokevirtual 详细描述了该指令的执行流程。\n3. **动态分派逻辑**：参考周志明《深入理解Java虚拟机：JVM高级特性与最佳实践》（第3版）第8章“虚拟机字节码执行引擎”。\n\n\n需要我进一步结合OpenJDK源码片段，分析方法表在HotSpot中的具体内存布局吗？",
+  "input_video_url" : "### 一、先明确场景与关键定义\n#### 1. 适用场景\nJava多态的核心讨论场景是：**父类引用指向子类对象，调用被重写的实例方法时，JVM会根据对象的“实际类型”而非“静态类型”选择执行的方法版本**（即“运行时多态”）。\n\n#### 2. 关键定义\n- **静态类型**：引用变量声明时的类型（编译期可知）。\n- **实际类型**：引用变量实际指向的对象的类型（运行期确定）。\n- **动态分派**：JVM在运行期根据对象实际类型选择方法版本的过程，是Java多态的核心实现机制。\n\n\n### 二、核心实现原理（基于JVM规范与HotSpot源码）\nJava多态的实现依赖两个核心机制：**方法表（vtable）** 和 **invokevirtual字节码指令**。以下按“类加载”到“方法调用”的完整流程推导：\n\n---\n\n#### 1. 类加载阶段：方法表（vtable）的初始化\n**来源**：《Java虚拟机规范》（JSR 337）、OpenJDK HotSpot源码（`InstanceKlass`类）。\n\n当JVM加载一个类时，会在方法区为该类构建一个**方法表（vtable）**，结构如下：\n- 方法表是一个数组，每个元素存储一个**实例方法的直接引用**（指向方法区中该方法的字节码）。\n- 子类的方法表会**先完整复制父类的方法表**，保证：\n  - 父类中已有的方法，在子类方法表中的**索引位置与父类完全一致**（这是Java单继承带来的优化，避免运行期遍历查找）。\n- 若子类**重写（Override）** 了父类的某个方法：\n  - 用子类方法的直接引用，覆盖方法表中该方法原有的索引位置。\n- 若子类**新增**了方法：\n  - 将新方法的引用添加到方法表的**末尾**（不影响父类方法的索引）。\n\n**示例**：\n```java\nclass Animal {\n    void makeSound() { ... } // 父类方法\n}\nclass Cat extends Animal {\n    @Override\n    void makeSound() { ... } // 重写父类方法\n    void scratch() { ... }   // 子类新增方法\n}\n```\n- `Animal`的vtable：`[makeSound(Animal)]`\n- `Cat`的vtable：`[makeSound(Cat), scratch(Cat)]`（`makeSound`索引与父类一致，但引用被覆盖）\n\n---\n\n#### 2. 运行期：invokevirtual指令的动态分派流程\n**来源**：《Java虚拟机规范》中“方法调用”章节。\n\n当Java代码执行`animal.makeSound()`时，javac会将其编译为`invokevirtual`字节码指令。该指令的执行流程是多态的核心：\n\n1. **解析符号引用**：\n   - `invokevirtual`的操作数是常量池索引，指向一个“方法符号引用”（包含方法名、描述符等）。\n   - JVM先解析该符号引用，确定方法的**名称和描述符**（如`makeSound:()V`）。\n\n2. **确定对象的实际类型**：\n   - 从操作数栈顶弹出**对象引用**（即`animal`变量指向的堆中对象）。\n   - 通过对象头中的**类型指针**（Klass Pointer），找到该对象的**实际类元数据**（在方法区中，如`Cat`的`InstanceKlass`）。\n\n3. **方法表快速定位**：\n   - 由于父类和子类中，相同方法的索引位置一致，JVM无需遍历方法表，直接通过**固定索引**（如`makeSound`在`Animal`和`Cat`的vtable中都是索引0），从实际类的vtable中取出方法引用。\n   - 若实际类未重写该方法（如`Dog extends Animal`但未重写`makeSound`），则vtable中该索引仍指向父类`Animal`的方法引用。\n\n4. **调用目标方法**：\n   - 将对象引用（`this`）和参数压入新的栈帧，跳转到vtable中找到的方法字节码执行。\n\n\n### 三、补充：静态分派 vs 动态分派\n为避免混淆，需明确Java中两种分派机制的区别（基于《深入理解Java虚拟机》）：\n\n| 分派类型 | 依据类型       | 典型场景       | 实现指令       | 确定时机 |\n|----------|----------------|----------------|----------------|----------|\n| 静态分派 | 引用的**静态类型** | 方法重载（Overload） | `invokestatic`/`invokespecial` | 编译期   |\n| 动态分派 | 对象的**实际类型** | 方法重写（Override） | `invokevirtual` | 运行期   |\n\n\n### 四、权威来源说明\n1. **方法表与vtable**：OpenJDK HotSpot源码（`openjdk/hotspot/src/share/vm/oops/instanceKlass.hpp`）中明确定义了`vtable`作为`InstanceKlass`的成员。\n2. **invokevirtual指令**：《Java虚拟机规范（Java SE 8版）》（JSR 337）§6.5.invokevirtual 详细描述了该指令的执行流程。\n3. **动态分派逻辑**：参考周志明《深入理解Java虚拟机：JVM高级特性与最佳实践》（第3版）第8章“虚拟机字节码执行引擎”。\n\n\n需要我进一步结合OpenJDK源码片段，分析方法表在HotSpot中的具体内存布局吗？",
+  "video_title" : "",
+  "video_path" : "### 一、先明确场景与关键定义\n#### 1. 适用场景\nJava多态的核心讨论场景是：**父类引用指向子类对象，调用被重写的实例方法时，JVM会根据对象的“实际类型”而非“静态类型”选择执行的方法版本**（即“运行时多态”）。\n\n#### 2. 关键定义\n- **静态类型**：引用变量声明时的类型（编译期可知）。\n- **实际类型**：引用变量实际指向的对象的类型（运行期确定）。\n- **动态分派**：JVM在运行期根据对象实际类型选择方法版本的过程，是Java多态的核心实现机制。\n\n\n### 二、核心实现原理（基于JVM规范与HotSpot源码）\nJava多态的实现依赖两个核心机制：**方法表（vtable）** 和 **invokevirtual字节码指令**。以下按“类加载”到“方法调用”的完整流程推导：\n\n---\n\n#### 1. 类加载阶段：方法表（vtable）的初始化\n**来源**：《Java虚拟机规范》（JSR 337）、OpenJDK HotSpot源码（`InstanceKlass`类）。\n\n当JVM加载一个类时，会在方法区为该类构建一个**方法表（vtable）**，结构如下：\n- 方法表是一个数组，每个元素存储一个**实例方法的直接引用**（指向方法区中该方法的字节码）。\n- 子类的方法表会**先完整复制父类的方法表**，保证：\n  - 父类中已有的方法，在子类方法表中的**索引位置与父类完全一致**（这是Java单继承带来的优化，避免运行期遍历查找）。\n- 若子类**重写（Override）** 了父类的某个方法：\n  - 用子类方法的直接引用，覆盖方法表中该方法原有的索引位置。\n- 若子类**新增**了方法：\n  - 将新方法的引用添加到方法表的**末尾**（不影响父类方法的索引）。\n\n**示例**：\n```java\nclass Animal {\n    void makeSound() { ... } // 父类方法\n}\nclass Cat extends Animal {\n    @Override\n    void makeSound() { ... } // 重写父类方法\n    void scratch() { ... }   // 子类新增方法\n}\n```\n- `Animal`的vtable：`[makeSound(Animal)]`\n- `Cat`的vtable：`[makeSound(Cat), scratch(Cat)]`（`makeSound`索引与父类一致，但引用被覆盖）\n\n---\n\n#### 2. 运行期：invokevirtual指令的动态分派流程\n**来源**：《Java虚拟机规范》中“方法调用”章节。\n\n当Java代码执行`animal.makeSound()`时，javac会将其编译为`invokevirtual`字节码指令。该指令的执行流程是多态的核心：\n\n1. **解析符号引用**：\n   - `invokevirtual`的操作数是常量池索引，指向一个“方法符号引用”（包含方法名、描述符等）。\n   - JVM先解析该符号引用，确定方法的**名称和描述符**（如`makeSound:()V`）。\n\n2. **确定对象的实际类型**：\n   - 从操作数栈顶弹出**对象引用**（即`animal`变量指向的堆中对象）。\n   - 通过对象头中的**类型指针**（Klass Pointer），找到该对象的**实际类元数据**（在方法区中，如`Cat`的`InstanceKlass`）。\n\n3. **方法表快速定位**：\n   - 由于父类和子类中，相同方法的索引位置一致，JVM无需遍历方法表，直接通过**固定索引**（如`makeSound`在`Animal`和`Cat`的vtable中都是索引0），从实际类的vtable中取出方法引用。\n   - 若实际类未重写该方法（如`Dog extends Animal`但未重写`makeSound`），则vtable中该索引仍指向父类`Animal`的方法引用。\n\n4. **调用目标方法**：\n   - 将对象引用（`this`）和参数压入新的栈帧，跳转到vtable中找到的方法字节码执行。\n\n\n### 三、补充：静态分派 vs 动态分派\n为避免混淆，需明确Java中两种分派机制的区别（基于《深入理解Java虚拟机》）：\n\n| 分派类型 | 依据类型       | 典型场景       | 实现指令       | 确定时机 |\n|----------|----------------|----------------|----------------|----------|\n| 静态分派 | 引用的**静态类型** | 方法重载（Overload） | `invokestatic`/`invokespecial` | 编译期   |\n| 动态分派 | 对象的**实际类型** | 方法重写（Override） | `invokevirtual` | 运行期   |\n\n\n### 四、权威来源说明\n1. **方法表与vtable**：OpenJDK HotSpot源码（`openjdk/hotspot/src/share/vm/oops/instanceKlass.hpp`）中明确定义了`vtable`作为`InstanceKlass`的成员。\n2. **invokevirtual指令**：《Java虚拟机规范（Java SE 8版）》（JSR 337）§6.5.invokevirtual 详细描述了该指令的执行流程。\n3. **动态分派逻辑**：参考周志明《深入理解Java虚拟机：JVM高级特性与最佳实践》（第3版）第8章“虚拟机字节码执行引擎”。\n\n\n需要我进一步结合OpenJDK源码片段，分析方法表在HotSpot中的具体内存布局吗？",
+  "output_dir" : "./output",
+  "result_markdown_path" : "",
+  "result_json_path" : "",
+  "stage_timings_ms" : {
+    "total_pipeline" : 10
+  },
+  "flow_flags" : {
+    "downloaded_from_url" : false,
+    "used_vl_flow" : false,
+    "used_legacy_flow" : false
+  },
+  "llm_cost" : {
+    "currency" : "USD",
+    "pricing_basis" : "per_1m_tokens",
+    "vl" : {
+      "model" : "qwen-vl-max-latest",
+      "input_tokens" : 0,
+      "output_tokens" : 0,
+      "total_tokens" : 0,
+      "token_source" : "",
+      "qwen3_vl_plus_cost" : {
+        "input_cost_usd" : 0.0,
+        "output_cost_usd" : 0.0,
+        "total_cost_usd" : 0.0
+      },
+      "ernie_4_5_turbo_vl_cost_range" : {
+        "input_cost_usd_min" : 0.0,
+        "input_cost_usd_max" : 0.0,
+        "output_cost_usd_min" : 0.0,
+        "output_cost_usd_max" : 0.0,
+        "total_cost_usd_min" : 0.0,
+        "total_cost_usd_max" : 0.0
+      },
+      "selected_pricing_model" : "unknown",
+      "selected_cost_usd_min" : 0.0,
+      "selected_cost_usd_max" : 0.0
+    },
+    "deepseek_chat" : {
+      "model" : "deepseek-chat",
+      "input_tokens_uncached" : 0,
+      "input_tokens_cached" : 0,
+      "output_tokens" : 0,
+      "total_calls" : 0,
+      "cached_calls" : 0,
+      "token_source" : "",
+      "input_uncached_cost_usd" : 0.0,
+      "input_cached_cost_usd" : 0.0,
+      "output_cost_usd" : 0.0,
+      "total_cost_usd" : 0.0
+    },
+    "total_cost_usd_min" : 0.0,
+    "total_cost_usd_max" : 0.0,
+    "total_cost_usd" : 0.0,
+    "coverage_note" : "DeepSeek cost is computed from persisted traces (phase2b_llm_trace/deepseek_audit) only."
+  }
+}

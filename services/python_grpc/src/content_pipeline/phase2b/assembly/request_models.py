@@ -26,6 +26,8 @@ class ScreenshotRequest:
     timestamp_sec: float
     label: str
     semantic_unit_id: str
+    frame_reason: str = ""
+    ocr_text: str = ""
 
 
 @dataclass

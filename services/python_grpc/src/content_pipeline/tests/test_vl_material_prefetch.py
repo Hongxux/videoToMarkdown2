@@ -1,7 +1,7 @@
 """
-VLMaterialGenerator 棰勮绛栫暐鍗曞厓娴嬭瘯
+VLMaterialGenerator 棰勮绛栫暐鍗曞厓娴嬭瘯
 
-鐩爣锛氶獙璇佲€滄寜鏃堕棿鑱氱被鎴?chunk + Union 棰勮鈥濈殑浠诲姟鏋勫缓閫昏緫锛岀‘淇濅笉浼氶€€鍖栦负閫愯姹傞殢鏈鸿闂€?"""
+鐩爣锛氶獙璇佲€滄寜鏃堕棿鑱氱被鎴?chunk + Union 棰勮鈥濈殑浠诲姟鏋勫缓閫昏緫锛岀‘淇濅笉浼氶€€鍖栦负閫愯姹傞殢鏈鸿闂€?"""
 
 from __future__ import annotations
 
@@ -135,3 +135,33 @@ def test_chunking_prefers_request_level_window_over_global_time_window():
     assert abs(float(win_u2["expanded_end"]) - 9.0) < 1e-6
 
 
+def test_chunking_supports_asymmetric_time_window():
+    from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
+
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "screenshot_optimization": {
+                "prefetch_union_max_span_seconds": 20.0,
+                "prefetch_chunk_max_requests": 1000,
+            },
+        }
+    )
+
+    requests: List[Dict[str, Any]] = [
+        {"unit_id": "u1", "timestamp_sec": 10.0},
+    ]
+
+    chunks = generator._build_screenshot_prefetch_chunks(
+        screenshot_requests=requests,
+        max_span_seconds=20.0,
+        max_requests=1000,
+        time_window_before=1.0,
+        time_window_after=2.0,
+    )
+
+    assert len(chunks) == 1
+    assert len(chunks[0]["windows"]) == 1
+    window = chunks[0]["windows"][0]
+    assert abs(float(window["expanded_start"]) - 9.0) < 1e-6
+    assert abs(float(window["expanded_end"]) - 12.0) < 1e-6

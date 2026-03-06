@@ -1,0 +1,25 @@
+{
+  "unit_id": "SU905",
+  "schema": "tutorial_stepwise_v1",
+  "raw_response": [],
+  "steps": [
+    {
+      "step_id": 1,
+      "step_description": "dedupe keyframe",
+      "main_operation": "只保留一张关键截图",
+      "clip_start_sec": 0.0,
+      "clip_end_sec": 8.0,
+      "clip_file": "SU905_clip_step_01_action.mp4",
+      "instructional_keyframes": [
+        "SU905_ss_step_01_key_01_action.png"
+      ],
+      "instructional_keyframe_details": [
+        {
+          "image_file": "SU905_ss_step_01_key_01_action.png",
+          "timestamp_sec": 3.5,
+          "frame_reason": "关键画面说明"
+        }
+      ]
+    }
+  ]
+}

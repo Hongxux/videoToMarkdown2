@@ -89,12 +89,17 @@ class ConcreteKnowledgeValidator:
         
         # V2: 闂傚倸鍊搁崐鎼佸磹閹间礁纾圭紒瀣嚦濞戞鏃堝焵椤掑啰浜辨繝鐢靛仜濡瑩骞愰幖浣稿瀭?ThreadSafeMathOCR 闂傚倸鍊风粈渚€骞栭位鍥敃閿曗偓閻ょ偓绻濇繝鍌涘櫧闁活厽鐟╅弻鈥愁吋鎼粹€崇闂侀€炲苯鍘哥紒鑸靛哺閻涱喚鈧綆鍠楅崑鎰版煙缂佹ê绗уù婊€鍗冲缁樻媴缁涘娈愰梺鎼炲妼闁帮絽鐣峰鈧崺锟犲礃閵婎煈鍞归梻鍌氬€搁崐鐑芥嚄閸洍鈧箓宕煎婵堟嚀椤繄鎹勯搹璇℃Ф婵犵數鍋涘Λ娆撳垂閸洩缍栭柡鍥ュ灪閻撳啴鏌曟径娑橆洭缂佹劗鍋炵换娑㈠箣濞嗗繒浠奸梺缁樺笒閻忔岸濡甸崟顖氱闁糕剝銇炴竟鏇㈡⒒?(闂傚倸鍊搁崐鐑芥倿閿曗偓椤啴宕归鍛姺闂佺鍕垫當缂佲偓婢跺备鍋撻獮鍨姎妞わ富鍨跺浼村Ψ閿斿墽顔曢梺鐟邦嚟閸庢垶绗熷☉銏＄厱闁靛牆鎳愭晶鏇㈡懚閺嶎厽鐓ラ柡鍐ㄥ€婚幗鍌炴煕鎼存稑鍔﹂柡?
         self._math_ocr = None
+        self._math_ocr_init_attempted = False
+        self._math_ocr_init_error: Optional[str] = None
+        self._math_ocr_init_lock = threading.Lock()
+        math_ocr_cfg = self._load_math_ocr_config(config_path=config_path)
+        self._math_ocr_enabled = bool(math_ocr_cfg.get("enabled", False))
+        raw_math_ocr_min_score = math_ocr_cfg.get("min_score", 0.7)
         try:
-            from services.python_grpc.src.content_pipeline.infra.runtime.ocr_utils import ThreadSafeMathOCR
-            self._math_ocr = ThreadSafeMathOCR()
-            logger.info("ThreadSafeMathOCR initialized for formula detection")
-        except Exception as e:
-            logger.warning(f"ThreadSafeMathOCR not available, using fallback formula detection: {e}")
+            parsed_math_ocr_min_score = float(raw_math_ocr_min_score)
+        except Exception:
+            parsed_math_ocr_min_score = 0.7
+        self._math_ocr_min_score = max(0.0, min(1.0, parsed_math_ocr_min_score))
         self._ocr_extractor = None
         self._ocr_extractor_init_error: Optional[str] = None
 
@@ -103,7 +108,7 @@ class ConcreteKnowledgeValidator:
             config_path=config_path,
             default_similarity_threshold=similarity_threshold,
         )
-        self._structure_preprocess_enabled = bool(structure_cfg.get("enabled", True))
+        self._structure_preprocess_enabled = bool(structure_cfg.get("enabled", False))
         self._structure_disable_after_backend_error = bool(
             structure_cfg.get("disable_ppstructure_after_backend_error", True)
         )
@@ -297,7 +302,7 @@ class ConcreteKnowledgeValidator:
         structure_default_dedup_threshold = min(0.88, normalized_default_threshold)
 
         defaults: Dict[str, Any] = {
-            "enabled": True,
+            "enabled": False,
             "disable_ppstructure_after_backend_error": True,
             "force_disable_ir_optim": True,
             "backend_compat_retry_enabled": True,
@@ -419,6 +424,42 @@ class ConcreteKnowledgeValidator:
             return merged
         except Exception as exc:
             logger.warning(f"Failed to load structure preprocess config, using defaults: {exc}")
+            return defaults
+
+    def _load_math_ocr_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
+        """Load math OCR config with safe defaults."""
+        defaults: Dict[str, Any] = {
+            "enabled": False,
+            "min_score": 0.7,
+        }
+        try:
+            if config_path is None:
+                config_file = resolve_video_config_path(anchor_file=__file__)
+            else:
+                config_file = resolve_video_config_path(str(config_path), anchor_file=__file__)
+            if not config_file or not config_file.exists():
+                return defaults
+            config = load_yaml_dict(config_file)
+            vision_cfg = config.get("vision_ai", {}) if isinstance(config, dict) else {}
+            math_cfg = (
+                vision_cfg.get("math_ocr", {})
+                if isinstance(vision_cfg, dict)
+                else {}
+            )
+            if not isinstance(math_cfg, dict):
+                return defaults
+
+            merged = dict(defaults)
+            merged["enabled"] = bool(math_cfg.get("enabled", defaults["enabled"]))
+            raw_min_score = math_cfg.get("min_score", defaults["min_score"])
+            try:
+                merged["min_score"] = float(raw_min_score)
+            except Exception:
+                merged["min_score"] = float(defaults["min_score"])
+            merged["min_score"] = max(0.0, min(1.0, merged["min_score"]))
+            return merged
+        except Exception as exc:
+            logger.warning(f"Failed to load math ocr config, using defaults: {exc}")
             return defaults
 
     @staticmethod
@@ -2057,15 +2098,56 @@ class ConcreteKnowledgeValidator:
             "sentence_text": str(sentence_text or "").strip(),
             "context_text": str(context_text or "").strip(),
         }
-    
+
+    def _get_math_ocr(self):
+        """Lazily initialize ThreadSafeMathOCR when enabled."""
+        if not bool(getattr(self, "_math_ocr_enabled", False)):
+            return None
+        if self._math_ocr is not None:
+            return self._math_ocr
+        if bool(getattr(self, "_math_ocr_init_attempted", False)):
+            return None
+
+        init_lock = getattr(self, "_math_ocr_init_lock", None)
+        if init_lock is None:
+            self._math_ocr_init_lock = threading.Lock()
+            init_lock = self._math_ocr_init_lock
+
+        with init_lock:
+            if self._math_ocr is not None:
+                return self._math_ocr
+            if bool(getattr(self, "_math_ocr_init_attempted", False)):
+                return None
+            self._math_ocr_init_attempted = True
+            try:
+                from services.python_grpc.src.content_pipeline.infra.runtime.ocr_utils import (
+                    ThreadSafeMathOCR,
+                )
+
+                self._math_ocr = ThreadSafeMathOCR()
+                logger.info("ThreadSafeMathOCR initialized lazily for formula detection")
+            except Exception as exc:
+                self._math_ocr_init_error = str(exc)
+                logger.warning(
+                    "ThreadSafeMathOCR lazy init skipped, fallback to text-only formula detection: %s",
+                    exc,
+                )
+                self._math_ocr = None
+            return self._math_ocr
+
     def _detect_math_formula(self, text: str = "", image: Optional[np.ndarray] = None) -> bool:
         """Detect whether OCR text/image likely contains formula-like content."""
-        if self._math_ocr and image is not None:
+        if image is not None:
+            math_ocr = self._get_math_ocr()
+        else:
+            math_ocr = None
+        if math_ocr is not None:
             try:
-                math_results = self._math_ocr.recognize_math(image)
+                math_results = math_ocr.recognize_math(image)
                 if math_results:
+                    min_score = float(getattr(self, "_math_ocr_min_score", 0.7) or 0.7)
                     for res in math_results:
-                        if float(res.get("score", 0) or 0.0) >= 0.7:
+                        if float(res.get("score", 0) or 0.0) >= min_score:
                             logger.debug(f"MathOCR detected: {str(res.get('text', ''))[:50]}")
                             return True
             except Exception as e:

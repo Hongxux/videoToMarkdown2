@@ -13,6 +13,7 @@
 import os
 import json
 import logging
+import re
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
@@ -306,6 +307,7 @@ class RichTextDocument:
         输出参数：
         - str 列表（与输入或处理结果一一对应）。"""
         lines = []
+        section_frame_reason_map = self._build_section_screenshot_frame_reason_map(section, assets_dir)
         
         # 标题
         lines.append(f"### {section.title}")
@@ -368,11 +370,21 @@ class RichTextDocument:
                 if operation_guidance:
                     body_lines.append(f"- 操作指导：{'；'.join(operation_guidance)}")
                 mats = step.get("materials", {})
+                step_frame_reason_map = self._build_step_keyframe_frame_reason_map(step, assets_dir)
                 ss_paths = mats.get("screenshot_paths", [])
                 if ss_paths:
                     for ss in ss_paths:
                         ss_path = self._relative_path(ss, assets_dir)
-                        body_lines.append(f"![Step Snapshot]({ss_path})")
+                        frame_reason = step_frame_reason_map.get(
+                            self._normalize_embed_lookup_key(ss_path),
+                            "",
+                        )
+                        if not frame_reason:
+                            frame_reason = section_frame_reason_map.get(
+                                self._normalize_embed_lookup_key(ss_path),
+                                "",
+                            )
+                        body_lines.append(self._format_obsidian_embed(ss_path, alias=frame_reason))
                 step_clip_paths = mats.get("clip_paths", [])
                 if not step_clip_paths:
                     clip_p = mats.get("clip_path")
@@ -380,7 +392,7 @@ class RichTextDocument:
                         step_clip_paths = [clip_p]
                 for clip_p in step_clip_paths:
                     clip_path = self._relative_path(clip_p, assets_dir)
-                    body_lines.append(f"![Step Clip]({clip_path})")
+                    body_lines.append(self._format_obsidian_embed(clip_path))
 
                 if step_type == "MAIN_FLOW":
                     lines.extend(body_lines)
@@ -400,11 +412,11 @@ class RichTextDocument:
                 clip_path = self._relative_path(section_clip_paths[0], assets_dir)
                 lines.append("**视频演示**")
                 lines.append("")
-                lines.append(f"![[{clip_path}]]")
+                lines.append(self._format_obsidian_embed(clip_path))
                 lines.append("")
                 for extra_clip in section_clip_paths[1:]:
                     extra_clip_path = self._relative_path(extra_clip, assets_dir)
-                    lines.append(f"![[{extra_clip_path}]]")
+                    lines.append(self._format_obsidian_embed(extra_clip_path))
                     lines.append("")
                 
                 # 辅助关键帧
@@ -414,8 +426,12 @@ class RichTextDocument:
                     for i, ss in enumerate(materials.screenshot_paths):
                         label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"图{i+1}"
                         ss_path = self._relative_path(ss, assets_dir)
+                        frame_reason = section_frame_reason_map.get(
+                            self._normalize_embed_lookup_key(ss_path),
+                            "",
+                        )
                         lines.append(f"{label}")
-                        lines.append(f"![[{ss_path}]]")
+                        lines.append(self._format_obsidian_embed(ss_path, alias=frame_reason))
                         lines.append("")
                 
             elif materials.screenshot_paths:
@@ -425,11 +441,95 @@ class RichTextDocument:
                 for i, ss in enumerate(materials.screenshot_paths):
                     label = materials.screenshot_labels[i] if i < len(materials.screenshot_labels) else f"图{i+1}"
                     ss_path = self._relative_path(ss, assets_dir)
+                    frame_reason = section_frame_reason_map.get(
+                        self._normalize_embed_lookup_key(ss_path),
+                        "",
+                    )
                     lines.append(f"{label}")
-                    lines.append(f"![[{ss_path}]]")
+                    lines.append(self._format_obsidian_embed(ss_path, alias=frame_reason))
                     lines.append("")
         
         return lines
+
+    @staticmethod
+    def _normalize_embed_lookup_key(path_text: str) -> str:
+        return str(path_text or "").strip().replace("\\", "/").strip().lower()
+
+    def _sanitize_embed_alias(self, alias: str) -> str:
+        safe_alias = str(alias or "").strip()
+        if not safe_alias:
+            return ""
+        safe_alias = re.sub(r"[\r\n]+", " ", safe_alias)
+        safe_alias = safe_alias.replace("|", "/").replace("[", "(").replace("]", ")").strip()
+        return safe_alias
+
+    def _format_obsidian_embed(self, rel_path: str, alias: str = "") -> str:
+        normalized_path = str(rel_path or "").strip().replace("\\", "/")
+        if not normalized_path:
+            return ""
+        safe_alias = self._sanitize_embed_alias(alias)
+        if safe_alias:
+            return f"![[{normalized_path}|{safe_alias}]]"
+        return f"![[{normalized_path}]]"
+
+    def _build_section_screenshot_frame_reason_map(
+        self,
+        section: RichTextSection,
+        assets_dir: str,
+    ) -> Dict[str, str]:
+        frame_reason_map: Dict[str, str] = {}
+        materials = getattr(section, "materials", None)
+        if materials is None:
+            return frame_reason_map
+        raw_items = list(getattr(materials, "screenshot_items", []) or [])
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            frame_reason = str(item.get("frame_reason", "") or "").strip()
+            if not frame_reason:
+                continue
+            raw_path = str(
+                item.get("img_path")
+                or item.get("image_path")
+                or item.get("path")
+                or ""
+            ).strip()
+            if not raw_path:
+                continue
+            rel_path = self._relative_path(raw_path, assets_dir)
+            key = self._normalize_embed_lookup_key(rel_path)
+            if key and key not in frame_reason_map:
+                frame_reason_map[key] = frame_reason
+        return frame_reason_map
+
+    def _build_step_keyframe_frame_reason_map(
+        self,
+        step: Dict[str, Any],
+        assets_dir: str,
+    ) -> Dict[str, str]:
+        frame_reason_map: Dict[str, str] = {}
+        details = step.get("instructional_keyframe_details", []) if isinstance(step, dict) else []
+        if not isinstance(details, list):
+            return frame_reason_map
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            frame_reason = str(item.get("frame_reason", "") or "").strip()
+            if not frame_reason:
+                continue
+            raw_path = str(
+                item.get("image_path")
+                or item.get("image_file")
+                or item.get("img_path")
+                or ""
+            ).strip()
+            if not raw_path:
+                continue
+            rel_path = self._relative_path(raw_path, assets_dir)
+            key = self._normalize_embed_lookup_key(rel_path)
+            if key and key not in frame_reason_map:
+                frame_reason_map[key] = frame_reason
+        return frame_reason_map
 
     def _normalize_step_text_list(self, value: Any) -> List[str]:
         """Normalize step list-like text fields into clean string list."""
@@ -488,6 +588,9 @@ class RichTextDocument:
         if not abs_path:
             return ""
         normalized = str(abs_path).replace("\\", "/")
+        rel_prefix = f"{assets_dir}/"
+        if normalized.startswith(rel_prefix):
+            return normalized
         marker = f"/{assets_dir}/"
         if marker in normalized:
             suffix = normalized.split(marker, 1)[1].strip("/")

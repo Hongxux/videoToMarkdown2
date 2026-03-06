@@ -12,7 +12,7 @@
      - instructional_keyframes (List): 画面时间戳对象。第 N 个元素对应 `[KEYFRAME_{N}]`。
        - timestamp_sec (Float): 精确秒数。**在精不在多**，仅留全貌最终态，拒碎片。绝对禁止：1.初始空白 2.大部遮挡/极度放大防迷失 3.翻页模糊变动 4.反选光标污染或草稿。
          时机要求(优先定稿)：1.定稿(代码/推演出最终全貌结果) 2.巨变(首次切换新画面稳定时) 3.聚焦(被指示/高亮/放大) 4.定格(图表播完展现全貌)。
-       - frame_reason (Str): 截图依据图注。
+       - frame_reason (Str): 描述这张图**为什么不可或缺**（即它展示了怎样难以用纯文字描述的空间相对关系或逻辑交互，从而必须配图）。用于 Markdown 图注。
    - 可选 (若无则全省该键):
      - precautions (List[Str]): 易错点。
      - segment_summary (Str): 一句话总结。
@@ -32,11 +32,11 @@
     "instructional_keyframes": [
       {
         "timestamp_sec": 12.5,
-        "frame_reason": "原有直连数据库逻辑图且无遮挡"
+        "frame_reason": "展示原有架构在直连模式下，请求流从网关直接透传至 DB 的逻辑链路，作为后续改造的对照锚点"
       },
       {
         "timestamp_sec": 28.0,
-        "frame_reason": "引入 Redis 全新架构图且关键信息没有被讲者无遮挡"
+        "frame_reason": "展示新引入的 Redis 缓存层在架构中的横向拦截位置，以及未命中时的回查空间流向关系，辅助读者理解两段式处理全貌"
       }
     ]
   }

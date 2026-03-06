@@ -37,6 +37,51 @@ def _build_pipeline(tmp_path: Path) -> RichTextPipeline:
     return pipeline
 
 
+def test_structure_preprocess_default_disabled(tmp_path):
+    validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
+    assert validator._structure_preprocess_enabled is False
+
+
+def test_math_ocr_default_disabled_and_not_initialized(tmp_path):
+    validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
+    assert validator._math_ocr_enabled is False
+    assert validator._math_ocr is None
+    assert validator._math_ocr_init_attempted is False
+
+
+def test_detect_math_formula_with_text_only_does_not_trigger_math_ocr_lazy_init(monkeypatch, tmp_path):
+    validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
+    validator._math_ocr_enabled = True
+    calls = {"count": 0}
+
+    def _fake_get_math_ocr():
+        calls["count"] += 1
+        return object()
+
+    monkeypatch.setattr(validator, "_get_math_ocr", _fake_get_math_ocr)
+    assert validator._detect_math_formula("x = 1", image=None) is True
+    assert calls["count"] == 0
+
+
+def test_detect_math_formula_with_image_uses_math_ocr_lazy_loader(monkeypatch, tmp_path):
+    validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
+    validator._math_ocr_enabled = True
+    calls = {"count": 0}
+
+    class _StubMathOCR:
+        def recognize_math(self, _image):
+            return [{"text": "x=1", "score": 0.95}]
+
+    def _fake_get_math_ocr():
+        calls["count"] += 1
+        return _StubMathOCR()
+
+    monkeypatch.setattr(validator, "_get_math_ocr", _fake_get_math_ocr)
+    image = np.zeros((16, 16, 3), dtype=np.uint8)
+    assert validator._detect_math_formula("", image=image) is True
+    assert calls["count"] == 1
+
+
 def test_extract_structured_screenshots_groups_expected_types(monkeypatch, tmp_path):
     validator = ConcreteKnowledgeValidator(output_dir=str(tmp_path))
     image_path = tmp_path / "assets" / "SU900" / "raw.png"
@@ -719,6 +764,73 @@ def test_apply_external_materials_person_prefilter_reject_does_not_restore_delet
     assert unit.materials.screenshot_paths == []
     assert unit.materials.screenshot_items == []
     assert not raw_img.exists()
+
+
+def test_apply_external_materials_skips_structure_preprocess_when_disabled(tmp_path):
+    pipeline = _build_pipeline(tmp_path)
+    output_dir = Path(pipeline.output_dir)
+    screenshots_dir = output_dir / "assets"
+    clips_dir = output_dir / "assets"
+    (screenshots_dir / "SU932").mkdir(parents=True, exist_ok=True)
+    raw_img = screenshots_dir / "SU932" / "raw.png"
+    _write_dummy_image(raw_img, width=220, height=120)
+
+    class _StubValidator:
+        def __init__(self):
+            self._structure_preprocess_enabled = False
+            self.extract_called = 0
+            self.validate_called = 0
+
+        def extract_structured_screenshots(self, image_path: str, source_id: str = "", timestamp_sec=None):
+            self.extract_called += 1
+            return []
+
+        def dedupe_structured_candidates_keep_latest(self, candidates):
+            return candidates
+
+        def validate(self, image_path: str, skip_duplicate_check: bool = False):
+            self.validate_called += 1
+            return SimpleNamespace(should_include=True, img_description="ok", reason="")
+
+    stub_validator = _StubValidator()
+    pipeline._concrete_validator = stub_validator
+
+    unit = SemanticUnit(
+        unit_id="SU932",
+        knowledge_type="concrete",
+        knowledge_topic="topic",
+        full_text="demo",
+        source_paragraph_ids=[],
+        source_sentence_ids=[],
+        start_sec=0.0,
+        end_sec=8.0,
+    )
+
+    requests = MaterialRequests(
+        screenshot_requests=[
+            ScreenshotRequest(
+                screenshot_id="SU932/raw",
+                timestamp_sec=3.0,
+                label="head",
+                semantic_unit_id="SU932",
+            )
+        ],
+        clip_requests=[],
+        action_classifications=[],
+    )
+
+    pipeline._apply_external_materials(
+        unit=unit,
+        screenshots_dir=str(screenshots_dir),
+        clips_dir=str(clips_dir),
+        material_requests=requests,
+    )
+
+    assert stub_validator.extract_called == 0
+    assert stub_validator.validate_called == 1
+    assert unit.materials is not None
+    assert unit.materials.screenshot_paths == [str(raw_img.resolve())]
+    assert raw_img.exists()
 
 
 def test_apply_external_materials_pre_dedup_skips_repeated_ppstructure_and_validate(tmp_path):

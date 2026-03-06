@@ -77,7 +77,7 @@ class FrameScore:
     # 璇勫垎
     S1_stability: float     # 绋冲畾鎬?(MSE-based) 0-100
     S2_info_density: float  # 淇℃伅瀵嗗害 (Standard 2) 0-100
-    S3_completeness: float  # 鏋舵瀯瀹屾暣鎬?(Standard 3: 绠ご/鐭╁舰) 0-100
+    S3_completeness: float  # 鏋舵瀯瀹屾暣鎬?(Standard 3: 绠ご/鐭╁舰) 0-100
     S4_no_occlusion: float  # 鏃犻伄鎸¤瘎鍒?0-100
     final_score: float      # 缁煎悎璇勫垎 0-100
     
@@ -91,7 +91,7 @@ class FrameScore:
 @dataclass
 class ScreenshotSelection:
     """
-    鎴浘閫夋嫨缁撴灉
+    鎴浘閫夋嫨缁撴灉
     """
     selected_frame_idx: int
     selected_timestamp: float
@@ -150,7 +150,7 @@ def _analyze_frame_quality_worker(frame: np.ndarray) -> Tuple[float, float, floa
 
 class ScreenshotSelector:
     """
-    鎴浘閫夋嫨鍣?(V6.2 Refined Logic)
+    鎴浘閫夋嫨鍣?(V6.2 Refined Logic)
     
     Improvements:
     1. Fluctuation Tolerance Island Clustering (<=2 jitter frames)
@@ -176,7 +176,7 @@ class ScreenshotSelector:
             from services.python_grpc.src.content_pipeline.infra.runtime.config_loader import load_module2_config
             config = load_module2_config()
         
-        # V6.2 榛樿涓ユ牸鏉冮噸
+        # V6.2 榛樿涓ユ牸鏉冮噸
         self.WEIGHT_S1 = 0.2
         self.WEIGHT_S2 = 0.3
         self.WEIGHT_S3 = 0.4
@@ -189,11 +189,11 @@ class ScreenshotSelector:
         """
         馃殌 宸ュ巶鏂规硶锛氬垱寤鸿交閲忕骇瀹炰緥锛堢敤浜?ProcessPool Worker锛?
         
-        涓嶅垵濮嬪寲 visual_extractor锛堝湪 Worker 涓笉闇€瑕佽鍙栬棰戯級
+        涓嶅垵濮嬪寲 visual_extractor锛堝湪 Worker 涓笉闇€瑕佽鍙栬棰戯級
         """
         instance = object.__new__(cls)
         instance.visual_extractor = None
-        instance.detector = None  # 寤惰繜鍒濆鍖?
+        instance.detector = None  # 寤惰繜鍒濆鍖?
         instance.WEIGHT_S1 = 0.2
         instance.WEIGHT_S2 = 0.3
         instance.WEIGHT_S3 = 0.4
@@ -211,21 +211,22 @@ class ScreenshotSelector:
         frames: List[np.ndarray],
         timestamps: List[float],
         fps: float = 30.0,
-        res_factor: float = 1.0
+        res_factor: float = 1.0,
+        min_static_island_ms: float = 200.0,
     ) -> dict:
         """
-        馃殌 ProcessPool 鍏煎鐗堟湰锛氫粠棰勮鍙栫殑甯т腑閫夋嫨鏈€浣虫埅鍥?
+        馃殌 ProcessPool 鍏煎鐗堟湰锛氫粠棰勮鍙栫殑甯т腑閫夋嫨鏈€浣虫埅鍥?
         
         淇濈暀瀹屾暣鐨勫矝灞胯仛绫?+ 鍗氬紙 + 鎷╀紭閫昏緫锛屼絾锛?
-        1. 鎺ュ彈棰勮鍙栫殑甯э紙鑰岄潪浠庤棰戣鍙栵級
-        2. 鍚屾鎵ц锛堣€岄潪 async锛?
+        1. 鎺ュ彈棰勮鍙栫殑甯э紙鑰岄潪浠庤棰戣鍙栵級
+        2. 鍚屾鎵ц锛堣€岄潪 async锛?
         3. 涓嶄繚瀛樻枃浠讹紙浠呰繑鍥炴椂闂存埑锛?
         
         Args:
-            frames: 棰勮鍙栫殑甯у垪琛?
+            frames: 棰勮鍙栫殑甯у垪琛?
             timestamps: 瀵瑰簲鐨勬椂闂存埑鍒楄〃
-            fps: 瑙嗛甯х巼
-            res_factor: 鍒嗚鲸鐜囩郴鏁帮紙鐩稿浜?1080p锛?
+            fps: 瑙嗛甯х巼
+            res_factor: 鍒嗚鲸鐜囩郴鏁帮紙鐩稿浜?1080p锛?
             
         Returns:
             {
@@ -242,14 +243,15 @@ class ScreenshotSelector:
                 "selected_timestamp": timestamps[0] if timestamps else 0.0,
                 "quality_score": 0.0,
                 "island_count": 0,
-                "analyzed_frames": 0
+                "analyzed_frames": 0,
+                "candidates": [],
             }
         
-        # 1. 璇嗗埆鍐呭绫诲瀷浠ヨ皟鏁撮槇鍊?
+        # 1. 璇嗗埆鍐呭绫诲瀷浠ヨ皟鏁撮槇鍊?
         content_type = self._identify_action_type_v6(frames[0])
         threshold_config = self._get_adaptive_threshold(content_type, res_factor, fps)
         
-        # 2. 璁＄畻甯ч棿 MSE 宸紓锛堝悓姝ョ増鏈級
+        # 2. 璁＄畻甯ч棿 MSE 宸紓锛堝悓姝ョ増鏈級
         mse_diffs = []
         analysis_frames = frames
         for i in range(len(analysis_frames) - 1):
@@ -267,13 +269,14 @@ class ScreenshotSelector:
             struct_mse_diffs.append(np.mean(diff) / (255 * 255))
         struct_mse_diffs.append(0.0)
         
-        # 4. 鍚屾璁＄畻璐ㄩ噺鎸囨爣
+        # 4. 鍚屾璁＄畻璐ㄩ噺鎸囨爣
         quality_results = [_analyze_frame_quality_worker(f) for f in frames]
         
         # 5. 娉㈠姩瀹瑰繊鑱氱被
         PIXEL_THRESH = threshold_config["pixel_mse"]
         STRUCT_THRESH = threshold_config["struct_mse"]
-        MIN_STABLE_LEN = threshold_config["min_stable_frames"]
+        safe_fps = max(1.0, float(fps) if fps else 1.0)
+        MIN_STABLE_LEN = max(1, int(np.ceil(max(0.0, float(min_static_island_ms)) / 1000.0 * safe_fps)))
         
         islands = []
         current_island = []
@@ -304,7 +307,7 @@ class ScreenshotSelector:
                 current_island = []
                 fluctuation_count = 0
         
-        # 澶勭悊鏈€鍚庝竴涓矝灞?
+        # 澶勭悊鏈€鍚庝竴涓矝灞?
         if len(current_island) >= MIN_STABLE_LEN:
             islands.append(self._finalize_island_sync(current_island, quality_results, mse_diffs, frames))
         
@@ -324,7 +327,16 @@ class ScreenshotSelector:
                 "selected_timestamp": timestamps[best_idx],
                 "quality_score": best_score,
                 "island_count": 0,
-                "analyzed_frames": len(frames)
+                "analyzed_frames": len(frames),
+                "candidates": [
+                    {
+                        "timestamp_sec": float(timestamps[best_idx]),
+                        "score": float(best_score),
+                        "island_index": 0,
+                        "island_start": float(timestamps[best_idx]),
+                        "island_end": float(timestamps[best_idx]),
+                    }
+                ],
             }
         
         # 7. 杩囨护鏈夋晥宀涘笨
@@ -333,29 +345,39 @@ class ScreenshotSelector:
         if not valid_islands:
             valid_islands = islands  # 鍥為€€鍒版墍鏈夊矝灞?
         
-        # 8. 宀涘笨鍘婚噸锛堢畝鍖栫増鏈紝閬垮厤 SSIM 璁＄畻寮€閿€锛?
+        # 8. 宀涘笨鍘婚噸锛堢畝鍖栫増鏈紝閬垮厤 SSIM 璁＄畻寮€閿€锛?
         unique_islands = self._deduplicate_islands_simple(valid_islands, timestamps)
         
         if not unique_islands:
             unique_islands = valid_islands
         
         # 9. 宀涘唴鎷╀紭
-        best_island = None
-        best_island_score = -1
+        candidates: List[Dict[str, float]] = []
+        best_island_score = -1.0
         best_frame_idx = 0
-        
-        for island in unique_islands:
+
+        for island_index, island in enumerate(unique_islands):
             idx, score = self._select_intra_island_winner_sync(island, frames, quality_results)
-            if score > best_island_score:
-                best_island_score = score
+            candidate = {
+                "timestamp_sec": float(timestamps[idx]),
+                "score": float(score),
+                "island_index": int(island_index),
+                "island_start": float(timestamps[island["indices"][0]]),
+                "island_end": float(timestamps[island["indices"][-1]]),
+            }
+            candidates.append(candidate)
+            if float(score) > best_island_score:
+                best_island_score = float(score)
                 best_frame_idx = idx
-                best_island = island
-        
+
+        candidates.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+
         return {
             "selected_timestamp": timestamps[best_frame_idx],
             "quality_score": best_island_score,
             "island_count": len(unique_islands),
-            "analyzed_frames": len(frames)
+            "analyzed_frames": len(frames),
+            "candidates": candidates,
         }
     
     def _finalize_island_sync(self, indices, quality_results, mse_diffs, frames):
@@ -363,7 +385,7 @@ class ScreenshotSelector:
         avg_lap = np.mean([quality_results[i][0] for i in indices])
         avg_ent = np.mean([quality_results[i][1] for i in indices])
         
-        # 蹇€?S4 浼扮畻锛堟娊鏍烽灏句腑锛?
+        # 蹇€?S4 浼扮畻锛堟娊鏍烽灏句腑锛?
         sample_indices = [indices[0], indices[-1], indices[len(indices)//2]]
         s4_vals = [self._calculate_S4_no_occlusion_v6(frames[i]) for i in sample_indices]
         avg_s4 = np.mean(s4_vals)
@@ -395,17 +417,17 @@ class ScreenshotSelector:
                 if len(fluct_frames) / len(island["indices"]) > 0.2:
                     continue
             
-            # 鍐呭瀵嗗害妫€鏌?
+            # 鍐呭瀵嗗害妫€鏌?
             if island["avg_entropy"] < global_ent_mean * 0.5:
                 continue
             
-            # 娓呮櫚搴︽鏌?
+            # 娓呮櫚搴︽鏌?
             sharp_thresh = max(10.0, max_sharp * 0.6)
             sharp_count = sum(1 for idx in island["indices"] if quality_results[idx][0] > sharp_thresh)
             if sharp_count / len(island["indices"]) < 0.6:
                 continue
             
-            # 閬尅妫€鏌?
+            # 閬尅妫€鏌?
             if island["avg_s4"] < 50:
                 continue
             
@@ -420,14 +442,14 @@ class ScreenshotSelector:
         
         unique = [islands[0]]
         for island in islands[1:]:
-            # 濡傛灉涓や釜宀涘笨鐨勪腑蹇冩椂闂村樊 > 2s锛岃涓烘槸涓嶅悓鍐呭
+            # 濡傛灉涓や釜宀涘笨鐨勪腑蹇冩椂闂村樊 > 2s锛岃涓烘槸涓嶅悓鍐呭
             last_mid = timestamps[unique[-1]["indices"][len(unique[-1]["indices"])//2]]
             curr_mid = timestamps[island["indices"][len(island["indices"])//2]]
             
             if abs(curr_mid - last_mid) > 2.0:
                 unique.append(island)
             else:
-                # 淇濈暀鍚庝竴涓紙閫氬父鍐呭鏇村畬鏁达級
+                # 淇濈暀鍚庝竴涓紙閫氬父鍐呭鏇村畬鏁达級
                 unique[-1] = island
         
         return unique
@@ -458,9 +480,9 @@ class ScreenshotSelector:
         max_width: Optional[int] = None,
     ) -> Tuple[List[float], List[np.ndarray]]:
         """
-        椤哄簭璇诲抚妯″紡锛氭寜鏃堕棿鎴虫帓搴忓悗锛屽敖閲忎互杩炵画 read() 浠ｆ浛澶氭闅忔満 seek銆?
+        椤哄簭璇诲抚妯″紡锛氭寜鏃堕棿鎴虫帓搴忓悗锛屽敖閲忎互杩炵画 read() 浠ｆ浛澶氭闅忔満 seek銆?
 
-        鐩爣锛氶檷浣?cap.set(...) 楂橀璋冪敤甯︽潵鐨?IO/瑙ｇ爜寮€閿€銆?
+        鐩爣锛氶檷浣?cap.set(...) 楂橀璋冪敤甯︽潵鐨?IO/瑙ｇ爜寮€閿€銆?
         """
         if not timestamps:
             return [], []
@@ -562,10 +584,10 @@ class ScreenshotSelector:
         roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> np.ndarray:
         """
-        鍦?ROI 鍐呰鍓抚锛岀敤浜庡噺灏戝瓧骞曠瓑杈圭紭鍣０骞叉壈銆?
+        鍦?ROI 鍐呰鍓抚锛岀敤浜庡噺灏戝瓧骞曠瓑杈圭紭鍣０骞叉壈銆?
         鍋氫粈涔堬細
-        - 灏嗗悗缁ǔ瀹氬矝妫€娴嬩笌宀涘唴閫変紭闄愬畾鍒?ROI 鍖哄煙銆?        涓轰粈涔堬細
-        - 璺敱鎴浘鍦烘櫙甯告湁搴曢儴瀛楀箷鏉★紝鐩存帴鍙備笌璇勫垎浼氭媺浣庣ǔ瀹氭€у垽鏂川閲忋€?        """
+        - 灏嗗悗缁ǔ瀹氬矝妫€娴嬩笌宀涘唴閫変紭闄愬畾鍒?ROI 鍖哄煙銆?        涓轰粈涔堬細
+        - 璺敱鎴浘鍦烘櫙甯告湁搴曢儴瀛楀箷鏉★紝鐩存帴鍙備笌璇勫垎浼氭媺浣庣ǔ瀹氭€у垽鏂川閲忋€?        """
         if frame is None or roi is None:
             return frame
         try:
@@ -589,6 +611,7 @@ class ScreenshotSelector:
         end_sec: float,
         coarse_fps: float = 2.0,
         fine_fps: float = 10.0,
+        min_static_island_ms: float = 200.0,
         roi: Optional[Tuple[int, int, int, int]] = None,
         stable_islands_override: Optional[List[Tuple[float, float]]] = None,
         action_segments_override: Optional[List[Tuple[float, float]]] = None,
@@ -599,9 +622,9 @@ class ScreenshotSelector:
         decode_enable_async_transcode: Optional[bool] = None,
     ) -> List[Dict]:
         """
-        馃殌 鍏堢矖鍚庣粏鎴浘閫夋嫨 (鍚屾鐗堟湰锛岀敤浜?ProcessPool - 浠嶉渶鑷璇诲彇甯?
+        馃殌 鍏堢矖鍚庣粏鎴浘閫夋嫨 (鍚屾鐗堟湰锛岀敤浜?ProcessPool - 浠嶉渶鑷璇诲彇甯?
         
-        鈿狅笍 娉ㄦ剰: 姝ゆ柟娉曚粛鐒跺湪 Worker 涓鍙栧抚锛岀敤浜庣畝鍗曞満鏅€?
+        鈿狅笍 娉ㄦ剰: 姝ゆ柟娉曚粛鐒跺湪 Worker 涓鍙栧抚锛岀敤浜庣畝鍗曞満鏅€?
         瀵逛簬楂樻€ц兘鍦烘櫙锛屽簲浣跨敤 detect_stable_islands_from_frames + select_best_frame_from_frames
         """
         import time
@@ -637,6 +660,8 @@ class ScreenshotSelector:
         
         # Stage 1: 绮楅噰鏍凤紙椤哄簭璇诲抚锛屽噺灏戦殢鏈?seek锛?
         coarse_interval = 1.0 / coarse_fps
+        safe_min_island_ms = max(0.0, float(min_static_island_ms or 0.0))
+        min_island_len = max(1, int(np.ceil((safe_min_island_ms / 1000.0) / max(coarse_interval, 1e-6))))
         coarse_ts_candidates = []
         t = start_sec
         while t < end_sec:
@@ -676,6 +701,7 @@ class ScreenshotSelector:
                 coarse_frames,
                 coarse_timestamps,
                 coarse_interval,
+                min_island_len=min_island_len,
                 roi=roi,
             )
         
@@ -720,7 +746,7 @@ class ScreenshotSelector:
             else:
                 islands = [{"start_sec": s, "end_sec": e} for s, e in action_ranges]
         
-        # Stage 2: 缁嗛噰鏍烽€夋渶浣冲抚锛堥『搴忚甯?+ 骞惰璐ㄩ噺璇勫垎锛?
+        # Stage 2: 缁嗛噰鏍烽€夋渶浣冲抚锛堥『搴忚甯?+ 骞惰璐ㄩ噺璇勫垎锛?
         results = []
         fine_interval = 1.0 / fine_fps
         
@@ -798,12 +824,12 @@ class ScreenshotSelector:
         roi: Optional[Tuple[int, int, int, int]] = None,
     ) -> List[Dict]:
         """
-        馃殌 Stage 1: 浠庨璇诲彇鐨勫抚涓瘑鍒ǔ瀹氬矝 (绾绠楋紝鏃?IO)
+        馃殌 Stage 1: 浠庨璇诲彇鐨勫抚涓瘑鍒ǔ瀹氬矝 (绾绠楋紝鏃?IO)
         
         鐢ㄤ簬 ProcessPool Worker锛屾帴鏀朵富杩涚▼閫氳繃 SharedMemory 浼犻€掔殑甯?
         
         Args:
-            frames: 棰勮鍙栫殑甯у垪琛?
+            frames: 棰勮鍙栫殑甯у垪琛?
             timestamps: 瀵瑰簲鐨勬椂闂存埑鍒楄〃
             interval: 閲囨牱闂撮殧
             stable_thresh: MSE 绋冲畾闃堝€?
@@ -841,7 +867,7 @@ class ScreenshotSelector:
                     })
                 current_island_indices = []
         
-        # 澶勭悊鏈熬
+        # 澶勭悊鏈熬
         if len(current_island_indices) >= min_island_len:
             islands.append({
                 "start_sec": timestamps[current_island_indices[0]],
@@ -859,12 +885,12 @@ class ScreenshotSelector:
         return_index: bool = False,
     ) -> Tuple[float, float]:
         """
-        馃殌 Stage 2: 浠庨璇诲彇鐨勫抚涓€夋嫨鏈€浣冲抚 (绾绠楋紝鏃?IO)
+        馃殌 Stage 2: 浠庨璇诲彇鐨勫抚涓€夋嫨鏈€浣冲抚 (绾绠楋紝鏃?IO)
         
         鐢ㄤ簬 ProcessPool Worker锛屾帴鏀朵富杩涚▼閫氳繃 SharedMemory 浼犻€掔殑甯?
         
         Args:
-            frames: 棰勮鍙栫殑甯у垪琛?
+            frames: 棰勮鍙栫殑甯у垪琛?
             timestamps: 瀵瑰簲鐨勬椂闂存埑鍒楄〃
             
         Returns:
@@ -928,7 +954,7 @@ class ScreenshotSelector:
         end_sec: float,
         output_dir: str = None,
         output_name: str = None,
-        save_image: bool = True  # 馃挜 鏂板: 鏄惁淇濆瓨鍥剧墖鏂囦欢
+        save_image: bool = True  # 馃挜 鏂板: 鏄惁淇濆瓨鍥剧墖鏂囦欢
     ) -> ScreenshotSelection:
         """
         V6.2 鏍稿績娴佺▼: 娉㈠姩瀹瑰繊鑱氱被 + 宀涘笨鍗氬紙 + 宀涘唴鎷╀紭
@@ -940,10 +966,10 @@ class ScreenshotSelector:
         fps = self._get_video_fps(video_path)
         safe_end_sec = max(start_sec + 1.0, end_sec)
         
-        # 2. 璋冪敤鍏ㄥ眬鑷€傚簲鍐崇瓥寮曟搸 (Phase 6.9: Unified Features)
+        # 2. 璋冪敤鍏ㄥ眬鑷€傚簲鍐崇瓥寮曟搸 (Phase 6.9: Unified Features)
         refined_visual = await self.visual_extractor.extract_visual_features(start_sec, safe_end_sec, sample_rate=1)
         
-        # 浠庣紦瀛樻垨杩斿洖瀵硅薄涓幏鍙栨暟鎹?
+        # 浠庣紦瀛樻垨杩斿洖瀵硅薄涓幏鍙栨暟鎹?
         cache = self.visual_extractor.get_cached_content(start_sec, safe_end_sec, sample_rate=1)
         if not cache or not cache.enhanced_frames:
              return await self._handle_empty_frames_complex(start_sec, safe_end_sec, output_dir)
@@ -956,19 +982,19 @@ class ScreenshotSelector:
         video_width = frames[0].shape[1]
         res_factor = video_width / 1920.0
         
-        # 璇嗗埆鍐呭绫诲瀷浠ヨ皟鏁撮槇鍊?
+        # 璇嗗埆鍐呭绫诲瀷浠ヨ皟鏁撮槇鍊?
         content_type = self._identify_action_type_v6(frames[0])
         threshold_config = self._get_adaptive_threshold(content_type, res_factor, fps)
         
         logger.info(f"Selecting V6.9 ({content_type}, ResFactor={res_factor:.2f}) from {start_sec:.2f}s to {safe_end_sec:.2f}s")
         
-        # 4. 鍩虹鎸囨爣鍏ㄩ噺骞惰璁＄畻
+        # 4. 鍩虹鎸囨爣鍏ㄩ噺骞惰璁＄畻
         import asyncio
         from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import get_visual_process_pool
         loop = asyncio.get_running_loop()
         executor = get_visual_process_pool()
         
-        # 4.5 棰勮绠楄竟缂樺浘浠ョ敤浜庣粨鏋?MSE (V6.2 Struct-MSE)
+        # 4.5 棰勮绠楄竟缂樺浘浠ョ敤浜庣粨鏋?MSE (V6.2 Struct-MSE)
         edge_maps = [cv2.Canny(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY), 50, 150) for f in frames]
         
         # Struct-MSE 鏍稿績璁＄畻 (Numba 鍔犻€熺増)
@@ -987,7 +1013,7 @@ class ScreenshotSelector:
         if len(mse_diffs_actual) < len(timestamps):
             mse_diffs_actual.append(0.0)
 
-        # Quality Worker 骞惰
+        # Quality Worker 骞惰
         quality_tasks = [loop.run_in_executor(executor, _analyze_frame_quality_worker, f) for f in frames]
         quality_results = await asyncio.gather(*quality_tasks) # [(lap, ent, sharp, cont), ...]
         
@@ -1000,10 +1026,10 @@ class ScreenshotSelector:
         current_island = []
         fluctuation_count = 0 # 瀹归敊璁℃暟鍣?
         
-        MAX_FLUCT_MSE = PIXEL_THRESH * 3.0 # 鍏佽鐬棿鎶栧姩鍒?3 鍊嶉槇鍊?(e.g. 榧犳爣椋炶繃)
+        MAX_FLUCT_MSE = PIXEL_THRESH * 3.0 # 鍏佽鐬棿鎶栧姩鍒?3 鍊嶉槇鍊?(e.g. 榧犳爣椋炶繃)
         MAX_FLUCT_SMSE = STRUCT_THRESH * 3.0
         
-        # 璐ㄩ噺闂ㄦ (Quality Gate: Laplacian > 10.0*res_factor, Contrast > 0.15)
+        # 璐ㄩ噺闂ㄦ (Quality Gate: Laplacian > 10.0*res_factor, Contrast > 0.15)
         LAP_GATE = 10.0 * res_factor
         CONT_GATE = 0.15
         
@@ -1015,30 +1041,30 @@ class ScreenshotSelector:
             is_visually_stable = (mse < PIXEL_THRESH) and (smse < STRUCT_THRESH)
             is_high_quality = (lap > LAP_GATE) and (contrast > CONT_GATE)
             
-            # 瀹归敊鍒ゅ畾: 濡傛灉涓嶇ǔ瀹氾紝浣嗘姈鍔ㄥ湪瀹瑰繊鑼冨洿鍐咃紝涓斾笉绠楀お涔咃紝涓旂敾闈緷鐒舵竻鏅?
+            # 瀹归敊鍒ゅ畾: 濡傛灉涓嶇ǔ瀹氾紝浣嗘姈鍔ㄥ湪瀹瑰繊鑼冨洿鍐咃紝涓斾笉绠楀お涔咃紝涓旂敾闈緷鐒舵竻鏅?
             is_tolerable_fluctuation = (mse < MAX_FLUCT_MSE) and (smse < MAX_FLUCT_SMSE) and is_high_quality
             
             if is_visually_stable and is_high_quality:
-                # 瀹岀編绋冲畾甯? 鍔犲叆宀涘笨锛岄噸缃姈鍔ㄨ鏁?
+                # 瀹岀編绋冲畾甯? 鍔犲叆宀涘笨锛岄噸缃姈鍔ㄨ鏁?
                 current_island.append(i)
                 fluctuation_count = 0 
                 
             elif is_tolerable_fluctuation and len(current_island) > 0 and fluctuation_count < 2:
-                # 瀹瑰繊鎶栧姩甯? 鏆傛椂鍔犲叆宀涘笨锛屽鍔犳姈鍔ㄨ鏁?
-                # 馃挜 绋冲畾鎬у寮? 纭繚宀涘唴鎶栧姩姣斾緥涓嶈秴杩?20%
+                # 瀹瑰繊鎶栧姩甯? 鏆傛椂鍔犲叆宀涘笨锛屽鍔犳姈鍔ㄨ鏁?
+                # 馃挜 绋冲畾鎬у寮? 纭繚宀涘唴鎶栧姩姣斾緥涓嶈秴杩?20%
                 current_island.append(i)
                 fluctuation_count += 1
                 
             else:
-                # 褰诲簳鏂紑: 缁撶畻褰撳墠宀涘笨
+                # 褰诲簳鏂紑: 缁撶畻褰撳墠宀涘笨
                 if len(current_island) >= MIN_STABLE_LEN:
-                    # 鍙湁褰撳矝灞夸笉浠呬粎鐢辨姈鍔ㄥ抚缁勬垚鏃舵墠鏈夋晥 (绠€鍗曟牎楠? 闀垮害澶熼暱閫氬父鎰忓懗鐫€鍖呭惈绋冲畾甯?
+                    # 鍙湁褰撳矝灞夸笉浠呬粎鐢辨姈鍔ㄥ抚缁勬垚鏃舵墠鏈夋晥 (绠€鍗曟牎楠? 闀垮害澶熼暱閫氬父鎰忓懗鐫€鍖呭惈绋冲畾甯?
                      islands.append(self._finalize_island(current_island, quality_results, mse_diffs_actual, frames))
                 
                 current_island = []
                 fluctuation_count = 0
 
-        # 澶勭悊鏈€鍚庝竴涓矝灞?
+        # 澶勭悊鏈€鍚庝竴涓矝灞?
         if len(current_island) >= MIN_STABLE_LEN:
             islands.append(self._finalize_island(current_island, quality_results, mse_diffs_actual, frames))
 
@@ -1185,12 +1211,12 @@ class ScreenshotSelector:
             return best_of_all if best_of_all else self._fallback_select(frames, timestamps, quality_results, output_dir, save_image)
 
     def _finalize_island(self, indices, quality_results, mse_diffs, frames):
-        """缁撶畻宀涘笨缁熻鎸囨爣"""
+        """缁撶畻宀涘笨缁熻鎸囨爣"""
         # avg_laplacian is index 0 in quality_results
         avg_lap = np.mean([quality_results[i][0] for i in indices])
         avg_ent = np.mean([quality_results[i][1] for i in indices])
         
-        # 蹇€?S4 浼扮畻 (鎶芥牱棣栧熬涓?
+        # 蹇€?S4 浼扮畻 (鎶芥牱棣栧熬涓?
         sample_indices = [indices[0], indices[-1], indices[len(indices)//2]]
         s4_vals = [self._calculate_S4_no_occlusion_v6(frames[i]) for i in sample_indices]
         avg_s4 = np.mean(s4_vals)
@@ -1224,7 +1250,7 @@ class ScreenshotSelector:
         return best_idx
 
     def _identify_action_type_v6(self, frame_sample) -> str:
-        """V6 鍐呭鍒嗙被"""
+        """V6 鍐呭鍒嗙被"""
         gray = cv2.cvtColor(frame_sample, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
         rect_count = self.detector.detect_rectangles(edges)
@@ -1242,8 +1268,8 @@ class ScreenshotSelector:
         base_struct = 0.0015
         
         scale_map = {
-            "handwriting": {"p": 1.5, "s": 1.5, "time": 0.5}, # 鍏佽澶ф尝鍔紝鐭椂闂?
-            "ppt_complex": {"p": 0.8, "s": 0.8, "time": 0.8}, # 瑕佹眰绋冲畾锛岀◢鐭椂闂?
+            "handwriting": {"p": 1.5, "s": 1.5, "time": 0.5}, # 鍏佽澶ф尝鍔紝鐭椂闂?
+            "ppt_complex": {"p": 0.8, "s": 0.8, "time": 0.8}, # 瑕佹眰绋冲畾锛岀◢鐭椂闂?
             "ppt_basic":   {"p": 1.0, "s": 1.0, "time": 0.6},
             "popup":       {"p": 1.0, "s": 1.0, "time": 0.5}
         }
@@ -1280,7 +1306,7 @@ class ScreenshotSelector:
         best_idx = 0
         
         for i, (lap, ent, sharp, cont) in enumerate(quality_results):
-            # 鏃堕棿鏉冮噸: 瓒婇潬鍚庤秺閲嶈 (鍋囪鏉夸功鍐欏畬浜?
+            # 鏃堕棿鏉冮噸: 瓒婇潬鍚庤秺閲嶈 (鍋囪鏉夸功鍐欏畬浜?
             time_bias = 1.0 + (i / len(frames)) * 0.5
             score = ent * lap * time_bias
             if score > best_score:
@@ -1324,7 +1350,7 @@ class ScreenshotSelector:
 
     def filter_valid_islands(self, islands: list, frames: list, quality_results: list, mse_diffs_ref: list, pixel_thresh_ref: float) -> list:
         """
-        V6.3 杩囨护鏈夋晥宀涘笨: 淇濈暀绋冲畾涓旀湁鍐呭浠峰€肩殑宀?
+        V6.3 杩囨护鏈夋晥宀涘笨: 淇濈暀绋冲畾涓旀湁鍐呭浠峰€肩殑宀?
         Criteria:
         1. Duration > 0.6s (Handled in clustering)
         2. Entropy > Global Mean * 0.5
@@ -1339,8 +1365,8 @@ class ScreenshotSelector:
         
         valid_islands = []
         for island in islands:
-            # 0. 绋冲畾鎬т慨姝? 妫€鏌ユ姈鍔ㄥ抚鍗犳瘮 (闃叉浼矝灞?
-            # 鎴戜滑鍋囪宀涘唴杩炵画鎶栧姩 > 2 宸茬粡鏂紑锛屼絾鍙兘鎬诲崰姣斾緷鐒跺緢楂?
+            # 0. 绋冲畾鎬т慨姝? 妫€鏌ユ姈鍔ㄥ抚鍗犳瘮 (闃叉浼矝灞?
+            # 鎴戜滑鍋囪宀涘唴杩炵画鎶栧姩 > 2 宸茬粡鏂紑锛屼絾鍙兘鎬诲崰姣斾緷鐒跺緢楂?
             # 杩欓噷寮哄埗瑕佹眰宀涘唴楂樿川閲忓崰姣?> 80%
             if "indices" in island:
                 fluct_frames = [idx for idx in island["indices"] if mse_diffs_ref[idx] > pixel_thresh_ref] 
@@ -1373,7 +1399,7 @@ class ScreenshotSelector:
 
     def deduplicate_islands(self, valid_islands: list, frames: list) -> list:
         """
-        V6.3 宀涘笨鍘婚噸: 鍩轰簬 SSIM 淇濈暀鍞竴鍐呭宀?
+        V6.3 宀涘笨鍘婚噸: 鍩轰簬 SSIM 淇濈暀鍞竴鍐呭宀?
         Strategy:
         - Pick temp best frame for each island
         - Compare SSIM of effective content regions
@@ -1429,7 +1455,7 @@ class ScreenshotSelector:
 
     def _export_debug_trace_tiered(self, data, output_dir, ts, frames, timestamps, islands, quality_results, sharp_thresh, contrast_thresh):
         """
-        瀵煎嚭鍒嗗眰绾у喅绛栭摼涓庡鐓у浘 (V6.2 Lean Mode)
+        瀵煎嚭鍒嗗眰绾у喅绛栭摼涓庡鐓у浘 (V6.2 Lean Mode)
         鐢ㄦ埛瑕佹眰: 涓嶉渶瑕?Quality Pass, 閲嶇偣鍖哄埆宀涘笨涓庡矝灞?
         """
         if not output_dir: return
@@ -1442,7 +1468,7 @@ class ScreenshotSelector:
             with open(case_dir / "decision_trace.json", 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4, ensure_ascii=False)
                 
-            # 2. Layer 1: Raw Samples (鍥哄畾瀵嗗害閲囨牱 - 瑙嗚鍙傝€?
+            # 2. Layer 1: Raw Samples (鍥哄畾瀵嗗害閲囨牱 - 瑙嗚鍙傝€?
             raw_dir = case_dir / "01_raw_samples"
             raw_dir.mkdir(exist_ok=True)
             step = max(1, len(frames) // 10)
@@ -1494,7 +1520,7 @@ class ScreenshotSelector:
             logger.error(f"Tiered debug trace failed: {e}", exc_info=True)
 
 
-    # 鍏煎鎬у厹搴曟柟娉曪細鍋氫粈涔堟槸淇濈暀鏃ф帴鍙ｏ紱涓轰粈涔堟槸閬垮厤璋冪敤鏂规柇瑁傦紱鏉冭　鏄€昏緫杈冪畝鍖?
+    # 鍏煎鎬у厹搴曟柟娉曪細鍋氫粈涔堟槸淇濈暀鏃ф帴鍙ｏ紱涓轰粈涔堟槸閬垮厤璋冪敤鏂规柇瑁傦紱鏉冭　鏄€昏緫杈冪畝鍖?
     def _get_video_fps(self, path):
         """兼容旧接口：返回视频 FPS。"""
         return self.visual_extractor.fps
@@ -1504,7 +1530,7 @@ class ScreenshotSelector:
         """空帧兜底：返回默认空选择结果。"""
         return self._create_empty_selection(s)
 
-    # 绌洪€夋嫨鏋勯€狅細鍋氫粈涔堟槸鐢熸垚榛樿 ScreenshotSelection锛涗负浠€涔堟槸缁熶竴杩斿洖缁撴瀯锛涙潈琛℃槸缁嗚妭淇℃伅缂哄け
+    # 绌洪€夋嫨鏋勯€狅細鍋氫粈涔堟槸鐢熸垚榛樿 ScreenshotSelection锛涗负浠€涔堟槸缁熶竴杩斿洖缁撴瀯锛涙潈琛℃槸缁嗚妭淇℃伅缂哄け
     def _create_empty_selection(self, ts):
         """生成空的 `ScreenshotSelection`。"""
         return ScreenshotSelection(0, ts, "", 0, 0, 0, 0, 0, [])
@@ -1512,13 +1538,13 @@ class ScreenshotSelector:
         """
         浣跨敤 FFmpeg 鎻愬彇楂樺垎杈ㄧ巼甯?
         
-        馃挜 閲嶆瀯: 涓嶅啀浣跨敤 OpenCV 浠ｇ悊甯э紝鐩存帴浠庡師濮嬭棰戞彁鍙栭珮鍒嗚鲸鐜囧抚
+        馃挜 閲嶆瀯: 涓嶅啀浣跨敤 OpenCV 浠ｇ悊甯э紝鐩存帴浠庡師濮嬭棰戞彁鍙栭珮鍒嗚鲸鐜囧抚
         """
         import subprocess
         
         if not output_dir: output_dir = "screenshots"
         
-        # 纭畾杈撳嚭鏂囦欢鍚?
+        # 纭畾杈撳嚭鏂囦欢鍚?
         final_name = output_name or getattr(self, '_current_output_name', None)
         if final_name:
             p = Path(output_dir) / f"{final_name}.png"
@@ -1526,7 +1552,7 @@ class ScreenshotSelector:
             p = Path(output_dir) / f"screenshot_{ts:.2f}s.png"
         p.parent.mkdir(parents=True, exist_ok=True)
         
-        # 鑾峰彇瑙嗛璺緞 (浠?visual_extractor)
+        # 鑾峰彇瑙嗛璺緞 (浠?visual_extractor)
         video_path = getattr(self.visual_extractor, 'video_path', None)
         
         if video_path and Path(video_path).exists():

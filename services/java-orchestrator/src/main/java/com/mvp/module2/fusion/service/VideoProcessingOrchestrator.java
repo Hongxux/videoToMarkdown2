@@ -235,6 +235,7 @@ public class VideoProcessingOrchestrator {
         public boolean downloadedFromUrl;
         public String cleanupSourcePath;
         public DownloadResult downloadResult;
+        public String subtitlePath;
         public Stage1Result stage1Result;
         public DynamicTimeoutCalculator.TimeoutConfig timeouts;
         public long pipelineStartTimeMs;
@@ -581,8 +582,13 @@ public class VideoProcessingOrchestrator {
     }
 
     public IOPhaseResult processVideoIOPhase(String taskId, String videoUrl, String outputDir) throws Exception {
+        IOPhaseResult ioResult = processVideoDownloadPhase(taskId, videoUrl, outputDir);
+        return processVideoTranscribeStage1Phase(taskId, ioResult);
+    }
+
+    public IOPhaseResult processVideoDownloadPhase(String taskId, String videoUrl, String outputDir) throws Exception {
         if (shouldProcessAsBook(videoUrl, null)) {
-            throw new IllegalArgumentException("processVideoIOPhase does not support book/article sources");
+            throw new IllegalArgumentException("processVideoDownloadPhase does not support book/article sources");
         }
 
         IOPhaseResult ioResult = new IOPhaseResult();
@@ -683,7 +689,41 @@ public class VideoProcessingOrchestrator {
                 videoDuration = resolveVideoDurationSec(taskId, videoPath, videoDuration);
             }
 
-            DynamicTimeoutCalculator.TimeoutConfig timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
+            ioResult.videoPath = videoPath;
+            ioResult.outputDir = outputDir;
+            ioResult.videoDuration = videoDuration;
+            ioResult.downloadedFromUrl = downloadedFromUrl;
+            ioResult.cleanupSourcePath = cleanupSourcePath;
+            ioResult.downloadResult = downloadResult;
+            ioResult.timeouts = timeoutCalculator.calculateTimeouts(videoDuration);
+            return ioResult;
+        } catch (Throwable e) {
+            handleVideoIOPhaseFailure(taskId, ioResult, e);
+            return ioResult;
+        }
+    }
+
+    public IOPhaseResult processVideoTranscribeStage1Phase(String taskId, IOPhaseResult ioResult) throws Exception {
+        IOPhaseResult transcribed = processVideoTranscribePhase(taskId, ioResult);
+        return processVideoStage1Phase(taskId, transcribed);
+    }
+
+    public IOPhaseResult processVideoTranscribePhase(String taskId, IOPhaseResult ioResult) throws Exception {
+        if (ioResult == null) {
+            throw new IllegalArgumentException("ioResult is required for transcribe phase");
+        }
+        if (ioResult.videoPath == null || ioResult.videoPath.isBlank()) {
+            throw new IllegalArgumentException("videoPath is required for transcribe phase");
+        }
+
+        try {
+            String outputDir = ioResult.outputDir;
+            String videoPath = ioResult.videoPath;
+            DynamicTimeoutCalculator.TimeoutConfig timeouts = ioResult.timeouts;
+            if (timeouts == null) {
+                timeouts = timeoutCalculator.calculateTimeouts(Math.max(1.0d, ioResult.videoDuration));
+                ioResult.timeouts = timeouts;
+            }
             TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
                 (progress, message) -> updateProgress(taskId, progress, message);
 
@@ -707,6 +747,34 @@ public class VideoProcessingOrchestrator {
                 throw new RuntimeException("Transcribe failed: " + tr.errorMsg);
             }
             ioResult.stageTimingsMs.put("transcribe", System.currentTimeMillis() - transcribeStart);
+            ioResult.subtitlePath = tr.subtitlePath;
+            return ioResult;
+        } catch (Throwable e) {
+            handleVideoIOPhaseFailure(taskId, ioResult, e);
+            return ioResult;
+        }
+    }
+
+    public IOPhaseResult processVideoStage1Phase(String taskId, IOPhaseResult ioResult) throws Exception {
+        if (ioResult == null) {
+            throw new IllegalArgumentException("ioResult is required for stage1 phase");
+        }
+        if (ioResult.videoPath == null || ioResult.videoPath.isBlank()) {
+            throw new IllegalArgumentException("videoPath is required for stage1 phase");
+        }
+        if (ioResult.subtitlePath == null || ioResult.subtitlePath.isBlank()) {
+            throw new IllegalArgumentException("subtitlePath is required for stage1 phase");
+        }
+        try {
+            String outputDir = ioResult.outputDir;
+            String videoPath = ioResult.videoPath;
+            DynamicTimeoutCalculator.TimeoutConfig timeouts = ioResult.timeouts;
+            if (timeouts == null) {
+                timeouts = timeoutCalculator.calculateTimeouts(Math.max(1.0d, ioResult.videoDuration));
+                ioResult.timeouts = timeouts;
+            }
+            TaskProgressWatchdogBridge.SignalEmitter taskSignalEmitter =
+                (progress, message) -> updateProgress(taskId, progress, message);
 
             updateProgress(taskId, 0.25, "正在执行阶段一处理...");
             long stage1Start = System.currentTimeMillis();
@@ -718,7 +786,7 @@ public class VideoProcessingOrchestrator {
                 s1 = grpcClient.processStage1(
                     taskId,
                     videoPath,
-                    tr.subtitlePath,
+                    ioResult.subtitlePath,
                     outputDir,
                     6,
                     timeouts.getStage1TimeoutSec()
@@ -730,46 +798,48 @@ public class VideoProcessingOrchestrator {
                 throw new RuntimeException("Stage1 failed: " + s1.errorMsg);
             }
             ioResult.stageTimingsMs.put("stage1", System.currentTimeMillis() - stage1Start);
-
-            ioResult.videoPath = videoPath;
-            ioResult.outputDir = outputDir;
-            ioResult.videoDuration = videoDuration;
-            ioResult.downloadedFromUrl = downloadedFromUrl;
-            ioResult.cleanupSourcePath = cleanupSourcePath;
-            ioResult.downloadResult = downloadResult;
             ioResult.stage1Result = s1;
-            ioResult.timeouts = timeouts;
             return ioResult;
         } catch (Throwable e) {
-            String normalizedError = normalizeThrowableMessage(e, "Video IO phase failed with unknown throwable");
-            logger.error("Video IO Phase Failed: {} - {}", taskId, normalizedError, e);
+            handleVideoIOPhaseFailure(taskId, ioResult, e);
+            return ioResult;
+        }
+    }
 
-            ProcessingResult failed = new ProcessingResult();
-            failed.taskId = taskId;
-            failed.success = false;
-            failed.errorMessage = normalizedError;
-            failed.processingTimeMs = System.currentTimeMillis() - ioResult.pipelineStartTimeMs;
+    private void handleVideoIOPhaseFailure(String taskId, IOPhaseResult ioResult, Throwable error) throws Exception {
+        String normalizedError = normalizeThrowableMessage(error, "Video IO phase failed with unknown throwable");
+        logger.error("Video IO Phase Failed: {} - {}", taskId, normalizedError, error);
 
+        ProcessingResult failed = new ProcessingResult();
+        failed.taskId = taskId;
+        failed.success = false;
+        failed.errorMessage = normalizedError;
+        long startedAt = ioResult != null && ioResult.pipelineStartTimeMs > 0
+                ? ioResult.pipelineStartTimeMs
+                : System.currentTimeMillis();
+        failed.processingTimeMs = Math.max(0L, System.currentTimeMillis() - startedAt);
+
+        if (ioResult != null) {
             ioResult.stageTimingsMs.put("total_pipeline", failed.processingTimeMs);
             ioResult.flowFlags.putIfAbsent("downloaded_from_url", false);
             ioResult.flowFlags.putIfAbsent("used_vl_flow", false);
             ioResult.flowFlags.putIfAbsent("used_legacy_flow", false);
-
             writeTaskMetricsReport(
                     taskId,
-                    ioResult.metricsOutputDir,
-                    ioResult.metricsVideoPath,
-                    ioResult.metricsInputVideoUrl,
-                    ioResult.metricsVideoTitle,
+                    firstNonBlank(ioResult.metricsOutputDir, ioResult.outputDir),
+                    firstNonBlank(ioResult.metricsVideoPath, ioResult.videoPath),
+                    firstNonBlank(ioResult.metricsInputVideoUrl, ioResult.videoUrl),
+                    firstNonBlank(ioResult.metricsVideoTitle, ""),
                     failed,
                     ioResult.stageTimingsMs,
                     ioResult.flowFlags
             );
-            if (e instanceof Exception exception) {
-                throw exception;
-            }
-            throw new RuntimeException(normalizedError, e);
         }
+
+        if (error instanceof Exception exception) {
+            throw exception;
+        }
+        throw new RuntimeException(normalizedError, error);
     }
 
     public ProcessingResult processVideoLLMPhase(String taskId, IOPhaseResult ioResult) {

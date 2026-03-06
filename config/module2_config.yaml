@@ -328,6 +328,36 @@ vl_material_generation:
     max_retries: 2
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
+    # 离线异步任务模式（提交后每 5 秒轮询）
+    offline_task_enabled: true
+    offline_poll_interval_sec: 5.0
+    offline_max_wait_sec: 86400.0  # 24h
+    # 同步链路兜底超时（仅当 offline_task_enabled=false 时生效）
+    request_timeout_sec: 120.0
+    request_timeout_ratio_by_video_duration: 0.5
+    request_timeout_min_sec: 1.0
+    # 上传前压缩（启用）
+    # 压缩策略：H.264 + CRF + 15fps + 去音频 + 超过1080p才降分辨率
+    long_video_upload_compress_enabled: true
+    long_video_upload_target_height: 1080
+    long_video_upload_crf: 28
+    long_video_upload_preset: "fast"
+    long_video_upload_target_fps: 15.0
+    long_video_upload_drop_audio: true
+    long_video_upload_timeout_sec: 1800
+    # DashScope Files.upload 分片与超时策略
+    # 2MB 分片上传（SDK 透传参数）
+    upload_chunk_size_bytes: 2097152
+    # 上传超时按视频时长设置（秒）
+    upload_timeout_by_video_duration: true
+    # 超时下限，避免极短视频出现 0 秒
+    upload_timeout_min_sec: 1.0
+    # 上传失败自动重试（指数退避）
+    upload_retry_max_attempts: 3
+    upload_retry_initial_backoff_sec: 1.0
+    upload_retry_multiplier: 2.0
+    upload_retry_max_backoff_sec: 30.0
+    upload_retry_jitter_sec: 0.0
     
     # 视频输入策略
     # auto: 仅在 DashScope 场景自动尝试 data-uri / upload
@@ -366,6 +396,9 @@ vl_material_generation:
   # 机制：对 stable 区间保留两侧边缘（keep_edge_sec），仅剔除中间核心段。
   pre_vl_static_pruning:
     enabled: false
+    # 按知识类型开关（默认都关闭，需要时显式开启）
+    process_enabled: false
+    concrete_enabled: false
     only_process: true
     # 是否启用“process stable detect”多进程稳定段检测分支（默认关闭）
     process_stable_detect_enabled: false
@@ -411,6 +444,16 @@ vl_material_generation:
     parallel_workers: auto
     # 并发硬上限，防止 unit 数很大时瞬时请求过载
     parallel_hard_cap: 32
+    # 单元级流式流水线：切片->压缩上传->离线VL->结果消费，按 unit 无等待推进
+    stream_unit_pipeline_enabled: true
+    # 单元切片独立进程池并发度（auto=CPU-1）
+    stream_split_process_workers: auto
+    # 单元切片进程池硬上限
+    stream_split_process_hard_cap: 8
+    # 切片完成后允许堆积的分析任务倍数（analysis_workers * multiplier）
+    stream_split_backpressure_multiplier: 4
+    # 仅对这些知识类型启用流式单元管线
+    stream_pipeline_knowledge_types: ["process", "concrete"]
   
   
   # Tutorial mode for long, multi-step process units
@@ -497,7 +540,10 @@ vl_material_generation:
   # Screenshot optimization settings
   screenshot_optimization:
     enabled: true
-    time_window_seconds: 1.0  # 在建议时间戳前后各扩展 1 秒
+    time_window_before_seconds: 1.0  # 在建议时间戳前扩展 1 秒
+    time_window_after_seconds: 2.0   # 在建议时间戳后扩展 2 秒
+    time_window_seconds: 1.0         # 兼容旧配置（仅当 before/after 未设置时生效）
+    static_island_min_ms: 100.0      # 静态岛最小时长阈值（毫秒）
     reuse_visual_extractor: true         # 复用 VisualFeatureExtractor（按 video_path 缓存）
     
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)

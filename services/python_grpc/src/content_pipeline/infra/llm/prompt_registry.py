@@ -43,6 +43,8 @@ class PromptKeys:
     DEEPSEEK_MD_COMBINED_USER = "deepseek.markdown.combined.user"
     DEEPSEEK_MD_STRUCTURED_SYSTEM = "deepseek.markdown.structured.system"
     DEEPSEEK_MD_STRUCTURED_USER = "deepseek.markdown.structured.user"
+    DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG = "deepseek.markdown.structured.system.preserve_img"
+    DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG = "deepseek.markdown.structured.user.preserve_img"
     DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM = "deepseek.markdown.img_desc_augment.system"
     DEEPSEEK_MD_IMG_DESC_AUG_USER = "deepseek.markdown.img_desc_augment.user"
     DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM = "deepseek.vl_arg.structured.system"
@@ -145,6 +147,16 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         key=PromptKeys.DEEPSEEK_MD_STRUCTURED_USER,
         relative_path="deepseek/markdown_enhancer/structured_user.md",
         description="结构化文本 User Prompt",
+    ),
+    PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG,
+        relative_path="deepseek/markdown_enhancer/structured_system_preserve_img.md",
+        description="Structured markdown system prompt (preserve existing markdown images)",
+    ),
+    PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG,
+        relative_path="deepseek/markdown_enhancer/structured_user_preserve_img.md",
+        description="Structured markdown user prompt (preserve existing markdown images)",
     ),
     PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM: PromptRegistryEntry(
         key=PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM,

@@ -1,0 +1,35 @@
+{
+  "title": "Demo Document",
+  "knowledge_groups": [
+    {
+      "group_id": 1,
+      "group_name": "Concrete Unit Alias",
+      "reason": "",
+      "units": [
+        {
+          "unit_id": "SU001",
+          "title": "Concrete Unit Alias",
+          "knowledge_type": "concrete",
+          "body_text": "concrete concept body",
+          "mult_steps": false,
+          "instructional_steps": [],
+          "materials": {
+            "screenshots": [
+              "D:\\videoToMarkdownTest2\\zztest123\\pt_full_20260305224447348\\test_concrete_section_placehol1\\assets\\SU001_img_02.png"
+            ],
+            "screenshot_items": [
+              {
+                "img_id": "SU001_img_02",
+                "img_path": "D:\\videoToMarkdownTest2\\zztest123\\pt_full_20260305224447348\\test_concrete_section_placehol1\\assets\\SU001_img_02.png",
+                "img_description": "generic description",
+                "frame_reason": "关键交互画面"
+              }
+            ],
+            "clip": "",
+            "action_classifications": []
+          }
+        }
+      ]
+    }
+  ]
+}

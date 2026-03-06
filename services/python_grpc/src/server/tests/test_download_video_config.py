@@ -389,3 +389,5 @@ def test_download_video_preserves_bilibili_episode_query_for_batch_collection(mo
     assert response.success is True
     assert "p=2" in captured["download_url"]
     assert "p=2" in response.resolved_url
+    assert "spm_id_from=333.788.videopod.episodes" in captured["download_url"]
+    assert "spm_id_from=333.788.videopod.episodes" in response.resolved_url

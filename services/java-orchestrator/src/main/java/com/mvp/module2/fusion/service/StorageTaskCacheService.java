@@ -139,6 +139,41 @@ public class StorageTaskCacheService {
         return Optional.empty();
     }
 
+    public void evictTaskByStorageKey(String storageKey) {
+        String normalizedStorageKey = trimToNull(storageKey);
+        if (normalizedStorageKey == null) {
+            return;
+        }
+        CachedTask removed = taskCache.remove(normalizedStorageKey);
+        if (removed != null) {
+            String removedTaskId = trimToNull(removed.taskId);
+            if (removedTaskId != null) {
+                taskIdToStorageKey.remove(removedTaskId, normalizedStorageKey);
+            }
+            return;
+        }
+        taskIdToStorageKey.entrySet().removeIf(entry -> normalizedStorageKey.equals(entry.getValue()));
+    }
+
+    public void evictTaskByTaskId(String taskId) {
+        String normalizedTaskId = trimToNull(taskId);
+        if (normalizedTaskId == null) {
+            return;
+        }
+        String indexedStorageKey = taskIdToStorageKey.remove(normalizedTaskId);
+        if (indexedStorageKey != null) {
+            taskCache.remove(indexedStorageKey);
+        }
+        taskCache.entrySet().removeIf(entry -> {
+            CachedTask cachedTask = entry.getValue();
+            if (cachedTask == null) {
+                return false;
+            }
+            String cachedTaskId = trimToNull(cachedTask.taskId);
+            return normalizedTaskId.equals(cachedTaskId);
+        });
+    }
+
     /**
      * 根据路径解析存储键（用于通过 path 查找任务的场景）
      */

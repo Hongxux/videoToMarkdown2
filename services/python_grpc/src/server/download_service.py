@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 from .platform_rules import (
     extract_bilibili_episode_index as _extract_bilibili_episode_index_from_rules,
+    extract_bilibili_video_id as _extract_bilibili_video_id_from_rules,
     is_bilibili_host as _is_bilibili_host_from_rules,
 )
 
@@ -58,6 +59,27 @@ def _extract_bilibili_episode_index(*url_candidates: str) -> int:
     return 0
 
 
+def _extract_bilibili_url_with_query(*url_candidates: str) -> str:
+    for candidate in url_candidates:
+        normalized_url = str(candidate or "").strip()
+        if not normalized_url:
+            continue
+        try:
+            parsed = urlparse(normalized_url)
+        except Exception:
+            continue
+        if parsed.scheme.lower() not in {"http", "https"}:
+            continue
+        if not _is_bilibili_host_from_rules(parsed.netloc):
+            continue
+        if not parsed.query:
+            continue
+        if not _extract_bilibili_video_id_from_rules(normalized_url):
+            continue
+        return normalized_url
+    return ""
+
+
 def _attach_bilibili_episode_index(video_url: str, episode_index: int) -> str:
     normalized_url = str(video_url or "").strip()
     if episode_index <= 0 or not normalized_url:
@@ -93,6 +115,59 @@ def _read_runtime_title_from_downloader_meta(*, task_dir: str, platform: str) ->
     if not isinstance(payload, dict):
         return ""
     return _normalize_title(str(payload.get("title", "") or ""))
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(str(value).strip())
+    except Exception:
+        return default
+
+
+def _load_download_retry_policy(config: Dict[str, Any]) -> Dict[str, Any]:
+    video_cfg = config.get("video", {}) if isinstance(config, dict) else {}
+    if not isinstance(video_cfg, dict):
+        video_cfg = {}
+
+    attempts = _to_int(video_cfg.get("download_retry_attempts", 3), 3)
+    if attempts < 1:
+        attempts = 1
+    if attempts > 8:
+        attempts = 8
+
+    base_delay_sec = _to_float(video_cfg.get("download_retry_base_delay_sec", 1.0), 1.0)
+    if base_delay_sec < 0:
+        base_delay_sec = 0.0
+
+    max_delay_sec = _to_float(video_cfg.get("download_retry_max_delay_sec", 16.0), 16.0)
+    if max_delay_sec < 0:
+        max_delay_sec = 0.0
+    if max_delay_sec < base_delay_sec:
+        max_delay_sec = base_delay_sec
+
+    return {
+        "attempts": attempts,
+        "base_delay_sec": base_delay_sec,
+        "max_delay_sec": max_delay_sec,
+    }
+
+
+def _compute_backoff_delay_sec(*, retry_index: int, base_delay_sec: float, max_delay_sec: float) -> float:
+    if retry_index <= 0 or base_delay_sec <= 0:
+        return 0.0
+    delay_sec = base_delay_sec * (2 ** (retry_index - 1))
+    if max_delay_sec > 0:
+        delay_sec = min(delay_sec, max_delay_sec)
+    if delay_sec < 0:
+        return 0.0
+    return delay_sec
 
 
 async def run_download_flow(
@@ -134,6 +209,14 @@ async def run_download_flow(
 
             # B站分P链接必须保留 p 参数，否则合集批量提交会退化为同一集下载。
             if resolved_platform == "bilibili":
+                preserved_query_url = _extract_bilibili_url_with_query(
+                    resolved_extracted_url,
+                    raw_video_input,
+                )
+                if preserved_query_url:
+                    if preserved_query_url != video_url:
+                        logger.info(f"[{task_id}] Bilibili query preserved for download URL: {preserved_query_url}")
+                    video_url = preserved_query_url
                 requested_episode_index = _extract_bilibili_episode_index(
                     resolved_extracted_url,
                     raw_video_input,
@@ -179,37 +262,70 @@ async def run_download_flow(
         os.makedirs(task_dir, exist_ok=True)
         video_filename = "video"
 
-        if is_douyin_url(video_url):
-            video_path = await douyin_downloader(
-                task_id=task_id,
-                video_url=video_url,
-                task_dir=task_dir,
-                video_filename=video_filename,
+        retry_policy = _load_download_retry_policy(config)
+        max_download_attempts = int(retry_policy["attempts"])
+        backoff_base_sec = float(retry_policy["base_delay_sec"])
+        backoff_max_sec = float(retry_policy["max_delay_sec"])
+
+        is_douyin_download = is_douyin_url(video_url)
+        download_options = load_download_video_options(config) if not is_douyin_download else {}
+        if not is_douyin_download and (
+            download_options.get("cookies_file") or download_options.get("cookies_from_browser")
+        ):
+            logger.info(
+                f"[{task_id}] Download auth enabled: "
+                f"cookies_file={bool(download_options.get('cookies_file'))}, "
+                f"cookies_from_browser={download_options.get('cookies_from_browser') or ''}, "
+                f"proxy={download_options.get('proxy') or ''}"
             )
-            downloader_runtime_title = ""
-        else:
-            download_options = load_download_video_options(config)
-            downloader = video_processor_cls(**download_options)
-            if download_options.get("cookies_file") or download_options.get("cookies_from_browser"):
-                logger.info(
-                    f"[{task_id}] Download auth enabled: "
-                    f"cookies_file={bool(download_options.get('cookies_file'))}, "
-                    f"cookies_from_browser={download_options.get('cookies_from_browser') or ''}, "
-                    f"proxy={download_options.get('proxy') or ''}"
-                )
-            if download_options.get("external_downloader"):
-                logger.info(
-                    f"[{task_id}] External downloader enabled: "
-                    f"{download_options.get('external_downloader')} "
-                    f"args={download_options.get('external_downloader_args') or []}"
-                )
-            video_path = await asyncio.to_thread(
-                downloader.download,
-                url=video_url,
-                output_dir=task_dir,
-                filename=video_filename,
+        if not is_douyin_download and download_options.get("external_downloader"):
+            logger.info(
+                f"[{task_id}] External downloader enabled: "
+                f"{download_options.get('external_downloader')} "
+                f"args={download_options.get('external_downloader_args') or []}"
             )
-            downloader_runtime_title = _normalize_title(getattr(downloader, "last_video_title", ""))
+
+        video_path = ""
+        downloader_runtime_title = ""
+        for attempt in range(1, max_download_attempts + 1):
+            if attempt > 1:
+                logger.warning(
+                    f"[{task_id}] Download retry attempt {attempt}/{max_download_attempts} started"
+                )
+            try:
+                if is_douyin_download:
+                    video_path = await douyin_downloader(
+                        task_id=task_id,
+                        video_url=video_url,
+                        task_dir=task_dir,
+                        video_filename=video_filename,
+                    )
+                    downloader_runtime_title = ""
+                else:
+                    downloader = video_processor_cls(**download_options)
+                    video_path = await asyncio.to_thread(
+                        downloader.download,
+                        url=video_url,
+                        output_dir=task_dir,
+                        filename=video_filename,
+                    )
+                    downloader_runtime_title = _normalize_title(getattr(downloader, "last_video_title", ""))
+                break
+            except Exception as download_error:
+                if attempt >= max_download_attempts:
+                    raise
+                retry_index = attempt
+                delay_sec = _compute_backoff_delay_sec(
+                    retry_index=retry_index,
+                    base_delay_sec=backoff_base_sec,
+                    max_delay_sec=backoff_max_sec,
+                )
+                logger.warning(
+                    f"[{task_id}] Download attempt {attempt}/{max_download_attempts} failed: {download_error}; "
+                    f"retry in {delay_sec:.2f}s"
+                )
+                if delay_sec > 0:
+                    await asyncio.sleep(delay_sec)
 
         if not resolved_title and downloader_runtime_title:
             resolved_title = downloader_runtime_title

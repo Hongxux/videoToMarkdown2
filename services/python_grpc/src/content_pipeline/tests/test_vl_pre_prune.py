@@ -35,6 +35,52 @@ def _build_generator():
     )
 
 
+def test_pre_vl_pruning_defaults_disabled_for_process_and_concrete():
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "pre_vl_static_pruning": {},
+        }
+    )
+    assert generator.pre_vl_pruning_enabled is False
+    assert generator.pre_vl_process_pruning_enabled is False
+    assert generator.pre_vl_concrete_pruning_enabled is False
+    assert generator._is_pre_vl_pruning_enabled_for_knowledge_type("process") is False
+    assert generator._is_pre_vl_pruning_enabled_for_knowledge_type("concrete") is False
+
+
+def test_pre_vl_pruning_can_enable_process_and_concrete_independently():
+    process_only = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "pre_vl_static_pruning": {
+                "enabled": False,
+                "process_enabled": True,
+                "concrete_enabled": False,
+            },
+        }
+    )
+    assert process_only.pre_vl_process_pruning_enabled is True
+    assert process_only.pre_vl_concrete_pruning_enabled is False
+    assert process_only._is_pre_vl_pruning_enabled_for_knowledge_type("process") is True
+    assert process_only._is_pre_vl_pruning_enabled_for_knowledge_type("concrete") is False
+
+    concrete_only = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "pre_vl_static_pruning": {
+                "enabled": False,
+                "process_enabled": False,
+                "concrete_enabled": True,
+            },
+        }
+    )
+    assert concrete_only.pre_vl_process_pruning_enabled is False
+    assert concrete_only.pre_vl_concrete_pruning_enabled is True
+    assert concrete_only._is_pre_vl_pruning_enabled_for_knowledge_type("process") is False
+    assert concrete_only._is_pre_vl_pruning_enabled_for_knowledge_type("concrete") is True
+
+
 def test_generate_skips_abstract_units_before_vl_analysis(tmp_path, monkeypatch):
     generator = VLMaterialGenerator(
         {
@@ -223,6 +269,84 @@ def test_prepare_pruned_clips_uses_override_stable_intervals(tmp_path, monkeypat
     assert len(results) == 2
     assert results[0]["kept_segments"] == [(1.0, 6.0)]
     assert results[1]["kept_segments"] == [(2.0, 7.0)]
+
+
+def test_prepare_pruned_clips_process_mode_skips_detect_for_disabled_knowledge_type(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "pre_vl_static_pruning": {
+                "enabled": False,
+                "process_enabled": True,
+                "concrete_enabled": False,
+                "process_stable_detect_enabled": True,
+                "parallel_mode": "process",
+                "parallel_workers": 2,
+                "parallel_hard_cap": 4,
+            },
+        },
+        cv_executor=object(),
+    )
+
+    clips_dir = tmp_path / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    unit_tasks = [
+        {
+            "semantic_unit": {"unit_id": "P1", "start_sec": 0.0, "end_sec": 12.0, "knowledge_type": "process"},
+            "clip_path": str(clips_dir / "p1.mp4"),
+        },
+        {
+            "semantic_unit": {"unit_id": "C1", "start_sec": 0.0, "end_sec": 12.0, "knowledge_type": "concrete"},
+            "clip_path": str(clips_dir / "c1.mp4"),
+        },
+    ]
+
+    captured = {"detect_units": [], "prepared_units": []}
+
+    async def _fake_detect_stable_islands_for_units_via_process_pool(*, unit_tasks, worker_count):
+        captured["detect_units"] = [
+            str((task.get("semantic_unit", {}) or {}).get("unit_id", ""))
+            for task in (unit_tasks or [])
+        ]
+        return [[(1.0, 6.0)]]
+
+    async def _fake_prepare_pruned_clip_for_vl(
+        clips_dir,
+        semantic_unit,
+        original_clip_path,
+        force_preprocess=False,
+        stable_intervals_override=None,
+    ):
+        captured["prepared_units"].append(str((semantic_unit or {}).get("unit_id", "")))
+        return {
+            "applied": True,
+            "clip_path_for_vl": original_clip_path,
+            "kept_segments": stable_intervals_override or [],
+            "removed_segments": [],
+            "pre_context_prompt": "",
+        }
+
+    monkeypatch.setattr(
+        generator,
+        "_detect_stable_islands_for_units_via_process_pool",
+        _fake_detect_stable_islands_for_units_via_process_pool,
+    )
+    monkeypatch.setattr(generator, "_prepare_pruned_clip_for_vl", _fake_prepare_pruned_clip_for_vl)
+
+    results = asyncio.run(
+        generator._prepare_pruned_clips_for_units(
+            clips_dir=str(clips_dir),
+            unit_tasks=unit_tasks,
+            force_preprocess=False,
+        )
+    )
+
+    assert captured["detect_units"] == ["P1"]
+    assert captured["prepared_units"] == ["P1"]
+    assert len(results) == 2
+    assert results[0]["applied"] is True
+    assert results[1]["applied"] is False
 
 
 def test_prepare_pruned_clips_process_mode_fallbacks_on_detect_failure(tmp_path, monkeypatch):

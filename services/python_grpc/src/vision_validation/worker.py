@@ -938,7 +938,8 @@ def run_screenshot_selection_task(
     expanded_start: float,
     expanded_end: float,
     shm_frames: Dict[float, dict],
-    fps: float = 30.0
+    fps: float = 30.0,
+    static_island_min_ms: Optional[float] = None,
 ) -> dict:
     """方法说明：`run_screenshot_selection_task` 核心方法。
     执行步骤：
@@ -950,6 +951,14 @@ def run_screenshot_selection_task(
 
         start_sec = float(expanded_start)
         end_sec = float(expanded_end)
+        if static_island_min_ms is None:
+            min_static_island_ms = _get_env_float("CV_ROUTE_STATIC_ISLAND_MIN_MS", 200.0, 0.0, 5000.0)
+        else:
+            try:
+                min_static_island_ms = float(static_island_min_ms)
+            except (TypeError, ValueError):
+                min_static_island_ms = 200.0
+            min_static_island_ms = max(0.0, min(5000.0, min_static_island_ms))
         used_shm_names: set = set()
 
         # 1. Read frame data from SharedMemory
@@ -990,7 +999,17 @@ def run_screenshot_selection_task(
                 "selected_timestamp": (expanded_start + expanded_end) / 2,
                 "quality_score": 0.0,
                 "island_count": 0,
-                "analyzed_frames": 0
+                "analyzed_frames": 0,
+                "candidate_screenshots": [
+                    {
+                        "timestamp_sec": (expanded_start + expanded_end) / 2,
+                        "score": 0.0,
+                        "island_index": 0,
+                        "island_start": start_sec,
+                        "island_end": end_sec,
+                    }
+                ],
+                "static_island_threshold_ms": min_static_island_ms,
             }
         
         # 2. 鍒涘缓杞婚噺绾?ScreenshotSelector
@@ -1012,8 +1031,40 @@ def run_screenshot_selection_task(
             frames=frames,
             timestamps=timestamps,
             fps=fps,
-            res_factor=res_factor
+            res_factor=res_factor,
+            min_static_island_ms=min_static_island_ms,
         )
+
+        candidate_screenshots: List[Dict[str, Any]] = []
+        raw_candidates = result.get("candidates", []) if isinstance(result, dict) else []
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    ts = float(item.get("timestamp_sec", result.get("selected_timestamp", 0.0)))
+                except (TypeError, ValueError):
+                    continue
+                candidate_screenshots.append(
+                    {
+                        "timestamp_sec": ts,
+                        "score": float(item.get("score", 0.0) or 0.0),
+                        "island_index": int(item.get("island_index", 0) or 0),
+                        "island_start": float(item.get("island_start", ts) or ts),
+                        "island_end": float(item.get("island_end", ts) or ts),
+                    }
+                )
+        if not candidate_screenshots:
+            candidate_screenshots = [
+                {
+                    "timestamp_sec": float(result.get("selected_timestamp", (expanded_start + expanded_end) / 2)),
+                    "score": float(result.get("quality_score", 0.0) or 0.0),
+                    "island_index": 0,
+                    "island_start": start_sec,
+                    "island_end": end_sec,
+                }
+            ]
+        candidate_screenshots.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
         
         logger.info(
             f"鉁?Screenshot selected for {unit_id}_island{island_index} (PID={os.getpid()}): "
@@ -1027,7 +1078,9 @@ def run_screenshot_selection_task(
             "selected_timestamp": result["selected_timestamp"],
             "quality_score": result["quality_score"],
             "island_count": result["island_count"],
-            "analyzed_frames": result["analyzed_frames"]
+            "analyzed_frames": result["analyzed_frames"],
+            "candidate_screenshots": candidate_screenshots,
+            "static_island_threshold_ms": min_static_island_ms,
         }
         
     except Exception as e:
@@ -1044,6 +1097,16 @@ def run_screenshot_selection_task(
             "quality_score": 0.0,
             "island_count": 0,
             "analyzed_frames": 0,
+            "candidate_screenshots": [
+                {
+                    "timestamp_sec": fallback_timestamp,
+                    "score": 0.0,
+                    "island_index": 0,
+                    "island_start": start_sec,
+                    "island_end": end_sec,
+                }
+            ],
+            "static_island_threshold_ms": min_static_island_ms,
             "error": str(e)
         }
     finally:

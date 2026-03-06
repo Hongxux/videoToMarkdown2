@@ -456,6 +456,14 @@ class MarkdownEnhancer:
             PromptKeys.DEEPSEEK_MD_STRUCTURED_USER,
             fallback=STRUCTURED_TEXT_USER_PROMPT,
         )
+        self._structured_system_preserve_img_prompt = get_prompt(
+            PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG,
+            fallback=self._structured_system_prompt,
+        )
+        self._structured_user_preserve_img_prompt_template = get_prompt(
+            PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG,
+            fallback=self._structured_user_prompt_template,
+        )
         self._img_desc_augment_system_prompt = get_prompt(
             PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM,
             fallback=IMG_DESC_AUGMENT_SYSTEM_PROMPT,
@@ -1472,10 +1480,12 @@ class MarkdownEnhancer:
                             item.get("img_path") or item.get("path") or item.get("file_path") or ""
                         ).strip()
                         if item_path:
+                            frame_reason = str(item.get("frame_reason", "") or "").strip()
                             keyframe_entries.append(
                                 {
                                     "image_path": _to_abs(item_path, base_dir=base_dir),
                                     "timestamp_sec": _safe_float(item.get("timestamp_sec", 0.0), 0.0),
+                                    **({"frame_reason": frame_reason} if frame_reason else {}),
                                 }
                             )
             if not keyframe_entries:
@@ -1487,13 +1497,30 @@ class MarkdownEnhancer:
                             keyframe_entries.append({"image_path": image_path})
 
             deduped_keyframes: List[Dict[str, Any]] = []
-            seen_keyframes: set[str] = set()
+            keyframe_path_to_index: Dict[str, int] = {}
+            seen_pathless_keyframes: set[str] = set()
             for item in keyframe_entries:
-                key = json.dumps(item, ensure_ascii=False, sort_keys=True)
-                if key in seen_keyframes:
+                image_path_key = self._normalize_embed_path(item.get("image_path", ""))
+                if image_path_key:
+                    existed_idx = keyframe_path_to_index.get(image_path_key)
+                    if existed_idx is None:
+                        keyframe_path_to_index[image_path_key] = len(deduped_keyframes)
+                        deduped_keyframes.append(dict(item))
+                    else:
+                        existed_item = deduped_keyframes[existed_idx]
+                        if not existed_item.get("frame_reason") and item.get("frame_reason"):
+                            existed_item["frame_reason"] = item.get("frame_reason")
+                        if existed_item.get("timestamp_sec") is None and item.get("timestamp_sec") is not None:
+                            existed_item["timestamp_sec"] = item.get("timestamp_sec")
+                        if existed_item.get("bbox") is None and item.get("bbox") is not None:
+                            existed_item["bbox"] = item.get("bbox")
                     continue
-                seen_keyframes.add(key)
-                deduped_keyframes.append(item)
+
+                key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                if key in seen_pathless_keyframes:
+                    continue
+                seen_pathless_keyframes.add(key)
+                deduped_keyframes.append(dict(item))
 
             timestamps = _extract_timestamps(raw_step)
             for item in deduped_keyframes:
@@ -1656,11 +1683,13 @@ class MarkdownEnhancer:
                 or raw.get("label")
                 or f"image_{idx:02d}"
             ).strip()
+            frame_reason = str(raw.get("frame_reason", "") or "").strip()
             normalized.append(
                 {
                     "img_id": img_id,
                     "img_path": img_path,
                     "img_description": img_description,
+                    "frame_reason": frame_reason,
                     "timestamp_sec": raw.get("timestamp_sec"),
                     "sentence_id": str(raw.get("sentence_id") or "").strip(),
                     "sentence_text": str(raw.get("sentence_text") or "").strip(),
@@ -2135,14 +2164,33 @@ class MarkdownEnhancer:
             value = re.sub(r"[^A-Za-z0-9_\-]", "", value)
             return value.lower()
 
+        def _iter_img_id_aliases(item: Dict[str, Any]) -> List[str]:
+            aliases: List[str] = []
+            primary_img_id = str(item.get("img_id", "") or "").strip()
+            if primary_img_id:
+                aliases.append(primary_img_id)
+
+            source_id = str(item.get("source_id", "") or "").strip()
+            if source_id:
+                aliases.append(source_id)
+                aliases.append(source_id.replace("\\", "_").replace("/", "_"))
+                source_name = Path(source_id).name
+                if source_name:
+                    aliases.append(source_name)
+                    source_stem = Path(source_name).stem
+                    if source_stem and source_stem != source_name:
+                        aliases.append(source_stem)
+            return aliases
+
         by_id: Dict[str, Dict[str, Any]] = {}
         for item in screenshot_items:
             if not isinstance(item, dict):
                 continue
-            img_id = _normalize_img_id(item.get("img_id", ""))
-            if not img_id:
-                continue
-            by_id[img_id] = item
+            for candidate_img_id in _iter_img_id_aliases(item):
+                img_id = _normalize_img_id(candidate_img_id)
+                if not img_id:
+                    continue
+                by_id.setdefault(img_id, item)
 
         if not by_id:
             return content
@@ -2183,7 +2231,8 @@ class MarkdownEnhancer:
                     # It's the last one, replace with image
                     img_path = str(item.get("img_path", "") or "").strip()
                     if img_path:
-                        replacement = self._format_obsidian_embed(img_path)
+                        frame_reason = str(item.get("frame_reason", "") or "").strip()
+                        replacement = self._format_obsidian_embed(img_path, alias=frame_reason)
                 else:
                     # Not the last one, remove it (replace with empty string)
                     replacement = ""
@@ -2204,6 +2253,25 @@ class MarkdownEnhancer:
         stripped = re.sub(r"[【\[\(]?\s*imgneeded_[A-Za-z0-9_\-{}]*\s*[】\]\)]?", "", stripped, flags=re.IGNORECASE)
         stripped = re.sub(r"[ \t]+\n", "\n", stripped)
         return stripped
+
+    @staticmethod
+    def _normalize_embed_path(path_text: Any) -> str:
+        path = str(path_text or "").strip()
+        if not path:
+            return ""
+        return path.replace("\\", "/")
+
+    @classmethod
+    def _extract_obsidian_embed_paths(cls, content: str) -> set[str]:
+        if not content:
+            return set()
+        paths: set[str] = set()
+        pattern = re.compile(r"!\[\[\s*([^|\]]+)(?:\|[^\]]*)?\]\]")
+        for match in pattern.finditer(content):
+            normalized = cls._normalize_embed_path(match.group(1))
+            if normalized:
+                paths.add(normalized)
+        return paths
 
     @staticmethod
     def _replace_tutorial_keyframe_placeholders(content: str, keyframe_embeds: List[str]) -> str:
@@ -2249,11 +2317,24 @@ class MarkdownEnhancer:
             return content
 
         missing: List[str] = []
+        existing_embed_paths = self._extract_obsidian_embed_paths(content)
         for item in screenshot_items:
-            embed = self._format_obsidian_embed(str(item.get("img_path", "") or ""))
-            if not embed or embed in content:
+            img_path = str(item.get("img_path", "") or "").strip()
+            if not img_path:
                 continue
-            desc = str(item.get("img_description", "") or "").strip()
+            frame_reason = str(item.get("frame_reason", "") or "").strip()
+            embed = self._format_obsidian_embed(img_path, alias=frame_reason)
+            if not embed:
+                continue
+            embed_paths = self._extract_obsidian_embed_paths(embed)
+            embed_path = next(iter(embed_paths), "")
+            if embed_path:
+                if embed_path in existing_embed_paths:
+                    continue
+                existing_embed_paths.add(embed_path)
+            elif embed in content:
+                continue
+            desc = frame_reason or str(item.get("img_description", "") or "").strip()
             if desc:
                 missing.append(f"- {desc}: {embed}")
             else:
@@ -2272,11 +2353,14 @@ class MarkdownEnhancer:
         prev_title: str = "", next_title: str = "",
     ) -> str:
         base_text = (section.original_body or "").strip()
+        normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
         image_items = self._build_concept_image_items(section)
-        augment_image_items = self._build_augment_image_items(section)
 
-        # 先做图片描述驱动的增量补全，再进入结构化步骤
-        base_text = await self._augment_body_with_image_descriptions(section, base_text, augment_image_items)
+        # concrete 走“保图结构化”链路：跳过 img-desc 增量补全，直接做占位符回填。
+        if normalized_kt != "concrete":
+            augment_image_items = self._build_augment_image_items(section)
+            # 先做图片描述驱动的增量补全，再进入结构化步骤
+            base_text = await self._augment_body_with_image_descriptions(section, base_text, augment_image_items)
 
         image_context = "(none)"
         if image_items:
@@ -2295,9 +2379,21 @@ class MarkdownEnhancer:
         if not self._enabled or not self._llm_client:
             return self._append_missing_image_embeds(base_text, image_items)
 
-        prompt = self._structured_user_prompt_template.format(
+        structured_system_prompt = self._structured_system_prompt
+        structured_user_prompt_template = self._structured_user_prompt_template
+        if normalized_kt == "concrete":
+            structured_system_prompt = (
+                self._structured_system_preserve_img_prompt
+                or self._structured_system_prompt
+            )
+            structured_user_prompt_template = (
+                self._structured_user_preserve_img_prompt_template
+                or self._structured_user_prompt_template
+            )
+
+        prompt = structured_user_prompt_template.format(
             title=section.title,
-            knowledge_type=self._normalize_knowledge_type(section.knowledge_type),
+            knowledge_type=normalized_kt,
             body_text=base_text,
             image_context=image_context,
             adjacent_context=adjacent_context,
@@ -2307,14 +2403,14 @@ class MarkdownEnhancer:
         try:
             content, meta, _ = await self._complete_text_with_model_fallback(
                 prompt=prompt,
-                system_message=self._structured_system_prompt,
+                system_message=structured_system_prompt,
                 model=self._structured_text_model,
             )
             duration_ms = (time.perf_counter() - start_ts) * 1000.0
             await self._write_llm_trace_record(
                 step_name="structured_text",
                 unit_id=str(section.unit_id),
-                system_prompt=self._structured_system_prompt,
+                system_prompt=structured_system_prompt,
                 user_prompt=prompt,
                 response_text=content,
                 duration_ms=duration_ms,
@@ -2327,7 +2423,7 @@ class MarkdownEnhancer:
             await self._write_llm_trace_record(
                 step_name="structured_text",
                 unit_id=str(section.unit_id),
-                system_prompt=self._structured_system_prompt,
+                system_prompt=structured_system_prompt,
                 user_prompt=prompt,
                 response_text="",
                 duration_ms=duration_ms,
@@ -2375,6 +2471,7 @@ class MarkdownEnhancer:
             if not isinstance(keyframe_entries, list):
                 keyframe_entries = []
             keyframe_embeds: List[str] = []
+            seen_keyframe_paths: set[str] = set()
             for item in keyframe_entries:
                 image_path = ""
                 frame_reason = ""
@@ -2385,9 +2482,14 @@ class MarkdownEnhancer:
                     image_path = str(item).strip()
                 if not image_path:
                     continue
+                normalized_image_path = self._normalize_embed_path(image_path)
+                if normalized_image_path and normalized_image_path in seen_keyframe_paths:
+                    continue
                 embed = self._format_obsidian_embed(image_path, alias=frame_reason)
                 if embed:
                     keyframe_embeds.append(embed)
+                    if normalized_image_path:
+                        seen_keyframe_paths.add(normalized_image_path)
 
             raw_main_operation = step.get("main_operation")
             if raw_main_operation is None:
@@ -2419,9 +2521,17 @@ class MarkdownEnhancer:
             if rendered_operation:
                 operation_lines = rendered_operation.splitlines()
                 if keyframe_embeds and not has_keyframe_placeholder:
+                    rendered_embed_paths = self._extract_obsidian_embed_paths(rendered_operation)
                     for embed in keyframe_embeds:
-                        if embed not in rendered_operation:
-                            operation_lines.append(embed)
+                        embed_paths = self._extract_obsidian_embed_paths(embed)
+                        embed_path = next(iter(embed_paths), "")
+                        if embed_path:
+                            if embed_path in rendered_embed_paths:
+                                continue
+                            rendered_embed_paths.add(embed_path)
+                        elif embed in rendered_operation:
+                            continue
+                        operation_lines.append(embed)
                 if step_type == "MAIN_FLOW":
                     lines.extend(operation_lines)
                 else:

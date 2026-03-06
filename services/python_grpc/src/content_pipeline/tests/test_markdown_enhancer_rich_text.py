@@ -139,6 +139,62 @@ def test_concrete_section_placeholder_replaced_with_obsidian_embed(tmp_path, mon
     assert "### Concrete Unit" in markdown
 
 
+def test_concrete_section_placeholder_prefers_frame_reason_alias(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU001_img_02.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU001",
+                "title": "Concrete Unit Alias",
+                "knowledge_type": "concrete",
+                "body_text": "concrete concept body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU001_img_02",
+                            "img_path": str(img_path),
+                            "img_description": "generic description",
+                            "frame_reason": "关键交互画面",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("- key step\n【imgneeded_SU001_img_02】\n- end")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU001": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "【imgneeded_SU001_img_02】" not in markdown
+    assert "![[assets/SU001_img_02.png|关键交互画面]]" in markdown
+    assert "![[assets/SU001_img_02.png]]" not in markdown
+
+
 def test_concrete_section_embed_preserves_assets_subdirectory(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets" / "SU888"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -190,6 +246,61 @@ def test_concrete_section_embed_preserves_assets_subdirectory(tmp_path, monkeypa
     )
 
     assert "![[assets/SU888/SU888_ss_head_001.png]]" in markdown
+
+
+def test_concrete_alias_embed_does_not_append_duplicate_supplemental_image(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU889_img_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU889",
+                "title": "Concrete Alias",
+                "knowledge_type": "concrete",
+                "body_text": "concrete alias body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU889_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "关键画面",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("- 核心操作 ![[assets/SU889_img_01.png|关键画面]]")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU889": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "![[assets/SU889_img_01.png|关键画面]]" in markdown
+    assert "![[assets/SU889_img_01.png]]" not in markdown
+    assert "Supplemental images:" not in markdown
 
 
 def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
@@ -325,6 +436,76 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_01_open_settings.mp4]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_02_change_port.mp4]]" in markdown
     assert "> ?? **" not in markdown
+
+
+def test_tutorial_step_dedupes_same_keyframe_path_and_keeps_alias(tmp_path):
+    unit_dir = tmp_path / "vl_tutorial_units" / "SU905"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    clip1 = unit_dir / "SU905_clip_step_01_action.mp4"
+    key1 = unit_dir / "SU905_ss_step_01_key_01_action.png"
+    clip1.write_bytes(b"asset")
+    key1.write_bytes(b"asset")
+
+    steps_payload = {
+        "unit_id": "SU905",
+        "schema": "tutorial_stepwise_v1",
+        "raw_response": [],
+        "steps": [
+            {
+                "step_id": 1,
+                "step_description": "dedupe keyframe",
+                "main_operation": "只保留一张关键截图",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 8.0,
+                "clip_file": clip1.name,
+                "instructional_keyframes": [key1.name],
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key1.name,
+                        "timestamp_sec": 3.5,
+                        "frame_reason": "关键画面说明",
+                    }
+                ],
+            }
+        ],
+    }
+    (unit_dir / "SU905_steps.json").write_text(json.dumps(steps_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU905",
+                "title": "Tutorial Dedupe",
+                "knowledge_type": "process",
+                "body_text": "tutorial body",
+                "mult_steps": True,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    alias_embed = "![[vl_tutorial_units/SU905/SU905_ss_step_01_key_01_action.png|关键画面说明]]"
+    plain_embed = "![[vl_tutorial_units/SU905/SU905_ss_step_01_key_01_action.png]]"
+    assert markdown.count(alias_embed) == 1
+    assert plain_embed not in markdown
 
 
 def test_tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed(tmp_path):
@@ -627,6 +808,61 @@ def test_concrete_imgneeded_placeholders_are_replaced(tmp_path, monkeypatch):
     assert "![[assets/SU100_img_02.png]]" in markdown
 
 
+def test_concrete_imgneeded_placeholder_can_match_source_id_alias(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU500_img_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU500",
+                "title": "Concrete Source Alias",
+                "knowledge_type": "concrete",
+                "body_text": "source-id placeholder test",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU500_img_01",
+                            "source_id": "SU500/SU500_ss_concrete_seg_01_key_01",
+                            "img_path": str(img_path),
+                            "img_description": "from concrete keyframe",
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FakeLLMClient("line1\n【imgneeded_SU500_ss_concrete_seg_01_key_01】\nline2")
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU500": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "imgneeded_SU500_ss_concrete_seg_01_key_01" not in markdown
+    assert "![[assets/SU500_img_01.png]]" in markdown
+
+
 def test_old_img_placeholder_not_replaced_but_supplemental_images_present(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -848,7 +1084,7 @@ def test_process_non_tutorial_renders_multiple_videos(tmp_path, monkeypatch):
     assert "![[assets/SU201_clip_02.mp4]]" in markdown
 
 
-def test_concrete_section_uses_image_desc_augment_before_structuring_when_enabled(tmp_path, monkeypatch):
+def test_concrete_section_skips_image_desc_augment_even_when_enabled(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     img_path = assets_dir / "SU300_img_01.png"
@@ -903,9 +1139,16 @@ def test_concrete_section_uses_image_desc_augment_before_structuring_when_enable
         )
     )
 
-    assert AUGMENTED_BODY_TEXT in markdown
-    assert sum(1 for call in recorder.calls if AUGMENT_PROMPT_MARKER in call["prompt"]) == 1
-    assert sum(1 for call in recorder.calls if STRUCTURED_PROMPT_MARKER in call["prompt"]) == 1
+    assert BASE_BODY_TEXT in markdown
+    assert sum(1 for call in recorder.calls if AUGMENT_PROMPT_MARKER in call["prompt"]) == 0
+    assert (
+        sum(
+            1
+            for call in recorder.calls
+            if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
+        )
+        == 1
+    )
 
 
 def test_concrete_section_skips_image_desc_augment_when_disabled(tmp_path, monkeypatch):
@@ -965,7 +1208,14 @@ def test_concrete_section_skips_image_desc_augment_when_disabled(tmp_path, monke
 
     assert BASE_BODY_TEXT in markdown
     assert sum(1 for call in recorder.calls if AUGMENT_PROMPT_MARKER in call["prompt"]) == 0
-    assert sum(1 for call in recorder.calls if STRUCTURED_PROMPT_MARKER in call["prompt"]) == 1
+    assert (
+        sum(
+            1
+            for call in recorder.calls
+            if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
+        )
+        == 1
+    )
 
 
 def test_markdown_enhancer_img_desc_switch_defaults_true_from_config(tmp_path, monkeypatch):
@@ -1050,10 +1300,17 @@ def test_concrete_section_skips_img_desc_augment_without_alignment_evidence(tmp_
 
     assert BASE_BODY_TEXT in markdown
     assert sum(1 for call in recorder.calls if AUGMENT_PROMPT_MARKER in call["prompt"]) == 0
-    assert sum(1 for call in recorder.calls if STRUCTURED_PROMPT_MARKER in call["prompt"]) == 1
+    assert (
+        sum(
+            1
+            for call in recorder.calls
+            if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
+        )
+        == 1
+    )
 
 
-def test_concrete_section_logs_augment_triggered_with_sentence_ids(tmp_path, monkeypatch, caplog):
+def test_concrete_section_does_not_log_augment_triggered_with_sentence_ids(tmp_path, monkeypatch, caplog):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
     img_path = assets_dir / "SU303_img_01.png"
@@ -1110,8 +1367,8 @@ def test_concrete_section_logs_augment_triggered_with_sentence_ids(tmp_path, mon
     )
 
     logs = "\n".join(record.message for record in caplog.records)
-    assert "[SU303] img-desc augment triggered" in logs
-    assert "sentence_ids=S002" in logs
+    assert "[SU303] img-desc augment triggered" not in logs
+    assert "sentence_ids=S002" not in logs
 
 
 def test_img_desc_augment_uses_excluded_screenshot_items_as_evidence():
@@ -1437,10 +1694,10 @@ def test_markdown_enhancer_writes_llm_trace_jsonl(tmp_path, monkeypatch):
     trace_path = tmp_path / "intermediates" / "phase2b_llm_trace.jsonl"
     assert trace_path.exists()
     lines = [line for line in trace_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) >= 2
+    assert len(lines) >= 1
     payloads = [json.loads(line) for line in lines]
     steps = {item.get("step_name") for item in payloads}
-    assert "img_desc_augment" in steps
+    assert "img_desc_augment" not in steps
     assert "structured_text" in steps
 
 

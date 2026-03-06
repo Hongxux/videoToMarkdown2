@@ -11,11 +11,8 @@
       - clip_start_sec (Float): 步骤开始时间。
       - clip_end_sec (Float): 步骤结束时间。
       - instructional_keyframes (List[Object]): 该步骤中最重要的截图凭证。必须选取最能代表该步骤结果的瞬间。列表中的第 N 个元素必须严格对应 `main_operation` 里的 `[KEYFRAME_{N}]` 占位符。
-       - timestamp_sec (Float): 关键帧精确相对时间（秒）。**核心红线：截图在精不在多。** 必须用最少、最清晰的图覆盖最多信息。绝对禁止截取空白界面、被遮挡、被极度放大失去上下文、模糊过渡或被选定反色污染的劣质画面。截图时机要求（优先选定稿）：
-         1. 结果定稿时：配置完全填好或执行出最终反馈的瞬间。
-         2. 状态巨变时：页面成功跳转或关键结果首次稳定呈现的瞬间。
-         3. 行为聚焦时：定稿后被鼠标清晰指示的瞬间。
-        - frame_reason (String): 描述这张图证明了什么。用于 Markdown 图注。
+       - timestamp_sec (Float): 关键帧精确相对时间（秒）。**核心红线：截图在精不在多。** 只有那些在脱离了视觉辅助后难以通过纯文本讲清的内容，才配被截图！**你必须着重截取旨在向读者展示元素之间「空间相对关系」或「逻辑相对关系」的画面。**必须用最少、最清晰的图覆盖最多信息。绝对禁止截取空白界面、被遮挡、被极度放大失去上下文、模糊过渡或被选定反色污染的劣质画面。
+        - frame_reason (String): 描述这张图**为什么不可或缺**（即它展示了怎样难以用纯文字描述的空间相对关系或逻辑交互，从而必须配图）。用于 Markdown 图注。
         - target_ui_type (String): 目标 UI 元素的具体类型（例如：提交按钮、输入框、下拉菜单栏、侧边栏列表项等）。
         - target_text (String): 目标区域囊括的具体文本内容（必须如实记录画面上的字眼，以便进行后续的 OCR 断言或网格匹配，如："Confirm"、"Proxy"、"File"）。
         - target_relative_position (String): 目标在整个画面中的大致方位（如“屏幕右上角”）以及与其他显著 UI 模块的空间关系（如“位于左侧导航树的最下方”、“在 Cancel 按钮的右侧”）。该语义特征将作为 Stage 2 视觉网格锚定的关键线索。
@@ -54,14 +51,14 @@
     "instructional_keyframes": [
       {
         "timestamp_sec": 12.5,
-        "frame_reason": "Settings 菜单入口",
+        "frame_reason": "展示顶部工具栏中 File 与下拉菜单中 Settings 的空间层级关系，辅助快速定位入口",
         "target_ui_type": "菜单项",
         "target_text": "Settings",
         "target_relative_position": "位于屏幕顶端工具栏偏左，File 下拉菜单中"
       },
       {
         "timestamp_sec": 18.0,
-        "frame_reason": "Proxy 填写完成状态",
+        "frame_reason": "展示 Proxy 配置面板中 IP 输入框、底部的 Apply 按钮与右侧 Success 反馈的同屏逻辑关联，提供填写后的视觉核对标准",
         "target_ui_type": "配置表单及按钮",
         "target_text": "127.0.0.1, Apply, Success",
         "target_relative_position": "画面中部的代理配置面板，要求包含输入框、底部的 Apply 按钮和右侧结果反馈文字"

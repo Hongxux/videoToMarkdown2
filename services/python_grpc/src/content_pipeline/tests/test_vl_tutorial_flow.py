@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, Dict
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from concurrent.futures import ProcessPoolExecutor
 
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
 import services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator as vl_material_generator_module
+from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer import (
     VLAnalysisResult,
     VLClipAnalysisResponse,
@@ -292,6 +294,71 @@ def test_vl_analyze_clips_batch_preserves_order_and_exceptions(monkeypatch):
     assert results[2].error_msg == "U3"
 
 
+def test_vl_analyze_clips_batch_result_callback_runs_non_blocking(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+
+    async def _fake_analyze_clip(
+        clip_path: str,
+        semantic_unit_start_sec: float,
+        semantic_unit_id: str,
+        extra_prompt: str | None = None,
+        analysis_mode: str = "default",
+    ) -> VLClipAnalysisResponse:
+        _ = (clip_path, semantic_unit_start_sec, extra_prompt, analysis_mode)
+        response = VLClipAnalysisResponse(success=True)
+        response.error_msg = semantic_unit_id
+        return response
+
+    callback_state: Dict[str, Any] = {
+        "started": [],
+        "finished": [],
+    }
+
+    async def _fake_result_callback(index: int, item: Any):
+        _ = index
+        callback_state["started"].append(str(getattr(item, "error_msg", "")))
+        await asyncio.sleep(0.1)
+        callback_state["finished"].append(str(getattr(item, "error_msg", "")))
+
+    monkeypatch.setattr(analyzer, "analyze_clip", _fake_analyze_clip)
+
+    start_ts = time.perf_counter()
+    results = asyncio.run(
+        analyzer.analyze_clips_batch(
+            tasks=[
+                {
+                    "clip_path": "u1.mp4",
+                    "semantic_unit_start_sec": 0.0,
+                    "semantic_unit_id": "U1",
+                    "analysis_mode": "default",
+                },
+                {
+                    "clip_path": "u2.mp4",
+                    "semantic_unit_start_sec": 10.0,
+                    "semantic_unit_id": "U2",
+                    "analysis_mode": "default",
+                },
+                {
+                    "clip_path": "u3.mp4",
+                    "semantic_unit_start_sec": 20.0,
+                    "semantic_unit_id": "U3",
+                    "analysis_mode": "default",
+                },
+            ],
+            max_inflight=3,
+            return_exceptions=True,
+            result_callback=_fake_result_callback,
+        )
+    )
+    elapsed_sec = time.perf_counter() - start_ts
+
+    assert [str(getattr(item, "error_msg", "")) for item in results] == ["U1", "U2", "U3"]
+    assert sorted(callback_state["started"]) == ["U1", "U2", "U3"]
+    assert sorted(callback_state["finished"]) == ["U1", "U2", "U3"]
+    # 若 callback 串行阻塞，总耗时会接近 0.3s；并发调度下应明显低于该值。
+    assert elapsed_sec < 0.28
+
+
 def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path: Path):
     clip = tmp_path / "demo.mp4"
     clip.write_bytes(b"fake-video")
@@ -326,6 +393,441 @@ def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path:
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
     assert any(item.get("type") == "image_url" for item in messages[1]["content"])
+
+
+def test_prepare_video_for_dashscope_upload_compresses_without_duration_threshold(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.long_video_upload_compress_enabled = True
+
+    captured: Dict[str, Any] = {}
+
+    async def _fake_compress(video_path: str) -> str:
+        captured["video_path"] = video_path
+        return "compressed.mp4"
+
+    monkeypatch.setattr(analyzer, "_compress_video_for_dashscope_upload", _fake_compress)
+
+    prepared = asyncio.run(analyzer._prepare_video_for_dashscope_upload("demo.mp4"))
+
+    assert prepared == "compressed.mp4"
+    assert captured["video_path"] == "demo.mp4"
+
+
+def test_prepare_video_for_dashscope_upload_defaults_to_original_video():
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.long_video_upload_compress_enabled = False
+
+    prepared = asyncio.run(analyzer._prepare_video_for_dashscope_upload("origin.mp4"))
+
+    assert prepared == "origin.mp4"
+
+
+def test_compress_video_for_dashscope_upload_ignores_larger_cached_file(tmp_path):
+    source = Path(tmp_path) / "source.mp4"
+    cached = Path(tmp_path) / "_vl_upload_cache" / "source_cached_720p.mp4"
+    source.write_bytes(b"a" * 100)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_bytes(b"b" * 200)
+
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.long_video_upload_compress_enabled = True
+    analyzer._build_long_video_upload_output_path = lambda _video_path: cached
+
+    compressed = asyncio.run(analyzer._compress_video_for_dashscope_upload(str(source)))
+
+    assert compressed == str(source)
+    assert not cached.exists()
+
+
+def test_compress_video_for_dashscope_upload_uses_crf_fps_and_drop_audio(monkeypatch, tmp_path):
+    source = Path(tmp_path) / "source.mp4"
+    output = Path(tmp_path) / "_vl_upload_cache" / "source_out_1080p.mp4"
+    source.write_bytes(b"a" * 1024)
+
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.long_video_upload_compress_enabled = True
+    analyzer.long_video_upload_target_height = 1080
+    analyzer.long_video_upload_crf = 28
+    analyzer.long_video_upload_preset = "fast"
+    analyzer.long_video_upload_target_fps = 15.0
+    analyzer.long_video_upload_drop_audio = True
+    analyzer.long_video_upload_timeout_sec = 30
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run(command, capture_output=True, text=True, timeout=0):
+        _ = (capture_output, text)
+        captured["command"] = list(command)
+        captured["timeout"] = timeout
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"x" * 100)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.resolve_ffmpeg_bin",
+        lambda: "ffmpeg",
+    )
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.subprocess.run",
+        _fake_run,
+    )
+    monkeypatch.setattr(analyzer, "_build_long_video_upload_output_path", lambda _video_path: output)
+
+    compressed = asyncio.run(analyzer._compress_video_for_dashscope_upload(str(source)))
+
+    command = captured["command"]
+    assert compressed == str(output)
+    assert "-c:v" in command and "libx264" in command
+    assert "-crf" in command and command[command.index("-crf") + 1] == "28"
+    assert "-preset" in command and command[command.index("-preset") + 1] == "fast"
+    assert "-r" in command and command[command.index("-r") + 1] == "15"
+    assert "-an" in command
+    assert "-vf" in command
+    assert "1080" in command[command.index("-vf") + 1]
+    assert "-b:v" not in command
+
+
+def test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer._api_key = "test-key"
+    analyzer.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    analyzer.dashscope_upload_chunk_size_bytes = 2 * 1024 * 1024
+    analyzer.dashscope_upload_timeout_by_video_duration = True
+    analyzer.dashscope_upload_timeout_min_sec = 1.0
+
+    captured: Dict[str, Any] = {}
+
+    async def _fake_prepare(_video_path: str) -> str:
+        return "prepared.mp4"
+
+    monkeypatch.setattr(analyzer, "_prepare_video_for_dashscope_upload", _fake_prepare)
+    monkeypatch.setattr(analyzer, "_resolve_video_duration_sec", lambda _video_path: 913.0)
+
+    class _FakeUploadResponse:
+        status_code = 200
+        output = {"url": "https://example.com/video.mp4"}
+        request_id = "req-001"
+
+    class _FakeFiles:
+        @staticmethod
+        def upload(**kwargs):
+            captured.update(kwargs)
+            return _FakeUploadResponse()
+
+    class _FakeDashScope:
+        api_key = ""
+        Files = _FakeFiles
+
+    monkeypatch.setitem(sys.modules, "dashscope", _FakeDashScope)
+
+    temp_url = asyncio.run(analyzer._try_get_dashscope_temp_url("demo.mp4", raise_on_failure=True))
+
+    assert temp_url == "https://example.com/video.mp4"
+    assert captured["purpose"] == "file-extract"
+    assert int(captured["chunk_size"]) == 2 * 1024 * 1024
+    assert float(captured["timeout"]) == 913.0
+    assert captured["headers"]["Authorization"] == "Bearer test-key"
+
+
+def test_try_get_dashscope_temp_url_normalizes_http_oss_to_https(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer._api_key = "test-key"
+    analyzer.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    async def _fake_prepare(_video_path: str) -> str:
+        return "prepared.mp4"
+
+    monkeypatch.setattr(analyzer, "_prepare_video_for_dashscope_upload", _fake_prepare)
+    monkeypatch.setattr(analyzer, "_resolve_video_duration_sec", lambda _video_path: 913.0)
+
+    class _FakeUploadResponse:
+        status_code = 200
+        output = {
+            "url": "http://dashscope-file-mgr.oss-cn-beijing.aliyuncs.com/demo.mp4?signature=abc"
+        }
+        request_id = "req-http-url"
+
+    class _FakeFiles:
+        @staticmethod
+        def upload(**kwargs):
+            _ = kwargs
+            return _FakeUploadResponse()
+
+    class _FakeDashScope:
+        api_key = ""
+        Files = _FakeFiles
+
+    monkeypatch.setitem(sys.modules, "dashscope", _FakeDashScope)
+
+    temp_url = asyncio.run(analyzer._try_get_dashscope_temp_url("demo.mp4", raise_on_failure=True))
+
+    assert temp_url.startswith("https://dashscope-file-mgr.oss-")
+
+
+def test_try_get_dashscope_temp_url_retries_with_exponential_backoff(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer._api_key = "test-key"
+    analyzer.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    analyzer.dashscope_upload_retry_max_attempts = 3
+    analyzer.dashscope_upload_retry_initial_backoff_sec = 1.0
+    analyzer.dashscope_upload_retry_multiplier = 2.0
+    analyzer.dashscope_upload_retry_max_backoff_sec = 10.0
+    analyzer.dashscope_upload_retry_jitter_sec = 0.0
+    analyzer.dashscope_upload_timeout_by_video_duration = True
+    analyzer.dashscope_upload_timeout_min_sec = 1.0
+
+    captured: Dict[str, Any] = {"upload_calls": 0, "sleep_values": []}
+
+    async def _fake_prepare(_video_path: str) -> str:
+        return "prepared.mp4"
+
+    async def _fake_sleep(seconds: float):
+        captured["sleep_values"].append(float(seconds))
+        return None
+
+    monkeypatch.setattr(analyzer, "_prepare_video_for_dashscope_upload", _fake_prepare)
+    monkeypatch.setattr(analyzer, "_resolve_video_duration_sec", lambda _video_path: 913.0)
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    class _FakeUploadResponse:
+        status_code = 200
+        output = {"url": "https://example.com/video.mp4"}
+        request_id = "req-retry-ok"
+
+    class _FakeFiles:
+        @staticmethod
+        def upload(**kwargs):
+            _ = kwargs
+            captured["upload_calls"] += 1
+            if captured["upload_calls"] < 3:
+                raise RuntimeError("simulated upload timeout")
+            return _FakeUploadResponse()
+
+    class _FakeDashScope:
+        api_key = ""
+        Files = _FakeFiles
+
+    monkeypatch.setitem(sys.modules, "dashscope", _FakeDashScope)
+
+    temp_url = asyncio.run(analyzer._try_get_dashscope_temp_url("demo.mp4", raise_on_failure=True))
+
+    assert temp_url == "https://example.com/video.mp4"
+    assert captured["upload_calls"] == 3
+    assert captured["sleep_values"] == [1.0, 2.0]
+
+
+def test_call_vl_api_prefers_dashscope_offline_task_when_enabled(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.vl_offline_task_enabled = True
+    analyzer.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    async def _fake_build_messages(video_path: str, extra_prompt=None, analysis_mode="default", **kwargs):
+        _ = (video_path, extra_prompt, analysis_mode, kwargs)
+        return [{"role": "system", "content": "sys"}]
+
+    async def _fake_offline_call(*, messages):
+        assert messages == [{"role": "system", "content": "sys"}]
+        return (
+            '[{"id":1,"knowledge_type":"process","clip_start_sec":0,"clip_end_sec":5}]',
+            "stop",
+            {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            {"task_id": "task_123", "task_status": "SUCCEEDED", "poll_count": 2},
+        )
+
+    def _fake_parse(content: str, finish_reason=None, analysis_mode="default"):
+        _ = (content, finish_reason, analysis_mode)
+        return [VLAnalysisResult(id=1, knowledge_type="process", clip_start_sec=0.0, clip_end_sec=5.0)], []
+
+    async def _should_not_call_sync(**kwargs):
+        raise AssertionError("sync vl_chat_completion should not be called when offline task is enabled")
+
+    monkeypatch.setattr(analyzer, "_build_messages", _fake_build_messages)
+    monkeypatch.setattr(analyzer, "_call_vl_api_with_dashscope_offline_task", _fake_offline_call)
+    monkeypatch.setattr(analyzer, "_parse_response_with_payload", _fake_parse)
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _should_not_call_sync)
+
+    parsed_results, token_usage, raw_json, interactions = asyncio.run(
+        analyzer._call_vl_api("demo_0.00-10.00.mp4", analysis_mode="default")
+    )
+
+    assert len(parsed_results) == 1
+    assert token_usage["total_tokens"] == 18
+    assert raw_json == []
+    assert interactions[0]["request"]["offline_task_enabled"] is True
+    assert interactions[0]["request"]["offline_task_meta"]["task_id"] == "task_123"
+
+
+def test_call_vl_api_sync_path_passes_timeout_and_hedge(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.vl_offline_task_enabled = False
+
+    async def _fake_build_messages(video_path: str, extra_prompt=None, analysis_mode="default", **kwargs):
+        _ = (video_path, extra_prompt, analysis_mode, kwargs)
+        return [{"role": "system", "content": "sys"}]
+
+    def _fake_parse(content: str, finish_reason=None, analysis_mode="default"):
+        _ = (content, finish_reason, analysis_mode)
+        return [VLAnalysisResult(id=1, knowledge_type="process", clip_start_sec=0.0, clip_end_sec=5.0)], []
+
+    captured: Dict[str, Any] = {}
+
+    async def _fake_vl_chat_completion(**kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        captured["hedge_delay_ms"] = kwargs.get("hedge_delay_ms")
+        return llm_gateway.VLChatResult(
+            content='[{"id":1,"knowledge_type":"process","clip_start_sec":0,"clip_end_sec":5}]',
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            model="test-model",
+        )
+
+    monkeypatch.setattr(analyzer, "_build_messages", _fake_build_messages)
+    monkeypatch.setattr(analyzer, "_parse_response_with_payload", _fake_parse)
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
+
+    asyncio.run(analyzer._call_vl_api("demo_100.00-220.00.mp4", analysis_mode="default"))
+
+    assert float(captured["timeout"]) == 60.0
+    assert int(captured["hedge_delay_ms"]) == 60000
+
+
+def test_dashscope_offline_task_uses_openai_batch_with_5s_poll(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer._api_key = "test-key"
+    analyzer.model = "test-model"
+    analyzer.vl_offline_poll_interval_sec = 5.0
+
+    captured: Dict[str, Any] = {
+        "files_create_calls": 0,
+        "batches_create_calls": 0,
+        "batches_retrieve_calls": 0,
+        "files_content_calls": 0,
+        "sleep_calls": 0,
+        "sleep_seconds": [],
+    }
+
+    class _FakeFileContent:
+        def __init__(self, text: str):
+            self.text = text
+
+    class _FakeFiles:
+        async def create(self, *, file, purpose: str, **kwargs):
+            _ = kwargs
+            captured["files_create_calls"] += 1
+            captured["purpose"] = purpose
+            captured["uploaded_file"] = file
+
+            payload_bytes = b""
+            if isinstance(file, tuple) and len(file) >= 2:
+                payload_bytes = file[1] if isinstance(file[1], (bytes, bytearray)) else b""
+            elif hasattr(file, "read") and callable(getattr(file, "read")):
+                payload = file.read()
+                if isinstance(payload, str):
+                    payload_bytes = payload.encode("utf-8")
+                elif isinstance(payload, (bytes, bytearray)):
+                    payload_bytes = bytes(payload)
+            payload_text = payload_bytes.decode("utf-8", errors="replace")
+            row = json.loads(payload_text.strip().splitlines()[0])
+            captured["custom_id"] = row["custom_id"]
+            captured["batch_body"] = row["body"]
+
+            return SimpleNamespace(id="file-input-001")
+
+        async def content(self, file_id: str, **kwargs):
+            _ = kwargs
+            captured["files_content_calls"] += 1
+            captured["output_file_id"] = file_id
+            output_row = {
+                "custom_id": captured.get("custom_id", ""),
+                "response": {
+                    "status_code": 200,
+                    "body": {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": '[{"id":1,"knowledge_type":"process","clip_start_sec":0,"clip_end_sec":1}]'
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5},
+                    },
+                },
+            }
+            return _FakeFileContent(json.dumps(output_row, ensure_ascii=False) + "\n")
+
+    class _FakeBatches:
+        async def create(self, *, input_file_id: str, endpoint: str, completion_window: str, **kwargs):
+            _ = kwargs
+            captured["batches_create_calls"] += 1
+            captured["input_file_id"] = input_file_id
+            captured["endpoint"] = endpoint
+            captured["completion_window"] = completion_window
+            return SimpleNamespace(id="batch-001", status="in_progress")
+
+        async def retrieve(self, batch_id: str, **kwargs):
+            _ = kwargs
+            captured["batches_retrieve_calls"] += 1
+            captured["task_id"] = batch_id
+            if captured["batches_retrieve_calls"] == 1:
+                return SimpleNamespace(id=batch_id, status="in_progress")
+            return SimpleNamespace(id=batch_id, status="completed", output_file_id="file-output-001")
+
+    class _FakeClient:
+        def __init__(self):
+            self.files = _FakeFiles()
+            self.batches = _FakeBatches()
+
+    analyzer.client = _FakeClient()
+
+    async def _fake_sleep(_seconds: float):
+        captured["sleep_calls"] += 1
+        captured["sleep_seconds"].append(float(_seconds))
+        return None
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    content, finish_reason, usage, meta = asyncio.run(
+        analyzer._call_vl_api_with_dashscope_offline_task(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}},
+                        {"type": "text", "text": "analyze"},
+                    ],
+                }
+            ]
+        )
+    )
+
+    assert captured["files_create_calls"] == 1
+    assert captured["batches_create_calls"] == 1
+    assert captured["batches_retrieve_calls"] == 2
+    assert captured["files_content_calls"] == 1
+    assert captured["purpose"] == "batch"
+    assert captured["endpoint"] == "/v1/chat/completions"
+    assert captured["completion_window"] == "24h"
+    assert captured["task_id"] == "batch-001"
+    assert captured["sleep_calls"] == 1
+    assert captured["sleep_seconds"] == [5.0]
+    assert captured["batch_body"]["model"] == analyzer.model
+    assert captured["batch_body"]["max_tokens"] == analyzer.max_tokens
+    assert content.startswith("[{")
+    assert finish_reason == "stop"
+    assert usage["total_tokens"] == 5
+    assert meta["task_id"] == "batch-001"
+    assert meta["batch_id"] == "batch-001"
+    assert meta["input_file_id"] == "file-input-001"
+    assert meta["output_file_id"] == "file-output-001"
+    assert meta["task_status"] == "COMPLETED"
+    assert int(meta["poll_count"]) == 2
 
 
 def test_build_messages_uses_concrete_mode_prompts(monkeypatch):
@@ -1189,6 +1691,86 @@ def test_generate_marks_unit_concrete_when_should_type_concrete(monkeypatch):
     assert semantic_units[0]["knowledge_type"] == "concrete"
     assert semantic_units[0]["_vl_route_override"] == "concrete"
     assert semantic_units[0]["_vl_no_needed_video"] is False
+
+
+def test_generate_uses_stream_unit_pipeline_when_enabled(monkeypatch, tmp_path):
+    config = _build_generator_config()
+    config["vl_analysis"] = {
+        "parallel_workers": 2,
+        "parallel_hard_cap": 8,
+        "stream_unit_pipeline_enabled": True,
+        "stream_pipeline_knowledge_types": ["process", "concrete"],
+    }
+    generator = VLMaterialGenerator(config)
+
+    video_path = Path(tmp_path) / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = Path(tmp_path) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    semantic_units = [
+        {
+            "unit_id": "SU_STREAM_001",
+            "knowledge_type": "process",
+            "mult_steps": True,
+            "start_sec": 0.0,
+            "end_sec": 12.0,
+        }
+    ]
+
+    called: Dict[str, int] = {"stream": 0, "legacy_split": 0}
+
+    async def _fake_stream_pipeline(
+        *,
+        video_path: str,
+        semantic_units: list[dict[str, Any]],
+        resolved_output_dir: str,
+        all_clip_requests: list[dict[str, Any]],
+        all_screenshot_requests: list[dict[str, Any]],
+        token_stats: dict[str, Any],
+    ):
+        _ = (video_path, semantic_units, resolved_output_dir)
+        called["stream"] += 1
+        token_stats["vl_units"] = 1
+        token_stats["prompt_tokens_actual"] = 10
+        token_stats["completion_tokens_actual"] = 5
+        token_stats["total_tokens_actual"] = 15
+        all_clip_requests.append(
+            {
+                "clip_id": "SU_STREAM_001/SU_STREAM_001_clip_001",
+                "start_sec": 0.0,
+                "end_sec": 6.0,
+            }
+        )
+        all_screenshot_requests.append(
+            {
+                "screenshot_id": "SU_STREAM_001/SU_STREAM_001_ss_001",
+                "timestamp_sec": 3.0,
+            }
+        )
+        return [], [], {}, 0
+
+    async def _fake_legacy_split(*args, **kwargs):
+        _ = (args, kwargs)
+        called["legacy_split"] += 1
+        return str(output_dir / "semantic_unit_clips_vl")
+
+    monkeypatch.setattr(generator, "_run_stream_unit_pipeline", _fake_stream_pipeline)
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_legacy_split)
+    monkeypatch.setattr(generator, "_serialize_unit_analysis_outputs", lambda **kwargs: [])
+
+    result = asyncio.run(
+        generator.generate(
+            video_path=str(video_path),
+            semantic_units=semantic_units,
+            output_dir=str(output_dir),
+        )
+    )
+
+    assert result.success is True
+    assert called["stream"] == 1
+    assert called["legacy_split"] == 0
+    assert len(result.clip_requests) == 1
+    assert len(result.screenshot_requests) == 1
 
 
 def test_generate_uses_concrete_mode_override_and_exposes_unit_outputs(monkeypatch):
@@ -2572,9 +3154,10 @@ def test_tutorial_assets_export_uses_parallel_limited_workers(tmp_path, monkeypa
     assert elapsed < 0.12
 
 
-def test_apply_screenshot_optimization_with_bypass_skips_concrete_requests(monkeypatch):
+def test_apply_screenshot_optimization_with_bypass_only_skips_explicit_requests(monkeypatch):
     config = _build_generator_config()
     config["screenshot_optimization"]["enabled"] = True
+    config["screenshot_optimization"]["best_frame_vision_select_enabled"] = False
     generator = VLMaterialGenerator(config)
 
     captured: Dict[str, Any] = {"requests": []}
@@ -2625,15 +3208,150 @@ def test_apply_screenshot_optimization_with_bypass_skips_concrete_requests(monke
     )
 
     assert captured["video_path"] == "dummy.mp4"
-    assert len(captured["requests"]) == 1
-    assert captured["requests"][0]["screenshot_id"] == "SU002/SU002_ss_vl_01_01"
+    assert len(captured["requests"]) == 3
+    assert {item["screenshot_id"] for item in captured["requests"]} == {
+        "SU001/SU001_ss_concrete_seg_01_key_01",
+        "SU002/SU002_ss_vl_01_01",
+        "SU003/SU003_ss_vl_01_01",
+    }
 
     assert len(merged) == 4
-    assert merged[0]["timestamp_sec"] == 1.0
-    assert "_optimized_by_cv" not in merged[0]
+    assert merged[0]["timestamp_sec"] == 1.25
+    assert merged[0]["_optimized_by_cv"] is True
     assert merged[1]["timestamp_sec"] == 2.25
     assert merged[1]["_optimized_by_cv"] is True
-    assert merged[2]["timestamp_sec"] == 3.0
-    assert "_optimized_by_cv" not in merged[2]
+    assert merged[2]["timestamp_sec"] == 3.25
+    assert merged[2]["_optimized_by_cv"] is True
     assert merged[3]["timestamp_sec"] == 4.0
     assert "_optimized_by_cv" not in merged[3]
+
+
+def test_annotate_screenshot_requests_with_unit_context_does_not_force_skip():
+    generator = VLMaterialGenerator(_build_generator_config())
+    requests = [
+        {
+            "screenshot_id": "SU900/SU900_ss_vl_01_01",
+            "timestamp_sec": 12.34,
+        }
+    ]
+
+    generator._annotate_screenshot_requests_with_unit_context(
+        screenshot_requests=requests,
+        semantic_unit={"knowledge_type": "concrete"},
+        analysis_mode="default",
+    )
+
+    assert requests[0]["analysis_mode"] == "default"
+    assert requests[0]["knowledge_type"] == "concrete"
+    assert "_skip_cv_optimization" not in requests[0]
+
+
+def test_apply_selection_result_persists_candidate_screenshots():
+    generator = VLMaterialGenerator(_build_generator_config())
+    request = {"screenshot_id": "SU700/SU700_ss_vl_01_01", "timestamp_sec": 10.0}
+
+    generator._apply_selection_result(
+        req=request,
+        original_ts=10.0,
+        unit_id="SU700",
+        result={
+            "selected_timestamp": 10.4,
+            "quality_score": 0.81,
+            "static_island_threshold_ms": 200.0,
+            "candidate_screenshots": [
+                {"timestamp_sec": 10.4, "score": 0.81, "island_index": 1},
+                {"timestamp_sec": 10.1, "score": 0.72, "island_index": 0},
+            ],
+        },
+    )
+
+    assert request["timestamp_sec"] == 10.4
+    assert request["_cv_quality_score"] == 0.81
+    assert request["_cv_static_island_threshold_ms"] == 200.0
+    assert len(request["_cv_candidate_screenshots"]) == 2
+    assert request["_cv_candidate_screenshots"][0]["timestamp_sec"] == 10.4
+
+
+def test_apply_best_frame_vision_selection_collapses_candidates(monkeypatch):
+    config = _build_generator_config()
+    config["screenshot_optimization"]["enabled"] = True
+    config["screenshot_optimization"]["best_frame_vision_select_enabled"] = True
+    generator = VLMaterialGenerator(config)
+
+    candidates = [
+        {"timestamp_sec": 20.10, "score": 0.62, "island_index": 0},
+        {"timestamp_sec": 20.35, "score": 0.58, "island_index": 1},
+        {"timestamp_sec": 20.60, "score": 0.55, "island_index": 2},
+    ]
+
+    async def _fake_pick(**kwargs):
+        return dict(candidates[1]), "ai"
+
+    monkeypatch.setattr(generator, "_select_best_frame_candidate_with_vision", _fake_pick)
+
+    requests = [
+        {
+            "screenshot_id": "SU710/SU710_ss_vl_01_01",
+            "timestamp_sec": 20.10,
+            "_cv_quality_score": 0.62,
+            "_cv_candidate_screenshots": [dict(item) for item in candidates],
+            "frame_reason": "点击设置按钮",
+        }
+    ]
+
+    updated = asyncio.run(
+        generator._apply_best_frame_vision_selection(
+            video_path="dummy.mp4",
+            screenshot_requests=requests,
+        )
+    )
+
+    assert len(updated) == 1
+    assert updated[0]["timestamp_sec"] == 20.35
+    assert updated[0]["_cv_quality_score"] == 0.58
+    assert updated[0]["_cv_vision_selection_source"] == "ai"
+    assert len(updated[0]["_cv_candidate_screenshots"]) == 1
+    assert updated[0]["_cv_candidate_screenshots"][0]["timestamp_sec"] == 20.35
+
+
+def test_select_best_frame_candidate_with_vision_invalid_response_falls_back(monkeypatch):
+    config = _build_generator_config()
+    config["screenshot_optimization"]["enabled"] = True
+    config["screenshot_optimization"]["best_frame_vision_select_enabled"] = True
+    generator = VLMaterialGenerator(config)
+    generator._analyzer = SimpleNamespace(client=object(), model="test-vl-model")
+
+    candidates = [
+        {"timestamp_sec": 8.2, "score": 0.90, "island_index": 0},
+        {"timestamp_sec": 8.6, "score": 0.75, "island_index": 1},
+    ]
+
+    monkeypatch.setattr(
+        generator,
+        "_build_candidate_images_for_vision_selection",
+        lambda **kwargs: [
+            {"image_id": "image_1", "candidate": dict(candidates[0]), "data_uri": "data:image/jpeg;base64,AA=="},
+            {"image_id": "image_2", "candidate": dict(candidates[1]), "data_uri": "data:image/jpeg;base64,AA=="},
+        ],
+    )
+
+    async def _fake_vl_chat_completion(**_kwargs):
+        return llm_gateway.VLChatResult(
+            content="invalid_choice_text",
+            finish_reason="stop",
+            usage={},
+            model="test-vl-model",
+        )
+
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
+
+    selected, source = asyncio.run(
+        generator._select_best_frame_candidate_with_vision(
+            video_path="dummy.mp4",
+            request={"frame_reason": "显示设置页面"},
+            candidates=[dict(item) for item in candidates],
+        )
+    )
+
+    assert source == "fallback_cv_top"
+    assert selected["timestamp_sec"] == 8.2

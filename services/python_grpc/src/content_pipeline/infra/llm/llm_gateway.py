@@ -1143,6 +1143,7 @@ async def _call_vl_api_once(
     max_tokens: int,
     temperature: float,
     response_format: Optional[Dict[str, Any]] = None,
+    timeout: Optional[float] = None,
 ) -> Tuple[str, Optional[str], Dict[str, int], str]:
     """方法说明：_call_vl_api_once 工具方法。
     执行步骤：
@@ -1157,6 +1158,13 @@ async def _call_vl_api_once(
     }
     if response_format is not None:
         kwargs["response_format"] = response_format
+    if timeout is not None:
+        try:
+            resolved_timeout = float(timeout)
+        except Exception:
+            resolved_timeout = 0.0
+        if resolved_timeout > 0:
+            kwargs["timeout"] = resolved_timeout
 
     response = await client.chat.completions.create(**kwargs)
     content = response.choices[0].message.content
@@ -1175,6 +1183,8 @@ async def vl_chat_completion(
     temperature: float,
     response_format: Optional[Dict[str, Any]] = None,
     cache_key: Optional[str] = None,
+    timeout: Optional[float] = None,
+    hedge_delay_ms: Optional[int] = None,
 ) -> VLChatResult:
     """
     作用：统一 VL ChatCompletion 调用，附带缓存、去重与并发控制。
@@ -1213,6 +1223,7 @@ async def vl_chat_completion(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 response_format=response_format,
+                timeout=timeout,
             )
             await _VL_CONCURRENCY.record_success()
 
@@ -1246,10 +1257,16 @@ async def vl_chat_completion(
                 await _VL_CONCURRENCY.release(acquired)
 
     async def _do_hedged_request() -> VLChatResult:
+        resolved_hedge_delay_ms = _VL_HEDGE_DELAY_MS
+        if hedge_delay_ms is not None:
+            try:
+                resolved_hedge_delay_ms = max(0, int(hedge_delay_ms))
+            except Exception:
+                resolved_hedge_delay_ms = _VL_HEDGE_DELAY_MS
         return await _run_hedged_async_request(
             request_name="vl_chat_completion",
             enabled=_VL_HEDGE_ENABLED,
-            delay_ms=_VL_HEDGE_DELAY_MS,
+            delay_ms=resolved_hedge_delay_ms,
             primary_factory=_do_request,
             secondary_factory=_do_request,
         )
@@ -1293,6 +1310,8 @@ async def vl_chat_completions(
                 temperature=float(payload["temperature"]),
                 response_format=payload.get("response_format"),
                 cache_key=payload.get("cache_key"),
+                timeout=payload.get("timeout"),
+                hedge_delay_ms=payload.get("hedge_delay_ms"),
             )
 
     await asyncio.gather(*[_run_single(index, payload) for index, payload in enumerate(requests)])

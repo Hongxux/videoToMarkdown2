@@ -4171,11 +4171,11 @@
         const trimmed = String(rawInput || '').trim();
         if (!trimmed) return '';
         if (looksLikeLocalPath(trimmed)) return trimmed;
-        const bv = extractBvId(trimmed);
-        if (!bv) return trimmed;
-        if (/^https?:\/\//i.test(trimmed) && !/bilibili\.com/i.test(trimmed)) {
+        if (/^https?:\/\//i.test(trimmed)) {
             return trimmed;
         }
+        const bv = extractBvId(trimmed);
+        if (!bv) return trimmed;
         return `https://www.bilibili.com/video/${bv}`;
     }
 
@@ -11910,11 +11910,22 @@
         return String(raw || '').replace(/\s+/g, ' ').trim();
     }
 
+    function resolveImageFrameReason(imageNode) {
+        if (!imageNode) {
+            return '';
+        }
+        const frameReason = normalizeFrameReasonText(imageNode.getAttribute('data-frame-reason'));
+        if (frameReason) {
+            return frameReason;
+        }
+        return normalizeFrameReasonText(imageNode.getAttribute('title'));
+    }
+
     function syncImageFrameReasonShell(imageNode, shellNode) {
         if (!imageNode || !shellNode) {
             return;
         }
-        const frameReason = normalizeFrameReasonText(imageNode.getAttribute('data-frame-reason'));
+        const frameReason = resolveImageFrameReason(imageNode);
         let reasonNode = shellNode.querySelector('.md-image-frame-reason');
         if (!frameReason) {
             shellNode.removeAttribute('data-has-frame-reason');
@@ -11922,6 +11933,9 @@
                 reasonNode.remove();
             }
             return;
+        }
+        if (!imageNode.getAttribute('data-frame-reason')) {
+            imageNode.setAttribute('data-frame-reason', frameReason);
         }
         if (!imageNode.getAttribute('title')) {
             imageNode.setAttribute('title', frameReason);

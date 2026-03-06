@@ -24,6 +24,8 @@ class _RecorderLLMClient:
             return "augmented body text", None, None
         if prompt.startswith("USER_STRUCTURED_TEMPLATE::"):
             return "structured body text", None, None
+        if prompt.startswith("USER_STRUCTURED_PRESERVE_TEMPLATE::"):
+            return "structured body text", None, None
         return "ok", None, None
 
     async def complete_json(self, prompt: str, system_message: str = None):
@@ -39,6 +41,8 @@ def _install_prompt_loader_stub(monkeypatch):
         PromptKeys.DEEPSEEK_MD_COMBINED_USER: "COMBINED_USER_TEMPLATE::{title}|{level_info}|{body_text}|{ocr_text}|{action_info}",
         PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM: "STRUCTURED_SYSTEM_TEMPLATE",
         PromptKeys.DEEPSEEK_MD_STRUCTURED_USER: "USER_STRUCTURED_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}",
+        PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG: "STRUCTURED_SYSTEM_PRESERVE_TEMPLATE",
+        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG: "USER_STRUCTURED_PRESERVE_TEMPLATE::{title}|{knowledge_type}|{body_text}|{adjacent_context}",
         PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM: "IMG_DESC_SYSTEM_TEMPLATE",
         PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_USER: "USER_IMG_DESC_TEMPLATE::{body_text}|{image_evidence}",
     }
@@ -60,6 +64,7 @@ def test_markdown_enhancer_loads_all_md_prompts_from_loader(monkeypatch):
     assert expected_keys.issubset(set(loaded_keys))
     assert enhancer._combined_system_prompt == "COMBINED_SYSTEM_TEMPLATE"
     assert enhancer._structured_system_prompt == "STRUCTURED_SYSTEM_TEMPLATE"
+    assert enhancer._structured_system_preserve_img_prompt == "STRUCTURED_SYSTEM_PRESERVE_TEMPLATE"
     assert enhancer._img_desc_augment_system_prompt == "IMG_DESC_SYSTEM_TEMPLATE"
 
 
@@ -130,7 +135,7 @@ def test_markdown_enhancer_runtime_paths_use_loader_templates(monkeypatch, tmp_p
     )
     concept_md = asyncio.run(enhancer._build_structured_text_for_concept(concept_section))
     assert "structured body text" in concept_md
-    assert any(call["system_message"] == "IMG_DESC_SYSTEM_TEMPLATE" for call in enhancer._llm_client.text_calls)
-    assert any(call["system_message"] == "STRUCTURED_SYSTEM_TEMPLATE" for call in enhancer._llm_client.text_calls)
-    assert any(call["prompt"].startswith("USER_IMG_DESC_TEMPLATE::") for call in enhancer._llm_client.text_calls)
-    assert any(call["prompt"].startswith("USER_STRUCTURED_TEMPLATE::") for call in enhancer._llm_client.text_calls)
+    assert all(call["system_message"] != "IMG_DESC_SYSTEM_TEMPLATE" for call in enhancer._llm_client.text_calls)
+    assert any(call["system_message"] == "STRUCTURED_SYSTEM_PRESERVE_TEMPLATE" for call in enhancer._llm_client.text_calls)
+    assert all(not call["prompt"].startswith("USER_IMG_DESC_TEMPLATE::") for call in enhancer._llm_client.text_calls)
+    assert any(call["prompt"].startswith("USER_STRUCTURED_PRESERVE_TEMPLATE::") for call in enhancer._llm_client.text_calls)

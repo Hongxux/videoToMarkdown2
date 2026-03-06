@@ -25,15 +25,23 @@ import asyncio
 import logging
 import io
 import math
+import random
 import httpx
 import hashlib
+import subprocess
+import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from dataclasses import dataclass, field
 from openai import AsyncOpenAI
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
-from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
+from services.python_grpc.src.common.utils.opencv_decode import (
+    get_video_basic_metadata,
+    open_video_capture_with_fallback,
+    resolve_ffmpeg_bin,
+)
 # 统一 LLM 调用入口
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
@@ -153,6 +161,87 @@ class VLVideoAnalyzer:
         self.compression_crf = api_config.get("compression_crf", 28)  # 0-51, 越大压缩越多
         self.max_tokens = api_config.get("max_tokens", 4096)
         self.temperature = api_config.get("temperature", 0.2)
+        self.vl_request_timeout_sec = max(1.0, safe_float(api_config.get("request_timeout_sec", 120.0), 120.0))
+        self.vl_request_timeout_ratio_by_video_duration = max(
+            0.0,
+            safe_float(api_config.get("request_timeout_ratio_by_video_duration", 0.5), 0.5),
+        )
+        self.vl_request_timeout_min_sec = max(
+            0.0,
+            safe_float(api_config.get("request_timeout_min_sec", 1.0), 1.0),
+        )
+        self.long_video_upload_compress_enabled = bool(api_config.get("long_video_upload_compress_enabled", False))
+        self.long_video_upload_target_height = max(
+            180,
+            safe_int(api_config.get("long_video_upload_target_height", 720), 720),
+        )
+        self.long_video_upload_target_bitrate = str(
+            api_config.get("long_video_upload_target_bitrate", "3M") or "3M"
+        ).strip()
+        self.long_video_upload_min_bitrate = str(
+            api_config.get("long_video_upload_min_bitrate", "2M") or "2M"
+        ).strip()
+        self.long_video_upload_max_bitrate = str(
+            api_config.get("long_video_upload_max_bitrate", "4M") or "4M"
+        ).strip()
+        self.long_video_upload_timeout_sec = max(
+            60,
+            safe_int(api_config.get("long_video_upload_timeout_sec", 1800), 1800),
+        )
+        self.long_video_upload_crf = min(
+            51,
+            max(0, safe_int(api_config.get("long_video_upload_crf", 28), 28)),
+        )
+        self.long_video_upload_preset = str(
+            api_config.get("long_video_upload_preset", "fast") or "fast"
+        ).strip() or "fast"
+        self.long_video_upload_target_fps = max(
+            1.0,
+            safe_float(api_config.get("long_video_upload_target_fps", 15.0), 15.0),
+        )
+        self.long_video_upload_drop_audio = bool(api_config.get("long_video_upload_drop_audio", True))
+        self.dashscope_upload_chunk_size_bytes = max(
+            64 * 1024,
+            safe_int(api_config.get("upload_chunk_size_bytes", 2 * 1024 * 1024), 2 * 1024 * 1024),
+        )
+        self.dashscope_upload_timeout_by_video_duration = bool(
+            api_config.get("upload_timeout_by_video_duration", True)
+        )
+        self.dashscope_upload_timeout_min_sec = max(
+            1.0,
+            safe_float(api_config.get("upload_timeout_min_sec", 1.0), 1.0),
+        )
+        self.dashscope_upload_retry_max_attempts = max(
+            1,
+            safe_int(api_config.get("upload_retry_max_attempts", 3), 3),
+        )
+        self.dashscope_upload_retry_initial_backoff_sec = max(
+            0.0,
+            safe_float(api_config.get("upload_retry_initial_backoff_sec", 1.0), 1.0),
+        )
+        self.dashscope_upload_retry_multiplier = max(
+            1.0,
+            safe_float(api_config.get("upload_retry_multiplier", 2.0), 2.0),
+        )
+        self.dashscope_upload_retry_max_backoff_sec = max(
+            self.dashscope_upload_retry_initial_backoff_sec,
+            safe_float(api_config.get("upload_retry_max_backoff_sec", 30.0), 30.0),
+        )
+        self.dashscope_upload_retry_jitter_sec = max(
+            0.0,
+            safe_float(api_config.get("upload_retry_jitter_sec", 0.0), 0.0),
+        )
+        self.vl_offline_task_enabled = bool(api_config.get("offline_task_enabled", False))
+        self.vl_offline_poll_interval_sec = max(
+            1.0,
+            safe_float(api_config.get("offline_poll_interval_sec", 5.0), 5.0),
+        )
+        self.vl_offline_result_format = str(api_config.get("offline_result_format", "message") or "message").strip()
+        self.vl_offline_max_wait_sec = max(
+            self.vl_offline_poll_interval_sec,
+            safe_float(api_config.get("offline_max_wait_sec", 86400.0), 86400.0),
+        )
+        self._video_duration_cache: Dict[str, float] = {}
 
         # 输入策略：
         # - DashScope 默认 auto（data-uri -> upload -> keyframes）
@@ -168,7 +257,7 @@ class VLVideoAnalyzer:
         self.http_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
             headers={"Accept-Encoding": "gzip, deflate"},
-            timeout=httpx.Timeout(120.0, connect=10.0)
+            timeout=httpx.Timeout(self.vl_request_timeout_sec, connect=10.0)
         )
         
         # 初始化 OpenAI 兼容客户端
@@ -177,8 +266,13 @@ class VLVideoAnalyzer:
             "base_url": self.base_url,
             "http_client": self.http_client,
         }
+        default_headers: Dict[str, str] = {}
+        if self._api_key:
+            default_headers["Authorization"] = f"Bearer {self._api_key}"
         if self.appid:
-            client_kwargs["default_headers"] = {"appid": self.appid}
+            default_headers["appid"] = self.appid
+        if default_headers:
+            client_kwargs["default_headers"] = default_headers
         self.client = AsyncOpenAI(**client_kwargs)
         
         # 截图优化配置
@@ -313,6 +407,681 @@ class VLVideoAnalyzer:
         if mode in {"concrete", "concrete_focus"}:
             return "concrete"
         return "default"
+
+    def _build_video_duration_cache_key(self, video_path: str) -> str:
+        source = Path(str(video_path or ""))
+        try:
+            stat = source.stat()
+            return f"{str(source.resolve())}::{int(stat.st_size)}::{int(stat.st_mtime_ns)}"
+        except Exception:
+            return str(source)
+
+    def _extract_duration_from_filename(self, video_path: str) -> float:
+        stem = Path(str(video_path or "")).stem
+        if not stem:
+            return 0.0
+        match = re.search(r"(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$", stem)
+        if not match:
+            return 0.0
+        start_sec = safe_float(match.group(1), 0.0)
+        end_sec = safe_float(match.group(2), 0.0)
+        if end_sec <= start_sec:
+            return 0.0
+        return max(0.0, end_sec - start_sec)
+
+    def _resolve_video_duration_sec(self, video_path: str) -> float:
+        cache_key = self._build_video_duration_cache_key(video_path)
+        cached_duration = self._video_duration_cache.get(cache_key)
+        if cached_duration is not None:
+            return max(0.0, float(cached_duration))
+
+        duration_sec = self._extract_duration_from_filename(video_path)
+        if duration_sec <= 0.0:
+            try:
+                _fps, metadata_duration, _width, _height = get_video_basic_metadata(video_path)
+                duration_sec = max(0.0, float(metadata_duration))
+            except Exception:
+                duration_sec = 0.0
+
+        self._video_duration_cache[cache_key] = max(0.0, float(duration_sec))
+        return max(0.0, float(duration_sec))
+
+    def _resolve_vl_request_timeout_sec(self, video_path: str) -> float:
+        fallback_timeout = max(1.0, float(self.vl_request_timeout_sec))
+        duration_ratio = max(0.0, float(self.vl_request_timeout_ratio_by_video_duration))
+        if duration_ratio <= 0.0:
+            return fallback_timeout
+
+        duration_sec = self._resolve_video_duration_sec(video_path)
+        if duration_sec <= 0.0:
+            return fallback_timeout
+
+        calculated_timeout = duration_sec * duration_ratio
+        if calculated_timeout <= 0.0:
+            return fallback_timeout
+
+        return max(float(self.vl_request_timeout_min_sec), float(calculated_timeout))
+
+    def _resolve_vl_hedge_delay_ms(self, video_path: str) -> int:
+        timeout_sec = self._resolve_vl_request_timeout_sec(video_path)
+        return max(1, int(round(timeout_sec * 1000.0)))
+
+    def _build_long_video_upload_output_path(self, video_path: str) -> Path:
+        source = Path(video_path)
+        try:
+            stat = source.stat()
+            fingerprint = (
+                f"{str(source.resolve())}::{int(stat.st_size)}::{int(stat.st_mtime_ns)}::"
+                f"{self.long_video_upload_target_height}::{self.long_video_upload_crf}::"
+                f"{self.long_video_upload_preset}::{self.long_video_upload_target_fps}::"
+                f"{self.long_video_upload_drop_audio}"
+            )
+        except Exception:
+            fingerprint = (
+                f"{video_path}::{self.long_video_upload_target_height}::{self.long_video_upload_crf}::"
+                f"{self.long_video_upload_preset}::{self.long_video_upload_target_fps}::"
+                f"{self.long_video_upload_drop_audio}"
+            )
+        digest = hashlib.md5(fingerprint.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        cache_dir = source.parent / "_vl_upload_cache"
+        return cache_dir / f"{source.stem}_{digest}_{int(self.long_video_upload_target_height)}p.mp4"
+
+    async def _compress_video_for_dashscope_upload(self, video_path: str) -> str:
+        ffmpeg_bin = resolve_ffmpeg_bin()
+        if not ffmpeg_bin:
+            logger.warning("VL long-video upload compression skipped because ffmpeg is unavailable: %s", video_path)
+            return video_path
+
+        source_path = Path(video_path)
+        if not source_path.exists():
+            return video_path
+
+        output_path = self._build_long_video_upload_output_path(video_path)
+        try:
+            if output_path.exists() and output_path.stat().st_size > 0:
+                source_size = source_path.stat().st_size
+                output_size = output_path.stat().st_size
+                if output_size < source_size:
+                    return str(output_path)
+                logger.warning(
+                    "VL upload compression cache ignored because compressed file is not smaller: source=%s, compressed=%s, source_bytes=%s, compressed_bytes=%s",
+                    video_path,
+                    str(output_path),
+                    source_size,
+                    output_size,
+                )
+                try:
+                    output_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        target_height = int(self.long_video_upload_target_height)
+        fps_value = float(self.long_video_upload_target_fps)
+        if abs(fps_value - int(round(fps_value))) < 1e-6:
+            fps_arg = str(int(round(fps_value)))
+        else:
+            fps_arg = f"{fps_value:.3f}".rstrip("0").rstrip(".")
+        scale_filter = (
+            f"scale=if(gt(ih\\,{target_height})\\,-2\\,iw):"
+            f"if(gt(ih\\,{target_height})\\,{target_height}\\,ih)"
+        )
+        command = [
+            ffmpeg_bin,
+            "-y",
+            "-i",
+            str(source_path),
+            "-map",
+            "0:v:0",
+            "-vf",
+            scale_filter,
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(int(self.long_video_upload_crf)),
+            "-preset",
+            str(self.long_video_upload_preset),
+            "-r",
+            fps_arg,
+        ]
+        if self.long_video_upload_drop_audio:
+            command.extend(["-an"])
+        else:
+            command.extend(
+                [
+                    "-map",
+                    "0:a?",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                ]
+            )
+        command.extend(
+            [
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        )
+
+        def _run_ffmpeg() -> None:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=int(self.long_video_upload_timeout_sec),
+            )
+            if result.returncode != 0:
+                stderr_text = str(result.stderr or "").strip()
+                raise RuntimeError(
+                    f"ffmpeg rc={result.returncode}, stderr={stderr_text[:500]}"
+                )
+
+        try:
+            await asyncio.to_thread(_run_ffmpeg)
+        except Exception as exc:
+            logger.warning(
+                "VL long-video upload compression failed, fallback to source video: path=%s, error=%s",
+                video_path,
+                self._format_exception_detail(exc),
+            )
+            return video_path
+
+        try:
+            if output_path.exists() and output_path.stat().st_size > 0:
+                source_size = source_path.stat().st_size
+                output_size = output_path.stat().st_size
+                if output_size >= source_size:
+                    logger.warning(
+                        "VL upload compression fallback to source because compressed file is not smaller: source=%s, compressed=%s, source_bytes=%s, compressed_bytes=%s",
+                        video_path,
+                        str(output_path),
+                        source_size,
+                        output_size,
+                    )
+                    try:
+                        output_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    return video_path
+                logger.info(
+                    "VL long-video upload compression applied: source=%s, compressed=%s, source_bytes=%s, compressed_bytes=%s",
+                    video_path,
+                    str(output_path),
+                    source_size,
+                    output_size,
+                )
+                return str(output_path)
+        except Exception:
+            pass
+        return video_path
+
+    async def _prepare_video_for_dashscope_upload(self, video_path: str) -> str:
+        if not bool(self.long_video_upload_compress_enabled):
+            return video_path
+
+        return await self._compress_video_for_dashscope_upload(video_path)
+
+    def _should_use_dashscope_offline_task(self) -> bool:
+        return bool(self.vl_offline_task_enabled) and self._is_dashscope_endpoint(self.base_url)
+
+    def _to_plain_value(self, value: Any) -> Any:
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, list):
+            return [self._to_plain_value(item) for item in value]
+        if isinstance(value, tuple):
+            return [self._to_plain_value(item) for item in value]
+        if isinstance(value, dict):
+            return {str(k): self._to_plain_value(v) for k, v in value.items()}
+        if hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+            try:
+                return self._to_plain_value(value.to_dict())
+            except Exception:
+                pass
+        if hasattr(value, "__dict__"):
+            try:
+                return self._to_plain_value(vars(value))
+            except Exception:
+                pass
+        try:
+            return self._to_plain_value(dict(value))
+        except Exception:
+            return str(value)
+
+    def _convert_openai_messages_to_dashscope_messages(self, messages: Any) -> List[Dict[str, Any]]:
+        converted: List[Dict[str, Any]] = []
+        if not isinstance(messages, list):
+            return [{"role": "user", "content": [{"text": str(messages or "")}]}]
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role", "user") or "user").strip() or "user"
+            content = message.get("content")
+            converted_content: List[Dict[str, Any]] = []
+
+            if isinstance(content, str):
+                if content:
+                    converted_content.append({"text": content})
+            elif isinstance(content, list):
+                for item in content:
+                    if not isinstance(item, dict):
+                        text_value = str(item or "")
+                        if text_value:
+                            converted_content.append({"text": text_value})
+                        continue
+                    item_type = str(item.get("type", "") or "").strip().lower()
+                    if item_type == "text":
+                        text_value = str(item.get("text", "") or "")
+                        if text_value:
+                            converted_content.append({"text": text_value})
+                        continue
+                    if item_type == "image_url":
+                        image_payload = item.get("image_url") if isinstance(item.get("image_url"), dict) else {}
+                        image_url = str(image_payload.get("url", "") or "")
+                        if image_url:
+                            converted_content.append({"image": image_url})
+                        continue
+                    if item_type == "video_url":
+                        video_payload = item.get("video_url") if isinstance(item.get("video_url"), dict) else {}
+                        video_url = str(video_payload.get("url", "") or "")
+                        if video_url:
+                            converted_content.append({"video": video_url})
+                        continue
+                    unknown_text = self._safe_json_preview(item, max_len=4000)
+                    if unknown_text:
+                        converted_content.append({"text": unknown_text})
+            else:
+                fallback_text = self._safe_json_preview(content, max_len=4000)
+                if fallback_text:
+                    converted_content.append({"text": fallback_text})
+
+            if not converted_content:
+                converted_content = [{"text": ""}]
+            converted.append({"role": role, "content": converted_content})
+
+        if not converted:
+            return [{"role": "user", "content": [{"text": ""}]}]
+        return converted
+
+    def _extract_text_from_dashscope_payload(self, payload: Any) -> str:
+        plain_payload = self._to_plain_value(payload)
+
+        def _extract(node: Any) -> str:
+            if isinstance(node, str):
+                return node
+            if isinstance(node, list):
+                for item in node:
+                    result = _extract(item)
+                    if result:
+                        return result
+                return ""
+            if not isinstance(node, dict):
+                return ""
+
+            direct_text = node.get("text")
+            if isinstance(direct_text, str) and direct_text.strip():
+                return direct_text
+
+            content = node.get("content")
+            if isinstance(content, str) and content.strip():
+                return content
+            if isinstance(content, list):
+                merged: List[str] = []
+                for content_item in content:
+                    if isinstance(content_item, dict):
+                        text_value = content_item.get("text")
+                        if isinstance(text_value, str) and text_value.strip():
+                            merged.append(text_value)
+                    elif isinstance(content_item, str) and content_item.strip():
+                        merged.append(content_item)
+                if merged:
+                    return "".join(merged)
+
+            for nested_key in ("message", "output", "result"):
+                nested_value = node.get(nested_key)
+                result = _extract(nested_value)
+                if result:
+                    return result
+
+            for list_key in ("choices", "results", "items", "data"):
+                list_value = node.get(list_key)
+                if isinstance(list_value, list):
+                    result = _extract(list_value)
+                    if result:
+                        return result
+            return ""
+
+        return _extract(plain_payload)
+
+    def _extract_finish_reason_from_dashscope_payload(self, payload: Any) -> Optional[str]:
+        plain_payload = self._to_plain_value(payload)
+        if not isinstance(plain_payload, dict):
+            return None
+
+        finish_reason = plain_payload.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason.strip():
+            return finish_reason
+
+        choices = plain_payload.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                choice_payload = self._to_plain_value(choice)
+                if not isinstance(choice_payload, dict):
+                    continue
+                reason = choice_payload.get("finish_reason")
+                if isinstance(reason, str) and reason.strip():
+                    return reason
+        return None
+
+    def _normalize_dashscope_usage(self, usage_payload: Any) -> Dict[str, int]:
+        usage = self._to_plain_value(usage_payload)
+        if not isinstance(usage, dict):
+            usage = {}
+
+        prompt_tokens = safe_int(
+            usage.get("prompt_tokens", usage.get("input_tokens", usage.get("inputTokens", 0))),
+            0,
+        )
+        completion_tokens = safe_int(
+            usage.get("completion_tokens", usage.get("output_tokens", usage.get("outputTokens", 0))),
+            0,
+        )
+        total_tokens = safe_int(
+            usage.get("total_tokens", usage.get("totalTokens", prompt_tokens + completion_tokens)),
+            prompt_tokens + completion_tokens,
+        )
+        if total_tokens <= 0:
+            total_tokens = max(0, prompt_tokens + completion_tokens)
+        return {
+            "prompt_tokens": max(0, int(prompt_tokens)),
+            "completion_tokens": max(0, int(completion_tokens)),
+            "total_tokens": max(0, int(total_tokens)),
+        }
+
+    def _extract_batch_id(self, batch_payload: Any) -> str:
+        payload = self._to_plain_value(batch_payload)
+        if not isinstance(payload, dict):
+            return ""
+        value = payload.get("id") or payload.get("batch_id")
+        return str(value).strip() if value else ""
+
+    def _extract_batch_status(self, batch_payload: Any) -> str:
+        payload = self._to_plain_value(batch_payload)
+        if not isinstance(payload, dict):
+            return ""
+        status = payload.get("status")
+        if isinstance(status, str) and status.strip():
+            return status.strip().lower()
+        return ""
+
+    def _extract_batch_output_file_id(self, batch_payload: Any) -> str:
+        payload = self._to_plain_value(batch_payload)
+        if not isinstance(payload, dict):
+            return ""
+        value = payload.get("output_file_id")
+        return str(value).strip() if value else ""
+
+    def _extract_batch_error_file_id(self, batch_payload: Any) -> str:
+        payload = self._to_plain_value(batch_payload)
+        if not isinstance(payload, dict):
+            return ""
+        value = payload.get("error_file_id")
+        return str(value).strip() if value else ""
+
+    def _extract_batch_error_preview(self, batch_payload: Any) -> str:
+        payload = self._to_plain_value(batch_payload)
+        if not isinstance(payload, dict):
+            return ""
+        errors = payload.get("errors")
+        if errors not in (None, "", [], {}):
+            return self._safe_json_preview(errors)
+        return ""
+
+    @staticmethod
+    def _is_batch_done_status(task_status: str) -> bool:
+        return str(task_status or "").strip().lower() in {
+            "completed",
+            "succeeded",
+            "success",
+            "done",
+            "finished",
+        }
+
+    @staticmethod
+    def _is_batch_failed_status(task_status: str) -> bool:
+        return str(task_status or "").strip().lower() in {
+            "failed",
+            "expired",
+            "cancelled",
+            "canceled",
+            "error",
+        }
+
+    def _build_dashscope_batch_input_record(
+        self,
+        *,
+        messages: Any,
+        custom_id: str,
+    ) -> Dict[str, Any]:
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": int(self.max_tokens),
+            "temperature": float(self.temperature),
+        }
+        return {
+            "custom_id": str(custom_id or ""),
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": body,
+        }
+
+    async def _read_batch_output_text(self, output_file_id: str) -> str:
+        if not output_file_id:
+            return ""
+        content_response = await self.client.files.content(output_file_id)
+        text_attr = getattr(content_response, "text", "")
+        if callable(text_attr):
+            text_value = text_attr()
+        else:
+            text_value = text_attr
+        if isinstance(text_value, str) and text_value.strip():
+            return text_value
+
+        read_method = getattr(content_response, "read", None)
+        if callable(read_method):
+            binary_value = read_method()
+            if isinstance(binary_value, (bytes, bytearray)):
+                return bytes(binary_value).decode("utf-8", errors="replace")
+            if isinstance(binary_value, str):
+                return binary_value
+        return ""
+
+    def _extract_batch_result_body(self, *, jsonl_text: str, custom_id: str) -> Any:
+        last_line_preview = ""
+        for raw_line in str(jsonl_text or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            last_line_preview = line
+            try:
+                row = self._to_plain_value(json.loads(line))
+            except Exception:
+                continue
+            if not isinstance(row, dict):
+                continue
+            row_custom_id = str(row.get("custom_id", "") or "").strip()
+            if row_custom_id != str(custom_id or "").strip():
+                continue
+
+            row_error = row.get("error")
+            if row_error not in (None, "", {}, []):
+                raise RuntimeError(
+                    f"DashScope batch response has error row: custom_id={custom_id}, error={self._safe_json_preview(row_error)}"
+                )
+
+            response_payload = self._to_plain_value(row.get("response"))
+            if isinstance(response_payload, dict):
+                response_status = safe_int(response_payload.get("status_code", 0), 0)
+                if response_status >= 400:
+                    raise RuntimeError(
+                        "DashScope batch response status failed: "
+                        f"custom_id={custom_id}, status_code={response_status}, response={self._safe_json_preview(response_payload)}"
+                    )
+                if "body" in response_payload:
+                    return self._to_plain_value(response_payload.get("body"))
+                return response_payload
+
+            return row
+
+        raise RuntimeError(
+            "DashScope batch output missing target custom_id: "
+            f"custom_id={custom_id}, output_preview={self._safe_json_preview(last_line_preview)}"
+        )
+
+    async def _call_vl_api_with_dashscope_offline_task(
+        self,
+        *,
+        messages: Any,
+    ) -> tuple[str, Optional[str], Dict[str, int], Dict[str, Any]]:
+        if not self._api_key:
+            raise RuntimeError(
+                f"DashScope offline task requires api_key, env={self._api_key_env or 'DASHSCOPE_API_KEY'}"
+            )
+
+        request_custom_id = f"vl-offline-{uuid.uuid4().hex}"
+        batch_record = self._build_dashscope_batch_input_record(
+            messages=self._to_plain_value(messages),
+            custom_id=request_custom_id,
+        )
+        batch_jsonl = json.dumps(batch_record, ensure_ascii=False) + "\n"
+        batch_file_payload = (
+            "vl_offline_input.jsonl",
+            batch_jsonl.encode("utf-8"),
+            "application/jsonl",
+        )
+
+        try:
+            input_file = await self.client.files.create(
+                file=batch_file_payload,
+                purpose="batch",
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"DashScope batch input upload failed: {self._format_exception_detail(exc)}"
+            ) from exc
+
+        input_file_id = str(getattr(input_file, "id", "") or "").strip()
+        if not input_file_id:
+            raise RuntimeError(
+                f"DashScope batch input upload succeeded but file id is missing: {self._safe_json_preview(input_file)}"
+            )
+
+        try:
+            submit_response = await self.client.batches.create(
+                input_file_id=input_file_id,
+                endpoint="/v1/chat/completions",
+                completion_window="24h",
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"DashScope batch submit failed: {self._format_exception_detail(exc)}"
+            ) from exc
+
+        task_id = self._extract_batch_id(submit_response)
+        if not task_id:
+            raise RuntimeError(
+                f"DashScope batch submit succeeded but task_id is missing: {self._safe_json_preview(submit_response)}"
+            )
+
+        logger.info(
+            "DashScope VL offline batch submitted: task_id=%s, input_file_id=%s, poll_interval_sec=%.1f",
+            task_id,
+            input_file_id,
+            float(self.vl_offline_poll_interval_sec),
+        )
+
+        deadline = time.monotonic() + float(self.vl_offline_max_wait_sec)
+        poll_count = 0
+        last_status = ""
+
+        while True:
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"DashScope offline task polling timeout: task_id={task_id}, last_status={last_status or 'UNKNOWN'}"
+                )
+
+            poll_count += 1
+            try:
+                poll_response = await self.client.batches.retrieve(task_id)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"DashScope batch polling failed: task_id={task_id}, detail={self._format_exception_detail(exc)}"
+                ) from exc
+
+            task_status = self._extract_batch_status(poll_response)
+            if task_status:
+                last_status = task_status
+            error_preview = self._extract_batch_error_preview(poll_response)
+
+            if self._is_batch_failed_status(task_status):
+                raise RuntimeError(
+                    "DashScope batch task failed: "
+                    f"task_id={task_id}, task_status={task_status}, errors={error_preview or 'none'}"
+                )
+
+            if self._is_batch_done_status(task_status):
+                output_file_id = self._extract_batch_output_file_id(poll_response)
+                if not output_file_id:
+                    error_file_id = self._extract_batch_error_file_id(poll_response)
+                    error_preview = ""
+                    if error_file_id:
+                        try:
+                            error_preview = await self._read_batch_output_text(error_file_id)
+                        except Exception as exc:
+                            error_preview = f"read_error={self._format_exception_detail(exc)}"
+                    raise RuntimeError(
+                        "DashScope batch completed but output_file_id is empty: "
+                        f"task_id={task_id}, error_file_id={error_file_id or 'none'}, "
+                        f"error_preview={self._safe_json_preview(error_preview, max_len=1500)}, "
+                        f"response={self._safe_json_preview(poll_response)}"
+                    )
+                output_text = await self._read_batch_output_text(output_file_id)
+                final_payload = self._extract_batch_result_body(
+                    jsonl_text=output_text,
+                    custom_id=request_custom_id,
+                )
+                content = self._extract_text_from_dashscope_payload(final_payload)
+                finish_reason = self._extract_finish_reason_from_dashscope_payload(final_payload)
+                usage_payload = {}
+                if isinstance(final_payload, dict):
+                    usage_payload = final_payload.get("usage", {}) or {}
+                usage = self._normalize_dashscope_usage(usage_payload)
+                if not content:
+                    raise RuntimeError(
+                        "DashScope batch completed but parsed content is empty: "
+                        f"task_id={task_id}, output_file_id={output_file_id}, payload={self._safe_json_preview(final_payload)}"
+                    )
+                return (
+                    content,
+                    finish_reason,
+                    usage,
+                    {
+                        "task_id": task_id,
+                        "batch_id": task_id,
+                        "input_file_id": input_file_id,
+                        "output_file_id": output_file_id,
+                        "task_status": task_status.upper(),
+                        "poll_count": poll_count,
+                    },
+                )
+
+            await asyncio.sleep(float(self.vl_offline_poll_interval_sec))
 
     def _normalize_step_type(self, value: Any) -> str:
         """归一教程步骤类型，未知值回落为 MAIN_FLOW。"""
@@ -739,6 +1508,7 @@ class VLVideoAnalyzer:
 
         semaphore = asyncio.Semaphore(resolved_inflight)
         ordered_results: List[Any] = [None] * len(tasks)
+        pending_callbacks: set[asyncio.Task] = set()
 
         async def _run_single(index: int, task: Dict[str, Any]) -> tuple[int, Any]:
             async with semaphore:
@@ -766,13 +1536,23 @@ class VLVideoAnalyzer:
                 index, result_item = await done_task
                 ordered_results[index] = result_item
                 if result_callback is not None:
-                    callback_result = result_callback(index, result_item)
-                    if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
-                        await callback_result
+                    async def _invoke_callback(i: int, item: Any) -> None:
+                        try:
+                            callback_result = result_callback(i, item)
+                            if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                                await callback_result
+                        except Exception as callback_error:
+                            logger.warning("[VL-Batch] result_callback failed: index=%s, err=%s", i, callback_error)
+
+                    callback_task = asyncio.create_task(_invoke_callback(index, result_item))
+                    pending_callbacks.add(callback_task)
+                    callback_task.add_done_callback(lambda finished: pending_callbacks.discard(finished))
         finally:
             for task in inflight_tasks:
                 if not task.done():
                     task.cancel()
+            if pending_callbacks:
+                await asyncio.gather(*list(pending_callbacks), return_exceptions=True)
 
         if return_exceptions:
             return [item if item is not None else RuntimeError("empty_batch_result") for item in ordered_results]
@@ -870,6 +1650,30 @@ class VLVideoAnalyzer:
             "max_image_dim": int(self.max_image_dim),
             "compression_crf": float(self.compression_crf),
             "max_video_size_mb": float(self.max_video_size_mb),
+            "vl_request_timeout_sec": float(self.vl_request_timeout_sec),
+            "vl_request_timeout_ratio_by_video_duration": float(self.vl_request_timeout_ratio_by_video_duration),
+            "vl_request_timeout_min_sec": float(self.vl_request_timeout_min_sec),
+            "vl_offline_task_enabled": bool(self.vl_offline_task_enabled),
+            "vl_offline_poll_interval_sec": float(self.vl_offline_poll_interval_sec),
+            "vl_offline_max_wait_sec": float(self.vl_offline_max_wait_sec),
+            "long_video_upload_compress_enabled": bool(self.long_video_upload_compress_enabled),
+            "long_video_upload_target_height": int(self.long_video_upload_target_height),
+            "long_video_upload_target_bitrate": str(self.long_video_upload_target_bitrate or ""),
+            "long_video_upload_min_bitrate": str(self.long_video_upload_min_bitrate or ""),
+            "long_video_upload_max_bitrate": str(self.long_video_upload_max_bitrate or ""),
+            "long_video_upload_timeout_sec": int(self.long_video_upload_timeout_sec),
+            "long_video_upload_crf": int(self.long_video_upload_crf),
+            "long_video_upload_preset": str(self.long_video_upload_preset or ""),
+            "long_video_upload_target_fps": float(self.long_video_upload_target_fps),
+            "long_video_upload_drop_audio": bool(self.long_video_upload_drop_audio),
+            "dashscope_upload_chunk_size_bytes": int(self.dashscope_upload_chunk_size_bytes),
+            "dashscope_upload_timeout_by_video_duration": bool(self.dashscope_upload_timeout_by_video_duration),
+            "dashscope_upload_timeout_min_sec": float(self.dashscope_upload_timeout_min_sec),
+            "dashscope_upload_retry_max_attempts": int(self.dashscope_upload_retry_max_attempts),
+            "dashscope_upload_retry_initial_backoff_sec": float(self.dashscope_upload_retry_initial_backoff_sec),
+            "dashscope_upload_retry_multiplier": float(self.dashscope_upload_retry_multiplier),
+            "dashscope_upload_retry_max_backoff_sec": float(self.dashscope_upload_retry_max_backoff_sec),
+            "dashscope_upload_retry_jitter_sec": float(self.dashscope_upload_retry_jitter_sec),
             "optimize_screenshots": bool(self.optimize_screenshots),
             "search_window_sec": float(self.search_window_sec),
             "tutorial_min_step_duration_sec": float(self.tutorial_min_step_duration_sec),
@@ -971,6 +1775,26 @@ class VLVideoAnalyzer:
             tuple: (分析结果列表, token 使用量, 归一化 JSON 结果)
         """
         normalized_mode = self._normalize_analysis_mode(analysis_mode)
+        video_duration_sec = self._resolve_video_duration_sec(video_path)
+        use_dashscope_offline_task = self._should_use_dashscope_offline_task()
+        vl_request_timeout_sec = self._resolve_vl_request_timeout_sec(video_path)
+        vl_hedge_delay_ms = self._resolve_vl_hedge_delay_ms(video_path)
+        if use_dashscope_offline_task:
+            logger.info(
+                "VL offline task mode enabled: video_path=%s, duration_sec=%.2f, poll_interval_sec=%.1f, max_wait_sec=%.1f",
+                video_path,
+                video_duration_sec,
+                float(self.vl_offline_poll_interval_sec),
+                float(self.vl_offline_max_wait_sec),
+            )
+        else:
+            logger.info(
+                "VL request timing resolved: video_path=%s, duration_sec=%.2f, timeout_sec=%.2f, hedge_delay_ms=%s",
+                video_path,
+                video_duration_sec,
+                vl_request_timeout_sec,
+                vl_hedge_delay_ms,
+            )
         messages = await self._build_messages(
             video_path,
             extra_prompt=extra_prompt,
@@ -1008,22 +1832,13 @@ class VLVideoAnalyzer:
                     # 使用 json_object 可提升重试场景的 JSON 稳定性。
                     response_kwargs["response_format"] = {"type": "json_object"}
 
-                try:
-                    cache_key = base_cache_key if attempt == 0 else None
-                    result = await llm_gateway.vl_chat_completion(
-                        client=self.client,
-                        model=self.model,
-                        messages=messages,
-                        max_tokens=self.max_tokens,
-                        temperature=response_kwargs["temperature"],
-                        response_format=response_kwargs.get("response_format"),
-                        cache_key=cache_key,
+                offline_task_meta: Dict[str, Any] = {}
+                if use_dashscope_offline_task:
+                    content, finish_reason, token_usage, offline_task_meta = (
+                        await self._call_vl_api_with_dashscope_offline_task(messages=messages)
                     )
-                except Exception as e:
-                    # 兼容非 OpenAI 官方网关：不支持 response_format 时回退。
-                    err_str = str(e).lower()
-                    if "response_format" in response_kwargs and ("response_format" in err_str or "unknown" in err_str):
-                        response_kwargs.pop("response_format", None)
+                else:
+                    try:
                         cache_key = base_cache_key if attempt == 0 else None
                         result = await llm_gateway.vl_chat_completion(
                             client=self.client,
@@ -1031,15 +1846,34 @@ class VLVideoAnalyzer:
                             messages=messages,
                             max_tokens=self.max_tokens,
                             temperature=response_kwargs["temperature"],
-                            response_format=None,
+                            response_format=response_kwargs.get("response_format"),
                             cache_key=cache_key,
+                            timeout=vl_request_timeout_sec,
+                            hedge_delay_ms=vl_hedge_delay_ms,
                         )
-                    else:
-                        raise
+                    except Exception as e:
+                        # 兼容非 OpenAI 官方网关：不支持 response_format 时回退。
+                        err_str = str(e).lower()
+                        if "response_format" in response_kwargs and ("response_format" in err_str or "unknown" in err_str):
+                            response_kwargs.pop("response_format", None)
+                            cache_key = base_cache_key if attempt == 0 else None
+                            result = await llm_gateway.vl_chat_completion(
+                                client=self.client,
+                                model=self.model,
+                                messages=messages,
+                                max_tokens=self.max_tokens,
+                                temperature=response_kwargs["temperature"],
+                                response_format=None,
+                                cache_key=cache_key,
+                                timeout=vl_request_timeout_sec,
+                                hedge_delay_ms=vl_hedge_delay_ms,
+                            )
+                        else:
+                            raise
 
-                content = result.content
-                finish_reason = result.finish_reason
-                token_usage = result.usage
+                    content = result.content
+                    finish_reason = result.finish_reason
+                    token_usage = result.usage
                 parsed_results, raw_json = self._parse_response_with_payload(
                     content,
                     finish_reason=finish_reason,
@@ -1057,11 +1891,17 @@ class VLVideoAnalyzer:
                             "response_format": response_kwargs.get("response_format"),
                             "analysis_mode": normalized_mode,
                             "video_path": str(video_path or ""),
+                            "video_duration_sec": float(video_duration_sec),
+                            "offline_task_enabled": bool(use_dashscope_offline_task),
+                            "offline_task_meta": dict(offline_task_meta or {}),
+                            "timeout_sec": float(vl_request_timeout_sec),
+                            "hedge_delay_ms": int(vl_hedge_delay_ms),
                             "messages": request_messages_audit,
                         },
                         "response": {
                             "finish_reason": finish_reason,
                             "usage": dict(token_usage or {}),
+                            "offline_task_meta": dict(offline_task_meta or {}),
                             "content": str(content or ""),
                             "parsed_payload": raw_json,
                         },
@@ -1089,6 +1929,11 @@ class VLVideoAnalyzer:
                             "response_format": response_kwargs.get("response_format"),
                             "analysis_mode": normalized_mode,
                             "video_path": str(video_path or ""),
+                            "video_duration_sec": float(video_duration_sec),
+                            "offline_task_enabled": bool(use_dashscope_offline_task),
+                            "offline_task_meta": dict(locals().get("offline_task_meta", {}) or {}),
+                            "timeout_sec": float(vl_request_timeout_sec),
+                            "hedge_delay_ms": int(vl_hedge_delay_ms),
                             "messages": request_messages_audit,
                         },
                         "error": err_detail,
@@ -1334,12 +2179,27 @@ class VLVideoAnalyzer:
                     f"DashScope Files.upload requires api_key, env={self._api_key_env or 'DASHSCOPE_API_KEY'}"
                 )
             return None
+        upload_video_path = await self._prepare_video_for_dashscope_upload(video_path)
+        video_duration_sec = max(0.0, self._resolve_video_duration_sec(video_path))
+        if self.dashscope_upload_timeout_by_video_duration:
+            resolved_upload_timeout_sec = max(self.dashscope_upload_timeout_min_sec, video_duration_sec)
+        else:
+            resolved_upload_timeout_sec = max(
+                self.dashscope_upload_timeout_min_sec,
+                float(self.long_video_upload_timeout_sec),
+            )
+
+        def _normalize_dashscope_media_url(raw_url: Any) -> str:
+            url = str(raw_url or "").strip()
+            if url.startswith("http://dashscope-file-mgr.oss-"):
+                return "https://" + url[len("http://") :]
+            return url
 
         def _extract_temp_url_from_output(output: Any) -> tuple[Optional[str], str]:
             if not isinstance(output, dict):
                 return None, ""
 
-            direct_url = str(output.get("url") or "").strip()
+            direct_url = _normalize_dashscope_media_url(output.get("url"))
             if direct_url:
                 return direct_url, "output.url"
 
@@ -1351,7 +2211,7 @@ class VLVideoAnalyzer:
             for item in uploaded_files:
                 if not isinstance(item, dict):
                     continue
-                item_url = str(item.get("url") or "").strip()
+                item_url = _normalize_dashscope_media_url(item.get("url"))
                 if item_url:
                     return item_url, "uploaded_files.url"
                 file_id = str(item.get("file_id") or "").strip()
@@ -1361,11 +2221,11 @@ class VLVideoAnalyzer:
                 meta_status = getattr(meta_resp, "status_code", None)
                 meta_output = getattr(meta_resp, "output", None)
                 if meta_status == 200 and isinstance(meta_output, dict):
-                    meta_url = str(meta_output.get("url") or "").strip()
+                    meta_url = _normalize_dashscope_media_url(meta_output.get("url"))
                     if meta_url:
                         return meta_url, f"files.get({file_id})"
                 if isinstance(meta_resp, dict) and meta_resp.get("status_code") == 200:
-                    meta_url = str(((meta_resp.get("output") or {}).get("url") or "")).strip()
+                    meta_url = _normalize_dashscope_media_url((meta_resp.get("output") or {}).get("url"))
                     if meta_url:
                         return meta_url, f"files.get({file_id})"
             return None, ""
@@ -1374,8 +2234,11 @@ class VLVideoAnalyzer:
             dashscope.api_key = self._api_key
             # Files.upload 需要 file_path 字符串参数
             resp = dashscope.Files.upload(
-                file_path=video_path,
-                purpose="file-extract"
+                file_path=upload_video_path,
+                purpose="file-extract",
+                chunk_size=int(self.dashscope_upload_chunk_size_bytes),
+                timeout=float(resolved_upload_timeout_sec),
+                headers={"Authorization": f"Bearer {self._api_key}"},
             )
             status_code = getattr(resp, "status_code", None)
             request_id = getattr(resp, "request_id", None)
@@ -1384,15 +2247,18 @@ class VLVideoAnalyzer:
                 temp_url, url_source = _extract_temp_url_from_output(output)
                 if temp_url:
                     try:
-                        file_size = Path(video_path).stat().st_size
+                        file_size = Path(upload_video_path).stat().st_size
                     except Exception:
                         file_size = 0
                     logger.info(
-                        "DashScope Files.upload succeeded: video_path=%s, size_bytes=%s, url_source=%s, request_id=%s",
+                        "DashScope Files.upload succeeded: video_path=%s, source_video_path=%s, size_bytes=%s, url_source=%s, request_id=%s, timeout_sec=%.2f, chunk_size=%s",
+                        upload_video_path,
                         video_path,
                         file_size,
                         url_source or "unknown",
                         request_id or "unknown",
+                        float(resolved_upload_timeout_sec),
+                        int(self.dashscope_upload_chunk_size_bytes),
                     )
                     return temp_url
                 raise RuntimeError(
@@ -1405,15 +2271,18 @@ class VLVideoAnalyzer:
                 temp_url, url_source = _extract_temp_url_from_output(dict_output)
                 if temp_url:
                     try:
-                        file_size = Path(video_path).stat().st_size
+                        file_size = Path(upload_video_path).stat().st_size
                     except Exception:
                         file_size = 0
                     logger.info(
-                        "DashScope Files.upload(dict) succeeded: video_path=%s, size_bytes=%s, url_source=%s, request_id=%s",
+                        "DashScope Files.upload(dict) succeeded: video_path=%s, source_video_path=%s, size_bytes=%s, url_source=%s, request_id=%s, timeout_sec=%.2f, chunk_size=%s",
+                        upload_video_path,
                         video_path,
                         file_size,
                         url_source or "unknown",
                         resp.get("request_id", "unknown"),
+                        float(resolved_upload_timeout_sec),
+                        int(self.dashscope_upload_chunk_size_bytes),
                     )
                     return temp_url
                 raise RuntimeError(
@@ -1423,14 +2292,43 @@ class VLVideoAnalyzer:
             message = getattr(resp, "message", None) or str(resp)
             raise RuntimeError(f"DashScope Files.upload 失败: {message}")
 
-        try:
-            return await asyncio.to_thread(_upload)
-        except Exception as e:
-            error_detail = self._format_exception_detail(e)
-            if raise_on_failure:
-                raise RuntimeError(f"DashScope Files.upload failed: {error_detail}") from e
-            logger.warning(f"DashScope temp URL upload failed, fallback to next strategy: {error_detail}")
-            return None
+        max_attempts = max(1, int(self.dashscope_upload_retry_max_attempts))
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await asyncio.to_thread(_upload)
+            except Exception as e:
+                error_detail = self._format_exception_detail(e)
+                if attempt >= max_attempts:
+                    if raise_on_failure:
+                        raise RuntimeError(
+                            f"DashScope Files.upload failed after {max_attempts} attempts: {error_detail}"
+                        ) from e
+                    logger.warning(
+                        "DashScope temp URL upload failed after %s attempts, fallback to next strategy: %s",
+                        max_attempts,
+                        error_detail,
+                    )
+                    return None
+
+                backoff_sec = float(self.dashscope_upload_retry_initial_backoff_sec) * (
+                    float(self.dashscope_upload_retry_multiplier) ** float(attempt - 1)
+                )
+                backoff_sec = min(float(self.dashscope_upload_retry_max_backoff_sec), backoff_sec)
+                jitter_cap = float(self.dashscope_upload_retry_jitter_sec)
+                if jitter_cap > 0:
+                    backoff_sec += random.uniform(0.0, jitter_cap)
+                backoff_sec = max(0.0, backoff_sec)
+
+                logger.warning(
+                    "DashScope Files.upload failed (attempt %s/%s): %s, retry in %.2fs",
+                    attempt,
+                    max_attempts,
+                    error_detail,
+                    backoff_sec,
+                )
+                if backoff_sec > 0:
+                    await asyncio.sleep(backoff_sec)
+        return None
     
     def _encode_video_base64(self, video_path: str) -> Optional[str]:
         """将视频文件编码为 base64（仅适用于小文件）"""

@@ -96,6 +96,8 @@ def test_get_video_info_detects_bilibili_collection_and_current_episode(monkeypa
         "https://img.example.com/ep2-large.jpg",
     ]
     assert captured["probe_url"].endswith("p=2")
+    assert "p=2" in response.resolved_url
+    assert "spm_id_from=333.788.videopod.episodes" in response.resolved_url
 
 
 def test_get_video_info_supports_bare_bv_input(monkeypatch):

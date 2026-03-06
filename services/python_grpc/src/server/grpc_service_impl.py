@@ -2940,11 +2940,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 for item in episodes
             ]
 
+            response_resolved_url = (
+                _first_non_blank(probe_url, extracted_url, resolved_url)
+                if source_platform == "bilibili"
+                else _first_non_blank(resolved_url, probe_url, extracted_url)
+            )
+
             return video_processing_pb2.VideoInfoResponse(
                 success=True,
                 error_msg="",
                 raw_input=raw_video_input,
-                resolved_url=_first_non_blank(resolved_url, probe_url),
+                resolved_url=response_resolved_url,
                 source_platform=_first_non_blank(source_platform, "unknown"),
                 canonical_id=canonical_id,
                 video_title=video_title,
@@ -2964,7 +2970,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 success=False,
                 error_msg=str(exc),
                 raw_input=raw_video_input,
-                resolved_url=_first_non_blank(resolved_url, probe_url),
+                resolved_url=(
+                    _first_non_blank(probe_url, extracted_url, resolved_url)
+                    if source_platform == "bilibili"
+                    else _first_non_blank(resolved_url, probe_url, extracted_url)
+                ),
                 source_platform=_first_non_blank(source_platform, "unknown"),
                 canonical_id=canonical_id,
                 video_title="",

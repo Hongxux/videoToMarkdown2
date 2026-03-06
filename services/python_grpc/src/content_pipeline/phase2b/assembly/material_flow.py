@@ -70,6 +70,8 @@ def _should_enable_structure_process_parallel(task_count: int, validator: Any) -
     """判定是否启用结构预处理多进程并发。"""
     if task_count <= 1:
         return False
+    if not bool(getattr(validator, "_structure_preprocess_enabled", True)):
+        return False
 
     mode = str(os.getenv("PHASE2B_STRUCTURE_PREPROCESS_MODE", "auto") or "auto").strip().lower()
     if mode in {"off", "disabled", "false", "0", "serial"}:
@@ -1084,7 +1086,10 @@ def apply_external_materials(
 
         if should_validate_screenshot and self._concrete_validator and normalized_candidates:
             extractor = getattr(self._concrete_validator, "extract_structured_screenshots", None)
-            if callable(extractor):
+            structure_preprocess_enabled = bool(
+                getattr(self._concrete_validator, "_structure_preprocess_enabled", True)
+            )
+            if callable(extractor) and structure_preprocess_enabled:
                 use_process_parallel = _should_enable_structure_process_parallel(
                     len(normalized_candidates),
                     self._concrete_validator,
@@ -1173,6 +1178,11 @@ def apply_external_materials(
                             extract_error,
                         )
                         expanded_items_by_index[candidate_index] = None
+            elif callable(extractor):
+                logger.info(
+                    "%s: structure preprocess disabled by config, keep original screenshots",
+                    unit.unit_id,
+                )
 
         for candidate_index, (raw_path, label, sid, request_ts) in enumerate(normalized_candidates):
             parent_key = _resolve_path_key(raw_path)
@@ -1520,8 +1530,11 @@ def apply_external_materials(
 
         req_meta = _resolve_request_meta_for_candidate(str(sid or "").strip(), raw_path)
         ocr_text_hint = ""
+        frame_reason = str(candidate.get("frame_reason", "") or "").strip()
         if req_meta is not None:
             ocr_text_hint = str(getattr(req_meta, "ocr_text", "") or "").strip()
+            if not frame_reason:
+                frame_reason = str(getattr(req_meta, "frame_reason", "") or "").strip()
         if request_ts is None and req_meta is not None:
             try:
                 request_ts = float(req_meta.timestamp_sec)
@@ -1619,6 +1632,7 @@ def apply_external_materials(
                         "img_path": rejected_path,
                         "img_description": resolved_desc,
                         "img_desription": resolved_desc,
+                        "frame_reason": frame_reason,
                         "should_include": False,
                         "label": label,
                         "source_id": sid,
@@ -1682,6 +1696,7 @@ def apply_external_materials(
             "img_path": normalized_path,
             "img_description": resolved_desc,
             "img_desription": resolved_desc,
+            "frame_reason": frame_reason,
             "should_include": True,
             "label": label,
             "source_id": sid,
@@ -1758,6 +1773,21 @@ def apply_external_materials(
                 step_materials = {}
 
             resolved_step_screenshots: List[str] = []
+            resolved_step_keyframe_details: List[Dict[str, Any]] = []
+            seen_step_keyframe_paths: set[str] = set()
+            existing_keyframe_details = step.get("instructional_keyframe_details", [])
+            existing_keyframe_by_sid: Dict[str, Dict[str, Any]] = {}
+            if isinstance(existing_keyframe_details, list):
+                for item in existing_keyframe_details:
+                    if not isinstance(item, dict):
+                        continue
+                    item_sid = str(
+                        item.get("screenshot_id")
+                        or item.get("source_id")
+                        or ""
+                    ).strip()
+                    if item_sid and item_sid not in existing_keyframe_by_sid:
+                        existing_keyframe_by_sid[item_sid] = item
             raw_screenshot_ids = step_materials.get("screenshot_ids", []) or []
             for raw_screenshot_id in raw_screenshot_ids:
                 screenshot_id = str(raw_screenshot_id or "").strip()
@@ -1785,9 +1815,55 @@ def apply_external_materials(
 
                 for hit_path in _deduplicate_paths(hit_paths):
                     _append_unique_path(resolved_step_screenshots, hit_path)
+                    req_meta = _resolve_request_meta_for_candidate(screenshot_id, hit_path)
+                    matched_existing_detail = existing_keyframe_by_sid.get(screenshot_id)
+                    frame_reason = ""
+                    if req_meta is not None:
+                        frame_reason = str(getattr(req_meta, "frame_reason", "") or "").strip()
+                    if not frame_reason and isinstance(matched_existing_detail, dict):
+                        frame_reason = str(matched_existing_detail.get("frame_reason", "") or "").strip()
+
+                    detail: Dict[str, Any] = {
+                        "image_path": hit_path,
+                        "screenshot_id": screenshot_id,
+                    }
+
+                    timestamp_value: Optional[float] = None
+                    if req_meta is not None:
+                        try:
+                            timestamp_value = float(getattr(req_meta, "timestamp_sec"))
+                        except Exception:
+                            timestamp_value = None
+                    if timestamp_value is None and isinstance(matched_existing_detail, dict):
+                        try:
+                            raw_timestamp = matched_existing_detail.get("timestamp_sec", None)
+                            if raw_timestamp is None:
+                                raw_timestamp = matched_existing_detail.get("timestamp", None)
+                            if raw_timestamp is not None:
+                                timestamp_value = float(raw_timestamp)
+                        except Exception:
+                            timestamp_value = None
+                    if timestamp_value is not None:
+                        detail["timestamp_sec"] = timestamp_value
+                    if frame_reason:
+                        detail["frame_reason"] = frame_reason
+
+                    if isinstance(matched_existing_detail, dict):
+                        for ext_key in ("bbox", "target_ui_type", "target_ui_label"):
+                            ext_val = matched_existing_detail.get(ext_key)
+                            if ext_val not in (None, "") and ext_key not in detail:
+                                detail[ext_key] = ext_val
+
+                    normalized_keyframe_path = _resolve_path_key(hit_path)
+                    if normalized_keyframe_path in seen_step_keyframe_paths:
+                        continue
+                    seen_step_keyframe_paths.add(normalized_keyframe_path)
+                    resolved_step_keyframe_details.append(detail)
 
             if resolved_step_screenshots:
                 step_materials["screenshot_paths"] = resolved_step_screenshots
+            if resolved_step_keyframe_details:
+                step["instructional_keyframe_details"] = resolved_step_keyframe_details
 
             resolved_step_clips: List[str] = []
             raw_clip_id = str(step_materials.get("clip_id", "") or "").strip()
@@ -1847,6 +1923,7 @@ def apply_external_materials(
                         "img_path": fallback_path,
                         "img_description": "fallback_unit_scan",
                         "img_desription": "fallback_unit_scan",
+                        "frame_reason": "",
                         "should_include": True,
                         "label": "fallback_unit_scan",
                         "source_id": f"{unit.unit_id}/fallback_unit_scan",

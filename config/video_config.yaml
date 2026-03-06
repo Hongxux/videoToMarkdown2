@@ -269,9 +269,14 @@ vision_ai:
     high_conf_min_area: 0.08
     # 0: General，1: Landscape（MediaPipe SelfieSegmentation）
     model_selection: 1
+  # 数学公式 OCR（懒加载，默认关闭）
+  math_ocr:
+    enabled: false
+    # 识别结果分数达到阈值才判定命中公式
+    min_score: 0.7
   # PP-Structure 拆图预处理
   structure_preprocess:
-    enabled: true
+    enabled: false
     # Windows + PaddleOCR2.x 下强制关闭 IR 优化，规避 fused_conv2d / OneDNN 崩溃
     force_disable_ir_optim: true
     # 命中 oneDNN/mkldnn 后端异常时，是否自动禁用 mkldnn 后重试一次 PP-Structure

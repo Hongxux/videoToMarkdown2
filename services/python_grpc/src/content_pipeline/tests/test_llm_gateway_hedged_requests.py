@@ -133,6 +133,72 @@ def test_vl_hedge_uses_second_and_cancels_slow_primary(monkeypatch):
     assert state["cancelled"] == 1
 
 
+def test_vl_chat_completion_allows_custom_timeout_and_hedge_delay(monkeypatch):
+    monkeypatch.setattr(llm_gateway, "_VL_HEDGE_ENABLED", True)
+    monkeypatch.setattr(llm_gateway, "_VL_CACHE_ENABLED", False)
+    monkeypatch.setattr(llm_gateway, "_VL_HEDGE_DELAY_MS", 200)
+
+    class _FakeRateLimiter:
+        async def acquire(self, estimated_tokens: int):
+            _ = estimated_tokens
+            return 0.0, 0.0
+
+    class _FakeLimiter:
+        async def acquire(self, permits: int) -> int:
+            return permits
+
+        async def record_success(self) -> None:
+            return None
+
+        async def record_failure(self, is_rate_limit: bool = False) -> None:
+            _ = is_rate_limit
+            return None
+
+        async def release(self, permits: int) -> None:
+            _ = permits
+            return None
+
+    captured = {"timeout": None, "delay_ms": None}
+
+    async def _fake_call_vl_api_once(**kwargs):
+        captured["timeout"] = kwargs.get("timeout")
+        return "ok", "stop", {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}, "fake-model"
+
+    async def _fake_run_hedged_async_request(
+        *,
+        request_name: str,
+        enabled: bool,
+        delay_ms: int,
+        primary_factory,
+        secondary_factory=None,
+    ):
+        _ = (request_name, enabled, secondary_factory)
+        captured["delay_ms"] = delay_ms
+        return await primary_factory()
+
+    monkeypatch.setattr(llm_gateway, "_VL_RATE_LIMITER", _FakeRateLimiter())
+    monkeypatch.setattr(llm_gateway, "_VL_CONCURRENCY", _FakeLimiter())
+    monkeypatch.setattr(llm_gateway, "_call_vl_api_once", _fake_call_vl_api_once)
+    monkeypatch.setattr(llm_gateway, "_run_hedged_async_request", _fake_run_hedged_async_request)
+
+    result = asyncio.run(
+        llm_gateway.vl_chat_completion(
+            client=object(),
+            model="fake-model",
+            messages=[],
+            max_tokens=16,
+            temperature=0.1,
+            cache_key=None,
+            timeout=33.5,
+            hedge_delay_ms=44,
+        )
+    )
+
+    assert result.content == "ok"
+    assert float(captured["timeout"]) == 33.5
+    assert int(captured["delay_ms"]) == 44
+
+
 def test_vl_chat_completions_keeps_order_and_respects_inflight(monkeypatch):
     state = {"active": 0, "max_active": 0}
 

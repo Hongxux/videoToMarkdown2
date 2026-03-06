@@ -1,0 +1,34 @@
+{
+  "unit_id": "SU003",
+  "schema": "tutorial_stepwise_v1",
+  "raw_response": [
+    {
+      "step_id": 1,
+      "step_description": "install sdk",
+      "main_operation": "open package manager\n【imgneeded_SU003_img_01】\nconfirm install",
+      "clip_start_sec": 0.0,
+      "clip_end_sec": 8.0,
+      "instructional_keyframes": [
+        {
+          "timestamp_sec": 3.5
+        }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "step_id": 1,
+      "step_description": "install sdk",
+      "main_operation": "open package manager\n【imgneeded_SU003_img_01】\nconfirm install",
+      "clip_start_sec": 0.0,
+      "clip_end_sec": 8.0,
+      "clip_file": "SU003_clip_step_01_install.mp4",
+      "instructional_keyframe_details": [
+        {
+          "image_file": "SU003_ss_step_01_key_01_install.png",
+          "timestamp_sec": 3.5
+        }
+      ]
+    }
+  ]
+}

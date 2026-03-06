@@ -1,0 +1,110 @@
+{
+  "unit_id": "SU002",
+  "schema": "tutorial_stepwise_v1",
+  "raw_response": [
+    {
+      "step_id": 1,
+      "step_description": "open settings",
+      "main_action": "open settings panel",
+      "main_operation": "click settings\nopen network tab\n[KEYFRAME_1]",
+      "precautions": [
+        "do not edit unrelated options"
+      ],
+      "step_summary": "settings panel opened and network tab visible",
+      "operation_guidance": [
+        "click settings first",
+        "then open network tab"
+      ],
+      "clip_start_sec": 0.0,
+      "clip_end_sec": 6.0,
+      "instructional_keyframes": [
+        {
+          "timestamp_sec": 5.4,
+          "frame_reason": "settings panel visible",
+          "bbox": [
+            100,
+            80,
+            900,
+            980
+          ]
+        }
+      ]
+    },
+    {
+      "step_id": 2,
+      "step_description": "change port",
+      "main_action": "change service port",
+      "main_operation": "update port\nsave config\n[KEYFRAME_1]",
+      "precautions": [],
+      "clip_start_sec": 6.0,
+      "clip_end_sec": 13.0,
+      "instructional_keyframes": [
+        {
+          "timestamp_sec": 12.2,
+          "frame_reason": "port value saved",
+          "bbox": [
+            120,
+            120,
+            880,
+            920
+          ]
+        }
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "step_id": 1,
+      "step_description": "open settings",
+      "main_action": "open settings panel",
+      "main_operation": "click settings\nopen network tab\n[KEYFRAME_1]",
+      "precautions": [
+        "do not edit unrelated options"
+      ],
+      "step_summary": "settings panel opened and network tab visible",
+      "operation_guidance": [
+        "click settings first",
+        "then open network tab"
+      ],
+      "clip_start_sec": 0.0,
+      "clip_end_sec": 6.0,
+      "clip_file": "SU002_clip_step_01_open_settings.mp4",
+      "instructional_keyframe_details": [
+        {
+          "image_file": "SU002_ss_step_01_key_01_open_settings.png",
+          "timestamp_sec": 5.4,
+          "frame_reason": "settings panel visible",
+          "bbox": [
+            100,
+            80,
+            900,
+            980
+          ]
+        }
+      ]
+    },
+    {
+      "step_id": 2,
+      "step_description": "change port",
+      "main_action": "change service port",
+      "main_operation": "update port\nsave config\n[KEYFRAME_1]",
+      "precautions": [],
+      "clip_start_sec": 6.0,
+      "clip_end_sec": 13.0,
+      "clip_file": "SU002_clip_step_02_change_port.mp4",
+      "instructional_keyframe_details": [
+        {
+          "image_file": "SU002_ss_step_02_key_01_change_port.png",
+          "timestamp_sec": 12.2,
+          "frame_reason": "port value saved",
+          "bbox": [
+            120,
+            120,
+            880,
+            920
+          ]
+        }
+      ]
+    }
+  ]
+}

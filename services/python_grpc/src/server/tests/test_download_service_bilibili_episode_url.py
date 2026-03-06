@@ -90,3 +90,5 @@ def test_run_download_flow_preserves_bilibili_episode_query_for_download():
     assert result.success is True
     assert "p=2" in captured["download_url"]
     assert "p=2" in result.resolved_url
+    assert "spm_id_from=333.788.videopod.episodes" in captured["download_url"]
+    assert "spm_id_from=333.788.videopod.episodes" in result.resolved_url

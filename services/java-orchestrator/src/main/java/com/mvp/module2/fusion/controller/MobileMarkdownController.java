@@ -1102,40 +1102,70 @@ public class MobileMarkdownController {
 
     @DeleteMapping("/tasks/{taskId}")
     public ResponseEntity<Map<String, Object>> cancelRuntimeTask(@PathVariable String taskId) {
-        TaskEntry runtimeTask = taskQueueManager.getTask(taskId);
-        if (runtimeTask == null) {
-            return ResponseEntity.status(404).body(Map.of(
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
-                    "status", "NOT_FOUND",
-                    "message", "task not found"
+                    "status", "INVALID_ARGUMENT",
+                    "message", "taskId cannot be empty"
             ));
         }
 
-        TaskStatus currentStatus = runtimeTask.status != null ? runtimeTask.status : TaskStatus.QUEUED;
-        if (currentStatus == TaskStatus.COMPLETED
-                || currentStatus == TaskStatus.FAILED
-                || currentStatus == TaskStatus.CANCELLED) {
-            return ResponseEntity.status(409).body(Map.of(
+        TaskEntry runtimeTask = taskQueueManager.getTask(normalizedTaskId);
+        if (runtimeTask != null) {
+            TaskStatus currentStatus = runtimeTask.status != null ? runtimeTask.status : TaskStatus.QUEUED;
+            if (currentStatus == TaskStatus.QUEUED || currentStatus == TaskStatus.PROCESSING) {
+                boolean cancelled = taskQueueManager.cancelTask(normalizedTaskId);
+                if (!cancelled) {
+                    return ResponseEntity.status(409).body(Map.of(
+                            "success", false,
+                            "status", currentStatus.name(),
+                            "message", "task cannot be cancelled in current state"
+                    ));
+                }
+                return ResponseEntity.ok(Map.of(
+                        "success", true,
+                        "taskId", normalizedTaskId,
+                        "status", TaskStatus.CANCELLED.name(),
+                        "runtimeRemoved", false,
+                        "storageDeleted", false,
+                        "deletedEntries", 0,
+                        "message", "task cancelled and no new steps will be scheduled"
+                ));
+            }
+        }
+
+        boolean runtimeRemoved = taskQueueManager.removeTask(normalizedTaskId);
+        StorageDeleteResult storageDelete = deleteStorageTaskByTaskId(normalizedTaskId);
+        if (!storageDelete.success) {
+            return ResponseEntity.status(500).body(Map.of(
                     "success", false,
-                    "status", currentStatus.name(),
-                    "message", "task is already finished"
+                    "status", "DELETE_FAILED",
+                    "message", storageDelete.message != null ? storageDelete.message : "delete task artifacts failed"
             ));
         }
 
-        boolean cancelled = taskQueueManager.cancelTask(taskId);
-        if (!cancelled) {
-            return ResponseEntity.status(409).body(Map.of(
-                    "success", false,
-                    "status", currentStatus.name(),
-                    "message", "task cannot be cancelled in current state"
+        if (!runtimeRemoved && !storageDelete.found) {
+            return ResponseEntity.ok(Map.of(
+                    "success", true,
+                    "taskId", normalizedTaskId,
+                    "status", "ALREADY_DELETED",
+                    "runtimeRemoved", false,
+                    "storageDeleted", false,
+                    "deletedEntries", 0,
+                    "message", "task already deleted"
             ));
         }
 
-        return ResponseEntity.ok(Map.of(
-                "success", true,
-                "status", TaskStatus.CANCELLED.name(),
-                "message", "task cancelled and no new steps will be scheduled"
-        ));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", normalizedTaskId);
+        payload.put("status", (runtimeRemoved || storageDelete.deleted) ? "DELETED" : "REMOVED");
+        payload.put("runtimeRemoved", runtimeRemoved);
+        payload.put("storageDeleted", storageDelete.deleted);
+        payload.put("deletedEntries", storageDelete.deletedEntries);
+        payload.put("message", (runtimeRemoved || storageDelete.deleted) ? "task deleted" : "task removed");
+        return ResponseEntity.ok(payload);
     }
 
     @GetMapping("/tasks/{taskId}/personalization/cache")
@@ -3351,6 +3381,93 @@ public class MobileMarkdownController {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
+    private StorageDeleteResult deleteStorageTaskByTaskId(String taskId) {
+        StorageDeleteResult result = new StorageDeleteResult();
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return result;
+        }
+
+        Set<String> candidateStorageKeys = new LinkedHashSet<>();
+        boolean foundInCache = false;
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> byTaskId =
+                storageTaskCacheService.getTaskByTaskId(normalizedTaskId);
+        byTaskId.ifPresent(cached -> {
+            String key = trimToNullSafe(cached.storageKey);
+            if (key != null && isSafeStorageKey(key)) {
+                candidateStorageKeys.add(key);
+            }
+        });
+        if (byTaskId.isPresent()) {
+            foundInCache = true;
+        }
+
+        String keyFromTaskId = resolveStorageDeleteKey(normalizedTaskId);
+        if (keyFromTaskId != null) {
+            candidateStorageKeys.add(keyFromTaskId);
+            Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> byStorageKey =
+                    storageTaskCacheService.getTask(keyFromTaskId);
+            byStorageKey.ifPresent(cached -> {
+                String key = trimToNullSafe(cached.storageKey);
+                if (key != null && isSafeStorageKey(key)) {
+                    candidateStorageKeys.add(key);
+                }
+            });
+            if (byStorageKey.isPresent()) {
+                foundInCache = true;
+            }
+        }
+
+        if (candidateStorageKeys.isEmpty()) {
+            return result;
+        }
+
+        Path storageRoot = resolveStorageRoot().toAbsolutePath().normalize();
+        boolean existsOnDisk = false;
+        for (String storageKey : candidateStorageKeys) {
+            Path target = storageRoot.resolve(storageKey).normalize();
+            if (!target.startsWith(storageRoot)) {
+                continue;
+            }
+            if (!Files.exists(target)) {
+                storageTaskCacheService.evictTaskByStorageKey(storageKey);
+                continue;
+            }
+            existsOnDisk = true;
+            try {
+                result.deletedEntries += deletePathRecursively(target, storageRoot);
+                result.deleted = true;
+                storageTaskCacheService.evictTaskByStorageKey(storageKey);
+            } catch (IOException ex) {
+                logger.warn(
+                        "delete storage task directory failed: taskId={} storageKey={} err={}",
+                        normalizedTaskId,
+                        storageKey,
+                        ex.getMessage()
+                );
+                result.success = false;
+                result.message = "delete storage task directory failed";
+                return result;
+            }
+        }
+
+        result.found = foundInCache || existsOnDisk;
+        storageTaskCacheService.evictTaskByTaskId(normalizedTaskId);
+        return result;
+    }
+
+    private String resolveStorageDeleteKey(String taskId) {
+        String normalizedTaskId = trimToNullSafe(taskId);
+        if (normalizedTaskId == null) {
+            return null;
+        }
+        if (normalizedTaskId.startsWith(STORAGE_TASK_PREFIX)) {
+            String storageKey = trimToNullSafe(normalizedTaskId.substring(STORAGE_TASK_PREFIX.length()));
+            return isSafeStorageKey(storageKey) ? storageKey : null;
+        }
+        return isSafeStorageKey(normalizedTaskId) ? normalizedTaskId : null;
+    }
+
     private List<String> normalizeAnchorIdList(List<String> rawAnchorIds) {
         if (rawAnchorIds == null || rawAnchorIds.isEmpty()) {
             return List.of();
@@ -4622,6 +4739,14 @@ public class MobileMarkdownController {
         public String userId;
         public String outputDir;
         public String priority;
+    }
+
+    private static class StorageDeleteResult {
+        private boolean success = true;
+        private boolean found;
+        private boolean deleted;
+        private int deletedEntries;
+        private String message;
     }
 
     private static class TaskView {

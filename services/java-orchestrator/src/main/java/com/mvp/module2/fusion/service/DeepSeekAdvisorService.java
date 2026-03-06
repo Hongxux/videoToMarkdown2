@@ -434,7 +434,7 @@ public class DeepSeekAdvisorService {
                     systemPrompt,
                     userPrompt,
                     0.2,
-                    Math.max(512, phase2bMaxTokens),
+                    Math.max(4096, phase2bMaxTokens),
                     onDelta
             );
         } catch (Exception ex) {
@@ -444,7 +444,8 @@ public class DeepSeekAdvisorService {
         if (!StringUtils.hasText(raw)) {
             throw new IllegalStateException("DeepSeek phase2b stream returned empty");
         }
-        return normalizePhase2bListIndentation(raw.trim());
+        //return normalizePhase2bListIndentation(raw.trim());
+        return raw.trim();
     }
 
     public Map<String, StructuredAdviceResult> requestStructuredAdviceBatch(
@@ -732,11 +733,11 @@ public class DeepSeekAdvisorService {
              BufferedReader reader = new BufferedReader(new InputStreamReader(bodyStream, StandardCharsets.UTF_8))) {
             String line;
             while ((line = reader.readLine()) != null) {
-                String trimmed = String.valueOf(line).trim();
+                String trimmed = String.valueOf(line);
                 if (!StringUtils.hasText(trimmed) || !trimmed.startsWith("data:")) {
                     continue;
                 }
-                String data = trimmed.substring(5).trim();
+                String data = trimmed.substring(5);
                 if (!StringUtils.hasText(data)) {
                     continue;
                 }
@@ -755,7 +756,7 @@ public class DeepSeekAdvisorService {
                 }
                 JsonNode first = choices.get(0);
                 String delta = first.path("delta").path("content").asText("");
-                if (StringUtils.hasText(delta)) {
+                if (!delta.isEmpty()) {
                     aggregated.append(delta);
                     if (onDelta != null) {
                         try {

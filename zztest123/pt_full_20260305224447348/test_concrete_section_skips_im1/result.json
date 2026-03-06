@@ -1,0 +1,37 @@
+{
+  "title": "Demo Document",
+  "knowledge_groups": [
+    {
+      "group_id": 1,
+      "group_name": "Concrete Unit",
+      "reason": "",
+      "units": [
+        {
+          "unit_id": "SU301",
+          "title": "Concrete Unit",
+          "knowledge_type": "concrete",
+          "body_text": "open the settings panel",
+          "mult_steps": false,
+          "instructional_steps": [],
+          "materials": {
+            "screenshots": [
+              "D:\\videoToMarkdownTest2\\zztest123\\pt_full_20260305224447348\\test_concrete_section_skips_im1\\assets\\SU301_img_01.png"
+            ],
+            "screenshot_items": [
+              {
+                "img_id": "SU301_img_01",
+                "img_path": "D:\\videoToMarkdownTest2\\zztest123\\pt_full_20260305224447348\\test_concrete_section_skips_im1\\assets\\SU301_img_01.png",
+                "img_description": "terminal shows command npm run dev",
+                "timestamp_sec": 5.2,
+                "sentence_id": "S002",
+                "sentence_text": "the command appears in terminal"
+              }
+            ],
+            "clip": "",
+            "action_classifications": []
+          }
+        }
+      ]
+    }
+  ]
+}

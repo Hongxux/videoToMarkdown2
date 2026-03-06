@@ -44,19 +44,40 @@ def resolve_max_workers(
 def build_screenshot_prefetch_chunks(
     *,
     screenshot_requests: List[Dict[str, Any]],
-    time_window: float,
     max_span_seconds: float,
     max_requests: int,
+    time_window: Optional[float] = None,
+    time_window_before: Optional[float] = None,
+    time_window_after: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """将截图请求按时间聚类为多个可预取 chunk。"""
     if not screenshot_requests:
         return []
 
+    try:
+        legacy_window = float(time_window if time_window is not None else 1.0)
+    except (TypeError, ValueError):
+        legacy_window = 1.0
+    if legacy_window < 0.0:
+        legacy_window = 0.0
+    try:
+        resolved_before = float(time_window_before if time_window_before is not None else legacy_window)
+    except (TypeError, ValueError):
+        resolved_before = legacy_window
+    try:
+        resolved_after = float(time_window_after if time_window_after is not None else legacy_window)
+    except (TypeError, ValueError):
+        resolved_after = legacy_window
+    if resolved_before < 0.0:
+        resolved_before = 0.0
+    if resolved_after < 0.0:
+        resolved_after = 0.0
+
     windows = []
     for index, request in enumerate(screenshot_requests):
         original_ts = float(request.get("timestamp_sec", 0) or 0.0)
-        default_start = max(0.0, original_ts - time_window)
-        default_end = original_ts + time_window
+        default_start = max(0.0, original_ts - resolved_before)
+        default_end = original_ts + resolved_after
 
         # 允许请求级窗口覆盖全局 time_window（用于动作头尾定向截图）。
         raw_window_start = request.get("_window_start_sec")

@@ -689,6 +689,8 @@ class RichTextPipeline:
                             "timestamp_sec": request_item.timestamp_sec,
                             "label": request_item.label,
                             "semantic_unit_id": request_item.semantic_unit_id,
+                            "frame_reason": str(getattr(request_item, "frame_reason", "") or ""),
+                            "ocr_text": str(getattr(request_item, "ocr_text", "") or ""),
                         }
                         for request_item in list(material_requests.screenshot_requests or [])
                     ],
@@ -886,7 +888,7 @@ class RichTextPipeline:
         material_requests_map: Dict[str, MaterialRequests],
     ) -> None:
         """
-        做什么：当 semantic_units 中 material_requests 为空时，尝试从 vl_analysis_cache 回填。
+        做什么：当 semantic_units 中 material_requests 为空时，尝试从 VL 产物回填。
         为什么：恢复“请求驱动匹配”，避免 assemble_only 主要依赖目录扫描兜底。
         权衡：仅补空，不覆盖已存在请求；缓存损坏时静默降级，不阻断主流程。
         """
@@ -894,47 +896,91 @@ class RichTextPipeline:
             return
 
         semantic_dir = Path(semantic_units_json_path).resolve().parent
-        candidate_paths: List[Path] = [semantic_dir / "vl_analysis_cache.json"]
-        if semantic_dir.name.lower() == "intermediates":
-            candidate_paths.append(semantic_dir.parent / "vl_analysis_cache.json")
+        candidate_dirs: List[Path] = [semantic_dir]
+        if semantic_dir.name.lower() in {"intermediates", "immediates"}:
+            candidate_dirs.append(semantic_dir.parent)
+        for root_dir in list(candidate_dirs):
+            candidate_dirs.append(root_dir / "intermediates")
+            candidate_dirs.append(root_dir / "immediates")
 
-        cache_path: Optional[Path] = None
+        ordered_dirs: List[Path] = []
+        seen_dir_keys: set[str] = set()
+        for directory in candidate_dirs:
+            try:
+                dir_key = str(directory.resolve())
+            except Exception:
+                dir_key = os.path.abspath(str(directory))
+            if dir_key in seen_dir_keys:
+                continue
+            seen_dir_keys.add(dir_key)
+            if directory.exists() and directory.is_dir():
+                ordered_dirs.append(directory)
+
+        candidate_paths: List[Path] = []
+        for directory in ordered_dirs:
+            candidate_paths.append(directory / "vl_analysis_cache.json")
+            candidate_paths.append(directory / "vl_analysis_output_latest.json")
+            latest_outputs = sorted(
+                directory.glob("vl_analysis_output_*.json"),
+                key=lambda path_item: path_item.stat().st_mtime,
+                reverse=True,
+            )
+            if latest_outputs:
+                candidate_paths.append(latest_outputs[0])
+
+        existing_sources: List[Path] = []
+        seen_source_keys: set[str] = set()
         for candidate in candidate_paths:
+            try:
+                source_key = str(candidate.resolve())
+            except Exception:
+                source_key = os.path.abspath(str(candidate))
+            if source_key in seen_source_keys:
+                continue
+            seen_source_keys.add(source_key)
             if candidate.exists() and candidate.is_file():
-                cache_path = candidate
-                break
-        if cache_path is None:
+                existing_sources.append(candidate)
+
+        if not existing_sources:
             return
 
-        try:
-            with open(cache_path, "r", encoding="utf-8") as file_obj:
-                cache_data = json.load(file_obj)
-        except Exception as error:
-            logger.warning(f"[Phase2B] failed to read vl cache for material backfill: {error}")
+        source_payloads: List[Tuple[Path, Dict[str, Any]]] = []
+        for source_path in existing_sources:
+            try:
+                with open(source_path, "r", encoding="utf-8") as file_obj:
+                    source_data = json.load(file_obj)
+            except Exception as error:
+                logger.warning(f"[Phase2B] failed to read VL source for material backfill: path={source_path}, err={error}")
+                continue
+            if isinstance(source_data, dict):
+                source_payloads.append((source_path, source_data))
+
+        if not source_payloads:
             return
 
-        if not isinstance(cache_data, dict):
-            return
+        screenshot_payloads: List[Dict[str, Any]] = []
+        clip_payloads: List[Dict[str, Any]] = []
+        for _, source_data in source_payloads:
+            for key in ("aggregated_screenshots", "merged_screenshots"):
+                raw_items = source_data.get(key, [])
+                if isinstance(raw_items, list):
+                    screenshot_payloads.extend([item for item in raw_items if isinstance(item, dict)])
+            for key in ("aggregated_clips", "merged_clips"):
+                raw_items = source_data.get(key, [])
+                if isinstance(raw_items, list):
+                    clip_payloads.extend([item for item in raw_items if isinstance(item, dict)])
 
-        def _is_actual_vl_cache_item(payload: Dict[str, Any]) -> bool:
+        def _should_skip_cache_item(payload: Dict[str, Any]) -> bool:
             mode = str(payload.get("analysis_mode", "") or "").strip().lower()
-            if mode in {"legacy_action_units", "tutorial_stepwise", "tutorial_vl", "vl"}:
-                return True
-            if mode.startswith("vl_"):
-                return True
-            id_token = str(
-                payload.get("screenshot_id", "")
-                or payload.get("clip_id", "")
-                or ""
-            ).strip().lower()
-            return "_vl_" in id_token
+            # legacy_action_units 产物命名不稳定，保持原策略跳过，避免污染请求驱动匹配。
+            return mode == "legacy_action_units"
 
         by_unit_screenshots: Dict[str, List[ScreenshotRequest]] = {}
+        by_unit_frame_reason: Dict[str, Dict[str, str]] = {}
+        by_unit_ocr_text: Dict[str, Dict[str, str]] = {}
         seen_ss_ids: Dict[str, set] = {}
-        for item in list(cache_data.get("aggregated_screenshots", []) or []):
-            if not isinstance(item, dict):
-                continue
-            if _is_actual_vl_cache_item(item):
+        for item in screenshot_payloads:
+            if _should_skip_cache_item(item):
                 continue
             unit_id = str(item.get("semantic_unit_id", "") or "").strip()
             screenshot_id = str(item.get("screenshot_id", "") or "").strip()
@@ -949,6 +995,12 @@ class RichTextPipeline:
             label = str(item.get("label", "") or Path(screenshot_id).name).strip()
             if not label:
                 label = Path(screenshot_id).name
+            frame_reason = str(item.get("frame_reason", "") or "").strip()
+            ocr_text = str(item.get("ocr_text", "") or "").strip()
+            if frame_reason:
+                by_unit_frame_reason.setdefault(unit_id, {}).setdefault(screenshot_id, frame_reason)
+            if ocr_text:
+                by_unit_ocr_text.setdefault(unit_id, {}).setdefault(screenshot_id, ocr_text)
 
             unit_seen = seen_ss_ids.setdefault(unit_id, set())
             if screenshot_id in unit_seen:
@@ -960,15 +1012,15 @@ class RichTextPipeline:
                     timestamp_sec=timestamp_sec,
                     label=label,
                     semantic_unit_id=unit_id,
+                    frame_reason=frame_reason,
+                    ocr_text=ocr_text,
                 )
             )
 
         by_unit_clips: Dict[str, List[ClipRequest]] = {}
         seen_clip_ids: Dict[str, set] = {}
-        for item in list(cache_data.get("aggregated_clips", []) or []):
-            if not isinstance(item, dict):
-                continue
-            if _is_actual_vl_cache_item(item):
+        for item in clip_payloads:
+            if _should_skip_cache_item(item):
                 continue
             unit_id = str(item.get("semantic_unit_id", "") or "").strip()
             clip_id = str(item.get("clip_id", "") or "").strip()
@@ -1035,30 +1087,86 @@ class RichTextPipeline:
 
             filled_ss = False
             filled_clip = False
-            if not list(requests.screenshot_requests or []):
-                cached_ss = by_unit_screenshots.get(unit_id, [])
-                if cached_ss:
+            cached_ss = by_unit_screenshots.get(unit_id, [])
+            if cached_ss:
+                existing_ss = list(requests.screenshot_requests or [])
+                if not existing_ss:
                     requests.screenshot_requests = list(cached_ss)
                     merged_screenshot_count += len(cached_ss)
                     filled_ss = True
+                else:
+                    existing_ss_ids = {
+                        str(getattr(req_item, "screenshot_id", "") or "").strip()
+                        for req_item in existing_ss
+                    }
+                    appended_count = 0
+                    for cached_req in cached_ss:
+                        cached_id = str(getattr(cached_req, "screenshot_id", "") or "").strip()
+                        if not cached_id or cached_id in existing_ss_ids:
+                            continue
+                        existing_ss.append(cached_req)
+                        existing_ss_ids.add(cached_id)
+                        appended_count += 1
+                    if appended_count > 0:
+                        requests.screenshot_requests = existing_ss
+                        merged_screenshot_count += appended_count
+                        filled_ss = True
 
-            if not list(requests.clip_requests or []):
-                cached_clips = by_unit_clips.get(unit_id, [])
-                if cached_clips:
+            # 不覆盖已有请求，仅补齐缺失的 frame_reason/ocr_text。
+            frame_reason_by_id = by_unit_frame_reason.get(unit_id, {})
+            ocr_text_by_id = by_unit_ocr_text.get(unit_id, {})
+            if requests.screenshot_requests:
+                for request_item in requests.screenshot_requests:
+                    screenshot_id = str(getattr(request_item, "screenshot_id", "") or "").strip()
+                    if not screenshot_id:
+                        continue
+                    if not str(getattr(request_item, "frame_reason", "") or "").strip():
+                        cached_reason = str(frame_reason_by_id.get(screenshot_id, "") or "").strip()
+                        if cached_reason:
+                            request_item.frame_reason = cached_reason
+                    if not str(getattr(request_item, "ocr_text", "") or "").strip():
+                        cached_ocr = str(ocr_text_by_id.get(screenshot_id, "") or "").strip()
+                        if cached_ocr:
+                            request_item.ocr_text = cached_ocr
+
+            cached_clips = by_unit_clips.get(unit_id, [])
+            if cached_clips:
+                existing_clips = list(requests.clip_requests or [])
+                if not existing_clips:
                     requests.clip_requests = list(cached_clips)
                     merged_clip_count += len(cached_clips)
                     filled_clip = True
+                else:
+                    existing_clip_ids = {
+                        str(getattr(req_item, "clip_id", "") or "").strip()
+                        for req_item in existing_clips
+                    }
+                    appended_count = 0
+                    for cached_req in cached_clips:
+                        cached_id = str(getattr(cached_req, "clip_id", "") or "").strip()
+                        if not cached_id or cached_id in existing_clip_ids:
+                            continue
+                        existing_clips.append(cached_req)
+                        existing_clip_ids.add(cached_id)
+                        appended_count += 1
+                    if appended_count > 0:
+                        requests.clip_requests = existing_clips
+                        merged_clip_count += appended_count
+                        filled_clip = True
 
             if filled_ss or filled_clip:
                 merged_units += 1
 
         if merged_units > 0:
+            source_preview = [str(path_item) for path_item, _ in source_payloads[:3]]
+            if len(source_payloads) > 3:
+                source_preview.append(f"...(+{len(source_payloads) - 3} more)")
             logger.info(
-                "[Phase2B] backfilled material requests from vl cache: units=%s, screenshots=%s, clips=%s, cache=%s",
+                "[Phase2B] backfilled material requests from VL sources: units=%s, screenshots=%s, clips=%s, sources=%s",
                 merged_units,
                 merged_screenshot_count,
                 merged_clip_count,
-                cache_path,
+                ",".join(source_preview),
             )
 
     async def analyze_only(self) -> Tuple[List[ScreenshotRequest], List[ClipRequest], str]:

@@ -18,6 +18,8 @@ def create_screenshot_request(
     timestamp_sec: float,
     label: str,
     semantic_unit_id: str,
+    frame_reason: str = "",
+    ocr_text: str = "",
 ):
     """构造 ScreenshotRequest。"""
     return screenshot_request_type(
@@ -25,6 +27,8 @@ def create_screenshot_request(
         timestamp_sec=timestamp_sec,
         label=label,
         semantic_unit_id=semantic_unit_id,
+        frame_reason=frame_reason,
+        ocr_text=ocr_text,
     )
 
 
@@ -61,4 +65,3 @@ def clamp_clip_segments(segments: Optional[List[Tuple[float, float]]]) -> Option
             continue
         normalized.append({"start_sec": start_value, "end_sec": end_value})
     return normalized or None
-

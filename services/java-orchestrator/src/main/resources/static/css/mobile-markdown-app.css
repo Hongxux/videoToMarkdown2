@@ -930,6 +930,7 @@ button:active:not(:disabled),
 
 .markdown-body .md-image-shell {
     --md-image-aspect-ratio: 16 / 9;
+    --md-image-frame-reason-area: 0px;
     position: relative;
     display: block;
     width: min(100%, var(--content-media-max-width));
@@ -940,13 +941,21 @@ button:active:not(:disabled),
     aspect-ratio: var(--md-image-aspect-ratio);
     min-height: clamp(84px, 18vw, 150px);
     max-height: var(--content-media-max-height);
+    padding-bottom: var(--md-image-frame-reason-area);
     box-shadow: 0 12px 32px -8px rgba(37, 99, 235, 0.15);
     isolation: isolate;
 }
 
+.markdown-body .md-image-shell[data-has-frame-reason="1"] {
+    --md-image-frame-reason-area: 34px;
+}
+
 .markdown-body .md-image-shell > img {
     position: absolute;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: var(--md-image-frame-reason-area);
     width: 100%;
     height: 100%;
     object-fit: contain;
@@ -958,7 +967,10 @@ button:active:not(:disabled),
 .markdown-body .md-image-shell::before {
     content: '';
     position: absolute;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: var(--md-image-frame-reason-area);
     background: linear-gradient(102deg, rgba(226, 232, 240, 0.18) 8%, rgba(148, 163, 184, 0.52) 48%, rgba(226, 232, 240, 0.2) 86%);
     background-size: 220% 100%;
     animation: mdImageShellShimmer 1.25s ease-in-out infinite;
@@ -970,7 +982,7 @@ button:active:not(:disabled),
     content: '';
     position: absolute;
     left: 50%;
-    top: 50%;
+    top: calc((100% - var(--md-image-frame-reason-area)) / 2);
     width: 26px;
     height: 26px;
     margin: -13px 0 0 -13px;
@@ -984,26 +996,30 @@ button:active:not(:disabled),
 
 .markdown-body .md-image-frame-reason {
     position: absolute;
-    left: 10px;
-    right: 10px;
-    bottom: 10px;
+    left: 0;
+    right: 0;
+    bottom: 0;
     z-index: 3;
-    padding: 6px 9px;
-    border-radius: 10px;
-    background: linear-gradient(180deg, rgba(15, 23, 42, 0.74) 0%, rgba(15, 23, 42, 0.88) 100%);
-    color: #e2e8f0;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: var(--md-image-frame-reason-area);
+    max-height: var(--md-image-frame-reason-area);
+    padding: 0 10px;
+    border-top: 1px solid rgba(148, 163, 184, 0.28);
+    background: linear-gradient(180deg, rgba(248, 250, 252, 0.94) 0%, rgba(241, 245, 249, 0.98) 100%);
+    color: #1e293b;
     font-size: 12px;
     line-height: 1.35;
     letter-spacing: 0.01em;
-    opacity: 0;
-    transform: translateY(5px);
-    transition: opacity 160ms ease, transform 180ms var(--motion-ease-out);
-    pointer-events: none;
-}
-
-.markdown-body .md-image-shell[data-has-frame-reason="1"]:is(:hover, :focus-within) > .md-image-frame-reason {
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
+    transition: none;
+    pointer-events: none;
 }
 
 .markdown-body .md-image-shell.is-loaded {

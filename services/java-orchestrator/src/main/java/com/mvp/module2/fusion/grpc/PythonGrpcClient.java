@@ -13,6 +13,12 @@ import org.springframework.stereotype.Component;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -58,6 +64,15 @@ public class PythonGrpcClient {
 
     @Value("${grpc.python.keepalive-without-calls:false}")
     private boolean grpcKeepaliveWithoutCalls;
+
+    @Value("${grpc.proto.self-check.auto-heal.enabled:true}")
+    private boolean grpcProtoSelfHealEnabled;
+
+    @Value("${grpc.proto.self-check.auto-heal.command:}")
+    private String grpcProtoSelfHealCommand;
+
+    @Value("${grpc.proto.self-check.auto-heal.timeout-seconds:300}")
+    private long grpcProtoSelfHealTimeoutSeconds;
     
     private ManagedChannel channel;
     private VideoProcessingServiceGrpc.VideoProcessingServiceBlockingStub blockingStub;
@@ -90,30 +105,288 @@ public class PythonGrpcClient {
         channel = builder.build();
 
         blockingStub = VideoProcessingServiceGrpc.newBlockingStub(channel);
-        warmupGrpcResponseBuilders();
+        verifyGrpcProtoSelfCheckWithAutoHeal();
         
         logger.info("Python gRPC client initialized");
     }
 
-    private void warmupGrpcResponseBuilders() {
+    private void verifyGrpcProtoSelfCheckWithAutoHeal() {
         try {
-            DownloadResponse.newBuilder();
-            VideoInfoResponse.newBuilder();
-            TranscribeResponse.newBuilder();
-            Stage1Response.newBuilder();
-            AnalyzeResponse.newBuilder();
-            AssembleResponse.newBuilder();
-            ExtractBookPdfResponse.newBuilder();
-            CVValidationResponse.newBuilder();
-            GenerateMaterialRequestsResponse.newBuilder();
-            VLAnalysisResponse.newBuilder();
-            ReleaseResourcesResponse.newBuilder();
-            HealthCheckResponse.newBuilder();
-            WatchdogSignalEvent.newBuilder();
-            logger.debug("gRPC protobuf response builders warmed up");
-        } catch (Throwable t) {
-            logger.warn("gRPC protobuf warmup failed, continue with lazy loading: {}", t.toString());
+            runGrpcProtoSelfCheck(false);
+            logger.info("gRPC protobuf self-check passed");
+            return;
+        } catch (Throwable checkError) {
+            logger.error("gRPC protobuf self-check failed: {}", rootCauseSummary(checkError), checkError);
+            if (!grpcProtoSelfHealEnabled) {
+                throw new IllegalStateException("gRPC protobuf self-check failed and auto-heal is disabled", checkError);
+            }
+            logger.warn("gRPC protobuf auto-heal enabled, trying rebuild workflow");
         }
+
+        boolean healed = runGrpcProtoAutoHealWorkflow();
+        if (!healed) {
+            throw new IllegalStateException("gRPC protobuf auto-heal failed, startup aborted");
+        }
+
+        try {
+            runGrpcProtoSelfCheck(true);
+            logger.info("gRPC protobuf self-check passed after auto-heal");
+        } catch (Throwable healedCheckError) {
+            throw new IllegalStateException(
+                "gRPC protobuf self-check still failed after auto-heal: " + rootCauseSummary(healedCheckError),
+                healedCheckError
+            );
+        }
+    }
+
+    private void runGrpcProtoSelfCheck(boolean verifyDiskLocations) throws Exception {
+        DownloadResponse.parser();
+        VideoInfoResponse.parser();
+        TranscribeResponse.parser();
+        Stage1Response.parser();
+        AnalyzeResponse.parser();
+        AssembleResponse.parser();
+        ExtractBookPdfResponse.parser();
+        CVValidationRequest.parser();
+        CVValidationResponse.parser();
+        GenerateMaterialRequestsResponse.parser();
+        VLAnalysisResponse.parser();
+        com.mvp.videoprocessing.grpc.ScreenshotRequest.parser();
+        ReleaseResourcesResponse.parser();
+        HealthCheckResponse.parser();
+        WatchdogSignalEvent.parser();
+
+        ClassLoader loader = PythonGrpcClient.class.getClassLoader();
+        Class.forName("com.mvp.videoprocessing.grpc.ScreenshotRequest$1", true, loader);
+        Class.forName("com.mvp.videoprocessing.grpc.CVValidationRequest$1", true, loader);
+
+        if (!verifyDiskLocations) {
+            return;
+        }
+        Path repoRoot = resolveRepoRootDirectory();
+        verifyGrpcProtoPythonGeneratedFiles(repoRoot);
+        verifyGrpcProtoGeneratedFiles(repoRoot);
+        verifyGrpcProtoCompiledClasses(repoRoot);
+    }
+
+    private boolean runGrpcProtoAutoHealWorkflow() {
+        Path repoRoot = resolveRepoRootDirectory();
+        String healCommand = resolveGrpcProtoAutoHealCommand(repoRoot);
+        if (healCommand.isBlank()) {
+            logger.error("gRPC protobuf auto-heal command is empty");
+            return false;
+        }
+        logger.info("Running gRPC protobuf auto-heal command: {}", healCommand);
+        boolean commandOk = runShellCommand(healCommand, repoRoot, grpcProtoSelfHealTimeoutSeconds);
+        if (!commandOk) {
+            return false;
+        }
+        try {
+            verifyGrpcProtoPythonGeneratedFiles(repoRoot);
+            verifyGrpcProtoGeneratedFiles(repoRoot);
+            verifyGrpcProtoCompiledClasses(repoRoot);
+            logger.info("gRPC protobuf auto-heal artifacts verified under expected locations");
+            return true;
+        } catch (Exception verifyError) {
+            logger.error("gRPC protobuf artifact location verification failed: {}", rootCauseSummary(verifyError), verifyError);
+            return false;
+        }
+    }
+
+    private String resolveGrpcProtoAutoHealCommand(Path repoRoot) {
+        String manualCommand = grpcProtoSelfHealCommand == null ? "" : grpcProtoSelfHealCommand.trim();
+        if (!manualCommand.isEmpty()) {
+            return manualCommand;
+        }
+        Path scriptPath = repoRoot.resolve("scripts").resolve("build").resolve("generate_grpc.ps1");
+        Path orchestratorPom = repoRoot.resolve("services").resolve("java-orchestrator").resolve("pom.xml");
+        if (Files.exists(scriptPath)) {
+            String quotedScript = quoteForShell(scriptPath.toAbsolutePath().toString());
+            String quotedPom = quoteForShell(orchestratorPom.toAbsolutePath().toString());
+            return "powershell -NoProfile -ExecutionPolicy Bypass -File " + quotedScript
+                + " && mvn -f " + quotedPom + " -DskipTests compile -q";
+        }
+        String quotedPom = quoteForShell(orchestratorPom.toAbsolutePath().toString());
+        return "mvn -f " + quotedPom + " -DskipTests compile -q";
+    }
+
+    private boolean runShellCommand(String command, Path workDir, long timeoutSeconds) {
+        List<String> shellCommand = new ArrayList<>();
+        boolean isWindows = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win");
+        if (isWindows) {
+            shellCommand.add("cmd");
+            shellCommand.add("/c");
+            shellCommand.add(command);
+        } else {
+            shellCommand.add("bash");
+            shellCommand.add("-lc");
+            shellCommand.add(command);
+        }
+
+        ProcessBuilder processBuilder = new ProcessBuilder(shellCommand);
+        processBuilder.directory(workDir.toFile());
+        processBuilder.redirectErrorStream(true);
+
+        StringBuffer output = new StringBuffer();
+        try {
+            Process process = processBuilder.start();
+            Thread outputDrainThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        output.append(line).append(System.lineSeparator());
+                    }
+                } catch (Exception readError) {
+                    output
+                        .append("[output-read-error] ")
+                        .append(rootCauseSummary(readError))
+                        .append(System.lineSeparator());
+                }
+            }, "grpc-proto-auto-heal-output-drain");
+            outputDrainThread.setDaemon(true);
+            outputDrainThread.start();
+
+            boolean finished = process.waitFor(Math.max(1L, timeoutSeconds), TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                process.waitFor(5, TimeUnit.SECONDS);
+                outputDrainThread.join(1000);
+                logger.error("gRPC protobuf auto-heal command timeout after {}s", timeoutSeconds);
+                return false;
+            }
+            outputDrainThread.join(2000);
+            int exitCode = process.exitValue();
+            if (exitCode != 0) {
+                logger.error("gRPC protobuf auto-heal command failed with exitCode={}, output:\n{}", exitCode, output);
+                return false;
+            }
+            logger.info("gRPC protobuf auto-heal command succeeded");
+            if (output.length() > 0) {
+                logger.info("gRPC protobuf auto-heal output:\n{}", output);
+            }
+            return true;
+        } catch (InterruptedException interruptedError) {
+            Thread.currentThread().interrupt();
+            logger.error(
+                "gRPC protobuf auto-heal command interrupted: {}",
+                rootCauseSummary(interruptedError),
+                interruptedError
+            );
+            return false;
+        } catch (Exception execError) {
+            logger.error("gRPC protobuf auto-heal command execution failed: {}", rootCauseSummary(execError), execError);
+            return false;
+        }
+    }
+
+    private Path resolveRepoRootDirectory() {
+        Path current = Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize();
+        Path cursor = current;
+        for (int i = 0; i < 8 && cursor != null; i++) {
+            Path protoPath = cursor.resolve("contracts").resolve("proto").resolve("video_processing.proto");
+            Path orchestratorPom = cursor.resolve("services").resolve("java-orchestrator").resolve("pom.xml");
+            if (Files.exists(protoPath) && Files.exists(orchestratorPom)) {
+                return cursor;
+            }
+            cursor = cursor.getParent();
+        }
+        throw new IllegalStateException("Cannot resolve repo root from user.dir=" + current);
+    }
+
+    private void verifyGrpcProtoGeneratedFiles(Path repoRoot) {
+        Path messageGeneratedDir = repoRoot
+            .resolve("services")
+            .resolve("java-orchestrator")
+            .resolve("target")
+            .resolve("generated-sources")
+            .resolve("protobuf")
+            .resolve("java")
+            .resolve("com")
+            .resolve("mvp")
+            .resolve("videoprocessing")
+            .resolve("grpc");
+        List<String> requiredMessageFiles = List.of(
+            "ScreenshotRequest.java",
+            "CVValidationRequest.java",
+            "VLAnalysisResponse.java"
+        );
+        List<String> missingMessageFiles = requiredMessageFiles.stream()
+            .filter(name -> !Files.exists(messageGeneratedDir.resolve(name)))
+            .collect(Collectors.toList());
+        if (!missingMessageFiles.isEmpty()) {
+            throw new IllegalStateException(
+                "Missing generated protobuf message java files under "
+                    + messageGeneratedDir
+                    + ": "
+                    + missingMessageFiles
+            );
+        }
+
+        Path grpcGeneratedDir = repoRoot
+            .resolve("services")
+            .resolve("java-orchestrator")
+            .resolve("target")
+            .resolve("generated-sources")
+            .resolve("protobuf")
+            .resolve("grpc-java")
+            .resolve("com")
+            .resolve("mvp")
+            .resolve("videoprocessing")
+            .resolve("grpc");
+        if (!Files.exists(grpcGeneratedDir.resolve("VideoProcessingServiceGrpc.java"))) {
+            throw new IllegalStateException(
+                "Missing generated grpc stub java file under "
+                    + grpcGeneratedDir
+                    + ": [VideoProcessingServiceGrpc.java]"
+            );
+        }
+    }
+
+    private void verifyGrpcProtoPythonGeneratedFiles(Path repoRoot) {
+        Path pythonGeneratedDir = repoRoot
+            .resolve("contracts")
+            .resolve("gen")
+            .resolve("python");
+        List<String> requiredPythonFiles = List.of(
+            "video_processing_pb2.py",
+            "video_processing_pb2_grpc.py"
+        );
+        List<String> missing = requiredPythonFiles.stream()
+            .filter(name -> !Files.exists(pythonGeneratedDir.resolve(name)))
+            .collect(Collectors.toList());
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("Missing generated python grpc files under " + pythonGeneratedDir + ": " + missing);
+        }
+    }
+
+    private void verifyGrpcProtoCompiledClasses(Path repoRoot) {
+        Path classesDir = repoRoot
+            .resolve("services")
+            .resolve("java-orchestrator")
+            .resolve("target")
+            .resolve("classes")
+            .resolve("com")
+            .resolve("mvp")
+            .resolve("videoprocessing")
+            .resolve("grpc");
+        List<String> requiredClasses = List.of(
+            "ScreenshotRequest.class",
+            "ScreenshotRequest$1.class",
+            "CVValidationRequest.class",
+            "CVValidationRequest$1.class",
+            "VLAnalysisResponse.class",
+            "VideoProcessingServiceGrpc.class"
+        );
+        List<String> missing = requiredClasses.stream()
+            .filter(name -> !Files.exists(classesDir.resolve(name)))
+            .collect(Collectors.toList());
+        if (!missing.isEmpty()) {
+            throw new IllegalStateException("Missing compiled protobuf classes under " + classesDir + ": " + missing);
+        }
+    }
+
+    private String quoteForShell(String text) {
+        return "\"" + text.replace("\"", "\\\"") + "\"";
     }
 
     private String resolveGrpcHost(String rawHost) {
@@ -975,6 +1248,14 @@ public class PythonGrpcClient {
 
             logger.info("[{}] ValidateCVBatch Streaming completed", taskId);
             return true;
+        } catch (LinkageError linkageError) {
+            logger.error(
+                "[{}] ValidateCVBatch Streaming linkage failed: {}",
+                taskId,
+                rootCauseSummary(linkageError),
+                linkageError
+            );
+            return false;
         } catch (Exception e) {
             logger.error("[{}] ValidateCVBatch Streaming failed: {}", taskId, e.getMessage());
             return false;
@@ -1362,16 +1643,30 @@ public class PythonGrpcClient {
             return result;
         } catch (StatusRuntimeException e) {
             boolean interrupted = isInterruptedCancellation(e);
+            boolean protoClasspathFailure = isGrpcProtoClasspathFailure(e);
             if (interrupted) {
                 Thread.currentThread().interrupt();
                 logger.warn("[{}] AnalyzeWithVL interrupted: {}", taskId, e.getStatus());
+            } else if (protoClasspathFailure) {
+                logger.error("[{}] AnalyzeWithVL failed due to protobuf classpath mismatch: {}", taskId, rootCauseSummary(e), e);
             } else {
                 logger.error("[{}] AnalyzeWithVL failed: {}", taskId, e.getStatus());
             }
             VLAnalysisResult result = new VLAnalysisResult();
             result.success = false;
             result.interrupted = interrupted;
-            result.errorMsg = statusDescriptionOrCode(e);
+            if (protoClasspathFailure) {
+                result.errorMsg = buildGrpcProtoClasspathFixHint(e);
+            } else {
+                result.errorMsg = statusDescriptionOrCode(e);
+            }
+            return result;
+        } catch (LinkageError linkageError) {
+            logger.error("[{}] AnalyzeWithVL linkage failed: {}", taskId, rootCauseSummary(linkageError), linkageError);
+            VLAnalysisResult result = new VLAnalysisResult();
+            result.success = false;
+            result.interrupted = false;
+            result.errorMsg = buildGrpcProtoClasspathFixHint(linkageError);
             return result;
         }
     }
@@ -1474,17 +1769,27 @@ public class PythonGrpcClient {
         if (!normalized.contains("failed to read message")) {
             return false;
         }
-        Throwable cause = error.getCause();
+        return isGrpcProtoClasspathFailure(error);
+    }
+
+    private boolean isGrpcProtoClasspathFailure(Throwable error) {
+        Throwable cause = error;
         while (cause != null) {
-            if (cause instanceof NoClassDefFoundError || cause instanceof ClassNotFoundException) {
-                String message = cause.getMessage();
-                if (message == null || message.contains("AnalyzeResponse$Builder")) {
+            if (cause instanceof NoClassDefFoundError || cause instanceof ClassNotFoundException || cause instanceof LinkageError) {
+                String message = String.valueOf(cause.getMessage());
+                if (message.contains("com/mvp/videoprocessing/grpc") || message.contains("com.mvp.videoprocessing.grpc")) {
                     return true;
                 }
             }
             cause = cause.getCause();
         }
         return false;
+    }
+
+    private String buildGrpcProtoClasspathFixHint(Throwable error) {
+        return "gRPC protobuf classpath mismatch: "
+            + rootCauseSummary(error)
+            + ". Please run grpc rebuild script and compile java orchestrator, then restart service.";
     }
 
     private String rootCauseSummary(Throwable error) {

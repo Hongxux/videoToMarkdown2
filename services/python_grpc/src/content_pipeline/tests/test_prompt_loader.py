@@ -194,3 +194,27 @@ def test_vl_arg_prompt_keys_are_loadable(monkeypatch):
     assert "{{main_operation}}" in user_prompt
     assert "{{subtitle_context}}" in user_prompt
 
+
+def test_markdown_preserve_img_prompt_keys_are_loadable(monkeypatch):
+    _reset_loader_cache()
+    monkeypatch.setattr(
+        prompt_loader,
+        "load_module2_config",
+        lambda: {
+            "prompt_management": {
+                "enabled": True,
+                "root_dir": "",
+                "overrides": {},
+                "strict": False,
+            }
+        },
+    )
+
+    system_prompt = get_prompt(PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG)
+    user_prompt = get_prompt(PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG)
+
+    assert isinstance(system_prompt, str)
+    assert isinstance(user_prompt, str)
+    assert len(system_prompt) > 10
+    assert "{body_text}" in user_prompt
+

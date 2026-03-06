@@ -13,6 +13,57 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-03-05 移动端批量删除任务出现 task not found（删除语义与实现不一致）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 前端批量删除提示：`删除完成：成功 0，失败 1（VT_xxx：task not found）`。
+  - 接口表现：`DELETE /api/mobile/tasks/{taskId}` 对历史任务返回 `404 task not found`，导致批量删除链路中断。
+  - 影响范围：移动端任务列表“批量删除/真实删除”场景，尤其是已完成并落盘到 storage 的任务。
+- 触发条件：
+  - 任务不在运行时队列（`TaskQueueManager`）中，或已经是历史任务（storage cache）。
+  - 前端仍统一调用 `DELETE /api/mobile/tasks/{taskId}` 进行删除。
+- 根因定位：
+  - 接口实现只支持“取消运行中任务”，未实现“删除历史任务目录”，并在任务不在运行时内存时直接返回 404。
+  - 删除语义与前端调用语义不一致：前端期望幂等删除，后端提供的是运行态取消。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 重构 `DELETE /api/mobile/tasks/{taskId}`：
+      - 运行中任务（`QUEUED/PROCESSING`）走取消逻辑（保持原有能力）。
+      - 非运行中任务走删除逻辑：尝试删除 storage 目录并同步缓存驱逐。
+      - 对不存在任务改为幂等成功返回：`status=ALREADY_DELETED`（避免批量删除被单条 404 打断）。
+    - 新增 `deleteStorageTaskByTaskId/resolveStorageDeleteKey` 等删除辅助逻辑，统一做路径边界校验。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+    - 新增 `removeTask(taskId)`，支持将已结束任务从运行时映射移除，避免“已结束任务只能报冲突不可删”。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+    - 新增 `evictTaskByStorageKey/evictTaskByTaskId`，确保删除后缓存与索引即时一致。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerDeleteTaskTest.java`
+    - 新增回归测试：
+      - 不存在任务删除应幂等成功。
+      - 运行中任务删除应取消成功。
+      - 历史 storage 任务删除应落盘目录删除成功。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerDeleteTaskTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化 `MobileMarkdownControllerDeleteTaskTest`，覆盖“运行态取消 + 历史态删除 + 幂等删除”三类行为。
+  - 监控：
+    - 关注删除接口返回的 `status=DELETE_FAILED/ALREADY_DELETED` 比例，识别目录权限或缓存不一致问题。
+  - 校验：
+    - 任何删除接口改动必须同时核对“前端删除语义”和“后端返回语义”是否一致（特别是幂等语义）。
+  - 回滚：
+    - 若线上需快速回退，可先回滚到旧删除实现，同时在前端临时将 `task not found` 视为成功以保障批量删除可用性。
+- 相关文件/接口：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerDeleteTaskTest.java`
+  - `DELETE /api/mobile/tasks/{taskId}`
+- 复盘要点：
+  - `DELETE` 语义在产品层面通常要求幂等，后端不应把“资源不存在”当成批量流程失败。
+  - 任务系统存在“运行态 + 存储态”双视图时，删除链路必须同时覆盖内存态与落盘态，避免出现“列表可见但不可删”。
+
 ## 2026-03-04 下载阶段等待 Python 响应被中断后直接失败（缺少幂等重试）
 - 日期：2026-03-04
 - 现象与影响范围：
@@ -7672,3 +7723,439 @@
     - 排障时优先核对 `Files.upload` 原始 `output` 结构，再判断是否真失败。
   - 回滚：
     - 如需回滚，仅移除 `file_id -> Files.get` 分支；但会恢复“上传成功被误判失败”风险。
+
+## 2026-03-05 任务并发闸门过粗导致转录排队（拆分为下载/转录双闸门）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 线上任务观测出现“任务A进入 `step1-step6` 后，任务B仍未进入转录”的排队体感，表现为后续任务转录启动晚于预期。
+  - 影响范围：`services/java-orchestrator` 的视频任务调度链路（`TaskProcessingWorker -> VideoProcessingOrchestrator`）。
+- 根因定位：
+  - 旧调度使用单一粗粒度 IO 闸门，将 `download + transcribe + stage1` 绑定在同一并发许可下。
+  - `stage1(step1-step6)` 属于重计算阶段，却错误占用了“转录许可窗口”，导致“转录完成后无法立即放行下一个任务转录”。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - 将单闸门改为双闸门：`downloadSemaphore` 与 `transcribeSemaphore`。
+    - 执行链改为：`download(下载闸门) -> transcribe(转录闸门) -> stage1(无转录闸门) -> llm`。
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+    - 将 `transcribe` 与 `stage1` 明确拆分为 `processVideoTranscribePhase` 与 `processVideoStage1Phase`。
+    - `IOPhaseResult` 补充 `subtitlePath`，作为分阶段衔接数据，避免跨阶段重复计算或隐式状态。
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - 新增 `task.pipeline.download-concurrency=3`、`task.pipeline.transcribe-concurrency=1`。
+    - 保留 `task.pipeline.io-concurrency=1` 作为兼容回退配置。
+  - 文件：`services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerIoConcurrencyTest.java`
+    - 新增时序门闩断言：显式挂起首个任务 Stage1，验证第二个任务转录可在 Stage1 挂起期间启动。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest="TaskProcessingWorkerDownloadRetryTest,TaskProcessingWorkerUploadCleanupTest,TaskProcessingWorkerIoConcurrencyTest" test -q`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_rate_limiter.py -q`（通过，`10 passed`）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留并扩展 `TaskProcessingWorkerIoConcurrencyTest` 的时序断言，防止后续重构把 Stage1 重新纳入转录闸门。
+  - 监控：
+    - 启动日志持续输出 `workerConcurrency/downloadConcurrency/transcribeConcurrency`，用于现场快速确认配置是否生效。
+  - 校验：
+    - 排障时优先核对“转录阶段开始时间”与“前序任务 Stage1 开始时间”是否可重叠，避免仅依据总耗时误判。
+  - 回滚：
+    - 如需回滚可恢复单 IO 闸门，但会重新引入“Stage1 阻塞后续任务转录”的队头阻塞风险。
+
+## 2026-03-05 VL 长视频同步超时与上传负载过高
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 线上日志出现 `hedge triggered after 25000ms`、`APITimeoutError: Request timed out`，并伴随并发回退（`Concurrency 8->7->6`）。
+  - 影响范围：`services/python_grpc` 的 VL 分析链路（DashScope 上传 + VL 调用）。
+- 根因定位：
+  - 根因1：长视频在同步等待模型返回时，连接时长预算与实际推理时长不匹配，导致请求层超时。
+  - 根因2：上传前未统一压缩，长视频直接上传导致传输与模型侧处理成本偏高。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 新增 DashScope 离线任务链路：提交任务后按 `5s` 周期查询状态，成功后再回填解析流程。
+    - 上传链路新增统一压缩预处理：`720P` + `2-4Mbps`（目标 `3Mbps`），不设置时长门槛。
+    - 保留同步链路 fallback，并支持按视频时长动态设置 `timeout/hedge`。
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - `vl_chat_completion` 支持透传 `timeout` 与 `hedge_delay_ms`，避免上层策略丢失。
+  - 文件：`config/module2_config.yaml`
+    - 新增离线任务开关与轮询周期配置，默认开启离线任务并固定 `5s` 查询。
+    - 新增上传压缩参数配置，默认启用压缩。
+- 验证方式：
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "prepare_video_for_dashscope_upload_compresses_without_duration_threshold or call_vl_api_prefers_dashscope_offline_task_when_enabled or call_vl_api_sync_path_passes_timeout_and_hedge"`（通过，`3 passed`）
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -k "vl_chat_completion_allows_custom_timeout_and_hedge_delay"`（通过，`1 passed`）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留离线路径与同步 fallback 双通道单测，防止后续改动误删其中一条。
+  - 监控：
+    - 关注日志关键字：`VL offline task mode enabled`、`DashScope VL offline task submitted`、`DashScope Files.upload succeeded`。
+  - 校验：
+    - 遇到超时先确认是否已命中离线路径；若未命中，再核对 `offline_task_enabled` 与端点是否为 DashScope。
+  - 回滚：
+    - 可将 `offline_task_enabled=false` 回退为同步链路，但会恢复长视频超时风险。
+
+## 2026-03-05 DashScope 上传写超时（按视频时长超时 + 2MB 分片参数化）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 指定视频 `001_SU003_getNext函数详细实现步骤_370.00-1283.00.mp4` 连续上传失败，错误为：
+    - `Connection aborted. TimeoutError: The write operation timed out`
+  - 影响范围：`services/python_grpc` 中 `DashScope Files.upload` 上传链路。
+- 根因定位：
+  - 旧实现上传参数不可观测，未显式配置分片与超时策略，测试与生产链路缺少统一约束。
+  - 在当前网络环境下，上传阶段触发 socket write timeout，SDK 单次请求无法自动恢复。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 新增并启用上传参数：
+      - `chunk_size=upload_chunk_size_bytes`（默认 `2MB`）
+      - `timeout=max(upload_timeout_min_sec, 视频时长秒数)`（默认按视频时长）
+    - 上传成功日志补充 `timeout_sec/chunk_size` 字段，便于现场回溯实际参数。
+    - 上传参数纳入 cache key 指纹，避免参数变更后缓存语义不一致。
+  - 文件：`config/module2_config.yaml`
+    - 新增：
+      - `upload_chunk_size_bytes: 2097152`
+      - `upload_timeout_by_video_duration: true`
+      - `upload_timeout_min_sec: 1.0`
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增单测 `test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout`，锁定参数透传行为。
+- 验证方式：
+  - 单测验证：
+    - `test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout` 断言 `chunk_size=2MB`、`timeout=913.0`。
+  - 实测验证（同一视频、同一环境）：
+    - 三次上传耗时约 `301~302s` 后触发写超时，说明参数已下发但网络写超时仍存在。
+  - 编译验证：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化上传参数单测，防止后续改动遗漏 `chunk_size/timeout` 透传。
+  - 监控：
+    - 关注日志关键字：
+      - `DashScope Files.upload succeeded ... timeout_sec=... chunk_size=...`
+      - `DashScope Files.upload failed: ... write operation timed out`
+  - 校验：
+    - 现场先核对日志中 `timeout_sec/chunk_size` 是否为期望值，再定位网络链路问题。
+  - 回滚：
+    - 可临时关闭“按时长超时”策略回退为固定超时；但不建议长期使用，会降低长视频上传成功率。
+
+## 2026-03-05 压缩产物大于原视频导致“越压越大”问题
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 观测到 `_vl_upload_cache/*.mp4` 的压缩产物体积明显大于原视频，上传链路若命中该缓存会产生反向效果。
+  - 影响范围：`VLVideoAnalyzer` 的上传前压缩路径（含缓存命中路径）。
+- 根因定位：
+  - 旧实现在命中已存在压缩缓存时仅检查“文件存在且非空”，未比较与原视频大小。
+  - 新压缩落盘后也未执行“大小收益校验”，导致目标码率高于原视频时出现体积放大仍被使用。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 对缓存命中路径增加大小比较：仅当 `compressed_bytes < source_bytes` 才复用缓存。
+    - 对新压缩结果增加大小比较：若 `compressed_bytes >= source_bytes`，立即回退原视频并删除压缩产物。
+    - 增加告警日志，输出 `source_bytes/compressed_bytes` 便于现场溯源。
+- 验证方式：
+  - `test_compress_video_for_dashscope_upload_ignores_larger_cached_file`（通过）
+  - `test_prepare_video_for_dashscope_upload_defaults_to_original_video`（通过）
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化“缓存文件更大时必须回退原视频”的回归测试，防止后续回归。
+  - 监控：
+    - 关注日志关键字：`compression cache ignored because compressed file is not smaller`。
+  - 校验：
+    - 排障优先核对 `_vl_upload_cache` 中文件大小与原片大小关系。
+  - 回滚：
+    - 可回滚该保护逻辑，但会恢复“压缩结果变大仍被使用”的风险，不建议。
+
+## 2026-03-05 VL 单元消费回调阻塞导致并发退化
+- 日期：2026-03-05
+- 现象与影响范围：
+  - VL 主并发执行过程中，`result_callback/on_result` 与主分析协程串行等待，导致“分析已完成但下一批请求迟迟不发”。
+  - 影响范围：`VLVideoAnalyzer.analyze_clips_batch` 与 `VLMaterialGenerator._analyze_unit_tasks_in_parallel`。
+- 根因定位：
+  - 根因1：每个结果返回后立即 `await callback`，回调中的 DeepSeek 补充、素材导出等耗时逻辑会占用主调度路径。
+  - 根因2：回调耗时与 VL API 耗时耦合，实质上把“并发分析”退化为“分析+消费串行链路”。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - `analyze_clips_batch` 改为对 callback 创建异步任务并在末尾汇合，不再逐结果同步阻塞。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `_analyze_unit_tasks_in_parallel` 改为异步调度 `on_result`，用独立任务集合收敛回调，主分析链路持续推进。
+- 验证方式：
+  - `test_vl_analyze_clips_batch_result_callback_runs_non_blocking`：3 个 callback（每个 0.1s）总耗时 `<0.28s`（通过）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留 callback 非阻塞回归用例，避免后续重构将 `await callback` 放回主循环。
+  - 监控：
+    - 观察 `VL-UnitParallel` 调度日志与 unit 消费日志是否持续交错输出，若出现长时间只消费不调度需告警。
+  - 校验：
+    - 现场排障优先确认 `result_callback/on_result` 是否在独立任务中执行，而非主循环直 await。
+  - 回滚：
+    - 可回滚为同步 callback，但会重新引入并发退化风险，仅建议临时定位问题时使用。
+
+## 2026-03-05 教程步骤图片重复插入（同路径 alias/无 alias 双份）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 生成的教程 Markdown 中，同一张关键帧在同一步骤内连续出现两次：
+    - `![[.../xxx.png|说明文本]]`
+    - `![[.../xxx.png]]`
+  - 典型现象：`SU003_ss_step_01_key_01_action.png` 等同路径图片被重复插入，造成阅读噪声与文档膨胀。
+  - 影响范围：`services/python_grpc/src/content_pipeline/markdown_enhancer.py` 的教程步骤渲染链路与补图兜底链路。
+- 根因定位：
+  - `*_steps.json` 同时携带 `instructional_keyframe_details`（对象，含 `frame_reason`）与 `instructional_keyframes`（字符串列表）时，旧逻辑按整对象 JSON 字符串去重，导致同路径“带说明对象 + 纯路径对象”被保留两份。
+  - 渲染阶段使用“整串 embed 文本”判重，`![[path|alias]]` 与 `![[path]]` 不相等，被误判为缺失并追加。
+  - `_append_missing_image_embeds` 同样按整串 embed 判重，正文已有 alias 版本时仍会追加无 alias 版本。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `_load_tutorial_steps` 中 keyframe 去重改为“按 `image_path` 聚合”：
+      - 同路径仅保留一条，并优先合并 `frame_reason/timestamp_sec/bbox` 等更完整信息。
+    - `_render_tutorial_steps` 中 keyframe embed 构建改为按路径去重，避免同路径二次渲染。
+    - 新增 `_normalize_embed_path` 与 `_extract_obsidian_embed_paths`，统一按 Obsidian 路径判重。
+    - `_append_missing_image_embeds` 改为按路径判重，避免 alias/非 alias 文本差异导致重复补图。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 新增 `test_tutorial_step_dedupes_same_keyframe_path_and_keeps_alias`。
+    - 新增 `test_concrete_alias_embed_does_not_append_duplicate_supplemental_image`。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py -k "concrete_alias_embed_does_not_append_duplicate_supplemental_image or tutorial_step_dedupes_same_keyframe_path_and_keeps_alias or process_multistep_renders_ordered_steps_with_assets or tutorial_step_legacy_imgneeded_placeholder_uses_keyframe_embed" -q`（通过，`4 passed`）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化“同路径 keyframe 同时出现在 details 与字符串列表”回归用例，确保始终只输出一次图片。
+    - 固化“正文已存在 alias 图时不再补无 alias 图”回归用例。
+  - 监控：
+    - 对输出 Markdown 做增量巡检：若同一路径在相邻行出现 alias/非 alias 双份，记录告警。
+  - 校验：
+    - 排障时优先核对 `*_steps.json` 的 `instructional_keyframe_details` 与 `instructional_keyframes` 是否并存同路径。
+    - 再核对最终 Markdown 中相同路径的出现次数是否超过 1。
+  - 回滚：
+    - 可按文件粒度回滚 `markdown_enhancer.py` 本次路径级去重逻辑；但会恢复“同路径图片重复插入”风险，不建议。
+
+## 2026-03-05 App 端 B 站链接 query 在探测/下载链路被裁剪
+- 日期：2026-03-05
+- 现象与影响范围：
+  - App 侧日志出现同一任务 URL 从“完整 query 链接”退化为“仅 BV 主链接”的现象：
+    - `GetVideoInfo` 首次收到完整 URL（含 `p/spm/share_*` 等参数）；
+    - 后续 `GetVideoInfo/DownloadVideo` 使用了被裁剪后的 `https://www.bilibili.com/video/BV...`。
+  - 影响范围：
+    - App/Web 提交入口（前端 `normalizeTaskVideoInput`）。
+    - Python gRPC 探测返回与下载执行链路（`GetVideoInfo` / `run_download_flow`）。
+- 根因定位：
+  - 根因1（前端）：`normalizeTaskVideoInput` 对包含 BV 的输入做 URL 重写，导致原始 `?` 后参数被直接丢弃。
+  - 根因2（后端探测返回）：`GetVideoInfo` 默认回传 canonical `resolved_url`，未优先回传 B 站 probe/extracted 链接，导致 App 后续重试/提交继续使用无参 URL。
+  - 根因3（后端下载）：`run_download_flow` 在 B 站场景优先使用 canonical URL，仅补写 `p` 参数，其他 query 参数会丢失。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/resources/static/index.html`
+    - `normalizeTaskVideoInput` 调整为：HTTP/HTTPS 链接原样透传，不再重写为 `https://www.bilibili.com/video/{BV}`。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - `GetVideoInfo` 在 B 站场景优先回传 `probe_url/extracted_url`（保留 query），避免返回值二次“去参”。
+  - 文件：`services/python_grpc/src/server/download_service.py`
+    - 新增 `_extract_bilibili_url_with_query`，在 B 站下载前优先选用带 query 的原始链接（`extracted_url/raw_video_input`）。
+    - 继续保留原有 `p` 分集参数校正逻辑，保证分P定位准确。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_get_video_info.py services/python_grpc/src/server/tests/test_download_service_bilibili_episode_url.py services/python_grpc/src/server/tests/test_download_video_config.py -q`
+    - 结果：`1 passed, 2 skipped`（环境相关模块跳过，变更相关用例通过）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化断言：B 站 `resolved_url/download_url` 必须保留 `spm_id_from` 等 query；不仅检查 `p`。
+  - 监控：
+    - 关注日志中同 task 的 URL 是否出现“先含 query 后无 query”的退化轨迹。
+  - 校验：
+    - 排障时优先核对 `GetVideoInfo` 返回 `resolved_url` 与 `DownloadVideo` 入参是否仍带 query。
+  - 回滚：
+    - 可分别回滚前端透传或后端保留策略，但会恢复“分P/上下文定位不准”的风险，不建议。
+
+## 2026-03-05 DownloadVideo 增加通用重试与指数回避（aria2c/yt-dlp 抖动兜底）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 线上任务出现 `Download failed: yt-dlp 执行失败: ERROR: aria2c exited with code 1`，一次失败即终止任务，导致偶发网络抖动/外部下载器瞬时异常直接放大为用户可见失败。
+  - 影响范围：
+    - Python gRPC 下载编排层 `run_download_flow`（`services/python_grpc/src/server/download_service.py`）。
+    - 所有经过 DownloadVideo 的下载路径（非抖音 `yt-dlp` 路径与抖音 downloader 路径）。
+- 根因定位：
+  - 根因1：下载编排层缺少“通用重试策略”，仅依赖 `yt-dlp` 内部参数与局部回退（格式回退/Cookie 降级/代理降级），当异常逃逸到编排层时直接失败返回。
+  - 根因2：不同失败类型（aria2c 进程错误、瞬时 IO/网络错误）没有统一退避机制，重压下失败峰值会集中暴露。
+- 修复措施：
+  - 文件：`services/python_grpc/src/server/download_service.py`
+    - 新增 `_load_download_retry_policy`：统一读取下载重试策略（默认 `attempts=3`、`base_delay_sec=1.0`、`max_delay_sec=16.0`，并做边界归一化）。
+    - 新增 `_compute_backoff_delay_sec`：按指数回避计算等待时间（`base * 2^(n-1)`，并受 `max` 限制）。
+    - `run_download_flow` 将抖音下载器与 `VideoProcessor.download` 统一纳入同一重试环，失败后执行退避等待并重试；耗尽后再返回失败。
+  - 文件：`services/python_grpc/src/server/tests/test_download_service_retry.py`
+    - 新增指数回避计算测试（含上限截断）。
+    - 新增“前两次失败第三次成功”与“重试耗尽失败”两条回归用例。
+- 验证方式：
+  - `pytest services/python_grpc/src/server/tests/test_download_service_retry.py services/python_grpc/src/server/tests/test_download_service_bilibili_episode_url.py services/python_grpc/src/server/tests/test_download_video_config.py -q`
+    - 结果：`4 passed, 1 skipped`。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留“通用重试成功/耗尽失败”双向用例，避免后续重构误删重试环或退避计算被改坏。
+  - 监控：
+    - 关注日志关键字：
+      - `Download attempt X/Y failed: ...; retry in ...s`
+      - `Download retry attempt X/Y started`
+    - 若单任务重试次数连续触顶，应联动排查代理出口与外部下载器稳定性。
+  - 校验：
+    - 现场优先核对 `video.download_retry_attempts / download_retry_base_delay_sec / download_retry_max_delay_sec` 配置是否符合预期。
+  - 回滚：
+    - 可按文件粒度回滚 `download_service.py` 的重试包装逻辑；但会恢复“一次失败即终止”的高敏感行为，不建议。
+
+## 2026-03-05 gRPC protobuf 类缺失导致 VL/CV 中途崩溃（自检失败自动重建+落盘校验）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - 任务在 `analysis_extraction` 阶段中途失败，日志出现：
+    - `NoClassDefFoundError: com/mvp/videoprocessing/grpc/ScreenshotRequest$1`
+    - `NoClassDefFoundError: com/mvp/videoprocessing/grpc/CVValidationRequest`
+  - 影响范围：
+    - `AnalyzeWithVL` 响应解码。
+    - Legacy 回退中的 `ValidateCVBatch`。
+- 根因定位：
+  - 根因1：运行时 protobuf 类集与当前调用链不一致（class path 载入到不完整产物），导致消息反序列化/请求构建时触发 `NoClassDefFoundError`。
+  - 根因2：旧启动预热仅做 `newBuilder()` 且异常吞并，未覆盖关键 parser/内部类加载路径，问题被延迟到任务中途暴露。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+    - 将启动预热升级为严格自检：显式校验 `VLAnalysisResponse/CVValidationRequest/ScreenshotRequest` 等 parser 与关键内部类可加载。
+    - 自检失败时自动触发重建流程：
+      - 优先执行配置命令 `grpc.proto.self-check.auto-heal.command`；
+      - 未配置时默认执行 `scripts/build/generate_grpc.ps1` + `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`。
+    - 重建后新增“产物位置校验”：
+      - `contracts/gen/python/video_processing_pb2.py` 与 `contracts/gen/python/video_processing_pb2_grpc.py`
+      - `target/generated-sources/protobuf/java/com/mvp/videoprocessing/grpc/*.java`
+      - `target/generated-sources/protobuf/grpc-java/com/mvp/videoprocessing/grpc/VideoProcessingServiceGrpc.java`
+      - `target/classes/com/mvp/videoprocessing/grpc/*.class`
+      - 关键文件缺失时启动直接失败，避免带病运行。
+    - `validateCVBatchStreamingBlocking` 增加 `LinkageError` 捕获，避免 `NoClassDefFoundError` 直接炸穿线程池。
+    - `analyzeWithVL` 增加 protobuf classpath 异常识别与明确修复提示，替代模糊 `Failed to read message`。
+  - 文件：`services/java-orchestrator/src/main/resources/application.properties`
+    - 新增：
+      - `grpc.proto.self-check.auto-heal.enabled`
+      - `grpc.proto.self-check.auto-heal.command`
+      - `grpc.proto.self-check.auto-heal.timeout-seconds`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 增加启动自检失败场景的集成测试，覆盖“自动重建成功/失败”的两条路径（后续补齐）。
+  - 监控：
+    - 关注日志关键字：
+      - `gRPC protobuf self-check failed`
+      - `gRPC protobuf auto-heal command succeeded`
+      - `artifact location verification failed`
+  - 校验：
+    - 若触发自动重建，必须确认 `contracts/gen/python/...`、`target/generated-sources/protobuf/java/...`、`target/generated-sources/protobuf/grpc-java/...` 与 `target/classes/...` 四处关键文件存在。
+  - 回滚：
+    - 可回滚到旧 warmup 逻辑，但会恢复“问题延迟到任务中途爆炸”的风险，不建议。
+
+## 2026-03-05 VL `frame_reason` 未透传到前端（concrete/process 图注缺失）
+- 日期：2026-03-05
+- 现象与影响范围：
+  - `vl_analysis_output_*.json` / `vl_analysis_cache.json` 中 `merged_screenshots`（含 `concrete`、`tutorial_stepwise`）已有 `frame_reason`，但最终 `result.json` 的 `materials.screenshot_items` 以及前端图片下方说明未携带该字段。
+  - 影响范围：
+    - Phase2B 组装链路（`semantic_units` 回填、素材匹配、`screenshot_items` 构建）。
+    - Markdown 渲染链路（concrete 占位符替换与补图 embed）。
+- 根因定位：
+  - 根因1：`ScreenshotRequest` 模型缺少 `frame_reason`（以及 `ocr_text`）字段，导致结构化链路天然丢字段。
+  - 根因2：`RichTextPipeline` 对 `material_requests.screenshot_requests` 的序列化未写出 `frame_reason`，回读后字段无法恢复。
+  - 根因3：`_merge_material_requests_from_vl_cache` 未将 `frame_reason` 注入回填请求，且 tutorial 场景的请求补全能力不足。
+  - 根因4：`apply_external_materials` 构建 `screenshot_items` 时未写入 `frame_reason`；tutorial 步骤也未生成含 `frame_reason` 的 `instructional_keyframe_details`。
+  - 根因5：`MarkdownEnhancer` 在 concrete 图片占位替换时未优先使用 `frame_reason` 作为 embed alias。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/request_models.py`
+    - `ScreenshotRequest` 新增 `frame_reason`、`ocr_text` 字段（默认空字符串）。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/pipeline_material_request_utils.py`
+    - `create_screenshot_request` 新增 `frame_reason`、`ocr_text` 透传参数。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `_serialize_semantic_units` 序列化 `frame_reason/ocr_text`。
+    - `_merge_material_requests_from_vl_cache` 回填并补齐 `frame_reason/ocr_text`；保留对 `legacy_action_units` 的过滤，允许 tutorial/concrete 请求进入回填；并支持“已有请求追加缺失缓存请求”。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+    - `screenshot_items`（包含 include/reject/fallback 分支）写入 `frame_reason`。
+    - tutorial 步骤匹配时补齐 `instructional_keyframe_details`（`image_path/screenshot_id/timestamp_sec/frame_reason`），保证 process 渲染链路可直接消费。
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - concrete 图片占位替换与补图 embed 优先使用 `frame_reason` 作为 alias；
+    - tutorial 从 `materials.screenshot_items` 回退构建 keyframe 时保留 `frame_reason`。
+  - 文件：测试补充
+    - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+      - 增加 `frame_reason` 在 `screenshot_items` / tutorial 步骤 keyframe 明细中的透传断言。
+      - 增加 VL cache 回填 `frame_reason`（含 tutorial_stepwise）断言。
+    - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+      - 增加 concrete 占位替换优先使用 `frame_reason` alias 的断言。
+- 验证方式：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/request_models.py services/python_grpc/src/content_pipeline/phase2b/assembly/pipeline_material_request_utils.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - 实样链路验证（基于 `var/storage/storage/1927273923733a17b4508552a8854907`）：
+    - `_load_semantic_units` 后 `screenshot_requests.frame_reason_nonempty`：`28/28`；
+    - `_apply_external_materials` 后 `screenshot_items.frame_reason_nonempty`：`3/3`（示例单元 `SU002`）；
+    - Markdown 最小复现中 concrete 占位符替换输出 `![[...|frame_reason]]`。
+  - Java 编译校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+  - 说明：
+    - `pytest` 在当前运行环境受临时目录 ACL 限制（`pytest-of-HongXU` 目录拒绝访问）未能完成，需要在可写临时目录环境下复跑。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留新增的 `frame_reason` 透传断言，防止后续重构再次在模型/序列化/渲染任一层丢字段。
+  - 监控：
+    - 在 Phase2B 组装日志增加（或关注）`screenshot_items` 的 `frame_reason` 命中率统计，异常下降时快速告警。
+  - 校验：
+    - 任务验收增加抽样规则：`vl_analysis_cache.aggregated_screenshots.frame_reason` 与 `result.knowledge_groups[].units[].materials.screenshot_items.frame_reason` 需要可追踪一致。
+  - 回滚：
+    - 若需回滚，优先回滚 `markdown_enhancer` alias 行为；不建议回滚模型与回填字段，否则会恢复链路级数据丢失。
+
+## 2026-03-05 修复：`![[path|alias]]` 在 fallback markdown 与 VL 输出文件链路中的透传缺口
+- 现象：
+  - 前端图片下方未展示 `frame_reason`，最终 markdown 中大量图片仍为 `![[path]]`（无 alias）。
+  - 任务目录中 `immediates/intermediates/vl_analysis_output_*.json` 已包含 `frame_reason`，但部分任务在 Phase2B 组装后未带入 `result.json`/markdown。
+- 根因：
+  - 根因1：Phase2B 回填仅依赖 `vl_analysis_cache.json` 的 `aggregated_screenshots/aggregated_clips`，未覆盖 `vl_analysis_output_latest.json` 的 `merged_screenshots/merged_clips`。
+  - 根因2：`rich_text_document.py` 的 fallback 写盘路径未消费 `frame_reason`，步骤截图与普通截图会写成无 alias 的 embed 或标准 markdown 图片语法。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `_merge_material_requests_from_vl_cache` 扩展为“VL 多源回填”：
+      - 搜索 `vl_analysis_cache.json`、`vl_analysis_output_latest.json`、最新 `vl_analysis_output_*.json`；
+      - 统一读取 `aggregated_*` 与 `merged_*` 结构；
+      - 继续过滤 `legacy_action_units`，并在已有请求场景下补齐缺失 `frame_reason/ocr_text`。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+    - 增加 `frame_reason -> alias` 写盘逻辑：
+      - top-level 截图、tutorial 步骤截图均输出 `![[path|alias]]`；
+      - 新增步骤 keyframe 明细与 section screenshot_items 的 frame_reason 映射；
+      - alias 做安全清洗（去换行，替换 `|[]`），避免破坏 embed 语法。
+- 验证方式：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/tests/test_rich_text_document_metrics.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+  - 手工断言脚本（在仓库内可写目录）：
+    - 验证 fallback markdown 写出 `![[assets/...|frame_reason]]`；
+    - 验证 `_load_semantic_units` 可从 `intermediates/vl_analysis_output_latest.json` 回填 `frame_reason` 与 clip 请求。
+  - Java 编译校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+  - 说明：
+    - `pytest` 在当前环境受临时目录 ACL 限制，执行阶段出现 `PermissionError: pytest-of-HongXU`，未能完成自动化回归。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 新增/保留以下断言：
+      - `test_rich_text_document_metrics.py`：fallback markdown 的 top-level 与 step 截图 alias 输出；
+      - `test_phase2b_material_resilience.py`：从 `vl_analysis_output_latest.json` 回填 `frame_reason`。
+  - 监控：
+    - 关注 Phase2B 日志中“backfilled material requests from VL sources”的命中情况，发现 sources 缺失时快速告警。
+  - 校验：
+    - 任务验收新增比对：`vl_analysis_output_*.json.frame_reason` → `result.json.materials.screenshot_items.frame_reason` → markdown alias 三点一致性。
+  - 回滚：
+    - 若需回滚，优先回滚 `rich_text_document` alias 渲染变更；保留 `rich_text_pipeline` 多源回填以避免数据链路再次丢失。
+
+## 2026-03-06 修复：Phase2B 流式分片丢弃纯空白 delta 导致缩进漂移
+- 现象：
+  - `POST /api/mobile/cards/phase2b/structured-markdown` 流式过程中，部分层级列表在预览与最终文本中出现缩进不稳定。
+  - 典型表现为：模型本应输出的前导空格被吞掉，尤其在空白被单独分片返回时更容易出现层级塌陷。
+- 根因：
+  - `DeepSeekAdvisorService.callDeepSeekWithPromptsStreamed` 对 `delta` 使用 `StringUtils.hasText(delta)` 判定，纯空格/纯换行分片被当作“空内容”直接丢弃。
+  - 当模型把缩进前导空格拆到独立 delta 时，这些空白未进入 `aggregated` 与 WebSocket 增量回传，导致后续 Markdown 层级被破坏。
+- 修复措施：
+  - 文件：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 将流式 `delta` 判定从“有非空白文本”调整为“非空字符串”（`!delta.isEmpty()`）。
+    - 保留纯空格/纯换行分片进入聚合与回调，确保缩进字符链路完整。
+- 验证方式：
+  - 编译校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 链路校验：
+    - 触发 `POST /api/mobile/cards/phase2b/structured-markdown`，观察流式 `phase2bMarkdownChunk` 与最终 `phase2bMarkdownFinal`。
+    - 重点确认“由多个 delta 拼接的子级列表”在最终文本中保留原始前导空白，不再因纯空白分片被吞而塌缩。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 补充流式拼接回归样例：构造 `delta=["    ", "- item"]` 与 `delta=["\n", "    ", "- item"]`，断言聚合结果保留前导空白。
+  - 监控：
+    - 结合 `phase2b.llm.raw` 的 `INDENT PROBE`，持续关注 `sp=1`、`sp=0` 异常比例波动。
+  - 校验：
+    - 每次调整流式 SSE 解析逻辑后，抽样核对“chunk 拼接结果”与“最终 markdown”缩进一致性。
+  - 回滚：
+    - 如需回滚可恢复 `hasText` 判定，但会重新引入纯空白分片丢失风险，不建议长期使用。

@@ -69,6 +69,15 @@ public class TaskProcessingWorker {
     @Value("${task.queue.max-concurrent:1}")
     private int configuredWorkerConcurrency;
 
+    @Value("${task.pipeline.download-concurrency:3}")
+    private int configuredDownloadConcurrency;
+
+    @Value("${task.pipeline.transcribe-concurrency:${task.pipeline.io-concurrency:1}}")
+    private int configuredTranscribeConcurrency;
+
+    @Value("${task.pipeline.phase2-concurrency:${task.queue.max-concurrent:6}}")
+    private int configuredPhase2Concurrency;
+
     @Value("${task.pipeline.io-concurrency:1}")
     private int configuredIoConcurrency;
 
@@ -86,15 +95,21 @@ public class TaskProcessingWorker {
 
     private ExecutorService workerPool;
     private ScheduledExecutorService watchdogScheduler;
-    private Semaphore ioSemaphore;
+    private Semaphore downloadSemaphore;
+    private Semaphore transcribeSemaphore;
+    private Semaphore phase2Semaphore;
     private volatile boolean running = true;
     private Thread dispatcherThread;
 
     @PostConstruct
     public void start() {
         int workerConcurrency = Math.max(1, configuredWorkerConcurrency);
-        int ioConcurrency = Math.max(1, configuredIoConcurrency);
-        ioSemaphore = new Semaphore(ioConcurrency);
+        int downloadConcurrency = Math.max(1, configuredDownloadConcurrency);
+        int transcribeConcurrency = Math.max(1, configuredTranscribeConcurrency);
+        int phase2Concurrency = Math.max(1, configuredPhase2Concurrency);
+        downloadSemaphore = new Semaphore(downloadConcurrency);
+        transcribeSemaphore = new Semaphore(transcribeConcurrency);
+        phase2Semaphore = new Semaphore(phase2Concurrency);
         workerPool = Executors.newFixedThreadPool(workerConcurrency, runnable -> {
             Thread thread = new Thread(runnable, "TaskWorker-" + System.currentTimeMillis());
             thread.setDaemon(true);
@@ -112,10 +127,18 @@ public class TaskProcessingWorker {
         dispatcherThread.start();
 
         logger.info(
-                "TaskProcessingWorker started with workerConcurrency={} (configured={}), ioConcurrency={} (configured={})",
+                "TaskProcessingWorker started with workerConcurrency={} (configured={}), "
+                        + "downloadConcurrency={} (configured={}), transcribeConcurrency={} (configured={}), "
+                        + "phase2Concurrency={} (configured={}), legacyIoConcurrency={} (configured={})",
                 workerConcurrency,
                 configuredWorkerConcurrency,
-                ioConcurrency,
+                downloadConcurrency,
+                configuredDownloadConcurrency,
+                transcribeConcurrency,
+                configuredTranscribeConcurrency,
+                phase2Concurrency,
+                configuredPhase2Concurrency,
+                Math.max(1, configuredIoConcurrency),
                 configuredIoConcurrency
         );
     }
@@ -385,23 +408,25 @@ public class TaskProcessingWorker {
             );
         }
         VideoProcessingOrchestrator.IOPhaseResult ioResult =
-                executeVideoIOPhaseWithPermit(task.taskId, task.videoUrl, outputDir);
-        return orchestrator.processVideoLLMPhase(task.taskId, ioResult);
+                executeVideoDownloadPhaseWithPermit(task.taskId, task.videoUrl, outputDir);
+        ioResult = executeVideoTranscribePhaseWithPermit(task.taskId, ioResult);
+        ioResult = orchestrator.processVideoStage1Phase(task.taskId, ioResult);
+        return executeVideoPhase2WithPermit(task.taskId, ioResult);
     }
 
-    private VideoProcessingOrchestrator.IOPhaseResult executeVideoIOPhaseWithPermit(
+    private VideoProcessingOrchestrator.IOPhaseResult executeVideoDownloadPhaseWithPermit(
             String taskId,
             String videoUrl,
             String outputDir
     ) throws Exception {
-        Semaphore semaphore = ioSemaphore;
+        Semaphore semaphore = downloadSemaphore;
         boolean permitAcquired = false;
         if (semaphore != null) {
-            acquireIoPhasePermit(taskId, semaphore);
+            acquirePhasePermit(taskId, semaphore, "download");
             permitAcquired = true;
         }
         try {
-            return orchestrator.processVideoIOPhase(taskId, videoUrl, outputDir);
+            return orchestrator.processVideoDownloadPhase(taskId, videoUrl, outputDir);
         } finally {
             if (permitAcquired) {
                 semaphore.release();
@@ -409,10 +434,48 @@ public class TaskProcessingWorker {
         }
     }
 
-    private void acquireIoPhasePermit(String taskId, Semaphore semaphore) throws InterruptedException {
+    private VideoProcessingOrchestrator.IOPhaseResult executeVideoTranscribePhaseWithPermit(
+            String taskId,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult
+    ) throws Exception {
+        Semaphore semaphore = transcribeSemaphore;
+        boolean permitAcquired = false;
+        if (semaphore != null) {
+            acquirePhasePermit(taskId, semaphore, "transcribe");
+            permitAcquired = true;
+        }
+        try {
+            return orchestrator.processVideoTranscribePhase(taskId, ioResult);
+        } finally {
+            if (permitAcquired) {
+                semaphore.release();
+            }
+        }
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult executeVideoPhase2WithPermit(
+            String taskId,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult
+    ) throws Exception {
+        Semaphore semaphore = phase2Semaphore;
+        boolean permitAcquired = false;
+        if (semaphore != null) {
+            acquirePhasePermit(taskId, semaphore, "phase2");
+            permitAcquired = true;
+        }
+        try {
+            return orchestrator.processVideoLLMPhase(taskId, ioResult);
+        } finally {
+            if (permitAcquired) {
+                semaphore.release();
+            }
+        }
+    }
+
+    private void acquirePhasePermit(String taskId, Semaphore semaphore, String phaseName) throws InterruptedException {
         while (true) {
             if (taskQueueManager != null && taskQueueManager.isTaskCancelled(taskId)) {
-                throw new CancellationException("task cancelled while waiting for io phase permit");
+                throw new CancellationException("task cancelled while waiting for " + phaseName + " phase permit");
             }
             if (semaphore.tryAcquire(500, TimeUnit.MILLISECONDS)) {
                 return;

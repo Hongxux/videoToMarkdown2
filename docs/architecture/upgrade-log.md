@@ -3,6 +3,40 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-03-05 Mobile 删除接口语义收敛（运行态取消 + 历史态删除 + 幂等返回）
+- 日期：2026-03-05
+- 触发背景与问题：
+  - 前端任务列表“批量删除”调用 `DELETE /api/mobile/tasks/{taskId}` 时，历史任务返回 `404 task not found`，批量操作出现“成功 0，失败 1”。
+  - 后端实现仅覆盖“取消运行中任务”，未覆盖“删除 storage 历史目录”与“不存在任务幂等删除”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：任务删除是资源生命周期终态操作，必须同时处理运行态（内存）与历史态（磁盘）两个真实状态源。
+  - 复用杠杆1：复用现有 `TaskQueueManager` 状态机与取消能力，不改提交/处理链路。
+  - 复用杠杆2：复用 `StorageTaskCacheService` 的 taskId/storageKey 索引能力，不新增目录扫描器。
+  - 复用杠杆3：复用 `deletePathRecursively` 的边界校验删除逻辑，避免重复实现路径安全控制。
+- 架构决策：
+  - 决策1：`DELETE /api/mobile/tasks/{taskId}` 从“仅取消运行态”扩展为三段式：
+    - `QUEUED/PROCESSING`：取消任务；
+    - 已结束任务：移除运行态映射并删除历史 storage 目录；
+    - 任务不存在：返回 `ALREADY_DELETED`（幂等成功）。
+  - 决策2：在 `TaskQueueManager` 增加 `removeTask(taskId)`，用于清理已结束运行态记录。
+  - 决策3：在 `StorageTaskCacheService` 增加缓存驱逐方法，确保删除后列表视图与缓存立即一致。
+- 调用链与决策链变化：
+  - 改造前：`DELETE /tasks/{id} -> runtime getTask -> 仅 cancel -> not found 返回 404`
+  - 改造后：`DELETE /tasks/{id} -> (runtime running? cancel : remove runtime) -> resolve storage key -> delete storage dir -> evict cache -> 幂等返回`
+- 已落地改动：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerDeleteTaskTest.java`
+- 性能对比数据（本次为语义一致性与可靠性修复，非吞吐优化）：
+  - 测试方式：Java 编译回归 + 删除语义单测。
+  - 测试数据：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+    - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerDeleteTaskTest test -q`：通过。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerDeleteTaskTest test -q`
+
 ## 2026-03-04 MinerU PDF 抽取分页多进程并发（资源感知 Worker）
 - 日期：2026-03-04
 - 触发背景与问题：
@@ -10229,3 +10263,261 @@
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
   - `mvn -f services/java-orchestrator/pom.xml -Dtest="TaskProcessingWorkerDownloadRetryTest,TaskProcessingWorkerUploadCleanupTest,TaskProcessingWorkerIoConcurrencyTest" test -q`（通过）
   - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_rate_limiter.py -q`（通过，`10 passed`）
+
+## 2026-03-05 VL 离线提交 + 5 秒轮询 + 上传统一压缩
+- 日期：2026-03-05
+- 升级目标：
+  - 将 DashScope VL 调用从“同步长连接等待”升级为“离线任务提交 + 周期查询”，避免长视频在同步链路上超时。
+  - 将 DashScope 上传链路统一改为“上传前压缩”，不再设置时长门槛，稳定降低上传负载与模型侧解码成本。
+- 第一性原理与复用杠杆：
+  - 第一性原理：长视频场景本质是“计算时长不确定 + 同步连接预算有限”，应改为“任务化提交 + 状态轮询”。
+  - 复用杠杆1：复用现有 `VLVideoAnalyzer._call_vl_api` 解析链，不改下游 JSON 结构与 Phase2A/2B 消费方式。
+  - 复用杠杆2：复用现有 DashScope `Files.upload` 路径，仅在上传前插入压缩预处理，不重写媒体输入路由。
+  - 复用杠杆3：复用 `llm_gateway.vl_chat_completion` 同步链作为回退，离线模式通过配置开关控制。
+- 架构决策：
+  - 决策1：新增 `offline_task_enabled`，在 DashScope 端点下走离线任务模式。
+  - 决策2：离线任务状态轮询间隔固定 `5s`（`offline_poll_interval_sec`），并保留 `offline_max_wait_sec` 上限保护。
+  - 决策3：上传压缩默认启用，统一输出 `720P`、`2-4Mbps`（目标 `3Mbps`），不依赖“>5 分钟”门槛。
+  - 决策4：同步链路保留动态 `timeout/hedge` 作为 fallback，避免离线能力不可用时直接中断。
+- 调用链变化：
+  - 改造前：`_call_vl_api -> llm_gateway.vl_chat_completion(sync + hedge)`
+  - 改造后：`_call_vl_api -> DashScope offline submit -> every 5s query -> parse result`，同步链路作为回退。
+  - 上传链路：`_try_get_dashscope_temp_url -> _prepare_video_for_dashscope_upload(统一压缩) -> Files.upload`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+  - `config/module2_config.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+- 性能对比数据（机制级）：
+  - 测试方式：
+    - 单测验证离线路径优先级、同步 fallback 的 timeout/hedge 透传、上传压缩无时长门槛触发。
+  - 测试数据：
+    - `test_call_vl_api_prefers_dashscope_offline_task_when_enabled`：离线路径命中，且同步入口未被调用。
+    - `test_call_vl_api_sync_path_passes_timeout_and_hedge`：同步 fallback 下 `timeout=duration/2`、`hedge=timeout`。
+    - `test_prepare_video_for_dashscope_upload_compresses_without_duration_threshold`：压缩预处理对所有上传请求生效。
+    - `test_vl_chat_completion_allows_custom_timeout_and_hedge_delay`：网关层覆盖参数可稳定下传。
+  - 结论：
+    - 对长视频场景，主链路从“连接时长受限”转为“任务状态驱动”，并通过上传压缩降低上游与模型解码压力。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`（通过）
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "prepare_video_for_dashscope_upload_compresses_without_duration_threshold or call_vl_api_prefers_dashscope_offline_task_when_enabled or call_vl_api_sync_path_passes_timeout_and_hedge"`（通过，`3 passed`）
+  - `pytest -q services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -k "vl_chat_completion_allows_custom_timeout_and_hedge_delay"`（通过，`1 passed`）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-05 阶段并发策略细化（Phase2A/Phase2B 并发 6 + VL 令牌桶限流）
+- 日期：2026-03-05
+- 升级目标：
+  - 在保持 `download=3`、`transcribe=1` 的前提下，将后续 `Phase2A/Phase2B` 并发上限提升到 `6`。
+  - 保持 VL 分析链路使用令牌桶算法限流，避免放开并发后触发上游 API 速率抖动。
+- 第一性原理与复用杠杆：
+  - 第一性原理：阶段并发应按瓶颈拆分控制，`transcribe` 是稀缺资源需串行，`Phase2` 以计算/API 组合为主可更高并发，但必须受 API 速率约束。
+  - 复用杠杆1：复用 `TaskProcessingWorker` 既有分阶段闸门机制，新增 `phase2Semaphore`，不重写调度主链。
+  - 复用杠杆2：复用既有 `orchestrator.processVideoLLMPhase(...)` 作为 Phase2 统一入口，不拆散业务流程。
+  - 复用杠杆3：复用 Python 侧 `content_pipeline/rate_limiter.py` + `llm_gateway.vl_chat_completion` 的 VL 双桶限流实现，无需新增第二套限流器。
+- 架构决策：
+  - 决策1：新增配置 `task.pipeline.phase2-concurrency=6`，并在 Worker 中以独立信号量包裹 Phase2 执行。
+  - 决策2：`task.queue.max-concurrent` 调整为 `6`，确保 Phase2 并发上限可实际达到。
+  - 决策3：保留 `task.pipeline.download-concurrency=3` 与 `task.pipeline.transcribe-concurrency=1`，避免回归“粗粒度串行”。
+  - 决策4：VL 分析继续在 Python 侧调用前执行 token bucket `acquire(...)`，并发放开不绕过速率控制。
+- 调用链变化：
+  - 改造前：`... -> stage1 -> processVideoLLMPhase(仅受 worker 并发上限约束)`
+  - 改造后：`... -> stage1 -> phase2Semaphore -> processVideoLLMPhase -> release`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerIoConcurrencyTest.java`
+- 性能对比数据（并发上限与约束模型）：
+  - 测试方式：
+    - 通过 Worker 并发测试验证下载可并行、转录仍串行、Phase2 可并行执行。
+    - 通过 VL 限流测试确认 token bucket 行为不受并发提升影响。
+  - 测试数据：
+    - Worker 并发：`task.queue.max-concurrent=6`（由 `4` 提升到 `6`）。
+    - Phase2 并发上限：`task.pipeline.phase2-concurrency=6`。
+    - VL 速率控制：维持双桶策略（`RPM + TPM`）。
+  - 结论：
+    - 调度侧支持 Phase2 更高并发，VL 调用侧继续受令牌桶速率约束，吞吐与稳定性可同时兼顾。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest="TaskProcessingWorkerDownloadRetryTest,TaskProcessingWorkerUploadCleanupTest,TaskProcessingWorkerIoConcurrencyTest" test -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_rate_limiter.py -q`
+
+## 2026-03-05 - VL PrePrune 分类型开关与默认策略收敛
+- 日期：2026-03-05
+- 升级目标：
+  - 将 VL PrePrune 从“单一总开关”升级为“按知识类型独立开关”。
+  - `process/concrete` 均改为默认关闭，避免无意触发预剪枝链路。
+  - 保留可配置开启能力，兼容历史 `enabled + only_process` 语义。
+- 第一性原理与复用杠杆：
+  - 第一性原理：预处理是否执行应由“业务类型 + 明确开关”共同决定，避免隐式默认导致不可控开销。
+  - 复用杠杆1：复用 `VLMaterialGenerator._prepare_pruned_clips_for_units` 并行框架，仅新增类型判定与任务过滤。
+  - 复用杠杆2：复用现有 `pre_vl_static_pruning` 配置节，增量扩展 `process_enabled/concrete_enabled`，不新增配置文件与加载链路。
+  - 复用杠杆3：复用既有截图旁路机制 `_skip_cv_optimization`，仅补齐请求上下文字段确保 concrete 稳定命中。
+- 架构决策：
+  - 决策1：新增 `pre_vl_static_pruning.process_enabled` 与 `pre_vl_static_pruning.concrete_enabled`，默认均为 `false`。
+  - 决策2：`VLMaterialGenerator` 在进程池稳定段检测前先按知识类型过滤任务，禁用类型不进入检测。
+  - 决策3：当截图请求缺失 `analysis_mode/knowledge_type` 时，在单元汇总阶段补齐上下文，保证 concrete 直出时间戳策略生效。
+- 调用链变化：
+  - 改造前：`unit_tasks -> (可选)process_pool stable detect(全量) -> pre_prune`
+  - 改造后：`unit_tasks -> 按 knowledge_type 过滤 -> (可选)process_pool stable detect(仅启用类型) -> pre_prune`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `config/module2_config.yaml`
+  - `config/module2_config.local.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（本次为配置/调度收敛）：
+  - 测试方式：
+    - 通过单测验证禁用类型不会进入 process-pool stable detect。
+    - 通过定向测试验证 concrete 截图旁路标记可稳定下发。
+  - 测试数据：
+    - `test_prepare_pruned_clips_process_mode_skips_detect_for_disabled_knowledge_type`：检测任务由 `["P1", "C1"]` 收敛为 `["P1"]`。
+    - `test_annotate_screenshot_requests_with_unit_context_marks_concrete_for_bypass`：concrete 请求自动打标 `_skip_cv_optimization=True`。
+  - 结论：
+    - 默认配置下 PrePrune 不再触发；开启时仅作用于显式开启的知识类型，避免额外稳定段检测与预剪枝开销。
+- 验证方式：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py::test_pre_vl_pruning_defaults_disabled_for_process_and_concrete services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py::test_pre_vl_pruning_can_enable_process_and_concrete_independently services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py::test_prepare_pruned_clips_process_mode_skips_detect_for_disabled_knowledge_type services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_annotate_screenshot_requests_with_unit_context_marks_concrete_for_bypass services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_pruned_clips_for_units_parallel_and_order`（通过，`5 passed`）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-05 任务并行调度细化（下载并行3 + 转录串行1 + Stage1 不阻塞后续转录）
+- 日期：2026-03-05
+- 升级目标：
+  - 允许下载阶段并行，提升 URL/本地素材准备吞吐，目标并发度 `3`。
+  - 保持转录阶段严格串行，避免 Python worker/GPU 转录资源争用，目标并发度 `1`。
+  - 确保任务A转录完成后，任务B可以立即进入转录，不再被任务A的 `step1-step6` 阻塞。
+- 第一性原理与复用杠杆：
+  - 第一性原理：`download / transcribe / stage1` 是不同资源瓶颈阶段，不能用单一粗粒度锁统一约束，否则会把“可并行下载”和“需串行转录”一起误伤。
+  - 复用杠杆1：复用现有 `TaskProcessingWorker` 线程池和任务队列，只替换阶段闸门粒度，不重建调度框架。
+  - 复用杠杆2：复用现有 `VideoProcessingOrchestrator` 主链路，只将 `transcribe` 与 `stage1` 物理拆分为独立方法。
+  - 复用杠杆3：复用原有 `task.pipeline.io-concurrency` 兼容键作为 `transcribe-concurrency` 默认回退，避免历史配置失效。
+- 架构决策：
+  - 决策1：`TaskProcessingWorker` 由单一 `ioSemaphore` 升级为 `downloadSemaphore + transcribeSemaphore` 双闸门。
+  - 决策2：执行链路调整为：`download(持下载闸门) -> transcribe(持转录闸门) -> stage1(无转录闸门) -> llm`。
+  - 决策3：`VideoProcessingOrchestrator` 新增/明确 `processVideoTranscribePhase` 与 `processVideoStage1Phase`，并保留组合包装方法用于兼容。
+  - 决策4：配置拆分为 `task.pipeline.download-concurrency=3` 与 `task.pipeline.transcribe-concurrency=1`，保留 `task.pipeline.io-concurrency=1` 作为兼容项。
+- 调用链变化：
+  - 改造前：`TaskWorker -> ioSemaphore -> (download + transcribe + stage1) -> release -> llm`
+  - 改造后：`TaskWorker -> downloadSemaphore -> download -> release -> transcribeSemaphore -> transcribe -> release -> stage1 -> llm`
+- 已落地文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerIoConcurrencyTest.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerDownloadRetryTest.java`
+- 性能对比数据（并发调度行为）：
+  - 测试方式：
+    - 通过 `TaskProcessingWorkerIoConcurrencyTest` 构造双任务并发，显式挂起首个任务 `stage1`，观察第二个任务转录是否可在挂起期间开始。
+    - 通过 Worker 相关单测回归下载中断重试、清理逻辑与取消等待语义，确保分阶段闸门不破坏既有行为。
+  - 测试数据：
+    - 下载并行观测：`downloadMaxInFlight >= 2`（配置上限为 `3`，双任务样本下达到并行）。
+    - 转录串行观测：`transcribeMaxInFlight = 1`（保持严格串行）。
+    - 关键时序观测：`transcribeStartedWhileStage1InFlight >= 1`，确认“首任务 Stage1 进行中，次任务已进入转录”。
+  - 结论：
+    - 机制已从“粗粒度 IO 串行”收敛为“下载并行 + 转录串行 + Stage1 解耦”，满足“转录完成后立即放行下一个任务转录”的目标。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest="TaskProcessingWorkerDownloadRetryTest,TaskProcessingWorkerUploadCleanupTest,TaskProcessingWorkerIoConcurrencyTest" test -q`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_rate_limiter.py -q`（通过，`10 passed`）
+
+## 2026-03-05 DashScope 上传参数对齐（2MB 分片 + 上传超时=视频时长）
+- 日期：2026-03-05
+- 升级目标：
+  - 按用户约定将 DashScope SDK 上传参数统一为：
+    - `chunk_size=2MB`
+    - `timeout=视频时长（秒）`
+  - 确保同一套上传参数同时作用于“测试链路”和“生成链路”（共用 `VLVideoAnalyzer._try_get_dashscope_temp_url`）。
+- 第一性原理与复用杠杆：
+  - 第一性原理：上传链路的稳定性参数必须集中在单点实现，避免测试与生产路径参数漂移。
+  - 复用杠杆1：复用既有 `DashScope Files.upload` 实现，不新增平行上传器，降低维护复杂度。
+  - 复用杠杆2：复用 `_resolve_video_duration_sec` 元数据能力，直接映射为上传超时基线。
+  - 复用杠杆3：复用 `module2_config.yaml` 的 `api` 段配置加载链路，新增参数可直接下发到运行时。
+- 架构决策：
+  - 决策1：新增配置项 `upload_chunk_size_bytes`，默认 `2097152`（2MB）。
+  - 决策2：新增配置项 `upload_timeout_by_video_duration=true`，并增加 `upload_timeout_min_sec` 作为下限保护。
+  - 决策3：将上传参数纳入 VL cache key 运行时指纹，避免参数调整后命中旧缓存语义。
+- 调用链变化：
+  - 改造前：`_try_get_dashscope_temp_url -> Files.upload(file_path, purpose)`
+  - 改造后：`_try_get_dashscope_temp_url -> resolve_duration -> Files.upload(file_path, purpose, chunk_size, timeout)`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `config/module2_config.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（上传阶段实测）：
+  - 测试方式：
+    - 使用指定视频 `001_SU003_getNext函数详细实现步骤_370.00-1283.00.mp4`，执行真实 `DashScope Files.upload`。
+    - 配置：`chunk_size=2MB`、`timeout=913s`（视频时长）。
+  - 测试数据：
+    - 三次上传尝试耗时：`301.3s / 302.0s / 301.2s`。
+    - 三次均失败：`Connection aborted, The write operation timed out`。
+  - 结论：
+    - 参数已按约定透传到 SDK 调用；当前环境下失败点为网络写超时（非业务逻辑异常），后续需结合网络质量或 SDK/上传实现能力继续排查。
+- 验证方式：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout or dashscope_offline_task_uses_openai_batch_with_5s_poll"`（通过）
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-05 上传策略收敛：默认直传原视频 + 压缩收益保护
+- 日期：2026-03-05
+- 升级目标：
+  - 上传前处理默认改为“直接上传原视频”，避免非必要转码引入额外耗时与不确定性。
+  - 即便开启压缩，也必须满足“体积变小”才允许使用压缩产物。
+- 第一性原理与复用杠杆：
+  - 第一性原理：上传前处理应优先保证确定性，任何优化都必须满足可量化收益（体积下降）。
+  - 复用杠杆1：复用 `VLVideoAnalyzer._prepare_video_for_dashscope_upload` 单入口，不分叉测试/生产链路。
+  - 复用杠杆2：复用既有 `_vl_upload_cache` 缓存路径，仅补充大小校验和失败清理，不引入新目录结构。
+- 架构决策：
+  - 决策1：`long_video_upload_compress_enabled` 默认值改为 `false`，主路径直传原视频。
+  - 决策2：缓存命中或新产物落盘后都强制执行 `compressed_bytes < source_bytes` 判定。
+  - 决策3：不满足收益条件时自动删除压缩产物并回退原视频，防止后续重复误用。
+- 调用链变化：
+  - 改造前：`_prepare_video_for_dashscope_upload -> (默认压缩) -> 直接使用缓存/压缩产物`
+  - 改造后：`_prepare_video_for_dashscope_upload -> (默认直传) / (开启压缩时先比较大小再决定是否使用)`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `config/module2_config.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（机制级）：
+  - 测试方式：
+    - 构造“缓存压缩文件大于原视频”场景，验证自动回退与缓存清理。
+  - 测试数据：
+    - `source=100B, cached=200B`：返回原视频路径且删除缓存文件。
+  - 结论：
+    - 上传策略已从“可能越压越大”收敛为“默认直传 + 压缩必须有收益”。
+- 验证方式：
+  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "compress_video_for_dashscope_upload_ignores_larger_cached_file or prepare_video_for_dashscope_upload_defaults_to_original_video"`（通过）
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+
+## 2026-03-05 VL 单元级流式并发链路（独立进程池切片 + 即时消费）
+- 日期：2026-03-05
+- 升级目标：
+  - 对 `process/concrete` 语义单元启用“切片完成即分析、分析完成即消费”的无全局等待流水线。
+  - 使用独立进程池并发切片，避免全量切片完成后才开始上传/离线任务轮询。
+  - 消除 `on_result` 回调串行阻塞，保证 VL 主并发不被下游消费拖慢。
+- 第一性原理与复用杠杆：
+  - 第一性原理：长尾瓶颈来自“阶段性 barrier”（先全部切片，再全部分析），应改为 unit 粒度的生产-消费重叠。
+  - 复用杠杆1：复用既有 `split_video_by_semantic_units.py` 切片能力，仅把输入粒度改为单 unit。
+  - 复用杠杆2：复用既有 `_consume_unit_analysis_result_streaming`，避免重复维护 DeepSeek 增量补充、资产导出、时间映射逻辑。
+  - 复用杠杆3：复用既有 `VLVideoAnalyzer` 压缩/上传/离线轮询链路，不新增平行上传实现。
+- 架构决策：
+  - 决策1：新增 `vl_analysis.stream_unit_pipeline_enabled` 开关，开启后走单元级流式链路。
+  - 决策2：新增 `stream_split_process_workers / stream_split_process_hard_cap / stream_split_backpressure_multiplier`，将切片与分析解耦并做背压控制。
+  - 决策3：`_analyze_unit_tasks_in_parallel` 与 `analyze_clips_batch` 的回调改为异步任务调度，统一在尾部汇合，避免单结果阻塞。
+- 调用链变化：
+  - 改造前：`全量切片 -> 全量调度 VL -> 回调串行消费`
+  - 改造后：`unit 并发切片(process pool) -> unit 进入 VL -> unit 结果即时消费`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `config/module2_config.yaml`
+  - `config/module2_config.local.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（机制级）：
+  - 测试方式：
+    - 用 `test_vl_analyze_clips_batch_result_callback_runs_non_blocking` 验证 callback 从串行阻塞变为并发调度。
+    - 用 `test_generate_uses_stream_unit_pipeline_when_enabled` 验证开启开关后不再走全量切片入口。
+  - 测试数据：
+    - callback 压测样本（3 个任务、每个 callback sleep=0.1s）总耗时 `< 0.28s`，低于串行理论值 `~0.3s`。
+    - `stream_unit_pipeline_enabled=true` 时，`_run_stream_unit_pipeline` 被调用且 `_split_video_by_semantic_units` 不被调用。
+  - 结论：
+    - 调度链路已从“批次 barrier”收敛为“unit 粒度流式重叠”，可显著降低长视频场景首结果延迟与整体等待时间。

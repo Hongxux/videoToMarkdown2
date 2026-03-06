@@ -17,6 +17,30 @@ from services.python_grpc.src.content_pipeline.common.utils.path_utils import fi
 
 logger = logging.getLogger(__name__)
 
+
+def _resolve_screenshot_time_window(generator) -> tuple[float, float]:
+    resolver = getattr(generator, "_resolve_screenshot_time_window", None)
+    if callable(resolver):
+        try:
+            before, after = resolver()
+            return max(0.0, float(before)), max(0.0, float(after))
+        except Exception:
+            pass
+    window = safe_float(getattr(generator, "screenshot_config", {}).get("time_window_seconds", 1.0), 1.0)
+    window = max(0.0, float(window))
+    return window, window
+
+
+def _resolve_screenshot_static_island_threshold_ms(generator) -> float:
+    resolver = getattr(generator, "_resolve_screenshot_static_island_threshold_ms", None)
+    if callable(resolver):
+        try:
+            threshold = float(resolver())
+            return max(0.0, min(5000.0, threshold))
+        except Exception:
+            pass
+    return 200.0
+
 async def split_video_by_semantic_units(
     generator,
     video_path: str,
@@ -314,7 +338,8 @@ async def optimize_screenshots_batch_mode(
     if not screenshot_requests:
         return []
     
-    time_window = generator.screenshot_config.get("time_window_seconds", 1.0)
+    time_window_before, time_window_after = _resolve_screenshot_time_window(generator)
+    static_island_threshold_ms = _resolve_screenshot_static_island_threshold_ms(generator)
     
     try:
         from concurrent.futures import ProcessPoolExecutor
@@ -346,9 +371,10 @@ async def optimize_screenshots_batch_mode(
 
         chunks = generator._build_screenshot_prefetch_chunks(
             screenshot_requests=screenshot_requests,
-            time_window=time_window,
             max_span_seconds=chunk_max_span_sec,
             max_requests=chunk_max_requests,
+            time_window_before=time_window_before,
+            time_window_after=time_window_after,
         )
 
         logger.info(
@@ -417,6 +443,7 @@ async def optimize_screenshots_batch_mode(
                                 expanded_end=p["expanded_end"],
                                 shm_frames=p["shm_frames"],
                                 fps=p["fps"],
+                                static_island_min_ms=static_island_threshold_ms,
                             ),
                         )
                         futures.append(future)
@@ -507,7 +534,8 @@ async def optimize_screenshots_streaming_pipeline(
     if not screenshot_requests:
         return []
     
-    time_window = generator.screenshot_config.get("time_window_seconds", 1.0)
+    time_window_before, time_window_after = _resolve_screenshot_time_window(generator)
+    static_island_threshold_ms = _resolve_screenshot_static_island_threshold_ms(generator)
     
     try:
         from concurrent.futures import ProcessPoolExecutor
@@ -542,9 +570,10 @@ async def optimize_screenshots_streaming_pipeline(
 
         chunks = generator._build_screenshot_prefetch_chunks(
             screenshot_requests=screenshot_requests,
-            time_window=time_window,
             max_span_seconds=chunk_max_span_sec,
             max_requests=chunk_max_requests,
+            time_window_before=time_window_before,
+            time_window_after=time_window_after,
         )
 
         logger.info(
@@ -688,6 +717,7 @@ async def optimize_screenshots_streaming_pipeline(
                             expanded_end=p["expanded_end"],
                             shm_frames=p["shm_frames"],
                             fps=p["fps"],
+                            static_island_min_ms=static_island_threshold_ms,
                         ),
                     )
                     pending.add(fut)

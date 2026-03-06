@@ -256,6 +256,21 @@ public class TaskQueueManager {
         return true;
     }
 
+    public synchronized boolean removeTask(String taskId) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return false;
+        }
+        if (task.status == TaskStatus.QUEUED || task.status == TaskStatus.PROCESSING) {
+            return false;
+        }
+        taskQueue.remove(task);
+        releaseTaskResources(task);
+        allTasks.remove(taskId);
+        logger.info("Task removed from runtime map: {}", taskId);
+        return true;
+    }
+
     public synchronized void finalizeCancelledTask(String taskId) {
         TaskEntry task = allTasks.get(taskId);
         if (task == null || task.status != TaskStatus.CANCELLED) {

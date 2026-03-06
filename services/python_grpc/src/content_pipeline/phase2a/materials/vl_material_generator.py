@@ -19,9 +19,12 @@ import logging
 import asyncio
 import time
 import re
+import base64
 import inspect
 import functools
 import threading
+import subprocess
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from collections import deque
 from pathlib import Path
@@ -79,6 +82,7 @@ _PACKAGE_PROMPT_ROOT = (Path(__file__).resolve().parents[2] / "prompts").resolve
 _DEFAULT_GRID_SPATIAL_ANCHOR_REL_PATH = "vl/video_analysis/grid_spatial_anchor.md"
 _DEFAULT_VL_ARG_STRUCTURED_SYSTEM_REL_PATH = "deepseek/vl_arg/structured_system.md"
 _DEFAULT_VL_ARG_STRUCTURED_USER_REL_PATH = "deepseek/vl_arg/structured_user.md"
+_DEFAULT_BEST_FRAME_SELECTION_REL_PATH = "vision_ai/best_frame_selection.md"
 
 
 def _resolve_prompt_key_attr(attr_name: str, default_key: str) -> str:
@@ -112,6 +116,143 @@ def _load_package_prompt_default(relative_path: str, *, fallback: str) -> str:
             error,
         )
     return fallback
+
+
+def _sanitize_stream_unit_folder_name(text: str) -> str:
+    """将语义单元标识清洗为安全目录名，避免跨平台路径字符问题。"""
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", str(text or "").strip())
+    cleaned = cleaned.strip("._")
+    return cleaned or "UNKNOWN_UNIT"
+
+
+def _split_single_unit_clip_worker(
+    *,
+    video_path: str,
+    semantic_unit: Dict[str, Any],
+    output_dir: str,
+    split_pre_cut_config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    在独立进程中对单个语义单元执行切片。
+    设计点：
+    1) 每个 unit 使用独立输出目录，避免 manifest/中间文件并发写冲突；
+    2) 复用既有 split_video_by_semantic_units.py，减少新逻辑分叉；
+    3) 返回结构化结果，主流程可按完成顺序流式衔接后续步骤。
+    """
+    unit_id = str((semantic_unit or {}).get("unit_id", "") or "").strip()
+    start_sec = safe_float((semantic_unit or {}).get("start_sec", 0.0), 0.0)
+    end_sec = safe_float((semantic_unit or {}).get("end_sec", 0.0), 0.0)
+    if not unit_id:
+        return {
+            "success": False,
+            "unit_id": "",
+            "error": "missing_unit_id",
+        }
+    if end_sec <= start_sec:
+        return {
+            "success": False,
+            "unit_id": unit_id,
+            "error": f"invalid_time_range:{start_sec:.3f}-{end_sec:.3f}",
+        }
+
+    project_root = find_repo_root(__file__)
+    script_path = project_root / "tools" / "split_video_by_semantic_units.py"
+    if not script_path.exists():
+        return {
+            "success": False,
+            "unit_id": unit_id,
+            "error": f"split_script_not_found:{script_path}",
+        }
+
+    unit_folder = _sanitize_stream_unit_folder_name(unit_id)
+    unit_split_dir = (
+        Path(output_dir).resolve()
+        / "semantic_unit_clips_vl"
+        / "_stream_units"
+        / unit_folder
+    )
+    unit_split_dir.mkdir(parents=True, exist_ok=True)
+
+    semantic_units_json = unit_split_dir / "semantic_units_vl_subset.json"
+    semantic_units_json.write_text(
+        json.dumps([semantic_unit], ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    cmd: List[str] = [
+        "python",
+        str(script_path),
+        "--video",
+        str(Path(video_path).resolve()),
+        "--semantic-units",
+        str(semantic_units_json),
+        "--out-dir",
+        str(unit_split_dir),
+        "--overwrite",
+    ]
+
+    split_cfg = split_pre_cut_config if isinstance(split_pre_cut_config, dict) else {}
+    if bool(split_cfg.get("enabled", True)):
+        large_segment_threshold_sec = max(
+            0.0,
+            safe_float(split_cfg.get("large_segment_threshold_sec", 120.0), 120.0),
+        )
+        large_segment_scale_height = max(
+            0,
+            int(safe_float(split_cfg.get("downscale_height", 480.0), 480.0)),
+        )
+        large_segment_video_bitrate = (
+            str(split_cfg.get("video_bitrate", "500k") or "").strip() or "500k"
+        )
+        cmd.extend(
+            [
+                "--large-segment-threshold-sec",
+                f"{large_segment_threshold_sec:.3f}",
+                "--large-segment-scale-height",
+                str(large_segment_scale_height),
+                "--large-segment-video-bitrate",
+                large_segment_video_bitrate,
+            ]
+        )
+
+    process = subprocess.run(cmd, capture_output=True, text=True)
+    if process.returncode != 0:
+        error_text = (process.stderr or process.stdout or "").strip()
+        return {
+            "success": False,
+            "unit_id": unit_id,
+            "error": f"split_failed_rc={process.returncode}",
+            "stderr": error_text[:500],
+            "command": cmd,
+        }
+
+    unit_pattern = re.compile(rf"(?:^|_){re.escape(unit_id)}(?:_|$)", re.IGNORECASE)
+    clip_candidates = [
+        clip_path for clip_path in unit_split_dir.glob("*.mp4")
+        if unit_pattern.search(clip_path.stem)
+    ]
+    if not clip_candidates:
+        clip_candidates = list(unit_split_dir.glob("*.mp4"))
+    if not clip_candidates:
+        return {
+            "success": False,
+            "unit_id": unit_id,
+            "error": "split_succeeded_but_clip_missing",
+            "command": cmd,
+        }
+
+    clip_candidates.sort(
+        key=lambda path: path.stat().st_mtime if path.exists() else 0.0,
+        reverse=True,
+    )
+    selected_clip_path = clip_candidates[0]
+    return {
+        "success": True,
+        "unit_id": unit_id,
+        "clip_path": str(selected_clip_path.resolve()),
+        "clip_dir": str(unit_split_dir.resolve()),
+        "command": cmd,
+    }
 
 
 @dataclass
@@ -184,6 +325,34 @@ class VLMaterialGenerator:
         self.enabled = config.get("enabled", False)
         self.screenshot_config = config.get("screenshot_optimization", {})
         self.fallback_config = config.get("fallback", {})
+        self.best_frame_vision_select_enabled = bool(
+            self.screenshot_config.get("best_frame_vision_select_enabled", True)
+        )
+        try:
+            self.best_frame_vision_max_candidates = max(
+                2,
+                int(self.screenshot_config.get("best_frame_vision_max_candidates", 4)),
+            )
+        except (TypeError, ValueError):
+            self.best_frame_vision_max_candidates = 4
+        try:
+            self.best_frame_vision_timeout_sec = max(
+                1.0,
+                float(self.screenshot_config.get("best_frame_vision_timeout_sec", 45.0)),
+            )
+        except (TypeError, ValueError):
+            self.best_frame_vision_timeout_sec = 45.0
+        try:
+            self.best_frame_vision_max_tokens = max(
+                8,
+                int(self.screenshot_config.get("best_frame_vision_max_tokens", 64)),
+            )
+        except (TypeError, ValueError):
+            self.best_frame_vision_max_tokens = 64
+        self._best_frame_selection_prompt = _load_package_prompt_default(
+            _DEFAULT_BEST_FRAME_SELECTION_REL_PATH,
+            fallback=self._get_default_best_frame_selection_prompt(),
+        )
 
         # VL 前预处理：剔闄?process 单元中的长时闂?stable 片段，降浣?VL 输入冗余
         # 关键取舍锛?
@@ -191,8 +360,44 @@ class VLMaterialGenerator:
         # 2) 采用“stable 核心剔除 + 1s 边缘保留”，在节省成本与保留上下文之间平衡銆?
         # 3) 若预处理失败，自动回退原始片段，保证主流程可用性銆?
         self.pre_vl_pruning_config = config.get("pre_vl_static_pruning", {})
-        self.pre_vl_pruning_enabled = bool(self.pre_vl_pruning_config.get("enabled", False))
-        self.pre_vl_only_process = bool(self.pre_vl_pruning_config.get("only_process", True))
+
+        def _parse_pre_vl_flag(raw_value: Any, default_value: bool) -> bool:
+            if isinstance(raw_value, bool):
+                return raw_value
+            if isinstance(raw_value, (int, float)):
+                return bool(raw_value)
+            if isinstance(raw_value, str):
+                lowered = raw_value.strip().lower()
+                if lowered in {"1", "true", "yes", "y", "on"}:
+                    return True
+                if lowered in {"0", "false", "no", "n", "off"}:
+                    return False
+            return bool(default_value)
+
+        legacy_global_enabled = _parse_pre_vl_flag(
+            self.pre_vl_pruning_config.get("enabled", False),
+            False,
+        )
+        self.pre_vl_only_process = _parse_pre_vl_flag(
+            self.pre_vl_pruning_config.get("only_process", True),
+            True,
+        )
+        raw_process_enabled = self.pre_vl_pruning_config.get("process_enabled", None)
+        raw_concrete_enabled = self.pre_vl_pruning_config.get("concrete_enabled", None)
+        if raw_process_enabled is None:
+            self.pre_vl_process_pruning_enabled = bool(legacy_global_enabled)
+        else:
+            self.pre_vl_process_pruning_enabled = _parse_pre_vl_flag(raw_process_enabled, False)
+        if raw_concrete_enabled is None:
+            self.pre_vl_concrete_pruning_enabled = bool(
+                legacy_global_enabled and not self.pre_vl_only_process
+            )
+        else:
+            self.pre_vl_concrete_pruning_enabled = _parse_pre_vl_flag(raw_concrete_enabled, False)
+        self.pre_vl_pruning_enabled = bool(
+            self.pre_vl_process_pruning_enabled or self.pre_vl_concrete_pruning_enabled
+        )
+
         self.pre_vl_min_unit_duration_sec = float(self.pre_vl_pruning_config.get("min_unit_duration_sec", 10.0))
         self.pre_vl_keep_edge_sec = float(self.pre_vl_pruning_config.get("keep_edge_sec", 1.0))
         # stable 片段长度必须严格大于该阈值才允许进入剔除流程
@@ -254,6 +459,45 @@ class VLMaterialGenerator:
             self.vl_parallel_hard_cap = max(1, int(self.vl_analysis_config.get("parallel_hard_cap", 32)))
         except (TypeError, ValueError):
             self.vl_parallel_hard_cap = 32
+        self.stream_unit_pipeline_enabled = _parse_pre_vl_flag(
+            self.vl_analysis_config.get("stream_unit_pipeline_enabled", False),
+            False,
+        )
+        self.stream_split_process_workers = self.vl_analysis_config.get("stream_split_process_workers", "auto")
+        try:
+            self.stream_split_process_hard_cap = max(
+                1,
+                int(self.vl_analysis_config.get("stream_split_process_hard_cap", 8)),
+            )
+        except (TypeError, ValueError):
+            self.stream_split_process_hard_cap = 8
+        try:
+            self.stream_split_backpressure_multiplier = max(
+                1,
+                int(self.vl_analysis_config.get("stream_split_backpressure_multiplier", 4)),
+            )
+        except (TypeError, ValueError):
+            self.stream_split_backpressure_multiplier = 4
+        raw_stream_types = self.vl_analysis_config.get(
+            "stream_pipeline_knowledge_types",
+            ["process", "concrete"],
+        )
+        if isinstance(raw_stream_types, str):
+            stream_type_candidates = [
+                item.strip()
+                for item in re.split(r"[,\s]+", raw_stream_types)
+                if item and item.strip()
+            ]
+        elif isinstance(raw_stream_types, (list, tuple, set)):
+            stream_type_candidates = [str(item or "").strip() for item in raw_stream_types if str(item or "").strip()]
+        else:
+            stream_type_candidates = ["process", "concrete"]
+        normalized_stream_types: set[str] = set()
+        for item in stream_type_candidates:
+            normalized = self._normalize_pre_vl_pruning_knowledge_type(item)
+            if normalized:
+                normalized_stream_types.add(normalized)
+        self.stream_pipeline_knowledge_types = normalized_stream_types or {"process", "concrete"}
 
 
         # AnalyzeWithVL routing: long clips go through process flow
@@ -697,6 +941,81 @@ class VLMaterialGenerator:
 
         return max(1, min(desired_workers, self.vl_parallel_hard_cap, unit_count))
 
+    def _resolve_stream_split_process_workers(self, unit_count: int) -> int:
+        """解析“单元切片独立进程池”的并发度。"""
+        if unit_count <= 0:
+            return 1
+
+        raw_value = self.stream_split_process_workers
+        desired_workers = 1
+        if isinstance(raw_value, int):
+            desired_workers = raw_value
+        else:
+            config_value = str(raw_value or "").strip().lower()
+            if config_value in {"", "auto"}:
+                desired_workers = max(1, (os.cpu_count() or 4) - 1)
+            else:
+                try:
+                    desired_workers = int(config_value)
+                except (TypeError, ValueError):
+                    desired_workers = 1
+
+        return max(1, min(desired_workers, self.stream_split_process_hard_cap, unit_count))
+
+    def _should_stream_pipeline_for_unit(self, semantic_unit: Dict[str, Any]) -> bool:
+        """判断语义单元是否进入“流式切片+分析”链路。"""
+        knowledge_type = self._normalize_pre_vl_pruning_knowledge_type(
+            semantic_unit.get("knowledge_type", "")
+        )
+        return knowledge_type in set(self.stream_pipeline_knowledge_types or set())
+
+    def _build_vl_unit_task_blueprints(
+        self,
+        semantic_units: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """
+        构建待分析 unit 的基础任务（不含 clip_path）。
+        目的：将“任务属性推导”与“视频切片来源”解耦，便于复用到批量与流式链路。
+        """
+        unit_tasks: List[Dict[str, Any]] = []
+        for semantic_unit in semantic_units or []:
+            if not isinstance(semantic_unit, dict):
+                continue
+            unit_id = str(semantic_unit.get("unit_id", "") or "").strip()
+            if not unit_id:
+                continue
+
+            start_sec = float(semantic_unit.get("start_sec", 0) or 0)
+            end_sec = float(semantic_unit.get("end_sec", 0) or 0)
+            duration = max(0.0, end_sec - start_sec)
+
+            extra_prompt = None
+            analysis_mode = "default"
+            mode_override = str(
+                semantic_unit.get("_vl_analysis_mode_override", semantic_unit.get("vl_analysis_mode_override", ""))
+                or ""
+            ).strip().lower()
+            if mode_override in {"concrete", "concrete_focus"}:
+                analysis_mode = "concrete"
+            elif mode_override in {"tutorial", "tutorial_stepwise"}:
+                analysis_mode = "tutorial_stepwise"
+            elif self._is_tutorial_process_unit(semantic_unit, duration):
+                analysis_mode = "tutorial_stepwise"
+                extra_prompt = self._build_tutorial_extra_prompt()
+
+            unit_tasks.append(
+                {
+                    "semantic_unit": semantic_unit,
+                    "analysis_mode": analysis_mode,
+                    "extra_prompt": extra_prompt,
+                    "unit_id": unit_id,
+                    "start_sec": start_sec,
+                    "end_sec": end_sec,
+                    "duration": duration,
+                }
+            )
+        return unit_tasks
+
     def _normalize_bool_flag(self, value: Any) -> bool:
         """将多种布尔表示统一归一为 bool。"""
         if isinstance(value, bool):
@@ -714,6 +1033,22 @@ class VLMaterialGenerator:
         if text in {"concrete", "具象", "具体", "实例"}:
             return "concrete"
         return ""
+
+    def _normalize_pre_vl_pruning_knowledge_type(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        if text in {"process", "process_short", "process_long"}:
+            return "process"
+        if self._normalize_should_type(text) == "concrete":
+            return "concrete"
+        return text
+
+    def _is_pre_vl_pruning_enabled_for_knowledge_type(self, knowledge_type: Any) -> bool:
+        normalized = self._normalize_pre_vl_pruning_knowledge_type(knowledge_type)
+        if normalized == "process":
+            return bool(self.pre_vl_process_pruning_enabled)
+        if normalized == "concrete":
+            return bool(self.pre_vl_concrete_pruning_enabled)
+        return bool(self.pre_vl_pruning_enabled)
 
     def _analysis_result_has_no_needed_video(self, analysis_result: Any) -> bool:
         """判断 VL 结果是否标记“该语义单元不需要视频表达”."""
@@ -932,6 +1267,32 @@ class VLMaterialGenerator:
 
         analysis_results: List[Any] = [RuntimeError("vl_dispatch_result_missing") for _ in task_inputs]
         streamed_indexes: set[int] = set()
+        pending_callback_tasks: set[asyncio.Task] = set()
+        callback_semaphore = asyncio.Semaphore(max(1, worker_count))
+
+        async def _invoke_on_result_callback(original_index: int, result_item: Any) -> None:
+            if on_result is None:
+                return
+            async with callback_semaphore:
+                try:
+                    callback_result = on_result(
+                        original_index,
+                        task_metadata[original_index] if original_index < len(task_metadata) else {},
+                        result_item,
+                    )
+                    if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
+                        await callback_result
+                except Exception as callback_error:
+                    logger.warning(
+                        "[VL-UnitParallel] on_result callback failed: index=%s, unit=%s, err=%s",
+                        original_index,
+                        (
+                            task_metadata[original_index].get("unit_id", "")
+                            if original_index < len(task_metadata)
+                            else ""
+                        ),
+                        callback_error,
+                    )
 
         async def _emit_stream_result(original_index: int, result_item: Any) -> None:
             analysis_results[original_index] = result_item
@@ -940,25 +1301,11 @@ class VLMaterialGenerator:
             if original_index in streamed_indexes:
                 return
             streamed_indexes.add(original_index)
-            try:
-                callback_result = on_result(
-                    original_index,
-                    task_metadata[original_index] if original_index < len(task_metadata) else {},
-                    result_item,
-                )
-                if asyncio.isfuture(callback_result) or asyncio.iscoroutine(callback_result):
-                    await callback_result
-            except Exception as callback_error:
-                logger.warning(
-                    "[VL-UnitParallel] on_result callback failed: index=%s, unit=%s, err=%s",
-                    original_index,
-                    (
-                        task_metadata[original_index].get("unit_id", "")
-                        if original_index < len(task_metadata)
-                        else ""
-                    ),
-                    callback_error,
-                )
+            callback_task = asyncio.create_task(
+                _invoke_on_result_callback(original_index, result_item)
+            )
+            pending_callback_tasks.add(callback_task)
+            callback_task.add_done_callback(lambda finished: pending_callback_tasks.discard(finished))
 
         batch_runner = getattr(self.analyzer, "analyze_clips_batch", None)
         if callable(batch_runner):
@@ -1032,6 +1379,8 @@ class VLMaterialGenerator:
                 for pending_task in pending_dispatch_tasks:
                     if not pending_task.done():
                         pending_task.cancel()
+        if pending_callback_tasks:
+            await asyncio.gather(*list(pending_callback_tasks), return_exceptions=True)
         logger.info(
             f"[VL-UnitParallel] done: dispatched={len(task_inputs)}, results={len(analysis_results)}"
         )
@@ -1442,16 +1791,36 @@ class VLMaterialGenerator:
 
         stable_overrides: List[Optional[List[Tuple[float, float]]]] = [None for _ in unit_tasks]
         if process_mode:
-            stable_overrides = await self._detect_stable_islands_for_units_via_process_pool(
-                unit_tasks=unit_tasks,
-                worker_count=worker_count,
-            )
+            eligible_indexes: List[int] = []
+            eligible_tasks: List[Dict[str, Any]] = []
+            for index, task in enumerate(unit_tasks):
+                semantic_unit = task.get("semantic_unit", {}) if isinstance(task, dict) else {}
+                if self._is_pre_vl_pruning_enabled_for_knowledge_type(
+                    (semantic_unit or {}).get("knowledge_type", "")
+                ):
+                    eligible_indexes.append(index)
+                    eligible_tasks.append(task)
+            if eligible_tasks:
+                detected_overrides = await self._detect_stable_islands_for_units_via_process_pool(
+                    unit_tasks=eligible_tasks,
+                    worker_count=worker_count,
+                )
+                for rel_index, unit_index in enumerate(eligible_indexes):
+                    if rel_index < len(detected_overrides):
+                        stable_overrides[unit_index] = detected_overrides[rel_index]
 
         semaphore = asyncio.Semaphore(worker_count)
 
         async def _run_single(task: Dict[str, Any], stable_intervals_override: Optional[List[Tuple[float, float]]]) -> Dict[str, Any]:
             semantic_unit = task.get("semantic_unit", {})
             clip_path = str(task.get("clip_path", "") or "")
+            if not self._is_pre_vl_pruning_enabled_for_knowledge_type(
+                (semantic_unit or {}).get("knowledge_type", "")
+            ):
+                return self._build_default_pre_prune_info(
+                    semantic_unit=semantic_unit,
+                    clip_path=clip_path,
+                )
             if process_mode and stable_intervals_override is None:
                 return self._build_default_pre_prune_info(
                     semantic_unit=semantic_unit,
@@ -1601,7 +1970,9 @@ class VLMaterialGenerator:
         """Decide whether this semantic unit should use tutorial-stepwise VL mode."""
         if not self.tutorial_mode_enabled:
             return False
-        knowledge_type = str(semantic_unit.get("knowledge_type", "") or "").strip().lower()
+        knowledge_type = self._normalize_pre_vl_pruning_knowledge_type(
+            semantic_unit.get("knowledge_type", "")
+        )
         return (
             knowledge_type == "process"
             and bool(semantic_unit.get("mult_steps", False))
@@ -2248,6 +2619,15 @@ class VLMaterialGenerator:
             ),
         )
 
+    @staticmethod
+    def _get_default_best_frame_selection_prompt() -> str:
+        return (
+            "You are an expert screenshot selector.\n"
+            "You will receive a frame_reason and multiple candidate screenshots.\n"
+            "Choose exactly one best image that matches the frame_reason and is clear/stable.\n"
+            "Output only image_n (for example image_2) or image_none."
+        )
+
     def _render_grid_anchor_prompt(
         self,
         *,
@@ -2458,6 +2838,337 @@ class VLMaterialGenerator:
         if len(raw) > max_len:
             return raw[:max_len].rstrip("_") or "action"
         return raw
+
+    @staticmethod
+    def _normalize_cv_candidate_screenshots(
+        raw_candidates: Any,
+        *,
+        fallback_timestamp: float,
+        fallback_score: float = 0.0,
+    ) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        if isinstance(raw_candidates, list):
+            for item in raw_candidates:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    timestamp_sec = float(item.get("timestamp_sec", fallback_timestamp))
+                except (TypeError, ValueError):
+                    continue
+                score = safe_float(
+                    item.get("score", item.get("quality_score", fallback_score)),
+                    fallback_score,
+                )
+                island_index = int(safe_float(item.get("island_index", 0), 0.0))
+                island_start = safe_float(item.get("island_start", timestamp_sec), timestamp_sec)
+                island_end = safe_float(item.get("island_end", timestamp_sec), timestamp_sec)
+                normalized.append(
+                    {
+                        "timestamp_sec": float(timestamp_sec),
+                        "score": float(score),
+                        "island_index": island_index,
+                        "island_start": float(island_start),
+                        "island_end": float(island_end),
+                    }
+                )
+
+        if not normalized:
+            normalized = [
+                {
+                    "timestamp_sec": float(fallback_timestamp),
+                    "score": float(fallback_score),
+                    "island_index": 0,
+                    "island_start": float(fallback_timestamp),
+                    "island_end": float(fallback_timestamp),
+                }
+            ]
+
+        deduped: Dict[float, Dict[str, Any]] = {}
+        for item in normalized:
+            key = round(float(item.get("timestamp_sec", 0.0)), 3)
+            existing = deduped.get(key)
+            if existing is None or float(item.get("score", 0.0)) > float(existing.get("score", 0.0)):
+                deduped[key] = item
+        finalized = list(deduped.values())
+        finalized.sort(key=lambda it: float(it.get("score", 0.0)), reverse=True)
+        return finalized
+
+    @staticmethod
+    def _extract_vl_response_text(raw_content: Any) -> str:
+        if isinstance(raw_content, str):
+            return raw_content.strip()
+        if isinstance(raw_content, list):
+            parts: List[str] = []
+            for item in raw_content:
+                if isinstance(item, str):
+                    text = item.strip()
+                    if text:
+                        parts.append(text)
+                    continue
+                if isinstance(item, dict):
+                    text = str(item.get("text", "") or "").strip()
+                    if text:
+                        parts.append(text)
+                        continue
+                    inner = item.get("content")
+                    if isinstance(inner, str) and inner.strip():
+                        parts.append(inner.strip())
+            merged = "\n".join(parts).strip()
+            if merged:
+                return merged
+        return str(raw_content or "").strip()
+
+    @staticmethod
+    def _encode_frame_as_jpeg_data_uri(frame: Any, *, jpeg_quality: int = 82) -> Optional[str]:
+        try:
+            import cv2
+        except Exception:
+            return None
+        if frame is None:
+            return None
+        quality = max(30, min(95, int(jpeg_quality)))
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if not ok:
+            return None
+        raw = encoded.tobytes()
+        if not raw:
+            return None
+        return f"data:image/jpeg;base64,{base64.b64encode(raw).decode('utf-8')}"
+
+    def _build_candidate_images_for_vision_selection(
+        self,
+        *,
+        video_path: str,
+        candidates: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not candidates:
+            return []
+
+        try:
+            import cv2
+        except Exception as error:
+            logger.warning("[VL] best-frame vision selection skipped: cv2 import failed: %s", error)
+            return []
+
+        cap, effective_video_path, _ = self._open_video_capture_with_subset_policy(video_path)
+        if cap is None or not cap.isOpened():
+            logger.warning(
+                "[VL] best-frame vision selection cannot open video: source=%s, effective=%s",
+                video_path,
+                effective_video_path,
+            )
+            return []
+
+        prepared: List[Dict[str, Any]] = []
+        try:
+            fps = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            for candidate in candidates:
+                timestamp_sec = safe_float(candidate.get("timestamp_sec", 0.0), 0.0)
+                frame_index = int(max(0.0, timestamp_sec) * fps) if fps > 0 else 0
+                if total_frames > 0:
+                    frame_index = max(0, min(frame_index, total_frames - 1))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    continue
+                data_uri = self._encode_frame_as_jpeg_data_uri(frame)
+                if not data_uri:
+                    continue
+                prepared.append(
+                    {
+                        "image_id": f"image_{len(prepared) + 1}",
+                        "candidate": dict(candidate),
+                        "data_uri": data_uri,
+                    }
+                )
+        finally:
+            cap.release()
+
+        return prepared
+
+    @staticmethod
+    def _build_best_frame_vision_user_text(
+        *,
+        request: Dict[str, Any],
+        prepared_candidates: List[Dict[str, Any]],
+    ) -> str:
+        frame_reason = str(request.get("frame_reason", "") or "").strip()
+        if not frame_reason:
+            frame_reason = str(request.get("label", "") or "").strip()
+        if not frame_reason:
+            frame_reason = "Select the frame that best represents the current semantic action."
+
+        lines: List[str] = [f"frame_reason: {frame_reason}", "candidate_metadata:"]
+        for item in prepared_candidates:
+            candidate = item.get("candidate", {})
+            lines.append(
+                f"{item.get('image_id')}: timestamp_sec={safe_float(candidate.get('timestamp_sec', 0.0), 0.0):.3f}, "
+                f"cv_score={safe_float(candidate.get('score', 0.0), 0.0):.4f}, "
+                f"island_index={int(safe_float(candidate.get('island_index', 0), 0.0))}"
+            )
+        lines.append("Return only image_n or image_none.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _parse_best_frame_selection_index(raw_text: str, candidate_count: int) -> Optional[int]:
+        if candidate_count <= 0:
+            return None
+        text = str(raw_text or "").strip().lower()
+        if not text:
+            return None
+        if re.search(r"\bimage_none\b", text):
+            return None
+
+        match = re.search(r"\bimage[_\s-]*(\d{1,2})\b", text)
+        if match:
+            index = int(match.group(1))
+            if 1 <= index <= candidate_count:
+                return index - 1
+
+        number_match = re.search(r"\b(\d{1,2})\b", text)
+        if number_match:
+            index = int(number_match.group(1))
+            if 1 <= index <= candidate_count:
+                return index - 1
+        return None
+
+    async def _select_best_frame_candidate_with_vision(
+        self,
+        *,
+        video_path: str,
+        request: Dict[str, Any],
+        candidates: List[Dict[str, Any]],
+    ) -> Tuple[Dict[str, Any], str]:
+        top_candidate = dict(candidates[0])
+        prepared_candidates = self._build_candidate_images_for_vision_selection(
+            video_path=video_path,
+            candidates=candidates,
+        )
+        if len(prepared_candidates) <= 1:
+            return top_candidate, "fallback_cv_top"
+
+        analyzer = self.analyzer
+        client = getattr(analyzer, "client", None)
+        model = str(getattr(analyzer, "model", "") or "").strip()
+        if client is None or not model:
+            return top_candidate, "fallback_cv_top"
+
+        user_text = self._build_best_frame_vision_user_text(
+            request=request,
+            prepared_candidates=prepared_candidates,
+        )
+        content_items: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
+        for item in prepared_candidates:
+            content_items.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": str(item.get("data_uri", "") or "")},
+                }
+            )
+
+        messages = [
+            {
+                "role": "system",
+                "content": str(self._best_frame_selection_prompt or self._get_default_best_frame_selection_prompt()),
+            },
+            {
+                "role": "user",
+                "content": content_items,
+            },
+        ]
+
+        try:
+            result = await llm_gateway.vl_chat_completion(
+                client=client,
+                model=model,
+                messages=messages,
+                max_tokens=int(self.best_frame_vision_max_tokens),
+                temperature=0.0,
+                timeout=float(self.best_frame_vision_timeout_sec),
+            )
+        except Exception as error:
+            logger.warning("[VL] best-frame vision selection failed: %s", error)
+            return top_candidate, "fallback_cv_top"
+
+        raw_text = self._extract_vl_response_text(getattr(result, "content", ""))
+        selected_index = self._parse_best_frame_selection_index(
+            raw_text,
+            len(prepared_candidates),
+        )
+        if selected_index is None:
+            logger.warning(
+                "[VL] best-frame vision selection returned invalid choice, fallback to CV top: response=%s",
+                raw_text[:160],
+            )
+            return top_candidate, "fallback_cv_top"
+
+        selected_candidate = prepared_candidates[selected_index].get("candidate")
+        if not isinstance(selected_candidate, dict):
+            return top_candidate, "fallback_cv_top"
+        return dict(selected_candidate), "ai"
+
+    async def _apply_best_frame_vision_selection(
+        self,
+        *,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not screenshot_requests:
+            return screenshot_requests
+        if not self.best_frame_vision_select_enabled:
+            return screenshot_requests
+
+        multi_candidate_count = 0
+        ai_selected_count = 0
+        fallback_selected_count = 0
+        max_candidates = max(2, int(self.best_frame_vision_max_candidates))
+
+        for req in screenshot_requests:
+            if not isinstance(req, dict):
+                continue
+            current_ts = safe_float(req.get("timestamp_sec", 0.0), 0.0)
+            current_score = safe_float(req.get("_cv_quality_score", req.get("score", 0.0)), 0.0)
+            candidates = self._normalize_cv_candidate_screenshots(
+                req.get("_cv_candidate_screenshots"),
+                fallback_timestamp=current_ts,
+                fallback_score=current_score,
+            )
+            candidates = candidates[:max_candidates]
+            if len(candidates) <= 1:
+                req["_cv_candidate_screenshots"] = candidates[:1]
+                only_candidate = candidates[0]
+                req["timestamp_sec"] = float(only_candidate.get("timestamp_sec", current_ts))
+                req["_cv_quality_score"] = float(only_candidate.get("score", current_score))
+                continue
+
+            multi_candidate_count += 1
+            selected_candidate, source = await self._select_best_frame_candidate_with_vision(
+                video_path=video_path,
+                request=req,
+                candidates=candidates,
+            )
+
+            selected_ts = safe_float(selected_candidate.get("timestamp_sec", current_ts), current_ts)
+            selected_score = safe_float(selected_candidate.get("score", current_score), current_score)
+            req["timestamp_sec"] = float(selected_ts)
+            req["_cv_quality_score"] = float(selected_score)
+            req["_cv_candidate_screenshots"] = [dict(selected_candidate)]
+            req["_cv_vision_selection_source"] = source
+
+            if source == "ai":
+                ai_selected_count += 1
+            else:
+                fallback_selected_count += 1
+
+        if multi_candidate_count > 0:
+            logger.info(
+                "[VL] best-frame vision selection summary: multi=%s, ai=%s, fallback=%s",
+                multi_candidate_count,
+                ai_selected_count,
+                fallback_selected_count,
+            )
+        return screenshot_requests
 
     def _build_unit_relative_asset_id(self, semantic_unit_id: str, file_stem: str) -> str:
         """构建 unit_id/file_stem 形式的素材 ID，保持与 VL 产物命名一致。"""
@@ -4369,7 +5080,6 @@ class VLMaterialGenerator:
                     continue
             for ss_item in analysis_result.screenshot_requests:
                 ss_item["knowledge_type"] = "concrete"
-                ss_item["_skip_cv_optimization"] = True
             logger.info(
                 "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
                 unit_id,
@@ -4635,7 +5345,7 @@ class VLMaterialGenerator:
 
         if not self.pre_vl_pruning_enabled:
             return default_result
-        if self.pre_vl_only_process and knowledge_type != "process":
+        if not self._is_pre_vl_pruning_enabled_for_knowledge_type(knowledge_type):
             return default_result
         if (not force_preprocess) and duration_sec < self.pre_vl_min_unit_duration_sec:
             return default_result
@@ -4810,6 +5520,279 @@ class VLMaterialGenerator:
 
         return route_map
 
+    def _build_single_task_dispatch_payload(
+        self,
+        *,
+        unit_task: Dict[str, Any],
+        pre_prune_info: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
+        """
+        为单个 unit 构建 VL 调度输入与元数据。
+        返回 (task_input, task_meta, pre_prune_applied)。
+        """
+        unit_id = str(unit_task.get("unit_id", "") or "")
+        start_sec = safe_float(unit_task.get("start_sec", 0.0), 0.0)
+        end_sec = safe_float(unit_task.get("end_sec", start_sec), start_sec)
+        duration = max(0.0, safe_float(unit_task.get("duration", end_sec - start_sec), end_sec - start_sec))
+        clip_path = str(unit_task.get("clip_path", "") or "")
+        analysis_mode = str(unit_task.get("analysis_mode", "default") or "default")
+        extra_prompt = unit_task.get("extra_prompt")
+
+        clip_path_for_vl = self._resolve_vl_analysis_clip_path(
+            original_clip_path=clip_path,
+            preferred_clip_path=pre_prune_info.get("clip_path_for_vl", clip_path),
+        )
+
+        pre_context_prompt = str(pre_prune_info.get("pre_context_prompt", "") or "").strip()
+        if pre_context_prompt:
+            if extra_prompt:
+                extra_prompt = str(extra_prompt) + "\n\n" + pre_context_prompt
+            else:
+                extra_prompt = pre_context_prompt
+
+        task_input = {
+            "clip_path": clip_path_for_vl,
+            "semantic_unit_start_sec": start_sec,
+            "semantic_unit_id": unit_id,
+            "extra_prompt": extra_prompt,
+            "analysis_mode": analysis_mode,
+        }
+        task_meta = {
+            "unit_id": unit_id,
+            "semantic_unit": unit_task.get("semantic_unit", {}),
+            "start_sec": start_sec,
+            "end_sec": end_sec,
+            "unit_duration": duration,
+            "clip_path": clip_path,
+            "vl_clip_path": clip_path_for_vl,
+            "pre_prune": pre_prune_info,
+            "analysis_mode": analysis_mode,
+        }
+        return task_input, task_meta, bool(pre_prune_info.get("applied"))
+
+    async def _run_stream_unit_pipeline(
+        self,
+        *,
+        video_path: str,
+        semantic_units: List[Dict[str, Any]],
+        resolved_output_dir: str,
+        all_clip_requests: List[Dict[str, Any]],
+        all_screenshot_requests: List[Dict[str, Any]],
+        token_stats: Dict[str, Any],
+    ) -> Tuple[List[Any], List[Dict[str, Any]], Dict[str, LegacyFallbackMaterial], int]:
+        """
+        单元级流式流水线：
+        1) 进程池并发切片（一个进程处理一个 unit 切片任务）；
+        2) 单元切完即进入 VL 分析；
+        3) 分析结果即刻消费（deepseek 补充、素材导出、截图/片段聚合）。
+        """
+        unit_blueprints = self._build_vl_unit_task_blueprints(semantic_units)
+        if not unit_blueprints:
+            return [], [], {}, 0
+
+        split_worker_count = self._resolve_stream_split_process_workers(len(unit_blueprints))
+        analysis_worker_count = self._resolve_vl_parallel_workers(len(unit_blueprints))
+        backpressure_limit = max(1, analysis_worker_count * int(self.stream_split_backpressure_multiplier))
+        analysis_semaphore = asyncio.Semaphore(max(1, analysis_worker_count))
+        split_pre_cut_config = (
+            self.config.get("semantic_split_pre_cut", {})
+            if isinstance(self.config.get("semantic_split_pre_cut", {}), dict)
+            else {}
+        )
+
+        logger.info(
+            "[VL-UnitStream] start: units=%s, split_workers=%s, analysis_workers=%s, backpressure=%s",
+            len(unit_blueprints),
+            split_worker_count,
+            analysis_worker_count,
+            backpressure_limit,
+        )
+
+        analysis_results: List[Any] = []
+        task_metadata: List[Dict[str, Any]] = []
+        streamed_result_indexes: set[int] = set()
+        pending_analysis_tasks: set[asyncio.Task] = set()
+        legacy_fallback_materials: Dict[str, LegacyFallbackMaterial] = {}
+        pruned_units = 0
+        dispatched_vl_units = 0
+        legacy_units = 0
+
+        async def _drain_analysis_tasks(wait_all: bool = False) -> None:
+            nonlocal pending_analysis_tasks
+            if not pending_analysis_tasks:
+                return
+            return_when = asyncio.ALL_COMPLETED if wait_all else asyncio.FIRST_COMPLETED
+            done_tasks, pending_tasks = await asyncio.wait(pending_analysis_tasks, return_when=return_when)
+            pending_analysis_tasks = set(pending_tasks)
+            for done_task in done_tasks:
+                try:
+                    await done_task
+                except Exception as error:
+                    logger.warning("[VL-UnitStream] analysis task failed: %s", error)
+
+        def _schedule_analysis_task(unit_task: Dict[str, Any], pre_prune_info: Dict[str, Any]) -> None:
+            nonlocal pruned_units, dispatched_vl_units
+            task_input, task_meta, pre_prune_applied = self._build_single_task_dispatch_payload(
+                unit_task=unit_task,
+                pre_prune_info=pre_prune_info,
+            )
+            result_index = len(task_metadata)
+            task_metadata.append(task_meta)
+            analysis_results.append(RuntimeError("vl_stream_result_pending"))
+            if pre_prune_applied:
+                pruned_units += 1
+            dispatched_vl_units += 1
+
+            async def _run_and_consume(
+                index_value: int,
+                input_value: Dict[str, Any],
+                meta_value: Dict[str, Any],
+            ) -> None:
+                async with analysis_semaphore:
+                    try:
+                        analyzed_result = await self.analyzer.analyze_clip(
+                            clip_path=str(input_value.get("clip_path", "") or ""),
+                            semantic_unit_start_sec=float(input_value.get("semantic_unit_start_sec", 0.0) or 0.0),
+                            semantic_unit_id=str(input_value.get("semantic_unit_id", "") or ""),
+                            extra_prompt=input_value.get("extra_prompt"),
+                            analysis_mode=str(input_value.get("analysis_mode", "default") or "default"),
+                        )
+                    except Exception as error:
+                        analyzed_result = error
+                analysis_results[index_value] = analyzed_result
+                await self._consume_unit_analysis_result_streaming(
+                    result_index=index_value,
+                    analysis_result=analyzed_result,
+                    meta=meta_value,
+                    legacy_fallback_materials=legacy_fallback_materials,
+                    all_clip_requests=all_clip_requests,
+                    all_screenshot_requests=all_screenshot_requests,
+                    token_stats=token_stats,
+                    resolved_output_dir=resolved_output_dir,
+                    original_video_path=video_path,
+                )
+                streamed_result_indexes.add(index_value)
+
+            task = asyncio.create_task(_run_and_consume(result_index, task_input, task_meta))
+            pending_analysis_tasks.add(task)
+
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=split_worker_count) as split_executor:
+            async def _run_single_split(unit_blueprint: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+                split_payload = await loop.run_in_executor(
+                    split_executor,
+                    functools.partial(
+                        _split_single_unit_clip_worker,
+                        video_path=video_path,
+                        semantic_unit=unit_blueprint.get("semantic_unit", {}),
+                        output_dir=resolved_output_dir,
+                        split_pre_cut_config=split_pre_cut_config,
+                    ),
+                )
+                return unit_blueprint, split_payload
+
+            split_tasks = [asyncio.create_task(_run_single_split(blueprint)) for blueprint in unit_blueprints]
+            for done_task in asyncio.as_completed(split_tasks):
+                try:
+                    unit_blueprint, split_payload = await done_task
+                except Exception as split_error:
+                    logger.warning("[VL-UnitStream] split task crashed: %s", split_error)
+                    continue
+                unit_id = str(unit_blueprint.get("unit_id", "") or "")
+                if not bool(split_payload.get("success", False)):
+                    logger.warning(
+                        "[VL-UnitStream] split failed: unit=%s, err=%s",
+                        unit_id,
+                        split_payload.get("error", "unknown"),
+                    )
+                    continue
+
+                clip_path = str(split_payload.get("clip_path", "") or "").strip()
+                clip_dir = str(split_payload.get("clip_dir", "") or "").strip()
+                if not clip_path:
+                    logger.warning("[VL-UnitStream] split clip missing: unit=%s", unit_id)
+                    continue
+                if not clip_dir:
+                    clip_dir = str(Path(clip_path).parent)
+
+                unit_task = dict(unit_blueprint)
+                unit_task["clip_path"] = clip_path
+                pre_prune_info = await self._prepare_pruned_clip_for_vl(
+                    clips_dir=clip_dir,
+                    semantic_unit=unit_task.get("semantic_unit", {}),
+                    original_clip_path=clip_path,
+                    force_preprocess=False,
+                )
+
+                semantic_unit = unit_task.get("semantic_unit", {})
+                raw_duration_sec = safe_float(unit_task.get("duration", 0.0), 0.0)
+                if self._should_use_stable_action_legacy_branch(
+                    semantic_unit=semantic_unit,
+                    pre_prune_info=pre_prune_info,
+                    raw_duration_sec=raw_duration_sec,
+                ):
+                    legacy_units += 1
+                    legacy_dispatch_plan = await self._prepare_legacy_action_dispatch_plan(
+                        clips_dir=clip_dir,
+                        legacy_action_tasks=[
+                            {
+                                "task": unit_task,
+                                "pre_prune_info": pre_prune_info,
+                            }
+                        ],
+                    )
+                    all_clip_requests.extend(legacy_dispatch_plan.immediate_clip_requests)
+                    all_screenshot_requests.extend(legacy_dispatch_plan.immediate_screenshot_requests)
+                    for fallback_unit_id, material in (legacy_dispatch_plan.fallback_materials or {}).items():
+                        legacy_fallback_materials[fallback_unit_id] = material
+
+                    for queued_index, queued_task in enumerate(legacy_dispatch_plan.vl_unit_tasks):
+                        queued_pre_prune = (
+                            legacy_dispatch_plan.vl_pre_prune_results[queued_index]
+                            if queued_index < len(legacy_dispatch_plan.vl_pre_prune_results)
+                            else self._build_default_pre_prune_info(
+                                semantic_unit=queued_task.get("semantic_unit", {}),
+                                clip_path=str(queued_task.get("clip_path", "") or ""),
+                            )
+                        )
+                        _schedule_analysis_task(queued_task, queued_pre_prune)
+                else:
+                    _schedule_analysis_task(unit_task, pre_prune_info)
+
+                if len(pending_analysis_tasks) >= backpressure_limit:
+                    await _drain_analysis_tasks(wait_all=False)
+
+            await _drain_analysis_tasks(wait_all=True)
+
+        # 理论上每个结果都会在 _run_and_consume 中被消费；这里兜底避免异常导致遗漏。
+        for result_index, analyzed_result in enumerate(analysis_results):
+            if result_index in streamed_result_indexes:
+                continue
+            meta = task_metadata[result_index] if result_index < len(task_metadata) else {}
+            await self._consume_unit_analysis_result_streaming(
+                result_index=result_index,
+                analysis_result=analyzed_result,
+                meta=meta,
+                legacy_fallback_materials=legacy_fallback_materials,
+                all_clip_requests=all_clip_requests,
+                all_screenshot_requests=all_screenshot_requests,
+                token_stats=token_stats,
+                resolved_output_dir=resolved_output_dir,
+                original_video_path=video_path,
+            )
+            streamed_result_indexes.add(result_index)
+
+        token_stats["stable_action_legacy_units"] += legacy_units
+        token_stats["vl_units"] = int(dispatched_vl_units)
+        logger.info(
+            "[VL-UnitStream] done: split_units=%s, vl_units=%s, legacy_units=%s, pruned=%s",
+            len(unit_blueprints),
+            dispatched_vl_units,
+            legacy_units,
+            pruned_units,
+        )
+        return analysis_results, task_metadata, legacy_fallback_materials, pruned_units
+
     async def generate(
         self,
         video_path: str,
@@ -4925,6 +5908,97 @@ class VLMaterialGenerator:
         # 如果没有缓存,执桢畬整的VL分析流程
         if not all_screenshot_requests and not all_clip_requests:
             try:
+                use_stream_unit_pipeline = bool(self.stream_unit_pipeline_enabled)
+                if use_stream_unit_pipeline:
+                    stream_unsupported_units = [
+                        str(unit.get("unit_id", "") or "")
+                        for unit in semantic_units
+                        if not self._should_stream_pipeline_for_unit(unit if isinstance(unit, dict) else {})
+                    ]
+                    if stream_unsupported_units:
+                        use_stream_unit_pipeline = False
+                        logger.info(
+                            "[VL-UnitStream] fallback to legacy pipeline because unsupported knowledge types exist: count=%s, sample=%s",
+                            len(stream_unsupported_units),
+                            stream_unsupported_units[:3],
+                        )
+
+                if use_stream_unit_pipeline:
+                    logger.info(
+                        "[VL-UnitStream] enabled: process/concrete units will be split+analyzed in streaming mode"
+                    )
+                    analysis_results, task_metadata, _legacy_fallback_materials, pruned_units = await self._run_stream_unit_pipeline(
+                        video_path=video_path,
+                        semantic_units=semantic_units,
+                        resolved_output_dir=resolved_output_dir,
+                        all_clip_requests=all_clip_requests,
+                        all_screenshot_requests=all_screenshot_requests,
+                        token_stats=token_stats,
+                    )
+                    token_stats["pruned_units"] += pruned_units
+
+                    if self.merge_multistep_clip_requests:
+                        all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
+
+                    token_stats["saved_tokens_est"] = max(
+                        0,
+                        int(token_stats["total_tokens_baseline_est"] - token_stats["total_tokens_actual"]),
+                    )
+                    if token_stats["total_tokens_baseline_est"] > 0:
+                        token_stats["saved_ratio_est"] = float(token_stats["saved_tokens_est"]) / float(
+                            token_stats["total_tokens_baseline_est"]
+                        )
+                    else:
+                        token_stats["saved_ratio_est"] = 0.0
+
+                    logger.info(
+                        "[VL-Token] units=%s, legacy_action=%s, pruned=%s, actual_total=%s, baseline_est=%s, saved_est=%s, saved_ratio=%.2f%%",
+                        token_stats.get("vl_units", 0),
+                        token_stats.get("stable_action_legacy_units", 0),
+                        token_stats.get("pruned_units", 0),
+                        token_stats.get("total_tokens_actual", 0),
+                        token_stats.get("total_tokens_baseline_est", 0),
+                        token_stats.get("saved_tokens_est", 0),
+                        float(token_stats.get("saved_ratio_est", 0.0)) * 100.0,
+                    )
+                    unit_analysis_outputs = self._serialize_unit_analysis_outputs(
+                        analysis_results=analysis_results,
+                        task_metadata=task_metadata,
+                    )
+
+                    if self.config.get("save_cache", True):
+                        self._save_vl_results(
+                            cache_path=cache_path,
+                            analysis_results=analysis_results,
+                            task_metadata=task_metadata,
+                            screenshot_requests=all_screenshot_requests,
+                            clip_requests=all_clip_requests,
+                        )
+
+                    if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
+                        logger.info(f"开始批閲?CV 优化 {len(all_screenshot_requests)} 个截图请姹?..")
+                        all_screenshot_requests = await self._apply_screenshot_optimization_with_bypass(
+                            video_path=video_path,
+                            screenshot_requests=all_screenshot_requests,
+                        )
+                    if all_screenshot_requests:
+                        all_screenshot_requests = self._dedupe_incremental_legacy_drop_tail_screenshots(
+                            video_path=video_path,
+                            screenshot_requests=all_screenshot_requests,
+                        )
+
+                    result.clip_requests = all_clip_requests
+                    result.screenshot_requests = all_screenshot_requests
+                    result.token_stats = token_stats
+                    result.unit_analysis_outputs = unit_analysis_outputs
+                    result.success = True
+                    logger.info(
+                        "[VL-UnitStream] finished: clips=%s, screenshots=%s",
+                        len(result.clip_requests),
+                        len(result.screenshot_requests),
+                    )
+                    return result
+
                 # 1. 切割视频为语义单元片娈?
                 logger.info(f"开始切割视棰? {video_path}")
                 clips_dir = await self._split_video_by_semantic_units(
@@ -5166,7 +6240,6 @@ class VLMaterialGenerator:
                                 continue
                         for ss_item in analysis_result.screenshot_requests:
                             ss_item["knowledge_type"] = "concrete"
-                            ss_item["_skip_cv_optimization"] = True
                         logger.info(
                             "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
                             unit_id,
@@ -5432,34 +6505,34 @@ class VLMaterialGenerator:
         screenshot_requests: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """
-        优化截图时间鐐?
-        
-        对每个建议的截图时间戳，鍦?±1s 范围内使鐢?screenshot_selector 查找最佳帧
-        
+        浼樺寲鎴浘鏃堕棿閻?
+
+        瀵规瘡涓缓璁殑鎴浘鏃堕棿鎴筹紝閸?卤1s 鑼冨洿鍐呬娇閻?screenshot_selector 鏌ユ壘鏈€浣冲抚
+
         Args:
-            video_path: 原视频路寰?
-            screenshot_requests: 截图请求列表
-            
+            video_path: 鍘熻棰戣矾瀵?
+            screenshot_requests: 鎴浘璇锋眰鍒楄〃
+
         Returns:
-            List[Dict]: 优化后的截图请求
+            List[Dict]: 浼樺寲鍚庣殑鎴浘璇锋眰
         """
         if not screenshot_requests:
             return []
-        
-        time_window = self.screenshot_config.get("time_window_seconds", 1.0)
-        optimized = []
-        
-        try:
-            # 使用 screenshot_selector 的逻辑
-            from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
-            
-            selector = ScreenshotSelector.create_lightweight()
-            
-            for req in screenshot_requests:
-                original_ts = req.get("timestamp_sec", 0)
 
-                default_start = max(0.0, original_ts - time_window)
-                default_end = original_ts + time_window
+        time_window_before, time_window_after = self._resolve_screenshot_time_window()
+        static_island_threshold_ms = self._resolve_screenshot_static_island_threshold_ms()
+        optimized: List[Dict[str, Any]] = []
+
+        try:
+            from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
+
+            selector = ScreenshotSelector.create_lightweight()
+
+            for req in screenshot_requests:
+                original_ts = safe_float(req.get("timestamp_sec", 0.0), 0.0)
+
+                default_start = max(0.0, original_ts - time_window_before)
+                default_end = original_ts + time_window_after
                 raw_window_start = req.get("_window_start_sec")
                 raw_window_end = req.get("_window_end_sec")
                 if raw_window_start is None and raw_window_end is None:
@@ -5477,42 +6550,57 @@ class VLMaterialGenerator:
                     search_start = max(0.0, search_start)
                     if search_end < search_start:
                         search_end = search_start
-                
+
                 try:
-                    # 调用截图选择逻辑
                     best_screenshots = selector.select_screenshots_for_range_sync(
                         video_path=video_path,
                         start_sec=search_start,
                         end_sec=search_end,
                         coarse_fps=2.0,
-                        fine_fps=10.0
+                        fine_fps=10.0,
+                        min_static_island_ms=static_island_threshold_ms,
                     )
-                    
-                    if best_screenshots:
-                        # 使用最佳时间戳
-                        best_ts = best_screenshots[0].get("timestamp_sec", original_ts)
-                        req["timestamp_sec"] = best_ts
-                        req["_optimized"] = True
-                        req["_original_timestamp"] = original_ts
-                        logger.debug(
-                            f"截图时间优化: {original_ts:.2f}s -> {best_ts:.2f}s "
-                            f"(score={best_screenshots[0].get('score', 0):.2f})"
-                        )
-                    
-                except Exception as e:
-                    logger.warning(f"截图优化失败: {e}, 使用原始时间戳")
-                
+                    normalized_candidates = self._normalize_cv_candidate_screenshots(
+                        best_screenshots,
+                        fallback_timestamp=original_ts,
+                        fallback_score=0.0,
+                    )
+                    best_candidate = normalized_candidates[0]
+                    best_ts = safe_float(best_candidate.get("timestamp_sec", original_ts), original_ts)
+                    best_score = safe_float(best_candidate.get("score", 0.0), 0.0)
+
+                    req["timestamp_sec"] = float(best_ts)
+                    req["_optimized"] = True
+                    req["_original_timestamp"] = float(original_ts)
+                    req["_cv_quality_score"] = float(best_score)
+                    req["_cv_candidate_screenshots"] = normalized_candidates
+                    req["_cv_static_island_threshold_ms"] = float(static_island_threshold_ms)
+                    logger.debug(
+                        f"鎴浘鏃堕棿浼樺寲: {original_ts:.2f}s -> {best_ts:.2f}s "
+                        f"(score={best_score:.2f})"
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Screenshot optimization failed, fallback to original timestamp: %s",
+                        error,
+                    )
+                    req["_cv_candidate_screenshots"] = self._normalize_cv_candidate_screenshots(
+                        [],
+                        fallback_timestamp=original_ts,
+                        fallback_score=0.0,
+                    )
+                    req["_cv_static_island_threshold_ms"] = float(static_island_threshold_ms)
+
                 optimized.append(req)
-            
+
         except ImportError:
-            logger.warning("screenshot_selector 不可用，跳过截图优化")
+            logger.warning("screenshot_selector is unavailable, skip screenshot optimization")
             return screenshot_requests
-        except Exception as e:
-            logger.warning(f"截图优化失败: {e}")
+        except Exception as error:
+            logger.warning(f"鎴浘浼樺寲澶辫触: {error}")
             return screenshot_requests
-        
+
         return optimized
-    
     async def _optimize_screenshots_parallel(
         self,
         video_path: str,
@@ -5585,10 +6673,6 @@ class VLMaterialGenerator:
             request_knowledge_type = self._normalize_should_type(item.get("knowledge_type", ""))
             if unit_knowledge_type and not request_knowledge_type:
                 item["knowledge_type"] = unit_knowledge_type
-                request_knowledge_type = unit_knowledge_type
-
-            if request_knowledge_type == "concrete" or item.get("analysis_mode") in {"concrete", "concrete_focus"}:
-                item["_skip_cv_optimization"] = True
 
     def _should_bypass_screenshot_cv_optimization(self, request: Dict[str, Any]) -> bool:
         """
@@ -5597,23 +6681,7 @@ class VLMaterialGenerator:
         """
         if not isinstance(request, dict):
             return False
-        if bool(request.get("_skip_cv_optimization", False)):
-            return True
-
-        analysis_mode = str(request.get("analysis_mode", "") or "").strip().lower()
-        if analysis_mode in {"concrete", "concrete_focus"}:
-            return True
-
-        knowledge_type = self._normalize_should_type(request.get("knowledge_type", ""))
-        if knowledge_type == "concrete":
-            return True
-
-        screenshot_id = str(request.get("screenshot_id", "") or "").strip().lower()
-        if "_ss_concrete_seg_" in screenshot_id:
-            return True
-
-        label = str(request.get("label", "") or "").strip().lower()
-        return label.startswith("concrete_segment_")
+        return bool(request.get("_skip_cv_optimization", False))
 
     async def _apply_screenshot_optimization_with_bypass(
         self,
@@ -5643,7 +6711,7 @@ class VLMaterialGenerator:
 
         if not optimize_requests:
             logger.info(
-                "[VL] screenshot CV optimize bypassed: concrete/direct=%s, optimize=0",
+                "[VL] screenshot CV optimize bypassed: explicit_skip=%s, optimize=0",
                 bypass_count,
             )
             return screenshot_requests
@@ -5673,6 +6741,12 @@ class VLMaterialGenerator:
                 optimized_cursor += 1
             else:
                 break
+
+        if self.best_frame_vision_select_enabled:
+            merged_requests = await self._apply_best_frame_vision_selection(
+                video_path=video_path,
+                screenshot_requests=merged_requests,
+            )
         return merged_requests
 
     def _is_legacy_action_drop_tail_screenshot_request(self, request: Dict[str, Any]) -> bool:
@@ -5853,6 +6927,30 @@ class VLMaterialGenerator:
         value = os.getenv(name, default).strip().lower()
         return value in {"1", "true", "yes", "y", "on"}
 
+    def _resolve_screenshot_time_window(self) -> Tuple[float, float]:
+        """瑙ｆ瀽鎴浘鏃堕棿绐楀彛锛屽吋瀹硅€佺殑瀵圭О閰嶇疆銆?"""
+        legacy_window = safe_float(self.screenshot_config.get("time_window_seconds", 1.0), 1.0)
+        if legacy_window < 0.0:
+            legacy_window = 0.0
+        before = safe_float(
+            self.screenshot_config.get("time_window_before_seconds", legacy_window),
+            legacy_window,
+        )
+        after = safe_float(
+            self.screenshot_config.get("time_window_after_seconds", legacy_window),
+            legacy_window,
+        )
+        return max(0.0, float(before)), max(0.0, float(after))
+
+    def _resolve_screenshot_static_island_threshold_ms(self) -> float:
+        """瑙ｆ瀽闈欐€佸矝鏈€灏忔椂闀块槇鍊硷紝鍚戝悗鍏煎鏃ф牸寮忛厤缃€?"""
+        raw_value = self.screenshot_config.get(
+            "static_island_min_ms",
+            self.screenshot_config.get("static_island_threshold_ms", 200.0),
+        )
+        threshold_ms = safe_float(raw_value, 200.0)
+        return max(0.0, min(5000.0, float(threshold_ms)))
+
     def _resolve_max_workers(self, request_count: int) -> int:
         """解析截图并发 worker 数量上限。"""
         return resolve_max_workers(
@@ -5866,9 +6964,11 @@ class VLMaterialGenerator:
         self,
         *,
         screenshot_requests: List[Dict[str, Any]],
-        time_window: float,
         max_span_seconds: float,
         max_requests: int,
+        time_window: Optional[float] = None,
+        time_window_before: Optional[float] = None,
+        time_window_after: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         将截图请求按时间聚类为多涓?chunk銆?
@@ -5883,9 +6983,11 @@ class VLMaterialGenerator:
         """
         return build_screenshot_prefetch_chunks(
             screenshot_requests=screenshot_requests,
-            time_window=time_window,
             max_span_seconds=max_span_seconds,
             max_requests=max_requests,
+            time_window=time_window,
+            time_window_before=time_window_before,
+            time_window_after=time_window_after,
         )
 
     def _prefetch_union_frames_to_registry_sync(
@@ -6026,24 +7128,35 @@ class VLMaterialGenerator:
 
     def _apply_selection_result(self, *, req: Dict[str, Any], original_ts: float, unit_id: str, result: Any) -> None:
         """
-        灏?worker 返回结果写回鍒?request（原地更新）銆?
+        鐏?worker 杩斿洖缁撴灉鍐欏洖閸?request锛堝師鍦版洿鏂帮級閵?
 
-        约束：不改变 screenshot_requests 的顺序；仅更鏂?timestamp_sec 与诊断字段銆?
+        绾︽潫锛氫笉鏀瑰彉 screenshot_requests 鐨勯『搴忥紱浠呮洿閺?timestamp_sec 涓庤瘖鏂瓧娈甸妴?
         """
         if isinstance(result, Exception):
-            logger.warning(f"CV Worker 异常: {unit_id}: {result}")
+            logger.warning(f"CV Worker 寮傚父: {unit_id}: {result}")
             return
 
         if isinstance(result, dict) and "selected_timestamp" in result:
-            req["timestamp_sec"] = result["selected_timestamp"]
+            selected_ts = safe_float(result.get("selected_timestamp", original_ts), original_ts)
+            quality_score = safe_float(result.get("quality_score", 0.0), 0.0)
+            req["timestamp_sec"] = float(selected_ts)
             req["_optimized"] = True
-            req["_original_timestamp"] = original_ts
-            req["_cv_quality_score"] = result.get("quality_score", 0)
-            logger.debug(
-                f"CV 优化: {unit_id}: {original_ts:.2f}s 鈫?{result['selected_timestamp']:.2f}s "
-                f"(score={result.get('quality_score', 0):.3f})"
+            req["_original_timestamp"] = float(original_ts)
+            req["_cv_quality_score"] = float(quality_score)
+            req["_cv_candidate_screenshots"] = self._normalize_cv_candidate_screenshots(
+                result.get("candidate_screenshots"),
+                fallback_timestamp=selected_ts,
+                fallback_score=quality_score,
             )
-    
+            default_threshold_ms = self._resolve_screenshot_static_island_threshold_ms()
+            req["_cv_static_island_threshold_ms"] = safe_float(
+                result.get("static_island_threshold_ms", default_threshold_ms),
+                default_threshold_ms,
+            )
+            logger.debug(
+                f"CV 浼樺寲: {unit_id}: {original_ts:.2f}s 閳?{selected_ts:.2f}s "
+                f"(score={quality_score:.3f})"
+            )
     async def _optimize_screenshots_streaming_pipeline(
         self,
         video_path: str,
