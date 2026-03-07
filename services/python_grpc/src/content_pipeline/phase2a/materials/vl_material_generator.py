@@ -6212,6 +6212,12 @@ class VLMaterialGenerator:
             result.clip_requests = []
             result.screenshot_requests = []
             result.token_stats = token_stats
+            self._write_phase2a_token_cost_audit(
+                output_dir=resolved_output_dir,
+                token_stats=token_stats,
+                unit_analysis_outputs=[],
+                video_path=video_path,
+            )
             result.success = True
             logger.info(
                 "[VL] No units left after abstract filtering, skip VL analysis: total=%s, skipped_abstract=%s",
@@ -6318,6 +6324,12 @@ class VLMaterialGenerator:
                     result.screenshot_requests = all_screenshot_requests
                     result.token_stats = token_stats
                     result.unit_analysis_outputs = unit_analysis_outputs
+                    self._write_phase2a_token_cost_audit(
+                        output_dir=resolved_output_dir,
+                        token_stats=token_stats,
+                        unit_analysis_outputs=unit_analysis_outputs,
+                        video_path=video_path,
+                    )
                     result.success = True
                     logger.info(
                         "[VL-UnitStream] finished: clips=%s, screenshots=%s",
@@ -6589,6 +6601,12 @@ class VLMaterialGenerator:
             result.screenshot_requests = all_screenshot_requests
             result.token_stats = token_stats
             result.unit_analysis_outputs = unit_analysis_outputs
+            self._write_phase2a_token_cost_audit(
+                output_dir=resolved_output_dir,
+                token_stats=token_stats,
+                unit_analysis_outputs=unit_analysis_outputs,
+                video_path=video_path,
+            )
             result.success = True
             
             logger.info(
