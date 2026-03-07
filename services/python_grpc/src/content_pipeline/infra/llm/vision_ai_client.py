@@ -162,7 +162,7 @@ class HashCacheManager:
     2) 步骤2：协调类内方法完成业务处理。
     3) 步骤3：输出处理结果并提供可复用能力。"""
     
-    def __init__(self, similarity_threshold: float = 0.95):
+    def __init__(self, similarity_threshold: float = 0.99):
         """
         执行逻辑：
         1) 解析配置或依赖，准备运行环境。
@@ -601,7 +601,7 @@ class VisionAIConfig:
     
     # 重复帧检测
     duplicate_detection_enabled: bool = True
-    similarity_threshold: float = 0.95
+    similarity_threshold: float = 0.99
     # 批量调用配置（默认关闭，保持旧行为不变）
     batch_enabled: bool = False
     batch_max_size: int = 4
@@ -1557,7 +1557,7 @@ def _resolve_runtime_default_vision_config() -> VisionAIConfig:
             temperature=float(vision_block.get("temperature", 0.3) or 0.3),
             rate_limit_per_minute=int(vision_block.get("rate_limit_per_minute", 60) or 60),
             duplicate_detection_enabled=bool(vision_block.get("duplicate_detection", True)),
-            similarity_threshold=float(vision_block.get("similarity_threshold", 0.95) or 0.95),
+            similarity_threshold=float(vision_block.get("similarity_threshold", 0.99) or 0.99),
         )
 
     vl_block = module2_config.get("vl_material_generation", {})
@@ -1579,7 +1579,7 @@ def _resolve_runtime_default_vision_config() -> VisionAIConfig:
         temperature=float(vl_api.get("temperature", 0.2) or 0.2),
         rate_limit_per_minute=60,
         duplicate_detection_enabled=True,
-        similarity_threshold=0.95,
+        similarity_threshold=0.99,
     )
 
 
@@ -1591,7 +1591,7 @@ def _vision_client_config_signature(config: VisionAIConfig) -> Tuple[Any, ...]:
         str(getattr(config, "api_key_env", "") or "").strip(),
         str(getattr(config, "bearer_token_env", "") or "").strip(),
         bool(getattr(config, "duplicate_detection_enabled", True)),
-        float(getattr(config, "similarity_threshold", 0.95) or 0.95),
+        float(getattr(config, "similarity_threshold", 0.99) or 0.99),
     )
 
 

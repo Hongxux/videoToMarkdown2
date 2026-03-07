@@ -8412,6 +8412,47 @@
     - 如需回滚，只需移除 concrete 请求的 `_window_start_sec` 注入逻辑，不会影响其他知识类型的通用截图优化链路。
     - tutorial 若需回滚为旧行为，只需把 `keyframe_iframe_search_before_sec` 设置回与 `keyframe_iframe_search_after_sec` 相同即可恢复对称搜索。
 
+## 2026-03-07：token 花费统计口径不准，且缺少统一 cost 审计落盘文件
+- 现象：
+  - 任务级 `token_stats` 只有 token 数聚合，没有结合模型价格形成可复核的 cost 审计文件。
+  - Phase2B 已有 `phase2b_deepseek_call_audit.json`，但历史上只记录 input/output 与基础 metadata，没有把 cost 估算、价格来源、汇总统计真正落到文件。
+  - DeepSeek 若返回 `prompt_cache_hit_tokens / prompt_cache_miss_tokens`，旧链路会在中间层丢掉这些字段，导致 cached prompt 不能按更低费率计费，成本统计偏高或失真。
+- 根因：
+  - `llm_client / llm_gateway` 只保留 `prompt_tokens/completion_tokens/total_tokens` 三元组，没有稳定透传 usage 细项。
+  - Phase2A 的 `raw_llm_interactions` 虽保留了 usage，但没有统一价格快照与任务级 audit writer，导致数据停留在运行态对象里，没有形成审计文件。
+  - 价格口径散落在人的记忆里，没有“带检查日期与官方来源”的本地快照，难以复盘“当时为何这样计费”。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/token_costing.py`
+    - 新增统一 token/cost 估算工具，内置 `2026-03-07` 检查的官方价格快照与来源链接。
+    - 当前覆盖项目内最关键的模型：`deepseek-chat`、`qwen-vl-max-latest`、`qwen-vl-max-2025-08-13`。
+    - 支持解析 `prompt_cache_hit_tokens / prompt_cache_miss_tokens / prompt_tokens_details.cached_tokens`，并对 DeepSeek 优惠时段应用单独费率。
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - `LLMResponse` 与本地缓存条目新增 `usage_details`，确保 provider 返回的 usage 细项不再丢失。
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - VL usage 提取逻辑改为保留 cached/miss token 细项。
+    - `VLChatResult` 新增 `cache_hit`，便于区分“本地缓存复用 = 0 成本”与“真实远端调用”。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - Phase2A 原始交互记录补充 `response.model / response.cache_hit`，为后续 cost 审计提供足够上下文。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `intermediates/phase2a_token_cost_audit.json` 任务级审计文件。
+    - 文件内容包含：价格快照、任务级 token_stats、summary 汇总、逐条 canonical records。
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/deepseek_audit.py`
+    - 现有 `phase2b_deepseek_call_audit.json` 增加 `token_usage / cost_estimate / pricing_snapshot / summary`，把 token 成本真正落盘到审计文件。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "token_cost or deepseek_audit_writes_token_cost_summary or write_phase2a_token_cost_audit" -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_ffmpeg_utils.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "llm_gateway or iframe or token_cost or deepseek_audit_writes_token_cost_summary or write_phase2a_token_cost_audit or annotate_screenshot_requests_with_unit_context" -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化 cached/miss token、DeepSeek 优惠时段、Phase2A audit 落盘、Phase2B audit summary 的回归用例。
+  - 监控：
+    - 线上巡检时优先查看 `phase2a_token_cost_audit.json` 与 `phase2b_deepseek_call_audit.json` 的 `summary.estimated_cost_by_currency` 是否连续可读。
+  - 校验：
+    - 每次升级模型名或切换 provider 时，必须同步更新 `token_costing.py` 的官方价格快照与 `checked_at/source_url`。
+  - 回滚：
+    - 如需回滚，仅需移除新审计文件写入与价格估算逻辑；原有 token 统计主流程不受影响。
+
 ## 2026-03-07：`visual_feature_extractor.py` 暂存区私有区字符导致 encoding guard 阻断提交
 - 现象：
   - 执行 `git commit` 时，仓库的 encoding guard 阻断提交，并提示 `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py` 含有私有区 Unicode 字符（`U+E000-U+F8FF`）。
@@ -8437,3 +8478,40 @@
     - 提交前对目标文件执行一次私有区字符扫描；若出现异常，先排查编码链路，再决定是否修正文案。
   - 回滚：
     - 如需回滚，仅回退 `_get_clip_model()` 文档字符串与两条日志文本即可，不影响运行时加载逻辑。
+
+## 2026-03-07：转录阶段实际持续完成分段，但 watchdog 因缺少逐段 hard 信号误判无进展
+- 现象：
+  - Java 日志中 `TaskWatchdog` 在 `transcribe` 阶段报出“阶段长时间无进展，准备重启子步骤”，随后 `PythonGrpcClient.transcribeVideo()` 被线程中断并返回 `Status{code=CANCELLED, description=Thread interrupted}`。
+  - 同一时间段 Python 转录日志仍持续输出“段 11/16 完成”“段 12/16 完成”直到“段 16/16 完成”，说明真实转录工作并未卡死。
+  - watchdog 桥接日志重复看到 `checkpoint=transcribe_engine_running`、`completed=0`、`pending=1`、`signal_type=soft`，导致 Java 侧只能看到重复心跳，看不到真实段进度。
+- 根因：
+  - `services/python_grpc/src/server/grpc_service_impl.py` 中的 `TranscribeVideo()` 只在“转录启动”和“字幕落盘排队完成”两个时点发送 `hard` 心跳。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py` 虽然在主进程里能明确知道每个分段何时完成，但这些信息之前只写到了控制台日志，没有回传给 watchdog。
+  - Java 侧 `TaskWatchdog` 对 `transcribe` 阶段默认不把重复 `soft` 心跳当作强进展，因此在长视频并行转录期间会把“持续工作但没有 hard 进展事件”误判为 idle。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - 为 `transcribe_parallel()` 新增可选 `progress_callback`。
+    - 在主进程汇总 `ProcessPoolExecutor` 结果时，每当一个分段成功完成，就立刻回调一次事件，内容包含 `checkpoint/completed/pending/segment_index/total_segments`。
+    - 串行补偿分支在分段补偿成功时也发出同样的完成事件，保证并行失败回退时进展语义不丢。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/transcription.py`
+    - `Transcriber.transcribe()` 透传 `progress_callback` 到 `transcribe_parallel()`，保持现有调用链不变，只扩展可观测性能力。
+  - 文件：`services/python_grpc/src/server/grpc_service_impl.py`
+    - 在 `TranscribeVideo()` 内新增 `_on_transcribe_segment_completed()` 桥接函数。
+    - 每当并行转录主进程回调“某一段完成”事件时，立即更新软心跳状态，并通过 `TaskWatchdogSignalWriter` 发出对应的 `hard` 心跳。
+    - `hard` 心跳的 `completed/pending` 现在按真实分段数递增，Java 侧能够按段感知强进展，不再只看到静态的 `transcribe_engine_running`。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py`
+    - 新增回归用例，固定“每完成一个分段就触发一次进度回调”的行为，覆盖 `completed/pending/segment_index` 递增语义。
+- 验证方式：
+  - `PYTHONPATH=D:\videoToMarkdownTest2 pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 后续凡是调整并行转录汇总逻辑、串行补偿逻辑或 watchdog 心跳桥接逻辑，都必须保留“每段成功完成触发一次 hard 进展事件”的回归断言。
+  - 监控：
+    - 线上排障时优先同时对照 Java `WATCHDOG_SIGNAL` 与 Python “段 X/Y 完成”日志；若二者脱钩，先检查 progress callback 到 watchdog writer 的桥接链路。
+  - 校验：
+    - 评审转录相关改动时，必须确认 `completed/pending` 反映真实分段数，而不是固定 `0/1` 占位值。
+    - 若未来引入新的并发执行器或分段策略，必须同步验证补偿分支也能发出逐段 hard 心跳。
+  - 回滚：
+    - 如需回滚，可仅移除 `transcribe_parallel()` 的 progress callback 与 `TranscribeVideo()` 的桥接函数；原有转录主流程、字幕落盘与最终完成心跳不会受影响。

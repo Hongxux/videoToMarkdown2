@@ -28,6 +28,15 @@ os.environ['HF_HUB_DISABLE_PROGRESS_BARS'] = '0'
 os.environ['HF_HUB_ENABLE_HF_TRANSFER'] = '0'
 
 
+def _notify_progress(progress_callback, event):
+    if progress_callback is None or not isinstance(event, dict):
+        return
+    try:
+        progress_callback(dict(event))
+    except Exception as callback_error:
+        print(f"[并行转录] 进度回调失败: {callback_error}", flush=True)
+
+
 def _extract_full_audio(video_path, full_audio_path):
     """一次性提取整段音频，避免后续分段重复解码视频。"""
     cmd = [
@@ -399,7 +408,8 @@ def transcribe_segment(args):
 
 def transcribe_parallel(video_path, model_size="small", device="cpu",
                        compute_type="int8", language="auto",
-                       segment_duration=600, num_workers=3, hf_endpoint=None, config=None):
+                       segment_duration=600, num_workers=3, hf_endpoint=None,
+                       config=None, progress_callback=None):
     """
     执行逻辑：
     1) 准备必要上下文与参数。
@@ -589,6 +599,19 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
                 if result['success']:
                     all_subtitles.extend(result['subtitles'])
                     completed += 1
+                    _notify_progress(
+                        progress_callback,
+                        {
+                            "stage": "transcribe",
+                            "status": "running",
+                            "checkpoint": f"transcribe_segment_{result['segment_id'] + 1}_completed",
+                            "completed": completed,
+                            "pending": max(0, len(segments) - completed),
+                            "segment_id": result['segment_id'],
+                            "segment_index": result['segment_id'] + 1,
+                            "total_segments": len(segments),
+                        },
+                    )
                     print(f"[并行转录] ✓ 段 {result['segment_id']+1}/{len(segments)} 完成 "
                           f"({completed}/{len(segments)})")
                 else:
@@ -603,6 +626,19 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
                 if fallback_result['success']:
                     all_subtitles.extend(fallback_result['subtitles'])
                     completed += 1
+                    _notify_progress(
+                        progress_callback,
+                        {
+                            "stage": "transcribe",
+                            "status": "running",
+                            "checkpoint": f"transcribe_segment_{segment['id'] + 1}_completed",
+                            "completed": completed,
+                            "pending": max(0, len(segments) - completed),
+                            "segment_id": segment['id'],
+                            "segment_index": segment['id'] + 1,
+                            "total_segments": len(segments),
+                        },
+                    )
                     print(f"[并行转录] ✓ 段 {segment['id']+1}/{len(segments)} 串行补偿完成 "
                           f"({completed}/{len(segments)})")
                 else:

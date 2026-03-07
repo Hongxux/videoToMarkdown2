@@ -67,6 +67,7 @@ def test_get_vision_ai_client_loads_runtime_vl_api_config(monkeypatch):
         assert client.config.enabled is True
         assert client.config.base_url.endswith("/chat/completions")
         assert client.config.model == "qwen-vl-max-2025-08-13"
+        assert client.config.similarity_threshold == 0.99
         assert client._api_key == "runtime-vl-key"
     finally:
         asyncio.run(client.close())

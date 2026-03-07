@@ -18,7 +18,7 @@ pycryptodome>=3.20.0
 
 # Media Processing
 yt-dlp>=2023.10.13
-opencv-python>=4.8.0
+opencv-python==4.6.0.66
 Pillow>=10.0.0
 scikit-image>=0.21.0
 webrtcvad>=2.0.10

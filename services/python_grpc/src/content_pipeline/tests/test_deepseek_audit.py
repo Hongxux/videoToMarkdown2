@@ -106,3 +106,40 @@ def test_deepseek_gateway_call_is_audited(tmp_path):
     assert payload["total_calls"] == 1
     assert payload["records"][0]["step_name"] == "img_desc_augment"
 
+
+def test_deepseek_audit_writes_token_cost_summary(tmp_path):
+    ctx = build_phase2b_audit_context(
+        output_dir=str(tmp_path),
+        task_id="task-cost",
+        video_path="demo.mp4",
+        enabled=True,
+        only_img_desc_augment=False,
+    )
+    token = push_deepseek_audit_context(ctx)
+    try:
+        append_deepseek_call_record(
+            prompt="img description augment request",
+            system_message="You are an image description augmentation assistant.",
+            model="deepseek-chat",
+            temperature=0.3,
+            need_logprobs=False,
+            output_text="augmented body text",
+            metadata={
+                "prompt_tokens": 1000,
+                "completion_tokens": 500,
+                "total_tokens": 1500,
+                "prompt_cache_hit_tokens": 400,
+                "prompt_cache_miss_tokens": 600,
+            },
+        )
+    finally:
+        pop_deepseek_audit_context(token)
+
+    audit_path = tmp_path / "intermediates" / "phase2b_deepseek_call_audit.json"
+    payload = json.loads(audit_path.read_text(encoding="utf-8"))
+
+    assert payload["summary"]["total_records"] == 1
+    assert payload["summary"]["priced_records"] == 1
+    assert payload["records"][0]["token_usage"]["prompt_cache_hit_tokens"] == 400
+    assert payload["records"][0]["cost_estimate"]["status"] == "ok"
+    assert payload["records"][0]["cost_estimate"]["currency"] == "CNY"

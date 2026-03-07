@@ -253,6 +253,8 @@ vision_ai:
   
   # 每次分析的最大帧数 (建议 5-8 张)
   max_frames_per_call: 8  # 建议 4~10；过大可能增加时延与 token 成本
+  # 相似帧复用阈值（越高越严格，0.99 表示 99%）
+  similarity_threshold: 0.99
   batch:
     enabled: true
     max_size: 4

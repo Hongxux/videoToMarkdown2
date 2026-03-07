@@ -35,3 +35,4 @@ vision_ai:
     assert vision_cfg.api_key_env == "DASHSCOPE_API_KEY"
     assert vision_cfg.model == "qwen-vl-plus-2025-07-10"
     assert vision_cfg.base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    assert vision_cfg.similarity_threshold == 0.99

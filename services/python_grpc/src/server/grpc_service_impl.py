@@ -3287,7 +3287,42 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 )
                 
                 # transcribe 是异步方法
-                subtitle_text = await transcriber.transcribe(video_path, language=whisper_language)
+                def _on_transcribe_segment_completed(event: Optional[Dict[str, Any]]) -> None:
+                    if transcribe_watchdog is None or not isinstance(event, dict):
+                        return
+                    try:
+                        status = str(event.get("status") or "running").strip().lower() or "running"
+                        checkpoint = str(
+                            event.get("checkpoint") or "transcribe_segment_completed"
+                        ).strip() or "transcribe_segment_completed"
+                        completed = max(0, _to_int(event.get("completed", 0), 0))
+                        pending = max(0, _to_int(event.get("pending", 0), 0))
+                        extra: Dict[str, Any] = {}
+                        for key in ("segment_id", "segment_index", "total_segments"):
+                            if key in event:
+                                extra[key] = _to_int(event.get(key), 0)
+                        _update_transcribe_soft_state(
+                            status=status,
+                            checkpoint=checkpoint,
+                            completed=completed,
+                            pending=pending,
+                        )
+                        transcribe_watchdog.emit(
+                            status=status,
+                            checkpoint=checkpoint,
+                            completed=completed,
+                            pending=pending,
+                            signal_type="hard",
+                            extra=extra or None,
+                        )
+                    except Exception as progress_error:
+                        logger.warning(f"[{task_id}] Transcribe segment progress bridge failed: {progress_error}")
+
+                subtitle_text = await transcriber.transcribe(
+                    video_path,
+                    language=whisper_language,
+                    progress_callback=_on_transcribe_segment_completed,
+                )
                 
                 # 🔑 保存字幕文件为 subtitles.txt（异步写盘进程，不阻塞主流程）
                 enqueue_text_write(subtitle_path, subtitle_text, scope_key=output_dir)
@@ -5142,6 +5177,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     pending=2,
                     signal_type="hard",
                 )
+
                 logger.info(
                     f"[{task_id}] AssembleRichText selected runtime semantic units: "
                     f"units={len(semantic_units_payload)}, "

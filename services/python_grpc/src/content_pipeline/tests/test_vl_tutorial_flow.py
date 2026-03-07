@@ -3761,6 +3761,56 @@ def test_apply_best_frame_vision_selection_collapses_candidates(monkeypatch):
     assert updated[0]["_cv_candidate_screenshots"][0]["timestamp_sec"] == 20.35
 
 
+def test_write_phase2a_token_cost_audit_writes_records(tmp_path):
+    generator = VLMaterialGenerator(_build_generator_config())
+    unit_analysis_outputs = [
+        {
+            "unit_id": "SU_AUDIT",
+            "analysis_mode": "concrete",
+            "raw_llm_interactions": [
+                {
+                    "stage": "vl_video_analysis",
+                    "attempt": 1,
+                    "success": True,
+                    "timestamp_utc": "2026-03-07T01:00:00+00:00",
+                    "request": {
+                        "model": "qwen-vl-max-latest",
+                        "analysis_mode": "concrete",
+                        "video_path": "demo.mp4",
+                        "timeout_sec": 30.0,
+                        "hedge_delay_ms": 0,
+                    },
+                    "response": {
+                        "model": "qwen-vl-max-latest",
+                        "cache_hit": False,
+                        "finish_reason": "stop",
+                        "usage": {
+                            "prompt_tokens": 1000,
+                            "completion_tokens": 500,
+                            "total_tokens": 1500,
+                        },
+                    },
+                }
+            ],
+        }
+    ]
+
+    audit_path = generator._write_phase2a_token_cost_audit(
+        output_dir=str(tmp_path),
+        token_stats={"total_tokens_actual": 1500},
+        unit_analysis_outputs=unit_analysis_outputs,
+        video_path="demo.mp4",
+    )
+
+    payload = json.loads(Path(audit_path).read_text(encoding="utf-8"))
+    assert payload["scene"] == "phase2a_vl"
+    assert payload["summary"]["total_records"] == 1
+    assert payload["summary"]["priced_records"] == 1
+    assert payload["records"][0]["unit_id"] == "SU_AUDIT"
+    assert payload["records"][0]["cost_estimate"]["status"] == "ok"
+    assert payload["records"][0]["cost_estimate"]["currency"] == "CNY"
+
+
 def test_select_best_frame_candidate_with_vision_invalid_response_falls_back(monkeypatch):
     config = _build_generator_config()
     config["screenshot_optimization"]["enabled"] = True

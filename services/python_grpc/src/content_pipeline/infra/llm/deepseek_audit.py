@@ -275,18 +275,19 @@ def append_deepseek_call_record(
     system_text = _apply_text_limit(system_message or "", context.max_text_chars)
     prompt_text = _apply_text_limit(prompt or "", context.max_text_chars)
     output_text_safe = _apply_text_limit(output_text or "", context.max_text_chars)
+    record_timestamp = _now_iso()
     metadata_payload = _metadata_to_dict(metadata)
     usage_source = metadata_payload.get("usage_details") or metadata_payload
     token_usage = normalize_usage_payload(usage_source)
     cost_estimate = build_token_cost_estimate(
         usage=token_usage,
         model=model or metadata_payload.get("model", ""),
-        timestamp_utc=_now_iso(),
+        timestamp_utc=record_timestamp,
         local_cache_hit=bool(metadata_payload.get("cache_hit", False)),
     )
 
     record: Dict[str, Any] = {
-        "timestamp": _now_iso(),
+        "timestamp": record_timestamp,
         "scene": context.scene,
         "step_name": "img_desc_augment" if _is_img_desc_augment_call(prompt, system_message) else "deepseek_complete_text",
         "input": {

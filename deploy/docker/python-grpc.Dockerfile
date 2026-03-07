@@ -1,4 +1,4 @@
-FROM python:3.11-bookworm
+FROM python:3.10-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
@@ -21,7 +21,10 @@ COPY services /app/services
 COPY config /app/config
 
 RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r /app/requirements.txt \
+    && grep -v '^mediapipe==' /app/requirements.txt > /app/requirements.docker.txt \
+    && pip install -r /app/requirements.docker.txt \
+    && pip install absl-py attrs flatbuffers matplotlib \
+    && pip install --no-deps mediapipe==0.10.14 \
     && mkdir -p /app/contracts/gen/python \
     && python -m grpc_tools.protoc \
       -I /app/contracts/proto \

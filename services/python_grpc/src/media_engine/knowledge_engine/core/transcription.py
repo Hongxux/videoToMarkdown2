@@ -164,7 +164,7 @@ class Transcriber(BaseProcessor):
                 if self.on_manual_output_end:
                     self.on_manual_output_end()
 
-    async def transcribe(self, video_path, language="auto"):
+    async def transcribe(self, video_path, language="auto", progress_callback=None):
         """
         异步转录接口：供 gRPC 服务调用。
         内部委托给 parallel_transcription.transcribe_parallel，
@@ -196,5 +196,6 @@ class Transcriber(BaseProcessor):
             num_workers=self.num_workers,
             hf_endpoint=hf_endpoint,
             config=self.config,
+            progress_callback=progress_callback,
         )
         return subtitle_text

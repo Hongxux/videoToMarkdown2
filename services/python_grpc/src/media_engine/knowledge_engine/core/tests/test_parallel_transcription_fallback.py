@@ -135,6 +135,56 @@ def test_parallel_failure_then_serial_fallback_success(monkeypatch):
     assert subtitle_text == "A|B"
 
 
+def test_parallel_progress_callback_emits_per_completed_segment(monkeypatch):
+    futures = {
+        0: _FutureStub(
+            result_payload={
+                "segment_id": 0,
+                "subtitles": [{"start": 0.0, "end": 1.0, "text": "A"}],
+                "success": True,
+            }
+        ),
+        1: _FutureStub(
+            result_payload={
+                "segment_id": 1,
+                "subtitles": [{"start": 10.0, "end": 11.0, "text": "B"}],
+                "success": True,
+            }
+        ),
+    }
+    _patch_common(monkeypatch, futures)
+    monkeypatch.setattr(
+        pt,
+        "transcribe_segment",
+        lambda args: {
+            "segment_id": args[1]["id"],
+            "subtitles": [{"start": float(args[1]["id"]), "end": float(args[1]["id"]) + 1.0, "text": str(args[1]["id"])}],
+            "success": True,
+        },
+    )
+
+    events = []
+    subtitle_text = pt.transcribe_parallel(
+        video_path="demo.mp4",
+        model_size="small",
+        device="cpu",
+        compute_type="int8",
+        language="zh",
+        segment_duration=600,
+        num_workers=2,
+        hf_endpoint=None,
+        config={"whisper": {"parallel": {"enabled": True}}},
+        progress_callback=lambda event: events.append(dict(event)),
+    )
+
+    assert subtitle_text == "A|B"
+    assert [event["completed"] for event in events] == [1, 2]
+    assert [event["pending"] for event in events] == [1, 0]
+    assert [event["segment_index"] for event in events] == [1, 2]
+    assert all(event["stage"] == "transcribe" for event in events)
+    assert all(event["status"] == "running" for event in events)
+
+
 def test_parallel_and_fallback_partial_failure_raises(monkeypatch):
     futures = {
         0: _FutureStub(

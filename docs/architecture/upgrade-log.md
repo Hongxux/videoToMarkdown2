@@ -10604,3 +10604,30 @@
     - `stream_unit_pipeline_enabled=true` 时，`_run_stream_unit_pipeline` 被调用且 `_split_video_by_semantic_units` 不被调用。
   - 结论：
     - 调度链路已从“批次 barrier”收敛为“unit 粒度流式重叠”，可显著降低长视频场景首结果延迟与整体等待时间。
+
+## 2026-03-07：统一 Phase2A / Phase2B 的 token cost 审计落盘
+- 背景：
+  - 旧链路已经能拿到部分 `prompt_tokens/completion_tokens/total_tokens`，但没有统一价格快照、没有任务级 Phase2A 审计文件、也没有把 Phase2B 的 cost 汇总真正落盘。
+  - 当 provider 返回 cached prompt token 细项时，旧口径会在中间层丢失这些字段，导致成本估算偏差。
+- 本次升级：
+  - 新增统一价格快照与成本估算工具：`services/python_grpc/src/content_pipeline/infra/llm/token_costing.py`
+  - Phase2A 新增任务级审计文件：`intermediates/phase2a_token_cost_audit.json`
+  - Phase2B 增强既有审计文件：`intermediates/phase2b_deepseek_call_audit.json`
+  - `llm_client / llm_gateway / vl_video_analyzer` 补齐 usage 细项、cache_hit 与 model 上下文透传
+- 调用链变化：
+  - `provider response usage -> normalize_usage_payload -> build_token_cost_estimate`
+  - `Phase2A raw_llm_interactions -> phase2a_token_cost_audit.json`
+  - `Phase2B append_deepseek_call_record -> phase2b_deepseek_call_audit.json(summary + cost_estimate)`
+- 设计决策：
+  - 决策1：价格口径本地快照化，而不是散落在日志或人工备注里；每条快照必须带 `checked_at` 与 `source_url`。
+  - 决策2：本地缓存命中单独标记为 `app_cache_hit`，成本视为 0，避免与远端 provider cache 折扣混淆。
+  - 决策3：优先覆盖当前生产主路径模型：`deepseek-chat`、`qwen-vl-max-latest`、`qwen-vl-max-2025-08-13`；未覆盖模型保持 `unsupported_model`，拒绝拍脑袋估价。
+  - 决策4：DeepSeek 优惠时段按官方半价规则估算；若时间戳无法解析，则回退标准价。
+- 产物：
+  - `intermediates/phase2a_token_cost_audit.json`
+  - `intermediates/phase2b_deepseek_call_audit.json`（增强版）
+  - `pricing_snapshot / summary / records[].token_usage / records[].cost_estimate`
+- 验证：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "token_cost or deepseek_audit_writes_token_cost_summary or write_phase2a_token_cost_audit" -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_ffmpeg_utils.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "llm_gateway or iframe or token_cost or deepseek_audit_writes_token_cost_summary or write_phase2a_token_cost_audit or annotate_screenshot_requests_with_unit_context" -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`

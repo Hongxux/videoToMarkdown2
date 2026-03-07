@@ -75,7 +75,7 @@ class ConcreteKnowledgeValidator:
             self._cache_signature = self._build_cache_signature(vision_config)
         
         # 闂傚倸鍊搁崐鐑芥嚄閸撲礁鍨濇い鏍仦閸嬧剝銇勯弽顐粶缂佲偓閸喓绠鹃柟瀛樼懃閻忣亪鏌涚€ｎ剙鏋戠紒缁樼洴楠炲鈻庤箛鏇氱棯闂備胶顭堟鍝ョ矓瑜版帒钃熸繛鎴欏灩閸楁娊鏌曟繛鍨姎妞ゎ偀鏅滅换婵堝枈濡搫鈷夋繝鐢靛仜閿曨亜顕ｆ繝姘櫜濠㈣埖蓱閺咃絽鈹戦悩璇у伐闁哥噥鍋呴幈銊︽償閵婏腹鎷虹紒缁㈠幖閹冲酣藟瀹ュ悿鐟邦煥鎼粹€斥拫閻庢鍣崑濠囥€佸▎鎾村殐闁冲搫鍊归悾鐑芥⒒娓氣偓閳ь剛鍋涢懟顖涙櫠閻楀牅绻嗛柛娆忣槸婵秹鏌℃担绋库偓鍧楀蓟閵娾晩鏁嶆慨姗嗗亜椤?(闂傚倸鍊搁崐鐑芥倿閿曗偓椤啴宕归鍛姺闂佺鍕垫當缂佲偓婢舵劖鍊甸柨婵嗛婢ф彃鈹戦鎸庣彧闁靛洤瀚伴獮鎺楀箣濠垫劒鐥俊?Vision API 闂傚倸鍊搁崐椋庢濮橆剦鐒界紓浣姑肩换鍡涙煕閵夘喖澧痪鎯ф健閺屾洟宕煎┑鍥ф珴闂?
-        similarity_threshold = vision_config.similarity_threshold if vision_config else 0.95
+        similarity_threshold = vision_config.similarity_threshold if vision_config else 0.99
         self._hash_cache = HashCacheManager(similarity_threshold=similarity_threshold)
         self._hasher = PerceptualHasher
 
@@ -251,7 +251,7 @@ class ConcreteKnowledgeValidator:
                 temperature=vision_config.get("temperature", 0.3),
                 rate_limit_per_minute=vision_config.get("rate_limit_per_minute", 60),
                 duplicate_detection_enabled=vision_config.get("duplicate_detection", True),
-                similarity_threshold=vision_config.get("similarity_threshold", 0.95),
+                similarity_threshold=vision_config.get("similarity_threshold", 0.99),
                 batch_enabled=bool(batch_cfg.get("enabled", False)),
                 batch_max_size=max(1, int(batch_cfg.get("max_size", 4) or 4)),
                 batch_flush_ms=max(0, int(batch_cfg.get("flush_ms", 20) or 20)),
@@ -290,7 +290,7 @@ class ConcreteKnowledgeValidator:
     def _load_structure_preprocess_config(
         self,
         config_path: Optional[str] = None,
-        default_similarity_threshold: float = 0.95,
+        default_similarity_threshold: float = 0.99,
     ) -> Dict[str, Any]:
         """Docstring omitted."""
         try:
@@ -1383,7 +1383,7 @@ class ConcreteKnowledgeValidator:
                 "temperature": getattr(vision_config, "temperature", 0.0),
                 "vision_mode": "description_only_v1",
                 "duplicate_detection": getattr(vision_config, "duplicate_detection_enabled", True),
-                "similarity_threshold": getattr(vision_config, "similarity_threshold", 0.95),
+                "similarity_threshold": getattr(vision_config, "similarity_threshold", 0.99),
                 "person_subject_filter_enabled": getattr(vision_config, "person_subject_filter_enabled", True),
                 "person_mask_area_threshold": getattr(vision_config, "person_mask_area_threshold", 0.3),
                 "person_mask_binary_threshold": getattr(vision_config, "person_mask_binary_threshold", 0.5),
