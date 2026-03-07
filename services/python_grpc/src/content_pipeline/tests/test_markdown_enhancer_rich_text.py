@@ -21,6 +21,13 @@ class _FakeLLMClient:
         return self._structured_text, None, None
 
 
+class _FailIfCalledLLMClient:
+    async def complete_text(self, prompt: str, system_message: str = None):
+        _ = prompt
+        _ = system_message
+        raise AssertionError("structured llm should not be called for concrete KEYFRAME direct-pass flow")
+
+
 class _Meta:
     def __init__(self, model: str = "fake-model", prompt_tokens: int = 10, completion_tokens: int = 20, total_tokens: int = 30):
         self.model = model
@@ -303,6 +310,342 @@ def test_concrete_alias_embed_does_not_append_duplicate_supplemental_image(tmp_p
     assert "Supplemental images:" not in markdown
 
 
+def test_concrete_keyframe_direct_pass_replaces_in_place_without_structured_llm(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img1 = assets_dir / "SU777_key_01.png"
+    img2 = assets_dir / "SU777_key_02.png"
+    img1.write_bytes(b"img1")
+    img2.write_bytes(b"img2")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU777",
+                "title": "Concrete Keyframe Direct Pass",
+                "knowledge_type": "concrete",
+                "body_text": "legacy concrete body",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "line A [KEYFRAME_1]\nline B [KEYFRAME_2]",
+                        "instructional_keyframes": [
+                            {"timestamp_sec": 1.0, "frame_reason": "first keyframe"},
+                            {"timestamp_sec": 2.0, "frame_reason": "second keyframe"},
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img1), str(img2)],
+                    # 故意倒序，验证 concrete 不依赖截图列表顺序，而依赖 instructional_keyframes 顺序。
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU777_img_02",
+                            "source_id": "SU777/SU777_ss_concrete_seg_01_key_02",
+                            "img_path": str(img2),
+                            "img_description": "second keyframe",
+                        },
+                        {
+                            "img_id": "SU777_img_01",
+                            "source_id": "SU777/SU777_ss_concrete_seg_01_key_01",
+                            "img_path": str(img1),
+                            "img_description": "first keyframe",
+                        },
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FailIfCalledLLMClient()
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU777": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "legacy concrete body" not in markdown
+    assert "[KEYFRAME_1]" not in markdown
+    assert "[KEYFRAME_2]" not in markdown
+    assert "Supplemental images:" not in markdown
+    assert "![[assets/SU777_key_01.png|first keyframe]]" in markdown
+    assert "![[assets/SU777_key_02.png|second keyframe]]" in markdown
+    assert markdown.index("![[assets/SU777_key_01.png|first keyframe]]") < markdown.index("![[assets/SU777_key_02.png|second keyframe]]")
+
+
+def test_concrete_keyframe_direct_pass_prefers_instructional_keyframe_order(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img1 = assets_dir / "SU778_key_01.png"
+    img2 = assets_dir / "SU778_key_02.png"
+    img1.write_bytes(b"img1")
+    img2.write_bytes(b"img2")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU778",
+                "title": "Concrete Keyframe Ordered By Instructional",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body without keyframe",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "line A [KEYFRAME_1]\nline B [KEYFRAME_2]",
+                        # 故意把 instructional_keyframes 顺序设为 2 -> 1，验证回填按该顺序执行。
+                        "instructional_keyframes": [
+                            {"timestamp_sec": 2.0, "frame_reason": "second"},
+                            {"timestamp_sec": 1.0, "frame_reason": "first"},
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img1), str(img2)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU778_img_01",
+                            "source_id": "SU778/SU778_ss_concrete_seg_01_key_01",
+                            "img_path": str(img1),
+                            "img_description": "first keyframe",
+                            "timestamp_sec": 1.0,
+                        },
+                        {
+                            "img_id": "SU778_img_02",
+                            "source_id": "SU778/SU778_ss_concrete_seg_01_key_02",
+                            "img_path": str(img2),
+                            "img_description": "second keyframe",
+                            "timestamp_sec": 2.0,
+                        },
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FailIfCalledLLMClient()
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU778": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "legacy body without keyframe" not in markdown
+    assert "line A" in markdown
+    assert "line B" in markdown
+    assert "[KEYFRAME_1]" not in markdown
+    assert "[KEYFRAME_2]" not in markdown
+    assert "![[assets/SU778_key_02.png|second]]" in markdown
+    assert "![[assets/SU778_key_01.png|first]]" in markdown
+    assert markdown.index("![[assets/SU778_key_02.png|second]]") < markdown.index("![[assets/SU778_key_01.png|first]]")
+
+
+def test_concrete_keyframe_direct_pass_prefers_keyframe_id_over_instructional_order(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img1 = assets_dir / "SU778B_key_01.png"
+    img2 = assets_dir / "SU778B_key_02.png"
+    img1.write_bytes(b"img1")
+    img2.write_bytes(b"img2")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU778B",
+                "title": "Concrete Keyframe Ordered By Keyframe ID",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body without keyframe",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "line A [KEYFRAME_1]\nline B [KEYFRAME_2]",
+                        # 故意把列表顺序设为 2 -> 1，验证 keyframe_id 可以覆盖顺序漂移。
+                        "instructional_keyframes": [
+                            {"keyframe_id": "KEYFRAME_2", "timestamp_sec": 2.0, "frame_reason": "second by id"},
+                            {"keyframe_id": "KEYFRAME_1", "timestamp_sec": 1.0, "frame_reason": "first by id"},
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img1), str(img2)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU778B_img_02",
+                            "source_id": "SU778B/SU778B_ss_concrete_seg_01_key_02",
+                            "img_path": str(img2),
+                            "img_description": "second keyframe",
+                            "timestamp_sec": 2.0,
+                            "keyframe_id": "KEYFRAME_2",
+                        },
+                        {
+                            "img_id": "SU778B_img_01",
+                            "source_id": "SU778B/SU778B_ss_concrete_seg_01_key_01",
+                            "img_path": str(img1),
+                            "img_description": "first keyframe",
+                            "timestamp_sec": 1.0,
+                            "keyframe_id": "KEYFRAME_1",
+                        },
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FailIfCalledLLMClient()
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU778B": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "[KEYFRAME_1]" not in markdown
+    assert "[KEYFRAME_2]" not in markdown
+    assert "![[assets/SU778B_key_01.png|first by id]]" in markdown
+    assert "![[assets/SU778B_key_02.png|second by id]]" in markdown
+    assert markdown.index("![[assets/SU778B_key_01.png|first by id]]") < markdown.index("![[assets/SU778B_key_02.png|second by id]]")
+
+
+def test_concrete_section_prefers_semantic_units_phase2a_canonical_body(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img1 = assets_dir / "SU779_key_01.png"
+    img1.write_bytes(b"img1")
+
+    # result.json 故意给旧 body_text，验证会被 semantic_units_phase2a 中 concrete canonical 覆盖。
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU779",
+                "title": "Concrete Canonical",
+                "knowledge_type": "concrete",
+                "body_text": "old result body should be ignored",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img1)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU779_img_01",
+                            "source_id": "SU779/SU779_ss_concrete_seg_01_key_01",
+                            "img_path": str(img1),
+                            "img_description": "canonical image",
+                            "timestamp_sec": 2.0,
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    semantic_payload = {
+        "schema_version": "phase2a.grouped.v1",
+        "knowledge_groups": [
+            {
+                "group_id": 1,
+                "group_name": "G1",
+                "reason": "r",
+                "units": [
+                    {
+                        "unit_id": "SU779",
+                        "knowledge_type": "concrete",
+                        "knowledge_topic": "Concrete Canonical",
+                        "full_text": "canonical full_text [KEYFRAME_1]",
+                        "_vl_concrete_segments": [
+                            {
+                                "segment_id": 1,
+                                "main_content": "canonical main_content [KEYFRAME_1]",
+                                "instructional_keyframes": [
+                                    {"timestamp_sec": 2.0, "frame_reason": "canonical frame"}
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    (tmp_path / "semantic_units_phase2a.json").write_text(
+        json.dumps(semantic_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FailIfCalledLLMClient()
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU779": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "old result body should be ignored" not in markdown
+    assert "canonical main_content" in markdown
+    assert "![[assets/SU779_key_01.png|canonical frame]]" in markdown
+    result_obj = json.loads(result_path.read_text(encoding="utf-8"))
+    synced_unit = result_obj["knowledge_groups"][0]["units"][0]
+    assert synced_unit["body_text"] == "canonical main_content [KEYFRAME_1]"
+    assert synced_unit["_vl_concrete_segments"][0]["segment_id"] == 1
+
+
 def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
     unit_dir = tmp_path / "vl_tutorial_units" / "SU002"
     unit_dir.mkdir(parents=True, exist_ok=True)
@@ -431,6 +774,8 @@ def test_process_multistep_renders_ordered_steps_with_assets(tmp_path):
     assert "click settings" in markdown
     assert "open network tab" in markdown
     assert "[KEYFRAME_1]" not in markdown
+    assert "- settings panel visible: ![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png|settings panel visible]]" in markdown
+    assert "- port value saved: ![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png|port value saved]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_ss_step_01_key_01_open_settings.png|settings panel visible]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_ss_step_02_key_01_change_port.png|port value saved]]" in markdown
     assert "![[vl_tutorial_units/SU002/SU002_clip_step_01_open_settings.mp4]]" in markdown
@@ -1084,6 +1429,103 @@ def test_process_non_tutorial_renders_multiple_videos(tmp_path, monkeypatch):
     assert "![[assets/SU201_clip_02.mp4]]" in markdown
 
 
+def test_only_abstract_uses_structured_llm_in_enhance_pipeline(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    abs_img = assets_dir / "SUA_img_01.png"
+    con_img = assets_dir / "SUC_img_01.png"
+    pro_img = assets_dir / "SUP_img_01.png"
+    for file_path in [abs_img, con_img, pro_img]:
+        file_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SUA",
+                "title": "Abstract Unit",
+                "knowledge_type": "abstract",
+                "body_text": "abstract body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(abs_img)],
+                    "screenshot_items": [
+                        {"img_id": "SUA_img_01", "img_path": str(abs_img), "img_description": "abstract image"}
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            },
+            {
+                "unit_id": "SUC",
+                "title": "Concrete Unit",
+                "knowledge_type": "concrete",
+                "body_text": "concrete body [KEYFRAME_1]",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(con_img)],
+                    "screenshot_items": [
+                        {"img_id": "SUC_img_01", "img_path": str(con_img), "img_description": "concrete image"}
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            },
+            {
+                "unit_id": "SUP",
+                "title": "Process Unit",
+                "knowledge_type": "process",
+                "body_text": "process body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(pro_img)],
+                    "screenshot_items": [
+                        {"img_id": "SUP_img_01", "img_path": str(pro_img), "img_description": "process image"}
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            },
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    recorder = _RecorderAugmentLLMClient()
+    enhancer._llm_client = recorder
+
+    async def _fake_hierarchy(sections, subject):
+        return {
+            "SUA": {"level": 2, "parent_id": None},
+            "SUC": {"level": 2, "parent_id": None},
+            "SUP": {"level": 2, "parent_id": None},
+        }
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    structured_calls = sum(
+        1
+        for call in recorder.calls
+        if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
+    )
+    assert structured_calls == 1
+    assert "### Abstract Unit" in markdown
+    assert "### Concrete Unit" in markdown
+    assert "### Process Unit" in markdown
+
+
 def test_concrete_section_skips_image_desc_augment_even_when_enabled(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -1147,7 +1589,7 @@ def test_concrete_section_skips_image_desc_augment_even_when_enabled(tmp_path, m
             for call in recorder.calls
             if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
         )
-        == 1
+        == 0
     )
 
 
@@ -1214,7 +1656,7 @@ def test_concrete_section_skips_image_desc_augment_when_disabled(tmp_path, monke
             for call in recorder.calls
             if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
         )
-        == 1
+        == 0
     )
 
 
@@ -1306,7 +1748,7 @@ def test_concrete_section_skips_img_desc_augment_without_alignment_evidence(tmp_
             for call in recorder.calls
             if STRUCTURED_PROMPT_MARKER in call["prompt"] or STRUCTURED_SYS_MARKER in call["system_message"]
         )
-        == 1
+        == 0
     )
 
 
@@ -1654,8 +2096,8 @@ def test_markdown_enhancer_writes_llm_trace_jsonl(tmp_path, monkeypatch):
         [
             {
                 "unit_id": "SU400",
-                "title": "Concrete Unit",
-                "knowledge_type": "concrete",
+                "title": "Abstract Unit",
+                "knowledge_type": "abstract",
                 "body_text": "open config",
                 "mult_steps": False,
                 "instructional_steps": [],
@@ -1697,7 +2139,6 @@ def test_markdown_enhancer_writes_llm_trace_jsonl(tmp_path, monkeypatch):
     assert len(lines) >= 1
     payloads = [json.loads(line) for line in lines]
     steps = {item.get("step_name") for item in payloads}
-    assert "img_desc_augment" not in steps
     assert "structured_text" in steps
 
 

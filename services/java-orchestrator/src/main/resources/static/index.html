@@ -3762,6 +3762,7 @@
         taskManualCollectionMeta: {
             collectionTitles: {},
             collectionParents: {},
+            collectionPaths: {},
         },
         taskCollectionExpandedById: {},
         taskCollectionEditingId: '',
@@ -3794,8 +3795,12 @@
         wikilinkSideAnchor: '',
     };
     state.deleteSwipeSoundEnabled = readDeleteSwipeSoundPreference();
-    state.taskManualCollections = readTaskManualCollectionStore();
-    state.taskManualCollectionMeta = readTaskManualCollectionMetaStore();
+    state.taskManualCollections = {};
+    state.taskManualCollectionMeta = {
+        collectionTitles: {},
+        collectionParents: {},
+        collectionPaths: {},
+    };
 
     const perfUtils = window.MobilePerformanceUtils || {};
     const scheduleDoubleAnimationFrame = typeof perfUtils.scheduleDoubleAnimationFrame === 'function'
@@ -3924,6 +3929,9 @@
     const wikilinkExistenceCache = new Map();
     let runtimeLibraryLoadPromise = null;
     let emptyStateSvgSeed = 0;
+    let taskManualCollectionSyncTimerId = 0;
+    let taskManualCollectionSyncInFlight = false;
+    let taskManualCollectionSyncPending = false;
     const DEFAULT_VIDEO_POSTER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360" viewBox="0 0 640 360"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop offset="0%" stop-color="#0f172a"/><stop offset="100%" stop-color="#334155"/></linearGradient></defs><rect width="640" height="360" fill="url(#g)"/><circle cx="320" cy="180" r="48" fill="rgba(255,255,255,0.16)"/><polygon points="305,155 305,205 348,180" fill="#ffffff"/><text x="320" y="248" text-anchor="middle" fill="#cbd5e1" font-size="22" font-family="Arial, sans-serif">视频预览</text></svg>'
     )}`;
@@ -5831,7 +5839,12 @@
     }
 
     async function fetchTasks() {
-        const resp = await fetchWithTimeout(`${API_BASE}/tasks`, {}, 12000);
+        const query = new URLSearchParams({
+            page: '0',
+            pageSize: '0',
+            onlyMultiSegment: 'false',
+        });
+        const resp = await fetchWithTimeout(`${API_BASE}/tasks?${query.toString()}`, {}, 12000);
         if (!resp.ok) {
             throw new Error(`获取故事库失败: HTTP ${resp.status}`);
         }
@@ -5846,7 +5859,7 @@
             console.warn('获取故事列表格式异常', data);
             state.tasks = [];
         }
-        pruneTaskManualCollectionStoreToTaskIds((state.tasks || []).map((task) => task && task.taskId));
+        hydrateTaskManualCollectionsFromTaskPaths(state.tasks || []);
         applyTaskManualCollectionsToStateTasks();
         return state.tasks;
     }
@@ -5887,6 +5900,200 @@
         return String(taskId || '').trim();
     }
 
+    function normalizeCollectionPath(rawPath) {
+        const normalized = String(rawPath || '').trim().replace(/\\/g, '/');
+        if (!normalized) {
+            return '';
+        }
+        const parts = normalized
+            .split('/')
+            .map((segment) => String(segment || '').trim())
+            .filter(Boolean);
+        return parts.join('/');
+    }
+
+    function splitCollectionPathSegments(rawPath) {
+        const normalized = normalizeCollectionPath(rawPath);
+        if (!normalized) {
+            return [];
+        }
+        return normalized.split('/').map((segment) => String(segment || '').trim()).filter(Boolean);
+    }
+
+    function buildCollectionIdFromPath(collectionPathRaw) {
+        const normalizedPath = normalizeCollectionPath(collectionPathRaw);
+        if (!normalizedPath) {
+            return '';
+        }
+        return `manual-path-${encodeURIComponent(normalizedPath).replace(/%/g, '_')}`;
+    }
+
+    function isManualCollectionTask(task) {
+        if (!task || typeof task !== 'object') {
+            return false;
+        }
+        if (task.manualCollection === true) {
+            return true;
+        }
+        const collectionId = normalizeCollectionId(task.collectionId);
+        return /^manual-path::/i.test(collectionId);
+    }
+
+    function hydrateTaskManualCollectionsFromTaskPaths(tasks) {
+        const list = Array.isArray(tasks) ? tasks : [];
+        const nextMap = {};
+        const nextTitles = {};
+        const nextParents = {};
+        const nextPaths = {};
+        const idByPath = {};
+        list.forEach((task) => {
+            const taskId = normalizeTaskId(task && task.taskId);
+            const taskPath = normalizeTaskId(task && task.taskPath);
+            const collectionPath = normalizeCollectionPath(task && task.collectionPath);
+            if (!taskId || !taskPath || !collectionPath || !isManualCollectionTask(task)) {
+                return;
+            }
+            const segments = splitCollectionPathSegments(collectionPath);
+            if (!segments.length) {
+                return;
+            }
+            let cursorPath = '';
+            let parentId = '';
+            segments.forEach((segment) => {
+                cursorPath = cursorPath ? `${cursorPath}/${segment}` : segment;
+                const collectionId = idByPath[cursorPath] || buildCollectionIdFromPath(cursorPath);
+                if (!collectionId) {
+                    return;
+                }
+                idByPath[cursorPath] = collectionId;
+                nextTitles[collectionId] = segment;
+                nextPaths[collectionId] = cursorPath;
+                if (parentId && parentId !== collectionId) {
+                    nextParents[collectionId] = parentId;
+                }
+                parentId = collectionId;
+            });
+            if (!parentId) {
+                return;
+            }
+            nextMap[taskId] = {
+                collectionId: parentId,
+                collectionTitle: segments[segments.length - 1] || TASK_COLLECTION_DEFAULT_TITLE,
+            };
+        });
+        state.taskManualCollections = nextMap;
+        state.taskManualCollectionMeta = {
+            collectionTitles: nextTitles,
+            collectionParents: nextParents,
+            collectionPaths: nextPaths,
+        };
+        writeTaskManualCollectionStore(nextMap, { skipBackendSync: true });
+        writeTaskManualCollectionMetaStore(state.taskManualCollectionMeta, { skipBackendSync: true });
+    }
+
+    function resolveTaskPathByTaskId(taskIdRaw) {
+        const taskId = normalizeTaskId(taskIdRaw);
+        if (!taskId) {
+            return '';
+        }
+        const task = findTaskById(taskId);
+        const taskPath = normalizeTaskId(task && task.taskPath);
+        if (taskPath) {
+            return taskPath;
+        }
+        return `task/${taskId}`;
+    }
+
+    function resolveCollectionPathByCollectionId(collectionIdRaw) {
+        const collectionId = normalizeCollectionId(collectionIdRaw);
+        if (!collectionId) {
+            return '';
+        }
+        const meta = normalizeTaskManualCollectionMeta(state.taskManualCollectionMeta);
+        const explicitPath = normalizeCollectionPath(meta.collectionPaths && meta.collectionPaths[collectionId]);
+        if (explicitPath) {
+            return explicitPath;
+        }
+        const segments = [];
+        const seen = new Set();
+        let cursor = collectionId;
+        while (cursor && !seen.has(cursor)) {
+            seen.add(cursor);
+            const title = String(resolveTaskCollectionTitleById(cursor) || '').trim();
+            if (title) {
+                segments.unshift(title);
+            }
+            cursor = normalizeCollectionId(meta.collectionParents && meta.collectionParents[cursor]);
+        }
+        return normalizeCollectionPath(segments.join('/'));
+    }
+
+    function buildTaskManualCollectionBindingsPayload() {
+        const map = normalizeTaskManualCollectionMap(state.taskManualCollections);
+        const unique = {};
+        Object.keys(map).forEach((taskId) => {
+            const entry = map[taskId];
+            const collectionId = normalizeCollectionId(entry && entry.collectionId);
+            if (!collectionId) {
+                return;
+            }
+            const taskPath = resolveTaskPathByTaskId(taskId);
+            const collectionPath = resolveCollectionPathByCollectionId(collectionId);
+            if (!taskPath || !collectionPath) {
+                return;
+            }
+            unique[taskPath] = collectionPath;
+        });
+        const bindings = Object.keys(unique).map((taskPath) => ({
+            taskPath,
+            collectionPath: unique[taskPath],
+        }));
+        return { bindings };
+    }
+
+    async function pushTaskManualCollectionsToBackend() {
+        const payload = buildTaskManualCollectionBindingsPayload();
+        const resp = await fetch(`${API_BASE}/manual-task-collections`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+        });
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+    }
+
+    async function flushTaskManualCollectionBackendSync() {
+        if (taskManualCollectionSyncInFlight) {
+            return;
+        }
+        while (taskManualCollectionSyncPending) {
+            taskManualCollectionSyncPending = false;
+            taskManualCollectionSyncInFlight = true;
+            try {
+                await pushTaskManualCollectionsToBackend();
+            } catch (error) {
+                console.warn('sync manual collections failed', error);
+            } finally {
+                taskManualCollectionSyncInFlight = false;
+            }
+        }
+    }
+
+    function scheduleTaskManualCollectionBackendSync() {
+        taskManualCollectionSyncPending = true;
+        if (taskManualCollectionSyncTimerId) {
+            clearTimeout(taskManualCollectionSyncTimerId);
+        }
+        taskManualCollectionSyncTimerId = setTimeout(() => {
+            taskManualCollectionSyncTimerId = 0;
+            void flushTaskManualCollectionBackendSync();
+        }, 180);
+    }
+
     function normalizeTaskManualCollectionMap(raw) {
         if (!raw || typeof raw !== 'object') {
             return {};
@@ -5922,8 +6129,12 @@
         const rawParents = source.collectionParents && typeof source.collectionParents === 'object'
             ? source.collectionParents
             : {};
+        const rawPaths = source.collectionPaths && typeof source.collectionPaths === 'object'
+            ? source.collectionPaths
+            : {};
         const collectionTitles = {};
         const collectionParents = {};
+        const collectionPaths = {};
         Object.keys(rawTitles).forEach((collectionIdRaw) => {
             const collectionId = normalizeCollectionId(collectionIdRaw);
             const title = String(rawTitles[collectionIdRaw] || '').trim();
@@ -5940,9 +6151,18 @@
             }
             collectionParents[collectionId] = parentId;
         });
+        Object.keys(rawPaths).forEach((collectionIdRaw) => {
+            const collectionId = normalizeCollectionId(collectionIdRaw);
+            const path = normalizeCollectionPath(rawPaths[collectionIdRaw]);
+            if (!collectionId || !path) {
+                return;
+            }
+            collectionPaths[collectionId] = path;
+        });
         return {
             collectionTitles,
             collectionParents,
+            collectionPaths,
         };
     }
 
@@ -5959,10 +6179,13 @@
         }
     }
 
-    function writeTaskManualCollectionStore(raw) {
+    function writeTaskManualCollectionStore(raw, options = {}) {
         try {
             const normalized = normalizeTaskManualCollectionMap(raw);
             localStorage.setItem(TASK_MANUAL_COLLECTIONS_STORAGE_KEY, JSON.stringify(normalized));
+            if (!options || options.skipBackendSync !== true) {
+                scheduleTaskManualCollectionBackendSync();
+            }
         } catch (_error) {
             // Ignore storage write failure.
         }
@@ -5975,6 +6198,7 @@
                 return {
                     collectionTitles: {},
                     collectionParents: {},
+                    collectionPaths: {},
                 };
             }
             const parsed = JSON.parse(raw);
@@ -5983,14 +6207,18 @@
             return {
                 collectionTitles: {},
                 collectionParents: {},
+                collectionPaths: {},
             };
         }
     }
 
-    function writeTaskManualCollectionMetaStore(raw) {
+    function writeTaskManualCollectionMetaStore(raw, options = {}) {
         try {
             const normalized = normalizeTaskManualCollectionMeta(raw);
             localStorage.setItem(TASK_MANUAL_COLLECTION_META_STORAGE_KEY, JSON.stringify(normalized));
+            if (!options || options.skipBackendSync !== true) {
+                scheduleTaskManualCollectionBackendSync();
+            }
         } catch (_error) {
             // Ignore storage write failure.
         }
@@ -6012,6 +6240,7 @@
             collectionParents: {
                 ...meta.collectionParents,
             },
+            collectionPaths: {},
         };
         writeTaskManualCollectionMetaStore(state.taskManualCollectionMeta);
         return true;
@@ -6037,6 +6266,7 @@
                 ...meta.collectionTitles,
             },
             collectionParents: nextParents,
+            collectionPaths: {},
         };
         writeTaskManualCollectionMetaStore(state.taskManualCollectionMeta);
         return true;
@@ -6051,7 +6281,7 @@
             const manual = taskId ? map[taskId] : null;
             if (!manual) {
                 const existingCollectionId = normalizeCollectionId(task && task.collectionId);
-                if (!existingCollectionId || !/^manual-col-/i.test(existingCollectionId)) {
+                if (!existingCollectionId || !/^manual-(?:col-|path::|path-)/i.test(existingCollectionId)) {
                     return task;
                 }
                 const nextTask = { ...(task || {}) };
@@ -6151,6 +6381,7 @@
         state.taskManualCollectionMeta = {
             collectionTitles: nextTitles,
             collectionParents: nextParents,
+            collectionPaths: {},
         };
         writeTaskManualCollectionMetaStore(state.taskManualCollectionMeta);
     }
@@ -6191,7 +6422,6 @@
                 .map((task) => normalizeTaskId(task && task.taskId))
                 .filter(Boolean)
         );
-        pruneTaskManualCollectionStoreToTaskIds(Array.from(available));
         Array.from(state.taskListSelectedIds || []).forEach((taskIdRaw) => {
             const taskId = normalizeTaskId(taskIdRaw);
             if (!taskId || !available.has(taskId)) {
@@ -9354,7 +9584,6 @@
                 .map((task) => normalizeTaskId(task && task.taskId))
                 .filter(Boolean)
         );
-        pruneTaskManualCollectionStoreToTaskIds(Array.from(availableTaskIds));
         const availableCollectionIds = collectActiveCollectionIdsFromManualState();
         Array.from(state.taskListSelectedIds || []).forEach((selectionKeyRaw) => {
             const parsed = parseTaskListSelectionKey(selectionKeyRaw);
@@ -9932,6 +10161,7 @@
         state.taskManualCollectionMeta = {
             collectionTitles: nextTitles,
             collectionParents: nextParents,
+            collectionPaths: {},
         };
         writeTaskManualCollectionMetaStore(state.taskManualCollectionMeta);
 

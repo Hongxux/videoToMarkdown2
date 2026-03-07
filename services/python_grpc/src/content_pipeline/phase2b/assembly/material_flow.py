@@ -777,6 +777,7 @@ def apply_external_materials(
             )
         return False
 
+
     def _dedupe_screenshot_candidates_exact_keep_earliest(
         candidates: List[Tuple[str, str, str, Optional[float]]]
     ) -> Tuple[List[Tuple[str, str, str, Optional[float]]], int]:
@@ -1849,7 +1850,7 @@ def apply_external_materials(
                         detail["frame_reason"] = frame_reason
 
                     if isinstance(matched_existing_detail, dict):
-                        for ext_key in ("bbox", "target_ui_type", "target_ui_label"):
+                        for ext_key in ("bbox", "target_ui_label"):
                             ext_val = matched_existing_detail.get(ext_key)
                             if ext_val not in (None, "") and ext_key not in detail:
                                 detail[ext_key] = ext_val

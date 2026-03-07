@@ -330,6 +330,7 @@ class EnhancedSection:
     group_id: int = 0
     group_name: str = ""
     group_reason: str = ""
+    vl_concrete_segments: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -790,6 +791,162 @@ class MarkdownEnhancer:
                 prompt=prompt,
                 system_message=system_message,
             )
+
+    @staticmethod
+    def _flatten_semantic_units_payload(payload: Any) -> List[Dict[str, Any]]:
+        units: List[Dict[str, Any]] = []
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict):
+                    units.append(item)
+            return units
+
+        if not isinstance(payload, dict):
+            return units
+
+        raw_groups = payload.get("knowledge_groups", [])
+        if isinstance(raw_groups, list):
+            for group in raw_groups:
+                if not isinstance(group, dict):
+                    continue
+                group_units = group.get("units", [])
+                if not isinstance(group_units, list):
+                    continue
+                for unit in group_units:
+                    if isinstance(unit, dict):
+                        units.append(unit)
+
+        raw_units = payload.get("semantic_units", [])
+        if isinstance(raw_units, list):
+            for unit in raw_units:
+                if isinstance(unit, dict):
+                    units.append(unit)
+        return units
+
+    def _load_concrete_canonical_by_unit(self, result_dir: str) -> Dict[str, Dict[str, Any]]:
+        """
+        concrete 单元 canonical 源：优先来自 phase2a 语义文件，而不是 result.json 的 body_text。
+        """
+        if not result_dir:
+            return {}
+
+        base_dir = Path(result_dir)
+        candidate_paths: List[Path] = [
+            base_dir / "semantic_units_phase2a.json",
+            base_dir / "intermediates" / "semantic_units_phase2a.json",
+        ]
+        rpc_candidates = sorted(
+            (base_dir / "intermediates").glob("semantic_units_from_rpc_*.json"),
+            key=lambda path_item: path_item.stat().st_mtime,
+            reverse=True,
+        ) if (base_dir / "intermediates").exists() else []
+        if rpc_candidates:
+            candidate_paths.append(rpc_candidates[0])
+
+        canonical_by_unit: Dict[str, Dict[str, Any]] = {}
+        for path in candidate_paths:
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning(f"Failed to load concrete canonical payload: path={path}, err={exc}")
+                continue
+
+            for unit in self._flatten_semantic_units_payload(payload):
+                unit_id = str(unit.get("unit_id", "") or "").strip()
+                if not unit_id:
+                    continue
+                knowledge_type = self._normalize_knowledge_type(unit.get("knowledge_type"))
+                if knowledge_type != "concrete":
+                    continue
+                raw_segments = unit.get("_vl_concrete_segments", unit.get("vl_concrete_segments", []))
+                vl_segments = raw_segments if isinstance(raw_segments, list) else []
+                main_content_blocks: List[str] = []
+                for segment in vl_segments:
+                    if not isinstance(segment, dict):
+                        continue
+                    main_content = str(segment.get("main_content", "") or "").strip()
+                    if main_content:
+                        main_content_blocks.append(main_content)
+
+                canonical_body = "\n\n".join(main_content_blocks).strip()
+                if not canonical_body:
+                    canonical_body = str(
+                        unit.get("full_text")
+                        or unit.get("text")
+                        or unit.get("body_text")
+                        or ""
+                    ).strip()
+                if not canonical_body:
+                    continue
+                canonical_by_unit[unit_id] = {
+                    "body_text": canonical_body,
+                    "vl_concrete_segments": list(vl_segments),
+                    "source_path": str(path),
+                }
+            if canonical_by_unit:
+                logger.info(
+                    f"Concrete canonical payload loaded: path={path}, units={len(canonical_by_unit)}"
+                )
+                return canonical_by_unit
+        return canonical_by_unit
+
+    def _sync_concrete_canonical_into_result_payload(
+        self,
+        payload: Any,
+        canonical_by_unit: Dict[str, Dict[str, Any]],
+    ) -> bool:
+        if not isinstance(payload, dict) or not canonical_by_unit:
+            return False
+
+        changed = False
+
+        def _apply(unit_node: Any) -> bool:
+            if not isinstance(unit_node, dict):
+                return False
+            unit_id = str(unit_node.get("unit_id", "") or "").strip()
+            if not unit_id:
+                return False
+            if self._normalize_knowledge_type(unit_node.get("knowledge_type")) != "concrete":
+                return False
+            canonical = canonical_by_unit.get(unit_id, {})
+            if not isinstance(canonical, dict) or not canonical:
+                return False
+
+            local_changed = False
+            canonical_body = str(canonical.get("body_text", "") or "").strip()
+            if canonical_body and str(unit_node.get("body_text", "") or "").strip() != canonical_body:
+                unit_node["body_text"] = canonical_body
+                local_changed = True
+
+            canonical_segments = canonical.get("vl_concrete_segments")
+            if isinstance(canonical_segments, list):
+                current_segments = unit_node.get("_vl_concrete_segments")
+                if current_segments != canonical_segments:
+                    unit_node["_vl_concrete_segments"] = list(canonical_segments)
+                    local_changed = True
+            return local_changed
+
+        raw_groups = payload.get("knowledge_groups", [])
+        if isinstance(raw_groups, list):
+            for group in raw_groups:
+                if not isinstance(group, dict):
+                    continue
+                units = group.get("units", [])
+                if not isinstance(units, list):
+                    continue
+                for unit in units:
+                    if _apply(unit):
+                        changed = True
+
+        raw_sections = payload.get("sections", [])
+        if isinstance(raw_sections, list):
+            for section in raw_sections:
+                if _apply(section):
+                    changed = True
+
+        return changed
     
     @property
     def enabled(self) -> bool:
@@ -833,6 +990,17 @@ class MarkdownEnhancer:
         self._markdown_dir = os.path.abspath(markdown_dir) if markdown_dir else None
         self._result_dir = str(Path(result_json_path).resolve().parent)
         self._prepare_llm_trace_output()
+        concrete_canonical_by_unit = self._load_concrete_canonical_by_unit(self._result_dir)
+        if concrete_canonical_by_unit:
+            try:
+                if self._sync_concrete_canonical_into_result_payload(data, concrete_canonical_by_unit):
+                    with open(result_json_path, "w", encoding="utf-8") as file_obj:
+                        json.dump(data, file_obj, ensure_ascii=False, indent=2)
+                    logger.info(
+                        f"Synced concrete canonical fields into result.json: units={len(concrete_canonical_by_unit)}"
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to sync concrete canonical fields into result.json: {exc}")
 
         raw_groups = data.get("knowledge_groups", [])
         sections = data.get("sections", [])
@@ -923,6 +1091,12 @@ class MarkdownEnhancer:
                 if not isinstance(section, dict):
                     continue
                 unit_id = str(section.get("unit_id", "") or "").strip()
+                normalized_kt = self._normalize_knowledge_type(section.get("knowledge_type"))
+                concrete_canonical = (
+                    concrete_canonical_by_unit.get(unit_id, {})
+                    if normalized_kt == "concrete"
+                    else {}
+                )
                 materials = section.get("materials", {})
                 if not isinstance(materials, dict):
                     materials = {}
@@ -945,7 +1119,11 @@ class MarkdownEnhancer:
                     knowledge_type=str(section.get("knowledge_type", "") or ""),
                     level=2,
                     parent_id=None,
-                    original_body=str(section.get("body_text", "") or ""),
+                    original_body=str(
+                        concrete_canonical.get("body_text")
+                        or section.get("body_text")
+                        or ""
+                    ),
                     screenshots=filtered_screenshots,
                     screenshot_items=filtered_screenshot_items,
                     augment_screenshot_items=augment_screenshot_items,
@@ -958,6 +1136,19 @@ class MarkdownEnhancer:
                     group_id=group_id,
                     group_name=group_name,
                     group_reason=group_reason,
+                    vl_concrete_segments=(
+                        concrete_canonical.get("vl_concrete_segments")
+                        if isinstance(concrete_canonical.get("vl_concrete_segments"), list)
+                        else (
+                            section.get("_vl_concrete_segments")
+                            if isinstance(section.get("_vl_concrete_segments"), list)
+                            else (
+                                section.get("vl_concrete_segments")
+                                if isinstance(section.get("vl_concrete_segments"), list)
+                                else []
+                            )
+                        )
+                    ),
                 )
 
                 if enhanced.video_clip and enhanced.video_clip not in enhanced.video_clips:
@@ -1003,23 +1194,18 @@ class MarkdownEnhancer:
                     sec.structured_content = ""
                     return idx
 
-                if normalized_kt in {"abstract", "concrete"}:
-                    # abstract/concrete: render structured body only.
+                if normalized_kt == "abstract":
+                    # 仅 abstract 使用 structured LLM。
                     sec.enhanced_body = sec.original_body
                     sec.structured_content = await self._build_structured_text_for_concept(
                         sec, prev_title=prev_title, next_title=next_title
                     )
                     return idx
 
-                if normalized_kt == "process":
-                    # process（非 tutorial_stepwise）走与 abstract/concrete 一致的结构化插图链路：
-                    # 1) DeepSeek 结构化正文
-                    # 2) 【imgneeded_{img_id}】占位替换
-                    # 3) 缺失图片兜底追加
+                if normalized_kt in {"concrete", "process"}:
+                    # concrete/process 禁用 structured LLM，统一走确定性规则链路。
                     sec.enhanced_body = sec.original_body
-                    sec.structured_content = await self._build_structured_text_for_concept(
-                        sec, prev_title=prev_title, next_title=next_title
-                    )
+                    sec.structured_content = self._build_deterministic_text_for_non_abstract(sec)
                     return idx
 
                 if self._combine_llm_calls:
@@ -1687,6 +1873,7 @@ class MarkdownEnhancer:
             normalized.append(
                 {
                     "img_id": img_id,
+                    "source_id": str(raw.get("source_id") or "").strip(),
                     "img_path": img_path,
                     "img_description": img_description,
                     "frame_reason": frame_reason,
@@ -2274,10 +2461,38 @@ class MarkdownEnhancer:
         return paths
 
     @staticmethod
-    def _replace_tutorial_keyframe_placeholders(content: str, keyframe_embeds: List[str]) -> str:
+    def _normalize_keyframe_id(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        matched = re.search(r"KEYFRAME[_\-\s]*(\d+)", text, flags=re.IGNORECASE)
+        if matched:
+            return f"KEYFRAME_{int(matched.group(1))}"
+        if re.fullmatch(r"\d+", text):
+            return f"KEYFRAME_{int(text)}"
+        return ""
+
+    @classmethod
+    def _replace_tutorial_keyframe_placeholders(
+        cls,
+        content: str,
+        keyframe_embeds: List[str],
+        *,
+        keyframe_embed_map: Optional[Dict[str, str]] = None,
+    ) -> str:
         if not content:
             return content
-        if not keyframe_embeds:
+        normalized_map: Dict[str, str] = {}
+        for raw_key, embed in (keyframe_embed_map or {}).items():
+            normalized_key = cls._normalize_keyframe_id(raw_key)
+            if not normalized_key:
+                continue
+            embed_text = str(embed or "").strip()
+            if not embed_text:
+                continue
+            if normalized_key not in normalized_map:
+                normalized_map[normalized_key] = embed_text
+        if not keyframe_embeds and not normalized_map:
             return re.sub(r"\[\s*KEYFRAME_\d+\s*\]", "", content, flags=re.IGNORECASE)
 
         def _replace(match: re.Match) -> str:
@@ -2285,6 +2500,9 @@ class MarkdownEnhancer:
                 idx = int(match.group(1))
             except Exception:
                 idx = 0
+            keyframe_id = f"KEYFRAME_{idx}" if idx > 0 else ""
+            if keyframe_id and keyframe_id in normalized_map:
+                return normalized_map[keyframe_id]
             if idx <= 0 or idx > len(keyframe_embeds):
                 return ""
             return keyframe_embeds[idx - 1]
@@ -2311,6 +2529,329 @@ class MarkdownEnhancer:
 
         text = re.sub(r"【\s*imgneeded_[^】]*】", _replace, content, flags=re.IGNORECASE)
         return re.sub(r"\[\s*IMG:[^\]]+\]", _replace, text, flags=re.IGNORECASE)
+
+    def _build_concrete_keyframe_embeds(self, screenshot_items: List[Dict[str, Any]]) -> List[str]:
+        if not screenshot_items:
+            return []
+
+        ordered_items: List[Tuple[int, int, float, int, Dict[str, Any]]] = []
+        for idx, item in enumerate(screenshot_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            img_path = str(item.get("img_path", "") or "").strip()
+            if not img_path:
+                continue
+
+            sort_group = 3
+            sort_idx = idx
+            timestamp_sort = float("inf")
+
+            source_id = str(item.get("source_id") or "").strip()
+            source_match = re.search(r"_key_(\d+)", source_id, flags=re.IGNORECASE)
+            if source_match:
+                sort_group = 0
+                sort_idx = int(source_match.group(1))
+            else:
+                img_id = str(item.get("img_id") or "").strip()
+                img_match = re.search(r"_img_(\d+)", img_id, flags=re.IGNORECASE)
+                if img_match:
+                    sort_group = 1
+                    sort_idx = int(img_match.group(1))
+                else:
+                    try:
+                        timestamp_sort = float(item.get("timestamp_sec"))
+                        if timestamp_sort >= 0:
+                            sort_group = 2
+                            sort_idx = int(timestamp_sort * 1000)
+                    except Exception:
+                        pass
+
+            ordered_items.append((sort_group, sort_idx, timestamp_sort, idx, item))
+
+        ordered_items.sort(key=lambda entry: (entry[0], entry[1], entry[2], entry[3]))
+
+        embeds: List[str] = []
+        seen_paths: set[str] = set()
+        for _, _, _, _, item in ordered_items:
+            img_path = str(item.get("img_path", "") or "").strip()
+            normalized_path = self._normalize_embed_path(img_path)
+            if normalized_path and normalized_path in seen_paths:
+                continue
+            frame_reason = str(item.get("frame_reason", "") or "").strip()
+            embed = self._format_obsidian_embed(img_path, alias=frame_reason)
+            if not embed:
+                continue
+            embeds.append(embed)
+            if normalized_path:
+                seen_paths.add(normalized_path)
+        return embeds
+
+    @staticmethod
+    def _sort_concrete_segments(section: EnhancedSection) -> List[Dict[str, Any]]:
+        raw_segments = section.vl_concrete_segments or []
+        if not isinstance(raw_segments, list):
+            return []
+
+        sortable: List[Tuple[int, int, Dict[str, Any]]] = []
+        for index, segment in enumerate(raw_segments, start=1):
+            if not isinstance(segment, dict):
+                continue
+            segment_id_raw = segment.get("segment_id", segment.get("id", index))
+            try:
+                segment_id = int(float(segment_id_raw))
+            except Exception:
+                segment_id = index
+            if segment_id <= 0:
+                segment_id = index
+            sortable.append((segment_id, index, segment))
+        sortable.sort(key=lambda item: (item[0], item[1]))
+        return [item[2] for item in sortable]
+
+    def _resolve_concrete_base_text(self, section: EnhancedSection) -> str:
+        fallback_text = str(section.original_body or "").strip()
+        if self._normalize_knowledge_type(section.knowledge_type) != "concrete":
+            return fallback_text
+
+        segments = self._sort_concrete_segments(section)
+        if not segments:
+            return fallback_text
+
+        main_content_blocks: List[str] = []
+        for segment in segments:
+            main_content = str(segment.get("main_content", "") or "").strip()
+            if main_content:
+                main_content_blocks.append(main_content)
+        if not main_content_blocks:
+            return fallback_text
+        return "\n\n".join(main_content_blocks).strip()
+
+    @classmethod
+    def _extract_keyframe_id_from_source_id(cls, source_id: Any) -> str:
+        source_text = str(source_id or "").strip()
+        if not source_text:
+            return ""
+        matched = re.search(r"_key_(\d+)", source_text, flags=re.IGNORECASE)
+        if not matched:
+            return ""
+        return cls._normalize_keyframe_id(f"KEYFRAME_{matched.group(1)}")
+
+    def _build_concrete_keyframe_embeds_bundle_by_segment_order(
+        self,
+        section: EnhancedSection,
+        screenshot_items: List[Dict[str, Any]],
+    ) -> Tuple[List[str], Dict[str, str]]:
+        segments = self._sort_concrete_segments(section)
+        if not segments or not screenshot_items:
+            return [], {}
+
+        available: List[Dict[str, Any]] = []
+        for idx, item in enumerate(screenshot_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            img_path = str(item.get("img_path", "") or "").strip()
+            if not img_path:
+                continue
+            timestamp_sort = float("inf")
+            try:
+                timestamp_value = float(item.get("timestamp_sec"))
+                if timestamp_value >= 0:
+                    timestamp_sort = timestamp_value
+            except Exception:
+                pass
+            keyframe_id = self._normalize_keyframe_id(
+                item.get("keyframe_id", item.get("keyframeId"))
+            )
+            if not keyframe_id:
+                keyframe_id = self._extract_keyframe_id_from_source_id(item.get("source_id"))
+            available.append(
+                {
+                    "idx": idx,
+                    "item": item,
+                    "img_path": img_path,
+                    "normalized_path": self._normalize_embed_path(img_path),
+                    "timestamp": timestamp_sort,
+                    "keyframe_id": keyframe_id,
+                }
+            )
+
+        if not available:
+            return [], {}
+
+        def _pop_entry(entry_index: int) -> Dict[str, Any]:
+            return available.pop(entry_index)
+
+        def _take_by_keyframe_id(keyframe_id: str) -> Optional[Dict[str, Any]]:
+            normalized = self._normalize_keyframe_id(keyframe_id)
+            if not normalized:
+                return None
+            for idx, entry in enumerate(available):
+                if str(entry.get("keyframe_id", "") or "").upper() == normalized:
+                    return _pop_entry(idx)
+            return None
+
+        def _take_by_path(path_text: str) -> Optional[Dict[str, Any]]:
+            normalized = self._normalize_embed_path(path_text)
+            path_name = Path(str(path_text or "")).name
+            for idx, entry in enumerate(available):
+                if normalized and entry["normalized_path"] == normalized:
+                    return _pop_entry(idx)
+            if path_name:
+                for idx, entry in enumerate(available):
+                    if Path(entry["img_path"]).name == path_name:
+                        return _pop_entry(idx)
+            return None
+
+        def _take_by_timestamp(timestamp_sec: float) -> Optional[Dict[str, Any]]:
+            best_index = -1
+            best_delta = float("inf")
+            for idx, entry in enumerate(available):
+                entry_ts = float(entry.get("timestamp", float("inf")))
+                if entry_ts == float("inf"):
+                    continue
+                delta = abs(entry_ts - timestamp_sec)
+                if delta < best_delta:
+                    best_delta = delta
+                    best_index = idx
+            if best_index < 0:
+                return None
+            return _pop_entry(best_index)
+
+        ordered_embeds: List[str] = []
+        embed_map: Dict[str, str] = {}
+        seen_paths: set[str] = set()
+
+        for segment in segments:
+            keyframes = segment.get("instructional_keyframes")
+            if not isinstance(keyframes, list):
+                continue
+            for keyframe in keyframes:
+                candidate: Optional[Dict[str, Any]] = None
+                frame_reason = ""
+                explicit_path = ""
+                timestamp_sec = None
+                keyframe_id = ""
+                if isinstance(keyframe, dict):
+                    frame_reason = str(keyframe.get("frame_reason", "") or "").strip()
+                    keyframe_id = self._normalize_keyframe_id(
+                        keyframe.get("keyframe_id", keyframe.get("keyframeId"))
+                    )
+                    explicit_path = str(
+                        keyframe.get("image_path")
+                        or keyframe.get("image_file")
+                        or keyframe.get("img_path")
+                        or ""
+                    ).strip()
+                    try:
+                        timestamp_sec = float(keyframe.get("timestamp_sec"))
+                    except Exception:
+                        timestamp_sec = None
+
+                if keyframe_id:
+                    candidate = _take_by_keyframe_id(keyframe_id)
+
+                if explicit_path:
+                    candidate = candidate or _take_by_path(explicit_path)
+                    if candidate is None:
+                        candidate = {
+                            "item": {
+                                "img_path": explicit_path,
+                                "frame_reason": frame_reason,
+                            },
+                            "img_path": explicit_path,
+                            "normalized_path": self._normalize_embed_path(explicit_path),
+                            "keyframe_id": keyframe_id,
+                        }
+
+                if candidate is None and timestamp_sec is not None:
+                    candidate = _take_by_timestamp(timestamp_sec)
+
+                if candidate is None and available:
+                    candidate = _pop_entry(0)
+
+                if candidate is None:
+                    continue
+
+                candidate_item = dict(candidate.get("item", {}) or {})
+                img_path = str(candidate_item.get("img_path", "") or "").strip()
+                if not img_path:
+                    img_path = str(candidate.get("img_path", "") or "").strip()
+                if not img_path:
+                    continue
+                normalized_path = self._normalize_embed_path(img_path)
+                if normalized_path and normalized_path in seen_paths:
+                    continue
+                candidate_keyframe_id = self._normalize_keyframe_id(
+                    candidate_item.get("keyframe_id", candidate.get("keyframe_id"))
+                )
+                if not keyframe_id:
+                    keyframe_id = candidate_keyframe_id
+                alias = frame_reason or str(candidate_item.get("frame_reason", "") or "").strip()
+                embed = self._format_obsidian_embed(img_path, alias=alias)
+                if not embed:
+                    continue
+                ordered_embeds.append(embed)
+                if keyframe_id and keyframe_id not in embed_map:
+                    embed_map[keyframe_id] = embed
+                if normalized_path:
+                    seen_paths.add(normalized_path)
+
+        return ordered_embeds, embed_map
+
+    def _build_concrete_keyframe_embeds_by_segment_order(
+        self,
+        section: EnhancedSection,
+        screenshot_items: List[Dict[str, Any]],
+    ) -> List[str]:
+        ordered, _ = self._build_concrete_keyframe_embeds_bundle_by_segment_order(
+            section,
+            screenshot_items,
+        )
+        return ordered
+
+    @staticmethod
+    def _build_sequential_keyframe_embed_map(keyframe_embeds: List[str]) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        for index, embed in enumerate(keyframe_embeds, start=1):
+            embed_text = str(embed or "").strip()
+            if not embed_text:
+                continue
+            mapping[f"KEYFRAME_{index}"] = embed_text
+        return mapping
+
+    def _build_concrete_keyframe_embeds_for_section(
+        self,
+        section: EnhancedSection,
+        screenshot_items: List[Dict[str, Any]],
+    ) -> Tuple[List[str], Dict[str, str]]:
+        ordered, ordered_map = self._build_concrete_keyframe_embeds_bundle_by_segment_order(
+            section,
+            screenshot_items,
+        )
+        # concrete 单元只保留“instructional_keyframes 顺序回填”单路径，禁用其他回填分支。
+        if self._normalize_knowledge_type(section.knowledge_type) == "concrete":
+            merged_map = self._build_sequential_keyframe_embed_map(ordered)
+            for keyframe_id, embed in ordered_map.items():
+                merged_map[keyframe_id] = embed
+            return ordered, merged_map
+
+        fallback = self._build_concrete_keyframe_embeds(screenshot_items)
+        if not ordered:
+            return fallback, self._build_sequential_keyframe_embed_map(fallback)
+
+        merged = list(ordered)
+        seen_paths = self._extract_obsidian_embed_paths("\n".join(merged))
+        for embed in fallback:
+            embed_paths = self._extract_obsidian_embed_paths(embed)
+            embed_path = next(iter(embed_paths), "")
+            if embed_path and embed_path in seen_paths:
+                continue
+            merged.append(embed)
+            if embed_path:
+                seen_paths.add(embed_path)
+        merged_map = self._build_sequential_keyframe_embed_map(merged)
+        for keyframe_id, embed in ordered_map.items():
+            merged_map[keyframe_id] = embed
+        return merged, merged_map
 
     def _append_missing_image_embeds(self, content: str, screenshot_items: List[Dict[str, Any]]) -> str:
         if not screenshot_items:
@@ -2348,13 +2889,69 @@ class MarkdownEnhancer:
             base += "\n"
         return base + "\n" + "Supplemental images:\n" + "\n".join(missing)
 
+    def _build_deterministic_text_for_non_abstract(self, section: EnhancedSection) -> str:
+        """
+        concrete/process 的确定性正文渲染：
+        - 不调用 structured LLM；
+        - 仅做占位符替换与图片回填兜底。
+        """
+        base_text = self._resolve_concrete_base_text(section)
+        normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
+        image_items = self._build_concept_image_items(section)
+        has_keyframe_placeholder = bool(
+            re.search(r"\[\s*KEYFRAME_\d+\s*\]", base_text, flags=re.IGNORECASE)
+        )
+
+        if normalized_kt == "concrete" and has_keyframe_placeholder:
+            keyframe_embeds, keyframe_embed_map = self._build_concrete_keyframe_embeds_for_section(
+                section,
+                image_items,
+            )
+            structured = self._replace_tutorial_keyframe_placeholders(
+                base_text,
+                keyframe_embeds,
+                keyframe_embed_map=keyframe_embed_map,
+            )
+            structured = self._replace_image_placeholders(structured, image_items)
+            structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
+            structured = self._strip_imgneeded_placeholders(structured).strip()
+            return structured or base_text
+
+        keyframe_embeds, _ = self._build_concrete_keyframe_embeds_for_section(section, image_items)
+        structured = base_text
+        structured = self._replace_image_placeholders(structured, image_items)
+        structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
+        structured = self._strip_imgneeded_placeholders(structured).strip()
+        if not image_items:
+            return structured or base_text
+        return self._append_missing_image_embeds(structured or base_text, image_items)
+
     async def _build_structured_text_for_concept(
         self, section: EnhancedSection,
         prev_title: str = "", next_title: str = "",
     ) -> str:
-        base_text = (section.original_body or "").strip()
+        base_text = self._resolve_concrete_base_text(section)
         normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
         image_items = self._build_concept_image_items(section)
+        has_keyframe_placeholder = bool(
+            re.search(r"\[\s*KEYFRAME_\d+\s*\]", base_text, flags=re.IGNORECASE)
+        )
+
+        # concrete + KEYFRAME 走确定性直通：直接用 Phase2A main_content 回填，不做结构化改写。
+        if normalized_kt == "concrete" and has_keyframe_placeholder:
+            keyframe_embeds, keyframe_embed_map = self._build_concrete_keyframe_embeds_for_section(
+                section,
+                image_items,
+            )
+            structured = self._replace_tutorial_keyframe_placeholders(
+                base_text,
+                keyframe_embeds,
+                keyframe_embed_map=keyframe_embed_map,
+            )
+            structured = self._replace_image_placeholders(structured, image_items)
+            structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
+            structured = self._strip_imgneeded_placeholders(structured).strip()
+            return structured or base_text
 
         # concrete 走“保图结构化”链路：跳过 img-desc 增量补全，直接做占位符回填。
         if normalized_kt != "concrete":
@@ -2487,7 +3084,11 @@ class MarkdownEnhancer:
                     continue
                 embed = self._format_obsidian_embed(image_path, alias=frame_reason)
                 if embed:
-                    keyframe_embeds.append(embed)
+                    caption = re.sub(r"[\r\n]+", " ", frame_reason).strip()
+                    if caption:
+                        keyframe_embeds.append(f"- {caption}: {embed}")
+                    else:
+                        keyframe_embeds.append(embed)
                     if normalized_image_path:
                         seen_keyframe_paths.add(normalized_image_path)
 

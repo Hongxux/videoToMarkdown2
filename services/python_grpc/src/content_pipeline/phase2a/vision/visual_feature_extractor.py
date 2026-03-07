@@ -17,6 +17,8 @@ import concurrent.futures
 import asyncio
 import os
 import gc
+import json
+import time
 import hashlib
 from typing import List, Dict, Tuple, Optional, Any
 from dataclasses import dataclass
@@ -24,6 +26,7 @@ from pathlib import Path
 from collections import OrderedDict
 from multiprocessing import shared_memory
 import threading
+from contextlib import contextmanager
 from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
 from services.python_grpc.src.content_pipeline.infra.runtime.resource_utils import ResourceOrchestrator
 from services.python_grpc.src.content_pipeline.infra.runtime.dynamic_decision_engine import DynamicDecisionEngine, GlobalAnalysisCache
@@ -121,50 +124,208 @@ class VisualFeatures:
 _VISUAL_PROCESS_POOL = None
 _CLIP_MODEL = None
 _CLIP_LOCK = threading.Lock()
+_CLIP_MODEL_NAME = "clip-ViT-B-32"
+_CLIP_STATE_FILENAME = "clip_vit_b32_probe_state.json"
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = str(os.getenv(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "y", "t"}
+
+
+def _clip_retry_cooldown_sec() -> int:
+    raw = str(os.getenv("MODULE2_CLIP_RETRY_COOLDOWN_SEC", "21600") or "").strip()
+    try:
+        value = int(raw)
+    except Exception:
+        return 21600
+    return max(0, value)
+
+
+def _resolve_clip_probe_state_path() -> Path:
+    env_path = str(os.getenv("MODULE2_CLIP_PROBE_STATE_PATH", "") or "").strip()
+    base_path = Path(env_path) if env_path else Path("var") / "intermediates" / _CLIP_STATE_FILENAME
+    if not base_path.is_absolute():
+        base_path = Path.cwd() / base_path
+    return base_path
+
+
+def _load_clip_probe_state() -> Dict[str, Any]:
+    path = _resolve_clip_probe_state_path()
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+        if isinstance(data, dict):
+            return data
+    except Exception as exc:
+        logger.warning(
+            "Failed to read CLIP probe state: path=%s, error=%s: %s",
+            path,
+            type(exc).__name__,
+            exc,
+        )
+    return {}
+
+
+def _save_clip_probe_state(status: str, error_message: str = "") -> None:
+    path = _resolve_clip_probe_state_path()
+    payload = {
+        "schema_version": 1,
+        "model_name": _CLIP_MODEL_NAME,
+        "status": status,
+        "updated_at_epoch": int(time.time()),
+        "updated_at_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "error_message": str(error_message or "")[:500],
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(temp_path, "w", encoding="utf-8") as file_obj:
+            json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+        os.replace(temp_path, path)
+    except Exception as exc:
+        logger.warning(
+            "Failed to write CLIP probe state: path=%s, error=%s: %s",
+            path,
+            type(exc).__name__,
+            exc,
+        )
+
+
+def _should_skip_clip_reload_after_failure(state: Dict[str, Any], now_epoch: float) -> bool:
+    if str(state.get("status", "") or "").strip().lower() != "failed":
+        return False
+    try:
+        last_epoch = float(state.get("updated_at_epoch", 0) or 0)
+    except Exception:
+        return False
+    cooldown_sec = _clip_retry_cooldown_sec()
+    if cooldown_sec <= 0:
+        return False
+    return (now_epoch - last_epoch) < cooldown_sec
+
+
+@contextmanager
+def _temporary_hf_offline(enabled: bool):
+    if not enabled:
+        yield
+        return
+    previous_hf = os.environ.get("HF_HUB_OFFLINE")
+    previous_tf = os.environ.get("TRANSFORMERS_OFFLINE")
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    try:
+        yield
+    finally:
+        if previous_hf is None:
+            os.environ.pop("HF_HUB_OFFLINE", None)
+        else:
+            os.environ["HF_HUB_OFFLINE"] = previous_hf
+        if previous_tf is None:
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+        else:
+            os.environ["TRANSFORMERS_OFFLINE"] = previous_tf
+
+
+def _load_clip_model(local_files_only: bool):
+    original_loader = transformers.CLIPProcessor.from_pretrained
+
+    def _slow_clip_processor_loader(*args, **kwargs):
+        kwargs.setdefault("use_fast", False)
+        if local_files_only:
+            kwargs.setdefault("local_files_only", True)
+        return original_loader(*args, **kwargs)
+
+    model_kwargs: Dict[str, Any] = {"device": "cpu"}
+    if local_files_only:
+        model_kwargs["local_files_only"] = True
+
+    try:
+        transformers.CLIPProcessor.from_pretrained = _slow_clip_processor_loader
+        with _temporary_hf_offline(enabled=local_files_only):
+            try:
+                return SentenceTransformer(_CLIP_MODEL_NAME, **model_kwargs)
+            except TypeError as exc:
+                if local_files_only and "local_files_only" in str(exc):
+                    model_kwargs.pop("local_files_only", None)
+                    return SentenceTransformer(_CLIP_MODEL_NAME, **model_kwargs)
+                raise
+    finally:
+        transformers.CLIPProcessor.from_pretrained = original_loader
 
 def _get_clip_model():
     """
-    执逻辑?
-    1) 准必上下文与参数?
-    2) 执核心处理并返回结果?
-    实现方式：过内部函数组合与条件判斮现?
-    核心价：封逻辑单元，提升用与叻护?
-    决策逻辑?
-    - 条件：not HAS_CLIP
-    - 条件：_CLIP_MODEL is None
-    - 条件：_CLIP_MODEL != 'FAILED'
-    依据来源（证捓）：
-    - 阈常量：HAS_CLIP, _CLIP_MODEL?
-    输入参数?
-    - 无?
-    输出参数?
-    - 函数计算/封后的结果对象?"""
+    执行逻辑：
+    1) 先检查 CLIP 依赖是否可用，不可用时直接返回空结果。
+    2) 在全局锁内按照“内存缓存 -> 持久状态 -> 实际加载”的顺序获取模型实例。
+    实现方式：复用持久化 probe 状态、失败冷却时间和本地优先加载策略，减少重复初始化与无意义远程探测。
+    核心价值：把模型加载副作用收敛到单一入口，降低并发场景下的重复加载与失败风暴。
+    决策逻辑：
+    - 条件：`not HAS_CLIP` 时直接返回 `None`
+    - 条件：`_CLIP_MODEL is None` 时才尝试初始化
+    - 条件：最近一次持久化状态为失败且仍在冷却期时跳过重试
+    输入参数：
+    - 无
+    输出参数：
+    - `SentenceTransformer` 实例；若不可用则返回 `None`
+    """
     global _CLIP_MODEL
-    if not HAS_CLIP: return None
-    
+    if not HAS_CLIP:
+        return None
+
     with _CLIP_LOCK:
         if _CLIP_MODEL is None:
+            probe_state = _load_clip_probe_state()
+            now_epoch = time.time()
+            if _should_skip_clip_reload_after_failure(probe_state, now_epoch):
+                cooldown_sec = _clip_retry_cooldown_sec()
+                last_epoch = float(probe_state.get("updated_at_epoch", 0) or 0)
+                elapsed = max(0.0, now_epoch - last_epoch)
+                remaining_sec = max(0, int(cooldown_sec - elapsed))
+                logger.info(
+                    "Skip CLIP reload because persisted failure is still cooling down: remaining_sec=%s, state_path=%s",
+                    remaining_sec,
+                    _resolve_clip_probe_state_path(),
+                )
+                _CLIP_MODEL = "FAILED"
+                return None
+
+            prefer_local_only = str(probe_state.get("status", "") or "").strip().lower() == "ready"
+            allow_remote_recovery = _env_flag(
+                "MODULE2_CLIP_ALLOW_REMOTE_RECOVERY_ON_LOCAL_MISS",
+                default=False,
+            )
             try:
-                # 🚀 V5: Using lightweight CLIP. Explicit device='cpu' to avoid meta-tensor issues in parallel envs.
-                # If you have GPU, SentenceTransformer usually handles it, but 'cpu' is safest for sidecar stability.
-                logger.info("📡 Loading CLIP model (Global Singleton)...")
-                _original_clip_processor_loader = transformers.CLIPProcessor.from_pretrained
-
-                def _slow_clip_processor_loader(*args, **kwargs):
-                    kwargs.setdefault("use_fast", False)
-                    return _original_clip_processor_loader(*args, **kwargs)
-
+                logger.info("开始加载 CLIP 模型（全局单例）。")
+                if prefer_local_only:
+                    logger.info(
+                        "Detected persisted CLIP ready record; using local-only loading to skip remote probing. state_path=%s",
+                        _resolve_clip_probe_state_path(),
+                    )
                 try:
-                    transformers.CLIPProcessor.from_pretrained = _slow_clip_processor_loader
-                    _CLIP_MODEL = SentenceTransformer('clip-ViT-B-32', device='cpu')
-                finally:
-                    transformers.CLIPProcessor.from_pretrained = _original_clip_processor_loader
-                logger.info("?V5: CLIP model loaded successfully.")
+                    _CLIP_MODEL = _load_clip_model(local_files_only=prefer_local_only)
+                except Exception:
+                    if prefer_local_only and allow_remote_recovery:
+                        logger.warning(
+                            "Local-only CLIP loading failed; remote recovery is enabled, retry with network."
+                        )
+                        _CLIP_MODEL = _load_clip_model(local_files_only=False)
+                    else:
+                        raise
+                _save_clip_probe_state(status="ready")
+                logger.info("CLIP 模型加载成功。")
             except Exception as e:
                 logger.warning(f"[V5] Failed to load CLIP model: {e}")
-                # Don't try again if it fails once to avoid flooding logs
+                _save_clip_probe_state(
+                    status="failed",
+                    error_message=f"{type(e).__name__}: {e}",
+                )
                 _CLIP_MODEL = "FAILED"
-    
+
     return _CLIP_MODEL if _CLIP_MODEL != "FAILED" else None
 
 _VISUAL_PROCESS_POOL = None

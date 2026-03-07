@@ -1,8 +1,37 @@
 import asyncio
+import json
 import logging
 from pathlib import Path
 
 from services.python_grpc.src.content_pipeline.infra.runtime import vl_ffmpeg_utils as ffmpeg_utils
+
+
+def test_probe_iframe_timestamps_honors_asymmetric_window(monkeypatch):
+    captured = {}
+
+    def _fake_resolve_ffprobe_bin():
+        return "ffprobe"
+
+    async def _fake_run_subprocess(command):
+        captured["command"] = list(command)
+        return 0, json.dumps({"frames": []}), ""
+
+    monkeypatch.setattr(ffmpeg_utils, "resolve_ffprobe_bin", _fake_resolve_ffprobe_bin)
+    monkeypatch.setattr(ffmpeg_utils, "_run_subprocess", _fake_run_subprocess)
+
+    timestamps = asyncio.run(
+        ffmpeg_utils._probe_iframe_timestamps(
+            video_path="dummy.mp4",
+            target_timestamp_sec=10.0,
+            search_window_sec=0.2,
+            search_before_sec=0.0,
+            search_after_sec=0.35,
+        )
+    )
+
+    assert timestamps == []
+    interval_index = captured["command"].index("-read_intervals") + 1
+    assert captured["command"][interval_index] == "10.000000%10.350000"
 
 
 def test_export_keyframe_with_ffmpeg_selects_sharpest_iframe(monkeypatch, tmp_path):

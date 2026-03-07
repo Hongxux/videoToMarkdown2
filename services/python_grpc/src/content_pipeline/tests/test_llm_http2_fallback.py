@@ -1,4 +1,6 @@
 import asyncio
+import httpx
+from tenacity import RetryCallState, Retrying
 
 from services.python_grpc.src.content_pipeline.infra.llm import llm_client
 
@@ -45,3 +47,41 @@ def test_pool_manager_fallback_to_http11_when_h2_missing(monkeypatch):
     assert calls == [True, False]
     assert client.kwargs["http2"] is False
 
+
+def test_is_retryable_llm_exception_supports_httpx_connect_timeout():
+    assert llm_client._is_retryable_llm_exception(httpx.ConnectError("connect failed")) is True
+    assert llm_client._is_retryable_llm_exception(httpx.ReadTimeout("timeout")) is True
+    assert llm_client._is_retryable_llm_exception(ValueError("bad request")) is False
+
+
+def test_is_retryable_llm_exception_supports_openai_wrapped_errors(monkeypatch):
+    class _FakeAPIConnectionError(Exception):
+        pass
+
+    monkeypatch.setattr(
+        llm_client,
+        "_load_openai_retry_exceptions",
+        lambda: (_FakeAPIConnectionError,),
+    )
+
+    assert llm_client._is_retryable_llm_exception(_FakeAPIConnectionError("Connection error.")) is True
+
+
+def test_build_llm_retry_wait_grows_exponentially_with_jitter():
+    wait_strategy = llm_client._build_llm_retry_wait(
+        initial_backoff_seconds=2.0,
+        max_backoff_seconds=10.0,
+        jitter_seconds=1.0,
+    )
+    retrying = Retrying(wait=wait_strategy)
+    state = RetryCallState(retrying, None, (), {})
+
+    delays = []
+    for attempt_number in (1, 2, 3, 4):
+        state.attempt_number = attempt_number
+        delays.append(retrying.wait(state))
+
+    assert 2.0 <= delays[0] <= 3.0
+    assert 4.0 <= delays[1] <= 5.0
+    assert 8.0 <= delays[2] <= 9.0
+    assert delays[3] == 10.0

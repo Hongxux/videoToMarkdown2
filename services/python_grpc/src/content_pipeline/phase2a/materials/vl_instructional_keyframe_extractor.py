@@ -4,6 +4,7 @@ Tutorial keyframe bbox normalization and enhanced crop utilities.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -480,6 +481,216 @@ def save_grid_overlay_image(
 
     output_image_path.parent.mkdir(parents=True, exist_ok=True)
     return bool(cv2.imwrite(str(output_image_path), rendered))
+
+
+def _resolve_top_banner_font(font_size: int):
+    from PIL import ImageFont  # type: ignore
+
+    candidate_paths: List[Path] = []
+    windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
+    candidate_paths.extend(
+        [
+            windir / "Fonts" / "msyhbd.ttc",
+            windir / "Fonts" / "msyh.ttc",
+            windir / "Fonts" / "msyhbd.ttf",
+            windir / "Fonts" / "msyh.ttf",
+            windir / "Fonts" / "simhei.ttf",
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"),
+            Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            Path("/usr/share/fonts/truetype/noto/NotoSansCJKsc-Bold.otf"),
+            Path("/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf"),
+            Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf"),
+            Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf"),
+        ]
+    )
+    for candidate in candidate_paths:
+        try:
+            if candidate.exists():
+                return ImageFont.truetype(str(candidate), size=max(1, int(font_size)))
+        except Exception:
+            continue
+    for fallback_name in (
+        "msyhbd.ttc",
+        "msyh.ttc",
+        "Microsoft YaHei UI Bold",
+        "Microsoft YaHei",
+        "Noto Sans CJK SC Bold",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC Bold",
+        "Source Han Sans SC",
+    ):
+        try:
+            return ImageFont.truetype(fallback_name, size=max(1, int(font_size)))
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _wrap_text_to_pixel_width(draw: Any, text: str, font: Any, max_width_px: int) -> List[str]:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if max_width_px <= 0:
+        return [normalized.strip()] if normalized.strip() else []
+
+    wrapped_lines: List[str] = []
+    for paragraph in normalized.split("\n"):
+        clean_paragraph = re.sub(r"\s+", " ", paragraph).strip()
+        if not clean_paragraph:
+            if wrapped_lines:
+                wrapped_lines.append("")
+            continue
+
+        current = ""
+        for ch in clean_paragraph:
+            candidate = f"{current}{ch}"
+            bbox = draw.textbbox((0, 0), candidate, font=font)
+            candidate_width = int(bbox[2] - bbox[0])
+            if candidate_width <= max_width_px or not current:
+                current = candidate
+                continue
+            wrapped_lines.append(current.strip())
+            current = "" if ch.isspace() else ch
+        if current.strip():
+            wrapped_lines.append(current.strip())
+    return wrapped_lines
+
+
+def _build_top_reason_banner_layout(
+    *,
+    image_width: int,
+    image_height: int,
+    box_width_ratio: float = 0.9,
+    top_margin_px: Optional[int] = None,
+    padding_y_px: Optional[int] = None,
+    padding_x_px: Optional[int] = None,
+    font_size_px: Optional[int] = None,
+) -> Dict[str, int]:
+    width = max(1, int(image_width))
+    height = max(1, int(image_height))
+    safe_box_width_ratio = max(0.2, min(1.0, float(box_width_ratio)))
+    box_width = max(1, int(round(width * safe_box_width_ratio)))
+    resolved_top_margin = max(0, int(top_margin_px)) if top_margin_px is not None else int(round(height * 0.05))
+    resolved_padding_y = max(0, int(padding_y_px)) if padding_y_px is not None else int(round(height * 0.02))
+    resolved_padding_x = max(0, int(padding_x_px)) if padding_x_px is not None else int(round(width * 0.02))
+    resolved_font_size = max(1, int(font_size_px)) if font_size_px is not None else max(1, int(round(height / 40.0)))
+    return {
+        "box_width": box_width,
+        "top_margin": resolved_top_margin,
+        "padding_y": resolved_padding_y,
+        "padding_x": resolved_padding_x,
+        "font_size": resolved_font_size,
+    }
+
+
+def save_top_reason_banner_image(
+    *,
+    source_image_path: Path,
+    output_image_path: Path,
+    text: str,
+    top_margin_px: Optional[int] = None,
+    box_width_ratio: float = 0.9,
+    background_rgba: Tuple[int, int, int, int] = (26, 26, 26, 191),
+    border_radius_px: int = 8,
+    padding_y_px: Optional[int] = None,
+    padding_x_px: Optional[int] = None,
+    font_size_px: Optional[int] = None,
+    line_height_multiplier: float = 1.4,
+) -> bool:
+    if not source_image_path.exists():
+        return False
+
+    banner_text = str(text or "").strip()
+    if not banner_text:
+        return False
+
+    try:
+        from PIL import Image, ImageDraw  # type: ignore
+    except Exception:
+        return False
+
+    try:
+        with Image.open(source_image_path) as loaded_image:
+            image = loaded_image.convert("RGBA")
+    except Exception:
+        return False
+
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return False
+
+    layout = _build_top_reason_banner_layout(
+        image_width=width,
+        image_height=height,
+        box_width_ratio=box_width_ratio,
+        top_margin_px=top_margin_px,
+        padding_y_px=padding_y_px,
+        padding_x_px=padding_x_px,
+        font_size_px=font_size_px,
+    )
+    box_width = int(layout["box_width"])
+    top_margin = int(layout["top_margin"])
+    resolved_padding_y = int(layout["padding_y"])
+    resolved_padding_x = int(layout["padding_x"])
+    resolved_font_size = int(layout["font_size"])
+    text_width_limit = max(1, box_width - (resolved_padding_x * 2))
+    draw_probe = ImageDraw.Draw(image)
+
+    chosen_font = _resolve_top_banner_font(resolved_font_size)
+    chosen_lines = _wrap_text_to_pixel_width(draw_probe, banner_text, chosen_font, text_width_limit)
+    if not chosen_lines:
+        return False
+
+    font_bbox = draw_probe.textbbox((0, 0), "Ag", font=chosen_font)
+    font_height = max(1, int(font_bbox[3] - font_bbox[1]))
+    chosen_spacing = max(0, int(round(font_height * max(0.0, float(line_height_multiplier) - 1.0))))
+    wrapped_text = "\n".join(chosen_lines)
+    chosen_text_bbox = draw_probe.multiline_textbbox(
+        (0, 0),
+        wrapped_text,
+        font=chosen_font,
+        spacing=chosen_spacing,
+        align="center",
+    )
+
+    text_width = int(chosen_text_bbox[2] - chosen_text_bbox[0])
+    text_height = int(chosen_text_bbox[3] - chosen_text_bbox[1])
+    box_height = text_height + (resolved_padding_y * 2)
+    box_x0 = int(round((width - box_width) / 2.0))
+    box_y0 = top_margin
+    box_x1 = box_x0 + box_width
+    box_y1 = box_y0 + box_height
+    if box_y1 > height:
+        return False
+
+    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rounded_rectangle(
+        (box_x0, box_y0, box_x1, box_y1),
+        radius=max(0, int(border_radius_px)),
+        fill=background_rgba,
+    )
+    image = Image.alpha_composite(image, overlay)
+
+    text_draw = ImageDraw.Draw(image)
+    text_x = box_x0 + ((box_width - text_width) / 2.0) - float(chosen_text_bbox[0])
+    text_y = box_y0 + resolved_padding_y - float(chosen_text_bbox[1])
+    text_draw.multiline_text(
+        (text_x, text_y),
+        wrapped_text,
+        font=chosen_font,
+        fill=(255, 255, 255, 255),
+        spacing=chosen_spacing,
+        align="center",
+    )
+
+    output_image_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if output_image_path.suffix.lower() in {".jpg", ".jpeg"}:
+            image.convert("RGB").save(output_image_path, quality=95, subsampling=0)
+        else:
+            image.save(output_image_path)
+    except Exception:
+        return False
+    return True
 
 
 def _column_label_to_index(label: str) -> Optional[int]:

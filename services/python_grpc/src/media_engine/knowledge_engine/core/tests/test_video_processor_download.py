@@ -810,6 +810,79 @@ def test_probe_video_info_retries_without_proxy_on_timeout(monkeypatch):
     assert "proxy" not in second_call
 
 
+def test_probe_video_info_retries_on_incomplete_read_with_exponential_backoff(monkeypatch):
+    class _YoutubeDLProbeIncompleteReadRetryStub:
+        calls = []
+
+        def __init__(self, opts):
+            self._opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def extract_info(self, _url, download=False):
+            _ = download
+            type(self).calls.append(dict(self._opts))
+            if len(type(self).calls) < 3:
+                raise Exception(
+                    "ERROR: [BiliBili] 1EY4y1L72w: 1EY4y1L72w: Error reading response: 47590 bytes read "
+                    "(caused by <IncompleteRead: 47590 bytes read>)"
+                )
+            return {"title": "probe-ok", "duration": 12.0}
+
+    sleep_calls = []
+    uniform_calls = []
+    _YoutubeDLProbeIncompleteReadRetryStub.calls = []
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLProbeIncompleteReadRetryStub)
+    monkeypatch.setattr(video_mod.time, "sleep", lambda delay_sec: sleep_calls.append(delay_sec))
+    monkeypatch.setattr(
+        video_mod.random,
+        "uniform",
+        lambda lower, upper: (uniform_calls.append((lower, upper)) or upper),
+    )
+
+    processor = video_mod.VideoProcessor(proxy="http://127.0.0.1:7897")
+    info = processor.probe_video_info("https://www.bilibili.com/video/BV1n9CwYoEro")
+
+    assert info.get("title") == "probe-ok"
+    assert len(_YoutubeDLProbeIncompleteReadRetryStub.calls) == 3
+    assert sleep_calls == pytest.approx([1.15, 2.3])
+    assert uniform_calls == [(0.0, 0.15), (0.0, 0.3)]
+
+
+def test_probe_video_info_incomplete_read_error_has_specific_hint(monkeypatch):
+    class _YoutubeDLProbeAlwaysIncompleteReadStub:
+        def __init__(self, _opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def extract_info(self, _url, download=False):
+            _ = download
+            raise Exception(
+                "ERROR: [BiliBili] 1EY4y1L72w: 1EY4y1L72w: Error reading response: 47590 bytes read "
+                "(caused by <IncompleteRead: 47590 bytes read>)"
+            )
+
+    monkeypatch.setattr(video_mod.yt_dlp, "YoutubeDL", _YoutubeDLProbeAlwaysIncompleteReadStub)
+    monkeypatch.setattr(video_mod.time, "sleep", lambda _delay_sec: None)
+
+    processor = video_mod.VideoProcessor(proxy="http://127.0.0.1:7897")
+    with pytest.raises(RuntimeError) as exc_info:
+        processor.probe_video_info("https://www.bilibili.com/video/BV1n9CwYoEro")
+
+    message = str(exc_info.value)
+    assert "响应读取中断" in message
+    assert "attempts=" in message
+
+
 def test_probe_video_info_timeout_error_has_specific_hint(monkeypatch):
     class _YoutubeDLProbeAlwaysTimeoutStub:
         def __init__(self, _opts):

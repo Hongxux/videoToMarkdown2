@@ -4,12 +4,14 @@ import cv2
 import numpy as np
 
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_instructional_keyframe_extractor import (
+    _build_top_reason_banner_layout,
     crop_keyframe_inplace_by_grid_range,
     crop_keyframe_inplace_by_bbox_1000,
     expand_bbox_1000,
     normalize_bbox_1000,
     parse_grid_cell_label,
     save_grid_overlay_image,
+    save_top_reason_banner_image,
 )
 
 
@@ -292,3 +294,40 @@ def test_save_grid_overlay_image_and_crop_by_grid_range(tmp_path):
     assert cropped is not None
     assert int(cropped.shape[0]) < 200
     assert int(cropped.shape[1]) < 300
+
+
+def test_save_top_reason_banner_image_renders_top_overlay(tmp_path):
+    image_path = Path(tmp_path) / "frame_banner_input.jpg"
+    output_path = Path(tmp_path) / "frame_banner_output.jpg"
+    image = np.full((1080, 1920, 3), 235, dtype=np.uint8)
+    assert cv2.imwrite(str(image_path), image)
+
+    assert save_top_reason_banner_image(
+        source_image_path=image_path,
+        output_image_path=output_path,
+        text="大家请看画面左侧的题目描述部分，这里明确提出了需要实现一个支持 push、pop、top 和 getMin 操作的栈。",
+    )
+    assert output_path.exists()
+
+    rendered = cv2.imread(str(output_path), cv2.IMREAD_COLOR)
+    assert rendered is not None
+    assert int(rendered.shape[0]) == 1080
+    assert int(rendered.shape[1]) == 1920
+
+    top_sample = rendered[55:135, 120:1800]
+    assert top_sample.size > 0
+    assert int(np.mean(top_sample)) < 235
+
+
+def test_build_top_reason_banner_layout_uses_height_div_40_formula():
+    hd_layout = _build_top_reason_banner_layout(image_width=1920, image_height=1080)
+    qhd_layout = _build_top_reason_banner_layout(image_width=2560, image_height=1440)
+    uhd_layout = _build_top_reason_banner_layout(image_width=3840, image_height=2160)
+
+    assert hd_layout["font_size"] == 27
+    assert hd_layout["top_margin"] == 54
+    assert hd_layout["padding_y"] == 22
+    assert hd_layout["padding_x"] == 38
+
+    assert qhd_layout["font_size"] == 36
+    assert uhd_layout["font_size"] == 54

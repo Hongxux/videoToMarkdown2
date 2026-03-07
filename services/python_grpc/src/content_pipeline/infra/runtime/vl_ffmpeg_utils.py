@@ -106,6 +106,8 @@ async def _probe_iframe_timestamps(
     video_path: str,
     target_timestamp_sec: float,
     search_window_sec: float,
+    search_before_sec: Optional[float] = None,
+    search_after_sec: Optional[float] = None,
 ) -> List[float]:
     ffprobe_bin = resolve_ffprobe_bin()
     if not ffprobe_bin:
@@ -113,8 +115,10 @@ async def _probe_iframe_timestamps(
 
     target_ts = max(0.0, float(target_timestamp_sec))
     window_sec = max(0.0, float(search_window_sec))
-    start_sec = max(0.0, target_ts - window_sec)
-    end_sec = max(start_sec, target_ts + window_sec)
+    before_sec = window_sec if search_before_sec is None else max(0.0, float(search_before_sec))
+    after_sec = window_sec if search_after_sec is None else max(0.0, float(search_after_sec))
+    start_sec = max(0.0, target_ts - before_sec)
+    end_sec = max(start_sec, target_ts + after_sec)
 
     command = [
         ffprobe_bin,
@@ -224,6 +228,8 @@ async def export_keyframe_with_ffmpeg(
     output_path: Path,
     logger,
     iframe_search_window_sec: float = 0.2,
+    iframe_search_before_sec: Optional[float] = None,
+    iframe_search_after_sec: Optional[float] = None,
     select_sharpest_iframe: bool = True,
 ) -> bool:
     """导出关键帧，支持在时间窗内选择最清晰 I 帧。"""
@@ -231,12 +237,27 @@ async def export_keyframe_with_ffmpeg(
     ffmpeg_bin = resolve_ffmpeg_bin() or "ffmpeg"
     requested_ts = max(0.0, float(timestamp_sec))
     selected_ts = requested_ts
+    effective_before_sec = (
+        max(0.0, float(iframe_search_before_sec))
+        if iframe_search_before_sec is not None
+        else max(0.0, float(iframe_search_window_sec))
+    )
+    effective_after_sec = (
+        max(0.0, float(iframe_search_after_sec))
+        if iframe_search_after_sec is not None
+        else max(0.0, float(iframe_search_window_sec))
+    )
+    search_start_sec = max(0.0, requested_ts - effective_before_sec)
+    search_end_sec = max(search_start_sec, requested_ts + effective_after_sec)
+    search_interval_text = f"[{search_start_sec:.3f}s,{search_end_sec:.3f}s]"
 
-    if bool(select_sharpest_iframe) and float(iframe_search_window_sec) > 0.0:
+    if bool(select_sharpest_iframe) and (effective_before_sec > 0.0 or effective_after_sec > 0.0):
         iframe_candidates = await _probe_iframe_timestamps(
             video_path=video_path,
             target_timestamp_sec=requested_ts,
             search_window_sec=float(iframe_search_window_sec),
+            search_before_sec=effective_before_sec,
+            search_after_sec=effective_after_sec,
         )
         if iframe_candidates:
             best_score = -1.0
@@ -287,13 +308,26 @@ async def export_keyframe_with_ffmpeg(
             if accepted_candidates > 0:
                 selected_ts = best_ts
             logger.info(
-                "[VL-Tutorial] keyframe I-frame selection: file=%s requested=%.3fs selected=%.3fs candidates=%s accepted=%s score=%.2f",
+                "[VL-Tutorial] keyframe I-frame selection: file=%s requested=%.3fs selected=%.3fs search_interval=%s before=%.3fs after=%.3fs candidates=%s accepted=%s score=%.2f",
                 output_path.name,
                 requested_ts,
                 selected_ts,
+                search_interval_text,
+                effective_before_sec,
+                effective_after_sec,
                 len(iframe_candidates),
                 accepted_candidates,
                 best_score,
+            )
+        else:
+            logger.info(
+                "[VL-Tutorial] keyframe I-frame selection: file=%s requested=%.3fs selected=%.3fs search_interval=%s before=%.3fs after=%.3fs candidates=0 accepted=0 score=na",
+                output_path.name,
+                requested_ts,
+                selected_ts,
+                search_interval_text,
+                effective_before_sec,
+                effective_after_sec,
             )
 
     ok, err_msg = await _export_keyframe_at_timestamp(
@@ -314,19 +348,21 @@ async def export_keyframe_with_ffmpeg(
         )
         if fallback_ok:
             logger.warning(
-                "[VL-Tutorial] keyframe fallback to requested timestamp succeeded: file=%s requested=%.3fs selected=%.3fs",
+                "[VL-Tutorial] keyframe fallback to requested timestamp succeeded: file=%s requested=%.3fs selected=%.3fs search_interval=%s",
                 output_path.name,
                 requested_ts,
                 selected_ts,
+                search_interval_text,
             )
             return True
         err_msg = fallback_err or err_msg
 
     logger.warning(
-        "[VL-Tutorial] keyframe export failed: file=%s requested=%.3fs selected=%.3fs err=%s",
+        "[VL-Tutorial] keyframe export failed: file=%s requested=%.3fs selected=%.3fs search_interval=%s err=%s",
         output_path.name,
         requested_ts,
         selected_ts,
+        search_interval_text,
         err_msg,
     )
     return False

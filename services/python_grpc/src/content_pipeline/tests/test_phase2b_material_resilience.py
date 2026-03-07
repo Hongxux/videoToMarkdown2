@@ -479,6 +479,56 @@ def test_apply_external_materials_records_rejected_item_when_validator_rejects_a
     assert unit.materials.screenshot_items[0].get("img_description") == "reject"
 
 
+def test_load_semantic_units_prefers_concrete_main_content_from_vl_segments(tmp_path):
+    pipeline, output_dir = _build_pipeline(tmp_path)
+    semantic_units_path = output_dir / "semantic_units_phase2a.json"
+    semantic_units_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "phase2a.grouped.v1",
+                "knowledge_groups": [
+                    {
+                        "group_id": 1,
+                        "group_name": "Test Group",
+                        "reason": "test",
+                        "units": [
+                            {
+                                "unit_id": "SUC_MAIN",
+                                "start_sec": 0.0,
+                                "end_sec": 10.0,
+                                "knowledge_type": "concrete",
+                                "knowledge_topic": "Concrete Main Content",
+                                "full_text": "legacy full_text should not win",
+                                "_vl_concrete_segments": [
+                                    {
+                                        "segment_id": 1,
+                                        "main_content": "main_content line [KEYFRAME_1]",
+                                        "instructional_keyframes": [{"timestamp_sec": 2.0}],
+                                    }
+                                ],
+                                "material_requests": {
+                                    "screenshot_requests": [],
+                                    "clip_requests": [],
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    units, _ = pipeline._load_semantic_units(str(semantic_units_path))
+
+    assert len(units) == 1
+    assert units[0].full_text == "main_content line [KEYFRAME_1]"
+    assert isinstance(getattr(units[0], "_vl_concrete_segments", None), list)
+    assert units[0]._vl_concrete_segments[0]["segment_id"] == 1
+
+
 def test_apply_external_materials_process_degraded_branch_runs_validator(tmp_path):
     pipeline, output_dir = _build_pipeline(tmp_path)
     assets_dir = output_dir / "assets"

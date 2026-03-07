@@ -13,6 +13,97 @@
 - 相关文件/接口
 - 复盘要点
 
+## 2026-03-06 修复：LLM 连接异常重试被 `min` 钳制，未形成真正的指数回避
+- 日期：2026-03-06
+- 现象与影响范围：
+  - `services.python_grpc.src.content_pipeline.infra.llm.llm_client.LLMClient.complete_text` 在连接异常时日志持续出现 `Retrying ... in 2.0 seconds`。
+  - 高并发下多个请求会在相同 2 秒窗口内同时回放，容易继续放大上游连接抖动与瞬时拥塞。
+  - 影响范围：`services/python_grpc/src/content_pipeline/infra/llm/llm_client.py` 中 `complete_text` 与 `complete_json` 的统一重试入口。
+- 触发条件：
+  - 上游 LLM 网关出现 `APIConnectionError`、`httpx.NetworkError`、`httpx.TimeoutException` 等可重试瞬时故障。
+  - 同一时段存在多条并发请求同时失败并进入 Tenacity 重试。
+- 根因定位：
+  - 原实现使用 `wait_exponential(multiplier=1, min=2, max=10)` 与 `wait_exponential(multiplier=1, min=4, max=10)`。
+  - 在当前最多 3 次尝试的配置下，`min` 会把前两次等待分别钳成 `2 -> 2`、`4 -> 4`，表现上接近固定退避，而不是真正的指数回避。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+    - 新增 `_build_llm_retry_wait`，统一构造 LLM 重试等待策略。
+    - `complete_text` 升级为“指数回避 + 1 秒有界抖动”，实际等待区间为 `2~3 -> 4~5 -> 8~9`（上限 `10`）。
+    - `complete_json` 升级为“指数回避 + 1 秒有界抖动”，实际等待区间为 `4~5 -> 8~9 -> 10`（上限 `10`）。
+    - 将退避策略收敛到统一辅助函数，避免后续再出现“函数名看起来是指数退避、实际等待序列不是指数增长”的误配，并降低高并发失败时的同波重放概率。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_llm_http2_fallback.py`
+    - 新增 `test_build_llm_retry_wait_grows_exponentially_with_jitter`，固化等待区间 `2~3 / 4~5 / 8~9 / 10` 的回归测试。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_http2_fallback.py -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 保留 `_build_llm_retry_wait` 的等待序列单测，后续调整重试参数时必须同步验证实际序列，而不是只看 API 名称。
+  - 监控：
+    - 观察 `Retrying ... in X seconds` 日志，确认连接错误场景下的等待时间会随重试次数递增，且同批失败请求不会长期集中在同一秒重放。
+  - 校验：
+    - 新增或修改 Tenacity 参数时，必须结合 `stop_after_attempt` 一起推导首轮与次轮的真实等待值，避免被 `min/max` 钳制成固定退避。
+  - 回滚：
+    - 如需止损，可回滚到旧参数配置；但会重新引入高并发故障下的同波重放问题。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_client.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_http2_fallback.py`
+  - `services.python_grpc.src.content_pipeline.infra.llm.llm_client.LLMClient.complete_text`
+  - `services.python_grpc.src.content_pipeline.infra.llm.llm_client.LLMClient.complete_json`
+- 复盘要点：
+  - “使用了指数退避函数”不等于“实际等待序列就是指数增长”；必须结合 `multiplier/min/max/attempts` 看最终值。
+  - 统一重试策略的构造入口，是这类基础设施参数修正的最高杠杆点，能同时覆盖文本与 JSON 两条调用链。
+
+## 2026-03-06 修复：`should_type=concrete` 仅做路由改写，未真正走 concrete 分析链路
+- 日期：2026-03-06
+- 现象与影响范围：
+  - `Phase2A VL` 中，`process/default` 分析结果若返回 `should_type=concrete`，系统只把 `knowledge_type` 改写为 `concrete`。
+  - 旧行为未触发 concrete 模式专用 VL 分析，因此无法稳定产出 concrete schema 的结果，也无法保证后续 `deepseek` 增量补充与 concrete 截图链路一致。
+  - 影响范围：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py` 的流式与非流式消费路径。
+- 触发条件：
+  - 语义单元初次分析模式不是 `concrete`（常见为 `default/process`）。
+  - VL 返回中包含 `should_type=concrete` 且 `no_needed_video=false`。
+- 根因定位：
+  - 消费阶段仅执行“后处理路由覆盖”（改 `knowledge_type`、清空 clip、保留 screenshot），未发起 concrete 模式重分析。
+  - 流式与非流式路径存在重复消费逻辑，导致“统一修复点”不集中，链路一致性难保证。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 新增 `_rerun_should_type_concrete_with_concrete_mode`：
+      - 命中 `should_type=concrete` 且当前非 concrete 模式时，强制二次调用 `analyze_clip(..., analysis_mode="concrete")`。
+      - 成功后就地替换当前 `analysis_result`（保持引用一致），并合并两次调用 token 使用统计与原始交互记录。
+      - 回写 `semantic_unit._vl_analysis_mode_override="concrete"` 与 `knowledge_type=concrete`，确保后续链路一致。
+    - 新增 `_merge_token_usage`，避免二次分析后 token 统计丢失。
+    - 在消费流程中将“二次 concrete 重分析”前置到 postprocess 前，确保 `deepseek` 增量补充使用 concrete 结果。
+    - 调整截图上下文标注优先使用 `analysis_result.analysis_mode`，避免沿用旧 mode。
+    - 为 task metadata 补充 `extra_prompt`，二次 concrete 分析可复用同一上下文。
+    - 非流式汇总路径统一复用 `_consume_unit_analysis_result_streaming`，与流式路径保持行为一致。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增 `test_generate_should_type_concrete_reruns_concrete_mode_and_postprocesses_main_content`，覆盖：
+      - 二次 concrete 分析触发；
+      - `deepseek` 增量补充生效；
+      - 截图来源与结果模式为 concrete；
+      - token 统计包含两次分析调用。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "should_type_concrete or concrete_mode_override or reruns_concrete_mode" -q`（通过）
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "should_type_concrete or concrete_mode_override or parse_response_with_payload_concrete_schema or build_messages_uses_concrete_mode_prompts" -q`（通过）
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化“`should_type=concrete` 必须二次 concrete 分析”的回归测试，防止回退为路由改写。
+  - 监控：
+    - 关注 `token_stats.should_type_concrete_reanalysis_units` 与日志 `concrete rerun success/failed` 比例。
+  - 校验：
+    - 发布前抽检 `unit_analysis_outputs.analysis_mode`、`raw_response_json.main_content` 与最终 screenshot id 是否为 concrete 风格。
+  - 回滚：
+    - 如需快速止损，可临时回退到旧的 route-only 逻辑，但会重新引入 concrete 链路不一致问题。
+- 相关文件/接口：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `AnalyzeWithVL`（Python gRPC `VLMaterialGenerator.generate` 内部链路）
+- 复盘要点：
+  - “路由标记”等于“处理语义”是伪命题；一旦要求 concrete 语义一致性，必须在模型层真正执行 concrete 模式分析。
+  - 关键分支行为应统一收敛到单一消费入口，避免流式/非流式路径长期漂移。
+
 ## 2026-03-05 移动端批量删除任务出现 task not found（删除语义与实现不一致）
 - 日期：2026-03-05
 - 现象与影响范围：
@@ -8159,3 +8250,190 @@
     - 每次调整流式 SSE 解析逻辑后，抽样核对“chunk 拼接结果”与“最终 markdown”缩进一致性。
   - 回滚：
     - 如需回滚可恢复 `hasText` 判定，但会重新引入纯空白分片丢失风险，不建议长期使用。
+
+## 2026-03-06 修复：VL 分析前视频压缩默认去音频导致信息丢失
+- 现象：
+  - `Phase2A` 在 VL 分析前执行 `ffmpeg` 压缩后，输出视频默认不含音频流。
+  - 当下游需要参考语音内容时，压缩后素材无法满足分析或回溯需求。
+- 根因：
+  - `VLVideoAnalyzer` 中 `long_video_upload_drop_audio` 的默认值为 `true`，且默认配置 `module2_config.yaml` 也为 `true`。
+  - 压缩命令显式映射了视频流（`-map 0:v:0`），在未映射音频流时会天然丢失音频。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 将 `long_video_upload_drop_audio` 的默认值从 `True` 调整为 `False`，使系统默认保留音频。
+    - 保留功能开关，并在显式开启 `drop_audio=true` 时继续下发 `-an`，确保兼容旧策略。
+  - 文件：`config/module2_config.yaml`
+    - 将 `long_video_upload_drop_audio` 默认配置改为 `false`。
+    - 同步注释描述为“默认保留音频”。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增“默认保留音频”用例，断言命令包含 `-map 0:a?`、`-c:a aac`、`-b:a 128k` 且不包含 `-an`。
+    - 保留“显式去音频”用例，断言 `-an` 仍然生效。
+- 验证方式：
+  - 语法校验：
+    - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`（通过）。
+  - 行为校验（最小脚本）：
+    - 默认配置：命令包含音频映射与编码参数，不含 `-an`（通过）。
+    - 显式 `drop_audio=true`：命令包含 `-an`，不含音频映射参数（通过）。
+  - 编译校验：
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+  - 说明：
+    - `pytest` 在当前环境受临时目录 ACL 限制（`pytest-of-HongXU` 目录拒绝访问），未能完成自动化回归。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化双分支断言：默认保留音频 + 显式去音频，防止后续重构误改默认策略。
+  - 监控：
+    - 在压缩日志中持续输出 `long_video_upload_drop_audio` 与最终命令关键参数，便于快速定位配置偏差。
+  - 校验：
+    - 发布前抽检压缩后文件流信息，确认“未配置 `drop_audio` 时存在音频流”。
+  - 回滚：
+    - 若需临时恢复旧行为，可仅通过配置将 `long_video_upload_drop_audio` 设为 `true`，无需回滚代码。
+
+## 2026-03-06 修复：`GetVideoInfo` 遇到 B 站 `IncompleteRead` 直接失败（缺少可重试判定与指数回避）
+- 日期：2026-03-06
+- 现象与影响范围：
+  - `GetVideoInfo` 在调用 `yt-dlp` 探测 B 站元信息时，偶发报错：
+    - `Error reading response ... (caused by <IncompleteRead ...>)`
+  - 出错后接口直接返回失败，无法自动重试，导致同一链接在网络抖动场景下成功率偏低。
+  - 影响范围：
+    - `services/python_grpc/src/server/grpc_service_impl.py` 的 `GetVideoInfo` 链路（底层调用 `VideoProcessor.probe_video_info`）。
+- 触发条件：
+  - B 站元数据请求过程中发生响应中断/分块读取中断（`IncompleteRead`、`Error reading response`、`ChunkedEncodingError`）。
+  - 错误发生在 `probe_video_info` 的早期尝试阶段，且未命中既有“可重试错误”集合。
+- 根因定位：
+  - `VideoProcessor._is_retryable_probe_error` 仅识别超时、代理连接、502/503/504，不包含 `IncompleteRead` 类瞬时网络错误。
+  - `probe_video_info` 多尝试链路之间缺少指数回避，失败后会立即进入下一次尝试，无法有效吸收瞬时网络抖动。
+- 修复措施：
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_is_incomplete_read_error`，识别 `IncompleteRead/Error reading response/ChunkedEncodingError`。
+    - 将上述错误纳入 `_is_retryable_probe_error`。
+    - 新增 `_compute_probe_backoff_delay_sec`，在探测失败后按指数回避等待（`1s -> 2s -> 4s`，最大 `8s`）。
+    - 在指数回避基础上增加轻量随机抖动（jitter），默认 `+0~15%` 且单次增量不超过 `0.5s`，减少同波重试碰撞。
+    - `probe_video_info` 的多尝试循环在可继续重试时执行回避等待，避免连续瞬时失败。
+    - 补充 `IncompleteRead` 专用错误提示，输出更明确的故障语义与 attempts 链。
+  - 文件：`services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 新增 `test_probe_video_info_retries_on_incomplete_read_with_exponential_backoff`，校验：
+      - 命中 `IncompleteRead` 后会重试；
+      - 回避时长按指数回避并叠加轻量 jitter（可重复验证）；
+      - 后续尝试成功可恢复正常返回。
+    - 新增 `test_probe_video_info_incomplete_read_error_has_specific_hint`，校验最终错误提示包含“响应读取中断”语义。
+- 验证方式：
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py -k "probe_video_info" -q`（通过，`4 passed`）。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化 `IncompleteRead` 回归用例，覆盖“可重试判定 + 指数回避 + 最终错误语义”三点。
+  - 监控：
+    - 关注日志中 `yt-dlp 探测视频信息失败` 的 `attempts=` 链，识别是否集中在 `IncompleteRead`。
+  - 校验：
+    - 每次调整下载/探测重试策略时，必须核对“可重试错误集合”是否覆盖网络抖动类错误。
+  - 回滚：
+    - 如需紧急回滚，可仅回退 `probe_video_info` 重试判定与回避逻辑，不影响下载主链路其他行为。
+
+## 2026-03-06：Phase2B concrete 未直通 main_content，KEYFRAME 回填顺序偏离 instructional_keyframes
+- 现象：
+  - 在 `var/storage/storage/7cc5b9ec9cf9fafeb86faa259d691e1c/semantic_units_phase2a.json` 中，`concrete` 单元已包含 `main_content + [KEYFRAME_N] + instructional_keyframes`，但 Phase2B 最终输出未稳定按该链路渲染。
+  - 部分场景下 KEYFRAME 回填顺序由截图元数据排序决定，而不是严格遵循 `instructional_keyframes` 的顺序。
+- 根因：
+  - Phase2B 读取语义单元时，`full_text` 与 `main_content` 的优先级不稳定；当 `full_text` 为旧值时，可能覆盖 concrete 的最新 `main_content`。
+  - Markdown 回填 KEYFRAME 时，主要依赖 `screenshot_items` 的排序规则（`source_id/img_id/timestamp`），缺少对 `_vl_concrete_segments[].instructional_keyframes` 顺序的强绑定。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+    - `_load_semantic_units` 对 `concrete` 单元优先使用 `_vl_concrete_segments[].main_content` 组装 `full_text`。
+    - 反序列化后将 `_vl_concrete_segments` 挂回 `SemanticUnit`，并在序列化时保留该字段。
+  - 文件：`services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+    - `RichTextSection` 新增 `vl_concrete_segments` 字段并写入 `result.json`。
+    - `create_section_from_semantic_unit` 对 concrete 优先使用 `main_content` 作为 `body_text`。
+  - 文件：`services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - `EnhancedSection` 增加 `vl_concrete_segments` 透传字段。
+    - 新增 concrete 专用正文解析：优先以 `main_content` 作为渲染基文。
+    - 新增 KEYFRAME 顺序映射逻辑：先按 `_vl_concrete_segments` 的 `segment_id -> instructional_keyframes` 顺序匹配截图并回填；再以历史排序规则补齐遗漏项。
+    - 新增 concrete canonical 读取链路：在 `result.json` 所在目录优先读取 `semantic_units_phase2a.json`（及 `intermediates/semantic_units_phase2a.json`、最新 `semantic_units_from_rpc_*.json`），按 `unit_id` 回填 concrete 的 `body_text/vl_concrete_segments`，避免 `result.json` 旧 `body_text` 污染。
+    - 下线 concrete 多路径回填：`_build_concrete_keyframe_embeds_for_section` 对 concrete 仅保留 `instructional_keyframes` 顺序映射路径，不再走截图排序兜底分支。
+    - 新增 `result.json` 同步回写：增强前若发现 concrete canonical 与 `result.json` 不一致，自动回写 `body_text` 与 `_vl_concrete_segments`，保证中间产物与最终渲染一致。
+  - 测试补充：
+    - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+      - `test_concrete_keyframe_direct_pass_prefers_instructional_keyframe_order`
+    - `services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py`
+      - `test_load_semantic_units_prefers_concrete_main_content_from_vl_segments`
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`（通过）。
+  - 由于当前环境的 `pytest` 临时目录权限异常（`WinError 5`），未能稳定跑完整回归；改用最小化 Python 探针验证两条核心修复路径（均通过）：
+    - concrete `body_text` 优先来自 `main_content`。
+    - KEYFRAME 回填优先遵循 `instructional_keyframes` 顺序。
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 固化 “旧 `full_text` + 新 `main_content`” 的优先级用例与 KEYFRAME 顺序用例，避免回归到截图排序驱动。
+  - 监控：
+    - 在 Phase2B trace 中持续采集 concrete 单元的 KEYFRAME 占位符命中率与映射顺序信息。
+  - 校验：
+    - 每次调整 Phase2A/Phase2B schema 字段时，强制检查 `_vl_concrete_segments` 是否完整透传到 `result.json`。
+  - 回滚：
+    - 如需回滚，可先退回 `markdown_enhancer` 的新顺序映射函数，不影响抽象/流程型单元链路。
+
+## 2026-03-07：concrete VL 截图检索窗口不应回溯到时间戳之前
+- 现象：
+  - concrete VL 分析产出截图时间戳后，后续 CV 截图优化阶段仍可能沿用通用“向前扩窗”逻辑，在时间戳之前的窗口内挑到更早的画面。
+  - 这会让 concrete 单元的截图偏向动作发生前的状态，削弱时间戳与截图内容的一致性。
+  - tutorial 关键帧导出阶段在查找邻近 I 帧时，也默认使用对称窗口，存在把关键帧吸附到更早 I 帧的同类问题。
+- 根因：
+  - 截图优化链路支持通过 `_window_start_sec/_window_end_sec` 对单条请求覆写检索范围，但 concrete 请求在进入优化链路前没有显式写入“禁止向前回溯”的窗口提示。
+  - 因此后续阶段只能退回到通用时间窗策略，而不是 concrete 专用的“从当前时间戳开始搜”。
+  - `tutorial` 关键帧的 I 帧探测函数只有单一 `search_window_sec` 参数，默认按 `target-window ~ target+window` 对称搜索，无法表达“只向后搜索”的语义。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 在 `_annotate_screenshot_requests_with_unit_context` 中，对 `analysis_mode=concrete` 的截图请求自动补齐 `_window_start_sec=timestamp_sec`。
+    - 复用现有 `_window_start_sec` 覆写机制，只收紧检索起点，不改动通用的窗口终点与后续选择器实现。
+    - 为 tutorial 关键帧导出新增 `keyframe_iframe_search_before_sec/keyframe_iframe_search_after_sec` 读取逻辑，默认配置为 `before=0.0`、`after=legacy_window`，让 tutorial I 帧搜索改为前向-only。
+  - 文件：`services/python_grpc/src/content_pipeline/infra/runtime/vl_ffmpeg_utils.py`
+    - 为 `_probe_iframe_timestamps/export_keyframe_with_ffmpeg` 增加前后独立窗口参数，在不破坏旧单窗口参数兼容性的前提下支持非对称搜索区间。
+  - 文件：`config/module2_config.yaml`
+    - 补充 tutorial 关键帧 I 帧搜索的前/后窗口默认配置，显式表达“不向前回溯、仅向后搜索”。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增回归测试 `test_annotate_screenshot_requests_with_unit_context_sets_concrete_window_start_to_timestamp`，确保 concrete 请求会把检索起点钉在自身时间戳，不再向前扩窗。
+    - 更新 `test_export_keyframe_wrapper_passes_iframe_selection_config`，确保 tutorial 包装层会把前/后窗口显式透传给 ffmpeg 导出函数。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_ffmpeg_utils.py`
+    - 新增 `test_probe_iframe_timestamps_honors_asymmetric_window`，确保底层 ffprobe 区间为 `target+0s ~ target+after`，不再包含时间戳之前的窗口。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_ffmpeg_utils.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "iframe or annotate_screenshot_requests_with_unit_context" -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "annotate_screenshot_requests_with_unit_context" -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 后续若新增 concrete 专用截图策略，必须补充“窗口起点不早于 `timestamp_sec`”的断言。
+    - 后续若调整 tutorial 关键帧 I 帧策略，必须同时覆盖“前/后窗口边界”的断言，避免回退到对称搜索。
+  - 监控：
+    - 可在截图优化 trace 中持续记录 concrete 请求的 `timestamp_sec/_window_start_sec`，便于快速确认是否出现错误回溯。
+    - 可在关键帧导出日志中持续记录 `requested/selected` 与实际 ffprobe 搜索区间，便于排查是否再次向前吸附。
+  - 校验：
+    - 评审涉及 screenshot optimization 的改动时，优先检查是否误删 concrete 的 per-request 窗口覆盖。
+    - 评审 tutorial keyframe 导出改动时，优先检查 before/after 非对称窗口是否仍被正确透传。
+  - 回滚：
+    - 如需回滚，只需移除 concrete 请求的 `_window_start_sec` 注入逻辑，不会影响其他知识类型的通用截图优化链路。
+    - tutorial 若需回滚为旧行为，只需把 `keyframe_iframe_search_before_sec` 设置回与 `keyframe_iframe_search_after_sec` 相同即可恢复对称搜索。
+
+## 2026-03-07：`visual_feature_extractor.py` 暂存区私有区字符导致 encoding guard 阻断提交
+- 现象：
+  - 执行 `git commit` 时，仓库的 encoding guard 阻断提交，并提示 `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py` 含有私有区 Unicode 字符（`U+E000-U+F8FF`）。
+  - 异常字符出现在 `_get_clip_model()` 的文档字符串附近，同时伴随局部日志文本乱码。
+- 根因：
+  - 该函数说明文本在一次编码不一致的编辑过程中被写成了错误字符序列，原本就不完整的乱码文案又进一步混入了私有区字符。
+  - encoding guard 会拒绝这类字符进入版本库，因此即使业务逻辑未变，提交也会失败。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+    - 将 `_get_clip_model()` 的损坏文档字符串改写为清晰、可维护的中文说明，移除私有区字符与乱码残片。
+    - 同步修正该加载路径上的两条乱码日志，避免再次通过错误编码把异常字符写回源码。
+    - 保持业务分支、锁语义、冷却逻辑与持久化状态读取逻辑不变，仅做编码层面的定点修复。
+- 验证方式：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `python -X utf8 -c "from pathlib import Path; text=Path(r'services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py').read_text(encoding='utf-8'); assert not any(0xE000 <= ord(ch) <= 0xF8FF for ch in text)"`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 后续若继续整理 `visual_feature_extractor.py` 的中文注释，优先使用 `apply_patch` 或显式 `UTF-8` 写回，避免再次触发本机默认编码写入。
+  - 监控：
+    - 继续保留 encoding guard 对私有区字符的阻断，作为源码编码污染的第一道防线。
+  - 校验：
+    - 提交前对目标文件执行一次私有区字符扫描；若出现异常，先排查编码链路，再决定是否修正文案。
+  - 回滚：
+    - 如需回滚，仅回退 `_get_clip_model()` 文档字符串与两条日志文本即可，不影响运行时加载逻辑。

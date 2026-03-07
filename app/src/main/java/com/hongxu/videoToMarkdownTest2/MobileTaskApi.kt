@@ -34,7 +34,9 @@ data class MobileTaskListItem(
     val mainTopic: String,
     val markdownAvailable: Boolean,
     val createdAt: String,
-    val lastOpenedAt: String
+    val lastOpenedAt: String,
+    val taskPath: String = "",
+    val collectionPath: String = ""
 )
 
 private data class MobileTaskListPage(
@@ -90,10 +92,18 @@ class HttpMobileTaskApi(
 
     suspend fun listTasks(
         page: Int = 0,
-        pageSize: Int = 40,
+        pageSize: Int = 0,
         onlyMultiSegment: Boolean = true
     ): List<MobileTaskListItem> {
         return withContext(Dispatchers.IO) {
+            if (pageSize <= 0) {
+                val singlePage = listTasksPage(
+                    page = page.coerceAtLeast(0),
+                    pageSize = pageSize,
+                    onlyMultiSegment = onlyMultiSegment
+                )
+                return@withContext deduplicateTaskSnapshots(singlePage.tasks)
+            }
             val allTasks = mutableListOf<MobileTaskListItem>()
             var currentPage = page.coerceAtLeast(0)
             var hasMore = true
@@ -190,7 +200,9 @@ class HttpMobileTaskApi(
                     mainTopic = item.optString("mainTopic").ifBlank { item.optString("main_topic") },
                     markdownAvailable = item.optBoolean("markdownAvailable", false),
                     createdAt = item.optString("createdAt"),
-                    lastOpenedAt = item.optString("lastOpenedAt")
+                    lastOpenedAt = item.optString("lastOpenedAt"),
+                    taskPath = item.optString("taskPath").trim(),
+                    collectionPath = item.optString("collectionPath").trim()
                 )
             }
             MobileTaskListPage(

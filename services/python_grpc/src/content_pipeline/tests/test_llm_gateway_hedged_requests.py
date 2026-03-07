@@ -401,6 +401,82 @@ def test_deepseek_complete_json_uses_dynamic_delay(monkeypatch):
     assert captured["delay_ms"] == 37
 
 
+def test_deepseek_complete_json_fallbacks_to_qwen3_plus_when_primary_fails(monkeypatch):
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_HEDGE_ENABLED", False)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_ENABLED", True)
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_MODEL", "qwen3-plus")
+    monkeypatch.setattr(
+        llm_gateway,
+        "_DEEPSEEK_QWEN_FALLBACK_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV", "DASHSCOPE_API_KEY")
+    monkeypatch.setattr(llm_gateway, "_DEEPSEEK_QWEN_FALLBACK_API_KEY", "")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-test-key")
+
+    class _PrimaryFailingClient:
+        async def complete_json(
+            self,
+            prompt: str,
+            system_message: str = None,
+            need_logprobs: bool = False,
+            max_tokens: int = None,
+            disable_inflight_dedup: bool = False,
+        ):
+            _ = (prompt, system_message, need_logprobs, max_tokens, disable_inflight_dedup)
+            raise RuntimeError("Connection error.")
+
+    class _FallbackClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_json(
+            self,
+            prompt: str,
+            system_message: str = None,
+            need_logprobs: bool = False,
+            max_tokens: int = None,
+            disable_inflight_dedup: bool = False,
+        ):
+            self.calls += 1
+            _ = (prompt, system_message, need_logprobs, max_tokens, disable_inflight_dedup)
+            return {"provider": "qwen", "ok": True}, {"model": "qwen3-plus"}, None
+
+    fallback_client = _FallbackClient()
+
+    def _fake_get_deepseek_client(
+        api_key=None,
+        base_url="",
+        model="",
+        temperature=0.3,
+        enable_logprobs=None,
+        cache_enabled=None,
+        inflight_dedup_enabled=None,
+    ):
+        _ = (temperature, enable_logprobs, cache_enabled, inflight_dedup_enabled)
+        assert api_key == "dashscope-test-key"
+        assert base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        assert model == "qwen3-plus"
+        return fallback_client
+
+    monkeypatch.setattr(llm_gateway, "get_deepseek_client", _fake_get_deepseek_client)
+
+    result_json, metadata, logprobs = asyncio.run(
+        llm_gateway.deepseek_complete_json(
+            prompt="hello",
+            system_message="system",
+            max_tokens=64,
+            client=_PrimaryFailingClient(),
+            model="deepseek-chat",
+        )
+    )
+
+    assert result_json == {"provider": "qwen", "ok": True}
+    assert metadata["model"] == "qwen3-plus"
+    assert logprobs is None
+    assert fallback_client.calls == 1
+
+
 def test_deepseek_dynamic_delay_uses_video_and_step6_context():
     estimator = llm_gateway._DeepseekHedgeDelayEstimator(
         quantile=0.82,

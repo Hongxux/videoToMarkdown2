@@ -337,13 +337,13 @@ vl_material_generation:
     request_timeout_ratio_by_video_duration: 0.5
     request_timeout_min_sec: 1.0
     # 上传前压缩（启用）
-    # 压缩策略：H.264 + CRF + 15fps + 去音频 + 超过1080p才降分辨率
+    # 压缩策略：H.264 + CRF + 15fps + 默认保留音频 + 超过1080p才降分辨率
     long_video_upload_compress_enabled: true
     long_video_upload_target_height: 1080
     long_video_upload_crf: 28
     long_video_upload_preset: "fast"
     long_video_upload_target_fps: 15.0
-    long_video_upload_drop_audio: true
+    long_video_upload_drop_audio: false
     long_video_upload_timeout_sec: 1800
     # DashScope Files.upload 分片与超时策略
     # 2MB 分片上传（SDK 透传参数）
@@ -498,6 +498,8 @@ vl_material_generation:
 
     # 在目标时间戳前后搜索 I 帧的时间窗（秒）
     keyframe_iframe_search_window_sec: 0.2
+    keyframe_iframe_search_before_sec: 0.0  # tutorial 关键帧找 I 帧时不再向前回溯
+    keyframe_iframe_search_after_sec: 0.2   # tutorial 关键帧找 I 帧时仅向后搜索 0.2 秒
 
     # 是否在搜索窗内按清晰度选择最优 I 帧
     keyframe_select_sharpest_iframe: true

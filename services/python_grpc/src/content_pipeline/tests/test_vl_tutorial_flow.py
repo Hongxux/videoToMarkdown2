@@ -115,6 +115,8 @@ def test_export_keyframe_wrapper_passes_iframe_selection_config(monkeypatch, tmp
             "tutorial_mode": {
                 "enabled": True,
                 "keyframe_iframe_search_window_sec": 0.35,
+                "keyframe_iframe_search_before_sec": 0.0,
+                "keyframe_iframe_search_after_sec": 0.35,
                 "keyframe_select_sharpest_iframe": True,
             },
             "screenshot_optimization": {"enabled": False},
@@ -147,6 +149,8 @@ def test_export_keyframe_wrapper_passes_iframe_selection_config(monkeypatch, tmp
     assert float(captured["timestamp_sec"]) == 12.5
     assert captured["output_path"] == output_path
     assert float(captured["iframe_search_window_sec"]) == 0.35
+    assert float(captured["iframe_search_before_sec"]) == 0.0
+    assert float(captured["iframe_search_after_sec"]) == 0.35
     assert captured["select_sharpest_iframe"] is True
 
 
@@ -437,6 +441,57 @@ def test_compress_video_for_dashscope_upload_ignores_larger_cached_file(tmp_path
 
     assert compressed == str(source)
     assert not cached.exists()
+
+
+def test_compress_video_for_dashscope_upload_uses_crf_fps_and_keeps_audio_by_default(monkeypatch, tmp_path):
+    source = Path(tmp_path) / "source.mp4"
+    output = Path(tmp_path) / "_vl_upload_cache" / "source_out_1080p.mp4"
+    source.write_bytes(b"a" * 1024)
+
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.long_video_upload_compress_enabled = True
+    analyzer.long_video_upload_target_height = 1080
+    analyzer.long_video_upload_crf = 28
+    analyzer.long_video_upload_preset = "fast"
+    analyzer.long_video_upload_target_fps = 15.0
+    analyzer.long_video_upload_timeout_sec = 30
+    assert analyzer.long_video_upload_drop_audio is False
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_run(command, capture_output=True, text=True, timeout=0):
+        _ = (capture_output, text)
+        captured["command"] = list(command)
+        captured["timeout"] = timeout
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"x" * 100)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.resolve_ffmpeg_bin",
+        lambda: "ffmpeg",
+    )
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.subprocess.run",
+        _fake_run,
+    )
+    monkeypatch.setattr(analyzer, "_build_long_video_upload_output_path", lambda _video_path: output)
+
+    compressed = asyncio.run(analyzer._compress_video_for_dashscope_upload(str(source)))
+
+    command = captured["command"]
+    assert compressed == str(output)
+    assert "-c:v" in command and "libx264" in command
+    assert "-crf" in command and command[command.index("-crf") + 1] == "28"
+    assert "-preset" in command and command[command.index("-preset") + 1] == "fast"
+    assert "-r" in command and command[command.index("-r") + 1] == "15"
+    assert "-an" not in command
+    assert "-map" in command and "0:a?" in command
+    assert "-c:a" in command and command[command.index("-c:a") + 1] == "aac"
+    assert "-b:a" in command and command[command.index("-b:a") + 1] == "128k"
+    assert "-vf" in command
+    assert "1080" in command[command.index("-vf") + 1]
+    assert "-b:v" not in command
 
 
 def test_compress_video_for_dashscope_upload_uses_crf_fps_and_drop_audio(monkeypatch, tmp_path):
@@ -866,6 +921,7 @@ def test_parse_response_with_payload_concrete_schema():
             "clip_end_sec": 9.5,
             "instructional_keyframes": [
                 {
+                    "keyframe_id": "keyframe-1",
                     "timestamp_sec": 4.2,
                     "frame_reason": "架构图完整出现",
                 }
@@ -883,8 +939,10 @@ def test_parse_response_with_payload_concrete_schema():
     assert results[0].step_description == "系统架构总览"
     assert results[0].main_operation == ["> **核心观点**：这是一个示例 [KEYFRAME_1]"]
     assert len(results[0].instructional_keyframes) == 1
+    assert results[0].instructional_keyframes[0]["keyframe_id"] == "KEYFRAME_1"
     assert normalized[0]["segment_id"] == 1
     assert normalized[0]["main_content"] == "> **核心观点**：这是一个示例 [KEYFRAME_1]"
+    assert normalized[0]["instructional_keyframes"][0]["keyframe_id"] == "KEYFRAME_1"
 
 
 def test_postprocess_unit_main_content_updates_raw_json(monkeypatch):
@@ -990,9 +1048,6 @@ def test_tutorial_schema_parse_and_normalize():
         {
             "timestamp_sec": 6.2,
             "frame_reason": "settings page visible",
-            "target_ui_type": "menu_item",
-            "target_text": "Settings",
-            "target_relative_position": "top-left in toolbar",
             "bbox": [120, 80, 760, 920],
         }
     ]
@@ -1009,12 +1064,15 @@ def test_tutorial_schema_parse_and_normalize():
         {
             "timestamp_sec": 6.2,
             "frame_reason": "settings page visible",
-            "target_ui_type": "menu_item",
-            "target_text": "Settings",
-            "target_relative_position": "top-left in toolbar",
             "bbox": [120, 80, 760, 920],
         }
     ]
+    assert "target_ui_type" not in results[0].instructional_keyframes[0]
+    assert "target_text" not in results[0].instructional_keyframes[0]
+    assert "target_relative_position" not in results[0].instructional_keyframes[0]
+    assert "target_ui_type" not in normalized[0]["instructional_keyframes"][0]
+    assert "target_text" not in normalized[0]["instructional_keyframes"][0]
+    assert "target_relative_position" not in normalized[0]["instructional_keyframes"][0]
     assert normalized[0]["step_type"] == "MAIN_FLOW"
     assert set(normalized[0].keys()) == {
         "step_id",
@@ -1025,15 +1083,13 @@ def test_tutorial_schema_parse_and_normalize():
         "precautions",
         "step_summary",
         "operation_guidance",
-        "no_needed_video",
-        "should_type",
         "clip_start_sec",
         "clip_end_sec",
         "instructional_keyframe_timestamp",
         "step_type",
     }
-    assert normalized[0]["no_needed_video"] is False
-    assert normalized[0]["should_type"] == ""
+    assert "no_needed_video" not in normalized[0]
+    assert "should_type" not in normalized[0]
 
 
 def test_tutorial_schema_parse_handles_unescaped_newlines_in_main_operation():
@@ -1100,7 +1156,7 @@ def test_tutorial_schema_parse_salvages_truncated_array():
     assert [item["step_description"] for item in normalized] == ["Open settings", "Change port"]
 
 
-def test_tutorial_schema_preserves_no_needed_video_and_should_type_override():
+def test_tutorial_schema_ignores_no_needed_video_and_should_type_override():
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
     payload = [
         {
@@ -1130,15 +1186,15 @@ def test_tutorial_schema_preserves_no_needed_video_and_should_type_override():
     )
 
     assert len(results) == 2
-    assert results[0].no_needed_video is True
-    assert results[0].should_type == "abstract"
-    assert normalized[0]["no_needed_video"] is True
-    assert normalized[0]["should_type"] == "abstract"
+    assert results[0].no_needed_video is False
+    assert results[0].should_type == ""
+    assert "no_needed_video" not in normalized[0]
+    assert "should_type" not in normalized[0]
 
     assert results[1].no_needed_video is False
-    assert results[1].should_type == "concrete"
-    assert normalized[1]["no_needed_video"] is False
-    assert normalized[1]["should_type"] == "concrete"
+    assert results[1].should_type == ""
+    assert "no_needed_video" not in normalized[1]
+    assert "should_type" not in normalized[1]
 
 
 def test_normalize_route_controls_no_needed_video_has_highest_priority():
@@ -1495,6 +1551,9 @@ def test_analyze_clip_uses_unit_relative_ids_for_tutorial_mode(monkeypatch):
     assert result.screenshot_requests[0]["screenshot_id"] == "SU200/SU200_ss_step_02_key_01_change_port"
     assert result.screenshot_requests[0]["frame_reason"] == "port value changed"
     assert result.screenshot_requests[0]["bbox"] == [100, 120, 900, 980]
+    assert "target_ui_type" not in result.screenshot_requests[0]
+    assert "target_text" not in result.screenshot_requests[0]
+    assert "target_relative_position" not in result.screenshot_requests[0]
 
 
 def test_generate_marks_unit_abstract_when_no_needed_video(monkeypatch):
@@ -1594,6 +1653,123 @@ def test_generate_marks_unit_abstract_when_no_needed_video(monkeypatch):
     assert semantic_units[0]["_vl_no_needed_video"] is True
 
 
+def test_generate_tutorial_mode_ignores_no_needed_video_and_should_type(monkeypatch):
+    sandbox_dir = Path("tmp_vl_tutorial_ignore_route_controls_test")
+    if sandbox_dir.exists():
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+    video_path = sandbox_dir / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = sandbox_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    semantic_units = [
+        {
+            "unit_id": "SU_TUTORIAL",
+            "knowledge_type": "process",
+            "mult_steps": True,
+            "start_sec": 10.0,
+            "end_sec": 35.0,
+        }
+    ]
+
+    generator = VLMaterialGenerator(_build_generator_config())
+    analyze_modes: list[str] = []
+
+    class _TutorialAnalyzerWithRouteFields:
+        async def analyze_clip(
+            self,
+            clip_path: str,
+            semantic_unit_start_sec: float,
+            semantic_unit_id: str,
+            extra_prompt: str | None = None,
+            analysis_mode: str = "default",
+        ) -> VLClipAnalysisResponse:
+            _ = (clip_path, extra_prompt)
+            analyze_modes.append(str(analysis_mode))
+            result = VLClipAnalysisResponse(success=True, analysis_mode="tutorial_stepwise")
+            result.token_usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            result.analysis_results = [
+                VLAnalysisResult(
+                    id=1,
+                    knowledge_type="process",
+                    no_needed_video=True,
+                    should_type="abstract",
+                    clip_start_sec=0.0,
+                    clip_end_sec=20.0,
+                    suggested_screenshoot_timestamps=[5.0],
+                    step_id=1,
+                    step_description="demo step",
+                    main_operation=["do demo [KEYFRAME_1]"],
+                )
+            ]
+            result.clip_requests = [
+                {
+                    "clip_id": f"{semantic_unit_id}/{semantic_unit_id}_clip_step_01_demo_step",
+                    "start_sec": semantic_unit_start_sec,
+                    "end_sec": semantic_unit_start_sec + 20.0,
+                    "knowledge_type": "process",
+                    "semantic_unit_id": semantic_unit_id,
+                    "analysis_mode": "tutorial_stepwise",
+                }
+            ]
+            result.screenshot_requests = [
+                {
+                    "screenshot_id": f"{semantic_unit_id}/{semantic_unit_id}_ss_step_01_key_01_demo_step",
+                    "timestamp_sec": semantic_unit_start_sec + 5.0,
+                    "semantic_unit_id": semantic_unit_id,
+                    "_relative_timestamp": 5.0,
+                    "analysis_mode": "tutorial_stepwise",
+                }
+            ]
+            result.raw_response_json = [
+                {
+                    "step_id": 1,
+                    "step_description": "demo step",
+                    "no_needed_video": True,
+                    "should_type": "abstract",
+                }
+            ]
+            return result
+
+    generator._analyzer = _TutorialAnalyzerWithRouteFields()
+
+    clips_dir = sandbox_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = clips_dir / "001_SU_TUTORIAL_demo_10.00-35.00.mp4"
+    clip_file.write_bytes(b"clip")
+
+    async def _fake_split_video_by_semantic_units(video_path, semantic_units, output_dir=None):
+        return str(clips_dir)
+
+    def _fake_find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec):
+        return str(clip_file)
+
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_split_video_by_semantic_units)
+    monkeypatch.setattr(generator, "_find_clip_for_unit", _fake_find_clip_for_unit)
+
+    try:
+        result = asyncio.run(
+            generator.generate(
+                video_path=str(video_path),
+                semantic_units=semantic_units,
+                output_dir=str(output_dir),
+            )
+        )
+    finally:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+    assert result.success is True
+    assert analyze_modes == ["tutorial_stepwise"]
+    assert len(result.clip_requests) == 1
+    assert len(result.screenshot_requests) == 1
+    assert semantic_units[0]["knowledge_type"] == "process"
+    assert "_vl_route_override" not in semantic_units[0]
+    assert "_vl_no_needed_video" not in semantic_units[0]
+    assert result.token_stats["no_needed_video_units"] == 0
+    assert result.token_stats["should_type_abstract_units"] == 0
+
+
 def test_generate_marks_unit_concrete_when_should_type_concrete(monkeypatch):
     sandbox_dir = Path("tmp_vl_should_type_concrete_test")
     if sandbox_dir.exists():
@@ -1691,6 +1867,167 @@ def test_generate_marks_unit_concrete_when_should_type_concrete(monkeypatch):
     assert semantic_units[0]["knowledge_type"] == "concrete"
     assert semantic_units[0]["_vl_route_override"] == "concrete"
     assert semantic_units[0]["_vl_no_needed_video"] is False
+
+
+def test_generate_should_type_concrete_reruns_concrete_mode_and_postprocesses_main_content(monkeypatch):
+    sandbox_dir = Path("tmp_vl_should_type_concrete_rerun_test")
+    if sandbox_dir.exists():
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+    video_path = sandbox_dir / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = sandbox_dir / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    semantic_units = [
+        {
+            "unit_id": "SU_CONCRETE_RERUN",
+            "knowledge_type": "process",
+            "mult_steps": False,
+            "start_sec": 10.0,
+            "end_sec": 30.0,
+        }
+    ]
+
+    generator = VLMaterialGenerator(_build_generator_config())
+    generator.vl_arg_postprocess_concrete_enabled = True
+
+    analyze_modes: list[str] = []
+    deepseek_calls: list[dict[str, Any]] = []
+
+    class _ConcreteRerunAnalyzer:
+        async def analyze_clip(
+            self,
+            clip_path: str,
+            semantic_unit_start_sec: float,
+            semantic_unit_id: str,
+            extra_prompt: str | None = None,
+            analysis_mode: str = "default",
+        ) -> VLClipAnalysisResponse:
+            _ = (clip_path, extra_prompt)
+            analyze_modes.append(str(analysis_mode))
+            if str(analysis_mode) != "concrete":
+                result = VLClipAnalysisResponse(success=True, analysis_mode="default")
+                result.token_usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+                result.analysis_results = [
+                    VLAnalysisResult(
+                        id=1,
+                        knowledge_type="process",
+                        should_type="concrete",
+                        no_needed_video=False,
+                        clip_start_sec=0.0,
+                        clip_end_sec=20.0,
+                        suggested_screenshoot_timestamps=[5.0],
+                    )
+                ]
+                result.clip_requests = [
+                    {
+                        "clip_id": f"{semantic_unit_id}/{semantic_unit_id}_clip_vl_001",
+                        "start_sec": semantic_unit_start_sec,
+                        "end_sec": semantic_unit_start_sec + 20.0,
+                        "knowledge_type": "process",
+                        "semantic_unit_id": semantic_unit_id,
+                    }
+                ]
+                result.screenshot_requests = [
+                    {
+                        "screenshot_id": f"{semantic_unit_id}/{semantic_unit_id}_ss_vl_01_01",
+                        "timestamp_sec": semantic_unit_start_sec + 5.0,
+                        "semantic_unit_id": semantic_unit_id,
+                        "_relative_timestamp": 5.0,
+                    }
+                ]
+                result.raw_response_json = [{"id": 1, "knowledge_type": "process", "should_type": "concrete"}]
+                return result
+
+            concrete_result = VLClipAnalysisResponse(success=True, analysis_mode="concrete")
+            concrete_result.token_usage = {"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10}
+            concrete_result.analysis_results = [
+                VLAnalysisResult(
+                    id=1,
+                    knowledge_type="concrete",
+                    no_needed_video=False,
+                    clip_start_sec=0.0,
+                    clip_end_sec=20.0,
+                    suggested_screenshoot_timestamps=[6.0],
+                    analysis_mode="concrete",
+                )
+            ]
+            concrete_result.clip_requests = []
+            concrete_result.screenshot_requests = [
+                {
+                    "screenshot_id": f"{semantic_unit_id}/{semantic_unit_id}_ss_concrete_seg_01_key_01",
+                    "timestamp_sec": semantic_unit_start_sec + 6.0,
+                    "semantic_unit_id": semantic_unit_id,
+                    "_relative_timestamp": 6.0,
+                    "analysis_mode": "concrete",
+                    "knowledge_type": "concrete",
+                }
+            ]
+            concrete_result.raw_response_json = [
+                {
+                    "segment_id": 1,
+                    "segment_description": "demo",
+                    "main_content": "原始内容 [KEYFRAME_1]",
+                    "clip_start_sec": 0.0,
+                    "clip_end_sec": 20.0,
+                    "instructional_keyframes": [{"timestamp_sec": 6.0}],
+                }
+            ]
+            return concrete_result
+
+    generator._analyzer = _ConcreteRerunAnalyzer()
+
+    async def _fake_deepseek_complete_text_with_backoff(**kwargs):
+        deepseek_calls.append(kwargs)
+        return ('[{"segment_id":1,"main_content":"增量补充后 [KEYFRAME_1]"}]', None, None)
+
+    monkeypatch.setattr(
+        generator,
+        "_call_deepseek_complete_text_with_backoff",
+        _fake_deepseek_complete_text_with_backoff,
+    )
+
+    clips_dir = sandbox_dir / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    clip_file = clips_dir / "001_SU_CONCRETE_RERUN_demo_10.00-30.00.mp4"
+    clip_file.write_bytes(b"clip")
+
+    async def _fake_split_video_by_semantic_units(video_path, semantic_units, output_dir=None):
+        return str(clips_dir)
+
+    def _fake_find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec):
+        return str(clip_file)
+
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_split_video_by_semantic_units)
+    monkeypatch.setattr(generator, "_find_clip_for_unit", _fake_find_clip_for_unit)
+
+    try:
+        result = asyncio.run(
+            generator.generate(
+                video_path=str(video_path),
+                semantic_units=semantic_units,
+                output_dir=str(output_dir),
+            )
+        )
+    finally:
+        shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+    assert result.success is True
+    assert analyze_modes == ["default", "concrete"]
+    assert result.clip_requests == []
+    assert len(result.screenshot_requests) == 1
+    assert "ss_concrete_seg_01_key_01" in result.screenshot_requests[0]["screenshot_id"]
+    assert len(deepseek_calls) == 1
+    assert result.token_stats["should_type_concrete_reanalysis_units"] == 1
+    assert result.token_stats["prompt_tokens_actual"] == 17
+    assert result.token_stats["completion_tokens_actual"] == 8
+    assert result.token_stats["total_tokens_actual"] == 25
+    assert semantic_units[0]["knowledge_type"] == "concrete"
+    assert semantic_units[0]["_vl_analysis_mode_override"] == "concrete"
+    assert len(result.unit_analysis_outputs) == 1
+    assert result.unit_analysis_outputs[0]["analysis_mode"] == "concrete"
+    assert result.unit_analysis_outputs[0]["raw_response_json"][0]["main_content"] == "增量补充后 [KEYFRAME_1]"
 
 
 def test_generate_uses_stream_unit_pipeline_when_enabled(monkeypatch, tmp_path):
@@ -2994,6 +3331,98 @@ def test_save_tutorial_assets_prefers_mapped_screenshot_timestamps_for_keyframes
     assert keyframe_calls[0][1] == 110.0
 
 
+def test_save_tutorial_assets_applies_top_reason_banner_to_keyframe_image(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "export_assets": True,
+                "save_step_json": False,
+                "asset_export_parallel_workers": 1,
+                "asset_export_parallel_hard_cap": 1,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return True
+
+    async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image = np.full((1080, 1920, 3), 235, dtype=np.uint8)
+        assert cv2.imwrite(str(output_path), image)
+        return True
+
+    monkeypatch.setattr(generator, "_export_clip_asset_with_ffmpeg", _fake_export_clip_asset_with_ffmpeg)
+    monkeypatch.setattr(generator, "_export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    clip_requests = [
+        {
+            "semantic_unit_id": "SU779",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "step_description": "step one",
+            "action_brief": "step_one",
+            "start_sec": 10.0,
+            "end_sec": 20.0,
+        }
+    ]
+    screenshot_requests = [
+        {
+            "semantic_unit_id": "SU779",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "timestamp_sec": 15.0,
+            "frame_reason": "大家请看画面顶部的设置区域，这里展示了需要重点核对的关键状态。",
+        }
+    ]
+    raw_response_json = [
+        {
+            "step_id": 1,
+            "step_description": "step one",
+            "step_type": "MAIN_FLOW",
+            "main_action": "open panel",
+            "main_operation": "1. open panel\n[KEYFRAME_1]",
+            "clip_start_sec": 10.0,
+            "clip_end_sec": 20.0,
+            "instructional_keyframes": [
+                {
+                    "timestamp_sec": 15.0,
+                    "frame_reason": "大家请看画面顶部的设置区域，这里展示了需要重点核对的关键状态。",
+                }
+            ],
+        }
+    ]
+
+    asyncio.run(
+        generator._save_tutorial_assets_for_unit(
+            video_path="dummy.mp4",
+            output_dir=str(output_dir),
+            unit_id="SU779",
+            clip_requests=clip_requests,
+            screenshot_requests=screenshot_requests,
+            raw_response_json=raw_response_json,
+        )
+    )
+
+    unit_asset_dir = output_dir / "vl_tutorial_units" / "SU779"
+    matched_images = list(unit_asset_dir.glob("SU779_ss_step_01_key_01_*"))
+    assert len(matched_images) == 1
+    rendered = cv2.imread(str(matched_images[0]), cv2.IMREAD_COLOR)
+    assert rendered is not None
+    top_sample = rendered[40:170, 100:1820]
+    assert top_sample.size > 0
+    assert int(np.mean(top_sample)) < 235
+
+
 def test_apply_grid_anchor_crop_for_keyframe(tmp_path, monkeypatch):
     generator = VLMaterialGenerator(
         {
@@ -3034,9 +3463,6 @@ def test_apply_grid_anchor_crop_for_keyframe(tmp_path, monkeypatch):
     meta = asyncio.run(
         generator._apply_grid_anchor_crop_for_keyframe(
             keyframe_path=image_path,
-            target_text="Settings",
-            target_ui_type="menu_item",
-            target_relative_position="top-left",
         )
     )
 
@@ -3244,6 +3670,27 @@ def test_annotate_screenshot_requests_with_unit_context_does_not_force_skip():
     assert requests[0]["analysis_mode"] == "default"
     assert requests[0]["knowledge_type"] == "concrete"
     assert "_skip_cv_optimization" not in requests[0]
+
+
+def test_annotate_screenshot_requests_with_unit_context_sets_concrete_window_start_to_timestamp():
+    generator = VLMaterialGenerator(_build_generator_config())
+    requests = [
+        {
+            "screenshot_id": "SU901/SU901_ss_concrete_seg_01_key_01",
+            "timestamp_sec": 12.34,
+        }
+    ]
+
+    generator._annotate_screenshot_requests_with_unit_context(
+        screenshot_requests=requests,
+        semantic_unit={"knowledge_type": "concrete"},
+        analysis_mode="concrete",
+    )
+
+    assert requests[0]["analysis_mode"] == "concrete"
+    assert requests[0]["knowledge_type"] == "concrete"
+    assert requests[0]["_window_start_sec"] == 12.34
+    assert "_window_end_sec" not in requests[0]
 
 
 def test_apply_selection_result_persists_candidate_screenshots():

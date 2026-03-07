@@ -11,7 +11,9 @@
 - 各函数/类返回的结构化结果或副作用。"""
 
 import os
+import random
 import subprocess
+import time
 import yt_dlp
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -42,6 +44,8 @@ class VideoProcessor(BaseProcessor):
     _SHORT_VIDEO_MAX_DURATION_SEC = 3600.0
     _YOUTUBE_HLS_FALLBACK_FORMAT_IDS = ("96", "95", "94", "93", "92", "91")
     _YOUTUBE_PLAYER_CLIENT_CHAIN = ("web_safari", "tv_downgraded", "web")
+    _PROBE_RETRY_JITTER_RATIO = 0.15
+    _PROBE_RETRY_JITTER_CAP_SEC = 0.5
     
     def __init__(
         self,
@@ -462,12 +466,23 @@ class VideoProcessor(BaseProcessor):
             or "winerror 10060" in lower_raw
         )
 
+    @staticmethod
+    def _is_incomplete_read_error(err: Exception) -> bool:
+        """判断是否为响应读取中断（例如 IncompleteRead/ChunkedEncodingError）。"""
+        lower_raw = str(err).lower()
+        return (
+            "incompleteread" in lower_raw
+            or "error reading response" in lower_raw
+            or "chunkedencodingerror" in lower_raw
+        )
+
     def _is_retryable_probe_error(self, err: Exception) -> bool:
         """判断元信息探测失败是否可重试（仅网络层与代理层错误）。"""
         return (
             self._is_network_timeout_error(err)
             or self._is_proxy_connection_error(err)
             or self._is_gateway_bad_response_error(err)
+            or self._is_incomplete_read_error(err)
         )
 
     def _build_probe_error_message(self, *, err: Exception, url: str, attempts: list[str]) -> str:
@@ -511,7 +526,41 @@ class VideoProcessor(BaseProcessor):
                 f" 原始错误: {raw} [attempts={attempts_text}] [url={url}]"
             )
 
+        if self._is_incomplete_read_error(err):
+            return (
+                "yt-dlp 探测视频信息失败：上游响应读取中断（IncompleteRead）。"
+                " 常见于网络抖动或平台侧短时连接中断，建议稍后重试。"
+                f" 原始错误: {raw} [attempts={attempts_text}] [url={url}]"
+            )
+
         return f"yt-dlp 探测视频信息失败: {raw} [attempts={attempts_text}] [url={url}]"
+
+    @staticmethod
+    def _compute_probe_backoff_delay_sec(
+        *,
+        retry_index: int,
+        base_delay_sec: float = 1.0,
+        max_delay_sec: float = 8.0,
+        jitter_ratio: float = 0.0,
+        jitter_cap_sec: float = 0.0,
+    ) -> float:
+        if retry_index <= 0 or base_delay_sec <= 0:
+            return 0.0
+
+        delay_sec = base_delay_sec * (2 ** (retry_index - 1))
+        if max_delay_sec > 0:
+            delay_sec = min(delay_sec, max_delay_sec)
+        if delay_sec < 0:
+            return 0.0
+
+        if jitter_ratio > 0 and jitter_cap_sec > 0 and delay_sec > 0:
+            jitter_upper_sec = min(delay_sec * jitter_ratio, jitter_cap_sec)
+            if jitter_upper_sec > 0:
+                delay_sec += random.uniform(0.0, jitter_upper_sec)
+                if max_delay_sec > 0:
+                    delay_sec = min(delay_sec, max_delay_sec)
+
+        return delay_sec
 
     @staticmethod
     def _is_bilibili_bvid_extractor_error(err: Exception) -> bool:
@@ -1056,7 +1105,7 @@ class VideoProcessor(BaseProcessor):
 
         last_error: Optional[Exception] = None
         attempted_labels: list[str] = []
-        for label, use_proxy, socket_timeout_sec in attempt_plan:
+        for attempt_index, (label, use_proxy, socket_timeout_sec) in enumerate(attempt_plan, start=1):
             probe_opts = _build_probe_options(use_proxy=use_proxy, socket_timeout_sec=socket_timeout_sec)
             try:
                 with yt_dlp.YoutubeDL(probe_opts) as ydl:
@@ -1068,9 +1117,19 @@ class VideoProcessor(BaseProcessor):
             except Exception as exc:
                 last_error = exc
                 attempted_labels.append(label)
+                has_next_attempt = attempt_index < len(attempt_plan)
+                if not has_next_attempt:
+                    break
                 if not self._is_retryable_probe_error(exc):
                     if not (self.proxy and not use_proxy):
                         break
+                delay_sec = self._compute_probe_backoff_delay_sec(
+                    retry_index=len(attempted_labels),
+                    jitter_ratio=self._PROBE_RETRY_JITTER_RATIO,
+                    jitter_cap_sec=self._PROBE_RETRY_JITTER_CAP_SEC,
+                )
+                if delay_sec > 0:
+                    time.sleep(delay_sec)
 
         if last_error is not None:
             raise RuntimeError(

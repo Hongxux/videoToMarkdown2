@@ -31,6 +31,7 @@ from services.python_grpc.src.content_pipeline.infra.llm.llm_client import (
     _AsyncInFlightDeduper,
 )
 from services.python_grpc.src.content_pipeline.infra.llm.deepseek_audit import append_deepseek_call_record
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import normalize_usage_payload
 from services.python_grpc.src.content_pipeline.infra.llm.vision_ai_client import (
     VisionAIClient,
     VisionAIConfig,
@@ -134,6 +135,28 @@ _DEEPSEEK_HEDGE_CTX_CHARS_PER_TOKEN = max(
     0.2,
     _env_float("MODULE2_DEEPSEEK_HEDGE_CTX_CHARS_PER_TOKEN", 1.0),
 )
+_DEEPSEEK_QWEN_FALLBACK_ENABLED = _env_bool("MODULE2_DEEPSEEK_QWEN_FALLBACK_ENABLED", True)
+_DEEPSEEK_QWEN_FALLBACK_BASE_URL = (
+    str(
+        os.getenv(
+            "MODULE2_DEEPSEEK_QWEN_FALLBACK_BASE_URL",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        )
+        or ""
+    ).strip()
+    or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+)
+_DEEPSEEK_QWEN_FALLBACK_MODEL = (
+    str(os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_MODEL", "qwen3-plus") or "").strip()
+    or "qwen3-plus"
+)
+_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV = (
+    str(os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV", "DASHSCOPE_API_KEY") or "").strip()
+    or "DASHSCOPE_API_KEY"
+)
+_DEEPSEEK_QWEN_FALLBACK_API_KEY = str(
+    os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_API_KEY", "") or ""
+).strip()
 
 _VISION_HEDGE_ENABLED = _env_bool("MODULE2_VISION_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
 _VISION_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VISION_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
@@ -661,6 +684,145 @@ def get_deepseek_client(
         return client
 
 
+def _resolve_qwen_fallback_api_key() -> Tuple[str, str]:
+    explicit_api_key = str(_DEEPSEEK_QWEN_FALLBACK_API_KEY or "").strip()
+    if explicit_api_key:
+        return explicit_api_key, "MODULE2_DEEPSEEK_QWEN_FALLBACK_API_KEY"
+
+    api_key_env = str(_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV or "").strip() or "DASHSCOPE_API_KEY"
+    env_api_key = str(os.getenv(api_key_env, "") or "").strip()
+    return env_api_key, api_key_env
+
+
+def _build_qwen_fallback_client(
+    *,
+    temperature: float,
+    enable_logprobs: Optional[bool],
+    cache_enabled: Optional[bool],
+    inflight_dedup_enabled: Optional[bool],
+) -> Optional[LLMClient]:
+    if not _DEEPSEEK_QWEN_FALLBACK_ENABLED:
+        return None
+
+    fallback_api_key, api_key_source = _resolve_qwen_fallback_api_key()
+    if not fallback_api_key:
+        logger.warning(
+            "[LLM降级] 无法降级到Qwen：缺少API Key，来源=%s",
+            api_key_source,
+        )
+        return None
+
+    return get_deepseek_client(
+        api_key=fallback_api_key,
+        base_url=_DEEPSEEK_QWEN_FALLBACK_BASE_URL,
+        model=_DEEPSEEK_QWEN_FALLBACK_MODEL,
+        temperature=temperature,
+        enable_logprobs=enable_logprobs,
+        cache_enabled=cache_enabled,
+        inflight_dedup_enabled=inflight_dedup_enabled,
+    )
+
+
+async def _fallback_to_qwen_text(
+    *,
+    prompt: str,
+    system_message: Optional[str],
+    need_logprobs: bool,
+    temperature: float,
+    enable_logprobs: Optional[bool],
+    cache_enabled: Optional[bool],
+    inflight_dedup_enabled: Optional[bool],
+    source_error: Exception,
+) -> Optional[Tuple[str, Any, Any]]:
+    fallback_client = _build_qwen_fallback_client(
+        temperature=temperature,
+        enable_logprobs=enable_logprobs,
+        cache_enabled=cache_enabled,
+        inflight_dedup_enabled=inflight_dedup_enabled,
+    )
+    if fallback_client is None:
+        return None
+
+    logger.warning(
+        "[LLM降级] DeepSeek文本调用失败，开始降级到Qwen。model=%s, base_url=%s, error=%s",
+        _DEEPSEEK_QWEN_FALLBACK_MODEL,
+        _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
+        source_error,
+    )
+    try:
+        result = await _call_deepseek_text_once(
+            client=fallback_client,
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            disable_inflight_dedup=False,
+        )
+        logger.warning(
+            "[LLM降级] DeepSeek文本调用已降级到Qwen并成功返回。model=%s",
+            _DEEPSEEK_QWEN_FALLBACK_MODEL,
+        )
+        return result
+    except Exception as fallback_exc:
+        logger.error(
+            "[LLM降级] DeepSeek文本调用降级到Qwen失败。model=%s, original_error=%s, fallback_error=%s",
+            _DEEPSEEK_QWEN_FALLBACK_MODEL,
+            source_error,
+            fallback_exc,
+        )
+        raise
+
+
+async def _fallback_to_qwen_json(
+    *,
+    prompt: str,
+    system_message: Optional[str],
+    need_logprobs: bool,
+    max_tokens: Optional[int],
+    temperature: float,
+    enable_logprobs: Optional[bool],
+    cache_enabled: Optional[bool],
+    inflight_dedup_enabled: Optional[bool],
+    source_error: Exception,
+) -> Optional[Tuple[Dict[str, Any], Any, Any]]:
+    fallback_client = _build_qwen_fallback_client(
+        temperature=temperature,
+        enable_logprobs=enable_logprobs,
+        cache_enabled=cache_enabled,
+        inflight_dedup_enabled=inflight_dedup_enabled,
+    )
+    if fallback_client is None:
+        return None
+
+    logger.warning(
+        "[LLM降级] DeepSeek JSON调用失败，开始降级到Qwen。model=%s, base_url=%s, error=%s",
+        _DEEPSEEK_QWEN_FALLBACK_MODEL,
+        _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
+        source_error,
+    )
+    try:
+        result = await _call_deepseek_json_once(
+            client=fallback_client,
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            max_tokens=max_tokens,
+            disable_inflight_dedup=False,
+        )
+        logger.warning(
+            "[LLM降级] DeepSeek JSON调用已降级到Qwen并成功返回。model=%s",
+            _DEEPSEEK_QWEN_FALLBACK_MODEL,
+        )
+        return result
+    except Exception as fallback_exc:
+        logger.error(
+            "[LLM降级] DeepSeek JSON调用降级到Qwen失败。model=%s, original_error=%s, fallback_error=%s",
+            _DEEPSEEK_QWEN_FALLBACK_MODEL,
+            source_error,
+            fallback_exc,
+        )
+        raise
+
+
 async def deepseek_complete_text(
     *,
     prompt: str,
@@ -726,6 +888,18 @@ async def deepseek_complete_text(
         return output_text, metadata, logprobs
     except Exception as exc:
         error_text = str(exc)
+        fallback_output = await _fallback_to_qwen_text(
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            temperature=temperature,
+            enable_logprobs=enable_logprobs,
+            cache_enabled=cache_enabled,
+            inflight_dedup_enabled=inflight_dedup_enabled,
+            source_error=exc,
+        )
+        if fallback_output is not None:
+            return fallback_output
         raise
     finally:
         try:
@@ -817,6 +991,21 @@ async def deepseek_complete_json(
             ),
         )
         return result_json, metadata, logprobs
+    except Exception as exc:
+        fallback_json = await _fallback_to_qwen_json(
+            prompt=prompt,
+            system_message=system_message,
+            need_logprobs=need_logprobs,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            enable_logprobs=enable_logprobs,
+            cache_enabled=cache_enabled,
+            inflight_dedup_enabled=inflight_dedup_enabled,
+            source_error=exc,
+        )
+        if fallback_json is not None:
+            return fallback_json
+        raise
     finally:
         try:
             _DEEPSEEK_HEDGE_ESTIMATOR.observe(
@@ -1001,6 +1190,7 @@ class VLChatResult:
     finish_reason: Optional[str]
     usage: Dict[str, int]
     model: str
+    cache_hit: bool = False
 
 
 @dataclass
@@ -1052,36 +1242,19 @@ def _extract_usage_from_response(response: Any) -> Dict[str, int]:
     1) 步骤1：接收并校验输入参数，确保当前调用上下文有效。
     2) 步骤2：按方法职责执行核心处理逻辑，并维护必要的中间状态。
     3) 步骤3：返回处理结果或更新状态，供后续流程继续使用。"""
-    usage = None
-    if isinstance(response, dict):
-        usage = response.get("usage")
-    else:
-        usage = getattr(response, "usage", None)
-
-    prompt_tokens = 0
-    completion_tokens = 0
-    total_tokens = 0
-
-    def _as_int(val: Any, default: int = 0) -> int:
-        try:
-            return int(val)
-        except Exception:
-            return int(default)
-
-    if usage is not None:
-        if isinstance(usage, dict):
-            prompt_tokens = _as_int(usage.get("prompt_tokens", 0))
-            completion_tokens = _as_int(usage.get("completion_tokens", 0))
-            total_tokens = _as_int(usage.get("total_tokens", prompt_tokens + completion_tokens))
-        else:
-            prompt_tokens = _as_int(getattr(usage, "prompt_tokens", 0))
-            completion_tokens = _as_int(getattr(usage, "completion_tokens", 0))
-            total_tokens = _as_int(getattr(usage, "total_tokens", prompt_tokens + completion_tokens))
-
+    usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
+    normalized = normalize_usage_payload(usage)
     return {
-        "prompt_tokens": max(0, prompt_tokens),
-        "completion_tokens": max(0, completion_tokens),
-        "total_tokens": max(0, total_tokens),
+        key: value
+        for key, value in normalized.items()
+        if key in {
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "cached_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+        }
     }
 
 
@@ -1200,6 +1373,7 @@ async def vl_chat_completion(
                 finish_reason=cached.finish_reason,
                 usage=dict(cached.usage or {}),
                 model=str(cached.model or model),
+                cache_hit=True,
             )
         cache_metrics.miss("module2.vl.result_cache")
 
@@ -1244,6 +1418,7 @@ async def vl_chat_completion(
                 finish_reason=finish_reason,
                 usage=usage,
                 model=model_name,
+                cache_hit=False,
             )
         except asyncio.CancelledError:
             raise

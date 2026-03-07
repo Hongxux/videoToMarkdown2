@@ -42,7 +42,7 @@ def _install_prompt_loader_stub(monkeypatch):
         PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM: "STRUCTURED_SYSTEM_TEMPLATE",
         PromptKeys.DEEPSEEK_MD_STRUCTURED_USER: "USER_STRUCTURED_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}",
         PromptKeys.DEEPSEEK_MD_STRUCTURED_SYSTEM_PRESERVE_IMG: "STRUCTURED_SYSTEM_PRESERVE_TEMPLATE",
-        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG: "USER_STRUCTURED_PRESERVE_TEMPLATE::{title}|{knowledge_type}|{body_text}|{adjacent_context}",
+        PromptKeys.DEEPSEEK_MD_STRUCTURED_USER_PRESERVE_IMG: "USER_STRUCTURED_PRESERVE_TEMPLATE::{title}|{knowledge_type}|{body_text}|{image_context}|{adjacent_context}",
         PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_SYSTEM: "IMG_DESC_SYSTEM_TEMPLATE",
         PromptKeys.DEEPSEEK_MD_IMG_DESC_AUG_USER: "USER_IMG_DESC_TEMPLATE::{body_text}|{image_evidence}",
     }

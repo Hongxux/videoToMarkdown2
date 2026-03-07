@@ -12,6 +12,7 @@ import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
 import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
+import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
 import com.mvp.module2.fusion.service.VideoMetaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -121,6 +122,9 @@ public class MobileMarkdownController {
     private CollectionRepository collectionRepository;
 
     @Autowired(required = false)
+    private TaskManualCollectionRepository taskManualCollectionRepository;
+
+    @Autowired(required = false)
     private FileReuseService fileReuseService;
 
     @Autowired
@@ -146,15 +150,16 @@ public class MobileMarkdownController {
     @GetMapping("/tasks")
     public ResponseEntity<Map<String, Object>> listTasks(
             @RequestParam(value = "page", defaultValue = "0") int page,
-            @RequestParam(value = "pageSize", defaultValue = "20") int pageSize,
+            @RequestParam(value = "pageSize", defaultValue = "0") int pageSize,
             @RequestParam(value = "onlyMultiSegment", defaultValue = "true") boolean onlyMultiSegment
     ) {
+        int normalizedPage = Math.max(0, page);
         List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
         com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult =
-                storageTaskCacheService.getTasks(page, pageSize);
+                storageTaskCacheService.getTasks(normalizedPage, pageSize);
 
         List<TaskView> finalViewList = new ArrayList<>();
-        if (page == 0) {
+        if (normalizedPage == 0) {
             for (TaskEntry runtimeTask : runtimeTasks) {
                 finalViewList.add(fromRuntimeTask(runtimeTask));
             }
@@ -166,10 +171,13 @@ public class MobileMarkdownController {
         finalViewList = deduplicateTaskViews(finalViewList);
         finalViewList.sort(Comparator.comparingLong(this::bestTimestamp).reversed());
         Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
+        Map<String, String> manualCollectionPathByTaskPath = findManualCollectionPathByTaskPath(finalViewList);
 
         List<Map<String, Object>> taskList = new ArrayList<>(finalViewList.size());
         for (TaskView task : finalViewList) {
+            task.taskPath = resolveTaskPath(task);
             attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
+            attachManualCollectionPath(task, manualCollectionPathByTaskPath.get(task.taskPath));
             if (onlyMultiSegment && !isTaskMultiSegmentReadable(task)) {
                 continue;
             }
@@ -183,11 +191,62 @@ public class MobileMarkdownController {
         } else {
             response.put("totalCount", runtimeTasks.size() + storageResult.totalCount);
         }
-        response.put("page", page);
+        response.put("page", normalizedPage);
         response.put("pageSize", pageSize);
         response.put("hasMore", storageResult.hasMore);
 
         return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/manual-task-collections")
+    public ResponseEntity<Map<String, Object>> getManualTaskCollections() {
+        if (taskManualCollectionRepository == null) {
+            return ResponseEntity.ok(Map.of("bindings", List.of()));
+        }
+        Map<String, String> allBindings = taskManualCollectionRepository.listAllBindings();
+        List<Map<String, Object>> items = new ArrayList<>(allBindings.size());
+        allBindings.forEach((taskPath, collectionPath) -> {
+            if (taskPath == null || taskPath.isBlank() || collectionPath == null || collectionPath.isBlank()) {
+                return;
+            }
+            items.add(Map.of(
+                    "taskPath", taskPath,
+                    "collectionPath", collectionPath
+            ));
+        });
+        return ResponseEntity.ok(Map.of("bindings", items));
+    }
+
+    @PutMapping("/manual-task-collections")
+    public ResponseEntity<Map<String, Object>> replaceManualTaskCollections(
+            @RequestBody(required = false) ManualTaskCollectionsUpsertRequest request
+    ) {
+        if (taskManualCollectionRepository == null) {
+            return ResponseEntity.status(503).body(Map.of(
+                    "success", false,
+                    "message", "manual collection repository is not available"
+            ));
+        }
+        Map<String, String> normalized = new LinkedHashMap<>();
+        List<ManualTaskCollectionBindingItem> items = request != null ? request.bindings : null;
+        if (items != null) {
+            for (ManualTaskCollectionBindingItem item : items) {
+                if (item == null) {
+                    continue;
+                }
+                String taskPath = TaskManualCollectionRepository.normalizeTaskPath(item.taskPath);
+                String collectionPath = TaskManualCollectionRepository.normalizeCollectionPath(item.collectionPath);
+                if (taskPath.isEmpty() || collectionPath.isEmpty()) {
+                    continue;
+                }
+                normalized.put(taskPath, collectionPath);
+            }
+        }
+        int updatedCount = taskManualCollectionRepository.replaceAllBindings(normalized);
+        return ResponseEntity.ok(Map.of(
+                "success", true,
+                "updatedCount", updatedCount
+        ));
     }
 
     @PostMapping("/tasks/submit")
@@ -2196,6 +2255,9 @@ public class MobileMarkdownController {
         item.put("episodeNo", task.episodeNo);
         item.put("episodeTitle", task.episodeTitle != null ? task.episodeTitle : "");
         item.put("collectionTitle", task.collectionTitle != null ? task.collectionTitle : "");
+        item.put("collectionPath", task.collectionPath != null ? task.collectionPath : "");
+        item.put("taskPath", task.taskPath != null ? task.taskPath : "");
+        item.put("manualCollection", task.manualCollection);
         item.put("totalEpisodes", task.totalEpisodes);
         return item;
     }
@@ -2229,6 +2291,90 @@ public class MobileMarkdownController {
         task.episodeTitle = binding.episodeTitle;
         task.collectionTitle = binding.collectionTitle;
         task.totalEpisodes = binding.totalEpisodes;
+    }
+
+    private Map<String, String> findManualCollectionPathByTaskPath(List<TaskView> tasks) {
+        if (taskManualCollectionRepository == null || tasks == null || tasks.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> taskPaths = new LinkedHashSet<>();
+        for (TaskView task : tasks) {
+            String taskPath = resolveTaskPath(task);
+            if (taskPath.isEmpty()) {
+                continue;
+            }
+            taskPaths.add(taskPath);
+        }
+        if (taskPaths.isEmpty()) {
+            return Map.of();
+        }
+        return taskManualCollectionRepository.findCollectionPathByTaskPaths(taskPaths);
+    }
+
+    private void attachManualCollectionPath(TaskView task, String rawCollectionPath) {
+        if (task == null) {
+            return;
+        }
+        String manualPath = TaskManualCollectionRepository.normalizeCollectionPath(rawCollectionPath);
+        if (!manualPath.isEmpty()) {
+            task.collectionPath = manualPath;
+            task.manualCollection = true;
+            String terminal = lastPathSegment(manualPath);
+            task.collectionId = "manual-path::" + manualPath;
+            task.collectionTitle = terminal.isEmpty() ? manualPath : terminal;
+            task.episodeNo = null;
+            task.episodeTitle = null;
+            task.totalEpisodes = null;
+            return;
+        }
+        task.manualCollection = false;
+        if ((task.collectionPath == null || task.collectionPath.isBlank())
+                && task.collectionTitle != null && !task.collectionTitle.isBlank()) {
+            task.collectionPath = TaskManualCollectionRepository.normalizeCollectionPath(task.collectionTitle);
+        }
+    }
+
+    private String resolveTaskPath(TaskView task) {
+        if (task == null) {
+            return "";
+        }
+        if (task.storageKey != null && !task.storageKey.isBlank()) {
+            return "storage/" + TaskManualCollectionRepository.normalizeTaskPath(task.storageKey);
+        }
+        if (task.taskRootDir != null) {
+            String normalized = TaskManualCollectionRepository.normalizeTaskPath(task.taskRootDir.toString());
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        if (task.markdownPath != null) {
+            String normalized = TaskManualCollectionRepository.normalizeTaskPath(task.markdownPath.toString());
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        if (task.resultPath != null && !task.resultPath.isBlank()) {
+            String normalized = TaskManualCollectionRepository.normalizeTaskPath(task.resultPath);
+            if (!normalized.isEmpty()) {
+                return normalized;
+            }
+        }
+        if (task.taskId != null && !task.taskId.isBlank()) {
+            return "task/" + TaskManualCollectionRepository.normalizeTaskPath(task.taskId);
+        }
+        return "";
+    }
+
+    private String lastPathSegment(String normalizedPath) {
+        String source = normalizedPath == null ? "" : normalizedPath.trim();
+        if (source.isEmpty()) {
+            return "";
+        }
+        int slashAt = source.lastIndexOf('/');
+        if (slashAt < 0 || slashAt >= source.length() - 1) {
+            return source;
+        }
+        return source.substring(slashAt + 1).trim();
     }
 
     private boolean isCollectionInputValid(String collectionId, Integer episodeNo) {
@@ -4741,6 +4887,15 @@ public class MobileMarkdownController {
         public String priority;
     }
 
+    public static class ManualTaskCollectionBindingItem {
+        public String taskPath;
+        public String collectionPath;
+    }
+
+    public static class ManualTaskCollectionsUpsertRequest {
+        public List<ManualTaskCollectionBindingItem> bindings;
+    }
+
     private static class StorageDeleteResult {
         private boolean success = true;
         private boolean found;
@@ -4774,6 +4929,9 @@ public class MobileMarkdownController {
         private Integer episodeNo;
         private String episodeTitle;
         private String collectionTitle;
+        private String collectionPath;
+        private String taskPath;
+        private boolean manualCollection;
         private Integer totalEpisodes;
     }
 }

@@ -1,0 +1,140 @@
+﻿# =========================
+# 系统与编辑器配置
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.obsidian/
+.idea/
+*.iml
+.agent/
+
+# =========================
+# Python 运行与缓存
+# =========================
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# =========================
+# 凭据与本地敏感配置
+# =========================
+config/*.local.yaml
+config/*.local.yml
+.env
+.env.*
+!.env.example
+!deploy/docker/.env.example
+.envrc
+cookies.txt
+cookies.pkl
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.ovpn
+*secret*.pem
+*secret*.key
+*credentials*.json
+*service-account*.json
+
+# =========================
+# 临时文件与调试产物
+# =========================
+*.log
+hs_err_pid*.log
+replay_pid*.log
+*.tmp
+temp.txt
+debug_output.txt
+debug_status.txt
+bert_split_report.txt
+tools/test_result_*.txt
+tmp_*/
+tmp*/
+.tmp_*/
+temp_*/
+temp_frames/
+manual_assemble_fix_*/
+tmp_*.py
+tmp_*.txt
+
+# =========================
+# 运行时输出目录（默认不入库）
+# =========================
+storage/**
+var/**
+output/**
+services/java-orchestrator/var/**
+services/java-orchestrator/output/**
+
+# 白名单：仅保留目录说明文件/占位文件
+!storage/README.md
+!storage/.gitkeep
+!var/README.md
+!var/.gitkeep
+!output/.gitkeep
+!services/java-orchestrator/output/.gitignore
+
+# =========================
+# 媒体与模型大文件
+# =========================
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.flv
+*.wav
+*.pt
+*.onnx
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+find_alg/
+videoToMarkdown/models/
+
+# =========================
+# Java / Node / Android 构建产物
+# =========================
+**/target/
+**/node_modules/
+dist/
+build/
+.gradle/
+.gradle-user-home/
+.kotlin/
+local.properties
+captures/
+**/.externalNativeBuild/
+**/.cxx/
+*.apk
+*.aab
+.m2/
+.m2_temp/
+services/java-orchestrator/tmp_m2repo/
+services/java-orchestrator/build.log
+services/java-orchestrator/compile_error.txt
+services/java-orchestrator/compile_failure.log
+services/java-orchestrator/output/**/intermediates/task_metrics_latest.json
+
+# =========================
+# 第三方与生成代码
+# =========================
+MiniCMP/
+third_party/**
+!third_party/README.md
+generated_grpc/
+contracts/gen/python/

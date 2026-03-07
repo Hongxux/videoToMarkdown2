@@ -2181,7 +2181,7 @@ public class VideoProcessingOrchestrator {
             }
             merged.put(
                 key,
-                new JavaCVFFmpegService.ScreenshotRequest(req.screenshotId, req.timestampSec, req.label, req.semanticUnitId)
+                new JavaCVFFmpegService.ScreenshotRequest(req.screenshotId, req.timestampSec, req.label, req.semanticUnitId, req.frameReason)
             );
         }
     }
@@ -2205,7 +2205,7 @@ public class VideoProcessingOrchestrator {
             }
             merged.put(
                 key,
-                new JavaCVFFmpegService.ScreenshotRequest(req.screenshotId, req.timestampSec, req.label, req.semanticUnitId)
+                new JavaCVFFmpegService.ScreenshotRequest(req.screenshotId, req.timestampSec, req.label, req.semanticUnitId, req.frameReason)
             );
         }
     }
@@ -3253,7 +3253,7 @@ public class VideoProcessingOrchestrator {
         if (dtos == null) return list;
         for (ScreenshotRequestDTO dto : dtos) {
             list.add(new JavaCVFFmpegService.ScreenshotRequest(
-                dto.screenshotId, dto.timestampSec, dto.label, dto.semanticUnitId
+                dto.screenshotId, dto.timestampSec, dto.label, dto.semanticUnitId, dto.frameReason
             ));
         }
         return list;

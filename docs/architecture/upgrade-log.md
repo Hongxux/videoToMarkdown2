@@ -3,6 +3,89 @@
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-03-07 Phase2A `frame_reason` 顶部提示条正式上线（concrete/process 双链路收敛）
+- 日期：2026-03-07
+- 触发背景与问题：
+  - 现有 Phase2A 已能产出 `frame_reason`，但 concrete/process 截图落盘时没有把这段“讲师口吻引导文案”真正画进图片像素层。
+  - 结果是：语义文件里有解释，最终截图却缺少视觉引导，用户在核对关键区域时仍要依赖正文或图注，教学引导链路不闭环。
+- 第一性原理与复用杠杆：
+  - 第一性原理：`frame_reason` 的价值不在“存下来”，而在“进入最终视觉载体”；否则语义解释与图片消费断层。
+  - 复用杠杆1：复用既有 `instructional_keyframes[].frame_reason` / `ScreenshotRequest.frame_reason`，不新增平行文案源。
+  - 复用杠杆2：复用既有截图写盘点，而不是在 Phase2B 消费阶段做二次覆盖，避免重复叠加与幂等问题。
+  - 复用杠杆3：复用已落地的 Python 顶部 banner 渲染 helper，并在 Java 截图服务用同一版式公式实现等价渲染，保持 concrete/process 视觉一致。
+- 架构决策：
+  - 决策1：process tutorial_stepwise 截图在 `VLMaterialGenerator._save_tutorial_assets_for_unit` 的 keyframe 写盘后立即叠加顶部提示条。
+  - 决策2：concrete / VL / legacy 统一截图链路在 Java `JavaCVFFmpegService.extractScreenshotsBatch` 写 JPEG 前立即叠加顶部提示条，作为真正的“截图完成下游”。
+  - 决策3：`contracts/proto/video_processing.proto` 的 `ScreenshotRequest` 新增 `frame_reason` 字段，并沿 Python gRPC -> Java gRPC client -> Orchestrator -> FFmpeg service 全链透传。
+  - 决策4：顶部提示条字号从“高度/45”放大到“高度/40”，保持顶部 5%、宽度 90%、上下 padding 2%、左右 padding 2%、1.4 行距，解决 1080P 下字偏小问题。
+- 调用链与决策链变化：
+  - 改造前：
+    - `VL/MaterialRequests -> screenshot_requests(frame_reason only in metadata) -> Java/Python screenshot export -> assets/*.jpg/png（无顶部提示条）`
+  - 改造后：
+    - `VL/MaterialRequests -> screenshot_requests(frame_reason) -> Python tutorial keyframe export / Java batch screenshot export -> draw top reason banner -> assets/*.jpg/png`
+- 已落地改动：
+  - `contracts/proto/video_processing.proto`
+  - `contracts/gen/python/video_processing_pb2.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/grpc/PythonGrpcClient.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/JavaCVFFmpegService.java`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/JavaCVFFmpegServiceTest.java`
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py services/python_grpc/src/content_pipeline/tests/test_phase2b_material_resilience.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_save_tutorial_assets_uses_analysis_relative_timestamps services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_save_tutorial_assets_prefers_mapped_screenshot_timestamps_for_keyframes services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_save_tutorial_assets_applies_top_reason_banner_to_keyframe_image -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests test-compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=JavaCVFFmpegServiceTest test -q`
+- 测试数据：
+  - Python 精确回归：41 passed。
+  - Java 编译：`compile` 通过，`test-compile` 通过。
+  - Java 定向单测：`JavaCVFFmpegServiceTest` 通过。
+- 复用经验与后续建议：
+  - 任何后续新增截图语义字段（如 `bbox_anchor_text`、`ocr_hint`）都应优先沿 `ScreenshotRequest` contract 透传到真正写盘点，而不是延后到 Phase2B 消费阶段再补像素。
+  - 若未来要继续放大/缩小顶部条，优先只调“字号分母”这一单一参数，避免同时改动 margin/padding/line-height 造成多维漂移。
+
+## 2026-03-06 VL `should_type=concrete` 链路收敛（二次 concrete 分析 + deepseek 增量补充一致性）
+- 日期：2026-03-06
+- 触发背景与问题：
+  - 现有流程中，`should_type=concrete` 仅在消费阶段做路由改写，未真正切换到 concrete 模式 VL 分析。
+  - 结果是：上游标记了 concrete，下游却可能仍消费 default/process 结构，`deepseek` 增量补充与截图语义存在不一致风险。
+- 第一性原理与复用杠杆：
+  - 第一性原理：语义类型必须由“同语义模型输出”驱动；仅改标签不改分析模式，会造成语义与数据结构断层。
+  - 复用杠杆1：复用既有 `VLVideoAnalyzer.analyze_clip(analysis_mode="concrete")`，不新增平行 concrete 分析器。
+  - 复用杠杆2：复用既有 `_postprocess_unit_main_content`，确保 concrete 模式输出继续走 deepseek 增量补充。
+  - 复用杠杆3：复用既有 `_consume_unit_analysis_result_streaming` 作为统一消费入口，降低流式/非流式行为漂移。
+- 架构决策：
+  - 决策1：新增“命中 `should_type=concrete` 且当前非 concrete 模式时，强制二次 concrete 分析”的机制。
+  - 决策2：二次分析成功后采用“就地替换分析结果对象”的策略，保持引用一致，确保 `unit_analysis_outputs`、截图与 token 统计同步更新。
+  - 决策3：task metadata 增加 `extra_prompt` 透传，二次分析沿用同一上下文；并回写 `_vl_analysis_mode_override=concrete`。
+  - 决策4：非流式汇总路径统一复用 `_consume_unit_analysis_result_streaming`，收敛行为入口。
+- 调用链与决策链变化：
+  - 改造前：
+    - `analyze(default/process) -> should_type=concrete -> 仅 route override -> 后续按“改写结果”继续`
+  - 改造后：
+    - `analyze(default/process) -> should_type=concrete -> rerun analyze(concrete) -> deepseek concrete 增量补充 -> concrete screenshot/output`
+- 已落地改动：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（本次以语义一致性为主，非吞吐优化）：
+  - 测试方式：
+    - 通过回归测试验证“二次 concrete 分析 + deepseek 增量补充 + concrete 截图”链路一致性；
+    - 通过编译回归确认 Java 侧无联动破坏。
+  - 测试数据：
+    - `pytest ... -k "should_type_concrete or concrete_mode_override or reruns_concrete_mode" -q`：4 passed。
+    - `pytest ... -k "should_type_concrete or concrete_mode_override or parse_response_with_payload_concrete_schema or build_messages_uses_concrete_mode_prompts" -q`：6 passed。
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`：通过。
+  - 说明：
+    - 全量 `test_vl_tutorial_flow.py` 在当前环境仍受本机临时目录 ACL（`pytest-of-HongXU`）影响，存在与本次改动无关的 `PermissionError`。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "should_type_concrete or concrete_mode_override or reruns_concrete_mode" -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "should_type_concrete or concrete_mode_override or parse_response_with_payload_concrete_schema or build_messages_uses_concrete_mode_prompts" -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
 ## 2026-03-05 Mobile 删除接口语义收敛（运行态取消 + 历史态删除 + 幂等返回）
 - 日期：2026-03-05
 - 触发背景与问题：

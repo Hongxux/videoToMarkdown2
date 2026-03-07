@@ -76,6 +76,14 @@ public class DatabaseInitializer {
                         """);
                 statement.execute("CREATE INDEX IF NOT EXISTS idx_episode_task ON collection_episodes(task_id)");
                 statement.execute("""
+                        CREATE TABLE IF NOT EXISTS task_manual_collection_bindings (
+                            task_path TEXT PRIMARY KEY,
+                            collection_path TEXT NOT NULL,
+                            updated_at TEXT NOT NULL
+                        )
+                        """);
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_manual_collection_path ON task_manual_collection_bindings(collection_path)");
+                statement.execute("""
                         CREATE TABLE IF NOT EXISTS file_metadata (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             file_md5 TEXT NOT NULL,

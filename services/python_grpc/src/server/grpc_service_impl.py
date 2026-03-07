@@ -2512,6 +2512,94 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         parsed = json.loads(payload_text)
         return self._normalize_semantic_units_payload(parsed)
 
+    def _collect_semantic_unit_quality_metrics(
+        self,
+        semantic_units: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, int]:
+        metrics = {
+            "unit_count": 0,
+            "keyframe_unit_count": 0,
+            "keyframe_placeholder_count": 0,
+            "vl_segment_count": 0,
+            "instructional_step_count": 0,
+            "screenshot_item_count": 0,
+            "text_chars": 0,
+        }
+        if not isinstance(semantic_units, list):
+            return metrics
+
+        keyframe_pattern = re.compile(r"\[\s*KEYFRAME_\d+\s*\]", flags=re.IGNORECASE)
+        for unit in semantic_units:
+            if not isinstance(unit, dict):
+                continue
+            metrics["unit_count"] += 1
+
+            text_candidates = [
+                unit.get("full_text"),
+                unit.get("main_content"),
+                unit.get("body_text"),
+                unit.get("enhanced_body"),
+                unit.get("original_body"),
+            ]
+            unit_text = "\n".join(
+                [str(candidate).strip() for candidate in text_candidates if str(candidate or "").strip()]
+            )
+            if unit_text:
+                metrics["text_chars"] += len(unit_text)
+
+            keyframe_hits = len(keyframe_pattern.findall(unit_text))
+            metrics["keyframe_placeholder_count"] += keyframe_hits
+            if keyframe_hits > 0:
+                metrics["keyframe_unit_count"] += 1
+
+            vl_segments = unit.get("_vl_concrete_segments")
+            if isinstance(vl_segments, list):
+                metrics["vl_segment_count"] += len(vl_segments)
+
+            instructional_steps = unit.get("instructional_steps")
+            if isinstance(instructional_steps, list):
+                metrics["instructional_step_count"] += len(instructional_steps)
+
+            materials = unit.get("materials")
+            if isinstance(materials, dict):
+                screenshot_items = materials.get("screenshot_items")
+                if isinstance(screenshot_items, list):
+                    metrics["screenshot_item_count"] += len(screenshot_items)
+        return metrics
+
+    def _should_prefer_runtime_semantic_units(
+        self,
+        current_payload: Optional[List[Dict[str, Any]]],
+        runtime_payload: Optional[List[Dict[str, Any]]],
+    ) -> bool:
+        if not isinstance(runtime_payload, list) or not runtime_payload:
+            return False
+        if not isinstance(current_payload, list) or not current_payload:
+            return True
+
+        current_metrics = self._collect_semantic_unit_quality_metrics(current_payload)
+        runtime_metrics = self._collect_semantic_unit_quality_metrics(runtime_payload)
+
+        current_score = (
+            current_metrics["keyframe_placeholder_count"],
+            current_metrics["keyframe_unit_count"],
+            current_metrics["vl_segment_count"],
+            current_metrics["instructional_step_count"],
+            current_metrics["screenshot_item_count"],
+            current_metrics["text_chars"],
+            current_metrics["unit_count"],
+        )
+        runtime_score = (
+            runtime_metrics["keyframe_placeholder_count"],
+            runtime_metrics["keyframe_unit_count"],
+            runtime_metrics["vl_segment_count"],
+            runtime_metrics["instructional_step_count"],
+            runtime_metrics["screenshot_item_count"],
+            runtime_metrics["text_chars"],
+            runtime_metrics["unit_count"],
+        )
+        return runtime_score > current_score
+
     def _materialize_semantic_units_payload(
         self,
         output_dir: str,
@@ -4667,7 +4755,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                 screenshot_id=f"{task['unit_id']}/{task['unit_id']}_ss_island_{task['island_index'] + 1:03d}",
                                 timestamp_sec=(task['expanded_start'] + task['expanded_end']) / 2,
                                 label=f"稳定岛{task['island_index']}",
-                                semantic_unit_id=task['unit_id']
+                                semantic_unit_id=task['unit_id'],
+                                frame_reason="",
                             ))
                             continue
 
@@ -4696,7 +4785,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                 screenshot_id=f"{result['unit_id']}/{result['unit_id']}_ss_island_{result['island_index'] + 1:03d}",
                                 timestamp_sec=result['selected_timestamp'],
                                 label=f"稳定岛{result['island_index']}",
-                                semantic_unit_id=result['unit_id']
+                                semantic_unit_id=result['unit_id'],
+                                frame_reason="",
                             ))
                 finally:
                     self._cleanup_ephemeral_frame_registry(screenshot_registry)
@@ -4713,7 +4803,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         screenshot_id=f"{unit.unit_id}/{unit.unit_id}_ss_fallback_001",
                         timestamp_sec=mid_ts,
                         label="fallback",
-                        semantic_unit_id=unit.unit_id
+                        semantic_unit_id=unit.unit_id,
+                        frame_reason="",
                     ))
                 logger.info(f"[{task_id}] Fallback screenshots generated: {len(final_ss)}")
                 
@@ -5027,30 +5118,35 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         f"[{task_id}] AssembleRichText semantic_units_ref not found, fallback to runtime/path: ref_id={ref_id}"
                     )
 
-            if not semantic_units_payload:
-                runtime_semantic_units = self._get_phase2a_runtime_semantic_units(
-                    output_dir=output_dir,
-                    semantic_units_path="",
+            runtime_semantic_units = self._get_phase2a_runtime_semantic_units(
+                output_dir=output_dir,
+                semantic_units_path="",
+            )
+            if runtime_semantic_units is not None and self._should_prefer_runtime_semantic_units(
+                current_payload=semantic_units_payload,
+                runtime_payload=runtime_semantic_units,
+            ):
+                previous_metrics = self._collect_semantic_unit_quality_metrics(semantic_units_payload)
+                runtime_metrics = self._collect_semantic_unit_quality_metrics(runtime_semantic_units)
+                semantic_units_payload = runtime_semantic_units
+                _update_assemble_soft_state(
+                    status="running",
+                    checkpoint="phase2b_semantic_runtime_ready",
+                    completed=1,
+                    pending=2,
                 )
-                if runtime_semantic_units is not None:
-                    semantic_units_payload = runtime_semantic_units
-                    _update_assemble_soft_state(
-                        status="running",
-                        checkpoint="phase2b_semantic_runtime_ready",
-                        completed=1,
-                        pending=2,
-                    )
-                    assemble_watchdog.emit(
-                        status="running",
-                        checkpoint="phase2b_semantic_runtime_ready",
-                        completed=1,
-                        pending=2,
-                        signal_type="hard",
-                    )
-                    logger.info(
-                        f"[{task_id}] AssembleRichText loaded semantic units from runtime cache: "
-                        f"units={len(semantic_units_payload)}"
-                    )
+                assemble_watchdog.emit(
+                    status="running",
+                    checkpoint="phase2b_semantic_runtime_ready",
+                    completed=1,
+                    pending=2,
+                    signal_type="hard",
+                )
+                logger.info(
+                    f"[{task_id}] AssembleRichText selected runtime semantic units: "
+                    f"units={len(semantic_units_payload)}, "
+                    f"current_metrics={previous_metrics}, runtime_metrics={runtime_metrics}"
+                )
 
             materialized_semantic_units_path = ""
             if semantic_units_payload:
@@ -7729,18 +7825,36 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 合并 + 去重 + 稳定排序
             # ==================================================================
             def _dedup_screenshots(items):
-                seen = set()
+                seen_index = {}
                 deduped = []
+
+                def _score_screenshot(candidate):
+                    """优先保留包含 frame_reason/bbox/ocr_text 的截图请求，避免透传信息被无信息副本覆盖。"""
+                    score = 0
+                    if str(candidate.get("frame_reason", "") or "").strip():
+                        score += 4
+                    if candidate.get("bbox") not in (None, "", []):
+                        score += 2
+                    if str(candidate.get("ocr_text", "") or "").strip():
+                        score += 1
+                    return score
+
                 for item in items:
                     key = (
                         item.get("semantic_unit_id", ""),
                         float(item.get("timestamp_sec", 0.0)),
                         item.get("label", "")
                     )
-                    if key in seen:
+                    if key in seen_index:
+                        existing_idx = seen_index[key]
+                        existing_item = deduped[existing_idx]
+                        if _score_screenshot(item) > _score_screenshot(existing_item):
+                            merged = dict(existing_item or {})
+                            merged.update(dict(item or {}))
+                            deduped[existing_idx] = merged
                         continue
-                    seen.add(key)
-                    deduped.append(item)
+                    seen_index[key] = len(deduped)
+                    deduped.append(dict(item or {}))
                 deduped.sort(key=lambda x: (x.get("semantic_unit_id", ""), float(x.get("timestamp_sec", 0.0))))
                 return deduped
 
@@ -7769,7 +7883,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     screenshot_id=ss.get("screenshot_id", ""),
                     timestamp_sec=ss.get("timestamp_sec", 0.0),
                     label=ss.get("label", ""),
-                    semantic_unit_id=ss.get("semantic_unit_id", "")
+                    semantic_unit_id=ss.get("semantic_unit_id", ""),
+                    frame_reason=str(ss.get("frame_reason", "") or ""),
                 )
                 for ss in merged_screenshots
             ]
@@ -7803,27 +7918,124 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     persist_payload = self._build_grouped_semantic_units_payload(list(semantic_units or []))
                     persist_units_map = self._build_semantic_unit_index(persist_payload)
 
+                # 将 AnalyzeWithVL 聚合后的素材请求回写到 semantic_units，确保 process/concrete 的
+                # frame_reason 在 Phase2B 可直接从 semantic_units_phase2a.json 透传使用。
+                unit_screenshot_map: Dict[str, List[Dict[str, Any]]] = {}
+                for screenshot in merged_screenshots:
+                    if not isinstance(screenshot, dict):
+                        continue
+                    unit_id = str(screenshot.get("semantic_unit_id", "") or "").strip()
+                    screenshot_id = str(screenshot.get("screenshot_id", "") or "").strip()
+                    if not unit_id or not screenshot_id:
+                        continue
+                    screenshot_payload: Dict[str, Any] = {
+                        "screenshot_id": screenshot_id,
+                        "timestamp_sec": _safe_float(screenshot.get("timestamp_sec", 0.0), 0.0),
+                        "label": str(screenshot.get("label", "") or "").strip(),
+                        "semantic_unit_id": unit_id,
+                        "frame_reason": str(screenshot.get("frame_reason", "") or "").strip(),
+                        "ocr_text": str(screenshot.get("ocr_text", "") or "").strip(),
+                    }
+                    bbox_value = screenshot.get("bbox")
+                    if isinstance(bbox_value, list) and bbox_value:
+                        screenshot_payload["bbox"] = list(bbox_value)
+                    unit_screenshot_map.setdefault(unit_id, []).append(screenshot_payload)
+
+                unit_clip_map: Dict[str, List[Dict[str, Any]]] = {}
+                for clip in merged_clips:
+                    if not isinstance(clip, dict):
+                        continue
+                    unit_id = str(clip.get("semantic_unit_id", "") or "").strip()
+                    clip_id = str(clip.get("clip_id", "") or "").strip()
+                    if not unit_id or not clip_id:
+                        continue
+                    clip_payload: Dict[str, Any] = {
+                        "clip_id": clip_id,
+                        "start_sec": _safe_float(clip.get("start_sec", 0.0), 0.0),
+                        "end_sec": _safe_float(clip.get("end_sec", 0.0), 0.0),
+                        "knowledge_type": str(clip.get("knowledge_type", "") or "").strip(),
+                        "semantic_unit_id": unit_id,
+                    }
+                    raw_segments = clip.get("segments")
+                    if isinstance(raw_segments, list) and raw_segments:
+                        clip_payload["segments"] = raw_segments
+                    unit_clip_map.setdefault(unit_id, []).append(clip_payload)
+
+                updated_material_request_units = 0
+                for unit_id, target_node in persist_units_map.items():
+                    if unit_id not in unit_screenshot_map and unit_id not in unit_clip_map:
+                        continue
+                    if not isinstance(target_node, dict):
+                        continue
+                    material_requests = target_node.get("material_requests", {})
+                    if not isinstance(material_requests, dict):
+                        material_requests = {}
+                    material_requests["screenshot_requests"] = list(unit_screenshot_map.get(unit_id, []))
+                    material_requests["clip_requests"] = list(unit_clip_map.get(unit_id, []))
+                    target_node["material_requests"] = material_requests
+                    if unit_id in units_map and isinstance(units_map[unit_id], dict):
+                        units_map[unit_id]["material_requests"] = material_requests
+                    updated_material_request_units += 1
+                    has_updates = True
+
                 updated_instructional_units = 0
                 if vl_clip_requests:
                     # Group steps by unit
                     unit_steps = {} # uid -> list of step dicts
+                    screenshot_step_map: Dict[Tuple[str, int], List[Dict[str, Any]]] = {}
+                    for ss in vl_screenshot_requests:
+                        if not isinstance(ss, dict):
+                            continue
+                        uid = str(ss.get("semantic_unit_id", "") or "").strip()
+                        step_id_value = int(_safe_float(ss.get("step_id", 0), 0.0))
+                        if not uid or step_id_value <= 0:
+                            continue
+                        screenshot_step_map.setdefault((uid, step_id_value), []).append(ss)
+                    for key in list(screenshot_step_map.keys()):
+                        screenshot_step_map[key].sort(
+                            key=lambda item: (
+                                int(_safe_float(item.get("keyframe_index", 0), 0.0)),
+                                _safe_float(item.get("timestamp_sec", 0.0), 0.0),
+                            )
+                        )
                     for clip in vl_clip_requests:
                         if clip.get("analysis_mode") == "tutorial_stepwise":
-                            uid = clip.get("semantic_unit_id")
-                            if not uid: continue
-                            
+                            uid = str(clip.get("semantic_unit_id", "") or "").strip()
+                            if not uid:
+                                continue
+
                             if uid not in unit_steps:
                                 unit_steps[uid] = []
-                            
-                            # Find matching screenshots
-                            step_ss_ids = []
-                            step_id = clip.get("step_id")
-                            for ss in vl_screenshot_requests:
-                                if ss.get("semantic_unit_id") == uid and ss.get("step_id") == step_id:
-                                    step_ss_ids.append(ss.get("screenshot_id"))
-                            
-                            unit_steps[uid].append({
-                                "step_id": step_id,
+
+                            # Find matching screenshots and透传 frame_reason 到 step 级结构。
+                            step_id = int(_safe_float(clip.get("step_id", 0), 0.0))
+                            step_id = int(_safe_float(clip.get("step_id", 0), 0.0))
+                            matched_screenshots = screenshot_step_map.get((uid, step_id), [])
+                            step_ss_ids: List[str] = []
+                            step_keyframe_details: List[Dict[str, Any]] = []
+                            seen_step_screenshot_ids: set[str] = set()
+                            for ss in matched_screenshots:
+                                screenshot_id = str(ss.get("screenshot_id", "") or "").strip()
+                                if screenshot_id and screenshot_id not in seen_step_screenshot_ids:
+                                    seen_step_screenshot_ids.add(screenshot_id)
+                                    step_ss_ids.append(screenshot_id)
+                                detail: Dict[str, Any] = {}
+                                if screenshot_id:
+                                    detail["screenshot_id"] = screenshot_id
+                                timestamp_sec = _safe_float(ss.get("timestamp_sec", None), None)
+                                if timestamp_sec is not None:
+                                    detail["timestamp_sec"] = timestamp_sec
+                                frame_reason = str(ss.get("frame_reason", "") or "").strip()
+                                if frame_reason:
+                                    detail["frame_reason"] = frame_reason
+                                bbox = ss.get("bbox")
+                                if isinstance(bbox, list) and bbox:
+                                    detail["bbox"] = list(bbox)
+                                if detail:
+                                    step_keyframe_details.append(detail)
+
+                            step_payload: Dict[str, Any] = {
+                                "step_id": step_id if step_id > 0 else clip.get("step_id"),
                                 "step_description": clip.get("step_description", ""),
                                 "description": clip.get("step_description", ""),
                                 "step_type": str(clip.get("step_type") or "MAIN_FLOW").strip().upper() or "MAIN_FLOW",
@@ -7837,7 +8049,21 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                     "clip_id": clip.get("clip_id"),
                                     "screenshot_ids": step_ss_ids
                                 }
-                            })
+                            }
+                            if step_keyframe_details:
+                                step_payload["instructional_keyframe_details"] = step_keyframe_details
+                                instructional_keyframes = []
+                                for detail in step_keyframe_details:
+                                    keyframe_item: Dict[str, Any] = {
+                                        "timestamp_sec": _safe_float(detail.get("timestamp_sec", 0.0), 0.0),
+                                        "frame_reason": str(detail.get("frame_reason", "") or "").strip(),
+                                    }
+                                    if isinstance(detail.get("bbox"), list):
+                                        keyframe_item["bbox"] = list(detail.get("bbox") or [])
+                                    instructional_keyframes.append(keyframe_item)
+                                if instructional_keyframes:
+                                    step_payload["instructional_keyframes"] = instructional_keyframes
+                            unit_steps[uid].append(step_payload)
                     
                     for uid, steps in unit_steps.items():
                         if uid in units_map:
@@ -7973,7 +8199,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         json.dump(persist_payload, f, ensure_ascii=False, indent=2)
                     logger.info(
                         f"[{task_id}] Persisted semantic_units updates to {semantic_units_path} "
-                        f"(instructional_units={updated_instructional_units}, "
+                        f"(material_request_units={updated_material_request_units}, "
+                        f"instructional_units={updated_instructional_units}, "
                         f"concrete_main_content_units={updated_concrete_main_content_units}, "
                         f"route_override_units={synced_route_override_units}, "
                         f"no_needed_video_units={len(no_needed_video_units)}, "

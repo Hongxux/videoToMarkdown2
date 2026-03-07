@@ -83,8 +83,13 @@ public class StorageTaskCacheService {
         // 按时间倒序
         allTasks.sort(Comparator.comparing(CachedTask::getSortTimestamp).reversed());
 
+        int normalizedPage = Math.max(0, page);
+        if (pageSize <= 0) {
+            return new PagedResult(allTasks, allTasks.size(), normalizedPage, pageSize, false);
+        }
+
         int total = allTasks.size();
-        int start = Math.max(0, page * pageSize);
+        int start = Math.max(0, normalizedPage * pageSize);
         int end = Math.min(total, start + pageSize);
 
         List<CachedTask> pageContent;
@@ -94,7 +99,7 @@ public class StorageTaskCacheService {
             pageContent = allTasks.subList(start, end);
         }
 
-        return new PagedResult(pageContent, total, page, pageSize);
+        return new PagedResult(pageContent, total, normalizedPage, pageSize);
     }
 
     /**
@@ -490,11 +495,15 @@ public class StorageTaskCacheService {
         public boolean hasMore;
         
         public PagedResult(List<CachedTask> tasks, int total, int page, int pageSize) {
+            this(tasks, total, page, pageSize, pageSize > 0 && (page + 1) * pageSize < total);
+        }
+
+        public PagedResult(List<CachedTask> tasks, int total, int page, int pageSize, boolean hasMore) {
             this.tasks = tasks;
             this.totalCount = total;
             this.page = page;
             this.pageSize = pageSize;
-            this.hasMore = (page + 1) * pageSize < total;
+            this.hasMore = hasMore;
         }
     }
     

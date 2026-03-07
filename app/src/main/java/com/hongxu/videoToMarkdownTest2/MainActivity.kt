@@ -3682,6 +3682,14 @@ private fun SwipeRenameTaskListItem(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                if (task.collectionPath.isNotBlank()) {
+                    Text(
+                        text = "Path: ${task.collectionPath.trim()}",
+                        color = Color(0xFF475467),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
 
                 if (isProcessing) {
                     Row(

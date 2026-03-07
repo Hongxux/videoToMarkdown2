@@ -1,0 +1,67 @@
+{
+  "version" : "1.0",
+  "generated_at" : "2026-03-06T13:49:57.590870200Z",
+  "task_id" : "VT_1772804822545_3",
+  "success" : false,
+  "error_message" : "Download idle timeout exceeded (120s without file activity in dirs: d:\\videoToMarkdownTest2\\services\\java-orchestrator\\output | d:\\videoToMarkdownTest2\\var\\storage\\storage\\fed8b0129123ddd93deb9db24d3e56ea; bytes=112151641, files=23, latest_mtime=1772804877246)",
+  "input_video_url" : "https://www.bilibili.com/video/BV1if4y1d7ob",
+  "video_title" : "",
+  "video_path" : "https://www.bilibili.com/video/BV1if4y1d7ob",
+  "output_dir" : "./output",
+  "result_markdown_path" : "",
+  "result_json_path" : "",
+  "stage_timings_ms" : {
+    "prepare_local_video" : 0,
+    "download_video" : 160283,
+    "total_pipeline" : 160291
+  },
+  "flow_flags" : {
+    "downloaded_from_url" : false,
+    "used_vl_flow" : false,
+    "used_legacy_flow" : false
+  },
+  "llm_cost" : {
+    "currency" : "USD",
+    "pricing_basis" : "per_1m_tokens",
+    "vl" : {
+      "model" : "qwen-vl-max-latest",
+      "input_tokens" : 0,
+      "output_tokens" : 0,
+      "total_tokens" : 0,
+      "token_source" : "",
+      "qwen3_vl_plus_cost" : {
+        "input_cost_usd" : 0.0,
+        "output_cost_usd" : 0.0,
+        "total_cost_usd" : 0.0
+      },
+      "ernie_4_5_turbo_vl_cost_range" : {
+        "input_cost_usd_min" : 0.0,
+        "input_cost_usd_max" : 0.0,
+        "output_cost_usd_min" : 0.0,
+        "output_cost_usd_max" : 0.0,
+        "total_cost_usd_min" : 0.0,
+        "total_cost_usd_max" : 0.0
+      },
+      "selected_pricing_model" : "unknown",
+      "selected_cost_usd_min" : 0.0,
+      "selected_cost_usd_max" : 0.0
+    },
+    "deepseek_chat" : {
+      "model" : "deepseek-chat",
+      "input_tokens_uncached" : 0,
+      "input_tokens_cached" : 0,
+      "output_tokens" : 0,
+      "total_calls" : 0,
+      "cached_calls" : 0,
+      "token_source" : "",
+      "input_uncached_cost_usd" : 0.0,
+      "input_cached_cost_usd" : 0.0,
+      "output_cost_usd" : 0.0,
+      "total_cost_usd" : 0.0
+    },
+    "total_cost_usd_min" : 0.0,
+    "total_cost_usd_max" : 0.0,
+    "total_cost_usd" : 0.0,
+    "coverage_note" : "DeepSeek cost is computed from persisted traces (phase2b_llm_trace/deepseek_audit) only."
+  }
+}

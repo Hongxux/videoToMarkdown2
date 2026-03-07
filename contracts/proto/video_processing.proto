@@ -210,6 +210,7 @@ message ScreenshotRequest {
     double timestamp_sec = 2;       // 截图时间点（秒）
     string label = 3;               // 标签 (head/tail/stable/fallback)
     string semantic_unit_id = 4;    // 所属语义单元ID
+    string frame_reason = 5;        // 顶部引导文案/讲师口吻说明
 }
 
 message ClipRequest {

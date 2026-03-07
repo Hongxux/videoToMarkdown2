@@ -18,6 +18,7 @@ import json
 import logging
 import asyncio
 import time
+import random
 import re
 import base64
 import inspect
@@ -27,6 +28,7 @@ import subprocess
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple, Callable, Awaitable
 
@@ -57,12 +59,19 @@ from services.python_grpc.src.content_pipeline.phase2a.materials.errors import (
     JSONParseError,
 )
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import (
+    build_token_cost_estimate,
+    get_token_pricing_snapshot,
+    normalize_usage_payload,
+    summarize_token_cost_records,
+)
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_loader import get_prompt
 from services.python_grpc.src.content_pipeline.infra.llm.prompt_registry import PromptKeys
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_instructional_keyframe_extractor import (
     crop_keyframe_inplace_by_grid_range,
     normalize_bbox_1000,
     save_grid_overlay_image,
+    save_top_reason_banner_image,
 )
 from services.python_grpc.src.content_pipeline.common.utils.id_utils import build_unit_relative_asset_id
 from services.python_grpc.src.content_pipeline.common.utils.path_utils import find_repo_root
@@ -546,6 +555,25 @@ class VLMaterialGenerator:
             )
         except (TypeError, ValueError):
             self.tutorial_keyframe_iframe_search_window_sec = 0.2
+        try:
+            self.tutorial_keyframe_iframe_search_before_sec = max(
+                0.0,
+                float(self.tutorial_mode_config.get("keyframe_iframe_search_before_sec", 0.0)),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_iframe_search_before_sec = 0.0
+        try:
+            self.tutorial_keyframe_iframe_search_after_sec = max(
+                0.0,
+                float(
+                    self.tutorial_mode_config.get(
+                        "keyframe_iframe_search_after_sec",
+                        self.tutorial_keyframe_iframe_search_window_sec,
+                    )
+                ),
+            )
+        except (TypeError, ValueError):
+            self.tutorial_keyframe_iframe_search_after_sec = self.tutorial_keyframe_iframe_search_window_sec
         self.tutorial_keyframe_select_sharpest_iframe = bool(
             self.tutorial_mode_config.get("keyframe_select_sharpest_iframe", True)
         )
@@ -715,6 +743,41 @@ class VLMaterialGenerator:
             )
         except (TypeError, ValueError):
             self.vl_arg_postprocess_max_subtitle_lines = 120
+        try:
+            self.vl_arg_postprocess_retry_max_attempts = max(
+                1,
+                int(self.vl_arg_postprocess_config.get("retry_max_attempts", 3)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_retry_max_attempts = 3
+        try:
+            self.vl_arg_postprocess_retry_initial_backoff_sec = max(
+                0.1,
+                float(self.vl_arg_postprocess_config.get("retry_initial_backoff_sec", 1.0)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_retry_initial_backoff_sec = 1.0
+        try:
+            self.vl_arg_postprocess_retry_backoff_multiplier = max(
+                1.0,
+                float(self.vl_arg_postprocess_config.get("retry_backoff_multiplier", 2.0)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_retry_backoff_multiplier = 2.0
+        try:
+            self.vl_arg_postprocess_retry_max_backoff_sec = max(
+                self.vl_arg_postprocess_retry_initial_backoff_sec,
+                float(self.vl_arg_postprocess_config.get("retry_max_backoff_sec", 8.0)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_retry_max_backoff_sec = 8.0
+        try:
+            self.vl_arg_postprocess_retry_jitter_sec = max(
+                0.0,
+                float(self.vl_arg_postprocess_config.get("retry_jitter_sec", 0.2)),
+            )
+        except (TypeError, ValueError):
+            self.vl_arg_postprocess_retry_jitter_sec = 0.2
         vl_arg_structured_system_key = _resolve_prompt_key_attr(
             "DEEPSEEK_VL_ARG_STRUCTURED_SYSTEM",
             _DEFAULT_VL_ARG_STRUCTURED_SYSTEM_KEY,
@@ -829,7 +892,114 @@ class VLMaterialGenerator:
             
         except Exception as e:
             logger.warning(f"保存VL结果缓存失败: {e}")
-    
+
+    def _build_phase2a_token_cost_records(
+        self,
+        *,
+        unit_analysis_outputs: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """从 Phase2A 单元输出中抽取 canonical token/cost 审计记录。"""
+
+        records: List[Dict[str, Any]] = []
+        for unit_output in unit_analysis_outputs or []:
+            if not isinstance(unit_output, dict):
+                continue
+            unit_id = str(unit_output.get("unit_id", "") or "").strip()
+            analysis_mode = str(unit_output.get("analysis_mode", "") or "").strip().lower() or "default"
+            interactions = unit_output.get("raw_llm_interactions", []) or []
+            if not isinstance(interactions, list):
+                continue
+            for index, interaction in enumerate(interactions, start=1):
+                if not isinstance(interaction, dict):
+                    continue
+                request = interaction.get("request", {}) if isinstance(interaction.get("request", {}), dict) else {}
+                response = interaction.get("response", {}) if isinstance(interaction.get("response", {}), dict) else {}
+                model_name = str(
+                    request.get("model", response.get("model", "")) or response.get("model", request.get("model", ""))
+                ).strip()
+                token_usage = normalize_usage_payload(response.get("usage", {}))
+                cost_estimate = build_token_cost_estimate(
+                    usage=token_usage,
+                    model=model_name,
+                    timestamp_utc=interaction.get("timestamp_utc", ""),
+                    local_cache_hit=bool(response.get("cache_hit", False)),
+                )
+                records.append(
+                    {
+                        "record_index": len(records) + 1,
+                        "unit_id": unit_id,
+                        "analysis_mode": analysis_mode,
+                        "interaction_index": index,
+                        "stage": str(interaction.get("stage", "") or ""),
+                        "attempt": int(safe_float(interaction.get("attempt", index), float(index))),
+                        "success": bool(interaction.get("success", False)),
+                        "timestamp_utc": str(interaction.get("timestamp_utc", "") or ""),
+                        "model": model_name,
+                        "provider": str(cost_estimate.get("provider", "") or ""),
+                        "token_usage": token_usage,
+                        "cost_estimate": cost_estimate,
+                        "request": {
+                            "temperature": request.get("temperature"),
+                            "max_tokens": request.get("max_tokens"),
+                            "analysis_mode": request.get("analysis_mode"),
+                            "video_path": request.get("video_path"),
+                            "timeout_sec": request.get("timeout_sec"),
+                            "hedge_delay_ms": request.get("hedge_delay_ms"),
+                            "offline_task_enabled": request.get("offline_task_enabled"),
+                        },
+                        "response": {
+                            "finish_reason": response.get("finish_reason"),
+                            "cache_hit": bool(response.get("cache_hit", False)),
+                            "error": str(interaction.get("error", "") or interaction.get("error_raw", "") or ""),
+                        },
+                    }
+                )
+        return records
+
+    def _write_phase2a_token_cost_audit(
+        self,
+        *,
+        output_dir: str,
+        token_stats: Dict[str, Any],
+        unit_analysis_outputs: List[Dict[str, Any]],
+        video_path: str,
+    ) -> str:
+        """把 Phase2A 的 token/cost 审计统一落盘到 intermediates。"""
+
+        output_text = str(output_dir or "").strip()
+        if not output_text:
+            return ""
+
+        try:
+            audit_records = self._build_phase2a_token_cost_records(
+                unit_analysis_outputs=unit_analysis_outputs,
+            )
+            summary = summarize_token_cost_records(audit_records)
+            payload = {
+                "version": "1.0",
+                "scene": "phase2a_vl",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "video_path": str(video_path or ""),
+                "pricing_snapshot": get_token_pricing_snapshot(),
+                "task_token_stats": dict(token_stats or {}),
+                "summary": summary,
+                "records": audit_records,
+            }
+            audit_path = Path(output_text) / "intermediates" / "phase2a_token_cost_audit.json"
+            audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(audit_path, "w", encoding="utf-8") as file_obj:
+                json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+            logger.info(
+                "[VL-TokenAudit] phase2a token cost audit saved: path=%s, records=%s, priced=%s",
+                audit_path,
+                int(summary.get("total_records", 0) or 0),
+                int(summary.get("priced_records", 0) or 0),
+            )
+            return str(audit_path)
+        except Exception as exc:
+            logger.warning("[VL-TokenAudit] failed to write phase2a token cost audit: %s", exc)
+            return ""
+
     def _serialize_unit_analysis_outputs(
         self,
         *,
@@ -1112,6 +1282,144 @@ class VLMaterialGenerator:
         if no_needed_video:
             semantic_unit["_vl_no_needed_video_reason"] = "vl_no_needed_video_true"
 
+    @staticmethod
+    def _merge_token_usage(*token_usages: Any) -> Dict[str, int]:
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        for usage in token_usages:
+            if not isinstance(usage, dict):
+                continue
+            prompt_value = int(safe_float(usage.get("prompt_tokens", 0), 0.0))
+            completion_value = int(safe_float(usage.get("completion_tokens", 0), 0.0))
+            total_value = int(
+                safe_float(
+                    usage.get("total_tokens", prompt_value + completion_value),
+                    float(prompt_value + completion_value),
+                )
+            )
+            prompt_tokens += max(0, prompt_value)
+            completion_tokens += max(0, completion_value)
+            total_tokens += max(0, total_value)
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    async def _rerun_should_type_concrete_with_concrete_mode(
+        self,
+        *,
+        analysis_result: Any,
+        meta: Dict[str, Any],
+    ) -> tuple[Any, bool]:
+        if not bool(getattr(analysis_result, "success", False)):
+            return analysis_result, False
+        if self._analysis_result_has_no_needed_video(analysis_result):
+            return analysis_result, False
+        if self._analysis_result_should_type_override(analysis_result) != "concrete":
+            return analysis_result, False
+
+        current_mode = str(
+            meta.get("analysis_mode", getattr(analysis_result, "analysis_mode", "default")) or "default"
+        ).strip().lower()
+        if current_mode == "concrete":
+            return analysis_result, False
+
+        unit_id = str(meta.get("unit_id", "") or "").strip() or "UNKNOWN"
+        clip_path = str(meta.get("vl_clip_path", meta.get("clip_path", "")) or "").strip()
+        if not clip_path:
+            logger.warning(
+                "[VL] unit=%s should_type=concrete but no clip path found, skip concrete rerun",
+                unit_id,
+            )
+            return analysis_result, False
+
+        extra_prompt_raw = meta.get("extra_prompt")
+        extra_prompt: Optional[str]
+        if isinstance(extra_prompt_raw, str):
+            extra_prompt = extra_prompt_raw.strip() or None
+        else:
+            extra_prompt = None
+
+        logger.info(
+            "[VL] unit=%s should_type=concrete detected, rerun with concrete mode",
+            unit_id,
+        )
+        try:
+            concrete_result = await self.analyzer.analyze_clip(
+                clip_path=clip_path,
+                semantic_unit_start_sec=safe_float(meta.get("start_sec", 0.0), 0.0),
+                semantic_unit_id=unit_id,
+                extra_prompt=extra_prompt,
+                analysis_mode="concrete",
+            )
+        except Exception as error:
+            logger.warning(
+                "[VL] unit=%s concrete rerun failed with exception, keep original result: %s",
+                unit_id,
+                error,
+            )
+            return analysis_result, False
+
+        if not bool(getattr(concrete_result, "success", False)):
+            logger.warning(
+                "[VL] unit=%s concrete rerun failed, keep original result: %s",
+                unit_id,
+                str(getattr(concrete_result, "error_msg", "") or "").strip(),
+            )
+            return analysis_result, False
+
+        merged_token_usage = self._merge_token_usage(
+            getattr(analysis_result, "token_usage", {}) or {},
+            getattr(concrete_result, "token_usage", {}) or {},
+        )
+        old_interactions = getattr(analysis_result, "raw_llm_interactions", []) or []
+        new_interactions = getattr(concrete_result, "raw_llm_interactions", []) or []
+        merged_interactions: List[Any] = []
+        if isinstance(old_interactions, list):
+            merged_interactions.extend(list(old_interactions))
+        if isinstance(new_interactions, list):
+            merged_interactions.extend(list(new_interactions))
+        if not merged_interactions and isinstance(new_interactions, list):
+            merged_interactions = list(new_interactions)
+
+        try:
+            analysis_result.success = bool(getattr(concrete_result, "success", False))
+            analysis_result.error_msg = str(getattr(concrete_result, "error_msg", "") or "")
+            analysis_result.analysis_results = list(getattr(concrete_result, "analysis_results", []) or [])
+            analysis_result.clip_requests = list(getattr(concrete_result, "clip_requests", []) or [])
+            analysis_result.screenshot_requests = list(getattr(concrete_result, "screenshot_requests", []) or [])
+            analysis_result.token_usage = merged_token_usage
+            analysis_result.analysis_mode = "concrete"
+            analysis_result.raw_response_json = list(getattr(concrete_result, "raw_response_json", []) or [])
+            analysis_result.raw_llm_interactions = merged_interactions
+        except Exception:
+            concrete_result.token_usage = merged_token_usage
+            concrete_result.analysis_mode = "concrete"
+            concrete_result.raw_llm_interactions = merged_interactions
+            analysis_result = concrete_result
+
+        meta["analysis_mode"] = "concrete"
+
+        semantic_unit = meta.get("semantic_unit", {})
+        if isinstance(semantic_unit, dict):
+            semantic_unit["_vl_analysis_mode_override"] = "concrete"
+            self._mark_semantic_unit_knowledge_type(
+                semantic_unit,
+                knowledge_type="concrete",
+                reason="vl_should_type_concrete_reanalyze",
+                no_needed_video=False,
+            )
+
+        logger.info(
+            "[VL] unit=%s concrete rerun success: clips=%s, screenshots=%s",
+            unit_id,
+            len(list(getattr(analysis_result, "clip_requests", []) or [])),
+            len(list(getattr(analysis_result, "screenshot_requests", []) or [])),
+        )
+        return analysis_result, True
+
     def _resolve_vl_dispatch_lane(
         self,
         *,
@@ -1238,6 +1546,7 @@ class VLMaterialGenerator:
                     "vl_clip_path": clip_path_for_vl,
                     "pre_prune": pre_prune_info,
                     "analysis_mode": analysis_mode,
+                    "extra_prompt": extra_prompt,
                 }
             )
 
@@ -1988,8 +2297,7 @@ class VLMaterialGenerator:
             "Each step must be at least 5 seconds; merge overly short steps with adjacent ones. "
             "For each step, output step_description, required main_operation, optional main_action/precautions/"
             "step_summary/operation_guidance, "
-            "and instructional_keyframes (objects with timestamp_sec, optional frame_reason, optional target_ui_type, "
-            "optional target_text, optional target_relative_position) "
+            "and instructional_keyframes (objects with timestamp_sec, optional frame_reason, optional bbox) "
             "as true instructional keyframes "
             "(prefer final state or just-before-submit moment). "
             "Optional fields can be omitted or returned as empty values when unnecessary."
@@ -2211,6 +2519,62 @@ class VLMaterialGenerator:
             context = context[:max_chars].rstrip() + "..."
         return context
 
+    @staticmethod
+    def _is_retryable_network_error(error: Exception) -> bool:
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+            return True
+        message = str(error or "").strip().lower()
+        if not message:
+            return False
+        retryable_tokens = (
+            "connection error",
+            "all connection attempts failed",
+            "connecterror",
+            "connection reset",
+            "timed out",
+            "timeout",
+            "temporarily unavailable",
+        )
+        return any(token in message for token in retryable_tokens)
+
+    async def _call_deepseek_complete_text_with_backoff(
+        self,
+        *,
+        prompt: str,
+        system_message: str,
+        model: str,
+        hedge_context: Dict[str, Any],
+        retry_label: str,
+    ) -> Tuple[str, Any, Any]:
+        attempts = max(1, int(self.vl_arg_postprocess_retry_max_attempts))
+        for attempt in range(1, attempts + 1):
+            try:
+                return await llm_gateway.deepseek_complete_text(
+                    prompt=prompt,
+                    system_message=system_message,
+                    model=model,
+                    hedge_context=hedge_context,
+                )
+            except Exception as error:
+                is_retryable = self._is_retryable_network_error(error)
+                if attempt >= attempts or not is_retryable:
+                    raise
+                exp_delay = float(self.vl_arg_postprocess_retry_initial_backoff_sec) * (
+                    float(self.vl_arg_postprocess_retry_backoff_multiplier) ** float(attempt - 1)
+                )
+                capped_delay = min(float(self.vl_arg_postprocess_retry_max_backoff_sec), exp_delay)
+                jitter = random.uniform(0.0, float(self.vl_arg_postprocess_retry_jitter_sec))
+                sleep_sec = capped_delay + jitter
+                logger.warning(
+                    "[VL-Arg] %s retry scheduled: attempt=%s/%s, sleep_sec=%.2f, error=%s",
+                    retry_label,
+                    attempt + 1,
+                    attempts,
+                    sleep_sec,
+                    error,
+                )
+                await asyncio.sleep(sleep_sec)
+
     async def _postprocess_unit_main_operations(
         self,
         *,
@@ -2310,7 +2674,7 @@ class VLMaterialGenerator:
 
         step_ids_in_batch = [int(item.get("step_id", 0)) for item in step_payloads]
         try:
-            enhanced_text, _metadata, _logprobs = await llm_gateway.deepseek_complete_text(
+            enhanced_text, _metadata, _logprobs = await self._call_deepseek_complete_text_with_backoff(
                 prompt=prompt,
                 system_message=self._vl_arg_structured_system_prompt,
                 model=self.vl_arg_postprocess_model,
@@ -2319,6 +2683,7 @@ class VLMaterialGenerator:
                     "step_ids": step_ids_in_batch,
                     "stage": "vl_arg_main_operation_postprocess_batch",
                 },
+                retry_label="main_operation batch postprocess",
             )
         except Exception as error:
             logger.warning(
@@ -2546,7 +2911,7 @@ class VLMaterialGenerator:
 
         segment_ids = [int(item.get("segment_id", 0)) for item in segment_payloads]
         try:
-            enhanced_text, _metadata, _logprobs = await llm_gateway.deepseek_complete_text(
+            enhanced_text, _metadata, _logprobs = await self._call_deepseek_complete_text_with_backoff(
                 prompt=prompt,
                 system_message=(
                     "你是视频图文讲义补全助手。"
@@ -2559,6 +2924,7 @@ class VLMaterialGenerator:
                     "segment_ids": segment_ids,
                     "stage": "vl_arg_main_content_postprocess_batch",
                 },
+                retry_label="main_content batch postprocess",
             )
         except Exception as error:
             logger.warning(
@@ -2611,9 +2977,6 @@ class VLMaterialGenerator:
             fallback=(
                 "You are a visual anchoring assistant.\n"
                 "Locate the target area on this grid-overlaid image.\n"
-                "target_text={target_text}\n"
-                "target_ui_type={target_ui_type}\n"
-                "target_relative_position={target_relative_position}\n"
                 "Return only JSON: "
                 '{"visual_verification":"...", "grid_start":"C4", "grid_end":"E7"}'
             ),
@@ -2628,21 +2991,11 @@ class VLMaterialGenerator:
             "Output only image_n (for example image_2) or image_none."
         )
 
-    def _render_grid_anchor_prompt(
-        self,
-        *,
-        target_text: str,
-        target_ui_type: str,
-        target_relative_position: str,
-    ) -> str:
+    def _render_grid_anchor_prompt(self) -> str:
         template = str(getattr(self, "_tutorial_grid_anchor_prompt", "") or "").strip()
         if not template:
             template = self._get_default_grid_spatial_anchor_prompt()
-        return (
-            template.replace("{target_text}", target_text)
-            .replace("{target_ui_type}", target_ui_type)
-            .replace("{target_relative_position}", target_relative_position)
-        )
+        return template
 
     @staticmethod
     def _extract_json_object_candidate(text: str) -> str:
@@ -2711,14 +3064,9 @@ class VLMaterialGenerator:
         self,
         *,
         keyframe_path: Path,
-        target_text: str,
-        target_ui_type: str,
-        target_relative_position: str,
     ) -> Dict[str, Any]:
         if not self.tutorial_grid_anchor_enabled:
             return {"grid_anchor_status": "disabled"}
-        if not (target_text or target_ui_type or target_relative_position):
-            return {"grid_anchor_status": "missing_semantic_anchor"}
 
         overlay_path = keyframe_path.parent / f"{keyframe_path.stem}_grid_overlay{keyframe_path.suffix}"
         overlay_ok = save_grid_overlay_image(
@@ -2733,18 +3081,11 @@ class VLMaterialGenerator:
         if not overlay_ok:
             return {"grid_anchor_status": "overlay_failed"}
 
-        prompt = self._render_grid_anchor_prompt(
-            target_text=target_text,
-            target_ui_type=target_ui_type,
-            target_relative_position=target_relative_position,
-        )
+        prompt = self._render_grid_anchor_prompt()
         request_audit: Dict[str, Any] = {
             "model": "vision_ai",
             "image_path": str(overlay_path),
             "prompt": prompt,
-            "target_text": target_text,
-            "target_ui_type": target_ui_type,
-            "target_relative_position": target_relative_position,
         }
         try:
             payload = await llm_gateway.vision_validate_image(
@@ -3213,6 +3554,8 @@ class VLMaterialGenerator:
             output_path=output_path,
             logger=logger,
             iframe_search_window_sec=self.tutorial_keyframe_iframe_search_window_sec,
+            iframe_search_before_sec=self.tutorial_keyframe_iframe_search_before_sec,
+            iframe_search_after_sec=self.tutorial_keyframe_iframe_search_after_sec,
             select_sharpest_iframe=self.tutorial_keyframe_select_sharpest_iframe,
         )
 
@@ -3355,37 +3698,6 @@ class VLMaterialGenerator:
                 return "TROUBLESHOOTING"
             return "MAIN_FLOW"
 
-        def _normalize_keyframe_anchor_fields(value: Any) -> Dict[str, str]:
-            if not isinstance(value, dict):
-                return {
-                    "target_ui_type": "",
-                    "target_text": "",
-                    "target_relative_position": "",
-                }
-            return {
-                "target_ui_type": str(
-                    value.get(
-                        "target_ui_type",
-                        value.get("ui_type", value.get("target_type", value.get("uiTargetType", ""))),
-                    )
-                    or ""
-                ).strip(),
-                "target_text": str(
-                    value.get(
-                        "target_text",
-                        value.get("ui_text", value.get("target_content", value.get("text_anchor", ""))),
-                    )
-                    or ""
-                ).strip(),
-                "target_relative_position": str(
-                    value.get(
-                        "target_relative_position",
-                        value.get("relative_position", value.get("position_hint", value.get("spatial_hint", ""))),
-                    )
-                    or ""
-                ).strip(),
-            }
-
         def _normalize_instructional_keyframe_objects(
             value: Any,
             *,
@@ -3408,10 +3720,6 @@ class VLMaterialGenerator:
                     "timestamp_sec": float(ts),
                     "frame_reason": str(item.get("frame_reason", "") or "").strip(),
                 }
-                anchor_fields = _normalize_keyframe_anchor_fields(item)
-                entry["target_ui_type"] = anchor_fields["target_ui_type"]
-                entry["target_text"] = anchor_fields["target_text"]
-                entry["target_relative_position"] = anchor_fields["target_relative_position"]
                 bbox = normalize_bbox_1000(item.get("bbox"))
                 if bbox is not None:
                     entry["bbox"] = bbox
@@ -3576,10 +3884,6 @@ class VLMaterialGenerator:
                         "timestamp_sec": float(fallback_ts),
                         "frame_reason": str(fallback.get("frame_reason", "") or "").strip(),
                     }
-                    anchor_fields = _normalize_keyframe_anchor_fields(fallback)
-                    fallback_item["target_ui_type"] = anchor_fields["target_ui_type"]
-                    fallback_item["target_text"] = anchor_fields["target_text"]
-                    fallback_item["target_relative_position"] = anchor_fields["target_relative_position"]
                     bbox = normalize_bbox_1000(fallback.get("bbox"))
                     if bbox is not None:
                         fallback_item["bbox"] = bbox
@@ -3610,9 +3914,6 @@ class VLMaterialGenerator:
                         "key_name": key_name,
                         "timestamp_sec": key_ts,
                         "frame_reason": str(step_ss.get("frame_reason", "") or "").strip(),
-                        "target_ui_type": str(step_ss.get("target_ui_type", "") or "").strip(),
-                        "target_text": str(step_ss.get("target_text", "") or "").strip(),
-                        "target_relative_position": str(step_ss.get("target_relative_position", "") or "").strip(),
                         "bbox": normalize_bbox_1000(step_ss.get("bbox")),
                         "output_path": unit_dir / key_name,
                     }
@@ -3727,35 +4028,43 @@ class VLMaterialGenerator:
                         continue
                     if bool(key_result):
                         key_name = str(key_job.get("key_name", ""))
-                        key_path = Path(key_job["output_path"])
-                        target_ui_type = str(key_job.get("target_ui_type", "") or "").strip()
-                        target_text = str(key_job.get("target_text", "") or "").strip()
-                        target_relative_position = str(key_job.get("target_relative_position", "") or "").strip()
                         keyframe_post_t0 = time.perf_counter()
-                        grid_anchor_meta = await self._apply_grid_anchor_crop_for_keyframe(
-                            keyframe_path=key_path,
-                            target_text=target_text,
-                            target_ui_type=target_ui_type,
-                            target_relative_position=target_relative_position,
-                        )
+                        grid_anchor_meta = {"grid_anchor_status": "disabled_by_schema"}
+                        frame_reason = str(key_job.get("frame_reason", "") or "").strip()
+                        top_reason_banner_status = "skipped_no_reason"
+                        output_path_value = key_job.get("output_path")
+                        if frame_reason and output_path_value:
+                            output_path = Path(output_path_value)
+                            banner_ok = save_top_reason_banner_image(
+                                source_image_path=output_path,
+                                output_image_path=output_path,
+                                text=frame_reason,
+                            )
+                            top_reason_banner_status = "applied" if banner_ok else "failed"
+                            if not banner_ok:
+                                logger.warning(
+                                    "[VL-Tutorial] top reason banner apply failed: unit=%s step=%s file=%s",
+                                    unit_id,
+                                    job.get("step_index"),
+                                    key_name,
+                                )
                         keyframe_post_ms = (time.perf_counter() - keyframe_post_t0) * 1000.0
                         if keyframe_post_ms >= 200.0:
                             logger.info(
-                                "[VL-Tutorial] keyframe postprocess slow: unit=%s step=%s file=%s ms=%.1f status=%s",
+                                "[VL-Tutorial] keyframe postprocess slow: unit=%s step=%s file=%s ms=%.1f status=%s banner=%s",
                                 unit_id,
                                 job.get("step_index"),
                                 key_name,
                                 keyframe_post_ms,
                                 str((grid_anchor_meta or {}).get("grid_anchor_status", "")),
+                                top_reason_banner_status,
                             )
                         keyframe_files.append(key_name)
                         key_detail: Dict[str, Any] = {
                             "image_file": key_name,
                             "timestamp_sec": float(key_job.get("timestamp_sec", 0.0)),
                             "frame_reason": str(key_job.get("frame_reason", "") or "").strip(),
-                            "target_ui_type": target_ui_type,
-                            "target_text": target_text,
-                            "target_relative_position": target_relative_position,
+                            "top_reason_banner_status": top_reason_banner_status,
                         }
                         bbox = normalize_bbox_1000(key_job.get("bbox"))
                         if bbox is not None:
@@ -5023,6 +5332,21 @@ class VLMaterialGenerator:
             )
             return
 
+        current_mode = str(
+            meta.get("analysis_mode", getattr(analysis_result, "analysis_mode", "default")) or "default"
+        ).strip().lower()
+        is_tutorial_stepwise = current_mode == "tutorial_stepwise"
+
+        if not is_tutorial_stepwise:
+            analysis_result, concrete_rerun_applied = await self._rerun_should_type_concrete_with_concrete_mode(
+                analysis_result=analysis_result,
+                meta=meta,
+            )
+            if concrete_rerun_applied:
+                token_stats["should_type_concrete_reanalysis_units"] = int(
+                    token_stats.get("should_type_concrete_reanalysis_units", 0)
+                ) + 1
+
         await self._postprocess_unit_main_operations(
             analysis_result=analysis_result,
             semantic_unit=meta.get("semantic_unit", {}),
@@ -5034,61 +5358,62 @@ class VLMaterialGenerator:
             output_dir=resolved_output_dir,
         )
         semantic_unit = meta.get("semantic_unit", {})
-        should_type_override = self._analysis_result_should_type_override(analysis_result)
-        has_no_needed_video = self._analysis_result_has_no_needed_video(analysis_result)
-        if has_no_needed_video:
-            should_type_override = "abstract"
-            token_stats["no_needed_video_units"] += 1
+        if not is_tutorial_stepwise:
+            should_type_override = self._analysis_result_should_type_override(analysis_result)
+            has_no_needed_video = self._analysis_result_has_no_needed_video(analysis_result)
+            if has_no_needed_video:
+                should_type_override = "abstract"
+                token_stats["no_needed_video_units"] += 1
 
-        if should_type_override == "abstract":
-            if not has_no_needed_video:
-                token_stats["should_type_abstract_units"] += 1
-            self._mark_semantic_unit_knowledge_type(
-                semantic_unit,
-                knowledge_type="abstract",
-                reason="vl_no_needed_video_true" if has_no_needed_video else "vl_should_type_abstract",
-                no_needed_video=has_no_needed_video,
-            )
-            analysis_result.clip_requests = []
-            analysis_result.screenshot_requests = []
-            for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
-                try:
-                    parsed_item.knowledge_type = "abstract"
-                    parsed_item.no_needed_video = has_no_needed_video
-                    parsed_item.should_type = "abstract"
-                except Exception:
-                    continue
-            logger.info(
-                "[VL] unit=%s routed as abstract (no_needed_video/should_type); skip clip/screenshot generation",
-                unit_id,
-            )
-        elif should_type_override == "concrete":
-            token_stats["should_type_concrete_units"] += 1
-            self._mark_semantic_unit_knowledge_type(
-                semantic_unit,
-                knowledge_type="concrete",
-                reason="vl_should_type_concrete",
-                no_needed_video=False,
-            )
-            analysis_result.clip_requests = []
-            for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
-                try:
-                    parsed_item.knowledge_type = "concrete"
-                    parsed_item.no_needed_video = False
-                    parsed_item.should_type = "concrete"
-                except Exception:
-                    continue
-            for ss_item in analysis_result.screenshot_requests:
-                ss_item["knowledge_type"] = "concrete"
-            logger.info(
-                "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
-                unit_id,
-            )
+            if should_type_override == "abstract":
+                if not has_no_needed_video:
+                    token_stats["should_type_abstract_units"] += 1
+                self._mark_semantic_unit_knowledge_type(
+                    semantic_unit,
+                    knowledge_type="abstract",
+                    reason="vl_no_needed_video_true" if has_no_needed_video else "vl_should_type_abstract",
+                    no_needed_video=has_no_needed_video,
+                )
+                analysis_result.clip_requests = []
+                analysis_result.screenshot_requests = []
+                for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
+                    try:
+                        parsed_item.knowledge_type = "abstract"
+                        parsed_item.no_needed_video = has_no_needed_video
+                        parsed_item.should_type = "abstract"
+                    except Exception:
+                        continue
+                logger.info(
+                    "[VL] unit=%s routed as abstract (no_needed_video/should_type); skip clip/screenshot generation",
+                    unit_id,
+                )
+            elif should_type_override == "concrete":
+                token_stats["should_type_concrete_units"] += 1
+                self._mark_semantic_unit_knowledge_type(
+                    semantic_unit,
+                    knowledge_type="concrete",
+                    reason="vl_should_type_concrete",
+                    no_needed_video=False,
+                )
+                analysis_result.clip_requests = []
+                for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
+                    try:
+                        parsed_item.knowledge_type = "concrete"
+                        parsed_item.no_needed_video = False
+                        parsed_item.should_type = "concrete"
+                    except Exception:
+                        continue
+                for ss_item in analysis_result.screenshot_requests:
+                    ss_item["knowledge_type"] = "concrete"
+                logger.info(
+                    "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
+                    unit_id,
+                )
 
         self._annotate_screenshot_requests_with_unit_context(
             screenshot_requests=analysis_result.screenshot_requests,
             semantic_unit=semantic_unit,
-            analysis_mode=meta.get("analysis_mode", getattr(analysis_result, "analysis_mode", "default")),
+            analysis_mode=getattr(analysis_result, "analysis_mode", meta.get("analysis_mode", "default")),
         )
 
         usage = getattr(analysis_result, "token_usage", {}) or {}
@@ -5567,6 +5892,7 @@ class VLMaterialGenerator:
             "vl_clip_path": clip_path_for_vl,
             "pre_prune": pre_prune_info,
             "analysis_mode": analysis_mode,
+            "extra_prompt": extra_prompt,
         }
         return task_input, task_meta, bool(pre_prune_info.get("applied"))
 
@@ -5869,6 +6195,7 @@ class VLMaterialGenerator:
             "no_needed_video_units": 0,
             "should_type_abstract_units": 0,
             "should_type_concrete_units": 0,
+            "should_type_concrete_reanalysis_units": 0,
             "prompt_tokens_actual": 0,
             "completion_tokens_actual": 0,
             "total_tokens_actual": 0,
@@ -6183,219 +6510,20 @@ class VLMaterialGenerator:
                         )
                         continue
 
-                    await self._postprocess_unit_main_operations(
+                    await self._consume_unit_analysis_result_streaming(
+                        result_index=idx,
                         analysis_result=analysis_result,
-                        semantic_unit=meta.get("semantic_unit", {}),
-                        output_dir=resolved_output_dir,
+                        meta=meta,
+                        legacy_fallback_materials=legacy_fallback_materials,
+                        all_clip_requests=all_clip_requests,
+                        all_screenshot_requests=all_screenshot_requests,
+                        token_stats=token_stats,
+                        resolved_output_dir=resolved_output_dir,
+                        original_video_path=video_path,
                     )
-                    await self._postprocess_unit_main_content(
-                        analysis_result=analysis_result,
-                        semantic_unit=meta.get("semantic_unit", {}),
-                        output_dir=resolved_output_dir,
-                    )
-                    semantic_unit = meta.get("semantic_unit", {})
-                    should_type_override = self._analysis_result_should_type_override(analysis_result)
-                    has_no_needed_video = self._analysis_result_has_no_needed_video(analysis_result)
-                    if has_no_needed_video:
-                        should_type_override = "abstract"
-                        token_stats["no_needed_video_units"] += 1
+                    streamed_result_indexes.add(idx)
+                    continue
 
-                    if should_type_override == "abstract":
-                        if not has_no_needed_video:
-                            token_stats["should_type_abstract_units"] += 1
-                        self._mark_semantic_unit_knowledge_type(
-                            semantic_unit,
-                            knowledge_type="abstract",
-                            reason="vl_no_needed_video_true" if has_no_needed_video else "vl_should_type_abstract",
-                            no_needed_video=has_no_needed_video,
-                        )
-                        analysis_result.clip_requests = []
-                        analysis_result.screenshot_requests = []
-                        for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
-                            try:
-                                parsed_item.knowledge_type = "abstract"
-                                parsed_item.no_needed_video = has_no_needed_video
-                                parsed_item.should_type = "abstract"
-                            except Exception:
-                                continue
-                        logger.info(
-                            "[VL] unit=%s routed as abstract (no_needed_video/should_type); skip clip/screenshot generation",
-                            unit_id,
-                        )
-                    elif should_type_override == "concrete":
-                        token_stats["should_type_concrete_units"] += 1
-                        self._mark_semantic_unit_knowledge_type(
-                            semantic_unit,
-                            knowledge_type="concrete",
-                            reason="vl_should_type_concrete",
-                            no_needed_video=False,
-                        )
-                        analysis_result.clip_requests = []
-                        for parsed_item in getattr(analysis_result, "analysis_results", []) or []:
-                            try:
-                                parsed_item.knowledge_type = "concrete"
-                                parsed_item.no_needed_video = False
-                                parsed_item.should_type = "concrete"
-                            except Exception:
-                                continue
-                        for ss_item in analysis_result.screenshot_requests:
-                            ss_item["knowledge_type"] = "concrete"
-                        logger.info(
-                            "[VL] unit=%s routed as concrete by should_type; skip clip generation and keep screenshots",
-                            unit_id,
-                        )
-
-                    # 汇鎬?token 使用与基线估绠?
-                    self._annotate_screenshot_requests_with_unit_context(
-                        screenshot_requests=analysis_result.screenshot_requests,
-                        semantic_unit=semantic_unit,
-                        analysis_mode=meta.get("analysis_mode", getattr(analysis_result, "analysis_mode", "default")),
-                    )
-
-                    usage = getattr(analysis_result, "token_usage", {}) or {}
-                    prompt_actual = int(usage.get("prompt_tokens", 0) or 0)
-                    completion_actual = int(usage.get("completion_tokens", 0) or 0)
-                    total_actual = int(usage.get("total_tokens", prompt_actual + completion_actual) or 0)
-                    token_stats["prompt_tokens_actual"] += prompt_actual
-                    token_stats["completion_tokens_actual"] += completion_actual
-                    token_stats["total_tokens_actual"] += total_actual
-
-                    pre_prune_info = meta.get("pre_prune") or {}
-                    kept_segments = pre_prune_info.get("kept_segments") or []
-                    unit_duration = safe_float(meta.get("unit_duration", 0.0), 0.0)
-                    unit_start_sec = safe_float(meta.get("start_sec", 0.0), 0.0)
-                    unit_end_sec = safe_float(meta.get("end_sec", unit_start_sec), unit_start_sec)
-                    if unit_end_sec < unit_start_sec:
-                        unit_end_sec = unit_start_sec
-
-                    # 估算基线：对 pruned 单元做秒级线性回推（第一性近似），非 pruned 单元基线=实际
-                    if pre_prune_info.get("applied") and kept_segments:
-                        kept_duration = sum(max(0.0, e - s) for s, e in kept_segments)
-                        if kept_duration > 1e-6 and unit_duration > kept_duration:
-                            prompt_per_sec = prompt_actual / kept_duration
-                            completion_per_sec = completion_actual / kept_duration
-                            prompt_base = int(round(prompt_per_sec * unit_duration))
-                            completion_base = int(round(completion_per_sec * unit_duration))
-                            total_base = prompt_base + completion_base
-                        else:
-                            prompt_base = prompt_actual
-                            completion_base = completion_actual
-                            total_base = total_actual
-                    else:
-                        prompt_base = prompt_actual
-                        completion_base = completion_actual
-                        total_base = total_actual
-
-                    token_stats["prompt_tokens_baseline_est"] += max(0, prompt_base)
-                    token_stats["completion_tokens_baseline_est"] += max(0, completion_base)
-                    token_stats["total_tokens_baseline_est"] += max(0, total_base)
-
-                    # 若使用了预处理裁剪片段，需要将 VL 相对时间映射回原始时间轴
-                    if pre_prune_info.get("applied") and kept_segments:
-                        for clip_item in analysis_result.clip_requests:
-                            # clip 请求本身就是绝对时间：先转回单元相对时间，再映射回原始单元相对时间，再加单元起点
-                            rel_start = safe_float(clip_item.get("start_sec", unit_start_sec), unit_start_sec) - unit_start_sec
-                            rel_end = safe_float(clip_item.get("end_sec", unit_start_sec), unit_start_sec) - unit_start_sec
-
-                            mapped_rel_segments = self._map_pruned_interval_to_original_segments(
-                                rel_start=rel_start,
-                                rel_end=rel_end,
-                                kept_segments=kept_segments,
-                            )
-                            abs_segments: List[Dict[str, float]] = []
-                            for seg_rel_start, seg_rel_end in mapped_rel_segments:
-                                abs_seg_start = unit_start_sec + seg_rel_start
-                                abs_seg_end = unit_start_sec + seg_rel_end
-                                abs_seg_start = max(unit_start_sec, min(abs_seg_start, unit_end_sec))
-                                abs_seg_end = max(unit_start_sec, min(abs_seg_end, unit_end_sec))
-                                if abs_seg_end - abs_seg_start > 1e-6:
-                                    abs_segments.append({
-                                        "start_sec": abs_seg_start,
-                                        "end_sec": abs_seg_end,
-                                    })
-
-                            if abs_segments:
-                                abs_start = min(seg["start_sec"] for seg in abs_segments)
-                                abs_end = max(seg["end_sec"] for seg in abs_segments)
-                            else:
-                                mapped_rel_start = self._map_pruned_relative_to_original(rel_start, kept_segments)
-                                mapped_rel_end = self._map_pruned_relative_to_original(rel_end, kept_segments)
-                                abs_start = unit_start_sec + mapped_rel_start
-                                abs_end = unit_start_sec + mapped_rel_end
-                                abs_start = max(unit_start_sec, min(abs_start, unit_end_sec))
-                                abs_end = max(unit_start_sec, min(abs_end, unit_end_sec))
-
-                            if abs_end < abs_start:
-                                abs_start, abs_end = abs_end, abs_start
-                            clip_item["start_sec"] = abs_start
-                            clip_item["end_sec"] = abs_end
-                            # 同时给出 segments，复鐢?Java 侧拼接逻辑，且仅保留当鍓?clip 对应的有效子娈?
-                            clip_item["segments"] = abs_segments
-
-                        for ss_item in analysis_result.screenshot_requests:
-                            rel_ts = safe_float(ss_item.get("_relative_timestamp", 0.0), 0.0)
-                            mapped_rel_ts = self._map_pruned_relative_to_original(rel_ts, kept_segments)
-                            mapped_abs_ts = unit_start_sec + mapped_rel_ts
-                            mapped_abs_ts = max(unit_start_sec, min(mapped_abs_ts, unit_end_sec))
-                            ss_item["timestamp_sec"] = mapped_abs_ts
-                            ss_item["_relative_timestamp"] = mapped_rel_ts
-                            ss_item["_pre_pruned"] = True
-                    elif pre_prune_info.get("applied"):
-                        logger.warning(f"[VL-PrePrune] unit={unit_id} applied but no kept_segments, skip remap")
-
-                    # 统一兜底：无论是否预裁剪，都将时间戳约束在当前语义单元区间内銆?
-                    for clip_item in analysis_result.clip_requests:
-                        clip_start = safe_float(clip_item.get("start_sec", unit_start_sec), unit_start_sec)
-                        clip_end = safe_float(clip_item.get("end_sec", unit_start_sec), unit_start_sec)
-                        clip_start = max(unit_start_sec, min(clip_start, unit_end_sec))
-                        clip_end = max(unit_start_sec, min(clip_end, unit_end_sec))
-                        if clip_end < clip_start:
-                            clip_start, clip_end = clip_end, clip_start
-                        clip_item["start_sec"] = clip_start
-                        clip_item["end_sec"] = clip_end
-
-                    for ss_item in analysis_result.screenshot_requests:
-                        abs_ts = safe_float(ss_item.get("timestamp_sec", unit_start_sec), unit_start_sec)
-                        abs_ts = max(unit_start_sec, min(abs_ts, unit_end_sec))
-                        ss_item["timestamp_sec"] = abs_ts
-                    if str(meta.get("analysis_mode", "")).strip().lower() == "tutorial_stepwise":
-                        export_from_original = bool(
-                            self.tutorial_export_from_original_clip_when_prepruned
-                            and pre_prune_info.get("applied")
-                            and kept_segments
-                        )
-                        if export_from_original:
-                            tutorial_asset_video_path = str(
-                                meta.get("clip_path")
-                                or meta.get("vl_clip_path")
-                                or video_path
-                            ).strip() or video_path
-                            use_relative_ts_for_export = False
-                            prefer_screenshot_keyframes = True
-                        else:
-                            tutorial_asset_video_path = str(
-                                meta.get("vl_clip_path")
-                                or meta.get("clip_path")
-                                or video_path
-                            ).strip() or video_path
-                            use_relative_ts_for_export = True
-                            prefer_screenshot_keyframes = False
-                        await self._save_tutorial_assets_for_unit(
-                            video_path=tutorial_asset_video_path,
-                            output_dir=resolved_output_dir,
-                            unit_id=unit_id,
-                            clip_requests=analysis_result.clip_requests,
-                            screenshot_requests=analysis_result.screenshot_requests,
-                            raw_response_json=getattr(analysis_result, "raw_response_json", []) or [],
-                            raw_llm_interactions=getattr(analysis_result, "raw_llm_interactions", []) or [],
-                            use_analysis_relative_timestamps=use_relative_ts_for_export,
-                            prefer_screenshot_requests_keyframes=prefer_screenshot_keyframes,
-                        )
-
-                    
-                    # 收集结果 (暂不优化截图时间点，后续批量处理)
-                    all_clip_requests.extend(analysis_result.clip_requests)
-                    all_screenshot_requests.extend(analysis_result.screenshot_requests)
                 
                 if self.merge_multistep_clip_requests:
                     all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
@@ -6673,6 +6801,10 @@ class VLMaterialGenerator:
             request_knowledge_type = self._normalize_should_type(item.get("knowledge_type", ""))
             if unit_knowledge_type and not request_knowledge_type:
                 item["knowledge_type"] = unit_knowledge_type
+
+            if str(item.get("analysis_mode", "") or "").strip().lower() == "concrete":
+                concrete_ts = max(0.0, safe_float(item.get("timestamp_sec", 0.0), 0.0))
+                item.setdefault("_window_start_sec", concrete_ts)
 
     def _should_bypass_screenshot_cv_optimization(self, request: Dict[str, Any]) -> bool:
         """
@@ -7193,5 +7325,3 @@ class VLMaterialGenerator:
                 return True
         
         return True  # 默认回退
-
-

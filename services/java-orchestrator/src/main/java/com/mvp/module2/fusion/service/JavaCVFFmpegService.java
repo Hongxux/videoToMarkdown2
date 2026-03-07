@@ -10,7 +10,13 @@ import org.springframework.stereotype.Service;
 import com.sun.management.OperatingSystemMXBean;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import java.awt.AlphaComposite;
+import java.awt.Color;
+import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics2D;
+import java.awt.GraphicsEnvironment;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.BufferedReader;
 import java.io.File;
@@ -183,12 +189,18 @@ public class JavaCVFFmpegService {
         public double timestampSec;
         public String label;
         public String semanticUnitId;
+        public String frameReason;
         
         public ScreenshotRequest(String screenshotId, double timestampSec, String label, String semanticUnitId) {
+            this(screenshotId, timestampSec, label, semanticUnitId, "");
+        }
+
+        public ScreenshotRequest(String screenshotId, double timestampSec, String label, String semanticUnitId, String frameReason) {
             this.screenshotId = screenshotId;
             this.timestampSec = timestampSec;
             this.label = label;
             this.semanticUnitId = semanticUnitId;
+            this.frameReason = frameReason;
         }
     }
 
@@ -378,6 +390,7 @@ public class JavaCVFFmpegService {
                     if (frame != null && frame.image != null) {
                         // 转换为 BufferedImage
                         BufferedImage image = converter.convert(frame);
+                        applyTopReasonBannerInPlace(image, req.frameReason);
                         
                         // 保存为 JPEG（降低编码与写盘开销）
                         Path outputPath = Paths.get(outputDir, req.screenshotId + SCREENSHOT_EXT);
@@ -813,6 +826,128 @@ public class JavaCVFFmpegService {
         } finally {
             writer.dispose();
         }
+    }
+
+    static int computeTopReasonBannerFontSize(int imageHeight) {
+        return Math.max(1, (int) Math.round(Math.max(1, imageHeight) / 40.0));
+    }
+
+    static void applyTopReasonBannerInPlace(BufferedImage image, String frameReason) {
+        if (image == null) {
+            return;
+        }
+        String normalizedReason = frameReason == null ? "" : frameReason.trim();
+        if (normalizedReason.isEmpty()) {
+            return;
+        }
+
+        int imageWidth = Math.max(1, image.getWidth());
+        int imageHeight = Math.max(1, image.getHeight());
+        int boxWidth = Math.max(1, (int) Math.round(imageWidth * 0.90));
+        int topMargin = Math.max(0, (int) Math.round(imageHeight * 0.05));
+        int paddingY = Math.max(0, (int) Math.round(imageHeight * 0.02));
+        int paddingX = Math.max(0, (int) Math.round(imageWidth * 0.02));
+        int fontSize = computeTopReasonBannerFontSize(imageHeight);
+
+        Graphics2D graphics = image.createGraphics();
+        try {
+            graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+            Font font = resolveTopReasonBannerFont(fontSize);
+            graphics.setFont(font);
+            FontMetrics metrics = graphics.getFontMetrics(font);
+            int textWidthLimit = Math.max(1, boxWidth - (paddingX * 2));
+            List<String> wrappedLines = wrapTopReasonBannerText(normalizedReason, metrics, textWidthLimit);
+            if (wrappedLines.isEmpty()) {
+                return;
+            }
+
+            int lineHeight = Math.max(metrics.getHeight(), (int) Math.round(metrics.getHeight() * 1.4));
+            int textBlockHeight = metrics.getHeight() + Math.max(0, wrappedLines.size() - 1) * lineHeight;
+            int boxHeight = textBlockHeight + (paddingY * 2);
+            int boxX = Math.max(0, (imageWidth - boxWidth) / 2);
+            int boxY = Math.max(0, topMargin);
+
+            graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.75f));
+            graphics.setColor(new Color(26, 26, 26));
+            graphics.fillRoundRect(boxX, boxY, boxWidth, boxHeight, 16, 16);
+
+            graphics.setComposite(AlphaComposite.SrcOver);
+            graphics.setColor(Color.WHITE);
+            int baselineY = boxY + paddingY + metrics.getAscent();
+            for (int index = 0; index < wrappedLines.size(); index++) {
+                String line = wrappedLines.get(index);
+                int lineWidth = metrics.stringWidth(line);
+                int textX = boxX + Math.max(0, (boxWidth - lineWidth) / 2);
+                int textY = baselineY + (index * lineHeight);
+                graphics.drawString(line, textX, textY);
+            }
+        } finally {
+            graphics.dispose();
+        }
+    }
+
+    private static Font resolveTopReasonBannerFont(int fontSize) {
+        String[] preferredFamilies = new String[] {
+            "Source Han Sans SC",
+            "Source Han Sans CN",
+            "Microsoft YaHei",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "SansSerif"
+        };
+        try {
+            String[] availableFamilies = GraphicsEnvironment.getLocalGraphicsEnvironment().getAvailableFontFamilyNames();
+            for (String preferred : preferredFamilies) {
+                for (String available : availableFamilies) {
+                    if (available != null && available.equalsIgnoreCase(preferred)) {
+                        return new Font(available, Font.BOLD, fontSize);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return new Font("SansSerif", Font.BOLD, fontSize);
+    }
+
+    private static List<String> wrapTopReasonBannerText(String text, FontMetrics metrics, int maxWidthPx) {
+        List<String> lines = new ArrayList<>();
+        if (text == null || text.isBlank() || metrics == null || maxWidthPx <= 0) {
+            return lines;
+        }
+
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
+        for (String paragraph : normalized.split("\n")) {
+            String cleanParagraph = paragraph == null ? "" : paragraph.replaceAll("\\s+", " ").trim();
+            if (cleanParagraph.isEmpty()) {
+                continue;
+            }
+
+            StringBuilder currentLine = new StringBuilder();
+            for (int index = 0; index < cleanParagraph.length(); index++) {
+                char currentChar = cleanParagraph.charAt(index);
+                String candidateLine = currentLine.toString() + currentChar;
+                if (metrics.stringWidth(candidateLine) <= maxWidthPx || currentLine.length() == 0) {
+                    currentLine.append(currentChar);
+                    continue;
+                }
+
+                String flushed = currentLine.toString().trim();
+                if (!flushed.isEmpty()) {
+                    lines.add(flushed);
+                }
+                currentLine.setLength(0);
+                if (!Character.isWhitespace(currentChar)) {
+                    currentLine.append(currentChar);
+                }
+            }
+
+            String flushed = currentLine.toString().trim();
+            if (!flushed.isEmpty()) {
+                lines.add(flushed);
+            }
+        }
+        return lines;
     }
 
     private boolean extractSingleClipFastCopy(String videoPath, String outputPath, double startSec, double endSec) {

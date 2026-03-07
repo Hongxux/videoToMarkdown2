@@ -9,8 +9,8 @@
 4. 每个 Unit 只能有字段：`pids`, `k`, `m`, `title`。
 5. `k` 只能是 `0/1/2`；`m` 只能是 `0/1`（整数）。
 6. 同一知识类型且时间连续的段落必须合并为同一个 Unit。同一 Group 内不同类型的知识必须拆分为不同 Unit。
-7. **长 Process 强制拆分**：预估超 5 分钟的 Process 必须按逻辑断点（如环境准备/核心编码/验证）二次拆分，**绝不能生硬对半切**，拆分出的新单元保持 `k=2`。
-8. 严禁输出 `semantic_units`、`group_id`、`reasoning`、`confidence`、`text`、`full_text` 等字段。
+7. **【兜底极强提醒】**：如果文本中存在对**几何元素、相对位置（如上下左右、内外嵌套、遮挡）或任何视觉特征元素**的描述，请毫不犹豫地将其知识类型 `k` 判定为 `1` (Concrete)。
+7. 严禁输出 `semantic_units`、`group_id`、`reasoning`、`confidence`、`text`、`full_text` 等字段。
 
 输入段落：
 {paragraphs_json}
@@ -20,11 +20,10 @@
   "knowledge_groups": [
     {{
       "group_name": "CloudBot 完整配置流",
-      "reason": "围绕从准备到配置的同一核心论点，其中超长操作被合理拆分为两个阶段",
+      "reason": "围绕从准备到配置的同一核心论点",
       "units": [
         {{"pids": ["P001", "P002"], "k": 0, "m": 0, "title": "CloudBot 配置前置说明"}},
-        {{"pids": ["P003", "P004"], "k": 2, "m": 1, "title": "阶段一：基础环境与依赖安装"}},
-        {{"pids": ["P005", "P006"], "k": 2, "m": 1, "title": "阶段二：核心通信逻辑编写"}}
+        {{"pids": ["P003", "P004", "P005", "P006"], "k": 2, "m": 1, "title": "基础环境与核心通信逻辑编写"}}
       ]
     }}
   ]

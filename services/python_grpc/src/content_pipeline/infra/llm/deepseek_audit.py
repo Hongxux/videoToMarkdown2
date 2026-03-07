@@ -22,6 +22,13 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Optional
 
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import (
+    build_token_cost_estimate,
+    get_token_pricing_snapshot,
+    normalize_usage_payload,
+    summarize_token_cost_records,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -123,7 +130,24 @@ def _metadata_to_dict(metadata: Any) -> Dict[str, Any]:
         "total_tokens": int(getattr(metadata, "total_tokens", 0) or 0),
         "latency_ms": float(getattr(metadata, "latency_ms", 0.0) or 0.0),
         "cache_hit": bool(getattr(metadata, "cache_hit", False)),
+        "usage_details": normalize_usage_payload(getattr(metadata, "usage_details", None)),
     }
+
+
+def _build_payload_summary(records: Any) -> Dict[str, Any]:
+    canonical_records = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        canonical_records.append(
+            {
+                "model": str(record.get("input", {}).get("model", "") or ""),
+                "provider": str(record.get("cost_estimate", {}).get("provider", "") or ""),
+                "token_usage": dict(record.get("token_usage", {}) or {}),
+                "cost_estimate": dict(record.get("cost_estimate", {}) or {}),
+            }
+        )
+    return summarize_token_cost_records(canonical_records)
 
 
 def build_phase2b_audit_context(
@@ -212,6 +236,8 @@ def _initialize_audit_file(context: DeepSeekAuditContext) -> None:
             "created_at": _now_iso(),
             "updated_at": _now_iso(),
             "total_calls": 0,
+            "pricing_snapshot": get_token_pricing_snapshot(),
+            "summary": _build_payload_summary([]),
             "records": [],
         }
         with open(output_path, "w", encoding="utf-8") as file_obj:
@@ -249,6 +275,15 @@ def append_deepseek_call_record(
     system_text = _apply_text_limit(system_message or "", context.max_text_chars)
     prompt_text = _apply_text_limit(prompt or "", context.max_text_chars)
     output_text_safe = _apply_text_limit(output_text or "", context.max_text_chars)
+    metadata_payload = _metadata_to_dict(metadata)
+    usage_source = metadata_payload.get("usage_details") or metadata_payload
+    token_usage = normalize_usage_payload(usage_source)
+    cost_estimate = build_token_cost_estimate(
+        usage=token_usage,
+        model=model or metadata_payload.get("model", ""),
+        timestamp_utc=_now_iso(),
+        local_cache_hit=bool(metadata_payload.get("cache_hit", False)),
+    )
 
     record: Dict[str, Any] = {
         "timestamp": _now_iso(),
@@ -264,9 +299,11 @@ def append_deepseek_call_record(
         "output": {
             "success": not bool(error),
             "content": output_text_safe,
-            "metadata": _metadata_to_dict(metadata),
+            "metadata": metadata_payload,
             "error": str(error or ""),
         },
+        "token_usage": token_usage,
+        "cost_estimate": cost_estimate,
     }
     if extra:
         record["extra"] = dict(extra)
@@ -298,6 +335,8 @@ def append_deepseek_call_record(
         payload["video_path"] = context.video_path
         payload["updated_at"] = _now_iso()
         payload["total_calls"] = len(records)
+        payload["pricing_snapshot"] = get_token_pricing_snapshot()
+        payload["summary"] = _build_payload_summary(records)
 
         with open(output_path, "w", encoding="utf-8") as file_obj:
             json.dump(payload, file_obj, ensure_ascii=False, indent=2)

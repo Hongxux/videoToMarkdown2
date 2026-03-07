@@ -20,14 +20,15 @@ import logging
 import importlib.util
 from collections import OrderedDict
 from typing import Tuple, Dict, Any, List, Optional, Callable, Awaitable, TypeVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from tenacity import (
     retry,
     stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
+    wait_exponential_jitter,
+    retry_if_exception,
     before_sleep_log
 )
+from services.python_grpc.src.content_pipeline.infra.llm.token_costing import normalize_usage_payload
 import httpx
 import psutil
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
@@ -85,6 +86,50 @@ def _supports_http2_transport() -> bool:
     return importlib.util.find_spec("h2") is not None
 
 
+def _load_openai_retry_exceptions() -> Tuple[type, ...]:
+    """
+    做什么：懒加载 OpenAI SDK 的网络瞬态异常类型。
+    为什么：避免在模块导入期硬依赖 openai，且便于在无 openai 环境下运行单元测试。
+    权衡：若 openai 不可用，则仅依赖 httpx 异常重试。
+    """
+    try:
+        from openai import APIConnectionError, APITimeoutError
+
+        return (APIConnectionError, APITimeoutError)
+    except Exception:
+        return tuple()
+
+
+def _is_retryable_llm_exception(exc: BaseException) -> bool:
+    """
+    做什么：判断异常是否属于“可通过重试恢复”的网络抖动类错误。
+    为什么：OpenAI SDK 会把底层网络错误包装成 APIConnectionError/APITimeoutError，
+    若仅匹配 httpx 异常，会漏掉实际线上最常见的 Connection error。
+    权衡：只把连接/超时类异常纳入重试，避免误重试业务逻辑或配额类错误。
+    """
+    if isinstance(exc, (httpx.NetworkError, httpx.TimeoutException)):
+        return True
+    openai_retry_exceptions = _load_openai_retry_exceptions()
+    if openai_retry_exceptions and isinstance(exc, openai_retry_exceptions):
+        return True
+    return False
+
+
+def _build_llm_retry_wait(
+    initial_backoff_seconds: float,
+    max_backoff_seconds: float = 10.0,
+    jitter_seconds: float = 1.0,
+):
+    initial_backoff_seconds = max(float(initial_backoff_seconds), 0.1)
+    max_backoff_seconds = max(float(max_backoff_seconds), initial_backoff_seconds)
+    jitter_seconds = max(float(jitter_seconds), 0.0)
+    return wait_exponential_jitter(
+        initial=initial_backoff_seconds,
+        max=max_backoff_seconds,
+        jitter=jitter_seconds,
+    )
+
+
 @dataclass
 class _LLMCacheEntry:
     """
@@ -97,6 +142,7 @@ class _LLMCacheEntry:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    usage_details: Dict[str, Any]
     logprobs: Any
     created_at: float
     expires_at: float
@@ -665,6 +711,7 @@ class LLMResponse:
     total_tokens: int
     latency_ms: float
     cache_hit: bool = False
+    usage_details: Dict[str, Any] = field(default_factory=dict)
 
 
 class LLMClient:
@@ -859,6 +906,7 @@ class LLMClient:
             total_tokens=int(entry.total_tokens),
             latency_ms=0.0,
             cache_hit=True,
+            usage_details=dict(entry.usage_details or {}),
         )
 
     def _compute_resource_cap(self, base_limit: int) -> int:
@@ -927,8 +975,8 @@ class LLMClient:
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((httpx.NetworkError, httpx.TimeoutException)),
+        wait=_build_llm_retry_wait(initial_backoff_seconds=4.0, max_backoff_seconds=10.0),
+        retry=retry_if_exception(_is_retryable_llm_exception),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True
     )
@@ -1026,12 +1074,14 @@ class LLMClient:
 
                 # 构建响应元数据
                 latency_ms = (time.time() - start_time) * 1000
+                usage_details = normalize_usage_payload(getattr(response, "usage", None))
                 metadata = LLMResponse(
                     model=response.model,
                     prompt_tokens=response.usage.prompt_tokens,
                     completion_tokens=response.usage.completion_tokens,
                     total_tokens=response.usage.total_tokens,
                     latency_ms=latency_ms,
+                    usage_details=usage_details,
                 )
 
 
@@ -1054,6 +1104,7 @@ class LLMClient:
                             prompt_tokens=metadata.prompt_tokens,
                             completion_tokens=metadata.completion_tokens,
                             total_tokens=metadata.total_tokens,
+                            usage_details=dict(metadata.usage_details or {}),
                             logprobs=lprobs,
                             created_at=now,
                             expires_at=now + float(_GLOBAL_CACHE.ttl_seconds()),
@@ -1101,8 +1152,8 @@ class LLMClient:
     
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((httpx.NetworkError, httpx.TimeoutException)),
+        wait=_build_llm_retry_wait(initial_backoff_seconds=2.0, max_backoff_seconds=10.0),
+        retry=retry_if_exception(_is_retryable_llm_exception),
         before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True
     )
@@ -1170,12 +1221,14 @@ class LLMClient:
                 lprobs = getattr(response.choices[0], "logprobs", None) if enable_logprobs else None
 
                 latency_ms = (time.time() - start_time) * 1000
+                usage_details = normalize_usage_payload(getattr(response, "usage", None))
                 metadata = LLMResponse(
                     model=response.model,
                     prompt_tokens=response.usage.prompt_tokens,
                     completion_tokens=response.usage.completion_tokens,
                     total_tokens=response.usage.total_tokens,
                     latency_ms=latency_ms,
+                    usage_details=usage_details,
                 )
 
                 # 🚀 记录成功
@@ -1197,6 +1250,7 @@ class LLMClient:
                             prompt_tokens=metadata.prompt_tokens,
                             completion_tokens=metadata.completion_tokens,
                             total_tokens=metadata.total_tokens,
+                            usage_details=dict(metadata.usage_details or {}),
                             logprobs=lprobs,
                             created_at=now,
                             expires_at=now + float(_GLOBAL_CACHE.ttl_seconds()),

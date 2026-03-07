@@ -722,6 +722,7 @@ class RichTextPipeline:
                         "stage2": [],
                     },
                 ),
+                "_vl_concrete_segments": list(getattr(unit, "_vl_concrete_segments", []) or []),
                 "group_id": group_id,
                 "group_name": group_name,
                 "group_reason": group_reason,
@@ -833,11 +834,26 @@ class RichTextPipeline:
                     next_group_id += 1
                 group_id = group_name_to_id[normalized_group_name]
 
+            knowledge_type = str(item.get("knowledge_type", "abstract") or "abstract")
+            raw_vl_segments = item.get("_vl_concrete_segments", item.get("vl_concrete_segments", []))
+            vl_concrete_segments = raw_vl_segments if isinstance(raw_vl_segments, list) else []
+            concrete_main_content_blocks: List[str] = []
+            for segment in vl_concrete_segments:
+                if not isinstance(segment, dict):
+                    continue
+                main_content = str(segment.get("main_content", "") or "").strip()
+                if main_content:
+                    concrete_main_content_blocks.append(main_content)
+            full_text = str(item.get("full_text", item.get("text", "")) or "")
+            # concrete 单元优先直通 Phase2A 的 main_content，避免被旧文本覆盖。
+            if knowledge_type.strip().lower() == "concrete" and concrete_main_content_blocks:
+                full_text = "\n\n".join(concrete_main_content_blocks).strip()
+
             unit = SemanticUnit(
                 unit_id=item["unit_id"],
-                knowledge_type=item.get("knowledge_type", "abstract"),
+                knowledge_type=knowledge_type,
                 knowledge_topic=item.get("knowledge_topic", "未知主题"),
-                full_text=item.get("full_text", item.get("text", "")),
+                full_text=full_text,
                 source_paragraph_ids=item.get("source_paragraph_ids", []),
                 source_sentence_ids=item.get("source_sentence_ids", []),
                 group_id=group_id,
@@ -858,6 +874,7 @@ class RichTextPipeline:
                 "stage2": []
             })
             unit.group_reason = str(item.get("group_reason", "") or "").strip()
+            unit._vl_concrete_segments = list(vl_concrete_segments)
             
             # 恢复素材需求
             mr_data = item.get("material_requests", {})

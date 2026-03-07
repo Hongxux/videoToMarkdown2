@@ -199,7 +199,7 @@ class VLVideoAnalyzer:
             1.0,
             safe_float(api_config.get("long_video_upload_target_fps", 15.0), 15.0),
         )
-        self.long_video_upload_drop_audio = bool(api_config.get("long_video_upload_drop_audio", True))
+        self.long_video_upload_drop_audio = bool(api_config.get("long_video_upload_drop_audio", False))
         self.dashscope_upload_chunk_size_bytes = max(
             64 * 1024,
             safe_int(api_config.get("upload_chunk_size_bytes", 2 * 1024 * 1024), 2 * 1024 * 1024),
@@ -1141,12 +1141,10 @@ class VLVideoAnalyzer:
             "2) Each array item must be one complete step.\n"
             "3) Required fields per item: step_id (Integer), step_description (String), "
             "clip_start_sec (Float), clip_end_sec (Float), main_operation (String), instructional_keyframes (List[Object]).\n"
-            "   instructional_keyframes item fields: timestamp_sec (Float), optional frame_reason (String), "
-            "optional target_ui_type (String), optional target_text (String), optional target_relative_position (String), "
+            "   instructional_keyframes item fields: keyframe_id (String, e.g. KEYFRAME_1), timestamp_sec (Float), optional frame_reason (String), "
             "optional bbox ([xmin,ymin,xmax,ymax], 0-1000).\n"
             "   Optional fields: main_action (String), precautions (List[String]), "
-            "step_summary (String), operation_guidance (List[String]), step_type (MAIN_FLOW/CONDITIONAL/OPTIONAL/TROUBLESHOOTING), "
-            "no_needed_video (Boolean), should_type (abstract/concrete).\n"
+            "step_summary (String), operation_guidance (List[String]), step_type (MAIN_FLOW/CONDITIONAL/OPTIONAL/TROUBLESHOOTING).\n"
             "   If an optional field is unnecessary for a step, omit it or return an empty value.\n"
             "4) Do not output reasoning, key_evidence, or knowledge_type fields.\n"
             "5) Segmentation rules:\n"
@@ -1156,11 +1154,6 @@ class VLVideoAnalyzer:
             "6) instructional_keyframes must be true instructional keyframes, "
             "prefer final state or just-before-submit moments.\n"
             "7) Avoid -1 for timestamps; if action spans whole clip use [0.0, clip_duration].\n"
-            + VLVideoAnalyzer._build_route_rules_en(
-                subject="the step",
-                no_needed_prefix="8)",
-                should_type_prefix="9)",
-            )
         )
 
     @staticmethod
@@ -1197,9 +1190,8 @@ class VLVideoAnalyzer:
             "1) Output exactly one valid JSON array. No markdown fences and no extra text.\n"
             "2) Each array item must include: segment_id (Integer), segment_description (String), main_content (String), "
             "clip_start_sec (Float), clip_end_sec (Float), instructional_keyframes (List[Object]).\n"
-            "3) instructional_keyframes item fields: timestamp_sec (Float), frame_reason (String), "
-            "optional target_ui_type (String), optional target_text (String), "
-            "optional target_relative_position (String), optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
+            "3) instructional_keyframes item fields: keyframe_id (String, e.g. KEYFRAME_1), timestamp_sec (Float), frame_reason (String), "
+            "optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
             "4) Keep all textual fields in Chinese. Do not output reasoning/key_evidence/step_type.\n"
             "5) main_content must be markdown and use [KEYFRAME_N] placeholders aligned with instructional_keyframes.\n"
             "6) Use relative clip timestamps (from 0.0). Do not output -1.\n"
@@ -1344,23 +1336,29 @@ class VLVideoAnalyzer:
                     for ts in ar.suggested_screenshoot_timestamps
                 ]
 
-                route_override = self._normalize_should_type(ar.should_type)
-                ar.no_needed_video, ar.should_type = self._normalize_route_controls(
-                    ar.no_needed_video,
-                    route_override,
-                )
-                if route_override == "abstract":
-                    ar.knowledge_type = "abstract"
-                    should_abstract_count += 1
-                elif route_override == "concrete":
-                    ar.knowledge_type = "concrete"
-                    should_concrete_count += 1
+                route_override = ""
+                if normalized_mode == "tutorial_stepwise":
+                    # 教程模式下线 route control 字段，避免影响步骤切分与关键帧生成。
+                    ar.no_needed_video = False
+                    ar.should_type = ""
+                else:
+                    route_override = self._normalize_should_type(ar.should_type)
+                    ar.no_needed_video, ar.should_type = self._normalize_route_controls(
+                        ar.no_needed_video,
+                        route_override,
+                    )
+                    if route_override == "abstract":
+                        ar.knowledge_type = "abstract"
+                        should_abstract_count += 1
+                    elif route_override == "concrete":
+                        ar.knowledge_type = "concrete"
+                        should_concrete_count += 1
 
-                if ar.no_needed_video:
-                    # no_needed_video=true 时，统一转为 abstract，供下游按抽象语义处理。
-                    ar.knowledge_type = "abstract"
-                    ar.should_type = "abstract"
-                    no_needed_video_count += 1
+                    if ar.no_needed_video:
+                        # no_needed_video=true 时，统一转为 abstract，供下游按抽象语义处理。
+                        ar.knowledge_type = "abstract"
+                        ar.should_type = "abstract"
+                        no_needed_video_count += 1
 
                 result.analysis_results.append(ar)
 
@@ -1445,6 +1443,10 @@ class VLVideoAnalyzer:
                         label = f"concrete_segment_{step_id:02d}_keyframe_{j+1}"
                     if j < len(ar.instructional_keyframes or []):
                         keyframe_meta = dict(ar.instructional_keyframes[j] or {})
+                    keyframe_id = self._normalize_keyframe_id(
+                        keyframe_meta.get("keyframe_id", keyframe_meta.get("keyframeId", j + 1)),
+                        fallback_index=j + 1,
+                    )
 
                     result.screenshot_requests.append({
                         "screenshot_id": screenshot_id,
@@ -1461,10 +1463,8 @@ class VLVideoAnalyzer:
                         "analysis_mode": normalized_mode,
                         "is_instructional_keyframe": normalized_mode == "tutorial_stepwise",
                         "keyframe_index": j + 1,
+                        "keyframe_id": keyframe_id,
                         "frame_reason": str(keyframe_meta.get("frame_reason", "") or ""),
-                        "target_ui_type": str(keyframe_meta.get("target_ui_type", "") or "").strip(),
-                        "target_text": str(keyframe_meta.get("target_text", "") or "").strip(),
-                        "target_relative_position": str(keyframe_meta.get("target_relative_position", "") or "").strip(),
                         "bbox": self._normalize_bbox_1000(keyframe_meta.get("bbox")),
                     })
 
@@ -1899,6 +1899,8 @@ class VLVideoAnalyzer:
                             "messages": request_messages_audit,
                         },
                         "response": {
+                            "model": str(getattr(result, "model", self.model) or self.model),
+                            "cache_hit": bool(getattr(result, "cache_hit", False)),
                             "finish_reason": finish_reason,
                             "usage": dict(token_usage or {}),
                             "offline_task_meta": dict(offline_task_meta or {}),
@@ -1982,15 +1984,13 @@ class VLVideoAnalyzer:
             "Do NOT classify knowledge types.\n"
             "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, "
             "main_operation, instructional_keyframes, and optional fields "
-            "(main_action, precautions, step_summary, operation_guidance, no_needed_video, should_type).\n"
-            "instructional_keyframes item schema: timestamp_sec, optional frame_reason, "
-            "optional target_ui_type, optional target_text, optional target_relative_position, "
+            "(main_action, precautions, step_summary, operation_guidance).\n"
+            "instructional_keyframes item schema: keyframe_id (e.g. KEYFRAME_1), timestamp_sec, optional frame_reason, "
             "optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
             "Optional fields can be omitted or left empty when unnecessary.\n"
             "Keep explanation + execution + result in the same step.\n"
             "Remove hesitation/thinking-only intervals with no new information.\n"
             "Each step should be at least 5 seconds; merge overly short steps with neighbors.\n"
-            + self._build_route_rules_en(subject="the step")
         )
 
     def _get_concrete_system_prompt(self) -> str:
@@ -2628,34 +2628,21 @@ class VLVideoAnalyzer:
             ymin, ymax = ymax, ymin
         return [xmin, ymin, xmax, ymax]
 
-    @staticmethod
-    def _normalize_keyframe_semantic_fields(item: Dict[str, Any]) -> Dict[str, str]:
-        target_ui_type = str(
-            item.get(
-                "target_ui_type",
-                item.get("ui_type", item.get("target_type", item.get("uiTargetType", ""))),
-            )
-            or ""
-        ).strip()
-        target_text = str(
-            item.get(
-                "target_text",
-                item.get("ui_text", item.get("target_content", item.get("text_anchor", ""))),
-            )
-            or ""
-        ).strip()
-        target_relative_position = str(
-            item.get(
-                "target_relative_position",
-                item.get("relative_position", item.get("position_hint", item.get("spatial_hint", ""))),
-            )
-            or ""
-        ).strip()
-        return {
-            "target_ui_type": target_ui_type,
-            "target_text": target_text,
-            "target_relative_position": target_relative_position,
-        }
+    def _normalize_keyframe_id(self, value: Any, *, fallback_index: int) -> str:
+        """统一 keyframe_id 格式为 KEYFRAME_N，缺失时回退到顺序编号。"""
+        fallback = max(1, int(fallback_index))
+        text = str(value or "").strip()
+        if not text:
+            return f"KEYFRAME_{fallback}"
+
+        matched = re.search(r"KEYFRAME[_\-\s]*(\d+)", text, flags=re.IGNORECASE)
+        if matched:
+            return f"KEYFRAME_{int(matched.group(1))}"
+
+        if re.fullmatch(r"\d+", text):
+            return f"KEYFRAME_{int(text)}"
+
+        return f"KEYFRAME_{fallback}"
 
     def _normalize_instructional_keyframes(
         self,
@@ -2678,11 +2665,11 @@ class VLVideoAnalyzer:
                 entry: Dict[str, Any] = {
                     "timestamp_sec": ts_list[0],
                     "frame_reason": str(item.get("frame_reason", "") or "").strip(),
+                    "keyframe_id": self._normalize_keyframe_id(
+                        item.get("keyframe_id", item.get("keyframeId", item.get("id"))),
+                        fallback_index=index,
+                    ),
                 }
-                semantic_fields = self._normalize_keyframe_semantic_fields(item)
-                for field_name, field_value in semantic_fields.items():
-                    if field_value:
-                        entry[field_name] = field_value
                 bbox = self._normalize_bbox_1000(item.get("bbox"))
                 if bbox is not None:
                     entry["bbox"] = bbox
@@ -2690,8 +2677,14 @@ class VLVideoAnalyzer:
             if normalized:
                 return normalized
 
-        for ts in fallback_timestamps:
-            normalized.append({"timestamp_sec": float(ts), "frame_reason": ""})
+        for index, ts in enumerate(fallback_timestamps, start=1):
+            normalized.append(
+                {
+                    "timestamp_sec": float(ts),
+                    "frame_reason": "",
+                    "keyframe_id": self._normalize_keyframe_id(None, fallback_index=index),
+                }
+            )
         return normalized
 
     def _normalize_bool_flag(self, value: Any) -> bool:
@@ -2784,11 +2777,11 @@ class VLVideoAnalyzer:
                 key_entry: Dict[str, Any] = {
                     "timestamp_sec": round(key_ts, 6),
                     "frame_reason": str(keyframe.get("frame_reason", "") or "").strip(),
+                    "keyframe_id": self._normalize_keyframe_id(
+                        keyframe.get("keyframe_id", keyframe.get("keyframeId", key_index)),
+                        fallback_index=key_index,
+                    ),
                 }
-                semantic_fields = self._normalize_keyframe_semantic_fields(keyframe)
-                for field_name, field_value in semantic_fields.items():
-                    if field_value:
-                        key_entry[field_name] = field_value
                 bbox = self._normalize_bbox_1000(keyframe.get("bbox"))
                 if bbox is not None:
                     key_entry["bbox"] = bbox
@@ -2799,11 +2792,9 @@ class VLVideoAnalyzer:
                     {
                         "timestamp_sec": ts,
                         "frame_reason": "",
-                        "target_ui_type": "",
-                        "target_text": "",
-                        "target_relative_position": "",
+                        "keyframe_id": self._normalize_keyframe_id(None, fallback_index=i),
                     }
-                    for ts in clamped_timestamps
+                    for i, ts in enumerate(clamped_timestamps, start=1)
                 ]
             clamped_timestamps = [float(item.get("timestamp_sec", 0.0)) for item in clamped_keyframes]
 
@@ -2967,9 +2958,13 @@ class VLVideoAnalyzer:
             )
             has_step_schema = has_step_schema or tutorial_like
 
-            raw_no_needed_video = item.get("no_needed_video", item.get("no_need_video", item.get("video_not_needed")))
-            raw_should_type = item.get("should_type", item.get("target_type", item.get("suggested_type")))
-            no_needed_video, should_type = self._normalize_route_controls(raw_no_needed_video, raw_should_type)
+            if tutorial_like:
+                # 教程分步模式已下线 no_needed_video/should_type，不再解析这两个字段。
+                no_needed_video, should_type = False, ""
+            else:
+                raw_no_needed_video = item.get("no_needed_video", item.get("no_need_video", item.get("video_not_needed")))
+                raw_should_type = item.get("should_type", item.get("target_type", item.get("suggested_type")))
+                no_needed_video, should_type = self._normalize_route_controls(raw_no_needed_video, raw_should_type)
 
             knowledge_type = str(item.get("knowledge_type", "") or "").strip()
             if tutorial_like:
@@ -3021,8 +3016,6 @@ class VLVideoAnalyzer:
                     "precautions": precautions,
                     "step_summary": step_summary,
                     "operation_guidance": operation_guidance,
-                    "no_needed_video": bool(no_needed_video),
-                    "should_type": should_type,
                     "clip_start_sec": clip_start_sec,
                     "clip_end_sec": clip_end_sec,
                     "instructional_keyframes": instructional_keyframes,
@@ -3070,8 +3063,6 @@ class VLVideoAnalyzer:
                     "precautions": list(r.precautions or []),
                     "step_summary": str(r.step_summary or "").strip(),
                     "operation_guidance": list(r.operation_guidance or []),
-                    "no_needed_video": bool(getattr(r, "no_needed_video", False)),
-                    "should_type": str(getattr(r, "should_type", "") or ""),
                     "clip_start_sec": float(r.clip_start_sec),
                     "clip_end_sec": float(r.clip_end_sec),
                     "instructional_keyframe_timestamp": list(r.suggested_screenshoot_timestamps or []),

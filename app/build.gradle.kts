@@ -1,10 +1,26 @@
-plugins {
+﻿plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
     id("org.jetbrains.kotlin.kapt")
 }
 
+val mobileApiBaseUrl = sequenceOf(
+    (findProperty("mobileApiBaseUrl") as String?)?.trim(),
+    System.getenv("MOBILE_APP_API_BASE_URL")?.trim(),
+    System.getenv("MOBILE_API_BASE_URL")?.trim()
+).mapNotNull { candidate ->
+    candidate?.takeIf { it.isNotBlank() }?.trimEnd('/')?.let { trimmed ->
+        if (trimmed.endsWith("/api/mobile")) {
+            trimmed
+        } else {
+            "$trimmed/api/mobile"
+        }
+    }
+}.firstOrNull() ?: "http://10.0.2.2:8080/api/mobile"
+val mobileApiBaseUrlEscaped = mobileApiBaseUrl
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
 val mobileAutoUpdateEnabled = (findProperty("mobileAutoUpdateEnabled") as String?)
     ?.trim()
     ?.let { it.equals("true", ignoreCase = true) }
@@ -33,11 +49,11 @@ android {
         applicationId = "com.hongxu.videoToMarkdownTest2"
         minSdk = 24
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0.4"
+        versionCode = 5
+        versionName = "1.0.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "MOBILE_API_BASE_URL", "\"https://botryoidal-lashon-contumaciously.ngrok-free.dev/api/mobile\"")
+        buildConfigField("String", "MOBILE_API_BASE_URL", "\"$mobileApiBaseUrlEscaped\"")
         buildConfigField("boolean", "MOBILE_AUTO_UPDATE_ENABLED", mobileAutoUpdateEnabled.toString())
         buildConfigField(
             "long",
@@ -125,3 +141,4 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+

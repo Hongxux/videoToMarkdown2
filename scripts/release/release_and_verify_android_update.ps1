@@ -22,6 +22,41 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function Has-Property {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($null -eq $Object) {
+        return $false
+    }
+    return $Object.PSObject.Properties.Name -contains $Name
+}
+
+function Read-RequiredIntProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Context
+    )
+    if (-not (Has-Property -Object $Object -Name $Name)) {
+        throw "Verify failed: missing property '$Name' in $Context"
+    }
+    return [int]$Object.$Name
+}
+
+function Read-OptionalBoolProperty {
+    param(
+        [Parameter(Mandatory = $true)]$Object,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [bool]$DefaultValue = $false
+    )
+    if (-not (Has-Property -Object $Object -Name $Name)) {
+        return $DefaultValue
+    }
+    return [bool]$Object.$Name
+}
+
 if ([string]::IsNullOrWhiteSpace($ApiBaseUrl)) {
     $ApiBaseUrl = $env:MOBILE_API_BASE_URL
 }
@@ -115,6 +150,15 @@ if ($verifyClientVersionCode -le 0) {
 }
 
 $headers = @{}
+$apiHost = ""
+try {
+    $apiHost = ([System.Uri]$ApiBaseUrl).Host
+} catch {
+    $apiHost = ""
+}
+if (-not [string]::IsNullOrWhiteSpace($apiHost) -and $apiHost.ToLowerInvariant().Contains("ngrok")) {
+    $headers["ngrok-skip-browser-warning"] = "1"
+}
 $timeoutSec = [Math]::Max(10, $TimeoutSeconds)
 $encodedClientVersionName = [System.Uri]::EscapeDataString($CheckClientVersionName)
 $oldCheckUri = "$ApiBaseUrl/api/mobile/app/update/check?versionCode=$verifyClientVersionCode"
@@ -127,25 +171,37 @@ $newCheckUri = "$ApiBaseUrl/api/mobile/app/update/check?versionCode=$VersionCode
 
 Write-Host "[android-update] step=verify-check oldClientVersionCode=$verifyClientVersionCode"
 $oldResult = Invoke-RestMethod -Method Get -Uri $oldCheckUri -Headers $headers -TimeoutSec $timeoutSec -ErrorAction Stop
-if (-not $oldResult.success) {
+if ($oldResult -is [string]) {
+    throw "Verify failed: old client check returned non-JSON response. body-prefix=$($oldResult.Substring(0, [Math]::Min(160, $oldResult.Length)))"
+}
+$oldSuccess = Read-OptionalBoolProperty -Object $oldResult -Name "success" -DefaultValue $true
+if (-not $oldSuccess) {
     throw "Verify failed: old client check returned success=false"
 }
-if ([int]$oldResult.latestVersionCode -ne $VersionCode) {
-    throw "Verify failed: latestVersionCode=$($oldResult.latestVersionCode), expected $VersionCode"
+$oldLatestVersionCode = Read-RequiredIntProperty -Object $oldResult -Name "latestVersionCode" -Context "old client check"
+if ($oldLatestVersionCode -ne $VersionCode) {
+    throw "Verify failed: latestVersionCode=$oldLatestVersionCode, expected $VersionCode"
 }
-if ($verifyClientVersionCode -lt $VersionCode -and -not [bool]$oldResult.hasUpdate) {
+$oldHasUpdate = Read-OptionalBoolProperty -Object $oldResult -Name "hasUpdate" -DefaultValue $false
+if ($verifyClientVersionCode -lt $VersionCode -and -not $oldHasUpdate) {
     throw "Verify failed: hasUpdate=false for old client versionCode=$verifyClientVersionCode"
 }
 
 Write-Host "[android-update] step=verify-check currentClientVersionCode=$VersionCode"
 $newResult = Invoke-RestMethod -Method Get -Uri $newCheckUri -Headers $headers -TimeoutSec $timeoutSec -ErrorAction Stop
-if (-not $newResult.success) {
+if ($newResult -is [string]) {
+    throw "Verify failed: current client check returned non-JSON response. body-prefix=$($newResult.Substring(0, [Math]::Min(160, $newResult.Length)))"
+}
+$newSuccess = Read-OptionalBoolProperty -Object $newResult -Name "success" -DefaultValue $true
+if (-not $newSuccess) {
     throw "Verify failed: current client check returned success=false"
 }
-if ([int]$newResult.latestVersionCode -ne $VersionCode) {
-    throw "Verify failed: latestVersionCode=$($newResult.latestVersionCode), expected $VersionCode"
+$newLatestVersionCode = Read-RequiredIntProperty -Object $newResult -Name "latestVersionCode" -Context "current client check"
+if ($newLatestVersionCode -ne $VersionCode) {
+    throw "Verify failed: latestVersionCode=$newLatestVersionCode, expected $VersionCode"
 }
-if ([bool]$newResult.hasUpdate) {
+$newHasUpdate = Read-OptionalBoolProperty -Object $newResult -Name "hasUpdate" -DefaultValue $false
+if ($newHasUpdate) {
     throw "Verify failed: hasUpdate=true for current versionCode=$VersionCode"
 }
 

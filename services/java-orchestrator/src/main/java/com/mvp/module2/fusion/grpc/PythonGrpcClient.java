@@ -760,6 +760,7 @@ public class PythonGrpcClient {
         public double timestampSec;
         public String label;
         public String semanticUnitId;
+        public String frameReason;
     }
 
     public static class ClipSegment {
@@ -879,6 +880,7 @@ public class PythonGrpcClient {
             r.timestampSec = req.getTimestampSec();
             r.label = req.getLabel();
             r.semanticUnitId = req.getSemanticUnitId();
+            r.frameReason = req.getFrameReason();
             result.screenshotRequests.add(r);
         }
 
@@ -1382,6 +1384,7 @@ public class PythonGrpcClient {
         public double timestampSec;
         public String label;
         public String semanticUnitId;
+        public String frameReason;
     }
 
     public static class ClipRequestDTO {
@@ -1503,6 +1506,7 @@ public class PythonGrpcClient {
                 r.timestampSec = req.getTimestampSec();
                 r.label = req.getLabel();
                 r.semanticUnitId = req.getSemanticUnitId();
+                r.frameReason = req.getFrameReason();
                 result.screenshotRequests.add(r);
             }
 
@@ -1622,6 +1626,7 @@ public class PythonGrpcClient {
                 r.timestampSec = req.getTimestampSec();
                 r.label = req.getLabel();
                 r.semanticUnitId = req.getSemanticUnitId();
+                r.frameReason = req.getFrameReason();
                 result.screenshotRequests.add(r);
             }
 
