@@ -1,0 +1,3 @@
+content_pipeline:
+  markdown_enhancer:
+    enable_img_desc_text_augment: true

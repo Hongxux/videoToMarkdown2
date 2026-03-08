@@ -1,0 +1,8 @@
+content_pipeline:
+  markdown_enhancer:
+    enable_img_desc_text_augment: true
+  observability:
+    llm_trace:
+      enabled: true
+      level: full
+      output_path: intermediates/phase2b_llm_trace.jsonl
