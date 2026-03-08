@@ -1,9 +1,11 @@
 package com.mvp.module2.fusion.service;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.core.io.ByteArrayResource;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 
@@ -159,6 +161,36 @@ class DeepSeekAdvisorServiceTest {
         assertEquals(List.of("嵌套语境"), entropy.contextualExplanations);
         assertEquals(List.of("嵌套深度"), entropy.depth);
         assertEquals(List.of("嵌套广度"), entropy.breadth);
+    }
+
+    @Test
+    void shouldBuildPhase2bStructuredUserPromptFromTemplate() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        setField(service, "phase2bStructuredUserPromptResource", new ByteArrayResource(
+                "Body:\n{body_text}\nTail".getBytes(StandardCharsets.UTF_8)
+        ));
+        Method method = DeepSeekAdvisorService.class.getDeclaredMethod("buildPhase2bStructuredUserPrompt", String.class);
+        method.setAccessible(true);
+
+        String prompt = (String) method.invoke(service, "line1\nline2");
+
+        assertEquals("Body:\nline1\nline2\nTail", prompt);
+    }
+
+    @Test
+    void shouldAppendImageConstraintsToPhase2bStructuredSystemPrompt() throws Exception {
+        DeepSeekAdvisorService service = new DeepSeekAdvisorService();
+        setField(service, "phase2bStructuredSystemPromptResource", new ByteArrayResource(
+                "Base phase2b prompt".getBytes(StandardCharsets.UTF_8)
+        ));
+        Method method = DeepSeekAdvisorService.class.getDeclaredMethod("buildPhase2bStructuredSystemPrompt");
+        method.setAccessible(true);
+
+        String prompt = (String) method.invoke(service);
+
+        assertEquals(true, prompt.contains("Base phase2b prompt"));
+        assertEquals(true, prompt.contains("Image Marker Hard Constraints"));
+        assertEquals(true, prompt.contains("![alt](url)"));
     }
 
     private void setField(Object target, String fieldName, Object value) throws Exception {

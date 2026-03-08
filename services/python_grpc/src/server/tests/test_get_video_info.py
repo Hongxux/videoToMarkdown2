@@ -223,6 +223,68 @@ def test_get_video_info_parses_douyin_share_link(monkeypatch):
     assert "douyin.com/video/" in response.resolved_url
 
 
+def test_get_video_info_keeps_douyin_browser_probe_on_success(monkeypatch):
+    captured = {"video_processor_init_count": 0}
+
+    class _VideoProcessorStub:
+        def __init__(self, **_kwargs):
+            captured["video_processor_init_count"] += 1
+            raise AssertionError("VideoProcessor should stay unused after browser probe succeeds")
+
+    async def _resolve_share_link_stub(raw_text: str, timeout_ms: int = 45000):
+        _ = (raw_text, timeout_ms)
+        return types.SimpleNamespace(
+            extracted_url="https://v.douyin.com/k9CBH7pr0HM/",
+            resolved_url="https://www.douyin.com/video/7123456789012345678",
+            platform="douyin",
+            canonical_id="7123456789012345678",
+            resolver="browser-probe",
+            content_type="video",
+        )
+
+    class _ServicerStub:
+        def __init__(self):
+            self.config = {"video": {}}
+
+        def _cache_metrics_begin(self, *_args, **_kwargs):
+            return None
+
+        def _increment_tasks(self):
+            return None
+
+        def _decrement_tasks(self):
+            return None
+
+    async def _probe_douyin_stub(*, video_url, timeout_ms=30000):
+        captured["probe_url"] = video_url
+        captured["timeout_ms"] = timeout_ms
+        return {
+            "title": "browser probe title",
+            "duration": 88.0,
+            "thumbnail": "https://p3.douyinpic.com/browser-probe.jpg",
+            "webpage_url": video_url,
+        }
+
+    monkeypatch.setattr(impl, "VideoProcessor", _VideoProcessorStub)
+    monkeypatch.setattr(impl, "resolve_share_link", _resolve_share_link_stub)
+    monkeypatch.setattr(impl, "_probe_douyin_video_info", _probe_douyin_stub)
+
+    request = types.SimpleNamespace(
+        task_id="task-video-info-douyin-browser-probe",
+        video_input="copy text https://v.douyin.com/k9CBH7pr0HM/",
+    )
+    response = asyncio.run(impl._VideoProcessingServicerCore.GetVideoInfo(_ServicerStub(), request, None))
+
+    assert response.success is True
+    assert response.source_platform == "douyin"
+    assert response.canonical_id == "7123456789012345678"
+    assert response.video_title == "browser probe title"
+    assert response.duration_sec == 88.0
+    assert response.resolved_url == "https://www.douyin.com/video/7123456789012345678"
+    assert captured["probe_url"] == "https://www.douyin.com/video/7123456789012345678"
+    assert captured["video_processor_init_count"] == 0
+
+
 def test_get_video_info_parses_douyin_direct_url(monkeypatch):
     """验证直接抖音链接（非短链）能正确解析。"""
     captured = {}

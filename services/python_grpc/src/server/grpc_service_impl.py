@@ -2929,6 +2929,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
             download_options = _load_download_video_options(self.config)
             info = None
+            video_processor = None
 
             # 抖音优先走浏览器探测（yt-dlp 需要 cookies 易失败）
             if source_platform == "douyin":

@@ -1,5 +1,31 @@
 ﻿# 架构升级记录
 
+## 2026-03-08 移动端任务导出升级为扁平化闭包 ZIP + 多任务前端导出入口
+- 日期：2026-03-08
+- 背景：
+  - 原 `/api/mobile/tasks/{taskId}/export` 直接遍历任务目录并保持原目录结构打包，客户端解压后 markdown 内的相对图片/视频路径依赖原目录层级，挂载点笔记也不会按“阅读闭包”被精准收集。
+  - 移动端故事库已经具备任务多选能力，但导出仍停留在单任务入口，无法在选中态下连续导出多个任务。
+- 第一性原理与复用杠杆：
+  - 第一性原理：导出不是“拷贝整个目录”，而是导出“阅读可用闭包”——主 markdown、markdown 递归引用到的本地资源、以及 anchor 当前 mounted note / latest revision files。
+  - 复用杠杆1：复用 `MobileMarkdownController.resolveTaskView/resolveTaskRootDir/resolveMarkdown` 作为任务、目录和主 markdown 的事实来源，不重建任务定位链路。
+  - 复用杠杆2：复用现有 `StreamingResponseBody + ZipOutputStream`，继续走 HTTP chunked 流式下载，不引入新的传输协议。
+  - 复用杠杆3：复用现有前端 `streamResponseToWritable/streamResponseToBlob/triggerBrowserDownload`，把单任务下载提升为多任务顺序下载，而不是重写下载器。
+  - 复用杠杆4：复用现有 `mobileUploadInlineOpenPicker`，在阅读页顶部新增“导入”按钮时直接接到已有上传入口。
+- 架构决策：
+  - 决策1：新增 `TaskBundleExportService` 承接导出闭包解析、扁平命名、markdown 资源重写与 manifest 生成；controller 仅负责 HTTP 参数解析与流式响应。
+  - 决策2：`/api/mobile/tasks/{taskId}/export` 默认输出 `flat` 布局；增加 `layout=raw` 作为旧的整目录导出兜底，避免一次性切断历史行为。
+  - 决策3：前端任务多选条新增“批量导出”，按已选任务顺序逐个触发 ZIP 下载；阅读页顶部新增“导入”按钮，直接复用已有上传文件选择器。
+- 调用链变化：
+  - 调整前：`index.html(exportCurrentTaskZip) -> GET /api/mobile/tasks/{taskId}/export -> MobileMarkdownController.collectExportEntries -> ZipOutputStream(整目录)`。
+  - 调整后：`index.html(exportCurrentTaskZip / exportSelectedTasksAsMultipleZips) -> GET /api/mobile/tasks/{taskId}/export -> MobileMarkdownController -> TaskBundleExportService.planFlatExport -> TaskBundleExportService.writeFlatZipStreaming -> ZipOutputStream(扁平化闭包)`。
+- 验证计划：
+  - Java：`mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 定向测试：`mvn -f services/java-orchestrator/pom.xml -Dtest=TaskBundleExportServiceTest test -q`
+  - 前端手动验证：多选 2 个任务批量导出应触发 2 个 ZIP 下载；阅读页顶部“导入”按钮应能直接打开现有文件选择器。
+- 风险与回滚：
+  - 若扁平导出在个别历史任务上出现资源遗漏，可临时改用 `layout=raw` 保底。
+  - 若浏览器对多文件自动下载有限制，可保留当前顺序触发实现，并在后续迭代升级为目录选择器写入模式。
+
 ## 2026-03-07 Phase2A Windows concrete forward-search CV 路由线程化
 - 日期：2026-03-07
 - 背景：
@@ -10852,3 +10878,59 @@
   - `DashScope Files.upload` 成功日志现在显式输出 `transport=temp_url` 与 `tmp_url`，下游链路更容易核对真实媒体传输形态。
 - 结论：
   - offline batch 这条链路的关键不是“有没有 `file-batch-*`”，而是“最终 messages 使用的是哪种 transport、对应 body 体积是多少、是否真正拿到了 `tmp_url`”。
+
+## 2026-03-08：下线 img-desc augment 默认运行入口（保留代码，先关配置）
+- 背景：
+  - 现网观察到大量 img-desc augment skipped: no_image_items 日志，说明该实验链路长期空转。
+  - 进一步复核调用链后确认：真正稳定产出截图材料的是 process/concrete 单元，而当前 MarkdownEnhancer 主流程里仅 abstract 会进入该增强入口，导致“有图材料”和“可触发增强”两个条件在真实流量中几乎不相交。
+- 现有杠杆（复用点）：
+  - config/video_config.yaml 已提供 content_pipeline.markdown_enhancer.enable_img_desc_text_augment 总开关，无需先改动调用链即可安全下线。
+  - markdown_enhancer.py 已具备 skipped/triggered/result 级别日志，可继续观测关闭后的噪音收敛情况与回滚需求。
+- 本次调整：
+  - config/video_config.yaml
+    - 将 content_pipeline.markdown_enhancer.enable_img_desc_text_augment 从 true 调整为 false。
+    - 保留现有实现与测试资产，先做“运行下线”，不做物理删除，降低误删风险。
+- 调用链/决策链变化：
+  - 调整前：abstract -> _build_structured_text_for_concept(...) -> 可选 img-desc augment -> structured LLM
+  - 调整后：abstract -> _build_structured_text_for_concept(...) -> 直接跳过 img-desc augment -> structured LLM
+- 决策与理由：
+  - 决策1：先关配置，不立即删代码。
+    - 为什么：当前问题是生产交集近乎为空，而不是实现一定错误；先下线运行可立即降低日志噪音与无效 LLM 判断，同时保留后续基于真实样本复盘或彻底清理的余地。
+  - 决策2：保留文档证据链。
+    - 为什么：后续若确认真实业务永不需要 abstract + screenshot evidence 组合，可再做第二阶段物理删除，并据此清理测试与提示词资产。
+- 影响评估：
+  - 对现有 process/concrete 输出无影响；它们原本就不依赖该链路。
+  - 对 abstract 单元：不再尝试基于图片描述做正文增量补全，直接进入原结构化步骤。
+  - 对可观测性：img-desc augment 的空转日志应显著减少；若后续仍出现相关日志，说明存在环境变量覆盖或局部测试配置启用。
+- 回滚方式：
+  - 将 config/video_config.yaml 中 content_pipeline.markdown_enhancer.enable_img_desc_text_augment 恢复为 true，或通过环境变量 MODULE2_ENABLE_IMG_DESC_TEXT_AUGMENT=true 临时覆盖。
+
+## 2026-03-08: DeepSeek gateway unified retry budget and fast fallback to `qwen-plus`
+- Background:
+  - Production logs showed a two-step failure pattern: DeepSeek connection failure first, then DashScope fallback failure because the older model name was unavailable.
+  - The desired behavior was updated to: retry DeepSeek four times with `2s/4s/8s/16s`, then fallback to `qwen-plus`; after one full DeepSeek outage, later requests should fast-switch after a single DeepSeek failure.
+- Reusable leverage:
+  - Reuse the centralized `deepseek_complete_text` / `deepseek_complete_json` gateway entry points.
+  - Reuse the existing Qwen fallback client construction and `DASHSCOPE_API_KEY` injection path.
+  - Reuse the existing gateway hedged-request wrapper instead of changing business callers.
+- Changes:
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - Add unified gateway-level retries for DeepSeek and Qwen fallback with exponential backoff `2s/4s/8s/16s`.
+    - Switch the fallback default model to `qwen-plus` on `https://dashscope.aliyuncs.com/compatible-mode/v1`.
+    - Add a process-local fast-fallback state: first full DeepSeek exhaustion opens the breaker; later requests switch after one DeepSeek failure; a later DeepSeek success closes the breaker.
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - Add regression coverage for retry sequence and fast-fallback behavior.
+- Call-chain change:
+  - Old: `DeepSeek hedged request -> immediate Qwen fallback`
+  - New: `DeepSeek hedged request -> 4 retries with 2/4/8/16 seconds -> open fast-fallback mode -> Qwen fallback with the same retry budget -> later single DeepSeek failure switches immediately -> later DeepSeek success closes fast-fallback mode`
+- Decisions:
+  - Decision 1: keep retry orchestration in the gateway layer.
+    - Reason: all callers that already reuse `deepseek_complete_text/json` get the same policy without touching business modules.
+  - Decision 2: implement fast fallback as "open on full exhaustion, close on later success" instead of a permanent latch.
+    - Reason: this satisfies the requested fast-switch behavior while still allowing DeepSeek to recover automatically.
+  - Decision 3: align the default fallback model with `qwen-plus`.
+    - Reason: this removes the older `qwen3-plus` default that caused secondary `model_not_found` failures.
+- Validation/observability:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - Observe retry logs for `2/4/8/16` spacing and verify breaker open/close transitions in gateway logs.

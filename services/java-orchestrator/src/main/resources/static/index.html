@@ -2599,6 +2599,7 @@
                         <span class="task-bulk-meta" id="taskBulkMeta">未选择任务</span>
                         <div class="task-bulk-actions">
                             <button class="btn btn-primary" id="taskBulkMergeBtn" type="button" disabled>合并为合集</button>
+                            <button class="btn btn-primary" id="taskBulkExportBtn" type="button" disabled>&#x6279;&#x91cf;&#x5bfc;&#x51fa;</button>
                             <button class="btn btn-primary" id="taskBulkDeleteBtn" type="button" disabled>批量删除</button>
                         </div>
                     </div>
@@ -2635,6 +2636,13 @@
                     </div>
                     <input class="submit-file-input" id="mobileVideoFile" type="file" accept="video/*,.mp4,.mov,.mkv,.avi,.webm,.m4v,.txt,.md,.pdf,.epub" onchange="if (window.handleMobileVideoFileSelected) { return window.handleMobileVideoFileSelected(this); } return window.mobileUploadInlineOnFileChange && window.mobileUploadInlineOnFileChange(this);">
                     <div class="submit-tip" id="mobileSubmitTip"></div>
+                    <div class="task-notification-row" id="taskNotificationRow" aria-live="polite">
+                        <div class="task-notification-copy">
+                            <strong class="task-notification-title">&#x5b8c;&#x6210;&#x901a;&#x77e5;</strong>
+                            <span class="task-notification-status" id="taskNotificationStatus">&#x5f00;&#x542f;&#x540e;&#xff0c;&#x4efb;&#x52a1;&#x5b8c;&#x6210;&#x6216;&#x5931;&#x8d25;&#x4f1a;&#x5728;&#x7cfb;&#x7edf;&#x5c42;&#x4e3b;&#x52a8;&#x63d0;&#x9192;</span>
+                        </div>
+                        <button class="task-notification-toggle" id="taskNotificationToggleBtn" type="button" aria-pressed="false">&#x5f00;&#x542f;</button>
+                    </div>
                 </div>
                 <button class="btn btn-ghost-icon task-composer-fab" id="taskComposerToggleBtn" type="button" aria-label="&#x5f00;&#x59cb;&#x521b;&#x4f5c;" title="&#x5f00;&#x59cb;&#x521b;&#x4f5c;" aria-expanded="false" hidden>
                     <svg class="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -2663,6 +2671,14 @@
                                 <path d="M4 7h0M4 12h0M4 17h0"/>
                             </svg>
                             <span class="btn-label">大纲</span>
+                        </button>
+                        <button class="btn has-icon" id="contentImportBtn" type="button">
+                            <svg class="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 20V10"/>
+                                <path d="M8.5 13.5 12 10l3.5 3.5"/>
+                                <path d="M5 7h14"/>
+                            </svg>
+                            <span class="btn-label">&#x5bfc;&#x5165;</span>
                         </button>
                         <button class="btn btn-ghost-icon" id="contentToolsToggleBtn" type="button" aria-label="更多功能" title="更多功能" aria-expanded="false" aria-controls="contentToolsPanel">
                             <svg class="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
@@ -3612,6 +3628,12 @@
     const PWA_SHARE_TARGET = window.mobilePwaShareTarget || null;
     const READER_TYPOGRAPHY = window.mobileReaderTypography || null;
     const CONTENT_INVITATION = window.mobileContentInvitation || null;
+    const TASK_NOTIFICATION_TAG_PREFIX = 'mobile-task-status:';
+    const TASK_UPDATES_WS_RECONNECT_BASE_MS = 1200;
+    const TASK_UPDATES_WS_RECONNECT_MAX_MS = 15000;
+    const TASK_NOTIFICATION_SW_READY_TIMEOUT_MS = 1600;
+    const TASK_NOTIFICATION_PREFERENCE_KEY = 'mobile.task.notification.enabled.v1';
+    const TASK_NOTIFICATION_GUIDE_SEEN_KEY = 'mobile.task.notification.guide.seen.v1';
     window.__MOBILE_COMPOSER_COPY = COMPOSER_COPY;
     if (PWA_SHARE_TARGET && typeof PWA_SHARE_TARGET.registerServiceWorker === 'function') {
         PWA_SHARE_TARGET.registerServiceWorker({ swUrl: '/sw.js' });
@@ -3619,6 +3641,7 @@
     const UI_COPY = Object.freeze({
         actionOpen: '打开故事',
         actionSaveFile: '保存文件',
+        actionImport: '导入内容',
         actionOutline: '故事大纲',
         actionEnterEdit: '进入编辑',
         actionExitEdit: '退出编辑',
@@ -3668,6 +3691,7 @@
         tasks: [],
         currentTaskId: null,
         currentTaskTitle: '',
+        currentTaskStorageKey: '',
         currentMarkdownPath: null,
         currentMarkdownBaseDir: null,
         currentMarkdownRaw: '',
@@ -3706,6 +3730,7 @@
         contentToolsOpen: false,
         contentNeedsReload: false,
         contentToolsAdvancedReveal: false,
+        pendingTaskAutoLoadInFlight: false,
         touchGesture: null,
         lastTapAt: 0,
         lastTapIndex: -1,
@@ -3756,6 +3781,13 @@
         },
         taskListHydrated: false,
         taskListReloading: false,
+        taskNotificationEnabled: false,
+        taskNotificationLedger: {},
+        taskUpdatesSocket: null,
+        taskUpdatesSocketConnectPromise: null,
+        taskUpdatesSocketReconnectTimerId: 0,
+        taskUpdatesSocketReconnectAttempt: 0,
+        taskUpdatesSocketManualClose: false,
         taskListSelectionMode: false,
         taskListSelectedIds: new Set(),
         taskListSelectionPivotId: '',
@@ -3796,6 +3828,7 @@
         wikilinkSideAnchor: '',
     };
     state.deleteSwipeSoundEnabled = readDeleteSwipeSoundPreference();
+    state.taskNotificationEnabled = readTaskNotificationPreference();
     state.taskManualCollections = {};
     state.taskManualCollectionMeta = {
         collectionTitles: {},
@@ -4902,6 +4935,10 @@
         if (exportBtn) {
             exportBtn.disabled = !!disabled;
         }
+        const bulkExportBtn = document.getElementById('taskBulkExportBtn');
+        if (bulkExportBtn) {
+            bulkExportBtn.disabled = !!disabled || resolveSelectedTaskListEntities().taskIds.length <= 0;
+        }
     }
 
     function setExportStatus(status, text, options = {}) {
@@ -5891,10 +5928,23 @@
         return 12;
     }
 
+
     function findTaskById(taskId) {
         const normalizedTaskId = String(taskId || '').trim();
         if (!normalizedTaskId) return null;
         return (state.tasks || []).find((task) => String(task && task.taskId || '') === normalizedTaskId) || null;
+    }
+
+    function findTaskByTaskIdentity(taskIdRaw, storageKeyRaw) {
+        const directTask = findTaskById(taskIdRaw);
+        if (directTask) {
+            return directTask;
+        }
+        const normalizedStorageKey = normalizeTaskTitleText(storageKeyRaw);
+        if (!normalizedStorageKey) {
+            return null;
+        }
+        return (state.tasks || []).find((task) => normalizeTaskTitleText(task && task.storageKey) === normalizedStorageKey) || null;
     }
 
     function normalizeTaskId(taskId) {
@@ -6444,6 +6494,7 @@
         const bulkMeta = document.getElementById('taskBulkMeta');
         const bulkMergeBtn = document.getElementById('taskBulkMergeBtn');
         const bulkDeleteBtn = document.getElementById('taskBulkDeleteBtn');
+        const bulkExportBtn = document.getElementById('taskBulkExportBtn');
         const selectionMode = !!state.taskListSelectionMode;
         const selectedCount = state.taskListSelectedIds ? state.taskListSelectedIds.size : 0;
 
@@ -6654,6 +6705,75 @@
         return payload;
     }
 
+    function canTaskBeResubmitted(task) {
+        const normalizedVideoUrl = normalizeTaskVideoInput(task && task.videoUrl);
+        if (!normalizedVideoUrl) {
+            return false;
+        }
+        return /^https?:\/\//i.test(normalizedVideoUrl);
+    }
+
+    function resolveSingleSelectedTaskForResubmit(payload = {}) {
+        let selectionKey = normalizeTaskListSelectionKey(payload && payload.selectionKey);
+        if (!selectionKey) {
+            const selected = resolveSelectedTaskListEntities();
+            if (selected.selectedKeys.length !== 1) {
+                return null;
+            }
+            selectionKey = normalizeTaskListSelectionKey(selected.selectedKeys[0]);
+        }
+        const parsed = parseTaskListSelectionKey(selectionKey);
+        if (!parsed || parsed.kind !== 'task') {
+            return null;
+        }
+        return findTaskById(parsed.taskId);
+    }
+
+    async function resubmitSelectedTask(payload = {}) {
+        const task = resolveSingleSelectedTaskForResubmit(payload);
+        if (!task) {
+            throw new Error('\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u4efb\u52a1');
+        }
+        if (!canTaskBeResubmitted(task)) {
+            throw new Error('\u53ea\u6709\u539f\u94fe\u63a5\u4efb\u52a1\u624d\u652f\u6301\u91cd\u65b0\u63d0\u4ea4');
+        }
+        const taskId = normalizeTaskId(task.taskId);
+        const normalizedVideoUrl = normalizeTaskVideoInput(task.videoUrl);
+        const displayInput = extractVideoInputDisplay(normalizedVideoUrl) || normalizedVideoUrl;
+        const collectionId = normalizeCollectionId(task.collectionId);
+        const collectionTitle = collectionId
+            ? (resolveTaskCollectionTitleById(collectionId) || String(task.collectionTitle || '').trim() || TASK_COLLECTION_DEFAULT_TITLE)
+            : '';
+        const confirmed = window.confirm(`\u91cd\u65b0\u63d0\u4ea4\u4f1a\u5148\u5220\u9664\u5f53\u524d\u4efb\u52a1\uff0c\u518d\u91cd\u65b0\u63d0\u4ea4\u539f\u94fe\u63a5\u300c${displayInput}\u300d\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`);
+        if (!confirmed) {
+            return { cancelled: true };
+        }
+        try {
+            setTaskSummary(`\u6b63\u5728\u91cd\u65b0\u63d0\u4ea4\u300c${displayInput}\u300d...`);
+            await deleteTaskById(taskId);
+            if (state.taskManualCollections && state.taskManualCollections[taskId]) {
+                delete state.taskManualCollections[taskId];
+                writeTaskManualCollectionStore(state.taskManualCollections);
+            }
+            const submitResult = await submitUrlTask(normalizedVideoUrl);
+            const nextTaskId = normalizeTaskId(submitResult && submitResult.taskId);
+            await reloadTaskList({ showLoading: false });
+            if (collectionId && nextTaskId) {
+                assignTaskIdsToCollection([nextTaskId], collectionId, collectionTitle);
+                applyTaskManualCollectionsToStateTasks();
+                renderTaskList();
+            }
+            pushView('tasks');
+            if (nextTaskId) {
+                revealSubmittedTaskCard(nextTaskId, { collectionId });
+            }
+            setTaskSummary(`\u5df2\u91cd\u65b0\u63d0\u4ea4\u300c${displayInput}\u300d`, 'success');
+            return { taskId: nextTaskId, submitResult };
+        } catch (error) {
+            setTaskSummary(`\u91cd\u65b0\u63d0\u4ea4\u5931\u8d25\uff1a${normalizeErrorMessage(error, { fallback: '\u8bf7\u7a0d\u540e\u91cd\u8bd5' })}`, 'error');
+            throw error;
+        }
+    }
     async function deleteSelectedTasksWithStrictConfirm() {
         const selected = resolveOrderedSelectedTaskIds();
         if (!selected.length) {
@@ -6766,6 +6886,10 @@
             await deleteSelectedTasksWithStrictConfirm();
             return;
         }
+        if (action === 'resubmit_selected_task') {
+            await resubmitSelectedTask(payload);
+            return;
+        }
         if (action === 'rename_selected_item') {
             const selected = resolveSelectedTaskListEntities();
             let selectionKey = normalizeTaskListSelectionKey(payload && payload.selectionKey);
@@ -6792,7 +6916,6 @@
             }
         }
     }
-
     function isTaskInProgress(task) {
         const normalized = normalizeTaskLifecycleStatus(task && task.status);
         return (
@@ -6848,6 +6971,7 @@
         return String(value == null ? '' : value).trim();
     }
 
+
     function isStorageFallbackTitle(task, titleText) {
         const normalizedTitle = normalizeTaskTitleText(titleText);
         if (!normalizedTitle) {
@@ -6862,6 +6986,17 @@
                 (storageKey && normalizedTitle === storageKey)
                 || (taskIdWithoutPrefix && normalizedTitle === taskIdWithoutPrefix)
             );
+    }
+
+    function isTaskIdFallbackTitle(task, titleText) {
+        const normalizedTitle = normalizeTaskTitleText(titleText);
+        const taskId = normalizeTaskTitleText(task && task.taskId);
+        return !!(normalizedTitle && taskId && normalizedTitle === taskId);
+    }
+
+    function hasUsableTaskTitle(task) {
+        const title = normalizeTaskTitleText(task && task.title);
+        return !!(title && !isStorageFallbackTitle(task, title) && !isTaskIdFallbackTitle(task, title));
     }
 
     function extractVideoInputDisplay(videoUrlRaw) {
@@ -6900,20 +7035,17 @@
         return raw;
     }
 
+
     function resolveTaskCardTitle(task) {
+        const title = normalizeTaskTitleText(task && task.title);
+        if (hasUsableTaskTitle(task)) {
+            return title;
+        }
         const metaTitle = normalizeTaskTitleText(task && task.metaTitle);
         if (metaTitle) {
             return metaTitle;
         }
-        const videoDisplay = extractVideoInputDisplay(task && task.videoUrl);
-        if (videoDisplay) {
-            return videoDisplay;
-        }
-        const title = normalizeTaskTitleText(task && task.title);
-        if (title && !isStorageFallbackTitle(task, title)) {
-            return title;
-        }
-        return normalizeTaskTitleText(task && task.taskId) || '未命名故事';
+        return normalizeTaskTitleText(task && task.taskId) || '未命名任务';
     }
 
     function normalizeTaskTitleSource(value) {
@@ -6924,22 +7056,14 @@
         return '';
     }
 
+
     function resolveTaskTitleSource(task) {
-        const provided = normalizeTaskTitleSource(task && task.titleSource);
-        if (provided) {
-            return provided;
+        if (hasUsableTaskTitle(task)) {
+            return 'title';
         }
         const metaTitle = normalizeTaskTitleText(task && task.metaTitle);
         if (metaTitle) {
             return 'meta';
-        }
-        const videoDisplay = extractVideoInputDisplay(task && task.videoUrl);
-        if (videoDisplay) {
-            return 'video';
-        }
-        const title = normalizeTaskTitleText(task && task.title);
-        if (title && !isStorageFallbackTitle(task, title)) {
-            return 'title';
         }
         return 'taskId';
     }
@@ -6967,13 +7091,28 @@
         return '排队中';
     }
 
-    function buildTaskStatusHint(statusVisual, progressPercent) {
-        const safeProgress = Math.max(0, Math.min(100, Math.round(Number(progressPercent) || 0)));
+
+    function resolveTaskPhaseText(task, statusVisual, progressPercent) {
+        const statusMessage = normalizeTaskTitleText(task && task.statusMessage);
+        if (statusMessage) {
+            return statusMessage;
+        }
         if (statusVisual === 'completed') return '已可阅读';
-        if (statusVisual === 'processing') return `${safeProgress}%`;
         if (statusVisual === 'failed') return '点击查看并重试';
         if (statusVisual === 'cancelled') return '已暂停';
-        return '等待开始';
+        if (statusVisual === 'queued') return '正在排队，等待调度...';
+        if (Number(progressPercent) < 20) return '正在提取音视频片段...';
+        if (Number(progressPercent) < 75) return 'AI 正在处理中...';
+        return '正在生成 Markdown...';
+    }
+
+    function buildTaskStatusHint(task, statusVisual, progressPercent) {
+        const safeProgress = Math.max(0, Math.min(100, Math.round(Number(progressPercent) || 0)));
+        const phaseText = resolveTaskPhaseText(task, statusVisual, safeProgress);
+        if (statusVisual === 'processing') {
+            return safeProgress > 0 ? `${phaseText} \u00b7 ${safeProgress}%` : phaseText;
+        }
+        return phaseText;
     }
 
     function buildTaskSourceIconSvg(sourceKind) {
@@ -7320,7 +7459,7 @@
         const statusVisual = getTaskStatusVisual(statusTextRaw);
         const progressPct = inferTaskProgressPercent(task);
         const statusLabel = getTaskStatusLabel(statusVisual);
-        const statusHint = buildTaskStatusHint(statusVisual, progressPct);
+        const statusHint = buildTaskStatusHint(task, statusVisual, progressPct);
         const sourceKind = resolveTaskSourceKind(task);
         const sourceIcon = buildTaskSourceIconSvg(sourceKind);
         const compactId = escapeHtml(compactTaskId(taskIdRaw));
@@ -7376,6 +7515,7 @@
             await retryAsync(() => fetchTasks(), 1);
             applyTaskListMotionDiff(previousTasks, state.tasks || []);
             renderTaskList();
+            await syncCurrentTaskRealtimeStateAfterTaskReload();
             setTaskSummary('');
             return true;
         } catch (error) {
@@ -7393,6 +7533,22 @@
 
     // 任务列表刷新策略模块：
     // 把触发条件、轮询节奏、失败退避、可见性恢复收敛到一个入口，避免逻辑散落在事件绑定中。
+
+    function shouldAutoRefreshTaskState(viewName = state.currentView) {
+        if (document.hidden) {
+            return false;
+        }
+        const currentView = String(viewName || state.currentView || '').trim();
+        if (currentView === 'tasks') {
+            return true;
+        }
+        if (currentView !== 'content' && currentView !== 'outline') {
+            return false;
+        }
+        const currentTask = findTaskByTaskIdentity(state.currentTaskId, state.currentTaskStorageKey);
+        return !!(currentTask && isTaskInProgress(currentTask));
+    }
+
     function createTaskListRefreshPolicy(options = {}) {
         const baseIntervalMs = Number(options.baseIntervalMs) > 0
             ? Number(options.baseIntervalMs)
@@ -7419,7 +7575,7 @@
         }
 
         function isAutoRefreshEligible() {
-            return state.currentView === 'tasks' && !document.hidden;
+            return shouldAutoRefreshTaskState();
         }
 
         function computeNextDelayMs() {
@@ -7498,7 +7654,7 @@
                 });
             },
             onViewChange(nextView, previousView) {
-                if (nextView === 'tasks' && nextView !== previousView) {
+                if (nextView !== previousView && shouldAutoRefreshTaskState(nextView)) {
                     refresh('view-enter', {
                         showLoading: false,
                         minGapMs: viewEnterMinGapMs,
@@ -7528,6 +7684,680 @@
         baseIntervalMs: TASK_LIST_AUTO_REFRESH_MS,
         maxBackoffMs: TASK_LIST_AUTO_REFRESH_MS * 8,
     });
+
+
+    function supportsTaskSystemNotification() {
+        return typeof window !== 'undefined' && typeof Notification !== 'undefined';
+    }
+
+    function readTaskNotificationPreference() {
+        try {
+            return String(localStorage.getItem(TASK_NOTIFICATION_PREFERENCE_KEY) || '').trim() === '1';
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    function writeTaskNotificationPreference(enabled) {
+        try {
+            localStorage.setItem(TASK_NOTIFICATION_PREFERENCE_KEY, enabled ? '1' : '0');
+        } catch (_error) {
+            // ignore storage failure
+        }
+    }
+
+    function hasSeenTaskNotificationGuide() {
+        try {
+            return String(localStorage.getItem(TASK_NOTIFICATION_GUIDE_SEEN_KEY) || '').trim() === '1';
+        } catch (_error) {
+            return true;
+        }
+    }
+
+    function markTaskNotificationGuideSeen() {
+        try {
+            localStorage.setItem(TASK_NOTIFICATION_GUIDE_SEEN_KEY, '1');
+        } catch (_error) {
+            // ignore storage failure
+        }
+    }
+
+    function getTaskNotificationPermissionState() {
+        if (!supportsTaskSystemNotification()) {
+            return 'unsupported';
+        }
+        return String(Notification.permission || 'default');
+    }
+
+    function isTaskNotificationEnabled() {
+        return !!state.taskNotificationEnabled && getTaskNotificationPermissionState() === 'granted';
+    }
+
+    function setTaskNotificationEnabled(nextEnabled, options = {}) {
+        state.taskNotificationEnabled = !!nextEnabled;
+        if (options.persist !== false) {
+            writeTaskNotificationPreference(state.taskNotificationEnabled);
+        }
+        renderTaskNotificationPreference();
+    }
+
+    function resolveTaskNotificationUiState() {
+        const permission = getTaskNotificationPermissionState();
+        if (permission === 'unsupported') {
+            return {
+                state: 'unsupported',
+                status: '当前浏览器不支持系统通知。',
+                actionLabel: '不支持',
+                pressed: false,
+                disabled: true,
+            };
+        }
+        if (permission === 'denied') {
+            return {
+                state: 'blocked',
+                status: '浏览器已阻止完成通知，请在站点设置中允许通知。',
+                actionLabel: '去设置',
+                pressed: false,
+                disabled: false,
+            };
+        }
+        if (permission === 'granted' && state.taskNotificationEnabled) {
+            return {
+                state: 'enabled',
+                status: '已开启：任务完成或失败时会主动提醒你。',
+                actionLabel: '关闭',
+                pressed: true,
+                disabled: false,
+            };
+        }
+        if (permission === 'granted') {
+            return {
+                state: 'ready',
+                status: '浏览器已授权，当前处于关闭提醒状态。',
+                actionLabel: '开启',
+                pressed: false,
+                disabled: false,
+            };
+        }
+        return {
+            state: 'idle',
+            status: '开启后，任务完成或失败会在系统层主动提醒。',
+            actionLabel: '开启',
+            pressed: false,
+            disabled: false,
+        };
+    }
+
+    function renderTaskNotificationPreference() {
+        const row = document.getElementById('taskNotificationRow');
+        const statusNode = document.getElementById('taskNotificationStatus');
+        const toggleBtn = document.getElementById('taskNotificationToggleBtn');
+        if (!row || !statusNode || !toggleBtn) {
+            return;
+        }
+        const snapshot = resolveTaskNotificationUiState();
+        row.dataset.notificationState = snapshot.state;
+        statusNode.textContent = snapshot.status;
+        toggleBtn.textContent = snapshot.actionLabel;
+        toggleBtn.disabled = !!snapshot.disabled;
+        toggleBtn.setAttribute('aria-pressed', snapshot.pressed ? 'true' : 'false');
+    }
+
+    async function ensureTaskNotificationPermission(options = {}) {
+        const permission = getTaskNotificationPermissionState();
+        if (permission !== 'default') {
+            return permission;
+        }
+        if (!options.prompt || typeof Notification.requestPermission !== 'function') {
+            return permission;
+        }
+        try {
+            return await Notification.requestPermission();
+        } catch (_error) {
+            return getTaskNotificationPermissionState();
+        }
+    }
+
+    async function handleTaskNotificationToggleClick() {
+        const permission = getTaskNotificationPermissionState();
+        if (permission === 'unsupported') {
+            setTaskSubmitTip('当前浏览器不支持完成通知。', 'error');
+            renderTaskNotificationPreference();
+            return false;
+        }
+        if (permission === 'denied') {
+            setTaskSubmitTip('浏览器已阻止完成通知，请在地址栏的站点设置里允许通知。', 'error');
+            renderTaskNotificationPreference();
+            return false;
+        }
+        if (permission === 'granted') {
+            const nextEnabled = !state.taskNotificationEnabled;
+            setTaskNotificationEnabled(nextEnabled);
+            setTaskSubmitTip(
+                nextEnabled
+                    ? '已开启完成通知，任务完成后会主动提醒你。'
+                    : '已关闭完成通知，你仍可在这里重新开启。',
+                nextEnabled ? 'success' : ''
+            );
+            return nextEnabled;
+        }
+        const requested = await ensureTaskNotificationPermission({ prompt: true });
+        if (requested === 'granted') {
+            setTaskNotificationEnabled(true);
+            setTaskSubmitTip('已开启完成通知，任务完成后会主动提醒你。', 'success');
+            return true;
+        }
+        if (requested === 'denied') {
+            setTaskNotificationEnabled(false);
+            setTaskSubmitTip('浏览器已阻止完成通知，请在地址栏的站点设置里允许通知。', 'error');
+            return false;
+        }
+        setTaskNotificationEnabled(false, { persist: false });
+        setTaskSubmitTip('还没开启完成通知，你可以稍后再手动开启。');
+        return false;
+    }
+
+    function bindTaskNotificationPreferenceUi() {
+        const toggleBtn = document.getElementById('taskNotificationToggleBtn');
+        if (!toggleBtn || toggleBtn.dataset.bound === '1') {
+            renderTaskNotificationPreference();
+            return;
+        }
+        toggleBtn.dataset.bound = '1';
+        toggleBtn.addEventListener('click', () => {
+            markTaskNotificationGuideSeen();
+            handleTaskNotificationToggleClick().catch((error) => {
+                console.warn('toggle task notification preference failed', error);
+                renderTaskNotificationPreference();
+            });
+        });
+        renderTaskNotificationPreference();
+    }
+
+    function maybeNudgeTaskNotificationPreference() {
+        const row = document.getElementById('taskNotificationRow');
+        if (!row || hasSeenTaskNotificationGuide()) {
+            return;
+        }
+        if (state.taskNotificationEnabled || getTaskNotificationPermissionState() !== 'default') {
+            markTaskNotificationGuideSeen();
+            return;
+        }
+        row.classList.remove('is-guide-pulse');
+        void row.offsetWidth;
+        row.classList.add('is-guide-pulse');
+        window.setTimeout(() => row.classList.remove('is-guide-pulse'), 760);
+        markTaskNotificationGuideSeen();
+    }
+
+    function resolveTaskUpdatesWebSocketUrl() {
+        const injected = String(window.__mobileTaskWebSocketUrl || '').trim();
+        const fallback = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/tasks`;
+        const raw = injected || fallback;
+        try {
+            const resolved = new URL(raw, window.location.href);
+            if (!resolved.searchParams.get('userId')) {
+                resolved.searchParams.set('userId', MOBILE_USER_ID);
+            }
+            return resolved.toString();
+        } catch (_error) {
+            const joiner = raw.includes('?') ? '&' : '?';
+            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}`;
+        }
+    }
+
+    function isTaskTerminalStatus(status) {
+        const normalized = normalizeTaskLifecycleStatus(status);
+        return normalized === 'completed' || normalized === 'failed' || normalized === 'cancelled';
+    }
+
+    function buildTaskNotificationTitle(status) {
+        const visual = getTaskStatusVisual(status);
+        if (visual === 'completed') return '任务已完成';
+        if (visual === 'failed') return '任务处理失败';
+        if (visual === 'cancelled') return '任务已暂停';
+        return '任务状态已更新';
+    }
+
+    function buildTaskNotificationBody(task, payload) {
+        const fallbackTask = task || { taskId: payload && payload.taskId ? payload.taskId : '' };
+        const taskTitle = resolveTaskCardTitle(fallbackTask);
+        const statusText = String(payload && payload.message ? payload.message : (fallbackTask && fallbackTask.statusMessage ? fallbackTask.statusMessage : ''))
+            .trim();
+        const visual = getTaskStatusVisual(payload && payload.status);
+        if (visual === 'completed') {
+            return `《${taskTitle}》已处理完成，点按可直接打开。`;
+        }
+        if (visual === 'failed') {
+            return statusText
+                ? `《${taskTitle}》处理失败：${statusText}`
+                : `《${taskTitle}》处理失败，点按返回任务列表查看。`;
+        }
+        if (visual === 'cancelled') {
+            return statusText
+                ? `《${taskTitle}》已暂停：${statusText}`
+                : `《${taskTitle}》已暂停处理。`;
+        }
+        return `《${taskTitle}》状态已更新。`;
+    }
+
+    function buildTaskNotificationTargetUrl(taskId) {
+        const normalizedTaskId = normalizeTaskId(taskId);
+        const currentPath = String(window.location.pathname || '').trim() || '/mobile-markdown.html';
+        const target = new URL(currentPath, window.location.origin);
+        if (normalizedTaskId) {
+            target.searchParams.set('taskId', normalizedTaskId);
+        }
+        return target.toString();
+    }
+
+    async function showTaskNotificationWithServiceWorker(title, options) {
+        if (!navigator.serviceWorker) {
+            return false;
+        }
+        try {
+            let registration = null;
+            if (typeof navigator.serviceWorker.getRegistration === 'function') {
+                registration = await navigator.serviceWorker.getRegistration();
+            }
+            if (!registration && navigator.serviceWorker.ready) {
+                registration = await Promise.race([
+                    navigator.serviceWorker.ready,
+                    new Promise((resolve) => setTimeout(() => resolve(null), TASK_NOTIFICATION_SW_READY_TIMEOUT_MS)),
+                ]);
+            }
+            if (!registration || typeof registration.showNotification !== 'function') {
+                return false;
+            }
+            await registration.showNotification(title, options);
+            return true;
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    function buildTaskListItemSelector(taskId) {
+        const normalizedTaskId = normalizeTaskId(taskId);
+        if (!normalizedTaskId) {
+            return '';
+        }
+        const safeTaskId = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+            ? CSS.escape(normalizedTaskId)
+            : normalizedTaskId.replace(/\\/g, '\\\\').replace(/"/g, '\"');
+        return `[data-task-id="${safeTaskId}"]`;
+    }
+
+    function scrollTaskItemIntoView(taskId) {
+        const selector = buildTaskListItemSelector(taskId);
+        if (!selector) {
+            return;
+        }
+        requestAnimationFrame(() => {
+            const node = document.querySelector(selector);
+            if (node && typeof node.scrollIntoView === 'function') {
+                node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
+        });
+    }
+
+    function playTaskSubmitHighlight(target) {
+        if (!(target instanceof HTMLElement)) {
+            return;
+        }
+        target.classList.remove('task-submit-highlight');
+        void target.offsetWidth;
+        target.classList.add('task-submit-highlight');
+        if (target.__taskSubmitHighlightTimerId) {
+            clearTimeout(target.__taskSubmitHighlightTimerId);
+        }
+        target.__taskSubmitHighlightTimerId = setTimeout(() => {
+            target.classList.remove('task-submit-highlight');
+            target.__taskSubmitHighlightTimerId = 0;
+        }, 1400);
+    }
+
+    function revealSubmittedTaskCard(taskIdRaw, options = {}) {
+        const taskId = normalizeTaskId(taskIdRaw);
+        if (!taskId) {
+            return false;
+        }
+        const collectionId = normalizeCollectionId(options.collectionId);
+        if (collectionId) {
+            state.taskCollectionExpandedById[collectionId] = true;
+        }
+        const now = Date.now();
+        setTaskMotionExpiry('entry', taskId, now + TASK_MOTION_CONFIG.entryFxMs, { maxOnly: true });
+        setTaskMotionExpiry('title', taskId, now + TASK_MOTION_CONFIG.titleFxMs, { maxOnly: true });
+        pushView('tasks');
+        renderTaskList();
+        const maxAttempts = Number(options.maxAttempts) > 0 ? Number(options.maxAttempts) : 14;
+        const attemptDelayMs = Number(options.attemptDelayMs) > 0 ? Number(options.attemptDelayMs) : 90;
+        const reveal = (attempt) => {
+            const selector = buildTaskListItemSelector(taskId);
+            const node = selector ? document.querySelector(selector) : null;
+            if (!(node instanceof HTMLElement)) {
+                if (attempt < maxAttempts) {
+                    setTimeout(() => reveal(attempt + 1), attemptDelayMs);
+                }
+                return;
+            }
+            if (typeof node.scrollIntoView === 'function') {
+                node.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            }
+            if (typeof node.focus === 'function') {
+                try {
+                    node.focus({ preventScroll: true });
+                } catch (_error) {
+                    node.focus();
+                }
+            }
+            playTaskSubmitHighlight(node);
+        };
+        requestAnimationFrame(() => reveal(0));
+        return true;
+    }
+    async function openTaskFromNotificationIntent(taskId, status) {
+        const normalizedTaskId = normalizeTaskId(taskId);
+        if (!normalizedTaskId) {
+            return false;
+        }
+        try {
+            if (typeof window.focus === 'function') {
+                window.focus();
+            }
+        } catch (_error) {
+            // ignore focus error
+        }
+        try {
+            await reloadTaskList({ showLoading: false });
+        } catch (_error) {
+            // ignore refresh error and fallback to current cache
+        }
+        const task = findTaskById(normalizedTaskId);
+        const visual = getTaskStatusVisual(task && task.status ? task.status : status);
+        if (visual === 'completed') {
+            try {
+                await openTaskForContent(normalizedTaskId);
+                return true;
+            } catch (error) {
+                console.warn('open completed task from notification failed', error);
+            }
+        }
+        pushView('tasks');
+        scrollTaskItemIntoView(normalizedTaskId);
+        if (visual === 'failed') {
+            setTaskSummary('任务处理失败，请打开任务列表查看详情。', 'error');
+        } else if (visual === 'cancelled') {
+            setTaskSummary('任务已暂停，可在任务列表继续查看。');
+        }
+        return !!task;
+    }
+
+    async function maybeShowTaskTerminalNotification(task, payload, previousStatus) {
+        const taskId = normalizeTaskId(payload && payload.taskId);
+        const nextStatus = normalizeTaskLifecycleStatus(payload && payload.status);
+        if (!taskId || !isTaskTerminalStatus(nextStatus) || !isTaskNotificationEnabled()) {
+            return false;
+        }
+        if (String(Notification.permission || '') !== 'granted') {
+            return false;
+        }
+        if (normalizeTaskLifecycleStatus(previousStatus) === nextStatus) {
+            return false;
+        }
+        if (String(state.taskNotificationLedger[taskId] || '') === nextStatus) {
+            return false;
+        }
+        if (document.visibilityState === 'visible' && document.hasFocus()) {
+            return false;
+        }
+        const title = buildTaskNotificationTitle(nextStatus);
+        const targetUrl = buildTaskNotificationTargetUrl(taskId);
+        const options = {
+            body: buildTaskNotificationBody(task, payload),
+            tag: `${TASK_NOTIFICATION_TAG_PREFIX}${taskId}`,
+            renotify: false,
+            data: {
+                type: 'taskStatusNotification',
+                taskId,
+                status: nextStatus,
+                url: targetUrl,
+            },
+            icon: '/icons/pwa-icon-192.svg',
+            badge: '/icons/pwa-icon-192.svg',
+            timestamp: Date.now(),
+        };
+        let shown = await showTaskNotificationWithServiceWorker(title, options);
+        if (!shown) {
+            try {
+                const notification = new Notification(title, options);
+                notification.onclick = () => {
+                    notification.close();
+                    openTaskFromNotificationIntent(taskId, nextStatus).catch((error) => {
+                        console.warn('open task from notification click failed', error);
+                    });
+                };
+                shown = true;
+            } catch (error) {
+                console.warn('show browser notification failed', error);
+            }
+        }
+        if (shown) {
+            state.taskNotificationLedger[taskId] = nextStatus;
+        }
+        return shown;
+    }
+
+    function mergeLiveTaskUpdateIntoState(payload) {
+        const taskId = normalizeTaskId(payload && payload.taskId);
+        if (!taskId) {
+            return null;
+        }
+        const previousTasks = Array.isArray(state.tasks)
+            ? state.tasks.map((task) => ({ ...task }))
+            : [];
+        const taskIndex = previousTasks.findIndex((task) => normalizeTaskId(task && task.taskId) === taskId);
+        const previousTask = taskIndex >= 0 ? previousTasks[taskIndex] : null;
+        const nextTask = {
+            ...(previousTask || {
+                taskId,
+                title: taskId,
+                createdAt: new Date().toISOString(),
+            }),
+        };
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'status')) {
+            nextTask.status = String(payload.status || '');
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'progress')) {
+            const rawProgress = Number(payload.progress);
+            if (Number.isFinite(rawProgress) && rawProgress >= 0) {
+                nextTask.progress = rawProgress;
+            }
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'message')) {
+            nextTask.statusMessage = String(payload.message || '');
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'errorMessage')) {
+            nextTask.errorMessage = String(payload.errorMessage || '');
+        }
+        if (payload && payload.resultPath) {
+            nextTask.resultPath = String(payload.resultPath);
+        }
+        if (!nextTask.title) {
+            nextTask.title = taskId;
+        }
+        if (getTaskStatusVisual(nextTask.status) === 'completed' && nextTask.resultPath) {
+            nextTask.markdownAvailable = true;
+        }
+        const nextTasks = previousTasks.slice();
+        if (taskIndex >= 0) {
+            nextTasks.splice(taskIndex, 1, nextTask);
+        } else {
+            nextTasks.unshift(nextTask);
+        }
+        state.tasks = nextTasks;
+        const shouldRenderLiveUpdate = !document.hidden
+            && (state.currentView === 'tasks' || state.currentTaskId === taskId);
+        if (shouldRenderLiveUpdate) {
+            applyTaskListMotionDiff(previousTasks, nextTasks);
+            renderTaskList();
+        }
+        if (state.currentTaskId === taskId && getTaskStatusVisual(nextTask.status) === 'completed') {
+            setContentNeedsReload(true);
+        }
+        return {
+            previousTask,
+            nextTask,
+        };
+    }
+
+    function handleTaskUpdatesSocketMessage(payload) {
+        const type = String(payload && payload.type || '').trim();
+        if (type !== 'taskUpdate') {
+            return;
+        }
+        const merged = mergeLiveTaskUpdateIntoState(payload);
+        if (!merged || !merged.nextTask) {
+            return;
+        }
+        maybeShowTaskTerminalNotification(
+            merged.nextTask,
+            payload,
+            merged.previousTask && merged.previousTask.status
+        ).catch((error) => {
+            console.warn('show terminal task notification failed', error);
+        });
+    }
+
+    function scheduleTaskUpdatesSocketReconnect() {
+        if (state.taskUpdatesSocketManualClose || state.taskUpdatesSocketReconnectTimerId) {
+            return;
+        }
+        const attempt = Math.max(0, Math.min(6, Number(state.taskUpdatesSocketReconnectAttempt) || 0));
+        const delayMs = Math.min(
+            TASK_UPDATES_WS_RECONNECT_MAX_MS,
+            Math.round(TASK_UPDATES_WS_RECONNECT_BASE_MS * Math.pow(2, attempt))
+        );
+        state.taskUpdatesSocketReconnectAttempt = attempt + 1;
+        state.taskUpdatesSocketReconnectTimerId = window.setTimeout(() => {
+            state.taskUpdatesSocketReconnectTimerId = 0;
+            ensureTaskUpdatesWebSocketConnected().catch((error) => {
+                console.warn('task updates WebSocket failed', error);
+            });
+        }, delayMs);
+    }
+
+    function closeTaskUpdatesWebSocket(options = {}) {
+        state.taskUpdatesSocketManualClose = options.manual !== false;
+        if (state.taskUpdatesSocketReconnectTimerId) {
+            clearTimeout(state.taskUpdatesSocketReconnectTimerId);
+            state.taskUpdatesSocketReconnectTimerId = 0;
+        }
+        const ws = state.taskUpdatesSocket;
+        state.taskUpdatesSocket = null;
+        state.taskUpdatesSocketConnectPromise = null;
+        if (!ws) {
+            return;
+        }
+        try {
+            ws.close();
+        } catch (_error) {
+            // ignore close error
+        }
+    }
+
+    function ensureTaskUpdatesWebSocketConnected() {
+        if (typeof WebSocket !== 'function') {
+            return Promise.resolve(false);
+        }
+        const current = state.taskUpdatesSocket;
+        if (current && current.readyState === WebSocket.OPEN) {
+            return Promise.resolve(true);
+        }
+        if (state.taskUpdatesSocketConnectPromise) {
+            return state.taskUpdatesSocketConnectPromise;
+        }
+        state.taskUpdatesSocketManualClose = false;
+        state.taskUpdatesSocketConnectPromise = new Promise((resolve) => {
+            const wsUrl = resolveTaskUpdatesWebSocketUrl();
+            let ws;
+            let settled = false;
+            const finish = (ok) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                state.taskUpdatesSocketConnectPromise = null;
+                resolve(ok);
+            };
+            try {
+                ws = new WebSocket(wsUrl);
+            } catch (_error) {
+                state.taskUpdatesSocket = null;
+                finish(false);
+                scheduleTaskUpdatesSocketReconnect();
+                return;
+            }
+            state.taskUpdatesSocket = ws;
+            const openTimer = window.setTimeout(() => {
+                if (ws.readyState === WebSocket.CONNECTING) {
+                    try {
+                        ws.close();
+                    } catch (_error) {
+                        // ignore close error
+                    }
+                }
+            }, 2500);
+            ws.addEventListener('open', () => {
+                clearTimeout(openTimer);
+                state.taskUpdatesSocketReconnectAttempt = 0;
+                finish(true);
+            }, { once: true });
+            ws.addEventListener('message', (event) => {
+                let payload = null;
+                try {
+                    payload = JSON.parse(String(event && event.data || ''));
+                } catch (_error) {
+                    payload = null;
+                }
+                if (!payload) {
+                    return;
+                }
+                handleTaskUpdatesSocketMessage(payload);
+            });
+            ws.addEventListener('error', () => {
+                clearTimeout(openTimer);
+                finish(false);
+                scheduleTaskUpdatesSocketReconnect();
+            }, { once: true });
+            ws.addEventListener('close', () => {
+                clearTimeout(openTimer);
+                if (state.taskUpdatesSocket === ws) {
+                    state.taskUpdatesSocket = null;
+                }
+                state.taskUpdatesSocketConnectPromise = null;
+                if (!state.taskUpdatesSocketManualClose) {
+                    scheduleTaskUpdatesSocketReconnect();
+                }
+            });
+        });
+        return state.taskUpdatesSocketConnectPromise;
+    }
+
+    function bindTaskNotificationMessageBridge() {
+        if (!navigator.serviceWorker || typeof navigator.serviceWorker.addEventListener !== 'function') {
+            return;
+        }
+        navigator.serviceWorker.addEventListener('message', (event) => {
+            const payload = event && event.data && typeof event.data === 'object' ? event.data : {};
+            if (String(payload.type || '') !== 'openTaskFromNotification') {
+                return;
+            }
+            openTaskFromNotificationIntent(payload.taskId, payload.status).catch((error) => {
+                console.warn('handle service worker notification bridge failed', error);
+            });
+        });
+    }
 
     async function parseSubmitResponse(response) {
         const rawBody = await response.text();
@@ -8963,6 +9793,7 @@
         const urlInput = document.getElementById('mobileVideoUrl');
         const fileInput = document.getElementById('mobileVideoFile');
 
+
         const rawInput = urlInput ? String(urlInput.value || '').trim() : '';
         const normalizedVideoUrl = normalizeTaskVideoInput(rawInput);
         const selectedVideoFile = fileInput && fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : null;
@@ -9006,13 +9837,14 @@
             closeTaskComposer();
 
             await reloadTaskList({ showLoading: false });
+            const submitResultTaskId = normalizeTaskId(submitResult && submitResult.taskId);
             let submitAssignedCollectionTitle = '';
             let submitAssignedTaskCount = 0;
+            let revealTaskId = submitResultTaskId;
             if (submitTargetCollectionId) {
                 const candidateTaskIds = (Array.isArray(state.tasks) ? state.tasks : [])
                     .map((task) => normalizeTaskId(task && task.taskId))
                     .filter((taskId) => !!taskId && !taskIdsBeforeSubmit.has(taskId));
-                const submitResultTaskId = normalizeTaskId(submitResult && submitResult.taskId);
                 if (submitResultTaskId && !candidateTaskIds.includes(submitResultTaskId)) {
                     candidateTaskIds.push(submitResultTaskId);
                 }
@@ -9024,18 +9856,23 @@
                         submitAssignedCollectionTitle
                     );
                     submitAssignedTaskCount = assignedTaskIds.length;
+                    if (!revealTaskId && submitAssignedTaskCount > 0) {
+                        revealTaskId = normalizeTaskId(assignedTaskIds[0]);
+                    }
                     if (submitAssignedTaskCount > 0) {
                         state.taskCollectionExpandedById[submitTargetCollectionId] = true;
                         renderTaskList();
                     }
                 }
             }
-            const autoOpened = await autoEnterSingleInProgressTask();
-            if (!autoOpened) {
-                pushView('tasks');
-                if (submitAssignedTaskCount > 0) {
-                    setTaskSummary(`已将 ${submitAssignedTaskCount} 个新任务归入合集「${submitAssignedCollectionTitle || TASK_COLLECTION_DEFAULT_TITLE}」`);
-                }
+            pushView('tasks');
+            if (revealTaskId) {
+                revealSubmittedTaskCard(revealTaskId, { collectionId: submitTargetCollectionId });
+            }
+            if (submitAssignedTaskCount > 0) {
+                setTaskSummary(`已将 ${submitAssignedTaskCount} 个新任务归入合集「${submitAssignedCollectionTitle || TASK_COLLECTION_DEFAULT_TITLE}」`, 'success');
+            } else if (revealTaskId) {
+                setTaskSummary('已提交新任务', 'success');
             }
             return true;
         } catch (error) {
@@ -9622,6 +10459,7 @@
         const bulkMeta = document.getElementById('taskBulkMeta');
         const bulkMergeBtn = document.getElementById('taskBulkMergeBtn');
         const bulkDeleteBtn = document.getElementById('taskBulkDeleteBtn');
+        const bulkExportBtn = document.getElementById('taskBulkExportBtn');
         const selectionMode = !!state.taskListSelectionMode;
         const selectedCount = state.taskListSelectedIds ? state.taskListSelectedIds.size : 0;
         const selectedEntities = resolveSelectedTaskListEntities();
@@ -9654,6 +10492,9 @@
         }
         if (bulkDeleteBtn instanceof HTMLButtonElement) {
             bulkDeleteBtn.disabled = selectedEntities.taskIds.length <= 0;
+        }
+        if (bulkExportBtn instanceof HTMLButtonElement) {
+            bulkExportBtn.disabled = selectedEntities.taskIds.length <= 0 || state.exportInProgress;
         }
     }
 
@@ -9769,11 +10610,23 @@
 
     function buildTaskListContextMenuItems() {
         const selected = resolveSelectedTaskListEntities();
+        const singleSelectionKey = selected.selectedKeys.length === 1
+            ? normalizeTaskListSelectionKey(selected.selectedKeys[0])
+            : '';
+        const singleSelectionParsed = parseTaskListSelectionKey(singleSelectionKey);
+        const singleTask = singleSelectionParsed && singleSelectionParsed.kind === 'task'
+            ? findTaskById(singleSelectionParsed.taskId)
+            : null;
         const items = [
             { id: 'merge_into_collection', label: '\u5408\u5e76\u4e3a\u5408\u96c6', disabled: !canMergeSelectedTaskListItems() },
             { id: 'delete_selected_tasks', label: '\u6279\u91cf\u5220\u9664', disabled: selected.taskIds.length <= 0 },
         ];
-        if (selected.selectedKeys.length === 1) {
+        if (singleTask) {
+            items.push({
+                id: 'resubmit_selected_task',
+                label: '\u91cd\u65b0\u63d0\u4ea4',
+                disabled: !canTaskBeResubmitted(singleTask),
+            });
             items.push({
                 id: 'rename_selected_item',
                 label: '\u91cd\u547d\u540d',
@@ -9789,7 +10642,6 @@
         }
         return items;
     }
-
     function reinsertTasksContiguously(taskIdsRaw, options = {}) {
         const availableTaskIdSet = new Set(
             (Array.isArray(state.tasks) ? state.tasks : [])
@@ -10615,7 +11467,7 @@
         const statusVisual = getTaskStatusVisual(statusTextRaw);
         const progressPct = inferTaskProgressPercent(task);
         const statusLabel = getTaskStatusLabel(statusVisual);
-        const statusHint = buildTaskStatusHint(statusVisual, progressPct);
+        const statusHint = buildTaskStatusHint(task, statusVisual, progressPct);
         const sourceKind = resolveTaskSourceKind(task);
         const sourceIcon = buildTaskSourceIconSvg(sourceKind);
         const compactId = escapeHtml(compactTaskId(taskIdRaw));
@@ -10871,9 +11723,10 @@
         return resp.json();
     }
 
+
     function renderMarkdownLoadingSkeleton(options = {}) {
-        const title = escapeHtml(String((options && options.title) || '正在打开内容...'));
-        const detail = escapeHtml(String((options && options.detail) || '正在传输 Markdown 正文，请稍候。'));
+        const title = escapeHtml(String((options && options.title) || '\u6b63\u5728\u6253\u5f00\u5185\u5bb9...'));
+        const detail = escapeHtml(String((options && options.detail) || '\u6b63\u5728\u4f20\u8f93 Markdown \u6b63\u6587\uff0c\u8bf7\u7a0d\u5019\u3002'));
         const markdownBody = document.getElementById('markdownBody');
         if (!markdownBody) {
             return;
@@ -10894,6 +11747,74 @@
         `;
     }
 
+    function renderPendingTaskContentStatus(task) {
+        const currentTask = task && typeof task === 'object' ? task : null;
+        const statusVisual = getTaskStatusVisual(currentTask && currentTask.status);
+        const progressPct = inferTaskProgressPercent(currentTask);
+        const detail = buildTaskStatusHint(currentTask, statusVisual, progressPct);
+        const title = resolveTaskCardTitle(currentTask) || state.currentTaskTitle || String(state.currentTaskId || '').trim();
+        if (title) {
+            state.currentTaskTitle = title;
+            syncTaskTitleFromState(title);
+        }
+        if (currentTask && currentTask.storageKey) {
+            state.currentTaskStorageKey = normalizeTaskTitleText(currentTask.storageKey);
+        }
+        refreshViewerTitle();
+        const skeletonTitle = statusVisual === 'failed'
+            ? '\u4efb\u52a1\u5904\u7406\u5931\u8d25'
+            : statusVisual === 'cancelled'
+                ? '\u4efb\u52a1\u5df2\u6682\u505c'
+                : '\u5185\u5bb9\u6b63\u5728\u751f\u6210\u4e2d...';
+        renderMarkdownLoadingSkeleton({
+            title: skeletonTitle,
+            detail,
+        });
+    }
+
+    async function syncCurrentTaskRealtimeStateAfterTaskReload() {
+        if (!state.currentTaskId) {
+            return;
+        }
+        if (state.currentView !== 'content' && state.currentView !== 'outline') {
+            return;
+        }
+        const currentTask = findTaskByTaskIdentity(state.currentTaskId, state.currentTaskStorageKey);
+        if (!currentTask) {
+            return;
+        }
+        if (currentTask.taskId && currentTask.taskId !== state.currentTaskId) {
+            state.currentTaskId = currentTask.taskId;
+            updateUrlTaskId(currentTask.taskId);
+        }
+        if (currentTask.storageKey) {
+            state.currentTaskStorageKey = normalizeTaskTitleText(currentTask.storageKey);
+        }
+        const nextTitle = resolveTaskCardTitle(currentTask) || state.currentTaskTitle || state.currentTaskId;
+        if (nextTitle && nextTitle !== state.currentTaskTitle) {
+            state.currentTaskTitle = nextTitle;
+            syncTaskTitleFromState(nextTitle);
+        }
+        refreshViewerTitle();
+        const hasMarkdown = String(state.currentMarkdownRaw || '').trim().length > 0;
+        if (isTaskInProgress(currentTask) && !currentTask.markdownAvailable) {
+            renderPendingTaskContentStatus(currentTask);
+            return;
+        }
+        if (currentTask.markdownAvailable && !hasMarkdown && !state.pendingTaskAutoLoadInFlight) {
+            state.pendingTaskAutoLoadInFlight = true;
+            try {
+                await openTaskForContent(state.currentTaskId, { forceMarkdownRequest: true });
+            } finally {
+                state.pendingTaskAutoLoadInFlight = false;
+            }
+            return;
+        }
+        if (!hasMarkdown) {
+            renderPendingTaskContentStatus(currentTask);
+        }
+    }
+
     function isContentOpenRequestActive(requestSeq) {
         return Number(requestSeq) > 0 && Number(requestSeq) === Number(state.contentOpenRequestSeq);
     }
@@ -10906,6 +11827,8 @@
         const hasExistingMarkdown = String(state.currentMarkdownRaw || '').trim().length > 0;
         const keepExistingVisibleContent = previousTaskId === taskId && hasExistingMarkdown;
         state.currentTaskId = taskId;
+        const currentTask = findTaskById(taskId);
+        state.currentTaskStorageKey = normalizeTaskTitleText(currentTask && currentTask.storageKey);
         updateUrlTaskId(taskId);
         pushView('content');
         setContentNeedsReload(false);
@@ -10976,6 +11899,8 @@
     async function loadTaskMarkdownByRelativePath(taskId, relativePath, options = {}) {
         flushCurrentReadingPositionNow();
         state.currentTaskId = taskId;
+        const currentTask = findTaskById(taskId);
+        state.currentTaskStorageKey = normalizeTaskTitleText(currentTask && currentTask.storageKey);
         pushView('content');
         updateUrlTaskId(taskId, {
             notePath: relativePath,
@@ -11017,6 +11942,7 @@
 
         state.currentTaskId = taskId;
         state.currentTaskTitle = fallbackTitle;
+        state.currentTaskStorageKey = normalizeTaskTitleText(task && task.storageKey);
         state.currentMarkdownPath = null;
         state.currentMarkdownBaseDir = null;
         state.currentMarkdownRaw = '';
@@ -11032,13 +11958,7 @@
         refreshQuickActionLabels();
         setSyncStatus('pending');
 
-        const markdownBody = document.getElementById('markdownBody');
-        if (markdownBody) {
-            renderMarkdownLoadingSkeleton({
-                title: '内容正在生成中...',
-                detail: '系统会在完成后自动替换为可编辑正文。',
-            });
-        }
+        renderPendingTaskContentStatus(task);
         teardownScrollSpy();
         const outlineList = document.getElementById('outlineList');
         if (outlineList) {
@@ -15001,7 +15921,7 @@
         };
         paragraphWikilinkTitles.forEach(pushUnique);
         (state.tasks || []).forEach((task) => {
-            pushUnique(task && (task.title || task.taskId));
+            pushUnique(resolveTaskCardTitle(task));
         });
         collectParagraphInlineCandidatesFromMarkdown().forEach(pushUnique);
 
@@ -16607,6 +17527,123 @@
         throw new Error('导出准备超时，请稍后重试');
     }
 
+    function openReaderImportPicker(event) {
+        if (event && typeof event.preventDefault === 'function') {
+            event.preventDefault();
+        }
+        if (typeof window.mobileUploadInlineOpenPicker === 'function') {
+            return window.mobileUploadInlineOpenPicker(event);
+        }
+        const fileInput = document.getElementById('mobileVideoFile');
+        if (fileInput && typeof fileInput.click === 'function') {
+            fileInput.click();
+            return false;
+        }
+        setTaskSummary('导入入口尚未就绪，请稍后重试', 'error');
+        return false;
+    }
+
+    async function downloadTaskZip(taskId, options = {}) {
+        const normalizedTaskId = String(taskId || '').trim();
+        if (!normalizedTaskId) {
+            throw new Error('missing task id');
+        }
+        const fallback = `${normalizedTaskId.replace(/[:\\/]/g, '_')}_bundle.zip`;
+        let pickerTarget = null;
+        if (options.preferPicker) {
+            pickerTarget = await pickExportWritableTarget(fallback);
+            if (pickerTarget && pickerTarget.cancelled) {
+                return { cancelled: true };
+            }
+        }
+        try {
+            const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(normalizedTaskId)}/export`);
+            if (!resp.ok) {
+                const { payload, rawText } = await parseJsonPayload(resp);
+                throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
+            }
+            const filename = getDownloadFilename(resp, fallback) || fallback;
+            const onProgress = typeof options.onProgress === 'function'
+                ? (received, total) => options.onProgress(received, total, filename)
+                : () => {};
+            if (pickerTarget && pickerTarget.writable) {
+                const result = await streamResponseToWritable(resp, pickerTarget.writable, onProgress);
+                return { filename, bytes: result.bytes, total: result.total, savedWithPicker: true };
+            }
+            const result = await streamResponseToBlob(resp, onProgress);
+            triggerBrowserDownload(result.blob, filename);
+            return { filename, bytes: result.bytes, total: result.total, savedWithPicker: false };
+        } catch (error) {
+            if (pickerTarget && pickerTarget.writable) {
+                try {
+                    await pickerTarget.writable.abort();
+                } catch (_abortError) {
+                    // ignore abort errors
+                }
+            }
+            throw error;
+        }
+    }
+
+    async function exportSelectedTasksAsMultipleZips() {
+        const selected = resolveSelectedTaskListEntities();
+        if (!selected.taskIds.length) {
+            setTaskSummary('请先选择要导出的任务', 'error');
+            return;
+        }
+        if (state.exportInProgress) {
+            setExportStatus('running', UI_COPY.saveBusy);
+            return;
+        }
+        const successFiles = [];
+        const failedTasks = [];
+        setExportStatus('running', `正在批量导出 0/${selected.taskIds.length}`);
+        try {
+            for (let index = 0; index < selected.taskIds.length; index += 1) {
+                const taskId = selected.taskIds[index];
+                try {
+                    const result = await downloadTaskZip(taskId, {
+                        preferPicker: false,
+                        onProgress: (received, total, filename) => {
+                            const prefix = `正在批量导出 ${index + 1}/${selected.taskIds.length}`;
+                            if (total > 0) {
+                                const percent = Math.min(100, (received / total) * 100);
+                                setExportStatus('running', `${prefix}：${filename} ${formatBytes(received)} / ${formatBytes(total)} (${percent.toFixed(1)}%)`);
+                            } else {
+                                setExportStatus('running', `${prefix}：${filename} ${formatBytes(received)}`);
+                            }
+                        },
+                    });
+                    if (result && !result.cancelled) {
+                        successFiles.push(result.filename);
+                    }
+                } catch (error) {
+                    failedTasks.push({
+                        taskId,
+                        message: normalizeErrorMessage(error, { fallback: '请稍后重试' }),
+                    });
+                }
+            }
+            if (!successFiles.length) {
+                const failedText = failedTasks.length ? failedTasks[0].message : '请稍后重试';
+                setExportStatus('error', `批量导出失败：${failedText}`);
+                return;
+            }
+            const summary = failedTasks.length
+                ? `已导出 ${successFiles.length} 个任务，${failedTasks.length} 个失败`
+                : `已开始下载 ${successFiles.length} 个导出包`;
+            setTaskSummary(summary, failedTasks.length ? 'error' : 'success');
+            setExportStatus(failedTasks.length ? 'error' : 'success', summary, { percent: 100 });
+        } finally {
+            if (state.exportState === 'running') {
+                setExportStatus('idle', UI_COPY.saveHint);
+            } else {
+                setExportButtonsDisabled(false);
+                state.exportInProgress = false;
+            }
+        }
+    }
+
     async function exportCurrentTaskZip() {
         if (!state.currentTaskId) {
             setTaskSummary(UI_COPY.openContentFirst, 'error');
@@ -16616,64 +17653,25 @@
             setExportStatus('running', UI_COPY.saveBusy);
             return;
         }
-
-        const fallback = `${String(state.currentTaskId).replace(/[:\\/]/g, '_')}_bundle.zip`;
-        let pickerTarget = null;
         setExportStatus('running', UI_COPY.savePreparing);
         try {
-            pickerTarget = await pickExportWritableTarget(fallback);
-            if (pickerTarget && pickerTarget.cancelled) {
+            const result = await downloadTaskZip(state.currentTaskId, {
+                preferPicker: true,
+                onProgress: (received, total) => {
+                    if (total > 0) {
+                        const percent = Math.min(100, (received / total) * 100);
+                        setExportStatus('running', `正在下载导出包：${formatBytes(received)} / ${formatBytes(total)} (${percent.toFixed(1)}%)`, { percent });
+                    } else {
+                        setExportStatus('running', `正在下载导出包：${formatBytes(received)}（总大小未知）`);
+                    }
+                },
+            });
+            if (result && result.cancelled) {
                 setExportStatus('idle', UI_COPY.saveCanceled);
                 return;
             }
-
-            const prepared = await requestExportPrepare(state.currentTaskId);
-            const readySnapshot = await waitUntilExportReady(state.currentTaskId, prepared);
-            const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(state.currentTaskId)}/export`);
-            if (!resp.ok) {
-                const { payload, rawText } = await parseJsonPayload(resp);
-                throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
-            }
-
-            const filename = readySnapshot.fileName || getDownloadFilename(resp, fallback) || fallback;
-            const onProgress = (received, total) => {
-                if (total > 0) {
-                    const percent = Math.min(100, (received / total) * 100);
-                    setExportStatus(
-                        'running',
-                        `正在下载导出包：${formatBytes(received)} / ${formatBytes(total)} (${percent.toFixed(1)}%)`,
-                        { percent }
-                    );
-                    return;
-                }
-                setExportStatus('running', `正在下载导出包：${formatBytes(received)}（总大小未知）`);
-            };
-
-            if (pickerTarget && pickerTarget.writable) {
-                const result = await streamResponseToWritable(resp, pickerTarget.writable, onProgress);
-                setExportStatus(
-                    'success',
-                    `${UI_COPY.saveDone}：${filename}（${formatBytes(result.bytes)}）。后端已缓存，可重复下载。`,
-                    { percent: 100 }
-                );
-                return;
-            }
-
-            const result = await streamResponseToBlob(resp, onProgress);
-            triggerBrowserDownload(result.blob, filename);
-            setExportStatus(
-                'success',
-                `${UI_COPY.saveDone}：${filename}（${formatBytes(result.bytes)}）。后端已缓存，可重复下载。`,
-                { percent: 100 }
-            );
+            setExportStatus('success', `${UI_COPY.saveDone}：${result.filename}（${formatBytes(result.bytes)}）`, { percent: 100 });
         } catch (error) {
-            if (pickerTarget && pickerTarget.writable) {
-                try {
-                    await pickerTarget.writable.abort();
-                } catch (_abortError) {
-                    // ignore abort errors
-                }
-            }
             setExportStatus('error', `${UI_COPY.saveFailed}：${normalizeErrorMessage(error, { fallback: '请稍后重试' })}`);
             throw error;
         } finally {
@@ -16705,7 +17703,7 @@
             syncTaskTitleFromState(nextTitle);
         } else {
             const current = (state.tasks || []).find((task) => task.taskId === state.currentTaskId);
-            state.currentTaskTitle = current ? (current.title || state.currentTaskId) : state.currentTaskId;
+            state.currentTaskTitle = current ? (resolveTaskCardTitle(current) || state.currentTaskId) : state.currentTaskId;
         }
         refreshViewerTitle();
     }
@@ -16930,6 +17928,12 @@
 
         document.addEventListener('visibilitychange', () => {
             taskListRefreshPolicy.onVisibilityChange();
+            if (!document.hidden) {
+                renderTaskNotificationPreference();
+                ensureTaskUpdatesWebSocketConnected().catch((error) => {
+                    console.warn('reconnect task status websocket on visibility restore failed', error);
+                });
+            }
             if (document.hidden) {
                 flushCurrentReadingPositionNow();
             }
@@ -17166,6 +18170,14 @@
             }
         });
 
+        const contentImportBtn = document.getElementById('contentImportBtn');
+        if (contentImportBtn) {
+            contentImportBtn.addEventListener('click', (event) => {
+                openReaderImportPicker(event);
+                setContentToolsOpen(false);
+            });
+        }
+
         const toggleParagraphEditorBtn = document.getElementById('toggleParagraphEditorBtn');
         if (toggleParagraphEditorBtn) {
             toggleParagraphEditorBtn.addEventListener('click', () => {
@@ -17200,6 +18212,13 @@
         if (taskBulkDeleteBtn) {
             taskBulkDeleteBtn.addEventListener('click', async () => {
                 await deleteSelectedTasksWithStrictConfirm();
+                closeTaskListContextMenu();
+            });
+        }
+        const taskBulkExportBtn = document.getElementById('taskBulkExportBtn');
+        if (taskBulkExportBtn) {
+            taskBulkExportBtn.addEventListener('click', async () => {
+                await exportSelectedTasksAsMultipleZips();
                 closeTaskListContextMenu();
             });
         }
@@ -18530,6 +19549,12 @@
         bindListScrollMotion();
         bindRootOverscrollGuard();
         bindEdgeBackNavigation();
+        bindTaskNotificationPreferenceUi();
+        window.setTimeout(() => maybeNudgeTaskNotificationPreference(), 420);
+        bindTaskNotificationMessageBridge();
+        ensureTaskUpdatesWebSocketConnected().catch((error) => {
+            console.warn('initialize task status websocket failed', error);
+        });
         taskListRefreshPolicy.start();
         pushView(state.currentView);
         refreshQuickActionLabels();
@@ -19047,6 +20072,11 @@
             setControlLabel(outlineBtn, UI_COPY.actionOutline);
             outlineBtn.disabled = isParagraphEditorMode();
         }
+        const contentImportBtn = document.getElementById('contentImportBtn');
+        if (contentImportBtn) {
+            setControlLabel(contentImportBtn, UI_COPY.actionImport);
+            contentImportBtn.disabled = false;
+        }
         const toggleParagraphEditorBtn = document.getElementById('toggleParagraphEditorBtn');
         if (toggleParagraphEditorBtn) {
             const editing = isParagraphEditorMode();
@@ -19200,6 +20230,7 @@
 
     window.addEventListener('beforeunload', () => {
         flushCurrentReadingPositionNow();
+        closeTaskUpdatesWebSocket({ manual: true });
         if (jsonParseWorkerPool && typeof jsonParseWorkerPool.dispose === 'function') {
             jsonParseWorkerPool.dispose();
         }

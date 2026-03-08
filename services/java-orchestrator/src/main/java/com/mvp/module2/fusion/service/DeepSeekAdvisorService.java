@@ -224,6 +224,14 @@ public class DeepSeekAdvisorService {
             "输出必须是结构化 Markdown，不输出 JSON 或代码块。"
     );
 
+    private static final String PHASE2B_IMAGE_MARKER_CONSTRAINTS = String.join("\n",
+            "## Image Marker Hard Constraints",
+            "- If the input contains Markdown image markers such as `![alt](url)` or `![[path]]`, keep every marker exactly as-is.",
+            "- Do not rewrite image path, alt text, filename, bracket shape, order, or relative position.",
+            "- Do not delete, merge, duplicate, relocate, or convert image markers.",
+            "- If exact preservation is difficult, leave the original image marker untouched and continue restructuring only the surrounding text."
+    );
+
     @Value("${deepseek.advisor.enabled:true}")
     private boolean advisorEnabled;
 
@@ -426,7 +434,9 @@ public class DeepSeekAdvisorService {
         if (!StringUtils.hasText(apiKey)) {
             throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
         }
-        String systemPrompt = buildPhase2bStructuredSystemPrompt();
+        String systemPrompt = blendMode
+                ? buildPhase2bBlendSystemPrompt()
+                : buildPhase2bStructuredSystemPrompt();
         String userPrompt = buildPhase2bStructuredUserPrompt(safeBody);
         String raw;
         try {
@@ -1061,23 +1071,43 @@ public class DeepSeekAdvisorService {
     }
 
     private String buildPhase2bStructuredSystemPrompt() {
-        return loadPromptTemplate(
+        return appendPhase2bImageMarkerConstraints(loadPromptTemplate(
                 "phase2b_structured_system",
                 phase2bStructuredSystemPromptResource,
                 DEFAULT_PHASE2B_STRUCTURED_SYSTEM_PROMPT
-        );
+        ));
     }
 
     private String buildPhase2bBlendSystemPrompt() {
-        return loadPromptTemplate(
+        return appendPhase2bImageMarkerConstraints(loadPromptTemplate(
                 "phase2b_blend_system",
                 phase2bBlendSystemPromptResource,
                 DEFAULT_PHASE2B_BLEND_SYSTEM_PROMPT
-        );
+        ));
     }
 
     private String buildPhase2bStructuredUserPrompt(String bodyText) {
-        return String.valueOf(bodyText == null ? "" : bodyText).trim();
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put("body_text", trimContext(bodyText));
+        return applyTemplate(
+                loadPromptTemplate(
+                        "phase2b_structured_user",
+                        phase2bStructuredUserPromptResource,
+                        DEFAULT_PHASE2B_STRUCTURED_USER_PROMPT
+                ),
+                values
+        );
+    }
+
+    private String appendPhase2bImageMarkerConstraints(String prompt) {
+        String basePrompt = String.valueOf(prompt == null ? "" : prompt).trim();
+        if (!StringUtils.hasText(basePrompt)) {
+            return PHASE2B_IMAGE_MARKER_CONSTRAINTS;
+        }
+        if (basePrompt.contains("Image Marker Hard Constraints")) {
+            return basePrompt;
+        }
+        return basePrompt + "\n\n" + PHASE2B_IMAGE_MARKER_CONSTRAINTS;
     }
 
     private String renderTermsBlock(List<String> terms) {

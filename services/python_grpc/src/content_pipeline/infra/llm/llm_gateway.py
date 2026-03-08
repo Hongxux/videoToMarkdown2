@@ -147,8 +147,8 @@ _DEEPSEEK_QWEN_FALLBACK_BASE_URL = (
     or "https://dashscope.aliyuncs.com/compatible-mode/v1"
 )
 _DEEPSEEK_QWEN_FALLBACK_MODEL = (
-    str(os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_MODEL", "qwen3-plus") or "").strip()
-    or "qwen3-plus"
+    str(os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_MODEL", "qwen-plus") or "").strip()
+    or "qwen-plus"
 )
 _DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV = (
     str(os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV", "DASHSCOPE_API_KEY") or "").strip()
@@ -157,6 +157,11 @@ _DEEPSEEK_QWEN_FALLBACK_API_KEY_ENV = (
 _DEEPSEEK_QWEN_FALLBACK_API_KEY = str(
     os.getenv("MODULE2_DEEPSEEK_QWEN_FALLBACK_API_KEY", "") or ""
 ).strip()
+_DEEPSEEK_PROVIDER_MAX_RETRIES = 4
+_DEEPSEEK_PROVIDER_INITIAL_BACKOFF_SEC = 2.0
+_DEEPSEEK_PROVIDER_MAX_BACKOFF_SEC = 16.0
+_DEEPSEEK_FAST_FALLBACK_LOCK = threading.Lock()
+_DEEPSEEK_FAST_FALLBACK_OPEN = False
 
 _VISION_HEDGE_ENABLED = _env_bool("MODULE2_VISION_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
 _VISION_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_VISION_HEDGE_DELAY_MS", _LLM_HEDGE_DELAY_MS))
@@ -553,6 +558,93 @@ async def _run_hedged_async_request(
         )
 
 
+def _is_deepseek_fast_fallback_open() -> bool:
+    with _DEEPSEEK_FAST_FALLBACK_LOCK:
+        return bool(_DEEPSEEK_FAST_FALLBACK_OPEN)
+
+
+def _trip_deepseek_fast_fallback() -> bool:
+    global _DEEPSEEK_FAST_FALLBACK_OPEN
+    with _DEEPSEEK_FAST_FALLBACK_LOCK:
+        if _DEEPSEEK_FAST_FALLBACK_OPEN:
+            return False
+        _DEEPSEEK_FAST_FALLBACK_OPEN = True
+        return True
+
+
+def _reset_deepseek_fast_fallback() -> bool:
+    global _DEEPSEEK_FAST_FALLBACK_OPEN
+    with _DEEPSEEK_FAST_FALLBACK_LOCK:
+        was_open = _DEEPSEEK_FAST_FALLBACK_OPEN
+        _DEEPSEEK_FAST_FALLBACK_OPEN = False
+        return bool(was_open)
+
+
+def _compute_provider_retry_backoff_seconds(retry_index: int) -> float:
+    bounded_retry_index = max(0, int(retry_index))
+    wait_seconds = _DEEPSEEK_PROVIDER_INITIAL_BACKOFF_SEC * (2 ** bounded_retry_index)
+    return min(_DEEPSEEK_PROVIDER_MAX_BACKOFF_SEC, float(wait_seconds))
+
+
+async def _run_provider_with_retry(
+    *,
+    request_name: str,
+    provider_label: str,
+    max_retries: int,
+    attempt_factory: Callable[[], Awaitable[_HedgeResultT]],
+) -> _HedgeResultT:
+    total_attempts = max(1, int(max_retries) + 1)
+    last_exc: Optional[Exception] = None
+    for attempt_idx in range(total_attempts):
+        try:
+            return await attempt_factory()
+        except Exception as exc:
+            last_exc = exc
+            if attempt_idx >= total_attempts - 1:
+                raise
+            retry_no = attempt_idx + 1
+            wait_seconds = _compute_provider_retry_backoff_seconds(attempt_idx)
+            logger.warning(
+                "[LLM-retry] %s failed, retry %s/%s scheduled. provider=%s, wait=%.1fs, error=%s",
+                request_name,
+                retry_no,
+                max_retries,
+                provider_label,
+                wait_seconds,
+                exc,
+            )
+            await asyncio.sleep(wait_seconds)
+    raise last_exc if last_exc is not None else RuntimeError(f"{request_name} retry finished without result")
+
+
+def _resolve_unwrapped_async_method(bound_method: Any) -> Optional[Callable[..., Awaitable[Any]]]:
+    wrapped = getattr(bound_method, "__wrapped__", None)
+    if wrapped is not None:
+        return wrapped
+    method_func = getattr(bound_method, "__func__", None)
+    if method_func is not None:
+        wrapped = getattr(method_func, "__wrapped__", None)
+        if wrapped is not None:
+            return wrapped
+    return None
+
+
+async def _call_client_complete_text_raw(client: Any, **kwargs: Any) -> Tuple[str, Any, Any]:
+    bound_method = getattr(client, "complete_text")
+    unwrapped_method = _resolve_unwrapped_async_method(bound_method)
+    if unwrapped_method is not None:
+        return await unwrapped_method(client, **kwargs)
+    return await bound_method(**kwargs)
+
+
+async def _call_client_complete_json_raw(client: Any, **kwargs: Any) -> Tuple[Dict[str, Any], Any, Any]:
+    bound_method = getattr(client, "complete_json")
+    unwrapped_method = _resolve_unwrapped_async_method(bound_method)
+    if unwrapped_method is not None:
+        return await unwrapped_method(client, **kwargs)
+    return await bound_method(**kwargs)
+
+
 async def _call_deepseek_text_once(
     *,
     client: LLMClient,
@@ -563,16 +655,17 @@ async def _call_deepseek_text_once(
 ) -> Tuple[str, Any, Any]:
     if disable_inflight_dedup:
         try:
-            return await client.complete_text(
+            return await _call_client_complete_text_raw(
+                client,
                 prompt=prompt,
                 system_message=system_message,
                 need_logprobs=need_logprobs,
                 disable_inflight_dedup=True,
             )
         except TypeError:
-            # 兼容注入的旧版 fake client（无 disable_inflight_dedup 参数）。
             pass
-    return await client.complete_text(
+    return await _call_client_complete_text_raw(
+        client,
         prompt=prompt,
         system_message=system_message,
         need_logprobs=need_logprobs,
@@ -590,7 +683,8 @@ async def _call_deepseek_json_once(
 ) -> Tuple[Dict[str, Any], Any, Any]:
     if disable_inflight_dedup:
         try:
-            return await client.complete_json(
+            return await _call_client_complete_json_raw(
+                client,
                 prompt=prompt,
                 system_message=system_message,
                 need_logprobs=need_logprobs,
@@ -598,9 +692,9 @@ async def _call_deepseek_json_once(
                 disable_inflight_dedup=True,
             )
         except TypeError:
-            # 兼容注入的旧版 fake client（无 disable_inflight_dedup 参数）。
             pass
-    return await client.complete_json(
+    return await _call_client_complete_json_raw(
+        client,
         prompt=prompt,
         system_message=system_message,
         need_logprobs=need_logprobs,
@@ -744,27 +838,32 @@ async def _fallback_to_qwen_text(
         return None
 
     logger.warning(
-        "[LLM降级] DeepSeek文本调用失败，开始降级到Qwen。model=%s, base_url=%s, error=%s",
+        "[LLM-degrade] DeepSeek text call failed; switching to Qwen. model=%s, base_url=%s, error=%s",
         _DEEPSEEK_QWEN_FALLBACK_MODEL,
         _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
         source_error,
     )
     try:
-        result = await _call_deepseek_text_once(
-            client=fallback_client,
-            prompt=prompt,
-            system_message=system_message,
-            need_logprobs=need_logprobs,
-            disable_inflight_dedup=False,
+        result = await _run_provider_with_retry(
+            request_name="qwen_fallback_text",
+            provider_label=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+            max_retries=_DEEPSEEK_PROVIDER_MAX_RETRIES,
+            attempt_factory=lambda: _call_deepseek_text_once(
+                client=fallback_client,
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                disable_inflight_dedup=False,
+            ),
         )
         logger.warning(
-            "[LLM降级] DeepSeek文本调用已降级到Qwen并成功返回。model=%s",
+            "[LLM-degrade] DeepSeek text call succeeded via Qwen fallback. model=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
         )
         return result
     except Exception as fallback_exc:
         logger.error(
-            "[LLM降级] DeepSeek文本调用降级到Qwen失败。model=%s, original_error=%s, fallback_error=%s",
+            "[LLM-degrade] DeepSeek text fallback to Qwen failed. model=%s, original_error=%s, fallback_error=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
             source_error,
             fallback_exc,
@@ -794,28 +893,33 @@ async def _fallback_to_qwen_json(
         return None
 
     logger.warning(
-        "[LLM降级] DeepSeek JSON调用失败，开始降级到Qwen。model=%s, base_url=%s, error=%s",
+        "[LLM-degrade] DeepSeek JSON call failed; switching to Qwen. model=%s, base_url=%s, error=%s",
         _DEEPSEEK_QWEN_FALLBACK_MODEL,
         _DEEPSEEK_QWEN_FALLBACK_BASE_URL,
         source_error,
     )
     try:
-        result = await _call_deepseek_json_once(
-            client=fallback_client,
-            prompt=prompt,
-            system_message=system_message,
-            need_logprobs=need_logprobs,
-            max_tokens=max_tokens,
-            disable_inflight_dedup=False,
+        result = await _run_provider_with_retry(
+            request_name="qwen_fallback_json",
+            provider_label=f"Qwen/{_DEEPSEEK_QWEN_FALLBACK_MODEL}",
+            max_retries=_DEEPSEEK_PROVIDER_MAX_RETRIES,
+            attempt_factory=lambda: _call_deepseek_json_once(
+                client=fallback_client,
+                prompt=prompt,
+                system_message=system_message,
+                need_logprobs=need_logprobs,
+                max_tokens=max_tokens,
+                disable_inflight_dedup=False,
+            ),
         )
         logger.warning(
-            "[LLM降级] DeepSeek JSON调用已降级到Qwen并成功返回。model=%s",
+            "[LLM-degrade] DeepSeek JSON call succeeded via Qwen fallback. model=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
         )
         return result
     except Exception as fallback_exc:
         logger.error(
-            "[LLM降级] DeepSeek JSON调用降级到Qwen失败。model=%s, original_error=%s, fallback_error=%s",
+            "[LLM-degrade] DeepSeek JSON fallback to Qwen failed. model=%s, original_error=%s, fallback_error=%s",
             _DEEPSEEK_QWEN_FALLBACK_MODEL,
             source_error,
             fallback_exc,
@@ -865,29 +969,44 @@ async def deepseek_complete_text(
         max_tokens=None,
         hedge_context=hedge_context,
     )
+    deepseek_fast_fallback_open = _is_deepseek_fast_fallback_open()
+    deepseek_max_retries = 0 if deepseek_fast_fallback_open else _DEEPSEEK_PROVIDER_MAX_RETRIES
     try:
-        output_text, metadata, logprobs = await _run_hedged_async_request(
+        output_text, metadata, logprobs = await _run_provider_with_retry(
             request_name="deepseek_complete_text",
-            enabled=_DEEPSEEK_HEDGE_ENABLED,
-            delay_ms=delay_ms,
-            primary_factory=lambda: _call_deepseek_text_once(
-                client=client,
-                prompt=prompt,
-                system_message=system_message,
-                need_logprobs=need_logprobs,
-                disable_inflight_dedup=False,
-            ),
-            secondary_factory=lambda: _call_deepseek_text_once(
-                client=client,
-                prompt=prompt,
-                system_message=system_message,
-                need_logprobs=need_logprobs,
-                disable_inflight_dedup=True,
+            provider_label="DeepSeek",
+            max_retries=deepseek_max_retries,
+            attempt_factory=lambda: _run_hedged_async_request(
+                request_name="deepseek_complete_text",
+                enabled=_DEEPSEEK_HEDGE_ENABLED,
+                delay_ms=delay_ms,
+                primary_factory=lambda: _call_deepseek_text_once(
+                    client=client,
+                    prompt=prompt,
+                    system_message=system_message,
+                    need_logprobs=need_logprobs,
+                    disable_inflight_dedup=False,
+                ),
+                secondary_factory=lambda: _call_deepseek_text_once(
+                    client=client,
+                    prompt=prompt,
+                    system_message=system_message,
+                    need_logprobs=need_logprobs,
+                    disable_inflight_dedup=True,
+                ),
             ),
         )
+        if deepseek_fast_fallback_open and _reset_deepseek_fast_fallback():
+            logger.warning("[LLM-degrade] DeepSeek recovered; fast fallback mode closed.")
         return output_text, metadata, logprobs
     except Exception as exc:
         error_text = str(exc)
+        if not deepseek_fast_fallback_open and _trip_deepseek_fast_fallback():
+            logger.warning(
+                "[LLM-degrade] DeepSeek exhausted retries; fast fallback mode opened. retries=%s, error=%s",
+                _DEEPSEEK_PROVIDER_MAX_RETRIES,
+                exc,
+            )
         fallback_output = await _fallback_to_qwen_text(
             prompt=prompt,
             system_message=system_message,
@@ -968,30 +1087,45 @@ async def deepseek_complete_json(
         max_tokens=max_tokens,
         hedge_context=hedge_context,
     )
+    deepseek_fast_fallback_open = _is_deepseek_fast_fallback_open()
+    deepseek_max_retries = 0 if deepseek_fast_fallback_open else _DEEPSEEK_PROVIDER_MAX_RETRIES
     try:
-        result_json, metadata, logprobs = await _run_hedged_async_request(
+        result_json, metadata, logprobs = await _run_provider_with_retry(
             request_name="deepseek_complete_json",
-            enabled=_DEEPSEEK_HEDGE_ENABLED,
-            delay_ms=delay_ms,
-            primary_factory=lambda: _call_deepseek_json_once(
-                client=client,
-                prompt=prompt,
-                system_message=system_message,
-                need_logprobs=need_logprobs,
-                max_tokens=max_tokens,
-                disable_inflight_dedup=False,
-            ),
-            secondary_factory=lambda: _call_deepseek_json_once(
-                client=client,
-                prompt=prompt,
-                system_message=system_message,
-                need_logprobs=need_logprobs,
-                max_tokens=max_tokens,
-                disable_inflight_dedup=True,
+            provider_label="DeepSeek",
+            max_retries=deepseek_max_retries,
+            attempt_factory=lambda: _run_hedged_async_request(
+                request_name="deepseek_complete_json",
+                enabled=_DEEPSEEK_HEDGE_ENABLED,
+                delay_ms=delay_ms,
+                primary_factory=lambda: _call_deepseek_json_once(
+                    client=client,
+                    prompt=prompt,
+                    system_message=system_message,
+                    need_logprobs=need_logprobs,
+                    max_tokens=max_tokens,
+                    disable_inflight_dedup=False,
+                ),
+                secondary_factory=lambda: _call_deepseek_json_once(
+                    client=client,
+                    prompt=prompt,
+                    system_message=system_message,
+                    need_logprobs=need_logprobs,
+                    max_tokens=max_tokens,
+                    disable_inflight_dedup=True,
+                ),
             ),
         )
+        if deepseek_fast_fallback_open and _reset_deepseek_fast_fallback():
+            logger.warning("[LLM-degrade] DeepSeek JSON recovered; fast fallback mode closed.")
         return result_json, metadata, logprobs
     except Exception as exc:
+        if not deepseek_fast_fallback_open and _trip_deepseek_fast_fallback():
+            logger.warning(
+                "[LLM-degrade] DeepSeek JSON exhausted retries; fast fallback mode opened. retries=%s, error=%s",
+                _DEEPSEEK_PROVIDER_MAX_RETRIES,
+                exc,
+            )
         fallback_json = await _fallback_to_qwen_json(
             prompt=prompt,
             system_message=system_message,

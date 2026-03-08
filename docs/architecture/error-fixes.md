@@ -1,5 +1,64 @@
 ﻿# 错误修正记录
 
+## 2026-03-08 Web submit-card collection selector and completion-notification controls were not clickable
+- Date: 2026-03-08
+- Symptom:
+  - The "assign to collection after submit" select could not open or change value.
+  - The "completion notification" toggle was visible but ignored clicks.
+  - The guide pulse suggested these controls were actionable, but the overlay still swallowed pointer events.
+- Root cause:
+  - The floating submit card used a shared pointer-events pass-through rule under `.submit-card.chat-gpt-float:not(.is-floating-tray)`.
+  - Only `.submit-source-shell` restored `pointer-events: auto`; the new collection/notification rows and their inner controls were omitted.
+  - The guide pulse highlighted the whole row without re-aligning the real clickable hit area.
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+    - Restore `pointer-events: auto` for `.task-submit-collection-row`, `.submit-tip`, and `.task-notification-row`.
+    - Restore direct interaction for `.task-submit-collection-select` and `.task-notification-toggle`.
+    - Keep `is-guide-pulse` as visual guidance only.
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - Keep the guidance/state logic, but stop relying on the swallowed click chain so collection selection and notification toggling work immediately.
+- Validation:
+  - `node --check services/java-orchestrator/src/main/resources/static/sw.js`
+  - `mvn -Dmaven.repo.local=D:\videoToMarkdownTest2\.m2\repository -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Audit parent `pointer-events` rules whenever new controls are added under the floating submit card.
+  - Keep guide animation, clickable area, and event binding aligned.
+  - Add minimal click regression checks for both `select` and `button` under overlay-style shells.
+- Files:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/css/mobile-task-interactions.css`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-08 Web running-task deduplication, title fallback, and live detail refresh
+- Date: 2026-03-08
+- Symptom:
+  - The task list could render one running task twice: one runtime record and one storage-backed record.
+  - Newly finished tasks could show `BV...` or `storage:...` instead of the human task title.
+  - When a running task was opened from the content page, the web view did not keep refreshing stage text/progress or auto-switch to markdown when ready.
+- Root cause:
+  - `/api/mobile/tasks` only deduplicated by `taskId`; temporary storage-only records without a task id could bypass that rule.
+  - The web card title fell back to `metaTitle/videoUrl/taskId` too early instead of treating `title` as the primary display source.
+  - Auto-refresh was effectively tied to the task-list view and was not kept alive for in-progress task details.
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - Normalize task identity with `taskId + storageKey + storage path`, and derive storage identity for runtime tasks when possible.
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - Prefer `title` for task cards, show stage text plus progress for running tasks, and keep refreshing in-progress detail views until markdown is readable.
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerTaskListDeduplicateTest.java`
+    - Lock the runtime/storage shadow-record dedup contract with a regression test.
+- Validation:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Do not rely on `taskId` alone when runtime and storage views are merged.
+  - Keep `title` as the primary human-readable display source.
+  - Couple detail-page polling with list-page polling for every in-progress task surface.
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerTaskListDeduplicateTest.java`
+
 ## 2026-03-07 Phase2A concrete 向后搜寻 2s 在 Windows 触发进程级崩溃
 - 日期：2026-03-07
 - 现象：
@@ -8872,3 +8931,72 @@
   - 以后看到 `file-batch-*` 只说明离线 batch JSONL 已上传，不能再把它当成视频 `tmp_url` 上传成功证据。
   - 排障时优先检查 `message_transport/body_bytes/jsonl_bytes`，先确认传输形态，再判断是否踩到服务端 body 限制。
   - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py` 后续凡是新增媒体传输策略，都必须同步补齐 transport 级日志和失败语义，避免再次混淆 `tmp_url` 与内联媒体。
+
+## 2026-03-08: Phase2B 结构化接口在图片输入场景下可能 200 返回原文
+- 现象：
+  - `POST /api/mobile/cards/phase2b/structured-markdown` 返回 `200`，但当输入里包含 Markdown 图片标记时，响应 `markdown` 可能仍然接近原始输入，没有得到预期的结构化结果。
+  - 前端从状态码上看是“成功”，但用户实际拿到的是未结构化文本，容易误判为模型效果差，而不是后端决策链发生了安全回退。
+- 根因：
+  - `MobileCardController` 旧逻辑会先把图片 Markdown 替换成拓扑 token，再在模型输出后执行 `restoreImageMarkers`。
+  - 一旦图片 token 的数量、顺序或唯一性与原输入不一致，就会触发 `restoreOrFallback(..., llmSourceText)`，最终把原始输入文本回填到响应里，形成“200 + 原文返回”的假成功。
+  - 同时 `DeepSeekAdvisorService.buildPhase2bStructuredUserPrompt()` 之前没有真正使用 `phase2bStructuredUserPromptResource` 模板，导致 Phase2B 的结构化约束没有完整进入 user prompt。
+- 修复：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileCardController.java`
+    - 移除 Phase2B 接口里的图片拓扑保护回退，不再在恢复失败时把 `llmSourceText` 作为成功结果返回。
+    - 改为直接将原始 `llmSourceText` 交给模型，并以模型返回的 Markdown 作为最终输出。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 为 Phase2B system prompt 追加图片标记硬约束，明确要求 `![alt](url)` / `![[path]]` 必须原样保留。
+    - 让 `buildPhase2bStructuredUserPrompt()` 正式走 `phase2bStructuredUserPromptResource` 模板。
+    - 在流式 Phase2B 调用中按 `blendMode` 正确选择 `structured` / `blend` system prompt。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/DeepSeekAdvisorServiceTest.java`
+    - 新增 prompt 构建测试，锁定 user template 注入与图片保留硬约束行为。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 以后凡是“安全回退”会改变用户可见输出语义的路径，禁止静默回退到原始输入并继续返回 `200`。
+  - prompt 资源字段一旦引入，必须补充最小单测，验证模板确实进入实际调用链。
+
+
+## 2026-03-08: GetVideoInfo 在抖音浏览器探测成功后仍读取未初始化的 `video_processor`
+- 现象：
+  - Android 端通过 WebSocket 发起视频信息探测时，`PythonGrpcClient` 能正常进入 `GetVideoInfo`，但 `VideoProcessingController` 随后记录 `cannot access local variable 'video_processor' where it is not associated with a value`。
+  - 该问题在抖音分享口令/短链场景更容易出现，因为服务端会优先走浏览器探测分支。
+- 根因：
+  - `services/python_grpc/src/server/grpc_service_impl.py` 的 `GetVideoInfo` 中，抖音分支若 `_probe_douyin_video_info(...)` 已成功返回，就不会再实例化 `VideoProcessor`。
+  - 但后续组装响应标题时仍无条件读取 `getattr(video_processor, "last_video_title", "")`，导致局部变量未绑定异常。
+- 修复：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 在进入抖音探测/回退分支前显式初始化 `video_processor = None`，让“浏览器探测成功且无需 yt-dlp 回退”的路径也能安全复用统一响应组装逻辑。
+  - `services/python_grpc/src/server/tests/test_get_video_info.py`
+    - 增加回归测试，锁定“抖音浏览器探测成功时不应初始化 `VideoProcessor`，且响应仍应成功返回标题/时长”的行为。
+- 验证：
+  - `pytest services/python_grpc/src/server/tests/test_get_video_info.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 以后凡是“主路径成功、回退路径跳过”的双分支逻辑，都要先给共享变量设置安全默认值，再进入分支。
+  - 对抖音、B 站这类平台特化探测逻辑，新增分支时必须补“成功但未触发回退”的最小回归测试，避免再次出现未初始化局部变量。
+
+## 2026-03-08: DeepSeek gateway retries four times before Qwen fallback
+- Symptom:
+  - A transient DeepSeek `Connection error` could trigger fallback too early, and the old fallback model name could fail again.
+  - After a full DeepSeek outage, the gateway had no process-level fast-failover state for later requests.
+- Root cause:
+  - `llm_gateway.py` did not enforce one gateway-level retry budget for DeepSeek and fallback calls.
+  - The default fallback model was still `qwen3-plus` instead of the required `qwen-plus`.
+  - There was no breaker-like state to convert "full outage once" into "single failure then fast fallback" for later requests.
+- Fix:
+  - `services/python_grpc/src/content_pipeline/infra/llm/llm_gateway.py`
+    - Add gateway-level exponential backoff retries with `2s/4s/8s/16s` for DeepSeek text/json and for the Qwen fallback path.
+    - Change the default fallback model to `qwen-plus` with `https://dashscope.aliyuncs.com/compatible-mode/v1`.
+    - Add a process-local fast-fallback mode: after DeepSeek exhausts retries once, later requests switch to Qwen after a single DeepSeek failure; a later DeepSeek success closes the fast-fallback mode.
+  - `services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py`
+    - Add regression tests for four retries before fallback and for single-attempt fast fallback after the breaker is open.
+- Validation:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Future multi-provider fallback changes must define primary retry budget, fallback retry budget, and breaker open/close rules at the gateway layer.
+  - Model-name changes must update both gateway tests and operational docs together.

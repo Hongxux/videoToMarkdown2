@@ -1,5 +1,5 @@
 // 升级缓存版本：强制淘汰旧的离线壳资源，避免继续命中历史 index.html。
-const SHELL_CACHE_NAME = 'mobile-markdown-shell-v7';
+const SHELL_CACHE_NAME = 'mobile-markdown-shell-v8';
 const SHELL_ASSETS = [
     '/',
     '/index.html',
@@ -60,4 +60,65 @@ self.addEventListener('fetch', (event) => {
             return response;
         })());
     }
+});
+
+
+function resolveNotificationTargetUrl(data) {
+    const fallback = '/mobile-markdown.html';
+    const raw = data && typeof data.url === 'string' ? data.url.trim() : '';
+    if (!raw) {
+        return fallback;
+    }
+    try {
+        const resolved = new URL(raw, self.location.origin);
+        if (resolved.origin !== self.location.origin) {
+            return fallback;
+        }
+        return resolved.toString();
+    } catch (_error) {
+        return fallback;
+    }
+}
+
+self.addEventListener('notificationclick', (event) => {
+    const notification = event.notification;
+    const data = notification && notification.data && typeof notification.data === 'object'
+        ? notification.data
+        : {};
+    const targetUrl = resolveNotificationTargetUrl(data);
+    notification.close();
+    event.waitUntil((async () => {
+        const clientList = await self.clients.matchAll({
+            type: 'window',
+            includeUncontrolled: true,
+        });
+        const matchedClient = clientList.find((client) => {
+            try {
+                return new URL(client.url).origin === self.location.origin;
+            } catch (_error) {
+                return false;
+            }
+        });
+        if (matchedClient) {
+            if (typeof matchedClient.focus === 'function') {
+                await matchedClient.focus();
+            }
+            if (typeof matchedClient.postMessage === 'function') {
+                matchedClient.postMessage({
+                    type: 'openTaskFromNotification',
+                    taskId: String(data.taskId || ''),
+                    status: String(data.status || ''),
+                    url: targetUrl,
+                });
+                return;
+            }
+            if (typeof matchedClient.navigate === 'function') {
+                await matchedClient.navigate(targetUrl);
+                return;
+            }
+        }
+        if (self.clients.openWindow) {
+            await self.clients.openWindow(targetUrl);
+        }
+    })());
 });

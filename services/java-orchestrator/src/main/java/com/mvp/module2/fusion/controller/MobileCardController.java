@@ -3,7 +3,6 @@ package com.mvp.module2.fusion.controller;
 import com.mvp.module2.fusion.service.CardStorageService;
 import com.mvp.module2.fusion.service.DeepSeekAdvisorService;
 import com.mvp.module2.fusion.service.Phase2bArticleLinkService;
-import com.mvp.module2.fusion.service.Phase2bImageTopologyGuard;
 import com.mvp.module2.fusion.service.SelectionSyntaxRefineService;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import org.slf4j.Logger;
@@ -506,11 +505,10 @@ public class MobileCardController {
                 emitPhase2bProgress(progressChannel, progressRequestId, "semantic_fusion", "语义网络构建中，准备融合您的额外观点...", false, false);
             }
 
-            Phase2bImageTopologyGuard.MaskResult imageMask = Phase2bImageTopologyGuard.maskImageMarkers(llmSourceText);
             AtomicInteger chunkIndex = new AtomicInteger(0);
             emitPhase2bProgress(progressChannel, progressRequestId, "phase2b_deep", "Phase2B 深度重构中...", false, false);
             String rawMarkdown = deepSeekAdvisorService.requestPhase2bStructuredMarkdownStreamed(
-                    imageMask.getMaskedMarkdown(),
+                    llmSourceText,
                     "",
                     blendMode,
                     (delta) -> emitPhase2bMarkdownDelta(
@@ -520,14 +518,8 @@ public class MobileCardController {
                             chunkIndex.getAndIncrement()
                     )
             );
-            emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在恢复图片拓扑并整理 Markdown...", false, false);
-            String restoredMarkdown = Phase2bImageTopologyGuard.restoreImageMarkers(rawMarkdown, imageMask);
-            boolean topologyFallback = false;
-            if (!StringUtils.hasText(restoredMarkdown)) {
-                topologyFallback = true;
-                restoredMarkdown = Phase2bImageTopologyGuard.restoreOrFallback(rawMarkdown, imageMask, llmSourceText);
-            }
-            String finalMarkdown = StringUtils.hasText(restoredMarkdown) ? restoredMarkdown : rawMarkdown;
+            emitPhase2bProgress(progressChannel, progressRequestId, "post_processing", "正在整理最终 Markdown...", false, false);
+            String finalMarkdown = rawMarkdown.trim();
             emitPhase2bMarkdownFinal(progressChannel, progressRequestId, finalMarkdown, chunkIndex.get());
 
             Map<String, Object> payload = new LinkedHashMap<>();
@@ -538,14 +530,11 @@ public class MobileCardController {
             if (!linkWarnings.isEmpty()) {
                 payload.put("linkWarnings", linkWarnings);
             }
-            if (topologyFallback) {
-                payload.put("imageTopologyFallback", true);
-            }
             emitPhase2bProgress(
                     progressChannel,
                     progressRequestId,
                     "completed",
-                    topologyFallback ? "结构化完成（已启用图片拓扑保护回退）" : "结构化完成",
+                    "结构化完成",
                     true,
                     true
             );

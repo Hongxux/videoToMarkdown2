@@ -13,6 +13,7 @@ import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
 import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
+import com.mvp.module2.fusion.service.TaskBundleExportService;
 import com.mvp.module2.fusion.service.VideoMetaService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -129,6 +130,9 @@ public class MobileMarkdownController {
 
     @Autowired
     private FileTransferService fileTransferService;
+
+    @Autowired
+    private TaskBundleExportService taskBundleExportService;
 
     private VideoMetaService videoMetaService = new VideoMetaService();
 
@@ -2175,7 +2179,11 @@ public class MobileMarkdownController {
     }
 
     @GetMapping("/tasks/{taskId}/export")
-    public ResponseEntity<StreamingResponseBody> exportTaskBundle(@PathVariable String taskId) {
+    public ResponseEntity<StreamingResponseBody> exportTaskBundle(
+            @PathVariable String taskId,
+            @RequestParam(value = "layout", defaultValue = "flat") String rawLayout
+    ) {
+        String layout = normalizeExportLayout(rawLayout);
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task not found");
@@ -2190,34 +2198,84 @@ public class MobileMarkdownController {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory does not exist");
         }
 
-        final List<ExportFileEntry> exportEntries;
-        try {
-            exportEntries = collectExportEntries(taskRoot);
-        } catch (IOException ex) {
-            logger.warn("export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
-        }
-        if (exportEntries.isEmpty()) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "no exportable markdown/video/screenshot assets found");
+        String filename = buildSafeExportFilename(task.taskId);
+        if ("raw".equals(layout)) {
+            final List<ExportFileEntry> exportEntries;
+            try {
+                exportEntries = collectExportEntries(taskRoot);
+            } catch (IOException ex) {
+                logger.warn("raw export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+            }
+            if (exportEntries.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "no exportable markdown/video/screenshot assets found");
+            }
+            StreamingResponseBody rawBody = outputStream -> {
+                try (ZipOutputStream zos = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
+                    ExportZipResult zipResult = writeTaskExportZipStreaming(exportEntries, zos);
+                    zos.finish();
+                    logger.info("streaming raw export completed: taskId={} root={} exported={} skipped={}", taskId, taskRoot, zipResult.exportedCount, zipResult.skippedCount);
+                } catch (IOException ex) {
+                    logger.warn("streaming raw export failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                    throw ex;
+                }
+            };
+            return ResponseEntity.ok()
+                    .contentType(MediaType.parseMediaType("application/zip"))
+                    .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
+                    .header("X-Export-Layout", layout)
+                    .body(rawBody);
         }
 
-        String filename = buildSafeExportFilename(task.taskId);
-        StreamingResponseBody body = outputStream -> {
+        final TaskBundleExportService.FlatTaskExportPlan exportPlan;
+        final Path markdownPath;
+        try {
+            ResolvedMarkdown resolved = resolveMarkdown(task);
+            markdownPath = resolved.markdownPath;
+            exportPlan = taskBundleExportService.planFlatExport(task.taskId, taskRoot, resolved.markdownPath);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, ex.getMessage(), ex);
+        } catch (IOException ex) {
+            logger.warn("flat export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+        }
+        StreamingResponseBody flatBody = outputStream -> {
             try (ZipOutputStream zos = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
-                ExportZipResult zipResult = writeTaskExportZipStreaming(exportEntries, zos);
+                TaskBundleExportService.ExportZipResult zipResult = taskBundleExportService.writeFlatZipStreaming(exportPlan, zos);
                 zos.finish();
-                logger.info("streaming export completed: taskId={} root={} exported={} skipped={}",
-                        taskId, taskRoot, zipResult.exportedCount, zipResult.skippedCount);
+                logger.info("streaming flat export completed: taskId={} root={} markdown={} collectedFiles={} markdownCount={} binaryCount={} zipEntries={} bytes={}",
+                        taskId,
+                        taskRoot,
+                        markdownPath,
+                        exportPlan.collectedFileCount(),
+                        exportPlan.markdownCount(),
+                        exportPlan.binaryCount(),
+                        zipResult.exportedCount(),
+                        zipResult.exportedBytes());
             } catch (IOException ex) {
-                logger.warn("streaming export failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+                logger.warn("streaming flat export failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
                 throw ex;
             }
         };
         return ResponseEntity.ok()
-                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .contentType(MediaType.parseMediaType("application/zip"))
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
-                .body(body);
+                .header("X-Export-Layout", layout)
+                .body(flatBody);
     }
+
+    private String normalizeExportLayout(String rawLayout) {
+        String normalized = trimToNullSafe(rawLayout);
+        if (normalized == null) {
+            return "flat";
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        if ("flat".equals(lower) || "raw".equals(lower)) {
+            return lower;
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unsupported export layout");
+    }
+
     private String buildSafeExportFilename(String taskId) {
         String raw = taskId == null ? "task" : taskId.trim();
         if (raw.isEmpty()) {
@@ -2619,6 +2677,7 @@ public class MobileMarkdownController {
     private TaskView fromRuntimeTask(TaskEntry task) {
         TaskView view = new TaskView();
         view.taskId = task.taskId;
+        view.storageKey = resolveStorageKeyFromPath(resolveAbsolutePathSafe(task.outputDir));
         String lockedTitle = trimToNullSafe(task.title);
         view.title = lockedTitle != null ? lockedTitle : deriveTaskTitle(task.videoUrl, task.taskId);
         view.videoUrl = task.videoUrl;
@@ -3847,23 +3906,107 @@ public class MobileMarkdownController {
             return List.of();
         }
         Map<String, TaskView> deduplicated = new LinkedHashMap<>();
+        Map<String, String> dedupKeyByIdentity = new LinkedHashMap<>();
         int anonymousSeq = 0;
         for (TaskView candidate : input) {
             if (candidate == null) {
                 continue;
             }
-            String key = trimToNullSafe(candidate.taskId);
+            Set<String> identityKeys = buildTaskIdentityKeys(candidate);
+            String key = null;
+            for (String identityKey : identityKeys) {
+                String existingKey = dedupKeyByIdentity.get(identityKey);
+                if (existingKey != null) {
+                    key = existingKey;
+                    break;
+                }
+            }
+            if (key == null && !identityKeys.isEmpty()) {
+                key = identityKeys.iterator().next();
+            }
             if (key == null) {
-                key = "__anonymous__" + (++anonymousSeq);
+                String normalizedTaskId = trimToNullSafe(candidate.taskId);
+                key = normalizedTaskId != null ? "taskId:" + normalizedTaskId : "__anonymous__" + (++anonymousSeq);
             }
             TaskView existing = deduplicated.get(key);
             if (existing == null) {
                 deduplicated.put(key, candidate);
-                continue;
+            } else {
+                deduplicated.put(key, choosePreferredTaskView(existing, candidate));
             }
-            deduplicated.put(key, choosePreferredTaskView(existing, candidate));
+            for (String identityKey : identityKeys) {
+                dedupKeyByIdentity.put(identityKey, key);
+            }
         }
         return new ArrayList<>(deduplicated.values());
+    }
+
+    private Set<String> buildTaskIdentityKeys(TaskView task) {
+        Set<String> keys = new LinkedHashSet<>();
+        if (task == null) {
+            return keys;
+        }
+        addTaskIdentityKey(keys, "taskId", trimToNullSafe(task.taskId));
+        if (task.taskId != null && task.taskId.startsWith(STORAGE_TASK_PREFIX)) {
+            addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.taskId.substring(STORAGE_TASK_PREFIX.length())));
+        }
+        addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.storageKey));
+        addStorageIdentityKey(keys, task.taskRootDir);
+        addStorageIdentityKey(keys, task.baseDir);
+        addStorageIdentityKey(keys, task.markdownPath);
+        addStorageIdentityKey(keys, resolveAbsolutePathSafe(task.resultPath));
+        if (task.runtimeTask != null) {
+            addStorageIdentityKey(keys, resolveAbsolutePathSafe(task.runtimeTask.outputDir));
+        }
+        return keys;
+    }
+
+    private void addTaskIdentityKey(Set<String> keys, String type, String rawValue) {
+        String normalizedValue = trimToNullSafe(rawValue);
+        if (normalizedValue == null || type == null || type.isBlank()) {
+            return;
+        }
+        keys.add(type + ":" + normalizedValue);
+    }
+
+    private void addStorageIdentityKey(Set<String> keys, Path candidatePath) {
+        String storageKey = resolveStorageKeyFromPath(candidatePath);
+        if (storageKey != null) {
+            addTaskIdentityKey(keys, "storageKey", storageKey);
+        }
+    }
+
+    private Path resolveAbsolutePathSafe(String rawPath) {
+        String normalized = trimToNullSafe(rawPath);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return Paths.get(normalized).toAbsolutePath().normalize();
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String resolveStorageKeyFromPath(Path candidatePath) {
+        if (candidatePath == null) {
+            return null;
+        }
+        try {
+            Path normalizedPath = candidatePath.toAbsolutePath().normalize();
+            Path storageRoot = resolveStorageRoot().toAbsolutePath().normalize();
+            if (!normalizedPath.startsWith(storageRoot)) {
+                return null;
+            }
+            Path relative = storageRoot.relativize(normalizedPath);
+            if (relative.getNameCount() == 0) {
+                return null;
+            }
+            String storageKey = trimToNullSafe(relative.getName(0).toString());
+            return isSafeStorageKey(storageKey) ? storageKey : null;
+        } catch (Exception ex) {
+            return null;
+        }
     }
 
     private TaskView choosePreferredTaskView(TaskView existing, TaskView candidate) {
