@@ -483,9 +483,7 @@ def save_grid_overlay_image(
     return bool(cv2.imwrite(str(output_image_path), rendered))
 
 
-def _resolve_top_banner_font(font_size: int):
-    from PIL import ImageFont  # type: ignore
-
+def _resolve_top_banner_font_path() -> Optional[Path]:
     candidate_paths: List[Path] = []
     windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
     candidate_paths.extend(
@@ -506,9 +504,24 @@ def _resolve_top_banner_font(font_size: int):
     for candidate in candidate_paths:
         try:
             if candidate.exists():
-                return ImageFont.truetype(str(candidate), size=max(1, int(font_size)))
+                return candidate
         except Exception:
             continue
+    return None
+
+
+def _resolve_top_banner_font(font_size: int):
+    try:
+        from PIL import ImageFont  # type: ignore
+    except Exception:
+        return None
+
+    candidate_path = _resolve_top_banner_font_path()
+    if candidate_path is not None:
+        try:
+            return ImageFont.truetype(str(candidate_path), size=max(1, int(font_size)))
+        except Exception:
+            pass
     for fallback_name in (
         "msyhbd.ttc",
         "msyh.ttc",
@@ -523,7 +536,7 @@ def _resolve_top_banner_font(font_size: int):
             return ImageFont.truetype(fallback_name, size=max(1, int(font_size)))
         except Exception:
             continue
-    return ImageFont.load_default()
+    return None
 
 
 def _wrap_text_to_pixel_width(draw: Any, text: str, font: Any, max_width_px: int) -> List[str]:
@@ -552,6 +565,18 @@ def _wrap_text_to_pixel_width(draw: Any, text: str, font: Any, max_width_px: int
         if current.strip():
             wrapped_lines.append(current.strip())
     return wrapped_lines
+
+
+def _normalize_banner_text_for_cv(text: str) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return ""
+    ascii_safe = "".join(ch if ord(ch) < 128 else " " for ch in normalized)
+    ascii_safe = re.sub(r"\s+", " ", ascii_safe).strip()
+    return ascii_safe or "Key point"
+
+
 
 
 def _build_top_reason_banner_layout(
@@ -602,18 +627,11 @@ def save_top_reason_banner_image(
     if not banner_text:
         return False
 
-    try:
-        from PIL import Image, ImageDraw  # type: ignore
-    except Exception:
+    image = cv2.imread(str(source_image_path), cv2.IMREAD_UNCHANGED)
+    if image is None or len(image.shape) < 2:
         return False
-
-    try:
-        with Image.open(source_image_path) as loaded_image:
-            image = loaded_image.convert("RGBA")
-    except Exception:
-        return False
-
-    width, height = image.size
+    image = _to_bgr(image)
+    height, width = int(image.shape[0]), int(image.shape[1])
     if width <= 0 or height <= 0:
         return False
 
@@ -632,27 +650,67 @@ def save_top_reason_banner_image(
     resolved_padding_x = int(layout["padding_x"])
     resolved_font_size = int(layout["font_size"])
     text_width_limit = max(1, box_width - (resolved_padding_x * 2))
-    draw_probe = ImageDraw.Draw(image)
 
-    chosen_font = _resolve_top_banner_font(resolved_font_size)
-    chosen_lines = _wrap_text_to_pixel_width(draw_probe, banner_text, chosen_font, text_width_limit)
-    if not chosen_lines:
-        return False
+    wrapped_lines: List[str] = []
+    text_width = 0
+    text_height = 0
+    line_height = 0
+    line_spacing = 0
+    baseline = 0
+    pil_font = None
+    pil_text_bbox = None
+    text_render_mode = "cv"
 
-    font_bbox = draw_probe.textbbox((0, 0), "Ag", font=chosen_font)
-    font_height = max(1, int(font_bbox[3] - font_bbox[1]))
-    chosen_spacing = max(0, int(round(font_height * max(0.0, float(line_height_multiplier) - 1.0))))
-    wrapped_text = "\n".join(chosen_lines)
-    chosen_text_bbox = draw_probe.multiline_textbbox(
-        (0, 0),
-        wrapped_text,
-        font=chosen_font,
-        spacing=chosen_spacing,
-        align="center",
-    )
+    try:
+        from PIL import Image, ImageDraw  # type: ignore
 
-    text_width = int(chosen_text_bbox[2] - chosen_text_bbox[0])
-    text_height = int(chosen_text_bbox[3] - chosen_text_bbox[1])
+        pil_font = _resolve_top_banner_font(resolved_font_size)
+        if pil_font is not None:
+            probe_canvas = Image.new("RGBA", (max(1, box_width), max(64, resolved_font_size * 6)), (0, 0, 0, 0))
+            probe_draw = ImageDraw.Draw(probe_canvas)
+            wrapped_lines = _wrap_text_to_pixel_width(probe_draw, banner_text, pil_font, text_width_limit)
+            if wrapped_lines:
+                wrapped_text = "\n".join(wrapped_lines)
+                font_bbox = probe_draw.textbbox((0, 0), "Ag", font=pil_font)
+                line_height = max(1, int(font_bbox[3] - font_bbox[1]))
+                line_spacing = max(0, int(round(line_height * max(0.0, float(line_height_multiplier) - 1.0))))
+                pil_text_bbox = probe_draw.multiline_textbbox(
+                    (0, 0),
+                    wrapped_text,
+                    font=pil_font,
+                    spacing=line_spacing,
+                    align="center",
+                )
+                text_width = int(pil_text_bbox[2] - pil_text_bbox[0])
+                text_height = int(pil_text_bbox[3] - pil_text_bbox[1])
+                text_render_mode = "pil"
+    except Exception:
+        text_render_mode = "cv"
+
+    if text_render_mode != "pil":
+        font_face, font_scale, thickness = _build_cv_text_measure(resolved_font_size)
+        wrapped_lines = _wrap_text_to_pixel_width_cv(
+            banner_text,
+            text_width_limit,
+            font_face,
+            font_scale,
+            thickness,
+        )
+        if not wrapped_lines:
+            return False
+        line_metrics = [
+            _measure_cv_text(line, font_face, font_scale, thickness)
+            for line in wrapped_lines
+            if str(line or "").strip()
+        ]
+        if not line_metrics:
+            return False
+        text_width = max(metric[0] for metric in line_metrics)
+        line_height = max(metric[1] for metric in line_metrics)
+        baseline = max(metric[2] for metric in line_metrics)
+        line_spacing = max(0, int(round(line_height * max(0.0, float(line_height_multiplier) - 1.0))))
+        text_height = (line_height * len(line_metrics)) + (line_spacing * max(0, len(line_metrics) - 1))
+
     box_height = text_height + (resolved_padding_y * 2)
     box_x0 = int(round((width - box_width) / 2.0))
     box_y0 = top_margin
@@ -661,34 +719,79 @@ def save_top_reason_banner_image(
     if box_y1 > height:
         return False
 
-    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    overlay_draw.rounded_rectangle(
-        (box_x0, box_y0, box_x1, box_y1),
-        radius=max(0, int(border_radius_px)),
-        fill=background_rgba,
+    overlay = image.copy()
+    cv2.rectangle(
+        overlay,
+        (int(box_x0), int(box_y0)),
+        (int(box_x1), int(box_y1)),
+        (int(background_rgba[0]), int(background_rgba[1]), int(background_rgba[2])),
+        thickness=-1,
+        lineType=cv2.LINE_AA,
     )
-    image = Image.alpha_composite(image, overlay)
+    alpha = max(0.0, min(1.0, float(background_rgba[3]) / 255.0))
+    rendered = cv2.addWeighted(overlay, alpha, image, 1.0 - alpha, 0.0)
 
-    text_draw = ImageDraw.Draw(image)
-    text_x = box_x0 + ((box_width - text_width) / 2.0) - float(chosen_text_bbox[0])
-    text_y = box_y0 + resolved_padding_y - float(chosen_text_bbox[1])
-    text_draw.multiline_text(
-        (text_x, text_y),
-        wrapped_text,
-        font=chosen_font,
-        fill=(255, 255, 255, 255),
-        spacing=chosen_spacing,
-        align="center",
-    )
+    if text_render_mode == "pil" and pil_font is not None and pil_text_bbox is not None:
+        from PIL import Image, ImageDraw  # type: ignore
+
+        text_canvas = Image.new("RGBA", (box_width, box_height), (0, 0, 0, 0))
+        text_draw = ImageDraw.Draw(text_canvas)
+        text_x = int(round((box_width - text_width) / 2.0 - float(pil_text_bbox[0])))
+        text_y = int(round(resolved_padding_y - float(pil_text_bbox[1])))
+        text_draw.multiline_text(
+            (text_x, text_y),
+            "\n".join(wrapped_lines),
+            font=pil_font,
+            fill=(255, 255, 255, 255),
+            spacing=line_spacing,
+            align="center",
+        )
+        text_rgba = np.asarray(text_canvas, dtype=np.uint8)
+        alpha_mask = text_rgba[:, :, 3:4].astype(np.float32) / 255.0
+        if float(alpha_mask.max()) > 0.0:
+            roi = rendered[box_y0:box_y1, box_x0:box_x1].astype(np.float32)
+            text_rgb = text_rgba[:, :, :3].astype(np.float32)
+            blended = roi * (1.0 - alpha_mask) + text_rgb * alpha_mask
+            rendered[box_y0:box_y1, box_x0:box_x1] = blended.astype(np.uint8)
+    else:
+        font_face, font_scale, thickness = _build_cv_text_measure(resolved_font_size)
+        cursor_y = int(box_y0 + resolved_padding_y + line_height)
+        for line in wrapped_lines:
+            clean_line = str(line or "").strip()
+            if not clean_line:
+                cursor_y += line_height + line_spacing
+                continue
+            line_width, _, baseline = _measure_cv_text(clean_line, font_face, font_scale, thickness)
+            text_x = int(round(box_x0 + ((box_width - line_width) / 2.0)))
+            text_y = int(cursor_y)
+            cv2.putText(
+                rendered,
+                clean_line,
+                (text_x, text_y),
+                fontFace=font_face,
+                fontScale=font_scale,
+                color=(255, 255, 255),
+                thickness=thickness,
+                lineType=cv2.LINE_AA,
+            )
+            cursor_y += line_height + baseline + line_spacing
 
     output_image_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_output_path = output_image_path.with_name(f"{output_image_path.stem}.banner_tmp{output_image_path.suffix}")
     try:
         if output_image_path.suffix.lower() in {".jpg", ".jpeg"}:
-            image.convert("RGB").save(output_image_path, quality=95, subsampling=0)
+            ok = cv2.imwrite(str(temp_output_path), rendered, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
         else:
-            image.save(output_image_path)
+            ok = cv2.imwrite(str(temp_output_path), rendered)
+        if not ok or not temp_output_path.exists():
+            return False
+        os.replace(temp_output_path, output_image_path)
     except Exception:
+        try:
+            if temp_output_path.exists():
+                temp_output_path.unlink()
+        except Exception:
+            pass
         return False
     return True
 

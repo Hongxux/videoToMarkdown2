@@ -319,6 +319,24 @@ def test_save_top_reason_banner_image_renders_top_overlay(tmp_path):
     assert int(np.mean(top_sample)) < 235
 
 
+def test_save_top_reason_banner_image_supports_same_path_output(tmp_path):
+    image_path = Path(tmp_path) / "frame_banner_same_path.jpg"
+    image = np.full((720, 1280, 3), 228, dtype=np.uint8)
+    assert cv2.imwrite(str(image_path), image)
+
+    assert save_top_reason_banner_image(
+        source_image_path=image_path,
+        output_image_path=image_path,
+        text="请关注这里的关键状态变化。",
+    )
+
+    rendered = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+    assert rendered is not None
+    top_sample = rendered[30:120, 80:1200]
+    assert top_sample.size > 0
+    assert int(np.mean(top_sample)) < 228
+
+
 def test_build_top_reason_banner_layout_uses_height_div_40_formula():
     hd_layout = _build_top_reason_banner_layout(image_width=1920, image_height=1080)
     qhd_layout = _build_top_reason_banner_layout(image_width=2560, image_height=1440)

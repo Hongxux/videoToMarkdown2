@@ -16,6 +16,8 @@
   - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
     - 新增 CV 路由执行器选择：Windows 命中 `concrete_forward` profile 时切到线程池，保留 forward-search 逻辑但绕开进程级 spawn 崩溃面。
     - 仅在进程池模式下执行 warmup。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
+    - 将 tutorial keyframe 顶部原因 banner 从 PIL 原地重写改为 OpenCV 渲染，并先写临时文件再原子替换目标图，缩小图片后处理的 native 崩溃面。
   - `services/python_grpc/src/vision_validation/worker.py`
     - 将 SHM 句柄缓存改为线程局部存储，避免一个线程释放句柄时误伤另一个并发任务。
     - 将轻量 `ScreenshotSelector` 改为线程局部缓存，避免同进程多线程共享选择器实例。
@@ -24,6 +26,7 @@
   - `pytest services/python_grpc/src/content_pipeline/tests/test_worker_shm_release.py -q`
   - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/vision_validation/worker.py`
   - 任务 `var/storage/storage/cf0709da1f054891626d603463037839` 在“从现有 `semantic_unit_clips_vl` 继续、不重切片”的条件下重跑成功，产出 `62` 个 clip requests 与 `84` 个 screenshot requests，未再复现 `-1073741819`。
+  - `var/storage/storage/8ee46a849615baf562160d7e3b7ac7d3` 从现有 `semantic_unit_clips_vl` 继续有效复跑成功，产出 `7` 个 clip requests、`8` 个 screenshot requests，`SU003/SU004` 的 tutorial 资产与 keyframe 图片均已落盘。
 - 预防：
   - Windows 下凡是 `SharedMemory + OpenCV + 并发执行器` 组合，优先审计“是否必须用进程池”；若子任务本身已是外部进程或可线程安全复用，应优先线程化。
   - 共享内存句柄与轻量视觉选择器默认按线程/worker 隔离，避免把“进程隔离假设”错误复用到线程并发模型。

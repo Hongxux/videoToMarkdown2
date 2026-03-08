@@ -9,12 +9,14 @@
   - 保留 concrete 的 2s forward-search 语义，不做功能降级。
   - 将 unit 流式切片外层执行器改为 `ThreadPoolExecutor`，避免重复 spawn 大模块。
   - 将 Windows 且命中 `concrete_forward` profile 的截图 CV 路由切换到线程池执行，并把 SHM 句柄与轻量 `ScreenshotSelector` 改为线程局部缓存。
+  - 将 tutorial keyframe 顶部原因 banner 从 PIL 原地重写切换为 OpenCV 渲染 + 临时文件替换，缩小截图后处理阶段的 native 崩溃面。
 - 调用链变化：
   - 原链路：`VLMaterialGenerator.generate -> flow_ops.optimize_screenshots_streaming_pipeline -> ProcessPoolExecutor(run_screenshot_selection_task)`。
   - 新链路：`VLMaterialGenerator.generate -> flow_ops.optimize_screenshots_streaming_pipeline -> Windows+concrete_forward 命中线程池 -> thread-local ScreenshotSelector/SHM handles -> run_screenshot_selection_task`。
 - 验证：
   - 定向测试通过：`test_vl_tutorial_flow.py` 相关截图/执行器用例、`test_worker_shm_release.py`。
   - 任务 `var/storage/storage/cf0709da1f054891626d603463037839` 从现有切片继续重跑成功，产出 `62` 个 clip requests 与 `84` 个 screenshot requests。
+  - 任务 `var/storage/storage/8ee46a849615baf562160d7e3b7ac7d3` 通过文件脚本入口从现有切片继续重跑成功，产出 `7` 个 clip requests 与 `8` 个 screenshot requests。
 - 经验：
   - 当子任务本身已经通过 `python` / `ffmpeg` 落到外部进程时，外层再套一层进程池通常只会增加 Windows `spawn` 风险，而不会增加真实吞吐。
   - Windows 并发模型切换为线程池后，必须同步把 SHM 句柄和轻量视觉选择器改为线程局部资源，避免“线程成功替代进程，但资源缓存仍按进程假设设计”的隐性崩溃。

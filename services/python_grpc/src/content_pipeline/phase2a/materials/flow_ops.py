@@ -97,6 +97,7 @@ def _should_use_threaded_cv_executor(generator, screenshot_requests: List[Dict[s
 
 
 def _resolve_cv_route_executor(generator, screenshot_requests: List[Dict[str, Any]], max_workers: int, init_cv_worker):
+    from concurrent.futures import ProcessPoolExecutor
     if _should_use_threaded_cv_executor(generator, screenshot_requests):
         try:
             init_cv_worker()
