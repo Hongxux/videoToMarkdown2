@@ -91,6 +91,7 @@ def test_split_video_by_semantic_units_passes_pre_cut_low_res_args(monkeypatch):
         {
             "semantic_split_pre_cut": {
                 "enabled": True,
+                "apply_to_all_units": True,
                 "large_segment_threshold_sec": 90.0,
                 "downscale_height": 480,
                 "video_bitrate": "500k",
@@ -110,12 +111,16 @@ def test_split_video_by_semantic_units_passes_pre_cut_low_res_args(monkeypatch):
         assert clips_dir == str(output_dir / "semantic_unit_clips_vl")
         assert "cmd" in captured
         cmd = captured["cmd"]
+        assert "--stream-unit-layout" in cmd
         assert "--large-segment-threshold-sec" in cmd
         assert cmd[cmd.index("--large-segment-threshold-sec") + 1] == "90.000"
         assert "--large-segment-scale-height" in cmd
         assert cmd[cmd.index("--large-segment-scale-height") + 1] == "480"
         assert "--large-segment-video-bitrate" in cmd
         assert cmd[cmd.index("--large-segment-video-bitrate") + 1] == "500k"
+        assert "--apply-low-res-to-all-units" in cmd
+        assert "--stream-unit-layout" in cmd
+        assert "--apply-low-res-to-all-units" in cmd
     finally:
         shutil.rmtree(sandbox_dir, ignore_errors=True)
 
@@ -154,9 +159,11 @@ def test_split_video_by_semantic_units_skips_pre_cut_args_when_disabled(monkeypa
         )
         assert "cmd" in captured
         cmd = captured["cmd"]
+        assert "--stream-unit-layout" in cmd
         assert "--large-segment-threshold-sec" not in cmd
         assert "--large-segment-scale-height" not in cmd
         assert "--large-segment-video-bitrate" not in cmd
+        assert "--apply-low-res-to-all-units" not in cmd
     finally:
         shutil.rmtree(sandbox_dir, ignore_errors=True)
 
@@ -175,7 +182,9 @@ def test_split_video_by_semantic_units_only_splits_missing_units(monkeypatch):
     video_path.write_bytes(b"video")
 
     # 模拟路由预处理阶段已经先切过一次 SU006。
-    (clips_dir / "001_SU006_demo_614.00-884.00.mp4").write_bytes(b"clip")
+    stream_unit_dir = clips_dir / "_stream_units" / "SU006"
+    stream_unit_dir.mkdir(parents=True, exist_ok=True)
+    (stream_unit_dir / "001_SU006_demo_614.00-884.00.mp4").write_bytes(b"clip")
 
     captured: Dict[str, Any] = {}
 
@@ -201,6 +210,7 @@ def test_split_video_by_semantic_units_only_splits_missing_units(monkeypatch):
         assert returned_dir == str(clips_dir)
         assert "cmd" in captured
         cmd = captured["cmd"]
+        assert "--stream-unit-layout" in cmd
         assert "--semantic-units" in cmd
         subset_json = Path(cmd[cmd.index("--semantic-units") + 1])
         subset_payload = json.loads(subset_json.read_text(encoding="utf-8"))
@@ -208,3 +218,26 @@ def test_split_video_by_semantic_units_only_splits_missing_units(monkeypatch):
         assert subset_unit_ids == ["SU002", "SU004"]
     finally:
         shutil.rmtree(sandbox_dir, ignore_errors=True)
+
+
+def test_find_clip_for_unit_prefers_stream_unit_layout(tmp_path):
+    clips_dir = tmp_path / "semantic_unit_clips_vl"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_clip = clips_dir / "001_SU006_demo_614.00-884.00.mp4"
+    legacy_clip.write_bytes(b"legacy")
+
+    stream_unit_dir = clips_dir / "_stream_units" / "SU006"
+    stream_unit_dir.mkdir(parents=True, exist_ok=True)
+    stream_clip = stream_unit_dir / "001_SU006_demo_614.00-884.00.mp4"
+    stream_clip.write_bytes(b"stream")
+
+    selected = flow_ops.find_clip_for_unit(
+        generator=None,
+        clips_dir=str(clips_dir),
+        unit_id="SU006",
+        start_sec=614.0,
+        end_sec=884.0,
+    )
+
+    assert selected == str(stream_clip)

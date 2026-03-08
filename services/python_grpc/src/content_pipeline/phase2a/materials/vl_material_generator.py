@@ -25,7 +25,7 @@ import inspect
 import functools
 import threading
 import subprocess
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections import deque
 from datetime import datetime, timezone
@@ -223,6 +223,8 @@ def _split_single_unit_clip_worker(
                 large_segment_video_bitrate,
             ]
         )
+        if bool(split_cfg.get("apply_to_all_units", False)):
+            cmd.append("--apply-low-res-to-all-units")
 
     process = subprocess.run(cmd, capture_output=True, text=True)
     if process.returncode != 0:
@@ -1098,7 +1100,8 @@ class VLMaterialGenerator:
             return 1
 
         raw_value = self.vl_parallel_workers
-        desired_workers = unit_count
+        cpu_count = max(1, int(os.cpu_count() or 4))
+        desired_workers = max(2, min(4, max(1, cpu_count // 2)))
         if isinstance(raw_value, int):
             desired_workers = raw_value
         else:
@@ -1107,7 +1110,7 @@ class VLMaterialGenerator:
                 try:
                     desired_workers = int(config_value)
                 except (TypeError, ValueError):
-                    desired_workers = unit_count
+                    desired_workers = max(2, min(4, max(1, cpu_count // 2)))
 
         return max(1, min(desired_workers, self.vl_parallel_hard_cap, unit_count))
 
@@ -1123,7 +1126,8 @@ class VLMaterialGenerator:
         else:
             config_value = str(raw_value or "").strip().lower()
             if config_value in {"", "auto"}:
-                desired_workers = max(1, (os.cpu_count() or 4) - 1)
+                cpu_count = max(1, int(os.cpu_count() or 4))
+                desired_workers = max(1, min(2, max(1, cpu_count // 4)))
             else:
                 try:
                     desired_workers = int(config_value)
@@ -1138,6 +1142,18 @@ class VLMaterialGenerator:
             semantic_unit.get("knowledge_type", "")
         )
         return knowledge_type in set(self.stream_pipeline_knowledge_types or set())
+
+    def _create_stream_split_executor(self, *, worker_count: int) -> ThreadPoolExecutor:
+        """
+        创建 unit 流式切片执行器。
+
+        切片阶段的实际重活已经在 `_split_single_unit_clip_worker` 内部通过独立
+        `python + ffmpeg` 子进程完成；外层再套一层 `ProcessPoolExecutor` 会让
+        Windows `spawn` 反复重导 `vl_material_generator.py` 整个大模块，显著放大
+        原生依赖初始化与进程级崩溃风险。这里改为线程池，既保留并发切片能力，
+        又避免重复 spawn 大进程。
+        """
+        return ThreadPoolExecutor(max_workers=max(1, int(worker_count or 1)))
 
     def _build_vl_unit_task_blueprints(
         self,
@@ -2183,10 +2199,7 @@ class VLMaterialGenerator:
         Whether to merge multi-step clips back into one clip (legacy compatibility).
         """
         knowledge_type = (unit.get("knowledge_type", "") or "").lower()
-        start_sec = float(unit.get("start_sec", 0.0))
-        end_sec = float(unit.get("end_sec", 0.0))
-        duration = max(0.0, end_sec - start_sec)
-        return knowledge_type == "process" and duration > self.process_duration_threshold_sec and bool(unit.get("mult_steps", False))
+        return knowledge_type == "process" and bool(unit.get("mult_steps", False))
 
     def _collect_segments_from_clip(self, clip: Dict[str, Any]) -> List[Dict[str, float]]:
         """
@@ -2285,7 +2298,6 @@ class VLMaterialGenerator:
         return (
             knowledge_type == "process"
             and bool(semantic_unit.get("mult_steps", False))
-            and float(duration_sec) > float(self.process_duration_threshold_sec)
         )
 
     def _build_tutorial_extra_prompt(self) -> str:
@@ -4463,7 +4475,7 @@ class VLMaterialGenerator:
         if unit_duration_sec <= 0.0:
             return kept_segments
 
-        output_dir = str(Path(clips_dir).parent)
+        output_dir = str(getattr(self, "_current_subtitle_output_dir", "") or Path(clips_dir).parent)
         self._current_subtitle_output_dir = output_dir
         all_subtitles = self._load_subtitles_for_output_dir(output_dir)
         unit_subtitles = self._build_unit_relative_subtitles(all_subtitles, unit_start_sec, unit_end_sec)
@@ -5735,7 +5747,8 @@ class VLMaterialGenerator:
                     "pre_context_prompt": context_prompt,
                 }
 
-            pruned_dir = Path(clips_dir) / "vl_pruned_clips"
+            clip_parent_dir = Path(original_clip_path).resolve().parent if str(original_clip_path or "").strip() else Path(clips_dir)
+            pruned_dir = clip_parent_dir / "vl_pruned_clips"
             pruned_name = f"{Path(original_clip_path).stem}_pruned.mp4"
             pruned_clip_path = str(pruned_dir / pruned_name)
 
@@ -5927,9 +5940,10 @@ class VLMaterialGenerator:
         )
 
         logger.info(
-            "[VL-UnitStream] start: units=%s, split_workers=%s, analysis_workers=%s, backpressure=%s",
+            "[VL-UnitStream] start: units=%s, split_workers=%s, split_executor=%s, analysis_workers=%s, backpressure=%s",
             len(unit_blueprints),
             split_worker_count,
+            "thread",
             analysis_worker_count,
             backpressure_limit,
         )
@@ -6003,7 +6017,7 @@ class VLMaterialGenerator:
             pending_analysis_tasks.add(task)
 
         loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=split_worker_count) as split_executor:
+        with self._create_stream_split_executor(worker_count=split_worker_count) as split_executor:
             async def _run_single_split(unit_blueprint: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 split_payload = await loop.run_in_executor(
                     split_executor,
@@ -6241,102 +6255,125 @@ class VLMaterialGenerator:
         # 如果没有缓存,执桢畬整的VL分析流程
         if not all_screenshot_requests and not all_clip_requests:
             try:
+                all_vl_semantic_units = list(semantic_units)
+                aggregated_analysis_results: List[Any] = []
+                aggregated_task_metadata: List[Dict[str, Any]] = []
+                stream_semantic_units: List[Dict[str, Any]] = []
+                legacy_pipeline_units: List[Dict[str, Any]] = list(all_vl_semantic_units)
+
                 use_stream_unit_pipeline = bool(self.stream_unit_pipeline_enabled)
                 if use_stream_unit_pipeline:
-                    stream_unsupported_units = [
-                        str(unit.get("unit_id", "") or "")
-                        for unit in semantic_units
-                        if not self._should_stream_pipeline_for_unit(unit if isinstance(unit, dict) else {})
-                    ]
-                    if stream_unsupported_units:
-                        use_stream_unit_pipeline = False
+                    legacy_pipeline_units = []
+                    legacy_unit_ids_sample: List[str] = []
+                    for unit in all_vl_semantic_units:
+                        semantic_unit = unit if isinstance(unit, dict) else {}
+                        if self._should_stream_pipeline_for_unit(semantic_unit):
+                            stream_semantic_units.append(unit)
+                            continue
+                        legacy_pipeline_units.append(unit)
+                        unit_id = str(semantic_unit.get("unit_id", "") or "")
+                        if unit_id and len(legacy_unit_ids_sample) < 3:
+                            legacy_unit_ids_sample.append(unit_id)
+
+                    if stream_semantic_units and legacy_pipeline_units:
                         logger.info(
-                            "[VL-UnitStream] fallback to legacy pipeline because unsupported knowledge types exist: count=%s, sample=%s",
-                            len(stream_unsupported_units),
-                            stream_unsupported_units[:3],
+                            "[VL-UnitStream] hybrid mode: stream_units=%s, legacy_units=%s, legacy_sample=%s",
+                            len(stream_semantic_units),
+                            len(legacy_pipeline_units),
+                            legacy_unit_ids_sample,
+                        )
+                    elif stream_semantic_units:
+                        logger.info(
+                            "[VL-UnitStream] enabled: process/concrete units will be split+analyzed in streaming mode"
+                        )
+                    else:
+                        logger.info(
+                            "[VL-UnitStream] no eligible units for streaming; fallback to legacy pipeline"
                         )
 
-                if use_stream_unit_pipeline:
-                    logger.info(
-                        "[VL-UnitStream] enabled: process/concrete units will be split+analyzed in streaming mode"
-                    )
+                if stream_semantic_units:
                     analysis_results, task_metadata, _legacy_fallback_materials, pruned_units = await self._run_stream_unit_pipeline(
                         video_path=video_path,
-                        semantic_units=semantic_units,
+                        semantic_units=stream_semantic_units,
                         resolved_output_dir=resolved_output_dir,
                         all_clip_requests=all_clip_requests,
                         all_screenshot_requests=all_screenshot_requests,
                         token_stats=token_stats,
                     )
+                    aggregated_analysis_results.extend(analysis_results)
+                    aggregated_task_metadata.extend(task_metadata)
                     token_stats["pruned_units"] += pruned_units
 
-                    if self.merge_multistep_clip_requests:
-                        all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
+                    if not legacy_pipeline_units:
+                        if self.merge_multistep_clip_requests:
+                            all_clip_requests = self._merge_multistep_clip_requests(all_vl_semantic_units, all_clip_requests)
 
-                    token_stats["saved_tokens_est"] = max(
-                        0,
-                        int(token_stats["total_tokens_baseline_est"] - token_stats["total_tokens_actual"]),
-                    )
-                    if token_stats["total_tokens_baseline_est"] > 0:
-                        token_stats["saved_ratio_est"] = float(token_stats["saved_tokens_est"]) / float(
-                            token_stats["total_tokens_baseline_est"]
+                        token_stats["saved_tokens_est"] = max(
+                            0,
+                            int(token_stats["total_tokens_baseline_est"] - token_stats["total_tokens_actual"]),
                         )
-                    else:
-                        token_stats["saved_ratio_est"] = 0.0
+                        if token_stats["total_tokens_baseline_est"] > 0:
+                            token_stats["saved_ratio_est"] = float(token_stats["saved_tokens_est"]) / float(
+                                token_stats["total_tokens_baseline_est"]
+                            )
+                        else:
+                            token_stats["saved_ratio_est"] = 0.0
 
-                    logger.info(
-                        "[VL-Token] units=%s, legacy_action=%s, pruned=%s, actual_total=%s, baseline_est=%s, saved_est=%s, saved_ratio=%.2f%%",
-                        token_stats.get("vl_units", 0),
-                        token_stats.get("stable_action_legacy_units", 0),
-                        token_stats.get("pruned_units", 0),
-                        token_stats.get("total_tokens_actual", 0),
-                        token_stats.get("total_tokens_baseline_est", 0),
-                        token_stats.get("saved_tokens_est", 0),
-                        float(token_stats.get("saved_ratio_est", 0.0)) * 100.0,
-                    )
-                    unit_analysis_outputs = self._serialize_unit_analysis_outputs(
-                        analysis_results=analysis_results,
-                        task_metadata=task_metadata,
-                    )
-
-                    if self.config.get("save_cache", True):
-                        self._save_vl_results(
-                            cache_path=cache_path,
-                            analysis_results=analysis_results,
-                            task_metadata=task_metadata,
-                            screenshot_requests=all_screenshot_requests,
-                            clip_requests=all_clip_requests,
+                        logger.info(
+                            "[VL-Token] units=%s, legacy_action=%s, pruned=%s, actual_total=%s, baseline_est=%s, saved_est=%s, saved_ratio=%.2f%%",
+                            token_stats.get("vl_units", 0),
+                            token_stats.get("stable_action_legacy_units", 0),
+                            token_stats.get("pruned_units", 0),
+                            token_stats.get("total_tokens_actual", 0),
+                            token_stats.get("total_tokens_baseline_est", 0),
+                            token_stats.get("saved_tokens_est", 0),
+                            float(token_stats.get("saved_ratio_est", 0.0)) * 100.0,
+                        )
+                        unit_analysis_outputs = self._serialize_unit_analysis_outputs(
+                            analysis_results=aggregated_analysis_results,
+                            task_metadata=aggregated_task_metadata,
                         )
 
-                    if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
-                        logger.info(f"开始批閲?CV 优化 {len(all_screenshot_requests)} 个截图请姹?..")
-                        all_screenshot_requests = await self._apply_screenshot_optimization_with_bypass(
+                        if self.config.get("save_cache", True):
+                            self._save_vl_results(
+                                cache_path=cache_path,
+                                analysis_results=aggregated_analysis_results,
+                                task_metadata=aggregated_task_metadata,
+                                screenshot_requests=all_screenshot_requests,
+                                clip_requests=all_clip_requests,
+                            )
+
+                        if self.screenshot_config.get("enabled", True) and all_screenshot_requests:
+                            logger.info(f"开始批閲?CV 优化 {len(all_screenshot_requests)} 个截图请姹?..")
+                            all_screenshot_requests = await self._apply_screenshot_optimization_with_bypass(
+                                video_path=video_path,
+                                screenshot_requests=all_screenshot_requests,
+                            )
+                        if all_screenshot_requests:
+                            all_screenshot_requests = self._dedupe_incremental_legacy_drop_tail_screenshots(
+                                video_path=video_path,
+                                screenshot_requests=all_screenshot_requests,
+                            )
+
+                        result.clip_requests = all_clip_requests
+                        result.screenshot_requests = all_screenshot_requests
+                        result.token_stats = token_stats
+                        result.unit_analysis_outputs = unit_analysis_outputs
+                        self._write_phase2a_token_cost_audit(
+                            output_dir=resolved_output_dir,
+                            token_stats=token_stats,
+                            unit_analysis_outputs=unit_analysis_outputs,
                             video_path=video_path,
-                            screenshot_requests=all_screenshot_requests,
                         )
-                    if all_screenshot_requests:
-                        all_screenshot_requests = self._dedupe_incremental_legacy_drop_tail_screenshots(
-                            video_path=video_path,
-                            screenshot_requests=all_screenshot_requests,
+                        result.success = True
+                        logger.info(
+                            "[VL-UnitStream] finished: clips=%s, screenshots=%s",
+                            len(result.clip_requests),
+                            len(result.screenshot_requests),
                         )
+                        return result
 
-                    result.clip_requests = all_clip_requests
-                    result.screenshot_requests = all_screenshot_requests
-                    result.token_stats = token_stats
-                    result.unit_analysis_outputs = unit_analysis_outputs
-                    self._write_phase2a_token_cost_audit(
-                        output_dir=resolved_output_dir,
-                        token_stats=token_stats,
-                        unit_analysis_outputs=unit_analysis_outputs,
-                        video_path=video_path,
-                    )
-                    result.success = True
-                    logger.info(
-                        "[VL-UnitStream] finished: clips=%s, screenshots=%s",
-                        len(result.clip_requests),
-                        len(result.screenshot_requests),
-                    )
-                    return result
+                semantic_units = legacy_pipeline_units
 
                 # 1. 切割视频为语义单元片娈?
                 logger.info(f"开始切割视棰? {video_path}")
@@ -6393,7 +6430,6 @@ class VLMaterialGenerator:
                         }
                     )
 
-                token_stats["vl_units"] = len(unit_tasks)
                 logger.info(
                     f"[VL-PrePrune] dispatch units={len(unit_tasks)}, skipped={len(semantic_units) - len(unit_tasks)}"
                 )
@@ -6433,7 +6469,7 @@ class VLMaterialGenerator:
                         vl_unit_tasks.append(task)
                         vl_pre_prune_results.append(pre_prune_info)
 
-                token_stats["stable_action_legacy_units"] = len(legacy_action_tasks)
+                token_stats["stable_action_legacy_units"] += len(legacy_action_tasks)
                 legacy_fallback_materials: Dict[str, LegacyFallbackMaterial] = {}
                 if legacy_action_tasks:
                     logger.info(
@@ -6451,7 +6487,7 @@ class VLMaterialGenerator:
                     vl_pre_prune_results.extend(legacy_dispatch_plan.vl_pre_prune_results)
                     legacy_fallback_materials = dict(legacy_dispatch_plan.fallback_materials)
 
-                token_stats["vl_units"] = len(vl_unit_tasks)
+                token_stats["vl_units"] += len(vl_unit_tasks)
                 if legacy_action_tasks:
                     logger.info(
                         "[VL-PrePrune] legacy-action queued into VL: queued=%s, fallback_only=%s",
@@ -6491,6 +6527,8 @@ class VLMaterialGenerator:
                         on_result=_on_stream_result,
                     )
                 token_stats["pruned_units"] += pruned_units
+                aggregated_analysis_results.extend(analysis_results)
+                aggregated_task_metadata.extend(task_metadata)
                 
                 # 收集所有成功的分析结果
                 for idx, analysis_result in enumerate(analysis_results):
@@ -6538,7 +6576,7 @@ class VLMaterialGenerator:
 
                 
                 if self.merge_multistep_clip_requests:
-                    all_clip_requests = self._merge_multistep_clip_requests(semantic_units, all_clip_requests)
+                    all_clip_requests = self._merge_multistep_clip_requests(all_vl_semantic_units, all_clip_requests)
                 logger.info(f"VL 分析汇鎬? clips={len(all_clip_requests)}, screenshots={len(all_screenshot_requests)}")
 
                 token_stats["saved_tokens_est"] = max(
@@ -6561,16 +6599,16 @@ class VLMaterialGenerator:
                     float(token_stats.get("saved_ratio_est", 0.0)) * 100.0,
                 )
                 unit_analysis_outputs = self._serialize_unit_analysis_outputs(
-                    analysis_results=analysis_results,
-                    task_metadata=task_metadata,
+                    analysis_results=aggregated_analysis_results,
+                    task_metadata=aggregated_task_metadata,
                 )
                 
                 # 保存VL分析原始结果(CV优化鍓?
                 if self.config.get("save_cache", True):
                     self._save_vl_results(
                         cache_path=cache_path,
-                        analysis_results=analysis_results,
-                        task_metadata=task_metadata,
+                        analysis_results=aggregated_analysis_results,
+                        task_metadata=aggregated_task_metadata,
                         screenshot_requests=all_screenshot_requests,
                         clip_requests=all_clip_requests
                     )
@@ -6800,7 +6838,7 @@ class VLMaterialGenerator:
         semantic_unit: Dict[str, Any],
         analysis_mode: str,
     ) -> None:
-        """补齐截图请求上下文，确保 concrete 能稳定旁路 CV 评分。"""
+        """补齐截图请求上下文，保留 concrete 向后搜寻 2s 所需的窗口与预取参数。"""
         if not screenshot_requests:
             return
 
@@ -6820,18 +6858,27 @@ class VLMaterialGenerator:
             if unit_knowledge_type and not request_knowledge_type:
                 item["knowledge_type"] = unit_knowledge_type
 
-            if str(item.get("analysis_mode", "") or "").strip().lower() == "concrete":
+            resolved_mode = str(item.get("analysis_mode", "") or "").strip().lower()
+            resolved_knowledge_type = self._normalize_should_type(item.get("knowledge_type", ""))
+            if resolved_mode == "concrete" or resolved_knowledge_type == "concrete":
                 concrete_ts = max(0.0, safe_float(item.get("timestamp_sec", 0.0), 0.0))
-                item.setdefault("_window_start_sec", concrete_ts)
+                concrete_profile = self._resolve_concrete_forward_search_profile()
+                item["_window_start_sec"] = concrete_ts
+                item["_window_end_sec"] = concrete_ts + float(concrete_profile["forward_after_seconds"])
+                item["_cv_prefetch_profile"] = str(concrete_profile["profile_key"])
+                item["_prefetch_chunk_max_span_seconds"] = float(concrete_profile["chunk_max_span_seconds"])
+                item["_prefetch_chunk_max_requests"] = int(concrete_profile["chunk_max_requests"])
+                item["_prefetch_sample_rate"] = int(concrete_profile["sample_rate"])
+                item["_prefetch_target_height"] = int(concrete_profile["target_height"])
 
     def _should_bypass_screenshot_cv_optimization(self, request: Dict[str, Any]) -> bool:
         """
-        concrete 截图保持 VL 时间戳直出，不参与后续 CV 评分优化。
-        这样可以避免 concrete 单元在截图阶段再次引入长尾延迟。
+        仅对显式标记的请求跳过 CV 优化。
         """
         if not isinstance(request, dict):
             return False
         return bool(request.get("_skip_cv_optimization", False))
+
 
     async def _apply_screenshot_optimization_with_bypass(
         self,
@@ -6840,8 +6887,8 @@ class VLMaterialGenerator:
         screenshot_requests: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
         """
-        对截图优化增加“concrete 直出”旁路策略：
-        - concrete 请求：直接保留 VL 时间戳；
+        对截图优化增加“显式旁路”策略：
+        - 显式标记 `_skip_cv_optimization` 的请求：直接保留当前时间戳；
         - 其他请求：继续走既有 CV 优化链路。
         """
         if not screenshot_requests:
@@ -7100,6 +7147,67 @@ class VLMaterialGenerator:
         )
         threshold_ms = safe_float(raw_value, 200.0)
         return max(0.0, min(5000.0, float(threshold_ms)))
+
+    def _resolve_concrete_forward_search_profile(self) -> Dict[str, Any]:
+        """解析 concrete 截图的轻量 forward-search 配置。"""
+        _, default_after = self._resolve_screenshot_time_window()
+        base_sample_rate = max(1, int(self.screenshot_config.get("prefetch_sample_rate", 2) or 2))
+        base_target_height = max(0, int(self.screenshot_config.get("prefetch_target_height", 360) or 360))
+        base_chunk_max_requests = max(1, int(self.screenshot_config.get("prefetch_chunk_max_requests", 1000) or 1000))
+
+        forward_after_seconds = max(
+            0.0,
+            safe_float(
+                self.screenshot_config.get("concrete_forward_search_after_seconds", default_after),
+                default_after,
+            ),
+        )
+        chunk_max_span_seconds = max(
+            0.5,
+            safe_float(
+                self.screenshot_config.get(
+                    "concrete_prefetch_chunk_max_span_seconds",
+                    max(2.5, forward_after_seconds + 0.5),
+                ),
+                max(2.5, forward_after_seconds + 0.5),
+            ),
+        )
+        chunk_max_requests = max(
+            1,
+            int(
+                safe_float(
+                    self.screenshot_config.get("concrete_prefetch_chunk_max_requests", min(64, base_chunk_max_requests)),
+                    min(64, base_chunk_max_requests),
+                )
+            ),
+        )
+        sample_rate = max(
+            base_sample_rate,
+            int(
+                safe_float(
+                    self.screenshot_config.get("concrete_prefetch_sample_rate", max(base_sample_rate, 3)),
+                    max(base_sample_rate, 3),
+                )
+            ),
+        )
+        default_target_height = min(base_target_height, 240) if base_target_height > 0 else 240
+        target_height = max(
+            0,
+            int(
+                safe_float(
+                    self.screenshot_config.get("concrete_prefetch_target_height", default_target_height),
+                    default_target_height,
+                )
+            ),
+        )
+        return {
+            "forward_after_seconds": forward_after_seconds,
+            "chunk_max_span_seconds": chunk_max_span_seconds,
+            "chunk_max_requests": chunk_max_requests,
+            "sample_rate": sample_rate,
+            "target_height": target_height,
+            "profile_key": "concrete_forward",
+        }
 
     def _resolve_max_workers(self, request_count: int) -> int:
         """解析截图并发 worker 数量上限。"""

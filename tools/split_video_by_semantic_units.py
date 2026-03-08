@@ -22,6 +22,7 @@ import argparse
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -98,6 +99,38 @@ def _sanitize_filename_component(text: str, max_len: int = 40) -> str:
     return _sanitize_filename_component_impl(text, max_len=max_len)
 
 
+def _sanitize_stream_unit_folder_name(unit_id: str) -> str:
+    """
+    做什么：将语义单元 ID 清洗为 `_stream_units/<unit_id>/` 目录名。
+    为什么这样做：统一批量切片与流式单元切片的目录布局，避免根目录与子目录双份产物。
+    权衡：目录名会丢失少量特殊字符，但可换取跨平台路径稳定性。
+    """
+
+    cleaned = _sanitize_filename_component(unit_id, max_len=64)
+    return cleaned.strip("._") or "UNKNOWN_UNIT"
+
+
+def _build_output_path(
+    *,
+    out_dir: str,
+    out_name: str,
+    unit_id: str,
+    stream_unit_layout: bool,
+) -> str:
+    """
+    做什么：根据目录布局策略构造输出文件路径。
+    为什么这样做：让 `_stream_units` 成为 VL 输入片段的唯一规范落盘位置，同时保留旧布局兼容能力。
+    权衡：manifest 中的 `out_path` 可能从根目录文件变为子目录文件，但调用方可通过 manifest 精确定位。
+    """
+
+    base_dir = Path(out_dir)
+    if not stream_unit_layout:
+        return str(base_dir / out_name)
+
+    unit_folder = _sanitize_stream_unit_folder_name(unit_id)
+    return str(base_dir / "_stream_units" / unit_folder / out_name)
+
+
 def ffprobe_duration(video_path: str) -> float:
     """
     做什么：用 ffprobe 获取视频总时长（秒）。
@@ -150,6 +183,32 @@ def _build_output_name(
         parts.append(safe_topic)
     parts.append(tr)
     return "_".join(parts) + ".mp4"
+
+
+def _build_canonical_stream_unit_output_name(
+    unit_id: str,
+    knowledge_topic: str,
+    start_sec: float,
+    end_sec: float,
+) -> str:
+    return _build_output_name(
+        index=1,
+        index_width=3,
+        unit_id=unit_id,
+        knowledge_topic=knowledge_topic,
+        start_sec=start_sec,
+        end_sec=end_sec,
+    )
+
+
+def _remove_stale_unit_outputs(parent_dir: Path, unit_id: str, keep_path: Path) -> None:
+    pattern = re.compile(rf"(?:^|_){re.escape(unit_id)}(?:_|$)", re.IGNORECASE)
+    keep_resolved = keep_path.resolve()
+    for existing_file in parent_dir.glob("*.mp4"):
+        if existing_file.resolve() == keep_resolved:
+            continue
+        if pattern.search(existing_file.stem):
+            existing_file.unlink(missing_ok=True)
 
 
 def _ensure_parent_dir(path: Path) -> None:
@@ -328,6 +387,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default="500k",
         help="Target video bitrate for large-segment low-res pre-cut (default: 500k).",
     )
+    parser.add_argument(
+        "--apply-low-res-to-all-units",
+        action="store_true",
+        help="Apply low-res/bitrate profile to every semantic-unit clip instead of only large segments.",
+    )
+    parser.add_argument(
+        "--stream-unit-layout",
+        action="store_true",
+        help="Write clips into _stream_units/<unit_id>/ as the canonical VL subset layout.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output files.")
     parser.add_argument("--fail-fast", action="store_true", help="Fail immediately on first ffmpeg error.")
     parser.add_argument("--dry-run", action="store_true", help="Print planned segments and ffmpeg commands, no execution.")
@@ -376,6 +445,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     large_segment_threshold_sec = max(0.0, float(args.large_segment_threshold_sec))
     raw_large_segment_scale_height = max(0, int(args.large_segment_scale_height))
     large_segment_scale_height = _normalize_even_scale_height(raw_large_segment_scale_height) or 0
+    apply_low_res_to_all_units = bool(args.apply_low_res_to_all_units)
+    stream_unit_layout = bool(args.stream_unit_layout)
     if raw_large_segment_scale_height > 0 and large_segment_scale_height != raw_large_segment_scale_height:
         global_warnings.append(
             "large_segment_scale_height adjusted to even value for libx264 compatibility: "
@@ -389,8 +460,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         unit_id = str(u["unit_id"])
         topic = str(u.get("knowledge_topic") or "")
 
-        out_name = _build_output_name(i, index_width, unit_id, topic, start_sec, end_sec)
-        out_path = str(Path(out_dir) / out_name)
+        out_name = (
+            _build_canonical_stream_unit_output_name(unit_id, topic, start_sec, end_sec)
+            if stream_unit_layout
+            else _build_output_name(i, index_width, unit_id, topic, start_sec, end_sec)
+        )
+        out_path = _build_output_path(
+            out_dir=out_dir,
+            out_name=out_name,
+            unit_id=unit_id,
+            stream_unit_layout=stream_unit_layout,
+        )
+        if args.overwrite:
+            _ensure_parent_dir(Path(out_path))
+            _remove_stale_unit_outputs(Path(out_path).parent, unit_id, Path(out_path))
 
         warnings: List[str] = []
         if duration_sec < float(args.min_duration):
@@ -403,10 +486,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # 先构造命令用于 dry-run 打印/manifest
         timeout_sec = max(120.0, duration_sec * 6.0)
-        use_low_res_precut = (
-            large_segment_threshold_sec > 0.0
-            and duration_sec >= large_segment_threshold_sec
-            and large_segment_scale_height > 0
+        use_low_res_precut = bool(large_segment_scale_height > 0) and (
+            apply_low_res_to_all_units
+            or (
+                large_segment_threshold_sec > 0.0
+                and duration_sec >= large_segment_threshold_sec
+            )
         )
         cmd_preview = [
             str(args.ffmpeg),
@@ -512,10 +597,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         # pending -> run
         _ensure_parent_dir(Path(item.out_path))
         timeout_sec = max(120.0, item.duration_sec * 6.0)
-        use_low_res_precut = (
-            large_segment_threshold_sec > 0.0
-            and item.duration_sec >= large_segment_threshold_sec
-            and large_segment_scale_height > 0
+        use_low_res_precut = bool(large_segment_scale_height > 0) and (
+            apply_low_res_to_all_units
+            or (
+                large_segment_threshold_sec > 0.0
+                and item.duration_sec >= large_segment_threshold_sec
+            )
         )
         rc, stderr, cmd, elapsed = _run_ffmpeg_cut(
             ffmpeg_path=str(args.ffmpeg),
@@ -565,6 +652,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         "large_segment_threshold_sec": large_segment_threshold_sec,
         "large_segment_scale_height": large_segment_scale_height,
         "large_segment_video_bitrate": large_segment_video_bitrate,
+        "apply_low_res_to_all_units": apply_low_res_to_all_units,
+        "stream_unit_layout": stream_unit_layout,
         "overwrite": bool(args.overwrite),
         "ffmpeg": str(args.ffmpeg),
         "global_warnings": global_warnings,

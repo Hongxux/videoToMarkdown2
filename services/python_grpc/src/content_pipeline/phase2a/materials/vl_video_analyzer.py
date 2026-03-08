@@ -620,6 +620,11 @@ class VLVideoAnalyzer:
         return video_path
 
     async def _prepare_video_for_dashscope_upload(self, video_path: str) -> str:
+        normalized_path = str(video_path or "").replace("\\", "/").strip().lower()
+        if normalized_path:
+            parts = [part for part in normalized_path.split("/") if part]
+            if "semantic_unit_clips_vl" in parts and "_stream_units" in parts:
+                return video_path
         if not bool(self.long_video_upload_compress_enabled):
             return video_path
 
@@ -1833,9 +1838,17 @@ class VLVideoAnalyzer:
                     response_kwargs["response_format"] = {"type": "json_object"}
 
                 offline_task_meta: Dict[str, Any] = {}
+                vl_response: Optional[llm_gateway.VLChatResult] = None
                 if use_dashscope_offline_task:
                     content, finish_reason, token_usage, offline_task_meta = (
                         await self._call_vl_api_with_dashscope_offline_task(messages=messages)
+                    )
+                    vl_response = llm_gateway.VLChatResult(
+                        content=content,
+                        finish_reason=finish_reason,
+                        usage=dict(token_usage or {}),
+                        model=str(offline_task_meta.get("model", self.model) or self.model),
+                        cache_hit=False,
                     )
                 else:
                     try:
@@ -1871,9 +1884,10 @@ class VLVideoAnalyzer:
                         else:
                             raise
 
-                    content = result.content
-                    finish_reason = result.finish_reason
-                    token_usage = result.usage
+                    vl_response = result
+                    content = vl_response.content
+                    finish_reason = vl_response.finish_reason
+                    token_usage = vl_response.usage
                 parsed_results, raw_json = self._parse_response_with_payload(
                     content,
                     finish_reason=finish_reason,
@@ -1899,8 +1913,8 @@ class VLVideoAnalyzer:
                             "messages": request_messages_audit,
                         },
                         "response": {
-                            "model": str(getattr(result, "model", self.model) or self.model),
-                            "cache_hit": bool(getattr(result, "cache_hit", False)),
+                            "model": str(getattr(vl_response, "model", self.model) or self.model),
+                            "cache_hit": bool(getattr(vl_response, "cache_hit", False)),
                             "finish_reason": finish_reason,
                             "usage": dict(token_usage or {}),
                             "offline_task_meta": dict(offline_task_meta or {}),

@@ -1,5 +1,5 @@
 // 升级缓存版本：强制淘汰旧的离线壳资源，避免继续命中历史 index.html。
-const SHELL_CACHE_NAME = 'mobile-markdown-shell-v6';
+const SHELL_CACHE_NAME = 'mobile-markdown-shell-v7';
 const SHELL_ASSETS = [
     '/',
     '/index.html',

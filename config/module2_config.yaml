@@ -275,15 +275,12 @@ vl_material_generation:
     # false: 仅在预处理器自身命中条件时才执行（保留旧行为）
     process_force_preprocess_before_routing: true
 
-    # process 分流阈值（单位: 秒）
-    # 有效时长 <= 阈值: 归入 process_short（CV 路由）
-    # 有效时长 >  阈值: 归入 process_long（VL 路由）
+    # 已废弃：不再用于 long/short process 路由分流；保留该键仅为兼容旧配置与历史缓存说明。
     process_duration_threshold_sec: 40.0
 
-    # 路由截图流水线模式
-    # process_streaming: 使用进程池 + 生产者/消费者队列
-    # legacy_batch: 保留历史线程池批处理模式（当前样本压测更优）
-    screenshot_pipeline_mode: legacy_batch
+    # 路由截图流水线模式（当前统一保留 process_streaming 作为兼容默认值）
+    # 注意：process 现已统一进入 VL 主链路，短/长 process 不再在此处分流。
+    screenshot_pipeline_mode: process_streaming
 
     # 路由截图 worker 数
     # auto: 跟随 gRPC CV 进程池能力自动确定
@@ -353,11 +350,11 @@ vl_material_generation:
     # 超时下限，避免极短视频出现 0 秒
     upload_timeout_min_sec: 1.0
     # 上传失败自动重试（指数退避）
-    upload_retry_max_attempts: 3
-    upload_retry_initial_backoff_sec: 1.0
+    upload_retry_max_attempts: 4
+    upload_retry_initial_backoff_sec: 5.0
     upload_retry_multiplier: 2.0
-    upload_retry_max_backoff_sec: 30.0
-    upload_retry_jitter_sec: 0.0
+    upload_retry_max_backoff_sec: 45.0
+    upload_retry_jitter_sec: 2.0
     
     # 视频输入策略
     # auto: 仅在 DashScope 场景自动尝试 data-uri / upload
@@ -383,6 +380,8 @@ vl_material_generation:
   # 语义单元预切片参数（仅供 VL 预分析使用，不影响最终 assets 回源截取）
   semantic_split_pre_cut:
     enabled: true
+    # true: 所有 VL 语义片段在首次从原视频裁切时就直接压缩，避免上传前二次压缩
+    apply_to_all_units: true
     # 仅对超长片段启用降分辨率/码率；<=0 表示关闭该策略
     large_segment_threshold_sec: 120.0
     # 与 FFmpeg 参数 `-vf scale=-1:480` 对齐
@@ -439,19 +438,19 @@ vl_material_generation:
   # VL 主分析并行配置（语义单元级）
   # 语义单元级策略：每个 unit 仅发起一次 analyze_clip（一次主 VL API 调用）
   vl_analysis:
-    # auto: 默认按 unit 数并发，受 parallel_hard_cap 限制
+    # auto: 使用保守 CPU 感知默认值，避免统一 process 主链后把 unit 数直接打满
     # int:  手动指定并发度
-    parallel_workers: auto
+    parallel_workers: 4
     # 并发硬上限，防止 unit 数很大时瞬时请求过载
-    parallel_hard_cap: 32
+    parallel_hard_cap: 4
     # 单元级流式流水线：切片->压缩上传->离线VL->结果消费，按 unit 无等待推进
     stream_unit_pipeline_enabled: true
-    # 单元切片独立进程池并发度（auto=CPU-1）
-    stream_split_process_workers: auto
+    # 单元切片独立进程池并发度（建议保守；统一 process 主链后优先保证稳定性）
+    stream_split_process_workers: 2
     # 单元切片进程池硬上限
     stream_split_process_hard_cap: 8
     # 切片完成后允许堆积的分析任务倍数（analysis_workers * multiplier）
-    stream_split_backpressure_multiplier: 4
+    stream_split_backpressure_multiplier: 1
     # 仅对这些知识类型启用流式单元管线
     stream_pipeline_knowledge_types: ["process", "concrete"]
   
@@ -482,7 +481,7 @@ vl_material_generation:
     # 教程资产导出并发度（step clip/keyframe）
     # auto: 自动并发（默认最多 4），受 asset_export_parallel_hard_cap 限制
     # int:  手动指定并发度
-    asset_export_parallel_workers: 4
+    asset_export_parallel_workers: 2
 
     # 教程资产导出并发硬上限，防止 ffmpeg 子进程瞬时过多
     asset_export_parallel_hard_cap: 8
@@ -547,20 +546,38 @@ vl_material_generation:
     time_window_seconds: 1.0         # 兼容旧配置（仅当 before/after 未设置时生效）
     static_island_min_ms: 100.0      # 静态岛最小时长阈值（毫秒）
     reuse_visual_extractor: true         # 复用 VisualFeatureExtractor（按 video_path 缓存）
+
+    # concrete 保留“向后搜索 2 秒”，但使用更轻的预取 profile，降低主进程预读/缩放压力
+    concrete_forward_search_after_seconds: 2.0
+    concrete_prefetch_chunk_max_span_seconds: 3.0
+    concrete_prefetch_chunk_max_requests: 64
+    concrete_prefetch_sample_rate: 3
+    concrete_prefetch_target_height: 240
     
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
-    streaming_overlap_buffers: 2          # 重叠缓冲 chunk 数: 2=double-buffer overlap, 1=顺序chunk(更稳)
+    streaming_overlap_buffers: 1          # 主进程预取链默认单缓冲，优先稳定性
+    streaming_overlap_buffers_hard_cap: 1 # 主进程预取链硬上限，防止多 chunk 并存放大内存峰值
     max_workers: 1                        # 当前样本压测最优: 1
     max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
+    max_inflight_hard_cap: 2              # 主进程向进程池投递的硬上限，避免 pending 无限堆积
     
     # 预读配置 (与批量模式共享)
     prefetch_sample_rate: 2               # 采样率
     prefetch_target_height: 360           # 目标高度
-    prefetch_max_frames_per_chunk: 240    # 单 chunk 预读帧数上限；超出时自动放大采样步长，抑制内存峰值
+    prefetch_max_frames_per_chunk: 160    # 单 chunk 预读帧数软上限；超出时自动放大采样步长，抑制内存峰值
     prefetch_union_min_requests: 20       # Union预读最小请求数
-    prefetch_union_max_span_seconds: 10.0 # Union预读最大时间跨度
-    prefetch_chunk_max_requests: 1000     # 单 chunk 最大请求数(防御性上限)，主要由 max_span 控制切分
+    prefetch_union_max_span_seconds: 8.0  # Union预读最大时间跨度
+    prefetch_chunk_max_requests: 256      # 单 chunk 最大请求数(防御性上限)，主要由 max_span 控制切分
+
+    # 主进程预取链硬 governor：即使配置被调大，也会在代码层再次钳制
+    prefetch_hard_max_frames_per_chunk: 160
+    prefetch_hard_max_span_seconds: 8.0
+    prefetch_hard_max_requests_per_chunk: 256
+
+    # 主进程预取监控：用于定位 CPU / RSS 峰值与 chunk 级热点
+    prefetch_monitor_enabled: true
+    prefetch_monitor_warn_rss_mb: 2048
     
   # 回退行为配置
   fallback:

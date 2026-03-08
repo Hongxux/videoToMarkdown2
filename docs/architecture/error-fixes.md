@@ -1,5 +1,145 @@
 ﻿# 错误修正记录
 
+## 2026-03-07 Phase2A concrete 向后搜寻 2s 在 Windows 触发进程级崩溃
+- 日期：2026-03-07
+- 现象：
+  - Phase2A 在 unit 流式处理 concrete/process 后，进入 concrete 截图的向后搜寻 2s 窗口时，Windows 偶发进程级崩溃，退出码 `-1073741819`。
+  - 故障形态不是普通 Python 异常，而是截图 CV 路由执行器直接中断，后续截图请求无法完整消费。
+- 根因：
+  - concrete 的 forward-search 会进入 `flow_ops.optimize_screenshots_streaming_pipeline`；Windows 下 `SharedMemory + ProcessPoolExecutor + OpenCV` 组合存在 native 崩溃风险。
+  - `run_screenshot_selection_task` 原先按进程全局缓存 `ScreenshotSelector` 与已附加 SHM 句柄；一旦在同进程并发执行，跨线程共享这些对象会放大句柄提前关闭与非线程安全访问风险。
+  - unit 流式切片外层此前额外套了一层 `ProcessPoolExecutor`，Windows `spawn` 会反复重导大模块，进一步抬高进程级崩溃概率。
+- 修复：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - unit 流式切片执行器改为 `ThreadPoolExecutor`，保留并发切片能力，但移除外层重复 spawn。
+    - 保留 concrete 向后搜寻 2s 的窗口与预取参数，不再通过功能降级绕开该链路。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - 新增 CV 路由执行器选择：Windows 命中 `concrete_forward` profile 时切到线程池，保留 forward-search 逻辑但绕开进程级 spawn 崩溃面。
+    - 仅在进程池模式下执行 warmup。
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - 将 SHM 句柄缓存改为线程局部存储，避免一个线程释放句柄时误伤另一个并发任务。
+    - 将轻量 `ScreenshotSelector` 改为线程局部缓存，避免同进程多线程共享选择器实例。
+- 验证：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "apply_screenshot_optimization_with_bypass or annotate_screenshot_requests_with_unit_context or create_stream_split_executor or should_use_threaded_cv_executor" -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_worker_shm_release.py -q`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/vision_validation/worker.py`
+  - 任务 `var/storage/storage/cf0709da1f054891626d603463037839` 在“从现有 `semantic_unit_clips_vl` 继续、不重切片”的条件下重跑成功，产出 `62` 个 clip requests 与 `84` 个 screenshot requests，未再复现 `-1073741819`。
+- 预防：
+  - Windows 下凡是 `SharedMemory + OpenCV + 并发执行器` 组合，优先审计“是否必须用进程池”；若子任务本身已是外部进程或可线程安全复用，应优先线程化。
+  - 共享内存句柄与轻量视觉选择器默认按线程/worker 隔离，避免把“进程隔离假设”错误复用到线程并发模型。
+
+
+## 2026-03-07 Phase2B 悬浮面板拖拽范围与布局修复
+- 日期：2026-03-07
+- 现象：
+  - Phase2B 浮层展开后拖动余量过小。
+  - 窄容器下头部按钮、输入区、预览区容易挤压错位。
+  - 多个子区域会溢出卡片边框。
+- 根因：
+  - `anchorMountPanel` 缺少 `position: relative`，CSS 定位参照系与 JS 边界计算不一致。
+  - 画布默认/最大尺寸过大，且固定 `grid-template-rows` 对状态切换不友好。
+  - Phase2B 子树未统一 `box-sizing` 与 `min-width/max-width` 约束，100% 宽度子块会把内边距和内容挤出卡片边框。
+- 修复：
+  - 为 `anchorMountPanel` 增加定位上下文。
+  - 收紧 Phase2B 画布默认/最大尺寸。
+  - 拖拽边界改为按当前可见盒子计算，避免展开态继续沿用整个 dock 外框导致拖动余量失真。
+  - 将主体布局改为纵向 flex，头部操作区支持换行，结果预览改为弹性滚动区。
+  - Phase2B 卡片子树统一 `box-sizing: border-box`，并为输入区、处理中、结果区、预览区、反馈区补齐 `width/max-width/min-width` 约束。
+- 验证：
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- 预防：
+  - 浮层默认尺寸必须保留拖拽安全边距。
+  - 可见区块频繁切换时，优先使用 flex，避免固定 grid 行造成空轨道。
+  - 为浮层子组件统一盒模型和宽度约束，避免 100% 宽度元素把 padding 挑出父容器。
+- 文件：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+
+## 2026-03-07 Phase2B 悬浮面板拖拽范围与布局修复
+- 日期：2026-03-07
+- 现象：
+  - Phase2B 浮层展开后拖动余量过小。
+  - 窄容器下头部按钮、输入区、预览区容易挤压错位。
+- 根因：
+  - `anchorMountPanel` 缺少 `position: relative`，CSS 定位参照系与 JS 边界计算不一致。
+  - 画布默认/最大尺寸过大，且固定 `grid-template-rows` 对状态切换不友好。
+- 修复：
+  - 为 `anchorMountPanel` 增加定位上下文。
+  - 收紧 Phase2B 画布默认/最大尺寸。
+  - 将主体布局改为纵向 flex，头部操作区支持换行，结果预览改为弹性滚动区。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 浮层默认尺寸必须保留拖拽安全边距。
+  - 可见区块频繁切换时，优先使用 flex，避免固定 grid 行造成空轨道。
+- 文件：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+
+## 2026-03-07 `_stream_units/<unit_id>/` 覆盖重切后残留 `002_...`，破坏 canonical 命名
+- 日期：2026-03-07
+- 现象：
+  - 同一个 unit 在 `semantic_unit_clips_vl/_stream_units/SU004/` 下，首次切片会生成 canonical `001_SU004_...mp4`，再次 `overwrite` 重切后目录里可能残留 `002_SU004_...mp4`。
+  - manifest/文件探测一旦同时看到多个 sibling mp4，下游就无法稳定判断“哪个才是该 unit 的唯一 canonical clip”。
+- 根因：
+  - `_stream_units` 的设计目标是“每个 unit 一个稳定 canonical clip”，但旧逻辑仍沿用全量输出目录的序号语义，没有把 `unit_id + time_range` 固化成唯一命名契约。
+  - `overwrite` 只覆盖本次目标输出路径，没有清理同 unit 目录下已经失效的 sibling mp4，因此重跑后会遗留 `002_...`、`003_...` 等历史文件。
+- 修复：
+  - `tools/split_video_by_semantic_units.py`
+    - 新增 `stream_unit_layout=true` 下的 canonical 文件名构造，统一输出 `001_<unit_id>_<topic>_<start>-<end>.mp4`。
+    - 在 `overwrite` 模式下，按 `unit_id` 清理同目录 stale sibling mp4，只保留本次 canonical 输出。
+  - `services/python_grpc/src/content_pipeline/tests/test_split_video_by_semantic_units_tool.py`
+    - 新增回归测试，固化“第二次 overwrite 后 `002_...` 会被清理，目录只保留 canonical `001_...`”这一契约。
+- 验证：
+  - `python -X utf8 -m py_compile tools/split_video_by_semantic_units.py services/python_grpc/src/content_pipeline/tests/test_split_video_by_semantic_units_tool.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_split_video_by_semantic_units_tool.py services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py -q`
+- 预防：
+  - `_stream_units` 下每个 unit 只允许存在一个 canonical mp4；发现 sibling 序号漂移时，先审计命名与 stale cleanup，不要继续放宽消费侧匹配。
+  - Web/Phase2B/VL 若以 `_stream_units/<unit_id>/` 作为输入契约，就必须继续以 `unit_id` 维度保证幂等输出，不能把“多文件并存”视为正常状态。
+- 文件：
+  - `tools/split_video_by_semantic_units.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_split_video_by_semantic_units_tool.py`
+- 复盘：
+  - canonical 命名不是“展示层格式”，而是跨工具链复用时的稳定主键；一旦命名漂移，后续 manifest、文件探测、重试和幂等都会变得脆弱。
+
+## 2026-03-07 统一以 `semantic_unit_clips_vl/_stream_units` 作为 VL canonical 输入，修复重复上传与链路分叉
+- 日期：2026-03-07
+- 现象：
+  - 同一批语义切片同时散落在 `semantic_unit_clips_vl/*.mp4` 与 `semantic_unit_clips_vl/_stream_units/<unit>/*.mp4`，concrete/process/VL 链路对 clip 的发现规则不一致。
+  - 部分 VL 上传前会对已经完成预切片压缩的 `_stream_units` 子集再次压缩，造成重复 I/O、重复上传与不必要的等待。
+- 根因：
+  - 预切片工具、`flow_ops.find_clip_for_unit`、VL 分析输入选择、上传前压缩策略没有围绕同一份 canonical 布局收敛。
+  - 下游仍兼容“顶层目录 clip + `_stream_units` 子目录 clip”双轨并存，导致不同阶段可能命中不同文件副本。
+- 修复：
+  - `tools/split_video_by_semantic_units.py`
+    - 新增 `--stream-unit-layout`，让 VL 子集切片直接写入 `_stream_units/<unit_id>/`。
+    - 新增 `--apply-low-res-to-all-units`，让所有 VL 语义片段在首次从原视频裁切时就完成低分辨率/低码率预处理，避免上传前二次压缩。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - `split_video_by_semantic_units` 先探测 `_stream_units` 现存 clip，只对缺失 unit 生成 subset JSON 并补切。
+    - `find_clip_for_unit` 优先读取 `_stream_units/<unit_id>/manifest.json` / `*.mp4`，仅在必要时才回退顶层目录。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - unit worker 与 `pre-prune` 统一消费 `_stream_units` canonical clip，移除根目录/子目录双轨分叉。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 上传前若路径已位于 `semantic_unit_clips_vl/_stream_units/...`，则跳过二次压缩，直接复用首次预切片结果。
+  - `config/module2_config.yaml`
+    - 开启 `semantic_split_pre_cut.apply_to_all_units: true`，确保 VL 语义切片从生成第一刻起就符合上传 profile。
+- 验证：
+  - `python -X utf8 -m py_compile tools/split_video_by_semantic_units.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_video_for_dashscope_upload_compresses_without_duration_threshold services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_video_for_dashscope_upload_skips_compression_for_stream_unit_subset services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_video_for_dashscope_upload_defaults_to_original_video -q`
+- 预防：
+  - `_stream_units` 必须是 VL 链路的单一 canonical 输入；后续新增消费者时，应优先扩展 manifest/查找策略，而不是重新引入顶层 `semantic_unit_clips_vl/*.mp4` 平行来源。
+  - 任何“上传前再压缩”策略都必须先判断该 clip 是否已在预切片阶段完成 profile 收敛，避免同一素材被重复降质与重复 I/O。
+- 文件：
+  - `tools/split_video_by_semantic_units.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `config/module2_config.yaml`
+- 复盘：
+  - 语义单元 clip 的“切一次、全链复用”是当前链路的高杠杆点；只要 canonical 目录稳定，Phase2A 的补切、预剪枝、VL 上传和后续截图回源都能共享同一份资产，不再各自维护副本与 profile。
 > 目的：记录错误修正的完整信息，避免同类问题重复发生。
 
 ## 记录字段
@@ -8515,3 +8655,190 @@
     - 若未来引入新的并发执行器或分段策略，必须同步验证补偿分支也能发出逐段 hard 心跳。
   - 回滚：
     - 如需回滚，可仅移除 `transcribe_parallel()` 的 progress callback 与 `TranscribeVideo()` 的桥接函数；原有转录主流程、字幕落盘与最终完成心跳不会受影响。
+
+## 2026-03-07：DashScope VL 离线任务成功后，审计日志错误读取未定义 `result` 导致 `UnboundLocalError`
+- 现象：
+  - Python 日志在 `VL API call failed (attempt 1/3)` 中重复报出 `UnboundLocalError: cannot access local variable 'result' where it is not associated with a value`，随后上层将语义单元标记为 `VL analysis failed (SUxxx)`。
+  - 失败发生在 `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py` 的 `_call_vl_api()` 内部，表现为首轮调用刚结束就进入重试，而不是典型的远端接口超时/限流报错。
+  - 该症状只在 DashScope 离线任务链路开启时出现；同步 `vl_chat_completion()` 路径不受影响。
+- 根因：
+  - `_call_vl_api()` 里在线路径会得到 `llm_gateway.VLChatResult result`，但离线路径 `_call_vl_api_with_dashscope_offline_task()` 只返回 `content/finish_reason/usage/offline_task_meta`，并不会返回同名 `result` 对象。
+  - 成功分支写审计日志时仍统一读取 `result.model` 与 `result.cache_hit`，导致离线路径在“接口实际已返回内容”的情况下，因为访问未赋值局部变量而抛出 `UnboundLocalError`。
+  - 上层异常包装把该本地代码错误误记成 VL 调用失败，掩盖了真实根因。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 在 `_call_vl_api()` 内新增统一的 `vl_response` 响应对象承载审计字段，避免成功日志直接依赖仅在线路径存在的局部变量 `result`。
+    - DashScope 离线路径在拿到 `content/finish_reason/usage` 后，立即规范化构造 `llm_gateway.VLChatResult`，明确 `model=self.model`、`cache_hit=False`，让后续解析与审计逻辑共享同一数据形状。
+    - 在线路径继续复用真实的 `llm_gateway.VLChatResult`，保证缓存命中标记与模型名仍来自真实网关返回值。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 扩展 `test_call_vl_api_prefers_dashscope_offline_task_when_enabled`，新增对 `interactions[0]["response"]["model"]` 与 `cache_hit` 的断言，固定离线路径必须生成可审计的规范化响应对象。
+- 验证方式：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 后续凡是扩展 VL 在线/离线双通道逻辑，都必须保证公共成功路径只依赖“统一响应对象”或显式元数据，禁止继续隐式读取某个分支专属局部变量。
+    - 保留离线路径回归测试中对 `response.model`、`response.cache_hit` 的断言，避免再次出现“接口成功、审计崩溃”的假失败。
+  - 监控：
+    - 线上若再次出现 `UnboundLocalError`、`NameError` 这类本地变量异常，应优先判定为代码路径问题，而不是直接归因为 VL 供应商失败。
+  - 校验：
+    - 评审涉及多供应商、多执行模式聚合的代码时，必须逐项核对成功审计、异常审计、重试日志依赖的变量是否在所有分支均已定义。
+  - 回滚：
+    - 如需回滚，可仅撤销 `vl_response` 规范化逻辑与对应测试断言；不影响 DashScope 离线任务提交、轮询与正文解析链路。
+
+## 2026-03-07：混合 knowledge type 误触发全量切片 barrier，导致不能“一段切完就开始处理”
+- 现象：
+  - 日志会出现整批 `执行视频切割: python ... split_video_by_semantic_units.py ...`，并且必须等全部语义单元切完后，后续 VL 处理才开始推进。
+  - 在同时包含 `process/concrete` 与未知 `knowledge_type` 的任务里，本应可流式处理的 unit 也被迫等待整批切片完成，首结果延迟退化为 batch 模式。
+- 根因：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py` 中，`stream_unit_pipeline_enabled` 采用“全有或全无”的判定：只要存在任意不支持流式的 unit，就关闭整个 stream pipeline。
+  - 关闭后会把完整 `semantic_units` 交给 `_split_video_by_semantic_units`，导致本可与后续处理重叠的 unit 也被挡在全量切片 barrier 之后。
+- 修复措施：
+  - 文件：`services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 改为子集分流：`stream_semantic_units` 进入 `_run_stream_unit_pipeline`，`legacy_pipeline_units` 才进入旧批量切片链路。
+    - 把 `vl_units / stable_action_legacy_units / aggregated_analysis_results / aggregated_task_metadata` 统一累计，保证 mixed mode 下缓存、token 审计与素材汇总口径一致。
+  - 文件：`services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - 新增 `test_generate_uses_hybrid_stream_pipeline_for_mixed_units`，固定 mixed 场景下“流式只吃支持子集、legacy 只吃剩余子集”的回归断言。
+- 验证方式：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - 直接调用 `test_generate_uses_stream_unit_pipeline_when_enabled` 与 `test_generate_uses_hybrid_stream_pipeline_for_mixed_units` 两个测试函数，验证 pure-stream 与 hybrid-stream 两条关键链路。
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防方案（测试/监控/校验/回滚）：
+  - 测试：
+    - 后续凡是调整 streaming 开关或 knowledge type 分流逻辑，必须同时保留 pure-stream 与 mixed-stream 两类回归断言，防止再次把“少量不可流式子集”错误放大成“整批 fallback”。
+  - 监控：
+    - 排障时同时关注 `[VL-UnitStream] hybrid mode` 日志与 legacy split 的 unit 数；若 mixed 任务重新出现整批切片日志，应优先检查分流判断是否退化。
+  - 校验：
+    - 评审任何生产者/消费者改动时，必须确认 barrier 是否只作用于必要子集，而不是把不可流式的局部约束升级成整批阻塞。
+  - 回滚：
+    - 如需回滚，可仅撤销 `generate()` 中的 mixed-stream 分流逻辑；旧 `_split_video_by_semantic_units` 全量链路仍可独立工作。
+
+
+
+## 2026-03-07: Duplicate VL clip materialization between root and `_stream_units`
+- Symptom:
+  - Under `var/storage/storage/cf0709da1f054891626d603463037839/semantic_unit_clips_vl`, root-level semantic clips and `_stream_units/<unit_id>/` clips co-existed.
+  - The same semantic unit could be batch-split, unit-split, and possibly upload-time recompressed again, creating "duplicate and useless" video artifacts and wasting IO plus ffmpeg time.
+- Root cause:
+  - Batch split and stream-unit split did not share a single canonical output layout: batch split used root-level files, while stream-unit split used `_stream_units/<unit_id>/`.
+  - Upload preparation did not recognize `_stream_units` clips as already prepared VL inputs, so an extra upload-time compression pass could still happen.
+  - Some logic inferred the task root from `clips_dir.parent`, which becomes unsafe once clips live under `_stream_units/<unit_id>`.
+- Fix:
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - Batch split now always uses `--stream-unit-layout`.
+    - Incremental reuse and clip lookup now prefer `_stream_units` and keep flat-root lookup only as backward-compatible fallback.
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - Unit split now shares the same `apply_to_all_units` low-res profile flag.
+    - Pre-prune boundary refinement now reuses the task-level resolved output dir for subtitle context.
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - `_stream_units` clips now bypass upload-time recompression.
+  - `services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`
+    - Added regression coverage for `_stream_units` layout, incremental reuse, and clip lookup priority.
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - Added regression coverage for skipping upload-time recompression on `_stream_units` clips.
+- Validation:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "stream_unit or dashscope_upload" -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - Prevention:
+    - Tests: any future output-layout or upload-compression change must keep both `_stream_units` incremental-reuse coverage and upload-bypass coverage.
+    - Monitoring: when debugging a task, compare root-level `semantic_unit_clips_vl/*.mp4` count with `_stream_units/*/*.mp4`; large new root-level clip counts indicate a missed `--stream-unit-layout` call.
+    - Review checklist: keep VL input clip storage separate from final asset materialization responsibilities.
+    - Rollback: revert batch `--stream-unit-layout` and `_stream_units` upload-bypass only; flat-root compatibility remains in clip lookup.
+
+
+
+## 2026-03-07: `AnalyzeWithVL` resource spike could terminate Python gRPC service
+- 现象：
+  - 任务执行中，Java 侧先收到 `UNAVAILABLE: io exception` / `Connection reset`，随后紧接着 `Connection refused: /127.0.0.1:50051`。
+  - 这说明已建立的 gRPC 连接被硬断开，随后 Python gRPC 服务已不再监听本地端口，表现为进程级故障而非普通业务失败返回。
+- 根因：
+  - 旧架构把 `process` 拆成 `process_short/process_long` 两条主链：短 `process` 仍可能停留在路由截图链，导致主进程继续承担同步视频扫描、截图范围选择、预取、缩放和 SHM 注册等高负载工作。
+  - `concrete` 的“向后 2 秒搜索”没有独立轻量预算，可能与通用截图请求混合进入更大的 union chunk，放大主进程预取压力。
+  - 预取链缺少代码层硬 governor 与 chunk 级资源监控，导致配置被调大或任务分布异常时，主进程 CPU/RSS 峰值缺少边界保护。
+- 修复：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 取消 `process_short/process_long` 主链分流，所有 `process` 统一进入 VL 主链与下游消费。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 取消多步骤 `process` 的时长阈值依赖。
+    - 为 `concrete` 注入 forward-search 轻量 profile，保留向后 2 秒搜索，但显式缩小 chunk 预算与预取分辨率。
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+    - 按请求 profile 分桶构建 prefetch chunk，避免不同预算的请求混合放大主进程负载。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - 为 batch/streaming 两条预取链增加代码层硬限流与 `PrefetchMonitor`。
+  - `config/module2_config.yaml`
+    - 收紧默认预取参数与 inflight/overlap 上界。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "annotate_screenshot_requests_with_unit_context or build_screenshot_prefetch_chunks or tutorial_process_unit or merge_multistep"`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 测试：后续任何 `process` 路由或截图预算改动，都必须同时覆盖“统一 process 主链”和“concrete 轻量 forward-search profile”两个断言。
+  - 监控：排障时优先查看 `[PrefetchMonitor]` 的 `rss_mb / sampled_frames / inflight / profile`，若 chunk 级指标持续贴近硬上限，应先调小预算再看模型/ffmpeg 层。
+  - 评审清单：主进程只能承担编排与受控预取；新增截图/视频扫描逻辑时，先判断是否能复用现有 `cv_process_pool`，禁止无预算地回流到主进程同步链路。
+  - 回滚：若需快速止血，可仅回退本次 governor/profile 参数；统一 `process -> VL` 主链建议保留，避免重新引入双主链结构债。
+
+
+
+## 2026-03-07: Unified `process` routing could still overload Python via VL unit-stream concurrency
+- 现象：
+  - 统一 `process` 主链后，日志出现 `analysis_workers=30`、`backpressure=120`，随后 Java 侧收到 `Connection reset`，紧接着 fallback 变成 `Connection refused`。
+- 根因：
+  - 截图 governor 已经收紧，但新的第一瓶颈转移到了 VL 单元级并发。
+  - `vl_analysis.parallel_workers=auto` 默认按 `unit_count` 拉满；`stream_split_process_workers=auto` 也偏激进，导致上传、离线批任务轮询、结果消费、`should_type=concrete` rerun 叠加放大。
+- 修复：
+  - 将 `vl_analysis.parallel_workers / parallel_hard_cap` 收紧到 `4`。
+  - 将 `stream_split_process_workers` 收紧到 `2`，`stream_split_backpressure_multiplier` 收紧到 `1`。
+  - 将 `tutorial_mode.asset_export_parallel_workers` 收紧到 `2`。
+  - 将 `_resolve_vl_parallel_workers()` 与 `_resolve_stream_split_process_workers()` 的 `auto` 默认改为保守 CPU 感知值，避免配置回退到 `auto` 后再次按 unit 数打满。
+- 验证：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "tutorial_process_unit or merge_multistep or resolve_vl_parallel_workers_auto or resolve_stream_split_process_workers_auto"`
+  - 结合运行日志观察 `analysis_workers` 是否收敛到预期值。
+  - 预防：
+  - 以后只要扩大 `process` 进入 VL 主链的覆盖范围，必须同步审查 `analysis_workers / split_workers / backpressure` 三个预算，禁止只改路由不改并发。
+
+
+
+
+## 2026-03-07: DashScope upload backoff too short for transient TLS EOF resets
+- Symptom:
+  - `DashScope Files.upload` could fail with `SSLEOFError: [SSL: UNEXPECTED_EOF_WHILE_READING]` and retry again after only `1s/2s`, often re-entering the same unstable network window.
+- Root cause:
+  - The retry policy was tuned too aggressively for upload failures. For WAN/proxy/TLS gateway instability, the previous backoff window was too short to let the transport path recover.
+  - `upload_retry_jitter_sec=0.0` also made retries more bursty under repeated failures.
+- Fix:
+  - `config/module2_config.yaml`
+    - Changed `upload_retry_max_attempts` from `3` to `4`.
+    - Changed `upload_retry_initial_backoff_sec` from `1.0` to `5.0`.
+    - Kept `upload_retry_multiplier=2.0`.
+    - Changed `upload_retry_max_backoff_sec` from `30.0` to `45.0`.
+    - Changed `upload_retry_jitter_sec` from `0.0` to `2.0`.
+- Validation:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - For upload and TLS reset incidents, prefer a `5s+` initial backoff plus jitter before changing business logic.
+  - During incident triage, inspect retry timestamps together with network/proxy stability before attributing the failure to application code.
+  - Rollback: restore the previous retry values if longer waits prove unacceptable for throughput-sensitive scenarios.
+
+## 2026-03-07: Java phase2b raw markdown probe logs should not print by default
+- 现象：
+  - Java 服务端常规运行时会打印 `----- RAW BEGIN -----`、`----- RAW END -----`、`----- INDENT PROBE BEGIN -----`、`----- INDENT PROBE END -----` 等大段 phase2b 原始 Markdown 与缩进探针日志，污染正常服务日志。
+- 根因：
+  - `DeepSeekAdvisorService.logPhase2bRawMarkdownIfEnabled()` 虽然已有 `phase2bLogRawMarkdown` 开关，但 `application.properties` 将 `deepseek.advisor.phase2b-log-raw-markdown` 显式设为了 `true`。
+  - 同时原始诊断载荷使用 `info` 级别输出，导致调试日志进入默认运行日志通道。
+- 修复：
+  - `services/java-orchestrator/src/main/resources/application.properties`
+    - 将 `deepseek.advisor.phase2b-log-raw-markdown` 改为 `false`。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/DeepSeekAdvisorService.java`
+    - 增加 `logger.isDebugEnabled()` 门控，避免在非调试级别下构造和输出大块诊断日志。
+    - 将输出级别从 `logger.info(...)` 下调为 `logger.debug(...)`。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 以后凡是原始模型输出、格式探针、payload dump，一律走“显式配置开关 + debug 级别”双门控，禁止直接走默认 `info` 通道。
+  - 默认运行配置只保留业务关键信号，避免排障载荷淹没业务日志。

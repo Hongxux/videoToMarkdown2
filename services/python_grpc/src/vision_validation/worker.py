@@ -15,6 +15,7 @@ import logging
 import gc
 import time
 import re
+import threading
 import psutil
 from typing import Dict, List, Tuple, Any, Optional
 from multiprocessing import shared_memory
@@ -28,6 +29,7 @@ from services.python_grpc.src.common.utils.opencv_decode import (
 # Worker 进程内的全局缓存
 _validator_cache: Dict[str, Any] = {}
 _initialized = False
+_thread_local = threading.local()
 _attached_shms: Dict[str, shared_memory.SharedMemory] = {}  # 宸查檮鍔犵殑鍏变韩鍐呭瓨
 
 logger = logging.getLogger(__name__)
@@ -167,13 +169,36 @@ def _check_memory_usage():
         pass
 
 
+def _get_attached_shm_store() -> Dict[str, shared_memory.SharedMemory]:
+    if threading.current_thread() is threading.main_thread():
+        return _attached_shms
+    store = getattr(_thread_local, "attached_shms", None)
+    if not isinstance(store, dict):
+        store = {}
+        _thread_local.attached_shms = store
+    return store
+
+
+def _get_thread_local_screenshot_selector(selector_key: str):
+    selector_cache = getattr(_thread_local, "screenshot_selector_cache", None)
+    if not isinstance(selector_cache, dict):
+        selector_cache = {}
+        _thread_local.screenshot_selector_cache = selector_cache
+    selector = selector_cache.get(selector_key)
+    if selector is None:
+        from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
+        selector = ScreenshotSelector.create_lightweight()
+        selector_cache[selector_key] = selector
+    return selector
+
+
 def get_frame_from_shm(shm_ref: dict, copy: bool = False) -> Optional[np.ndarray]:
     """方法说明：`get_frame_from_shm` 核心方法。
     执行步骤：
     1) 步骤1：从共享内存描述中解析名称、形状与数据类型。
     2) 步骤2：附加或复用共享内存对象并构建 `numpy` 视图。
     3) 步骤3：按需返回拷贝或只读视图，异常时返回 `None`。"""
-    global _attached_shms
+    attached_shms = _get_attached_shm_store()
     
     try:
         shm_name = shm_ref.get("shm_name")
@@ -184,15 +209,15 @@ def get_frame_from_shm(shm_ref: dict, copy: bool = False) -> Optional[np.ndarray
             return None
         
         # 复用已附加的共享内存
-        if shm_name not in _attached_shms:
+        if shm_name not in attached_shms:
             try:
                 shm = shared_memory.SharedMemory(name=shm_name)
-                _attached_shms[shm_name] = shm
+                attached_shms[shm_name] = shm
             except FileNotFoundError:
                 logger.warning(f"SharedMemory not found: {shm_name}")
                 return None
         
-        shm = _attached_shms[shm_name]
+        shm = attached_shms[shm_name]
         frame = np.ndarray(shape, dtype=dtype, buffer=shm.buf)
         return frame.copy() if copy else frame
         
@@ -207,15 +232,15 @@ def release_attached_shm_refs(shm_names: Optional[List[str]] = None) -> None:
     1) 步骤1：确定需要释放的共享内存名称集合。
     2) 步骤2：关闭 worker 进程中已附加但不再需要的共享内存句柄。
     3) 步骤3：从本地缓存移除句柄，避免长期任务造成句柄累积。"""
-    global _attached_shms
+    attached_shms = _get_attached_shm_store()
 
     if shm_names is None:
-        target_names = list(_attached_shms.keys())
+        target_names = list(attached_shms.keys())
     else:
         target_names = [name for name in shm_names if name]
 
     for shm_name in target_names:
-        shm = _attached_shms.pop(shm_name, None)
+        shm = attached_shms.pop(shm_name, None)
         if shm is None:
             continue
         try:
@@ -1015,13 +1040,8 @@ def run_screenshot_selection_task(
         # 2. 鍒涘缓杞婚噺绾?ScreenshotSelector
         from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
         
-        global _validator_cache
         selector_key = "screenshot_selector_lightweight"
-        
-        if selector_key not in _validator_cache:
-            _validator_cache[selector_key] = ScreenshotSelector.create_lightweight()
-        
-        selector = _validator_cache[selector_key]
+        selector = _get_thread_local_screenshot_selector(selector_key)
         
         # Encoding fixed: corrupted comment cleaned.
         # 璁＄畻鍒嗚鲸鐜囩郴鏁?
@@ -1146,16 +1166,8 @@ def run_select_screenshots_for_range_task(
     try:
         from services.python_grpc.src.content_pipeline.phase2a.vision.screenshot_selector import ScreenshotSelector
 
-        global _validator_cache
-        if '_validator_cache' not in globals():
-            globals()['_validator_cache'] = {}
-        _validator_cache = globals()['_validator_cache']
-
         selector_key = f"screenshot_selector_range_cf_{coarse_fps}_{fine_fps}"
-        if selector_key not in _validator_cache:
-            _validator_cache[selector_key] = ScreenshotSelector.create_lightweight()
-
-        selector = _validator_cache[selector_key]
+        selector = _get_thread_local_screenshot_selector(selector_key)
         effective_video_path = _resolve_worker_readable_video_path(
             video_path,
             decode_open_timeout_sec=decode_open_timeout_sec,

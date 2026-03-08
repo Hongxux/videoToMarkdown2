@@ -20,6 +20,34 @@ def test_supports_http2_transport_honors_env_override(monkeypatch):
     assert llm_client._supports_http2_transport() is False
 
 
+def test_get_concurrency_limiter_uses_default_deepseek_limits(monkeypatch):
+    monkeypatch.delenv("MODULE2_DEEPSEEK_CONCURRENCY_INITIAL", raising=False)
+    monkeypatch.delenv("MODULE2_DEEPSEEK_CONCURRENCY_MIN", raising=False)
+    monkeypatch.delenv("MODULE2_DEEPSEEK_CONCURRENCY_MAX", raising=False)
+    monkeypatch.delenv("MODULE2_DEEPSEEK_CONCURRENCY_INCREASE_STEP", raising=False)
+    monkeypatch.delenv("MODULE2_DEEPSEEK_CONCURRENCY_WINDOW_SIZE", raising=False)
+    monkeypatch.setattr(llm_client, "_global_concurrency_limiter", None)
+
+    limiter = llm_client.get_concurrency_limiter()
+
+    assert limiter.current_limit == 56
+    assert limiter.min_limit == 8
+    assert limiter.max_limit == 64
+
+
+def test_get_concurrency_limiter_honors_env_overrides(monkeypatch):
+    monkeypatch.setenv("MODULE2_DEEPSEEK_CONCURRENCY_INITIAL", "6")
+    monkeypatch.setenv("MODULE2_DEEPSEEK_CONCURRENCY_MIN", "3")
+    monkeypatch.setenv("MODULE2_DEEPSEEK_CONCURRENCY_MAX", "9")
+    monkeypatch.setattr(llm_client, "_global_concurrency_limiter", None)
+
+    limiter = llm_client.get_concurrency_limiter()
+
+    assert limiter.current_limit == 6
+    assert limiter.min_limit == 3
+    assert limiter.max_limit == 9
+
+
 def test_pool_manager_fallback_to_http11_when_h2_missing(monkeypatch):
     manager = llm_client.AdaptiveConnectionPoolManager()
     monkeypatch.setattr(llm_client, "_supports_http2_transport", lambda: True)

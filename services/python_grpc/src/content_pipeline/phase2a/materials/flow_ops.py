@@ -1,4 +1,4 @@
-"""VL ???????????????"""
+"""VL 语义单元切片与定位辅助逻辑。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import asyncio
 import functools
 import json
 import logging
+import os
 import re
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +18,12 @@ from services.python_grpc.src.common.utils.numbers import safe_float
 from services.python_grpc.src.content_pipeline.common.utils.path_utils import find_repo_root
 
 logger = logging.getLogger(__name__)
+
+
+def _sanitize_stream_unit_folder_name(text: str) -> str:
+    cleaned = re.sub(r"[^0-9A-Za-z._-]+", "_", str(text or "").strip())
+    cleaned = cleaned.strip("._")
+    return cleaned or "UNKNOWN_UNIT"
 
 
 def _resolve_screenshot_time_window(generator) -> tuple[float, float]:
@@ -41,6 +49,135 @@ def _resolve_screenshot_static_island_threshold_ms(generator) -> float:
             pass
     return 200.0
 
+
+def _resolve_prefetch_governor(generator) -> Dict[str, Any]:
+    config = getattr(generator, "screenshot_config", {}) or {}
+
+    def _safe_int(name: str, default: int, minimum: int = 1) -> int:
+        try:
+            return max(minimum, int(config.get(name, default)))
+        except (TypeError, ValueError):
+            return max(minimum, int(default))
+
+    def _safe_float(name: str, default: float, minimum: float = 0.0) -> float:
+        try:
+            return max(minimum, float(config.get(name, default)))
+        except (TypeError, ValueError):
+            return max(minimum, float(default))
+
+    return {
+        "monitor_enabled": bool(config.get("prefetch_monitor_enabled", True)),
+        "rss_warn_mb": _safe_float("prefetch_monitor_warn_rss_mb", 2048.0, 0.0),
+        "prefetch_frames_hard_cap": _safe_int("prefetch_hard_max_frames_per_chunk", 160, 8),
+        "prefetch_requests_hard_cap": _safe_int("prefetch_hard_max_requests_per_chunk", 256, 1),
+        "prefetch_span_hard_cap": _safe_float("prefetch_hard_max_span_seconds", 8.0, 0.5),
+        "max_inflight_hard_cap": _safe_int("max_inflight_hard_cap", 2, 1),
+        "overlap_buffers_hard_cap": _safe_int("streaming_overlap_buffers_hard_cap", 1, 1),
+    }
+
+
+def _should_use_threaded_cv_executor(generator, screenshot_requests: List[Dict[str, Any]]) -> bool:
+    config = getattr(generator, "screenshot_config", {}) or {}
+    override = str(
+        config.get("cv_route_executor_mode", os.getenv("MODULE2_CV_ROUTE_EXECUTOR_MODE", "")) or ""
+    ).strip().lower()
+    if override in {"thread", "threads"}:
+        return True
+    if override in {"process", "processes"}:
+        return False
+    if os.name != "nt":
+        return False
+    for request in screenshot_requests or []:
+        if not isinstance(request, dict):
+            continue
+        profile = str(request.get("_cv_prefetch_profile", "default") or "default").strip().lower()
+        if profile == "concrete_forward":
+            return True
+    return False
+
+
+def _resolve_cv_route_executor(generator, screenshot_requests: List[Dict[str, Any]], max_workers: int, init_cv_worker):
+    if _should_use_threaded_cv_executor(generator, screenshot_requests):
+        try:
+            init_cv_worker()
+        except Exception as error:
+            logger.warning("[CV ROUTE] thread-mode init failed: %s", error)
+        return ThreadPoolExecutor(max_workers=max_workers), True, "thread"
+    executor = getattr(generator, "_cv_executor", None)
+    if executor is None:
+        return ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker), True, "process_local"
+    return executor, False, "process_shared"
+
+
+def _collect_prefetch_runtime_snapshot() -> Dict[str, float]:
+    try:
+        import psutil
+
+        process = psutil.Process()
+        return {
+            "rss_mb": float(process.memory_info().rss) / (1024.0 * 1024.0),
+            "cpu_percent": float(psutil.cpu_percent(interval=None)),
+        }
+    except Exception:
+        return {}
+
+
+def _emit_prefetch_monitor(
+    *,
+    governor: Dict[str, Any],
+    mode: str,
+    chunk_index: int,
+    total_chunks: int,
+    profile: str,
+    request_count: int,
+    span_sec: float,
+    sampled_frames: int,
+    inflight: int,
+    inflight_cap: int,
+) -> None:
+    if not bool(governor.get("monitor_enabled", False)):
+        return
+
+    snapshot = _collect_prefetch_runtime_snapshot()
+    rss_mb = snapshot.get("rss_mb")
+    cpu_percent = snapshot.get("cpu_percent")
+    logger.info(
+        "[PrefetchMonitor] mode=%s chunk=%s/%s profile=%s reqs=%s span=%.2fs sampled_frames=%s inflight=%s/%s rss_mb=%s cpu=%s",
+        mode,
+        chunk_index,
+        total_chunks,
+        profile,
+        request_count,
+        span_sec,
+        sampled_frames,
+        inflight,
+        inflight_cap,
+        f"{rss_mb:.1f}" if isinstance(rss_mb, (int, float)) else "na",
+        f"{cpu_percent:.1f}" if isinstance(cpu_percent, (int, float)) else "na",
+    )
+
+    rss_warn_mb = float(governor.get("rss_warn_mb", 0.0) or 0.0)
+    if rss_warn_mb > 0.0 and isinstance(rss_mb, (int, float)) and rss_mb >= rss_warn_mb:
+        logger.warning(
+            "[PrefetchMonitor] RSS above warning threshold: mode=%s chunk=%s/%s rss_mb=%.1f threshold_mb=%.1f",
+            mode,
+            chunk_index,
+            total_chunks,
+            rss_mb,
+            rss_warn_mb,
+        )
+
+    prefetch_frames_hard_cap = int(governor.get("prefetch_frames_hard_cap", 0) or 0)
+    if prefetch_frames_hard_cap > 0 and sampled_frames >= prefetch_frames_hard_cap:
+        logger.warning(
+            "[PrefetchMonitor] sampled_frames reached hard cap: mode=%s chunk=%s/%s sampled_frames=%s hard_cap=%s",
+            mode,
+            chunk_index,
+            total_chunks,
+            sampled_frames,
+            prefetch_frames_hard_cap,
+        )
+
 async def split_video_by_semantic_units(
     generator,
     video_path: str,
@@ -48,103 +185,132 @@ async def split_video_by_semantic_units(
     output_dir: str = None
 ) -> Optional[str]:
     """
-    调用 split_video_by_semantic_units.py 切割视频
-    
-    Args:
-        video_path: 原视频路径
-        semantic_units: 语义单元列表
-        output_dir: 输出目录
-        
-    Returns:
-        str: 切割后的视频片段目录路径
+    调用 `split_video_by_semantic_units.py` 生成 VL 语义单元切片。
+
+    约束：
+    1) 优先复用 `_stream_units/<unit_id>/` 下已存在的 VL canonical clip。
+    2) 只对缺失的语义单元补切，避免重复 ffmpeg 与重复 I/O。
+    3) 让后续 assets / analyzer / pre-prune 统一消费同一套 VL 切片布局。
     """
-    # 确定输出目录
     if output_dir is None:
         output_dir = str(Path(video_path).parent)
 
-    # 仅为 VL 目标单元切割，避免复用全量 semantic_units_phase2a.json 导致无效切片。
     clips_dir = Path(output_dir) / "semantic_unit_clips_vl"
     intermediates_dir = Path(output_dir) / "intermediates"
     intermediates_dir.mkdir(parents=True, exist_ok=True)
     semantic_units_json = intermediates_dir / "semantic_units_vl_subset.json"
 
-    # 去重并过滤非法单元，确保后续切割列表与实际 VL 分析候选一致。
     valid_units: List[Dict[str, Any]] = []
     seen_unit_ids = set()
     for unit in semantic_units or []:
         unit_id = str(unit.get("unit_id", "") or "").strip()
         start_sec = safe_float(unit.get("start_sec", 0.0), 0.0)
         end_sec = safe_float(unit.get("end_sec", 0.0), 0.0)
-        if not unit_id:
-            continue
-        if end_sec <= start_sec:
-            continue
-        if unit_id in seen_unit_ids:
+        if not unit_id or end_sec <= start_sec or unit_id in seen_unit_ids:
             continue
         seen_unit_ids.add(unit_id)
         valid_units.append(unit)
 
     if not valid_units:
-        raise ValueError("没有可用于 VL 分析的有效语义单元，跳过视频切割")
+        raise ValueError("没有可用于 VL 切片的有效语义单元")
 
-    # 查找脚本路径
     project_root = find_repo_root(__file__)
     script_path = project_root / "tools" / "split_video_by_semantic_units.py"
-    
     if not script_path.exists():
-        raise FileNotFoundError(f"视频切割脚本不存在: {script_path}")
-    
-    def _collect_missing_units(existing_names: List[str]) -> List[str]:
-        missing_units: List[str] = []
+        raise FileNotFoundError(f"未找到语义单元切片脚本: {script_path}")
+
+    def _find_existing_unit_clip(unit_id: str, start_sec: float, end_sec: float) -> Optional[str]:
+        unit_dir = clips_dir / "_stream_units" / _sanitize_stream_unit_folder_name(unit_id)
+
+        def _is_valid_file(path_value: Any) -> Optional[str]:
+            if not path_value:
+                return None
+            candidate = Path(str(path_value))
+            if not candidate.is_absolute():
+                candidate = (clips_dir / candidate).resolve()
+            if candidate.exists() and candidate.is_file():
+                return str(candidate)
+            return None
+
+        def _iter_manifest_matches(manifest_file: Path) -> List[Dict[str, Any]]:
+            if not manifest_file.exists():
+                return []
+            try:
+                with open(manifest_file, "r", encoding="utf-8") as manifest_fp:
+                    manifest = json.load(manifest_fp)
+            except Exception:
+                return []
+            matches = [
+                item for item in (manifest.get("items", []) or [])
+                if isinstance(item, dict)
+                and str(item.get("unit_id", "")) == str(unit_id)
+                and str(item.get("status", "")) == "success"
+            ]
+            matches.sort(
+                key=lambda item: abs(safe_float(item.get("start_sec", start_sec), start_sec) - start_sec)
+                + abs(safe_float(item.get("end_sec", end_sec), end_sec) - end_sec)
+            )
+            return matches
+
+        for manifest_file in (unit_dir / "manifest.json", clips_dir / "manifest.json"):
+            for item in _iter_manifest_matches(manifest_file):
+                manifest_out = _is_valid_file(item.get("out_path"))
+                if manifest_out:
+                    return manifest_out
+
+        unit_pattern = re.compile(rf"(?:^|_){re.escape(unit_id)}(?:_|$)", re.IGNORECASE)
+        for clip_file in sorted(unit_dir.glob("*.mp4")):
+            if unit_pattern.search(clip_file.stem):
+                return str(clip_file)
+
+        for clip_file in sorted(clips_dir.glob("*.mp4")):
+            if unit_pattern.search(clip_file.stem):
+                return str(clip_file)
+        return None
+
+    def _collect_missing_units() -> List[str]:
+        missing: List[str] = []
         for su in valid_units:
             unit_id = str(su.get("unit_id", "") or "").strip()
+            start_sec = safe_float(su.get("start_sec", 0.0), 0.0)
+            end_sec = safe_float(su.get("end_sec", 0.0), 0.0)
             if not unit_id:
                 continue
-            unit_pattern = re.compile(rf"(?:^|_){re.escape(unit_id)}(?:_|$)", re.IGNORECASE)
-            if not any(unit_pattern.search(name) for name in existing_names):
-                missing_units.append(unit_id)
-        return missing_units
+            if not _find_existing_unit_clip(unit_id, start_sec, end_sec):
+                missing.append(unit_id)
+        return missing
 
-    # 检查是否已经切割过（避免重复切割）
     units_to_split: List[Dict[str, Any]] = list(valid_units)
     missing_units: List[str] = []
     manifest_path = clips_dir / "manifest.json"
     if manifest_path.exists():
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            # 检查是否切割成功
+            with open(manifest_path, "r", encoding="utf-8") as manifest_fp:
+                manifest = json.load(manifest_fp)
             summary = manifest.get("summary", {})
             if summary.get("success", 0) > 0 and summary.get("failed", 0) == 0:
-                # 只要当前所需 unit 都存在即可复用，不要求目录中仅包含当前子集。
-                existing_clips = list(clips_dir.glob("*.mp4"))
-                existing_names = [f.name for f in existing_clips]
-                missing_units = _collect_missing_units(existing_names)
+                missing_units = _collect_missing_units()
                 if not missing_units:
-                    logger.info(f"复用已存在的 VL 目标视频片段: {clips_dir}")
+                    logger.info(f"复用已有 VL 语义切片目录: {clips_dir}")
                     return str(clips_dir)
-                logger.info(f"manifest 存在但仍需补切片: missing={len(missing_units)}")
-            
+                logger.info("manifest 校验发现缺失切片单元: missing=%s", len(missing_units))
         except Exception:
             pass
-    
-    # 2. 备用检查：直接检查是否存在对应的 .mp4 文件
-    # 如果 manifest 丢失但文件都在，也可以复用
+
     if clips_dir.exists() and not missing_units:
         try:
-            existing_clips = list(clips_dir.glob("*.mp4"))
-            if len(existing_clips) > 0:
-                # 检查是否所有 unit_id 都有对应的片段
-                existing_names = [f.name for f in existing_clips]
-                missing_units = _collect_missing_units(existing_names)
-                
-                if not missing_units:
-                    logger.info(f"复用已存在的视频片段 (文件完整性检查通过): {clips_dir}")
-                    return str(clips_dir)
-                else:
-                    logger.warning(f"无法复用视频片段，缺失: {len(missing_units)}/{len(valid_units)} (e.g., {missing_units[:3]})")
-        except Exception as e:
-            logger.warning(f"文件完整性检查出错: {e}")
+            missing_units = _collect_missing_units()
+            if not missing_units:
+                logger.info(f"复用已有切片目录（文件探测通过）: {clips_dir}")
+                return str(clips_dir)
+            logger.warning(
+                "检测到缺失语义单元，准备补切 %s/%s (e.g., %s)",
+                len(missing_units),
+                len(valid_units),
+                missing_units[:3],
+            )
+        except Exception as error:
+            logger.warning(f"探测已有语义切片失败: {error}")
 
     if missing_units and len(missing_units) < len(valid_units):
         missing_set = {str(unit_id) for unit_id in missing_units if str(unit_id)}
@@ -153,31 +319,30 @@ async def split_video_by_semantic_units(
             if str(su.get("unit_id", "") or "").strip() in missing_set
         ]
         logger.info(
-            "检测到增量切片场景，仅切割缺失单元: missing=%s/%s",
+            "仅对缺失语义单元执行补切: missing=%s/%s",
             len(units_to_split),
             len(valid_units),
         )
 
-    # 每次按“待分析子集”重写 JSON，确保切割范围与当前 VL 候选严格一致。
-    with open(semantic_units_json, "w", encoding="utf-8") as f:
-        json.dump(units_to_split, f, ensure_ascii=False, indent=2)
-    
-    # 执行切割命令
+    with open(semantic_units_json, "w", encoding="utf-8") as manifest_fp:
+        json.dump(units_to_split, manifest_fp, ensure_ascii=False, indent=2)
+
     cmd = [
         "python",
         str(script_path),
         "--video", video_path,
         "--semantic-units", str(semantic_units_json),
         "--out-dir", str(clips_dir),
-        "--overwrite"  # 覆盖已存在的文件
+        "--stream-unit-layout",
+        "--overwrite",
     ]
 
-    # 超长片段预切降码率/分辨率：仅用于 VL 预分析输入，最终 assets 仍从原视频按时间戳截取。
     split_pre_cut_config = {}
     if isinstance(getattr(generator, "config", None), dict):
         raw_cfg = generator.config.get("semantic_split_pre_cut", {})
         if isinstance(raw_cfg, dict):
             split_pre_cut_config = raw_cfg
+
     pre_cut_enabled = bool(split_pre_cut_config.get("enabled", True))
     if pre_cut_enabled:
         large_segment_threshold_sec = max(
@@ -191,6 +356,7 @@ async def split_video_by_semantic_units(
         large_segment_video_bitrate = (
             str(split_pre_cut_config.get("video_bitrate", "500k") or "").strip() or "500k"
         )
+        apply_low_res_to_all_units = bool(split_pre_cut_config.get("apply_to_all_units", False))
         cmd.extend(
             [
                 "--large-segment-threshold-sec",
@@ -201,28 +367,27 @@ async def split_video_by_semantic_units(
                 large_segment_video_bitrate,
             ]
         )
-    
-    logger.info(f"执行视频切割: {' '.join(cmd)}")
-    
+        if apply_low_res_to_all_units:
+            cmd.append("--apply-low-res-to-all-units")
+
+    logger.info(f"执行语义单元切片命令: {' '.join(cmd)}")
+
     try:
-        # 使用 asyncio 异步执行
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
-        
-        stdout, stderr = await process.communicate()
-        
+        _stdout, stderr = await process.communicate()
+
         if process.returncode != 0:
             error_msg = stderr.decode("utf-8", errors="ignore")
-            raise RuntimeError(f"视频切割失败 (code={process.returncode}): {error_msg[:500]}")
-        
-        logger.info(f"视频切割完成: {clips_dir}")
+            raise RuntimeError(f"语义单元切片失败 (code={process.returncode}): {error_msg[:500]}")
+
+        logger.info(f"语义单元切片完成: {clips_dir}")
         return str(clips_dir)
-        
-    except Exception as e:
-        logger.error(f"视频切割执行失败: {e}")
+    except Exception as error:
+        logger.error(f"执行语义单元切片异常: {error}")
         raise
 
 
@@ -234,18 +399,17 @@ def find_clip_for_unit(
     end_sec: float
 ) -> Optional[str]:
     """
-    查找语义单元对应的视频片段
-    
-    Args:
-        clips_dir: 视频片段目录
-        unit_id: 语义单元 ID
-        start_sec: 起始时间
-        end_sec: 结束时间
-        
-    Returns:
-        str: 视频片段路径，未找到则返回 None
+    按 unit_id 与时间范围为当前语义单元定位 clip。
+
+    查找顺序：
+    1) 顶层 `manifest.json`
+    2) `_stream_units/<unit_id>/manifest.json`
+    3) `_stream_units/<unit_id>/*.mp4`
+    4) 顶层目录下的 `*.mp4` 回退匹配
     """
+    _ = generator
     clips_path = Path(clips_dir)
+    unit_dir = clips_path / "_stream_units" / _sanitize_stream_unit_folder_name(unit_id)
 
     def _is_valid_file(path_value: Any) -> Optional[str]:
         if not path_value:
@@ -258,8 +422,6 @@ def find_clip_for_unit(
         return None
 
     def _filename_matches_unit(clip_name: str, target_unit_id: str) -> bool:
-        # 文件名典型格式：001_SU001_topic_0.00-10.00.mp4
-        # 这里要求 unit_id token 边界匹配，避免 SU01 误匹配 SU010。
         pattern = re.compile(rf"(?:^|_){re.escape(target_unit_id)}(?:_|$)", re.IGNORECASE)
         return bool(pattern.search(Path(clip_name).stem))
 
@@ -268,31 +430,36 @@ def find_clip_for_unit(
         e = safe_float(item.get("end_sec", end_sec), end_sec)
         return abs(s - start_sec) + abs(e - end_sec)
 
-    # 1) 优先通过 manifest 做精确匹配（最可靠）
-    manifest_path = clips_path / "manifest.json"
-    if manifest_path.exists():
+    def _load_manifest_items(manifest_file: Path) -> List[Dict[str, Any]]:
+        if not manifest_file.exists():
+            return []
         try:
-            with open(manifest_path, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            items = [
-                item for item in (manifest.get("items", []) or [])
-                if isinstance(item, dict)
-                and str(item.get("unit_id", "")) == str(unit_id)
-                and str(item.get("status", "")) == "success"
-            ]
-            items.sort(key=_close_to_expected)
-            for item in items:
-                manifest_out = _is_valid_file(item.get("out_path"))
-                if manifest_out:
-                    return manifest_out
+            with open(manifest_file, "r", encoding="utf-8") as manifest_fp:
+                manifest = json.load(manifest_fp)
         except Exception:
-            pass
+            return []
+        items = [
+            item for item in (manifest.get("items", []) or [])
+            if isinstance(item, dict)
+            and str(item.get("unit_id", "")) == str(unit_id)
+            and str(item.get("status", "")) == "success"
+        ]
+        items.sort(key=_close_to_expected)
+        return items
 
-    # 2) 文件名精确 token 匹配
+    for manifest_file in (unit_dir / "manifest.json", clips_path / "manifest.json"):
+        for item in _load_manifest_items(manifest_file):
+            manifest_out = _is_valid_file(item.get("out_path"))
+            if manifest_out:
+                return manifest_out
+
     matched_files: List[Path] = []
-    for clip_file in clips_path.glob("*.mp4"):
-        if _filename_matches_unit(clip_file.name, str(unit_id)):
-            matched_files.append(clip_file)
+    for search_dir in (unit_dir, clips_path):
+        for clip_file in search_dir.glob("*.mp4"):
+            if _filename_matches_unit(clip_file.name, str(unit_id)):
+                matched_files.append(clip_file)
+        if matched_files:
+            break
 
     if matched_files:
         if len(matched_files) == 1:
@@ -306,15 +473,13 @@ def find_clip_for_unit(
         matched_files.sort(key=lambda f: f.name)
         return str(matched_files[0])
 
-    # 3) 时间范围回退匹配
     time_pattern = f"{start_sec:.2f}-{end_sec:.2f}"
-    for clip_file in clips_path.glob("*.mp4"):
-        if time_pattern in clip_file.name:
-            return str(clip_file)
+    for search_dir in (unit_dir, clips_path):
+        for clip_file in search_dir.glob("*.mp4"):
+            if time_pattern in clip_file.name:
+                return str(clip_file)
 
     return None
-
-
 async def optimize_screenshots_batch_mode(
     generator,
     video_path: str,
@@ -342,7 +507,6 @@ async def optimize_screenshots_batch_mode(
     static_island_threshold_ms = _resolve_screenshot_static_island_threshold_ms(generator)
     
     try:
-        from concurrent.futures import ProcessPoolExecutor
         from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import SharedFrameRegistry
         import sys
         import gc
@@ -360,14 +524,19 @@ async def optimize_screenshots_batch_mode(
         extractor = generator._get_cached_visual_extractor(video_path)
 
         # 配置参数
+        governor = _resolve_prefetch_governor(generator)
         max_workers = generator._resolve_max_workers(request_count=len(screenshot_requests))
         max_inflight_multiplier = int(generator.screenshot_config.get("max_inflight_multiplier", 2))
         max_inflight = max(1, max_workers * max_inflight_multiplier)
-        sample_rate = int(generator.screenshot_config.get("prefetch_sample_rate", 2))
-        target_height = int(generator.screenshot_config.get("prefetch_target_height", 360))
-        max_prefetch_frames = int(generator.screenshot_config.get("prefetch_max_frames_per_chunk", 240))
-        chunk_max_span_sec = float(generator.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
-        chunk_max_requests = int(generator.screenshot_config.get("prefetch_chunk_max_requests", 1000))
+        max_inflight = min(max_inflight, int(governor["max_inflight_hard_cap"]))
+        sample_rate = max(1, int(generator.screenshot_config.get("prefetch_sample_rate", 2)))
+        target_height = max(0, int(generator.screenshot_config.get("prefetch_target_height", 360)))
+        max_prefetch_frames = max(8, int(generator.screenshot_config.get("prefetch_max_frames_per_chunk", 240)))
+        max_prefetch_frames = min(max_prefetch_frames, int(governor["prefetch_frames_hard_cap"]))
+        chunk_max_span_sec = max(0.5, float(generator.screenshot_config.get("prefetch_union_max_span_seconds", 10.0)))
+        chunk_max_span_sec = min(chunk_max_span_sec, float(governor["prefetch_span_hard_cap"]))
+        chunk_max_requests = max(1, int(generator.screenshot_config.get("prefetch_chunk_max_requests", 1000)))
+        chunk_max_requests = min(chunk_max_requests, int(governor["prefetch_requests_hard_cap"]))
 
         chunks = generator._build_screenshot_prefetch_chunks(
             screenshot_requests=screenshot_requests,
@@ -383,17 +552,20 @@ async def optimize_screenshots_batch_mode(
             f"max_prefetch_frames={max_prefetch_frames}"
         )
 
-        executor = generator._cv_executor
-        created_executor = False
-        if executor is None:
-            executor = ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker)
-            created_executor = True
+        executor, created_executor, executor_kind = _resolve_cv_route_executor(
+            generator,
+            screenshot_requests,
+            max_workers,
+            init_cv_worker,
+        )
 
         try:
             loop = asyncio.get_running_loop()
 
             # 可选 Warmup：诊断是否真的分发到多个 Worker
-            await generator._maybe_warmup_pool(loop=loop, executor=executor, worker_count=max_workers)
+            if executor_kind.startswith("process"):
+                await generator._maybe_warmup_pool(loop=loop, executor=executor, worker_count=max_workers)
+            logger.info("[CV ROUTE] executor_kind=%s, workers=%s", executor_kind, max_workers)
 
             submitted_tasks = 0
             completed_tasks = 0
@@ -401,14 +573,30 @@ async def optimize_screenshots_batch_mode(
             for chunk_id, chunk in enumerate(chunks):
                 chunk_t0 = time.perf_counter()
 
+                chunk_profile = str(chunk.get("prefetch_profile", "default") or "default")
+                chunk_sample_rate = max(1, int(chunk.get("prefetch_sample_rate", sample_rate) or sample_rate))
+                chunk_target_height = max(0, int(chunk.get("prefetch_target_height", target_height) or target_height))
                 registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
                     generator._prefetch_union_frames_to_registry_sync,
                     extractor,
                     SharedFrameRegistry,
                     chunk["union_start"],
                     chunk["union_end"],
-                    sample_rate,
-                    target_height,
+                    chunk_sample_rate,
+                    chunk_target_height,
+                )
+
+                _emit_prefetch_monitor(
+                    governor=governor,
+                    mode="batch",
+                    chunk_index=chunk_id + 1,
+                    total_chunks=len(chunks),
+                    profile=chunk_profile,
+                    request_count=len(chunk["windows"]),
+                    span_sec=float(chunk["union_end"] - chunk["union_start"]),
+                    sampled_frames=len(ts_to_shm_ref),
+                    inflight=0,
+                    inflight_cap=max_inflight,
                 )
 
                 try:
@@ -464,7 +652,7 @@ async def optimize_screenshots_batch_mode(
                         f"✅ [Batch Mode] Chunk {chunk_id + 1}/{len(chunks)} done: "
                         f"reqs={len(chunk['windows'])}, span={chunk['union_end'] - chunk['union_start']:.2f}s, "
                         f"prefetch={prefetch_ms:.1f}ms, register={register_ms:.1f}ms, "
-                        f"submitted={len(futures)}, total={chunk_total_ms:.1f}ms"
+                        f"submitted={len(futures)}, profile={chunk_profile}, total={chunk_total_ms:.1f}ms"
                     )
                 finally:
                     # cleanup chunk SHM：确保异常情况下也不会泄漏
@@ -556,17 +744,23 @@ async def optimize_screenshots_streaming_pipeline(
         extractor = generator._get_cached_visual_extractor(video_path)
 
         # 配置参数
+        governor = _resolve_prefetch_governor(generator)
         max_workers = generator._resolve_max_workers(request_count=len(screenshot_requests))
         max_inflight_multiplier = int(generator.screenshot_config.get("max_inflight_multiplier", 2))
         max_inflight = max(1, max_workers * max_inflight_multiplier)
+        max_inflight = min(max_inflight, int(governor["max_inflight_hard_cap"]))
         overlap_buffers = int(generator.screenshot_config.get("streaming_overlap_buffers", 2))
         overlap_buffers = max(1, overlap_buffers)
+        overlap_buffers = min(overlap_buffers, int(governor["overlap_buffers_hard_cap"]))
 
-        sample_rate = int(generator.screenshot_config.get("prefetch_sample_rate", 2))
-        target_height = int(generator.screenshot_config.get("prefetch_target_height", 360))
-        max_prefetch_frames = int(generator.screenshot_config.get("prefetch_max_frames_per_chunk", 240))
-        chunk_max_span_sec = float(generator.screenshot_config.get("prefetch_union_max_span_seconds", 10.0))
-        chunk_max_requests = int(generator.screenshot_config.get("prefetch_chunk_max_requests", 1000))
+        sample_rate = max(1, int(generator.screenshot_config.get("prefetch_sample_rate", 2)))
+        target_height = max(0, int(generator.screenshot_config.get("prefetch_target_height", 360)))
+        max_prefetch_frames = max(8, int(generator.screenshot_config.get("prefetch_max_frames_per_chunk", 240)))
+        max_prefetch_frames = min(max_prefetch_frames, int(governor["prefetch_frames_hard_cap"]))
+        chunk_max_span_sec = max(0.5, float(generator.screenshot_config.get("prefetch_union_max_span_seconds", 10.0)))
+        chunk_max_span_sec = min(chunk_max_span_sec, float(governor["prefetch_span_hard_cap"]))
+        chunk_max_requests = max(1, int(generator.screenshot_config.get("prefetch_chunk_max_requests", 1000)))
+        chunk_max_requests = min(chunk_max_requests, int(governor["prefetch_requests_hard_cap"]))
 
         chunks = generator._build_screenshot_prefetch_chunks(
             screenshot_requests=screenshot_requests,
@@ -583,17 +777,20 @@ async def optimize_screenshots_streaming_pipeline(
             f"max_prefetch_frames={max_prefetch_frames}"
         )
 
-        executor = generator._cv_executor
-        created_executor = False
-        if executor is None:
-            executor = ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker)
-            created_executor = True
+        executor, created_executor, executor_kind = _resolve_cv_route_executor(
+            generator,
+            screenshot_requests,
+            max_workers,
+            init_cv_worker,
+        )
 
         try:
             loop = asyncio.get_running_loop()
 
             # 可选 Warmup：诊断是否真的分发到多个 Worker
-            await generator._maybe_warmup_pool(loop=loop, executor=executor, worker_count=max_workers)
+            if executor_kind.startswith("process"):
+                await generator._maybe_warmup_pool(loop=loop, executor=executor, worker_count=max_workers)
+            logger.info("[CV ROUTE] executor_kind=%s, workers=%s", executor_kind, max_workers)
 
             pending: set = set()
             futures_meta: Dict[asyncio.Future, Dict[str, Any]] = {}
@@ -661,14 +858,30 @@ async def optimize_screenshots_streaming_pipeline(
                     await drain_first_completed()
 
                 chunk_t0 = time.perf_counter()
+                chunk_profile = str(chunk.get("prefetch_profile", "default") or "default")
+                chunk_sample_rate = max(1, int(chunk.get("prefetch_sample_rate", sample_rate) or sample_rate))
+                chunk_target_height = max(0, int(chunk.get("prefetch_target_height", target_height) or target_height))
                 registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
                     generator._prefetch_union_frames_to_registry_sync,
                     extractor,
                     SharedFrameRegistry,
                     chunk["union_start"],
                     chunk["union_end"],
-                    sample_rate,
-                    target_height,
+                    chunk_sample_rate,
+                    chunk_target_height,
+                )
+
+                _emit_prefetch_monitor(
+                    governor=governor,
+                    mode="streaming",
+                    chunk_index=chunk_id + 1,
+                    total_chunks=len(chunks),
+                    profile=chunk_profile,
+                    request_count=len(chunk["windows"]),
+                    span_sec=float(chunk["union_end"] - chunk["union_start"]),
+                    sampled_frames=len(ts_to_shm_ref),
+                    inflight=len(pending),
+                    inflight_cap=max_inflight,
                 )
 
                 if not ts_to_shm_ref:
@@ -740,7 +953,7 @@ async def optimize_screenshots_streaming_pipeline(
                     f"📌 [Streaming Pipeline] Feed chunk {chunk_id + 1}/{len(chunks)}: "
                     f"reqs={len(chunk['windows'])}, span={chunk['union_end'] - chunk['union_start']:.2f}s, "
                     f"prefetch={prefetch_ms:.1f}ms, register={register_ms:.1f}ms, "
-                    f"submitted={submitted_in_chunk}, inflight={len(pending)}, total={chunk_total_ms:.1f}ms"
+                    f"submitted={submitted_in_chunk}, inflight={len(pending)}, profile={chunk_profile}, total={chunk_total_ms:.1f}ms"
                 )
 
                 gc.collect()

@@ -917,7 +917,7 @@ public class DeepSeekAdvisorService {
     }
 
     private void logPhase2bRawMarkdownIfEnabled(String mode, String rawMarkdown) {
-        if (!phase2bLogRawMarkdown) {
+        if (!phase2bLogRawMarkdown || !logger.isDebugEnabled()) {
             return;
         }
         String source = String.valueOf(rawMarkdown == null ? "" : rawMarkdown);
@@ -963,7 +963,7 @@ public class DeepSeekAdvisorService {
                     .append(" lines\n");
         }
         builder.append("----- INDENT PROBE END -----");
-        logger.info(builder.toString());
+        logger.debug(builder.toString());
     }
 
     private int countLeadingSpaces(String line) {

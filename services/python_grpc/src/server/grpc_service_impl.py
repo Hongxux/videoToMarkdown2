@@ -7184,8 +7184,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 "total": len(semantic_units),
                 "abstract": 0,
                 "concrete": 0,
-                "process_short": 0,
-                "process_long": 0,
+                "process": 0,
                 "process_preprocessed": 0,
                 "process_static_legacy": 0,
                 "unknown": 0
@@ -7204,10 +7203,6 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             )
             route_decode_enable_async_transcode = bool(
                 routing_cfg.get("screenshot_decode_enable_async_transcode", True)
-            )
-            duration_threshold_sec = max(
-                0.0,
-                _safe_float(routing_cfg.get("process_duration_threshold_sec", 20.0), 20.0)
             )
             force_process_preprocess = bool(routing_cfg.get("process_force_preprocess_before_routing", True))
             route_screenshot_mode = str(routing_cfg.get("screenshot_pipeline_mode", "process_streaming")).strip().lower()
@@ -7301,28 +7296,17 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         )
                         force_stable_action_legacy = False
 
+                routing_stats["process"] += 1
                 if force_stable_action_legacy:
                     routing_stats["process_static_legacy"] += 1
                     unit["_routing_force_legacy_action"] = True
-                    vl_units.append(unit)
-                    continue
-
-                if effective_duration <= duration_threshold_sec:
-                    routing_stats["process_short"] += 1
-                    cv_screenshot_units.append(unit)
-                    if unit.get("mult_steps", False):
-                        cv_clip_units.append(unit)
-                else:
-                    routing_stats["process_long"] += 1
-                    vl_units.append(unit)
+                vl_units.append(unit)
 
             logger.info(
                 f"[{task_id}] VL 路由统计: total={routing_stats['total']}, "
-                f"abstract={routing_stats['abstract']}, concrete={routing_stats['concrete']}, "
-                f"process_short={routing_stats['process_short']}, process_long={routing_stats['process_long']}, "
+                f"abstract={routing_stats['abstract']}, concrete={routing_stats['concrete']}, process={routing_stats['process']}, "
                 f"process_preprocessed={routing_stats['process_preprocessed']}, "
                 f"process_static_legacy={routing_stats['process_static_legacy']}, "
-                f"threshold={duration_threshold_sec:.1f}s, "
                 f"unknown={routing_stats['unknown']}"
             )
 

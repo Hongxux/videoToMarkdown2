@@ -3,7 +3,7 @@
         return;
     }
     window.__mobileAnchorPanelReady = true;
-    const ANCHOR_PANEL_BUILD = '20260304l-enter-only-open';
+    const ANCHOR_PANEL_BUILD = '20260307-phase2b-toolbar-bottom-row';
     if (typeof console !== 'undefined' && typeof console.info === 'function') {
         console.info(`[mobile-anchor-panel] build=${ANCHOR_PANEL_BUILD}`);
     }
@@ -1214,6 +1214,9 @@
             fileChips: document.getElementById('anchorPhase2bFileChips'),
             inputWrap: document.getElementById('anchorPhase2bInputWrap'),
             input: document.getElementById('anchorPhase2bInput'),
+            inputSkeleton: document.getElementById('anchorPhase2bInputSkeleton'),
+            pasteSubmitBtn: document.getElementById('anchorPhase2bPasteSubmitBtn'),
+            inlineCopyBtn: document.getElementById('anchorPhase2bInlineCopyBtn'),
             submitBtn: document.getElementById('anchorPhase2bSubmitBtn'),
             headSubmitBtn: document.getElementById('anchorPhase2bHeadSubmitBtn'),
             headCopyBtn: document.getElementById('anchorPhase2bHeadCopyBtn'),
@@ -1519,7 +1522,8 @@
                 if (payloadType === 'phase2bMarkdownFinal') {
                     const finalMarkdown = String(payload.markdown || '');
                     runtime.phase2b.streamActive = false;
-                    if (finalMarkdown || Number(runtime.phase2b.streamChunkCount || 0) > 0) {
+                    runtime.phase2b.streamChunkCount = 0;
+                    if (finalMarkdown) {
                         runtime.phase2b.inputValue = finalMarkdown;
                         runtime.phase2b.resultValue = finalMarkdown;
                     }
@@ -1529,17 +1533,11 @@
                 const chunkText = String(payload.chunk || '');
                 const isDone = payload.done === true;
                 if (chunkText) {
-                    if (!runtime.phase2b.streamActive && Number(runtime.phase2b.streamChunkCount || 0) === 0) {
-                        runtime.phase2b.inputValue = '';
-                        runtime.phase2b.resultValue = '';
-                    }
                     runtime.phase2b.streamActive = true;
-                    runtime.phase2b.streamChunkCount = Number(runtime.phase2b.streamChunkCount || 0) + 1;
-                    runtime.phase2b.inputValue = `${String(runtime.phase2b.inputValue || '')}${chunkText}`;
-                    runtime.phase2b.resultValue = runtime.phase2b.inputValue;
                 }
                 if (isDone) {
                     runtime.phase2b.streamActive = false;
+                    runtime.phase2b.streamChunkCount = 0;
                 }
                 renderPhase2bFloatingUi();
             });
@@ -1825,6 +1823,42 @@
         });
     }
 
+    function getPhase2bDockVisualMetrics(dockLike) {
+        const dock = dockLike instanceof HTMLElement ? dockLike : document.getElementById('anchorPhase2bDock');
+        if (!(dock instanceof HTMLElement)) {
+            return {
+                width: 0,
+                height: 0,
+                offsetX: 0,
+                offsetY: 0,
+            };
+        }
+        const phase2b = runtime.phase2b && typeof runtime.phase2b === 'object' ? runtime.phase2b : {};
+        const canvas = document.getElementById('anchorPhase2bCanvas');
+        const capsuleBtn = document.getElementById('anchorPhase2bCapsuleBtn');
+        const visibleNode = phase2b.expanded && canvas instanceof HTMLElement && !canvas.hidden
+            ? canvas
+            : (capsuleBtn instanceof HTMLElement ? capsuleBtn : dock);
+        const width = Math.max(0, Number(visibleNode.offsetWidth || dock.offsetWidth || 0));
+        const height = Math.max(0, Number(visibleNode.offsetHeight || dock.offsetHeight || 0));
+        if (visibleNode === dock) {
+            return {
+                width,
+                height,
+                offsetX: 0,
+                offsetY: 0,
+            };
+        }
+        const dockRect = dock.getBoundingClientRect();
+        const visibleRect = visibleNode.getBoundingClientRect();
+        return {
+            width,
+            height,
+            offsetX: visibleRect.left - dockRect.left,
+            offsetY: visibleRect.top - dockRect.top,
+        };
+    }
+
     function applyPhase2bDockPosition(dockLike) {
         const dock = dockLike instanceof HTMLElement ? dockLike : document.getElementById('anchorPhase2bDock');
         if (!(dock instanceof HTMLElement)) {
@@ -1834,11 +1868,20 @@
         if (!(panel instanceof HTMLElement)) {
             return;
         }
+        const visualMetrics = getPhase2bDockVisualMetrics(dock);
+        const clampDockOffset = (rawX, rawY) => {
+            const minX = Math.min(0, Math.round(-Number(visualMetrics.offsetX || 0)));
+            const minY = Math.min(0, Math.round(-Number(visualMetrics.offsetY || 0)));
+            const maxX = Math.max(minX, Math.round(panel.clientWidth - Number(visualMetrics.width || 0) - Number(visualMetrics.offsetX || 0)));
+            const maxY = Math.max(minY, Math.round(panel.clientHeight - Number(visualMetrics.height || 0) - Number(visualMetrics.offsetY || 0)));
+            return {
+                x: Math.min(maxX, Math.max(minX, Math.round(Number(rawX) || 0))),
+                y: Math.min(maxY, Math.max(minY, Math.round(Number(rawY) || 0))),
+            };
+        };
         const resolveDefaultDockOffset = () => {
-            const maxX = Math.max(0, panel.clientWidth - dock.offsetWidth);
-            const maxY = Math.max(0, panel.clientHeight - dock.offsetHeight);
             const rightMargin = Math.max(10, Math.min(24, Math.round(panel.clientWidth * 0.02)));
-            let preferredY = Math.round((panel.clientHeight - dock.offsetHeight) * 0.5);
+            let preferredY = Math.round((panel.clientHeight - Number(visualMetrics.height || 0)) * 0.5);
             const editorShell = document.getElementById('anchorComposerShell');
             if (editorShell instanceof HTMLElement) {
                 const panelRect = panel.getBoundingClientRect();
@@ -1846,13 +1889,13 @@
                 if (editorRect.height > 0 && editorRect.width > 0) {
                     const relativeTop = editorRect.top - panelRect.top;
                     const editorCenterY = relativeTop + (editorRect.height * 0.5);
-                    preferredY = Math.round(editorCenterY - (dock.offsetHeight * 0.5));
+                    preferredY = Math.round(editorCenterY - (Number(visualMetrics.height || 0) * 0.5));
                 }
             }
-            return {
-                x: Math.min(maxX, Math.max(0, Math.round(maxX - rightMargin))),
-                y: Math.min(maxY, Math.max(0, Math.round(preferredY))),
-            };
+            return clampDockOffset(
+                panel.clientWidth - rightMargin - Number(visualMetrics.width || 0) - Number(visualMetrics.offsetX || 0),
+                preferredY - Number(visualMetrics.offsetY || 0),
+            );
         };
         const phase2b = runtime.phase2b;
         const x = Number(phase2b.moveX);
@@ -1866,10 +1909,9 @@
             dock.style.bottom = 'auto';
             return;
         }
-        const maxX = Math.max(0, panel.clientWidth - dock.offsetWidth);
-        const maxY = Math.max(0, panel.clientHeight - dock.offsetHeight);
-        const clampedX = Math.min(maxX, Math.max(0, x));
-        const clampedY = Math.min(maxY, Math.max(0, y));
+        const clamped = clampDockOffset(x, y);
+        const clampedX = clamped.x;
+        const clampedY = clamped.y;
         phase2b.moveX = clampedX;
         phase2b.moveY = clampedY;
         dock.style.left = `${Math.round(clampedX)}px`;
@@ -1894,8 +1936,8 @@
             canvas.style.height = '';
             return;
         }
-        const maxWidth = Math.max(320, panel.clientWidth - 10);
-        const maxHeight = Math.max(260, panel.clientHeight - 36);
+        const maxWidth = Math.max(320, panel.clientWidth - 48);
+        const maxHeight = Math.max(260, panel.clientHeight - 88);
         const clampedWidth = Math.max(320, Math.min(maxWidth, preferred.width));
         const clampedHeight = Math.max(260, Math.min(maxHeight, preferred.height));
         phase2b.canvasWidth = Math.round(clampedWidth);
@@ -1961,57 +2003,75 @@
             #anchorMountPanel .anchor-phase2b-dock.is-notice .anchor-phase2b-toast { opacity: 1; transform: translateY(0) scale(1); }
             #anchorMountPanel .anchor-phase2b-dock.is-notice .anchor-phase2b-capsule { animation: anchorPhase2bNotify .36s cubic-bezier(0.16, 1, 0.3, 1) 1; }
             
-            #anchorMountPanel .anchor-phase2b-canvas { width: min(460px, calc(100vw - 56px), calc(100% - 8px)); max-height: min(74vh, 760px, calc(100% - 64px)); border-radius: 18px; border: 1px solid var(--p2b-border); background: var(--p2b-bg); backdrop-filter: blur(40px) saturate(150%); -webkit-backdrop-filter: blur(40px) saturate(150%); box-shadow: inset 0 1px 0 var(--p2b-border-inner), 0 24px 60px var(--p2b-shadow); padding: 16px 20px 20px 20px; display: grid; gap: 12px; grid-template-rows: auto auto auto minmax(0,1fr) auto; transform-origin: right bottom; transform: translateY(16px) scale(.92); opacity: 0; pointer-events: none; transition: transform .4s cubic-bezier(0.16, 1, 0.3, 1), opacity .3s ease; position: relative; min-height: 280px; }
+            #anchorMountPanel .anchor-phase2b-canvas { width: min(400px, calc(100vw - 72px), calc(100% - 48px)); max-height: min(68vh, 720px, calc(100% - 96px)); border-radius: 18px; border: 1px solid var(--p2b-border); background: var(--p2b-bg); backdrop-filter: blur(40px) saturate(150%); -webkit-backdrop-filter: blur(40px) saturate(150%); box-shadow: inset 0 1px 0 var(--p2b-border-inner), 0 24px 60px var(--p2b-shadow); padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 12px; transform-origin: right bottom; transform: translateY(16px) scale(.92); opacity: 0; pointer-events: none; transition: transform .4s cubic-bezier(0.16, 1, 0.3, 1), opacity .3s ease; position: relative; min-height: 260px; overflow: hidden; box-sizing: border-box; }
+            #anchorMountPanel .anchor-phase2b-canvas, #anchorMountPanel .anchor-phase2b-canvas * { box-sizing: border-box; }
+            #anchorMountPanel .anchor-phase2b-canvas > * { min-width: 0; max-width: 100%; }
             #anchorMountPanel .anchor-phase2b-dock.is-open .anchor-phase2b-canvas { transform: translateY(0) scale(1); opacity: 1; pointer-events: auto; }
             #anchorMountPanel .anchor-phase2b-dock.is-moving .anchor-phase2b-canvas { transition: none; }
-            #anchorMountPanel .anchor-phase2b-dock.is-open .anchor-phase2b-capsule { opacity: 0; transform: translateY(12px) scale(.8); pointer-events: none; }
+            #anchorMountPanel .anchor-phase2b-dock.is-open .anchor-phase2b-capsule { opacity: 0; transform: translateY(12px) scale(.8); pointer-events: none; position: absolute; right: 0; top: 0; visibility: hidden; }
             
-            #anchorMountPanel .anchor-phase2b-canvas-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: move; user-select: none; touch-action: none; padding-bottom: 4px; }
-            #anchorMountPanel .anchor-phase2b-canvas-title { font-size: 14px; font-weight: 600; color: var(--p2b-text-primary); }
-            #anchorMountPanel .anchor-phase2b-canvas-actions { display: inline-flex; align-items: center; gap: 4px; }
+            #anchorMountPanel .anchor-phase2b-canvas-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; column-gap: 10px; row-gap: 8px; cursor: move; user-select: none; touch-action: none; padding-bottom: 4px; }
+            #anchorMountPanel .anchor-phase2b-canvas-title { min-width: 0; font-size: 14px; font-weight: 600; line-height: 1.45; color: var(--p2b-text-primary); }
+            #anchorMountPanel .anchor-phase2b-canvas-actions { display: inline-flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px; max-width: 100%; }
             #anchorMountPanel .anchor-phase2b-canvas-actions .btn { min-width: 28px; min-height: 28px; border-radius: 8px; padding: 0 6px; font-size: 14px; cursor: pointer; color: var(--p2b-text-secondary); background: transparent; transition: background .2s ease, color .2s ease; border: none; outline: none;}
             #anchorMountPanel .anchor-phase2b-canvas-actions .btn:hover { background: var(--p2b-btn-ghost-hover); color: var(--p2b-text-primary); }
             
-            #anchorMountPanel .anchor-phase2b-chips { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+            #anchorMountPanel .anchor-phase2b-chips { width: 100%; max-width: 100%; min-width: 0; display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; min-height: 0; overflow: hidden; }
             #anchorMountPanel .anchor-phase2b-chip { border: 1px solid rgba(148,163,184,.2); background: rgba(148,163,184,.12); color: var(--p2b-text-secondary); border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 500; line-height: 1.5; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
             #anchorMountPanel .anchor-phase2b-chip.is-link { border-color: rgba(59,130,246,.2); background: rgba(59,130,246,.08); color: var(--p2b-accent); max-width: min(100%, 360px); }
             #anchorMountPanel .anchor-phase2b-chip-site { width: 14px; height: 14px; border-radius: 999px; background: rgba(59,130,246,.2); color: var(--p2b-accent); font-size: 9px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; margin-right: 6px; }
             
-            #anchorMountPanel .anchor-phase2b-input-wrap { display: grid; gap: 8px; transition: opacity .4s ease, margin .4s cubic-bezier(0.16, 1, 0.3, 1); }
+            #anchorMountPanel .anchor-phase2b-input-wrap { width: 100%; max-width: 100%; min-width: 0; display: grid; gap: 8px; flex: 0 0 auto; min-height: 0; transition: opacity .4s ease, margin .4s cubic-bezier(0.16, 1, 0.3, 1); }
             #anchorMountPanel .anchor-phase2b-input-wrap.is-collapsed { display: none; }
             #anchorMountPanel .anchor-phase2b-dock.is-processing .anchor-phase2b-input-wrap { opacity: 0.3; pointer-events: none; margin-bottom: -20px; transform: scale(0.96); transform-origin: top center; transition: all .4s cubic-bezier(0.16, 1, 0.3, 1); }
             
-            #anchorMountPanel .anchor-phase2b-input-shell { position: relative; border-radius: 14px; background: var(--p2b-input-bg); transition: background .3s ease, box-shadow .3s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.02) inset; border: 1px solid transparent; }
+            #anchorMountPanel .anchor-phase2b-input-shell { width: 100%; max-width: 100%; min-width: 0; position: relative; border-radius: 14px; background: var(--p2b-input-bg); transition: background .3s ease, box-shadow .3s ease; box-shadow: 0 2px 8px rgba(0,0,0,0.02) inset; border: 1px solid transparent; overflow: hidden; }
             #anchorMountPanel .anchor-phase2b-input-shell:focus-within { background: var(--p2b-input-bg-focus); box-shadow: 0 0 0 2px var(--p2b-shadow-focus), 0 4px 12px rgba(0,0,0,0.04); }
             #anchorMountPanel .anchor-phase2b-dock.is-dragging .anchor-phase2b-input-shell { background: var(--p2b-input-bg-focus); box-shadow: 0 0 0 2px var(--p2b-accent), 0 14px 30px var(--p2b-shadow-focus); }
             
-            #anchorMountPanel .anchor-phase2b-input { width: 100%; resize: none; border: 0; outline: none; background: transparent; color: var(--p2b-text-primary); padding: 14px 44px 14px 14px; font-size: 14px; line-height: 1.6; min-height: 96px; max-height: 38vh; overflow-y: auto; font-family: inherit; }
+            #anchorMountPanel .anchor-phase2b-input { display: block; width: 100%; max-width: 100%; min-width: 0; resize: none; border: 0; outline: none; background: transparent; color: var(--p2b-text-primary); padding: 14px 14px 56px 14px; font-size: 14px; line-height: 1.6; min-height: 112px; max-height: 38vh; overflow-y: auto; overflow-x: hidden; font-family: inherit; transition: opacity .2s ease; }
             #anchorMountPanel .anchor-phase2b-input::placeholder { color: var(--p2b-text-muted); }
             #anchorMountPanel .anchor-phase2b-input::-webkit-scrollbar { width: 6px; }
             #anchorMountPanel .anchor-phase2b-input::-webkit-scrollbar-thumb { border-radius: 999px; background: rgba(148,163,184,.3); }
-            
+            #anchorMountPanel .anchor-phase2b-input-shell.is-processing .anchor-phase2b-input { opacity: 0; }
+            #anchorMountPanel .anchor-phase2b-input-skeleton { position: absolute; inset: 14px 14px 56px 14px; display: grid; align-content: start; gap: 10px; pointer-events: none; }
+            #anchorMountPanel .anchor-phase2b-input-skeleton[hidden] { display: none; }
+            #anchorMountPanel .anchor-phase2b-skeleton-line { height: 12px; border-radius: 999px; background: linear-gradient(90deg, rgba(148,163,184,.16) 0%, rgba(148,163,184,.32) 50%, rgba(148,163,184,.16) 100%); background-size: 220% 100%; animation: anchorPhase2bSkeletonShift 1.2s linear infinite; }
+            #anchorMountPanel .anchor-phase2b-skeleton-line-lg { width: 92%; }
+            #anchorMountPanel .anchor-phase2b-skeleton-line-sm { width: 68%; }
+
             #anchorMountPanel .anchor-phase2b-clear { position: absolute; right: 8px; top: 8px; width: 24px; height: 24px; border-radius: 50%; background: rgba(148,163,184,.2); color: var(--p2b-text-secondary); border: none; font-size: 14px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; transition: background .2s, color .2s; }
             #anchorMountPanel .anchor-phase2b-clear:hover { background: rgba(148,163,184,.4); color: var(--p2b-text-primary); }
-            
-            #anchorMountPanel .anchor-phase2b-submit { position: absolute; right: 8px; bottom: 8px; width: 32px; height: 32px; border-radius: 999px; border: none; background: var(--p2b-text-secondary); color: #fff; font-size: 16px; font-weight: bold; cursor: pointer; transition: transform .2s cubic-bezier(0.16, 1, 0.3, 1), background .3s, opacity .3s; display: inline-flex; align-items: center; justify-content: center; outline: none; opacity: 0.6; }
+
+            #anchorMountPanel .anchor-phase2b-action-row { position: absolute; left: 8px; right: 8px; bottom: 8px; display: inline-flex; align-items: center; justify-content: flex-end; gap: 4px; max-width: none; padding: 4px; border-radius: 999px; background: rgba(255,255,255,.82); box-shadow: inset 0 0 0 1px rgba(148,163,184,.22), 0 8px 18px rgba(15,23,42,.08); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); overflow-x: auto; overflow-y: hidden; }
+            #anchorMountPanel .anchor-phase2b-action-row > button { height: 30px; border-radius: 999px; border: none; display: inline-flex; align-items: center; justify-content: center; white-space: nowrap; cursor: pointer; transition: background .2s ease, opacity .2s ease, transform .2s ease, color .2s ease, box-shadow .2s ease; }
+            #anchorMountPanel .anchor-phase2b-inline-copy { min-width: 46px; padding: 0 10px; background: rgba(148,163,184,.16); color: var(--p2b-text-primary); font-size: 12px; font-weight: 600; }
+            #anchorMountPanel .anchor-phase2b-inline-copy:hover:not(:disabled) { background: rgba(59,130,246,.14); transform: translateY(-1px); }
+            #anchorMountPanel .anchor-phase2b-inline-copy:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+            #anchorMountPanel .anchor-phase2b-paste-submit { min-width: 78px; padding: 0 12px; background: rgba(37,99,235,.14); color: var(--p2b-accent); font-size: 12px; font-weight: 700; }
+            #anchorMountPanel .anchor-phase2b-paste-submit:hover:not(:disabled) { background: rgba(37,99,235,.22); color: var(--p2b-accent-hover); transform: translateY(-1px); }
+            #anchorMountPanel .anchor-phase2b-paste-submit:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+            #anchorMountPanel .anchor-phase2b-submit { width: 30px; background: var(--p2b-accent); color: #fff; font-size: 15px; font-weight: 700; outline: none; box-shadow: 0 6px 12px rgba(37,99,235,.18); flex: 0 0 30px; }
             #anchorMountPanel .anchor-phase2b-input-shell:focus-within .anchor-phase2b-submit, #anchorMountPanel .anchor-phase2b-submit.is-active { background: var(--p2b-accent); opacity: 1; box-shadow: 0 4px 12px var(--p2b-shadow-focus); }
             #anchorMountPanel .anchor-phase2b-submit:hover:not(:disabled) { transform: scale(1.08); background: var(--p2b-accent-hover); }
             #anchorMountPanel .anchor-phase2b-submit:active:not(:disabled) { transform: scale(0.95); }
             #anchorMountPanel .anchor-phase2b-submit:disabled { opacity: .4; cursor: not-allowed; background: var(--p2b-text-secondary); box-shadow: none; transform: none; }
             
-            #anchorMountPanel .anchor-phase2b-processing { border-radius: 12px; min-height: 100px; padding: 16px; position: relative; overflow: hidden; background: transparent; display: grid; align-content: center; justify-content: center; gap: 12px; text-align: center; opacity: 0; pointer-events: none; transition: opacity .3s ease; transform: translateY(-10px); }
+            #anchorMountPanel .anchor-phase2b-processing { width: 100%; max-width: 100%; min-width: 0; border-radius: 12px; min-height: 100px; padding: 16px; position: relative; overflow: hidden; background: transparent; display: grid; align-content: center; justify-content: center; gap: 12px; text-align: center; opacity: 0; pointer-events: none; transition: opacity .3s ease; transform: translateY(-10px); flex: 0 0 auto; }
             #anchorMountPanel .anchor-phase2b-dock.is-processing .anchor-phase2b-processing { opacity: 1; pointer-events: auto; transform: translateY(0); }
             #anchorMountPanel .anchor-phase2b-processing-text { font-size: 13px; color: var(--p2b-text-secondary); font-weight: 500; line-height: 1.6; animation: anchorPhase2bFadePulse 2s ease-in-out infinite; }
             
-            #anchorMountPanel .anchor-phase2b-result { display: grid; gap: 12px; min-height: 0; align-content: start; animation: anchorPhase2bSlideUp .4s cubic-bezier(0.16, 1, 0.3, 1); }
-            #anchorMountPanel .anchor-phase2b-result-head { display: flex; align-items: center; justify-content: center; margin-top: 4px; padding-bottom: 4px; }
+            #anchorMountPanel .anchor-phase2b-result { width: 100%; max-width: 100%; min-width: 0; display: flex; flex-direction: column; gap: 12px; flex: 0 0 auto; min-height: 0; overflow: hidden; animation: anchorPhase2bSlideUp .4s cubic-bezier(0.16, 1, 0.3, 1); }
+            #anchorMountPanel .anchor-phase2b-result-head { width: 100%; max-width: 100%; min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 2px; padding-bottom: 0; }
             #anchorMountPanel .anchor-phase2b-copy-btn { min-width: 140px; min-height: 38px; padding: 0 20px; border-radius: 999px; border: none; background: var(--p2b-text-primary); color: var(--p2b-bg); font-size: 13px; font-weight: 600; cursor: pointer; transition: all .25s cubic-bezier(0.16, 1, 0.3, 1); box-shadow: 0 8px 16px var(--p2b-shadow-focus); letter-spacing: 0.02em; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
             #anchorMountPanel .anchor-phase2b-copy-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 12px 24px var(--p2b-shadow-focus); opacity: 0.9; }
             #anchorMountPanel .anchor-phase2b-copy-btn:active:not(:disabled) { transform: scale(0.96); box-shadow: 0 4px 8px var(--p2b-shadow-focus); }
             #anchorMountPanel .anchor-phase2b-copy-btn.is-copied { background: #10b981; color: #fff; box-shadow: 0 8px 16px rgba(16,185,129,.2); }
             #anchorMountPanel .anchor-phase2b-copy-btn:disabled { opacity: .5; cursor: not-allowed; box-shadow: none; }
             
-            #anchorMountPanel .anchor-phase2b-preview { max-height: min(40vh, 360px); overflow: auto; border-radius: 12px; border: 1px solid var(--p2b-border); background: var(--p2b-input-bg); padding: 14px 16px; font-size: 13px; line-height: 1.6; color: var(--p2b-text-primary); white-space: pre-wrap; word-break: break-word; }
+            #anchorMountPanel .anchor-phase2b-preview { width: 100%; max-width: 100%; min-width: 0; flex: 1 1 auto; min-height: 136px; max-height: none; overflow: auto; border-radius: 12px; border: 1px solid var(--p2b-border); background: var(--p2b-input-bg); padding: 14px 16px; font-size: 13px; line-height: 1.6; color: var(--p2b-text-primary); white-space: pre-wrap; word-break: break-word; }
             #anchorMountPanel .anchor-phase2b-preview :is(p,ul,ol,blockquote,pre,table,h1,h2,h3,h4,h5,h6) { margin: 0 0 .8em; }
             #anchorMountPanel .anchor-phase2b-preview p { margin-block: .6em; }
             #anchorMountPanel .anchor-phase2b-preview :is(p,li,blockquote,td,th) { white-space: pre-wrap; }
@@ -2019,7 +2079,7 @@
             #anchorMountPanel .anchor-phase2b-preview pre { background: rgba(15,23,42,.8); color: #e2e8f0; padding: 12px 14px; border-radius: 8px; overflow: auto; white-space: pre; border: 1px solid rgba(255,255,255,0.1); }
             #anchorMountPanel .anchor-phase2b-preview.is-streaming > * { animation: anchorPhase2bChunkIn .3s cubic-bezier(0.16, 1, 0.3, 1) both; }
             
-            #anchorMountPanel .anchor-phase2b-feedback { font-size: 12px; line-height: 1.5; color: var(--p2b-text-secondary); min-height: 18px; text-align: center; }
+            #anchorMountPanel .anchor-phase2b-feedback { width: 100%; max-width: 100%; min-width: 0; font-size: 12px; line-height: 1.5; color: var(--p2b-text-secondary); min-height: 18px; text-align: center; flex: 0 0 auto; overflow-wrap: anywhere; }
             #anchorMountPanel .anchor-phase2b-feedback.is-error { color: #ef4444; }
             
             #anchorMountPanel .anchor-phase2b-resizer { position: absolute; width: 16px; height: 16px; right: 4px; bottom: 4px; cursor: nwse-resize; opacity: 0.3; transition: opacity .2s; touch-action: none; background: radial-gradient(circle at 70% 70%, var(--p2b-text-secondary) 15%, transparent 16%); background-size: 4px 4px; border-radius: 0 0 16px 0; }
@@ -2027,13 +2087,15 @@
             #anchorMountPanel .anchor-phase2b-dock.is-resizing .anchor-phase2b-canvas { transition: none; }
             
             .viewer-layout.is-center-right-stacked #anchorMountPanel .anchor-phase2b-dock { right: 12px; bottom: 12px; }
-            .viewer-layout.is-center-right-stacked #anchorMountPanel .anchor-phase2b-canvas { width: min(420px, calc(100% - 4px)); max-height: min(62vh, calc(100% - 52px)); }
-            @media (max-width: 960px) { #anchorMountPanel .anchor-phase2b-dock { right: 12px; bottom: 12px; } #anchorMountPanel .anchor-phase2b-canvas { width: min(420px, calc(100vw - 28px), calc(100% - 4px)); } }
+            .viewer-layout.is-center-right-stacked #anchorMountPanel .anchor-phase2b-canvas { width: min(380px, calc(100% - 40px)); max-height: min(58vh, calc(100% - 80px)); }
+            @media (max-width: 960px) { #anchorMountPanel .anchor-phase2b-dock { right: 12px; bottom: 12px; } #anchorMountPanel .anchor-phase2b-canvas { width: min(380px, calc(100vw - 40px), calc(100% - 24px)); max-height: min(64vh, calc(100% - 64px)); padding: 14px 14px 16px; } }
+            @media (max-width: 640px) { #anchorMountPanel .anchor-phase2b-canvas { width: min(360px, calc(100vw - 28px), calc(100% - 16px)); } #anchorMountPanel .anchor-phase2b-canvas-head { grid-template-columns: minmax(0, 1fr); } #anchorMountPanel .anchor-phase2b-canvas-actions { justify-content: flex-start; } }
             
             @keyframes anchorPhase2bPulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,.4); } 70% { box-shadow: 0 0 0 8px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
             @keyframes anchorPhase2bNotify { 0% { transform: translateY(0) scale(1); } 35% { transform: translateY(-3px) scale(1.06); } 100% { transform: translateY(0) scale(1); } }
             @keyframes anchorPhase2bChunkIn { 0% { opacity: 0; transform: translateY(6px); } 100% { opacity: 1; transform: translateY(0); } }
             @keyframes anchorPhase2bFadePulse { 0% { opacity: 0.6; } 50% { opacity: 1; } 100% { opacity: 0.6; } }
+            @keyframes anchorPhase2bSkeletonShift { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
             @keyframes anchorPhase2bSlideUp { 0% { opacity: 0; transform: translateY(10px); } 100% { opacity: 1; transform: translateY(0); } }
         `;
         document.head.appendChild(style);
@@ -2052,39 +2114,41 @@
             dock.id = 'anchorPhase2bDock';
             dock.className = 'anchor-phase2b-dock';
             dock.innerHTML = `
-                                <button class="anchor-phase2b-capsule" id="anchorPhase2bCapsuleBtn" type="button" data-phase2b-action="open" aria-label="打开 Phase2B 结构化输入面板">
-                    <span class="anchor-phase2b-capsule-icon" aria-hidden="true">✦</span>
+
+                                <button class="anchor-phase2b-capsule" id="anchorPhase2bCapsuleBtn" type="button" data-phase2b-action="open" aria-label="\u6253\u5f00 Phase2B \u7ed3\u6784\u5316\u8f93\u5165\u9762\u677f">
+                    <span class="anchor-phase2b-capsule-icon" aria-hidden="true">&#10022;</span>
                     <span class="anchor-phase2b-capsule-indicator" id="anchorPhase2bCapsuleIndicator" aria-hidden="true"></span>
                 </button>
                 <div class="anchor-phase2b-toast" id="anchorPhase2bNotice" hidden></div>
                 <section class="anchor-phase2b-canvas" id="anchorPhase2bCanvas" hidden aria-hidden="true">
                     <div class="anchor-phase2b-canvas-head">
-                        <div class="anchor-phase2b-canvas-title">Phase2B 提示词结构化</div>
-                        <div class="anchor-phase2b-canvas-actions">
-                            <button class="btn btn-ghost-icon" id="anchorPhase2bHeadSubmitBtn" type="button" data-phase2b-action="submit" title="重新发送">⟳</button>
-                            <button class="btn btn-ghost-icon" id="anchorPhase2bHeadCopyBtn" type="button" data-phase2b-action="copy" title="一键复制">⧉</button>
-                            <button class="btn btn-ghost-icon" id="anchorPhase2bToggleInputBtn" type="button" data-phase2b-action="toggle-input" title="收起输入">▾</button>
-                            <button class="btn btn-ghost-icon" type="button" data-phase2b-action="collapse" title="最小化面板>×</button>
-                        </div>
+                        <div class="anchor-phase2b-canvas-title">Phase2B \u7ed3\u6784\u5316</div>
                     </div>
                     <div class="anchor-phase2b-chips" id="anchorPhase2bFileChips" hidden></div>
                     <div class="anchor-phase2b-input-wrap" id="anchorPhase2bInputWrap">
                         <div class="anchor-phase2b-input-shell" id="anchorPhase2bActionLayer">
-                            <textarea id="anchorPhase2bInput" class="anchor-phase2b-input" placeholder="直接粘贴旧文本即被覆盖！" spellcheck="false"></textarea>
-                            <button id="anchorPhase2bClearBtn" class="anchor-phase2b-clear" type="button" data-phase2b-action="clear" aria-label="清空内容" hidden title="清空内容">×</button>
-                            <button id="anchorPhase2bSubmitBtn" class="anchor-phase2b-submit" type="button" data-phase2b-action="submit" aria-label="发送">↑</button>
+                            <textarea id="anchorPhase2bInput" class="anchor-phase2b-input" placeholder="\u76f4\u63a5\u7c98\u8d34\u65e7\u6587\u672c\uff0c\u8fd4\u56de\u540e\u4f1a\u76f4\u63a5\u66ff\u6362\u4e3a\u5b8c\u6574\u7ed3\u679c\u3002" spellcheck="false"></textarea>
+                            <div class="anchor-phase2b-input-skeleton" id="anchorPhase2bInputSkeleton" hidden aria-hidden="true">
+                                <span class="anchor-phase2b-skeleton-line anchor-phase2b-skeleton-line-lg"></span>
+                                <span class="anchor-phase2b-skeleton-line"></span>
+                                <span class="anchor-phase2b-skeleton-line anchor-phase2b-skeleton-line-sm"></span>
+                            </div>
+                            <button id="anchorPhase2bClearBtn" class="anchor-phase2b-clear" type="button" data-phase2b-action="clear" aria-label="\u6e05\u7a7a\u5185\u5bb9" hidden title="\u6e05\u7a7a\u5185\u5bb9">&times;</button>
+                            <div class="anchor-phase2b-action-row">
+                                <button id="anchorPhase2bPasteSubmitBtn" class="anchor-phase2b-paste-submit" type="button" data-phase2b-action="paste-submit" aria-label="\u4e00\u952e\u7c98\u8d34\u5e76\u7ed3\u6784\u5316">\u7c98\u8d34\u53d1\u9001</button>
+                                <button id="anchorPhase2bInlineCopyBtn" class="anchor-phase2b-inline-copy" type="button" data-phase2b-action="copy" aria-label="\u4e00\u952e\u590d\u5236">\u590d\u5236</button>
+                                <button id="anchorPhase2bSubmitBtn" class="anchor-phase2b-submit" type="button" data-phase2b-action="submit" aria-label="\u53d1\u9001">&#8593;</button>
+                            </div>
                         </div>
                     </div>
                     <div class="anchor-phase2b-processing" id="anchorPhase2bProcessing"></div>
                     <div class="anchor-phase2b-result" id="anchorPhase2bResult" hidden>
-                        <div class="anchor-phase2b-preview" id="anchorPhase2bResultPreview"></div>
                         <div class="anchor-phase2b-result-head">
                             <button id="anchorPhase2bCopyBtn" class="anchor-phase2b-copy-btn" type="button" data-phase2b-action="copy">
-                                <span>⧉</span> 一键复制结果
+                                <span>&#x29C9;</span> \u4e00\u952e\u590d\u5236
                             </button>
                         </div>
                     </div>
-                    <div class="anchor-phase2b-feedback" id="anchorPhase2bFeedback" hidden></div>
                     <div class="anchor-phase2b-resizer" id="anchorPhase2bResizer" aria-hidden="true"></div>
                 </section>
             `;
@@ -2099,15 +2163,15 @@
         if (!refs.dock) {
             return;
         }
-        const hasResult = !!t(phase2b.resultValue || phase2b.inputValue);
+        const hasResultValue = !!t(phase2b.resultValue);
+        const hasResult = hasResultValue || !!t(phase2b.inputValue);
         const requestInFlight = isPhase2bRequestInFlight();
-        const hasStreamPreview = requestInFlight && Number(phase2b.streamChunkCount || 0) > 0;
         const mode = requestInFlight ? 'processing' : 'input';
-        const inputCollapsed = mode === 'input' && !!phase2b.inputCollapsed;
         const hasArticleLinks = Array.isArray(phase2b.linkItems) && phase2b.linkItems.length > 0;
         const submitDisabled = requestInFlight || (!t(phase2b.inputValue) && !hasArticleLinks);
         const copyText = String(phase2b.inputValue || phase2b.resultValue || '');
         const copyDisabled = !copyText.trim();
+        const showCopyAction = !requestInFlight && !copyDisabled;
         refs.dock.classList.toggle('is-open', !!phase2b.expanded);
         refs.dock.classList.toggle('is-processing', requestInFlight);
         refs.dock.classList.toggle('is-ready', !requestInFlight && hasResult);
@@ -2128,21 +2192,15 @@
             refs.capsuleBtn.setAttribute('aria-label', capsuleText);
         }
         if (refs.inputWrap) {
-            refs.inputWrap.hidden = mode !== 'input' || inputCollapsed;
-            refs.inputWrap.classList.toggle('is-collapsed', inputCollapsed);
+            refs.inputWrap.hidden = false;
+            refs.inputWrap.classList.remove('is-collapsed');
         }
         if (refs.processingWrap) {
-            refs.processingWrap.hidden = mode !== 'processing';
-            if (mode === 'processing') {
-                refs.processingWrap.innerHTML = `
-                    <div class="anchor-phase2b-processing-text" id="anchorPhase2bProcessingText"></div>
-                `;
-            } else {
-                refs.processingWrap.innerHTML = '';
-            }
+            refs.processingWrap.hidden = true;
+            refs.processingWrap.innerHTML = '';
         }
         if (refs.resultWrap) {
-            refs.resultWrap.hidden = mode === 'processing' && !hasStreamPreview;
+            refs.resultWrap.hidden = !showCopyAction;
         }
         const processingTextNode = document.getElementById('anchorPhase2bProcessingText');
         if (processingTextNode) {
@@ -2153,7 +2211,7 @@
         if (refs.fileChips) {
             const files = Array.isArray(phase2b.attachedFiles) ? phase2b.attachedFiles : [];
             const links = Array.isArray(phase2b.linkItems) ? phase2b.linkItems : [];
-            refs.fileChips.hidden = files.length === 0 && links.length === 0;
+            refs.fileChips.hidden = true;
             const fileChips = files.map((item) => {
                 const name = t(item && item.name) || 'untitled.md';
                 const chars = Number.isFinite(Number(item && item.chars)) ? Number(item.chars) : 0;
@@ -2174,42 +2232,35 @@
         if (refs.input) {
             refs.input.disabled = requestInFlight;
         }
+        if (refs.actionLayer) {
+            refs.actionLayer.classList.toggle('is-processing', requestInFlight);
+        }
+        if (refs.inputSkeleton) {
+            refs.inputSkeleton.hidden = !requestInFlight;
+        }
         const clearBtn = document.getElementById('anchorPhase2bClearBtn');
         if (clearBtn) {
-            clearBtn.hidden = requestInFlight || !t(phase2b.inputValue);
+            clearBtn.hidden = true;
+        }
+        if (refs.inlineCopyBtn) {
+            refs.inlineCopyBtn.disabled = copyDisabled;
+        }
+        if (refs.pasteSubmitBtn) {
+            refs.pasteSubmitBtn.disabled = requestInFlight;
         }
         if (refs.submitBtn) {
             refs.submitBtn.disabled = submitDisabled;
         }
-        if (refs.headSubmitBtn) {
-            refs.headSubmitBtn.hidden = mode !== 'input';
-            refs.headSubmitBtn.disabled = submitDisabled;
-        }
-        if (refs.headCopyBtn) {
-            refs.headCopyBtn.hidden = false;
-            refs.headCopyBtn.disabled = copyDisabled;
-        }
-        if (refs.toggleInputBtn) {
-            refs.toggleInputBtn.hidden = mode !== 'input';
-            refs.toggleInputBtn.textContent = inputCollapsed ? '⌨' : '▾';
-            refs.toggleInputBtn.setAttribute('title', inputCollapsed ? '展开输入' : '收起输入');
-            refs.toggleInputBtn.setAttribute('aria-label', inputCollapsed ? '展开输入' : '收起输入');
-        }
-        if (refs.resultPreview) {
-            const previewSource = String(phase2b.inputValue || '');
-            refs.resultPreview.innerHTML = previewSource
-                ? renderPhase2bPreviewMarkdown(previewSource)
-                : '<div class="anchor-obsidian-empty">暂无可预览的 Markdown 内容</div>';
-            refs.resultPreview.classList.toggle('is-streaming', hasStreamPreview);
-        }
         if (refs.copyBtn) {
             refs.copyBtn.classList.toggle('is-copied', !!phase2b.copied);
-            refs.copyBtn.textContent = phase2b.copied ? '已复制' : '一键复制';
+            refs.copyBtn.innerHTML = phase2b.copied
+                ? '<span>\u2713</span> \u5df2\u590d\u5236'
+                : '<span>\u29C9</span> \u4e00\u952e\u590d\u5236';
             refs.copyBtn.disabled = copyDisabled;
         }
-        const feedbackText = phase2b.error ? `处理失败：${phase2b.error}` : t(phase2b.feedback);
+        const feedbackText = phase2b.error ? `\u5904\u7406\u5931\u8d25\uff1a${phase2b.error}` : t(phase2b.feedback);
         if (refs.feedback) {
-            refs.feedback.hidden = !feedbackText;
+            refs.feedback.hidden = true;
             refs.feedback.classList.toggle('is-error', !!phase2b.error);
             refs.feedback.textContent = feedbackText;
         }
@@ -2338,12 +2389,11 @@
             upsertPhase2bLinkItems(inlineLinks, { status: 'queued' });
             prefetchPhase2bLinkTitles(inlineLinks);
             phase2b.inputValue = stripPhase2bArticleLinks(rawInputText);
-            phase2b.inputCollapsed = true;
         }
         const payloadText = String(phase2b.inputValue || '').trim();
         const hasArticleLinks = (Array.isArray(phase2b.linkItems) && phase2b.linkItems.length > 0) || inlineLinks.length > 0;
         if (!payloadText && !hasArticleLinks) {
-            phase2b.error = '请先输入文本，拖入 .md/.txt，或粘贴知乎/掘金文章链接';
+            phase2b.error = '\u8bf7\u5148\u8f93\u5165\u6587\u672c\uff0c\u62d6\u5165 .md/.txt\uff0c\u6216\u7c98\u8d34\u77e5\u4e4e/\u6398\u91d1\u6587\u7ae0\u94fe\u63a5';
             phase2b.feedback = '';
             renderPhase2bFloatingUi();
             return;
@@ -2361,7 +2411,7 @@
         phase2b.error = '';
         phase2b.feedback = '';
         phase2b.copied = false;
-        phase2b.progressText = '请求已发出，等待后端接收...';
+        phase2b.progressText = '\u8bf7\u6c42\u5df2\u53d1\u51fa\uff0c\u7b49\u5f85\u540e\u7aef\u63a5\u6536...';
         try {
             await ensurePhase2bWebSocketConnected();
         } catch (_e) {
@@ -2382,7 +2432,7 @@
             phase2b.streamActive = false;
             phase2b.streamChunkCount = 0;
             phase2b.progressText = '';
-            phase2b.feedback = '结构化完成，可继续编辑并实时预览。';
+            phase2b.feedback = '';
             phase2b.error = '';
             applyPhase2bResolvedLinkTitles(phase2bResult && phase2bResult.links);
             if (!phase2b.expanded && !t(phase2b.noticeText)) {
@@ -2399,7 +2449,7 @@
             phase2b.streamChunkCount = 0;
             phase2b.progressText = '';
             phase2b.feedback = '';
-            phase2b.error = t(error && error.message) || '请求失败';
+            phase2b.error = t(error && error.message) || '\u8bf7\u6c42\u5931\u8d25';
         } finally {
             if (requestSeq === runtime.phase2b.requestSeq) {
                 if (runtime.phase2b.inFlightRequestSeq === requestSeq) {
@@ -2417,7 +2467,7 @@
             return name.endsWith('.md') || name.endsWith('.markdown') || name.endsWith('.txt');
         });
         if (!supported.length) {
-            runtime.phase2b.feedback = '仅支持 .md / .markdown / .txt 文件';
+            runtime.phase2b.feedback = '\u4ec5\u652f\u6301 .md / .markdown / .txt \u6587\u4ef6';
             runtime.phase2b.error = '';
             renderPhase2bFloatingUi();
             return;
@@ -2434,7 +2484,7 @@
             files.push({ name: file.name, chars: text.length });
         }
         if (!chunks.length) {
-            runtime.phase2b.feedback = '文件内容为空，未导入。';
+            runtime.phase2b.feedback = '\u6587\u4ef6\u5185\u5bb9\u4e3a\u7a7a\uff0c\u672a\u5bfc\u5165\u3002';
             runtime.phase2b.error = '';
             renderPhase2bFloatingUi();
             return;
@@ -2443,7 +2493,7 @@
         const merged = `${prev}${chunks.join('')}`.trim();
         runtime.phase2b.inputValue = merged;
         runtime.phase2b.attachedFiles = files;
-        runtime.phase2b.feedback = `已导入 ${files.length} 个文件`;
+        runtime.phase2b.feedback = `\u5df2\u5bfc\u5165 ${files.length} \u4e2a\u6587\u4ef6`;
         runtime.phase2b.error = '';
         runtime.phase2b.mode = 'input';
         renderPhase2bFloatingUi();
@@ -2459,18 +2509,46 @@
             await navigator.clipboard.writeText(text);
             runtime.phase2b.copied = true;
             runtime.phase2b.error = '';
-            runtime.phase2b.feedback = '复制成功，面板即将收起';
+            runtime.phase2b.feedback = '';
             renderPhase2bFloatingUi();
             setTimeout(() => {
                 runtime.phase2b.copied = false;
                 renderPhase2bFloatingUi();
-                hidePhase2bFloatingUi();
             }, 800);
         } catch (error) {
-            runtime.phase2b.error = `复制失败：${t(error && error.message) || 'clipboard denied'}`;
+            runtime.phase2b.error = `\u590d\u5236\u5931\u8d25\uff1a${t(error && error.message) || 'clipboard denied'}`;
             runtime.phase2b.feedback = '';
             renderPhase2bFloatingUi();
         }
+    }
+
+    async function pasteAndSubmitPhase2bFromClipboard() {
+        if (isPhase2bRequestInFlight()) {
+            return;
+        }
+        let clipboardText = '';
+        try {
+            clipboardText = String(await navigator.clipboard.readText() || '');
+        } catch (error) {
+            runtime.phase2b.error = `\u8bfb\u53d6\u526a\u8d34\u677f\u5931\u8d25\uff1a${t(error && error.message) || 'clipboard denied'}`;
+            runtime.phase2b.feedback = '';
+            renderPhase2bFloatingUi();
+            return;
+        }
+        const normalized = clipboardText.trim();
+        if (!normalized) {
+            runtime.phase2b.error = '\u526a\u8d34\u677f\u5185\u5bb9\u4e3a\u7a7a';
+            runtime.phase2b.feedback = '';
+            renderPhase2bFloatingUi();
+            return;
+        }
+        runtime.phase2b.inputValue = normalized;
+        runtime.phase2b.resultValue = '';
+        runtime.phase2b.error = '';
+        runtime.phase2b.feedback = '';
+        runtime.phase2b.copied = false;
+        renderPhase2bFloatingUi();
+        await submitPhase2bContent();
     }
 
     function resetPhase2bForContextChange() {
@@ -9392,14 +9470,18 @@
                     renderPhase2bFloatingUi();
                     return;
                 }
-                if (action === 'submit') {
-                    submitPhase2bContent();
-                    return;
-                }
-                if (action === 'copy') {
-                    copyPhase2bResultToClipboard();
-                    return;
-                }
+        if (action === 'submit') {
+            submitPhase2bContent();
+            return;
+        }
+        if (action === 'paste-submit') {
+            pasteAndSubmitPhase2bFromClipboard();
+            return;
+        }
+        if (action === 'copy') {
+            copyPhase2bResultToClipboard();
+            return;
+        }
             });
             const hasDraggedFiles = (event) => {
                 const dt = event && event.dataTransfer;
@@ -9525,8 +9607,8 @@
                     }
                     const minWidth = 320;
                     const minHeight = 260;
-                    const maxWidth = Math.max(minWidth, panelNode.clientWidth - 10);
-                    const maxHeight = Math.max(minHeight, panelNode.clientHeight - 36);
+                    const maxWidth = Math.max(minWidth, panelNode.clientWidth - 48);
+                    const maxHeight = Math.max(minHeight, panelNode.clientHeight - 88);
                     const deltaX = e.clientX - Number(phase2b.resizeStartX || 0);
                     const deltaY = e.clientY - Number(phase2b.resizeStartY || 0);
                     phase2b.canvasWidth = Math.max(minWidth, Math.min(maxWidth, Number(phase2b.resizeStartWidth || phase2bCanvas.offsetWidth) + deltaX));
@@ -9702,10 +9784,6 @@
                     editor.setSelectionRange(caret, caret);
                 }
                 syncPhase2bInputFromTextarea(phase2bInput);
-                runtime.phase2b.inputCollapsed = true;
-                if (typeof phase2bInput.blur === 'function') {
-                    phase2bInput.blur();
-                }
                 renderPhase2bFloatingUi();
             });
             phase2bInput && phase2bInput.addEventListener('input', (e) => {

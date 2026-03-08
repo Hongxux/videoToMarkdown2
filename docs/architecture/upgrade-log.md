@@ -1,8 +1,74 @@
 ﻿# 架构升级记录
 
+## 2026-03-07 Phase2A Windows concrete forward-search CV 路由线程化
+- 日期：2026-03-07
+- 背景：
+  - Phase2A 的 concrete 单元需要保留向后搜寻 2s 的截图优化窗口，不能通过绕开 CV 优化来规避崩溃。
+  - Windows 上该链路叠加 `SharedMemory + ProcessPoolExecutor + OpenCV` 后，容易触发进程级崩溃。
+- 决策：
+  - 保留 concrete 的 2s forward-search 语义，不做功能降级。
+  - 将 unit 流式切片外层执行器改为 `ThreadPoolExecutor`，避免重复 spawn 大模块。
+  - 将 Windows 且命中 `concrete_forward` profile 的截图 CV 路由切换到线程池执行，并把 SHM 句柄与轻量 `ScreenshotSelector` 改为线程局部缓存。
+- 调用链变化：
+  - 原链路：`VLMaterialGenerator.generate -> flow_ops.optimize_screenshots_streaming_pipeline -> ProcessPoolExecutor(run_screenshot_selection_task)`。
+  - 新链路：`VLMaterialGenerator.generate -> flow_ops.optimize_screenshots_streaming_pipeline -> Windows+concrete_forward 命中线程池 -> thread-local ScreenshotSelector/SHM handles -> run_screenshot_selection_task`。
+- 验证：
+  - 定向测试通过：`test_vl_tutorial_flow.py` 相关截图/执行器用例、`test_worker_shm_release.py`。
+  - 任务 `var/storage/storage/cf0709da1f054891626d603463037839` 从现有切片继续重跑成功，产出 `62` 个 clip requests 与 `84` 个 screenshot requests。
+- 经验：
+  - 当子任务本身已经通过 `python` / `ffmpeg` 落到外部进程时，外层再套一层进程池通常只会增加 Windows `spawn` 风险，而不会增加真实吞吐。
+  - Windows 并发模型切换为线程池后，必须同步把 SHM 句柄和轻量视觉选择器改为线程局部资源，避免“线程成功替代进程，但资源缓存仍按进程假设设计”的隐性崩溃。
+
+
 > 目的：记录系统架构升级的背景、关键决策与复用经验，便于复盘与迁移。
 
 
+## 2026-03-07 Phase2A VL 统一收敛到 `_stream_units` canonical 子目录
+- 日期：2026-03-07
+- 触发背景与问题：
+  - 在样本任务 `var/storage/storage/cf0709da1f054891626d603463037839/semantic_unit_clips_vl` 中，同一批语义切片同时存在顶层 `*.mp4` 与 `_stream_units/<unit_id>/*.mp4` 两套布局，concrete/process 补切和 VL 消费会命中不同副本。
+  - 当 VL 仍从 `semantic_unit_clips_vl/` 顶层扫描输入时，会重复上传、重复压缩已经存在于 `_stream_units/` 的 clip，带来额外 I/O 与等待时间。
+- 第一性原理与复用杠杆：
+  - 第一性原理：一个语义单元只应有一份稳定的 canonical clip；“切片位置”和“VL 消费位置”必须是同一个事实来源。
+  - 复用杠杆1：复用现有 `tools/split_video_by_semantic_units.py`，把 canonical 目录布局前移到切片时刻，而不是在下游再做目录搬运。
+  - 复用杠杆2：复用 `flow_ops.find_clip_for_unit` 作为统一 clip 解析入口，避免 analyzer/pre-prune/worker 各写一套文件查找规则。
+  - 复用杠杆3：复用已有预切片低分辨率 profile，把“上传前压缩”尽量前移到首次裁切，减少二次处理。
+- 架构决策：
+  - 决策1：`tools/split_video_by_semantic_units.py` 新增 `--stream-unit-layout`，让 VL 子集切片直接落到 `semantic_unit_clips_vl/_stream_units/<unit_id>/`，并以 canonical 命名保存。
+  - 决策2：`flow_ops.split_video_by_semantic_units` 先探测 `_stream_units` 现有 clip，只对缺失 unit 生成子集 JSON 补切；`find_clip_for_unit` 优先消费 `_stream_units/<unit_id>/manifest.json` / `*.mp4`。
+  - 决策3：`long_video_upload_compress_enabled` 不再对 `_stream_units` canonical clip 进行二次压缩；预切片阶段通过 `apply_to_all_units` 直接生成 VL 上传可用 profile。
+  - 决策4：`pre-prune` 与 `vl_pruned_clips` 继续围绕同一份 `_stream_units` canonical clip 工作，不再让 VL 主链重新回到顶层 `semantic_unit_clips_vl/*.mp4`。
+- 调用链与决策链变化：
+  - 改造前：
+    - `原视频 -> semantic_unit_clips_vl/*.mp4 -> (_stream_units 可能存在也可能不存在) -> analyzer/pre-prune/VL 各自挑选 clip`
+  - 改造后：
+    - `原视频 -> semantic_unit_clips_vl/_stream_units/<unit_id>/*.mp4（canonical） -> 统一 pre-prune -> VL`
+    - `VL 分析结果 -> 后续素材回填 -> 继续生成 clip/screenshot 请求，不再引入第二套语义切片来源`
+- 已落地改动：
+  - `tools/split_video_by_semantic_units.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `config/module2_config.yaml`
+  - `services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比（测试方式 / 数据 / 结果）：
+  - 测试方式：对同一任务目录 `var/storage/storage/cf0709da1f054891626d603463037839/semantic_unit_clips_vl` 统计“顶层 clip 数 + `_stream_units` clip 数 + 去重后 unit 数”，并结合 `pytest` 回归用例确认 canonical 复用与跳过二次压缩行为。
+  - 测试数据：
+    - 顶层目录现有 clip：`22` 个，总计 `65,498,005` bytes。
+    - `_stream_units` 中额外 unit clip：`18` 个，总计 `67,962,908` bytes。
+    - 重复 unit_id：`15` 个，分别为 `SU004, SU008, SU012, SU014, SU016, SU018, SU019, SU023, SU024, SU029, SU033, SU034, SU037, SU038, SU042`。
+    - 改造前潜在 VL 上传次数：`22 + 18 = 40`。
+  - 结果：
+    - 收敛后按 semantic unit 去重，仅保留 `22` 份 canonical `_stream_units` clip 作为 VL 输入。
+    - 潜在 VL 上传次数由 `40 -> 22`，减少 `45.0%`。
+    - 当前先记录“上传次数/重复 I/O”维度对比；完整 wall-clock benchmark 待在下一次全链路复跑中继续补齐。
+- 验证：
+  - `python -X utf8 -m py_compile tools/split_video_by_semantic_units.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_video_for_dashscope_upload_compresses_without_duration_threshold services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_video_for_dashscope_upload_skips_compression_for_stream_unit_subset services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_prepare_video_for_dashscope_upload_defaults_to_original_video -q`
+- 复用经验：
+  - 一旦确定 `_stream_units` 是 canonical，就不要再为具体 profile 额外创建平行目录；需要差异化时，应优先通过 manifest/配置表达，而不是复制 clip。
+  - `concrete/process` 即使后续继续微调 profile，也应继续共享同一份 canonical clip 目录，避免旧的双源布局重新回流。
 ## 2026-03-07 Phase2A `frame_reason` 顶部提示条正式上线（concrete/process 双链路收敛）
 - 日期：2026-03-07
 - 触发背景与问题：
@@ -10605,6 +10671,33 @@
   - 结论：
     - 调度链路已从“批次 barrier”收敛为“unit 粒度流式重叠”，可显著降低长视频场景首结果延迟与整体等待时间。
 
+## 2026-03-07：VL 混合单元场景下的流式 + 批量混编
+- 背景：
+  - 现有 `stream_unit_pipeline_enabled` 只有在全部待分析 unit 都属于 `process/concrete` 时才启用；只要混入未知或未标注 `knowledge_type`，整批就会回退到 `_split_video_by_semantic_units`。
+  - 这会把首结果延迟重新拉回“全量切完再分析”的 batch barrier，与单元级流式设计目标冲突。
+- 本次升级：
+  - `VLMaterialGenerator.generate()` 改为先按 unit 粒度分流：可流式 unit 先进入 `_run_stream_unit_pipeline`，不支持流式的剩余 unit 再进入旧 `_split_video_by_semantic_units` 批量链路。
+  - `vl_units / stable_action_legacy_units / analysis_results / task_metadata` 改为统一累计，保证 mixed mode 下 token 统计、缓存落盘、Phase2A 审计文件口径一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：barrier 应收缩到最小必要集合；不可流式的少量 unit 不应拖垮整批首结果延迟。
+  - 复用杠杆1：复用既有 `_run_stream_unit_pipeline` 的 unit 级生产者/消费者链路，不再重复实现切片完成后的即时分析与即时消费。
+  - 复用杠杆2：复用既有 `flow_ops.split_video_by_semantic_units` 处理不支持流式的子集，不重写 ffmpeg 切片逻辑。
+  - 复用杠杆3：复用 `_serialize_unit_analysis_outputs / _save_vl_results / _write_phase2a_token_cost_audit` 统一收口，避免 mixed mode 再造一套缓存/审计出口。
+- 调用链变化：
+  - 改造前：`mixed units -> 全量 legacy split -> 全量 VL analyze`
+  - 改造后：`stream-capable units -> unit 级 split/analyze/consume` + `unsupported units -> subset legacy split/analyze`
+- 已落地文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- 性能对比数据（机制级）：
+  - 测试方式：
+    - 新增 `test_generate_uses_hybrid_stream_pipeline_for_mixed_units`，构造 2 个 unit（1 个 `process` + 1 个 `unknown`），验证流式入口只收到可流式子集，legacy split 只收到剩余子集。
+    - 保留 `test_generate_uses_stream_unit_pipeline_when_enabled`，验证纯流式场景仍不回退到全量切片入口。
+  - 测试数据：
+    - mixed 样本中，`stream_units=1`、`legacy_units=1`、`result.token_stats["vl_units"]=2`，说明双链路聚合后的计数、素材汇总与分析输出保持一致。
+  - 结论：
+    - 流式优势从“全有或全无”改为“能流多少流多少”，避免少量不支持 unit 拖慢整批任务首结果延迟。
+
 ## 2026-03-07：统一 Phase2A / Phase2B 的 token cost 审计落盘
 - 背景：
   - 旧链路已经能拿到部分 `prompt_tokens/completion_tokens/total_tokens`，但没有统一价格快照、没有任务级 Phase2A 审计文件、也没有把 Phase2B 的 cost 汇总真正落盘。
@@ -10631,3 +10724,97 @@
   - `pytest services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "token_cost or deepseek_audit_writes_token_cost_summary or write_phase2a_token_cost_audit" -q`
   - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py services/python_grpc/src/content_pipeline/tests/test_vl_ffmpeg_utils.py services/python_grpc/src/content_pipeline/tests/test_deepseek_audit.py services/python_grpc/src/content_pipeline/tests/test_token_costing.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "llm_gateway or iframe or token_cost or deepseek_audit_writes_token_cost_summary or write_phase2a_token_cost_audit or annotate_screenshot_requests_with_unit_context" -q`
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+
+
+## 2026-03-07: Consolidate VL clip outputs into `_stream_units`
+- Background:
+  - In task directory `var/storage/storage/cf0709da1f054891626d603463037839/semantic_unit_clips_vl`, the root `manifest.json` recorded 22 semantic clips while `_stream_units/` also contained 18 unit subdirectories. This confirmed a dual-materialization risk: root-level clips plus unit-level clips inside the same task.
+  - VL consumes semantic clips and their optional pre-prune derivatives, while final screenshots and final video assets are still materialized from the original video by absolute timestamps. Therefore `semantic_unit_clips_vl` should serve as a VL-input layer, not as a mixed canonical asset store.
+- Changes:
+  - `flow_ops.split_video_by_semantic_units()` now always invokes the split script with `--stream-unit-layout`, so batch split and unit-stream split both emit canonical mp4 files under `semantic_unit_clips_vl/_stream_units/<unit_id>/`.
+  - `flow_ops.find_clip_for_unit()` now resolves clips in this order: root manifest, unit manifest, `_stream_units/<unit_id>`, then legacy flat root fallback.
+  - Batch split and unit split now share the same low-res profile flag by forwarding `semantic_split_pre_cut.apply_to_all_units` to `--apply-low-res-to-all-units`.
+  - `VLVideoAnalyzer._prepare_video_for_dashscope_upload()` now bypasses upload-time recompression for `_stream_units` clips.
+  - `VLMaterialGenerator` now prefers the task-level `resolved_output_dir` when pre-prune boundary refinement needs subtitle context, avoiding misidentifying `_stream_units/<unit_id>` as the task root.
+- Call-chain change:
+  - Before: `original_video -> semantic_unit_clips_vl/*.mp4 -> (_stream_units/*.mp4 or upload-time recompress) -> VL`
+  - After: `original_video -> semantic_unit_clips_vl/_stream_units/<unit_id>/*.mp4 -> optional pre-prune -> VL`
+  - Unchanged: `VL relative timestamps -> original-video absolute timestamps -> final screenshot/clip materialization from original video`
+- Files changed:
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_flow_ops_split_video.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+- Performance data (mechanism-level):
+  - Method:
+    - Directory sampling on task `cf0709da1f054891626d603463037839` to verify duplicate VL clip materialization.
+    - Regression tests for stream layout, incremental reuse, stream-unit clip lookup, and upload-time recompression bypass.
+  - Data:
+    - Baseline sample: root manifest recorded 22 clips and `_stream_units/` contained 18 unit directories.
+    - Incremental reuse test: after seeding `_stream_units/SU006/001_SU006_demo_614.00-884.00.mp4`, only `SU002` and `SU004` remain in the split subset.
+    - Upload path test: `_stream_units` clips now bypass `_compress_video_for_dashscope_upload()`, reducing extra upload-time transcode count from up to 1 per VL clip to 0.
+  - Conclusion:
+    - This change removes duplicate materialization and redundant transcode paths first. End-to-end runtime gain still needs a full task replay with ffmpeg timing and VL upload timing.
+
+
+
+## 2026-03-07: Unify all `process` units into the VL main chain and add screenshot prefetch governor
+- 背景：
+  - 线上任务在 `AnalyzeWithVL` 阶段出现 `Connection reset` 后紧跟 `Connection refused`，说明 Python gRPC 服务端口 `50051` 在任务执行中途丢失监听，故障形态更像进程级崩溃或被资源压力拖死，而不是普通业务异常。
+  - 旧架构中，`process` 会按 `process_duration_threshold_sec` 分成 `process_short/process_long`：短 `process` 走路由截图链，长 `process` 进入 VL 主链。这样造成两条调用链并存，主进程仍承担一部分同步视频扫描、预取、缩放与 SHM 注册重活。
+  - 同时，`concrete` 虽然保留“向后 2 秒搜索”的产品意图，但未形成轻量 profile，容易与通用截图优化链共用过宽 chunk 预算。
+- 变更：
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - 移除 `process_short/process_long` 路由分流；所有 `knowledge_type=process` 单元统一进入 `vl_units`，复用与原长 `process` 相同的 VL 分析与下游消费链。
+    - `routing_stats` 口径收敛为 `process` 总量，不再把短/长视为主链分叉指标。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 取消多步骤 `process` 对时长阈值的内部隐式分流：`tutorial_stepwise` 与 multistep clip merge 改为基于 `knowledge_type=process + mult_steps=true` 判定，而不再依赖 long/short 时长阈值。
+    - 为 `concrete` 截图请求注入轻量 forward-search profile：保留“从当前时间戳向后搜索 2 秒”，但显式写入 `_window_start_sec/_window_end_sec`、chunk 预算、采样率与预取分辨率。
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+    - `build_screenshot_prefetch_chunks()` 支持按 request profile 分桶；当 profile、chunk span/request budget、sample rate、target height 不一致时强制拆 chunk，避免 `concrete` 与通用请求混合放大 union span。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - 为 batch/streaming 两条预取链统一增加 governor：对 `max_inflight / overlap_buffers / prefetch_max_frames / chunk_max_span / chunk_max_requests` 做代码层硬钳制。
+    - 新增 chunk 级 `PrefetchMonitor` 日志，输出 `mode/chunk/profile/reqs/span/sampled_frames/inflight/rss_mb/cpu`，用于快速定位主进程预取热点与 RSS 峰值。
+  - `config/module2_config.yaml`
+    - 将路由配置说明调整为“兼容保留，不再按长短 process 分流”。
+    - 将 `screenshot_pipeline_mode` 默认收敛为 `process_streaming`。
+    - 新增 concrete forward-search 预算与 prefetch governor/monitor 默认参数，并把默认预取预算收紧到更保守值。
+- 调用链变化：
+  - 之前：`process_short -> route screenshot (主进程/线程池)`；`process_long -> VL analyze -> VL downstream consume`
+  - 现在：`process -> preprocess_process_units_for_routing -> VL analyze -> downstream screenshot/clip consume`
+  - concrete 仍保留：`VL timestamp -> forward-search(2s)`，但通过独立 prefetch profile 走更轻的 chunk 预算。
+- 性能/资源治理数据：
+  - 测试方式：
+    - 静态语法检查：`python -m py_compile ...`
+    - 定向回归：`pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "annotate_screenshot_requests_with_unit_context or build_screenshot_prefetch_chunks or tutorial_process_unit or merge_multistep"`
+    - 运行时治理采用配置参数对比 + chunk 级监控日志验证。
+  - 对比数据：
+    - `routing`: `process_short/process_long` 双分流 -> `process` 单一路由。
+    - `streaming_overlap_buffers`: `2 -> 1`
+    - `prefetch_max_frames_per_chunk`: `240 -> 160`
+    - `prefetch_union_max_span_seconds`: `10.0 -> 8.0`
+    - `prefetch_chunk_max_requests`: `1000 -> 256`
+    - 新增 `max_inflight_hard_cap=2`、`streaming_overlap_buffers_hard_cap=1`
+    - `concrete` 轻量 profile：`forward_after=2.0s`、`chunk_max_span=3.0s`、`chunk_max_requests=64`、`sample_rate=3`、`target_height=240`
+  - 结论：
+    - 这次改动优先解决的是“资源上界”和“调用链分叉”问题，而不是盲目追求吞吐；目标是降低 gRPC 主进程被截图预取链拖死的概率，并让所有 `process` 统一复用 VL 主链与下游消费。
+
+
+
+## 2026-03-07: Tighten VL unit-stream concurrency after unified `process` routing
+- 背景：
+  - 将短/长 `process` 统一并入 VL 主链后，`vl_units` 数量显著上升。
+  - 原 `parallel_workers=auto` 语义是“按 unit 数全量并发，再受 hard cap 限制”，在 30 个 VL 单元场景下直接打出 `analysis_workers=30`，导致上传、轮询、结果消费和 concrete rerun 同时放大。
+- 调整：
+  - `config/module2_config.yaml`
+    - `vl_analysis.parallel_workers: 4`
+    - `vl_analysis.parallel_hard_cap: 4`
+    - `vl_analysis.stream_split_process_workers: 2`
+    - `vl_analysis.stream_split_backpressure_multiplier: 1`
+    - `tutorial_mode.asset_export_parallel_workers: 2`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `_resolve_vl_parallel_workers()` 的 `auto` 默认改为保守 CPU 感知值：最多 4。
+    - `_resolve_stream_split_process_workers()` 的 `auto` 默认改为保守 CPU 感知值：最多 2。
+- 结果：
+  - 统一 `process` 主链继续保留，但默认预算从“以任务数为中心”切到“以进程稳定性为中心”。

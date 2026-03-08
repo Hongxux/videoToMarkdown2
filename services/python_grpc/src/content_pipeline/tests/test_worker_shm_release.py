@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from multiprocessing import shared_memory
+import threading
 
 
 def test_release_attached_shm_refs_removes_selected_handles():
@@ -58,3 +59,21 @@ def test_release_attached_shm_refs_none_releases_all():
             except Exception:
                 pass
 
+
+
+def test_get_attached_shm_store_uses_thread_local_cache():
+    from services.python_grpc.src.vision_validation import worker
+
+    main_store = worker._get_attached_shm_store()
+    result = {}
+
+    def _runner():
+        result["thread_store"] = worker._get_attached_shm_store()
+
+    thread = threading.Thread(target=_runner)
+    thread.start()
+    thread.join()
+
+    assert main_store is worker._attached_shms
+    assert result["thread_store"] is not worker._attached_shms
+    assert result["thread_store"] == {}

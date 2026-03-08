@@ -104,6 +104,27 @@ def build_screenshot_prefetch_chunks(
             or request.get("screenshot_id")
             or f"req_{index}"
         )
+        profile_key = str(request.get("_cv_prefetch_profile", "default") or "default").strip().lower() or "default"
+        try:
+            effective_max_span_seconds = float(
+                request.get("_prefetch_chunk_max_span_seconds", max_span_seconds)
+            )
+        except (TypeError, ValueError):
+            effective_max_span_seconds = float(max_span_seconds)
+        effective_max_span_seconds = max(0.5, effective_max_span_seconds)
+        try:
+            effective_max_requests = int(request.get("_prefetch_chunk_max_requests", max_requests))
+        except (TypeError, ValueError):
+            effective_max_requests = int(max_requests)
+        effective_max_requests = max(1, effective_max_requests)
+        try:
+            effective_sample_rate = int(request.get("_prefetch_sample_rate", 0) or 0)
+        except (TypeError, ValueError):
+            effective_sample_rate = 0
+        try:
+            effective_target_height = int(request.get("_prefetch_target_height", 0) or 0)
+        except (TypeError, ValueError):
+            effective_target_height = 0
         windows.append(
             {
                 "req": request,
@@ -113,6 +134,11 @@ def build_screenshot_prefetch_chunks(
                 "original_ts": original_ts,
                 "expanded_start": search_start,
                 "expanded_end": search_end,
+                "profile_key": profile_key,
+                "max_chunk_span_seconds": effective_max_span_seconds,
+                "max_chunk_requests": effective_max_requests,
+                "prefetch_sample_rate": effective_sample_rate,
+                "prefetch_target_height": effective_target_height,
             }
         )
 
@@ -122,9 +148,16 @@ def build_screenshot_prefetch_chunks(
     current: List[Dict[str, Any]] = []
     union_start: Optional[float] = None
     union_end: Optional[float] = None
+    current_profile_key: str = "default"
+    current_max_span_seconds: float = max(0.5, float(max_span_seconds))
+    current_max_requests: int = max(1, int(max_requests))
+    current_prefetch_sample_rate: int = 0
+    current_prefetch_target_height: int = 0
 
     def flush() -> None:
         nonlocal current, union_start, union_end
+        nonlocal current_profile_key, current_max_span_seconds, current_max_requests
+        nonlocal current_prefetch_sample_rate, current_prefetch_target_height
         if not current:
             return
         chunks.append(
@@ -132,28 +165,62 @@ def build_screenshot_prefetch_chunks(
                 "union_start": float(union_start or 0.0),
                 "union_end": float(union_end or 0.0),
                 "windows": current,
+                "prefetch_profile": current_profile_key,
+                "max_chunk_span_seconds": current_max_span_seconds,
+                "max_chunk_requests": current_max_requests,
+                "prefetch_sample_rate": current_prefetch_sample_rate,
+                "prefetch_target_height": current_prefetch_target_height,
             }
         )
         current = []
         union_start = None
         union_end = None
+        current_profile_key = "default"
+        current_max_span_seconds = max(0.5, float(max_span_seconds))
+        current_max_requests = max(1, int(max_requests))
+        current_prefetch_sample_rate = 0
+        current_prefetch_target_height = 0
 
     for window in windows:
         if not current:
             current = [window]
             union_start = window["expanded_start"]
             union_end = window["expanded_end"]
+            current_profile_key = str(window.get("profile_key", "default") or "default")
+            current_max_span_seconds = max(0.5, float(window.get("max_chunk_span_seconds", max_span_seconds) or max_span_seconds))
+            current_max_requests = max(1, int(window.get("max_chunk_requests", max_requests) or max_requests))
+            current_prefetch_sample_rate = max(0, int(window.get("prefetch_sample_rate", 0) or 0))
+            current_prefetch_target_height = max(0, int(window.get("prefetch_target_height", 0) or 0))
             continue
 
         candidate_start = min(union_start, window["expanded_start"])  # type: ignore[arg-type]
         candidate_end = max(union_end, window["expanded_end"])  # type: ignore[arg-type]
         candidate_span = candidate_end - candidate_start
 
-        if (len(current) >= max_requests) or (candidate_span > max_span_seconds):
+        window_profile_key = str(window.get("profile_key", "default") or "default")
+        window_max_span_seconds = max(0.5, float(window.get("max_chunk_span_seconds", max_span_seconds) or max_span_seconds))
+        window_max_requests = max(1, int(window.get("max_chunk_requests", max_requests) or max_requests))
+        window_prefetch_sample_rate = max(0, int(window.get("prefetch_sample_rate", 0) or 0))
+        window_prefetch_target_height = max(0, int(window.get("prefetch_target_height", 0) or 0))
+
+        if (
+            window_profile_key != current_profile_key
+            or window_max_span_seconds != current_max_span_seconds
+            or window_max_requests != current_max_requests
+            or window_prefetch_sample_rate != current_prefetch_sample_rate
+            or window_prefetch_target_height != current_prefetch_target_height
+            or (len(current) >= current_max_requests)
+            or (candidate_span > current_max_span_seconds)
+        ):
             flush()
             current = [window]
             union_start = window["expanded_start"]
             union_end = window["expanded_end"]
+            current_profile_key = window_profile_key
+            current_max_span_seconds = window_max_span_seconds
+            current_max_requests = window_max_requests
+            current_prefetch_sample_rate = window_prefetch_sample_rate
+            current_prefetch_target_height = window_prefetch_target_height
             continue
 
         current.append(window)

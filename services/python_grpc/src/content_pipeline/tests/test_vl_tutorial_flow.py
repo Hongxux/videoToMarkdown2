@@ -17,11 +17,13 @@ import time
 import cv2
 import numpy as np
 
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
 import services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator as vl_material_generator_module
+import services.python_grpc.src.content_pipeline.phase2a.materials.flow_ops as flow_ops_module
+from services.python_grpc.src.content_pipeline.infra.runtime.vl_prefetch_utils import build_screenshot_prefetch_chunks
 from services.python_grpc.src.content_pipeline.infra.llm import llm_gateway
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer import (
     VLAnalysisResult,
@@ -417,6 +419,24 @@ def test_prepare_video_for_dashscope_upload_compresses_without_duration_threshol
     assert captured["video_path"] == "demo.mp4"
 
 
+def test_prepare_video_for_dashscope_upload_skips_compression_for_stream_unit_subset(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.long_video_upload_compress_enabled = True
+
+    async def _fail_if_called(video_path: str) -> str:
+        raise AssertionError(f"unexpected recompress: {video_path}")
+
+    monkeypatch.setattr(analyzer, "_compress_video_for_dashscope_upload", _fail_if_called)
+
+    video_path = (
+        r"var\storage\storage\demo123\semantic_unit_clips_vl\_stream_units\SU001"
+        r"\001_SU001_demo_0.00-10.00.mp4"
+    )
+    prepared = asyncio.run(analyzer._prepare_video_for_dashscope_upload(video_path))
+
+    assert prepared == video_path
+
+
 def test_prepare_video_for_dashscope_upload_defaults_to_original_video():
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
     analyzer.long_video_upload_compress_enabled = False
@@ -713,6 +733,8 @@ def test_call_vl_api_prefers_dashscope_offline_task_when_enabled(monkeypatch):
     assert raw_json == []
     assert interactions[0]["request"]["offline_task_enabled"] is True
     assert interactions[0]["request"]["offline_task_meta"]["task_id"] == "task_123"
+    assert interactions[0]["response"]["model"] == analyzer.model
+    assert interactions[0]["response"]["cache_hit"] is False
 
 
 def test_call_vl_api_sync_path_passes_timeout_and_hedge(monkeypatch):
@@ -2108,6 +2130,171 @@ def test_generate_uses_stream_unit_pipeline_when_enabled(monkeypatch, tmp_path):
     assert called["legacy_split"] == 0
     assert len(result.clip_requests) == 1
     assert len(result.screenshot_requests) == 1
+
+
+def test_generate_uses_hybrid_stream_pipeline_for_mixed_units(monkeypatch, tmp_path):
+    config = _build_generator_config()
+    config["vl_analysis"] = {
+        "parallel_workers": 2,
+        "parallel_hard_cap": 8,
+        "stream_unit_pipeline_enabled": True,
+        "stream_pipeline_knowledge_types": ["process", "concrete"],
+    }
+    generator = VLMaterialGenerator(config)
+
+    video_path = Path(tmp_path) / "video.mp4"
+    video_path.write_bytes(b"video")
+    output_dir = Path(tmp_path) / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    legacy_clips_dir = output_dir / "semantic_unit_clips_vl"
+    legacy_clips_dir.mkdir(parents=True, exist_ok=True)
+    legacy_clip_file = legacy_clips_dir / "001_SU_LEGACY_001_demo_12.00-24.00.mp4"
+    legacy_clip_file.write_bytes(b"clip")
+
+    semantic_units = [
+        {
+            "unit_id": "SU_STREAM_001",
+            "knowledge_type": "process",
+            "mult_steps": True,
+            "start_sec": 0.0,
+            "end_sec": 12.0,
+        },
+        {
+            "unit_id": "SU_LEGACY_001",
+            "knowledge_type": "unknown",
+            "mult_steps": False,
+            "start_sec": 12.0,
+            "end_sec": 24.0,
+        },
+    ]
+
+    called: Dict[str, list[str]] = {
+        "stream_units": [],
+        "legacy_split_units": [],
+        "legacy_analyze_units": [],
+    }
+
+    async def _fake_stream_pipeline(
+        *,
+        video_path: str,
+        semantic_units: list[dict[str, Any]],
+        resolved_output_dir: str,
+        all_clip_requests: list[dict[str, Any]],
+        all_screenshot_requests: list[dict[str, Any]],
+        token_stats: dict[str, Any],
+    ):
+        _ = (video_path, resolved_output_dir)
+        called["stream_units"] = [str(unit.get("unit_id", "") or "") for unit in semantic_units]
+        token_stats["vl_units"] += 1
+        token_stats["prompt_tokens_actual"] += 10
+        token_stats["completion_tokens_actual"] += 5
+        token_stats["total_tokens_actual"] += 15
+        all_clip_requests.append(
+            {
+                "clip_id": "SU_STREAM_001/SU_STREAM_001_clip_001",
+                "start_sec": 0.0,
+                "end_sec": 6.0,
+            }
+        )
+        all_screenshot_requests.append(
+            {
+                "screenshot_id": "SU_STREAM_001/SU_STREAM_001_ss_001",
+                "timestamp_sec": 3.0,
+            }
+        )
+        return [SimpleNamespace(success=True)], [{"unit_id": "SU_STREAM_001"}], {}, 0
+
+    async def _fake_legacy_split(video_path, semantic_units, output_dir=None):
+        _ = (video_path, output_dir)
+        called["legacy_split_units"] = [str(unit.get("unit_id", "") or "") for unit in semantic_units]
+        return str(legacy_clips_dir)
+
+    def _fake_find_clip_for_unit(clips_dir, unit_id, start_sec, end_sec):
+        _ = (clips_dir, unit_id, start_sec, end_sec)
+        return str(legacy_clip_file)
+
+    async def _fake_resolve_pre_prune_results_for_unit_tasks(clips_dir, unit_tasks, force_preprocess=False):
+        _ = (clips_dir, force_preprocess)
+        return [
+            generator._build_default_pre_prune_info(
+                semantic_unit=task.get("semantic_unit", {}),
+                clip_path=str(task.get("clip_path", "") or ""),
+            )
+            for task in unit_tasks
+        ]
+
+    async def _fake_analyze_unit_tasks_in_parallel(*, unit_tasks, pre_prune_results, on_result):
+        _ = (pre_prune_results, on_result)
+        called["legacy_analyze_units"] = [str(task.get("unit_id", "") or "") for task in unit_tasks]
+        return [SimpleNamespace(success=True)], [{"unit_id": "SU_LEGACY_001"}], 0
+
+    async def _fake_consume_unit_analysis_result_streaming(
+        *,
+        result_index,
+        analysis_result,
+        meta,
+        legacy_fallback_materials,
+        all_clip_requests,
+        all_screenshot_requests,
+        token_stats,
+        resolved_output_dir,
+        original_video_path,
+    ):
+        _ = (
+            result_index,
+            analysis_result,
+            legacy_fallback_materials,
+            token_stats,
+            resolved_output_dir,
+            original_video_path,
+        )
+        unit_id = str(meta.get("unit_id", "") or "")
+        if unit_id != "SU_LEGACY_001":
+            return
+        all_clip_requests.append(
+            {
+                "clip_id": "SU_LEGACY_001/SU_LEGACY_001_clip_001",
+                "start_sec": 12.0,
+                "end_sec": 18.0,
+            }
+        )
+        all_screenshot_requests.append(
+            {
+                "screenshot_id": "SU_LEGACY_001/SU_LEGACY_001_ss_001",
+                "timestamp_sec": 15.0,
+            }
+        )
+
+    monkeypatch.setattr(generator, "_run_stream_unit_pipeline", _fake_stream_pipeline)
+    monkeypatch.setattr(generator, "_split_video_by_semantic_units", _fake_legacy_split)
+    monkeypatch.setattr(generator, "_find_clip_for_unit", _fake_find_clip_for_unit)
+    monkeypatch.setattr(generator, "_resolve_pre_prune_results_for_unit_tasks", _fake_resolve_pre_prune_results_for_unit_tasks)
+    monkeypatch.setattr(generator, "_should_use_stable_action_legacy_branch", lambda **kwargs: False)
+    monkeypatch.setattr(generator, "_analyze_unit_tasks_in_parallel", _fake_analyze_unit_tasks_in_parallel)
+    monkeypatch.setattr(generator, "_consume_unit_analysis_result_streaming", _fake_consume_unit_analysis_result_streaming)
+    monkeypatch.setattr(
+        generator,
+        "_serialize_unit_analysis_outputs",
+        lambda **kwargs: [{"unit_id": meta.get("unit_id", ""), "success": True} for meta in kwargs.get("task_metadata", [])],
+    )
+
+    result = asyncio.run(
+        generator.generate(
+            video_path=str(video_path),
+            semantic_units=semantic_units,
+            output_dir=str(output_dir),
+        )
+    )
+
+    assert result.success is True
+    assert called["stream_units"] == ["SU_STREAM_001"]
+    assert called["legacy_split_units"] == ["SU_LEGACY_001"]
+    assert called["legacy_analyze_units"] == ["SU_LEGACY_001"]
+    assert result.token_stats["vl_units"] == 2
+    assert len(result.clip_requests) == 2
+    assert len(result.screenshot_requests) == 2
+    assert [item["unit_id"] for item in result.unit_analysis_outputs] == ["SU_STREAM_001", "SU_LEGACY_001"]
 
 
 def test_generate_uses_concrete_mode_override_and_exposes_unit_outputs(monkeypatch):
@@ -3673,7 +3860,17 @@ def test_annotate_screenshot_requests_with_unit_context_does_not_force_skip():
 
 
 def test_annotate_screenshot_requests_with_unit_context_sets_concrete_window_start_to_timestamp():
-    generator = VLMaterialGenerator(_build_generator_config())
+    config = _build_generator_config()
+    config["screenshot_optimization"].update(
+        {
+            "concrete_forward_search_after_seconds": 2.0,
+            "concrete_prefetch_chunk_max_span_seconds": 3.0,
+            "concrete_prefetch_chunk_max_requests": 64,
+            "concrete_prefetch_sample_rate": 3,
+            "concrete_prefetch_target_height": 240,
+        }
+    )
+    generator = VLMaterialGenerator(config)
     requests = [
         {
             "screenshot_id": "SU901/SU901_ss_concrete_seg_01_key_01",
@@ -3690,7 +3887,117 @@ def test_annotate_screenshot_requests_with_unit_context_sets_concrete_window_sta
     assert requests[0]["analysis_mode"] == "concrete"
     assert requests[0]["knowledge_type"] == "concrete"
     assert requests[0]["_window_start_sec"] == 12.34
-    assert "_window_end_sec" not in requests[0]
+    assert requests[0]["_window_end_sec"] == 14.34
+    assert requests[0]["_cv_prefetch_profile"] == "concrete_forward"
+    assert requests[0]["_prefetch_chunk_max_span_seconds"] == 3.0
+    assert requests[0]["_prefetch_chunk_max_requests"] == 64
+    assert requests[0]["_prefetch_sample_rate"] == 3
+    assert requests[0]["_prefetch_target_height"] == 240
+
+
+def test_build_screenshot_prefetch_chunks_respects_concrete_profile_overrides():
+    requests = [
+        {
+            "screenshot_id": "SU901/SU901_ss_concrete_seg_01_key_01",
+            "semantic_unit_id": "SU901",
+            "timestamp_sec": 12.34,
+            "_window_start_sec": 12.34,
+            "_window_end_sec": 14.34,
+            "_cv_prefetch_profile": "concrete_forward",
+            "_prefetch_chunk_max_span_seconds": 3.0,
+            "_prefetch_chunk_max_requests": 64,
+            "_prefetch_sample_rate": 3,
+            "_prefetch_target_height": 240,
+        },
+        {
+            "screenshot_id": "SU999/SU999_ss_vl_01_01",
+            "semantic_unit_id": "SU999",
+            "timestamp_sec": 12.80,
+        },
+    ]
+
+    chunks = build_screenshot_prefetch_chunks(
+        screenshot_requests=requests,
+        max_span_seconds=8.0,
+        max_requests=256,
+        time_window_before=1.0,
+        time_window_after=2.0,
+    )
+
+    assert len(chunks) == 2
+    assert chunks[0]["prefetch_profile"] == "concrete_forward"
+    assert chunks[0]["prefetch_sample_rate"] == 3
+    assert chunks[0]["prefetch_target_height"] == 240
+    assert chunks[0]["max_chunk_span_seconds"] == 3.0
+    assert chunks[1]["prefetch_profile"] == "default"
+
+
+def test_is_tutorial_process_unit_no_longer_depends_on_duration_threshold():
+    generator = VLMaterialGenerator(_build_generator_config())
+
+    assert generator._is_tutorial_process_unit(
+        {"knowledge_type": "process", "mult_steps": True},
+        duration_sec=5.0,
+    ) is True
+
+
+def test_should_merge_multistep_unit_no_longer_depends_on_duration_threshold():
+    generator = VLMaterialGenerator(_build_generator_config())
+
+    assert generator._should_merge_multistep_unit(
+        {"knowledge_type": "process", "mult_steps": True, "start_sec": 0.0, "end_sec": 5.0}
+    ) is True
+
+
+def test_resolve_vl_parallel_workers_auto_is_conservative(monkeypatch):
+    config = _build_generator_config()
+    config["vl_analysis"] = {
+        "parallel_workers": "auto",
+        "parallel_hard_cap": 32,
+    }
+    generator = VLMaterialGenerator(config)
+
+    monkeypatch.setattr(vl_material_generator_module.os, "cpu_count", lambda: 16)
+
+    assert generator._resolve_vl_parallel_workers(30) == 4
+
+
+def test_resolve_stream_split_process_workers_auto_is_conservative(monkeypatch):
+    config = _build_generator_config()
+    config["vl_analysis"] = {
+        "stream_split_process_workers": "auto",
+        "stream_split_process_hard_cap": 8,
+    }
+    generator = VLMaterialGenerator(config)
+
+    monkeypatch.setattr(vl_material_generator_module.os, "cpu_count", lambda: 16)
+
+    assert generator._resolve_stream_split_process_workers(30) == 2
+
+
+def test_create_stream_split_executor_uses_thread_pool():
+    generator = VLMaterialGenerator(_build_generator_config())
+
+    executor = generator._create_stream_split_executor(worker_count=2)
+    try:
+        assert isinstance(executor, ThreadPoolExecutor)
+        assert getattr(executor, "_max_workers", None) == 2
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_should_use_threaded_cv_executor_for_windows_concrete_forward(monkeypatch):
+    monkeypatch.setattr(flow_ops_module.os, "name", "nt", raising=False)
+    generator = SimpleNamespace(screenshot_config={})
+
+    assert flow_ops_module._should_use_threaded_cv_executor(
+        generator,
+        [{"_cv_prefetch_profile": "concrete_forward"}],
+    ) is True
+    assert flow_ops_module._should_use_threaded_cv_executor(
+        generator,
+        [{"_cv_prefetch_profile": "default"}],
+    ) is False
 
 
 def test_apply_selection_result_persists_candidate_screenshots():
