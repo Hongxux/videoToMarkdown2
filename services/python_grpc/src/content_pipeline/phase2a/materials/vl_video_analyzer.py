@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 
 _DASHSCOPE_DATA_URI_ITEM_MAX_BYTES = 10 * 1024 * 1024  # 来自 DashScope 400 错误信息
 _DATA_URI_SAFETY_RATIO = 0.90  # 留出协议/编码冗余，避免卡边界导致 400
+_DASHSCOPE_BATCH_BODY_MAX_BYTES = 6 * 1024 * 1024
 # 按用户要求放宽 base64 视频回退阈值到 1GB。
 _MAX_RAW_BYTES_FOR_BASE64_DATA_URI = 1024 * 1024 * 1024
 
@@ -154,7 +155,19 @@ class VLVideoAnalyzer:
             if appid_env:
                 self.appid = str(os.environ.get(appid_env, "") or "").strip()
 
-        self.max_retries = api_config.get("max_retries", 2)
+        self.max_retries = max(0, safe_int(api_config.get("max_retries", 4), 4))
+        self.vl_retry_initial_backoff_sec = max(
+            0.0,
+            safe_float(api_config.get("retry_initial_backoff_sec", 2.0), 2.0),
+        )
+        self.vl_retry_multiplier = max(
+            1.0,
+            safe_float(api_config.get("retry_multiplier", 2.0), 2.0),
+        )
+        self.vl_retry_max_backoff_sec = max(
+            self.vl_retry_initial_backoff_sec,
+            safe_float(api_config.get("retry_max_backoff_sec", 16.0), 16.0),
+        )
         
         # 视频压缩配置 (API 限制 10MB)
         self.max_video_size_mb = api_config.get("max_video_size_mb", 8)  # 留 2MB buffer
@@ -213,11 +226,11 @@ class VLVideoAnalyzer:
         )
         self.dashscope_upload_retry_max_attempts = max(
             1,
-            safe_int(api_config.get("upload_retry_max_attempts", 3), 3),
+            safe_int(api_config.get("upload_retry_max_attempts", 5), 5),
         )
         self.dashscope_upload_retry_initial_backoff_sec = max(
             0.0,
-            safe_float(api_config.get("upload_retry_initial_backoff_sec", 1.0), 1.0),
+            safe_float(api_config.get("upload_retry_initial_backoff_sec", 2.0), 2.0),
         )
         self.dashscope_upload_retry_multiplier = max(
             1.0,
@@ -225,7 +238,7 @@ class VLVideoAnalyzer:
         )
         self.dashscope_upload_retry_max_backoff_sec = max(
             self.dashscope_upload_retry_initial_backoff_sec,
-            safe_float(api_config.get("upload_retry_max_backoff_sec", 30.0), 30.0),
+            safe_float(api_config.get("upload_retry_max_backoff_sec", 16.0), 16.0),
         )
         self.dashscope_upload_retry_jitter_sec = max(
             0.0,
@@ -959,12 +972,34 @@ class VLVideoAnalyzer:
                 f"DashScope offline task requires api_key, env={self._api_key_env or 'DASHSCOPE_API_KEY'}"
             )
 
+        plain_messages = self._to_plain_value(messages)
+        request_transport_meta = self._summarize_message_transport(plain_messages)
         request_custom_id = f"vl-offline-{uuid.uuid4().hex}"
         batch_record = self._build_dashscope_batch_input_record(
-            messages=self._to_plain_value(messages),
+            messages=plain_messages,
             custom_id=request_custom_id,
         )
         batch_jsonl = json.dumps(batch_record, ensure_ascii=False) + "\n"
+        body_bytes = self._json_utf8_size_bytes(batch_record.get("body", {}))
+        jsonl_bytes = len(batch_jsonl.encode("utf-8"))
+        logger.info(
+            "DashScope VL offline batch input prepared: transport=%s, body_bytes=%s, body_limit_bytes=%s, jsonl_bytes=%s, video_url_count=%s, temp_url_count=%s, data_uri_video_count=%s, image_url_count=%s",
+            str(request_transport_meta.get("transport", "unknown") or "unknown"),
+            body_bytes,
+            int(_DASHSCOPE_BATCH_BODY_MAX_BYTES),
+            jsonl_bytes,
+            int(request_transport_meta.get("video_url_count", 0) or 0),
+            int(request_transport_meta.get("temp_url_count", 0) or 0),
+            int(request_transport_meta.get("data_uri_video_count", 0) or 0),
+            int(request_transport_meta.get("image_url_count", 0) or 0),
+        )
+        if body_bytes > int(_DASHSCOPE_BATCH_BODY_MAX_BYTES):
+            logger.warning(
+                "DashScope VL offline batch body exceeds known server limit before submit: transport=%s, body_bytes=%s, body_limit_bytes=%s",
+                str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                body_bytes,
+                int(_DASHSCOPE_BATCH_BODY_MAX_BYTES),
+            )
         batch_file_payload = (
             "vl_offline_input.jsonl",
             batch_jsonl.encode("utf-8"),
@@ -986,6 +1021,13 @@ class VLVideoAnalyzer:
             raise RuntimeError(
                 f"DashScope batch input upload succeeded but file id is missing: {self._safe_json_preview(input_file)}"
             )
+        logger.info(
+            "DashScope batch JSONL uploaded: input_file_id=%s, transport=%s, body_bytes=%s, jsonl_bytes=%s, note=batch JSONL only stores the offline request envelope and does not prove video media temp_url upload succeeded",
+            input_file_id,
+            str(request_transport_meta.get("transport", "unknown") or "unknown"),
+            body_bytes,
+            jsonl_bytes,
+        )
 
         try:
             submit_response = await self.client.batches.create(
@@ -1005,10 +1047,12 @@ class VLVideoAnalyzer:
             )
 
         logger.info(
-            "DashScope VL offline batch submitted: task_id=%s, input_file_id=%s, poll_interval_sec=%.1f",
+            "DashScope VL offline batch submitted: task_id=%s, input_file_id=%s, poll_interval_sec=%.1f, transport=%s, body_bytes=%s",
             task_id,
             input_file_id,
             float(self.vl_offline_poll_interval_sec),
+            str(request_transport_meta.get("transport", "unknown") or "unknown"),
+            body_bytes,
         )
 
         deadline = time.monotonic() + float(self.vl_offline_max_wait_sec)
@@ -1083,6 +1127,10 @@ class VLVideoAnalyzer:
                         "output_file_id": output_file_id,
                         "task_status": task_status.upper(),
                         "poll_count": poll_count,
+                        "body_bytes": int(body_bytes),
+                        "jsonl_bytes": int(jsonl_bytes),
+                        "message_transport": str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                        "message_transport_meta": dict(request_transport_meta or {}),
                     },
                 )
 
@@ -1767,6 +1815,79 @@ class VLVideoAnalyzer:
             sanitized.append({"role": role, "content": normalized_content})
         return sanitized
 
+    @staticmethod
+    def _compute_retry_backoff_sec(
+        *,
+        attempt_index: int,
+        initial_backoff_sec: float,
+        multiplier: float,
+        max_backoff_sec: float,
+        jitter_sec: float = 0.0,
+    ) -> float:
+        wait_time = float(initial_backoff_sec) * (float(multiplier) ** float(max(0, int(attempt_index))))
+        wait_time = min(float(max_backoff_sec), wait_time)
+        if jitter_sec > 0:
+            wait_time += random.uniform(0.0, float(jitter_sec))
+        return max(0.0, wait_time)
+
+    def _summarize_message_transport(self, messages: Any) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "transport": "unknown",
+            "video_url_count": 0,
+            "temp_url_count": 0,
+            "data_uri_video_count": 0,
+            "image_url_count": 0,
+            "data_uri_video_bytes": 0,
+            "image_data_uri_bytes": 0,
+        }
+        if not isinstance(messages, list):
+            return summary
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                item_type = str(item.get("type", "") or "").strip().lower()
+                if item_type == "video_url":
+                    summary["video_url_count"] += 1
+                    video_obj = item.get("video_url") if isinstance(item.get("video_url"), dict) else {}
+                    raw_url = str(video_obj.get("url", "") or "")
+                    if raw_url.startswith("data:"):
+                        summary["data_uri_video_count"] += 1
+                        summary["data_uri_video_bytes"] += len(raw_url.encode("utf-8"))
+                    elif raw_url:
+                        summary["temp_url_count"] += 1
+                elif item_type == "image_url":
+                    summary["image_url_count"] += 1
+                    image_obj = item.get("image_url") if isinstance(item.get("image_url"), dict) else {}
+                    raw_url = str(image_obj.get("url", "") or "")
+                    if raw_url.startswith("data:"):
+                        summary["image_data_uri_bytes"] += len(raw_url.encode("utf-8"))
+
+        if summary["temp_url_count"] > 0:
+            summary["transport"] = "temp_url"
+        elif summary["data_uri_video_count"] > 0:
+            summary["transport"] = "data_uri_video"
+        elif summary["image_url_count"] > 0:
+            summary["transport"] = "keyframes"
+        elif summary["video_url_count"] > 0:
+            summary["transport"] = "video_url"
+        else:
+            summary["transport"] = "text_only"
+        return summary
+
+    @staticmethod
+    def _json_utf8_size_bytes(value: Any) -> int:
+        try:
+            return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+        except Exception:
+            return 0
+
     async def _call_vl_api(
         self,
         video_path: str,
@@ -1806,6 +1927,7 @@ class VLVideoAnalyzer:
             analysis_mode=normalized_mode,
         )
         request_messages_audit = self._sanitize_messages_for_audit(messages)
+        request_transport_meta = self._summarize_message_transport(messages)
         raw_interactions: List[Dict[str, Any]] = []
 
         # 构建稳定 cache_key（仅用于首轮尝试，避免重试阶段误用缓存）
@@ -1910,6 +2032,8 @@ class VLVideoAnalyzer:
                             "offline_task_meta": dict(offline_task_meta or {}),
                             "timeout_sec": float(vl_request_timeout_sec),
                             "hedge_delay_ms": int(vl_hedge_delay_ms),
+                            "message_transport": str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                            "message_transport_meta": dict(request_transport_meta or {}),
                             "messages": request_messages_audit,
                         },
                         "response": {
@@ -1950,6 +2074,8 @@ class VLVideoAnalyzer:
                             "offline_task_meta": dict(locals().get("offline_task_meta", {}) or {}),
                             "timeout_sec": float(vl_request_timeout_sec),
                             "hedge_delay_ms": int(vl_hedge_delay_ms),
+                            "message_transport": str(request_transport_meta.get("transport", "unknown") or "unknown"),
+                            "message_transport_meta": dict(request_transport_meta or {}),
                             "messages": request_messages_audit,
                         },
                         "error": err_detail,
@@ -1958,7 +2084,12 @@ class VLVideoAnalyzer:
                     }
                 )
                 if attempt < self.max_retries:
-                    wait_time = 2 ** attempt
+                    wait_time = self._compute_retry_backoff_sec(
+                        attempt_index=attempt,
+                        initial_backoff_sec=float(self.vl_retry_initial_backoff_sec),
+                        multiplier=float(self.vl_retry_multiplier),
+                        max_backoff_sec=float(self.vl_retry_max_backoff_sec),
+                    )
                     logger.warning(
                         f"VL API call failed (attempt {attempt+1}/{self.max_retries+1}): "
                         f"{err_detail}, wait {wait_time}s"
@@ -2075,6 +2206,11 @@ class VLVideoAnalyzer:
         if can_use_dashscope_inline and mode in ("auto", "data_uri") and video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
             video_base64 = self._encode_video_base64(video_path)
             if video_base64:
+                logger.info(
+                    "VL media transport resolved: transport=data_uri_video, video_path=%s, size_bytes=%s, note=video will be embedded inline in request body",
+                    video_path,
+                    video_file_size,
+                )
                 return [
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": [
@@ -2089,9 +2225,11 @@ class VLVideoAnalyzer:
             try:
                 temp_url = await self._try_get_dashscope_temp_url(
                     video_path,
-                    raise_on_failure=False,
+                    raise_on_failure=(mode == "dashscope_upload"),
                 )
             except Exception as upload_error:
+                if mode == "dashscope_upload":
+                    raise
                 temp_url = None
                 dashscope_upload_error_detail = self._format_exception_detail(upload_error)
                 logger.warning(
@@ -2099,6 +2237,11 @@ class VLVideoAnalyzer:
                     dashscope_upload_error_detail,
                 )
             if temp_url:
+                logger.info(
+                    "VL media transport resolved: transport=temp_url, video_path=%s, tmp_url=%s, note=video media upload succeeded and VL request will reference temp_url instead of inline media",
+                    video_path,
+                    temp_url,
+                )
                 return [
                     {"role": "system", "content": system_content},
                     {"role": "user", "content": [
@@ -2111,30 +2254,11 @@ class VLVideoAnalyzer:
                 raise RuntimeError(
                     f"dashscope_upload mode requires DashScope endpoint, current base_url={self.base_url}"
                 )
-
-            # DashScope SDK 本地路径直传失败时，退化为 base64 直传
-            if video_file_size and video_file_size <= _MAX_RAW_BYTES_FOR_BASE64_DATA_URI:
-                video_base64 = self._encode_video_base64(video_path)
-                if video_base64:
-                    return [
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": [
-                            {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{video_base64}"}},
-                            {"type": "text", "text": user_text},
-                        ]}
-                    ]
-                raise RuntimeError(
-                    "DashScope SDK upload failed and base64 encode failed: "
-                    f"video_path={video_path}, upload_error={dashscope_upload_error_detail or 'unknown'}"
-                )
-
             raise RuntimeError(
-                "DashScope SDK upload failed and file is too large for base64 data-uri fallback: "
+                "dashscope_upload mode requires successful DashScope Files.upload temp_url before VL analysis: "
                 f"video_path={video_path}, size_bytes={video_file_size}, "
-                f"max_bytes={_MAX_RAW_BYTES_FOR_BASE64_DATA_URI}, "
-                f"upload_error={dashscope_upload_error_detail or 'unknown'}"
+                f"upload_error={dashscope_upload_error_detail or 'temporary URL missing'}"
             )
-
         # 3) 降级为关键帧（千帆链路默认路径）
         frames = await self._extract_keyframes(video_path, max_frames=self.max_input_frames)
         if not frames:
@@ -2155,6 +2279,12 @@ class VLVideoAnalyzer:
 
         if user_text:
             content_items.append({"type": "text", "text": user_text})
+        logger.info(
+            "VL media transport resolved: transport=keyframes, video_path=%s, frame_count=%s, max_image_dim=%s, note=keyframes will be embedded inline in request body",
+            video_path,
+            len(frames),
+            int(self.max_image_dim),
+        )
         
         return [
             {"role": "system", "content": system_content},
@@ -2265,9 +2395,10 @@ class VLVideoAnalyzer:
                     except Exception:
                         file_size = 0
                     logger.info(
-                        "DashScope Files.upload succeeded: video_path=%s, source_video_path=%s, size_bytes=%s, url_source=%s, request_id=%s, timeout_sec=%.2f, chunk_size=%s",
+                        "DashScope Files.upload succeeded: video_path=%s, source_video_path=%s, tmp_url=%s, size_bytes=%s, url_source=%s, request_id=%s, timeout_sec=%.2f, chunk_size=%s",
                         upload_video_path,
                         video_path,
+                        temp_url,
                         file_size,
                         url_source or "unknown",
                         request_id or "unknown",
@@ -2289,9 +2420,10 @@ class VLVideoAnalyzer:
                     except Exception:
                         file_size = 0
                     logger.info(
-                        "DashScope Files.upload(dict) succeeded: video_path=%s, source_video_path=%s, size_bytes=%s, url_source=%s, request_id=%s, timeout_sec=%.2f, chunk_size=%s",
+                        "DashScope video media upload succeeded: transport=temp_url, video_path=%s, source_video_path=%s, tmp_url=%s, size_bytes=%s, url_source=%s, request_id=%s, timeout_sec=%.2f, chunk_size=%s",
                         upload_video_path,
                         video_path,
+                        temp_url,
                         file_size,
                         url_source or "unknown",
                         resp.get("request_id", "unknown"),
@@ -2324,14 +2456,13 @@ class VLVideoAnalyzer:
                     )
                     return None
 
-                backoff_sec = float(self.dashscope_upload_retry_initial_backoff_sec) * (
-                    float(self.dashscope_upload_retry_multiplier) ** float(attempt - 1)
+                backoff_sec = self._compute_retry_backoff_sec(
+                    attempt_index=attempt - 1,
+                    initial_backoff_sec=float(self.dashscope_upload_retry_initial_backoff_sec),
+                    multiplier=float(self.dashscope_upload_retry_multiplier),
+                    max_backoff_sec=float(self.dashscope_upload_retry_max_backoff_sec),
+                    jitter_sec=float(self.dashscope_upload_retry_jitter_sec),
                 )
-                backoff_sec = min(float(self.dashscope_upload_retry_max_backoff_sec), backoff_sec)
-                jitter_cap = float(self.dashscope_upload_retry_jitter_sec)
-                if jitter_cap > 0:
-                    backoff_sec += random.uniform(0.0, jitter_cap)
-                backoff_sec = max(0.0, backoff_sec)
 
                 logger.warning(
                     "DashScope Files.upload failed (attempt %s/%s): %s, retry in %.2fs",

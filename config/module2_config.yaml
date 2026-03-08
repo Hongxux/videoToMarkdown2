@@ -322,7 +322,10 @@ vl_material_generation:
     # DashScope 无需 appid；该字段仅为兼容保留
     appid: ""
     appid_env: ""
-    max_retries: 2
+    max_retries: 4
+    retry_initial_backoff_sec: 2.0
+    retry_multiplier: 2.0
+    retry_max_backoff_sec: 16.0
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
     # 离线异步任务模式（提交后每 5 秒轮询）
@@ -350,11 +353,11 @@ vl_material_generation:
     # 超时下限，避免极短视频出现 0 秒
     upload_timeout_min_sec: 1.0
     # 上传失败自动重试（指数退避）
-    upload_retry_max_attempts: 4
-    upload_retry_initial_backoff_sec: 5.0
+    upload_retry_max_attempts: 5
+    upload_retry_initial_backoff_sec: 2.0
     upload_retry_multiplier: 2.0
-    upload_retry_max_backoff_sec: 45.0
-    upload_retry_jitter_sec: 2.0
+    upload_retry_max_backoff_sec: 16.0
+    upload_retry_jitter_sec: 0.0
     
     # 视频输入策略
     # auto: 仅在 DashScope 场景自动尝试 data-uri / upload
@@ -477,6 +480,9 @@ vl_material_generation:
 
     # Save per-unit step JSON (including raw model step output)
     save_step_json: true
+
+    # Whether to render frame_reason as a top banner on tutorial keyframes
+    top_reason_banner_enabled: false
 
     # 教程资产导出并发度（step clip/keyframe）
     # auto: 自动并发（默认最多 4），受 asset_export_parallel_hard_cap 限制

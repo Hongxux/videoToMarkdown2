@@ -10,6 +10,7 @@
   - 将 unit 流式切片外层执行器改为 `ThreadPoolExecutor`，避免重复 spawn 大模块。
   - 将 Windows 且命中 `concrete_forward` profile 的截图 CV 路由切换到线程池执行，并把 SHM 句柄与轻量 `ScreenshotSelector` 改为线程局部缓存。
   - 将 tutorial keyframe 顶部原因 banner 从 PIL 原地重写切换为 OpenCV 渲染 + 临时文件替换，缩小截图后处理阶段的 native 崩溃面。
+  - 将 `tutorial_mode.top_reason_banner_enabled` 设为默认关闭；需要 banner 时再显式开启，把“教程关键帧图片导出”和“中文解释文字后处理”解耦。
 - 调用链变化：
   - 原链路：`VLMaterialGenerator.generate -> flow_ops.optimize_screenshots_streaming_pipeline -> ProcessPoolExecutor(run_screenshot_selection_task)`。
   - 新链路：`VLMaterialGenerator.generate -> flow_ops.optimize_screenshots_streaming_pipeline -> Windows+concrete_forward 命中线程池 -> thread-local ScreenshotSelector/SHM handles -> run_screenshot_selection_task`。
@@ -10820,3 +10821,34 @@
     - `_resolve_stream_split_process_workers()` 的 `auto` 默认改为保守 CPU 感知值：最多 2。
 - 结果：
   - 统一 `process` 主链继续保留，但默认预算从“以任务数为中心”切到“以进程稳定性为中心”。
+
+## 2026-03-08: 将 `dashscope_upload` 收紧为严格 `tmp_url` 模式，并补齐 offline batch 传输/体积观测
+- 背景：
+  - `offline batch` 日志里出现 `input_file_id=file-batch-*` 时，之前很容易把 batch JSONL 上传误解成视频媒体已经拿到 DashScope `tmp_url`。
+  - 在 `dashscope_upload` 模式下，如果上传失败后仍退回内联视频，`/v1/chat/completions` 与 batch `body` 仍可能触发 `6291456` 字节限制。
+- 调整：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 在 offline batch 提交前补充 `message_transport/body_bytes/jsonl_bytes` 摘要日志。
+    - 增加 `DashScope batch JSONL uploaded` 日志，显式区分“batch 请求封套上传”和“视频媒体上传”。
+    - 将 `video_input_mode=dashscope_upload` 改为严格依赖 `tmp_url`：上传失败后不再降级到 base64，而是直接报错。
+    - VL 主请求与 `Files.upload` 共用 `_compute_retry_backoff_sec()`，统一指数退避策略。
+  - `config/module2_config.yaml`
+    - 为 VL 主请求补齐 `retry_initial_backoff_sec=2.0`、`retry_multiplier=2.0`、`retry_max_backoff_sec=16.0`。
+    - 上传重试改为最多 `5` 次，默认等待序列调整为 `2/4/8/16` 秒，取消默认抖动。
+- 调用链/决策链变化：
+  - 旧：`dashscope_upload -> 上传失败后可能退回 base64/keyframes -> messages 继续进入 offline batch body`
+  - 新：`dashscope_upload -> 必须先拿到 tmp_url -> VL analysis/offline batch 仅引用 tmp_url`
+- 验证/观测：
+  - 自动化验证：
+    - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "dashscope_upload_requires_temp_url or retries_with_exponential_backoff or retries_with_configured_backoff or dashscope_offline_task_uses_openai_batch_with_5s_poll"`
+    - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 关键观测项：
+    - 上传等待策略由“较长初始等待 + 抖动”收敛为默认 `2/4/8/16` 秒。
+    - 上传重试次数：`4 -> 5`
+    - VL 主请求重试次数：`2 -> 4`
+    - offline batch 观测字段：`task_id/input_file_id -> task_id/input_file_id/message_transport/body_bytes/jsonl_bytes`
+- 结果：
+  - 排障时可以第一时间区分“batch 请求封套已上传”和“视频媒体已上传”。
+  - `DashScope Files.upload` 成功日志现在显式输出 `transport=temp_url` 与 `tmp_url`，下游链路更容易核对真实媒体传输形态。
+- 结论：
+  - offline batch 这条链路的关键不是“有没有 `file-batch-*`”，而是“最终 messages 使用的是哪种 transport、对应 body 体积是多少、是否真正拿到了 `tmp_url`”。

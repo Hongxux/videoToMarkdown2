@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import sys
 from pathlib import Path
@@ -401,6 +402,38 @@ def test_build_messages_skip_dashscope_upload_for_qianfan(monkeypatch, tmp_path:
     assert any(item.get("type") == "image_url" for item in messages[1]["content"])
 
 
+def test_build_messages_dashscope_upload_requires_temp_url_before_vl_analysis(monkeypatch, tmp_path: Path):
+    clip = tmp_path / "demo.mp4"
+    clip.write_bytes(b"fake-video")
+
+    analyzer = VLVideoAnalyzer(
+        {
+            "api": {
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key": "test-key",
+                "video_input_mode": "dashscope_upload",
+            }
+        }
+    )
+
+    async def _fake_upload(_video_path: str, raise_on_failure: bool = False):
+        _ = raise_on_failure
+        return None
+
+    async def _fail_if_keyframes_called(_video_path: str, max_frames: int = 6):
+        _ = max_frames
+        raise AssertionError("keyframes fallback should not run in dashscope_upload mode")
+
+    monkeypatch.setattr(analyzer, "_try_get_dashscope_temp_url", _fake_upload)
+    monkeypatch.setattr(analyzer, "_extract_keyframes", _fail_if_keyframes_called)
+
+    try:
+        asyncio.run(analyzer._build_messages(str(clip), analysis_mode="default"))
+        raise AssertionError("expected dashscope_upload mode to require temp_url")
+    except RuntimeError as exc:
+        assert "temp_url" in str(exc)
+
+
 def test_prepare_video_for_dashscope_upload_compresses_without_duration_threshold(monkeypatch):
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
     analyzer.long_video_upload_compress_enabled = True
@@ -562,7 +595,7 @@ def test_compress_video_for_dashscope_upload_uses_crf_fps_and_drop_audio(monkeyp
     assert "-b:v" not in command
 
 
-def test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout(monkeypatch):
+def test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout(monkeypatch, caplog):
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
     analyzer._api_key = "test-key"
     analyzer.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
@@ -571,6 +604,7 @@ def test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout(m
     analyzer.dashscope_upload_timeout_min_sec = 1.0
 
     captured: Dict[str, Any] = {}
+    caplog.set_level(logging.INFO, logger="services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer")
 
     async def _fake_prepare(_video_path: str) -> str:
         return "prepared.mp4"
@@ -602,6 +636,7 @@ def test_try_get_dashscope_temp_url_uses_chunk_size_and_video_duration_timeout(m
     assert int(captured["chunk_size"]) == 2 * 1024 * 1024
     assert float(captured["timeout"]) == 913.0
     assert captured["headers"]["Authorization"] == "Bearer test-key"
+    assert "tmp_url=https://example.com/video.mp4" in caplog.text
 
 
 def test_try_get_dashscope_temp_url_normalizes_http_oss_to_https(monkeypatch):
@@ -644,7 +679,7 @@ def test_try_get_dashscope_temp_url_retries_with_exponential_backoff(monkeypatch
     analyzer._api_key = "test-key"
     analyzer.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     analyzer.dashscope_upload_retry_max_attempts = 3
-    analyzer.dashscope_upload_retry_initial_backoff_sec = 1.0
+    analyzer.dashscope_upload_retry_initial_backoff_sec = 2.0
     analyzer.dashscope_upload_retry_multiplier = 2.0
     analyzer.dashscope_upload_retry_max_backoff_sec = 10.0
     analyzer.dashscope_upload_retry_jitter_sec = 0.0
@@ -691,7 +726,7 @@ def test_try_get_dashscope_temp_url_retries_with_exponential_backoff(monkeypatch
 
     assert temp_url == "https://example.com/video.mp4"
     assert captured["upload_calls"] == 3
-    assert captured["sleep_values"] == [1.0, 2.0]
+    assert captured["sleep_values"] == [2.0, 4.0]
 
 
 def test_call_vl_api_prefers_dashscope_offline_task_when_enabled(monkeypatch):
@@ -769,6 +804,60 @@ def test_call_vl_api_sync_path_passes_timeout_and_hedge(monkeypatch):
 
     assert float(captured["timeout"]) == 60.0
     assert int(captured["hedge_delay_ms"]) == 60000
+
+
+def test_call_vl_api_retries_with_configured_backoff(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+    analyzer.vl_offline_task_enabled = False
+    analyzer.max_retries = 4
+    analyzer.vl_retry_initial_backoff_sec = 2.0
+    analyzer.vl_retry_multiplier = 2.0
+    analyzer.vl_retry_max_backoff_sec = 16.0
+
+    captured: Dict[str, Any] = {"sleep_values": [], "call_count": 0}
+
+    async def _fake_build_messages(video_path: str, extra_prompt=None, analysis_mode="default", **kwargs):
+        _ = (video_path, extra_prompt, analysis_mode, kwargs)
+        return [{"role": "system", "content": "sys"}]
+
+    def _fake_parse(content: str, finish_reason=None, analysis_mode="default"):
+        _ = (content, finish_reason, analysis_mode)
+        return [VLAnalysisResult(id=1, knowledge_type="process", clip_start_sec=0.0, clip_end_sec=5.0)], []
+
+    async def _fake_sleep(seconds: float):
+        captured["sleep_values"].append(float(seconds))
+        return None
+
+    async def _fake_vl_chat_completion(**kwargs):
+        _ = kwargs
+        captured["call_count"] += 1
+        if captured["call_count"] < 5:
+            raise RuntimeError(f"transient failure {captured['call_count']}")
+        return llm_gateway.VLChatResult(
+            content='[{"id":1,"knowledge_type":"process","clip_start_sec":0,"clip_end_sec":5}]',
+            finish_reason="stop",
+            usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            model="test-model",
+        )
+
+    monkeypatch.setattr(analyzer, "_build_messages", _fake_build_messages)
+    monkeypatch.setattr(analyzer, "_parse_response_with_payload", _fake_parse)
+    monkeypatch.setattr(llm_gateway, "vl_chat_completion", _fake_vl_chat_completion)
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer.asyncio.sleep",
+        _fake_sleep,
+    )
+
+    parsed_results, token_usage, raw_json, interactions = asyncio.run(
+        analyzer._call_vl_api("demo_0.00-10.00.mp4", analysis_mode="default")
+    )
+
+    assert len(parsed_results) == 1
+    assert token_usage["total_tokens"] == 3
+    assert raw_json == []
+    assert interactions[-1]["success"] is True
+    assert captured["call_count"] == 5
+    assert captured["sleep_values"] == [2.0, 4.0, 8.0, 16.0]
 
 
 def test_dashscope_offline_task_uses_openai_batch_with_5s_poll(monkeypatch):
@@ -905,6 +994,10 @@ def test_dashscope_offline_task_uses_openai_batch_with_5s_poll(monkeypatch):
     assert meta["output_file_id"] == "file-output-001"
     assert meta["task_status"] == "COMPLETED"
     assert int(meta["poll_count"]) == 2
+    assert int(meta["body_bytes"]) > 0
+    assert int(meta["jsonl_bytes"]) >= int(meta["body_bytes"])
+    assert meta["message_transport"] == "temp_url"
+    assert meta["message_transport_meta"]["temp_url_count"] == 1
 
 
 def test_build_messages_uses_concrete_mode_prompts(monkeypatch):
@@ -3342,6 +3435,7 @@ def test_save_tutorial_assets_uses_analysis_relative_timestamps(tmp_path, monkey
                 "enabled": True,
                 "export_assets": True,
                 "save_step_json": False,
+                "top_reason_banner_enabled": True,
                 "asset_export_parallel_workers": 1,
                 "asset_export_parallel_hard_cap": 1,
             },
@@ -3608,6 +3702,95 @@ def test_save_tutorial_assets_applies_top_reason_banner_to_keyframe_image(tmp_pa
     top_sample = rendered[40:170, 100:1820]
     assert top_sample.size > 0
     assert int(np.mean(top_sample)) < 235
+
+
+def test_save_tutorial_assets_skips_top_reason_banner_when_disabled(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "export_assets": True,
+                "save_step_json": False,
+                "top_reason_banner_enabled": False,
+                "asset_export_parallel_workers": 1,
+                "asset_export_parallel_hard_cap": 1,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return True
+
+    async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        image = np.full((1080, 1920, 3), 235, dtype=np.uint8)
+        assert cv2.imwrite(str(output_path), image)
+        return True
+
+    monkeypatch.setattr(generator, "_export_clip_asset_with_ffmpeg", _fake_export_clip_asset_with_ffmpeg)
+    monkeypatch.setattr(generator, "_export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    clip_requests = [{
+        "semantic_unit_id": "SU780",
+        "analysis_mode": "tutorial_stepwise",
+        "step_id": 1,
+        "step_description": "step one",
+        "action_brief": "step_one",
+        "start_sec": 10.0,
+        "end_sec": 20.0,
+    }]
+    screenshot_requests = [{
+        "semantic_unit_id": "SU780",
+        "analysis_mode": "tutorial_stepwise",
+        "step_id": 1,
+        "timestamp_sec": 15.0,
+        "frame_reason": "大家请看画面顶部的设置区域，这里展示了需要重点核对的关键状态。",
+    }]
+    raw_response_json = [{
+        "step_id": 1,
+        "step_description": "step one",
+        "step_type": "MAIN_FLOW",
+        "main_action": "open panel",
+        "main_operation": "1. open panel\n[KEYFRAME_1]",
+        "clip_start_sec": 10.0,
+        "clip_end_sec": 20.0,
+        "instructional_keyframes": [{
+            "timestamp_sec": 15.0,
+            "frame_reason": "大家请看画面顶部的设置区域，这里展示了需要重点核对的关键状态。",
+        }],
+    }]
+
+    asyncio.run(
+        generator._save_tutorial_assets_for_unit(
+            video_path="dummy.mp4",
+            output_dir=str(output_dir),
+            unit_id="SU780",
+            clip_requests=clip_requests,
+            screenshot_requests=screenshot_requests,
+            raw_response_json=raw_response_json,
+        )
+    )
+
+    unit_asset_dir = output_dir / "vl_tutorial_units" / "SU780"
+    matched_images = list(unit_asset_dir.glob("SU780_ss_step_01_key_01_*"))
+    assert len(matched_images) == 1
+    rendered = cv2.imread(str(matched_images[0]), cv2.IMREAD_COLOR)
+    assert rendered is not None
+    top_sample = rendered[40:170, 100:1820]
+    assert top_sample.size > 0
+    assert int(np.mean(top_sample)) == 235
+
+    data = json.loads((unit_asset_dir / "SU780_steps.json").read_text(encoding="utf-8")) if (unit_asset_dir / "SU780_steps.json").exists() else {"steps": []}
+    if data.get("steps"):
+        assert data["steps"][0]["instructional_keyframe_details"][0]["top_reason_banner_status"] == "disabled_by_config"
 
 
 def test_apply_grid_anchor_crop_for_keyframe(tmp_path, monkeypatch):

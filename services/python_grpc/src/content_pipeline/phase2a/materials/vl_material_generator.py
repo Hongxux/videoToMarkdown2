@@ -521,6 +521,11 @@ class VLMaterialGenerator:
         self.tutorial_min_step_duration_sec = float(self.tutorial_mode_config.get("min_step_duration_sec", 5.0))
         self.tutorial_export_assets = bool(self.tutorial_mode_config.get("export_assets", True))
         self.tutorial_save_step_json = bool(self.tutorial_mode_config.get("save_step_json", True))
+        raw_top_reason_banner_enabled = self.tutorial_mode_config.get("top_reason_banner_enabled", False)
+        if isinstance(raw_top_reason_banner_enabled, bool):
+            self.tutorial_top_reason_banner_enabled = raw_top_reason_banner_enabled
+        else:
+            self.tutorial_top_reason_banner_enabled = str(raw_top_reason_banner_enabled or "").strip().lower() in {"1", "true", "yes", "y", "on"}
         self.tutorial_assets_root_dir = str(self.tutorial_mode_config.get("assets_root_dir", "vl_tutorial_units") or "vl_tutorial_units")
         self.tutorial_export_from_original_clip_when_prepruned = bool(
             self.tutorial_mode_config.get("export_from_original_clip_when_prepruned", True)
@@ -4045,7 +4050,9 @@ class VLMaterialGenerator:
                         frame_reason = str(key_job.get("frame_reason", "") or "").strip()
                         top_reason_banner_status = "skipped_no_reason"
                         output_path_value = key_job.get("output_path")
-                        if frame_reason and output_path_value:
+                        if frame_reason and output_path_value and not self.tutorial_top_reason_banner_enabled:
+                            top_reason_banner_status = "disabled_by_config"
+                        elif frame_reason and output_path_value:
                             output_path = Path(output_path_value)
                             banner_ok = save_top_reason_banner_image(
                                 source_image_path=output_path,

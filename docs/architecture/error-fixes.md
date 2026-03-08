@@ -19,6 +19,7 @@
   - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
     - 将 tutorial keyframe 顶部原因 banner 从 PIL 原地重写改为 OpenCV 渲染，并先写临时文件再原子替换目标图，缩小图片后处理的 native 崩溃面。
   - `services/python_grpc/src/vision_validation/worker.py`
+    - 新增 `tutorial_mode.top_reason_banner_enabled` 开关，默认关闭；仅在显式开启时才渲染 `frame_reason` 顶部 banner，避免稳定性问题默认影响主链路。
     - 将 SHM 句柄缓存改为线程局部存储，避免一个线程释放句柄时误伤另一个并发任务。
     - 将轻量 `ScreenshotSelector` 改为线程局部缓存，避免同进程多线程共享选择器实例。
 - 验证：
@@ -8845,3 +8846,29 @@
 - 预防：
   - 以后凡是原始模型输出、格式探针、payload dump，一律走“显式配置开关 + debug 级别”双门控，禁止直接走默认 `info` 通道。
   - 默认运行配置只保留业务关键信号，避免排障载荷淹没业务日志。
+
+## 2026-03-08: DashScope offline batch 将 batch JSONL 上传误判为视频媒体上传，且请求体仍可能超过 6MiB
+- 现象：
+  - 日志出现 `DashScope VL offline batch submitted: input_file_id=file-batch-...` 时，容易误以为视频已经通过 DashScope 上传成功，但服务端随后仍返回 `The input body length cannot be exceeded 6291456 byte`。
+  - 排障时无法从日志直接区分“上传的是 batch JSONL 请求封套”还是“视频媒体已经拿到 `tmp_url`”，导致 offline batch 问题定位方向反复摇摆。
+- 根因：
+  - offline batch 的 `input_file_id=file-batch-...` 来自 `vl_offline_input.jsonl` 上传；该文件只保存 `/v1/chat/completions` 的离线请求封套和 `body/messages`，并不等同于 `DashScope Files.upload` 返回的视频 `tmp_url`。
+  - 旧逻辑下 `video_input_mode=dashscope_upload` 在上传失败后仍可能退回 `data:video/mp4;base64,...`，从而把大视频再次内联进 batch `body`，最终触发 `6291456` 字节上限。
+  - 缺少 `message_transport`、`body_bytes`、`jsonl_bytes` 等可观测字段，导致 transport 形态与体积预算只能靠零散日志猜测。
+- 修复：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 在 offline batch 提交前记录 `body_bytes/jsonl_bytes/message_transport`，并在超过 6MiB 已知上限前先告警。
+    - 增加 `DashScope batch JSONL uploaded` 日志，明确说明 `input_file_id` 只代表 batch JSONL 已上传，不代表视频媒体 `tmp_url` 上传成功。
+    - 将 `video_input_mode=dashscope_upload` 调整为严格模式：必须先通过 `DashScope Files.upload` 拿到 `tmp_url`，否则直接失败，不再回退到 base64 内联。
+    - 统一 VL 请求与上传请求的指数退避语义，默认等待序列为 `2/4/8/16` 秒。
+  - `config/module2_config.yaml`
+    - 将 `max_retries` 提升到 `4`，并补齐 `retry_initial_backoff_sec/retry_multiplier/retry_max_backoff_sec`。
+    - 将 `upload_retry_max_attempts` 提升到 `5`，并调整为 `upload_retry_initial_backoff_sec=2.0`、`upload_retry_max_backoff_sec=16.0`、`upload_retry_jitter_sec=0.0`。
+- 验证：
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -q -k "dashscope_upload_requires_temp_url or retries_with_exponential_backoff or retries_with_configured_backoff or dashscope_offline_task_uses_openai_batch_with_5s_poll"`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 以后看到 `file-batch-*` 只说明离线 batch JSONL 已上传，不能再把它当成视频 `tmp_url` 上传成功证据。
+  - 排障时优先检查 `message_transport/body_bytes/jsonl_bytes`，先确认传输形态，再判断是否踩到服务端 body 限制。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py` 后续凡是新增媒体传输策略，都必须同步补齐 transport 级日志和失败语义，避免再次混淆 `tmp_url` 与内联媒体。
