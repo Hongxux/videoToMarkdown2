@@ -1,0 +1,9 @@
+{
+  "id": "phase2b-structured-rewrite",
+  "name": "Phase2B Structured Rewrite",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "选中内容后调用后端 /phase2b/structured-markdown，并将结构化 Markdown 回填到当前选区。",
+  "author": "OpenAI Codex",
+  "isDesktopOnly": true
+}

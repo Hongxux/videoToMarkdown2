@@ -48,6 +48,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -60,6 +61,7 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -97,6 +99,7 @@ public class MobileMarkdownController {
     private static final Pattern UNSAFE_FILENAME_CHARS = Pattern.compile("[^A-Za-z0-9._-]");
     private static final Pattern MARKDOWN_LINK_PATTERN = Pattern.compile("(!?\\[[^\\]]*])\\(([^)\\s]+)([^)]*)\\)");
     private static final Pattern BOOK_SELECTOR_PATTERN = Pattern.compile("c(\\d+)s(\\d+)(?:t(\\d+))?", Pattern.CASE_INSENSITIVE);
+    private static final Pattern STORAGE_ID_BV_PATTERN = Pattern.compile("BV[0-9A-Za-z]{10}", Pattern.CASE_INSENSITIVE);
     private static final Set<String> ALLOWED_UPLOAD_EXTENSIONS = Set.of(
             ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v",
             ".txt", ".md", ".pdf", ".epub"
@@ -2677,7 +2680,7 @@ public class MobileMarkdownController {
     private TaskView fromRuntimeTask(TaskEntry task) {
         TaskView view = new TaskView();
         view.taskId = task.taskId;
-        view.storageKey = resolveStorageKeyFromPath(resolveAbsolutePathSafe(task.outputDir));
+        view.storageKey = resolveRuntimeStorageKey(task);
         String lockedTitle = trimToNullSafe(task.title);
         view.title = lockedTitle != null ? lockedTitle : deriveTaskTitle(task.videoUrl, task.taskId);
         view.videoUrl = task.videoUrl;
@@ -4004,6 +4007,226 @@ public class MobileMarkdownController {
             }
             String storageKey = trimToNullSafe(relative.getName(0).toString());
             return isSafeStorageKey(storageKey) ? storageKey : null;
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private String resolveRuntimeStorageKey(TaskEntry task) {
+        if (task == null) {
+            return null;
+        }
+        String byOutputDir = resolveStorageKeyFromPath(resolveAbsolutePathSafe(task.outputDir));
+        if (byOutputDir != null) {
+            return byOutputDir;
+        }
+        String bySourcePath = resolveStorageKeyFromPath(resolveAbsolutePathSafe(task.videoUrl));
+        if (bySourcePath != null) {
+            return bySourcePath;
+        }
+        if (storageTaskCacheService == null) {
+            return null;
+        }
+        String normalizedTaskId = trimToNullSafe(task.taskId);
+        if (normalizedTaskId != null) {
+            Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> cachedByTaskId =
+                    storageTaskCacheService.getTaskByTaskId(normalizedTaskId);
+            if (cachedByTaskId.isPresent()) {
+                String cachedStorageKey = trimToNullSafe(cachedByTaskId.get().storageKey);
+                if (cachedStorageKey != null) {
+                    return cachedStorageKey;
+                }
+            }
+        }
+        String predictedStorageKey = predictStorageKeyForVideoInput(task.videoUrl);
+        if (predictedStorageKey == null) {
+            return null;
+        }
+        Optional<com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask> predictedCached =
+                storageTaskCacheService.getTask(predictedStorageKey);
+        if (predictedCached.isPresent() && isRuntimeShadowStorageTask(predictedCached.get(), normalizedTaskId)) {
+            return predictedStorageKey;
+        }
+        return null;
+    }
+
+    private boolean isRuntimeShadowStorageTask(
+            com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached,
+            String runtimeTaskId
+    ) {
+        if (cached == null) {
+            return false;
+        }
+        String cachedTaskId = trimToNullSafe(cached.taskId);
+        if (cachedTaskId != null) {
+            return runtimeTaskId != null && cachedTaskId.equals(runtimeTaskId);
+        }
+        if (cached.markdownAvailable || cached.completedAt != null) {
+            return false;
+        }
+        String status = trimToNullSafe(cached.status);
+        if (status == null) {
+            return true;
+        }
+        String normalizedStatus = status.toUpperCase(Locale.ROOT);
+        return !"COMPLETED".equals(normalizedStatus)
+                && !"FAILED".equals(normalizedStatus)
+                && !"CANCELLED".equals(normalizedStatus)
+                && !"CANCELED".equals(normalizedStatus);
+    }
+
+    private String predictStorageKeyForVideoInput(String videoInput) {
+        String normalizedVideoInput = trimToNullSafe(videoInput);
+        if (normalizedVideoInput == null) {
+            return null;
+        }
+        if (looksLikeHttpUrl(normalizedVideoInput)) {
+            return md5HexSafe(buildPredictedDownloadTaskDirSource(normalizedVideoInput));
+        }
+        Path normalizedPath = resolveAbsolutePathSafe(normalizedVideoInput);
+        if (normalizedPath == null) {
+            return null;
+        }
+        String existingStorageKey = resolveStorageKeyFromPath(normalizedPath);
+        if (existingStorageKey != null) {
+            return existingStorageKey;
+        }
+        return md5HexSafe(normalizePathForStorageHash(normalizedPath.toString()));
+    }
+
+    private boolean looksLikeHttpUrl(String value) {
+        if (value == null) {
+            return false;
+        }
+        String lower = value.trim().toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://");
+    }
+
+    private String buildPredictedDownloadTaskDirSource(String videoUrl) {
+        String bilibiliVideoId = extractStorageIdentityBilibiliVideoId(videoUrl);
+        if (bilibiliVideoId != null && !bilibiliVideoId.isBlank()) {
+            Integer bilibiliEpisodeIndex = extractStorageIdentityBilibiliEpisodeIndex(videoUrl);
+            if (bilibiliEpisodeIndex != null && bilibiliEpisodeIndex > 0) {
+                return bilibiliVideoId + "_" + bilibiliEpisodeIndex;
+            }
+            return bilibiliVideoId;
+        }
+        return videoUrl;
+    }
+
+    private String extractStorageIdentityBilibiliVideoId(String videoUrl) {
+        String normalizedVideoUrl = trimToNullSafe(videoUrl);
+        if (normalizedVideoUrl == null) {
+            return null;
+        }
+        try {
+            URI parsed = URI.create(normalizedVideoUrl);
+            if (!isStorageIdentityBilibiliHost(parsed.getHost())) {
+                return null;
+            }
+            Map<String, String> query = parseStorageIdentityQueryParams(parsed.getRawQuery());
+            String bvid = trimToNullSafe(query.get("bvid"));
+            if (bvid != null) {
+                Matcher bvidMatcher = STORAGE_ID_BV_PATTERN.matcher(bvid);
+                if (bvidMatcher.find()) {
+                    return bvidMatcher.group();
+                }
+            }
+            String aid = trimToNullSafe(query.get("aid"));
+            if (aid != null && aid.chars().allMatch(Character::isDigit)) {
+                return "AV" + aid;
+            }
+            String searchSpace = String.join(
+                    " ",
+                    trimToNullSafe(parsed.getRawPath()) != null ? parsed.getRawPath() : "",
+                    trimToNullSafe(parsed.getRawQuery()) != null ? parsed.getRawQuery() : ""
+            );
+            Matcher bvMatcher = STORAGE_ID_BV_PATTERN.matcher(searchSpace);
+            if (bvMatcher.find()) {
+                return bvMatcher.group();
+            }
+        } catch (Exception ex) {
+            Matcher fallbackMatcher = STORAGE_ID_BV_PATTERN.matcher(normalizedVideoUrl);
+            if (fallbackMatcher.find()) {
+                return fallbackMatcher.group();
+            }
+        }
+        return null;
+    }
+
+    private Integer extractStorageIdentityBilibiliEpisodeIndex(String videoUrl) {
+        String normalizedVideoUrl = trimToNullSafe(videoUrl);
+        if (normalizedVideoUrl == null) {
+            return null;
+        }
+        try {
+            URI parsed = URI.create(normalizedVideoUrl);
+            Map<String, String> query = parseStorageIdentityQueryParams(parsed.getRawQuery());
+            String page = trimToNullSafe(query.get("p"));
+            if (page == null) {
+                page = trimToNullSafe(query.get("page"));
+            }
+            if (page != null && page.chars().allMatch(Character::isDigit)) {
+                return Integer.parseInt(page);
+            }
+        } catch (Exception ignored) {
+            return null;
+        }
+        return null;
+    }
+
+    private boolean isStorageIdentityBilibiliHost(String rawHost) {
+        String host = trimToNullSafe(rawHost);
+        if (host == null) {
+            return false;
+        }
+        String normalized = host.toLowerCase(Locale.ROOT);
+        return "bilibili.com".equals(normalized)
+                || normalized.endsWith(".bilibili.com")
+                || "b23.tv".equals(normalized);
+    }
+
+    private Map<String, String> parseStorageIdentityQueryParams(String rawQuery) {
+        Map<String, String> params = new LinkedHashMap<>();
+        String normalizedQuery = trimToNullSafe(rawQuery);
+        if (normalizedQuery == null) {
+            return params;
+        }
+        String[] pairs = normalizedQuery.split("&");
+        for (String pair : pairs) {
+            if (pair == null || pair.isBlank()) {
+                continue;
+            }
+            int eqIndex = pair.indexOf('=');
+            String rawKey = eqIndex >= 0 ? pair.substring(0, eqIndex) : pair;
+            String rawValue = eqIndex >= 0 ? pair.substring(eqIndex + 1) : "";
+            try {
+                params.put(
+                        URLDecoder.decode(rawKey, StandardCharsets.UTF_8),
+                        URLDecoder.decode(rawValue, StandardCharsets.UTF_8)
+                );
+            } catch (Exception ignored) {
+                params.put(rawKey, rawValue);
+            }
+        }
+        return params;
+    }
+
+    private String normalizePathForStorageHash(String path) {
+        String normalized = path == null ? "" : path.trim().replace('\', '/');
+        return normalized.toLowerCase(Locale.ROOT);
+    }
+
+    private String md5HexSafe(String value) {
+        String normalizedValue = value != null ? value : "";
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(normalizedValue.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte one : digest) {
+                sb.append(String.format(Locale.ROOT, "%02x", one));
+            }
+            return sb.toString();
         } catch (Exception ex) {
             return null;
         }

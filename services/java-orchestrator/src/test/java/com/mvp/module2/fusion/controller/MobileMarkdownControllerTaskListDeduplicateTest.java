@@ -6,11 +6,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.ResponseEntity;
 
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -21,19 +24,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MobileMarkdownControllerTaskListDeduplicateTest {
 
     @Test
-    void listTasksShouldDeduplicateRuntimeTaskAndStorageShadowByStorageIdentity() throws Exception {
+    void listTasksShouldDeduplicateRuntimeTaskAndPredictedStorageShadowWhileProcessing() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
         TaskQueueManager queueManager = new TaskQueueManager();
         StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
 
-        String storageKey = "ut_shadow_runtime_task";
-        Path outputDir = resolveControllerStorageRoot().resolve(storageKey);
+        String videoUrl = "https://www.bilibili.com/video/BV1ABCDEF123?p=2";
+        String storageKey = md5Hex("BV1ABCDEF123_2");
         TaskQueueManager.TaskEntry runtimeTask = queueManager.submitTask(
                 "u_task_list_dedup",
-                "https://www.bilibili.com/video/BV1ABCDEF123",
-                outputDir.toString(),
+                videoUrl,
+                "./output",
                 TaskQueueManager.Priority.NORMAL,
                 "Title A"
         );
@@ -43,9 +46,10 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
 
         StorageTaskCacheService.CachedTask cachedTask = new StorageTaskCacheService.CachedTask();
         cachedTask.storageKey = storageKey;
+        cachedTask.taskId = null;
         cachedTask.title = storageKey;
-        cachedTask.status = "COMPLETED";
-        cachedTask.markdownAvailable = true;
+        cachedTask.status = "UNKNOWN";
+        cachedTask.markdownAvailable = false;
         storageCache.put(cachedTask);
 
         ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false);
@@ -62,6 +66,16 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
         assertEquals("Title A", item.get("title"));
         assertEquals(TaskQueueManager.TaskStatus.PROCESSING.name(), item.get("status"));
         assertEquals("runtime", item.get("source"));
+    }
+
+    private static String md5Hex(String value) throws Exception {
+        MessageDigest md = MessageDigest.getInstance("MD5");
+        byte[] digest = md.digest(String.valueOf(value).getBytes(StandardCharsets.UTF_8));
+        StringBuilder sb = new StringBuilder();
+        for (byte one : digest) {
+            sb.append(String.format(Locale.ROOT, "%02x", one));
+        }
+        return sb.toString();
     }
 
     private static Path resolveControllerStorageRoot() {

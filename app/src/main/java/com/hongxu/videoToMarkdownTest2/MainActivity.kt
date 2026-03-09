@@ -28,6 +28,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -67,6 +68,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,17 +79,22 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -146,6 +153,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import java.io.InterruptedIOException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -159,6 +169,28 @@ private data class TaskReaderSession(
     val title: String,
     val pathHint: String?,
     val nodes: List<SemanticNode>
+)
+
+private data class TaskCollectionSectionUi(
+    val collectionPath: String,
+    val title: String,
+    val depth: Int,
+    val tasks: List<MobileTaskListItem>
+)
+
+private data class TaskCollectionBuckets(
+    val ungroupedTasks: List<MobileTaskListItem>,
+    val groupedSections: List<TaskCollectionSectionUi>
+)
+
+private data class TaskDragSession(
+    val task: MobileTaskListItem,
+    val pointerWindowPosition: Offset
+)
+
+private data class PendingTaskMergeRequest(
+    val sourceTaskId: String,
+    val targetTaskId: String
 )
 
 internal enum class TaskComposerMode {
@@ -1067,6 +1099,20 @@ private fun MobileTaskApp(
     var completionBanner by remember { mutableStateOf<CompletionBannerState?>(null) }
     var flashingTaskDeadlines by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
     var uiClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var collectionEditorTask by remember { mutableStateOf<MobileTaskListItem?>(null) }
+    var collectionEditorDraft by remember { mutableStateOf("") }
+    var collectionEditorSaving by remember { mutableStateOf(false) }
+    var pendingMergeRequest by remember { mutableStateOf<PendingTaskMergeRequest?>(null) }
+    var pendingMergeDraft by remember { mutableStateOf("") }
+    var pendingMergeSaving by remember { mutableStateOf(false) }
+    var dragSession by remember { mutableStateOf<TaskDragSession?>(null) }
+    var dragHoverCollectionPath by remember { mutableStateOf<String?>(null) }
+    var dragHoverTaskId by remember { mutableStateOf<String?>(null) }
+    var dragHoverUngroup by remember { mutableStateOf(false) }
+    val collapsedTaskCollections = remember { mutableStateMapOf<String, Boolean>() }
+    val taskCardBounds = remember { mutableStateMapOf<String, Rect>() }
+    val collectionHeaderBounds = remember { mutableStateMapOf<String, Rect>() }
+    var ungroupDropBounds by remember { mutableStateOf<Rect?>(null) }
     val processingTasksForSkeleton = remember(tasks, backendProcessingTasks) {
         deduplicateTasksByTaskId(
             buildList {

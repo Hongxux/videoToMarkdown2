@@ -35,8 +35,16 @@ data class MobileTaskListItem(
     val markdownAvailable: Boolean,
     val createdAt: String,
     val lastOpenedAt: String,
+    val videoUrl: String = "",
+    val collectionId: String = "",
+    val collectionTitle: String = "",
     val taskPath: String = "",
     val collectionPath: String = ""
+)
+
+data class MobileManualCollectionBinding(
+    val taskPath: String,
+    val collectionPath: String
 )
 
 private data class MobileTaskListPage(
@@ -201,6 +209,9 @@ class HttpMobileTaskApi(
                     markdownAvailable = item.optBoolean("markdownAvailable", false),
                     createdAt = item.optString("createdAt"),
                     lastOpenedAt = item.optString("lastOpenedAt"),
+                    videoUrl = item.optString("videoUrl").trim(),
+                    collectionId = item.optString("collectionId").trim(),
+                    collectionTitle = item.optString("collectionTitle").trim(),
                     taskPath = item.optString("taskPath").trim(),
                     collectionPath = item.optString("collectionPath").trim()
                 )
@@ -242,6 +253,124 @@ class HttpMobileTaskApi(
                 )
             }
         }
+    }
+
+    suspend fun listManualTaskCollections(): List<MobileManualCollectionBinding> {
+        return withContext(Dispatchers.IO) {
+            val url = URL("$apiBaseUrl/manual-task-collections")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                setRequestProperty("Accept", "application/json")
+            }
+            connection.useJsonPayload { json ->
+                val array = json.optJSONArray("bindings")
+                if (array == null || array.length() == 0) {
+                    return@useJsonPayload emptyList()
+                }
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val taskPath = item.optString("taskPath").trim()
+                        val collectionPath = item.optString("collectionPath").trim()
+                        if (taskPath.isNotBlank() && collectionPath.isNotBlank()) {
+                            add(
+                                MobileManualCollectionBinding(
+                                    taskPath = taskPath,
+                                    collectionPath = collectionPath
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun replaceManualTaskCollections(bindings: Collection<MobileManualCollectionBinding>): Int {
+        return withContext(Dispatchers.IO) {
+            val url = URL("$apiBaseUrl/manual-task-collections")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "PUT"
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                doOutput = true
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Content-Type", "application/json; charset=UTF-8")
+            }
+            val body = JSONObject().apply {
+                put("bindings", org.json.JSONArray().apply {
+                    bindings.forEach { binding ->
+                        val taskPath = binding.taskPath.trim()
+                        val collectionPath = binding.collectionPath.trim()
+                        if (taskPath.isBlank() || collectionPath.isBlank()) {
+                            return@forEach
+                        }
+                        put(
+                            JSONObject().apply {
+                                put("taskPath", taskPath)
+                                put("collectionPath", collectionPath)
+                            }
+                        )
+                    }
+                })
+            }.toString()
+            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use {
+                it.write(body)
+            }
+            connection.useJsonPayload { json ->
+                json.optInt("updatedCount", 0)
+            }
+        }
+    }
+
+    suspend fun syncManualTaskCollection(taskPath: String, collectionPath: String?) {
+        val normalizedTaskPath = taskPath.trim()
+        if (normalizedTaskPath.isEmpty()) {
+            throw IllegalArgumentException("taskPath cannot be empty")
+        }
+        val current = listManualTaskCollections().associateTo(LinkedHashMap()) { binding ->
+            binding.taskPath.trim() to binding.collectionPath.trim()
+        }
+        val normalizedCollectionPath = collectionPath?.trim().orEmpty()
+        if (normalizedCollectionPath.isBlank()) {
+            current.remove(normalizedTaskPath)
+        } else {
+            current[normalizedTaskPath] = normalizedCollectionPath
+        }
+        replaceManualTaskCollections(
+            current.entries.map { entry ->
+                MobileManualCollectionBinding(
+                    taskPath = entry.key,
+                    collectionPath = entry.value
+                )
+            }
+        )
+    }
+
+    suspend fun mergeManualTaskCollections(taskPaths: Collection<String>, collectionPath: String) {
+        val normalizedCollectionPath = collectionPath.trim()
+        if (normalizedCollectionPath.isEmpty()) {
+            throw IllegalArgumentException("collectionPath cannot be empty")
+        }
+        val current = listManualTaskCollections().associateTo(LinkedHashMap()) { binding ->
+            binding.taskPath.trim() to binding.collectionPath.trim()
+        }
+        taskPaths.forEach { rawTaskPath ->
+            val normalizedTaskPath = rawTaskPath.trim()
+            if (normalizedTaskPath.isNotEmpty()) {
+                current[normalizedTaskPath] = normalizedCollectionPath
+            }
+        }
+        replaceManualTaskCollections(
+            current.entries.map { entry ->
+                MobileManualCollectionBinding(
+                    taskPath = entry.key,
+                    collectionPath = entry.value
+                )
+            }
+        )
     }
 
     suspend fun uploadVideoFile(
