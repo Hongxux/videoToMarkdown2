@@ -163,3 +163,21 @@ def test_download_whisper_model_skip_reverify_after_success(monkeypatch):
     assert resolved == model_dir
     assert calls
     assert all(call.get("local_files_only") for call in calls)
+
+
+
+def test_resolve_whisper_cache_dir_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("WHISPER_MODEL_CACHE_DIR", "/tmp/whisper-cache")
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", "/tmp/hf-cache")
+    monkeypatch.setenv("HF_HOME", "/tmp/hf-home")
+
+    assert md._resolve_whisper_cache_dir() == "/tmp/whisper-cache"
+
+
+
+def test_resolve_whisper_cache_dir_falls_back_to_hf_home(monkeypatch):
+    monkeypatch.delenv("WHISPER_MODEL_CACHE_DIR", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_HUB_CACHE", raising=False)
+    monkeypatch.setenv("HF_HOME", "/tmp/hf-home")
+
+    assert md._resolve_whisper_cache_dir() == os.path.join("/tmp/hf-home", "hub")

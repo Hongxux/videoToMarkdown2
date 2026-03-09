@@ -8,6 +8,7 @@ import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
+import java.nio.charset.StandardCharsets
 import android.text.Layout
 import android.text.Selection
 import android.text.method.LinkMovementMethod
@@ -94,10 +95,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -148,6 +152,8 @@ import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
@@ -205,7 +211,8 @@ fun SemanticTopographyReader(
     onBlankTap: () -> Unit = {},
     onReadingPositionChanged: (Int, Int) -> Unit = { _, _ -> },
     onGestureEvent: (ParagraphGestureEvent) -> Unit = {},
-    onTelemetry: (ReaderTelemetryEvent) -> Unit = {}
+    onTelemetry: (ReaderTelemetryEvent) -> Unit = {},
+    externalMetaRefreshVersion: Int = 0
 ) {
     val listState = rememberLazyListState(
         initialFirstVisibleItemIndex = initialFirstVisibleItemIndex.coerceAtLeast(0),
@@ -235,6 +242,15 @@ fun SemanticTopographyReader(
     }
     var mountedAnchorPreviewRequestVersion by remember {
         mutableIntStateOf(0)
+    }
+    var anchorNoteEditorState by remember {
+        mutableStateOf<AnchorNoteEditorState?>(null)
+    }
+    var anchorNoteEditorRequestVersion by remember {
+        mutableIntStateOf(0)
+    }
+    var phase2bFloatingCardState by remember {
+        mutableStateOf(Phase2bFloatingCardState(false, false, "", null))
     }
 
     fun emitTelemetry(event: ReaderTelemetryEvent) {
@@ -386,7 +402,7 @@ fun SemanticTopographyReader(
         }
     }
 
-    LaunchedEffect(taskId, pathHint, metaApi) {
+    LaunchedEffect(taskId, pathHint, metaApi, externalMetaRefreshVersion) {
         if (taskId.isNullOrBlank() || metaApi == null) {
             favoritesState.clear()
             commentsState.clear()
@@ -508,7 +524,286 @@ fun SemanticTopographyReader(
         mountedAnchorPreviewState = mountedAnchorPreviewState?.let(transform)
     }
 
+    fun updateAnchorNoteEditorState(transform: (AnchorNoteEditorState) -> AnchorNoteEditorState) {
+        anchorNoteEditorState = anchorNoteEditorState?.let(transform)
+    }
+
+    fun currentAnchorEditorNote(state: AnchorNoteEditorState): AnchorEditorNoteTab? {
+        return state.notes.firstOrNull { note -> note.localId == state.activeNoteId } ?: state.notes.firstOrNull()
+    }
+
+    fun deriveEditorTitleFromMarkdown(markdown: String, fallback: String): String {
+        val heading = markdown.lineSequence()
+            .map { line -> line.trim() }
+            .firstOrNull { line -> line.startsWith("#") }
+            ?.trimStart('#')
+            ?.trim()
+            .orEmpty()
+        if (heading.isNotBlank()) {
+            return heading
+        }
+        val firstLine = markdown.lineSequence()
+            .map { line -> line.trim() }
+            .firstOrNull { line -> line.isNotBlank() }
+            .orEmpty()
+        return firstLine.ifBlank { fallback }.take(64)
+    }
+
+    fun buildEditorNotePath(title: String, index: Int): String {
+        val slug = title.lowercase()
+            .replace(Regex("[^a-z0-9\u4e00-\u9fa5]+"), "_")
+            .trim('_')
+            .ifBlank { "note_${index + 1}" }
+        return normalizeMountedNotePath("cards/$slug.md")
+    }
+
+    fun createEditorNote(title: String, markdown: String, notePath: String, index: Int): AnchorEditorNoteTab {
+        val effectiveTitle = title.ifBlank { deriveMountedNoteDisplayTitle(notePath).ifBlank { "Note ${index + 1}" } }
+        val normalizedPath = normalizeMountedNotePath(notePath).ifBlank { buildEditorNotePath(effectiveTitle, index) }
+        val effectiveMarkdown = markdown.ifBlank { "# $effectiveTitle\n\n" }
+        return AnchorEditorNoteTab(
+            localId = "note_${SystemClock.elapsedRealtime()}_${index}",
+            title = effectiveTitle,
+            notePath = normalizedPath,
+            markdown = effectiveMarkdown,
+            updatedAtMs = System.currentTimeMillis()
+        )
+    }
+
+    fun rewriteMarkdownTitle(markdown: String, title: String): String {
+        val normalizedTitle = title.trim().ifBlank { "Untitled" }
+        val markdownLines = markdown.lines().toMutableList()
+        val headingIndex = markdownLines.indexOfFirst { line -> line.trim().startsWith("#") }
+        if (headingIndex >= 0) {
+            markdownLines[headingIndex] = "# $normalizedTitle"
+            return markdownLines.joinToString("\n")
+        }
+        return "# $normalizedTitle\n\n${markdown.trim()}".trim()
+    }
+
+    fun updateAnchorEditorCurrentNote(transform: (AnchorEditorNoteTab, Int) -> AnchorEditorNoteTab) {
+        val current = anchorNoteEditorState ?: return
+        val currentIndex = current.notes.indexOfFirst { note -> note.localId == current.activeNoteId }
+        if (currentIndex < 0) {
+            return
+        }
+        val updatedNotes = current.notes.toMutableList()
+        updatedNotes[currentIndex] = transform(updatedNotes[currentIndex], currentIndex)
+        anchorNoteEditorState = current.copy(notes = updatedNotes)
+    }
+
+    fun applyMarkdownWrap(value: TextFieldValue, prefix: String, suffix: String = prefix): TextFieldValue {
+        val selection = value.selection
+        val text = value.text
+        val start = selection.start.coerceAtLeast(0)
+        val end = selection.end.coerceAtLeast(start)
+        val selected = text.substring(start, end)
+        val replacement = prefix + selected + suffix
+        val nextText = text.replaceRange(start, end, replacement)
+        val cursor = start + replacement.length
+        return TextFieldValue(nextText, TextRange(cursor, cursor))
+    }
+
+    fun applyMarkdownHeading(value: TextFieldValue, level: Int): TextFieldValue {
+        val headingPrefix = "#".repeat(level.coerceIn(1, 6)) + " "
+        val selection = value.selection
+        val text = value.text
+        val lineStart = text.lastIndexOf('\n', (selection.start - 1).coerceAtLeast(0)).let { if (it < 0) 0 else it + 1 }
+        val lineEnd = text.indexOf('\n', selection.end).let { if (it < 0) text.length else it }
+        val currentLine = text.substring(lineStart, lineEnd).trimStart()
+        val normalizedLine = currentLine.removePrefix("# ")
+            .removePrefix("## ")
+            .removePrefix("### ")
+            .removePrefix("#### ")
+            .removePrefix("##### ")
+            .removePrefix("###### ")
+        val replacement = headingPrefix + normalizedLine
+        val nextText = text.replaceRange(lineStart, lineEnd, replacement)
+        val cursor = lineStart + replacement.length
+        return TextFieldValue(nextText, TextRange(cursor, cursor))
+    }
+
+    suspend fun openAnchorNoteEditor(
+        anchorId: String,
+        blockId: String,
+        quote: String,
+        anchorHint: String,
+        anchorData: MobileAnchorData
+    ) {
+        val requestVersion = anchorNoteEditorRequestVersion + 1
+        anchorNoteEditorRequestVersion = requestVersion
+        val fallbackPath = anchorData.mountedPath.ifBlank { buildEditorNotePath(quote.ifBlank { "Note 1" }, 0) }
+        val fallbackNote = createEditorNote(
+            title = deriveMountedNoteDisplayTitle(fallbackPath),
+            markdown = "# ${deriveMountedNoteDisplayTitle(fallbackPath)}\n\n",
+            notePath = fallbackPath,
+            index = 0
+        )
+        anchorNoteEditorState = AnchorNoteEditorState(
+            anchorId = anchorId,
+            blockId = blockId,
+            quote = quote,
+            anchorHint = anchorHint,
+            notes = listOf(fallbackNote),
+            activeNoteId = fallbackNote.localId,
+            shadowByPath = emptyMap(),
+            pathHint = pathHint.orEmpty(),
+            mode = AnchorEditorMode.EDIT,
+            isSaving = false,
+            errorMessage = null
+        )
+        if (taskId.isNullOrBlank() || metaApi == null || !anchorData.status.equals("mounted", ignoreCase = true)) {
+            return
+        }
+        val initialPayload = runCatching {
+            metaApi.fetchMountedAnchorNote(taskId = taskId, anchorId = anchorId, pathHint = pathHint, notePath = null)
+        }.getOrNull() ?: return
+        if (anchorNoteEditorRequestVersion != requestVersion) {
+            return
+        }
+        val markdownPaths = mergeMountedMarkdownPaths(emptyList(), initialPayload)
+        val loadedNotes = buildList<AnchorEditorNoteTab> {
+            markdownPaths.forEachIndexed { index, candidatePath ->
+                val payload = runCatching {
+                    metaApi.fetchMountedAnchorNote(taskId = taskId, anchorId = anchorId, pathHint = pathHint, notePath = candidatePath)
+                }.getOrNull() ?: return@forEachIndexed
+                add(
+                    createEditorNote(
+                        title = deriveEditorTitleFromMarkdown(payload.rawMarkdown, deriveMountedNoteDisplayTitle(candidatePath)),
+                        markdown = payload.rawMarkdown.ifBlank { payload.markdown },
+                        notePath = candidatePath,
+                        index = index
+                    )
+                )
+            }
+        }.ifEmpty { listOf(fallbackNote) }
+        anchorNoteEditorState = anchorNoteEditorState?.copy(
+            notes = loadedNotes,
+            activeNoteId = loadedNotes.first().localId,
+            shadowByPath = loadedNotes.associate { note -> note.notePath to note.markdown },
+            errorMessage = null
+        )
+    }
+
+    suspend fun saveAnchorNoteEditor() {
+        val state = anchorNoteEditorState ?: return
+        if (taskId.isNullOrBlank() || metaApi == null) {
+            updateAnchorNoteEditorState { current ->
+                current.copy(errorMessage = "Anchor note sync unavailable.")
+            }
+            return
+        }
+        updateAnchorNoteEditorState { current -> current.copy(isSaving = true, errorMessage = null) }
+        val notes = state.notes.ifEmpty {
+            listOf(createEditorNote(title = "Note 1", markdown = "# Note 1\n\n", notePath = "cards/note_1.md", index = 0))
+        }
+        val currentMap = notes.associate { note -> note.notePath to note.markdown }
+        val activeNote = currentAnchorEditorNote(state) ?: notes.first()
+        val result = runCatching {
+            if (state.shadowByPath.isEmpty()) {
+                metaApi.mountAnchorNotes(
+                    taskId = taskId,
+                    anchorId = state.anchorId,
+                    request = MobileAnchorMountRequest(
+                        pathHint = state.pathHint,
+                        mainNotePath = activeNote.notePath,
+                        files = notes.mapIndexed { index, note ->
+                            MobileAnchorMountFile(
+                                relativePath = note.notePath,
+                                fileName = note.notePath.substringAfterLast('/').ifBlank { "note_${index + 1}.md" },
+                                bytes = note.markdown.toByteArray(StandardCharsets.UTF_8)
+                            )
+                        }
+                    )
+                )
+            } else {
+                val deleteOps = state.shadowByPath.keys
+                    .filter { path -> path !in currentMap.keys }
+                    .map { path -> MobileAnchorSyncOperation(op = "delete", relativePath = path) }
+                val upsertOps = currentMap.entries.mapNotNull { (notePath, markdown) ->
+                    val previous = state.shadowByPath[notePath]
+                    when {
+                        previous == null -> MobileAnchorSyncOperation(op = "add", relativePath = notePath, content = markdown)
+                        previous != markdown -> MobileAnchorSyncOperation(op = "replace", relativePath = notePath, content = markdown)
+                        else -> null
+                    }
+                }
+                metaApi.syncAnchorNotes(
+                    taskId = taskId,
+                    anchorId = state.anchorId,
+                    request = MobileAnchorSyncRequest(
+                        pathHint = state.pathHint,
+                        mainNotePath = activeNote.notePath,
+                        operations = deleteOps + upsertOps
+                    )
+                )
+            }
+        }
+        result.onSuccess { syncResult ->
+            val syncedAnchor = syncResult.anchor.copy(anchorHint = state.anchorHint.trim())
+            anchorsState[state.anchorId] = syncedAnchor
+            scheduleMetaSync(reason = "anchor_editor_save")
+            updateAnchorNoteEditorState { current ->
+                current.copy(
+                    notes = notes,
+                    shadowByPath = currentMap,
+                    isSaving = false,
+                    errorMessage = null,
+                    anchorHint = syncedAnchor.anchorHint
+                )
+            }
+        }.onFailure { error ->
+            updateAnchorNoteEditorState { current ->
+                current.copy(isSaving = false, errorMessage = error.message ?: "save failed")
+            }
+        }
+    }
+
+    fun openPhase2bFloatingCard() {
+        phase2bFloatingCardState = phase2bFloatingCardState.copy(visible = true, loading = true, errorMessage = null)
+        val state = anchorNoteEditorState ?: run {
+            phase2bFloatingCardState = phase2bFloatingCardState.copy(loading = false, errorMessage = "Anchor editor unavailable")
+            return
+        }
+        val activeNote = currentAnchorEditorNote(state) ?: run {
+            phase2bFloatingCardState = phase2bFloatingCardState.copy(loading = false, errorMessage = "No active note")
+            return
+        }
+        val api = cardApi ?: run {
+            phase2bFloatingCardState = phase2bFloatingCardState.copy(loading = false, errorMessage = "Phase2B service unavailable")
+            return
+        }
+        if (taskId.isNullOrBlank()) {
+            phase2bFloatingCardState = phase2bFloatingCardState.copy(loading = false, errorMessage = "Task context missing")
+            return
+        }
+        scope.launch {
+            runCatching {
+                api.generatePhase2bStructuredMarkdown(
+                    taskId = taskId,
+                    anchorId = state.anchorId,
+                    pathHint = state.pathHint,
+                    markdownBody = activeNote.markdown
+                )
+            }.onSuccess { result ->
+                phase2bFloatingCardState = phase2bFloatingCardState.copy(
+                    visible = true,
+                    loading = false,
+                    resultMarkdown = result.markdown,
+                    errorMessage = null
+                )
+            }.onFailure { error ->
+                phase2bFloatingCardState = phase2bFloatingCardState.copy(
+                    visible = true,
+                    loading = false,
+                    errorMessage = error.message ?: "Phase2B failed"
+                )
+            }
+        }
+    }
+
     fun mergeMountedPreviewFromPayload(
+
         current: MountedAnchorPreviewState,
         payload: MobileMountedAnchorPayload,
         displayTitle: String,
@@ -1129,11 +1424,19 @@ fun SemanticTopographyReader(
                         }
                     },
                     onRequestOpenMountedAnchor = { selection, anchorData ->
-                        openMountedAnchorPreview(
-                            blockId = block.blockId,
-                            selection = selection,
-                            anchorData = anchorData
-                        )
+                        scope.launch {
+                            openAnchorNoteEditor(
+                                anchorId = buildTokenMetaKey(
+                                    blockId = block.blockId,
+                                    start = selection.start,
+                                    end = selection.end
+                                ),
+                                blockId = block.blockId,
+                                quote = selection.token.trim(),
+                                anchorHint = anchorData.anchorHint,
+                                anchorData = anchorData
+                            )
+                        }
                     },
                     onRequestOpenTokenAnnotationEditor = { tokenSelection, anchor ->
                         openTokenAnnotationEditor(
@@ -1193,6 +1496,342 @@ fun SemanticTopographyReader(
                 tokenAnnotationBubbleState = null
             }
         )
+        val anchorEditorState = anchorNoteEditorState
+        if (anchorEditorState != null) {
+            val activeNote = currentAnchorEditorNote(anchorEditorState)
+            ModalBottomSheet(
+                onDismissRequest = {
+                    anchorNoteEditorState = null
+                    anchorNoteEditorRequestVersion += 1
+                }
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Anchor Notes",
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF0F172A)
+                    )
+                    if (anchorEditorState.quote.isNotBlank()) {
+                        Text(
+                            text = "?${anchorEditorState.quote}?",
+                            color = Color(0xFF475467),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    ScrollableTabRow(selectedTabIndex = anchorEditorState.notes.indexOfFirst { it.localId == anchorEditorState.activeNoteId }.coerceAtLeast(0)) {
+                        anchorEditorState.notes.forEachIndexed { index, note ->
+                            Tab(
+                                selected = note.localId == anchorEditorState.activeNoteId,
+                                onClick = {
+                                    updateAnchorNoteEditorState { current ->
+                                        current.copy(activeNoteId = note.localId)
+                                    }
+                                },
+                                text = { Text(note.title.take(12).ifBlank { "Note ${index + 1}" }) }
+                            )
+                        }
+                    }
+                    OutlinedTextField(
+                        value = anchorEditorState.anchorHint,
+                        onValueChange = { next ->
+                            updateAnchorNoteEditorState { current ->
+                                current.copy(anchorHint = next.take(120))
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text("Anchor Hint") }
+                    )
+                    if (activeNote != null) {
+                        var editorValue by remember(activeNote.localId, activeNote.markdown) {
+                            mutableStateOf(TextFieldValue(activeNote.markdown, TextRange(activeNote.markdown.length)))
+                        }
+                        OutlinedTextField(
+                            value = activeNote.title,
+                            onValueChange = { next ->
+                                updateAnchorEditorCurrentNote { note, index ->
+                                    val normalizedTitle = next.trim().ifBlank { "Note ${index + 1}" }
+                                    val nextMarkdown = rewriteMarkdownTitle(editorValue.text, normalizedTitle)
+                                    editorValue = editorValue.copy(text = nextMarkdown)
+                                    note.copy(
+                                        title = normalizedTitle,
+                                        notePath = buildEditorNotePath(normalizedTitle, index),
+                                        markdown = nextMarkdown,
+                                        updatedAtMs = System.currentTimeMillis()
+                                    )
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text("Note Title") }
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FloatingActionButton(
+                                onClick = {
+                                    updateAnchorEditorCurrentNote { note, _ ->
+                                        val nextValue = applyMarkdownHeading(editorValue, 1)
+                                        editorValue = nextValue
+                                        note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("H1") }
+                            FloatingActionButton(
+                                onClick = {
+                                    updateAnchorEditorCurrentNote { note, _ ->
+                                        val nextValue = applyMarkdownHeading(editorValue, 2)
+                                        editorValue = nextValue
+                                        note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("H2") }
+                            FloatingActionButton(
+                                onClick = {
+                                    updateAnchorEditorCurrentNote { note, _ ->
+                                        val nextValue = applyMarkdownWrap(editorValue, "**")
+                                        editorValue = nextValue
+                                        note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Bold") }
+                            FloatingActionButton(
+                                onClick = {
+                                    updateAnchorEditorCurrentNote { note, _ ->
+                                        val nextValue = applyMarkdownWrap(editorValue, "*")
+                                        editorValue = nextValue
+                                        note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("Italic") }
+                        }
+                        if (!editorValue.selection.collapsed) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        updateAnchorEditorCurrentNote { note, _ ->
+                                            val nextValue = applyMarkdownWrap(editorValue, "**")
+                                            editorValue = nextValue
+                                            note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                        }
+                                    }
+                                ) { Text("Bold Selection") }
+                                TextButton(
+                                    onClick = {
+                                        updateAnchorEditorCurrentNote { note, _ ->
+                                            val nextValue = applyMarkdownWrap(editorValue, "*")
+                                            editorValue = nextValue
+                                            note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                        }
+                                    }
+                                ) { Text("Italic Selection") }
+                                TextButton(
+                                    onClick = {
+                                        updateAnchorEditorCurrentNote { note, _ ->
+                                            val nextValue = applyMarkdownHeading(editorValue, 3)
+                                            editorValue = nextValue
+                                            note.copy(markdown = nextValue.text, updatedAtMs = System.currentTimeMillis())
+                                        }
+                                    }
+                                ) { Text("H3 Selection") }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FloatingActionButton(
+                                onClick = {
+                                    updateAnchorNoteEditorState { current ->
+                                        current.copy(mode = if (current.mode == AnchorEditorMode.EDIT) AnchorEditorMode.PREVIEW else AnchorEditorMode.EDIT)
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(if (anchorEditorState.mode == AnchorEditorMode.EDIT) "Preview" else "Edit")
+                            }
+                            FloatingActionButton(
+                                onClick = {
+                                    updateAnchorNoteEditorState { current ->
+                                        val nextIndex = current.notes.size
+                                        val note = createEditorNote(
+                                            title = "Note ${nextIndex + 1}",
+                                            markdown = "# Note ${nextIndex + 1}\n\n",
+                                            notePath = buildEditorNotePath("Note ${nextIndex + 1}", nextIndex),
+                                            index = nextIndex
+                                        )
+                                        current.copy(
+                                            notes = current.notes + note,
+                                            activeNoteId = note.localId,
+                                            mode = AnchorEditorMode.EDIT
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Add")
+                            }
+                            FloatingActionButton(
+                                onClick = {
+                                    openPhase2bFloatingCard()
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Phase2B")
+                            }
+                            FloatingActionButton(
+                                onClick = {
+                                    scope.launch { saveAnchorNoteEditor() }
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text(if (anchorEditorState.isSaving) "Saving" else "Save")
+                            }
+                        }
+                        if (anchorEditorState.notes.size > 1) {
+                            TextButton(
+                                onClick = {
+                                    updateAnchorNoteEditorState { current ->
+                                        val nextNotes = current.notes.filterNot { it.localId == activeNote.localId }
+                                        current.copy(
+                                            notes = nextNotes,
+                                            activeNoteId = nextNotes.firstOrNull()?.localId.orEmpty()
+                                        )
+                                    }
+                                }
+                            ) {
+                                Text("Delete Current Note")
+                            }
+                        }
+                        OutlinedTextField(
+                            value = editorValue,
+                            onValueChange = { next ->
+                                editorValue = next
+                                updateAnchorEditorCurrentNote { note, _ ->
+                                    note.copy(markdown = next.text, updatedAtMs = System.currentTimeMillis())
+                                }
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 180.dp),
+                            label = { Text("Markdown") }
+                        )
+                        AndroidView(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 180.dp)
+                                .background(Color(0xFFF8FAFC), RoundedCornerShape(14.dp))
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            factory = {
+                                TextView(it).apply {
+                                    setTextIsSelectable(false)
+                                    textSize = 15f
+                                    setLineSpacing(0f, 1.3f)
+                                }
+                            },
+                            update = { textView ->
+                                renderMountedAnchorDocument(
+                                    textView = textView,
+                                    markwon = markwon,
+                                    markdown = editorValue.text,
+                                    currentNotePath = activeNote.notePath,
+                                    markdownPaths = anchorEditorState.notes.map { note -> note.notePath },
+                                    onWikilinkTap = { link ->
+                                        updateAnchorNoteEditorState { current ->
+                                            current.copy(errorMessage = "WikiLink open is not supported in editor: ${link.displayText}")
+                                        }
+                                    }
+                                )
+                            }
+                        )
+                        if (phase2bFloatingCardState.visible) {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC))
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "Phase2B Card",
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = Color(0xFF0F172A)
+                                        )
+                                        TextButton(onClick = {
+                                            phase2bFloatingCardState = phase2bFloatingCardState.copy(visible = false)
+                                        }) {
+                                            Text("Close")
+                                        }
+                                    }
+                                    if (phase2bFloatingCardState.loading) {
+                                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                                    } else if (!phase2bFloatingCardState.errorMessage.isNullOrBlank()) {
+                                        val phase2bErrorText = phase2bFloatingCardState.errorMessage.orEmpty()
+                                        Text(
+                                            text = phase2bErrorText,
+                                            color = Color(0xFFB42318)
+                                        )
+                                    } else {
+                                        AndroidView(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .heightIn(min = 120.dp)
+                                                .background(Color.White, RoundedCornerShape(12.dp))
+                                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                                            factory = {
+                                                TextView(it).apply {
+                                                    setTextIsSelectable(false)
+                                                    textSize = 14f
+                                                    setLineSpacing(0f, 1.3f)
+                                                }
+                                            },
+                                            update = { textView ->
+                                                renderMountedAnchorDocument(
+                                                    textView = textView,
+                                                    markwon = markwon,
+                                                    markdown = phase2bFloatingCardState.resultMarkdown,
+                                                    currentNotePath = activeNote.notePath,
+                                                    markdownPaths = anchorEditorState.notes.map { note -> note.notePath },
+                                                    onWikilinkTap = { }
+                                                )
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!anchorEditorState.errorMessage.isNullOrBlank()) {
+                        Text(
+                            text = anchorEditorState.errorMessage,
+                            color = Color(0xFFB42318)
+                        )
+                    }
+                }
+            }
+        }
         val mountedPreviewState = mountedAnchorPreviewState
         if (mountedPreviewState != null) {
             ModalBottomSheet(
@@ -2229,7 +2868,23 @@ private fun TopographyParagraph(
                                                         )
                                                         onUpsertAnchor(selected, null)
                                                         pendingAnchorHintDraft = ""
-                                                        pendingAnchorHintSelection = selected
+                                                        pendingAnchorHintSelection = null
+                                                        onRequestOpenMountedAnchor(
+                                                            selected,
+                                                            MobileAnchorData(
+                                                                blockId = block.blockId,
+                                                                startIndex = selected.start,
+                                                                endIndex = selected.end,
+                                                                quote = selected.token.trim(),
+                                                                contextQuote = contextQuote,
+                                                                anchorHint = "",
+                                                                status = "pending",
+                                                                mountedPath = "",
+                                                                mountedRevisionId = "",
+                                                                updatedAt = "",
+                                                                revisions = emptyList()
+                                                            )
+                                                        )
                                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                                         Toast.makeText(
                                                             context,
@@ -2261,9 +2916,7 @@ private fun TopographyParagraph(
                                                 val anchorKey = rangeKey(selection)
                                                 val mountedAnchor = anchorsByDisplayRange[anchorKey]
                                                     ?: anchors[anchorKey]
-                                                if (mountedAnchor != null &&
-                                                    mountedAnchor.status.equals("mounted", ignoreCase = true)
-                                                ) {
+                                                if (mountedAnchor != null) {
                                                     onSelectionChanged(null)
                                                     haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
                                                     onRequestOpenMountedAnchor(selection, mountedAnchor)
@@ -6722,6 +7375,40 @@ private data class MountedAnchorPreviewState(
     val isLoading: Boolean,
     val errorMessage: String?,
     val isFullscreen: Boolean
+)
+
+private enum class AnchorEditorMode {
+    EDIT,
+    PREVIEW
+}
+
+private data class AnchorEditorNoteTab(
+    val localId: String,
+    val title: String,
+    val notePath: String,
+    val markdown: String,
+    val updatedAtMs: Long
+)
+
+private data class AnchorNoteEditorState(
+    val anchorId: String,
+    val blockId: String,
+    val quote: String,
+    val anchorHint: String,
+    val notes: List<AnchorEditorNoteTab>,
+    val activeNoteId: String,
+    val shadowByPath: Map<String, String>,
+    val pathHint: String,
+    val mode: AnchorEditorMode,
+    val isSaving: Boolean,
+    val errorMessage: String?
+)
+
+private data class Phase2bFloatingCardState(
+    val visible: Boolean,
+    val loading: Boolean,
+    val resultMarkdown: String,
+    val errorMessage: String?
 )
 
 private fun resolveTappedInsightTerm(

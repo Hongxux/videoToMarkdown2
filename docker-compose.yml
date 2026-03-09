@@ -1,13 +1,22 @@
 name: videotomarkdown-release
 
+x-service-defaults: &service-defaults
+  init: true
+  restart: unless-stopped
+  volumes:
+    - ./config:/app/config:ro
+    - ./var:/app/var
+
 services:
   python-grpc:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: deploy/docker/python-grpc.Dockerfile
     container_name: v2m-python-grpc
     environment:
       PYTHONNOUSERSITE: "1"
+      PYTHONPATH: /app:/app/contracts/gen/python
       VIDEO_CONFIG_PATH: /app/config/video_config.yaml
       MODULE2_CONFIG_PATH: /app/config/module2_config.yaml
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
@@ -21,9 +30,6 @@ services:
       MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT: ${MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT:-48}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       VISION_AI_BEARER_TOKEN: ${VISION_AI_BEARER_TOKEN:-}
-    volumes:
-      - ./config:/app/config
-      - ./var:/app/var
     ports:
       - "50051:50051"
     healthcheck:
@@ -32,9 +38,9 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
-    restart: unless-stopped
 
   java-orchestrator:
+    <<: *service-defaults
     build:
       context: .
       dockerfile: deploy/docker/java-orchestrator.Dockerfile
@@ -46,9 +52,15 @@ services:
       GRPC_PYTHON_HOST: python-grpc
       GRPC_PYTHON_PORT: 50051
       GRPC_PYTHON_TIMEOUT_SECONDS: 300
-    volumes:
-      - ./config:/app/config
-      - ./var:/app/var
+      MODULE2_CONFIG_PATH: /app/config/module2_config.yaml
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      VISION_AI_BEARER_TOKEN: ${VISION_AI_BEARER_TOKEN:-}
     ports:
       - "8080:8080"
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 40s

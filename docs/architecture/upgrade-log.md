@@ -1,5 +1,67 @@
 ﻿# 架构升级记录
 
+## 2026-03-09 Android HTTPS endpoint trust and 1.0.8 release packaging
+- Date: 2026-03-09
+- Background:
+  - The Android app needed to trust the deployed HTTPS endpoint at `https://frp-box.com:41570/` so the mobile app could call the backend directly.
+  - The release packaging path also needed to align the APK output and `latest.json` metadata for version `1.0.8`.
+- First-principles and reusable leverage:
+  - Keep Android API base URL, TLS trust policy, and release metadata aligned instead of patching only one layer.
+  - Reuse `network_security_config`, `BuildConfig.MOBILE_API_BASE_URL`, and the existing Android release output folder under `var/app-updates/android/`.
+- Changes:
+  - Wire `@xml/network_security_config` into `AndroidManifest.xml`.
+  - Point Android API access to `https://frp-box.com:41570/api/mobile` while trusting the host `https://frp-box.com:41570`.
+  - Refresh Android release packaging metadata for `1.0.8 (versionCode=8)`, including the APK path and `latest.json`.
+- Call-chain change:
+  - Old: `BuildConfig.MOBILE_API_BASE_URL -> unclear/non-HTTPS routing`
+  - New: `BuildConfig.MOBILE_API_BASE_URL -> https://frp-box.com:41570/api/mobile` plus `network_security_config` host trust for `https://frp-box.com:41570`
+- Artifacts:
+  - Release version: `1.0.8`
+  - APK path: `var/app-updates/android/releases/apk/videoToMarkdown-8-1.0.8.apk`
+  - Metadata path: `var/app-updates/android/latest.json`
+- Validation:
+  - Verify the release APK can connect to the HTTPS backend on a fresh install.
+  - Verify release signing/keystore configuration still matches the installed app lineage.
+## 2026-03-09 Android mounted-note sync and token-annotation flow alignment
+- Date: 2026-03-09
+- Background:
+  - Android still lacked a complete mounted-note management chain, even though the Web side already exposed mount/sync/delete endpoints for anchor notes.
+  - Token annotation and mounted-note editing needed to share one consistent data path so semantic-topography operations did not drift between Android and Web.
+- First-principles and reusable leverage:
+  - Treat the source of truth as `anchor -> mounted note -> revision`, instead of letting Android reconstruct note state locally.
+  - Reuse the existing Web contracts for `/anchors/{anchorId}/mount`, `/sync`, `/mounted`, and `/anchors/delete` instead of inventing a second Android-only protocol.
+  - Reuse `MobileMarkdownMetaApi` as the Android gateway so mounted-note fetch/mount/sync/delete all stay on one contract surface.
+- Changes:
+  - Add Android DTO/contracts for mounted-note mount/sync/delete operations.
+  - Extend `HttpMobileMarkdownMetaApi` to call the existing Web mount/sync/delete endpoints.
+  - Extend `SemanticTopographyReader` so mounted-note fetch and mutation use the same backend-backed flow.
+- Call-chain change:
+  - Old: `SemanticTopographyReader -> MobileMarkdownMetaApi(fetchTaskMeta/updateTaskMeta/fetchMountedAnchorNote)`
+  - New: `SemanticTopographyReader -> MobileMarkdownMetaApi(fetchTaskMeta/updateTaskMeta/fetchMountedAnchorNote/mountAnchorNotes/syncAnchorNotes/deleteAnchors)`
+- Validation:
+  - Mounted-note editing from Android bottom sheet now reuses the same backend mutation chain as Web.
+  - Mounted-note content stays anchored to backend revisions instead of local-only reconstruction.
+
+## 2026-03-09 Android task grouping and collection editing align with Web semantics
+- Date: 2026-03-09
+- Background:
+  - The Web side already persisted manual task collections and exposed `collectionPath/taskPath`, but Android task grouping still lagged behind and could not round-trip the same structure.
+  - Android task submission, regrouping, and URL resubmission needed to align with Web collection semantics.
+- First-principles and reusable leverage:
+  - Keep the visible grouping model backed by one server-side source of truth: task list metadata plus `manual-task-collections`.
+  - Reuse `/api/mobile/tasks` and `/api/mobile/manual-task-collections` rather than adding Android-only grouping storage.
+  - Reuse `TaskSubmissionForegroundService` for Android submissions so URL/upload entry points share one task-creation pipeline.
+- Changes:
+  - Extend Android task DTOs so `collectionPath` and related fields can round-trip Web grouping metadata.
+  - Integrate Android collection editing with the existing `manual-task-collections` GET/PUT API.
+  - Align Android URL resubmission and task submission with the same backend task endpoints the Web side already uses.
+- Call-chain change:
+  - Flat list route: `MainActivity -> HttpMobileTaskApi.listTasks -> render task path metadata`
+  - Grouped route: `MainActivity -> HttpMobileTaskApi.listTasks + manual-task-collections GET/PUT -> render grouped task tree`
+  - Submission route: `Composer -> TaskSubmissionForegroundService.startUrlSubmission/startUploadSubmission -> backend task endpoints`
+- Validation:
+  - Android grouped task UI now reflects the same collection structure semantics as Web.
+  - Collection edits round-trip through `manual-task-collections` without introducing a second storage model.
 ## 2026-03-08 移动端任务导出升级为扁平化闭包 ZIP + 多任务前端导出入口
 - 日期：2026-03-08
 - 背景：
@@ -10934,3 +10996,179 @@
   - `pytest services/python_grpc/src/content_pipeline/tests/test_llm_gateway_hedged_requests.py -q`
   - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
   - Observe retry logs for `2/4/8/16` spacing and verify breaker open/close transitions in gateway logs.
+
+## 2026-03-09: Tutorial/Concrete instructional clips + keyframes placeholder protocol unified
+- Background:
+  - The VL prompts were upgraded so both `tutorial process` and `concrete` can return two teaching-material channels at the same time: `instructional_keyframes` and `instructional_clips`.
+  - The downstream gap was that Phase2B only had stable placeholder backfill for image/keyframe flows, while clip placeholders and clip aliases were not wired through end-to-end.
+- Reusable leverage:
+  - Reuse the existing `instructional_keyframes` placeholder preservation path and Obsidian embed rendering in `markdown_enhancer.py`.
+  - Reuse the existing tutorial step asset export folder (`vl_tutorial_units/<unit_id>/`) instead of introducing a second tutorial asset tree.
+  - Reuse the existing Phase2A clip request/export chain for `concrete` clip assets so Phase2B can still resolve real files from unit-relative clip ids.
+- Changes:
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - Extend the VL normalized schema with `instructional_clips` and normalize `clip_id/start_sec/end_sec/clip_reason`.
+    - Keep tutorial step-level clip requests for compatibility, and additionally emit tutorial/concrete instructional clip requests with unit-relative asset ids for downstream export/backfill.
+    - Update the built-in tutorial/concrete constraint text so `[CLIP_N]` placeholders and `instructional_clips` stay in the same contract as `[KEYFRAME_N]`.
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - Export tutorial `instructional_clips` as real short clips during per-unit asset materialization.
+    - Persist `instructional_clip_details` into tutorial step JSON, carrying `instructional_clip_id`, `clip_reason`, and exported filenames.
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - Add `CLIP_N` placeholder replacement and clip alias rendering.
+    - Load tutorial `instructional_clips` from step manifests and replace clip placeholders in-place.
+    - Backfill `concrete` clip placeholders from Phase2A/Phase2B clip assets and align clip alias handling with `frame_reason` handling.
+    - Fix concrete keyframe matching so missing explicit `keyframe_id` no longer causes image/alias inversion when source ids already encode key order.
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
+    - Add/refresh coverage for tutorial schema clip normalization, tutorial clip request emission, and tutorial instructional clip manifest export.
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - Add coverage for tutorial `CLIP_N` replacement and concrete `CLIP_N` replacement with alias embeds.
+- Call-chain change:
+  - Old:
+    - `VL -> instructional_keyframes -> Phase2B image placeholder backfill`
+    - `tutorial step clip -> append at tail`
+  - New:
+    - `VL -> instructional_keyframes + instructional_clips -> tutorial asset export / concrete clip export -> Phase2B backfill by KEYFRAME_N / CLIP_N or step-manifest ids -> image alias uses frame_reason / clip alias uses clip_reason`
+- Decisions:
+  - Decision 1: keep tutorial step-level clip export while adding instructional sub-clips.
+    - Reason: tutorial step JSON and legacy consumers still need the coarse step clip, but placeholder backfill now depends on short instructional clips.
+  - Decision 2: use `clip_reason` exactly as the clip embed alias, mirroring `frame_reason`.
+    - Reason: this keeps the teaching narration contract symmetric across static and dynamic media.
+  - Decision 3: fix concrete keyframe order at the matching layer rather than by reordering final markdown afterwards.
+    - Reason: placeholder correctness should be solved where asset-to-id mapping happens, not as a presentation patch.
+- Validation/observability:
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+  - `python -m py_compile services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - `pytest --basetemp tmp_pytest_manual_validate_parse services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_tutorial_schema_parse_and_normalize services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_analyze_clip_emits_instructional_clip_requests_for_tutorial_mode services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_analyze_clip_uses_unit_relative_ids_for_tutorial_mode -q`
+  - Manual in-workspace execution of tutorial asset export + markdown placeholder scenarios was used to bypass the current local pytest temp-directory cleanup permission issue.
+
+
+## 2026-03-09: Mobile markdown endpoints hard-disable persona reading build chain
+- Background:
+  - `/api/mobile/tasks/{taskId}/markdown` and `/api/mobile/tasks/{taskId}/markdown/by-path` are read endpoints, but they previously still kept a persona-reading branch alive.
+  - Old behavior had two latency/resource risks on the markdown read path:
+    - when `includePersonalization=true` or omitted, the controller could synchronously call `PersonaAwareReadingService.loadOrCompute(...)`;
+    - when `includePersonalization=false`, the controller still started `PersonaAwareReadingService.precomputeAsync(...)` warmup.
+  - This meant a pure markdown fetch could still compete with persona reading / insight card generation, which is contrary to the "read fast, build elsewhere" boundary.
+- Reusable leverage:
+  - Reuse the existing controller-layer response enrichment seam instead of modifying markdown resolution, TOC resolution, or task meta persistence.
+  - Reuse the existing response fields `personalizationIncluded` and `personalizationWarmupStatus` so clients keep a stable contract while the expensive branch is disabled.
+  - Reuse focused controller tests with stub services to measure invocation counts directly, avoiding flaky wall-clock comparisons.
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - Change both markdown read endpoints so `includePersonalization` defaults to `false`.
+    - Remove the controller-side persona reading append/warmup path from both markdown read endpoints.
+    - Replace that branch with a fixed disabled marker: `personalizationIncluded=false` and `personalizationWarmupStatus=disabled`.
+    - Keep the request parameter for backward compatibility, but it is now intentionally ignored on these markdown read endpoints.
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerMarkdownPersonalizationDisabledTest.java`
+    - Add regression coverage that proves `includePersonalization=true` no longer triggers persona reading or insight index work.
+    - Add reflection-based coverage that both controller methods now default `includePersonalization` to `false`.
+- Call-chain change:
+  - Old:
+    - `GET /markdown -> resolve markdown -> append/loadOrCompute personalized reading OR precomputeAsync warmup -> optionally load insight index -> return response`
+  - New:
+    - `GET /markdown -> resolve markdown -> append disabled personalization markers only -> return response`
+- Decisions:
+  - Decision 1: disable the persona branch at the markdown controller ingress.
+    - Reason: this is the narrowest change that guarantees markdown reads stay fast without perturbing markdown generation, task completion hooks, or dedicated personalization inspection APIs.
+  - Decision 2: keep compatibility fields in the payload instead of silently deleting them.
+    - Reason: clients can still understand that personalization is intentionally off, while no hidden background work is started.
+  - Decision 3: keep the query parameter but treat it as a no-op for these endpoints.
+    - Reason: this avoids breaking older callers while still enforcing the new read-path boundary.
+- Performance comparison:
+  - Test method:
+    - Use controller regression tests with recording stub services and invoke `getTaskMarkdown(..., includePersonalization=true)`.
+    - Use reflected annotation checks to verify the default request parameter value on both endpoints.
+  - Test data:
+    - `PersonaAwareReadingService.loadOrCompute(...)`: `1 potential markdown-path invocation -> 0 actual invocations`.
+    - `PersonaAwareReadingService.precomputeAsync(...)`: `1 potential markdown-path warmup -> 0 actual invocations`.
+    - `PersonaInsightCardService.loadIndexSnapshot(...)`: `1 potential markdown-path lookup -> 0 actual invocations`.
+    - Markdown payload assertions remain unchanged for the test sample: markdown body still returns `# Title
+body` and task metadata is still present.
+- Validation/observability:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerMarkdownPersonalizationDisabledTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+
+## 2026-03-09: TaskProcessingWorker hard-disable post-completion persona artifacts
+- Background:
+  - After the markdown read endpoints were cut back to pure-read behavior, the task completion path still had a second automatic persona chain in `TaskProcessingWorker`.
+  - Old behavior on task completion was: read generated markdown -> call `PersonaAwareReadingService.loadOrCompute(...)` -> when nodes exist, call `PersonaInsightCardService.generateAsync(...)`.
+  - This meant the system could still spend CPU/IO/LLM budget on persona reading and insight cards immediately after a task finished, even when the product goal had switched to fully disabling that automatic chain.
+- Reusable leverage:
+  - Reuse the existing post-completion hook boundary in `TaskProcessingWorker` instead of touching the orchestrator or lower persona services.
+  - Reuse reflection-based worker tests to validate call counts directly without needing a full pipeline integration test.
+- Changes:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - Add a worker-local hard switch `postCompletionPersonaArtifactsEnabled = false`.
+    - Make `triggerPersonaArtifactsAfterCompletion(...)` return immediately while that switch is disabled, so completed tasks no longer auto-build persona reading payloads or insight cards.
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/worker/TaskProcessingWorkerPersonaArtifactsDisabledTest.java`
+    - Add regression coverage that injects recording persona services and verifies the post-completion hook performs zero `loadOrCompute(...)` and zero `generateAsync(...)` calls.
+- Call-chain change:
+  - Old:
+    - `task complete -> TaskProcessingWorker.triggerPersonaArtifactsAfterCompletion -> loadOrCompute persona reading -> generateAsync insight cards`
+  - New:
+    - `task complete -> TaskProcessingWorker.triggerPersonaArtifactsAfterCompletion -> immediate return (disabled)`
+- Decisions:
+  - Decision 1: disable at the worker hook instead of editing persona services.
+    - Reason: this keeps the layering clean; task completion no longer crosses into optional persona artifact generation, while manual/debug entry points can still exist independently.
+  - Decision 2: use a hardcoded worker-local disabled switch, not a runtime property.
+    - Reason: the current requirement is a hard global shutdown of the automatic chain, not a soft default that can be accidentally re-enabled by environment overrides.
+- Performance comparison:
+  - Test method:
+    - Invoke the worker's post-completion hook with recording stub services and a real markdown file path.
+  - Test data:
+    - `PersonaAwareReadingService.loadOrCompute(...)`: `1 potential completion-hook invocation -> 0 actual invocations`.
+    - `PersonaInsightCardService.generateAsync(...)`: `1 potential completion-hook invocation -> 0 actual invocations`.
+- Validation/observability:
+  - `D:pache-maven-3.9.12in\mvn.cmd -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerMarkdownPersonalizationDisabledTest,TaskProcessingWorkerPersonaArtifactsDisabledTest test -q`
+  - `D:pache-maven-3.9.12in\mvn.cmd -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+
+## 2026-03-09 Docker build path stabilizes Python Whisper base and Java Maven cache usage
+- Background:
+  - The `python-grpc` and `java-orchestrator` Docker images still had slow or fragile dependency/bootstrap behavior.
+  - Python image startup needed a stable Whisper base cache path, while Java image build time still suffered from repeated Maven resolution.
+- Decisions:
+  - Decision 1: keep Python Docker on CPU-oriented `torch/torchvision/torchaudio` dependency resolution for this build path.
+    - Reason: the current image target is CPU-first, and avoiding accidental CUDA coupling keeps the build portable.
+  - Decision 2: converge Whisper cache paths on `HF_HOME=/opt/huggingface`, `HUGGINGFACE_HUB_CACHE=/opt/huggingface/hub`, and `WHISPER_MODEL_CACHE_DIR=/opt/huggingface/hub`.
+    - Reason: one deterministic cache root is easier to prewarm, inspect, and mount.
+  - Decision 3: use Maven cache mounting in the Java Docker path.
+    - Reason: repeated Maven Central fetches were wasting build time and introducing unnecessary network sensitivity.
+- Changes:
+  - Update `deploy/docker/python-grpc.Dockerfile` and `deploy/docker/java-orchestrator.Dockerfile` for the stabilized dependency/cache layout.
+  - Update `services/python_grpc/src/media_engine/knowledge_engine/core/model_downloader.py` so Whisper download/cache behavior matches the Docker runtime path.
+  - Update dependency requirement files used by the Docker and grpc-server environments.
+- Validation:
+  - `docker compose build python-grpc`
+  - `docker compose build java-orchestrator`
+  - Confirm Whisper base artifacts land under `/opt/huggingface/hub/...`
+  - Confirm Java rebuilds reuse Maven cache rather than resolving the full graph again.
+- Decision:
+  - Add a shared frontend shortcut utility module at `services/java-orchestrator/src/main/resources/static/lib/mobile-editor-shortcuts.js`.
+  - Keep page-specific state checks in callers, but move reusable text mutation and key event consumption logic into the shared module.
+- Reuse leverage:
+  - `index.html` reuses the shared line-indent primitive for Markdown paragraph editing.
+  - `mobile-anchor-panel.js` reuses shared event consumption, capture binding, paragraph indent mutation, and heading mutation helpers.
+- Trade-off:
+  - This adds one more static script to the page, but in exchange future custom shortcuts no longer need to duplicate mutation and interception details.
+- Validation:
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-editor-shortcuts.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `D:\apache-maven-3.9.12\bin\mvn.cmd -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+
+### 2026-03-09 Web editor shortcut registry: declarative keymap for future customization
+- Context:
+  - After extracting shared shortcut primitives, anchor editor command shortcuts still risked falling back to long imperative `if/else` chains.
+- Decision:
+  - Extend `mobile-editor-shortcuts.js` with declarative keymap registration and execution primitives: `normalizeComboSpec`, `matchesKeyCombo`, `runKeymap`, and `bindKeymap`.
+  - Convert anchor editor command shortcuts to a rule table so future custom bindings can be added by appending keymap entries instead of editing control flow.
+- Reuse leverage:
+  - The same registry can now serve indentation interception, heading mutation, save/delete/list commands, and later custom shortcuts.
+- Validation:
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-editor-shortcuts.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `D:\apache-maven-3.9.12\bin\mvn.cmd -f services/java-orchestrator/pom.xml -DskipTests compile -q`

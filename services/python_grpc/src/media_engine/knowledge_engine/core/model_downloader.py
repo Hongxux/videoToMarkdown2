@@ -229,6 +229,31 @@ def set_hf_env(use_mirror=True, hf_endpoint=None, proxy=None):
             else:
                 os.environ[key] = value
 
+
+def _resolve_whisper_cache_dir():
+    """
+    执行逻辑：
+    1) 优先读取显式缓存目录环境变量。
+    2) 若未配置，则回退到 HuggingFace 默认缓存目录。
+    实现方式：按 `WHISPER_MODEL_CACHE_DIR` -> `HUGGINGFACE_HUB_CACHE` -> `HF_HOME` -> 默认路径 依次解析。
+    核心价值：确保 Docker 构建期预装模型与运行期读取模型使用同一路径，避免重复下载。
+    输入参数：无。
+    输出参数：
+    - str：Whisper/HuggingFace Hub 缓存目录。
+    """
+    explicit_cache = str(
+        os.getenv("WHISPER_MODEL_CACHE_DIR", "")
+        or os.getenv("HUGGINGFACE_HUB_CACHE", "")
+    ).strip()
+    if explicit_cache:
+        return os.path.expanduser(explicit_cache)
+
+    hf_home = str(os.getenv("HF_HOME", "")).strip()
+    if hf_home:
+        return os.path.join(os.path.expanduser(hf_home), "hub")
+
+    return os.path.expanduser("~/.cache/huggingface/hub")
+
 def _verify_file_integrity(file_path, filename):
     """
     执行逻辑：
@@ -302,7 +327,7 @@ def download_whisper_model(
 
     # 1. 设置路径与仓库
     repo_id = f"Systran/faster-whisper-{model_size}"
-    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    cache_dir = _resolve_whisper_cache_dir()
     
     # 2. 官方核心文件清单
     # 注意：纯净回装模式下，我们不再手动补齐 vocabulary.json

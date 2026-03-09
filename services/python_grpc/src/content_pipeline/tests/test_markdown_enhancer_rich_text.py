@@ -2142,3 +2142,141 @@ def test_markdown_enhancer_writes_llm_trace_jsonl(tmp_path, monkeypatch):
     assert "structured_text" in steps
 
 
+
+
+def test_tutorial_step_replaces_instructional_clip_placeholder_with_alias(tmp_path):
+    unit_dir = tmp_path / "vl_tutorial_units" / "SU906"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+
+    clip1 = unit_dir / "SU906_clip_step_01_clip_01_action.mp4"
+    key1 = unit_dir / "SU906_ss_step_01_key_01_action.png"
+    clip1.write_bytes(b"asset")
+    key1.write_bytes(b"asset")
+
+    steps_payload = {
+        "unit_id": "SU906",
+        "schema": "tutorial_stepwise_v1",
+        "steps": [
+            {
+                "step_id": 1,
+                "step_description": "replace clip placeholder",
+                "main_operation": "Open the panel\n[KEYFRAME_1]\nWatch the short demo\n[CLIP_1]",
+                "clip_start_sec": 0.0,
+                "clip_end_sec": 8.0,
+                "clip_file": clip1.name,
+                "instructional_keyframe_details": [
+                    {
+                        "image_file": key1.name,
+                        "timestamp_sec": 3.0,
+                        "frame_reason": "Focus on the finished screen",
+                    }
+                ],
+                "instructional_clip_details": [
+                    {
+                        "clip_file": clip1.name,
+                        "instructional_clip_id": "CLIP_1",
+                        "clip_reason": "Show the key transition",
+                        "start_sec": 4.0,
+                        "end_sec": 6.0,
+                    }
+                ],
+            }
+        ],
+    }
+    (unit_dir / "SU906_steps.json").write_text(json.dumps(steps_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU906",
+                "title": "Tutorial Clip Placeholder",
+                "knowledge_type": "process",
+                "body_text": "tutorial body",
+                "mult_steps": True,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "[CLIP_1]" not in markdown
+    assert "![[vl_tutorial_units/SU906/SU906_clip_step_01_clip_01_action.mp4|Show the key transition]]" in markdown
+
+
+def test_concrete_clip_placeholder_is_replaced_with_alias_embed(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    clip1 = assets_dir / "SU990_clip_concrete_seg_01_clip_01_demo.mp4"
+    clip1.write_bytes(b"clip")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU990",
+                "title": "Concrete Clip Placeholder",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "Review the concrete clip [CLIP_1]",
+                        "instructional_clips": [
+                            {
+                                "clip_id": "CLIP_1",
+                                "start_sec": 1.0,
+                                "end_sec": 3.0,
+                                "clip_reason": "Concrete clip demo",
+                            }
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [],
+                    "screenshot_items": [],
+                    "clips": [str(clip1)],
+                    "clip": str(clip1),
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    enhancer._llm_client = _FailIfCalledLLMClient()
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU990": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert "[CLIP_1]" not in markdown
+    assert "![[assets/SU990_clip_concrete_seg_01_clip_01_demo.mp4|Concrete clip demo]]" in markdown

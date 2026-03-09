@@ -47,6 +47,36 @@ powershell -ExecutionPolicy Bypass -File scripts/release/quick_start.ps1
 - 轮询 `http://localhost:8080/api/health`。
 - 启动成功后输出 Web Demo、健康检查和日志入口。
 
+### API Key 配置（Java + Python 共用）
+
+- 根目录 `D:\videoToMarkdownTest2\.env` 是 Docker Compose 的统一配置入口；`python-grpc` 和 `java-orchestrator` 都会从这里读取环境变量。
+- `DEEPSEEK_API_KEY`：必填；`java-orchestrator` 的 `DeepSeekAdvisorService` 和 `python-grpc` 的文本增强链路都会使用。
+- `DASHSCOPE_API_KEY`：建议填写；主要供 `python-grpc` 的 VL / 视频理解链路使用。
+- `VISION_AI_BEARER_TOKEN`：可选；仅在开启视觉校验相关能力时需要。
+- `.env` 建议保存为 `UTF-8` 无 BOM 纯文本；Docker 对首个变量名较敏感，带 BOM 时可能导致首个 key 注入失败。
+
+推荐至少填写：
+
+```env
+DEEPSEEK_API_KEY=你的_deepseek_key
+DASHSCOPE_API_KEY=你的_dashscope_key
+VISION_AI_BEARER_TOKEN=
+```
+
+- 如果根目录还没有 `.env`，先复制模板：
+
+```powershell
+Copy-Item D:\videoToMarkdownTest2\deploy\docker\.env.example D:\videoToMarkdownTest2\.env -Force
+```
+
+- 修改 `.env` 后，需要重建容器环境变量；仅改文件本身不会自动进入已运行容器。推荐执行：
+
+```powershell
+docker compose up -d --force-recreate python-grpc java-orchestrator
+```
+
+- 如果你只想确认变量是否已经进容器，优先看运行日志是否还出现 `DEEPSEEK_API_KEY is empty`，或直接重新触发对应功能链路验证。
+
 启动成功后直接打开：
 
 - Web Demo：`http://localhost:8080`
@@ -64,6 +94,24 @@ powershell -ExecutionPolicy Bypass -File scripts/release/docker_release.ps1 -Act
 # 停止服务
 powershell -ExecutionPolicy Bypass -File scripts/release/docker_release.ps1 -Action down
 ```
+
+### 首次构建经验（2026-03-09 已验证）
+
+- `python-grpc` 镜像现在会在构建期预装 `ffmpeg` 和 `Whisper base`，默认只预装 `base`，不额外预装 `medium/large`。
+- Whisper 模型缓存路径已经固定为 `/opt/huggingface/hub`，并通过 `HF_HOME`、`HUGGINGFACE_HUB_CACHE`、`WHISPER_MODEL_CACHE_DIR` 对齐“构建期预装”和“运行期读取”，容器首次启动时不应再重复下载 `base`。
+- `python-grpc` 构建显式使用 CPU 版 `torch` / `torchvision` / `torchaudio`，避免 Linux 下默认解析出超大的 CUDA 依赖，降低镜像膨胀和构建超时概率。
+- `java-orchestrator` 构建已启用 Maven 本地缓存挂载和轻量重试；如果失败信息是 Maven Central 握手/内容截断，优先重试；如果失败信息是 `compile` 或 `unclosed character literal`，优先按源码编译错误排查，而不是误判为 Docker 问题。
+- 首次完整构建通常最慢的阶段是：Python 依赖安装、`Whisper base` 下载、镜像导出；后续重建会明显更快，因为 Docker layer、pip 缓存和 Maven 缓存会复用。
+- 需要单独验证镜像时，优先用：
+
+```powershell
+docker compose build python-grpc
+docker compose build java-orchestrator
+```
+
+- 这两条命令已在当前仓库结构下做过真实验证，成功产出：
+  - `videotomarkdown-release-python-grpc:latest`
+  - `videotomarkdown-release-java-orchestrator:latest`
 
 ## App Demo 快速上手
 

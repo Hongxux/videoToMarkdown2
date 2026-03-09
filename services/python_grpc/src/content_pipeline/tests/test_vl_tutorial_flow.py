@@ -1119,7 +1119,7 @@ def test_tutorial_schema_parse_and_normalize():
             "step_id": 1,
             "step_description": "Open settings",
             "main_action": "Open settings panel",
-            "main_operation": "1. Click the settings icon\n2. Enter network settings\n[KEYFRAME_1]",
+            "main_operation": "1. Click the settings icon\n2. Enter network settings\n[KEYFRAME_1]\n[CLIP_1]",
             "precautions": ["Do not edit unrelated options"],
             "step_summary": "settings page opened",
             "operation_guidance": ["click settings", "open network settings"],
@@ -1133,6 +1133,14 @@ def test_tutorial_schema_parse_and_normalize():
                     "target_text": "Settings",
                     "target_relative_position": "top-left in toolbar",
                     "bbox": [120, 80, 760, 920],
+                }
+            ],
+            "instructional_clips": [
+                {
+                    "clip_id": 1,
+                    "start_sec": 5.0,
+                    "end_sec": 6.5,
+                    "clip_reason": "watch the network indicator turn green",
                 }
             ],
         },
@@ -1158,12 +1166,21 @@ def test_tutorial_schema_parse_and_normalize():
     assert results[0].step_id == 1
     assert results[0].step_description == "Open settings"
     assert results[0].main_action == "Open settings panel"
-    assert results[0].main_operation == ["1. Click the settings icon\n2. Enter network settings\n[KEYFRAME_1]"]
+    assert results[0].main_operation == ["1. Click the settings icon\n2. Enter network settings\n[KEYFRAME_1]\n[CLIP_1]"]
     assert results[0].instructional_keyframes == [
         {
             "timestamp_sec": 6.2,
             "frame_reason": "settings page visible",
+            "keyframe_id": "KEYFRAME_1",
             "bbox": [120, 80, 760, 920],
+        }
+    ]
+    assert results[0].instructional_clips == [
+        {
+            "clip_id": "CLIP_1",
+            "start_sec": 5.0,
+            "end_sec": 6.5,
+            "clip_reason": "watch the network indicator turn green",
         }
     ]
     assert results[0].precautions == ["Do not edit unrelated options"]
@@ -1179,7 +1196,16 @@ def test_tutorial_schema_parse_and_normalize():
         {
             "timestamp_sec": 6.2,
             "frame_reason": "settings page visible",
+            "keyframe_id": "KEYFRAME_1",
             "bbox": [120, 80, 760, 920],
+        }
+    ]
+    assert normalized[0]["instructional_clips"] == [
+        {
+            "clip_id": "CLIP_1",
+            "start_sec": 5.0,
+            "end_sec": 6.5,
+            "clip_reason": "watch the network indicator turn green",
         }
     ]
     assert "target_ui_type" not in results[0].instructional_keyframes[0]
@@ -1192,20 +1218,18 @@ def test_tutorial_schema_parse_and_normalize():
     assert set(normalized[0].keys()) == {
         "step_id",
         "step_description",
+        "step_type",
         "main_action",
         "main_operation",
         "instructional_keyframes",
+        "instructional_clips",
         "precautions",
         "step_summary",
         "operation_guidance",
         "clip_start_sec",
         "clip_end_sec",
         "instructional_keyframe_timestamp",
-        "step_type",
     }
-    assert "no_needed_video" not in normalized[0]
-    assert "should_type" not in normalized[0]
-
 
 def test_tutorial_schema_parse_handles_unescaped_newlines_in_main_operation():
     analyzer = VLVideoAnalyzer(_build_analyzer_config())
@@ -1621,6 +1645,62 @@ def test_analyze_clip_should_type_concrete_routes_as_concrete(monkeypatch):
     assert result.analysis_results[0].should_type == "concrete"
     assert result.clip_requests == []
     assert len(result.screenshot_requests) == 2
+
+
+def test_analyze_clip_emits_instructional_clip_requests_for_tutorial_mode(monkeypatch):
+    analyzer = VLVideoAnalyzer(_build_analyzer_config())
+
+    async def _fake_call_vl_api(clip_path, extra_prompt=None, analysis_mode="default"):
+        return (
+            [
+                VLAnalysisResult(
+                    id=1,
+                    knowledge_type="process",
+                    clip_start_sec=1.0,
+                    clip_end_sec=9.0,
+                    suggested_screenshoot_timestamps=[7.5],
+                    instructional_keyframes=[
+                        {
+                            "timestamp_sec": 7.5,
+                            "frame_reason": "port value changed",
+                            "bbox": [100, 120, 900, 980],
+                        }
+                    ],
+                    instructional_clips=[
+                        {
+                            "clip_id": "CLIP_1",
+                            "start_sec": 6.0,
+                            "end_sec": 8.5,
+                            "clip_reason": "watch the save confirmation animate in",
+                        }
+                    ],
+                    step_id=2,
+                    step_description="change port",
+                )
+            ],
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    monkeypatch.setattr(analyzer, "_call_vl_api", _fake_call_vl_api)
+
+    result = asyncio.run(
+        analyzer.analyze_clip(
+            clip_path="dummy.mp4",
+            semantic_unit_start_sec=200.0,
+            semantic_unit_id="SU201",
+            analysis_mode="tutorial_stepwise",
+        )
+    )
+
+    assert result.success is True
+    assert len(result.clip_requests) == 2
+    assert result.clip_requests[0]["clip_id"] == "SU201/SU201_clip_step_02_clip_01_change_port"
+    assert result.clip_requests[0]["instructional_clip_id"] == "CLIP_1"
+    assert result.clip_requests[0]["clip_reason"] == "watch the save confirmation animate in"
+    assert result.clip_requests[0]["start_sec"] == 206.0
+    assert result.clip_requests[0]["end_sec"] == 208.5
+    assert result.clip_requests[1]["clip_id"] == "SU201/SU201_clip_step_02_change_port"
 
 
 def test_analyze_clip_uses_unit_relative_ids_for_tutorial_mode(monkeypatch):
@@ -3611,6 +3691,108 @@ def test_save_tutorial_assets_prefers_mapped_screenshot_timestamps_for_keyframes
     assert keyframe_calls[0][0] == original_clip_path
     assert keyframe_calls[0][1] == 110.0
 
+
+def test_save_tutorial_assets_exports_instructional_clips_manifest(tmp_path, monkeypatch):
+    generator = VLMaterialGenerator(
+        {
+            "enabled": True,
+            "tutorial_mode": {
+                "enabled": True,
+                "export_assets": True,
+                "save_step_json": True,
+                "asset_export_parallel_workers": 1,
+                "asset_export_parallel_hard_cap": 1,
+            },
+            "screenshot_optimization": {"enabled": False},
+            "fallback": {"enabled": True},
+        }
+    )
+
+    output_dir = tmp_path / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    demo_video = tmp_path / "demo.mp4"
+    demo_video.write_bytes(b"video")
+
+    async def _fake_export_clip_asset_with_ffmpeg(video_path, start_sec, end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(f"{start_sec}-{end_sec}".encode("utf-8"))
+        return True
+
+    async def _fake_export_keyframe_with_ffmpeg(video_path, timestamp_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"keyframe")
+        return True
+
+    monkeypatch.setattr(generator, "_export_clip_asset_with_ffmpeg", _fake_export_clip_asset_with_ffmpeg)
+    monkeypatch.setattr(generator, "_export_keyframe_with_ffmpeg", _fake_export_keyframe_with_ffmpeg)
+
+    clip_requests = [
+        {
+            "semantic_unit_id": "SU780",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "step_description": "step one",
+            "action_brief": "step_one",
+            "clip_id": "SU780/SU780_clip_step_01_step_one",
+            "start_sec": 10.0,
+            "end_sec": 20.0,
+        },
+        {
+            "semantic_unit_id": "SU780",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "step_description": "step one",
+            "action_brief": "step_one",
+            "start_sec": 14.0,
+            "end_sec": 16.0,
+            "instructional_clip_id": "CLIP_1",
+            "clip_id": "SU780/SU780_clip_step_01_clip_01_step_one",
+            "clip_reason": "watch the animation",
+            "_analysis_relative_start_sec": 4.0,
+            "_analysis_relative_end_sec": 6.0,
+        },
+    ]
+    screenshot_requests = [
+        {
+            "semantic_unit_id": "SU780",
+            "analysis_mode": "tutorial_stepwise",
+            "step_id": 1,
+            "timestamp_sec": 15.0,
+            "frame_reason": "state visible",
+        }
+    ]
+    raw_response_json = [
+        {
+            "step_id": 1,
+            "step_description": "step one",
+            "step_type": "MAIN_FLOW",
+            "main_action": "open panel",
+            "main_operation": "1. open panel\n[KEYFRAME_1]\n[CLIP_1]",
+            "clip_start_sec": 0.0,
+            "clip_end_sec": 10.0,
+            "instructional_keyframes": [{"timestamp_sec": 5.0, "frame_reason": "state visible"}],
+            "instructional_clips": [{"clip_id": "CLIP_1", "start_sec": 4.0, "end_sec": 6.0, "clip_reason": "watch the animation"}],
+        }
+    ]
+
+    asyncio.run(
+        generator._save_tutorial_assets_for_unit(
+            video_path=str(demo_video),
+            output_dir=str(output_dir),
+            unit_id="SU780",
+            clip_requests=clip_requests,
+            screenshot_requests=screenshot_requests,
+            raw_response_json=raw_response_json,
+            use_analysis_relative_timestamps=True,
+            prefer_screenshot_requests_keyframes=False,
+        )
+    )
+
+    unit_dir = output_dir / "vl_tutorial_units" / "SU780"
+    data = json.loads((unit_dir / "SU780_steps.json").read_text(encoding="utf-8"))
+    assert data["steps"][0]["instructional_clips"] == ["SU780_clip_step_01_clip_01_step_one.mp4"]
+    assert data["steps"][0]["instructional_clip_details"][0]["instructional_clip_id"] == "CLIP_1"
+    assert data["steps"][0]["instructional_clip_details"][0]["clip_reason"] == "watch the animation"
 
 def test_save_tutorial_assets_applies_top_reason_banner_to_keyframe_image(tmp_path, monkeypatch):
     generator = VLMaterialGenerator(

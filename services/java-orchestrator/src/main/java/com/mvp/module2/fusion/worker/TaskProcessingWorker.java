@@ -93,6 +93,8 @@ public class TaskProcessingWorker {
     @Value("${video.download.interrupt-retry-backoff-ms:1200}")
     private long downloadInterruptRetryBackoffMs;
 
+    private boolean postCompletionPersonaArtifactsEnabled = false;
+
     private ExecutorService workerPool;
     private ScheduledExecutorService watchdogScheduler;
     private Semaphore downloadSemaphore;
@@ -251,7 +253,7 @@ public class TaskProcessingWorker {
             TaskEntry task,
             VideoProcessingOrchestrator.ProcessingResult result
     ) {
-        if (personaAwareReadingService == null || result == null) {
+        if (!postCompletionPersonaArtifactsEnabled || personaAwareReadingService == null || result == null) {
             return;
         }
         String markdownPathText = firstNonBlank(result.markdownPath, "");

@@ -15,6 +15,7 @@ import com.mvp.module2.fusion.service.FileReuseService;
 import com.mvp.module2.fusion.service.TaskManualCollectionRepository;
 import com.mvp.module2.fusion.service.TaskBundleExportService;
 import com.mvp.module2.fusion.service.VideoMetaService;
+import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -124,6 +125,9 @@ public class MobileMarkdownController {
 
     @Autowired(required = false)
     private CollectionRepository collectionRepository;
+
+    @Autowired(required = false)
+    private TaskWebSocketHandler taskWebSocketHandler;
 
     @Autowired(required = false)
     private TaskManualCollectionRepository taskManualCollectionRepository;
@@ -1013,7 +1017,7 @@ public class MobileMarkdownController {
     public ResponseEntity<?> getTaskMarkdown(
             @PathVariable String taskId,
             @RequestParam(value = "userId", required = false) String userId,
-            @RequestParam(value = "includePersonalization", defaultValue = "true") boolean includePersonalization
+            @RequestParam(value = "includePersonalization", defaultValue = "false") boolean includePersonalization
     ) {
         TaskView task = resolveTaskView(taskId);
         if (task == null) {
@@ -1046,14 +1050,7 @@ public class MobileMarkdownController {
             TocMetadata tocMetadata = resolveTaskTocMetadata(task, resolved.markdownPath);
             response.put("contentType", tocMetadata.contentType);
             response.put("bookSectionTree", tocMetadata.bookSectionTree);
-            appendOrWarmupPersonalizedReading(
-                    response,
-                    task.taskId,
-                    resolveReaderUserId(task, userId),
-                    resolved.markdownPath,
-                    markdown,
-                    includePersonalization
-            );
+            appendDisabledPersonalizationState(response);
             return ResponseEntity.ok(response);
         } catch (IOException ex) {
             logger.warn("read markdown content failed: taskId={} path={} err={}", taskId, resolved.markdownPath, ex.getMessage());
@@ -1065,7 +1062,7 @@ public class MobileMarkdownController {
     public ResponseEntity<?> getTaskMarkdownByRelativePath(
             @PathVariable String taskId,
             @RequestParam(value = "userId", required = false) String userId,
-            @RequestParam(value = "includePersonalization", defaultValue = "true") boolean includePersonalization,
+            @RequestParam(value = "includePersonalization", defaultValue = "false") boolean includePersonalization,
             @RequestParam("path") String rawPath
     ) {
         TaskView task = resolveTaskView(taskId);
@@ -1114,14 +1111,7 @@ public class MobileMarkdownController {
             TocMetadata tocMetadata = resolveTaskTocMetadata(task, target);
             response.put("contentType", tocMetadata.contentType);
             response.put("bookSectionTree", tocMetadata.bookSectionTree);
-            appendOrWarmupPersonalizedReading(
-                    response,
-                    task.taskId,
-                    resolveReaderUserId(task, userId),
-                    target,
-                    markdown,
-                    includePersonalization
-            );
+            appendDisabledPersonalizationState(response);
             return ResponseEntity.ok(response);
         } catch (IOException ex) {
             logger.warn("read relative markdown failed: taskId={} path={} err={}", taskId, rawPath, ex.getMessage());
@@ -1453,6 +1443,7 @@ public class MobileMarkdownController {
         payload.put("anchors", noteMeta.anchors != null ? sanitizeAnchors(noteMeta.anchors) : Map.of());
         payload.put("metaPath", taskRoot.resolve(META_FILE_NAME).toString());
         payload.put("updatedAt", Instant.now().toString());
+        broadcastMetaSyncEvent(task, noteKey, "meta", "");
         return ResponseEntity.ok(payload);
     }
 
@@ -1597,6 +1588,7 @@ public class MobileMarkdownController {
         payload.put("anchor", anchorRecord);
         payload.put("revision", revisionPayload);
         payload.put("updatedAt", now.toString());
+        broadcastMetaSyncEvent(task, noteKey, "anchor_mount", normalizedAnchorId);
         return ResponseEntity.ok(payload);
     }
 
@@ -1827,6 +1819,7 @@ public class MobileMarkdownController {
         payload.put("upsertCount", upsertCount);
         payload.put("deleteCount", deleteCount);
         payload.put("updatedAt", now.toString());
+        broadcastMetaSyncEvent(task, noteKey, "anchor_sync", normalizedAnchorId);
         return ResponseEntity.ok(payload);
     }
 
@@ -1917,6 +1910,7 @@ public class MobileMarkdownController {
         payload.put("missingAnchorIds", missingAnchorIds);
         payload.put("deletedFileEntries", deletedFileEntries);
         payload.put("updatedAt", Instant.now().toString());
+        broadcastMetaSyncEvent(task, noteKey, "anchor_delete", existingAnchorIds.isEmpty() ? "" : existingAnchorIds.get(0));
         return ResponseEntity.ok(payload);
     }
 
@@ -2607,74 +2601,26 @@ public class MobileMarkdownController {
         return null;
     }
 
-    private void appendPersonalizedReading(
-            Map<String, Object> response,
-            String taskId,
-            String userId,
-            Path markdownPath,
-            String markdown
-    ) {
-        if (personaAwareReadingService == null || response == null) {
+    private void broadcastMetaSyncEvent(TaskView task, String pathKey, String changeKind, String anchorId) {
+        if (taskWebSocketHandler == null || task == null) {
             return;
         }
-        try {
-            com.mvp.module2.fusion.service.PersonaAwareReadingService.PersonalizedReadingPayload payload =
-                    personaAwareReadingService.loadOrCompute(taskId, userId, markdownPath, markdown);
-            if (payload == null) {
-                return;
-            }
-            response.put("personalizedNodes", payload.nodes != null ? payload.nodes : List.of());
-            response.put("personalizationSource", payload.source != null ? payload.source : "unknown");
-            response.put("personalizationUserKey", payload.userKey != null ? payload.userKey : "");
-            response.put("personalizationGeneratedAt", payload.generatedAt != null ? payload.generatedAt : "");
-            response.put("personalizationCachePath", payload.cachePath != null ? payload.cachePath : "");
-            response.put("personalizationCacheScope", payload.cacheScope != null ? payload.cacheScope : "");
-            response.put("personalizationChunkStrategy", payload.chunkStrategy != null ? payload.chunkStrategy : "");
-            response.put("personaProfile", payload.persona != null ? payload.persona : Map.of());
-            if (personaInsightCardService != null) {
-                Map<String, Object> insightIndex = personaInsightCardService.loadIndexSnapshot(taskId, markdownPath);
-                if (!insightIndex.isEmpty()) {
-                    response.put("insightCardIndex", insightIndex);
-                }
-            }
-        } catch (Exception ex) {
-            logger.warn("append personalized reading failed: taskId={} err={}", taskId, ex.getMessage());
-        }
+        String userId = resolveReaderUserId(task, null);
+        taskWebSocketHandler.broadcastTaskMetaSync(
+                task.taskId,
+                userId,
+                pathKey,
+                changeKind,
+                anchorId
+        );
     }
 
-    private void appendOrWarmupPersonalizedReading(
-            Map<String, Object> response,
-            String taskId,
-            String userId,
-            Path markdownPath,
-            String markdown,
-            boolean includePersonalization
-    ) {
+    private void appendDisabledPersonalizationState(Map<String, Object> response) {
         if (response == null) {
             return;
         }
-        if (includePersonalization) {
-            appendPersonalizedReading(response, taskId, userId, markdownPath, markdown);
-            response.put("personalizationIncluded", true);
-            return;
-        }
         response.put("personalizationIncluded", false);
-        if (personaAwareReadingService == null) {
-            response.put("personalizationWarmupStatus", "unavailable");
-            return;
-        }
-        String markdownPathText = markdownPath != null ? markdownPath.toString() : "";
-        if (!StringUtils.hasText(markdownPathText)) {
-            response.put("personalizationWarmupStatus", "skipped_no_markdown_path");
-            return;
-        }
-        try {
-            personaAwareReadingService.precomputeAsync(taskId, userId, markdownPathText);
-            response.put("personalizationWarmupStatus", "started");
-        } catch (Exception ex) {
-            logger.warn("start personalization warmup failed: taskId={} err={}", taskId, ex.getMessage());
-            response.put("personalizationWarmupStatus", "failed_to_start");
-        }
+        response.put("personalizationWarmupStatus", "disabled");
     }
 
     private TaskView fromRuntimeTask(TaskEntry task) {
@@ -3750,28 +3696,18 @@ public class MobileMarkdownController {
         if (Files.isRegularFile(normalizedTarget) || Files.isSymbolicLink(normalizedTarget)) {
             return Files.deleteIfExists(normalizedTarget) ? 1 : 0;
         }
-        final int[] deletedCount = {0};
-        Files.walkFileTree(normalizedTarget, new SimpleFileVisitor<>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (Files.deleteIfExists(file)) {
-                    deletedCount[0] += 1;
+        int deletedCount = 0;
+        try (Stream<Path> pathStream = Files.walk(normalizedTarget)) {
+            List<Path> deleteOrder = pathStream
+                    .sorted(Comparator.reverseOrder())
+                    .toList();
+            for (Path path : deleteOrder) {
+                if (Files.deleteIfExists(path)) {
+                    deletedCount += 1;
                 }
-                return FileVisitResult.CONTINUE;
             }
-
-            @Override
-            public FileVisitResult postVisitDirectory(Path dir, IOException exc) throws IOException {
-                if (exc != null) {
-                    throw exc;
-                }
-                if (Files.deleteIfExists(dir)) {
-                    deletedCount[0] += 1;
-                }
-                return FileVisitResult.CONTINUE;
-            }
-        });
-        return deletedCount[0];
+        }
+        return deletedCount;
     }
 
     private List<ExportFileEntry> collectExportEntries(Path taskRoot) throws IOException {
@@ -3906,7 +3842,7 @@ public class MobileMarkdownController {
 
     private List<TaskView> deduplicateTaskViews(List<TaskView> input) {
         if (input == null || input.isEmpty()) {
-            return List.of();
+            return new ArrayList<>();
         }
         Map<String, TaskView> deduplicated = new LinkedHashMap<>();
         Map<String, String> dedupKeyByIdentity = new LinkedHashMap<>();
@@ -4213,7 +4149,7 @@ public class MobileMarkdownController {
     }
 
     private String normalizePathForStorageHash(String path) {
-        String normalized = path == null ? "" : path.trim().replace('\', '/');
+        String normalized = path == null ? "" : path.trim().replace('\\', '/');
         return normalized.toLowerCase(Locale.ROOT);
     }
 

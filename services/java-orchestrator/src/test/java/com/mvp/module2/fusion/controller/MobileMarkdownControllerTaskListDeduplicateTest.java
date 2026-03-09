@@ -24,6 +24,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class MobileMarkdownControllerTaskListDeduplicateTest {
 
     @Test
+    void listTasksShouldReturnEmptyListWhenNoTasksExist() throws Exception {
+        MobileMarkdownController controller = new MobileMarkdownController();
+        TaskQueueManager queueManager = new TaskQueueManager();
+        StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
+        injectField(controller, "taskQueueManager", queueManager);
+        injectField(controller, "storageTaskCacheService", storageCache);
+
+        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        Object tasksObject = response.getBody().get("tasks");
+        assertTrue(tasksObject instanceof List<?>);
+        assertTrue(((List<?>) tasksObject).isEmpty());
+        assertEquals(0, response.getBody().get("totalCount"));
+    }
+
+    @Test
     void listTasksShouldDeduplicateRuntimeTaskAndPredictedStorageShadowWhileProcessing() throws Exception {
         MobileMarkdownController controller = new MobileMarkdownController();
         TaskQueueManager queueManager = new TaskQueueManager();

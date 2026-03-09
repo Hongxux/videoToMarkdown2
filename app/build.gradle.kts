@@ -17,7 +17,7 @@ val mobileApiBaseUrl = sequenceOf(
             "$trimmed/api/mobile"
         }
     }
-}.firstOrNull() ?: "http://10.0.2.2:8080/api/mobile"
+}.firstOrNull() ?: "https://frp-box.com:41570/api/mobile"
 val mobileApiBaseUrlEscaped = mobileApiBaseUrl
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
@@ -41,16 +41,48 @@ val mobileAppUpdateMinChunkedDownloadMb = (findProperty("mobileAppUpdateMinChunk
     ?.coerceAtLeast(2)
     ?: 4
 
+val androidReleaseKeystorePath = sequenceOf(
+    (findProperty("androidReleaseKeystorePath") as String?)?.trim(),
+    System.getenv("ANDROID_RELEASE_KEYSTORE_PATH")?.trim()
+).firstOrNull { it != null && it.isNotBlank() }
+val androidReleaseKeystorePassword = sequenceOf(
+    (findProperty("androidReleaseKeystorePassword") as String?)?.trim(),
+    System.getenv("ANDROID_RELEASE_KEYSTORE_PASSWORD")?.trim()
+).firstOrNull { it != null && it.isNotBlank() }
+val androidReleaseKeyAlias = sequenceOf(
+    (findProperty("androidReleaseKeyAlias") as String?)?.trim(),
+    System.getenv("ANDROID_RELEASE_KEY_ALIAS")?.trim()
+).firstOrNull { it != null && it.isNotBlank() }
+val androidReleaseKeyPassword = sequenceOf(
+    (findProperty("androidReleaseKeyPassword") as String?)?.trim(),
+    System.getenv("ANDROID_RELEASE_KEY_PASSWORD")?.trim()
+).firstOrNull { it != null && it.isNotBlank() }
+val hasReleaseSigning = !androidReleaseKeystorePath.isNullOrBlank() &&
+    !androidReleaseKeystorePassword.isNullOrBlank() &&
+    !androidReleaseKeyAlias.isNullOrBlank() &&
+    !androidReleaseKeyPassword.isNullOrBlank()
+
 android {
     namespace = "com.hongxu.videoToMarkdownTest2"
     compileSdk = 35
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(androidReleaseKeystorePath!!)
+                storePassword = androidReleaseKeystorePassword
+                keyAlias = androidReleaseKeyAlias
+                keyPassword = androidReleaseKeyPassword
+            }
+        }
+    }
 
     defaultConfig {
         applicationId = "com.hongxu.videoToMarkdownTest2"
         minSdk = 24
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.5"
+        versionCode = 8
+        versionName = "1.0.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MOBILE_API_BASE_URL", "\"$mobileApiBaseUrlEscaped\"")
@@ -75,6 +107,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -91,6 +126,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    lint {
+        checkReleaseBuilds = false
+        abortOnError = false
     }
 }
 

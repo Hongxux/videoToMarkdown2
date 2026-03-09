@@ -1572,6 +1572,48 @@ class MarkdownEnhancer:
                     normalized.append(entry)
             return normalized
 
+        def _normalize_clip_entries(value: Any, base_dir: Optional[Path] = None) -> List[Dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            normalized: List[Dict[str, Any]] = []
+            for item in value:
+                if isinstance(item, str):
+                    clip_path = _to_abs(item, base_dir=base_dir)
+                    if clip_path:
+                        normalized.append({"clip_path": clip_path})
+                    continue
+                if not isinstance(item, dict):
+                    continue
+
+                entry: Dict[str, Any] = {}
+                clip_value = (
+                    item.get("clip_path")
+                    or item.get("clip_file")
+                    or item.get("video_path")
+                    or item.get("path")
+                    or item.get("file_path")
+                )
+                clip_path = _to_abs(clip_value, base_dir=base_dir)
+                if clip_path:
+                    entry["clip_path"] = clip_path
+                clip_reason = str(item.get("clip_reason", "") or "").strip()
+                if clip_reason:
+                    entry["clip_reason"] = clip_reason
+                clip_id = self._normalize_clip_id(
+                    item.get("instructional_clip_id", item.get("clip_id", item.get("clipId")))
+                )
+                if clip_id:
+                    entry["clip_id"] = clip_id
+                raw_start = item.get("start_sec", item.get("clip_start_sec"))
+                if raw_start is not None:
+                    entry["start_sec"] = _safe_float(raw_start, 0.0)
+                raw_end = item.get("end_sec", item.get("clip_end_sec"))
+                if raw_end is not None:
+                    entry["end_sec"] = _safe_float(raw_end, entry.get("start_sec", 0.0))
+                if entry:
+                    normalized.append(entry)
+            return normalized
+
         def _normalize_step(raw_step: Dict[str, Any], order: int, base_dir: Optional[Path] = None) -> Dict[str, Any]:
             step_id = _safe_int(raw_step.get("step_id", order), order)
             step_desc = str(
@@ -1640,6 +1682,54 @@ class MarkdownEnhancer:
             clip_file = raw_step.get("clip_file") or raw_step.get("clip_path")
             if not clip_file:
                 clip_file = materials.get("clip_path") or materials.get("clip")
+
+            clip_entries: List[Dict[str, Any]] = []
+            clip_entries.extend(
+                _normalize_clip_entries(
+                    raw_step.get("instructional_clip_details"),
+                    base_dir=base_dir,
+                )
+            )
+            clip_entries.extend(
+                _normalize_clip_entries(
+                    raw_step.get("instructional_clips"),
+                    base_dir=base_dir,
+                )
+            )
+            if not clip_entries:
+                material_clips = materials.get("clip_paths") or materials.get("clips")
+                if isinstance(material_clips, list):
+                    clip_entries.extend(_normalize_clip_entries(material_clips, base_dir=base_dir))
+            if clip_file:
+                clip_entries.extend(_normalize_clip_entries([clip_file], base_dir=base_dir))
+
+            deduped_clips: List[Dict[str, Any]] = []
+            clip_path_to_index: Dict[str, int] = {}
+            seen_pathless_clips: set[str] = set()
+            for item in clip_entries:
+                clip_path_key = self._normalize_embed_path(item.get("clip_path", ""))
+                if clip_path_key:
+                    existed_idx = clip_path_to_index.get(clip_path_key)
+                    if existed_idx is None:
+                        clip_path_to_index[clip_path_key] = len(deduped_clips)
+                        deduped_clips.append(dict(item))
+                    else:
+                        existed_item = deduped_clips[existed_idx]
+                        if not existed_item.get("clip_reason") and item.get("clip_reason"):
+                            existed_item["clip_reason"] = item.get("clip_reason")
+                        if not existed_item.get("clip_id") and item.get("clip_id"):
+                            existed_item["clip_id"] = item.get("clip_id")
+                        if existed_item.get("start_sec") is None and item.get("start_sec") is not None:
+                            existed_item["start_sec"] = item.get("start_sec")
+                        if existed_item.get("end_sec") is None and item.get("end_sec") is not None:
+                            existed_item["end_sec"] = item.get("end_sec")
+                    continue
+
+                key = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                if key in seen_pathless_clips:
+                    continue
+                seen_pathless_clips.add(key)
+                deduped_clips.append(dict(item))
 
             keyframe_entries: List[Dict[str, Any]] = []
             keyframe_entries.extend(
@@ -1737,6 +1827,7 @@ class MarkdownEnhancer:
                 "clip_end_sec": clip_end,
                 "instructional_keyframe_timestamp": deduped_timestamps,
                 "clip_file": _to_abs(clip_file, base_dir=base_dir),
+                "instructional_clips": deduped_clips,
                 "instructional_keyframes": deduped_keyframes,
             }
 
@@ -1830,6 +1921,8 @@ class MarkdownEnhancer:
                     existed["clip_end_sec"] = normalized["clip_end_sec"]
                     if normalized["clip_file"]:
                         existed["clip_file"] = normalized["clip_file"]
+                    if normalized.get("instructional_clips"):
+                        existed["instructional_clips"] = normalized["instructional_clips"]
                     if normalized["instructional_keyframes"]:
                         existed["instructional_keyframes"] = normalized["instructional_keyframes"]
             except Exception as exc:
@@ -1880,6 +1973,35 @@ class MarkdownEnhancer:
                     "timestamp_sec": raw.get("timestamp_sec"),
                     "sentence_id": str(raw.get("sentence_id") or "").strip(),
                     "sentence_text": str(raw.get("sentence_text") or "").strip(),
+                }
+            )
+        return normalized
+
+    def _build_concept_clip_items(self, section: EnhancedSection) -> List[Dict[str, Any]]:
+        raw_paths = list(section.video_clips or [])
+        if section.video_clip and section.video_clip not in raw_paths:
+            raw_paths.insert(0, section.video_clip)
+
+        normalized: List[Dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        for idx, clip_path in enumerate(raw_paths, start=1):
+            clip_text = str(clip_path or "").strip()
+            if not clip_text:
+                continue
+            normalized_path = self._normalize_embed_path(clip_text)
+            if normalized_path and normalized_path in seen_paths:
+                continue
+            if normalized_path:
+                seen_paths.add(normalized_path)
+            source_id = Path(clip_text).stem
+            normalized.append(
+                {
+                    "clip_id": self._extract_clip_id_from_source_id(source_id),
+                    "segment_id": self._extract_segment_id_from_source_id(source_id),
+                    "source_id": source_id,
+                    "clip_path": clip_text,
+                    "clip_reason": "",
+                    "clip_index": idx,
                 }
             )
         return normalized
@@ -2472,6 +2594,18 @@ class MarkdownEnhancer:
             return f"KEYFRAME_{int(text)}"
         return ""
 
+    @staticmethod
+    def _normalize_clip_id(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        matched = re.search(r"CLIP[_\-\s]*(\d+)", text, flags=re.IGNORECASE)
+        if matched:
+            return f"CLIP_{int(matched.group(1))}"
+        if re.fullmatch(r"\d+", text):
+            return f"CLIP_{int(text)}"
+        return ""
+
     @classmethod
     def _replace_tutorial_keyframe_placeholders(
         cls,
@@ -2508,6 +2642,48 @@ class MarkdownEnhancer:
             return keyframe_embeds[idx - 1]
 
         return re.sub(r"\[\s*KEYFRAME_(\d+)\s*\]", _replace, content, flags=re.IGNORECASE)
+
+    @classmethod
+    def _replace_clip_placeholders(
+        cls,
+        content: str,
+        clip_embeds: List[str],
+        *,
+        clip_embed_map: Optional[Dict[str, str]] = None,
+    ) -> str:
+        if not content:
+            return content
+        normalized_map: Dict[str, str] = {}
+        for raw_key, embed in (clip_embed_map or {}).items():
+            normalized_key = cls._normalize_clip_id(raw_key)
+            if not normalized_key:
+                continue
+            embed_text = str(embed or "").strip()
+            if not embed_text:
+                continue
+            if normalized_key not in normalized_map:
+                normalized_map[normalized_key] = embed_text
+        if not clip_embeds and not normalized_map:
+            return re.sub(r"\[\s*CLIP_\d+\s*\]", "", content, flags=re.IGNORECASE)
+
+        embed_index = 0
+
+        def _replace(match: re.Match) -> str:
+            nonlocal embed_index
+            try:
+                idx = int(match.group(1))
+            except Exception:
+                idx = 0
+            clip_id = f"CLIP_{idx}" if idx > 0 else ""
+            if clip_id and clip_id in normalized_map:
+                return normalized_map[clip_id]
+            if embed_index >= len(clip_embeds):
+                return ""
+            embed = clip_embeds[embed_index]
+            embed_index += 1
+            return embed
+
+        return re.sub(r"\[\s*CLIP_(\d+)\s*\]", _replace, content, flags=re.IGNORECASE)
 
     @staticmethod
     def _replace_tutorial_legacy_placeholders(content: str, keyframe_embeds: List[str]) -> str:
@@ -2635,6 +2811,140 @@ class MarkdownEnhancer:
             return ""
         return cls._normalize_keyframe_id(f"KEYFRAME_{matched.group(1)}")
 
+    @staticmethod
+    def _extract_segment_id_from_source_id(source_id: Any) -> int:
+        source_text = str(source_id or "").strip()
+        if not source_text:
+            return 0
+        matched = re.search(r"_seg_(\d+)", source_text, flags=re.IGNORECASE)
+        if not matched:
+            return 0
+        try:
+            return int(matched.group(1))
+        except Exception:
+            return 0
+
+    @classmethod
+    def _extract_clip_id_from_source_id(cls, source_id: Any) -> str:
+        source_text = str(source_id or "").strip()
+        if not source_text:
+            return ""
+        matched = re.search(r"_clip_(\d+)", source_text, flags=re.IGNORECASE)
+        if not matched:
+            return ""
+        return cls._normalize_clip_id(f"CLIP_{matched.group(1)}")
+
+    def _build_concrete_clip_embeds_by_segment_order(
+        self,
+        section: EnhancedSection,
+        clip_items: List[Dict[str, Any]],
+    ) -> List[str]:
+        segments = self._sort_concrete_segments(section)
+        if not segments or not clip_items:
+            return []
+
+        available: List[Dict[str, Any]] = []
+        for idx, item in enumerate(clip_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            clip_path = str(item.get("clip_path", "") or "").strip()
+            if not clip_path:
+                continue
+            segment_id = int(item.get("segment_id", 0) or 0)
+            if segment_id <= 0:
+                segment_id = self._extract_segment_id_from_source_id(item.get("source_id") or clip_path)
+            clip_id = self._normalize_clip_id(item.get("clip_id"))
+            if not clip_id:
+                clip_id = self._extract_clip_id_from_source_id(item.get("source_id") or clip_path)
+            start_sort = float("inf")
+            try:
+                start_sort = float(item.get("start_sec"))
+            except Exception:
+                pass
+            available.append(
+                {
+                    "idx": idx,
+                    "clip_path": clip_path,
+                    "normalized_path": self._normalize_embed_path(clip_path),
+                    "clip_id": clip_id,
+                    "segment_id": segment_id,
+                    "start_sec": start_sort,
+                }
+            )
+
+        if not available:
+            return []
+
+        def _pop_entry(entry_index: int) -> Dict[str, Any]:
+            return available.pop(entry_index)
+
+        def _take_by_segment_and_clip(segment_id: int, clip_id: str) -> Optional[Dict[str, Any]]:
+            for idx, entry in enumerate(available):
+                if segment_id > 0 and entry.get("segment_id") == segment_id and entry.get("clip_id") == clip_id:
+                    return _pop_entry(idx)
+            return None
+
+        def _take_by_clip_id(clip_id: str) -> Optional[Dict[str, Any]]:
+            for idx, entry in enumerate(available):
+                if entry.get("clip_id") == clip_id:
+                    return _pop_entry(idx)
+            return None
+
+        def _take_by_start(start_sec: float) -> Optional[Dict[str, Any]]:
+            best_index = -1
+            best_delta = float("inf")
+            for idx, entry in enumerate(available):
+                entry_start = float(entry.get("start_sec", float("inf")))
+                if entry_start == float("inf"):
+                    continue
+                delta = abs(entry_start - start_sec)
+                if delta < best_delta:
+                    best_delta = delta
+                    best_index = idx
+            if best_index < 0:
+                return None
+            return _pop_entry(best_index)
+
+        embeds: List[str] = []
+        seen_paths: set[str] = set()
+        for segment in segments:
+            segment_id = int(segment.get("segment_id", 0) or 0)
+            raw_clips = segment.get("instructional_clips")
+            if not isinstance(raw_clips, list):
+                continue
+            for index, clip_meta in enumerate(raw_clips, start=1):
+                if not isinstance(clip_meta, dict):
+                    continue
+                desired_clip_id = self._normalize_clip_id(
+                    clip_meta.get("clip_id", clip_meta.get("clipId", clip_meta.get("id")))
+                )
+                candidate = None
+                if desired_clip_id:
+                    candidate = _take_by_segment_and_clip(segment_id, desired_clip_id)
+                    if candidate is None:
+                        candidate = _take_by_clip_id(desired_clip_id)
+                if candidate is None:
+                    try:
+                        candidate = _take_by_start(float(clip_meta.get("start_sec")))
+                    except Exception:
+                        candidate = None
+                if candidate is None and available:
+                    candidate = _pop_entry(0)
+                if candidate is None:
+                    continue
+                clip_path = str(candidate.get("clip_path", "") or "").strip()
+                normalized_path = self._normalize_embed_path(clip_path)
+                if normalized_path and normalized_path in seen_paths:
+                    continue
+                clip_reason = str(clip_meta.get("clip_reason", "") or "").strip()
+                embed = self._format_obsidian_embed(clip_path, alias=clip_reason)
+                if not embed:
+                    continue
+                embeds.append(embed)
+                if normalized_path:
+                    seen_paths.add(normalized_path)
+        return embeds
+
     def _build_concrete_keyframe_embeds_bundle_by_segment_order(
         self,
         section: EnhancedSection,
@@ -2735,6 +3045,8 @@ class MarkdownEnhancer:
                     keyframe_id = self._normalize_keyframe_id(
                         keyframe.get("keyframe_id", keyframe.get("keyframeId"))
                     )
+                    if not keyframe_id:
+                        keyframe_id = f"KEYFRAME_{len(ordered_embeds) + 1}"
                     explicit_path = str(
                         keyframe.get("image_path")
                         or keyframe.get("image_file")
@@ -2889,39 +3201,81 @@ class MarkdownEnhancer:
             base += "\n"
         return base + "\n" + "Supplemental images:\n" + "\n".join(missing)
 
+    def _append_missing_clip_embeds(self, content: str, clip_items: List[Dict[str, Any]]) -> str:
+        if not clip_items:
+            return content
+
+        missing: List[str] = []
+        existing_embed_paths = self._extract_obsidian_embed_paths(content)
+        for item in clip_items:
+            clip_path = str(item.get("clip_path", "") or "").strip()
+            if not clip_path:
+                continue
+            clip_reason = str(item.get("clip_reason", "") or "").strip()
+            embed = self._format_obsidian_embed(clip_path, alias=clip_reason)
+            if not embed:
+                continue
+            embed_paths = self._extract_obsidian_embed_paths(embed)
+            embed_path = next(iter(embed_paths), "")
+            if embed_path:
+                if embed_path in existing_embed_paths:
+                    continue
+                existing_embed_paths.add(embed_path)
+            elif embed in content:
+                continue
+            missing.append(embed)
+
+        if not missing:
+            return content
+
+        base = content or ""
+        if base and not base.endswith("\n"):
+            base += "\n"
+        return base + "\n" + "Supplemental clips:\n" + "\n".join(missing)
+
     def _build_deterministic_text_for_non_abstract(self, section: EnhancedSection) -> str:
         """
-        concrete/process 的确定性正文渲染：
-        - 不调用 structured LLM；
-        - 仅做占位符替换与图片回填兜底。
+        Deterministic fallback for concrete/process sections.
+        - Do not call the structured LLM here.
+        - Preserve image and clip placeholder order.
         """
         base_text = self._resolve_concrete_base_text(section)
         normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
         image_items = self._build_concept_image_items(section)
+        clip_items = self._build_concept_clip_items(section)
         has_keyframe_placeholder = bool(
             re.search(r"\[\s*KEYFRAME_\d+\s*\]", base_text, flags=re.IGNORECASE)
         )
+        has_clip_placeholder = bool(
+            re.search(r"\[\s*CLIP_\d+\s*\]", base_text, flags=re.IGNORECASE)
+        )
 
-        if normalized_kt == "concrete" and has_keyframe_placeholder:
+        if normalized_kt == "concrete" and (has_keyframe_placeholder or has_clip_placeholder):
             keyframe_embeds, keyframe_embed_map = self._build_concrete_keyframe_embeds_for_section(
                 section,
                 image_items,
             )
+            clip_embeds = self._build_concrete_clip_embeds_by_segment_order(section, clip_items)
             structured = self._replace_tutorial_keyframe_placeholders(
                 base_text,
                 keyframe_embeds,
                 keyframe_embed_map=keyframe_embed_map,
             )
+            structured = self._replace_clip_placeholders(structured, clip_embeds)
             structured = self._replace_image_placeholders(structured, image_items)
             structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
             structured = self._strip_imgneeded_placeholders(structured).strip()
+            structured = self._append_missing_clip_embeds(structured or base_text, clip_items)
             return structured or base_text
 
         keyframe_embeds, _ = self._build_concrete_keyframe_embeds_for_section(section, image_items)
+        clip_embeds = self._build_concrete_clip_embeds_by_segment_order(section, clip_items)
         structured = base_text
+        structured = self._replace_clip_placeholders(structured, clip_embeds)
         structured = self._replace_image_placeholders(structured, image_items)
         structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
         structured = self._strip_imgneeded_placeholders(structured).strip()
+        structured = self._append_missing_clip_embeds(structured or base_text, clip_items)
         if not image_items:
             return structured or base_text
         return self._append_missing_image_embeds(structured or base_text, image_items)
@@ -2933,30 +3287,34 @@ class MarkdownEnhancer:
         base_text = self._resolve_concrete_base_text(section)
         normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
         image_items = self._build_concept_image_items(section)
+        clip_items = self._build_concept_clip_items(section)
         has_keyframe_placeholder = bool(
             re.search(r"\[\s*KEYFRAME_\d+\s*\]", base_text, flags=re.IGNORECASE)
         )
+        has_clip_placeholder = bool(
+            re.search(r"\[\s*CLIP_\d+\s*\]", base_text, flags=re.IGNORECASE)
+        )
 
-        # concrete + KEYFRAME 走确定性直通：直接用 Phase2A main_content 回填，不做结构化改写。
-        if normalized_kt == "concrete" and has_keyframe_placeholder:
+        if normalized_kt == "concrete" and (has_keyframe_placeholder or has_clip_placeholder):
             keyframe_embeds, keyframe_embed_map = self._build_concrete_keyframe_embeds_for_section(
                 section,
                 image_items,
             )
+            clip_embeds = self._build_concrete_clip_embeds_by_segment_order(section, clip_items)
             structured = self._replace_tutorial_keyframe_placeholders(
                 base_text,
                 keyframe_embeds,
                 keyframe_embed_map=keyframe_embed_map,
             )
+            structured = self._replace_clip_placeholders(structured, clip_embeds)
             structured = self._replace_image_placeholders(structured, image_items)
             structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
             structured = self._strip_imgneeded_placeholders(structured).strip()
+            structured = self._append_missing_clip_embeds(structured or base_text, clip_items)
             return structured or base_text
 
-        # concrete 走“保图结构化”链路：跳过 img-desc 增量补全，直接做占位符回填。
         if normalized_kt != "concrete":
             augment_image_items = self._build_augment_image_items(section)
-            # 先做图片描述驱动的增量补全，再进入结构化步骤
             base_text = await self._augment_body_with_image_descriptions(section, base_text, augment_image_items)
 
         image_context = "(none)"
@@ -2965,16 +3323,16 @@ class MarkdownEnhancer:
                 [f"- img_id={item['img_id']} | img_description={item['img_description']}" for item in image_items]
             )
 
-        # 构建跨话题上下文（供 LLM 生成过渡句）
         adjacent_parts = []
         if prev_title:
-            adjacent_parts.append(f"- 上一个话题：{prev_title}")
+            adjacent_parts.append(f"- Previous section: {prev_title}")
         if next_title:
-            adjacent_parts.append(f"- 下一个话题：{next_title}")
-        adjacent_context = "\n".join(adjacent_parts) if adjacent_parts else "(无上下文)"
+            adjacent_parts.append(f"- Next section: {next_title}")
+        adjacent_context = "\n".join(adjacent_parts) if adjacent_parts else "(none)"
 
         if not self._enabled or not self._llm_client:
-            return self._append_missing_image_embeds(base_text, image_items)
+            structured = self._append_missing_clip_embeds(base_text, clip_items)
+            return self._append_missing_image_embeds(structured, image_items)
 
         structured_system_prompt = self._structured_system_prompt
         structured_user_prompt_template = self._structured_user_prompt_template
@@ -3030,6 +3388,11 @@ class MarkdownEnhancer:
             logger.warning(f"Structured text generation failed for {section.unit_id}: {exc}")
             structured = base_text
 
+        structured = self._replace_clip_placeholders(
+            structured,
+            self._build_concrete_clip_embeds_by_segment_order(section, clip_items),
+        )
+        structured = self._append_missing_clip_embeds(structured, clip_items)
         if not image_items:
             structured = self._strip_imgneeded_placeholders(structured)
             return structured
@@ -3045,21 +3408,18 @@ class MarkdownEnhancer:
 
         lines: List[str] = []
         main_flow_index = 0
-        for order, step in enumerate(steps, start=1):
-            step_type = self._normalize_tutorial_step_type(
-                step.get("step_type")
-                if isinstance(step, dict)
-                else None
-            )
-            step_id = int(step.get("step_id", order) or order)
-            desc = str(step.get("step_description", "") or f"step_{step_id}").strip()
-            if step_type == "MAIN_FLOW":
-                main_flow_index += 1
-                lines.append(f"#### {main_flow_index}.{desc}")
-            elif step_type in {"CONDITIONAL", "OPTIONAL"}:
-                lines.append(f"> [!NOTE] 分支情况处理：{desc}")
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+
+            step_type = self._normalize_tutorial_step_type(step.get("step_type"))
+            desc = str(step.get("step_description") or step.get("title") or "").strip() or "Untitled step"
+            if step_type == "CONDITIONAL":
+                lines.append(f"> [!NOTE] Conditional step: {desc}")
+            elif step_type == "OPTIONAL":
+                lines.append(f"> [!NOTE] Optional step: {desc}")
             elif step_type == "TROUBLESHOOTING":
-                lines.append(f"> [!WARNING] 常见报错解决：{desc}")
+                lines.append(f"> [!WARNING] Troubleshooting: {desc}")
             else:
                 main_flow_index += 1
                 lines.append(f"#### {main_flow_index}.{desc}")
@@ -3092,6 +3452,36 @@ class MarkdownEnhancer:
                     if normalized_image_path:
                         seen_keyframe_paths.add(normalized_image_path)
 
+            clip_entries = step.get("instructional_clips") or []
+            if not isinstance(clip_entries, list):
+                clip_entries = []
+            clip_embeds: List[str] = []
+            clip_embed_map: Dict[str, str] = {}
+            seen_clip_paths: set[str] = set()
+            for item in clip_entries:
+                clip_path = ""
+                clip_reason = ""
+                clip_id = ""
+                if isinstance(item, dict):
+                    clip_path = str(item.get("clip_path") or item.get("clip_file") or "").strip()
+                    clip_reason = str(item.get("clip_reason") or "").strip()
+                    clip_id = self._normalize_clip_id(item.get("clip_id", item.get("instructional_clip_id")))
+                elif isinstance(item, str):
+                    clip_path = str(item).strip()
+                if not clip_path:
+                    continue
+                normalized_clip_path = self._normalize_embed_path(clip_path)
+                if normalized_clip_path and normalized_clip_path in seen_clip_paths:
+                    continue
+                embed = self._format_obsidian_embed(clip_path, alias=clip_reason)
+                if not embed:
+                    continue
+                clip_embeds.append(embed)
+                if clip_id and clip_id not in clip_embed_map:
+                    clip_embed_map[clip_id] = embed
+                if normalized_clip_path:
+                    seen_clip_paths.add(normalized_clip_path)
+
             raw_main_operation = step.get("main_operation")
             if raw_main_operation is None:
                 raw_main_operation = step.get("main_operations")
@@ -3103,15 +3493,22 @@ class MarkdownEnhancer:
                 main_operation = str(raw_main_operation or "").strip()
 
             if not main_operation:
-                fallback_main_action = str(step.get("main_action") or "").strip()
-                main_operation = fallback_main_action
+                main_operation = str(step.get("main_action") or "").strip()
 
             has_keyframe_placeholder = bool(
                 re.search(r"\[\s*KEYFRAME_\d+\s*\]", main_operation, flags=re.IGNORECASE)
             )
+            has_clip_placeholder = bool(
+                re.search(r"\[\s*CLIP_\d+\s*\]", main_operation, flags=re.IGNORECASE)
+            )
             rendered_operation = self._replace_tutorial_keyframe_placeholders(
                 main_operation,
                 keyframe_embeds,
+            )
+            rendered_operation = self._replace_clip_placeholders(
+                rendered_operation,
+                clip_embeds,
+                clip_embed_map=clip_embed_map,
             )
             rendered_operation = self._replace_tutorial_legacy_placeholders(
                 rendered_operation,
@@ -3121,9 +3518,20 @@ class MarkdownEnhancer:
 
             if rendered_operation:
                 operation_lines = rendered_operation.splitlines()
+                rendered_embed_paths = self._extract_obsidian_embed_paths(rendered_operation)
                 if keyframe_embeds and not has_keyframe_placeholder:
-                    rendered_embed_paths = self._extract_obsidian_embed_paths(rendered_operation)
                     for embed in keyframe_embeds:
+                        embed_paths = self._extract_obsidian_embed_paths(embed)
+                        embed_path = next(iter(embed_paths), "")
+                        if embed_path:
+                            if embed_path in rendered_embed_paths:
+                                continue
+                            rendered_embed_paths.add(embed_path)
+                        elif embed in rendered_operation:
+                            continue
+                        operation_lines.append(embed)
+                if clip_embeds and not has_clip_placeholder:
+                    for embed in clip_embeds:
                         embed_paths = self._extract_obsidian_embed_paths(embed)
                         embed_path = next(iter(embed_paths), "")
                         if embed_path:
@@ -3137,24 +3545,25 @@ class MarkdownEnhancer:
                     lines.extend(operation_lines)
                 else:
                     lines.extend(self._quote_lines(operation_lines))
-            elif keyframe_embeds:
+            elif keyframe_embeds or clip_embeds:
+                fallback_embeds = list(keyframe_embeds) + list(clip_embeds)
                 if step_type == "MAIN_FLOW":
-                    lines.extend(keyframe_embeds)
+                    lines.extend(fallback_embeds)
                 else:
-                    lines.extend(self._quote_lines(keyframe_embeds))
+                    lines.extend(self._quote_lines(fallback_embeds))
 
-            clip_path = str(step.get("clip_file") or step.get("clip_path") or "").strip()
-            if clip_path:
-                clip_embed = self._format_obsidian_embed(clip_path)
-                if step_type == "MAIN_FLOW":
-                    lines.append(clip_embed)
-                else:
-                    lines.extend(self._quote_lines([clip_embed]))
+            if not clip_embeds:
+                clip_path = str(step.get("clip_file") or step.get("clip_path") or "").strip()
+                if clip_path:
+                    clip_embed = self._format_obsidian_embed(clip_path)
+                    if step_type == "MAIN_FLOW":
+                        lines.append(clip_embed)
+                    else:
+                        lines.extend(self._quote_lines([clip_embed]))
             lines.append("")
 
         return lines
 
-    
     async def _enhance_and_extract(self, section: EnhancedSection) -> Tuple[str, str]:
         """
         做什么：一次 LLM 调用同时完成「正文增强」与「逻辑结构化」。

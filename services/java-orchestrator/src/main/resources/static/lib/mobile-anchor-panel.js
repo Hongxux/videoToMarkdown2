@@ -682,6 +682,155 @@
         return !!(vditorHost && vditorHost.contains(active));
     }
 
+
+    function getEditorShortcutUtils() {
+        return window.MobileEditorShortcuts || null;
+    }
+
+
+    function buildAnchorEditorCommandKeymap() {
+        return [
+            {
+                combo: ['Ctrl+S', 'Meta+S'],
+                when: (context) => !!context.activeId,
+                run: (context) => {
+                    persistActiveLocalNoteFromEditor(context.activeId, { retitle: true });
+                    renderLocalNoteCards(context.activeId);
+                    runtime.editorDirty = false;
+                    setPreview('Local markdown saved');
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+D', 'Meta+D'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyDeleteParagraphShortcut();
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+B', 'Meta+B'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyBoldShortcut();
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+1', 'Meta+1'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyHeadingShortcut(3);
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+2', 'Meta+2'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyHeadingShortcut(4);
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+3', 'Meta+3'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyHeadingShortcut(5);
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+A', 'Meta+A'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyUnorderedListShortcut();
+                    return true;
+                },
+            },
+            {
+                combo: ['Ctrl+Q', 'Meta+Q'],
+                when: (context) => !!context.activeId,
+                run: () => {
+                    applyOrderedListShortcut();
+                    return true;
+                },
+            },
+        ];
+    }
+
+    function runAnchorEditorCommandKeymap(event) {
+        const shortcutUtils = getEditorShortcutUtils();
+        if (!(shortcutUtils && typeof shortcutUtils.runKeymap === 'function')) {
+            return false;
+        }
+        return shortcutUtils.runKeymap(event, buildAnchorEditorCommandKeymap(), {
+            activeId: runtime.activeId,
+        });
+    }
+
+
+    function handleAnchorEditorIndentKeydown(event) {
+        if (!event || event.ctrlKey || event.metaKey || event.altKey || String(event.key || '') !== 'Tab') {
+            return false;
+        }
+        if (!isAnchorPanelDetailMode() || !isEditorFocusTarget(event.target) || !runtime.activeId) {
+            return false;
+        }
+        const shortcutUtils = getEditorShortcutUtils();
+        if (shortcutUtils && typeof shortcutUtils.consumeKeyEvent === 'function') {
+            shortcutUtils.consumeKeyEvent(event);
+        } else {
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === 'function') {
+                event.stopImmediatePropagation();
+            }
+        }
+        if (runtime.wikilinkSuggest.open) {
+            closeWikilinkSuggest();
+        }
+        applyParagraphIndentShortcut(event.shiftKey);
+        return true;
+    }
+
+    function bindAnchorEditorIndentInterceptors() {
+        const shortcutUtils = getEditorShortcutUtils();
+        const targets = [
+            document.getElementById('anchorQuickNoteInput'),
+            document.getElementById('anchorQuickNoteVditor'),
+        ];
+        targets.forEach((target) => {
+            if (!(target instanceof HTMLElement)) {
+                return;
+            }
+            if (shortcutUtils && typeof shortcutUtils.bindKeymap === 'function') {
+                shortcutUtils.bindKeymap(target, [
+                    {
+                        combo: ['Tab', 'Shift+Tab'],
+                        when: () => isAnchorPanelDetailMode() && isEditorFocusTarget(target) && !!runtime.activeId,
+                        run: (_context, event) => {
+                            if (runtime.wikilinkSuggest.open) {
+                                closeWikilinkSuggest();
+                            }
+                            applyParagraphIndentShortcut(event.shiftKey);
+                            return true;
+                        },
+                    },
+                ], { marker: 'anchorIndentInterceptBound' });
+                return;
+            }
+            if (target.dataset.anchorIndentInterceptBound === '1') {
+                return;
+            }
+            target.dataset.anchorIndentInterceptBound = '1';
+            target.addEventListener('keydown', (event) => {
+                handleAnchorEditorIndentKeydown(event);
+            }, true);
+        });
+    }
+
     function dispatchTextareaInputEvent() {
         const editor = document.getElementById('anchorQuickNoteInput');
         if (!(editor instanceof HTMLTextAreaElement)) {
@@ -756,16 +905,34 @@
         return true;
     }
 
-    function applyHeadingShortcut() {
+    function applyHeadingShortcut(levelLike) {
+        const level = Math.max(1, Math.min(6, Number(levelLike) || 1));
         if (isVditorReady()) {
-            if (runVditorExecCommand('formatBlock', '<h1>')) {
+            if (runVditorExecCommand('formatBlock', `<h${level}>`)) {
                 return true;
             }
-            return runVditorExecCommand('formatBlock', 'h1');
+            return runVditorExecCommand('formatBlock', `h${level}`);
         }
+        const shortcutUtils = getEditorShortcutUtils();
+        const editor = document.getElementById('anchorQuickNoteInput');
+        if (shortcutUtils && typeof shortcutUtils.applyHeadingMutation === 'function' && editor instanceof HTMLTextAreaElement) {
+            const next = shortcutUtils.applyHeadingMutation({
+                value: String(editor.value || ''),
+                start: editor.selectionStart,
+                end: editor.selectionEnd,
+                level,
+            });
+            if (next && typeof next.value === 'string') {
+                editor.value = next.value;
+                editor.setSelectionRange(Number(next.start) || 0, Number(next.end) || Number(next.start) || 0);
+                dispatchTextareaInputEvent();
+                return true;
+            }
+        }
+        const marker = `${'#'.repeat(level)} `;
         return transformSelectedLinesInTextarea((line) => {
             const normalized = normalizeMarkdownLineBody(line);
-            return `${normalized.indent}# ${normalized.body}`;
+            return `${normalized.indent}${marker}${normalized.body}`;
         });
     }
 
@@ -1051,24 +1218,62 @@
 
     function applyParagraphIndentShortcut(outdentLike) {
         const outdent = !!outdentLike;
-        const indentUnit = '    ';
-        return applyEditorTextMutation(({ value, start }) => {
+        return applyEditorTextMutation(({ value, start, end }) => {
+            const shortcutUtils = getEditorShortcutUtils();
+            if (shortcutUtils && typeof shortcutUtils.applyParagraphIndentMutation === 'function') {
+                return shortcutUtils.applyParagraphIndentMutation({
+                    value,
+                    start,
+                    end,
+                    outdent,
+                });
+            }
+            const indentUnit = '    ';
             const range = resolveParagraphRangeByOffset(value, start);
             const paragraph = value.slice(range.start, range.end);
             const localCaret = Math.max(0, Math.min(paragraph.length, start - range.start));
-            const beforeCaret = paragraph.slice(0, localCaret);
-            const mapper = outdent
-                ? (line) => {
-                    if (line.startsWith('\t')) {
-                        return line.slice(1);
-                    }
-                    return line.replace(/^ {1,4}/, '');
+            const lines = paragraph.split('\n');
+            let consumed = 0;
+            let caretLineIndex = 0;
+            let caretColumn = 0;
+            for (let index = 0; index < lines.length; index += 1) {
+                const lineLength = String(lines[index] || '').length;
+                const lineEnd = consumed + lineLength;
+                if (localCaret <= lineEnd || index === lines.length - 1) {
+                    caretLineIndex = index;
+                    caretColumn = Math.max(0, Math.min(lineLength, localCaret - consumed));
+                    break;
                 }
-                : (line) => `${indentUnit}${line}`;
-            const nextParagraph = mapParagraphLines(paragraph, mapper);
-            const nextBeforeCaret = mapParagraphLines(beforeCaret, mapper);
+                consumed = lineEnd + 1;
+            }
+            const transformedLines = lines.map((line) => {
+                const source = String(line || '');
+                if (outdent) {
+                    return source.startsWith(indentUnit) ? source.slice(indentUnit.length) : source;
+                }
+                return `${indentUnit}${source}`;
+            });
+            let nextCaretLocal = 0;
+            for (let index = 0; index < transformedLines.length; index += 1) {
+                if (index < caretLineIndex) {
+                    nextCaretLocal += transformedLines[index].length + 1;
+                    continue;
+                }
+                const currentLine = String(lines[index] || '');
+                let nextColumn = caretColumn;
+                if (outdent) {
+                    if (currentLine.startsWith(indentUnit)) {
+                        nextColumn = Math.max(0, caretColumn - indentUnit.length);
+                    }
+                } else {
+                    nextColumn = caretColumn + indentUnit.length;
+                }
+                nextCaretLocal += Math.max(0, Math.min(transformedLines[index].length, nextColumn));
+                break;
+            }
+            const nextParagraph = transformedLines.join('\n');
             const nextValue = `${value.slice(0, range.start)}${nextParagraph}${value.slice(range.end)}`;
-            const nextCaret = range.start + nextBeforeCaret.length;
+            const nextCaret = range.start + nextCaretLocal;
             return {
                 value: nextValue,
                 start: nextCaret,
@@ -3965,6 +4170,7 @@
         if (!container || !textarea) {
             return false;
         }
+        bindAnchorEditorIndentInterceptors();
         const ready = await ensureVditorRuntime();
         if (!ready || !window.Vditor) {
             container.hidden = true;
@@ -10047,6 +10253,9 @@
                     return;
                 }
             }
+            if (handleAnchorEditorIndentKeydown(e)) {
+                return;
+            }
             if (runtime.wikilinkSuggest.open) {
                 if (keyRaw === 'ArrowDown') {
                     e.preventDefault();
@@ -10076,49 +10285,8 @@
             if ((!e.ctrlKey && !e.metaKey) || e.altKey) {
                 return;
             }
-            if (key === 's') {
-                if (!runtime.activeId) {
-                    return;
-                }
-                e.preventDefault();
-                e.stopPropagation();
-                persistActiveLocalNoteFromEditor(runtime.activeId, { retitle: true });
-                renderLocalNoteCards(runtime.activeId);
-                runtime.editorDirty = false;
-                setPreview('Local markdown saved');
+            if (runAnchorEditorCommandKeymap(e)) {
                 return;
-            }
-            if (!runtime.activeId) {
-                return;
-            }
-            if (key === 'd') {
-                e.preventDefault();
-                e.stopPropagation();
-                applyDeleteParagraphShortcut();
-                return;
-            }
-            if (key === 'b') {
-                e.preventDefault();
-                e.stopPropagation();
-                applyBoldShortcut();
-                return;
-            }
-            if (key === '1' || key === '2' || key === '3') {
-                e.preventDefault();
-                e.stopPropagation();
-                applyHeadingShortcut();
-                return;
-            }
-            if (key === 'a') {
-                e.preventDefault();
-                e.stopPropagation();
-                applyUnorderedListShortcut();
-                return;
-            }
-            if (key === 'q') {
-                e.preventDefault();
-                e.stopPropagation();
-                applyOrderedListShortcut();
             }
         }, true);
         document.addEventListener('keydown', (e) => {

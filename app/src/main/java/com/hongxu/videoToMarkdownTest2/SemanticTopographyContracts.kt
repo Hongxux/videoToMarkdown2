@@ -148,6 +148,60 @@ data class MobileMountedAnchorPayload(
     val latestRevision: MobileAnchorRevision?
 )
 
+data class MobileAnchorNoteDraft(
+    val localId: String,
+    val title: String,
+    val markdown: String,
+    val notePath: String,
+    val updatedAtMs: Long
+)
+
+data class MobileAnchorMountFile(
+    val relativePath: String,
+    val fileName: String,
+    val bytes: ByteArray,
+    val mimeType: String = "text/markdown"
+)
+
+data class MobileAnchorMountRequest(
+    val pathHint: String?,
+    val mainNotePath: String?,
+    val files: List<MobileAnchorMountFile>
+)
+
+data class MobileAnchorSyncOperation(
+    val op: String,
+    val relativePath: String,
+    val content: String = ""
+)
+
+data class MobileAnchorSyncRequest(
+    val pathHint: String?,
+    val mainNotePath: String?,
+    val operations: List<MobileAnchorSyncOperation>
+)
+
+data class MobileAnchorSyncResult(
+    val taskId: String,
+    val pathKey: String,
+    val anchorId: String,
+    val anchor: MobileAnchorData,
+    val revision: MobileAnchorRevision?,
+    val upsertCount: Int,
+    val deleteCount: Int,
+    val updatedAt: String
+)
+
+data class MobileAnchorDeleteResult(
+    val taskId: String,
+    val pathKey: String,
+    val deletedCount: Int,
+    val deletedAnchorIds: List<String>,
+    val missingAnchorIds: List<String>,
+    val deletedFileEntries: Int,
+    val updatedAt: String
+)
+
 /**
  * 与 java-orchestrator 的 /api/mobile/tasks/{taskId}/meta 契约对齐。
  */
@@ -202,6 +256,25 @@ interface MobileMarkdownMetaApi {
         pathHint: String?,
         notePath: String? = null
     ): MobileMountedAnchorPayload
+
+    suspend fun mountAnchorNotes(
+        taskId: String,
+        anchorId: String,
+        request: MobileAnchorMountRequest
+    ): MobileAnchorSyncResult
+
+    suspend fun syncAnchorNotes(
+        taskId: String,
+        anchorId: String,
+        request: MobileAnchorSyncRequest
+    ): MobileAnchorSyncResult
+
+    suspend fun deleteAnchors(
+        taskId: String,
+        pathHint: String?,
+        anchorIds: List<String>,
+        removeFiles: Boolean = false
+    ): MobileAnchorDeleteResult
 }
 
 /**
@@ -448,9 +521,119 @@ class HttpMobileMarkdownMetaApi(
         }
     }
 
-    /**
-     * 统一处理 HTTP 返回与 JSON 解析。
-     */
+    override suspend fun mountAnchorNotes(
+        taskId: String,
+        anchorId: String,
+        request: MobileAnchorMountRequest
+    ): MobileAnchorSyncResult {
+        return withContext(Dispatchers.IO) {
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val encodedAnchor = URLEncoder.encode(anchorId, StandardCharsets.UTF_8)
+            val boundary = "----android-anchor-mount-${System.currentTimeMillis()}"
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/anchors/$encodedAnchor/mount")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 10_000
+                readTimeout = 20_000
+                doOutput = true
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
+            }
+            connection.outputStream.use { output ->
+                if (!request.pathHint.isNullOrBlank()) {
+                    writeTextPart(output, boundary, "path", request.pathHint)
+                }
+                if (!request.mainNotePath.isNullOrBlank()) {
+                    writeTextPart(output, boundary, "mainNotePath", request.mainNotePath)
+                }
+                request.files.forEach { file ->
+                    writeTextPart(output, boundary, "relativePaths", file.relativePath)
+                    output.write("--$boundary\r\n".toByteArray(StandardCharsets.UTF_8))
+                    output.write(
+                        "Content-Disposition: form-data; name=\"files\"; filename=\"${file.fileName}\"\r\n".toByteArray(StandardCharsets.UTF_8)
+                    )
+                    output.write("Content-Type: ${file.mimeType}\r\n\r\n".toByteArray(StandardCharsets.UTF_8))
+                    output.write(file.bytes)
+                    output.write("\r\n".toByteArray(StandardCharsets.UTF_8))
+                }
+                output.write("--$boundary--\r\n".toByteArray(StandardCharsets.UTF_8))
+            }
+            parseAnchorSyncResult(connection)
+        }
+    }
+
+    override suspend fun syncAnchorNotes(
+        taskId: String,
+        anchorId: String,
+        request: MobileAnchorSyncRequest
+    ): MobileAnchorSyncResult {
+        return withContext(Dispatchers.IO) {
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val encodedAnchor = URLEncoder.encode(anchorId, StandardCharsets.UTF_8)
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/anchors/$encodedAnchor/sync")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 8_000
+                readTimeout = 15_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+            }
+            val body = JSONObject().apply {
+                put("path", request.pathHint ?: "")
+                put("mainNotePath", request.mainNotePath ?: "")
+                put("operations", JSONArray().apply {
+                    request.operations.forEach { operation ->
+                        put(JSONObject().apply {
+                            put("op", operation.op)
+                            put("relativePath", operation.relativePath)
+                            if (operation.content.isNotBlank()) {
+                                put("content", operation.content)
+                            }
+                        })
+                    }
+                })
+            }.toString()
+            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
+                writer.write(body)
+            }
+            parseAnchorSyncResult(connection)
+        }
+    }
+
+    override suspend fun deleteAnchors(
+        taskId: String,
+        pathHint: String?,
+        anchorIds: List<String>,
+        removeFiles: Boolean
+    ): MobileAnchorDeleteResult {
+        return withContext(Dispatchers.IO) {
+            val encodedTask = URLEncoder.encode(taskId, StandardCharsets.UTF_8)
+            val url = URL("$apiBaseUrl/tasks/$encodedTask/anchors/delete")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 8_000
+                readTimeout = 15_000
+                doOutput = true
+                setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("Accept", "application/json")
+            }
+            val body = JSONObject().apply {
+                put("path", pathHint ?: "")
+                put("removeFiles", removeFiles)
+                put("anchorIds", JSONArray().apply {
+                    anchorIds.map { it.trim() }
+                        .filter { it.isNotBlank() }
+                        .forEach { put(it) }
+                })
+            }.toString()
+            OutputStreamWriter(connection.outputStream, StandardCharsets.UTF_8).use { writer ->
+                writer.write(body)
+            }
+            parseAnchorDeleteResult(connection)
+        }
+    }
+
     private fun HttpURLConnection.useAndReadPayload(): MobileTaskMetaPayload {
         return try {
             val code = responseCode
@@ -877,7 +1060,7 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
             .takeIf { it > startIndex }
             ?: anchorObj.optInt("end", -1).takeIf { it > startIndex }
             ?: continue
-        val revisions = buildList {
+        val revisions = buildList<MobileAnchorRevision> {
             val revisionArray = anchorObj.optJSONArray("revisions")
             if (revisionArray != null) {
                 for (i in 0 until revisionArray.length()) {
@@ -926,6 +1109,126 @@ private fun parseMobileTaskMetaPayload(text: String): MobileTaskMetaPayload {
         anchors = anchors,
         taskTitle = root.optString("taskTitle")
     )
+}
+
+private fun parseAnchorSyncResult(connection: HttpURLConnection): MobileAnchorSyncResult {
+    try {
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val text = stream?.use {
+            BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+        }.orEmpty()
+        if (code !in 200..299) {
+            throw IllegalStateException("HTTP $code: $text")
+        }
+        val root = JSONObject(if (text.isBlank()) "{}" else text)
+        return MobileAnchorSyncResult(
+            taskId = root.optString("taskId"),
+            pathKey = root.optString("pathKey"),
+            anchorId = root.optString("anchorId"),
+            anchor = parseSingleMobileAnchorData(root.optJSONObject("anchor")),
+            revision = parseSingleMobileAnchorRevision(root.optJSONObject("revision")),
+            upsertCount = root.optInt("upsertCount", 0),
+            deleteCount = root.optInt("deleteCount", 0),
+            updatedAt = root.optString("updatedAt")
+        )
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun parseAnchorDeleteResult(connection: HttpURLConnection): MobileAnchorDeleteResult {
+    try {
+        val code = connection.responseCode
+        val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+        val text = stream?.use {
+            BufferedReader(InputStreamReader(it, StandardCharsets.UTF_8)).readText()
+        }.orEmpty()
+        if (code !in 200..299) {
+            throw IllegalStateException("HTTP $code: $text")
+        }
+        val root = JSONObject(if (text.isBlank()) "{}" else text)
+        return MobileAnchorDeleteResult(
+            taskId = root.optString("taskId"),
+            pathKey = root.optString("pathKey"),
+            deletedCount = root.optInt("deletedCount", 0),
+            deletedAnchorIds = parseStringArray(root.optJSONArray("deletedAnchorIds")),
+            missingAnchorIds = parseStringArray(root.optJSONArray("missingAnchorIds")),
+            deletedFileEntries = root.optInt("deletedFileEntries", 0),
+            updatedAt = root.optString("updatedAt")
+        )
+    } finally {
+        connection.disconnect()
+    }
+}
+
+private fun writeTextPart(
+    output: java.io.OutputStream,
+    boundary: String,
+    name: String,
+    value: String
+) {
+    output.write("--$boundary\r\n".toByteArray(StandardCharsets.UTF_8))
+    output.write("Content-Disposition: form-data; name=\"$name\"\r\n\r\n".toByteArray(StandardCharsets.UTF_8))
+    output.write(value.toByteArray(StandardCharsets.UTF_8))
+    output.write("\r\n".toByteArray(StandardCharsets.UTF_8))
+}
+
+private fun parseSingleMobileAnchorRevision(revisionObj: JSONObject?): MobileAnchorRevision? {
+    revisionObj ?: return null
+    return MobileAnchorRevision(
+        revisionId = revisionObj.optString("revisionId").trim(),
+        createdAt = revisionObj.optString("createdAt").trim(),
+        relativeDir = revisionObj.optString("relativeDir").trim(),
+        notePath = revisionObj.optString("notePath").trim(),
+        fileCount = revisionObj.optInt("fileCount", -1).coerceAtLeast(-1),
+        totalBytes = revisionObj.optLong("totalBytes", -1L).coerceAtLeast(-1L),
+        files = parseRevisionFiles(revisionObj)
+    )
+}
+
+private fun parseSingleMobileAnchorData(anchorObj: JSONObject?): MobileAnchorData {
+
+    val safeAnchorObj = anchorObj ?: JSONObject()
+    val revisions = buildList {
+        val revisionArray = safeAnchorObj.optJSONArray("revisions")
+        if (revisionArray != null) {
+            for (i in 0 until revisionArray.length()) {
+                parseSingleMobileAnchorRevision(revisionArray.optJSONObject(i))?.let(::add)
+            }
+        }
+    }
+    return MobileAnchorData(
+        blockId = safeAnchorObj.optString("blockId").trim(),
+        startIndex = safeAnchorObj.optInt("startIndex", safeAnchorObj.optInt("start", 0)),
+        endIndex = safeAnchorObj.optInt("endIndex", safeAnchorObj.optInt("end", 0)),
+        quote = safeAnchorObj.optString("quote").trim(),
+        contextQuote = safeAnchorObj.optString("contextQuote")
+            .trim()
+            .ifBlank { safeAnchorObj.optString("quoteSnapshot").trim() },
+        anchorHint = safeAnchorObj.optString("anchorHint")
+            .trim()
+            .ifBlank { safeAnchorObj.optString("hint").trim() },
+        status = safeAnchorObj.optString("status").trim(),
+        mountedPath = safeAnchorObj.optString("mountedPath").trim(),
+        mountedRevisionId = safeAnchorObj.optString("mountedRevisionId").trim(),
+        updatedAt = safeAnchorObj.optString("updatedAt").trim(),
+        revisions = revisions
+    )
+}
+
+private fun parseStringArray(array: JSONArray?): List<String> {
+    if (array == null || array.length() == 0) {
+        return emptyList()
+    }
+    return buildList {
+        for (index in 0 until array.length()) {
+            val value = array.optString(index).trim()
+            if (value.isNotBlank()) {
+                add(value)
+            }
+        }
+    }
 }
 
 private fun parseMountedAnchorPayload(text: String): MobileMountedAnchorPayload {

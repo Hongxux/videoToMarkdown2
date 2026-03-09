@@ -81,6 +81,7 @@ class VLAnalysisResult:
     main_action: str = ""
     main_operation: List[str] = field(default_factory=list)
     instructional_keyframes: List[Dict[str, Any]] = field(default_factory=list)
+    instructional_clips: List[Dict[str, Any]] = field(default_factory=list)
     precautions: List[str] = field(default_factory=list)
     step_summary: str = ""
     operation_guidance: List[str] = field(default_factory=list)
@@ -1196,7 +1197,7 @@ class VLVideoAnalyzer:
             "clip_start_sec (Float), clip_end_sec (Float), main_operation (String), instructional_keyframes (List[Object]).\n"
             "   instructional_keyframes item fields: keyframe_id (String, e.g. KEYFRAME_1), timestamp_sec (Float), optional frame_reason (String), "
             "optional bbox ([xmin,ymin,xmax,ymax], 0-1000).\n"
-            "   Optional fields: main_action (String), precautions (List[String]), "
+            "   Optional fields: instructional_clips (List[Object]), main_action (String), precautions (List[String]), "
             "step_summary (String), operation_guidance (List[String]), step_type (MAIN_FLOW/CONDITIONAL/OPTIONAL/TROUBLESHOOTING).\n"
             "   If an optional field is unnecessary for a step, omit it or return an empty value.\n"
             "4) Do not output reasoning, key_evidence, or knowledge_type fields.\n"
@@ -1206,7 +1207,8 @@ class VLVideoAnalyzer:
             "   - No step shorter than 5 seconds. Merge short steps with adjacent steps.\n"
             "6) instructional_keyframes must be true instructional keyframes, "
             "prefer final state or just-before-submit moments.\n"
-            "7) Avoid -1 for timestamps; if action spans whole clip use [0.0, clip_duration].\n"
+            "7) instructional_clips are optional short motion clips aligned with [CLIP_N] placeholders in main_operation.\n"
+            "8) Avoid -1 for timestamps; if action spans whole clip use [0.0, clip_duration].\n"
         )
 
     @staticmethod
@@ -1245,9 +1247,10 @@ class VLVideoAnalyzer:
             "clip_start_sec (Float), clip_end_sec (Float), instructional_keyframes (List[Object]).\n"
             "3) instructional_keyframes item fields: keyframe_id (String, e.g. KEYFRAME_1), timestamp_sec (Float), frame_reason (String), "
             "optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
-            "4) Keep all textual fields in Chinese. Do not output reasoning/key_evidence/step_type.\n"
-            "5) main_content must be markdown and use [KEYFRAME_N] placeholders aligned with instructional_keyframes.\n"
-            "6) Use relative clip timestamps (from 0.0). Do not output -1.\n"
+            "4) Optional instructional_clips item fields: clip_id (String, e.g. CLIP_1), start_sec (Float), end_sec (Float), clip_reason (String).\n"
+            "5) Keep all textual fields in Chinese. Do not output reasoning/key_evidence/step_type.\n"
+            "6) main_content must be markdown and use [KEYFRAME_N]/[CLIP_N] placeholders aligned with instructional_keyframes/instructional_clips.\n"
+            "7) Use relative clip timestamps (from 0.0). Do not output -1.\n"
         )
 
     def _get_output_constraints(self, analysis_mode: str = "default") -> str:
@@ -1389,29 +1392,17 @@ class VLVideoAnalyzer:
                     for ts in ar.suggested_screenshoot_timestamps
                 ]
 
-                route_override = ""
-                if normalized_mode == "tutorial_stepwise":
-                    # 教程模式下线 route control 字段，避免影响步骤切分与关键帧生成。
-                    ar.no_needed_video = False
-                    ar.should_type = ""
-                else:
-                    route_override = self._normalize_should_type(ar.should_type)
-                    ar.no_needed_video, ar.should_type = self._normalize_route_controls(
-                        ar.no_needed_video,
-                        route_override,
-                    )
-                    if route_override == "abstract":
-                        ar.knowledge_type = "abstract"
-                        should_abstract_count += 1
-                    elif route_override == "concrete":
-                        ar.knowledge_type = "concrete"
-                        should_concrete_count += 1
+                route_override = str(getattr(ar, "should_type", "") or "").strip().lower()
+                if route_override == "abstract":
+                    should_abstract_count += 1
+                elif route_override == "concrete":
+                    should_concrete_count += 1
 
-                    if ar.no_needed_video:
-                        # no_needed_video=true 时，统一转为 abstract，供下游按抽象语义处理。
-                        ar.knowledge_type = "abstract"
-                        ar.should_type = "abstract"
-                        no_needed_video_count += 1
+                if ar.no_needed_video:
+                    ar.knowledge_type = "abstract"
+                    ar.should_type = "abstract"
+                    route_override = "abstract"
+                    no_needed_video_count += 1
 
                 result.analysis_results.append(ar)
 
@@ -1419,8 +1410,50 @@ class VLVideoAnalyzer:
                 step_type = self._normalize_step_type(getattr(ar, "step_type", ""))
                 action_brief = self._sanitize_action_brief(ar.step_description)
 
+                instructional_clip_requests: List[Dict[str, Any]] = []
+                for clip_index, clip_meta in enumerate(list(getattr(ar, "instructional_clips", []) or []), start=1):
+                    normalized_clip_id = self._normalize_clip_id(
+                        clip_meta.get("clip_id", clip_meta.get("clipId", clip_index)),
+                        fallback_index=clip_index,
+                    )
+                    clip_number_match = re.search(r"(\d+)$", normalized_clip_id)
+                    clip_number = int(clip_number_match.group(1)) if clip_number_match else clip_index
+                    clip_reason = str(clip_meta.get("clip_reason", "") or "").strip()
+                    clip_rel_start = safe_float(clip_meta.get("start_sec", ar.clip_start_sec), ar.clip_start_sec)
+                    clip_rel_end = safe_float(clip_meta.get("end_sec", ar.clip_end_sec), clip_rel_start)
+                    if clip_rel_end < clip_rel_start:
+                        clip_rel_start, clip_rel_end = clip_rel_end, clip_rel_start
+                    clip_abs_start = semantic_unit_start_sec + clip_rel_start
+                    clip_abs_end = semantic_unit_start_sec + clip_rel_end
+                    if normalized_mode == "tutorial_stepwise":
+                        clip_stem = f"{semantic_unit_id}_clip_step_{step_id:02d}_clip_{clip_number:02d}_{action_brief}"
+                    else:
+                        clip_stem = f"{semantic_unit_id}_clip_concrete_seg_{step_id:02d}_clip_{clip_number:02d}_{action_brief}"
+                    instructional_clip_requests.append({
+                        "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, clip_stem),
+                        "start_sec": clip_abs_start,
+                        "end_sec": clip_abs_end,
+                        "_analysis_relative_start_sec": clip_rel_start,
+                        "_analysis_relative_end_sec": clip_rel_end,
+                        "knowledge_type": "process" if normalized_mode == "tutorial_stepwise" else ar.knowledge_type,
+                        "semantic_unit_id": semantic_unit_id,
+                        "step_id": step_id,
+                        "step_description": ar.step_description,
+                        "step_type": step_type,
+                        "action_brief": action_brief,
+                        "main_action": str(ar.main_action or "").strip(),
+                        "main_operation": list(ar.main_operation or []),
+                        "precautions": list(ar.precautions or []),
+                        "step_summary": str(ar.step_summary or "").strip(),
+                        "operation_guidance": list(ar.operation_guidance or []),
+                        "analysis_mode": normalized_mode,
+                        "instructional_clip_id": normalized_clip_id,
+                        "clip_reason": clip_reason,
+                    })
+
                 if normalized_mode == "tutorial_stepwise":
-                    # 教程模式仅关注步骤切分与关键帧，不依赖 VL 返回 knowledge_type。
+                    if instructional_clip_requests:
+                        result.clip_requests.extend(instructional_clip_requests)
                     tutorial_clip_stem = f"{semantic_unit_id}_clip_step_{step_id:02d}_{action_brief}"
                     result.clip_requests.append({
                         "clip_id": self._build_unit_relative_asset_id(semantic_unit_id, tutorial_clip_stem),
@@ -1441,8 +1474,10 @@ class VLVideoAnalyzer:
                         "operation_guidance": list(ar.operation_guidance or []),
                         "analysis_mode": normalized_mode,
                     })
+                elif normalized_mode == "concrete":
+                    if instructional_clip_requests:
+                        result.clip_requests.extend(instructional_clip_requests)
                 else:
-                    # 默认模式保留旧行为：讲解型不生成视频切片。
                     if ar.no_needed_video:
                         continue
                     if route_override == "abstract":
@@ -2125,13 +2160,14 @@ class VLVideoAnalyzer:
 
         return (
             "You are an instructional video editor for 1-on-1 teaching replication.\n"
-            "Your only task is to split the clip into complete procedural steps and choose instructional keyframes.\n"
+            "Your only task is to split the clip into complete procedural steps and choose instructional keyframes / instructional clips.\n"
             "Do NOT classify knowledge types.\n"
             "For each step, output only: step_id, step_description, clip_start_sec, clip_end_sec, "
             "main_operation, instructional_keyframes, and optional fields "
-            "(main_action, precautions, step_summary, operation_guidance).\n"
+            "(instructional_clips, main_action, precautions, step_summary, operation_guidance).\n"
             "instructional_keyframes item schema: keyframe_id (e.g. KEYFRAME_1), timestamp_sec, optional frame_reason, "
             "optional bbox([xmin,ymin,xmax,ymax],0-1000).\n"
+            "instructional_clips item schema: clip_id (e.g. CLIP_1), start_sec, end_sec, optional clip_reason.\n"
             "Optional fields can be omitted or left empty when unnecessary.\n"
             "Keep explanation + execution + result in the same step.\n"
             "Remove hesitation/thinking-only intervals with no new information.\n"
@@ -2145,7 +2181,8 @@ class VLVideoAnalyzer:
             "You are a concrete-knowledge video analyst.\n"
             "Focus on extracting visually grounded content and precise keyframe timestamps.\n"
             "For each segment, provide: segment_id, segment_description, main_content, clip_start_sec, clip_end_sec, instructional_keyframes.\n"
-            "main_content must be markdown in Chinese and include [KEYFRAME_N] placeholders aligned with instructional_keyframes.\n"
+            "Optional instructional_clips item schema: clip_id (e.g. CLIP_1), start_sec, end_sec, clip_reason.\n"
+            "main_content must be markdown in Chinese and include [KEYFRAME_N]/[CLIP_N] placeholders aligned with instructional_keyframes/instructional_clips.\n"
             "Do not output reasoning or extra narration outside JSON.\n"
         )
 
@@ -2789,6 +2826,21 @@ class VLVideoAnalyzer:
 
         return f"KEYFRAME_{fallback}"
 
+    def _normalize_clip_id(self, value: Any, *, fallback_index: int) -> str:
+        fallback = max(1, int(fallback_index))
+        text = str(value or "").strip()
+        if not text:
+            return f"CLIP_{fallback}"
+
+        matched = re.search(r"CLIP[_\-\s]*(\d+)", text, flags=re.IGNORECASE)
+        if matched:
+            return f"CLIP_{int(matched.group(1))}"
+
+        if re.fullmatch(r"\d+", text):
+            return f"CLIP_{int(text)}"
+
+        return f"CLIP_{fallback}"
+
     def _normalize_instructional_keyframes(
         self,
         value: Any,
@@ -2830,6 +2882,55 @@ class VLVideoAnalyzer:
                     "keyframe_id": self._normalize_keyframe_id(None, fallback_index=index),
                 }
             )
+        return normalized
+
+    def _normalize_instructional_clips(
+        self,
+        value: Any,
+        *,
+        clip_start_sec: float,
+        clip_end_sec: float,
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+
+        normalized: List[Dict[str, Any]] = []
+        max_duration_sec = 5.0
+        for index, item in enumerate(value, start=1):
+            if not isinstance(item, dict):
+                continue
+
+            start_sec = safe_float(
+                item.get("start_sec", item.get("clip_start_sec", item.get("start", clip_start_sec))),
+                clip_start_sec,
+            )
+            end_sec = safe_float(
+                item.get("end_sec", item.get("clip_end_sec", item.get("end", start_sec))),
+                start_sec,
+            )
+            if end_sec < start_sec:
+                start_sec, end_sec = end_sec, start_sec
+            start_sec = max(clip_start_sec, min(start_sec, clip_end_sec))
+            end_sec = max(clip_start_sec, min(end_sec, clip_end_sec))
+            if end_sec < start_sec:
+                end_sec = start_sec
+            if end_sec - start_sec > max_duration_sec:
+                end_sec = min(clip_end_sec, start_sec + max_duration_sec)
+            if end_sec <= start_sec:
+                continue
+
+            normalized.append(
+                {
+                    "clip_id": self._normalize_clip_id(
+                        item.get("clip_id", item.get("clipId", item.get("id"))),
+                        fallback_index=index,
+                    ),
+                    "start_sec": round(float(start_sec), 6),
+                    "end_sec": round(float(end_sec), 6),
+                    "clip_reason": str(item.get("clip_reason", item.get("reason", "")) or "").strip(),
+                }
+            )
+
         return normalized
 
     def _normalize_bool_flag(self, value: Any) -> bool:
@@ -2910,6 +3011,11 @@ class VLVideoAnalyzer:
                 item.instructional_keyframes,
                 fallback_timestamps=clamped_timestamps,
             )
+            instructional_clips = self._normalize_instructional_clips(
+                getattr(item, "instructional_clips", []),
+                clip_start_sec=clip_start,
+                clip_end_sec=clip_end,
+            )
             clamped_keyframes: List[Dict[str, Any]] = []
             for key_index, keyframe in enumerate(keyframes, start=1):
                 raw_ts = keyframe.get("timestamp_sec", None)
@@ -2951,6 +3057,7 @@ class VLVideoAnalyzer:
             item.main_action = main_action
             item.main_operation = main_operation
             item.instructional_keyframes = clamped_keyframes
+            item.instructional_clips = instructional_clips
             item.precautions = precautions
             item.step_summary = step_summary
             item.operation_guidance = operation_guidance
@@ -3088,6 +3195,13 @@ class VLVideoAnalyzer:
             if clip_end_sec < clip_start_sec:
                 clip_start_sec, clip_end_sec = clip_end_sec, clip_start_sec
 
+            raw_instructional_clips = item.get("instructional_clips", None)
+            instructional_clips = self._normalize_instructional_clips(
+                raw_instructional_clips,
+                clip_start_sec=clip_start_sec,
+                clip_end_sec=clip_end_sec,
+            )
+
             key_evidence = item.get("key_evidence", "")
             if isinstance(key_evidence, list):
                 key_evidence = "; ".join([str(x) for x in key_evidence if x is not None])
@@ -3145,6 +3259,7 @@ class VLVideoAnalyzer:
                 main_action=main_action if tutorial_like else "",
                 main_operation=main_operation if tutorial_like else ([main_content] if concrete_like and main_content else []),
                 instructional_keyframes=instructional_keyframes if (tutorial_like or concrete_like) else [],
+                instructional_clips=instructional_clips if (tutorial_like or concrete_like) else [],
                 precautions=precautions if tutorial_like else [],
                 step_summary=step_summary if tutorial_like else "",
                 operation_guidance=operation_guidance if tutorial_like else [],
@@ -3164,6 +3279,7 @@ class VLVideoAnalyzer:
                     "clip_start_sec": clip_start_sec,
                     "clip_end_sec": clip_end_sec,
                     "instructional_keyframes": instructional_keyframes,
+                    "instructional_clips": instructional_clips,
                     "instructional_keyframe_timestamp": timestamps,
                 })
             elif concrete_like:
@@ -3176,6 +3292,7 @@ class VLVideoAnalyzer:
                     "clip_start_sec": clip_start_sec,
                     "clip_end_sec": clip_end_sec,
                     "instructional_keyframes": instructional_keyframes,
+                    "instructional_clips": instructional_clips,
                     "instructional_keyframe_timestamp": timestamps,
                 }
                 if precautions:
@@ -3205,6 +3322,7 @@ class VLVideoAnalyzer:
                     "main_action": str(r.main_action or "").strip(),
                     "main_operation": list(r.main_operation or []),
                     "instructional_keyframes": list(r.instructional_keyframes or []),
+                    "instructional_clips": list(r.instructional_clips or []),
                     "precautions": list(r.precautions or []),
                     "step_summary": str(r.step_summary or "").strip(),
                     "operation_guidance": list(r.operation_guidance or []),

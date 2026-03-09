@@ -3743,6 +3743,60 @@ class VLMaterialGenerator:
                 normalized.append(entry)
             return normalized
 
+        def _normalize_instructional_clip_id(value: Any, fallback_index: int) -> str:
+            fallback = max(1, int(fallback_index))
+            text_value = str(value or "").strip()
+            if not text_value:
+                return f"CLIP_{fallback}"
+            matched = re.search(r"CLIP[_\-\s]*(\d+)", text_value, flags=re.IGNORECASE)
+            if matched:
+                return f"CLIP_{int(matched.group(1))}"
+            if re.fullmatch(r"\d+", text_value):
+                return f"CLIP_{int(text_value)}"
+            return f"CLIP_{fallback}"
+
+        def _normalize_instructional_clip_objects(
+            value: Any,
+            *,
+            start_sec: float,
+            end_sec: float,
+        ) -> List[Dict[str, Any]]:
+            if not isinstance(value, list):
+                return []
+            normalized: List[Dict[str, Any]] = []
+            max_duration_sec = 5.0
+            for index, item in enumerate(value, start=1):
+                if not isinstance(item, dict):
+                    continue
+                clip_start = safe_float(
+                    item.get("start_sec", item.get("clip_start_sec", item.get("start", start_sec))),
+                    start_sec,
+                )
+                clip_end = safe_float(
+                    item.get("end_sec", item.get("clip_end_sec", item.get("end", clip_start))),
+                    clip_start,
+                )
+                if clip_end < clip_start:
+                    clip_start, clip_end = clip_end, clip_start
+                clip_start = max(start_sec, min(clip_start, end_sec))
+                clip_end = max(start_sec, min(clip_end, end_sec))
+                if clip_end - clip_start > max_duration_sec:
+                    clip_end = min(end_sec, clip_start + max_duration_sec)
+                if clip_end <= clip_start:
+                    continue
+                normalized.append(
+                    {
+                        "clip_id": _normalize_instructional_clip_id(
+                            item.get("clip_id", item.get("clipId", item.get("id"))),
+                            fallback_index=index,
+                        ),
+                        "start_sec": float(clip_start),
+                        "end_sec": float(clip_end),
+                        "clip_reason": str(item.get("clip_reason", item.get("reason", "")) or "").strip(),
+                    }
+                )
+            return normalized
+
         raw_steps_by_id: Dict[int, Dict[str, Any]] = {}
         for raw_step in raw_response_json or []:
             if not isinstance(raw_step, dict):
@@ -3770,26 +3824,46 @@ class VLMaterialGenerator:
             else:
                 step_ss.sort(key=lambda x: float(x.get("timestamp_sec", 0.0)))
 
-        ordered_clips = sorted(
-            tutorial_clips,
-            key=lambda c: (
-                int(safe_float(c.get("step_id", 0), 0.0)),
-                safe_float(
-                    c.get(
+        primary_clips_by_step: Dict[int, List[Dict[str, Any]]] = {}
+        instructional_clips_by_step: Dict[int, List[Dict[str, Any]]] = {}
+        for clip in tutorial_clips:
+            step_id = int(safe_float(clip.get("step_id", 0), 0.0))
+            if step_id <= 0:
+                continue
+            if str(clip.get("instructional_clip_id", "") or "").strip():
+                instructional_clips_by_step.setdefault(step_id, []).append(clip)
+            else:
+                primary_clips_by_step.setdefault(step_id, []).append(clip)
+
+        def _clip_sort_key(clip_item: Dict[str, Any]) -> float:
+            if use_relative_ts:
+                return safe_float(
+                    clip_item.get(
                         "_analysis_relative_start_sec",
-                        c.get("start_sec", 0.0),
-                    )
-                    if use_relative_ts
-                    else c.get("start_sec", 0.0),
+                        clip_item.get("start_sec", 0.0),
+                    ),
                     0.0,
-                ),
-            ),
+                )
+            return safe_float(clip_item.get("start_sec", 0.0), 0.0)
+
+        for clip_group in primary_clips_by_step.values():
+            clip_group.sort(key=_clip_sort_key)
+        for clip_group in instructional_clips_by_step.values():
+            clip_group.sort(key=_clip_sort_key)
+
+        step_ids = sorted(
+            set(raw_steps_by_id.keys())
+            | set(screenshots_by_step.keys())
+            | set(primary_clips_by_step.keys())
+            | set(instructional_clips_by_step.keys())
         )
 
-        export_workers = self._resolve_tutorial_asset_export_workers(len(ordered_clips))
+        export_workers = self._resolve_tutorial_asset_export_workers(
+            max(1, len(step_ids) + sum(len(items) for items in instructional_clips_by_step.values()))
+        )
         export_semaphore = asyncio.Semaphore(export_workers)
         logger.info(
-            f"[VL-Tutorial] asset export parallel: unit={unit_id}, steps={len(ordered_clips)}, workers={export_workers}"
+            f"[VL-Tutorial] asset export parallel: unit={unit_id}, steps={len(step_ids)}, workers={export_workers}"
         )
 
         async def _run_limited(awaitable: Any) -> Any:
@@ -3798,85 +3872,98 @@ class VLMaterialGenerator:
 
         step_jobs: List[Dict[str, Any]] = []
         ext = "jpg" if self.tutorial_keyframe_image_ext == "jpeg" else self.tutorial_keyframe_image_ext
-        for idx, clip in enumerate(ordered_clips, start=1):
-            step_id = int(safe_float(clip.get("step_id", idx), float(idx)))
-            step_index = step_id if step_id > 0 else idx
-            step_description = str(clip.get("step_description", "") or "").strip()
+        for idx, step_key in enumerate(step_ids, start=1):
+            step_index = step_key if step_key > 0 else idx
             raw_step = raw_steps_by_id.get(step_index, {})
+            primary_clips = list(primary_clips_by_step.get(step_index, []) or [])
+            primary_clip = primary_clips[0] if primary_clips else {}
+            step_instructional_clip_requests = list(instructional_clips_by_step.get(step_index, []) or [])
+
+            step_description = str(
+                primary_clip.get("step_description")
+                or raw_step.get("step_description")
+                or raw_step.get("description")
+                or ""
+            ).strip()
             step_type = _normalize_step_type(
-                clip.get("step_type", raw_step.get("step_type", raw_step.get("stepType", "")))
+                primary_clip.get("step_type", raw_step.get("step_type", raw_step.get("stepType", "")))
             )
             main_action = str(
-                clip.get("main_action")
+                primary_clip.get("main_action")
                 or raw_step.get("main_action")
-                or raw_step.get("主要动作")
                 or ""
             ).strip()
             raw_main_operation = raw_step.get("main_operation", None)
             if raw_main_operation is None:
                 raw_main_operation = raw_step.get("main_operations", None)
             if raw_main_operation is None:
-                raw_main_operation = clip.get("main_operation")
-            if raw_main_operation is None:
-                raw_main_operation = raw_step.get("主要操作", None)
+                raw_main_operation = primary_clip.get("main_operation")
             main_operation = _normalize_main_operation(raw_main_operation)
-            raw_precautions = clip.get("precautions")
+            raw_precautions = primary_clip.get("precautions")
             if raw_precautions is None:
                 raw_precautions = raw_step.get("precautions", None)
             if raw_precautions is None:
                 raw_precautions = raw_step.get("notes", None)
-            if raw_precautions is None:
-                raw_precautions = raw_step.get("注意事项", None)
             precautions = _normalize_text_list(raw_precautions)
             step_summary = str(
-                clip.get("step_summary")
+                primary_clip.get("step_summary")
                 or raw_step.get("step_summary")
-                or raw_step.get("步骤小结")
                 or raw_step.get("summary")
                 or ""
             ).strip()
-            raw_operation_guidance = clip.get("operation_guidance")
+            raw_operation_guidance = primary_clip.get("operation_guidance")
             if raw_operation_guidance is None:
                 raw_operation_guidance = raw_step.get("operation_guidance", None)
-            if raw_operation_guidance is None:
-                raw_operation_guidance = raw_step.get("操作指导", None)
             if raw_operation_guidance is None:
                 raw_operation_guidance = raw_step.get("guidance", None)
             operation_guidance = _normalize_text_list(raw_operation_guidance)
             action_brief = self._slugify_action_brief(
-                str(clip.get("action_brief", "") or step_description),
+                str(primary_clip.get("action_brief", "") or step_description),
             )
             if action_brief == "action" and step_description:
                 action_brief = self._slugify_action_brief(step_description)
 
+            fallback_clip_for_bounds = primary_clip or (step_instructional_clip_requests[0] if step_instructional_clip_requests else {})
             if use_relative_ts:
                 start_sec = safe_float(
                     raw_step.get(
                         "clip_start_sec",
-                        clip.get("_analysis_relative_start_sec", clip.get("start_sec", 0.0)),
+                        fallback_clip_for_bounds.get("_analysis_relative_start_sec", fallback_clip_for_bounds.get("start_sec", 0.0)),
                     ),
                     0.0,
                 )
                 end_sec = safe_float(
                     raw_step.get(
                         "clip_end_sec",
-                        clip.get("_analysis_relative_end_sec", clip.get("end_sec", start_sec)),
+                        fallback_clip_for_bounds.get("_analysis_relative_end_sec", fallback_clip_for_bounds.get("end_sec", start_sec)),
                     ),
                     start_sec,
                 )
                 start_sec = max(0.0, start_sec)
                 end_sec = max(0.0, end_sec)
             else:
-                start_sec = safe_float(clip.get("start_sec", 0.0), 0.0)
-                end_sec = safe_float(clip.get("end_sec", start_sec), start_sec)
+                start_sec = safe_float(
+                    fallback_clip_for_bounds.get(
+                        "start_sec",
+                        raw_step.get("clip_start_sec", 0.0),
+                    ),
+                    0.0,
+                )
+                end_sec = safe_float(
+                    fallback_clip_for_bounds.get(
+                        "end_sec",
+                        raw_step.get("clip_end_sec", start_sec),
+                    ),
+                    start_sec,
+                )
             if end_sec < start_sec:
                 start_sec, end_sec = end_sec, start_sec
 
             clip_filename = f"{unit_id}_clip_step_{step_index:02d}_{action_brief}.mp4"
-            clip_output_path = unit_dir / clip_filename
+            clip_output_path = unit_dir / clip_filename if primary_clip else None
 
-            fallback_keyframes = screenshots_by_step.get(step_id, [])
-            if not fallback_keyframes and step_id <= 0:
+            fallback_keyframes = screenshots_by_step.get(step_index, [])
+            if not fallback_keyframes and step_index <= 0:
                 fallback_keyframes = screenshots_by_step.get(idx, [])
 
             def _build_step_keyframes_from_fallback() -> List[Dict[str, Any]]:
@@ -3936,6 +4023,95 @@ class VLMaterialGenerator:
                     }
                 )
 
+            raw_instructional_clips = _normalize_instructional_clip_objects(
+                raw_step.get("instructional_clips", None),
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
+            unmatched_instructional_reqs = list(step_instructional_clip_requests)
+
+            def _pop_instructional_clip_request(clip_token: str) -> Optional[Dict[str, Any]]:
+                normalized_token = str(clip_token or "").strip().upper()
+                for req_index, req in enumerate(unmatched_instructional_reqs):
+                    req_token = str(req.get("instructional_clip_id", "") or "").strip().upper()
+                    if normalized_token and req_token == normalized_token:
+                        return unmatched_instructional_reqs.pop(req_index)
+                if unmatched_instructional_reqs:
+                    return unmatched_instructional_reqs.pop(0)
+                return None
+
+            instructional_clip_jobs: List[Dict[str, Any]] = []
+            for clip_idx, clip_item in enumerate(raw_instructional_clips, start=1):
+                clip_token = _normalize_instructional_clip_id(clip_item.get("clip_id"), clip_idx)
+                request_meta = _pop_instructional_clip_request(clip_token)
+                if use_relative_ts:
+                    clip_job_start = safe_float(
+                        (request_meta or {}).get("_analysis_relative_start_sec", clip_item.get("start_sec", start_sec)),
+                        start_sec,
+                    )
+                    clip_job_end = safe_float(
+                        (request_meta or {}).get("_analysis_relative_end_sec", clip_item.get("end_sec", clip_job_start)),
+                        clip_job_start,
+                    )
+                else:
+                    clip_job_start = safe_float(
+                        (request_meta or {}).get("start_sec", clip_item.get("start_sec", start_sec)),
+                        start_sec,
+                    )
+                    clip_job_end = safe_float(
+                        (request_meta or {}).get("end_sec", clip_item.get("end_sec", clip_job_start)),
+                        clip_job_start,
+                    )
+                if clip_job_end < clip_job_start:
+                    clip_job_start, clip_job_end = clip_job_end, clip_job_start
+                clip_job_start = max(start_sec, min(clip_job_start, end_sec))
+                clip_job_end = max(start_sec, min(clip_job_end, end_sec))
+                if clip_job_end <= clip_job_start:
+                    continue
+                clip_number_match = re.search(r"(\d+)$", clip_token)
+                clip_number = int(clip_number_match.group(1)) if clip_number_match else clip_idx
+                request_clip_id = str((request_meta or {}).get("clip_id", "") or "").strip()
+                clip_job_filename = f"{Path(request_clip_id).name}.mp4" if request_clip_id else (
+                    f"{unit_id}_clip_step_{step_index:02d}_clip_{clip_number:02d}_{action_brief}.mp4"
+                )
+                instructional_clip_jobs.append(
+                    {
+                        "instructional_clip_id": clip_token,
+                        "clip_reason": str(clip_item.get("clip_reason", "") or (request_meta or {}).get("clip_reason", "")).strip(),
+                        "start_sec": float(clip_job_start),
+                        "end_sec": float(clip_job_end),
+                        "clip_filename": clip_job_filename,
+                        "output_path": unit_dir / clip_job_filename,
+                    }
+                )
+
+            for extra_idx, request_meta in enumerate(unmatched_instructional_reqs, start=len(instructional_clip_jobs) + 1):
+                clip_token = _normalize_instructional_clip_id(request_meta.get("instructional_clip_id"), extra_idx)
+                if use_relative_ts:
+                    clip_job_start = safe_float(request_meta.get("_analysis_relative_start_sec", start_sec), start_sec)
+                    clip_job_end = safe_float(request_meta.get("_analysis_relative_end_sec", clip_job_start), clip_job_start)
+                else:
+                    clip_job_start = safe_float(request_meta.get("start_sec", start_sec), start_sec)
+                    clip_job_end = safe_float(request_meta.get("end_sec", clip_job_start), clip_job_start)
+                if clip_job_end < clip_job_start:
+                    clip_job_start, clip_job_end = clip_job_end, clip_job_start
+                if clip_job_end <= clip_job_start:
+                    continue
+                request_clip_id = str(request_meta.get("clip_id", "") or "").strip()
+                clip_job_filename = f"{Path(request_clip_id).name}.mp4" if request_clip_id else (
+                    f"{unit_id}_clip_step_{step_index:02d}_clip_{extra_idx:02d}_{action_brief}.mp4"
+                )
+                instructional_clip_jobs.append(
+                    {
+                        "instructional_clip_id": clip_token,
+                        "clip_reason": str(request_meta.get("clip_reason", "") or "").strip(),
+                        "start_sec": float(clip_job_start),
+                        "end_sec": float(clip_job_end),
+                        "clip_filename": clip_job_filename,
+                        "output_path": unit_dir / clip_job_filename,
+                    }
+                )
+
             step_jobs.append(
                 {
                     "step_index": step_index,
@@ -3951,23 +4127,45 @@ class VLMaterialGenerator:
                     "end_sec": end_sec,
                     "clip_filename": clip_filename,
                     "clip_output_path": clip_output_path,
+                    "instructional_clip_jobs": instructional_clip_jobs,
                     "keyframe_jobs": keyframe_jobs,
                 }
             )
 
         async def _export_one_step(job: Dict[str, Any]) -> Dict[str, Any]:
-            try:
-                clip_ok = await _run_limited(
-                    self._export_clip_asset_with_ffmpeg(
-                        video_path=video_path,
-                        start_sec=float(job["start_sec"]),
-                        end_sec=float(job["end_sec"]),
-                        output_path=job["clip_output_path"],
+            clip_output_path = job.get("clip_output_path")
+            clip_ok = False
+            if clip_output_path:
+                try:
+                    clip_ok = await _run_limited(
+                        self._export_clip_asset_with_ffmpeg(
+                            video_path=video_path,
+                            start_sec=float(job["start_sec"]),
+                            end_sec=float(job["end_sec"]),
+                            output_path=clip_output_path,
+                        )
                     )
-                )
-            except Exception as error:
-                logger.warning(f"[VL-Tutorial] step clip export exception: unit={unit_id}, step={job.get('step_index')}, err={error}")
-                clip_ok = False
+                except Exception as error:
+                    logger.warning(f"[VL-Tutorial] step clip export exception: unit={unit_id}, step={job.get('step_index')}, err={error}")
+                    clip_ok = False
+
+            instructional_clip_jobs = list(job.get("instructional_clip_jobs", []) or [])
+            instructional_clip_results: List[Any] = []
+            if instructional_clip_jobs:
+                clip_tasks = [
+                    asyncio.create_task(
+                        _run_limited(
+                            self._export_clip_asset_with_ffmpeg(
+                                video_path=video_path,
+                                start_sec=float(clip_job.get("start_sec", 0.0)),
+                                end_sec=float(clip_job.get("end_sec", 0.0)),
+                                output_path=clip_job["output_path"],
+                            )
+                        )
+                    )
+                    for clip_job in instructional_clip_jobs
+                ]
+                instructional_clip_results = await asyncio.gather(*clip_tasks, return_exceptions=True)
 
             keyframe_jobs = list(job.get("keyframe_jobs", []) or [])
             keyframe_results: List[Any] = []
@@ -4091,6 +4289,31 @@ class VLMaterialGenerator:
                         key_detail.update(dict(grid_anchor_meta or {}))
                         keyframe_details.append(key_detail)
 
+            instructional_clip_files: List[str] = []
+            instructional_clip_details: List[Dict[str, Any]] = []
+            if instructional_clip_results:
+                for clip_job, clip_result in zip(instructional_clip_jobs, instructional_clip_results):
+                    if isinstance(clip_result, Exception):
+                        logger.warning(
+                            f"[VL-Tutorial] instructional clip export exception: unit={unit_id}, step={job.get('step_index')}, "
+                            f"file={clip_job.get('clip_filename')}, err={clip_result}"
+                        )
+                        continue
+                    if bool(clip_result):
+                        clip_name = str(clip_job.get("clip_filename", "") or "").strip()
+                        if not clip_name:
+                            continue
+                        instructional_clip_files.append(clip_name)
+                        instructional_clip_details.append(
+                            {
+                                "clip_file": clip_name,
+                                "instructional_clip_id": str(clip_job.get("instructional_clip_id", "") or "").strip(),
+                                "clip_reason": str(clip_job.get("clip_reason", "") or "").strip(),
+                                "start_sec": float(clip_job.get("start_sec", 0.0)),
+                                "end_sec": float(clip_job.get("end_sec", 0.0)),
+                            }
+                        )
+
             return {
                 "step_id": int(job["step_index"]),
                 "step_description": str(job["step_description"]),
@@ -4104,6 +4327,8 @@ class VLMaterialGenerator:
                 "clip_start_sec": float(job["start_sec"]),
                 "clip_end_sec": float(job["end_sec"]),
                 "clip_file": str(job["clip_filename"]) if clip_ok else "",
+                "instructional_clips": instructional_clip_files,
+                "instructional_clip_details": instructional_clip_details,
                 "instructional_keyframes": keyframe_files,
                 "instructional_keyframe_details": keyframe_details,
             }
@@ -6677,7 +6902,7 @@ class VLMaterialGenerator:
         semantic_units: List[Dict[str, Any]],
         output_dir: str = None
     ) -> Optional[str]:
-        """??? `flow_ops`??????????"""
+        """Compatibility wrapper that delegates to `flow_ops`."""
         return await split_video_by_semantic_units(self, video_path, semantic_units, output_dir=output_dir)
     
     def _find_clip_for_unit(
@@ -6687,7 +6912,7 @@ class VLMaterialGenerator:
         start_sec: float,
         end_sec: float
     ) -> Optional[str]:
-        """??? `flow_ops`??????????"""
+        """Compatibility wrapper that delegates to `flow_ops`."""
         return find_clip_for_unit(self, clips_dir, unit_id, start_sec, end_sec)
     
     async def _optimize_screenshot_timestamps(
@@ -6835,7 +7060,7 @@ class VLMaterialGenerator:
         video_path: str,
         screenshot_requests: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """??? `flow_ops`??????????"""
+        """Compatibility wrapper that delegates to `flow_ops`."""
         return await optimize_screenshots_batch_mode(self, video_path, screenshot_requests)
 
     def _annotate_screenshot_requests_with_unit_context(
@@ -7427,7 +7652,7 @@ class VLMaterialGenerator:
         video_path: str,
         screenshot_requests: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
-        """??? `flow_ops`??????????"""
+        """Compatibility wrapper that delegates to `flow_ops`."""
         return await optimize_screenshots_streaming_pipeline(self, video_path, screenshot_requests)
     
     def _should_fallback(self, error: Exception) -> bool:

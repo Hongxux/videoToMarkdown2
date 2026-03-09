@@ -2,6 +2,7 @@ import {
   App,
   Editor,
   EditorPosition,
+  EditorSelectionOrCaret,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -32,6 +33,10 @@ interface SelectionSnapshot {
   selectedText: string;
   from: EditorPosition;
   to: EditorPosition;
+  fromOffset: number;
+  toOffset: number;
+  leadingAnchor: string;
+  trailingAnchor: string;
   context: LineContext;
 }
 
@@ -41,7 +46,14 @@ interface RewriteStatusOptions {
   rewriteToken?: number;
 }
 
-type ApplyReplacementMode = "saved-range" | "search-fallback";
+interface LocatedRange {
+  from: EditorPosition;
+  to: EditorPosition;
+  fromOffset: number;
+  toOffset: number;
+}
+
+type ApplyReplacementMode = "saved-range" | "offset-fallback" | "anchor-fallback" | "unique-text-fallback";
 type RewriteStatusPhase = "idle" | "running" | "received" | "completed" | "failed";
 
 const DEFAULT_SETTINGS: StructuredRewriteSettings = {
@@ -58,6 +70,7 @@ const STATUS_LABELS: Record<RewriteStatusPhase, string> = {
   completed: "Phase2B：完成改写",
   failed: "Phase2B：改写失败",
 };
+const ANCHOR_CONTEXT_CHARS = 24;
 
 export default class Phase2bStructuredRewritePlugin extends Plugin {
   settings!: StructuredRewriteSettings;
@@ -160,16 +173,16 @@ export default class Phase2bStructuredRewritePlugin extends Plugin {
       const applyMode = applyReplacementFromSnapshot(editor, snapshot, replacement);
 
       const notices: string[] = [];
-      if (applyMode === "search-fallback") {
-        notices.push("选区虽已取消，但已按缓存文本重新定位并替换");
+      if (applyMode !== "saved-range") {
+        notices.push(buildFallbackNotice(applyMode));
       }
       if (Array.isArray(payload.linkWarnings) && payload.linkWarnings.length > 0) {
         notices.push(`附带 ${payload.linkWarnings.length} 条链接警告`);
       }
 
-      const completionDetail = applyMode === "search-fallback"
-        ? "已按缓存文本重新定位并完成回填"
-        : "已按原始选区完成回填";
+      const completionDetail = applyMode === "saved-range"
+        ? "已按原始选区完成回填"
+        : `已通过${buildFallbackLabel(applyMode)}完成回填`;
       this.updateRewriteStatus("completed", {
         detail: completionDetail,
         autoResetMs: 5000,
@@ -329,10 +342,18 @@ function captureSelectionSnapshot(editor: Editor): SelectionSnapshot | null {
 
   const from = cloneEditorPosition(editor.getCursor("from"));
   const to = cloneEditorPosition(editor.getCursor("to"));
+  const fromOffset = editor.posToOffset(from);
+  const toOffset = editor.posToOffset(to);
+  const documentText = editor.getValue();
+
   return {
     selectedText,
     from,
     to,
+    fromOffset,
+    toOffset,
+    leadingAnchor: buildLeadingAnchor(documentText, fromOffset),
+    trailingAnchor: buildTrailingAnchor(documentText, toOffset),
     context: analyzeLineContext(editor, from),
   };
 }
@@ -344,23 +365,102 @@ function applyReplacementFromSnapshot(
 ): ApplyReplacementMode {
   const currentRangeText = editor.getRange(snapshot.from, snapshot.to);
   if (currentRangeText === snapshot.selectedText) {
-    editor.replaceRange(replacement, snapshot.from, snapshot.to);
+    applyLocatedReplacement(editor, {
+      from: snapshot.from,
+      to: snapshot.to,
+      fromOffset: snapshot.fromOffset,
+      toOffset: snapshot.toOffset,
+    }, replacement);
     return "saved-range";
   }
 
-  const fallbackRange = findUniqueTextRange(editor.getValue(), snapshot.selectedText);
-  if (!fallbackRange) {
-    throw new Error("原选区已变化，且无法唯一定位缓存文本；请重新选中后再试");
+  const offsetRange = findRangeByOffsets(editor, snapshot);
+  if (offsetRange) {
+    applyLocatedReplacement(editor, offsetRange, replacement);
+    return "offset-fallback";
   }
 
-  editor.replaceRange(replacement, fallbackRange.from, fallbackRange.to);
-  return "search-fallback";
+  const anchorRange = findRangeByAnchors(editor.getValue(), snapshot);
+  if (anchorRange) {
+    applyLocatedReplacement(editor, anchorRange, replacement);
+    return "anchor-fallback";
+  }
+
+  const uniqueRange = findUniqueTextRange(editor.getValue(), snapshot.selectedText);
+  if (uniqueRange) {
+    applyLocatedReplacement(editor, uniqueRange, replacement);
+    return "unique-text-fallback";
+  }
+
+  throw new Error("原选区已变化，且无法重新定位原文；请重新选中后再试");
 }
 
-function findUniqueTextRange(
+function findRangeByOffsets(editor: Editor, snapshot: SelectionSnapshot): LocatedRange | null {
+  const documentText = editor.getValue();
+  if (snapshot.fromOffset < 0 || snapshot.toOffset > documentText.length || snapshot.fromOffset > snapshot.toOffset) {
+    return null;
+  }
+
+  const candidate = documentText.slice(snapshot.fromOffset, snapshot.toOffset);
+  if (candidate !== snapshot.selectedText) {
+    return null;
+  }
+
+  return {
+    from: editor.offsetToPos(snapshot.fromOffset),
+    to: editor.offsetToPos(snapshot.toOffset),
+    fromOffset: snapshot.fromOffset,
+    toOffset: snapshot.toOffset,
+  };
+}
+
+function findRangeByAnchors(documentText: string, snapshot: SelectionSnapshot): LocatedRange | null {
+  const targetText = snapshot.selectedText;
+  if (!targetText) {
+    return null;
+  }
+
+  const matches: LocatedRange[] = [];
+  let searchStart = 0;
+  while (searchStart <= documentText.length) {
+    const foundIndex = documentText.indexOf(targetText, searchStart);
+    if (foundIndex < 0) {
+      break;
+    }
+
+    const fromOffset = foundIndex;
+    const toOffset = foundIndex + targetText.length;
+    if (matchesAnchors(documentText, fromOffset, toOffset, snapshot.leadingAnchor, snapshot.trailingAnchor)) {
+      matches.push({
+        from: offsetToEditorPosition(documentText, fromOffset),
+        to: offsetToEditorPosition(documentText, toOffset),
+        fromOffset,
+        toOffset,
+      });
+      if (matches.length > 1) {
+        return null;
+      }
+    }
+
+    searchStart = foundIndex + Math.max(1, targetText.length);
+  }
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function matchesAnchors(
   documentText: string,
-  targetText: string,
-): { from: EditorPosition; to: EditorPosition } | null {
+  fromOffset: number,
+  toOffset: number,
+  leadingAnchor: string,
+  trailingAnchor: string,
+): boolean {
+  const currentLeading = documentText.slice(Math.max(0, fromOffset - leadingAnchor.length), fromOffset);
+  const currentTrailing = documentText.slice(toOffset, Math.min(documentText.length, toOffset + trailingAnchor.length));
+  return currentLeading === leadingAnchor && currentTrailing === trailingAnchor;
+}
+
+function findUniqueTextRange(documentText: string, targetText: string): LocatedRange | null {
   if (!targetText) {
     return null;
   }
@@ -375,9 +475,72 @@ function findUniqueTextRange(
     return null;
   }
 
-  const from = offsetToEditorPosition(documentText, firstIndex);
-  const to = offsetToEditorPosition(documentText, firstIndex + targetText.length);
-  return { from, to };
+  const fromOffset = firstIndex;
+  const toOffset = firstIndex + targetText.length;
+  return {
+    from: offsetToEditorPosition(documentText, fromOffset),
+    to: offsetToEditorPosition(documentText, toOffset),
+    fromOffset,
+    toOffset,
+  };
+}
+
+function applyLocatedReplacement(editor: Editor, range: LocatedRange, replacement: string): void {
+  const replacementEnd = editor.offsetToPos(range.fromOffset + replacement.length);
+  const selection: EditorSelectionOrCaret = {
+    anchor: replacementEnd,
+    head: replacementEnd,
+  };
+
+  editor.transaction(
+    {
+      changes: [
+        {
+          from: range.from,
+          to: range.to,
+          text: replacement,
+        },
+      ],
+      selections: [selection],
+    },
+    "phase2b-structured-rewrite",
+  );
+
+  editor.scrollIntoView({ from: range.from, to: replacementEnd }, false);
+}
+
+function buildFallbackNotice(mode: ApplyReplacementMode): string {
+  switch (mode) {
+    case "offset-fallback":
+      return "已按原始偏移重新定位并替换";
+    case "anchor-fallback":
+      return "已按原文上下文锚点重新定位并替换";
+    case "unique-text-fallback":
+      return "已按唯一原文匹配重新定位并替换";
+    default:
+      return "";
+  }
+}
+
+function buildFallbackLabel(mode: ApplyReplacementMode): string {
+  switch (mode) {
+    case "offset-fallback":
+      return "原始偏移重定位";
+    case "anchor-fallback":
+      return "上下文锚点重定位";
+    case "unique-text-fallback":
+      return "唯一原文匹配重定位";
+    default:
+      return "原始选区";
+  }
+}
+
+function buildLeadingAnchor(documentText: string, fromOffset: number): string {
+  return documentText.slice(Math.max(0, fromOffset - ANCHOR_CONTEXT_CHARS), fromOffset);
+}
+
+function buildTrailingAnchor(documentText: string, toOffset: number): string {
+  return documentText.slice(toOffset, Math.min(documentText.length, toOffset + ANCHOR_CONTEXT_CHARS));
 }
 
 function offsetToEditorPosition(text: string, offset: number): EditorPosition {

@@ -1,11 +1,26 @@
 param(
-  [string]$VaultPluginDir = 'D:\云库\OneDrive\文档\Obsidian Vault\.obsidian\plugins\Obsidian_plug',
+  [string]$VaultPluginDir,
   [switch]$SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
 
+function Get-DefaultVaultPluginDir {
+  $documentsDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::MyDocuments)
+  if ([string]::IsNullOrWhiteSpace($documentsDir)) {
+    throw 'Cannot resolve MyDocuments folder for default Vault path.'
+  }
+
+  return (Join-Path $documentsDir 'Obsidian Vault\.obsidian\plugins\Obsidian_plug')
+}
+
 $pluginDir = $PSScriptRoot
+$resolvedVaultPluginDir = if ([string]::IsNullOrWhiteSpace($VaultPluginDir)) {
+  Get-DefaultVaultPluginDir
+} else {
+  $VaultPluginDir
+}
+
 $runtimeFiles = @('manifest.json', 'main.js')
 
 $stylesPath = Join-Path $pluginDir 'styles.css'
@@ -26,8 +41,8 @@ if (-not $SkipBuild) {
   }
 }
 
-if (-not (Test-Path $VaultPluginDir)) {
-  New-Item -ItemType Directory -Force -Path $VaultPluginDir | Out-Null
+if (-not (Test-Path $resolvedVaultPluginDir)) {
+  New-Item -ItemType Directory -Force -Path $resolvedVaultPluginDir | Out-Null
 }
 
 foreach ($file in $runtimeFiles) {
@@ -35,9 +50,9 @@ foreach ($file in $runtimeFiles) {
   if (-not (Test-Path $sourcePath)) {
     throw "missing runtime file: $sourcePath"
   }
-  $targetPath = Join-Path $VaultPluginDir $file
+  $targetPath = Join-Path $resolvedVaultPluginDir $file
   Copy-Item -LiteralPath $sourcePath -Destination $targetPath -Force
 }
 
-Write-Output ("Synced runtime files to {0}" -f $VaultPluginDir)
+Write-Output ("Synced runtime files to {0}" -f $resolvedVaultPluginDir)
 Write-Output ("Files: {0}" -f ($runtimeFiles -join ', '))

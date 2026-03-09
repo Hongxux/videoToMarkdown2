@@ -330,6 +330,34 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    public void broadcastTaskMetaSync(
+            String taskId,
+            String userId,
+            String pathKey,
+            String changeKind,
+            String anchorId
+    ) {
+        String normalizedTaskId = normalizeText(taskId);
+        if (normalizedTaskId.isEmpty()) {
+            return;
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("type", "taskMetaSync");
+        payload.put("taskId", normalizedTaskId);
+        payload.put("pathKey", normalizeText(pathKey));
+        payload.put("changeKind", normalizeText(changeKind));
+        payload.put("anchorId", normalizeText(anchorId));
+        payload.put("updatedAt", System.currentTimeMillis());
+
+        ConcurrentHashMap<String, WebSocketSession> subscribers = taskSubscribers.get(normalizedTaskId);
+        if (subscribers != null) {
+            for (WebSocketSession session : subscribers.values()) {
+                sendMessage(session, payload);
+            }
+        }
+        sendPayloadToUserSessions(userId, payload);
+    }
+
     private void sendTaskUpdate(WebSocketSession session, TaskQueueManager.TaskEntry task, String collectionId) {
         Map<String, Object> update = buildTaskUpdatePayload(
                 task.taskId,

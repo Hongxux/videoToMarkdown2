@@ -37,6 +37,7 @@ var STATUS_LABELS = {
   completed: "Phase2B\uFF1A\u5B8C\u6210\u6539\u5199",
   failed: "Phase2B\uFF1A\u6539\u5199\u5931\u8D25"
 };
+var ANCHOR_CONTEXT_CHARS = 24;
 var Phase2bStructuredRewritePlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
@@ -119,13 +120,13 @@ var Phase2bStructuredRewritePlugin = class extends import_obsidian.Plugin {
       const replacement = adaptMarkdownToSelectionContext(normalizedMarkdown, snapshot.context);
       const applyMode = applyReplacementFromSnapshot(editor, snapshot, replacement);
       const notices = [];
-      if (applyMode === "search-fallback") {
-        notices.push("\u9009\u533A\u867D\u5DF2\u53D6\u6D88\uFF0C\u4F46\u5DF2\u6309\u7F13\u5B58\u6587\u672C\u91CD\u65B0\u5B9A\u4F4D\u5E76\u66FF\u6362");
+      if (applyMode !== "saved-range") {
+        notices.push(buildFallbackNotice(applyMode));
       }
       if (Array.isArray(payload.linkWarnings) && payload.linkWarnings.length > 0) {
         notices.push(`\u9644\u5E26 ${payload.linkWarnings.length} \u6761\u94FE\u63A5\u8B66\u544A`);
       }
-      const completionDetail = applyMode === "search-fallback" ? "\u5DF2\u6309\u7F13\u5B58\u6587\u672C\u91CD\u65B0\u5B9A\u4F4D\u5E76\u5B8C\u6210\u56DE\u586B" : "\u5DF2\u6309\u539F\u59CB\u9009\u533A\u5B8C\u6210\u56DE\u586B";
+      const completionDetail = applyMode === "saved-range" ? "\u5DF2\u6309\u539F\u59CB\u9009\u533A\u5B8C\u6210\u56DE\u586B" : `\u5DF2\u901A\u8FC7${buildFallbackLabel(applyMode)}\u5B8C\u6210\u56DE\u586B`;
       this.updateRewriteStatus("completed", {
         detail: completionDetail,
         autoResetMs: 5e3,
@@ -242,25 +243,97 @@ function captureSelectionSnapshot(editor) {
   }
   const from = cloneEditorPosition(editor.getCursor("from"));
   const to = cloneEditorPosition(editor.getCursor("to"));
+  const fromOffset = editor.posToOffset(from);
+  const toOffset = editor.posToOffset(to);
+  const documentText = editor.getValue();
   return {
     selectedText,
     from,
     to,
+    fromOffset,
+    toOffset,
+    leadingAnchor: buildLeadingAnchor(documentText, fromOffset),
+    trailingAnchor: buildTrailingAnchor(documentText, toOffset),
     context: analyzeLineContext(editor, from)
   };
 }
 function applyReplacementFromSnapshot(editor, snapshot, replacement) {
   const currentRangeText = editor.getRange(snapshot.from, snapshot.to);
   if (currentRangeText === snapshot.selectedText) {
-    editor.replaceRange(replacement, snapshot.from, snapshot.to);
+    applyLocatedReplacement(editor, {
+      from: snapshot.from,
+      to: snapshot.to,
+      fromOffset: snapshot.fromOffset,
+      toOffset: snapshot.toOffset
+    }, replacement);
     return "saved-range";
   }
-  const fallbackRange = findUniqueTextRange(editor.getValue(), snapshot.selectedText);
-  if (!fallbackRange) {
-    throw new Error("\u539F\u9009\u533A\u5DF2\u53D8\u5316\uFF0C\u4E14\u65E0\u6CD5\u552F\u4E00\u5B9A\u4F4D\u7F13\u5B58\u6587\u672C\uFF1B\u8BF7\u91CD\u65B0\u9009\u4E2D\u540E\u518D\u8BD5");
+  const offsetRange = findRangeByOffsets(editor, snapshot);
+  if (offsetRange) {
+    applyLocatedReplacement(editor, offsetRange, replacement);
+    return "offset-fallback";
   }
-  editor.replaceRange(replacement, fallbackRange.from, fallbackRange.to);
-  return "search-fallback";
+  const anchorRange = findRangeByAnchors(editor.getValue(), snapshot);
+  if (anchorRange) {
+    applyLocatedReplacement(editor, anchorRange, replacement);
+    return "anchor-fallback";
+  }
+  const uniqueRange = findUniqueTextRange(editor.getValue(), snapshot.selectedText);
+  if (uniqueRange) {
+    applyLocatedReplacement(editor, uniqueRange, replacement);
+    return "unique-text-fallback";
+  }
+  throw new Error("\u539F\u9009\u533A\u5DF2\u53D8\u5316\uFF0C\u4E14\u65E0\u6CD5\u91CD\u65B0\u5B9A\u4F4D\u539F\u6587\uFF1B\u8BF7\u91CD\u65B0\u9009\u4E2D\u540E\u518D\u8BD5");
+}
+function findRangeByOffsets(editor, snapshot) {
+  const documentText = editor.getValue();
+  if (snapshot.fromOffset < 0 || snapshot.toOffset > documentText.length || snapshot.fromOffset > snapshot.toOffset) {
+    return null;
+  }
+  const candidate = documentText.slice(snapshot.fromOffset, snapshot.toOffset);
+  if (candidate !== snapshot.selectedText) {
+    return null;
+  }
+  return {
+    from: editor.offsetToPos(snapshot.fromOffset),
+    to: editor.offsetToPos(snapshot.toOffset),
+    fromOffset: snapshot.fromOffset,
+    toOffset: snapshot.toOffset
+  };
+}
+function findRangeByAnchors(documentText, snapshot) {
+  const targetText = snapshot.selectedText;
+  if (!targetText) {
+    return null;
+  }
+  const matches = [];
+  let searchStart = 0;
+  while (searchStart <= documentText.length) {
+    const foundIndex = documentText.indexOf(targetText, searchStart);
+    if (foundIndex < 0) {
+      break;
+    }
+    const fromOffset = foundIndex;
+    const toOffset = foundIndex + targetText.length;
+    if (matchesAnchors(documentText, fromOffset, toOffset, snapshot.leadingAnchor, snapshot.trailingAnchor)) {
+      matches.push({
+        from: offsetToEditorPosition(documentText, fromOffset),
+        to: offsetToEditorPosition(documentText, toOffset),
+        fromOffset,
+        toOffset
+      });
+      if (matches.length > 1) {
+        return null;
+      }
+    }
+    searchStart = foundIndex + Math.max(1, targetText.length);
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+function matchesAnchors(documentText, fromOffset, toOffset, leadingAnchor, trailingAnchor) {
+  const currentLeading = documentText.slice(Math.max(0, fromOffset - leadingAnchor.length), fromOffset);
+  const currentTrailing = documentText.slice(toOffset, Math.min(documentText.length, toOffset + trailingAnchor.length));
+  return currentLeading === leadingAnchor && currentTrailing === trailingAnchor;
 }
 function findUniqueTextRange(documentText, targetText) {
   if (!targetText) {
@@ -274,9 +347,65 @@ function findUniqueTextRange(documentText, targetText) {
   if (secondIndex >= 0) {
     return null;
   }
-  const from = offsetToEditorPosition(documentText, firstIndex);
-  const to = offsetToEditorPosition(documentText, firstIndex + targetText.length);
-  return { from, to };
+  const fromOffset = firstIndex;
+  const toOffset = firstIndex + targetText.length;
+  return {
+    from: offsetToEditorPosition(documentText, fromOffset),
+    to: offsetToEditorPosition(documentText, toOffset),
+    fromOffset,
+    toOffset
+  };
+}
+function applyLocatedReplacement(editor, range, replacement) {
+  const replacementEnd = editor.offsetToPos(range.fromOffset + replacement.length);
+  const selection = {
+    anchor: replacementEnd,
+    head: replacementEnd
+  };
+  editor.transaction(
+    {
+      changes: [
+        {
+          from: range.from,
+          to: range.to,
+          text: replacement
+        }
+      ],
+      selections: [selection]
+    },
+    "phase2b-structured-rewrite"
+  );
+  editor.scrollIntoView({ from: range.from, to: replacementEnd }, false);
+}
+function buildFallbackNotice(mode) {
+  switch (mode) {
+    case "offset-fallback":
+      return "\u5DF2\u6309\u539F\u59CB\u504F\u79FB\u91CD\u65B0\u5B9A\u4F4D\u5E76\u66FF\u6362";
+    case "anchor-fallback":
+      return "\u5DF2\u6309\u539F\u6587\u4E0A\u4E0B\u6587\u951A\u70B9\u91CD\u65B0\u5B9A\u4F4D\u5E76\u66FF\u6362";
+    case "unique-text-fallback":
+      return "\u5DF2\u6309\u552F\u4E00\u539F\u6587\u5339\u914D\u91CD\u65B0\u5B9A\u4F4D\u5E76\u66FF\u6362";
+    default:
+      return "";
+  }
+}
+function buildFallbackLabel(mode) {
+  switch (mode) {
+    case "offset-fallback":
+      return "\u539F\u59CB\u504F\u79FB\u91CD\u5B9A\u4F4D";
+    case "anchor-fallback":
+      return "\u4E0A\u4E0B\u6587\u951A\u70B9\u91CD\u5B9A\u4F4D";
+    case "unique-text-fallback":
+      return "\u552F\u4E00\u539F\u6587\u5339\u914D\u91CD\u5B9A\u4F4D";
+    default:
+      return "\u539F\u59CB\u9009\u533A";
+  }
+}
+function buildLeadingAnchor(documentText, fromOffset) {
+  return documentText.slice(Math.max(0, fromOffset - ANCHOR_CONTEXT_CHARS), fromOffset);
+}
+function buildTrailingAnchor(documentText, toOffset) {
+  return documentText.slice(toOffset, Math.min(documentText.length, toOffset + ANCHOR_CONTEXT_CHARS));
 }
 function offsetToEditorPosition(text, offset) {
   const safeOffset = Math.max(0, Math.min(text.length, offset));

@@ -9000,3 +9000,134 @@
 - Prevention:
   - Future multi-provider fallback changes must define primary retry budget, fallback retry budget, and breaker open/close rules at the gateway layer.
   - Model-name changes must update both gateway tests and operational docs together.
+
+
+
+## 2026-03-09: Web reader export CTA still routed to import flow, and Markdown editor missed Tab paragraph indent
+- Symptom:
+  - The top CTA in the Web reading view still behaved like an import entry and could open the `mobileVideoFile` picker instead of exporting the current task.
+  - Pressing `Tab` / `Shift+Tab` inside the Markdown editor moved browser focus instead of indenting or outdenting the current paragraph.
+- Root cause:
+  - The top CTA still reused the old import click handler and never switched to the existing `exportCurrentTaskZip()` + `/api/mobile/tasks/{taskId}/export` flat ZIP export chain.
+  - Neither the main Markdown editor nor the paragraph editor had a shared `Tab` / `Shift+Tab` interception layer.
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - Change the top reader CTA icon/label to export semantics and route it through `handleReaderPrimaryExport()` -> `exportCurrentTaskZip()`.
+    - Extend `setExportButtonsDisabled(...)` so the top CTA shares the same disabled state as other export actions.
+    - Add `applyMarkdownIndentShortcutToEditor(...)` plus line-range/selection mapping helpers so both the main editor and the paragraph editor support paragraph indent/outdent.
+    - Keep wikilink suggestion completion on plain `Tab`, while letting `Shift+Tab` fall back to outdent.
+- Validation:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Future reader CTA changes must verify label, icon, click handler, and backend chain together instead of changing only the visible text.
+  - Future Markdown keyboard features should go through one shared shortcut handler so the main editor and paragraph editor do not drift again.
+
+
+## 2026-03-09: `cancelRuntimeTask` could fail with `MobileMarkdownController$3` `NoClassDefFoundError`
+- Symptom:
+  - `DELETE /api/mobile/tasks/{taskId}` could fail in the `cancelRuntimeTask -> deleteStorageTaskByTaskId -> deletePathRecursively` path.
+  - The Web reader could then surface task deletion failure even though the UI action itself was valid.
+- Root cause:
+  - `deletePathRecursively(...)` still depended on an anonymous `SimpleFileVisitor`, which introduced an extra inner class and exposed classloading fragility in some packaged runs.
+  - The cleanup path only needed depth-first recursive deletion and did not benefit from that extra helper complexity.
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - Replace the recursive delete helper with a `Files.walk(...).sorted(Comparator.reverseOrder())` cleanup path so no anonymous `SimpleFileVisitor` helper class is required.
+    - Keep deepest-path-first deletion semantics so files and directories are removed safely.
+- Validation:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerDeleteTaskTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Prefer small standard-library helpers over extra anonymous inner classes when the task is only recursive delete.
+  - Add a focused regression test for `cancelRuntimeTask` and storage cleanup whenever deletion helpers are refactored.
+
+## 2026-03-09: `/api/mobile/tasks` could throw `UnsupportedOperationException` during sorting
+- Symptom:
+  - `GET /api/mobile/tasks` could return HTTP 500 before the response body was assembled.
+  - The stack trace pointed to `MobileMarkdownController.listTasks(...)` calling `sort(...)` on an immutable JDK collection.
+- Root cause:
+  - `deduplicateTaskViews(...)` returned `List.of()` in one path.
+  - `listTasks(...)` later sorted that list in place, which threw `UnsupportedOperationException`.
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - Return a mutable `new ArrayList<>()` instead of `List.of()` from `deduplicateTaskViews(...)` when the list will be sorted later.
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/controller/MobileMarkdownControllerTaskListDeduplicateTest.java`
+    - Add a focused regression test for the mutable-list contract.
+- Validation:
+  - `docker compose build java-orchestrator`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Do not return `List.of()` / `Set.of()` / `Map.of()` from helpers when callers may later sort, append, or remove.
+  - Add mutability checks to task-list aggregation tests whenever collection construction is refactored.
+
+## 2026-03-09: Python `cv2` import failed because `numpy` ABI no longer matched OpenCV 4.6
+- Symptom:
+  - `python-grpc` failed during `import cv2`, aborting inside `cv2/__init__.py -> bootstrap()`.
+  - The concrete error was `module compiled against ABI version 0x1000009 but this version of numpy is 0x2000000` followed by `ImportError: numpy.core.multiarray failed to import`.
+- Root cause:
+  - The environment still pinned `opencv-python(-headless)==4.6.0.66`, but allowed a `numpy 2.x` family.
+  - Docker and local installs could resolve `numpy 2.2.6`, while OpenCV 4.6 was still compiled against the `numpy 1.x` ABI.
+- Fix:
+  - Tighten the `numpy` upper bound from `<=2.3` to `<2.0.0` so it matches the OpenCV 4.6 ABI expectation.
+- Prevention:
+  - Do not pair `opencv-python(-headless)==4.6.0.66` with `numpy 2.x`.
+  - Treat any `numpy 2.x` upgrade as an ABI review point for OpenCV instead of assuming install success implies runtime import safety.
+
+## 2026-03-09: `MobileMarkdownController.java` had an invalid Java char literal
+- Symptom:
+  - `docker compose build java-orchestrator` failed in Maven with `unclosed character literal`.
+  - The offending code was a `.replace(...)` call in `MobileMarkdownController.java` where the backslash char literal was malformed.
+- Root cause:
+  - A single backslash had been written inside a Java char literal, but Java requires the escaped form `\`.
+  - The helper only needed Windows path separator rewriting.
+- Fix:
+  - Fix the Java char literal so Windows path separators are safely normalized to `/`.
+  - Re-run Java compilation to confirm there is no follow-up parser damage.
+- Prevention:
+  - Spot-check Java `char` and path-normalization edits before commit when backslashes are involved.
+  - Keep Docker/CI Java builds in the validation loop because parser issues surface there immediately.
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Future anchor-editor shortcuts should bind at the shared detail-mode keydown layer instead of only at textarea DOM level, because Vditor and textarea focus targets coexist.
+  - When a reusable editing primitive already exists, wire new shortcuts into that primitive first and avoid building a second text-mutation path.
+
+
+## 2026-03-09: Markdown Tab outdent semantics were too loose and are now fixed to 4 spaces
+- Symptom:
+  - `Tab` already added four spaces, but `Shift+Tab` could remove anywhere from one to four leading spaces, so one indent step was not strictly reversible.
+  - In the anchor mount editor and Web Markdown editor, repeated indent/outdent operations could drift away from a stable 4-space indentation rhythm.
+- Root cause:
+  - The outdent implementation used permissive rules such as `^ {1,4}` and legacy tab stripping, which optimized for cleanup but broke deterministic indentation semantics.
+- Fix:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - Change Markdown outdent to remove exactly one `MARKDOWN_INDENT_UNIT` (`4` spaces) and ignore shorter prefixes.
+  - `services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+    - Change paragraph outdent to remove exactly one 4-space indent level.
+    - Recompute caret mapping by line so that caret movement remains stable when indent/outdent happens inside the current paragraph.
+- Validation:
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `D:pache-maven-3.9.12in\mvn.cmd -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Future indentation shortcuts must define the unit size and the reverse operation together; never allow a looser outdent rule than the indent rule.
+
+
+## 2026-03-09: Editor shortcut interception was extracted into a reusable tool module
+- Symptom:
+  - Shortcut interception logic for Markdown editors was starting to spread across `index.html` and `mobile-anchor-panel.js`, making later custom keybinding expansion risky and repetitive.
+- Root cause:
+  - The earlier fixes solved specific keys in-place, but the project still lacked one reusable frontend shortcut utility layer for event consumption, 4-space indentation, paragraph mutation, and future binding helpers.
+- Fix:
+  - Add `services/java-orchestrator/src/main/resources/static/lib/mobile-editor-shortcuts.js`.
+  - Move reusable primitives such as `consumeKeyEvent`, `shiftLineIndent`, `applyParagraphIndentMutation`, `applyHeadingMutation`, and `bindCaptureKeydown` into the shared module.
+  - Rewire `index.html` and `mobile-anchor-panel.js` to consume the shared module instead of continuing to duplicate shortcut internals.
+- Validation:
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-editor-shortcuts.js`
+  - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
+  - `D:\apache-maven-3.9.12\bin\mvn.cmd -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Future editor shortcuts must first look for extension points in `mobile-editor-shortcuts.js` before adding page-local keyboard logic.

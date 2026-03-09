@@ -47,8 +47,22 @@ powershell -ExecutionPolicy Bypass -File scripts/release/build_docker_release_bu
 copy .env.example .env
 ```
 
-按需填写 `.env`：
-- `DEEPSEEK_API_KEY`：DeepSeek 文本相关链路
+`release` 包中的 `.env` 是统一入口，`python-grpc` 和 `java-orchestrator` 都会从这里读取环境变量：
+- `DEEPSEEK_API_KEY`：必填；`java-orchestrator` 的 DeepSeek advisor 和 `python-grpc` 的文本增强链路都会使用。
+- `DASHSCOPE_API_KEY`：建议填写；主要供 `python-grpc` 的 VL 视频分析链路使用。
+- `VISION_AI_BEARER_TOKEN`：可选；仅在需要 ERNIE Vision 具象校验时填写。
+
+`.env` 建议保存为 `UTF-8` 无 BOM 纯文本；Docker 对首个变量名较敏感，带 BOM 时可能导致首个 key 注入失败。
+
+推荐至少填写：
+
+```env
+DEEPSEEK_API_KEY=你的_deepseek_key
+DASHSCOPE_API_KEY=你的_dashscope_key
+VISION_AI_BEARER_TOKEN=
+```
+
+其余推荐参数保持模板默认值即可：
 - `MODULE2_DEEPSEEK_CONCURRENCY_INITIAL`：全局并发初始值（建议 `56`）
 - `MODULE2_DEEPSEEK_CONCURRENCY_MIN`：全局并发最小值（建议 `8`）
 - `MODULE2_DEEPSEEK_CONCURRENCY_MAX`：全局并发上限（建议 `64`）
@@ -56,8 +70,13 @@ copy .env.example .env
 - `MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT`：Markdown 增强并发上限（建议 `56`）
 - `MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT`：KC multi-unit 并发上限（建议 `48`）
 - `MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY`：语义分段并发上限（建议 `48`）
-- `DASHSCOPE_API_KEY`：VL 视频分析链路（可选）
-- `VISION_AI_BEARER_TOKEN`：ERNIE Vision 具象校验链路（可选）
+
+如果你在服务启动后才修改 `.env`，需要重新创建容器，变量才会重新注入：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/release/docker_release.ps1 -Action down
+powershell -ExecutionPolicy Bypass -File scripts/release/docker_release.ps1 -Action up
+```
 
 ### 2.3 启动服务
 在解压目录执行：

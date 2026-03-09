@@ -175,7 +175,8 @@ private data class TaskCollectionSectionUi(
     val collectionPath: String,
     val title: String,
     val depth: Int,
-    val tasks: List<MobileTaskListItem>
+    val tasks: List<MobileTaskListItem>,
+    val childGroupCount: Int
 )
 
 private data class TaskCollectionBuckets(
@@ -1089,6 +1090,7 @@ private fun MobileTaskApp(
     var readerSession by remember { mutableStateOf<TaskReaderSession?>(null) }
     var readerScrollSnapshot by remember { mutableStateOf<ReaderScrollSnapshot?>(null) }
     var readerChromeVisible by remember { mutableStateOf(true) }
+    var readerMetaSyncVersion by remember { mutableStateOf(0) }
     var clipboardCandidate by remember { mutableStateOf<ClipboardTaskCandidate?>(null) }
     var shareDispatchState by remember { mutableStateOf<ShareDispatchState?>(null) }
     var currentSharePayload by remember(initialSharePayload) { mutableStateOf(initialSharePayload) }
@@ -1105,6 +1107,11 @@ private fun MobileTaskApp(
     var pendingMergeRequest by remember { mutableStateOf<PendingTaskMergeRequest?>(null) }
     var pendingMergeDraft by remember { mutableStateOf("") }
     var pendingMergeSaving by remember { mutableStateOf(false) }
+    var batchSelectionMode by remember { mutableStateOf(false) }
+    val selectedTaskIds = remember { mutableStateMapOf<String, Boolean>() }
+    var pendingBatchMergeTaskIds by remember { mutableStateOf<List<String>>(emptyList()) }
+    var pendingBatchMergeDraft by remember { mutableStateOf("") }
+    var pendingBatchMergeSaving by remember { mutableStateOf(false) }
     var dragSession by remember { mutableStateOf<TaskDragSession?>(null) }
     var dragHoverCollectionPath by remember { mutableStateOf<String?>(null) }
     var dragHoverTaskId by remember { mutableStateOf<String?>(null) }
@@ -1346,7 +1353,16 @@ private fun MobileTaskApp(
                 }
             }.onFailure { error ->
                 if (showLoading) {
-                    actionMessage = "加载失败，请稍后重试"
+                    actionMessage = "Load failed. Please try again later."
+                }
+                scope.launch {
+                    val retryResult = snackbarHostState.showSnackbar(
+                        message = "Task list reload failed: ${error.message ?: "unknown"}",
+                        actionLabel = "Retry"
+                    )
+                    if (retryResult == SnackbarResult.ActionPerformed) {
+                        refreshTasks(showLoading = true)
+                    }
                 }
             }
         } finally {
@@ -1448,8 +1464,25 @@ private fun MobileTaskApp(
                 scope.launch {
                     applyRealtimeTaskUpdate(update)
                 }
+            },
+            onMetaSync = { event ->
+                if (readerSession?.taskId == event.taskId) {
+                    readerMetaSyncVersion += 1
+                }
             }
         )
+    }
+
+    DisposableEffect(readerSession?.taskId) {
+        val taskId = readerSession?.taskId?.trim().orEmpty()
+        if (taskId.isNotEmpty()) {
+            taskRealtimeClient.subscribeTask(taskId)
+        }
+        onDispose {
+            if (taskId.isNotEmpty()) {
+                taskRealtimeClient.unsubscribeTask(taskId)
+            }
+        }
     }
 
     fun updateLastOpenedAt(taskId: String, lastOpenedAt: String) {
@@ -1625,6 +1658,338 @@ private fun MobileTaskApp(
         renameSavingTaskId = null
     }
 
+    suspend fun showRetrySnackbar(message: String, retryAction: suspend () -> Unit) {
+        val result = snackbarHostState.showSnackbar(
+            message = message,
+            actionLabel = "Retry"
+        )
+        if (result == SnackbarResult.ActionPerformed) {
+            retryAction()
+        }
+    }
+
+    fun canTaskBeResubmitted(task: MobileTaskListItem): Boolean {
+        val normalizedVideoUrl = task.videoUrl.trim()
+        return normalizedVideoUrl.startsWith("http://", ignoreCase = true) ||
+            normalizedVideoUrl.startsWith("https://", ignoreCase = true)
+    }
+
+    fun normalizeManualCollectionPathInput(raw: String): String {
+        return raw
+            .replace('\\', '/')
+            .split('/')
+            .map { part -> part.trim() }
+            .filter { part -> part.isNotEmpty() }
+            .joinToString("/")
+    }
+
+    fun buildSuggestedManualCollectionPath(source: MobileTaskListItem, target: MobileTaskListItem): String {
+        val sourceTitle = resolveTaskDisplayName(source).trim()
+        val targetTitle = resolveTaskDisplayName(target).trim()
+        val baseTitle = listOf(sourceTitle, targetTitle)
+            .map { title -> title.replace("/", "-").trim() }
+            .firstOrNull { title -> title.isNotEmpty() }
+            ?: "New Group"
+        return normalizeManualCollectionPathInput(baseTitle)
+    }
+
+    fun openTaskCollectionEditor(task: MobileTaskListItem) {
+        collectionEditorTask = task
+        collectionEditorDraft = task.collectionPath.trim()
+        revealedTaskId = null
+    }
+
+    fun clearTaskDragState() {
+        dragSession = null
+        dragHoverCollectionPath = null
+        dragHoverTaskId = null
+        dragHoverUngroup = false
+    }
+
+    fun isTaskSelected(taskId: String): Boolean {
+        return selectedTaskIds[taskId] == true
+    }
+
+    fun clearTaskSelection() {
+        selectedTaskIds.clear()
+    }
+
+    fun exitBatchSelectionMode() {
+        batchSelectionMode = false
+        clearTaskSelection()
+    }
+
+    fun toggleTaskSelection(taskId: String) {
+        val normalizedTaskId = taskId.trim()
+        if (normalizedTaskId.isEmpty()) {
+            return
+        }
+        val nextSelected = !(selectedTaskIds[normalizedTaskId] == true)
+        if (nextSelected) {
+            selectedTaskIds[normalizedTaskId] = true
+        } else {
+            selectedTaskIds.remove(normalizedTaskId)
+        }
+    }
+
+    fun enterBatchSelectionMode(initialTaskId: String? = null) {
+        batchSelectionMode = true
+        if (!initialTaskId.isNullOrBlank()) {
+            selectedTaskIds[initialTaskId] = true
+        }
+        clearTaskDragState()
+        revealedTaskId = null
+    }
+
+    fun resolveSelectedTasks(): List<MobileTaskListItem> {
+        val selectedIds = selectedTaskIds.entries
+            .filter { it.value }
+            .map { it.key }
+            .toHashSet()
+        if (selectedIds.isEmpty()) {
+            return emptyList()
+        }
+        return tasks.filter { task -> task.taskId in selectedIds }
+    }
+
+    fun openBatchMergeSheetFromSelection() {
+        val selectedTasks = resolveSelectedTasks()
+        if (selectedTasks.size < 2) {
+            actionMessage = "Select at least two tasks to merge."
+            return
+        }
+        pendingBatchMergeTaskIds = selectedTasks.map { it.taskId }
+        val existingPath = selectedTasks
+            .map { task -> normalizeManualCollectionPathInput(task.collectionPath) }
+            .firstOrNull { path -> path.isNotBlank() }
+        pendingBatchMergeDraft = (existingPath ?: "").ifBlank {
+            normalizeManualCollectionPathInput(
+                selectedTasks.firstOrNull()?.title.orEmpty().ifBlank { "New Group" }
+            )
+        }
+    }
+
+    fun updateTaskDragHover(pointerWindowPosition: Offset) {
+        dragHoverUngroup = ungroupDropBounds?.contains(pointerWindowPosition) == true
+        dragHoverCollectionPath = collectionHeaderBounds.entries.firstOrNull { (_, rect) ->
+            rect.contains(pointerWindowPosition)
+        }?.key
+        dragHoverTaskId = taskCardBounds.entries.firstOrNull { (taskId, rect) ->
+            taskId != dragSession?.task?.taskId && rect.contains(pointerWindowPosition)
+        }?.key
+    }
+
+    suspend fun syncTaskCollection(task: MobileTaskListItem, collectionPath: String?) {
+        val normalizedTaskPath = task.taskPath.trim()
+        if (normalizedTaskPath.isEmpty()) {
+            actionMessage = "This task has no syncable task path."
+            return
+        }
+        val normalizedCollectionPath = normalizeManualCollectionPathInput(collectionPath.orEmpty())
+        collectionEditorSaving = true
+        actionLoading = true
+        runCatching {
+            taskApi.syncManualTaskCollection(
+                taskPath = normalizedTaskPath,
+                collectionPath = normalizedCollectionPath.ifBlank { null }
+            )
+        }.onSuccess {
+            actionMessage = if (normalizedCollectionPath.isBlank()) {
+                "Task removed from group."
+            } else {
+                "Task synced to group: $normalizedCollectionPath"
+            }
+            collectionEditorTask = null
+            refreshTasks(showLoading = false)
+        }.onFailure { error ->
+            actionMessage = "Group sync failed: ${error.message ?: "unknown"}"
+            showRetrySnackbar(actionMessage) {
+                syncTaskCollection(task, normalizedCollectionPath)
+            }
+        }
+        collectionEditorSaving = false
+        actionLoading = false
+    }
+
+    suspend fun mergeTasksIntoCollection(source: MobileTaskListItem, target: MobileTaskListItem, collectionPath: String) {
+        val normalizedCollectionPath = normalizeManualCollectionPathInput(collectionPath)
+        if (normalizedCollectionPath.isBlank()) {
+            actionMessage = "Group name cannot be empty."
+            return
+        }
+        val sourceTaskPath = source.taskPath.trim()
+        val targetTaskPath = target.taskPath.trim()
+        if (sourceTaskPath.isEmpty() || targetTaskPath.isEmpty()) {
+            actionMessage = "Some tasks have no syncable task path."
+            return
+        }
+        pendingMergeSaving = true
+        actionLoading = true
+        runCatching {
+            taskApi.mergeManualTaskCollections(
+                taskPaths = listOf(sourceTaskPath, targetTaskPath),
+                collectionPath = normalizedCollectionPath
+            )
+        }.onSuccess {
+            pendingMergeRequest = null
+            actionMessage = "Tasks merged into group: $normalizedCollectionPath"
+            refreshTasks(showLoading = false)
+        }.onFailure { error ->
+            actionMessage = "Group merge failed: ${error.message ?: "unknown"}"
+            showRetrySnackbar(actionMessage) {
+                mergeTasksIntoCollection(source, target, normalizedCollectionPath)
+            }
+        }
+        pendingMergeSaving = false
+        actionLoading = false
+    }
+
+    suspend fun mergeTaskBatchIntoCollection(tasksToMerge: List<MobileTaskListItem>, collectionPath: String) {
+        val normalizedCollectionPath = normalizeManualCollectionPathInput(collectionPath)
+        if (normalizedCollectionPath.isBlank()) {
+            actionMessage = "Group name cannot be empty."
+            return
+        }
+        val taskPaths = tasksToMerge
+            .map { task -> task.taskPath.trim() }
+            .filter { taskPath -> taskPath.isNotBlank() }
+            .distinct()
+        if (taskPaths.size < 2) {
+            actionMessage = "Select at least two syncable tasks."
+            return
+        }
+        pendingBatchMergeSaving = true
+        actionLoading = true
+        runCatching {
+            taskApi.mergeManualTaskCollections(
+                taskPaths = taskPaths,
+                collectionPath = normalizedCollectionPath
+            )
+        }.onSuccess {
+            pendingBatchMergeTaskIds = emptyList()
+            batchSelectionMode = false
+            clearTaskSelection()
+            actionMessage = "${taskPaths.size} tasks merged into group: $normalizedCollectionPath"
+            refreshTasks(showLoading = false)
+        }.onFailure { error ->
+            actionMessage = "Batch merge failed: ${error.message ?: "unknown"}"
+            showRetrySnackbar(actionMessage) {
+                mergeTaskBatchIntoCollection(tasksToMerge, normalizedCollectionPath)
+            }
+        }
+        pendingBatchMergeSaving = false
+        actionLoading = false
+    }
+
+    fun startTaskDrag(task: MobileTaskListItem, pointerWindowPosition: Offset) {
+        if (task.taskPath.isBlank() || actionLoading || editingTaskId != null) {
+            return
+        }
+        dragSession = TaskDragSession(
+            task = task,
+            pointerWindowPosition = pointerWindowPosition
+        )
+        updateTaskDragHover(pointerWindowPosition)
+    }
+
+    fun continueTaskDrag(pointerWindowPosition: Offset) {
+        val session = dragSession ?: return
+        dragSession = session.copy(pointerWindowPosition = pointerWindowPosition)
+        updateTaskDragHover(pointerWindowPosition)
+    }
+
+    suspend fun finishTaskDrag() {
+        val session = dragSession ?: return
+        val sourceTask = session.task
+        val hoveredCollectionPath = dragHoverCollectionPath?.trim().orEmpty()
+        val hoveredTaskId = dragHoverTaskId?.trim().orEmpty()
+        val shouldUngroup = dragHoverUngroup
+        clearTaskDragState()
+        when {
+            shouldUngroup && sourceTask.collectionPath.isNotBlank() -> {
+                syncTaskCollection(sourceTask, null)
+            }
+            hoveredCollectionPath.isNotEmpty() && hoveredCollectionPath != sourceTask.collectionPath.trim() -> {
+                syncTaskCollection(sourceTask, hoveredCollectionPath)
+            }
+            hoveredTaskId.isNotEmpty() -> {
+                val targetTask = tasks.firstOrNull { task -> task.taskId == hoveredTaskId } ?: return
+                val targetCollectionPath = targetTask.collectionPath.trim()
+                if (targetCollectionPath.isNotEmpty()) {
+                    syncTaskCollection(sourceTask, targetCollectionPath)
+                } else {
+                    pendingMergeRequest = PendingTaskMergeRequest(
+                        sourceTaskId = sourceTask.taskId,
+                        targetTaskId = targetTask.taskId
+                    )
+                    pendingMergeDraft = buildSuggestedManualCollectionPath(sourceTask, targetTask)
+                }
+            }
+        }
+    }
+
+    suspend fun resubmitTaskFromUi(task: MobileTaskListItem) {
+        val normalizedVideoUrl = task.videoUrl.trim()
+        if (!canTaskBeResubmitted(task)) {
+            actionMessage = "Only original URL tasks can be resubmitted."
+            return
+        }
+        actionLoading = true
+        actionMessage = "Resubmitting task..."
+        runCatching {
+            taskApi.cancelTask(task.taskId)
+            taskApi.submitVideoUrl(normalizedVideoUrl)
+        }.onSuccess { result ->
+            actionMessage = "Original URL task resubmitted."
+            refreshTasks(showLoading = false)
+            val originalCollectionPath = task.collectionPath.trim()
+            val nextTask = tasks.firstOrNull { loaded -> loaded.taskId == result.taskId }
+            if (originalCollectionPath.isNotEmpty() && nextTask != null && nextTask.taskPath.isNotBlank()) {
+                taskApi.syncManualTaskCollection(nextTask.taskPath, originalCollectionPath)
+                refreshTasks(showLoading = false)
+            }
+        }.onFailure { error ->
+            actionMessage = "Resubmit failed: ${error.message ?: "unknown"}"
+            showRetrySnackbar(actionMessage) {
+                resubmitTaskFromUi(task)
+            }
+        }
+        actionLoading = false
+    }
+
+    fun submitComposerTaskDirectly() {
+        val normalizedVideoUrl = videoUrlInput.trim()
+        if (normalizedVideoUrl.isEmpty()) {
+            actionMessage = "Enter a URL first, or upload a file."
+            return
+        }
+        val submissionId = UUID.randomUUID().toString()
+        runCatching {
+            TaskSubmissionForegroundService.startUrlSubmission(
+                context = context.applicationContext,
+                submissionId = submissionId,
+                title = deriveSubmissionTitleFromUrl(normalizedVideoUrl),
+                videoUrl = normalizedVideoUrl
+            )
+        }.onFailure { error ->
+            actionMessage = "Unable to submit the URL task right now: ${error.message ?: "unknown"}"
+            scope.launch {
+                showRetrySnackbar(actionMessage) {
+                    submitComposerTaskDirectly()
+                }
+            }
+            return
+        }
+        clipboardCandidate = null
+        pendingUploadSubmissionId = null
+        actionMessage = "URL task queued in background."
+        taskRouteViewModel.setComposerExpanded(false)
+        taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+        taskRouteViewModel.setVideoUrlInput("")
+        taskRouteViewModel.setBookPageOffsetInput("")
+        scope.launch { refreshTasks(showLoading = false) }
+    }
+
     val filteredAndSortedTasks = remember(tasks, taskSearchQuery, taskSortField, taskSortOrder) {
         val query = taskSearchQuery.trim().lowercase(Locale.ROOT)
         val filtered = if (query.isEmpty()) {
@@ -1641,6 +2006,162 @@ private fun MobileTaskApp(
         filteredAndSortedTasks.filterNot { task ->
             isProcessingStatus(task.status) && task.taskId in activeSubmissionTaskIds
         }
+    }
+    val taskCollectionBuckets = remember(visibleTaskCards) {
+        val directTasksByPath = LinkedHashMap<String, MutableList<MobileTaskListItem>>()
+        val allCollectionPaths = LinkedHashMap<String, MutableSet<String>>()
+        val ungrouped = mutableListOf<MobileTaskListItem>()
+        visibleTaskCards.forEach { task ->
+            val normalizedCollectionPath = normalizeManualCollectionPathInput(task.collectionPath)
+            if (normalizedCollectionPath.isEmpty()) {
+                ungrouped += task
+            } else {
+                val segments = normalizedCollectionPath.split('/').filter { segment -> segment.isNotBlank() }
+                var currentPath = ""
+                segments.forEach { segment ->
+                    currentPath = if (currentPath.isBlank()) segment else "$currentPath/$segment"
+                    allCollectionPaths.getOrPut(currentPath) { linkedSetOf() }
+                }
+                directTasksByPath.getOrPut(normalizedCollectionPath) { mutableListOf() }.add(task)
+            }
+        }
+        val sortedPaths = allCollectionPaths.keys.sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
+        sortedPaths.forEach { pathKey ->
+            val prefix = if (pathKey.contains('/')) pathKey.substringBeforeLast('/') else ""
+            if (prefix.isNotBlank()) {
+                allCollectionPaths.getOrPut(prefix) { linkedSetOf() }.add(pathKey)
+            }
+        }
+        TaskCollectionBuckets(
+            ungroupedTasks = ungrouped,
+            groupedSections = sortedPaths.map { collectionPath ->
+                val segments = collectionPath.split('/').filter { segment -> segment.isNotBlank() }
+                TaskCollectionSectionUi(
+                    collectionPath = collectionPath,
+                    title = segments.lastOrNull().orEmpty().ifBlank { collectionPath },
+                    depth = (segments.size - 1).coerceAtLeast(0),
+                    tasks = directTasksByPath[collectionPath].orEmpty().toList(),
+                    childGroupCount = allCollectionPaths[collectionPath]?.count { it != collectionPath } ?: 0
+                )
+            }
+        )
+    }
+    val selectedTaskCount = selectedTaskIds.values.count { it }
+
+    @Composable
+    fun TaskListCard(
+        task: MobileTaskListItem,
+        isDropTarget: Boolean = false,
+        isSelected: Boolean = false,
+        selectionMode: Boolean = false
+    ) {
+        val flashDeadline = flashingTaskDeadlines[task.taskId] ?: 0L
+        val shouldFlash = flashDeadline > uiClockMs
+        val flashTransition = androidx.compose.animation.core.rememberInfiniteTransition(
+            label = "task-flash-${task.taskId}"
+        )
+        val flashPulse by flashTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                animation = tween(durationMillis = 600),
+                repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
+            ),
+            label = "task-flash-pulse-${task.taskId}"
+        )
+        val isEditingCurrent = editingTaskId == task.taskId
+        SwipeRenameTaskListItem(
+            task = task,
+            shouldFlash = shouldFlash,
+            flashPulse = flashPulse,
+            isEditing = isEditingCurrent,
+            editValue = editingTaskTitleValue,
+            isRenameSaving = renameSavingTaskId == task.taskId,
+            isMenuRevealed = revealedTaskId == task.taskId,
+            canInteract = !actionLoading && (editingTaskId == null || isEditingCurrent),
+            dimOthers = editingTaskId != null && !isEditingCurrent,
+            canRetry = canTaskBeResubmitted(task) && isFailedStatus(task.status),
+            isDropTarget = isDropTarget,
+            isSelected = isSelected,
+            selectionMode = selectionMode,
+            onEditValueChange = { editingTaskTitleValue = it },
+            onOpen = {
+                if (selectionMode) {
+                    toggleTaskSelection(task.taskId)
+                    return@SwipeRenameTaskListItem
+                }
+                if (revealedTaskId == task.taskId) {
+                    revealedTaskId = null
+                    return@SwipeRenameTaskListItem
+                }
+                if (editingTaskId != null && editingTaskId != task.taskId) {
+                    scope.launch {
+                        commitInlineRename("switch_task")
+                    }
+                    return@SwipeRenameTaskListItem
+                }
+                scope.launch {
+                    openTask(task)
+                }
+            },
+            onRevealMenu = { shouldReveal ->
+                revealedTaskId = if (shouldReveal) task.taskId else null
+            },
+            onStartRename = {
+                startInlineRename(task)
+            },
+            onCommitRename = { trigger ->
+                scope.launch {
+                    commitInlineRename(trigger)
+                }
+            },
+            onCancelTask = {
+                scope.launch {
+                    actionLoading = true
+                    actionMessage = "Cancelling..."
+                    runCatching {
+                        taskApi.cancelTask(task.taskId)
+                    }.onSuccess { result ->
+                        actionMessage = result.message.ifBlank {
+                            if (result.success) "Task cancelled." else "Task cannot be cancelled."
+                        }
+                        refreshTasks(showLoading = false)
+                    }.onFailure {
+                        actionMessage = "Cancel failed. Please try again later."
+                    }
+                    actionLoading = false
+                }
+            },
+            onEditGroup = {
+                openTaskCollectionEditor(task)
+            },
+            onRetryTask = {
+                scope.launch {
+                    resubmitTaskFromUi(task)
+                }
+            },
+            onCardBoundsChanged = { rect ->
+                if (rect == null) {
+                    taskCardBounds.remove(task.taskId)
+                } else {
+                    taskCardBounds[task.taskId] = rect
+                }
+            },
+            onTaskDragStart = { pointerWindowPosition ->
+                startTaskDrag(task, pointerWindowPosition)
+            },
+            onTaskDrag = { pointerWindowPosition ->
+                continueTaskDrag(pointerWindowPosition)
+            },
+            onTaskDragEnd = {
+                scope.launch {
+                    finishTaskDrag()
+                }
+            },
+            onTaskDragCancel = {
+                clearTaskDragState()
+            }
+        )
     }
 
     fun inspectClipboardForTaskCandidate() {
@@ -1908,47 +2429,46 @@ private fun MobileTaskApp(
                 android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
         }
-        scope.launch {
-            val normalizedOffsetText = bookPageOffsetInput.trim()
-            val pageOffset = if (normalizedOffsetText.isEmpty()) {
-                null
-            } else {
-                normalizedOffsetText.toIntOrNull()
-            }
-            if (normalizedOffsetText.isNotEmpty() && pageOffset == null) {
-                actionMessage = "页码偏移必须是整数，例如 12 或 -12"
-                return@launch
-            }
-            actionLoading = true
-            actionMessage = "正在上传书籍并探测目录..."
-            runCatching {
-                taskApi.uploadVideoFile(
-                    contentResolver = context.contentResolver,
-                    uri = uri,
-                    probeOnly = true
-                )
-            }.onSuccess { uploadResult ->
-                if (!uploadResult.success) {
-                    actionMessage = uploadResult.message.ifBlank { "上传失败，请重试" }
-                    return@onSuccess
+        val preferredTitle = resolveSubmissionTitleFromUri(
+            contentResolver = context.contentResolver,
+            uri = uri
+        )
+        val submissionId = enqueueSubmissionWork(
+            mode = SUBMISSION_MODE_UPLOAD,
+            preferredTitle = preferredTitle,
+            uploadUri = uri
+        )
+        if (submissionId.isNullOrBlank()) {
+            actionMessage = "Unable to submit the file task right now."
+            scope.launch {
+                showRetrySnackbar(actionMessage) {
+                    val retriedSubmissionId = enqueueSubmissionWork(
+                        mode = SUBMISSION_MODE_UPLOAD,
+                        preferredTitle = preferredTitle,
+                        uploadUri = uri
+                    )
+                    if (!retriedSubmissionId.isNullOrBlank()) {
+                        pendingUploadSubmissionId = retriedSubmissionId
+                        actionMessage = "File task queued in background."
+                        taskRouteViewModel.setComposerExpanded(false)
+                        taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+                        taskRouteViewModel.setVideoUrlInput("")
+                        taskRouteViewModel.setBookPageOffsetInput("")
+                        refreshTasks(showLoading = false)
+                    }
                 }
-                val probeInput = uploadResult.normalizedVideoUrl.trim()
-                if (probeInput.isBlank()) {
-                    actionMessage = "上传成功，但未返回可探测的文件路径"
-                    return@onSuccess
-                }
-                pendingUploadSubmissionId = null
-                taskRouteViewModel.setVideoUrlInput(probeInput)
-                taskRouteViewModel.setComposerExpanded(true)
-                taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
-                collectionViewModel.setProbePreviewDocumentUri(uri.toString())
-                collectionViewModel.probeVideoInput(probeInput, pageOffset)
-                actionMessage = "已完成探测，请确认实际起始页与章节后再提交。"
-            }.onFailure { error ->
-                actionMessage = "上传探测失败: ${error.message ?: "unknown"}"
             }
-            actionLoading = false
+            return@rememberLauncherForActivityResult
         }
+        pendingUploadSubmissionId = submissionId
+        collectionViewModel.clearProbeResult()
+        collectionViewModel.setProbePreviewDocumentUri(null)
+        actionMessage = "File task queued in background."
+        taskRouteViewModel.setComposerExpanded(false)
+        taskRouteViewModel.setComposerMode(TaskComposerMode.URL)
+        taskRouteViewModel.setVideoUrlInput("")
+        taskRouteViewModel.setBookPageOffsetInput("")
+        scope.launch { refreshTasks(showLoading = false) }
     }
 
     fun cancelSubmissionHintFromUi(hint: ActiveSubmissionHint) {
@@ -2369,6 +2889,7 @@ private fun MobileTaskApp(
                         metaApi = metaApi,
                         telemetryApi = telemetryApi,
                         cardApi = cardApi,
+                        externalMetaRefreshVersion = readerMetaSyncVersion,
                         initialFirstVisibleItemIndex = initialReaderScrollPosition.firstVisibleItemIndex,
                         initialFirstVisibleItemScrollOffset = initialReaderScrollPosition.firstVisibleItemScrollOffset,
                         onScrollDown = {
@@ -2628,18 +3149,30 @@ private fun MobileTaskApp(
                                 onClick = {
                                     taskRouteViewModel.setHomeSection(HomeSection.FOOTPRINTS)
                                 },
-                                enabled = !actionLoading
+                                enabled = !actionLoading && !batchSelectionMode
                             ) {
-                                Text("阅读足迹")
+                                Text("Footprints")
                             }
                             TextButton(
                                 onClick = {
                                     taskRouteViewModel.setHomeSection(HomeSection.COLLECTIONS)
                                     collectionViewModel.refreshCollections()
                                 },
+                                enabled = !actionLoading && !batchSelectionMode
+                            ) {
+                                Text("Collections")
+                            }
+                            TextButton(
+                                onClick = {
+                                    if (batchSelectionMode) {
+                                        exitBatchSelectionMode()
+                                    } else {
+                                        enterBatchSelectionMode()
+                                    }
+                                },
                                 enabled = !actionLoading
                             ) {
-                                Text("查看合集")
+                                Text(if (batchSelectionMode) "Exit Select" else "Select")
                             }
                         }
                     }
@@ -2667,26 +3200,70 @@ private fun MobileTaskApp(
                             onClick = {
                                 taskRouteViewModel.cycleTaskSortField()
                             },
-                            enabled = !actionLoading
+                            enabled = !actionLoading && !batchSelectionMode
                         ) {
-                            Text("排序：${taskSortFieldLabel(taskSortField)}")
+                            Text("Sort: ${taskSortFieldLabel(taskSortField)}")
                         }
                         TextButton(
                             onClick = {
                                 taskRouteViewModel.toggleTaskSortOrder()
                             },
-                            enabled = !actionLoading
+                            enabled = !actionLoading && !batchSelectionMode
                         ) {
-                            Text("顺序：${if (taskSortOrder == SortOrder.DESC) "最新" else "最旧"}")
+                            Text("Order: ${if (taskSortOrder == SortOrder.DESC) "Newest" else "Oldest"}")
                         }
                     }
                 }
 
                 item {
                     Text(
-                        text = "显示 ${visibleTaskCards.size} / ${tasks.size} 条",
+                        text = "Showing ${visibleTaskCards.size} / ${tasks.size}",
                         color = Color(0xFF667085)
                     )
+                }
+
+                if (batchSelectionMode) {
+                    item(key = "task-batch-selection-bar") {
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = Color(0xFFF5F7FB))
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = if (selectedTaskCount > 0) {
+                                        "${selectedTaskCount} tasks selected"
+                                    } else {
+                                        "Tap task cards, then batch merge"
+                                    },
+                                    color = Color(0xFF344054)
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = { openBatchMergeSheetFromSelection() },
+                                        enabled = !actionLoading && selectedTaskCount >= 2,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("Batch Merge")
+                                    }
+                                    TextButton(
+                                        onClick = { clearTaskSelection() },
+                                        enabled = selectedTaskCount > 0,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("Clear")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
 
                 if (activeSubmissionHints.isNotEmpty()) {
@@ -2713,67 +3290,108 @@ private fun MobileTaskApp(
                     }
                 }
 
-                items(visibleTaskCards, key = { it.taskId }) { task ->
-                    val flashDeadline = flashingTaskDeadlines[task.taskId] ?: 0L
-                    val shouldFlash = flashDeadline > uiClockMs
-                    val flashTransition = androidx.compose.animation.core.rememberInfiniteTransition(
-                        label = "task-flash-${task.taskId}"
-                    )
-                    val flashPulse by flashTransition.animateFloat(
-                        initialValue = 0f,
-                        targetValue = 1f,
-                        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
-                            animation = tween(durationMillis = 600),
-                            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse
-                        ),
-                        label = "task-flash-pulse-${task.taskId}"
-                    )
-                    val isEditingCurrent = editingTaskId == task.taskId
-                    SwipeRenameTaskListItem(
-                        task = task,
-                        shouldFlash = shouldFlash,
-                        flashPulse = flashPulse,
-                        isEditing = isEditingCurrent,
-                        editValue = editingTaskTitleValue,
-                        isRenameSaving = renameSavingTaskId == task.taskId,
-                        isMenuRevealed = revealedTaskId == task.taskId,
-                        canInteract = !actionLoading && (editingTaskId == null || isEditingCurrent),
-                        dimOthers = editingTaskId != null && !isEditingCurrent,
-                        onEditValueChange = { editingTaskTitleValue = it },
-                        onOpen = {
-                            if (revealedTaskId == task.taskId) {
-                                revealedTaskId = null
-                                return@SwipeRenameTaskListItem
-                            }
-                            if (editingTaskId != null && editingTaskId != task.taskId) {
-                                scope.launch {
-                                    commitInlineRename("switch_task")
+                if (!batchSelectionMode && dragSession?.task?.collectionPath?.isNotBlank() == true) {
+                    item(key = "ungroup-drop-zone") {
+                        val isActiveDropZone = dragHoverUngroup
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned { coordinates ->
+                                    ungroupDropBounds = coordinates.boundsInWindow()
+                                },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isActiveDropZone) {
+                                    Color(0xFFFFE4E6)
+                                } else {
+                                    Color(0xFFF8FAFC)
                                 }
-                                return@SwipeRenameTaskListItem
-                            }
-                            scope.launch {
-                                openTask(task)
-                            }
-                        },
-                        onRevealMenu = { shouldReveal ->
-                            revealedTaskId = if (shouldReveal) task.taskId else null
-                        },
-                        onStartRename = {
-                            startInlineRename(task)
-                        },
-                        onCommitRename = { trigger ->
-                            scope.launch {
-                                commitInlineRename(trigger)
-                            }
-                        },
-                        onCancelTask = {
-                            cancelTaskFromUi(task.taskId)
+                            )
+                        ) {
+                            Text(
+                                text = "Drop here to remove from group",
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
+                                color = if (isActiveDropZone) Color(0xFFB42318) else Color(0xFF475467)
+                            )
                         }
-                    )
+                    }
+                } else {
+                    ungroupDropBounds = null
                 }
+
+                items(taskCollectionBuckets.ungroupedTasks, key = { it.taskId }) { task ->
+                            TaskListCard(
+                                task = task,
+                                isDropTarget = dragHoverTaskId == task.taskId,
+                                isSelected = isTaskSelected(task.taskId),
+                                selectionMode = batchSelectionMode
+                            )
+                }
+
+                taskCollectionBuckets.groupedSections.forEach { section ->
+                    item(key = "group-header-${section.collectionPath}") {
+                        val isCollapsed = collapsedTaskCollections[section.collectionPath] == true
+                        val isDropTarget = dragHoverCollectionPath == section.collectionPath
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .onGloballyPositioned { coordinates ->
+                                    collectionHeaderBounds[section.collectionPath] = coordinates.boundsInWindow()
+                                }
+                                .clickable(enabled = !actionLoading) {
+                                    collapsedTaskCollections[section.collectionPath] = !isCollapsed
+                                },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isDropTarget) {
+                                    Color(0xFFE0F2FE)
+                                } else {
+                                    Color(0xFFF5F7FB)
+                                }
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(
+                                        start = (12 + section.depth * 12).dp,
+                                        top = 10.dp,
+                                        end = 12.dp,
+                                        bottom = 10.dp
+                                    ),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = section.title,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Color(0xFF101828)
+                                )
+                                Text(
+                                    text = "${section.collectionPath} ? ${section.tasks.size} tasks ? ${section.childGroupCount} child groups",
+                                    color = Color(0xFF667085),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = if (isCollapsed) "Tap to expand" else "Tap to collapse",
+                                    color = Color(0xFF98A2B3),
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                        }
+                    }
+                    if (!(collapsedTaskCollections[section.collectionPath] == true)) {
+                        items(section.tasks, key = { task -> "${section.collectionPath}-${task.taskId}" }) { task ->
+                            TaskListCard(
+                                task = task,
+                        isDropTarget = dragHoverTaskId == task.taskId,
+                        isSelected = isTaskSelected(task.taskId),
+                        selectionMode = batchSelectionMode
+                            )
+                        }
                     }
                 }
 
+                    }
+                }
                 if (composerExpanded) {
                     ModalBottomSheet(
                         onDismissRequest = {
@@ -2819,8 +3437,8 @@ private fun MobileTaskApp(
                                     enabled = !actionLoading && !probeLoading,
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                                     keyboardActions = KeyboardActions(
-                                        onSearch = { triggerVideoProbe() },
-                                        onDone = { triggerVideoProbe() }
+                                        onSearch = { submitComposerTaskDirectly() },
+                                        onDone = { submitComposerTaskDirectly() }
                                     )
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
@@ -2842,18 +3460,10 @@ private fun MobileTaskApp(
                                     )
                                 }
                             }
-                            OutlinedTextField(
-                                value = bookPageOffsetInput,
-                                onValueChange = { taskRouteViewModel.setBookPageOffsetInput(it) },
-                                modifier = Modifier.fillMaxWidth(),
-                                singleLine = true,
-                                label = { Text("兼ebook页码偏移（可选）") },
-                                placeholder = { Text("书页号 + 偏移 = PDF页码，如：8 或 -12") },
-                                enabled = !actionLoading && !probeLoading,
-                                keyboardOptions = KeyboardOptions(
-                                    imeAction = ImeAction.Done,
-                                    keyboardType = KeyboardType.Text
-                                )
+                            Text(
+                                text = "Links and uploaded files are submitted immediately to the background queue.",
+                                color = Color(0xFF667085),
+                                style = MaterialTheme.typography.bodySmall
                             )
                             if (uploadHint != null) {
                                 Card(
@@ -2894,31 +3504,208 @@ private fun MobileTaskApp(
                                     }
                                 }
                             }
-                            AnimatedVisibility(visible = probeLoading) {
-                                ProbeDetectingSkeleton()
-                            }
-                            if (!probeError.isNullOrBlank()) {
-                                Text(
-                                    text = probeError,
-                                    color = Color(0xFFB42318)
-                                )
-                            }
                             Button(
-                                onClick = { triggerVideoProbe() },
-                                enabled = !actionLoading && !probeLoading,
+                                onClick = { submitComposerTaskDirectly() },
+                                enabled = !actionLoading,
                                 modifier = Modifier.fillMaxWidth()
                             ) {
-                                if (probeLoading) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(16.dp),
-                                        strokeWidth = 2.dp,
-                                        color = Color.White
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                }
-                                Text("解析并开始")
+                                Text("Submit Now")
                             }
                         }
+                    }
+                }
+
+                collectionEditorTask?.let { editingTask ->
+                    ModalBottomSheet(
+                        onDismissRequest = {
+                            if (!collectionEditorSaving) {
+                                collectionEditorTask = null
+                            }
+                        },
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .navigationBarsPadding(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Edit Group",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = resolveTaskDisplayName(editingTask),
+                                color = Color(0xFF475467),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            OutlinedTextField(
+                                value = collectionEditorDraft,
+                                onValueChange = { collectionEditorDraft = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("Group Path") },
+                                placeholder = { Text("e.g. Physics/Chapter 1") },
+                                enabled = !collectionEditorSaving
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            syncTaskCollection(editingTask, collectionEditorDraft)
+                                        }
+                                    },
+                                    enabled = !collectionEditorSaving,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Save")
+                                }
+                                TextButton(
+                                    onClick = {
+                                        scope.launch {
+                                            syncTaskCollection(editingTask, null)
+                                        }
+                                    },
+                                    enabled = !collectionEditorSaving && editingTask.collectionPath.isNotBlank(),
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("Remove")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                pendingMergeRequest?.let { request ->
+                    val sourceTask = visibleTaskCards.firstOrNull { task -> task.taskId == request.sourceTaskId }
+                        ?: tasks.firstOrNull { task -> task.taskId == request.sourceTaskId }
+                    val targetTask = visibleTaskCards.firstOrNull { task -> task.taskId == request.targetTaskId }
+                        ?: tasks.firstOrNull { task -> task.taskId == request.targetTaskId }
+                    if (sourceTask != null && targetTask != null) {
+                        ModalBottomSheet(
+                            onDismissRequest = {
+                                if (!pendingMergeSaving) {
+                                    pendingMergeRequest = null
+                                }
+                            },
+                            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp)
+                                    .navigationBarsPadding(),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                Text(
+                                    text = "Merge Into Group",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "${resolveTaskDisplayName(sourceTask)} + ${resolveTaskDisplayName(targetTask)}",
+                                    color = Color(0xFF475467),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                OutlinedTextField(
+                                    value = pendingMergeDraft,
+                                    onValueChange = { pendingMergeDraft = it },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    singleLine = true,
+                                    label = { Text("Group Path") },
+                                    placeholder = { Text("e.g. Physics/Chapter 1") },
+                                    enabled = !pendingMergeSaving
+                                )
+                                Button(
+                                    onClick = {
+                                        scope.launch {
+                                            mergeTasksIntoCollection(sourceTask, targetTask, pendingMergeDraft)
+                                        }
+                                    },
+                                    enabled = !pendingMergeSaving,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("Merge")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (pendingBatchMergeTaskIds.isNotEmpty()) {
+                    val batchMergeTasks = tasks.filter { task -> task.taskId in pendingBatchMergeTaskIds.toSet() }
+                    ModalBottomSheet(
+                        onDismissRequest = {
+                            if (!pendingBatchMergeSaving) {
+                                pendingBatchMergeTaskIds = emptyList()
+                            }
+                        },
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .navigationBarsPadding(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Batch Merge Into Group",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "${batchMergeTasks.size} tasks selected",
+                                color = Color(0xFF475467)
+                            )
+                            OutlinedTextField(
+                                value = pendingBatchMergeDraft,
+                                onValueChange = { pendingBatchMergeDraft = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("Group Path") },
+                                placeholder = { Text("e.g. Physics/Chapter 1") },
+                                enabled = !pendingBatchMergeSaving
+                            )
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        mergeTaskBatchIntoCollection(batchMergeTasks, pendingBatchMergeDraft)
+                                    }
+                                },
+                                enabled = !pendingBatchMergeSaving && batchMergeTasks.size >= 2,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Batch Merge")
+                            }
+                        }
+                    }
+                }
+
+                val activeDragSession = dragSession
+                if (activeDragSession != null) {
+                    Card(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .offset {
+                                IntOffset(
+                                    (activeDragSession.pointerWindowPosition.x.roundToInt() - 96).coerceAtLeast(0),
+                                    (activeDragSession.pointerWindowPosition.y.roundToInt() - 28).coerceAtLeast(0)
+                                )
+                            },
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1D4ED8))
+                    ) {
+                        Text(
+                            text = resolveTaskDisplayName(activeDragSession.task),
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            color = Color.White,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
 
@@ -3272,6 +4059,7 @@ private fun MobileTaskApp(
     }
 }
 
+
 @Composable
 private fun TaskRoute(content: @Composable () -> Unit) {
     content()
@@ -3574,16 +4362,28 @@ private fun SwipeRenameTaskListItem(
     isMenuRevealed: Boolean,
     canInteract: Boolean,
     dimOthers: Boolean,
+    canRetry: Boolean,
+    isDropTarget: Boolean,
+    isSelected: Boolean,
+    selectionMode: Boolean,
     onEditValueChange: (TextFieldValue) -> Unit,
     onOpen: () -> Unit,
     onRevealMenu: (Boolean) -> Unit,
     onStartRename: () -> Unit,
     onCommitRename: (String) -> Unit,
-    onCancelTask: () -> Unit
+    onCancelTask: () -> Unit,
+    onEditGroup: () -> Unit,
+    onRetryTask: () -> Unit,
+    onCardBoundsChanged: (Rect?) -> Unit,
+    onTaskDragStart: (Offset) -> Unit,
+    onTaskDrag: (Offset) -> Unit,
+    onTaskDragEnd: () -> Unit,
+    onTaskDragCancel: () -> Unit
 ) {
-    val menuWidth = 120.dp
+    val menuWidth = 188.dp
     val menuWidthPx = with(LocalDensity.current) { menuWidth.toPx() }
     var dragOffsetPx by remember(task.taskId) { mutableFloatStateOf(0f) }
+    var latestBounds by remember(task.taskId) { mutableStateOf<Rect?>(null) }
     val targetOffset = if (isMenuRevealed && !isEditing && canInteract) -menuWidthPx else 0f
     LaunchedEffect(targetOffset, task.taskId) {
         dragOffsetPx = targetOffset
@@ -3614,16 +4414,23 @@ private fun SwipeRenameTaskListItem(
                     .width(menuWidth)
                     .align(Alignment.CenterEnd),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
+                horizontalArrangement = Arrangement.SpaceEvenly
             ) {
                 TextButton(
-                    onClick = {
-                        onStartRename()
-                    },
-                    enabled = canInteract && !isRenameSaving
+                    onClick = onStartRename,
+                    enabled = canInteract && !isRenameSaving && !selectionMode
                 ) {
                     Text(
                         text = "Rename",
+                        color = Color.White
+                    )
+                }
+                TextButton(
+                    onClick = onEditGroup,
+                    enabled = canInteract && !selectionMode
+                ) {
+                    Text(
+                        text = "Group",
                         color = Color.White
                     )
                 }
@@ -3636,8 +4443,13 @@ private fun SwipeRenameTaskListItem(
                 .offset {
                     IntOffset(displayOffsetPx.roundToInt(), 0)
                 }
+                .onGloballyPositioned { coordinates ->
+                    val bounds = coordinates.boundsInWindow()
+                    latestBounds = bounds
+                    onCardBoundsChanged(bounds)
+                }
                 .pointerInput(task.taskId, canInteract, isEditing, menuWidthPx) {
-                    if (!canInteract || isEditing) {
+                    if (!canInteract || isEditing || selectionMode) {
                         return@pointerInput
                     }
                     detectHorizontalDragGestures(
@@ -3656,16 +4468,35 @@ private fun SwipeRenameTaskListItem(
                         }
                     )
                 }
+                .pointerInput(task.taskId, canInteract, isEditing) {
+                    if (!canInteract || isEditing || selectionMode) {
+                        return@pointerInput
+                    }
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { offset ->
+                            val base = latestBounds?.topLeft ?: Offset.Zero
+                            onTaskDragStart(base + offset)
+                        },
+                        onDrag = { change, _ ->
+                            change.consume()
+                            val base = latestBounds?.topLeft ?: Offset.Zero
+                            onTaskDrag(base + change.position)
+                        },
+                        onDragEnd = onTaskDragEnd,
+                        onDragCancel = onTaskDragCancel
+                    )
+                }
                 .clickable(
                     enabled = canInteract && !isEditing
                 ) {
                     onOpen()
                 },
-            colors = androidx.compose.material3.CardDefaults.cardColors(
-                containerColor = if (shouldFlash) {
-                    Color(0xFFFFF2CC).copy(alpha = 0.68f + flashPulse * 0.18f)
-                } else {
-                    Color.White
+            colors = CardDefaults.cardColors(
+                containerColor = when {
+                    isSelected -> Color(0xFFDBEAFE)
+                    isDropTarget -> Color(0xFFE0F2FE)
+                    shouldFlash -> Color(0xFFFFF2CC).copy(alpha = 0.68f + flashPulse * 0.18f)
+                    else -> Color.White
                 }
             )
         ) {
@@ -3728,6 +4559,12 @@ private fun SwipeRenameTaskListItem(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
+                if (selectionMode) {
+                    Text(
+                        text = if (isSelected) "Selected" else "Tap to select",
+                        color = if (isSelected) Color(0xFF1D4ED8) else Color(0xFF667085)
+                    )
+                }
                 if (task.collectionPath.isNotBlank()) {
                     Text(
                         text = "Path: ${task.collectionPath.trim()}",
@@ -3735,6 +4572,27 @@ private fun SwipeRenameTaskListItem(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                }
+                if (task.taskPath.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            onClick = onEditGroup,
+                            enabled = canInteract
+                        ) {
+                            Text(if (task.collectionPath.isBlank()) "Group" else "Edit Group")
+                        }
+                        if (isFailed && canRetry) {
+                            TextButton(
+                                onClick = onRetryTask,
+                                enabled = canInteract
+                            ) {
+                                Text("Retry")
+                            }
+                        }
+                    }
                 }
 
                 if (isProcessing) {
@@ -3763,7 +4621,7 @@ private fun SwipeRenameTaskListItem(
                             onClick = onCancelTask,
                             enabled = canInteract
                         ) {
-                            Text("取消")
+                            Text("Cancel")
                         }
                     }
                 } else if (isFailed) {
