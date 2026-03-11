@@ -2175,7 +2175,6 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         # - Java 控制发送多少并行请求 (熔断/重试)
         # - Python 使用 ProcessPool 绕过 GIL
         # - SharedFrameRegistry 实现帧共享
-        from concurrent.futures import ProcessPoolExecutor
         import multiprocessing
         
         # 🚀 释放物理算力: 设为 CPU 核心数
@@ -2202,8 +2201,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         
         # 创建 ProcessPool (使用 spawn 方式确保 Windows 兼容)
+        from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
         from services.python_grpc.src.vision_validation.worker import init_cv_worker
-        self.cv_process_pool = ProcessPoolExecutor(
+        self.cv_process_pool = create_spawn_process_pool(
             max_workers=self.cv_worker_count,
             initializer=init_cv_worker
         )
@@ -5030,7 +5030,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             task_id=task_id,
             output_dir=output_dir,
             stage="phase2b",
-            total_steps=3,
+            total_steps=4,
         )
         assemble_soft_stop = threading.Event()
         assemble_soft_thread: Optional[threading.Thread] = None
@@ -5039,7 +5039,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             "status": "running",
             "checkpoint": "phase2b_prepare",
             "completed": 0,
-            "pending": 3,
+            "pending": 4,
         }
 
         def _emit_assemble_soft_loop() -> None:
@@ -5055,7 +5055,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         status=str(snapshot.get("status") or "running"),
                         checkpoint=str(snapshot.get("checkpoint") or "phase2b_pending"),
                         completed=int(snapshot.get("completed", 0)),
-                        pending=int(snapshot.get("pending", 3)),
+                        pending=int(snapshot.get("pending", 4)),
                         signal_type="soft",
                     )
                 except Exception as soft_error:
@@ -5091,7 +5091,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 status="running",
                 checkpoint="phase2b_prepare",
                 completed=0,
-                pending=3,
+                pending=4,
                 signal_type="hard",
             )
             assemble_soft_thread = threading.Thread(
@@ -5115,13 +5115,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     status="running",
                     checkpoint="phase2b_semantic_inline_ready",
                     completed=1,
-                    pending=2,
+                    pending=3,
                 )
                 assemble_watchdog.emit(
                     status="running",
                     checkpoint="phase2b_semantic_inline_ready",
                     completed=1,
-                    pending=2,
+                    pending=3,
                     signal_type="hard",
                 )
                 logger.info(
@@ -5136,13 +5136,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                         status="running",
                         checkpoint="phase2b_semantic_ref_ready",
                         completed=1,
-                        pending=2,
+                        pending=3,
                     )
                     assemble_watchdog.emit(
                         status="running",
                         checkpoint="phase2b_semantic_ref_ready",
                         completed=1,
-                        pending=2,
+                        pending=3,
                         signal_type="hard",
                     )
                     logger.info(
@@ -5169,13 +5169,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     status="running",
                     checkpoint="phase2b_semantic_runtime_ready",
                     completed=1,
-                    pending=2,
+                    pending=3,
                 )
                 assemble_watchdog.emit(
                     status="running",
                     checkpoint="phase2b_semantic_runtime_ready",
                     completed=1,
-                    pending=2,
+                    pending=3,
                     signal_type="hard",
                 )
 
@@ -5206,13 +5206,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 status="running",
                 checkpoint="phase2b_materialized_ready",
                 completed=2,
-                pending=1,
+                pending=2,
             )
             assemble_watchdog.emit(
                 status="running",
                 checkpoint="phase2b_materialized_ready",
                 completed=2,
-                pending=1,
+                pending=2,
                 signal_type="hard",
             )
 
@@ -5234,7 +5234,33 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 clips_dir=clips_dir,
                 title=title
             )
-            
+            _update_assemble_soft_state(
+                status="running",
+                checkpoint="phase2b_assembled_ready",
+                completed=3,
+                pending=1,
+            )
+            assemble_watchdog.emit(
+                status="running",
+                checkpoint="phase2b_assembled_ready",
+                completed=3,
+                pending=1,
+                signal_type="hard",
+            )
+
+            try:
+                from services.python_grpc.src.content_pipeline.phase2b.video_category_service import (
+                    classify_phase2b_output,
+                )
+
+                await classify_phase2b_output(
+                    output_dir=output_dir,
+                    title=title,
+                    result_json_path=json_path,
+                )
+            except Exception as category_error:
+                logger.warning(f"[{task_id}] Phase2B category classification failed: {category_error}")
+             
             # 统计信息
             stats = video_processing_pb2.AssembleStats(
                 total_sections=0,
@@ -5246,13 +5272,13 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             _update_assemble_soft_state(
                 status="completed",
                 checkpoint="phase2b_response_ready",
-                completed=3,
+                completed=4,
                 pending=0,
             )
             assemble_watchdog.emit(
                 status="completed",
                 checkpoint="phase2b_response_ready",
-                completed=3,
+                completed=4,
                 pending=0,
                 signal_type="hard",
             )
@@ -5270,17 +5296,20 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             logger.error(f"[{task_id}] AssembleRichText failed: {e}")
             logger.error(traceback.format_exc()) # Log full traceback
             try:
+                with assemble_soft_lock:
+                    failed_completed = int(assemble_soft_state.get("completed", 0))
+                    failed_pending = max(1, int(assemble_soft_state.get("pending", 1)))
                 _update_assemble_soft_state(
                     status="failed",
                     checkpoint="phase2b_failed",
-                    completed=2,
-                    pending=1,
+                    completed=failed_completed,
+                    pending=failed_pending,
                 )
                 assemble_watchdog.emit(
                     status="failed",
                     checkpoint="phase2b_failed",
-                    completed=2,
-                    pending=1,
+                    completed=failed_completed,
+                    pending=failed_pending,
                     signal_type="hard",
                     extra={"error": str(e)[:200]},
                 )
@@ -6628,6 +6657,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                                         coarse_interval=coarse_interval,
                                         fine_shm_frames_by_island=None,
                                         video_path=video_path,
+                                        analysis_max_width=route_screenshot_analysis_max_width,
                                     )
                                 )
                                 pending.add(asyncio.create_task(wrap_task(future, "cf", unit_id)))
@@ -7207,6 +7237,10 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             )
             force_process_preprocess = bool(routing_cfg.get("process_force_preprocess_before_routing", True))
             route_screenshot_mode = str(routing_cfg.get("screenshot_pipeline_mode", "process_streaming")).strip().lower()
+            route_screenshot_analysis_max_width = max(
+                0,
+                int(_safe_float(routing_cfg.get("screenshot_analysis_max_width", 640), 640)),
+            )
             route_screenshot_queue_maxsize = max(
                 1,
                 int(_safe_float(routing_cfg.get("screenshot_queue_maxsize", max(8, self.cv_worker_count * 2)), max(8, self.cv_worker_count * 2))),
@@ -8511,5 +8545,3 @@ if __name__ == "__main__":
     )
     
     asyncio.run(serve())
-
-

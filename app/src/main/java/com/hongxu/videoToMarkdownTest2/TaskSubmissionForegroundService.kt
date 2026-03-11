@@ -268,7 +268,7 @@ class TaskSubmissionForegroundService : Service() {
         videoUrl: String?,
         uploadUri: Uri?
     ) {
-        val taskApi = HttpMobileTaskApi(BuildConfig.MOBILE_API_BASE_URL, mobileUserId)
+        val taskApi = HttpMobileTaskApi(MobileApiEndpointStore.resolveApiBaseUrl(applicationContext), mobileUserId)
         val completionNotifier = TaskCompletionNotifier(applicationContext)
         val progressNotificationId = progressNotificationId(submissionId)
         var taskId: String? = null
@@ -411,7 +411,7 @@ class TaskSubmissionForegroundService : Service() {
             throw IllegalStateException("mobile user id is empty")
         }
 
-        val wsEndpoint = CollectionApiFactory.toWebSocketUrl(BuildConfig.MOBILE_API_BASE_URL)
+        val wsEndpoint = CollectionApiFactory.toWebSocketUrl(MobileApiEndpointStore.resolveApiBaseUrl(applicationContext))
         val request = Request.Builder()
             .url("$wsEndpoint?userId=${Uri.encode(normalizedUserId)}")
             .build()
@@ -519,7 +519,7 @@ class TaskSubmissionForegroundService : Service() {
         if (!taskId.isNullOrBlank()) {
             serviceScope.launch {
                 runCatching {
-                    HttpMobileTaskApi(BuildConfig.MOBILE_API_BASE_URL, mobileUserId).cancelTask(taskId)
+                    HttpMobileTaskApi(MobileApiEndpointStore.resolveApiBaseUrl(applicationContext), mobileUserId).cancelTask(taskId)
                 }
             }
         }

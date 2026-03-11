@@ -340,22 +340,63 @@ function captureSelectionSnapshot(editor: Editor): SelectionSnapshot | null {
     return null;
   }
 
-  const from = cloneEditorPosition(editor.getCursor("from"));
-  const to = cloneEditorPosition(editor.getCursor("to"));
-  const fromOffset = editor.posToOffset(from);
-  const toOffset = editor.posToOffset(to);
+  const range = resolveSnapshotRange(editor, selectedText);
+  if (!range) {
+    return null;
+  }
+
+  const fromOffset = editor.posToOffset(range.from);
+  const toOffset = editor.posToOffset(range.to);
   const documentText = editor.getValue();
 
   return {
     selectedText,
-    from,
-    to,
+    from: range.from,
+    to: range.to,
     fromOffset,
     toOffset,
     leadingAnchor: buildLeadingAnchor(documentText, fromOffset),
     trailingAnchor: buildTrailingAnchor(documentText, toOffset),
-    context: analyzeLineContext(editor, from),
+    context: analyzeLineContext(editor, range.from),
   };
+}
+
+function resolveSnapshotRange(editor: Editor, selectedText: string): { from: EditorPosition; to: EditorPosition } | null {
+  const anchorHeadRange = normalizeSelectionBounds(
+    tryGetCursor(editor, "anchor"),
+    tryGetCursor(editor, "head"),
+  );
+  if (matchesSelectedText(editor, anchorHeadRange, selectedText)) {
+    return anchorHeadRange;
+  }
+
+  for (const selection of safeListSelections(editor)) {
+    const selectionRange = normalizeSelectionBounds(
+      cloneEditorPosition(selection.anchor),
+      cloneEditorPosition(selection.head),
+    );
+    if (matchesSelectedText(editor, selectionRange, selectedText)) {
+      return selectionRange;
+    }
+  }
+
+  const fromToRange = normalizeSelectionBounds(
+    tryGetCursor(editor, "from"),
+    tryGetCursor(editor, "to"),
+  );
+  if (matchesSelectedText(editor, fromToRange, selectedText)) {
+    return fromToRange;
+  }
+
+  const uniqueRange = findUniqueTextRange(editor.getValue(), selectedText);
+  if (uniqueRange) {
+    return {
+      from: uniqueRange.from,
+      to: uniqueRange.to,
+    };
+  }
+
+  return null;
 }
 
 function applyReplacementFromSnapshot(
@@ -486,26 +527,12 @@ function findUniqueTextRange(documentText: string, targetText: string): LocatedR
 }
 
 function applyLocatedReplacement(editor: Editor, range: LocatedRange, replacement: string): void {
-  const replacementEnd = editor.offsetToPos(range.fromOffset + replacement.length);
-  const selection: EditorSelectionOrCaret = {
-    anchor: replacementEnd,
-    head: replacementEnd,
-  };
+  editor.replaceRange(replacement, range.from, range.to, "phase2b-structured-rewrite");
 
-  editor.transaction(
-    {
-      changes: [
-        {
-          from: range.from,
-          to: range.to,
-          text: replacement,
-        },
-      ],
-      selections: [selection],
-    },
-    "phase2b-structured-rewrite",
-  );
-
+  const replacementEndOffset = range.fromOffset + replacement.length;
+  const documentTextAfterReplace = editor.getValue();
+  const safeEndOffset = Math.max(0, Math.min(documentTextAfterReplace.length, replacementEndOffset));
+  const replacementEnd = editor.offsetToPos(safeEndOffset);
   editor.scrollIntoView({ from: range.from, to: replacementEnd }, false);
 }
 
@@ -561,11 +588,75 @@ function offsetToEditorPosition(text: string, offset: number): EditorPosition {
   };
 }
 
-function cloneEditorPosition(position: EditorPosition): EditorPosition {
+function tryGetCursor(editor: Editor, side: "from" | "to" | "head" | "anchor"): EditorPosition | null {
+  try {
+    return cloneEditorPosition(editor.getCursor(side));
+  } catch {
+    return null;
+  }
+}
+
+function safeListSelections(editor: Editor): EditorSelectionOrCaret[] {
+  try {
+    return Array.isArray(editor.listSelections()) ? editor.listSelections() : [];
+  } catch {
+    return [];
+  }
+}
+
+function cloneEditorPosition(position: EditorPosition | null | undefined): EditorPosition | null {
+  if (!isEditorPosition(position)) {
+    return null;
+  }
+
   return {
     line: position.line,
     ch: position.ch,
   };
+}
+
+function isEditorPosition(value: unknown): value is EditorPosition {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<EditorPosition>;
+  return typeof candidate.line === "number" && typeof candidate.ch === "number";
+}
+
+function matchesSelectedText(
+  editor: Editor,
+  range: { from: EditorPosition; to: EditorPosition } | null,
+  selectedText: string,
+): range is { from: EditorPosition; to: EditorPosition } {
+  if (!range) {
+    return false;
+  }
+  return editor.getRange(range.from, range.to) === selectedText;
+}
+
+function normalizeSelectionBounds(
+  anchor: EditorPosition | null | undefined,
+  head: EditorPosition | null | undefined,
+): { from: EditorPosition; to: EditorPosition } | null {
+  if (!anchor || !head) {
+    return null;
+  }
+
+  return compareEditorPositions(anchor, head) <= 0
+    ? { from: anchor, to: head }
+    : { from: head, to: anchor };
+}
+
+function compareEditorPositions(left: EditorPosition | null | undefined, right: EditorPosition | null | undefined): number {
+  if (!left || !right) {
+    return 0;
+  }
+
+  if (left.line !== right.line) {
+    return left.line - right.line;
+  }
+  return left.ch - right.ch;
 }
 
 function adaptMarkdownToSelectionContext(markdown: string, context: LineContext): string {

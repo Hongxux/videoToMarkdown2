@@ -1,5 +1,51 @@
 ﻿# 架构升级记录
 
+## 2026-03-11 Phase2B 末尾接入视频分类与全局分类汇总
+- 日期：2026-03-11
+- 背景：
+  - 之前的视频分类只能通过仓库外侧的离线批处理方式补跑，`Phase2B` 主链路结束后不会自动生成 `category_path`、分类路径库或全局汇总结果。
+  - 这会导致同一批视频里“最终 markdown/result 已完成，但分类状态仍未落盘”，调用链在视频级标签层面断裂。
+- 第一性原理与复用杠杆：
+  - 第一性原理：视频分类属于 `Phase2B` 最终产物的一部分，应该在 `result.json` 稳定落盘后立刻生成，而不是依赖后置脚本兜底。
+  - 复用杠杆1：复用现有 `category_classifier` prompt 资源，不重写分类规则。
+  - 复用杠杆2：复用 `prompt_loader + prompt_registry + llm_gateway`，保持提示词加载和 LLM 调用链与现有 DeepSeek 能力一致。
+  - 复用杠杆3：复用现有任务目录 `video_meta.json` 作为视频级元数据承载点，不新增平行元数据文件体系。
+- 架构决策：
+  - 决策1：新增 `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`，把分类、校验、路径库更新、汇总 JSON 更新收敛到 `Phase2B` 域内模块。
+  - 决策2：在 `grpc_service_impl.AssembleRichText` 的 `pipeline.assemble_only(...)` 完成后立即触发分类，使调用链变为 `Phase2B 组装 -> 分类 -> 返回响应`。
+  - 决策3：分类失败只记告警，不反向打断 `Phase2B` 主装配结果，避免“标签能力故障拖垮 markdown/result 主产物”。
+  - 决策4：新增二次校验步骤，专门纠正模型首轮分类时可能出现的示例串台和 `is_new` 漂移。
+- 调用链变化：
+  - 调整前：
+    - `AssembleRichText -> RichTextPipeline.assemble_only -> 返回 markdown/result`
+  - 调整后：
+    - `AssembleRichText -> RichTextPipeline.assemble_only -> video_category_service.classify_phase2b_output -> 更新 category_paths.txt / category_classification.json / video_meta.json / var/storage/category_classification_results.json -> 返回响应`
+- 落盘结果：
+  - 任务级：`var/storage/storage/<taskId>/category_classification.json`
+  - 路径库：`var/storage/storage/category_paths.txt`
+  - 全局汇总：`var/storage/category_classification_results.json`
+  - 元数据回写：`var/storage/storage/<taskId>/video_meta.json` 中的 `category_*` 字段
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/video_category_service.py services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-09 Android 运行时入口改为可配置并发布 1.0.14
+- 日期：2026-03-09
+- 背景：
+  - 之前 Android App 的后端根地址仍然被固化在构建期常量里，一旦外网入口变更，就必须重新改代码并重新打包。
+  - 本次需要把默认入口切到 `https://216d0ee2.r9.cpolar.cn`，同时保证 API 与 WebSocket 都从同一个 root URL 派生，而不是分别硬编码。
+- 第一性原理与复用杠杆：
+  - 第一性原理：移动端服务地址属于运行时环境配置，不应与业务逻辑代码耦合。
+  - 复用杠杆：复用现有 `SharedPreferences` 作为轻量持久化载体，用 `MobileApiEndpointStore` 统一承接默认值、用户覆盖值和 URL 标准化逻辑。
+- 架构决策：
+  - 决策1：新增 `MobileApiEndpointStore`，把 root URL、`/api/mobile` 地址和 WebSocket 地址的派生逻辑收敛到单点。
+  - 决策2：`MainActivity`、`MobileTaskApi` 与相关刷新链路不再直接依赖硬编码常量，而是统一读取 store 中的当前入口。
+  - 决策3：同步更新网络安全配置与根证书资源，确保新入口在 Android 侧可直接建立 HTTPS 连接。
+- 验证：
+  - 默认入口：`https://216d0ee2.r9.cpolar.cn`
+  - 发布版本：`1.0.14`
+
 ## 2026-03-09 Android HTTPS endpoint trust and 1.0.8 release packaging
 - Date: 2026-03-09
 - Background:
@@ -11172,3 +11218,252 @@ body` and task metadata is still present.
   - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-editor-shortcuts.js`
   - `node --check services/java-orchestrator/src/main/resources/static/lib/mobile-anchor-panel.js`
   - `D:\apache-maven-3.9.12\bin\mvn.cmd -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 2026-03-09 Mobile task export: one flat manifest drives ZIP and direct file delivery
+- Context:
+  - Current-task export needed to keep ZIP output, add non-archive direct delivery of flattened Markdown + media files, and stop letting export rules drift across separate UI paths.
+- Decision:
+  - Keep `TaskBundleExportService` as the single export-planning layer and treat its flat plan as the canonical export manifest.
+  - Add a controller manifest endpoint for direct file delivery instead of creating a second asset-discovery implementation in the browser.
+  - Converge both current-task export buttons in `index.html` onto one shared export chooser, with `ZIP` and `direct files` as two output modes over the same backend plan.
+- Reuse leverage:
+  - Reuse the existing flat export planner for Markdown rewrite, linked-note collection, anchor-note collection, and collision-safe flat naming.
+  - Reuse the existing `/asset` endpoint for binary file transfer in direct-export mode instead of inventing another binary streaming path.
+  - Reuse the browser File System Access API when available, and degrade to sequential file downloads otherwise.
+- Trade-off:
+  - Direct multi-file export requires one manifest request plus per-binary fetches, so it is less network-efficient than a single ZIP stream, but it keeps files immediately usable without unpacking.
+- Validation:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=TaskBundleExportServiceTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+
+## 2026-03-10 Python 统一改用 spawn 进程池，规避 gRPC 与 fork 冲突
+- Background:
+  - Linux 容器日志持续出现 `fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers`。
+  - 并行转录、PDF 抽取和 Phase2B 等链路都可能在 gRPC 线程已活跃后再拉起 `ProcessPoolExecutor` 子进程。
+- Reusable leverage:
+  - 抽出公共 helper：`services/python_grpc/src/common/utils/process_pool.py`
+  - 复用现有各模块的 `ProcessPoolExecutor` 接入点，只替换进程上下文，不重写任务分发协议。
+- Call-chain alignment:
+  - Old:
+    - `python-grpc main process -> ProcessPoolExecutor (Linux default fork) -> child process inherits gRPC-threaded state`
+  - New:
+    - `python-grpc main process -> create_spawn_process_pool() -> multiprocessing spawn context -> clean child process bootstrap`
+- Decisions:
+  - Decision 1: 所有新的 Python 进程池统一通过公共 helper 创建。
+    - Reason: 避免 Whisper、CV、PDF、Phase2B 各自私有创建逻辑再次回退到 `fork`。
+  - Decision 2: helper 强制使用 `mp.get_context("spawn")`。
+    - Reason: `spawn` 会在干净解释器里启动子进程，避免继承 gRPC 线程态与底层句柄。
+- Scope:
+  - `services/python_grpc/src/common/utils/process_pool.py`
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+- Validation/observability:
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `python -X utf8 -m py_compile services/python_grpc/src/common/utils/process_pool.py services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/server/book_pdf_extractor.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+
+## 2026-03-10 Python 截图优化链路收紧 SHM 生命周期与任务级并发闸门
+- Background:
+  - `python-grpc` 容器在任务进行中被 Docker 记录为 `exitCode=135`，对应 Linux `SIGBUS`，而不是业务链路正常 `exit(0)`。
+  - 崩溃前日志集中落在 `VL -> screenshot CV optimize -> SharedMemory + process_shared` 路径，且容器默认 `/dev/shm` 仅 `64MB`。
+- Reusable leverage:
+  - 复用现有 `flow_ops.py` 的 chunk 级生命周期管理：chunk 关闭且 pending 归零后才做 registry cleanup。
+  - 复用 `VLMaterialGenerator._optimize_screenshots_parallel(...)` 作为截图优化总入口，在入口处加 task 粒度闸门即可同时覆盖 batch / streaming 两条支路。
+  - 复用 `vl_prefetch_utils.resolve_max_workers(...)`，只修正共享 `cv_executor` 注入时对显式配置的覆盖问题。
+- Call-chain alignment:
+  - Old:
+    - `AnalyzeWithVL -> screenshot optimization -> shared executor workers derived from injected pool -> per chunk frame count cap only`
+  - New:
+    - `AnalyzeWithVL -> screenshot optimization task gate(<=2 tasks) -> explicit max_workers clamp -> byte-budget-aware prefetch step -> chunk registry cleanup after pending=0`
+- Decisions:
+  - Decision 1: `SharedFrameRegistry` 不再承担“活跃阶段抢占淘汰”的职责，只做字节预算拒绝与最终 cleanup。
+    - Reason: producer 已经把 `shm_ref` 交给 worker 后，再做抢占淘汰会引入“引用已发出但底层已失效”的竞态。
+  - Decision 2: 在 `_prefetch_union_frames_to_registry_sync(...)` 里，先用 registry 字节预算反推单 chunk 可接受的采样密度。
+    - Reason: 让 active chunk 在写入前就落到预算内，避免运行到一半才发现 SHM 不够。
+  - Decision 3: 截图优化增加 task 粒度总闸门，最多允许 2 个任务同时进入该阶段。
+    - Reason: 当前主要风险不是单任务局部峰值，而是多个任务同时占用 SHM 与共享 executor 放大峰值。
+  - Decision 4: `resolve_max_workers(...)` 在共享 `cv_executor` 场景下仍需尊重显式 `max_workers` 配置。
+    - Reason: 否则本地 override 会被注入 executor 的 `_max_workers` 反向放大，导致配置看似收紧但运行时仍放量。
+- Scope:
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `config/module2_config.yaml`
+  - `config/module2_config.local.yaml`
+  - `docker-compose.yml`
+- Validation/observability:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py -q`
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - 运行态日志应出现：
+    - `screenshot task gate wait/acquired/released`
+    - `workers=1`
+    - `max_prefetch_frames=32`
+
+## 2026-03-11 Docker Python runtime compatibility layer and SHM default budget uplift
+- Background:
+  - The `python-grpc` container could emit protobuf runtime noise (`MessageFactory.GetPrototype`) after dependency upgrades.
+  - Screenshot optimization under Docker still hit a `128MB` shared-frame byte ceiling, which was below the practical working set for the current `shm_size: 1gb` deployment profile.
+- Reusable leverage:
+  - Reused `services/python_grpc/src/server/runtime_env.py` as the single startup compatibility layer instead of embedding protobuf-version branching in feature code.
+  - Reused the existing `MODULE2_SHARED_FRAME_REGISTRY_MAX_MB` override path instead of adding a parallel configuration channel.
+- Decisions:
+  - Decision 1: add a startup shim that restores legacy `MessageFactory.GetPrototype(...)` behavior via `GetMessageClass(...)`.
+    - Reason: this keeps `protobuf 6.x` in place while preserving compatibility with lagging third-party callers.
+  - Decision 2: lift the shared-frame registry hard ceiling from `128MB` to `512MB`, and set Docker default env to `384MB`.
+    - Reason: container runtime already reserves `1gb` for `/dev/shm`; keeping the application cap at `128MB` underutilized the deployment budget and caused avoidable prefetch rejection.
+- Scope:
+  - `services/python_grpc/src/server/runtime_env.py`
+  - `apps/grpc-server/main.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+  - `docker-compose.yml`
+  - `.env.example`
+- Validation:
+  - `pytest services/python_grpc/src/server/tests/test_runtime_env.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py -q`
+  - `python -m py_compile apps/grpc-server/main.py services/python_grpc/src/server/runtime_env.py services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/server/tests/test_runtime_env.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py`
+
+
+## 2026-03-11 Route screenshot analysis downscale and shared-frame reuse
+- Background:
+  - Route screenshot workers already had `screenshot_analysis_max_width`, but post-selection OCR/shape enrichment still reopened the original video and analyzed full-resolution frames.
+  - Under container memory pressure, this created an avoidable second decode path after coarse/fine selection and amplified `Could not allocate memory` risk.
+- Reusable leverage:
+  - Reused the existing routing config `screenshot_analysis_max_width` instead of introducing a new knob.
+  - Reused already-prefetched SharedMemory frames from coarse/fine selection instead of decoding the original video again.
+  - Reused existing `_extract_ocr_tokens(...)` and `_extract_shape_signature(...)` so the change stayed inside worker orchestration.
+- Decisions:
+  - Decision 1: add a single worker helper that downsizes analysis frames and scales ROI together before OCR/shape analysis.
+    - Reason: this keeps all post-selection enrichment on one resolution policy and prevents ROI drift after resize.
+  - Decision 2: let `run_coarse_fine_screenshot_task(...)` carry the selected fine/coarse SharedMemory frame into the enrichment phase.
+    - Reason: when a low-resolution shared frame is already in memory, reopening the video is pure waste and reintroduces decoder memory spikes.
+  - Decision 3: thread `screenshot_analysis_max_width` through the legacy coarse/fine worker path as well.
+    - Reason: otherwise the config only constrained the newer range-selection path and the old path could silently regress to large-frame analysis.
+- Performance comparison data:
+  - Test method:
+    - First-principles pixel-budget comparison on representative frames.
+    - Regression tests in `services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py`.
+  - Test data:
+    - 1280x720 frame downscaled to width 640 becomes 640x360: pixel count `921600 -> 230400`, reduced by `75.0%`.
+    - 1920x1080 frame downscaled to width 640 becomes 640x360: pixel count `2073600 -> 230400`, reduced by `88.9%`.
+    - In coarse/fine worker regression, when fine/coarse SharedMemory frames are available, extra fallback video reopen count becomes `1 -> 0` for the analyzed candidate.
+  - Note:
+    - This round records deterministic pixel-budget reduction and decode-path elimination. Container-level end-to-end wall-clock metrics still need runtime sampling after redeploy.
+- Scope:
+  - `services/python_grpc/src/vision_validation/worker.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py`
+- Validation:
+  - `pytest services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py services/python_grpc/src/server/tests/test_runtime_env.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py -q`
+  - `python -m py_compile services/python_grpc/src/vision_validation/worker.py services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py services/python_grpc/src/server/grpc_service_impl.py`
+
+
+## 2026-03-11 Unify Phase2B category collections with mobile task grouping
+- Background:
+  - Phase2B had already started writing `var/storage/category_classification_results.json`, but the mobile task list and `index.html` manual grouping flow still relied on a separate repository path.
+  - This created two conflicting facts for the same “task belongs to which collection” question: automatic classification lived in JSON, while frontend regrouping lived elsewhere.
+- Reusable leverage:
+  - Reused the existing mobile API surface `/api/mobile/tasks` and `/api/mobile/manual-task-collections` instead of adding a second collection-management endpoint.
+  - Reused the existing frontend nested collection state machine in `index.html`; only the hydration boundary was widened from “manual-only collectionPath” to “all collectionPath”.
+  - Reused Phase2B per-task classification artifacts and summary `results` as the default collection source, then layered effective bindings on top.
+- Decisions:
+  - Decision 1: add `CategoryClassificationResultsRepository` on the Java side and treat `var/storage/category_classification_results.json` as the single persisted collection source.
+    - Reason: this keeps automatic classification and manual regrouping in one file, avoiding cross-store drift.
+  - Decision 2: let `/api/mobile/tasks` resolve collection paths from “explicit collectionBindings override + automatic classification fallback”.
+    - Reason: a newly classified task should immediately appear in its category collection even before any manual adjustment is made.
+  - Decision 3: preserve `collectionBindings` when Phase2B rewrites the summary file, and only refresh bindings that still match the previous automatic classification.
+    - Reason: manual regrouping must survive later reclassification, while untouched tasks should still follow new automatic results.
+  - Decision 4: let frontend hydration consume every task-level `collectionPath`, not just `manualCollection=true`.
+    - Reason: the existing nested collection UI can already rebuild the full tree from task paths, so the lowest-risk change is to feed it the unified effective paths.
+- Scope:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CategoryClassificationResultsRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_summary_bindings.py`
+- Validation:
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/video_category_service.py services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_summary_bindings.py`
+  - `C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe -Command "cmd /c mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q"`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_summary_bindings.py --basetemp=... -q`
+    - Result: blocked by an environment-specific Windows `PermissionError` during pytest temporary-directory cleanup, not by a reported assertion failure in the test body.
+
+## 2026-03-11 python-grpc 容器教程关键帧顶部 banner 默认开启并补强中文字体链
+- 背景：
+  - 现有 `python-grpc` 已经具备 tutorial keyframe 顶部 banner 的渲染能力，但容器部署链路仍保留“默认关闭”的旧策略，导致容器内导出的关键帧没有自动带出 `frame_reason` 顶部引导条。
+  - banner 文本以中文讲解为主，一旦字体命中失败就会退回 OpenCV 英文字体渲染路径，出现中文无法稳定显示的问题。
+- 可复用杠杆：
+  - 复用现有 `tutorial_mode.top_reason_banner_enabled` 开关，不新增并行配置口径。
+  - 复用 `save_top_reason_banner_image(...)` 现有 PIL 渲染链，只补字体发现与容器 UTF-8 运行环境。
+  - 复用容器已有 `fonts-noto-cjk` / `fonts-wqy-zenhei` 依赖思路，并向运行时补齐 `LANG/LC_ALL/PYTHONUTF8`。
+- 决策：
+  - 决策 1：将 `VLMaterialGenerator` 中 `top_reason_banner_enabled` 的缺省值改回默认开启，同时把 `config/module2_config*.yaml` 对齐为 `true`。
+    - 原因：仓库中的 tutorial banner 回归测试已经把“未显式关闭时默认渲染 banner”作为目标行为，容器部署应与该产品语义保持一致。
+  - 决策 2：为 `python-grpc` 容器显式固定 `LANG=C.UTF-8`、`LC_ALL=C.UTF-8`、`PYTHONUTF8=1`。
+    - 原因：把日志、路径、Pillow/OpenCV 周边依赖统一到 UTF-8 缺省环境，减少容器和宿主机的编码漂移。
+  - 决策 3：扩展顶部 banner 字体发现链，支持 `TOP_REASON_BANNER_FONT_PATH` 覆盖、常见字体目录递归探测，以及 `WenQuanYi` / `Noto Sans SC` 名称级回退。
+    - 原因：仅靠少量固定绝对路径命中字体过于脆弱，镜像底包或字体包版本变化时容易退回不支持中文的渲染路径。
+- 作用范围：
+  - `config/module2_config.yaml`
+  - `config/module2_config.local.yaml`
+  - `deploy/docker/python-grpc.Dockerfile`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py`
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py`
+  - 手工脚本验证：`_resolve_top_banner_font_path()` 可命中 `TOP_REASON_BANNER_FONT_PATH` 覆盖；`save_top_reason_banner_image(...)` 能在样例图像顶部渲染深色 banner；`VLMaterialGenerator` 在缺省配置下默认开启 banner，显式传 `false` 时仍可关闭。
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py -k "top_reason_banner or resolve_top_banner_font_path" -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py -k "top_reason_banner" -q`
+    - 结果：本机 `pytest` 会在临时目录清理阶段触发 `PermissionError`，阻塞框架级收尾；未观察到本次改动引入的断言失败输出。
+- 经验：
+  - 对依赖 CJK 字体的图像渲染链，开关默认值、镜像字体包、运行时 locale 和字体发现策略必须一起收敛；单改其中一层，容器里仍可能表现为“功能开了但中文没画出来”。
+  - 若后续需要替换基础镜像或字体包，优先通过 `TOP_REASON_BANNER_FONT_PATH` 定点覆盖，而不是继续堆叠更多硬编码绝对路径。
+
+## 2026-03-11 Compact mobile task snapshots and incremental task-list sync
+- 背景：
+  - 网页端 `index.html` 的任务列表自动刷新此前固定请求 `/api/mobile/tasks?page=0&pageSize=0&onlyMultiSegment=false`，每次都把全部历史任务重新拉回前端。
+  - Android 端在 `MainActivity` 的 `refreshTasks()` 中会连续发起两次全量列表请求：一次取 `onlyMultiSegment=true` 的可见任务，一次取 `onlyMultiSegment=false` 后再本地筛处理中任务。
+  - `/api/mobile/tasks` 的单条任务项此前会返回 25 个字段，其中 `completedAt/resultPath/markdownPath/domain/mainTopic/episodeNo/episodeTitle/totalEpisodes` 不属于高频列表刷新必需字段。
+- 可复用杠杆：
+  - 复用现有 `/api/mobile/tasks` 主接口，只新增 `view=compact` 投影和 `/api/mobile/tasks/changes?since=` 增量接口，不拆第二套任务列表协议。
+  - 复用网页端已存在的 `mergeLiveTaskUpdateIntoState()` 与任务列表自动刷新策略，把“运行中进度”继续交给现有 WebSocket，把“历史任务/标题/分组变化”改走 delta 对账。
+  - 复用 Android 端已有的 `TaskRealtimeClient` 用户级 task update 流，只把冷启动/恢复前台的列表同步从全量拉取改成 compact snapshot + delta sync。
+- 决策：
+  - 决策 1：为 `/api/mobile/tasks` 增加 `view=compact` 和 `statuses` 过滤参数。
+    - 原因：列表卡片与排序只需要一小组核心字段，高频传输不应重复携带详情级字段；`statuses` 过滤可以让 Android 首屏处理中补集不再遍历整份历史结果。
+  - 决策 2：新增 `/api/mobile/tasks/changes?since=`，返回 `upserts/nextSince/resyncRequired/hasMoreChanges`。
+    - 原因：列表刷新最贵的问题不是单次 JSON 解析，而是“每次都重传全部历史任务”；delta 对账能把稳定任务从重复传输链路里移除。
+  - 决策 3：把 `category_classification_results.json` 的更新时间并入 `snapshotVersion/nextSince`。
+    - 原因：如果版本号只看任务时间戳，分类合集 JSON 一旦比任务更新时间新，前端会永远判断“需要回退全量同步”，增量策略会被自己打穿。
+  - 决策 4：网页端自动刷新改为“先尝试 `changes`，必要时再回退 `snapshot`”；Android 前台恢复改为“有 since 就 delta，没有 since 才 full snapshot”。
+    - 原因：保留原有可恢复性，同时把绝大多数无变化刷新从全量请求降成增量请求。
+- 作用范围：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CategoryClassificationResultsRepository.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 性能对比数据：
+  - 列表任务项字段数：`full` 视图保留 25 个字段，`compact` 视图收敛到 17 个字段，单条高频列表项少传 8 个详情字段。
+  - 网页端自动刷新请求模型：从“每轮 1 次全量 `/tasks?pageSize=0`”改成“首次 1 次 compact snapshot，后续优先 `/tasks/changes?since=`，仅在 `resyncRequired/hasMoreChanges` 时回退 full snapshot”。
+  - Android 恢复前台请求模型：从“每次恢复 2 次全量列表”改成“已有游标时 2 次 delta（可见任务 feed + 全任务 feed），仅在首次进入或服务端要求重同步时回退 snapshot”。
+- 测试方式：
+  - 以仓库内当前实现为样本，按接口字段清单核对 `full/compact` 两种任务项投影的字段差异。
+  - 对后端与 Android 调用链做静态编译验证，确保控制器签名、JSON 解析、前台恢复逻辑与任务实时流可以同时成立。
+  - 重点验证“分类合集更新时间进入同步版本号”这个边界，避免增量轮询被无穷回退到全量刷新。
+- 测试数据：
+  - 任务项字段样本直接来自 `MobileMarkdownController.toListItem(...)` 的 `full`/`compact` 分支。
+  - 增量版本样本来自 `TaskView` 的 `createdAt/lastOpenedAt/completedAt/metaUpdatedAt` 与 `category_classification_results.json` 的更新时间汇总。
+- 验证：
+  - `cmd /c mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `cmd /c .\gradlew.bat :app:compileDebugKotlin -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 经验：
+  - 列表轻量化的第一优先级不是压缩算法，而是把“列表投影”和“详情投影”分层，并停止重复全量推送历史数据。
+  - 只做任务时间戳增量是不够的；任何会影响列表展示的外部事实源，例如分类合集 JSON，也必须进入同步版本号模型。

@@ -25,6 +25,7 @@ import inspect
 import functools
 import threading
 import subprocess
+import weakref
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from collections import deque
@@ -34,6 +35,7 @@ from typing import Dict, List, Optional, Any, Tuple, Callable, Awaitable
 
 from services.python_grpc.src.common.utils.numbers import safe_float
 from services.python_grpc.src.common.utils.opencv_decode import open_video_capture_with_fallback
+from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
 from services.python_grpc.src.content_pipeline.shared.subtitle.subtitle_repository import SubtitleRepository
 from services.python_grpc.src.content_pipeline.infra.runtime.vl_interval_utils import (
     normalize_intervals,
@@ -92,6 +94,35 @@ _DEFAULT_GRID_SPATIAL_ANCHOR_REL_PATH = "vl/video_analysis/grid_spatial_anchor.m
 _DEFAULT_VL_ARG_STRUCTURED_SYSTEM_REL_PATH = "deepseek/vl_arg/structured_system.md"
 _DEFAULT_VL_ARG_STRUCTURED_USER_REL_PATH = "deepseek/vl_arg/structured_user.md"
 _DEFAULT_BEST_FRAME_SELECTION_REL_PATH = "vision_ai/best_frame_selection.md"
+_SCREENSHOT_TASK_GATE_ENV = "MODULE2_SCREENSHOT_TASK_MAX_CONCURRENCY"
+_SCREENSHOT_TASK_GATE_LOCK = threading.Lock()
+_SCREENSHOT_TASK_GATES: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+_SCREENSHOT_TASK_GATE_LIMITS: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, int]" = weakref.WeakKeyDictionary()
+
+
+def _resolve_screenshot_task_gate_limit(screenshot_config: Dict[str, Any]) -> int:
+    raw_limit = screenshot_config.get("task_max_concurrency", os.getenv(_SCREENSHOT_TASK_GATE_ENV, 2))
+    try:
+        return max(1, int(raw_limit))
+    except (TypeError, ValueError):
+        return 2
+
+
+def _resolve_screenshot_task_gate(limit: int) -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    with _SCREENSHOT_TASK_GATE_LOCK:
+        gate = _SCREENSHOT_TASK_GATES.get(loop)
+        current_limit = _SCREENSHOT_TASK_GATE_LIMITS.get(loop)
+        if gate is None:
+            gate = asyncio.Semaphore(limit)
+            _SCREENSHOT_TASK_GATES[loop] = gate
+            _SCREENSHOT_TASK_GATE_LIMITS[loop] = limit
+            return gate
+        if current_limit != limit and getattr(gate, "_value", 0) == int(current_limit or 0):
+            gate = asyncio.Semaphore(limit)
+            _SCREENSHOT_TASK_GATES[loop] = gate
+            _SCREENSHOT_TASK_GATE_LIMITS[loop] = limit
+        return gate
 
 
 def _resolve_prompt_key_attr(attr_name: str, default_key: str) -> str:
@@ -521,7 +552,7 @@ class VLMaterialGenerator:
         self.tutorial_min_step_duration_sec = float(self.tutorial_mode_config.get("min_step_duration_sec", 5.0))
         self.tutorial_export_assets = bool(self.tutorial_mode_config.get("export_assets", True))
         self.tutorial_save_step_json = bool(self.tutorial_mode_config.get("save_step_json", True))
-        raw_top_reason_banner_enabled = self.tutorial_mode_config.get("top_reason_banner_enabled", False)
+        raw_top_reason_banner_enabled = self.tutorial_mode_config.get("top_reason_banner_enabled", True)
         if isinstance(raw_top_reason_banner_enabled, bool):
             self.tutorial_top_reason_banner_enabled = raw_top_reason_banner_enabled
         else:
@@ -1836,7 +1867,6 @@ class VLMaterialGenerator:
 
         detect_t0 = time.perf_counter()
 
-        from concurrent.futures import ProcessPoolExecutor
         from services.python_grpc.src.vision_validation.worker import (
             init_cv_worker,
             run_detect_stable_islands_task,
@@ -1846,7 +1876,7 @@ class VLMaterialGenerator:
         executor = self._cv_executor
         created_executor = False
         if executor is None:
-            executor = ProcessPoolExecutor(max_workers=worker_count, initializer=init_cv_worker)
+            executor = create_spawn_process_pool(max_workers=worker_count, initializer=init_cv_worker)
             created_executor = True
 
         try:
@@ -7044,17 +7074,58 @@ class VLMaterialGenerator:
         
         if use_streaming:
             logger.info("🚀 使用流式处理模式 (streaming_pipeline=true)")
-            return await self._optimize_screenshots_streaming_pipeline(
-                video_path,
-                screenshot_requests
+            return await self._run_screenshot_optimization_with_task_gate(
+                mode="streaming",
+                video_path=video_path,
+                screenshot_requests=screenshot_requests,
             )
         else:
             logger.info("🚀 使用批量处理模式 (streaming_pipeline=false)")
-            return await self._optimize_screenshots_batch_mode(
-                video_path,
-                screenshot_requests
+            return await self._run_screenshot_optimization_with_task_gate(
+                mode="batch",
+                video_path=video_path,
+                screenshot_requests=screenshot_requests,
             )
     
+    async def _run_screenshot_optimization_with_task_gate(
+        self,
+        *,
+        mode: str,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """以 task 粒度限制截图优化并发，避免多任务同时占满 SHM。"""
+        task_gate_limit = _resolve_screenshot_task_gate_limit(self.screenshot_config)
+        task_gate = _resolve_screenshot_task_gate(task_gate_limit)
+        logger.info(
+            "[VL] screenshot task gate wait: limit=%s, mode=%s, requests=%s, video=%s",
+            task_gate_limit,
+            mode,
+            len(screenshot_requests),
+            video_path,
+        )
+        await task_gate.acquire()
+        try:
+            logger.info(
+                "[VL] screenshot task gate acquired: limit=%s, mode=%s, requests=%s, video=%s",
+                task_gate_limit,
+                mode,
+                len(screenshot_requests),
+                video_path,
+            )
+            if mode == "streaming":
+                return await self._optimize_screenshots_streaming_pipeline(video_path, screenshot_requests)
+            return await self._optimize_screenshots_batch_mode(video_path, screenshot_requests)
+        finally:
+            task_gate.release()
+            logger.info(
+                "[VL] screenshot task gate released: limit=%s, mode=%s, requests=%s, video=%s",
+                task_gate_limit,
+                mode,
+                len(screenshot_requests),
+                video_path,
+            )
+
     async def _optimize_screenshots_batch_mode(
         self,
         video_path: str,
@@ -7526,9 +7597,23 @@ class VLMaterialGenerator:
                 start_frame = max(0, min(start_frame, total_frames - 1))
                 end_frame = max(start_frame, min(end_frame, total_frames - 1))
 
+            source_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            source_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            effective_height = source_height if source_height > 0 else max(target_height, 1)
+            effective_width = source_width if source_width > 0 else max(2, effective_height)
+            if target_height > 0 and effective_height > 0 and effective_width > 0:
+                effective_width = max(2, int((effective_width / effective_height) * target_height))
+                effective_width = max(2, (effective_width // 2) * 2)
+                effective_height = target_height
+            estimated_frame_bytes = max(1, effective_width * max(1, effective_height) * 3)
+            registry_byte_budget = int(
+                max(1, getattr(registry_cls, "resolve_default_max_bytes", lambda: 64 * 1024 * 1024)())
+            )
             max_frames_per_chunk = int(
                 self.screenshot_config.get("prefetch_max_frames_per_chunk", 240)
             )
+            byte_safe_frame_cap = max(1, registry_byte_budget // estimated_frame_bytes)
+            max_frames_per_chunk = max(1, min(max_frames_per_chunk, byte_safe_frame_cap))
             step = resolve_adaptive_prefetch_step(
                 start_frame=start_frame,
                 end_frame=end_frame,
@@ -7539,7 +7624,10 @@ class VLMaterialGenerator:
             sampled_frame_count = int((end_frame - start_frame) // step) + 2
 
             # 该 chunk 内不允许淘汰：max_frames 覆盖本次候选帧数。
-            registry = registry_cls(max_frames=max(10, sampled_frame_count + 10))
+            registry = registry_cls(
+                max_frames=max(10, sampled_frame_count + 10),
+                max_bytes=registry_byte_budget,
+            )
 
             # Seek once, then sequential scan
             cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)

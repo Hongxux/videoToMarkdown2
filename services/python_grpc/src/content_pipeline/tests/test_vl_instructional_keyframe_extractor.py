@@ -5,6 +5,7 @@ import numpy as np
 
 from services.python_grpc.src.content_pipeline.phase2a.materials.vl_instructional_keyframe_extractor import (
     _build_top_reason_banner_layout,
+    _resolve_top_banner_font_path,
     crop_keyframe_inplace_by_grid_range,
     crop_keyframe_inplace_by_bbox_1000,
     expand_bbox_1000,
@@ -294,6 +295,18 @@ def test_save_grid_overlay_image_and_crop_by_grid_range(tmp_path):
     assert cropped is not None
     assert int(cropped.shape[0]) < 200
     assert int(cropped.shape[1]) < 300
+
+
+def test_resolve_top_banner_font_path_supports_env_override(tmp_path, monkeypatch):
+    font_path = Path(tmp_path) / "banner-font.ttf"
+    font_path.write_bytes(b"font")
+
+    monkeypatch.setenv("TOP_REASON_BANNER_FONT_PATH", str(font_path))
+    _resolve_top_banner_font_path.cache_clear()
+    try:
+        assert _resolve_top_banner_font_path() == font_path
+    finally:
+        _resolve_top_banner_font_path.cache_clear()
 
 
 def test_save_top_reason_banner_image_renders_top_overlay(tmp_path):

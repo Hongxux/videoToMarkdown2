@@ -96,6 +96,112 @@ from services.python_grpc.src.content_pipeline.phase2a.vision.visual_element_det
 
 logger = logging.getLogger(__name__)
 
+_SHARED_FRAME_REGISTRY_MIN_BYTES = 16 * 1024 * 1024
+_SHARED_FRAME_REGISTRY_MAX_BYTES = 512 * 1024 * 1024
+_SHARED_FRAME_REGISTRY_ENV = "MODULE2_SHARED_FRAME_REGISTRY_MAX_MB"
+_SHARED_FRAME_REGISTRY_SHM_RATIO_ENV = "MODULE2_SHARED_FRAME_REGISTRY_SHM_RATIO"
+_SHARED_FRAME_REGISTRY_TARGET_FRAMES_ENV = "MODULE2_SHARED_FRAME_REGISTRY_TARGET_FRAMES"
+_SHARED_FRAME_REGISTRY_DEFAULT_SHM_RATIO = 0.375
+_SHARED_FRAME_REGISTRY_DEFAULT_TARGET_FRAMES = 48
+_SHARED_FRAME_REGISTRY_MIN_TARGET_FRAMES = 8
+_SHARED_FRAME_REGISTRY_MAX_TARGET_FRAMES = 240
+
+
+def _resolve_shared_frame_registry_shm_total_bytes() -> int:
+    try:
+        if os.path.isdir("/dev/shm"):
+            shm_stat = os.statvfs("/dev/shm")
+            shm_total_bytes = int(shm_stat.f_frsize * shm_stat.f_blocks)
+            if shm_total_bytes > 0:
+                return shm_total_bytes
+    except Exception as error:
+        logger.debug("Resolve /dev/shm total bytes failed: %s", error)
+    return 0
+
+
+def _resolve_shared_frame_registry_shm_ratio() -> float:
+    raw_ratio = str(os.getenv(_SHARED_FRAME_REGISTRY_SHM_RATIO_ENV, "") or "").strip()
+    if raw_ratio:
+        try:
+            return max(0.10, min(0.80, float(raw_ratio)))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid %s=%s, fallback to default shm ratio",
+                _SHARED_FRAME_REGISTRY_SHM_RATIO_ENV,
+                raw_ratio,
+            )
+    return _SHARED_FRAME_REGISTRY_DEFAULT_SHM_RATIO
+
+
+def _resolve_shared_frame_registry_target_frames(default_target_frames: int) -> int:
+    raw_target_frames = str(os.getenv(_SHARED_FRAME_REGISTRY_TARGET_FRAMES_ENV, "") or "").strip()
+    if raw_target_frames:
+        try:
+            default_target_frames = int(float(raw_target_frames))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid %s=%s, fallback to target frame hint",
+                _SHARED_FRAME_REGISTRY_TARGET_FRAMES_ENV,
+                raw_target_frames,
+            )
+    return max(
+        _SHARED_FRAME_REGISTRY_MIN_TARGET_FRAMES,
+        min(_SHARED_FRAME_REGISTRY_MAX_TARGET_FRAMES, int(default_target_frames)),
+    )
+
+
+def _resolve_shared_frame_registry_max_bytes(
+    *,
+    estimated_frame_bytes: Optional[int] = None,
+    target_frame_count: Optional[int] = None,
+) -> int:
+    """解析共享帧注册表默认字节预算。"""
+    raw_limit_mb = str(os.getenv(_SHARED_FRAME_REGISTRY_ENV, "") or "").strip()
+    if raw_limit_mb:
+        try:
+            return max(1, int(float(raw_limit_mb) * 1024 * 1024))
+        except (TypeError, ValueError):
+            logger.warning("Invalid %s=%s, fallback to adaptive byte budget", _SHARED_FRAME_REGISTRY_ENV, raw_limit_mb)
+
+    shm_total_bytes = _resolve_shared_frame_registry_shm_total_bytes()
+    if shm_total_bytes > 0:
+        ratio_budget = int(shm_total_bytes * _resolve_shared_frame_registry_shm_ratio())
+        ratio_budget = max(
+            _SHARED_FRAME_REGISTRY_MIN_BYTES,
+            min(_SHARED_FRAME_REGISTRY_MAX_BYTES, ratio_budget),
+        )
+        if estimated_frame_bytes and int(estimated_frame_bytes) > 0:
+            resolved_target_frames = _resolve_shared_frame_registry_target_frames(
+                int(target_frame_count or _SHARED_FRAME_REGISTRY_DEFAULT_TARGET_FRAMES)
+            )
+            demand_budget = int(estimated_frame_bytes) * resolved_target_frames
+            return max(
+                _SHARED_FRAME_REGISTRY_MIN_BYTES,
+                min(ratio_budget, _SHARED_FRAME_REGISTRY_MAX_BYTES, demand_budget),
+            )
+        return ratio_budget
+
+    try:
+        status = ResourceOrchestrator.get_system_status()
+        available_gb = float(status.get("available_gb", 0.0) or 0.0)
+    except Exception:
+        available_gb = 0.0
+    adaptive_bytes = int(max(1.0, available_gb) * 32 * 1024 * 1024)
+    adaptive_budget = max(
+        _SHARED_FRAME_REGISTRY_MIN_BYTES,
+        min(_SHARED_FRAME_REGISTRY_MAX_BYTES, adaptive_bytes),
+    )
+    if estimated_frame_bytes and int(estimated_frame_bytes) > 0:
+        resolved_target_frames = _resolve_shared_frame_registry_target_frames(
+            int(target_frame_count or _SHARED_FRAME_REGISTRY_DEFAULT_TARGET_FRAMES)
+        )
+        demand_budget = int(estimated_frame_bytes) * resolved_target_frames
+        return max(
+            _SHARED_FRAME_REGISTRY_MIN_BYTES,
+            min(adaptive_budget, _SHARED_FRAME_REGISTRY_MAX_BYTES, demand_budget),
+        )
+    return adaptive_budget
+
 @dataclass
 class VisualFeatures:
     """类明：VisualFeatures 负责封木块相关能力?
@@ -402,7 +508,7 @@ class SharedFrameRegistry:
     1) 步1：接收调用求并组织上下文数?
     2) 步2：协调类内方法完成业务理?
     3) 步3：输出理结果并提供用能力?"""
-    def __init__(self, max_frames=None):
+    def __init__(self, max_frames=None, max_bytes=None):
         """
         执逻辑?
         1) 解析配置或依赖，准运?
@@ -419,12 +525,75 @@ class SharedFrameRegistry:
         - 无（仅产生副作用，日志/写盘/状更新）?"""
         if max_frames is None:
             max_frames = ResourceOrchestrator.get_adaptive_cache_size(base_size=50, per_gb_increment=25)
-        self.max_frames = max_frames
+        if max_bytes is None:
+            max_bytes = _resolve_shared_frame_registry_max_bytes()
+        self.max_frames = max(1, int(max_frames))
+        self.max_bytes = max(1, int(max_bytes))
         self._registry: Dict[int, str] = OrderedDict() # frame_idx -> shm_name
         self._shms: Dict[str, shared_memory.SharedMemory] = {}
+        self._frame_specs: Dict[int, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        self._current_bytes = 0
         self._shape = None
         self._dtype = None
+
+    @staticmethod
+    def resolve_default_max_bytes(
+        *,
+        estimated_frame_bytes: Optional[int] = None,
+        target_frame_count: Optional[int] = None,
+    ) -> int:
+        """暴露默认字节预算，供上层按帧大小预估 chunk 容量。"""
+        return _resolve_shared_frame_registry_max_bytes(
+            estimated_frame_bytes=estimated_frame_bytes,
+            target_frame_count=target_frame_count,
+        )
+
+    @property
+    def current_bytes(self) -> int:
+        """返回当前已占用的共享内存字节数。"""
+        return self._current_bytes
+
+    def _drop_frame_locked(self, frame_idx: int) -> None:
+        """释放指定帧占用的共享内存。"""
+        shm_name = self._registry.pop(frame_idx, None)
+        frame_spec = self._frame_specs.pop(frame_idx, {})
+        self._current_bytes = max(0, self._current_bytes - int(frame_spec.get("nbytes", 0) or 0))
+        if not shm_name:
+            return
+        shm = self._shms.pop(shm_name, None)
+        if shm is None:
+            return
+        try:
+            shm.close()
+        finally:
+            try:
+                shm.unlink()
+            except Exception:
+                pass
+
+    def _reserve_capacity_locked(self, required_bytes: int) -> bool:
+        """写入前先校验容量，不在活跃阶段做抢占淘汰。"""
+        if required_bytes <= 0:
+            return False
+        if required_bytes > self.max_bytes:
+            logger.warning(
+                "SharedMemory frame skipped: frame_bytes=%s exceeds registry_budget=%s",
+                required_bytes,
+                self.max_bytes,
+            )
+            return False
+        if len(self._registry) >= self.max_frames or self._current_bytes + required_bytes > self.max_bytes:
+            logger.warning(
+                "SharedMemory reserve rejected: current_bytes=%s required_bytes=%s budget=%s frame_count=%s max_frames=%s",
+                self._current_bytes,
+                required_bytes,
+                self.max_bytes,
+                len(self._registry),
+                self.max_frames,
+            )
+            return False
+        return True
 
     def register_frame(self, frame_idx: int, frame: np.ndarray):
         """
@@ -447,7 +616,44 @@ class SharedFrameRegistry:
         - 无（仅产生副作用，日志/写盘/状更新）?"""
         with self._lock:
             if frame_idx in self._registry:
+                self._registry.move_to_end(frame_idx)
                 return
+
+            frame_nbytes = int(getattr(frame, "nbytes", 0) or 0)
+            if not self._reserve_capacity_locked(frame_nbytes):
+                return
+            if self._shape is None:
+                self._shape = frame.shape
+                self._dtype = frame.dtype
+
+            try:
+                shm = shared_memory.SharedMemory(create=True, size=frame_nbytes)
+            except Exception as e:
+                logger.warning(f"SharedMemory allocation failed: {e}. Falling back to standard transfer.")
+                return
+
+            try:
+                dst = np.ndarray(frame.shape, dtype=frame.dtype, buffer=shm.buf)
+                dst[:] = frame[:]
+            except Exception:
+                try:
+                    shm.close()
+                finally:
+                    try:
+                        shm.unlink()
+                    except Exception:
+                        pass
+                raise
+
+            self._registry[frame_idx] = shm.name
+            self._shms[shm.name] = shm
+            self._frame_specs[frame_idx] = {
+                "shape": tuple(frame.shape),
+                "dtype": frame.dtype,
+                "nbytes": frame_nbytes,
+            }
+            self._current_bytes += frame_nbytes
+            return
             
             # 维护容量
             if len(self._registry) >= self.max_frames:
@@ -494,6 +700,15 @@ class SharedFrameRegistry:
             if not shm_name:
                 cache_metrics.miss("module2.shared_frame_registry.get_frame")
                 return None
+            frame_spec = self._frame_specs.get(frame_idx)
+            if frame_spec:
+                shm = self._shms.get(shm_name)
+                if not shm:
+                    cache_metrics.miss("module2.shared_frame_registry.get_frame")
+                    return None
+                self._registry.move_to_end(frame_idx)
+                cache_metrics.hit("module2.shared_frame_registry.get_frame")
+                return np.ndarray(frame_spec["shape"], dtype=frame_spec["dtype"], buffer=shm.buf)
             
             # 注意: 这里返回?ndarray 保持了 shm.buf 的引?
             # 调用者必须在进程结束前保?shm 打开状?
@@ -524,6 +739,8 @@ class SharedFrameRegistry:
                     logger.debug(f"SHM unlink failed for {shm_name}: {e}")
             self._registry.clear()
             self._shms.clear()
+            self._frame_specs.clear()
+            self._current_bytes = 0
 
     def get_shm_ref(self, frame_idx: int) -> Optional[Dict[str, Any]]:
         """
@@ -544,6 +761,16 @@ class SharedFrameRegistry:
             if not shm_name:
                 cache_metrics.miss("module2.shared_frame_registry.get_shm_ref")
                 return None
+            frame_spec = self._frame_specs.get(frame_idx)
+            if frame_spec:
+                self._registry.move_to_end(frame_idx)
+                cache_metrics.hit("module2.shared_frame_registry.get_shm_ref")
+                return {
+                    "shm_name": shm_name,
+                    "shape": frame_spec["shape"],
+                    "dtype": frame_spec["dtype"],
+                    "frame_idx": frame_idx
+                }
             cache_metrics.hit("module2.shared_frame_registry.get_shm_ref")
             return {
                 "shm_name": shm_name,

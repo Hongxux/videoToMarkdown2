@@ -7,6 +7,9 @@ ENV PYTHONNOUSERSITE=1
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_ROOT_USER_ACTION=ignore
 ENV PYTHONPATH=/app:/app/contracts/gen/python
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV PYTHONUTF8=1
 ENV HF_HOME=/opt/huggingface
 ENV HUGGINGFACE_HUB_CACHE=/opt/huggingface/hub
 ENV WHISPER_MODEL_CACHE_DIR=/opt/huggingface/hub
@@ -17,12 +20,16 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     tesseract-ocr \
+    fontconfig \
+    fonts-noto-cjk \
+    fonts-wqy-zenhei \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender1 \
     build-essential \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /app/requirements.txt
@@ -32,6 +39,7 @@ COPY requirements /app/requirements
 COPY contracts/proto /app/contracts/proto
 COPY apps /app/apps
 COPY services /app/services
+COPY tools/split_video_by_semantic_units.py /app/tools/split_video_by_semantic_units.py
 COPY config /app/config
 
 RUN --mount=type=cache,target=/root/.cache/pip \

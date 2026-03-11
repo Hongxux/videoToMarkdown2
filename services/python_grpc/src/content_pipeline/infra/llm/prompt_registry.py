@@ -63,6 +63,8 @@ class PromptKeys:
 
     DEEPSEEK_VIDEO_CLIP_MOTION_VALUE_SYSTEM = "deepseek.video_clip.motion_value.system"
     DEEPSEEK_VIDEO_CLIP_TRANSITION_SYSTEM = "deepseek.video_clip.transition.system"
+    DEEPSEEK_CATEGORY_CLASSIFIER_SYSTEM = "deepseek.category_classifier.system"
+    DEEPSEEK_CATEGORY_CLASSIFIER_USER = "deepseek.category_classifier.user"
 
 
 PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
@@ -238,6 +240,16 @@ PROMPT_REGISTRY: Dict[str, PromptRegistryEntry] = {
         key=PromptKeys.DEEPSEEK_VIDEO_CLIP_TRANSITION_SYSTEM,
         relative_path="deepseek/video_clip/transition_system.md",
         description="过渡语生成 System Prompt",
+    ),
+    PromptKeys.DEEPSEEK_CATEGORY_CLASSIFIER_SYSTEM: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_CATEGORY_CLASSIFIER_SYSTEM,
+        relative_path="deepseek/category_classifier/system.md",
+        description="视频分类 System Prompt",
+    ),
+    PromptKeys.DEEPSEEK_CATEGORY_CLASSIFIER_USER: PromptRegistryEntry(
+        key=PromptKeys.DEEPSEEK_CATEGORY_CLASSIFIER_USER,
+        relative_path="deepseek/category_classifier/user.md",
+        description="视频分类 User Prompt",
     ),
 }
 

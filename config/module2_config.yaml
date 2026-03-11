@@ -1,4 +1,4 @@
-﻿# Module 2 Complete Configuration
+# Module 2 Complete Configuration
 #
 # 配置文件使用说明（重要）：
 # 1) 本文件是 Module2 主配置，推荐路径：config/module2_config.yaml。
@@ -328,14 +328,15 @@ vl_material_generation:
     retry_max_backoff_sec: 16.0
     max_tokens: 8192
     temperature: 0.2  # 建议 0.0~0.3，越低结果越稳定
-    # 离线异步任务模式（提交后每 5 秒轮询）
-    offline_task_enabled: true
+    # 默认改为同步调用，避免 offline batch 的排队与轮询等待
+    offline_task_enabled: false
     offline_poll_interval_sec: 5.0
     offline_max_wait_sec: 86400.0  # 24h
     # 同步链路兜底超时（仅当 offline_task_enabled=false 时生效）
-    request_timeout_sec: 120.0
-    request_timeout_ratio_by_video_duration: 0.5
-    request_timeout_min_sec: 1.0
+    # 同步模式不再经过 batch 排队，因此这里预留更宽的等待窗口，避免长 clip 被过早超时
+    request_timeout_sec: 300.0
+    request_timeout_ratio_by_video_duration: 1.0
+    request_timeout_min_sec: 30.0
     # 上传前压缩（启用）
     # 压缩策略：H.264 + CRF + 15fps + 默认保留音频 + 超过1080p才降分辨率
     long_video_upload_compress_enabled: true
@@ -482,7 +483,7 @@ vl_material_generation:
     save_step_json: true
 
     # Whether to render frame_reason as a top banner on tutorial keyframes
-    top_reason_banner_enabled: false
+    top_reason_banner_enabled: true
 
     # 教程资产导出并发度（step clip/keyframe）
     # auto: 自动并发（默认最多 4），受 asset_export_parallel_hard_cap 限制
@@ -564,20 +565,21 @@ vl_material_generation:
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
     streaming_overlap_buffers: 1          # 主进程预取链默认单缓冲，优先稳定性
     streaming_overlap_buffers_hard_cap: 1 # 主进程预取链硬上限，防止多 chunk 并存放大内存峰值
+    task_max_concurrency: 2               # task 粒度总闸门：最多允许 2 个任务同时进入截图优化
     max_workers: 1                        # 当前样本压测最优: 1
     max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
-    max_inflight_hard_cap: 2              # 主进程向进程池投递的硬上限，避免 pending 无限堆积
+    max_inflight_hard_cap: 1              # 主进程向进程池投递的硬上限，避免 pending 无限堆积
     
     # 预读配置 (与批量模式共享)
     prefetch_sample_rate: 2               # 采样率
     prefetch_target_height: 360           # 目标高度
-    prefetch_max_frames_per_chunk: 160    # 单 chunk 预读帧数软上限；超出时自动放大采样步长，抑制内存峰值
+    prefetch_max_frames_per_chunk: 32     # 单 chunk 预读帧数软上限；优先稳定 SHM 峰值
     prefetch_union_min_requests: 20       # Union预读最小请求数
     prefetch_union_max_span_seconds: 8.0  # Union预读最大时间跨度
     prefetch_chunk_max_requests: 256      # 单 chunk 最大请求数(防御性上限)，主要由 max_span 控制切分
 
     # 主进程预取链硬 governor：即使配置被调大，也会在代码层再次钳制
-    prefetch_hard_max_frames_per_chunk: 160
+    prefetch_hard_max_frames_per_chunk: 32
     prefetch_hard_max_span_seconds: 8.0
     prefetch_hard_max_requests_per_chunk: 256
 

@@ -40,6 +40,9 @@ services/java-orchestrator/tmp_m2repo
 
 tests
 tools
+!tools/
+tools/*
+!tools/split_video_by_semantic_units.py
 docs/archive
 docs/benchmarks
 *.ijnb

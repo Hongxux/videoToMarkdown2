@@ -42,10 +42,10 @@ class TaskBundleExportServiceTest {
         Files.writeString(coverImage, "cover", StandardCharsets.UTF_8);
         Files.writeString(clipVideo, "video", StandardCharsets.UTF_8);
         Files.writeString(anchorImage, "note-image", StandardCharsets.UTF_8);
-        Files.writeString(anchorNote, "![anchor-image](./note-image.png)\n", StandardCharsets.UTF_8);
+        Files.writeString(anchorNote, "![[./note-image.png]]\n", StandardCharsets.UTF_8);
         Files.writeString(
                 mainMarkdown,
-                "![cover](../assets/cover.png)\n<video src=\"../clip.mp4\"></video>\n[anchor-note](../thinking/anchor_a1/rev_r1/note.md)\n",
+                "![[../assets/cover.png]]\n![[../clip.mp4]]\n[[../thinking/anchor_a1/rev_r1/note.md]]\n<img src=\"/api/mobile/tasks/task-1/asset?path=assets%2Fcover.png\">\n",
                 StandardCharsets.UTF_8
         );
 
@@ -97,9 +97,17 @@ class TaskBundleExportServiceTest {
         assertTrue(zipEntries.keySet().stream().allMatch(name -> !name.contains("/")));
 
         String mainMarkdownText = new String(zipEntries.get(plan.mainMarkdownEntryName()), StandardCharsets.UTF_8);
-        assertTrue(mainMarkdownText.contains("cover.png"));
-        assertTrue(mainMarkdownText.contains("clip.mp4"));
 
+        String coverEntryName = plan.entries().stream()
+                .filter(entry -> entry.originalPath().endsWith("cover.png"))
+                .findFirst()
+                .orElseThrow()
+                .entryName();
+        String clipEntryName = plan.entries().stream()
+                .filter(entry -> entry.originalPath().endsWith("clip.mp4"))
+                .findFirst()
+                .orElseThrow()
+                .entryName();
         String anchorNoteEntryName = plan.entries().stream()
                 .filter(entry -> "anchor_note".equals(entry.role()))
                 .findFirst()
@@ -110,10 +118,17 @@ class TaskBundleExportServiceTest {
                 .findFirst()
                 .orElseThrow()
                 .entryName();
-        assertTrue(mainMarkdownText.contains("(" + anchorNoteEntryName + ")"));
+
+        assertTrue(coverEntryName.startsWith("task-1_"));
+        assertTrue(clipEntryName.startsWith("task-1_"));
+        assertTrue(anchorImageEntryName.startsWith("task-1_"));
+        assertTrue(mainMarkdownText.contains("![[" + coverEntryName + "]]"));
+        assertTrue(mainMarkdownText.contains("![[" + clipEntryName + "]]"));
+        assertTrue(mainMarkdownText.contains("[[" + anchorNoteEntryName + "]]"));
+        assertTrue(mainMarkdownText.contains("<img src=\"" + coverEntryName + "\">"));
 
         String anchorMarkdownText = new String(zipEntries.get(anchorNoteEntryName), StandardCharsets.UTF_8);
-        assertTrue(anchorMarkdownText.contains(anchorImageEntryName));
+        assertTrue(anchorMarkdownText.contains("![[" + anchorImageEntryName + "]]"));
         assertNotNull(zipEntries.get(anchorImageEntryName));
     }
 

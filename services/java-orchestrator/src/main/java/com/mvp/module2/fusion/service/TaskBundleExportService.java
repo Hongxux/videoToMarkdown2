@@ -37,10 +37,16 @@ public class TaskBundleExportService {
     private static final Logger logger = LoggerFactory.getLogger(TaskBundleExportService.class);
     private static final String META_FILE_NAME = "mobile_task_meta.json";
     private static final String MANIFEST_FILE_NAME = "export_manifest.json";
+    private static final String OBSIDIAN_NOTE_PREFIX = "obsidian-note:";
     private static final int COPY_BUFFER_BYTES = 64 * 1024;
     private static final Pattern MARKDOWN_LINK_PATTERN = Pattern.compile("(!?\\[[^\\]]*])\\((<[^>]+>|[^)\\s]+)([^)]*)\\)");
     private static final Pattern HTML_ASSET_ATTR_PATTERN = Pattern.compile("(?i)(<(?:img|video|source|audio|a)\\b[^>]*?\\b(?:src|poster|href)\\s*=\\s*)([\"'])(.*?)(\\2)");
+    private static final Pattern OBSIDIAN_EMBED_PATTERN = Pattern.compile("!\\[\\[([^\\]]+)\\]\\]");
+    private static final Pattern OBSIDIAN_WIKILINK_PATTERN = Pattern.compile("(^|[^!])\\[\\[([^\\]]+)\\]\\]", Pattern.MULTILINE);
+    private static final Pattern API_TASK_ASSET_PATH_PATTERN = Pattern.compile("^/api/mobile/tasks/[^/]+/asset$", Pattern.CASE_INSENSITIVE);
     private static final Set<String> MARKDOWN_EXTENSIONS = Set.of(".md", ".markdown");
+    private static final Set<String> IMAGE_EXTENSIONS = Set.of(".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg");
+    private static final Set<String> VIDEO_EXTENSIONS = Set.of(".mp4", ".webm", ".mov", ".m4v");
     private static final Set<String> EXTERNAL_URL_PREFIXES = Set.of("http://", "https://", "data:", "blob:", "mailto:", "tel:", "javascript:");
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -78,7 +84,7 @@ public class TaskBundleExportService {
         List<ExportedFile> exportedFiles = new ArrayList<>();
         Map<Path, String> entryNameByPath = new HashMap<>();
         for (CollectedFile file : orderedFiles) {
-            String entryName = allocator.allocate(suggestFlatEntryName(file));
+            String entryName = allocator.allocate(suggestFlatEntryName(taskId, file));
             exportedFiles.add(new ExportedFile(file, entryName));
             entryNameByPath.put(file.path(), entryName);
         }
@@ -225,6 +231,22 @@ public class TaskBundleExportService {
                 urls.add(rawUrl);
             }
         }
+        Matcher obsidianEmbedMatcher = OBSIDIAN_EMBED_PATTERN.matcher(markdown);
+        while (obsidianEmbedMatcher.find()) {
+            ObsidianLinkParts link = parseObsidianLinkParts(obsidianEmbedMatcher.group(1));
+            String notePath = link != null ? trimToNull(link.notePath()) : null;
+            if (notePath != null) {
+                urls.add(notePath);
+            }
+        }
+        Matcher obsidianWikilinkMatcher = OBSIDIAN_WIKILINK_PATTERN.matcher(markdown);
+        while (obsidianWikilinkMatcher.find()) {
+            ObsidianLinkParts link = parseObsidianLinkParts(obsidianWikilinkMatcher.group(2));
+            String notePath = link != null ? trimToNull(link.notePath()) : null;
+            if (notePath != null) {
+                urls.add(notePath);
+            }
+        }
         return List.copyOf(urls);
     }
 
@@ -233,7 +255,9 @@ public class TaskBundleExportService {
             return markdown != null ? markdown : "";
         }
         String afterMarkdown = rewriteMarkdownStyleLinks(markdown, taskRoot, baseDir, entryNameByPath);
-        return rewriteHtmlAssetLinks(afterMarkdown, taskRoot, baseDir, entryNameByPath);
+        String afterHtml = rewriteHtmlAssetLinks(afterMarkdown, taskRoot, baseDir, entryNameByPath);
+        String afterObsidianEmbed = rewriteObsidianEmbedLinks(afterHtml, taskRoot, baseDir, entryNameByPath);
+        return rewriteObsidianWikilinks(afterObsidianEmbed, taskRoot, baseDir, entryNameByPath);
     }
 
     private String rewriteMarkdownStyleLinks(String markdown, Path taskRoot, Path baseDir, Map<Path, String> entryNameByPath) {
@@ -266,6 +290,62 @@ public class TaskBundleExportService {
         return buffer.toString();
     }
 
+    private String rewriteObsidianEmbedLinks(String markdown, Path taskRoot, Path baseDir, Map<Path, String> entryNameByPath) {
+        Matcher matcher = OBSIDIAN_EMBED_PATTERN.matcher(markdown);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String rewrittenBody = rewriteObsidianLinkBody(taskRoot, baseDir, matcher.group(1), entryNameByPath);
+            if (rewrittenBody == null) {
+                matcher.appendReplacement(buffer, Matcher.quoteReplacement(matcher.group(0)));
+            } else {
+                matcher.appendReplacement(buffer, Matcher.quoteReplacement("![[" + rewrittenBody + "]]"));
+            }
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
+    }
+
+    private String rewriteObsidianWikilinks(String markdown, Path taskRoot, Path baseDir, Map<Path, String> entryNameByPath) {
+        Matcher matcher = OBSIDIAN_WIKILINK_PATTERN.matcher(markdown);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String rewrittenBody = rewriteObsidianLinkBody(taskRoot, baseDir, matcher.group(2), entryNameByPath);
+            if (rewrittenBody == null) {
+                matcher.appendReplacement(buffer, Matcher.quoteReplacement(matcher.group(0)));
+            } else {
+                matcher.appendReplacement(buffer, Matcher.quoteReplacement(matcher.group(1) + "[[" + rewrittenBody + "]]"));
+            }
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
+    }
+
+    private String rewriteObsidianLinkBody(Path taskRoot, Path baseDir, String rawBody, Map<Path, String> entryNameByPath) {
+        ObsidianLinkParts link = parseObsidianLinkParts(rawBody);
+        String notePath = link != null ? trimToNull(link.notePath()) : null;
+        if (notePath == null) {
+            return null;
+        }
+        ResolvedReference ref = resolveLocalReference(taskRoot, baseDir, notePath);
+        if (ref == null) {
+            return null;
+        }
+        String entryName = entryNameByPath.get(ref.path());
+        if (entryName == null) {
+            return null;
+        }
+        StringBuilder builder = new StringBuilder(entryName);
+        String noteAnchor = trimToNull(link.noteAnchor());
+        if (noteAnchor != null) {
+            builder.append('#').append(noteAnchor);
+        }
+        String alias = trimToNull(link.alias());
+        if (alias != null) {
+            builder.append('|').append(alias);
+        }
+        return builder.toString();
+    }
+
     private String resolveRewrittenEntryName(Path taskRoot, Path baseDir, String rawUrl, Map<Path, String> entryNameByPath) {
         ResolvedReference ref = resolveLocalReference(taskRoot, baseDir, rawUrl);
         if (ref == null) {
@@ -281,8 +361,14 @@ public class TaskBundleExportService {
             return null;
         }
         String lower = url.toLowerCase(Locale.ROOT);
-        if (lower.startsWith("#") || lower.startsWith("/api/mobile/tasks/")) {
+        if (lower.startsWith("#")) {
             return null;
+        }
+        if (lower.startsWith(OBSIDIAN_NOTE_PREFIX)) {
+            return resolveObsidianNoteReference(taskRoot, baseDir, url);
+        }
+        if (lower.startsWith("/api/mobile/tasks/")) {
+            return resolveTaskApiAssetReference(taskRoot, url);
         }
         for (String prefix : EXTERNAL_URL_PREFIXES) {
             if (lower.startsWith(prefix)) {
@@ -304,6 +390,70 @@ public class TaskBundleExportService {
         } catch (Exception ex) {
             return null;
         }
+    }
+
+    private ResolvedReference resolveObsidianNoteReference(Path taskRoot, Path baseDir, String rawUrl) {
+        String payload = trimToNull(rawUrl);
+        if (payload == null || payload.length() <= OBSIDIAN_NOTE_PREFIX.length()) {
+            return null;
+        }
+        UrlParts urlParts = splitUrlParts(payload.substring(OBSIDIAN_NOTE_PREFIX.length()));
+        String decodedPath = decodeUrlComponent(stripAngleBrackets(urlParts.pathPart()));
+        if (trimToNull(decodedPath) == null) {
+            return null;
+        }
+        try {
+            Path candidate = Paths.get(decodedPath);
+            Path normalized = candidate.isAbsolute() ? candidate.toAbsolutePath().normalize() : baseDir.resolve(candidate).normalize();
+            if (!normalized.startsWith(taskRoot) || !Files.isRegularFile(normalized)) {
+                return null;
+            }
+            return new ResolvedReference(normalized, urlParts.suffix());
+        } catch (Exception ex) {
+            return null;
+        }
+    }
+
+    private ResolvedReference resolveTaskApiAssetReference(Path taskRoot, String rawUrl) {
+        String url = trimToNull(rawUrl);
+        if (url == null) {
+            return null;
+        }
+        int hashIndex = url.indexOf('#');
+        String suffix = hashIndex >= 0 ? url.substring(hashIndex) : "";
+        String withoutHash = hashIndex >= 0 ? url.substring(0, hashIndex) : url;
+        int queryIndex = withoutHash.indexOf('?');
+        if (queryIndex <= 0) {
+            return null;
+        }
+        String route = withoutHash.substring(0, queryIndex);
+        if (!API_TASK_ASSET_PATH_PATTERN.matcher(route).matches()) {
+            return null;
+        }
+        String encodedPath = findQueryParamValue(withoutHash.substring(queryIndex + 1), "path");
+        Path resolved = resolvePathWithinTask(taskRoot, encodedPath);
+        return resolved != null ? new ResolvedReference(resolved, suffix) : null;
+    }
+
+    private String findQueryParamValue(String query, String name) {
+        String normalizedName = trimToNull(name);
+        String normalizedQuery = trimToNull(query);
+        if (normalizedName == null || normalizedQuery == null) {
+            return null;
+        }
+        for (String part : normalizedQuery.split("&")) {
+            if (part == null || part.isBlank()) {
+                continue;
+            }
+            int equalsIndex = part.indexOf('=');
+            String key = equalsIndex >= 0 ? part.substring(0, equalsIndex) : part;
+            if (!normalizedName.equals(decodeUrlComponent(key))) {
+                continue;
+            }
+            String value = equalsIndex >= 0 ? part.substring(equalsIndex + 1) : "";
+            return decodeUrlComponent(value);
+        }
+        return null;
     }
 
     private Path requireDirectory(Path taskRoot) throws IOException {
@@ -353,13 +503,39 @@ public class TaskBundleExportService {
         return cutIndex < 0 ? new UrlParts(url, "") : new UrlParts(url.substring(0, cutIndex), url.substring(cutIndex));
     }
 
-    private String suggestFlatEntryName(CollectedFile file) {
+    private String suggestFlatEntryName(String taskId, CollectedFile file) {
         String originalName = file.path().getFileName() != null ? file.path().getFileName().toString() : "file";
         String safe = sanitizeFlatFilename(originalName);
+        if (shouldPrefixTaskIdForBinaryAsset(file)) {
+            String taskIdPrefix = sanitizeTaskIdPrefix(taskId);
+            if (taskIdPrefix != null) {
+                safe = sanitizeFlatFilename(taskIdPrefix + "_" + safe);
+            }
+        }
         if ((file.role() == ExportRole.ANCHOR_NOTE || file.role() == ExportRole.ANCHOR_ATTACHMENT) && file.anchorId() != null) {
+            if (shouldPrefixTaskIdForBinaryAsset(file)) {
+                return safe;
+            }
             return sanitizeFlatFilename("anchor_" + file.anchorId() + "_" + safe);
         }
         return safe;
+    }
+
+    private boolean shouldPrefixTaskIdForBinaryAsset(CollectedFile file) {
+        if (file == null || file.kind() != CollectedKind.BINARY) {
+            return false;
+        }
+        String filename = file.path().getFileName() != null ? file.path().getFileName().toString() : "";
+        return hasExtension(filename, IMAGE_EXTENSIONS) || hasExtension(filename, VIDEO_EXTENSIONS);
+    }
+
+    private String sanitizeTaskIdPrefix(String taskId) {
+        String normalized = trimToNull(taskId);
+        if (normalized == null) {
+            return null;
+        }
+        String safe = sanitizeFlatFilename(normalized);
+        return safe.isBlank() ? null : safe;
     }
 
     private String sanitizeFlatFilename(String raw) {
@@ -383,6 +559,63 @@ public class TaskBundleExportService {
             }
         }
         return false;
+    }
+
+    private boolean hasExtension(String filename, Set<String> extensions) {
+        String normalized = trimToNull(filename);
+        if (normalized == null) {
+            return false;
+        }
+        String lower = normalized.toLowerCase(Locale.ROOT);
+        for (String extension : extensions) {
+            if (lower.endsWith(extension)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private ObsidianLinkParts parseObsidianLinkParts(String rawBody) {
+        String body = trimToNull(rawBody);
+        if (body == null) {
+            return null;
+        }
+        int splitIndex = body.indexOf('|');
+        String targetPart = splitIndex >= 0 ? body.substring(0, splitIndex) : body;
+        String aliasPart = splitIndex >= 0 ? body.substring(splitIndex + 1) : "";
+        String rawTarget = trimToNull(targetPart);
+        if (rawTarget == null) {
+            return null;
+        }
+        String notePathPart = rawTarget;
+        String noteAnchor = "";
+        int hashIndex = rawTarget.indexOf('#');
+        if (hashIndex >= 0) {
+            notePathPart = rawTarget.substring(0, hashIndex).trim();
+            noteAnchor = rawTarget.substring(hashIndex + 1).trim();
+        }
+        return new ObsidianLinkParts(body, rawTarget, trimToNull(aliasPart), normalizeObsidianNotePath(notePathPart), noteAnchor);
+    }
+
+    private String normalizeObsidianNotePath(String rawPath) {
+        String normalized = trimToNull(rawPath);
+        if (normalized == null) {
+            return "";
+        }
+        String decoded = decodeUrlComponent(normalized).replace('\\', '/');
+        while (decoded.startsWith("./")) {
+            decoded = decoded.substring(2);
+        }
+        decoded = decoded.replaceFirst("^/+", "");
+        if (decoded.isBlank()) {
+            return "";
+        }
+        int lastSlash = decoded.lastIndexOf('/');
+        int lastDot = decoded.lastIndexOf('.');
+        if (lastDot > lastSlash) {
+            return decoded;
+        }
+        return decoded + ".md";
     }
 
     private String toRelativePath(Path taskRoot, Path file) {
@@ -477,6 +710,7 @@ public class TaskBundleExportService {
     private record AnchorMountedEntry(String anchorId, String noteKey, Path notePath, List<Path> attachmentPaths) {}
     private record ResolvedReference(Path path, String suffix) {}
     private record UrlParts(String pathPart, String suffix) {}
+    private record ObsidianLinkParts(String raw, String rawTarget, String alias, String notePath, String noteAnchor) {}
 
     private enum CollectedKind {
         MARKDOWN("markdown"), BINARY("binary");

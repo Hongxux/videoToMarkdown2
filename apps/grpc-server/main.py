@@ -21,11 +21,13 @@ def _bootstrap_repo_root() -> None:
 _bootstrap_repo_root()
 
 from services.python_grpc.src.server.runtime_env import (
+    patch_protobuf_message_factory_compat,
     patch_pydantic_generic_origin_compat,
     sanitize_user_site_packages,
 )
 
 sanitize_user_site_packages()
+patch_protobuf_message_factory_compat()
 patch_pydantic_generic_origin_compat()
 
 

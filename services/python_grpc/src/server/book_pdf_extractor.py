@@ -11,12 +11,14 @@ import subprocess
 import sys
 import time
 import uuid
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
+
+from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
 
 logger = logging.getLogger(__name__)
 
@@ -257,7 +259,7 @@ def _extract_with_mineru(
             slice_results.append(result)
     else:
         try:
-            with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            with create_spawn_process_pool(max_workers=worker_count) as executor:
                 future_map = {
                     executor.submit(
                         _extract_mineru_page_task,

@@ -912,3 +912,12 @@ def test_probe_video_info_timeout_error_has_specific_hint(monkeypatch):
     assert "探测视频信息超时" in message
     assert "YTDLP_PROXY" in message
     assert "attempts=" in message
+
+
+def test_resolve_ffmpeg_path_uses_absolute_path_from_path_lookup(monkeypatch):
+    monkeypatch.setattr(video_mod.os.path, 'isfile', lambda p: p == '/usr/bin/ffmpeg')
+    monkeypatch.setattr(video_mod.shutil, 'which', lambda name: '/usr/bin/ffmpeg' if name == 'ffmpeg' else None)
+
+    processor = video_mod.VideoProcessor()
+
+    assert processor._resolve_ffmpeg_path() == '/usr/bin/ffmpeg'

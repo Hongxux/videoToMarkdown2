@@ -1,5 +1,16 @@
 ﻿# 错误修正记录
 
+## 2026-03-09 App 默认后端地址固定，切换外网入口后无法自恢复
+- 现象：
+  - Android App 仍然依赖构建期常量 `BuildConfig.MOBILE_API_BASE_URL`，入口域名切换后必须重新发版才能恢复请求。
+- 根因：
+  - 后端根地址没有沉淀为运行时配置，API 与 WebSocket 地址也没有统一从单一 root URL 派生。
+- 修复：
+  - 新增 `MobileApiEndpointStore`，基于 `SharedPreferences` 管理默认值与用户覆盖值。
+  - `MainActivity` 与网络请求链路统一改为从 store 读取 root URL，再标准化派生 API / WebSocket 地址。
+- 预防：
+  - 以后禁止在移动端业务链路里继续硬编码 `BuildConfig.MOBILE_API_BASE_URL` 作为唯一运行时入口，所有环境切换都应先经过统一 endpoint store。
+
 ## 2026-03-08 Web submit-card collection selector and completion-notification controls were not clickable
 - Date: 2026-03-08
 - Symptom:
@@ -9131,3 +9142,242 @@
   - `python -X utf8 tools/architecture/check_docs_encoding.py`
 - Prevention:
   - Future editor shortcuts must first look for extension points in `mobile-editor-shortcuts.js` before adding page-local keyboard logic.
+
+## 2026-03-09: Flat task export missed Markdown-linked media and now supports direct multi-file delivery
+- Symptom:
+  - Task export could produce a flat ZIP that still missed Markdown-linked images or video clips when the Markdown used Obsidian wikilinks/embed syntax such as `![[clip.mp4]]` / `[[note.md]]`.
+  - The export UI only supported ZIP download, so users could not directly write the flattened Markdown + asset set into a target folder without repackaging.
+- Root cause:
+  - `TaskBundleExportService` only collected and rewrote standard Markdown links / HTML `src`-style links, but did not parse Obsidian wikilinks or `obsidian-note:` / `/api/mobile/tasks/.../asset?path=...` style references.
+  - Flattened asset naming did not apply the required `taskId_` prefix for exported images and video clips.
+  - The frontend current-task export entry still funneled users straight into ZIP output, without a second non-archive delivery mode.
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskBundleExportService.java`
+    - Extend flat-export reference collection and Markdown rewrite logic to support Obsidian embed/wikilink syntax plus task asset API URLs.
+    - Prefix exported image/video filenames with `taskId_` while keeping the export flat and collision-safe.
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - Add `/api/mobile/tasks/{taskId}/export/files` to expose the unified flat export file manifest for direct multi-file delivery.
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - Converge the current-task export buttons onto one export flow that lets the user choose ZIP export or direct multi-file export.
+    - Add directory-write delivery when `showDirectoryPicker` is available, with sequential browser-download fallback otherwise.
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/TaskBundleExportServiceTest.java`
+    - Add regression coverage for Obsidian-style asset references and `taskId_` filename prefixing.
+- Validation:
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=TaskBundleExportServiceTest test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Treat export as a two-stage pipeline: first build one canonical flat file manifest, then choose ZIP streaming or direct file delivery from that same manifest.
+  - Any future Markdown syntax added to the reader/editor must be reviewed against `TaskBundleExportService` so export collection and rewrite stay in lockstep.
+
+
+## 2026-03-10: Python `yt-dlp` 未显式传入 `ffmpeg` 路径导致合流失败
+- Symptom:
+  - 某些环境中 `yt-dlp` 合并音视频时直接报 `You have requested merging of multiple formats but ffmpeg is not installed`。
+  - 即使系统已安装 `ffmpeg`，下载链路也可能因为 PATH 不一致而找不到它。
+- Root cause:
+  - `VideoProcessor.download(...)` 之前没有把 `ffmpeg_location` 显式传给 `yt-dlp`。
+  - 代码默认依赖当前 shell 的 PATH，但服务进程、Docker 容器和交互式终端的 PATH 语义并不完全一致。
+  - 当 `yt-dlp` 自身的环境解析没有命中 `ffmpeg` 时，链路会误判成“未安装 ffmpeg”。
+- Fix:
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增 `_resolve_ffmpeg_path()`，优先解析 Python 运行时可见的 `ffmpeg` 绝对路径，并回退到 `shutil.which('ffmpeg')`。
+    - `download(...)` 调用 `yt-dlp` 时显式透传 `ffmpeg_location`。
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py`
+    - 补齐 PATH 解析与绝对路径透传的覆盖测试。
+- Validation:
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_video_processor_download.py -q -k resolve_ffmpeg_path_uses_absolute_path_from_path_lookup`
+  - `docker run --rm videotomarkdown-release-python-grpc:latest python -c "from services.python_grpc.src.media_engine.knowledge_engine.core.video import VideoProcessor; print(VideoProcessor()._resolve_ffmpeg_path())"`
+  - `docker compose up -d --force-recreate python-grpc java-orchestrator`
+- Prevention:
+  - 以后凡是依赖外部二进制的 Python 调用链，都要先在应用层解析出可执行绝对路径，再传给下游工具，而不是把正确性寄托在当前 shell PATH。
+  - 对 `ffmpeg_location`、`executable_path` 这类关键参数，应优先做显式注入，不要依赖第三方库的隐式发现。
+
+
+## 2026-03-10: Linux 默认 `fork` 继承 gRPC 线程态导致子进程不稳定
+- Symptom:
+  - Python 日志持续出现 `fork_posix.cc:71] Other threads are currently calling into gRPC, skipping fork() handlers`。
+  - 某些并行任务在子进程拉起阶段出现不稳定告警，尤其集中在 Whisper 等重 CPU/IO 链路。
+- Root cause:
+  - `ProcessPoolExecutor` 在 Linux 默认使用 `fork`。
+  - 当 `python-grpc` 主进程已经启动 gRPC 线程后再 `fork`，子进程会继承不安全的线程/句柄状态。
+  - 这个问题会扩散到转录、CV、PDF 和 Phase2B 多处并行路径。
+- Fix:
+  - `services/python_grpc/src/common/utils/process_pool.py`
+    - 抽出公共 helper，统一通过 `multiprocessing.get_context("spawn")` 创建进程池。
+  - 以下模块统一接入该 spawn helper：
+    - `services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py`
+    - `services/python_grpc/src/server/grpc_service_impl.py`
+    - `services/python_grpc/src/server/book_pdf_extractor.py`
+    - `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
+    - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
+- Validation:
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `python -X utf8 -m py_compile services/python_grpc/src/common/utils/process_pool.py services/python_grpc/src/media_engine/knowledge_engine/core/parallel_transcription.py services/python_grpc/src/server/book_pdf_extractor.py services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - Python 服务一旦进入 gRPC 常驻进程模型，后续新增并行子进程一律默认按 `spawn` 设计。
+  - 不允许在模块内临时直接 new `ProcessPoolExecutor` 绕过统一 spawn helper。
+
+
+## 2026-03-10: Python 容器缺少 `tools/split_video_by_semantic_units.py` 导致 `AnalyzeWithVL` 失败
+- Symptom:
+  - `AnalyzeWithVL` 报出 `切分脚本不存在: /app/tools/split_video_by_semantic_units.py`。
+  - 容器内无法找到 `tools/split_video_by_semantic_units.py`，VL 预切片链路直接失败。
+- Root cause:
+  - `.dockerignore` 之前把 `tools/` 整体排除。
+  - `deploy/docker/python-grpc.Dockerfile` 也没有把该脚本单独复制进镜像。
+- Fix:
+  - `.dockerignore`
+    - 为 `tools/split_video_by_semantic_units.py` 增加白名单，避免被整体忽略。
+  - `deploy/docker/python-grpc.Dockerfile`
+    - 显式复制 `tools/split_video_by_semantic_units.py` 到 `/app/tools/split_video_by_semantic_units.py`。
+- Validation:
+  - `docker compose build python-grpc`
+  - `docker run --rm videotomarkdown-release-python-grpc:latest python -c "from pathlib import Path; print(Path('/app/tools/split_video_by_semantic_units.py').exists())"`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后凡是运行时依赖的仓库级脚本，都必须在 Docker 构建链路中显式声明“忽略规则 + COPY 规则”。
+  - `.dockerignore` 变更后需要复核镜像内是否还包含运行时脚本依赖。
+
+
+## 2026-03-10: Python 顶部 banner 中文字体在容器内无法稳定命中
+- Symptom:
+  - Python 生成的 banner 图片在容器内中文显示异常，容易退回 OpenCV 默认字体路径。
+  - 关键帧顶部提示条看起来像是“功能开启了，但中文没有稳定渲染”。
+- Root cause:
+  - `vl_instructional_keyframe_extractor.py` 只覆盖了少量 Linux `Noto Sans CJK / Source Han Sans` 固定路径。
+  - `python-grpc` 镜像里的字体布局与这些硬编码路径不完全一致，导致命中率不足。
+- Fix:
+  - `deploy/docker/python-grpc.Dockerfile`
+    - 安装 `fontconfig`、`fonts-noto-cjk`、`fonts-wqy-zenhei`
+    - 执行 `fc-cache -f`
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
+    - 补充 `/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc` 等中文字体回退路径。
+- Validation:
+  - `docker compose build python-grpc`
+  - `docker run --rm videotomarkdown-release-python-grpc:latest python -c "from services.python_grpc.src.content_pipeline.phase2a.materials.vl_instructional_keyframe_extractor import _resolve_top_banner_font_path; print(_resolve_top_banner_font_path())"`
+  - `docker compose up -d --force-recreate python-grpc java-orchestrator`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 后续凡是依赖容器内字体的图像渲染链，都必须同时校验字体包安装、字体缓存和代码侧字体发现链，不能只改其中一层。
+  - 中文 banner 这类能力应优先依赖明确的 CJK 字体回退链，而不是假设基础镜像自带可用字体。
+
+
+## 2026-03-10: Python gRPC 截图优化阶段触发 `SIGBUS` 并导致容器中途重启
+- Symptom:
+  - `python-grpc` 容器在任务进行中被 Docker 自动重启，表现为“任务做到一半容器自己起来了”。
+  - Docker 事件显示最近两次退出均为 `exitCode=135`，不是 `exit=0`；`OOMKilled=false`。
+  - 崩溃前最后一段日志稳定落在 `VL -> screenshot CV optimize -> SharedMemory + process_shared` 路径。
+- Root cause:
+  - 容器默认 `/dev/shm` 仅 `64MB`，但截图优化链路会在同一时段并发持有多个 chunk 的 SHM 帧与共享 `cv_executor` 任务。
+  - `SharedFrameRegistry` 之前只有“按帧数”的容量概念，没有“按总字节数”的硬预算；并且共享 `cv_executor` 场景会优先取 injected pool 的 `_max_workers`，导致显式 `max_workers` 配置失效。
+  - `module2_config.local.yaml` 将 `streaming_overlap_buffers/max_workers/max_inflight_hard_cap/prefetch_max_frames_per_chunk` 全部放大，进一步放大了 SHM 峰值。
+- Fix:
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+    - 为 `SharedFrameRegistry` 增加字节预算、逐帧元数据与超预算拒绝逻辑，不在活跃阶段抢占淘汰旧帧。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 在截图优化总入口增加 task 粒度闸门，最多允许 2 个任务同时进入。
+    - 在 `_prefetch_union_frames_to_registry_sync(...)` 里根据 registry 字节预算反推预读采样密度，让 active chunk 尽量在写入前就落到预算内。
+  - `services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py`
+    - 修正共享 `cv_executor` 场景下的 worker 解析逻辑，显式 `max_workers` 仍然生效。
+  - `config/module2_config.yaml`
+  - `config/module2_config.local.yaml`
+    - 收紧截图优化配置：`task_max_concurrency=2`、`max_workers=1`、`max_inflight_hard_cap=1`、`prefetch_max_frames_per_chunk=32`、`streaming_overlap_buffers=1`。
+  - `docker-compose.yml`
+    - 为 `python-grpc` 增加 `shm_size: 1gb`。
+- Validation:
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py -q`
+  - `python -X utf8 -m py_compile services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/content_pipeline/infra/runtime/vl_prefetch_utils.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 以后所有 SHM/内存帧缓存都必须先定义“总字节预算”，不能只定义“条目数/帧数”。
+  - 活跃 worker 已经拿到引用后，不允许在同一 registry 内做抢占淘汰；应优先用缩窗口、降采样、拆 chunk 和 task 级闸门控制峰值。
+  - 本地 override 文件如果放大并发，必须同时核对 Docker `shm_size`、task 级并发闸门和运行日志中的实际 `workers/inflight` 是否一致。
+
+## 2026-03-11 Docker Python runtime compatibility shim and shared-frame budget default tuning
+- Date:
+  - 2026-03-11
+- Symptom:
+  - Container runtime logs could emit `AttributeError: ''MessageFactory'' object has no attribute ''GetPrototype''`.
+  - Screenshot optimization logs could repeatedly emit `SharedMemory reserve rejected: ... budget=134217728`, causing coarse/fine prefetch degradation under Docker.
+- Root cause:
+  - Some third-party Python dependencies still call the removed `MessageFactory.GetPrototype(...)` API, while the runtime environment now installs `protobuf 6.x`.
+  - `SharedFrameRegistry` hard-capped its adaptive byte budget at `128MB`, which was too conservative for the current `python-grpc` container profile (`shm_size: 1gb`) and high-resolution screenshot workloads.
+- Fix:
+  - `services/python_grpc/src/server/runtime_env.py`
+    - Added `patch_protobuf_message_factory_compat()` and mapped legacy `GetPrototype(...)` calls to `GetMessageClass(...)` during startup.
+  - `apps/grpc-server/main.py`
+    - Applied the protobuf compatibility shim before the rest of the server bootstrap.
+  - `services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py`
+    - Raised the shared-frame registry hard ceiling from `128MB` to `512MB` while preserving the existing environment override path.
+  - `docker-compose.yml`
+  - `.env.example`
+    - Added container default `MODULE2_SHARED_FRAME_REGISTRY_MAX_MB=384` so Docker deployment can use a less conservative byte budget without requiring code edits.
+  - Tests:
+    - Added `services/python_grpc/src/server/tests/test_runtime_env.py`.
+    - Extended `services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py` with env-budget coverage.
+- Validation:
+  - `pytest services/python_grpc/src/server/tests/test_runtime_env.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py -q`
+  - `python -m py_compile apps/grpc-server/main.py services/python_grpc/src/server/runtime_env.py services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/server/tests/test_runtime_env.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py`
+- Prevention:
+  - Keep cross-version dependency shims in the startup compatibility layer instead of scattering version checks across business code.
+  - Treat shared-memory frame transport as a byte-budgeted resource in Docker, and expose the budget as an environment variable so deployment can tune it per machine.
+
+## 2026-03-11 Route screenshot analysis still fell back to original large frames
+- Date:
+  - 2026-03-11
+- Symptom:
+  - Container logs could emit `h264 ... Could not allocate memory` during route screenshot worker execution, and coarse/fine selection could still reopen the original video for enrichment.
+  - `screenshot_analysis_max_width` already existed, but it did not consistently constrain post-selection OCR/shape analysis.
+- Root cause:
+  - `run_coarse_fine_screenshot_task(...)` reopened the original video after candidate selection and read timestamped frames for OCR/shape enrichment, bypassing the already downsampled SharedMemory frames.
+  - `run_select_screenshots_for_range_task(...)` accepted `analysis_max_width`, but the frame could still reach `_extract_ocr_tokens(...)` / `_extract_shape_signature(...)` at original resolution.
+- Fix:
+  - `services/python_grpc/src/vision_validation/worker.py`
+    - Added a shared helper that resizes analysis frames and scales ROI together before OCR/shape analysis.
+    - Made coarse/fine worker prefer fine/coarse SharedMemory frames for enrichment and reopen video only when no reusable frame exists.
+    - Stripped internal `_analysis_frame` fields before returning screenshot results.
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+    - Threaded `screenshot_analysis_max_width` through the legacy coarse/fine worker call path.
+  - Tests:
+    - `services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py`
+      - Added regressions for "reuse SharedMemory frames before reopen" and "resize frame plus ROI before OCR/shape analysis".
+- Validation:
+  - `pytest services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py services/python_grpc/src/server/tests/test_runtime_env.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py -q`
+  - `python -m py_compile services/python_grpc/src/vision_validation/worker.py services/python_grpc/src/vision_validation/tests/test_worker_screenshot_task.py services/python_grpc/src/server/grpc_service_impl.py`
+- Prevention:
+  - All post-selection screenshot enrichment must go through the shared "resize frame + scale ROI" helper instead of pushing original large frames directly into OCR/shape code.
+  - If SharedMemory already holds a usable candidate frame, worker code should not reopen the original video unless it explicitly records why fallback is necessary.
+
+## 2026-03-11 python-grpc 容器教程关键帧顶部 banner 未默认开启且中文字体命中不稳
+- 日期：2026-03-11
+- 现象：
+  - 容器内导出的 tutorial keyframe 图片没有自动附加顶部 `frame_reason` banner。
+  - 当镜像中的中文字体路径与代码硬编码路径不完全一致时，banner 文字可能退回 OpenCV 默认字体路径，导致中文无法稳定渲染。
+- 根因：
+  - `VLMaterialGenerator` 对 `tutorial_mode.top_reason_banner_enabled` 的缺省值仍为 `false`，而容器挂载的 `module2_config*.yaml` 也保持关闭，导致 banner 在部署态不会自动启用。
+  - 顶部 banner 字体发现链主要依赖少量固定路径，缺少环境覆盖和字体目录递归扫描；镜像字体布局稍有差异就可能找不到支持中文的字体。
+  - `python-grpc` 容器没有显式固定 UTF-8 locale / Python UTF-8 运行环境，编码默认值依赖基础镜像行为。
+- 修复：
+  - `config/module2_config.yaml`
+  - `config/module2_config.local.yaml`
+    - 将 `tutorial_mode.top_reason_banner_enabled` 调整为 `true`，让容器部署默认开启图片顶部 banner。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
+    - 将 `top_reason_banner_enabled` 的代码缺省值改为开启，同时保留显式 `false` 的关闭能力。
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py`
+    - 新增 `TOP_REASON_BANNER_FONT_PATH` 覆盖入口。
+    - 为 Linux / Windows 常见字体目录补充递归探测，扩展 `Noto Sans SC`、`WenQuanYi` 等字体名回退。
+  - `deploy/docker/python-grpc.Dockerfile`
+    - 显式设置 `LANG=C.UTF-8`、`LC_ALL=C.UTF-8`、`PYTHONUTF8=1`，把容器默认编码固定为 UTF-8。
+  - `services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py`
+    - 增加环境变量字体覆盖回归测试。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/vl_instructional_keyframe_extractor.py services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py services/python_grpc/src/content_pipeline/tests/test_vl_instructional_keyframe_extractor.py`
+  - 手工脚本验证通过：banner 字体覆盖、图片顶部横幅渲染、默认开启/显式关闭三项行为均符合预期。
+  - `pytest` 定向用例受本机临时目录 `PermissionError` 影响，未能形成干净的框架级退出结果。
+- 预防：
+  - 所有依赖中文图像绘制的能力都应同时具备“显式开关 + UTF-8 运行环境 + 可覆盖字体路径 + 自动字体探测”四层保障，避免再次把可用性押注在单一硬编码路径上。
+  - 以后若容器内再次出现中文 banner 异常，先检查 `TOP_REASON_BANNER_FONT_PATH`、`fc-cache` 与 `LANG/LC_ALL`，再排查业务逻辑。

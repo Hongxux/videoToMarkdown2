@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 
+from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
 from services.python_grpc.src.content_pipeline.phase2a.segmentation.semantic_unit_segmenter import SemanticUnit
 
 from services.python_grpc.src.content_pipeline.phase2b.assembly.request_models import (
@@ -126,7 +127,7 @@ def _get_phase2b_structure_pool(worker_count: int) -> concurrent.futures.Process
                     _PHASE2B_STRUCTURE_POOL.shutdown(wait=False, cancel_futures=True)
                 except Exception:
                     pass
-            _PHASE2B_STRUCTURE_POOL = concurrent.futures.ProcessPoolExecutor(
+            _PHASE2B_STRUCTURE_POOL = create_spawn_process_pool(
                 max_workers=max(1, int(worker_count))
             )
             _PHASE2B_STRUCTURE_POOL_WORKERS = max(1, int(worker_count))

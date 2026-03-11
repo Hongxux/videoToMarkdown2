@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/root/.m2 \
 COPY services/java-orchestrator/src /workspace/services/java-orchestrator/src
 
 RUN --mount=type=cache,target=/root/.m2 \
-    mvn -f /workspace/services/java-orchestrator/pom.xml clean package -DskipTests -Dhttps.protocols=TLSv1.2 -q \
+    mvn -f /workspace/services/java-orchestrator/pom.xml clean package -Dmaven.test.skip=true -Dhttps.protocols=TLSv1.2 -q \
     && cp "$(find /workspace/services/java-orchestrator/target -maxdepth 1 -type f -name 'fusion-orchestrator-*.jar' ! -name '*.original' | head -n 1)" /workspace/fusion-orchestrator.jar
 
 FROM eclipse-temurin:17-jre

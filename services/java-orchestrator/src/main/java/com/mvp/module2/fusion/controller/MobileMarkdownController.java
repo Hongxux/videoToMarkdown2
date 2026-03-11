@@ -9,6 +9,7 @@ import com.mvp.module2.fusion.grpc.PythonGrpcClient;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskStatus;
+import com.mvp.module2.fusion.service.CategoryClassificationResultsRepository;
 import com.mvp.module2.fusion.service.CollectionRepository;
 import com.mvp.module2.fusion.service.FileTransferService;
 import com.mvp.module2.fusion.service.FileReuseService;
@@ -130,7 +131,7 @@ public class MobileMarkdownController {
     private TaskWebSocketHandler taskWebSocketHandler;
 
     @Autowired(required = false)
-    private TaskManualCollectionRepository taskManualCollectionRepository;
+    private CategoryClassificationResultsRepository categoryClassificationResultsRepository;
 
     @Autowired(required = false)
     private FileReuseService fileReuseService;
@@ -162,59 +163,82 @@ public class MobileMarkdownController {
     public ResponseEntity<Map<String, Object>> listTasks(
             @RequestParam(value = "page", defaultValue = "0") int page,
             @RequestParam(value = "pageSize", defaultValue = "0") int pageSize,
-            @RequestParam(value = "onlyMultiSegment", defaultValue = "true") boolean onlyMultiSegment
+            @RequestParam(value = "onlyMultiSegment", defaultValue = "true") boolean onlyMultiSegment,
+            @RequestParam(value = "view", defaultValue = "full") String rawView,
+            @RequestParam(value = "statuses", required = false) String rawStatuses
     ) {
         int normalizedPage = Math.max(0, page);
-        List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
-        com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult =
-                storageTaskCacheService.getTasks(normalizedPage, pageSize);
-
-        List<TaskView> finalViewList = new ArrayList<>();
-        if (normalizedPage == 0) {
-            for (TaskEntry runtimeTask : runtimeTasks) {
-                finalViewList.add(fromRuntimeTask(runtimeTask));
-            }
-        }
-
-        for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
-            finalViewList.add(fromCachedTask(cached));
-        }
-        finalViewList = deduplicateTaskViews(finalViewList);
-        finalViewList.sort(Comparator.comparingLong(this::bestTimestamp).reversed());
-        Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
-        Map<String, String> manualCollectionPathByTaskPath = findManualCollectionPathByTaskPath(finalViewList);
-
-        List<Map<String, Object>> taskList = new ArrayList<>(finalViewList.size());
-        for (TaskView task : finalViewList) {
-            task.taskPath = resolveTaskPath(task);
-            attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
-            attachManualCollectionPath(task, manualCollectionPathByTaskPath.get(task.taskPath));
-            if (onlyMultiSegment && !isTaskMultiSegmentReadable(task)) {
-                continue;
-            }
-            taskList.add(toListItem(task));
+        boolean compactView = isCompactTaskListView(rawView);
+        Set<String> statusFilter = parseTaskStatusFilter(rawStatuses);
+        List<TaskView> finalViewList = collectTaskViews(normalizedPage, pageSize);
+        List<TaskView> filteredTasks = filterTaskViews(finalViewList, onlyMultiSegment, statusFilter);
+        List<Map<String, Object>> taskList = new ArrayList<>(filteredTasks.size());
+        for (TaskView task : filteredTasks) {
+            taskList.add(toListItem(task, compactView));
         }
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("tasks", taskList);
-        if (onlyMultiSegment) {
-            response.put("totalCount", taskList.size());
-        } else {
-            response.put("totalCount", runtimeTasks.size() + storageResult.totalCount);
-        }
+        response.put("totalCount", filteredTasks.size());
         response.put("page", normalizedPage);
         response.put("pageSize", pageSize);
-        response.put("hasMore", storageResult.hasMore);
+        response.put("hasMore", false);
+        response.put("view", compactView ? "compact" : "full");
+        long collectionBindingsUpdatedAt = categoryClassificationResultsRepository != null
+                ? categoryClassificationResultsRepository.getLastUpdatedEpochMillis()
+                : 0L;
+        response.put("snapshotVersion", Math.max(calculateTaskListSyncVersion(filteredTasks), collectionBindingsUpdatedAt));
 
+        return ResponseEntity.ok(response);
+    }
+
+    @GetMapping("/tasks/changes")
+    public ResponseEntity<Map<String, Object>> listTaskChanges(
+            @RequestParam(value = "since", defaultValue = "0") long since,
+            @RequestParam(value = "onlyMultiSegment", defaultValue = "true") boolean onlyMultiSegment,
+            @RequestParam(value = "view", defaultValue = "compact") String rawView,
+            @RequestParam(value = "statuses", required = false) String rawStatuses,
+            @RequestParam(value = "limit", defaultValue = "200") int limit
+    ) {
+        long normalizedSince = Math.max(0L, since);
+        int normalizedLimit = Math.max(1, Math.min(1000, limit));
+        boolean compactView = isCompactTaskListView(rawView);
+        Set<String> statusFilter = parseTaskStatusFilter(rawStatuses);
+
+        List<TaskView> filteredTasks = filterTaskViews(collectTaskViews(0, 0), onlyMultiSegment, statusFilter);
+        long collectionBindingsUpdatedAt = categoryClassificationResultsRepository != null
+                ? categoryClassificationResultsRepository.getLastUpdatedEpochMillis()
+                : 0L;
+        long nextSince = Math.max(calculateTaskListSyncVersion(filteredTasks), collectionBindingsUpdatedAt);
+        boolean resyncRequired = normalizedSince > 0L && collectionBindingsUpdatedAt > normalizedSince;
+
+        List<TaskView> changedTasks = filteredTasks.stream()
+                .filter(task -> computeTaskSyncVersion(task) > normalizedSince)
+                .sorted(Comparator.comparingLong(this::computeTaskSyncVersion).reversed())
+                .toList();
+
+        boolean hasMoreChanges = changedTasks.size() > normalizedLimit;
+        List<Map<String, Object>> upserts = new ArrayList<>(Math.min(normalizedLimit, changedTasks.size()));
+        changedTasks.stream()
+                .limit(normalizedLimit)
+                .forEach(task -> upserts.add(toListItem(task, compactView)));
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("upserts", upserts);
+        response.put("nextSince", nextSince);
+        response.put("resyncRequired", resyncRequired);
+        response.put("hasMoreChanges", hasMoreChanges);
+        response.put("view", compactView ? "compact" : "full");
+        response.put("deletes", List.of());
         return ResponseEntity.ok(response);
     }
 
     @GetMapping("/manual-task-collections")
     public ResponseEntity<Map<String, Object>> getManualTaskCollections() {
-        if (taskManualCollectionRepository == null) {
+        if (categoryClassificationResultsRepository == null) {
             return ResponseEntity.ok(Map.of("bindings", List.of()));
         }
-        Map<String, String> allBindings = taskManualCollectionRepository.listAllBindings();
+        Map<String, String> allBindings = categoryClassificationResultsRepository.listAllBindings();
         List<Map<String, Object>> items = new ArrayList<>(allBindings.size());
         allBindings.forEach((taskPath, collectionPath) -> {
             if (taskPath == null || taskPath.isBlank() || collectionPath == null || collectionPath.isBlank()) {
@@ -232,10 +256,10 @@ public class MobileMarkdownController {
     public ResponseEntity<Map<String, Object>> replaceManualTaskCollections(
             @RequestBody(required = false) ManualTaskCollectionsUpsertRequest request
     ) {
-        if (taskManualCollectionRepository == null) {
+        if (categoryClassificationResultsRepository == null) {
             return ResponseEntity.status(503).body(Map.of(
                     "success", false,
-                    "message", "manual collection repository is not available"
+                    "message", "category classification repository is not available"
             ));
         }
         Map<String, String> normalized = new LinkedHashMap<>();
@@ -253,7 +277,7 @@ public class MobileMarkdownController {
                 normalized.put(taskPath, collectionPath);
             }
         }
-        int updatedCount = taskManualCollectionRepository.replaceAllBindings(normalized);
+        int updatedCount = categoryClassificationResultsRepository.replaceAllBindings(normalized);
         return ResponseEntity.ok(Map.of(
                 "success", true,
                 "updatedCount", updatedCount
@@ -2224,18 +2248,9 @@ public class MobileMarkdownController {
                     .body(rawBody);
         }
 
-        final TaskBundleExportService.FlatTaskExportPlan exportPlan;
-        final Path markdownPath;
-        try {
-            ResolvedMarkdown resolved = resolveMarkdown(task);
-            markdownPath = resolved.markdownPath;
-            exportPlan = taskBundleExportService.planFlatExport(task.taskId, taskRoot, resolved.markdownPath);
-        } catch (IllegalArgumentException ex) {
-            throw new ResponseStatusException(HttpStatus.NOT_FOUND, ex.getMessage(), ex);
-        } catch (IOException ex) {
-            logger.warn("flat export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
-        }
+        final PreparedFlatExport flatExport = prepareFlatTaskExport(task, taskRoot, taskId);
+        final TaskBundleExportService.FlatTaskExportPlan exportPlan = flatExport.exportPlan();
+        final Path markdownPath = flatExport.markdownPath();
         StreamingResponseBody flatBody = outputStream -> {
             try (ZipOutputStream zos = new ZipOutputStream(outputStream, StandardCharsets.UTF_8)) {
                 TaskBundleExportService.ExportZipResult zipResult = taskBundleExportService.writeFlatZipStreaming(exportPlan, zos);
@@ -2259,6 +2274,86 @@ public class MobileMarkdownController {
                 .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + filename + "\"")
                 .header("X-Export-Layout", layout)
                 .body(flatBody);
+    }
+
+
+    @GetMapping("/tasks/{taskId}/export/files")
+    public ResponseEntity<Map<String, Object>> exportTaskFlatFilesManifest(@PathVariable String taskId) {
+        TaskView task = resolveTaskView(taskId);
+        if (task == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task not found");
+        }
+        Path taskRoot;
+        try {
+            taskRoot = resolveTaskRootDir(task);
+        } catch (Exception ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory not found", ex);
+        }
+        if (!Files.exists(taskRoot) || !Files.isDirectory(taskRoot)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "task directory does not exist");
+        }
+        PreparedFlatExport flatExport = prepareFlatTaskExport(task, taskRoot, taskId);
+        try {
+            return ResponseEntity.ok(buildFlatExportFilesPayload(task.taskId, flatExport.exportPlan()));
+        } catch (IOException ex) {
+            logger.warn("build flat export files manifest failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+        }
+    }
+
+
+    private PreparedFlatExport prepareFlatTaskExport(TaskView task, Path taskRoot, String taskId) {
+        try {
+            ResolvedMarkdown resolved = resolveMarkdown(task);
+            TaskBundleExportService.FlatTaskExportPlan exportPlan = taskBundleExportService.planFlatExport(task.taskId, taskRoot, resolved.markdownPath);
+            return new PreparedFlatExport(resolved.markdownPath, exportPlan);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, ex.getMessage(), ex);
+        } catch (IOException ex) {
+            logger.warn("flat export task failed: taskId={} root={} err={}", taskId, taskRoot, ex.getMessage());
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "export task failed", ex);
+        }
+    }
+
+    private Map<String, Object> buildFlatExportFilesPayload(String taskId, TaskBundleExportService.FlatTaskExportPlan exportPlan) throws IOException {
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", taskId != null ? taskId : "");
+        payload.put("layout", "flat");
+        payload.put("mainMarkdown", exportPlan.mainMarkdownEntryName());
+        List<Map<String, Object>> files = new ArrayList<>();
+        for (TaskBundleExportService.PreparedZipEntry entry : exportPlan.entries()) {
+            files.add(buildFlatExportFileItem(taskId, entry));
+        }
+        payload.put("files", files);
+        return payload;
+    }
+
+    private Map<String, Object> buildFlatExportFileItem(String taskId, TaskBundleExportService.PreparedZipEntry entry) throws IOException {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("entryName", entry.entryName());
+        item.put("kind", entry.kind());
+        item.put("role", entry.role());
+        item.put("originalPath", entry.originalPath());
+        if (entry.anchorId() != null) {
+            item.put("anchorId", entry.anchorId());
+        }
+        if (entry.inlineBytes() != null) {
+            item.put("inlineText", new String(entry.inlineBytes(), StandardCharsets.UTF_8));
+            item.put("size", entry.inlineBytes().length);
+            item.put("encoding", "utf-8");
+        } else if (entry.sourcePath() != null) {
+            item.put("downloadUrl", buildTaskAssetDownloadUrl(taskId, entry.originalPath()));
+            item.put("size", Files.size(entry.sourcePath()));
+        }
+        return item;
+    }
+
+    private String buildTaskAssetDownloadUrl(String taskId, String relativePath) {
+        return "/api/mobile/tasks/"
+                + URLEncoder.encode(taskId != null ? taskId : "", StandardCharsets.UTF_8)
+                + "/asset?path="
+                + URLEncoder.encode(relativePath != null ? relativePath : "", StandardCharsets.UTF_8);
     }
 
     private String normalizeExportLayout(String rawLayout) {
@@ -2285,7 +2380,121 @@ public class MobileMarkdownController {
         return safe + "_bundle.zip";
     }
 
-    private Map<String, Object> toListItem(TaskView task) {
+    private List<TaskView> collectTaskViews(int page, int pageSize) {
+        int normalizedPage = Math.max(0, page);
+        List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
+        com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult =
+                storageTaskCacheService.getTasks(normalizedPage, pageSize);
+
+        List<TaskView> finalViewList = new ArrayList<>();
+        if (normalizedPage == 0) {
+            for (TaskEntry runtimeTask : runtimeTasks) {
+                finalViewList.add(fromRuntimeTask(runtimeTask));
+            }
+        }
+
+        for (com.mvp.module2.fusion.service.StorageTaskCacheService.CachedTask cached : storageResult.tasks) {
+            finalViewList.add(fromCachedTask(cached));
+        }
+        finalViewList = deduplicateTaskViews(finalViewList);
+        finalViewList.sort(Comparator.comparingLong(this::bestTimestamp).reversed());
+
+        Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
+        Map<String, String> classifiedCollectionPathByTaskPath = findClassifiedCollectionPathByTaskPath(finalViewList);
+        for (TaskView task : finalViewList) {
+            task.taskPath = resolveTaskPath(task);
+            attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
+            attachManualCollectionPath(task, classifiedCollectionPathByTaskPath.get(task.taskPath));
+        }
+        return finalViewList;
+    }
+
+    private List<TaskView> filterTaskViews(List<TaskView> tasks, boolean onlyMultiSegment, Set<String> statusFilter) {
+        if (tasks == null || tasks.isEmpty()) {
+            return List.of();
+        }
+        List<TaskView> filtered = new ArrayList<>(tasks.size());
+        for (TaskView task : tasks) {
+            if (task == null) {
+                continue;
+            }
+            if (!statusFilter.isEmpty()) {
+                String normalizedStatus = normalizeTaskStatusToken(task.status);
+                if (normalizedStatus.isEmpty() || !statusFilter.contains(normalizedStatus)) {
+                    continue;
+                }
+            }
+            if (onlyMultiSegment && !isTaskMultiSegmentReadable(task)) {
+                continue;
+            }
+            filtered.add(task);
+        }
+        return filtered;
+    }
+
+    private Set<String> parseTaskStatusFilter(String rawStatuses) {
+        String normalized = trimToNullSafe(rawStatuses);
+        if (normalized == null) {
+            return Set.of();
+        }
+        Set<String> statuses = new LinkedHashSet<>();
+        for (String token : normalized.split(",")) {
+            String status = normalizeTaskStatusToken(token);
+            if (!status.isEmpty()) {
+                statuses.add(status);
+            }
+        }
+        return statuses;
+    }
+
+    private String normalizeTaskStatusToken(String rawStatus) {
+        String normalized = trimToNullSafe(rawStatus);
+        if (normalized == null) {
+            return "";
+        }
+        return normalized.trim().toUpperCase(Locale.ROOT);
+    }
+
+    private boolean isCompactTaskListView(String rawView) {
+        String normalized = trimToNullSafe(rawView);
+        if (normalized == null) {
+            return false;
+        }
+        return "compact".equalsIgnoreCase(normalized.trim());
+    }
+
+    private long calculateTaskListSyncVersion(List<TaskView> tasks) {
+        long version = 0L;
+        if (tasks == null || tasks.isEmpty()) {
+            return version;
+        }
+        for (TaskView task : tasks) {
+            version = Math.max(version, computeTaskSyncVersion(task));
+        }
+        return version;
+    }
+
+    private long computeTaskSyncVersion(TaskView task) {
+        if (task == null) {
+            return 0L;
+        }
+        long version = 0L;
+        if (task.metaUpdatedAt != null) {
+            version = Math.max(version, task.metaUpdatedAt.toEpochMilli());
+        }
+        if (task.lastOpenedAt != null) {
+            version = Math.max(version, task.lastOpenedAt.toEpochMilli());
+        }
+        if (task.completedAt != null) {
+            version = Math.max(version, task.completedAt.toEpochMilli());
+        }
+        if (task.createdAt != null) {
+            version = Math.max(version, task.createdAt.toEpochMilli());
+        }
+        return version;
+    }
+
+    private Map<String, Object> toListItem(TaskView task, boolean compactView) {
         Map<String, Object> item = new LinkedHashMap<>();
         String displayTitle = task.title != null && !task.title.isBlank() ? task.title : task.taskId;
         item.put("taskId", task.taskId);
@@ -2296,24 +2505,26 @@ public class MobileMarkdownController {
         item.put("status", task.status != null ? task.status : "");
         item.put("createdAt", instantToText(task.createdAt));
         item.put("lastOpenedAt", instantToText(task.lastOpenedAt));
-        item.put("completedAt", instantToText(task.completedAt));
-        item.put("resultPath", task.resultPath != null ? task.resultPath : "");
-        item.put("markdownPath", task.markdownPath != null ? task.markdownPath.toString() : "");
         item.put("markdownAvailable", task.markdownAvailable);
         item.put("source", task.storageTask ? "storage" : "runtime");
         item.put("storageKey", task.storageKey != null ? task.storageKey : "");
         item.put("progress", task.progress);
         item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
-        item.put("domain", task.domain != null ? task.domain : "");
-        item.put("mainTopic", task.mainTopic != null ? task.mainTopic : "");
         item.put("collectionId", task.collectionId != null ? task.collectionId : "");
-        item.put("episodeNo", task.episodeNo);
-        item.put("episodeTitle", task.episodeTitle != null ? task.episodeTitle : "");
         item.put("collectionTitle", task.collectionTitle != null ? task.collectionTitle : "");
         item.put("collectionPath", task.collectionPath != null ? task.collectionPath : "");
         item.put("taskPath", task.taskPath != null ? task.taskPath : "");
         item.put("manualCollection", task.manualCollection);
-        item.put("totalEpisodes", task.totalEpisodes);
+        if (!compactView) {
+            item.put("completedAt", instantToText(task.completedAt));
+            item.put("resultPath", task.resultPath != null ? task.resultPath : "");
+            item.put("markdownPath", task.markdownPath != null ? task.markdownPath.toString() : "");
+            item.put("domain", task.domain != null ? task.domain : "");
+            item.put("mainTopic", task.mainTopic != null ? task.mainTopic : "");
+            item.put("episodeNo", task.episodeNo);
+            item.put("episodeTitle", task.episodeTitle != null ? task.episodeTitle : "");
+            item.put("totalEpisodes", task.totalEpisodes);
+        }
         return item;
     }
 
@@ -2348,8 +2559,8 @@ public class MobileMarkdownController {
         task.totalEpisodes = binding.totalEpisodes;
     }
 
-    private Map<String, String> findManualCollectionPathByTaskPath(List<TaskView> tasks) {
-        if (taskManualCollectionRepository == null || tasks == null || tasks.isEmpty()) {
+    private Map<String, String> findClassifiedCollectionPathByTaskPath(List<TaskView> tasks) {
+        if (categoryClassificationResultsRepository == null || tasks == null || tasks.isEmpty()) {
             return Map.of();
         }
         Set<String> taskPaths = new LinkedHashSet<>();
@@ -2363,7 +2574,7 @@ public class MobileMarkdownController {
         if (taskPaths.isEmpty()) {
             return Map.of();
         }
-        return taskManualCollectionRepository.findCollectionPathByTaskPaths(taskPaths);
+        return categoryClassificationResultsRepository.findCollectionPathByTaskPaths(taskPaths);
     }
 
     private void attachManualCollectionPath(TaskView task, String rawCollectionPath) {
@@ -4276,6 +4487,9 @@ public class MobileMarkdownController {
             view.title = normalizedTitle;
             view.metaTitle = normalizedTitle;
         }
+        if (meta.updatedAt != null && !meta.updatedAt.isBlank()) {
+            view.metaUpdatedAt = parseInstantSafe(meta.updatedAt);
+        }
         if (meta.lastOpenedAt != null && !meta.lastOpenedAt.isBlank()) {
             view.lastOpenedAt = parseInstantSafe(meta.lastOpenedAt);
         }
@@ -5021,6 +5235,8 @@ public class MobileMarkdownController {
         return MediaType.APPLICATION_OCTET_STREAM;
     }
 
+    private record PreparedFlatExport(Path markdownPath, TaskBundleExportService.FlatTaskExportPlan exportPlan) {}
+
     private static class ExportFileEntry {
         private final Path path;
         private final String entryName;
@@ -5215,6 +5431,7 @@ public class MobileMarkdownController {
         private Instant createdAt;
         private Instant lastOpenedAt;
         private Instant completedAt;
+        private Instant metaUpdatedAt;
         private String resultPath;
         private boolean markdownAvailable;
         private Path markdownPath;

@@ -22,11 +22,6 @@ def resolve_max_workers(
     hard_cap: int = 6,
 ) -> int:
     """解析截图优化阶段的并发 worker 数。"""
-    if cv_executor is not None:
-        injected_workers = getattr(cv_executor, "_max_workers", None)
-        if isinstance(injected_workers, int) and injected_workers > 0:
-            return max(1, min(injected_workers, request_count))
-
     max_workers_config = screenshot_config.get("max_workers", "auto")
 
     if isinstance(max_workers_config, int):
@@ -38,7 +33,12 @@ def resolve_max_workers(
         else:
             desired = int(config_str)
 
-    return max(1, min(desired, hard_cap, request_count))
+    resolved = max(1, min(desired, hard_cap, request_count))
+    if cv_executor is not None:
+        injected_workers = getattr(cv_executor, "_max_workers", None)
+        if isinstance(injected_workers, int) and injected_workers > 0:
+            resolved = max(1, min(resolved, injected_workers, request_count))
+    return resolved
 
 
 def build_screenshot_prefetch_chunks(

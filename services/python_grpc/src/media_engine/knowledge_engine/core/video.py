@@ -12,6 +12,8 @@
 
 import os
 import random
+import shutil
+import sys
 import subprocess
 import time
 import yt_dlp
@@ -90,6 +92,17 @@ class VideoProcessor(BaseProcessor):
         self._last_explicit_probe_error: Optional[str] = None
         self._last_m3u8_probe_error: Optional[str] = None
         self._last_video_title: str = ""
+
+    def _resolve_ffmpeg_path(self) -> Optional[str]:
+        possible_paths = [
+            os.path.join(sys.prefix, 'Library', 'bin', 'ffmpeg.exe'),
+            os.path.join(sys.prefix, 'bin', 'ffmpeg'),
+        ]
+        for one_path in possible_paths:
+            if one_path and os.path.isfile(one_path):
+                return one_path
+        resolved = shutil.which('ffmpeg')
+        return resolved if resolved and os.path.isfile(resolved) else None
 
     @property
     def last_video_title(self) -> str:
@@ -777,20 +790,7 @@ class VideoProcessor(BaseProcessor):
         
         self.emit_progress("download", 0.1, f"准备下载: {url}")
         
-        import sys
-        
-        # 尝试定位 ffmpeg
-        ffmpeg_path = None
-        possible_paths = [
-            os.path.join(sys.prefix, 'Library', 'bin', 'ffmpeg.exe'), # Windows Conda
-            os.path.join(sys.prefix, 'bin', 'ffmpeg'), # Linux/Mac Conda
-            'ffmpeg' # System PATH
-        ]
-        
-        for p in possible_paths:
-            if p == 'ffmpeg' or (os.path.exists(p) and os.path.isfile(p)):
-                ffmpeg_path = p
-                break
+        ffmpeg_path = self._resolve_ffmpeg_path()
 
         base_format_candidates = self._get_format_candidates()
 

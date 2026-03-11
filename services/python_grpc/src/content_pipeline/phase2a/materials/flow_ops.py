@@ -97,7 +97,7 @@ def _should_use_threaded_cv_executor(generator, screenshot_requests: List[Dict[s
 
 
 def _resolve_cv_route_executor(generator, screenshot_requests: List[Dict[str, Any]], max_workers: int, init_cv_worker):
-    from concurrent.futures import ProcessPoolExecutor
+    from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
     if _should_use_threaded_cv_executor(generator, screenshot_requests):
         try:
             init_cv_worker()
@@ -106,7 +106,7 @@ def _resolve_cv_route_executor(generator, screenshot_requests: List[Dict[str, An
         return ThreadPoolExecutor(max_workers=max_workers), True, "thread"
     executor = getattr(generator, "_cv_executor", None)
     if executor is None:
-        return ProcessPoolExecutor(max_workers=max_workers, initializer=init_cv_worker), True, "process_local"
+        return create_spawn_process_pool(max_workers=max_workers, initializer=init_cv_worker), True, "process_local"
     return executor, False, "process_shared"
 
 
@@ -727,7 +727,6 @@ async def optimize_screenshots_streaming_pipeline(
     static_island_threshold_ms = _resolve_screenshot_static_island_threshold_ms(generator)
     
     try:
-        from concurrent.futures import ProcessPoolExecutor
         from services.python_grpc.src.content_pipeline.phase2a.vision.visual_feature_extractor import SharedFrameRegistry
         import sys
         import gc

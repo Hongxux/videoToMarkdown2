@@ -32,7 +32,7 @@
 - 本机可访问你需要的外部模型服务。
 - 如要跑完整处理链路，通常只需要准备 `DEEPSEEK_API_KEY` 和 `DASHSCOPE_API_KEY`。
 
-### 启动步骤
+### 方式 A：一键脚本（推荐）
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/release/quick_start.ps1
@@ -46,6 +46,89 @@ powershell -ExecutionPolicy Bypass -File scripts/release/quick_start.ps1
 - 执行 `docker compose up -d --build`。
 - 轮询 `http://localhost:8080/api/health`。
 - 启动成功后输出 Web Demo、健康检查和日志入口。
+
+### 方式 B：手动使用 docker compose（逐步）
+
+如果你想明确看到“compose 是如何构建并拉起整个项目”的每一步，按下面顺序执行即可。
+
+1. 进入仓库根目录：
+
+```powershell
+Set-Location D:\videoToMarkdownTest2
+```
+
+2. 确认 Docker Desktop 已启动，并且 `docker` 命令可用：
+
+```powershell
+docker info
+```
+
+如果这里报错，先打开 Docker Desktop，再继续后续步骤。
+
+3. 复制 `.env` 模板：
+
+```powershell
+Copy-Item .\deploy\docker\.env.example .\.env -Force
+```
+
+4. 打开根目录 `.env`，至少填写下面两个密钥：
+
+```env
+DEEPSEEK_API_KEY=你的_deepseek_key
+DASHSCOPE_API_KEY=你的_dashscope_key
+VISION_AI_BEARER_TOKEN=
+```
+
+5. 使用你已经写好的 `docker-compose.yml` 构建并后台启动两个服务：
+
+```powershell
+docker compose up -d --build
+```
+
+这条命令会做两件事：
+
+- 先根据 `deploy/docker/python-grpc.Dockerfile` 和 `deploy/docker/java-orchestrator.Dockerfile` 构建镜像。
+- 再按根目录 `docker-compose.yml` 启动 `python-grpc` 和 `java-orchestrator` 两个容器。
+
+6. 查看容器状态，确认服务已经起来：
+
+```powershell
+docker compose ps
+```
+
+正常情况下，你会看到：
+
+- `python-grpc` 对外暴露 `50051`
+- `java-orchestrator` 对外暴露 `8080`
+
+7. 验证 Web Demo 和健康检查：
+
+```powershell
+curl http://localhost:8080/api/health
+```
+
+如果健康检查通过，再打开：
+
+- Web Demo：`http://localhost:8080`
+- Health API：`http://localhost:8080/api/health`
+
+8. 如果启动失败，优先看日志：
+
+```powershell
+docker compose logs -f --tail=200
+```
+
+9. 如果你改了 `.env` 或配置文件，建议重建对应容器：
+
+```powershell
+docker compose up -d --build --force-recreate
+```
+
+10. 停止项目：
+
+```powershell
+docker compose down
+```
 
 ### API Key 配置（Java + Python 共用）
 

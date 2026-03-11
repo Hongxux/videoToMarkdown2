@@ -3782,6 +3782,7 @@
         },
         taskListHydrated: false,
         taskListReloading: false,
+        taskListSyncVersion: 0,
         taskNotificationEnabled: false,
         taskNotificationLedger: {},
         taskUpdatesSocket: null,
@@ -5887,12 +5888,16 @@
             page: '0',
             pageSize: '0',
             onlyMultiSegment: 'false',
+            view: 'compact',
         });
         const resp = await fetchWithTimeout(`${API_BASE}/tasks?${query.toString()}`, {}, 12000);
         if (!resp.ok) {
             throw new Error(`获取故事库失败: HTTP ${resp.status}`);
         }
         const data = await resp.json();
+        state.taskListSyncVersion = Number(data && data.snapshotVersion) > 0
+            ? Number(data.snapshotVersion)
+            : inferTaskListSyncVersion((data && data.tasks) || []);
         if (Array.isArray(data)) {
             state.tasks = data;
         } else if (data && Array.isArray(data.tasks)) {
@@ -5906,6 +5911,103 @@
         hydrateTaskManualCollectionsFromTaskPaths(state.tasks || []);
         applyTaskManualCollectionsToStateTasks();
         return state.tasks;
+    }
+
+    function inferTaskListSyncVersion(tasks) {
+        const list = Array.isArray(tasks) ? tasks : [];
+        return list.reduce((maxVersion, task) => {
+            const createdAt = Date.parse(String(task && task.createdAt || '').trim());
+            const lastOpenedAt = Date.parse(String(task && task.lastOpenedAt || '').trim());
+            const nextVersion = Math.max(
+                Number.isFinite(createdAt) ? createdAt : 0,
+                Number.isFinite(lastOpenedAt) ? lastOpenedAt : 0
+            );
+            return Math.max(maxVersion, nextVersion);
+        }, 0);
+    }
+
+    function compareTaskSyncOrder(left, right) {
+        const leftOpenedAt = Date.parse(String(left && left.lastOpenedAt || '').trim());
+        const rightOpenedAt = Date.parse(String(right && right.lastOpenedAt || '').trim());
+        const leftCreatedAt = Date.parse(String(left && left.createdAt || '').trim());
+        const rightCreatedAt = Date.parse(String(right && right.createdAt || '').trim());
+        const leftTs = Math.max(Number.isFinite(leftOpenedAt) ? leftOpenedAt : 0, Number.isFinite(leftCreatedAt) ? leftCreatedAt : 0);
+        const rightTs = Math.max(Number.isFinite(rightOpenedAt) ? rightOpenedAt : 0, Number.isFinite(rightCreatedAt) ? rightCreatedAt : 0);
+        if (leftTs !== rightTs) {
+            return rightTs - leftTs;
+        }
+        const leftTitle = String(left && (left.title || left.taskId) || '').trim();
+        const rightTitle = String(right && (right.title || right.taskId) || '').trim();
+        return leftTitle.localeCompare(rightTitle, 'zh-Hans-CN');
+    }
+
+    function mergeTaskRecordsIntoState(incomingTasks, options = {}) {
+        const list = Array.isArray(incomingTasks) ? incomingTasks : [];
+        const replace = !!(options && options.replace);
+        const existing = replace ? [] : (Array.isArray(state.tasks) ? state.tasks : []);
+        const byTaskId = new Map();
+        existing.forEach((task) => {
+            const taskId = normalizeTaskId(task && task.taskId);
+            if (!taskId) {
+                return;
+            }
+            byTaskId.set(taskId, { ...task });
+        });
+        list.forEach((task) => {
+            const taskId = normalizeTaskId(task && task.taskId);
+            if (!taskId) {
+                return;
+            }
+            const previous = byTaskId.get(taskId) || {};
+            byTaskId.set(taskId, {
+                ...previous,
+                ...task,
+                taskId,
+            });
+        });
+        state.tasks = Array.from(byTaskId.values()).sort(compareTaskSyncOrder);
+        hydrateTaskManualCollectionsFromTaskPaths(state.tasks || []);
+        applyTaskManualCollectionsToStateTasks();
+        return state.tasks;
+    }
+
+    async function fetchTaskChanges(since) {
+        const query = new URLSearchParams({
+            since: String(Math.max(0, Number(since) || 0)),
+            onlyMultiSegment: 'false',
+            view: 'compact',
+            limit: '200',
+        });
+        const resp = await fetchWithTimeout(`${API_BASE}/tasks/changes?${query.toString()}`, {}, 12000);
+        if (!resp.ok) {
+            throw new Error(`鑾峰彇浠诲姟澧為噺澶辫触 HTTP ${resp.status}`);
+        }
+        return resp.json();
+    }
+
+    async function refreshTaskListIncrementally(options = {}) {
+        const since = Math.max(0, Number(state.taskListSyncVersion) || 0);
+        if (!since) {
+            return reloadTaskList(options);
+        }
+        const previousTasks = Array.isArray(state.tasks) ? state.tasks.map((task) => ({ ...task })) : [];
+        const payload = await fetchTaskChanges(since);
+        if (payload && (payload.resyncRequired || payload.hasMoreChanges)) {
+            return reloadTaskList(options);
+        }
+        mergeTaskRecordsIntoState(payload && payload.upserts, { replace: false });
+        state.taskListSyncVersion = Math.max(
+            since,
+            Number(payload && payload.nextSince) || 0,
+            inferTaskListSyncVersion(state.tasks || [])
+        );
+        if (options && options.render !== false) {
+            applyTaskListMotionDiff(previousTasks, state.tasks || []);
+            renderTaskList();
+            await syncCurrentTaskRealtimeStateAfterTaskReload();
+            setTaskSummary('');
+        }
+        return true;
     }
 
     function normalizeTaskLifecycleStatus(status) {
@@ -6007,7 +6109,8 @@
             const taskId = normalizeTaskId(task && task.taskId);
             const taskPath = normalizeTaskId(task && task.taskPath);
             const collectionPath = normalizeCollectionPath(task && task.collectionPath);
-            if (!taskId || !taskPath || !collectionPath || !isManualCollectionTask(task)) {
+            const source = String(task && task.source || '').trim().toLowerCase();
+            if (!taskId || !taskPath || !collectionPath || (!isManualCollectionTask(task) && source !== 'storage')) {
                 return;
             }
             const segments = splitCollectionPathSegments(collectionPath);
@@ -7625,7 +7728,7 @@
 
             lastAttemptAt = now;
             try {
-                await reloadTaskList({ showLoading, loadingText });
+                await refreshTaskListIncrementally({ showLoading, loadingText, render: true });
                 consecutiveFailures = 0;
                 return true;
             } catch (error) {
@@ -17685,84 +17788,211 @@
         }
     }
 
-    function normalizeExportJob(payload) {
-        const raw = payload && typeof payload === 'object' ? payload : {};
-        const statusRaw = String(raw.status || '').toLowerCase();
-        const status = ['idle', 'running', 'success', 'error'].includes(statusRaw) ? statusRaw : 'idle';
-        const percentRaw = Number(raw.percent);
-        return {
-            status,
-            percent: Number.isFinite(percentRaw) ? Math.max(0, Math.min(100, percentRaw)) : null,
-            message: raw.message ? String(raw.message) : '',
-            downloadReady: !!raw.downloadReady,
-            fileName: raw.fileName ? String(raw.fileName) : '',
-            processedBytes: Number(raw.processedBytes) || 0,
-            totalBytes: Number(raw.totalBytes) || 0,
-            processedFiles: Number(raw.processedFiles) || 0,
-            totalFiles: Number(raw.totalFiles) || 0,
-            reused: !!raw.reused,
-        };
-    }
-
-    async function requestExportPrepare(taskId) {
-        const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/export/prepare`, { method: 'POST' });
+    async function requestTaskExportFilesManifest(taskId) {
+        const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/export/files`);
         const { payload, rawText } = await parseJsonPayload(resp);
         if (!resp.ok || payload.success === false) {
             throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
         }
-        return normalizeExportJob(payload);
+        return payload && typeof payload === 'object' ? payload : { files: [] };
     }
 
-    async function requestExportStatus(taskId) {
-        const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(taskId)}/export/status`);
-        const { payload, rawText } = await parseJsonPayload(resp);
-        if (!resp.ok || payload.success === false) {
-            throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
+    async function pickExportDirectoryTarget() {
+        if (typeof window.showDirectoryPicker !== 'function') {
+            return { supported: false };
         }
-        return normalizeExportJob(payload);
-    }
-
-    function renderExportPrepareProgress(snapshot) {
-        const hasPercent = Number.isFinite(snapshot.percent);
-        const prefix = snapshot.message || UI_COPY.savePreparing;
-        let detail = '';
-        if (snapshot.totalFiles > 0) {
-            detail = `（${snapshot.processedFiles}/${snapshot.totalFiles}）`;
-        } else if (snapshot.totalBytes > 0) {
-            detail = `（${formatBytes(snapshot.processedBytes)} / ${formatBytes(snapshot.totalBytes)}）`;
-        }
-        if (hasPercent) {
-            setExportStatus('running', `${prefix} ${snapshot.percent.toFixed(1)}%${detail}`, { percent: snapshot.percent });
-        } else {
-            setExportStatus('running', `${prefix}${detail}`);
-        }
-    }
-
-    async function waitUntilExportReady(taskId, firstSnapshot) {
-        let snapshot = firstSnapshot;
-        for (let attempt = 0; attempt < 600; attempt += 1) {
-            if (snapshot) {
-                if (snapshot.status === 'error') {
-                    throw new Error(snapshot.message || UI_COPY.saveFailed);
-                }
-                if (snapshot.downloadReady || snapshot.status === 'success') {
-                    return snapshot;
-                }
-                renderExportPrepareProgress(snapshot);
+        try {
+            const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+            return { supported: true, handle };
+        } catch (error) {
+            if (error && error.name === 'AbortError') {
+                return { supported: true, cancelled: true };
             }
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            snapshot = await requestExportStatus(taskId);
+            throw error;
         }
-        throw new Error('导出准备超时，请稍后重试');
     }
 
-    async function handleReaderPrimaryExport(event) {
+    function normalizeCurrentTaskExportMode(rawChoice) {
+        const value = String(rawChoice || '').trim().toLowerCase();
+        if (!value) {
+            return null;
+        }
+        if (['1', 'zip', 'z'].includes(value)) {
+            return 'zip';
+        }
+        if (['2', 'files', 'file', 'folder', 'dir', 'directory', 'folder-export'].includes(value)) {
+            return 'files';
+        }
+        return null;
+    }
+
+    async function chooseCurrentTaskExportMode() {
+        const supportsDirectory = typeof window.showDirectoryPicker === 'function';
+        const input = window.prompt(
+            supportsDirectory
+                ? 'Enter 1 for ZIP; enter 2 for direct file export to a folder.'
+                : 'Enter 1 for ZIP; enter 2 for direct file export (browser downloads each file).',
+            supportsDirectory ? '2' : '1'
+        );
+        if (input === null) {
+            return null;
+        }
+        const mode = normalizeCurrentTaskExportMode(input);
+        if (!mode) {
+            throw new Error('Unsupported export mode. Please enter 1 or 2.');
+        }
+        return mode;
+    }
+
+    function buildDirectExportProgressText(fileEntry, prefix, received, total) {
+        const name = fileEntry && fileEntry.entryName ? fileEntry.entryName : 'file';
+        if (Number.isFinite(total) && total > 0) {
+            return `${prefix}: ${name} ${formatBytes(received)} / ${formatBytes(total)}`;
+        }
+        if (Number.isFinite(received) && received > 0) {
+            return `${prefix}: ${name} ${formatBytes(received)}`;
+        }
+        return `${prefix}: ${name}`;
+    }
+
+    function createPreparedInlineBlob(fileEntry) {
+
+        const text = fileEntry && typeof fileEntry.inlineText === 'string' ? fileEntry.inlineText : '';
+        return new Blob([text], { type: 'text/plain;charset=utf-8' });
+    }
+
+    async function downloadPreparedBinaryFile(fileEntry, onProgress) {
+        const resp = await fetch(fileEntry.downloadUrl);
+        if (!resp.ok) {
+            const { payload, rawText } = await parseJsonPayload(resp);
+            throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
+        }
+        return streamResponseToBlob(resp, typeof onProgress === 'function' ? onProgress : () => {});
+    }
+
+    async function writePreparedInlineFile(directoryHandle, fileEntry) {
+        const handle = await directoryHandle.getFileHandle(fileEntry.entryName, { create: true });
+        const writable = await handle.createWritable();
+        const blob = createPreparedInlineBlob(fileEntry);
+        await writable.write(blob);
+        await writable.close();
+        return { bytes: blob.size, total: blob.size };
+    }
+
+    async function writePreparedBinaryFile(directoryHandle, fileEntry, onProgress) {
+        const resp = await fetch(fileEntry.downloadUrl);
+        if (!resp.ok) {
+            const { payload, rawText } = await parseJsonPayload(resp);
+            throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
+        }
+        const handle = await directoryHandle.getFileHandle(fileEntry.entryName, { create: true });
+        const writable = await handle.createWritable();
+        return streamResponseToWritable(resp, writable, typeof onProgress === 'function' ? onProgress : () => {});
+    }
+
+    async function exportCurrentTaskFiles() {
+        if (!state.currentTaskId) {
+            setTaskSummary(UI_COPY.openContentFirst, 'error');
+            return;
+        }
+        if (state.exportInProgress) {
+            setExportStatus('running', UI_COPY.saveBusy);
+            return;
+        }
+        setExportStatus('running', 'Preparing export files');
+        try {
+            const manifest = await requestTaskExportFilesManifest(state.currentTaskId);
+            const files = Array.isArray(manifest.files)
+                ? manifest.files.filter((fileEntry) => fileEntry && fileEntry.entryName)
+                : [];
+            if (!files.length) {
+                setExportStatus('error', 'No exportable Markdown, image, or video files were found');
+                return;
+            }
+            const directoryTarget = await pickExportDirectoryTarget();
+            if (directoryTarget && directoryTarget.cancelled) {
+                setExportStatus('idle', UI_COPY.saveCanceled);
+                return;
+            }
+            let exportedBytes = 0;
+            if (directoryTarget && directoryTarget.supported && directoryTarget.handle) {
+                for (let index = 0; index < files.length; index += 1) {
+                    const fileEntry = files[index];
+                    const prefix = `Exporting file ${index + 1}/${files.length}`;
+                    let result = null;
+                    if (typeof fileEntry.inlineText === 'string') {
+                        setExportStatus('running', buildDirectExportProgressText(fileEntry, prefix, Number(fileEntry.size) || 0, Number(fileEntry.size) || 0), { percent: ((index + 1) / files.length) * 100 });
+                        result = await writePreparedInlineFile(directoryTarget.handle, fileEntry);
+                    } else {
+                        result = await writePreparedBinaryFile(directoryTarget.handle, fileEntry, (received, total) => {
+                            setExportStatus('running', buildDirectExportProgressText(fileEntry, prefix, received, total), {
+                                percent: Math.min(99, ((index + Math.max(0, Math.min(1, total > 0 ? received / total : 0.5))) / files.length) * 100),
+                            });
+                        });
+                    }
+                    exportedBytes += Number(result && result.bytes) || 0;
+                }
+                const summary = `Exported ${files.length} files to the selected folder (${formatBytes(exportedBytes)})`;
+                setTaskSummary(summary, 'success');
+                setExportStatus('success', summary, { percent: 100 });
+                return;
+            }
+            for (let index = 0; index < files.length; index += 1) {
+                const fileEntry = files[index];
+                const prefix = `Downloading file ${index + 1}/${files.length}`;
+                if (typeof fileEntry.inlineText === 'string') {
+                    const blob = createPreparedInlineBlob(fileEntry);
+                    exportedBytes += blob.size;
+                    setExportStatus('running', buildDirectExportProgressText(fileEntry, prefix, blob.size, blob.size), { percent: ((index + 1) / files.length) * 100 });
+                    triggerBrowserDownload(blob, fileEntry.entryName);
+                } else {
+                    const result = await downloadPreparedBinaryFile(fileEntry, (received, total) => {
+                        setExportStatus('running', buildDirectExportProgressText(fileEntry, prefix, received, total), {
+                            percent: Math.min(99, ((index + Math.max(0, Math.min(1, total > 0 ? received / total : 0.5))) / files.length) * 100),
+                        });
+                    });
+                    exportedBytes += Number(result && result.bytes) || 0;
+                    triggerBrowserDownload(result.blob, fileEntry.entryName);
+                }
+                await new Promise((resolve) => setTimeout(resolve, 60));
+            }
+            const summary = `Started downloading ${files.length} files (${formatBytes(exportedBytes)})`;
+            setTaskSummary(summary, 'success');
+            setExportStatus('success', summary, { percent: 100 });
+        } catch (error) {
+            setExportStatus('error', `${UI_COPY.saveFailed}: ${normalizeErrorMessage(error, { fallback: 'Please try again later' })}`);
+            throw error;
+        } finally {
+            if (state.exportState === 'running') {
+                setExportStatus('idle', UI_COPY.saveHint);
+            } else {
+                setExportButtonsDisabled(false);
+                state.exportInProgress = false;
+            }
+        }
+    }
+
+    async function handleCurrentTaskExport(event, options = {}) {
         if (event && typeof event.preventDefault === 'function') {
             event.preventDefault();
         }
-        setContentToolsOpen(false);
+        if (options.closePanel !== false) {
+            setContentToolsOpen(false);
+        }
+        const mode = await chooseCurrentTaskExportMode();
+        if (!mode) {
+            return false;
+        }
+        if (mode === 'files') {
+            await exportCurrentTaskFiles();
+            return false;
+        }
         await exportCurrentTaskZip();
         return false;
+    }
+
+    async function handleReaderPrimaryExport(event) {
+        return handleCurrentTaskExport(event, { closePanel: true });
     }
 
     async function downloadTaskZip(taskId, options = {}) {
@@ -17770,7 +18000,7 @@
         if (!normalizedTaskId) {
             throw new Error('missing task id');
         }
-        const fallback = `${normalizedTaskId.replace(/[:\\/]/g, '_')}_bundle.zip`;
+        const fallback = `${normalizedTaskId.replace(/[:\/]/g, '_')}_bundle.zip`;
         let pickerTarget = null;
         if (options.preferPicker) {
             pickerTarget = await pickExportWritableTarget(fallback);
@@ -17779,7 +18009,7 @@
             }
         }
         try {
-            const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(normalizedTaskId)}/export`);
+            const resp = await fetch(`${API_BASE}/tasks/${encodeURIComponent(normalizedTaskId)}/export?layout=flat`);
             if (!resp.ok) {
                 const { payload, rawText } = await parseJsonPayload(resp);
                 throw new Error(payload.message || rawText || `HTTP ${resp.status}`);
@@ -17808,6 +18038,7 @@
     }
 
     async function exportSelectedTasksAsMultipleZips() {
+
         const selected = resolveSelectedTaskListEntities();
         if (!selected.taskIds.length) {
             setTaskSummary('请先选择要导出的任务', 'error');
@@ -18384,11 +18615,11 @@
             }
         });
 
-        document.getElementById('exportTaskBtn').addEventListener('click', async () => {
+        document.getElementById('exportTaskBtn').addEventListener('click', async (event) => {
             try {
-                await exportCurrentTaskZip();
+                await handleCurrentTaskExport(event, { closePanel: true });
             } catch (error) {
-                console.warn('保存失败', error);
+                console.warn('export failed', error);
             }
         });
 

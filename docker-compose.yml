@@ -14,6 +14,7 @@ services:
       context: .
       dockerfile: deploy/docker/python-grpc.Dockerfile
     container_name: v2m-python-grpc
+    shm_size: 1gb
     environment:
       PYTHONNOUSERSITE: "1"
       PYTHONPATH: /app:/app/contracts/gen/python
@@ -28,6 +29,7 @@ services:
       MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY: ${MODULE2_SEMANTIC_SEGMENT_BATCH_MAX_CONCURRENCY:-48}
       MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT: ${MODULE2_MARKDOWN_SECTION_MAX_INFLIGHT:-56}
       MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT: ${MODULE2_KC_MULTI_CHUNK_MAX_INFLIGHT:-48}
+      MODULE2_SHARED_FRAME_REGISTRY_MAX_MB: ${MODULE2_SHARED_FRAME_REGISTRY_MAX_MB:-384}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       VISION_AI_BEARER_TOKEN: ${VISION_AI_BEARER_TOKEN:-}
     ports:

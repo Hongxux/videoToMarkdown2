@@ -7,8 +7,8 @@
 
 val mobileApiBaseUrl = sequenceOf(
     (findProperty("mobileApiBaseUrl") as String?)?.trim(),
-    System.getenv("MOBILE_APP_API_BASE_URL")?.trim(),
-    System.getenv("MOBILE_API_BASE_URL")?.trim()
+    System.getenv("ORG_GRADLE_PROJECT_mobileApiBaseUrl")?.trim(),
+    System.getenv("MOBILE_APP_API_BASE_URL")?.trim()
 ).mapNotNull { candidate ->
     candidate?.takeIf { it.isNotBlank() }?.trimEnd('/')?.let { trimmed ->
         if (trimmed.endsWith("/api/mobile")) {
@@ -17,7 +17,7 @@ val mobileApiBaseUrl = sequenceOf(
             "$trimmed/api/mobile"
         }
     }
-}.firstOrNull() ?: "https://frp-box.com:41570/api/mobile"
+}.firstOrNull() ?: "https://216d0ee2.r9.cpolar.cn/api/mobile"
 val mobileApiBaseUrlEscaped = mobileApiBaseUrl
     .replace("\\", "\\\\")
     .replace("\"", "\\\"")
@@ -81,8 +81,8 @@ android {
         applicationId = "com.hongxu.videoToMarkdownTest2"
         minSdk = 24
         targetSdk = 35
-        versionCode = 8
-        versionName = "1.0.8"
+        versionCode = 15
+        versionName = "1.0.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MOBILE_API_BASE_URL", "\"$mobileApiBaseUrlEscaped\"")

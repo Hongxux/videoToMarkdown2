@@ -104,6 +104,29 @@ def patch_pydantic_generic_origin_compat() -> bool:
     return True
 
 
+def patch_protobuf_message_factory_compat() -> bool:
+    try:
+        from google.protobuf import message_factory
+    except Exception:
+        return False
+
+    factory_cls = getattr(message_factory, 'MessageFactory', None)
+    get_message_class = getattr(message_factory, 'GetMessageClass', None)
+    if factory_cls is None or get_message_class is None:
+        return False
+    if hasattr(factory_cls, 'GetPrototype'):
+        return False
+
+    def _compat_get_prototype(self, descriptor):
+        return get_message_class(descriptor)
+
+    factory_cls.GetPrototype = _compat_get_prototype
+    safe_print(
+        '[BOOT] Applied protobuf compatibility shim: MessageFactory.GetPrototype -> GetMessageClass'
+    )
+    return True
+
+
 def log_boot_step(message: str, enabled: bool) -> None:
     """按开关输出启动阶段进度日志。"""
     if enabled:

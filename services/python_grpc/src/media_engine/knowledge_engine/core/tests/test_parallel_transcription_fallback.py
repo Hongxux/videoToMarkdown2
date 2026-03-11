@@ -46,7 +46,7 @@ class _ExecutorStub:
 def _patch_common(monkeypatch, futures):
     monkeypatch.setattr(
         pt,
-        "ProcessPoolExecutor",
+        "_build_process_pool_executor",
         lambda max_workers: _ExecutorStub(futures),
     )
     monkeypatch.setattr(pt, "as_completed", lambda future_map: list(future_map.keys()))
@@ -222,3 +222,17 @@ def test_parallel_and_fallback_partial_failure_raises(monkeypatch):
             config={"whisper": {"parallel": {"enabled": True}}},
         )
 
+
+
+
+def test_build_process_pool_executor_uses_spawn_context(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        pt,
+        "create_spawn_process_pool",
+        lambda max_workers: captured.setdefault("max_workers", max_workers) or "executor",
+    )
+
+    pt._build_process_pool_executor(max_workers=3)
+
+    assert captured["max_workers"] == 3

@@ -49,7 +49,20 @@ data class MobileManualCollectionBinding(
 
 private data class MobileTaskListPage(
     val tasks: List<MobileTaskListItem>,
-    val hasMore: Boolean
+    val hasMore: Boolean,
+    val snapshotVersion: Long = 0L
+)
+
+data class MobileTaskListSnapshot(
+    val tasks: List<MobileTaskListItem>,
+    val snapshotVersion: Long
+)
+
+data class MobileTaskChangeSet(
+    val upserts: List<MobileTaskListItem>,
+    val nextSince: Long,
+    val resyncRequired: Boolean,
+    val hasMoreChanges: Boolean
 )
 
 data class MobileTaskSubmitResult(
@@ -101,14 +114,16 @@ class HttpMobileTaskApi(
     suspend fun listTasks(
         page: Int = 0,
         pageSize: Int = 0,
-        onlyMultiSegment: Boolean = true
+        onlyMultiSegment: Boolean = true,
+        statuses: Collection<String> = emptyList()
     ): List<MobileTaskListItem> {
         return withContext(Dispatchers.IO) {
             if (pageSize <= 0) {
-                val singlePage = listTasksPage(
+                val singlePage = fetchTaskSnapshot(
                     page = page.coerceAtLeast(0),
                     pageSize = pageSize,
-                    onlyMultiSegment = onlyMultiSegment
+                    onlyMultiSegment = onlyMultiSegment,
+                    statuses = statuses
                 )
                 return@withContext deduplicateTaskSnapshots(singlePage.tasks)
             }
@@ -116,16 +131,78 @@ class HttpMobileTaskApi(
             var currentPage = page.coerceAtLeast(0)
             var hasMore = true
             while (hasMore) {
-                val pageResult = listTasksPage(
+                val pageResult = fetchTaskSnapshot(
                     page = currentPage,
                     pageSize = pageSize,
-                    onlyMultiSegment = onlyMultiSegment
+                    onlyMultiSegment = onlyMultiSegment,
+                    statuses = statuses
                 )
                 allTasks += pageResult.tasks
                 hasMore = pageResult.hasMore && pageResult.tasks.isNotEmpty()
                 currentPage += 1
             }
             deduplicateTaskSnapshots(allTasks)
+        }
+    }
+
+    suspend fun listTaskSnapshot(
+        onlyMultiSegment: Boolean = true,
+        statuses: Collection<String> = emptyList()
+    ): MobileTaskListSnapshot {
+        return withContext(Dispatchers.IO) {
+            val snapshot = fetchTaskSnapshot(
+                page = 0,
+                pageSize = 0,
+                onlyMultiSegment = onlyMultiSegment,
+                statuses = statuses
+            )
+            MobileTaskListSnapshot(
+                tasks = deduplicateTaskSnapshots(snapshot.tasks),
+                snapshotVersion = snapshot.snapshotVersion
+            )
+        }
+    }
+
+    suspend fun listTaskChanges(
+        since: Long,
+        onlyMultiSegment: Boolean = true,
+        statuses: Collection<String> = emptyList(),
+        limit: Int = 200
+    ): MobileTaskChangeSet {
+        return withContext(Dispatchers.IO) {
+            val query = buildString {
+                append("?since=")
+                append(maxOf(0L, since))
+                append("&onlyMultiSegment=")
+                append(onlyMultiSegment)
+                append("&view=compact")
+                append("&limit=")
+                append(limit.coerceIn(1, 1000))
+                append(buildStatusesQuery(statuses))
+            }
+            val url = URL("$apiBaseUrl/tasks/changes$query")
+            val connection = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = 10_000
+                readTimeout = 15_000
+                setRequestProperty("Accept", "application/json")
+            }
+            connection.useJsonPayload { json ->
+                val upsertsArray = json.optJSONArray("upserts")
+                val upserts = mutableListOf<MobileTaskListItem>()
+                if (upsertsArray != null) {
+                    for (index in 0 until upsertsArray.length()) {
+                        val item = upsertsArray.optJSONObject(index) ?: continue
+                        parseTaskListItem(item)?.let(upserts::add)
+                    }
+                }
+                MobileTaskChangeSet(
+                    upserts = deduplicateTaskSnapshots(upserts),
+                    nextSince = json.optLong("nextSince", maxOf(0L, since)),
+                    resyncRequired = json.optBoolean("resyncRequired", false),
+                    hasMoreChanges = json.optBoolean("hasMoreChanges", false)
+                )
+            }
         }
     }
 
@@ -170,12 +247,22 @@ class HttpMobileTaskApi(
             normalized == "PENDING"
     }
 
-    private fun listTasksPage(
+    private fun fetchTaskSnapshot(
         page: Int,
         pageSize: Int,
-        onlyMultiSegment: Boolean
+        onlyMultiSegment: Boolean,
+        statuses: Collection<String>
     ): MobileTaskListPage {
-        val query = "?page=$page&pageSize=$pageSize&onlyMultiSegment=$onlyMultiSegment"
+        val query = buildString {
+            append("?page=")
+            append(page)
+            append("&pageSize=")
+            append(pageSize)
+            append("&onlyMultiSegment=")
+            append(onlyMultiSegment)
+            append("&view=compact")
+            append(buildStatusesQuery(statuses))
+        }
         val url = URL("$apiBaseUrl/tasks$query")
         val connection = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -188,39 +275,57 @@ class HttpMobileTaskApi(
             if (array == null || array.length() == 0) {
                 return@useJsonPayload MobileTaskListPage(
                     tasks = emptyList(),
-                    hasMore = false
+                    hasMore = false,
+                    snapshotVersion = json.optLong("snapshotVersion", 0L)
                 )
             }
             val result = mutableListOf<MobileTaskListItem>()
             for (i in 0 until array.length()) {
                 val item = array.optJSONObject(i) ?: continue
-                val taskId = item.optString("taskId").trim()
-                if (taskId.isEmpty()) {
-                    continue
-                }
-                result += MobileTaskListItem(
-                    taskId = taskId,
-                    title = item.optString("title").ifBlank { taskId },
-                    status = item.optString("status"),
-                    progress = item.optDouble("progress", 0.0),
-                    statusMessage = item.optString("statusMessage"),
-                    domain = item.optString("domain"),
-                    mainTopic = item.optString("mainTopic").ifBlank { item.optString("main_topic") },
-                    markdownAvailable = item.optBoolean("markdownAvailable", false),
-                    createdAt = item.optString("createdAt"),
-                    lastOpenedAt = item.optString("lastOpenedAt"),
-                    videoUrl = item.optString("videoUrl").trim(),
-                    collectionId = item.optString("collectionId").trim(),
-                    collectionTitle = item.optString("collectionTitle").trim(),
-                    taskPath = item.optString("taskPath").trim(),
-                    collectionPath = item.optString("collectionPath").trim()
-                )
+                parseTaskListItem(item)?.let(result::add)
             }
             MobileTaskListPage(
                 tasks = result,
-                hasMore = json.optBoolean("hasMore", false)
+                hasMore = json.optBoolean("hasMore", false),
+                snapshotVersion = json.optLong("snapshotVersion", 0L)
             )
         }
+    }
+
+    private fun parseTaskListItem(item: JSONObject): MobileTaskListItem? {
+        val taskId = item.optString("taskId").trim()
+        if (taskId.isEmpty()) {
+            return null
+        }
+        return MobileTaskListItem(
+            taskId = taskId,
+            title = item.optString("title").ifBlank { taskId },
+            status = item.optString("status"),
+            progress = item.optDouble("progress", 0.0),
+            statusMessage = item.optString("statusMessage"),
+            domain = item.optString("domain"),
+            mainTopic = item.optString("mainTopic").ifBlank { item.optString("main_topic") },
+            markdownAvailable = item.optBoolean("markdownAvailable", false),
+            createdAt = item.optString("createdAt"),
+            lastOpenedAt = item.optString("lastOpenedAt"),
+            videoUrl = item.optString("videoUrl").trim(),
+            collectionId = item.optString("collectionId").trim(),
+            collectionTitle = item.optString("collectionTitle").trim(),
+            taskPath = item.optString("taskPath").trim(),
+            collectionPath = item.optString("collectionPath").trim()
+        )
+    }
+
+    private fun buildStatusesQuery(statuses: Collection<String>): String {
+        val normalized = statuses.asSequence()
+            .map { it.trim().uppercase(Locale.ROOT) }
+            .filter { it.isNotEmpty() }
+            .distinct()
+            .toList()
+        if (normalized.isEmpty()) {
+            return ""
+        }
+        return "&statuses=" + URLEncoder.encode(normalized.joinToString(","), StandardCharsets.UTF_8)
     }
 
     suspend fun submitVideoUrl(videoUrl: String): MobileTaskSubmitResult {

@@ -9,6 +9,7 @@
 - 调用方传入的参数与数据路径。
 输出：
 - 各函数/类返回的结构化结果或副作用。"""
+import multiprocessing as mp
 import os
 import subprocess
 import math
@@ -19,6 +20,7 @@ import json
 import sys
 
 from services.python_grpc.src.common.utils.numbers import safe_int, safe_float
+from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
 from services.python_grpc.src.common.utils.time import format_hhmmss
 from services.python_grpc.src.common.utils.video import get_video_duration as _get_video_duration
 from .language_normalizer import normalize_whisper_language
@@ -297,6 +299,14 @@ def build_parallel_plan(requested_workers, segment_count, device="cpu", config=N
     }
 
 
+def _build_process_pool_executor(max_workers: int) -> ProcessPoolExecutor:
+    """
+    统一通过 spawn 上下文创建进程池。
+    避免 gRPC 线程态在 Linux 默认 fork 模式下被子进程继承。
+    """
+    return create_spawn_process_pool(max_workers=max_workers)
+
+
 # 进程级模型缓存：每个 Worker 进程只加载一次模型，后续段复用
 _worker_model = None
 _worker_model_key = None
@@ -351,7 +361,8 @@ def transcribe_segment(args):
         temp_audio = f"temp_segment_{os.getpid()}_{segment['id']}.wav"
         
         print(f"[进程 {os.getpid()}] 提取音频片段...", flush=True)
-        # 使用 ffmpeg 提取音频片段        _extract_audio_slice(
+        # 使用 ffmpeg 提取音频片段
+        _extract_audio_slice(
             source_audio_path=source_audio_path,
             start_sec=segment["start"],
             duration_sec=segment["duration"],
@@ -582,7 +593,7 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
 
     failed_tasks_args = []
     try:
-        with ProcessPoolExecutor(max_workers=effective_workers) as executor:
+        with _build_process_pool_executor(max_workers=effective_workers) as executor:
             futures = {executor.submit(transcribe_segment, args): args for args in tasks_args}
             for future in as_completed(futures):
                 task_args = futures[future]
@@ -684,7 +695,5 @@ def format_subtitles(subtitles):
         start_time = format_hhmmss(sub['start'])
         lines.append(f"[{start_time}] {sub['text']}")
     return "\n".join(lines)
-
-
 
 

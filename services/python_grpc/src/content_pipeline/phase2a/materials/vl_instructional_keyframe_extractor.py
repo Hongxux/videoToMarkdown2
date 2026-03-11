@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import threading
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -489,8 +490,13 @@ def save_grid_overlay_image(
     return bool(cv2.imwrite(str(output_image_path), rendered))
 
 
+@lru_cache(maxsize=1)
 def _resolve_top_banner_font_path() -> Optional[Path]:
+    override_font_path = str(os.environ.get("TOP_REASON_BANNER_FONT_PATH", "") or "").strip()
     candidate_paths: List[Path] = []
+    if override_font_path:
+        candidate_paths.append(Path(override_font_path))
+
     windir = Path(os.environ.get("WINDIR", r"C:\Windows"))
     candidate_paths.extend(
         [
@@ -505,6 +511,8 @@ def _resolve_top_banner_font_path() -> Optional[Path]:
             Path("/usr/share/fonts/truetype/noto/NotoSansCJKsc-Regular.otf"),
             Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf"),
             Path("/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            Path("/usr/share/fonts/truetype/wqy/wqy-microhei.ttc"),
         ]
     )
     for candidate in candidate_paths:
@@ -513,6 +521,41 @@ def _resolve_top_banner_font_path() -> Optional[Path]:
                 return candidate
         except Exception:
             continue
+
+    search_roots = [
+        windir / "Fonts",
+        Path("/usr/share/fonts"),
+        Path("/usr/local/share/fonts"),
+        Path.home() / ".fonts",
+    ]
+    preferred_filenames = (
+        "msyhbd.ttc",
+        "msyh.ttc",
+        "msyhbd.ttf",
+        "msyh.ttf",
+        "simhei.ttf",
+        "NotoSansCJK-Bold.ttc",
+        "NotoSansCJK-Regular.ttc",
+        "NotoSansCJKsc-Bold.otf",
+        "NotoSansCJKsc-Regular.otf",
+        "SourceHanSansSC-Bold.otf",
+        "SourceHanSansSC-Regular.otf",
+        "wqy-zenhei.ttc",
+        "wqy-microhei.ttc",
+    )
+    for root in search_roots:
+        try:
+            if not root.exists():
+                continue
+        except Exception:
+            continue
+        for filename in preferred_filenames:
+            try:
+                for match in sorted(root.rglob(filename)):
+                    if match.is_file():
+                        return match
+            except Exception:
+                continue
     return None
 
 
@@ -535,8 +578,11 @@ def _resolve_top_banner_font_with_meta(font_size: int):
         "Microsoft YaHei",
         "Noto Sans CJK SC Bold",
         "Noto Sans CJK SC",
+        "Noto Sans SC",
         "Source Han Sans SC Bold",
         "Source Han Sans SC",
+        "WenQuanYi Zen Hei",
+        "WenQuanYi Micro Hei",
     ):
         try:
             return ImageFont.truetype(fallback_name, size=max(1, int(font_size))), str(fallback_name)

@@ -5,6 +5,8 @@ VLMaterialGenerator 棰勮绛栫暐鍗曞厓娴嬭瘯
 
 from __future__ import annotations
 
+import asyncio
+
 from typing import Any, Dict, List
 
 
@@ -165,3 +167,78 @@ def test_chunking_supports_asymmetric_time_window():
     window = chunks[0]["windows"][0]
     assert abs(float(window["expanded_start"]) - 9.0) < 1e-6
     assert abs(float(window["expanded_end"]) - 12.0) < 1e-6
+
+
+def test_resolve_max_workers_respects_explicit_limit_with_injected_executor():
+    from services.python_grpc.src.content_pipeline.infra.runtime.vl_prefetch_utils import resolve_max_workers
+
+    class _FakeExecutor:
+        _max_workers = 4
+
+    resolved = resolve_max_workers(
+        request_count=10,
+        cv_executor=_FakeExecutor(),
+        screenshot_config={"max_workers": 1},
+        hard_cap=6,
+    )
+
+    assert resolved == 1
+
+
+def test_screenshot_task_gate_serializes_tasks_when_limit_is_one(monkeypatch):
+    from services.python_grpc.src.content_pipeline.phase2a.materials import vl_material_generator as generator_module
+    from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
+
+    async def _main() -> None:
+        generator_module._SCREENSHOT_TASK_GATES.clear()
+        generator_module._SCREENSHOT_TASK_GATE_LIMITS.clear()
+
+        generator_a = VLMaterialGenerator(
+            {
+                "enabled": True,
+                "screenshot_optimization": {
+                    "streaming_pipeline": True,
+                    "task_max_concurrency": 1,
+                },
+            }
+        )
+        generator_b = VLMaterialGenerator(
+            {
+                "enabled": True,
+                "screenshot_optimization": {
+                    "streaming_pipeline": True,
+                    "task_max_concurrency": 1,
+                },
+            }
+        )
+
+        release_event = asyncio.Event()
+        first_started = asyncio.Event()
+        inflight = 0
+        max_inflight = 0
+
+        async def _fake_streaming(video_path: str, screenshot_requests: List[Dict[str, Any]]):
+            nonlocal inflight, max_inflight
+            _ = video_path
+            inflight += 1
+            max_inflight = max(max_inflight, inflight)
+            first_started.set()
+            await release_event.wait()
+            inflight -= 1
+            return screenshot_requests
+
+        monkeypatch.setattr(generator_a, "_optimize_screenshots_streaming_pipeline", _fake_streaming)
+        monkeypatch.setattr(generator_b, "_optimize_screenshots_streaming_pipeline", _fake_streaming)
+
+        task_a = asyncio.create_task(generator_a._optimize_screenshots_parallel("video.mp4", [{"id": "a"}]))
+        await first_started.wait()
+        task_b = asyncio.create_task(generator_b._optimize_screenshots_parallel("video.mp4", [{"id": "b"}]))
+        await asyncio.sleep(0.05)
+
+        assert inflight == 1
+        assert max_inflight == 1
+
+        release_event.set()
+        await asyncio.gather(task_a, task_b)
+
+    asyncio.run(_main())

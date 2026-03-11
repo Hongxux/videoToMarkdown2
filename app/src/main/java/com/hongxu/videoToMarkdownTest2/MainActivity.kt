@@ -1000,7 +1000,10 @@ private fun MobileTaskApp(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val haptic = LocalHapticFeedback.current
-    val apiBaseUrl = BuildConfig.MOBILE_API_BASE_URL
+    var apiRootUrl by remember(context) {
+        mutableStateOf(MobileApiEndpointStore.resolveRootUrl(context.applicationContext))
+    }
+    val apiBaseUrl = remember(apiRootUrl) { MobileApiEndpointStore.toApiBaseUrl(apiRootUrl) }
     val mobileUserId = remember(context) {
         MobileClientIdentity.resolveUserId(context.applicationContext)
     }
@@ -1020,6 +1023,7 @@ private fun MobileTaskApp(
         }
     )
     val collectionViewModel: CollectionFeatureViewModel = viewModel(
+        key = "collection-${apiBaseUrl.hashCode()}",
         factory = remember(apiBaseUrl, application) {
             CollectionFeatureViewModelFactory(
                 application = application,
@@ -1069,6 +1073,8 @@ private fun MobileTaskApp(
 
     var tasks by remember { mutableStateOf<List<MobileTaskListItem>>(emptyList()) }
     var backendProcessingTasks by remember { mutableStateOf<List<MobileTaskListItem>>(emptyList()) }
+    var visibleTaskSyncVersion by remember { mutableStateOf(0L) }
+    var taskFeedSyncVersion by remember { mutableStateOf(0L) }
     var preparedSessions by remember { mutableStateOf<Map<String, TaskReaderSession>>(emptyMap()) }
     var taskStatusSnapshot by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var listLoading by remember { mutableStateOf(false) }
@@ -1116,6 +1122,9 @@ private fun MobileTaskApp(
     var dragHoverCollectionPath by remember { mutableStateOf<String?>(null) }
     var dragHoverTaskId by remember { mutableStateOf<String?>(null) }
     var dragHoverUngroup by remember { mutableStateOf(false) }
+    var apiRootSheetVisible by remember { mutableStateOf(false) }
+    var apiRootDraft by remember(apiRootUrl) { mutableStateOf(apiRootUrl) }
+    var apiRootSaving by remember { mutableStateOf(false) }
     val collapsedTaskCollections = remember { mutableStateMapOf<String, Boolean>() }
     val taskCardBounds = remember { mutableStateMapOf<String, Rect>() }
     val collectionHeaderBounds = remember { mutableStateMapOf<String, Rect>() }
@@ -1293,6 +1302,106 @@ private fun MobileTaskApp(
         }
     }
 
+    fun mergeTaskSnapshot(existing: MobileTaskListItem?, candidate: MobileTaskListItem): MobileTaskListItem {
+        if (existing == null) {
+            return candidate
+        }
+        return candidate.copy(
+            title = candidate.title.ifBlank { existing.title },
+            statusMessage = candidate.statusMessage.ifBlank { existing.statusMessage },
+            domain = candidate.domain.ifBlank { existing.domain },
+            mainTopic = candidate.mainTopic.ifBlank { existing.mainTopic },
+            createdAt = candidate.createdAt.ifBlank { existing.createdAt },
+            lastOpenedAt = candidate.lastOpenedAt.ifBlank { existing.lastOpenedAt },
+            videoUrl = candidate.videoUrl.ifBlank { existing.videoUrl },
+            collectionId = candidate.collectionId.ifBlank { existing.collectionId },
+            collectionTitle = candidate.collectionTitle.ifBlank { existing.collectionTitle },
+            taskPath = candidate.taskPath.ifBlank { existing.taskPath },
+            collectionPath = candidate.collectionPath.ifBlank { existing.collectionPath },
+            markdownAvailable = candidate.markdownAvailable || existing.markdownAvailable
+        )
+    }
+
+    fun upsertTaskList(
+        current: List<MobileTaskListItem>,
+        updates: List<MobileTaskListItem>,
+        insertMissing: Boolean
+    ): List<MobileTaskListItem> {
+        if (updates.isEmpty()) {
+            return deduplicateTasksByTaskId(current)
+        }
+        val byTaskId = LinkedHashMap<String, MobileTaskListItem>(current.size + updates.size)
+        current.forEach { task ->
+            val taskId = task.taskId.trim()
+            if (taskId.isNotEmpty()) {
+                byTaskId[taskId] = task
+            }
+        }
+        updates.forEach { task ->
+            val taskId = task.taskId.trim()
+            if (taskId.isEmpty()) {
+                return@forEach
+            }
+            val existing = byTaskId[taskId]
+            if (existing == null && !insertMissing) {
+                return@forEach
+            }
+            byTaskId[taskId] = mergeTaskSnapshot(existing, task)
+        }
+        return deduplicateTasksByTaskId(byTaskId.values.toList())
+    }
+
+    fun emitTaskCompletionEffects(loadedTasks: List<MobileTaskListItem>, previousStatus: Map<String, String>) {
+        loadedTasks.forEach { task ->
+            if (!isTaskNewlyCompleted(task.status, previousStatus[task.taskId])) {
+                return@forEach
+            }
+            taskCompletionNotifier.notifyTaskCompleted(
+                taskId = task.taskId,
+                taskTitle = task.title.ifBlank { task.taskId }
+            )
+            completionBanner = CompletionBannerState(
+                taskId = task.taskId,
+                title = task.title.ifBlank { task.taskId }
+            )
+            flashingTaskDeadlines = flashingTaskDeadlines + (
+                task.taskId to (System.currentTimeMillis() + TASK_FLASH_DURATION_MS)
+                )
+            scope.launch {
+                warmUpCompletedTaskSession(
+                    taskId = task.taskId,
+                    fallbackTitle = task.title.ifBlank { task.taskId }
+                )
+            }
+        }
+    }
+
+    fun applyTaskRefreshState(
+        loaded: List<MobileTaskListItem>,
+        runningLoaded: List<MobileTaskListItem>,
+        showLoading: Boolean
+    ) {
+        val ids = loaded.map { it.taskId }.toSet()
+        preparedSessions = preparedSessions.filterKeys { it in ids }
+        tasks = loaded
+        backendProcessingTasks = runningLoaded
+        if (editingTaskId != null && editingTaskId !in ids) {
+            editingTaskId = null
+            editingTaskTitleValue = TextFieldValue("")
+        }
+        if (revealedTaskId != null && revealedTaskId !in ids) {
+            revealedTaskId = null
+        }
+
+        val previousStatus = taskStatusSnapshot
+        emitTaskCompletionEffects(loaded, previousStatus)
+        taskStatusSnapshot = loaded.associate { it.taskId to it.status }
+
+        if (showLoading) {
+            actionMessage = ""
+        }
+    }
+
     suspend fun refreshTasks(showLoading: Boolean = true) {
         if (!refreshMutex.tryLock()) {
             return
@@ -1303,54 +1412,24 @@ private fun MobileTaskApp(
         }
         try {
             runCatching {
-                val visibleTasks = deduplicateTasksByTaskId(
-                    taskApi.listTasks(onlyMultiSegment = true)
+                val visibleSnapshot = taskApi.listTaskSnapshot(onlyMultiSegment = true)
+                val processingSnapshot = taskApi.listTaskSnapshot(
+                    onlyMultiSegment = false,
+                    statuses = listOf("QUEUED", "PROCESSING")
                 )
+                val visibleTasks = deduplicateTasksByTaskId(visibleSnapshot.tasks)
                 val processingTasks = deduplicateTasksByTaskId(
-                    taskApi.listTasks(onlyMultiSegment = false)
-                        .filter { task -> isProcessingStatus(task.status) }
+                    processingSnapshot.tasks.filter { task -> isProcessingStatus(task.status) }
                 )
-                visibleTasks to processingTasks
-            }.onSuccess { (loaded, runningLoaded) ->
-                val ids = loaded.map { it.taskId }.toSet()
-                preparedSessions = preparedSessions.filterKeys { it in ids }
-                tasks = loaded
-                backendProcessingTasks = runningLoaded
-                if (editingTaskId != null && editingTaskId !in ids) {
-                    editingTaskId = null
-                    editingTaskTitleValue = TextFieldValue("")
-                }
-                if (revealedTaskId != null && revealedTaskId !in ids) {
-                    revealedTaskId = null
-                }
-
-                val previousStatus = taskStatusSnapshot
-                loaded.forEach { task ->
-                    if (isTaskNewlyCompleted(task.status, previousStatus[task.taskId])) {
-                        taskCompletionNotifier.notifyTaskCompleted(
-                            taskId = task.taskId,
-                            taskTitle = task.title.ifBlank { task.taskId }
-                        )
-                        completionBanner = CompletionBannerState(
-                            taskId = task.taskId,
-                            title = task.title.ifBlank { task.taskId }
-                        )
-                        flashingTaskDeadlines = flashingTaskDeadlines + (
-                            task.taskId to (System.currentTimeMillis() + TASK_FLASH_DURATION_MS)
-                            )
-                        scope.launch {
-                            warmUpCompletedTaskSession(
-                                taskId = task.taskId,
-                                fallbackTitle = task.title.ifBlank { task.taskId }
-                            )
-                        }
-                    }
-                }
-                taskStatusSnapshot = loaded.associate { it.taskId to it.status }
-
-                if (showLoading) {
-                    actionMessage = ""
-                }
+                Triple(
+                    visibleTasks,
+                    processingTasks,
+                    visibleSnapshot.snapshotVersion to processingSnapshot.snapshotVersion
+                )
+            }.onSuccess { (loaded, runningLoaded, syncVersions) ->
+                visibleTaskSyncVersion = syncVersions.first
+                taskFeedSyncVersion = maxOf(syncVersions.first, syncVersions.second)
+                applyTaskRefreshState(loaded, runningLoaded, showLoading)
             }.onFailure { error ->
                 if (showLoading) {
                     actionMessage = "Load failed. Please try again later."
@@ -1370,6 +1449,91 @@ private fun MobileTaskApp(
                 listLoading = false
             }
             refreshMutex.unlock()
+        }
+    }
+
+    suspend fun refreshTasksIncrementally(showLoading: Boolean = false) {
+        if (visibleTaskSyncVersion <= 0L || taskFeedSyncVersion <= 0L) {
+            refreshTasks(showLoading = showLoading)
+            return
+        }
+        if (!refreshMutex.tryLock()) {
+            return
+        }
+        var needsFullResync = false
+        if (showLoading) {
+            listLoading = true
+        }
+        try {
+            runCatching {
+                val visibleChanges = taskApi.listTaskChanges(
+                    since = visibleTaskSyncVersion,
+                    onlyMultiSegment = true
+                )
+                val allChanges = taskApi.listTaskChanges(
+                    since = taskFeedSyncVersion,
+                    onlyMultiSegment = false
+                )
+                visibleChanges to allChanges
+            }.onSuccess { (visibleChanges, allChanges) ->
+                if (
+                    visibleChanges.resyncRequired ||
+                    visibleChanges.hasMoreChanges ||
+                    allChanges.resyncRequired ||
+                    allChanges.hasMoreChanges
+                ) {
+                    needsFullResync = true
+                    return@onSuccess
+                }
+
+                val previousStatus = taskStatusSnapshot
+                tasks = upsertTaskList(tasks, visibleChanges.upserts, insertMissing = true)
+                tasks = upsertTaskList(tasks, allChanges.upserts, insertMissing = false)
+                backendProcessingTasks = upsertTaskList(
+                    backendProcessingTasks,
+                    allChanges.upserts.filter { task -> isProcessingStatus(task.status) },
+                    insertMissing = true
+                ).filter { task -> isProcessingStatus(task.status) }
+                val terminalTaskIds = allChanges.upserts
+                    .filterNot { task -> isProcessingStatus(task.status) }
+                    .map { task -> task.taskId.trim() }
+                    .filter { taskId -> taskId.isNotEmpty() }
+                    .toHashSet()
+                if (terminalTaskIds.isNotEmpty()) {
+                    backendProcessingTasks = backendProcessingTasks.filter { task ->
+                        task.taskId !in terminalTaskIds
+                    }
+                }
+
+                visibleTaskSyncVersion = maxOf(visibleTaskSyncVersion, visibleChanges.nextSince)
+                taskFeedSyncVersion = maxOf(taskFeedSyncVersion, allChanges.nextSince)
+                emitTaskCompletionEffects(tasks, previousStatus)
+                taskStatusSnapshot = tasks.associate { it.taskId to it.status }
+                if (showLoading) {
+                    actionMessage = ""
+                }
+            }.onFailure { error ->
+                if (showLoading) {
+                    actionMessage = "Load failed. Please try again later."
+                }
+                scope.launch {
+                    val retryResult = snackbarHostState.showSnackbar(
+                        message = "Task delta sync failed: ${error.message ?: "unknown"}",
+                        actionLabel = "Retry"
+                    )
+                    if (retryResult == SnackbarResult.ActionPerformed) {
+                        refreshTasksIncrementally(showLoading = showLoading)
+                    }
+                }
+            }
+        } finally {
+            if (showLoading) {
+                listLoading = false
+            }
+            refreshMutex.unlock()
+        }
+        if (needsFullResync) {
+            refreshTasks(showLoading = showLoading)
         }
     }
 
@@ -1988,6 +2152,28 @@ private fun MobileTaskApp(
         taskRouteViewModel.setVideoUrlInput("")
         taskRouteViewModel.setBookPageOffsetInput("")
         scope.launch { refreshTasks(showLoading = false) }
+    }
+
+    suspend fun applyApiRootUrlFromSheet() {
+        val normalizedRoot = MobileApiEndpointStore.normalizeRootUrl(apiRootDraft)
+        if (normalizedRoot.isBlank()) {
+            actionMessage = "Root URL cannot be empty."
+            return
+        }
+        apiRootSaving = true
+        val savedRoot = MobileApiEndpointStore.saveRootUrl(context.applicationContext, normalizedRoot)
+        apiRootUrl = savedRoot
+        apiRootDraft = savedRoot
+        apiRootSheetVisible = false
+        preparedSessions = emptyMap()
+        readerSession = null
+        readerScrollSnapshot = null
+        collectionViewModel.closeCollectionDetail()
+        actionMessage = "Server root updated to $savedRoot"
+        scope.launch {
+            refreshTasks(showLoading = true)
+        }
+        apiRootSaving = false
     }
 
     val filteredAndSortedTasks = remember(tasks, taskSearchQuery, taskSortField, taskSortOrder) {
@@ -2717,7 +2903,7 @@ private fun MobileTaskApp(
                     Lifecycle.Event.ON_RESUME -> {
                         inspectClipboardForTaskCandidate()
                         scope.launch {
-                            refreshTasks(showLoading = false)
+                            refreshTasksIncrementally(showLoading = false)
                             runAutoUpdateCheck(trigger = "resume")
                         }
                     }
@@ -3147,11 +3333,20 @@ private fun MobileTaskApp(
                         Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextButton(
                                 onClick = {
+                                    apiRootDraft = apiRootUrl
+                                    apiRootSheetVisible = true
+                                },
+                                enabled = !actionLoading
+                            ) {
+                                Text("服务")
+                            }
+                            TextButton(
+                                onClick = {
                                     taskRouteViewModel.setHomeSection(HomeSection.FOOTPRINTS)
                                 },
                                 enabled = !actionLoading && !batchSelectionMode
                             ) {
-                                Text("Footprints")
+                                Text("阅读足迹")
                             }
                             TextButton(
                                 onClick = {
@@ -3160,7 +3355,7 @@ private fun MobileTaskApp(
                                 },
                                 enabled = !actionLoading && !batchSelectionMode
                             ) {
-                                Text("Collections")
+                                Text("合集")
                             }
                             TextButton(
                                 onClick = {
@@ -3172,7 +3367,7 @@ private fun MobileTaskApp(
                                 },
                                 enabled = !actionLoading
                             ) {
-                                Text(if (batchSelectionMode) "Exit Select" else "Select")
+                                Text(if (batchSelectionMode) "退出多选" else "多选")
                             }
                         }
                     }
@@ -3262,6 +3457,32 @@ private fun MobileTaskApp(
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+
+                item(key = "api-root-status") {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFFF8FAFC))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Server Root",
+                                color = Color(0xFF344054),
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                text = apiRootUrl,
+                                color = Color(0xFF667085),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }
@@ -3681,6 +3902,65 @@ private fun MobileTaskApp(
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text("Batch Merge")
+                            }
+                        }
+                    }
+                }
+
+                if (apiRootSheetVisible) {
+                    ModalBottomSheet(
+                        onDismissRequest = {
+                            if (!apiRootSaving) {
+                                apiRootSheetVisible = false
+                            }
+                        },
+                        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                .navigationBarsPadding(),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                text = "Set Server Root",
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Example: https://216d0ee2.r9.cpolar.cn",
+                                color = Color(0xFF667085)
+                            )
+                            OutlinedTextField(
+                                value = apiRootDraft,
+                                onValueChange = { apiRootDraft = it },
+                                modifier = Modifier.fillMaxWidth(),
+                                singleLine = true,
+                                label = { Text("Root URL") },
+                                enabled = !apiRootSaving
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        scope.launch { applyApiRootUrlFromSheet() }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !apiRootSaving
+                                ) {
+                                    Text(if (apiRootSaving) "Saving" else "Save")
+                                }
+                                TextButton(
+                                    onClick = {
+                                        apiRootDraft = "https://216d0ee2.r9.cpolar.cn"
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    enabled = !apiRootSaving
+                                ) {
+                                    Text("Reset")
+                                }
                             }
                         }
                     }

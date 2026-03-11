@@ -298,6 +298,109 @@ def _crop_frame_by_roi(frame: np.ndarray, roi: Optional[Tuple[int, int, int, int
         return frame
 
 
+
+def _resize_frame_and_roi_for_analysis(
+    frame: np.ndarray,
+    roi: Optional[Tuple[int, int, int, int]],
+    max_width: int,
+) -> Tuple[np.ndarray, Optional[Tuple[int, int, int, int]]]:
+    """方法说明：`_resize_frame_and_roi_for_analysis` 工具方法。
+    执行步骤：
+    1) 步骤1：根据分析宽度上限判断是否需要缩放整帧。
+    2) 步骤2：若发生缩放，则同步按比例缩放 ROI，避免 OCR/形状分析坐标失真。
+    3) 步骤3：返回可直接送入分析链路的帧与 ROI。"""
+    if frame is None:
+        return frame, roi
+
+    target_width = max(0, int(max_width or 0))
+    frame_h = int(frame.shape[0]) if len(frame.shape) > 0 else 0
+    frame_w = int(frame.shape[1]) if len(frame.shape) > 1 else 0
+    if target_width <= 0 or frame_h <= 0 or frame_w <= 0 or frame_w <= target_width:
+        if roi is None:
+            return frame, None
+        return frame, _normalize_roi(roi, frame.shape)
+
+    scale = float(target_width) / float(frame_w)
+    target_height = max(1, int(round(frame_h * scale)))
+    resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+    if roi is None:
+        return resized, None
+
+    x1, y1, x2, y2 = _normalize_roi(roi, frame.shape)
+    scaled_roi = (
+        int(round(x1 * scale)),
+        int(round(y1 * scale)),
+        int(round(x2 * scale)),
+        int(round(y2 * scale)),
+    )
+    return resized, _normalize_roi(scaled_roi, resized.shape)
+
+
+
+def _empty_shape_signature() -> Dict[str, float]:
+    """方法说明：`_empty_shape_signature` 工具方法。
+    执行步骤：
+    1) 步骤1：为无法取得分析帧的场景提供统一兜底结构。
+    2) 步骤2：避免多处手写默认字典导致结构漂移。
+    3) 步骤3：让增量截图过滤逻辑始终收到稳定字段。"""
+    return {"rect_count": 0, "component_count": 0, "edge_density": 0.0}
+
+
+
+def _analyze_frame_for_incremental_screenshot(
+    frame: np.ndarray,
+    roi: Optional[Tuple[int, int, int, int]],
+    analysis_max_width: int,
+) -> Tuple[set, Dict[str, float]]:
+    """方法说明：`_analyze_frame_for_incremental_screenshot` 工具方法。
+    执行步骤：
+    1) 步骤1：先将候选帧压到统一分析分辨率，控制 OCR/形状分析成本。
+    2) 步骤2：复用现有 `_extract_ocr_tokens` 与 `_extract_shape_signature`，不重复造轮子。
+    3) 步骤3：若帧为空，则返回稳定的空分析结果。"""
+    if frame is None:
+        return set(), _empty_shape_signature()
+
+    analysis_frame, analysis_roi = _resize_frame_and_roi_for_analysis(frame, roi, analysis_max_width)
+    return _extract_ocr_tokens(analysis_frame, analysis_roi), _extract_shape_signature(analysis_frame, analysis_roi)
+
+
+
+def _find_nearest_frame(
+    frames: List[np.ndarray],
+    timestamps: List[float],
+    target_sec: float,
+) -> Optional[np.ndarray]:
+    """方法说明：`_find_nearest_frame` 工具方法。
+    执行步骤：
+    1) 步骤1：在已有共享帧时间轴里寻找最接近目标时间戳的帧。
+    2) 步骤2：优先复用已降采样帧，减少 worker 再次打开视频的概率。
+    3) 步骤3：找不到可用帧时返回 `None`，交由上层决定是否回退到视频解码。"""
+    if not frames or not timestamps or len(frames) != len(timestamps):
+        return None
+    try:
+        best_idx = min(range(len(timestamps)), key=lambda idx: abs(float(timestamps[idx]) - float(target_sec)))
+    except Exception:
+        return None
+    if best_idx < 0 or best_idx >= len(frames):
+        return None
+    return frames[best_idx]
+
+
+
+def _strip_private_screenshot_fields(screenshots: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """方法说明：`_strip_private_screenshot_fields` 工具方法。
+    执行步骤：
+    1) 步骤1：移除 worker 内部临时字段，避免泄漏实现细节到返回结果。
+    2) 步骤2：仅清理以下划线开头的分析期字段，不影响业务字段。
+    3) 步骤3：返回适合持久化与后续链路消费的截图结果。"""
+    cleaned: List[Dict[str, Any]] = []
+    for item in screenshots:
+        if not isinstance(item, dict):
+            continue
+        cleaned.append({k: v for k, v in item.items() if not str(k).startswith('_')})
+    return cleaned
+
+
 def _get_route_roi(
     video_path: str,
     start_sec: float,
@@ -1199,7 +1302,7 @@ def run_select_screenshots_for_range_task(
         )
 
         enhanced_candidates: List[Dict[str, Any]] = []
-        if screenshots:
+        if screenshots and effective_video_path:
             cap, _, _ = open_video_capture_with_fallback(
                 effective_video_path,
                 timeout_sec=max(5, int(decode_open_timeout_sec)),
@@ -1220,12 +1323,11 @@ def run_select_screenshots_for_range_task(
                             if ok and sampled is not None:
                                 frame = sampled
 
-                        ocr_tokens = _extract_ocr_tokens(frame, route_roi) if frame is not None else set()
-                        shape_sig = _extract_shape_signature(frame, route_roi) if frame is not None else {
-                            "rect_count": 0,
-                            "component_count": 0,
-                            "edge_density": 0.0,
-                        }
+                        ocr_tokens, shape_sig = _analyze_frame_for_incremental_screenshot(
+                            frame,
+                            route_roi,
+                            analysis_max_width,
+                        )
                         enriched = dict(item)
                         enriched["ocr_tokens"] = sorted(ocr_tokens)
                         enriched["shape_signature"] = shape_sig
@@ -1282,6 +1384,7 @@ def run_coarse_fine_screenshot_task(
     fine_shm_frames_by_island: List[Dict[float, dict]] = None,
     video_path: str = "",
     stable_islands_override: Optional[List[Tuple[float, float]]] = None,
+    analysis_max_width: int = 640,
     decode_open_timeout_sec: int = 30,
     decode_allow_inline_transcode: bool = False,
     decode_enable_async_transcode: bool = True,
@@ -1403,78 +1506,89 @@ def run_coarse_fine_screenshot_task(
                             used_shm_names.add(str(shm_name))
                 
                 if not fine_frames:
-                    # Fallback: 浣跨敤宀涗腑鐐?
+                    fallback_ts = (island["start_sec"] + island["end_sec"]) / 2
                     screenshots.append({
-                        "timestamp_sec": (island["start_sec"] + island["end_sec"]) / 2,
+                        "timestamp_sec": fallback_ts,
                         "island_index": island_idx,
                         "score": 0.0,
                         "island_start": island["start_sec"],
-                        "island_end": island["end_sec"]
+                        "island_end": island["end_sec"],
+                        "_analysis_frame": _find_nearest_frame(coarse_frames, coarse_timestamps, fallback_ts),
                     })
                     continue
                 
-                best_ts, best_score = selector.select_best_frame_from_frames(
+                best_ts, best_score, best_idx = selector.select_best_frame_from_frames(
                     frames=fine_frames,
                     timestamps=fine_timestamps,
                     roi=route_roi,
+                    return_index=True,
                 )
+                analysis_frame = fine_frames[best_idx] if 0 <= int(best_idx) < len(fine_frames) else None
                 
                 screenshots.append({
                     "timestamp_sec": best_ts,
                     "island_index": island_idx,
                     "score": float(best_score),
                     "island_start": island["start_sec"],
-                    "island_end": island["end_sec"]
+                    "island_end": island["end_sec"],
+                    "_analysis_frame": analysis_frame,
                 })
         else:
             # Encoding fixed: corrupted comment cleaned.
             for island_idx, island in enumerate(stable_islands):
+                fallback_ts = (island["start_sec"] + island["end_sec"]) / 2
                 screenshots.append({
-                    "timestamp_sec": (island["start_sec"] + island["end_sec"]) / 2,
+                    "timestamp_sec": fallback_ts,
                     "island_index": island_idx,
                     "score": 0.5,
                     "island_start": island["start_sec"],
-                    "island_end": island["end_sec"]
+                    "island_end": island["end_sec"],
+                    "_analysis_frame": _find_nearest_frame(coarse_frames, coarse_timestamps, fallback_ts),
                 })
         
-        if screenshots and effective_video_path:
-            cap, _, _ = open_video_capture_with_fallback(
-                effective_video_path,
-                timeout_sec=max(5, int(decode_open_timeout_sec)),
-                logger=logger,
-                allow_inline_transcode=bool(decode_allow_inline_transcode),
-                enable_async_transcode=bool(decode_enable_async_transcode),
-            )
+        if screenshots:
+            need_video_fallback = any(item.get("_analysis_frame") is None for item in screenshots if isinstance(item, dict))
+            cap = None
             enhanced_candidates: List[Dict[str, Any]] = []
             try:
-                if cap is not None:
-                    fps_val = float(cap.get(cv2.CAP_PROP_FPS) or 30.0)
-                    for item in screenshots:
-                        ts = float(item.get("timestamp_sec", (start_sec + end_sec) / 2.0))
-                        frame = None
-                        if cap.isOpened() and fps_val > 0:
-                            frame_idx = int(max(0.0, ts) * fps_val)
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-                            ok, sampled = cap.read()
-                            if ok and sampled is not None:
-                                frame = sampled
+                if need_video_fallback and effective_video_path:
+                    cap, _, _ = open_video_capture_with_fallback(
+                        effective_video_path,
+                        timeout_sec=max(5, int(decode_open_timeout_sec)),
+                        logger=logger,
+                        allow_inline_transcode=bool(decode_allow_inline_transcode),
+                        enable_async_transcode=bool(decode_enable_async_transcode),
+                    )
+                fps_val = float(cap.get(cv2.CAP_PROP_FPS) or 30.0) if cap is not None else 0.0
+                for item in screenshots:
+                    ts = float(item.get("timestamp_sec", (start_sec + end_sec) / 2.0))
+                    frame = item.get("_analysis_frame") if isinstance(item, dict) else None
+                    if frame is None:
+                        frame = _find_nearest_frame(coarse_frames, coarse_timestamps, ts)
+                    if frame is None and cap is not None and cap.isOpened() and fps_val > 0:
+                        frame_idx = int(max(0.0, ts) * fps_val)
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ok, sampled = cap.read()
+                        if ok and sampled is not None:
+                            frame = sampled
 
-                        ocr_tokens = _extract_ocr_tokens(frame, route_roi) if frame is not None else set()
-                        shape_sig = _extract_shape_signature(frame, route_roi) if frame is not None else {
-                            "rect_count": 0,
-                            "component_count": 0,
-                            "edge_density": 0.0,
-                        }
-                        enriched = dict(item)
-                        enriched["ocr_tokens"] = sorted(ocr_tokens)
-                        enriched["shape_signature"] = shape_sig
-                        enhanced_candidates.append(enriched)
+                    ocr_tokens, shape_sig = _analyze_frame_for_incremental_screenshot(
+                        frame,
+                        route_roi,
+                        analysis_max_width,
+                    )
+                    enriched = {k: v for k, v in dict(item).items() if not str(k).startswith('_')}
+                    enriched["ocr_tokens"] = sorted(ocr_tokens)
+                    enriched["shape_signature"] = shape_sig
+                    enhanced_candidates.append(enriched)
             finally:
                 if cap is not None:
                     cap.release()
 
             if enhanced_candidates:
                 screenshots = _filter_incremental_screenshots(enhanced_candidates)
+            else:
+                screenshots = _strip_private_screenshot_fields(screenshots)
 
         logger.info(
             f"鉁?Coarse-Fine complete for {unit_id}: "
