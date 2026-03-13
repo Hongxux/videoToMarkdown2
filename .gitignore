@@ -138,3 +138,15 @@ third_party/**
 !third_party/README.md
 generated_grpc/
 contracts/gen/python/
+
+# =========================
+# 本地开发产物/工具（不入库）
+# =========================
+.android/
+.gradle-home/
+Download-Simply-Videos-From-YouTube/
+cookies (1).txt
+docker-compose.dev.yml
+scripts/dev/
+services/java-orchestrator/src/test/java/com/mvp/module2/fusion/scheduler/
+tools/bgutil-ytdlp-pot-provider/

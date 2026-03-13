@@ -68,6 +68,22 @@ class _RecorderAugmentLLMClient:
         return "", None, None
 
 
+class _RecordingStructuredLLMClient:
+    def __init__(self, response_text: str):
+        self.response_text = response_text
+        self.calls = []
+
+    async def complete_text(self, prompt: str, system_message: str = None, model: str = None):
+        self.calls.append(
+            {
+                "prompt": prompt,
+                "system_message": system_message or "",
+                "model": model,
+            }
+        )
+        return self.response_text, None, None
+
+
 def _write_result_json(path: Path, sections):
     groups = []
     for idx, section in enumerate(sections, start=1):
@@ -1370,6 +1386,74 @@ def test_process_non_tutorial_uses_placeholder_replacement_and_video_tail(tmp_pa
     assert "> Images **Keyframes**" not in markdown
 
 
+def test_process_non_tutorial_calls_preserve_prompt_after_media_backfill_and_syncs_main_content(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU250_img_01.png"
+    clip_path = assets_dir / "SU250_clip_01.mp4"
+    img_path.write_bytes(b"img")
+    clip_path.write_bytes(b"clip")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU250",
+                "title": "Process Preserve Unit",
+                "knowledge_type": "process",
+                "body_text": "process concept body",
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU250_img_01",
+                            "img_path": str(img_path),
+                            "img_description": "open menu",
+                        }
+                    ],
+                    "clip": str(clip_path),
+                    "clips": [str(clip_path)],
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    recorder = _RecordingStructuredLLMClient(
+        "final process body\n![[assets/SU250_img_01.png]]\n![[assets/SU250_clip_01.mp4]]"
+    )
+    enhancer._llm_client = recorder
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU250": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert len(recorder.calls) == 1
+    assert "![[assets/SU250_img_01.png]]" in recorder.calls[0]["prompt"]
+    assert "![[assets/SU250_clip_01.mp4]]" in recorder.calls[0]["prompt"]
+    assert "[KEYFRAME_" not in recorder.calls[0]["prompt"]
+    assert "[CLIP_" not in recorder.calls[0]["prompt"]
+    assert "final process body" in markdown
+    result_obj = json.loads(result_path.read_text(encoding="utf-8"))
+    synced_unit = result_obj["knowledge_groups"][0]["units"][0]
+    assert synced_unit["body_text"] == "final process body\n![[assets/SU250_img_01.png]]\n![[assets/SU250_clip_01.mp4]]"
+    assert synced_unit["main_content"] == "final process body\n![[assets/SU250_img_01.png]]\n![[assets/SU250_clip_01.mp4]]"
+
+
 def test_process_non_tutorial_renders_multiple_videos(tmp_path, monkeypatch):
     assets_dir = tmp_path / "assets"
     assets_dir.mkdir(parents=True, exist_ok=True)
@@ -2280,3 +2364,111 @@ def test_concrete_clip_placeholder_is_replaced_with_alias_embed(tmp_path, monkey
 
     assert "[CLIP_1]" not in markdown
     assert "![[assets/SU990_clip_concrete_seg_01_clip_01_demo.mp4|Concrete clip demo]]" in markdown
+
+
+def test_concrete_calls_preserve_prompt_after_media_backfill_and_syncs_main_content(tmp_path, monkeypatch):
+    assets_dir = tmp_path / "assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    img_path = assets_dir / "SU991_key_01.png"
+    img_path.write_bytes(b"img")
+
+    result_path = tmp_path / "result.json"
+    _write_result_json(
+        result_path,
+        [
+            {
+                "unit_id": "SU991",
+                "title": "Concrete Preserve Unit",
+                "knowledge_type": "concrete",
+                "body_text": "legacy body",
+                "_vl_concrete_segments": [
+                    {
+                        "segment_id": 1,
+                        "main_content": "Review the concrete frame [KEYFRAME_1]",
+                        "instructional_keyframes": [
+                            {"timestamp_sec": 2.0, "frame_reason": "canonical frame"}
+                        ],
+                    }
+                ],
+                "mult_steps": False,
+                "instructional_steps": [],
+                "materials": {
+                    "screenshots": [str(img_path)],
+                    "screenshot_items": [
+                        {
+                            "img_id": "SU991_img_01",
+                            "source_id": "SU991/SU991_ss_concrete_seg_01_key_01",
+                            "img_path": str(img_path),
+                            "img_description": "canonical frame",
+                            "frame_reason": "canonical frame",
+                            "timestamp_sec": 2.0,
+                        }
+                    ],
+                    "clip": "",
+                    "action_classifications": [],
+                },
+            }
+        ],
+    )
+    semantic_payload = {
+        "knowledge_groups": [
+            {
+                "group_name": "Concrete Preserve Unit",
+                "reason": "test",
+                "units": [
+                    {
+                        "unit_id": "SU991",
+                        "knowledge_type": "concrete",
+                        "knowledge_topic": "Concrete Preserve Unit",
+                        "full_text": "legacy full_text",
+                        "_vl_concrete_segments": [
+                            {
+                                "segment_id": 1,
+                                "main_content": "Review the concrete frame [KEYFRAME_1]",
+                                "instructional_keyframes": [
+                                    {"timestamp_sec": 2.0, "frame_reason": "canonical frame"}
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+    semantic_path = tmp_path / "semantic_units_phase2a.json"
+    semantic_path.write_text(
+        json.dumps(semantic_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    enhancer = MarkdownEnhancer()
+    enhancer._enabled = True
+    recorder = _RecordingStructuredLLMClient(
+        "final concrete body\n![[assets/SU991_key_01.png|canonical frame]]"
+    )
+    enhancer._llm_client = recorder
+
+    async def _fake_hierarchy(sections, subject):
+        return {"SU991": {"level": 2, "parent_id": None}}
+
+    monkeypatch.setattr(enhancer, "_classify_hierarchy", _fake_hierarchy)
+
+    markdown = asyncio.run(
+        enhancer.enhance(
+            str(result_path),
+            subject="test",
+            markdown_dir=str(tmp_path),
+        )
+    )
+
+    assert len(recorder.calls) == 1
+    assert "![[assets/SU991_key_01.png|canonical frame]]" in recorder.calls[0]["prompt"]
+    assert "[KEYFRAME_1]" not in recorder.calls[0]["prompt"]
+    assert "final concrete body" in markdown
+    result_obj = json.loads(result_path.read_text(encoding="utf-8"))
+    synced_unit = result_obj["knowledge_groups"][0]["units"][0]
+    assert synced_unit["body_text"] == "final concrete body\n![[assets/SU991_key_01.png|canonical frame]]"
+    assert synced_unit["main_content"] == "final concrete body\n![[assets/SU991_key_01.png|canonical frame]]"
+    semantic_obj = json.loads(semantic_path.read_text(encoding="utf-8"))
+    semantic_unit = semantic_obj["knowledge_groups"][0]["units"][0]
+    assert semantic_unit["main_content"] == "final concrete body\n![[assets/SU991_key_01.png|canonical frame]]"

@@ -56,7 +56,7 @@ public class CategoryClassificationResultsRepository {
             if (taskPath.isEmpty()) {
                 continue;
             }
-            String collectionPath = snapshot.effectiveBindings.get(taskPath);
+            String collectionPath = snapshot.archivedBindings.get(taskPath);
             if (collectionPath == null || collectionPath.isBlank()) {
                 continue;
             }
@@ -65,19 +65,67 @@ public class CategoryClassificationResultsRepository {
         return result;
     }
 
+    public Map<String, CategoryAssignment> findCategoryAssignmentsByTaskPaths(Collection<String> rawTaskPaths) {
+        if (rawTaskPaths == null || rawTaskPaths.isEmpty()) {
+            return Map.of();
+        }
+        Snapshot snapshot = loadSnapshot();
+        Map<String, CategoryAssignment> result = new LinkedHashMap<>();
+        for (String rawTaskPath : rawTaskPaths) {
+            String taskPath = TaskManualCollectionRepository.normalizeTaskPath(rawTaskPath);
+            if (taskPath.isEmpty()) {
+                continue;
+            }
+            boolean archived = snapshot.archivedTaskPaths.containsKey(taskPath);
+            String categoryPath = archived
+                    ? firstNonBlank(snapshot.archivedBindings.get(taskPath), snapshot.automaticBindings.get(taskPath))
+                    : snapshot.automaticBindings.get(taskPath);
+            String archivedAt = archived ? snapshot.archivedTaskPaths.getOrDefault(taskPath, "") : "";
+            boolean manualBinding = archived && snapshot.explicitBindings.containsKey(taskPath);
+            result.put(taskPath, new CategoryAssignment(
+                    TaskManualCollectionRepository.normalizeCollectionPath(categoryPath),
+                    archived,
+                    archivedAt,
+                    manualBinding
+            ));
+        }
+        return result;
+    }
+
     public Map<String, String> listAllBindings() {
-        return loadSnapshot().effectiveBindings;
+        return loadSnapshot().archivedBindings;
+    }
+
+    public Map<String, String> listAutomaticBindings() {
+        return loadSnapshot().automaticBindings;
+    }
+
+    public Map<String, String> listArchivedTaskPaths() {
+        return loadSnapshot().archivedTaskPaths;
     }
 
     public int replaceAllBindings(Map<String, String> rawBindings) {
-        Map<String, String> normalized = normalizeBindings(rawBindings);
+        Map<String, String> normalizedArchivedBindings = normalizeBindings(rawBindings);
         ObjectNode root = readOrCreateRoot();
+        Map<String, String> automaticBindings = readAutomaticBindings(root.path("results"));
+        Map<String, String> existingArchivedTaskPaths = readArchivedTaskPaths(root.path("archivedTaskPaths"));
+        String updatedAt = Instant.now().toString();
+
         ObjectNode bindingsNode = objectMapper.createObjectNode();
-        normalized.forEach(bindingsNode::put);
+        ObjectNode archivedTaskPathsNode = objectMapper.createObjectNode();
+        normalizedArchivedBindings.forEach((taskPath, collectionPath) -> {
+            String automaticPath = TaskManualCollectionRepository.normalizeCollectionPath(automaticBindings.get(taskPath));
+            if (automaticPath.isEmpty() || !automaticPath.equals(collectionPath)) {
+                bindingsNode.put(taskPath, collectionPath);
+            }
+            String archivedAt = firstNonBlank(existingArchivedTaskPaths.get(taskPath), updatedAt);
+            archivedTaskPathsNode.put(taskPath, archivedAt);
+        });
         root.set("collectionBindings", bindingsNode);
-        root.put("updated_at", Instant.now().toString());
+        root.set("archivedTaskPaths", archivedTaskPathsNode);
+        root.put("updated_at", updatedAt);
         writeRoot(root);
-        return normalized.size();
+        return normalizedArchivedBindings.size();
     }
 
     public long getLastUpdatedEpochMillis() {
@@ -111,12 +159,22 @@ public class CategoryClassificationResultsRepository {
         ObjectNode root = readOrCreateRoot();
         Map<String, String> explicitBindings = readCollectionBindings(root.path("collectionBindings"));
         Map<String, String> automaticBindings = readAutomaticBindings(root.path("results"));
-        Map<String, String> effectiveBindings = new LinkedHashMap<>(automaticBindings);
-        explicitBindings.forEach(effectiveBindings::put);
+        Map<String, String> archivedTaskPaths = readArchivedTaskPaths(root.path("archivedTaskPaths"));
+        Map<String, String> archivedBindings = new LinkedHashMap<>();
+        archivedTaskPaths.forEach((taskPath, archivedAt) -> {
+            String resolvedPath = TaskManualCollectionRepository.normalizeCollectionPath(
+                    firstNonBlank(explicitBindings.get(taskPath), automaticBindings.get(taskPath))
+            );
+            if (resolvedPath.isEmpty()) {
+                return;
+            }
+            archivedBindings.put(taskPath, resolvedPath);
+        });
         return new Snapshot(
                 Map.copyOf(explicitBindings),
                 Map.copyOf(automaticBindings),
-                Map.copyOf(effectiveBindings)
+                Map.copyOf(archivedTaskPaths),
+                Map.copyOf(archivedBindings)
         );
     }
 
@@ -162,6 +220,28 @@ public class CategoryClassificationResultsRepository {
             bindings.put(taskPath, collectionPath);
         }
         return bindings;
+    }
+
+    private Map<String, String> readArchivedTaskPaths(JsonNode archivedNode) {
+        Map<String, String> archivedTaskPaths = new LinkedHashMap<>();
+        if (!(archivedNode instanceof ObjectNode objectNode)) {
+            return archivedTaskPaths;
+        }
+        objectNode.fields().forEachRemaining(entry -> {
+            String taskPath = TaskManualCollectionRepository.normalizeTaskPath(entry.getKey());
+            if (taskPath.isEmpty()) {
+                return;
+            }
+            JsonNode value = entry.getValue();
+            String archivedAt = "";
+            if (value != null && value.isTextual()) {
+                archivedAt = value.asText("");
+            } else if (value != null && value.asBoolean(false)) {
+                archivedAt = Instant.EPOCH.toString();
+            }
+            archivedTaskPaths.put(taskPath, firstNonBlank(archivedAt, Instant.EPOCH.toString()));
+        });
+        return archivedTaskPaths;
     }
 
     private Map<String, String> normalizeBindings(Map<String, String> rawBindings) {
@@ -268,10 +348,19 @@ public class CategoryClassificationResultsRepository {
         return "";
     }
 
+    public record CategoryAssignment(
+            String categoryPath,
+            boolean archived,
+            String archivedAt,
+            boolean manualBinding
+    ) {
+    }
+
     private record Snapshot(
             Map<String, String> explicitBindings,
             Map<String, String> automaticBindings,
-            Map<String, String> effectiveBindings
+            Map<String, String> archivedTaskPaths,
+            Map<String, String> archivedBindings
     ) {
     }
 }

@@ -2080,7 +2080,7 @@
             gap: 6px;
         }
         .book-probe-content {
-            --book-probe-preview-width: 360px;
+            --book-probe-preview-width: 640px;
             display: grid;
             grid-template-columns: minmax(0, 1fr) 12px minmax(260px, var(--book-probe-preview-width));
             gap: 0;
@@ -2154,6 +2154,21 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            flex-wrap: wrap;
+        }
+        .book-probe-preview-toolbar-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-left: auto;
+        }
+        .book-probe-preview-zoom-label {
+            min-width: 58px;
+            font-size: 11px;
+            color: #334155;
+            text-align: center;
+            line-height: 1.45;
         }
         .book-probe-preview-page-meta {
             flex: 1;
@@ -2169,7 +2184,7 @@
         }
         .book-probe-preview-pdf-wrap {
             position: relative;
-            min-height: 220px;
+            min-height: 320px;
             border-radius: 10px;
             border: 1px solid rgba(148, 163, 184, 0.35);
             background: rgba(248, 250, 252, 0.82);
@@ -2177,10 +2192,24 @@
         }
         .book-probe-preview-pdf-frame {
             width: 100%;
-            min-height: 220px;
+            min-height: 320px;
             height: 100%;
             border: 0;
             background: #ffffff;
+        }
+        .book-probe-preview-pdf-wrap:fullscreen {
+            width: 100vw;
+            height: 100vh !important;
+            border-radius: 0;
+            border: 0;
+            background: #0f172a;
+        }
+        .book-probe-preview-pdf-wrap:fullscreen .book-probe-preview-pdf-frame {
+            min-height: 100%;
+            height: 100% !important;
+        }
+        .book-probe-preview-pdf-wrap:fullscreen .book-probe-preview-pdf-empty {
+            color: #cbd5e1;
         }
         .book-probe-preview-pdf-empty {
             position: absolute;
@@ -2964,6 +2993,13 @@
                         <button class="btn" id="bookProbePreviewPrevBtn" type="button">Prev</button>
                         <div class="book-probe-preview-page-meta" id="bookProbePreviewPageMeta">Page 1</div>
                         <button class="btn" id="bookProbePreviewNextBtn" type="button">Next</button>
+                        <div class="book-probe-preview-toolbar-actions">
+                            <button class="btn" id="bookProbePreviewZoomOutBtn" type="button">-</button>
+                            <button class="btn" id="bookProbePreviewZoomResetBtn" type="button">Fit</button>
+                            <div class="book-probe-preview-zoom-label" id="bookProbePreviewZoomLabel">Fit</div>
+                            <button class="btn" id="bookProbePreviewZoomInBtn" type="button">+</button>
+                            <button class="btn" id="bookProbePreviewFullscreenBtn" type="button">Full</button>
+                        </div>
                     </div>
                     <button class="btn" id="bookProbeUseCurrentPageBtn" type="button">Use current page as actual start</button>
                     <div class="book-probe-preview-pdf-panel">
@@ -3690,6 +3726,7 @@
     const TOKEN_SELECTION_SUPPRESS_AFTER_DOUBLE_CLICK_MS = 420;
     const state = {
         tasks: [],
+        pendingSubmitTasks: [],
         currentTaskId: null,
         currentTaskTitle: '',
         currentTaskStorageKey: '',
@@ -5652,7 +5689,7 @@
                 return `![](${buildAssetUrl(taskId, path)})`;
             }
             if (isVideoPath(path)) {
-                return `<video playsinline preload="metadata" data-immersive="1" src="${buildAssetUrl(taskId, path)}"></video>`;
+                return `<video playsinline preload="auto" data-immersive="1" src="${buildAssetUrl(taskId, path)}"></video>`;
             }
             if (isMarkdownPath(path)) {
                 const href = buildObsidianNoteHref(path, parsed.noteAnchor);
@@ -5906,8 +5943,9 @@
             state.tasks = data.data;
         } else {
             console.warn('获取故事列表格式异常', data);
-            state.tasks = [];
+        state.tasks = [];
         }
+        state.tasks = dedupeTasksByVideoUrl(state.tasks, { separateArchived: false });
         hydrateTaskManualCollectionsFromTaskPaths(state.tasks || []);
         applyTaskManualCollectionsToStateTasks();
         return state.tasks;
@@ -5926,19 +5964,112 @@
         }, 0);
     }
 
-    function compareTaskSyncOrder(left, right) {
-        const leftOpenedAt = Date.parse(String(left && left.lastOpenedAt || '').trim());
-        const rightOpenedAt = Date.parse(String(right && right.lastOpenedAt || '').trim());
-        const leftCreatedAt = Date.parse(String(left && left.createdAt || '').trim());
-        const rightCreatedAt = Date.parse(String(right && right.createdAt || '').trim());
-        const leftTs = Math.max(Number.isFinite(leftOpenedAt) ? leftOpenedAt : 0, Number.isFinite(leftCreatedAt) ? leftCreatedAt : 0);
-        const rightTs = Math.max(Number.isFinite(rightOpenedAt) ? rightOpenedAt : 0, Number.isFinite(rightCreatedAt) ? rightCreatedAt : 0);
+    function resolveTaskCreatedOrderValue(task) {
+        const createdAt = Date.parse(String(task && task.createdAt || '').trim());
+        if (Number.isFinite(createdAt)) {
+            return createdAt;
+        }
+        const completedAt = Date.parse(String(task && task.completedAt || '').trim());
+        if (Number.isFinite(completedAt)) {
+            return completedAt;
+        }
+        return Number.MAX_SAFE_INTEGER;
+    }
+
+    function compareTaskCreatedOrder(left, right) {
+        const leftTs = resolveTaskCreatedOrderValue(left);
+        const rightTs = resolveTaskCreatedOrderValue(right);
         if (leftTs !== rightTs) {
-            return rightTs - leftTs;
+            return leftTs - rightTs;
         }
         const leftTitle = String(left && (left.title || left.taskId) || '').trim();
         const rightTitle = String(right && (right.title || right.taskId) || '').trim();
         return leftTitle.localeCompare(rightTitle, 'zh-Hans-CN');
+    }
+
+    // 任务去重仅关注视频来源，同一链接只保留一个任务记录。
+    function resolveTaskVideoUrlKey(task, options = {}) {
+        const normalized = normalizeTaskVideoInput(task && task.videoUrl);
+        if (!normalized) {
+            return '';
+        }
+        const separateArchived = !!(options && options.separateArchived === true);
+        if (!separateArchived) {
+            return normalized;
+        }
+        const bucket = isTaskArchived(task) ? 'archived' : 'active';
+        return `${bucket}::${normalized}`;
+    }
+
+    function resolveTaskVideoDedupeTimestamp(task) {
+        const createdAt = Date.parse(String(task && task.createdAt || '').trim());
+        if (Number.isFinite(createdAt)) {
+            return createdAt;
+        }
+        const completedAt = Date.parse(String(task && task.completedAt || '').trim());
+        if (Number.isFinite(completedAt)) {
+            return completedAt;
+        }
+        const lastOpenedAt = Date.parse(String(task && task.lastOpenedAt || '').trim());
+        if (Number.isFinite(lastOpenedAt)) {
+            return lastOpenedAt;
+        }
+        return 0;
+    }
+
+    function resolveTaskVideoDedupeStatusRank(task) {
+        const visual = getTaskStatusVisual(task && task.status);
+        if (visual === 'completed') return 4;
+        if (visual === 'processing') return 3;
+        if (visual === 'queued') return 2;
+        if (visual === 'failed') return 1;
+        if (visual === 'cancelled') return 0;
+        return 0;
+    }
+
+    function pickPreferredTaskForVideoDedup(left, right) {
+        const leftTs = resolveTaskVideoDedupeTimestamp(left);
+        const rightTs = resolveTaskVideoDedupeTimestamp(right);
+        if (leftTs !== rightTs) {
+            return rightTs > leftTs ? right : left;
+        }
+        const leftRank = resolveTaskVideoDedupeStatusRank(left);
+        const rightRank = resolveTaskVideoDedupeStatusRank(right);
+        if (leftRank !== rightRank) {
+            return rightRank > leftRank ? right : left;
+        }
+        const leftId = normalizeTaskId(left && left.taskId);
+        const rightId = normalizeTaskId(right && right.taskId);
+        if (leftId && rightId && leftId !== rightId) {
+            return rightId > leftId ? right : left;
+        }
+        return right;
+    }
+
+    function dedupeTasksByVideoUrl(tasksRaw, options = {}) {
+        const tasks = Array.isArray(tasksRaw) ? tasksRaw : [];
+        if (!tasks.length) {
+            return tasks;
+        }
+        const keyToTask = new Map();
+        const noKeyTasks = [];
+        tasks.forEach((task) => {
+            const key = resolveTaskVideoUrlKey(task, options);
+            if (!key) {
+                noKeyTasks.push(task);
+                return;
+            }
+            const previous = keyToTask.get(key);
+            if (!previous) {
+                keyToTask.set(key, task);
+                return;
+            }
+            const preferred = pickPreferredTaskForVideoDedup(previous, task);
+            if (preferred === task) {
+                keyToTask.set(key, task);
+            }
+        });
+        return Array.from(keyToTask.values()).concat(noKeyTasks);
     }
 
     function mergeTaskRecordsIntoState(incomingTasks, options = {}) {
@@ -5965,7 +6096,9 @@
                 taskId,
             });
         });
-        state.tasks = Array.from(byTaskId.values()).sort(compareTaskSyncOrder);
+        const merged = Array.from(byTaskId.values());
+        const deduped = dedupeTasksByVideoUrl(merged, { separateArchived: false });
+        state.tasks = deduped.sort(compareTaskCreatedOrder);
         hydrateTaskManualCollectionsFromTaskPaths(state.tasks || []);
         applyTaskManualCollectionsToStateTasks();
         return state.tasks;
@@ -6087,6 +6220,21 @@
         return `manual-path-${encodeURIComponent(normalizedPath).replace(/%/g, '_')}`;
     }
 
+    function isTaskArchived(task) {
+        return !!(task && task.archived === true);
+    }
+
+    function resolveTaskCategoryPath(task) {
+        return normalizeCollectionPath(task && (task.categoryPath || task.collectionPath));
+    }
+
+    function resolveTaskArchivePath(task) {
+        if (!isTaskArchived(task)) {
+            return '';
+        }
+        return normalizeCollectionPath(task && task.collectionPath);
+    }
+
     function isManualCollectionTask(task) {
         if (!task || typeof task !== 'object') {
             return false;
@@ -6108,9 +6256,8 @@
         list.forEach((task) => {
             const taskId = normalizeTaskId(task && task.taskId);
             const taskPath = normalizeTaskId(task && task.taskPath);
-            const collectionPath = normalizeCollectionPath(task && task.collectionPath);
-            const source = String(task && task.source || '').trim().toLowerCase();
-            if (!taskId || !taskPath || !collectionPath || (!isManualCollectionTask(task) && source !== 'storage')) {
+            const collectionPath = resolveTaskArchivePath(task);
+            if (!taskId || !taskPath || !collectionPath || !isTaskArchived(task)) {
                 return;
             }
             const segments = splitCollectionPathSegments(collectionPath);
@@ -6209,6 +6356,121 @@
             collectionPath: unique[taskPath],
         }));
         return { bindings };
+    }
+
+    function buildBindingMapFromPayload(payload) {
+        const bindings = payload && Array.isArray(payload.bindings) ? payload.bindings : [];
+        const next = {};
+        bindings.forEach((item) => {
+            const taskPath = normalizeTaskId(item && item.taskPath);
+            const collectionPath = normalizeCollectionPath(item && item.collectionPath);
+            if (!taskPath || !collectionPath) {
+                return;
+            }
+            next[taskPath] = collectionPath;
+        });
+        return next;
+    }
+
+    function summarizeArchivePaths(pathsRaw) {
+        const paths = Array.from(new Set((Array.isArray(pathsRaw) ? pathsRaw : [])
+            .map((one) => normalizeCollectionPath(one))
+            .filter(Boolean)));
+        if (!paths.length) {
+            return '';
+        }
+        if (paths.length === 1) {
+            return paths[0];
+        }
+        const preview = paths.slice(0, 3).join('、');
+        return paths.length > 3 ? `${preview} 等 ${paths.length} 个分类` : preview;
+    }
+
+    async function syncArchiveBindingsByTaskPath(nextBindingMapRaw) {
+        const nextBindingMap = {};
+        Object.keys(nextBindingMapRaw || {}).forEach((taskPathRaw) => {
+            const taskPath = normalizeTaskId(taskPathRaw);
+            const collectionPath = normalizeCollectionPath(nextBindingMapRaw[taskPathRaw]);
+            if (!taskPath || !collectionPath) {
+                return;
+            }
+            nextBindingMap[taskPath] = collectionPath;
+        });
+        const bindings = Object.keys(nextBindingMap).sort().map((taskPath) => ({
+            taskPath,
+            collectionPath: nextBindingMap[taskPath],
+        }));
+        const resp = await fetch(`${API_BASE}/manual-task-collections`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ bindings }),
+        });
+        if (!resp.ok) {
+            const text = await resp.text();
+            throw new Error(text || `HTTP ${resp.status}`);
+        }
+        await fetchTasks();
+        renderTaskList();
+        return bindings.length;
+    }
+
+    async function archiveSelectedTaskListItemsToCategories() {
+        const selected = resolveSelectedTaskListEntities();
+        if (!selected.taskIds.length) {
+            setTaskSummary('请先选择要归档的任务', 'error');
+            return false;
+        }
+        const nextBindingMap = buildBindingMapFromPayload(buildTaskManualCollectionBindingsPayload());
+        const archivedPaths = [];
+        const skippedTitles = [];
+        selected.taskIds.forEach((taskId) => {
+            const task = findTaskById(taskId);
+            const taskPath = normalizeTaskId(task && task.taskPath);
+            const categoryPath = resolveTaskCategoryPath(task);
+            if (!taskPath || !categoryPath) {
+                skippedTitles.push(resolveTaskCardTitle(task) || taskId);
+                return;
+            }
+            nextBindingMap[taskPath] = categoryPath;
+            archivedPaths.push(categoryPath);
+        });
+        if (!archivedPaths.length) {
+            setTaskSummary(`没有可归档的分类路径${skippedTitles.length ? `：${skippedTitles.slice(0, 2).join('、')}` : ''}`, 'error');
+            return false;
+        }
+        await syncArchiveBindingsByTaskPath(nextBindingMap);
+        const summaryPath = summarizeArchivePaths(archivedPaths);
+        const skippedSuffix = skippedTitles.length ? `；跳过 ${skippedTitles.length} 个未分类任务` : '';
+        setTaskSummary(`已归档 ${archivedPaths.length} 个任务到「${summaryPath}」${skippedSuffix}`);
+        return true;
+    }
+
+    async function unarchiveSelectedTaskListItems() {
+        const selected = resolveSelectedTaskListEntities();
+        if (!selected.taskIds.length) {
+            setTaskSummary('请先选择要取消归档的任务', 'error');
+            return false;
+        }
+        const nextBindingMap = buildBindingMapFromPayload(buildTaskManualCollectionBindingsPayload());
+        let removedCount = 0;
+        selected.taskIds.forEach((taskId) => {
+            const task = findTaskById(taskId);
+            const taskPath = normalizeTaskId(task && task.taskPath);
+            if (!taskPath || !Object.prototype.hasOwnProperty.call(nextBindingMap, taskPath)) {
+                return;
+            }
+            delete nextBindingMap[taskPath];
+            removedCount += 1;
+        });
+        if (!removedCount) {
+            setTaskSummary('所选任务当前都未归档', 'error');
+            return false;
+        }
+        await syncArchiveBindingsByTaskPath(nextBindingMap);
+        setTaskSummary(`已取消归档 ${removedCount} 个任务`);
+        return true;
     }
 
     async function pushTaskManualCollectionsToBackend() {
@@ -6848,7 +7110,11 @@
         }
         const taskId = normalizeTaskId(task.taskId);
         const normalizedVideoUrl = normalizeTaskVideoInput(task.videoUrl);
-        const displayInput = extractVideoInputDisplay(normalizedVideoUrl) || normalizedVideoUrl;
+        const resolvedTitle = normalizeTaskTitleText(resolveTaskCardTitle(task));
+        const fallbackDisplay = extractVideoInputDisplay(normalizedVideoUrl);
+        const displayInput = (resolvedTitle && resolvedTitle !== '未命名任务')
+            ? resolvedTitle
+            : (fallbackDisplay || '该链接');
         const collectionId = normalizeCollectionId(task.collectionId);
         const collectionTitle = collectionId
             ? (resolveTaskCollectionTitleById(collectionId) || String(task.collectionTitle || '').trim() || TASK_COLLECTION_DEFAULT_TITLE)
@@ -6987,6 +7253,14 @@
         if (!action) {
             return;
         }
+        if (action === 'archive_selected_tasks') {
+            await archiveSelectedTaskListItemsToCategories();
+            return;
+        }
+        if (action === 'unarchive_selected_tasks') {
+            await unarchiveSelectedTaskListItems();
+            return;
+        }
         if (action === 'merge_into_collection') {
             mergeSelectedTasksIntoCollection(payload || {});
             return;
@@ -7113,9 +7387,9 @@
         if (!raw) {
             return '';
         }
-        const bvId = extractBvId(raw);
-        if (bvId) {
-            return bvId;
+        const rawBv = extractBvId(raw);
+        if (rawBv && rawBv.toLowerCase() === raw.toLowerCase()) {
+            return '';
         }
         if (/^https?:\/\//i.test(raw)) {
             try {
@@ -7130,6 +7404,9 @@
                 }
                 const segments = path.split('/').filter(Boolean);
                 const tail = segments.length > 0 ? segments[segments.length - 1] : '';
+                if (tail && extractBvId(tail)) {
+                    return host;
+                }
                 return tail ? `${host}/${tail}` : host;
             } catch (_error) {
                 return raw;
@@ -7154,7 +7431,11 @@
         if (metaTitle) {
             return metaTitle;
         }
-        return normalizeTaskTitleText(task && task.taskId) || '未命名任务';
+        const videoDisplay = extractVideoInputDisplay(task && task.videoUrl);
+        if (videoDisplay) {
+            return videoDisplay;
+        }
+        return '未命名任务';
     }
 
     function normalizeTaskTitleSource(value) {
@@ -7573,7 +7854,9 @@
         const sourceIcon = buildTaskSourceIconSvg(sourceKind);
         const compactId = escapeHtml(compactTaskId(taskIdRaw));
         const compactTime = escapeHtml(formatTaskCardTime(task && task.createdAt));
-        const metaQuiet = compactTime ? `${compactId} · ${compactTime}` : compactId;
+        const videoDisplay = escapeHtml(extractVideoInputDisplay(task && task.videoUrl));
+        const metaBase = videoDisplay || compactId;
+        const metaQuiet = compactTime ? `${metaBase} · ${compactTime}` : metaBase;
         const collectionTitleRaw = String(task && (task.collectionTitle || task.collectionId || '') || '').trim();
         const collectionChip = collectionTitleRaw
             ? `<span class="task-collection-chip" title="${escapeHtml(collectionTitleRaw)}">${escapeHtml(collectionTitleRaw)}</span>`
@@ -8302,13 +8585,14 @@
         if (taskIndex >= 0) {
             nextTasks.splice(taskIndex, 1, nextTask);
         } else {
-            nextTasks.unshift(nextTask);
+            nextTasks.push(nextTask);
         }
-        state.tasks = nextTasks;
+        const deduped = dedupeTasksByVideoUrl(nextTasks, { separateArchived: false });
+        state.tasks = deduped.sort(compareTaskCreatedOrder);
         const shouldRenderLiveUpdate = !document.hidden
             && (state.currentView === 'tasks' || state.currentTaskId === taskId);
         if (shouldRenderLiveUpdate) {
-            applyTaskListMotionDiff(previousTasks, nextTasks);
+            applyTaskListMotionDiff(previousTasks, state.tasks || []);
             renderTaskList();
         }
         if (state.currentTaskId === taskId && getTaskStatusVisual(nextTask.status) === 'completed') {
@@ -8875,12 +9159,14 @@
                     return null;
                 }
                 const outlineIndex = String(episode && episode.outlineIndex || '').trim();
+                const baseSectionSelector = String(episode && episode.baseSectionSelector || '').trim();
                 const startPage = Number(episode && episode.startPage);
                 const endPage = Number(episode && episode.endPage);
                 const title = String(episode && episode.title || '').trim();
                 return {
                     key: `${selector}#${index}`,
                     sectionSelector: selector,
+                    baseSectionSelector: baseSectionSelector || selector,
                     outlineIndex: outlineIndex || `Section-${index + 1}`,
                     title: title || `章节 ${index + 1}`,
                     startPage: Number.isFinite(startPage) && startPage > 0 ? Math.floor(startPage) : -1,
@@ -9272,13 +9558,14 @@
         return source;
     }
 
-    function buildBookProbePdfPageUrl(baseUrl, pageNo) {
+    function buildBookProbePdfPageUrl(baseUrl, pageNo, zoomValue = 'page-fit') {
         const normalizedPage = Math.max(1, normalizeBookProbeInt(pageNo, 1));
         const clean = String(baseUrl || '').trim().replace(/#.*$/, '');
         if (!clean) {
             return '';
         }
-        return `${clean}#page=${normalizedPage}&zoom=page-fit`;
+        const normalizedZoom = String(zoomValue || 'page-fit').trim() || 'page-fit';
+        return `${clean}#page=${normalizedPage}&zoom=${normalizedZoom}`;
     }
 
     async function openBookProbeSheet(probePayload, options = {}) {
@@ -9298,6 +9585,11 @@
         const previewPrevBtn = document.getElementById('bookProbePreviewPrevBtn');
         const previewNextBtn = document.getElementById('bookProbePreviewNextBtn');
         const previewPageMeta = document.getElementById('bookProbePreviewPageMeta');
+        const previewZoomOutBtn = document.getElementById('bookProbePreviewZoomOutBtn');
+        const previewZoomResetBtn = document.getElementById('bookProbePreviewZoomResetBtn');
+        const previewZoomLabel = document.getElementById('bookProbePreviewZoomLabel');
+        const previewZoomInBtn = document.getElementById('bookProbePreviewZoomInBtn');
+        const previewFullscreenBtn = document.getElementById('bookProbePreviewFullscreenBtn');
         const useCurrentPageBtn = document.getElementById('bookProbeUseCurrentPageBtn');
         const previewPdfWrap = document.getElementById('bookProbePdfWrap');
         const previewPdfFrame = document.getElementById('bookProbePdfFrame');
@@ -9317,6 +9609,7 @@
         const selectedEpisodeKeys = new Set(episodes.map((item) => item.key));
         const collapsedTreeKeys = probeTreeState.collapsedTreeKeys;
         const episodeByKey = new Map(episodes.map((item) => [item.key, item]));
+        const episodeOrderByKey = new Map(episodes.map((item, index) => [item.key, index]));
         const treeSelectionLookup = buildBookProbeTreeSelectionLookup(treeNodes);
         let focusedEpisodeKey = episodes.length ? episodes[0].key : '';
         const resolveFallbackFocusedEpisodeKey = () => (
@@ -9325,6 +9618,40 @@
                 : (episodes[0] && episodes[0].key ? episodes[0].key : '')
         );
         const displayPageShift = resolveProbeDisplayPageShift(probePayload);
+        const getSelectedItemsInRangeOrder = () => (
+            Array.from(selectedEpisodeKeys)
+                .map((episodeKey) => episodeByKey.get(episodeKey))
+                .filter(Boolean)
+                .sort((left, right) => {
+                    const leftOrder = episodeOrderByKey.has(left.key) ? episodeOrderByKey.get(left.key) : Number.MAX_SAFE_INTEGER;
+                    const rightOrder = episodeOrderByKey.has(right.key) ? episodeOrderByKey.get(right.key) : Number.MAX_SAFE_INTEGER;
+                    return leftOrder - rightOrder;
+                })
+        );
+        const buildSelectedRangePayload = () => {
+            const orderedItems = getSelectedItemsInRangeOrder();
+            if (!orderedItems.length) {
+                return null;
+            }
+            const firstItem = orderedItems[0];
+            const lastItem = orderedItems[orderedItems.length - 1];
+            const startToken = String(firstItem.outlineIndex || firstItem.sectionSelector || '').trim();
+            const endToken = String(lastItem.outlineIndex || lastItem.sectionSelector || '').trim();
+            const rangeText = startToken && endToken && startToken !== endToken
+                ? `${startToken} -> ${endToken}`
+                : (startToken || endToken || '');
+            const sectionSelector = startToken && endToken
+                ? (startToken === endToken ? startToken : `${startToken}-${endToken}`)
+                : String(firstItem.sectionSelector || '').trim();
+            if (!sectionSelector) {
+                return null;
+            }
+            return {
+                sectionSelector,
+                rangeText: rangeText || sectionSelector,
+                selectedCount: orderedItems.length,
+            };
+        };
 
         const detectedStartPage = Number(probePayload && probePayload.detectedStartPage);
         const confirmedStartPage = Number(probePayload && probePayload.confirmedStartPage);
@@ -9347,8 +9674,10 @@
         const previewPdfEnabled = !!previewPdfSource && isPdfLikeSource(previewPdfSource, probePayload, options);
         let previewPdfPage = Math.max(1, defaultStartPage);
         let lastFocusedEpisodeKeyForPreview = '';
-        const previewHeightStorageKey = 'book_probe_pdf_preview_height_v2';
-        const previewWidthStorageKey = 'book_probe_pdf_preview_width_v1';
+        const previewHeightStorageKey = 'book_probe_pdf_preview_height_v3';
+        const previewWidthStorageKey = 'book_probe_pdf_preview_width_v2';
+        const previewZoomStorageKey = 'book_probe_pdf_preview_zoom_v1';
+        const previewZoomLevels = ['page-fit', 'page-width', '125', '150', '200'];
         const readStoredPreviewSize = (storageKey) => {
             try {
                 return localStorage.getItem(storageKey) || '';
@@ -9359,8 +9688,9 @@
         const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
         const parsePreviewHeight = (candidate) => {
             const value = Number(candidate);
-            if (!Number.isFinite(value)) return 360;
-            return clampNumber(Math.floor(value), 220, 860);
+            const defaultHeight = clampNumber(Math.floor(window.innerHeight * 0.74), 420, 1040);
+            if (!Number.isFinite(value)) return defaultHeight;
+            return clampNumber(Math.floor(value), 320, 1200);
         };
         const resolvePreviewWidthBounds = () => {
             const minWidth = 260;
@@ -9382,15 +9712,28 @@
             const bounds = resolvePreviewWidthBounds();
             const value = Number(candidate);
             if (!Number.isFinite(value)) {
-                return clampNumber(360, bounds.minWidth, bounds.maxWidth);
+                return clampNumber(bounds.maxWidth, bounds.minWidth, bounds.maxWidth);
             }
             return clampNumber(Math.floor(value), bounds.minWidth, bounds.maxWidth);
+        };
+        const parsePreviewZoomIndex = (candidate) => {
+            const normalized = String(candidate || '').trim();
+            const index = previewZoomLevels.indexOf(normalized);
+            return index >= 0 ? index : 0;
+        };
+        const formatPreviewZoomLabel = (zoomValue) => {
+            if (zoomValue === 'page-fit') return 'Fit';
+            if (zoomValue === 'page-width') return 'Width';
+            return `${zoomValue}%`;
         };
         let previewFrameHeight = parsePreviewHeight(
             readStoredPreviewSize(previewHeightStorageKey)
         );
         let previewPanelWidth = parsePreviewWidth(
             readStoredPreviewSize(previewWidthStorageKey)
+        );
+        let previewZoomIndex = parsePreviewZoomIndex(
+            readStoredPreviewSize(previewZoomStorageKey)
         );
         const applyPreviewFrameHeight = (heightCandidate, persist = true) => {
             previewFrameHeight = parsePreviewHeight(heightCandidate);
@@ -9421,8 +9764,44 @@
                 }
             }
         };
+        const getPreviewZoomValue = () => previewZoomLevels[previewZoomIndex] || 'page-fit';
+        const syncPreviewZoomUi = () => {
+            if (previewZoomLabel) {
+                previewZoomLabel.textContent = formatPreviewZoomLabel(getPreviewZoomValue());
+            }
+            if (previewZoomOutBtn) {
+                previewZoomOutBtn.disabled = previewZoomIndex <= 0;
+            }
+            if (previewZoomInBtn) {
+                previewZoomInBtn.disabled = previewZoomIndex >= previewZoomLevels.length - 1;
+            }
+        };
+        const applyPreviewZoom = (zoomIndexCandidate, persist = true) => {
+            previewZoomIndex = clampNumber(Math.floor(zoomIndexCandidate), 0, previewZoomLevels.length - 1);
+            syncPreviewZoomUi();
+            if (persist) {
+                try {
+                    localStorage.setItem(previewZoomStorageKey, getPreviewZoomValue());
+                } catch (_error) {
+                    // ignore storage failures
+                }
+            }
+            syncPreviewPdfFrame();
+        };
+        const isPreviewFullscreen = () => !!(
+            previewPdfWrap
+            && document.fullscreenElement
+            && (document.fullscreenElement === previewPdfWrap || previewPdfWrap.contains(document.fullscreenElement))
+        );
+        const syncPreviewFullscreenUi = () => {
+            if (previewFullscreenBtn) {
+                previewFullscreenBtn.textContent = isPreviewFullscreen() ? 'Exit full' : 'Full';
+            }
+        };
         applyPreviewPanelWidth(previewPanelWidth, false);
         applyPreviewFrameHeight(previewFrameHeight, false);
+        syncPreviewZoomUi();
+        syncPreviewFullscreenUi();
 
         const syncPreviewPdfFrame = () => {
             const safePage = normalizedTotalPages > 0
@@ -9450,7 +9829,7 @@
                 previewPdfEmpty.textContent = 'PDF preview is available for .pdf files only.';
                 return;
             }
-            const frameSrc = buildBookProbePdfPageUrl(previewPdfSource, safePage);
+            const frameSrc = buildBookProbePdfPageUrl(previewPdfSource, safePage, getPreviewZoomValue());
             if (!frameSrc) {
                 previewPdfFrame.removeAttribute('src');
                 previewPdfFrame.dataset.currentSrc = '';
@@ -9517,10 +9896,14 @@
 
         const countSelection = () => selectedEpisodeKeys.size;
         const updateSelectionInfo = () => {
-            const count = countSelection();
-            selectionInfo.textContent = count > 0
-                ? `已选择 ${count} 个章节`
-                : '未选择章节';
+            const rangePayload = buildSelectedRangePayload();
+            if (!rangePayload) {
+                selectionInfo.textContent = '未选择章节';
+                return;
+            }
+            selectionInfo.textContent = rangePayload.selectedCount > 1
+                ? `已选择 ${rangePayload.selectedCount} 个章节，将按区间 ${rangePayload.rangeText} 提取`
+                : `已选择 ${rangePayload.rangeText}`;
         };
         renderProbeTree();
         updateSelectionInfo();
@@ -9635,6 +10018,25 @@
                 pageOffsetInput.value = String(Math.max(0, safePage - 1));
                 renderProbeTree();
             };
+            const onPreviewZoomOutClick = () => applyPreviewZoom(previewZoomIndex - 1, true);
+            const onPreviewZoomResetClick = () => applyPreviewZoom(0, true);
+            const onPreviewZoomInClick = () => applyPreviewZoom(previewZoomIndex + 1, true);
+            const onPreviewFullscreenClick = async () => {
+                if (!previewPdfWrap) return;
+                try {
+                    if (isPreviewFullscreen()) {
+                        if (document.exitFullscreen) {
+                            await document.exitFullscreen();
+                        }
+                    } else if (previewPdfWrap.requestFullscreen) {
+                        await previewPdfWrap.requestFullscreen();
+                    }
+                } catch (_error) {
+                    // ignore fullscreen failures
+                }
+                syncPreviewFullscreenUi();
+            };
+            const onPreviewFullscreenChange = () => syncPreviewFullscreenUi();
             const onWindowResize = () => {
                 applyPreviewPanelWidth(previewPanelWidth, false);
             };
@@ -9730,6 +10132,10 @@
                     previewHeightHandle.removeEventListener('keydown', onPreviewHeightKeyDown);
                     previewHeightHandle.classList.remove('is-active');
                 }
+                if (isPreviewFullscreen() && document.exitFullscreen) {
+                    document.exitFullscreen().catch(() => {});
+                }
+                document.removeEventListener('fullscreenchange', onPreviewFullscreenChange);
                 if (content) {
                     content.classList.remove('is-resizing');
                 }
@@ -9741,6 +10147,10 @@
                 if (clearBtn) clearBtn.onclick = null;
                 if (previewPrevBtn) previewPrevBtn.onclick = null;
                 if (previewNextBtn) previewNextBtn.onclick = null;
+                if (previewZoomOutBtn) previewZoomOutBtn.onclick = null;
+                if (previewZoomResetBtn) previewZoomResetBtn.onclick = null;
+                if (previewZoomInBtn) previewZoomInBtn.onclick = null;
+                if (previewFullscreenBtn) previewFullscreenBtn.onclick = null;
                 if (useCurrentPageBtn) useCurrentPageBtn.onclick = null;
                 if (previewPdfFrame) {
                     previewPdfFrame.removeAttribute('src');
@@ -9755,8 +10165,13 @@
             pageOffsetInput.addEventListener('input', onPageOffsetInput);
             if (previewPrevBtn) previewPrevBtn.onclick = onPreviewPrevClick;
             if (previewNextBtn) previewNextBtn.onclick = onPreviewNextClick;
+            if (previewZoomOutBtn) previewZoomOutBtn.onclick = onPreviewZoomOutClick;
+            if (previewZoomResetBtn) previewZoomResetBtn.onclick = onPreviewZoomResetClick;
+            if (previewZoomInBtn) previewZoomInBtn.onclick = onPreviewZoomInClick;
+            if (previewFullscreenBtn) previewFullscreenBtn.onclick = onPreviewFullscreenClick;
             if (useCurrentPageBtn) useCurrentPageBtn.onclick = onUseCurrentPageClick;
             window.addEventListener('resize', onWindowResize);
+            document.addEventListener('fullscreenchange', onPreviewFullscreenChange);
             if (previewWidthHandle) {
                 previewWidthHandle.addEventListener('pointerdown', onPreviewWidthPointerDown);
                 previewWidthHandle.addEventListener('keydown', onPreviewWidthKeyDown);
@@ -9793,17 +10208,16 @@
                     selectionInfo.textContent = '请至少选择一个章节';
                     return;
                 }
-                const selectors = Array.from(selectedEpisodeKeys)
-                    .map((episodeKey) => episodeByKey.get(episodeKey))
-                    .filter(Boolean)
-                    .map((item) => item.sectionSelector)
-                    .filter((selector) => !!selector);
-                const deduplicatedSelectors = Array.from(new Set(selectors));
+                const rangePayload = buildSelectedRangePayload();
+                if (!rangePayload || !rangePayload.sectionSelector) {
+                    selectionInfo.textContent = '未能生成连续章节区间';
+                    return;
+                }
                 const pageOffset = Number(pageOffsetInput.value);
                 closeSheet({
-                    sectionSelector: deduplicatedSelectors.join(','),
+                    sectionSelector: rangePayload.sectionSelector,
                     pageOffset: Number.isFinite(pageOffset) && pageOffset >= 0 ? Math.floor(pageOffset) : 0,
-                    selectedCount: selectedEpisodeKeys.size,
+                    selectedCount: rangePayload.selectedCount,
                 });
             };
             sheet.hidden = false;
@@ -9933,15 +10347,204 @@
         });
     }
 
+    let pendingSubmitSequence = 0;
+
+    function normalizePendingSubmitId(rawId) {
+        return String(rawId || '').trim();
+    }
+
+    function getPendingSubmitTasks() {
+        return Array.isArray(state.pendingSubmitTasks) ? state.pendingSubmitTasks : [];
+    }
+
+    function findPendingSubmitTask(pendingId) {
+        const normalized = normalizePendingSubmitId(pendingId);
+        if (!normalized) return null;
+        return getPendingSubmitTasks().find((item) => item && item.id === normalized) || null;
+    }
+
+    function addPendingSubmitTask(entry) {
+        if (!entry) return null;
+        if (!Array.isArray(state.pendingSubmitTasks)) {
+            state.pendingSubmitTasks = [];
+        }
+        state.pendingSubmitTasks.unshift(entry);
+        return entry;
+    }
+
+    function updatePendingSubmitTask(pendingId, updates = {}) {
+        const normalized = normalizePendingSubmitId(pendingId);
+        if (!normalized) return null;
+        const list = getPendingSubmitTasks();
+        const index = list.findIndex((item) => item && item.id === normalized);
+        if (index < 0) return null;
+        const next = Object.assign({}, list[index], updates || {});
+        list[index] = next;
+        return next;
+    }
+
+    function removePendingSubmitTask(pendingId) {
+        const normalized = normalizePendingSubmitId(pendingId);
+        if (!normalized) return false;
+        const list = getPendingSubmitTasks();
+        const next = list.filter((item) => item && item.id !== normalized);
+        if (next.length === list.length) {
+            return false;
+        }
+        state.pendingSubmitTasks = next;
+        return true;
+    }
+
+    function prunePendingSubmitTasks() {
+        const list = getPendingSubmitTasks();
+        if (!list.length) return false;
+        const existingTaskIds = new Set(
+            (Array.isArray(state.tasks) ? state.tasks : [])
+                .map((task) => normalizeTaskId(task && task.taskId))
+                .filter(Boolean)
+        );
+        const next = list.filter((item) => {
+            const taskId = normalizeTaskId(item && item.taskId);
+            if (taskId && existingTaskIds.has(taskId)) {
+                return false;
+            }
+            return true;
+        });
+        if (next.length === list.length) {
+            return false;
+        }
+        state.pendingSubmitTasks = next;
+        return true;
+    }
+
+    function resolvePendingSubmitLabel(entry) {
+        if (!entry) return '';
+        const fileName = String(entry.fileName || '').trim();
+        if (fileName) {
+            return fileName;
+        }
+        const urlLike = String(entry.normalizedVideoUrl || entry.rawInput || '').trim();
+        if (!urlLike) {
+            return '';
+        }
+        try {
+            const parsed = new URL(urlLike);
+            const host = parsed.hostname || '';
+            const path = parsed.pathname || '';
+            const combined = `${host}${path}`;
+            return combined || urlLike;
+        } catch (_error) {
+            return urlLike;
+        }
+    }
+
+    function buildPendingSubmitTaskHtml(entry) {
+        if (!entry) return '';
+        const pendingId = normalizePendingSubmitId(entry.id);
+        if (!pendingId) return '';
+        const status = String(entry.status || 'submitting');
+        const isFailed = status === 'failed';
+        const isQueued = status === 'queued';
+        const messageText = isFailed ? String(entry.errorMessage || '').trim() : '';
+        const labelText = resolvePendingSubmitLabel(entry);
+        const retryLabel = COMPOSER_COPY.retryActionLabel || '重试';
+        const allowRetry = !!entry.allowRetry && isFailed && !entry.inFlight;
+        const statusClasses = [
+            'task-item',
+            'task-skeleton-card',
+        ];
+        if (isFailed) {
+            statusClasses.push('is-failed');
+        } else if (isQueued) {
+            statusClasses.push('is-queued');
+        }
+        if (entry.inFlight) {
+            statusClasses.push('is-busy');
+        }
+        const metaHtml = labelText
+            ? `<div class="task-skeleton-meta">${escapeHtml(labelText)}</div>`
+            : '';
+        const messageHtml = messageText
+            ? `<span class="task-skeleton-message">${escapeHtml(messageText)}</span>`
+            : '';
+        const retryHtml = allowRetry
+            ? `<button class="btn btn-primary task-skeleton-action-btn" type="button" data-task-action="retry-submit" data-submit-id="${escapeHtml(pendingId)}">${escapeHtml(retryLabel)}</button>`
+            : '';
+        const actionRow = (messageHtml || retryHtml)
+            ? `<div class="task-skeleton-actions">${messageHtml}${retryHtml}</div>`
+            : '';
+        return `
+            <div class="${statusClasses.join(' ')}" data-pending-submit-id="${escapeHtml(pendingId)}" aria-live="polite">
+                <div class="task-main-row">
+                    <div class="task-title-stack">
+                        <span class="task-skeleton-line w-72"></span>
+                        <span class="task-skeleton-line w-46"></span>
+                    </div>
+                    <span class="task-skeleton-pill"></span>
+                </div>
+                <div class="task-foot-row">
+                    <span class="task-skeleton-chip"></span>
+                    <span class="task-skeleton-line w-56"></span>
+                </div>
+                ${metaHtml}
+                ${actionRow}
+            </div>
+        `;
+    }
+
+    function createPendingSubmitTask(payload = {}) {
+        pendingSubmitSequence += 1;
+        const now = Date.now();
+        const rawInput = String(payload.rawInput || '').trim();
+        const normalizedVideoUrl = String(payload.normalizedVideoUrl || '').trim();
+        const file = payload.file || null;
+        const fileName = file && file.name ? String(file.name) : '';
+        const fileSize = file && Number.isFinite(file.size) ? file.size : 0;
+        const collectionId = normalizeCollectionId(payload.collectionId);
+        return {
+            id: `pending-${now}-${pendingSubmitSequence}`,
+            createdAt: now,
+            rawInput,
+            normalizedVideoUrl,
+            file,
+            fileName,
+            fileSize,
+            sourceType: file ? 'file' : 'url',
+            status: 'submitting',
+            statusMessage: String(payload.statusMessage || ''),
+            errorMessage: '',
+            allowRetry: true,
+            inFlight: true,
+            taskId: '',
+            collectionId,
+        };
+    }
+
+    function retryPendingSubmitTask(pendingId) {
+        const normalized = normalizePendingSubmitId(pendingId);
+        if (!normalized) return Promise.resolve(false);
+        return submitTaskFromMobileForm({ source: 'retry-button', pendingId: normalized });
+    }
+
     async function submitTaskFromMobileForm(options = {}) {
         const urlInput = document.getElementById('mobileVideoUrl');
         const fileInput = document.getElementById('mobileVideoFile');
+        const pendingId = normalizePendingSubmitId(options && options.pendingId ? options.pendingId : '');
+        let pendingEntry = pendingId ? findPendingSubmitTask(pendingId) : null;
 
-
-        const rawInput = urlInput ? String(urlInput.value || '').trim() : '';
-        const normalizedVideoUrl = normalizeTaskVideoInput(rawInput);
-        const selectedVideoFile = fileInput && fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : null;
-        const submitTargetCollectionId = resolveTaskSubmitTargetCollectionId();
+        const rawInput = pendingEntry
+            ? String(pendingEntry.rawInput || '').trim()
+            : (urlInput ? String(urlInput.value || '').trim() : '');
+        const normalizedVideoUrl = pendingEntry
+            ? (String(pendingEntry.normalizedVideoUrl || '').trim() || normalizeTaskVideoInput(rawInput))
+            : normalizeTaskVideoInput(rawInput);
+        const selectedVideoFile = pendingEntry
+            ? pendingEntry.file
+            : (fileInput && fileInput.files && fileInput.files.length > 0 ? fileInput.files[0] : null);
+        const activeCollectionId = resolveTaskSubmitTargetCollectionId();
+        const submitTargetCollectionId = pendingEntry && pendingEntry.collectionId
+            ? normalizeCollectionId(pendingEntry.collectionId)
+            : activeCollectionId;
         const taskIdsBeforeSubmit = new Set(
             (Array.isArray(state.tasks) ? state.tasks : [])
                 .map((task) => normalizeTaskId(task && task.taskId))
@@ -9955,8 +10558,39 @@
                 });
                 triggerComposerLaunchFx('error');
             }
+            if (pendingEntry) {
+                removePendingSubmitTask(pendingEntry.id);
+                renderTaskList();
+            }
             return false;
         }
+
+        if (!pendingEntry) {
+            pendingEntry = createPendingSubmitTask({
+                rawInput,
+                normalizedVideoUrl,
+                file: selectedVideoFile,
+                collectionId: submitTargetCollectionId,
+                statusMessage: selectedVideoFile ? COMPOSER_COPY.uploadingTip : COMPOSER_COPY.checkingTip,
+            });
+            addPendingSubmitTask(pendingEntry);
+        } else {
+            pendingEntry = updatePendingSubmitTask(pendingEntry.id, {
+                rawInput,
+                normalizedVideoUrl,
+                file: selectedVideoFile || pendingEntry.file,
+                collectionId: submitTargetCollectionId,
+                statusMessage: selectedVideoFile ? COMPOSER_COPY.uploadingTip : COMPOSER_COPY.checkingTip,
+            }) || pendingEntry;
+        }
+        updatePendingSubmitTask(pendingEntry.id, {
+            status: 'submitting',
+            statusMessage: selectedVideoFile ? COMPOSER_COPY.uploadingTip : COMPOSER_COPY.checkingTip,
+            errorMessage: '',
+            allowRetry: false,
+            inFlight: true,
+        });
+        renderTaskList();
 
         triggerComposerLaunchFx('launch');
         setTaskSubmitTip(selectedVideoFile ? COMPOSER_COPY.uploadingTip : COMPOSER_COPY.checkingTip);
@@ -9968,8 +10602,24 @@
             } else {
                 submitResult = await submitUrlTask(normalizedVideoUrl);
             }
+            const submitResultTaskId = normalizeTaskId(submitResult && submitResult.taskId);
+            const submitResultDeduped = !!(submitResult && submitResult.deduped);
+            const dedupeWindowMinutes = Math.max(1, Number(submitResult && submitResult.dedupeWindowMinutes) || 30);
+            if (pendingEntry) {
+                updatePendingSubmitTask(pendingEntry.id, {
+                    status: 'queued',
+                    statusMessage: COMPOSER_COPY.queuedTip,
+                    taskId: submitResultTaskId,
+                    inFlight: false,
+                    allowRetry: false,
+                });
+                renderTaskList();
+            }
             void submitResult;
-            setTaskSubmitTip(COMPOSER_COPY.queuedTip, 'success');
+            setTaskSubmitTip(
+                submitResultDeduped ? `已复用 ${dedupeWindowMinutes} 分钟内的任务` : COMPOSER_COPY.queuedTip,
+                'success'
+            );
             triggerComposerLaunchFx('success');
 
             if (urlInput) {
@@ -9981,7 +10631,6 @@
             closeTaskComposer();
 
             await reloadTaskList({ showLoading: false });
-            const submitResultTaskId = normalizeTaskId(submitResult && submitResult.taskId);
             let submitAssignedCollectionTitle = '';
             let submitAssignedTaskCount = 0;
             let revealTaskId = submitResultTaskId;
@@ -10016,21 +10665,37 @@
             if (submitAssignedTaskCount > 0) {
                 setTaskSummary(`已将 ${submitAssignedTaskCount} 个新任务归入合集「${submitAssignedCollectionTitle || TASK_COLLECTION_DEFAULT_TITLE}」`, 'success');
             } else if (revealTaskId) {
-                setTaskSummary('已提交新任务', 'success');
+                setTaskSummary(
+                    submitResultDeduped ? `已复用 ${dedupeWindowMinutes} 分钟内的任务` : '已提交新任务',
+                    'success'
+                );
             }
             return true;
         } catch (error) {
             if (error && error.cancelled) {
+                if (pendingEntry) {
+                    removePendingSubmitTask(pendingEntry.id);
+                    renderTaskList();
+                }
                 setTaskSubmitTip('已取消提交');
                 return false;
             }
             const feedback = buildTaskSubmitFriendlyError(error, {
                 hasFile: !!selectedVideoFile,
             });
+            if (pendingEntry) {
+                updatePendingSubmitTask(pendingEntry.id, {
+                    status: 'failed',
+                    errorMessage: feedback.message,
+                    allowRetry: feedback.allowRetry,
+                    inFlight: false,
+                });
+                renderTaskList();
+            }
             setTaskSubmitTip(feedback.message, 'error', {
                 highlightLink: feedback.highlightLink,
                 onRetry: feedback.allowRetry
-                    ? () => submitTaskFromMobileForm({ source: 'retry-button' })
+                    ? () => (pendingEntry ? retryPendingSubmitTask(pendingEntry.id) : submitTaskFromMobileForm({ source: 'retry-button' }))
                     : null,
                 actionLabel: COMPOSER_COPY.retryActionLabel || '重试',
                 pendingLabel: '重试中...',
@@ -10529,11 +11194,33 @@
         if (selected.selectedKeys.length < 2) {
             return false;
         }
+        if (!selected.taskIds.every((taskId) => isTaskArchived(findTaskById(taskId)))) {
+            return false;
+        }
         const inferredTargetCollectionId = selected.collectionIds.length > 0
             ? selected.collectionIds[0]
             : '';
         const minRequiredTaskCount = inferredTargetCollectionId ? 1 : 2;
         return selected.taskIds.length >= minRequiredTaskCount;
+    }
+
+    function canArchiveSelectedTaskListItems() {
+        const selected = resolveSelectedTaskListEntities();
+        if (!selected.taskIds.length) {
+            return false;
+        }
+        return selected.taskIds.some((taskId) => {
+            const task = findTaskById(taskId);
+            return !isTaskArchived(task) && !!resolveTaskCategoryPath(task);
+        });
+    }
+
+    function canUnarchiveSelectedTaskListItems() {
+        const selected = resolveSelectedTaskListEntities();
+        if (!selected.taskIds.length) {
+            return false;
+        }
+        return selected.taskIds.some((taskId) => isTaskArchived(findTaskById(taskId)));
     }
 
     function collectActiveCollectionIdsFromManualState() {
@@ -10762,6 +11449,8 @@
             ? findTaskById(singleSelectionParsed.taskId)
             : null;
         const items = [
+            { id: 'archive_selected_tasks', label: '\u5f52\u6863\u5230\u5206\u7c7b', disabled: !canArchiveSelectedTaskListItems() },
+            { id: 'unarchive_selected_tasks', label: '\u53d6\u6d88\u5f52\u6863', disabled: !canUnarchiveSelectedTaskListItems() },
             { id: 'merge_into_collection', label: '\u5408\u5e76\u4e3a\u5408\u96c6', disabled: !canMergeSelectedTaskListItems() },
             { id: 'delete_selected_tasks', label: '\u6279\u91cf\u5220\u9664', disabled: selected.taskIds.length <= 0 },
         ];
@@ -11559,7 +12248,8 @@
             return '';
         };
 
-        const topItems = [];
+        const topTaskItems = [];
+        const topCollectionItems = [];
         const emittedRootCollections = new Set();
         tasks.forEach((task) => {
             const taskId = normalizeTaskId(task && task.taskId);
@@ -11568,7 +12258,7 @@
             }
             const collectionId = normalizeCollectionId(task && task.collectionId);
             if (!collectionId || !activeCollectionIds.has(collectionId)) {
-                topItems.push({
+                topTaskItems.push({
                     type: 'task',
                     task,
                 });
@@ -11581,7 +12271,7 @@
             emittedRootCollections.add(rootCollectionId);
             const rootNode = buildCollectionNode(rootCollectionId, 0, new Set());
             if (rootNode) {
-                topItems.push(rootNode);
+                topCollectionItems.push(rootNode);
             }
         });
 
@@ -11599,7 +12289,7 @@
             collectionChildren: childrenMap,
             collectionOrder: activeCollectionOrder,
         };
-        return topItems;
+        return topTaskItems.concat(topCollectionItems);
     }
 
     function buildTaskItemHtml(task, options = {}) {
@@ -11617,10 +12307,16 @@
         const compactId = escapeHtml(compactTaskId(taskIdRaw));
         const compactTime = escapeHtml(formatTaskCardTime(task && task.createdAt));
         const metaQuiet = compactTime ? `${compactId} · ${compactTime}` : compactId;
-        const collectionTitleRaw = String(task && (task.collectionTitle || task.collectionId || '') || '').trim();
+        const isArchived = isTaskArchived(task);
+        const collectionTitleRaw = isArchived ? String(task && (task.collectionTitle || task.collectionId || '') || '').trim() : '';
+        const suggestedCategoryPath = !isArchived ? resolveTaskCategoryPath(task) : '';
+        const suggestedCategorySegments = splitCollectionPathSegments(suggestedCategoryPath);
         const showCollectionChip = !options.hideCollectionChip;
         const collectionChip = showCollectionChip && collectionTitleRaw
             ? `<span class="task-collection-chip" title="${escapeHtml(collectionTitleRaw)}">${escapeHtml(collectionTitleRaw)}</span>`
+            : '';
+        const categoryChip = showCollectionChip && !collectionChip && suggestedCategorySegments.length
+            ? `<span class="task-collection-chip" title="${escapeHtml(suggestedCategoryPath)}">待归档·${escapeHtml(suggestedCategorySegments[suggestedCategorySegments.length - 1])}</span>`
             : '';
 
         const classes = resolveTaskItemMotionClasses(taskIdRaw, statusVisual, options);
@@ -11653,6 +12349,7 @@
                 <div class="task-foot-row">
                     <span class="task-source-chip source-${sourceKind}" aria-hidden="true">${sourceIcon}</span>
                     ${collectionChip}
+                    ${categoryChip}
                     <span class="task-progress-hint">${escapeHtml(statusHint)}</span>
                 </div>
             </button>
@@ -11740,12 +12437,30 @@
         });
     }
 
+    function buildTaskSectionLabelHtml(titleRaw, detailRaw) {
+        const title = escapeHtml(String(titleRaw || '').trim());
+        const detail = escapeHtml(String(detailRaw || '').trim());
+        return `
+            <section class="task-collection-item task-section-label">
+                <div class="task-collection-head is-expanded">
+                    <div class="task-collection-title">
+                        <span class="task-collection-title-text">${title}</span>
+                    </div>
+                    <span class="task-collection-badge">${detail}</span>
+                </div>
+            </section>
+        `;
+    }
+
     function renderTaskList() {
         const taskList = document.getElementById('taskList');
         if (!taskList) return;
         pruneTaskFxState();
 
         const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+        prunePendingSubmitTasks();
+        const pendingSubmitTasks = getPendingSubmitTasks();
+        const hasPendingSubmit = pendingSubmitTasks.length > 0;
         syncTaskListSelectionWithCurrentTasks();
         updateTaskComposerVisibility();
         if (!state.taskListReloading) {
@@ -11753,7 +12468,7 @@
         }
         const exitingItems = (state.taskExitItems || []).slice().sort((a, b) => (a.exitOrder || 0) - (b.exitOrder || 0));
 
-        if (!tasks.length && !exitingItems.length) {
+        if (!tasks.length && !exitingItems.length && !hasPendingSubmit) {
             state.taskCollectionRuntime = {
                 collectionTaskIds: {},
                 collectionTitles: {},
@@ -11780,15 +12495,40 @@
         taskList.dataset.titleSourceTitle = String(titleSourceStats.title);
         taskList.dataset.titleSourceTaskId = String(titleSourceStats.taskId);
 
-        const boardItems = buildTaskBoardState(tasks);
         const rows = [];
+        pendingSubmitTasks.forEach((pending, index) => {
+            rows.push({
+                order: -1000 + index * 0.01,
+                html: buildPendingSubmitTaskHtml(pending),
+            });
+        });
+
+        const boardItems = buildTaskBoardState(tasks);
+        const unarchivedCount = boardItems.filter((item) => item && item.type === 'task').length;
+        const archivedCount = boardItems.filter((item) => item && item.type === 'collection').length;
+        let unarchivedHeaderInserted = false;
+        let archivedHeaderInserted = false;
         boardItems.forEach((item, index) => {
             if (item.type === 'collection') {
+                if (!archivedHeaderInserted) {
+                    rows.push({
+                        order: index - 0.2,
+                        html: buildTaskSectionLabelHtml('已归档', archivedCount > 0 ? `${archivedCount} 个分类分组` : ''),
+                    });
+                    archivedHeaderInserted = true;
+                }
                 rows.push({
                     order: index,
                     html: buildTaskCollectionItemHtml(item),
                 });
             } else if (item.type === 'task') {
+                if (!unarchivedHeaderInserted) {
+                    rows.push({
+                        order: index - 0.2,
+                        html: buildTaskSectionLabelHtml('未归档', `${unarchivedCount} 个任务`),
+                    });
+                    unarchivedHeaderInserted = true;
+                }
                 rows.push({
                     order: index,
                     html: buildTaskItemHtml(item.task),
@@ -12177,7 +12917,7 @@
         video.controls = false;
         video.removeAttribute('controls');
         video.setAttribute('playsinline', 'playsinline');
-        video.setAttribute('preload', 'metadata');
+        video.setAttribute('preload', 'auto');
         if (!video.getAttribute('poster')) {
             video.setAttribute('poster', DEFAULT_VIDEO_POSTER);
         }
@@ -12346,7 +13086,7 @@
             link.dataset.previewBound = '1';
             const video = document.createElement('video');
             video.playsInline = true;
-            video.preload = 'metadata';
+            video.preload = 'auto';
             video.poster = DEFAULT_VIDEO_POSTER;
             video.src = href;
             video.setAttribute('data-immersive', '1');
@@ -13524,7 +14264,7 @@
                 video.setAttribute('poster', DEFAULT_VIDEO_POSTER);
             }
             video.setAttribute('playsinline', 'playsinline');
-            video.setAttribute('preload', 'metadata');
+            video.setAttribute('preload', 'auto');
         });
     }
 
@@ -19083,6 +19823,19 @@
                 if (emptyActionBtn) {
                     event.preventDefault();
                     handleEmptyStateAction(emptyActionBtn.getAttribute('data-empty-action'));
+                    return;
+                }
+                const retrySubmitBtn = event.target.closest('[data-task-action="retry-submit"]');
+                if (retrySubmitBtn) {
+                    event.preventDefault();
+                    const submitId = retrySubmitBtn.getAttribute('data-submit-id');
+                    if (submitId) {
+                        try {
+                            await retryPendingSubmitTask(submitId);
+                        } catch (_error) {
+                            // 错误已由提交流程处理。
+                        }
+                    }
                     return;
                 }
                 const retryBtn = event.target.closest('[data-task-action="retry-load"]');

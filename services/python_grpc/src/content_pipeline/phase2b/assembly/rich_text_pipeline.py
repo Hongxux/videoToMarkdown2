@@ -835,6 +835,7 @@ class RichTextPipeline:
                 group_id = group_name_to_id[normalized_group_name]
 
             knowledge_type = str(item.get("knowledge_type", "abstract") or "abstract")
+            preferred_main_content = str(item.get("main_content", "") or "").strip()
             raw_vl_segments = item.get("_vl_concrete_segments", item.get("vl_concrete_segments", []))
             vl_concrete_segments = raw_vl_segments if isinstance(raw_vl_segments, list) else []
             concrete_main_content_blocks: List[str] = []
@@ -844,9 +845,9 @@ class RichTextPipeline:
                 main_content = str(segment.get("main_content", "") or "").strip()
                 if main_content:
                     concrete_main_content_blocks.append(main_content)
-            full_text = str(item.get("full_text", item.get("text", "")) or "")
-            # concrete 单元优先直通 Phase2A 的 main_content，避免被旧文本覆盖。
-            if knowledge_type.strip().lower() == "concrete" and concrete_main_content_blocks:
+            full_text = preferred_main_content or str(item.get("full_text", item.get("text", "")) or "")
+            # 优先吃回填后的 main_content；若不存在，再回退到 concrete 分段 main_content。
+            if (not preferred_main_content) and knowledge_type.strip().lower() == "concrete" and concrete_main_content_blocks:
                 full_text = "\n\n".join(concrete_main_content_blocks).strip()
 
             unit = SemanticUnit(
@@ -874,6 +875,7 @@ class RichTextPipeline:
                 "stage2": []
             })
             unit.group_reason = str(item.get("group_reason", "") or "").strip()
+            unit.main_content = preferred_main_content
             unit._vl_concrete_segments = list(vl_concrete_segments)
             
             # 恢复素材需求

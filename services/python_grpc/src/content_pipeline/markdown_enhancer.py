@@ -17,7 +17,7 @@ import re
 import yaml
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Set
 from dataclasses import dataclass, field
 # 🚀 使用集中式 LLMClient (连接池+HTTP/2+自适应并发)
 import asyncio
@@ -823,6 +823,39 @@ class MarkdownEnhancer:
                     units.append(unit)
         return units
 
+    @staticmethod
+    def _get_semantic_unit_candidate_paths(result_dir: str) -> List[Path]:
+        if not result_dir:
+            return []
+
+        base_dir = Path(result_dir)
+        candidate_paths: List[Path] = [
+            base_dir / "semantic_units_phase2a.json",
+            base_dir / "intermediates" / "semantic_units_phase2a.json",
+        ]
+        intermediates_dir = base_dir / "intermediates"
+        rpc_candidates = (
+            sorted(
+                intermediates_dir.glob("semantic_units_from_rpc_*.json"),
+                key=lambda path_item: path_item.stat().st_mtime,
+                reverse=True,
+            )
+            if intermediates_dir.exists()
+            else []
+        )
+        if rpc_candidates:
+            candidate_paths.append(rpc_candidates[0])
+
+        unique_paths: List[Path] = []
+        seen_paths: Set[str] = set()
+        for path in candidate_paths:
+            normalized_path = str(path.resolve()) if path.exists() else str(path)
+            if normalized_path in seen_paths:
+                continue
+            seen_paths.add(normalized_path)
+            unique_paths.append(path)
+        return unique_paths
+
     def _load_concrete_canonical_by_unit(self, result_dir: str) -> Dict[str, Dict[str, Any]]:
         """
         concrete 单元 canonical 源：优先来自 phase2a 语义文件，而不是 result.json 的 body_text。
@@ -830,21 +863,8 @@ class MarkdownEnhancer:
         if not result_dir:
             return {}
 
-        base_dir = Path(result_dir)
-        candidate_paths: List[Path] = [
-            base_dir / "semantic_units_phase2a.json",
-            base_dir / "intermediates" / "semantic_units_phase2a.json",
-        ]
-        rpc_candidates = sorted(
-            (base_dir / "intermediates").glob("semantic_units_from_rpc_*.json"),
-            key=lambda path_item: path_item.stat().st_mtime,
-            reverse=True,
-        ) if (base_dir / "intermediates").exists() else []
-        if rpc_candidates:
-            candidate_paths.append(rpc_candidates[0])
-
         canonical_by_unit: Dict[str, Dict[str, Any]] = {}
-        for path in candidate_paths:
+        for path in self._get_semantic_unit_candidate_paths(result_dir):
             if not path.exists() or not path.is_file():
                 continue
             try:
@@ -862,6 +882,7 @@ class MarkdownEnhancer:
                     continue
                 raw_segments = unit.get("_vl_concrete_segments", unit.get("vl_concrete_segments", []))
                 vl_segments = raw_segments if isinstance(raw_segments, list) else []
+                canonical_body = str(unit.get("main_content", "") or "").strip()
                 main_content_blocks: List[str] = []
                 for segment in vl_segments:
                     if not isinstance(segment, dict):
@@ -870,7 +891,8 @@ class MarkdownEnhancer:
                     if main_content:
                         main_content_blocks.append(main_content)
 
-                canonical_body = "\n\n".join(main_content_blocks).strip()
+                if not canonical_body:
+                    canonical_body = "\n\n".join(main_content_blocks).strip()
                 if not canonical_body:
                     canonical_body = str(
                         unit.get("full_text")
@@ -947,6 +969,77 @@ class MarkdownEnhancer:
                     changed = True
 
         return changed
+
+    @staticmethod
+    def _write_json_payload(path: Path, payload: Any) -> None:
+        path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _sync_final_media_markdown_into_result_payload(
+        self,
+        payload: Any,
+        final_markdown_by_unit: Dict[str, str],
+    ) -> bool:
+        if not isinstance(payload, dict) or not final_markdown_by_unit:
+            return False
+
+        changed = False
+        for unit in self._flatten_semantic_units_payload(payload):
+            unit_id = str(unit.get("unit_id", "") or "").strip()
+            if not unit_id:
+                continue
+            final_markdown = str(final_markdown_by_unit.get(unit_id, "") or "").strip()
+            if not final_markdown:
+                continue
+            if str(unit.get("body_text", "") or "").strip() != final_markdown:
+                unit["body_text"] = final_markdown
+                changed = True
+            if str(unit.get("main_content", "") or "").strip() != final_markdown:
+                unit["main_content"] = final_markdown
+                changed = True
+        return changed
+
+    def _sync_final_media_markdown_into_semantic_units(
+        self,
+        result_dir: str,
+        final_markdown_by_unit: Dict[str, str],
+    ) -> int:
+        if not result_dir or not final_markdown_by_unit:
+            return 0
+
+        updated_files = 0
+        for path in self._get_semantic_unit_candidate_paths(result_dir):
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning(f"Failed to load semantic unit payload for main_content sync: path={path}, err={exc}")
+                continue
+
+            changed = False
+            for unit in self._flatten_semantic_units_payload(payload):
+                unit_id = str(unit.get("unit_id", "") or "").strip()
+                if not unit_id:
+                    continue
+                final_markdown = str(final_markdown_by_unit.get(unit_id, "") or "").strip()
+                if not final_markdown:
+                    continue
+                if str(unit.get("main_content", "") or "").strip() != final_markdown:
+                    unit["main_content"] = final_markdown
+                    changed = True
+
+            if not changed:
+                continue
+
+            try:
+                self._write_json_payload(path, payload)
+                updated_files += 1
+            except Exception as exc:
+                logger.warning(f"Failed to write semantic unit payload for main_content sync: path={path}, err={exc}")
+        return updated_files
     
     @property
     def enabled(self) -> bool:
@@ -1203,9 +1296,13 @@ class MarkdownEnhancer:
                     return idx
 
                 if normalized_kt in {"concrete", "process"}:
-                    # concrete/process 禁用 structured LLM，统一走确定性规则链路。
+                    # 先做素材占位符回填，再用 preserve_img prompt 做最终 Markdown 整理。
                     sec.enhanced_body = sec.original_body
-                    sec.structured_content = self._build_deterministic_text_for_non_abstract(sec)
+                    sec.structured_content = await self._build_structured_text_for_media_preserved_section(
+                        sec,
+                        prev_title=prev_title,
+                        next_title=next_title,
+                    )
                     return idx
 
                 if self._combine_llm_calls:
@@ -1232,6 +1329,48 @@ class MarkdownEnhancer:
                 completed += 1
                 if completed == len(tasks) or completed % 5 == 0:
                     logger.info(f"LLM sections completed: {completed}/{len(tasks)}")
+
+        final_media_markdown_by_unit: Dict[str, str] = {}
+        for sec in all_sections:
+            if self._is_tutorial_process_section(sec):
+                continue
+            normalized_kt = self._normalize_knowledge_type(sec.knowledge_type)
+            if normalized_kt not in {"concrete", "process"}:
+                continue
+            final_markdown = str(
+                sec.structured_content
+                or sec.enhanced_body
+                or sec.original_body
+                or ""
+            ).strip()
+            if not final_markdown:
+                continue
+            final_media_markdown_by_unit[str(sec.unit_id)] = final_markdown
+
+        if final_media_markdown_by_unit:
+            try:
+                if self._sync_final_media_markdown_into_result_payload(data, final_media_markdown_by_unit):
+                    self._write_json_payload(Path(result_json_path), data)
+                    logger.info(
+                        "Synced final media-preserved markdown into result.json: units=%s",
+                        len(final_media_markdown_by_unit),
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to sync final media-preserved markdown into result.json: {exc}")
+
+            try:
+                updated_semantic_files = self._sync_final_media_markdown_into_semantic_units(
+                    self._result_dir,
+                    final_media_markdown_by_unit,
+                )
+                if updated_semantic_files > 0:
+                    logger.info(
+                        "Synced final media-preserved markdown into semantic_units payloads: files=%s, units=%s",
+                        updated_semantic_files,
+                        len(final_media_markdown_by_unit),
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to sync final media-preserved markdown into semantic_units payloads: {exc}")
 
         # Step 3: 组装 Markdown（固定 group -> unit 两级）
         logger.info("Step 3: Assembling grouped markdown")
@@ -3236,8 +3375,8 @@ class MarkdownEnhancer:
     def _build_deterministic_text_for_non_abstract(self, section: EnhancedSection) -> str:
         """
         Deterministic fallback for concrete/process sections.
-        - Do not call the structured LLM here.
-        - Preserve image and clip placeholder order.
+        - 仅做素材占位符回填，不承担最终结构化整理。
+        - 保持图片和视频片段的嵌入顺序稳定。
         """
         base_text = self._resolve_concrete_base_text(section)
         normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
@@ -3271,6 +3410,95 @@ class MarkdownEnhancer:
         keyframe_embeds, _ = self._build_concrete_keyframe_embeds_for_section(section, image_items)
         clip_embeds = self._build_concrete_clip_embeds_by_segment_order(section, clip_items)
         structured = base_text
+        structured = self._replace_clip_placeholders(structured, clip_embeds)
+        structured = self._replace_image_placeholders(structured, image_items)
+        structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)
+        structured = self._strip_imgneeded_placeholders(structured).strip()
+        structured = self._append_missing_clip_embeds(structured or base_text, clip_items)
+        if not image_items:
+            return structured or base_text
+        return self._append_missing_image_embeds(structured or base_text, image_items)
+
+    async def _build_structured_text_for_media_preserved_section(
+        self,
+        section: EnhancedSection,
+        prev_title: str = "",
+        next_title: str = "",
+    ) -> str:
+        base_text = self._build_deterministic_text_for_non_abstract(section)
+        image_items = self._build_concept_image_items(section)
+        clip_items = self._build_concept_clip_items(section)
+        keyframe_embeds, keyframe_embed_map = self._build_concrete_keyframe_embeds_for_section(
+            section,
+            image_items,
+        )
+        clip_embeds = self._build_concrete_clip_embeds_by_segment_order(section, clip_items)
+        normalized_kt = self._normalize_knowledge_type(section.knowledge_type)
+
+        if not self._enabled or not self._llm_client:
+            return base_text
+
+        adjacent_parts = []
+        if prev_title:
+            adjacent_parts.append(f"- Previous section: {prev_title}")
+        if next_title:
+            adjacent_parts.append(f"- Next section: {next_title}")
+        adjacent_context = "\n".join(adjacent_parts) if adjacent_parts else "(none)"
+        structured_system_prompt = (
+            self._structured_system_preserve_img_prompt
+            or self._structured_system_prompt
+        )
+        structured_user_prompt_template = (
+            self._structured_user_preserve_img_prompt_template
+            or self._structured_user_prompt_template
+        )
+        prompt = structured_user_prompt_template.format(
+            title=section.title,
+            knowledge_type=normalized_kt,
+            body_text=base_text,
+            image_context="(none)",
+            adjacent_context=adjacent_context,
+        )
+
+        start_ts = time.perf_counter()
+        try:
+            content, meta, _ = await self._complete_text_with_model_fallback(
+                prompt=prompt,
+                system_message=structured_system_prompt,
+                model=self._structured_text_model,
+            )
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="structured_text_preserve_media",
+                unit_id=str(section.unit_id),
+                system_prompt=structured_system_prompt,
+                user_prompt=prompt,
+                response_text=content,
+                duration_ms=duration_ms,
+                success=True,
+                metadata=meta,
+            )
+            structured = (content or "").strip() or base_text
+        except Exception as exc:
+            duration_ms = (time.perf_counter() - start_ts) * 1000.0
+            await self._write_llm_trace_record(
+                step_name="structured_text_preserve_media",
+                unit_id=str(section.unit_id),
+                system_prompt=structured_system_prompt,
+                user_prompt=prompt,
+                response_text="",
+                duration_ms=duration_ms,
+                success=False,
+                error_msg=str(exc),
+            )
+            logger.warning(f"Structured media-preserve generation failed for {section.unit_id}: {exc}")
+            structured = base_text
+
+        structured = self._replace_tutorial_keyframe_placeholders(
+            structured,
+            keyframe_embeds,
+            keyframe_embed_map=keyframe_embed_map,
+        )
         structured = self._replace_clip_placeholders(structured, clip_embeds)
         structured = self._replace_image_placeholders(structured, image_items)
         structured = self._replace_tutorial_legacy_placeholders(structured, keyframe_embeds)

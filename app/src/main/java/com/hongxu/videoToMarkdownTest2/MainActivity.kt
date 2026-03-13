@@ -48,6 +48,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -176,7 +177,8 @@ private data class TaskCollectionSectionUi(
     val title: String,
     val depth: Int,
     val tasks: List<MobileTaskListItem>,
-    val childGroupCount: Int
+    val childGroupCount: Int,
+    val children: List<TaskCollectionSectionUi> = emptyList()
 )
 
 private data class TaskCollectionBuckets(
@@ -1306,6 +1308,13 @@ private fun MobileTaskApp(
         if (existing == null) {
             return candidate
         }
+        val mergedCategoryPath = candidate.categoryPath.ifBlank { existing.categoryPath }
+        val mergedArchived = candidate.archived
+        val mergedCollectionPath = if (mergedArchived) {
+            candidate.collectionPath.ifBlank { existing.collectionPath }
+        } else {
+            ""
+        }
         return candidate.copy(
             title = candidate.title.ifBlank { existing.title },
             statusMessage = candidate.statusMessage.ifBlank { existing.statusMessage },
@@ -1314,10 +1323,22 @@ private fun MobileTaskApp(
             createdAt = candidate.createdAt.ifBlank { existing.createdAt },
             lastOpenedAt = candidate.lastOpenedAt.ifBlank { existing.lastOpenedAt },
             videoUrl = candidate.videoUrl.ifBlank { existing.videoUrl },
-            collectionId = candidate.collectionId.ifBlank { existing.collectionId },
-            collectionTitle = candidate.collectionTitle.ifBlank { existing.collectionTitle },
+            collectionId = if (mergedArchived) {
+                candidate.collectionId.ifBlank { existing.collectionId }
+            } else {
+                ""
+            },
+            collectionTitle = if (mergedArchived) {
+                candidate.collectionTitle.ifBlank { existing.collectionTitle }
+            } else {
+                ""
+            },
             taskPath = candidate.taskPath.ifBlank { existing.taskPath },
-            collectionPath = candidate.collectionPath.ifBlank { existing.collectionPath },
+            collectionPath = mergedCollectionPath,
+            categoryPath = mergedCategoryPath,
+            archived = mergedArchived,
+            archivedAt = if (mergedArchived) candidate.archivedAt.ifBlank { existing.archivedAt } else "",
+            manualCollection = if (mergedArchived) candidate.manualCollection || existing.manualCollection else false,
             markdownAvailable = candidate.markdownAvailable || existing.markdownAvailable
         )
     }
@@ -1859,7 +1880,7 @@ private fun MobileTaskApp(
 
     fun openTaskCollectionEditor(task: MobileTaskListItem) {
         collectionEditorTask = task
-        collectionEditorDraft = task.collectionPath.trim()
+        collectionEditorDraft = task.collectionPath.trim().ifBlank { task.categoryPath.trim() }
         revealedTaskId = null
     }
 
@@ -1922,6 +1943,10 @@ private fun MobileTaskApp(
             actionMessage = "Select at least two tasks to merge."
             return
         }
+        if (!selectedTasks.all { task -> task.archived }) {
+            actionMessage = "Archive tasks first, then adjust their archive groups."
+            return
+        }
         pendingBatchMergeTaskIds = selectedTasks.map { it.taskId }
         val existingPath = selectedTasks
             .map { task -> normalizeManualCollectionPathInput(task.collectionPath) }
@@ -1959,20 +1984,33 @@ private fun MobileTaskApp(
             )
         }.onSuccess {
             actionMessage = if (normalizedCollectionPath.isBlank()) {
-                "Task removed from group."
+                "Task moved back to Unarchived."
             } else {
-                "Task synced to group: $normalizedCollectionPath"
+                "Task archived to: $normalizedCollectionPath"
             }
             collectionEditorTask = null
             refreshTasks(showLoading = false)
         }.onFailure { error ->
-            actionMessage = "Group sync failed: ${error.message ?: "unknown"}"
+            actionMessage = "Archive sync failed: ${error.message ?: "unknown"}"
             showRetrySnackbar(actionMessage) {
                 syncTaskCollection(task, normalizedCollectionPath)
             }
         }
         collectionEditorSaving = false
         actionLoading = false
+    }
+
+    suspend fun archiveTaskFromUi(task: MobileTaskListItem) {
+        val targetCategoryPath = normalizeManualCollectionPathInput(task.categoryPath)
+        if (task.archived) {
+            syncTaskCollection(task, null)
+            return
+        }
+        if (targetCategoryPath.isBlank()) {
+            actionMessage = "This task has no category suggestion yet."
+            return
+        }
+        syncTaskCollection(task, targetCategoryPath)
     }
 
     suspend fun mergeTasksIntoCollection(source: MobileTaskListItem, target: MobileTaskListItem, collectionPath: String) {
@@ -2195,9 +2233,14 @@ private fun MobileTaskApp(
     }
     val taskCollectionBuckets = remember(visibleTaskCards) {
         val directTasksByPath = LinkedHashMap<String, MutableList<MobileTaskListItem>>()
-        val allCollectionPaths = LinkedHashMap<String, MutableSet<String>>()
+        val allCollectionPaths = linkedSetOf<String>()
+        val childPathsByParent = LinkedHashMap<String, MutableList<String>>()
         val ungrouped = mutableListOf<MobileTaskListItem>()
         visibleTaskCards.forEach { task ->
+            if (!task.archived) {
+                ungrouped += task
+                return@forEach
+            }
             val normalizedCollectionPath = normalizeManualCollectionPathInput(task.collectionPath)
             if (normalizedCollectionPath.isEmpty()) {
                 ungrouped += task
@@ -2206,30 +2249,39 @@ private fun MobileTaskApp(
                 var currentPath = ""
                 segments.forEach { segment ->
                     currentPath = if (currentPath.isBlank()) segment else "$currentPath/$segment"
-                    allCollectionPaths.getOrPut(currentPath) { linkedSetOf() }
+                    allCollectionPaths += currentPath
                 }
                 directTasksByPath.getOrPut(normalizedCollectionPath) { mutableListOf() }.add(task)
             }
         }
-        val sortedPaths = allCollectionPaths.keys.sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
+        val sortedPaths = allCollectionPaths.sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
         sortedPaths.forEach { pathKey ->
             val prefix = if (pathKey.contains('/')) pathKey.substringBeforeLast('/') else ""
             if (prefix.isNotBlank()) {
-                allCollectionPaths.getOrPut(prefix) { linkedSetOf() }.add(pathKey)
+                childPathsByParent.getOrPut(prefix) { mutableListOf() }.add(pathKey)
             }
         }
+        fun buildSection(collectionPath: String): TaskCollectionSectionUi {
+            val segments = collectionPath.split('/').filter { segment -> segment.isNotBlank() }
+            val childPaths = childPathsByParent[collectionPath].orEmpty()
+                .distinct()
+                .sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
+            val childSections = childPaths.map(::buildSection)
+            return TaskCollectionSectionUi(
+                collectionPath = collectionPath,
+                title = segments.lastOrNull().orEmpty().ifBlank { collectionPath },
+                depth = (segments.size - 1).coerceAtLeast(0),
+                tasks = directTasksByPath[collectionPath].orEmpty().toList(),
+                childGroupCount = childSections.size,
+                children = childSections
+            )
+        }
+        val rootSections = sortedPaths
+            .filter { path -> !path.contains('/') }
+            .map(::buildSection)
         TaskCollectionBuckets(
             ungroupedTasks = ungrouped,
-            groupedSections = sortedPaths.map { collectionPath ->
-                val segments = collectionPath.split('/').filter { segment -> segment.isNotBlank() }
-                TaskCollectionSectionUi(
-                    collectionPath = collectionPath,
-                    title = segments.lastOrNull().orEmpty().ifBlank { collectionPath },
-                    depth = (segments.size - 1).coerceAtLeast(0),
-                    tasks = directTasksByPath[collectionPath].orEmpty().toList(),
-                    childGroupCount = allCollectionPaths[collectionPath]?.count { it != collectionPath } ?: 0
-                )
-            }
+            groupedSections = rootSections
         )
     }
     val selectedTaskCount = selectedTaskIds.values.count { it }
@@ -2321,6 +2373,11 @@ private fun MobileTaskApp(
             onEditGroup = {
                 openTaskCollectionEditor(task)
             },
+            onArchiveTask = {
+                scope.launch {
+                    archiveTaskFromUi(task)
+                }
+            },
             onRetryTask = {
                 scope.launch {
                     resubmitTaskFromUi(task)
@@ -2348,6 +2405,73 @@ private fun MobileTaskApp(
                 clearTaskDragState()
             }
         )
+    }
+
+    fun LazyListScope.renderArchiveSection(section: TaskCollectionSectionUi) {
+        item(key = "group-header-${section.collectionPath}") {
+            val isCollapsed = collapsedTaskCollections[section.collectionPath] == true
+            val isDropTarget = dragHoverCollectionPath == section.collectionPath
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .onGloballyPositioned { coordinates ->
+                        collectionHeaderBounds[section.collectionPath] = coordinates.boundsInWindow()
+                    }
+                    .clickable(enabled = !actionLoading) {
+                        collapsedTaskCollections[section.collectionPath] = !isCollapsed
+                    },
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isDropTarget) {
+                        Color(0xFFE0F2FE)
+                    } else {
+                        Color(0xFFF5F7FB)
+                    }
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(
+                            start = (12 + section.depth * 12).dp,
+                            top = 10.dp,
+                            end = 12.dp,
+                            bottom = 10.dp
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = section.title,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFF101828)
+                    )
+                    Text(
+                        text = "${section.collectionPath} · ${section.tasks.size} tasks · ${section.childGroupCount} child groups",
+                        color = Color(0xFF667085),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = if (isCollapsed) "Tap to expand" else "Tap to collapse",
+                        color = Color(0xFF98A2B3),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+        if (collapsedTaskCollections[section.collectionPath] == true) {
+            return
+        }
+        items(section.tasks, key = { task -> "${section.collectionPath}-${task.taskId}" }) { task ->
+            TaskListCard(
+                task = task,
+                isDropTarget = dragHoverTaskId == task.taskId,
+                isSelected = isTaskSelected(task.taskId),
+                selectionMode = batchSelectionMode
+            )
+        }
+        section.children.forEach { childSection ->
+            renderArchiveSection(childSection)
+        }
     }
 
     fun inspectClipboardForTaskCandidate() {
@@ -3529,7 +3653,7 @@ private fun MobileTaskApp(
                             )
                         ) {
                             Text(
-                                text = "Drop here to remove from group",
+                                text = "Drop here to move back to Unarchived",
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 12.dp),
                                 color = if (isActiveDropZone) Color(0xFFB42318) else Color(0xFF475467)
                             )
@@ -3539,76 +3663,37 @@ private fun MobileTaskApp(
                     ungroupDropBounds = null
                 }
 
-                items(taskCollectionBuckets.ungroupedTasks, key = { it.taskId }) { task ->
-                            TaskListCard(
-                                task = task,
-                                isDropTarget = dragHoverTaskId == task.taskId,
-                                isSelected = isTaskSelected(task.taskId),
-                                selectionMode = batchSelectionMode
-                            )
-                }
-
-                taskCollectionBuckets.groupedSections.forEach { section ->
-                    item(key = "group-header-${section.collectionPath}") {
-                        val isCollapsed = collapsedTaskCollections[section.collectionPath] == true
-                        val isDropTarget = dragHoverCollectionPath == section.collectionPath
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .onGloballyPositioned { coordinates ->
-                                    collectionHeaderBounds[section.collectionPath] = coordinates.boundsInWindow()
-                                }
-                                .clickable(enabled = !actionLoading) {
-                                    collapsedTaskCollections[section.collectionPath] = !isCollapsed
-                                },
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (isDropTarget) {
-                                    Color(0xFFE0F2FE)
-                                } else {
-                                    Color(0xFFF5F7FB)
-                                }
-                            )
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(
-                                        start = (12 + section.depth * 12).dp,
-                                        top = 10.dp,
-                                        end = 12.dp,
-                                        bottom = 10.dp
-                                    ),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    text = section.title,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Color(0xFF101828)
-                                )
-                                Text(
-                                    text = "${section.collectionPath} ? ${section.tasks.size} tasks ? ${section.childGroupCount} child groups",
-                                    color = Color(0xFF667085),
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = if (isCollapsed) "Tap to expand" else "Tap to collapse",
-                                    color = Color(0xFF98A2B3),
-                                    style = MaterialTheme.typography.bodySmall
-                                )
-                            }
-                        }
+                if (taskCollectionBuckets.ungroupedTasks.isNotEmpty()) {
+                    item(key = "unarchived-section-header") {
+                        Text(
+                            text = "Unarchived",
+                            color = Color(0xFF344054),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                        )
                     }
-                    if (!(collapsedTaskCollections[section.collectionPath] == true)) {
-                        items(section.tasks, key = { task -> "${section.collectionPath}-${task.taskId}" }) { task ->
-                            TaskListCard(
-                                task = task,
+                }
+                items(taskCollectionBuckets.ungroupedTasks, key = { it.taskId }) { task ->
+                    TaskListCard(
+                        task = task,
                         isDropTarget = dragHoverTaskId == task.taskId,
                         isSelected = isTaskSelected(task.taskId),
                         selectionMode = batchSelectionMode
-                            )
-                        }
+                    )
+                }
+
+                if (taskCollectionBuckets.groupedSections.isNotEmpty()) {
+                    item(key = "archived-section-header") {
+                        Text(
+                            text = "Archived",
+                            color = Color(0xFF344054),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+                        )
                     }
+                }
+                taskCollectionBuckets.groupedSections.forEach { section ->
+                    renderArchiveSection(section)
                 }
 
                     }
@@ -3753,7 +3838,7 @@ private fun MobileTaskApp(
                             verticalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Text(
-                                text = "Edit Group",
+                                text = if (editingTask.archived) "Adjust Archive" else "Archive Task",
                                 fontWeight = FontWeight.SemiBold
                             )
                             Text(
@@ -3767,8 +3852,8 @@ private fun MobileTaskApp(
                                 onValueChange = { collectionEditorDraft = it },
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = true,
-                                label = { Text("Group Path") },
-                                placeholder = { Text("e.g. Physics/Chapter 1") },
+                                label = { Text("Archive Path") },
+                                placeholder = { Text("e.g. 编程开发/算法与数据结构") },
                                 enabled = !collectionEditorSaving
                             )
                             Row(
@@ -3784,7 +3869,7 @@ private fun MobileTaskApp(
                                     enabled = !collectionEditorSaving,
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Text("Save")
+                                    Text(if (editingTask.archived) "Save" else "Archive")
                                 }
                                 TextButton(
                                     onClick = {
@@ -3795,7 +3880,7 @@ private fun MobileTaskApp(
                                     enabled = !collectionEditorSaving && editingTask.collectionPath.isNotBlank(),
                                     modifier = Modifier.weight(1f)
                                 ) {
-                                    Text("Remove")
+                                    Text("Unarchive")
                                 }
                             }
                         }
@@ -4653,6 +4738,7 @@ private fun SwipeRenameTaskListItem(
     onCommitRename: (String) -> Unit,
     onCancelTask: () -> Unit,
     onEditGroup: () -> Unit,
+    onArchiveTask: () -> Unit,
     onRetryTask: () -> Unit,
     onCardBoundsChanged: (Rect?) -> Unit,
     onTaskDragStart: (Offset) -> Unit,
@@ -4660,7 +4746,7 @@ private fun SwipeRenameTaskListItem(
     onTaskDragEnd: () -> Unit,
     onTaskDragCancel: () -> Unit
 ) {
-    val menuWidth = 188.dp
+    val menuWidth = 272.dp
     val menuWidthPx = with(LocalDensity.current) { menuWidth.toPx() }
     var dragOffsetPx by remember(task.taskId) { mutableFloatStateOf(0f) }
     var latestBounds by remember(task.taskId) { mutableStateOf<Rect?>(null) }
@@ -4710,7 +4796,16 @@ private fun SwipeRenameTaskListItem(
                     enabled = canInteract && !selectionMode
                 ) {
                     Text(
-                        text = "Group",
+                        text = if (task.archived) "Adjust" else "Plan",
+                        color = Color.White
+                    )
+                }
+                TextButton(
+                    onClick = onArchiveTask,
+                    enabled = canInteract && !selectionMode
+                ) {
+                    Text(
+                        text = if (task.archived) "Unarchive" else "Archive",
                         color = Color.White
                     )
                 }
@@ -4847,7 +4942,14 @@ private fun SwipeRenameTaskListItem(
                 }
                 if (task.collectionPath.isNotBlank()) {
                     Text(
-                        text = "Path: ${task.collectionPath.trim()}",
+                        text = "Archived: ${task.collectionPath.trim()}",
+                        color = Color(0xFF475467),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                } else if (task.categoryPath.isNotBlank()) {
+                    Text(
+                        text = "Suggested: ${task.categoryPath.trim()}",
                         color = Color(0xFF475467),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -4862,7 +4964,13 @@ private fun SwipeRenameTaskListItem(
                             onClick = onEditGroup,
                             enabled = canInteract
                         ) {
-                            Text(if (task.collectionPath.isBlank()) "Group" else "Edit Group")
+                            Text(if (task.archived) "Edit Archive" else "Plan Archive")
+                        }
+                        TextButton(
+                            onClick = onArchiveTask,
+                            enabled = canInteract
+                        ) {
+                            Text(if (task.archived) "Unarchive" else "Archive")
                         }
                         if (isFailed && canRetry) {
                             TextButton(

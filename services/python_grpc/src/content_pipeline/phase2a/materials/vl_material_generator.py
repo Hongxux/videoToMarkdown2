@@ -878,6 +878,15 @@ class VLMaterialGenerator:
             from services.python_grpc.src.content_pipeline.phase2a.materials.vl_video_analyzer import VLVideoAnalyzer
             self._analyzer = VLVideoAnalyzer(self.config)
         return self._analyzer
+
+    async def close(self):
+        """显式释放 VL 分析器资源。"""
+        if self._analyzer is None:
+            return
+        try:
+            await self._analyzer.close()
+        finally:
+            self._analyzer = None
     
     def is_enabled(self) -> bool:
         """检查是否启鐢?VL 素材生成"""

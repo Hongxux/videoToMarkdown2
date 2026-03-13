@@ -51,6 +51,11 @@ def _normalize_title(raw_title: str) -> str:
     return " ".join(str(raw_title or "").split()).strip()
 
 
+def _is_youtube_url(video_url: str) -> bool:
+    lower_url = str(video_url or "").lower()
+    return "youtube.com/" in lower_url or "youtu.be/" in lower_url
+
+
 def _extract_bilibili_episode_index(*url_candidates: str) -> int:
     for candidate in url_candidates:
         episode_index = _extract_bilibili_episode_index_from_rules(str(candidate or ""))
@@ -269,6 +274,29 @@ async def run_download_flow(
 
         is_douyin_download = is_douyin_url(video_url)
         download_options = load_download_video_options(config) if not is_douyin_download else {}
+        if not is_douyin_download and not _is_youtube_url(video_url):
+            download_options = dict(download_options)
+            download_options["cookies_file"] = None
+            download_options["cookies_from_browser"] = None
+            download_options["youtube_download_proxy"] = None
+            download_options["proxy"] = None
+        if not is_douyin_download and _is_youtube_url(video_url):
+            try:
+                probe_processor = video_processor_cls(**download_options)
+                info = probe_processor.probe_video_info(video_url)
+                if isinstance(info, dict) and info:
+                    if not resolved_platform or resolved_platform == "unknown":
+                        resolved_platform = "youtube"
+                    if not resolved_title:
+                        resolved_title = str(info.get("title") or "")
+                    if resolved_content_type == "unknown":
+                        resolved_content_type = "playlist" if info.get("entries") else "video"
+                    logger.info(
+                        f"[{task_id}] YouTube info resolved via yt-dlp: "
+                        f"title={resolved_title or '(empty)'}, content_type={resolved_content_type}"
+                    )
+            except Exception as exc:
+                logger.warning(f"[{task_id}] YouTube info probe skipped: {exc}")
         if not is_douyin_download and (
             download_options.get("cookies_file") or download_options.get("cookies_from_browser")
         ):
@@ -277,6 +305,10 @@ async def run_download_flow(
                 f"cookies_file={bool(download_options.get('cookies_file'))}, "
                 f"cookies_from_browser={download_options.get('cookies_from_browser') or ''}, "
                 f"proxy={download_options.get('proxy') or ''}"
+            )
+        if not is_douyin_download and _is_youtube_url(video_url) and download_options.get("youtube_download_proxy"):
+            logger.info(
+                f"[{task_id}] YouTube proxy enabled: {download_options.get('youtube_download_proxy')}"
             )
         if not is_douyin_download and download_options.get("external_downloader"):
             logger.info(

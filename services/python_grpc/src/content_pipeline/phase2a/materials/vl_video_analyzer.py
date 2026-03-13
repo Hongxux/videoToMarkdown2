@@ -29,6 +29,7 @@ import random
 import httpx
 import hashlib
 import subprocess
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -57,6 +58,155 @@ _DATA_URI_SAFETY_RATIO = 0.90  # 留出协议/编码冗余，避免卡边界导�
 _DASHSCOPE_BATCH_BODY_MAX_BYTES = 6 * 1024 * 1024
 # 按用户要求放宽 base64 视频回退阈值到 1GB。
 _MAX_RAW_BYTES_FOR_BASE64_DATA_URI = 1024 * 1024 * 1024
+
+_VL_HTTP_CLIENT_POOL: Dict[float, List[Dict[str, Any]]] = {}
+_VL_HTTP_CLIENT_POOL_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class VLHttpClientLease:
+    """VL HTTP 连接池租约。"""
+
+    timeout_sec: float
+    client_id: str
+
+
+@dataclass
+class _VLClientState:
+    """VL 客户端状态，用于双客户端切换与在途跟踪。"""
+
+    lease: VLHttpClientLease
+    http_client: httpx.AsyncClient
+    openai_client: AsyncOpenAI
+    inflight: int = 0
+    retiring: bool = False
+
+
+def _normalize_vl_timeout_sec(timeout_sec: Any) -> float:
+    """归一化 VL HTTP 超时配置。"""
+    try:
+        value = float(timeout_sec)
+    except Exception:
+        value = 120.0
+    if value <= 0:
+        value = 120.0
+    return value
+
+
+def _acquire_vl_http_client(
+    timeout_sec: Any,
+    *,
+    force_new: bool = False,
+) -> tuple[httpx.AsyncClient, VLHttpClientLease]:
+    """获取可复用的 VL HTTP 客户端。"""
+    normalized_timeout = _normalize_vl_timeout_sec(timeout_sec)
+    with _VL_HTTP_CLIENT_POOL_LOCK:
+        entries = _VL_HTTP_CLIENT_POOL.get(normalized_timeout) or []
+        if not force_new:
+            for entry in entries:
+                client = entry.get("client")
+                if isinstance(client, httpx.AsyncClient) and not client.is_closed:
+                    entry["refs"] = int(entry.get("refs", 0)) + 1
+                    return client, VLHttpClientLease(normalized_timeout, str(entry.get("id") or ""))
+        client = httpx.AsyncClient(
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            headers={"Accept-Encoding": "gzip, deflate"},
+            timeout=httpx.Timeout(normalized_timeout, connect=10.0)
+        )
+        entry_id = uuid.uuid4().hex
+        entries.append({"id": entry_id, "client": client, "refs": 1})
+        _VL_HTTP_CLIENT_POOL[normalized_timeout] = entries
+        return client, VLHttpClientLease(normalized_timeout, entry_id)
+
+
+async def _release_vl_http_client(
+    lease: Optional[VLHttpClientLease],
+    client: Optional[httpx.AsyncClient],
+) -> None:
+    """释放 VL HTTP 客户端引用计数，必要时关闭连接池。"""
+    if lease is None or client is None:
+        return
+    should_close = False
+    timeout_key = float(getattr(lease, "timeout_sec", 0.0) or 0.0)
+    target_id = str(getattr(lease, "client_id", "") or "")
+    with _VL_HTTP_CLIENT_POOL_LOCK:
+        entries = _VL_HTTP_CLIENT_POOL.get(timeout_key)
+        if not entries:
+            return
+        entry = None
+        for candidate in entries:
+            if str(candidate.get("id") or "") == target_id and candidate.get("client") is client:
+                entry = candidate
+                break
+        if entry is None:
+            return
+        refs = max(0, int(entry.get("refs", 0)) - 1)
+        if refs == 0:
+            entries.remove(entry)
+            if not entries:
+                _VL_HTTP_CLIENT_POOL.pop(timeout_key, None)
+            should_close = True
+        else:
+            entry["refs"] = refs
+    if should_close:
+        try:
+            await client.aclose()
+            logger.info("VL 共享 HTTP 客户端已关闭: timeout=%.2fs", float(timeout_key))
+        except Exception as exc:
+            logger.warning("VL 共享 HTTP 客户端关闭失败: %s", exc)
+
+
+def _iter_exception_chain(exc: BaseException, max_depth: int = 6) -> list[BaseException]:
+    """遍历异常链，避免遗漏连接池相关异常。"""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while current is not None and depth < max(1, int(max_depth)):
+        current_id = id(current)
+        if current_id in seen:
+            break
+        seen.add(current_id)
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return chain
+
+
+def _is_connection_pool_exhausted_error(exc: BaseException) -> bool:
+    """识别连接池资源不足导致的异常。"""
+    for current in _iter_exception_chain(exc):
+        if isinstance(current, httpx.PoolTimeout):
+            return True
+        text = str(current).lower()
+        if "pool timeout" in text or "connection pool" in text or "no available connections" in text:
+            return True
+    return False
+
+
+def _should_release_vl_http_client(exc: BaseException) -> bool:
+    """识别需要重置 VL HTTP 客户端的异常类型。"""
+    for current in _iter_exception_chain(exc):
+        if isinstance(current, (httpx.TimeoutException, httpx.NetworkError)):
+            return True
+    return False
+
+
+async def shutdown_vl_http_client_pool() -> None:
+    """统一关闭 VL 共用 HTTP 连接池。"""
+    clients: list[httpx.AsyncClient] = []
+    with _VL_HTTP_CLIENT_POOL_LOCK:
+        for entries in _VL_HTTP_CLIENT_POOL.values():
+            for entry in entries:
+                client = entry.get("client")
+                if isinstance(client, httpx.AsyncClient) and not client.is_closed:
+                    clients.append(client)
+        _VL_HTTP_CLIENT_POOL.clear()
+    for client in clients:
+        try:
+            await client.aclose()
+        except Exception as exc:
+            logger.warning("VL 共用 HTTP 连接池关闭失败: %s", exc)
 
 
 @dataclass
@@ -175,14 +325,19 @@ class VLVideoAnalyzer:
         self.compression_crf = api_config.get("compression_crf", 28)  # 0-51, 越大压缩越多
         self.max_tokens = api_config.get("max_tokens", 4096)
         self.temperature = api_config.get("temperature", 0.2)
-        self.vl_request_timeout_sec = max(1.0, safe_float(api_config.get("request_timeout_sec", 120.0), 120.0))
+        # 最小请求超时统一下限，避免短视频被过早超时
+        min_request_timeout_sec = 30.0
+        self.vl_request_timeout_sec = max(
+            min_request_timeout_sec,
+            safe_float(api_config.get("request_timeout_sec", 120.0), 120.0),
+        )
         self.vl_request_timeout_ratio_by_video_duration = max(
             0.0,
             safe_float(api_config.get("request_timeout_ratio_by_video_duration", 0.5), 0.5),
         )
         self.vl_request_timeout_min_sec = max(
-            0.0,
-            safe_float(api_config.get("request_timeout_min_sec", 1.0), 1.0),
+            min_request_timeout_sec,
+            safe_float(api_config.get("request_timeout_min_sec", 30.0), 30.0),
         )
         self.long_video_upload_compress_enabled = bool(api_config.get("long_video_upload_compress_enabled", False))
         self.long_video_upload_target_height = max(
@@ -267,27 +422,14 @@ class VLVideoAnalyzer:
         self.max_input_frames = int(api_config.get("max_input_frames", 6))
         self.max_image_dim = int(api_config.get("max_image_dim", 1024))
         
-        # 初始化 HTTP 客户端 (带连接池和压缩)
-        self.http_client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-            headers={"Accept-Encoding": "gzip, deflate"},
-            timeout=httpx.Timeout(self.vl_request_timeout_sec, connect=10.0)
-        )
-        
-        # 初始化 OpenAI 兼容客户端
-        client_kwargs: Dict[str, Any] = {
-            "api_key": api_key,
-            "base_url": self.base_url,
-            "http_client": self.http_client,
-        }
-        default_headers: Dict[str, str] = {}
-        if self._api_key:
-            default_headers["Authorization"] = f"Bearer {self._api_key}"
-        if self.appid:
-            default_headers["appid"] = self.appid
-        if default_headers:
-            client_kwargs["default_headers"] = default_headers
-        self.client = AsyncOpenAI(**client_kwargs)
+        self.http_client = None
+        self.client = None
+        self._http_client_lease = None
+        self._http_client_acquired = False
+        # 双客户端切换与安全释放状态
+        self._client_lock = asyncio.Lock()
+        self._active_client_state = None
+        self._retired_client_states = []
         
         # 截图优化配置
         self.screenshot_optimization = config.get("screenshot_optimization", {})
@@ -397,17 +539,155 @@ class VLVideoAnalyzer:
         return " | caused_by=".join(details) if details else str(error)
 
     def __del__(self):
-        """析构时确保资源释放 (注意: 在异步环境中，建议显式调用 close)"""
-        if hasattr(self, 'http_client') and not self.http_client.is_closed:
-            # 由于 __del__ 不支持 await，这里只能记录日志，
-            # 完整资源释放应调用 await self.close()
-            pass
+        """析构时尽力释放共享连接池引用。"""
+        if not getattr(self, "_http_client_acquired", False):
+            return
+        client_state = getattr(self, "_active_client_state", None)
+        if client_state is None:
+            return
+        client = getattr(client_state, "http_client", None)
+        lease = getattr(client_state, "lease", None)
+        if client is None or lease is None:
+            return
+        try:
+            loop = asyncio.get_event_loop()
+        except Exception:
+            return
+        if loop.is_closed():
+            return
+        if loop.is_running():
+            try:
+                loop.create_task(_release_vl_http_client(lease, client))
+            except Exception:
+                return
+
+    def _build_openai_client(self, http_client: httpx.AsyncClient) -> AsyncOpenAI:
+        client_kwargs: Dict[str, Any] = {
+            "api_key": self._api_key,
+            "base_url": self.base_url,
+            "http_client": http_client,
+        }
+        default_headers: Dict[str, str] = {}
+        if self._api_key:
+            default_headers["Authorization"] = f"Bearer {self._api_key}"
+        if self.appid:
+            default_headers["appid"] = self.appid
+        if default_headers:
+            client_kwargs["default_headers"] = default_headers
+        return AsyncOpenAI(**client_kwargs)
 
     async def close(self):
-        """显式关闭资源池"""
-        if hasattr(self, 'http_client'):
-            await self.http_client.aclose()
-            logger.info("VLVideoAnalyzer HTTP 客户端已关闭")
+        """显式释放共享连接池引用。"""
+        states: list[_VLClientState] = []
+        async with self._client_lock:
+            if self._active_client_state is not None:
+                states.append(self._active_client_state)
+            if self._retired_client_states:
+                states.extend(self._retired_client_states)
+            self._active_client_state = None
+            self._retired_client_states = []
+            self.http_client = None
+            self.client = None
+            self._http_client_lease = None
+            self._http_client_acquired = False
+        for state in states:
+            await _release_vl_http_client(state.lease, state.http_client)
+
+    async def _ensure_client(self) -> None:
+        release_targets: list[tuple[VLHttpClientLease, httpx.AsyncClient]] = []
+        async with self._client_lock:
+            if (
+                self._active_client_state is not None
+                and self._active_client_state.http_client is not None
+                and not self._active_client_state.http_client.is_closed
+                and self._active_client_state.openai_client is not None
+            ):
+                return
+            stale_state = self._active_client_state
+            if stale_state is not None:
+                stale_state.retiring = True
+                self._retired_client_states.append(stale_state)
+                self._active_client_state = None
+                if stale_state.inflight <= 0:
+                    release_targets.append((stale_state.lease, stale_state.http_client))
+                    try:
+                        self._retired_client_states.remove(stale_state)
+                    except ValueError:
+                        pass
+            http_client, lease = _acquire_vl_http_client(self.vl_request_timeout_sec)
+            openai_client = self._build_openai_client(http_client)
+            self._active_client_state = _VLClientState(
+                lease=lease,
+                http_client=http_client,
+                openai_client=openai_client,
+            )
+            self.http_client = http_client
+            self.client = openai_client
+            self._http_client_lease = lease
+            self._http_client_acquired = True
+        for lease, client in release_targets:
+            await _release_vl_http_client(lease, client)
+
+    async def _acquire_client_state(self) -> _VLClientState:
+        await self._ensure_client()
+        async with self._client_lock:
+            if self._active_client_state is None:
+                raise RuntimeError("VL active client not initialized")
+            self._active_client_state.inflight += 1
+            return self._active_client_state
+
+    async def _release_client_state(self, client_state: _VLClientState) -> None:
+        release_target: Optional[tuple[VLHttpClientLease, httpx.AsyncClient]] = None
+        async with self._client_lock:
+            client_state.inflight = max(0, int(client_state.inflight) - 1)
+            if client_state.retiring and client_state.inflight == 0:
+                release_target = (client_state.lease, client_state.http_client)
+                if client_state in self._retired_client_states:
+                    self._retired_client_states.remove(client_state)
+        if release_target is not None:
+            await _release_vl_http_client(release_target[0], release_target[1])
+
+    async def _rotate_active_client(
+        self,
+        *,
+        failed_state: Optional[_VLClientState],
+        reason: str,
+    ) -> None:
+        old_id = ""
+        new_id = ""
+        async with self._client_lock:
+            active_state = self._active_client_state
+            if active_state is None:
+                return
+            if failed_state is not None and active_state is not failed_state:
+                return
+            if active_state.retiring:
+                return
+            old_id = str(active_state.lease.client_id or "")
+            active_state.retiring = True
+            self._retired_client_states.append(active_state)
+            http_client, lease = _acquire_vl_http_client(
+                self.vl_request_timeout_sec,
+                force_new=True,
+            )
+            openai_client = self._build_openai_client(http_client)
+            self._active_client_state = _VLClientState(
+                lease=lease,
+                http_client=http_client,
+                openai_client=openai_client,
+            )
+            self.http_client = http_client
+            self.client = openai_client
+            self._http_client_lease = lease
+            self._http_client_acquired = True
+            new_id = str(lease.client_id or "")
+        if reason:
+            logger.warning(
+                "VL 客户端已切换: reason=%s, old_client_id=%s, new_client_id=%s",
+                reason,
+                old_id or "-",
+                new_id or "-",
+            )
 
     def _normalize_analysis_mode(self, analysis_mode: Optional[str]) -> str:
         """方法说明：VLVideoAnalyzer._normalize_analysis_mode 工具方法。
@@ -900,10 +1180,19 @@ class VLVideoAnalyzer:
             "body": body,
         }
 
-    async def _read_batch_output_text(self, output_file_id: str) -> str:
+    async def _read_batch_output_text(
+        self,
+        output_file_id: str,
+        client: Optional[AsyncOpenAI] = None,
+    ) -> str:
         if not output_file_id:
             return ""
-        content_response = await self.client.files.content(output_file_id)
+        if client is None:
+            await self._ensure_client()
+            client = self.client
+        if client is None:
+            return ""
+        content_response = await client.files.content(output_file_id)
         text_attr = getattr(content_response, "text", "")
         if callable(text_attr):
             text_value = text_attr()
@@ -967,11 +1256,18 @@ class VLVideoAnalyzer:
         self,
         *,
         messages: Any,
+        client: Optional[AsyncOpenAI] = None,
     ) -> tuple[str, Optional[str], Dict[str, int], Dict[str, Any]]:
         if not self._api_key:
             raise RuntimeError(
                 f"DashScope offline task requires api_key, env={self._api_key_env or 'DASHSCOPE_API_KEY'}"
             )
+
+        if client is None:
+            await self._ensure_client()
+            client = self.client
+        if client is None:
+            raise RuntimeError("VL client not initialized")
 
         plain_messages = self._to_plain_value(messages)
         request_transport_meta = self._summarize_message_transport(plain_messages)
@@ -1008,7 +1304,7 @@ class VLVideoAnalyzer:
         )
 
         try:
-            input_file = await self.client.files.create(
+            input_file = await client.files.create(
                 file=batch_file_payload,
                 purpose="batch",
             )
@@ -1031,7 +1327,7 @@ class VLVideoAnalyzer:
         )
 
         try:
-            submit_response = await self.client.batches.create(
+            submit_response = await client.batches.create(
                 input_file_id=input_file_id,
                 endpoint="/v1/chat/completions",
                 completion_window="24h",
@@ -1068,7 +1364,7 @@ class VLVideoAnalyzer:
 
             poll_count += 1
             try:
-                poll_response = await self.client.batches.retrieve(task_id)
+                poll_response = await client.batches.retrieve(task_id)
             except Exception as exc:
                 raise RuntimeError(
                     f"DashScope batch polling failed: task_id={task_id}, detail={self._format_exception_detail(exc)}"
@@ -1092,7 +1388,7 @@ class VLVideoAnalyzer:
                     error_preview = ""
                     if error_file_id:
                         try:
-                            error_preview = await self._read_batch_output_text(error_file_id)
+                            error_preview = await self._read_batch_output_text(error_file_id, client=client)
                         except Exception as exc:
                             error_preview = f"read_error={self._format_exception_detail(exc)}"
                     raise RuntimeError(
@@ -1101,7 +1397,7 @@ class VLVideoAnalyzer:
                         f"error_preview={self._safe_json_preview(error_preview, max_len=1500)}, "
                         f"response={self._safe_json_preview(poll_response)}"
                     )
-                output_text = await self._read_batch_output_text(output_file_id)
+                output_text = await self._read_batch_output_text(output_file_id, client=client)
                 final_payload = self._extract_batch_result_body(
                     jsonl_text=output_text,
                     custom_id=request_custom_id,
@@ -1979,7 +2275,13 @@ class VLVideoAnalyzer:
 
         # 调用 API（含重试）
         last_error = None
-        for attempt in range(self.max_retries + 1):
+        pool_retry_index = 0
+        pool_retry_max_attempts = 5
+        pool_retry_jitter_sec = max(0.0, float(self.vl_retry_initial_backoff_sec) * 0.3)
+        effective_max_retries = max(0, int(self.max_retries))
+        attempt = 0
+        while attempt <= effective_max_retries:
+            client_state = await self._acquire_client_state()
             try:
                 response_kwargs = {
                     "model": self.model,
@@ -1998,7 +2300,10 @@ class VLVideoAnalyzer:
                 vl_response: Optional[llm_gateway.VLChatResult] = None
                 if use_dashscope_offline_task:
                     content, finish_reason, token_usage, offline_task_meta = (
-                        await self._call_vl_api_with_dashscope_offline_task(messages=messages)
+                        await self._call_vl_api_with_dashscope_offline_task(
+                            messages=messages,
+                            client=client_state.openai_client,
+                        )
                     )
                     vl_response = llm_gateway.VLChatResult(
                         content=content,
@@ -2011,7 +2316,7 @@ class VLVideoAnalyzer:
                     try:
                         cache_key = base_cache_key if attempt == 0 else None
                         result = await llm_gateway.vl_chat_completion(
-                            client=self.client,
+                            client=client_state.openai_client,
                             model=self.model,
                             messages=messages,
                             max_tokens=self.max_tokens,
@@ -2028,7 +2333,7 @@ class VLVideoAnalyzer:
                             response_kwargs.pop("response_format", None)
                             cache_key = base_cache_key if attempt == 0 else None
                             result = await llm_gateway.vl_chat_completion(
-                                client=self.client,
+                                client=client_state.openai_client,
                                 model=self.model,
                                 messages=messages,
                                 max_tokens=self.max_tokens,
@@ -2092,6 +2397,12 @@ class VLVideoAnalyzer:
                 except Exception:
                     pass
                 last_error = e
+                should_release_client = _should_release_vl_http_client(e)
+                if should_release_client and not _is_connection_pool_exhausted_error(e):
+                    await self._rotate_active_client(
+                        failed_state=client_state,
+                        reason=err_detail,
+                    )
                 raw_interactions.append(
                     {
                         "stage": "vl_video_analysis",
@@ -2118,7 +2429,28 @@ class VLVideoAnalyzer:
                         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     }
                 )
-                if attempt < self.max_retries:
+                if _is_connection_pool_exhausted_error(e) and pool_retry_index < pool_retry_max_attempts:
+                    wait_time = self._compute_retry_backoff_sec(
+                        attempt_index=pool_retry_index,
+                        initial_backoff_sec=float(self.vl_retry_initial_backoff_sec),
+                        multiplier=float(self.vl_retry_multiplier),
+                        max_backoff_sec=float(self.vl_retry_max_backoff_sec),
+                        jitter_sec=pool_retry_jitter_sec,
+                    )
+                    pool_retry_index += 1
+                    effective_max_retries += 1
+                    logger.warning(
+                        "VL 连接池资源不足，触发退避等待: attempt=%s pool_retry=%s/%s wait=%.2fs error=%s",
+                        attempt + 1,
+                        pool_retry_index,
+                        pool_retry_max_attempts,
+                        wait_time,
+                        err_detail,
+                    )
+                    await asyncio.sleep(wait_time)
+                    attempt += 1
+                    continue
+                if attempt < effective_max_retries:
                     wait_time = self._compute_retry_backoff_sec(
                         attempt_index=attempt,
                         initial_backoff_sec=float(self.vl_retry_initial_backoff_sec),
@@ -2126,7 +2458,7 @@ class VLVideoAnalyzer:
                         max_backoff_sec=float(self.vl_retry_max_backoff_sec),
                     )
                     logger.warning(
-                        f"VL API call failed (attempt {attempt+1}/{self.max_retries+1}): "
+                        f"VL API call failed (attempt {attempt+1}/{effective_max_retries+1}): "
                         f"{err_detail}, wait {wait_time}s"
                     )
 
@@ -2143,6 +2475,9 @@ class VLVideoAnalyzer:
                             analysis_mode=normalized_mode,
                         )
                     await asyncio.sleep(wait_time)
+                attempt += 1
+            finally:
+                await self._release_client_state(client_state)
         if last_error is not None:
             setattr(last_error, "_raw_llm_interactions", raw_interactions)
             if not getattr(last_error, "_display_error_detail", None):

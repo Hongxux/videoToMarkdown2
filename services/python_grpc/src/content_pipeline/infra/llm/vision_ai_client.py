@@ -1629,3 +1629,16 @@ def get_vision_ai_client(config: Optional[VisionAIConfig] = None) -> VisionAICli
     if should_replace:
         _global_vision_client = VisionAIClient(resolved_config)
     return _global_vision_client
+
+
+async def shutdown_vision_ai_client() -> None:
+    """统一关闭全局 VisionAIClient。"""
+    global _global_vision_client
+    client = _global_vision_client
+    _global_vision_client = None
+    if client is None:
+        return
+    try:
+        await client.close()
+    except Exception as exc:
+        logger.warning("VisionAIClient 关闭失败: %s", exc)

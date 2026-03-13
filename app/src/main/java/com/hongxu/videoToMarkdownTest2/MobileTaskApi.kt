@@ -39,7 +39,11 @@ data class MobileTaskListItem(
     val collectionId: String = "",
     val collectionTitle: String = "",
     val taskPath: String = "",
-    val collectionPath: String = ""
+    val collectionPath: String = "",
+    val categoryPath: String = "",
+    val archived: Boolean = false,
+    val archivedAt: String = "",
+    val manualCollection: Boolean = false
 )
 
 data class MobileManualCollectionBinding(
@@ -312,7 +316,11 @@ class HttpMobileTaskApi(
             collectionId = item.optString("collectionId").trim(),
             collectionTitle = item.optString("collectionTitle").trim(),
             taskPath = item.optString("taskPath").trim(),
-            collectionPath = item.optString("collectionPath").trim()
+            collectionPath = item.optString("collectionPath").trim(),
+            categoryPath = item.optString("categoryPath").trim(),
+            archived = item.optBoolean("archived", false),
+            archivedAt = item.optString("archivedAt").trim(),
+            manualCollection = item.optBoolean("manualCollection", false)
         )
     }
 

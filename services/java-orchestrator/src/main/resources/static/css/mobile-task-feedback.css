@@ -158,6 +158,90 @@
         filter var(--motion-duration-fast) var(--motion-ease-out);
 }
 
+.task-skeleton-card {
+    cursor: default;
+    background: linear-gradient(180deg, var(--card) 0%, var(--bg) 100%);
+}
+
+.task-skeleton-card::before {
+    content: "";
+    position: absolute;
+    inset: -20% 0;
+    background: linear-gradient(100deg, rgba(255, 255, 255, 0) 8%, rgba(255, 255, 255, 0.86) 48%, rgba(255, 255, 255, 0) 92%);
+    transform: translateX(-120%);
+    animation: skeletonSweep 1.4s ease-in-out infinite;
+    pointer-events: none;
+}
+
+.task-skeleton-card.is-failed {
+    background: rgba(254, 242, 242, 0.86);
+    border-bottom-color: rgba(248, 113, 113, 0.4);
+}
+
+.task-skeleton-card.is-failed::before {
+    opacity: 0.6;
+    animation-duration: 2s;
+}
+
+.task-skeleton-line,
+.task-skeleton-pill,
+.task-skeleton-chip {
+    background: rgba(148, 163, 184, 0.38);
+    border-radius: 999px;
+    display: block;
+}
+
+.task-skeleton-line {
+    height: 10px;
+}
+
+.task-skeleton-line.w-72 { width: 72%; }
+.task-skeleton-line.w-56 { width: 56%; }
+.task-skeleton-line.w-46 { width: 46%; }
+
+.task-skeleton-pill {
+    width: 58px;
+    height: 18px;
+}
+
+.task-skeleton-chip {
+    width: 34px;
+    height: 18px;
+}
+
+.task-skeleton-meta {
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.task-skeleton-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.task-skeleton-message {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.4;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.task-skeleton-card.is-failed .task-skeleton-message {
+    color: #b91c1c;
+}
+
+.task-skeleton-action-btn {
+    padding: 4px 10px;
+    font-size: 12px;
+    border-radius: 999px;
+}
+
 .task-list > .task-item:last-child {
     border-bottom: 0;
 }

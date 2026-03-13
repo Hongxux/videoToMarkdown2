@@ -509,6 +509,15 @@ def _load_download_video_options(config: Dict[str, Any]) -> Dict[str, Any]:
         "short_video_max_duration_sec": short_video_max_duration_sec,
         "external_downloader": _pick_str("external_downloader", "YTDLP_EXTERNAL_DOWNLOADER"),
         "external_downloader_args": _pick_args("external_downloader_args", "YTDLP_EXTERNAL_DOWNLOADER_ARGS"),
+        "youtube_download_proxy": _pick_str("youtube_download_proxy", "YTDLP_YOUTUBE_PROXY"),
+        "youtube_simple_downloader_script": _pick_str(
+            "youtube_simple_downloader_script",
+            "YTDLP_YOUTUBE_SIMPLE_DOWNLOADER_SCRIPT",
+        ),
+        "youtube_pot_script_home": _pick_str("youtube_pot_script_home", "YTDLP_YOUTUBE_POT_SCRIPT_HOME"),
+        "youtube_pot_http_base_url": _pick_str("youtube_pot_http_base_url", "YTDLP_YOUTUBE_POT_HTTP_BASE_URL"),
+        "youtube_js_runtimes": _pick_args("youtube_js_runtimes", "YTDLP_YOUTUBE_JS_RUNTIMES"),
+        "youtube_remote_components": _pick_args("youtube_remote_components", "YTDLP_YOUTUBE_REMOTE_COMPONENTS"),
     }
 
 
@@ -876,6 +885,11 @@ def _is_douyin_host(host: str) -> bool:
 
 def _is_douyin_url(video_url: str) -> bool:
     return _is_douyin_url_from_rules(video_url)
+
+
+def _is_youtube_url(video_url: str) -> bool:
+    lower_url = str(video_url or "").lower()
+    return "youtube.com/" in lower_url or "youtu.be/" in lower_url
 
 
 def _extract_bilibili_video_id(video_url: str) -> Optional[str]:
@@ -2928,6 +2942,10 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 raise ValueError("invalid video input: cannot resolve HTTP URL")
 
             download_options = _load_download_video_options(self.config)
+            if not _is_youtube_url(probe_url):
+                download_options = dict(download_options)
+                download_options["cookies_file"] = None
+                download_options["cookies_from_browser"] = None
             info = None
             video_processor = None
 
@@ -6909,7 +6927,11 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     _emit_vl_heartbeat(signal_type="hard")
                 except Exception as heartbeat_error:
                     logger.warning(f"[{task_id}] AnalyzeWithVL heartbeat loop failed: {heartbeat_error}")
-        
+
+        routing_generator = None
+        vl_generator = None
+        vl_task = None
+
         try:
             self._increment_tasks()
             _update_vl_heartbeat_state(
@@ -7383,6 +7405,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             if vl_units:
                 vl_t0 = time.perf_counter()
                 generator = VLMaterialGenerator(vl_config, cv_executor=self.cv_process_pool)
+                vl_generator = generator
                 vl_task = asyncio.create_task(generator.generate(video_path, vl_units, output_dir))
                 vl_started_at_sec = time.time()
                 _update_vl_heartbeat_state(
@@ -8404,6 +8427,27 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 error_msg=error_detail
             )
         finally:
+            if vl_task is not None and not vl_task.done():
+                vl_task.cancel()
+                try:
+                    await vl_task
+                except Exception as cleanup_error:
+                    logger.warning(f"[{task_id}] VL 任务清理失败: {cleanup_error}")
+            elif vl_task is not None:
+                try:
+                    _ = vl_task.exception()
+                except Exception:
+                    pass
+            if vl_generator is not None:
+                try:
+                    await vl_generator.close()
+                except Exception as cleanup_error:
+                    logger.warning(f"[{task_id}] VL 生成器关闭失败: {cleanup_error}")
+            if routing_generator is not None and routing_generator is not vl_generator:
+                try:
+                    await routing_generator.close()
+                except Exception as cleanup_error:
+                    logger.warning(f"[{task_id}] VL 路由生成器关闭失败: {cleanup_error}")
             vl_heartbeat_stop.set()
             if vl_heartbeat_thread is not None and vl_heartbeat_thread.is_alive():
                 vl_heartbeat_thread.join(timeout=2.0)
@@ -8530,6 +8574,40 @@ async def _shutdown_grpc_server(server, servicer) -> None:
     if hasattr(servicer, "process_pool"):
         servicer.process_pool.shutdown()
         logger.info("Process pool shut down")
+    llm_client = getattr(servicer, "llm_client", None)
+    if llm_client is not None:
+        close_func = getattr(llm_client, "close", None)
+        if callable(close_func):
+            try:
+                result = close_func()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as exc:
+                logger.warning("Servicer LLM client close failed: %s", exc)
+    try:
+        from services.python_grpc.src.content_pipeline.infra.llm import llm_client as module2_llm_client
+
+        await module2_llm_client.shutdown_pool_manager()
+    except Exception as exc:
+        logger.warning("Module2 LLM pool shutdown failed: %s", exc)
+    try:
+        from services.python_grpc.src.content_pipeline.infra.llm import vision_ai_client
+
+        await vision_ai_client.shutdown_vision_ai_client()
+    except Exception as exc:
+        logger.warning("VisionAI client shutdown failed: %s", exc)
+    try:
+        from services.python_grpc.src.content_pipeline.phase2a.materials import vl_video_analyzer
+
+        await vl_video_analyzer.shutdown_vl_http_client_pool()
+    except Exception as exc:
+        logger.warning("VL HTTP pool shutdown failed: %s", exc)
+    try:
+        from services.python_grpc.src.transcript_pipeline.llm import client as transcript_llm_client
+
+        await transcript_llm_client.shutdown_deepseek_client_cache()
+    except Exception as exc:
+        logger.warning("Transcript LLM client shutdown failed: %s", exc)
 
 
 if __name__ == "__main__":

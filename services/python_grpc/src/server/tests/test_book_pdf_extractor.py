@@ -109,6 +109,42 @@ def test_extract_book_pdf_markdown_rejects_invalid_page_range(tmp_path: Path) ->
     assert "out of range" in (result.error_msg or "").lower()
 
 
+def test_build_mineru_page_tasks_splits_continuous_range_into_four_even_chunks(tmp_path: Path, monkeypatch) -> None:
+    pdf_path = tmp_path / "ten-pages.pdf"
+    _build_multi_page_pdf(pdf_path, page_count=10)
+
+    output_dir = tmp_path / "out-range"
+    monkeypatch.delenv("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", raising=False)
+    monkeypatch.setenv("BOOK_PDF_MINERU_TARGET_CHUNKS", "4")
+
+    tasks = _build_mineru_page_tasks(
+        sliced_pdf_path=pdf_path,
+        output_dir=output_dir,
+        section_id="range-c1s1t1-c2s2t3",
+        start_page=1,
+        end_page=10,
+        parallel_enabled=True,
+    )
+
+    assert [(start, end) for start, end, _path in tasks] == [
+        (1, 3),
+        (4, 6),
+        (7, 8),
+        (9, 10),
+    ]
+    assert all(path.is_file() for _start, _end, path in tasks)
+
+
+def test_decide_mineru_parallel_workers_prefers_four_default_workers(monkeypatch) -> None:
+    monkeypatch.delenv("BOOK_PDF_MINERU_WORKERS", raising=False)
+    monkeypatch.setenv("BOOK_PDF_MINERU_DEFAULT_WORKERS", "4")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_MAX", "8")
+    monkeypatch.setattr(extractor_mod.os, "cpu_count", lambda: 2)
+    monkeypatch.setattr(extractor_mod, "_read_available_memory_gb", lambda: 1.0)
+
+    assert _decide_mineru_parallel_workers(4) == 4
+
+
 def test_discover_mineru_cli_finds_script_near_python(monkeypatch, tmp_path: Path) -> None:
     fake_python = tmp_path / "python" / "python.exe"
     fake_python.parent.mkdir(parents=True, exist_ok=True)

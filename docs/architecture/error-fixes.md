@@ -1,5 +1,161 @@
 ﻿# 错误修正记录
 
+## 2026-03-13 Book PDF 叶子章节选择导致页码错位
+- 日期：
+  - 2026-03-13
+- 现象：
+  - Web 端 book probe 选择多个 leaf 章节后，MinerU 抽取日志只显示单页区间（如 `mineru extraction dispatch, pages=33-33`）。
+  - 选中的 leaf 区间在 PDF 抽取时出现页码错位或范围被截断。
+- 根因：
+  - `splitSectionByLeafIndexes(...)` 把 `tN` 当作 `baseStart + N - 1` 的页码偏移，忽略 probe 返回的 `startPage/endPage` 元数据。
+  - 叶子节点缺少 `baseSectionSelector`，导致 leaf selector 回落到错误的 base section。
+  - 多个 leaf 被拼成离散 selector 传入，后端无法表达“连续区间”语义。
+- 修复：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+    - leaf 选择优先使用 probe 的 `startPage/endPage/title` 构造 section 范围，避免页码推断。
+    - 新增连续 leaf 区间选择，按 leaf 顺序合并成单一 range section。
+    - 仅在目录编号缺失或无法映射时才退回到按页码匹配 section。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 叶子节点保留 `baseSectionSelector`，确保 selector 回落到正确 section。
+    - 多选 leaf 时生成连续区间 selector（start-end），并提示区间抽取。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - leaf selector 不能再用页码偏移假设，必须来自 probe 的 leaf 元数据。
+  - 多选 leaf 默认按顺序构造连续区间，避免离散 selector 造成页码漂移。
+- 文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-12 VL 请求超时下限过低导致短视频易超时
+- 日期：
+  - 2026-03-12
+- 现象：
+  - VL 分析在视频时长很短或无法解析时，超时被计算为几秒（最低 1 秒），触发 ReadTimeout/APITimeoutError。
+- 根因：
+  - `vl_request_timeout_min_sec` 与兜底超时允许低于 30 秒，结合比例计算导致超时过小。
+- 修复：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 统一将 VL 请求超时下限钳制为 30 秒，避免短视频过早超时。
+- 验证：
+  - 未执行（配置下限调整，建议在真实短视频场景验证）
+- 预防：
+  - 在配置说明中保留最小超时基线，并在告警日志中输出最终超时值。
+- 文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-12 VL 并发分析导致共享客户端提前关闭
+- 日期：
+  - 2026-03-12
+- 现象：
+  - 单个语义单元超时后，其它单元紧接着报错 `Cannot send a request, as the client has been closed.`。
+- 根因：
+  - VL 分析器被并发单元共享，异常分支触发 `self.close()` 直接关闭共享 `httpx.AsyncClient`，导致仍在执行中的请求失效。
+- 修复：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+    - 取消请求级异常分支中对共享客户端的关闭，改为仅在统一 shutdown/显式 close 时释放。
+    - 增加双客户端切换与 in-flight 计数，旧 client 失败后切换新 client 重试，旧 client 在无在途请求时再释放。
+- 验证：
+  - 未执行（建议用并发 VL 单元回放观察是否仍出现 `client has been closed`）
+- 预防：
+  - 共享连接池资源禁止在单个请求失败时关闭；如需重建，必须在无 in-flight 时再置换。
+- 文件：
+  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_video_analyzer.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-12 Phase2B 单任务提深偏离离线整组分桶规则
+- 日期：
+  - 2026-03-12
+- 现象：
+  - 新任务先被粗分到 `后端/java` 这类叶子后，只要该叶子超阈值，系统就尝试把“当前任务单独提深”到 `后端/java/子类`。
+  - 这会导致同一批任务里同时存在 `后端/java` 与 `后端/java/*`，分类树出现混层；模型若跳出父目录，还会继续报“没有在指定父目录下进一步细分”。
+- 根因：
+  - 先前把“支持多级路径”误实现成了“允许当前任务自由返回更深层级”，偏离了用户真正的离线分桶规则。
+  - 叶子超阈值时，系统没有把该叶子下全部任务作为一个重分桶批次处理，而是只重分当前任务，破坏了分类树的一致性。
+  - 重分桶阶段若顺序不稳定，当前任务还可能抢占本该属于旧任务的子类，造成整组映射错位。
+- 修复：
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+    - 恢复为“每次调用只允许输出精确 `target_level` 深度”的校验，不再把多级路径当作自由深度输出。
+    - 新任务先按基础层级分类；如果该路径下已经存在活动子类，则沿现有分类树逐层路由到当前叶子。
+    - 当叶子任务数超过阈值时，收集该叶子下全部任务，在原父路径下统一增加一层重分桶；整组成功后才整体写回。
+    - 重分桶顺序改为“已有任务在前，当前任务在后”，避免顺序漂移导致新旧任务子类互换。
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/system.md`
+    - 明确 `category_path` 必须严格等于当前请求的 `target_level`，并在有父目录约束时保持在该前缀下细分。
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/user.md`
+    - 明确分类器每次只做当前层级的分类决策，不允许跳层输出。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+    - 增加“阈值内直归”“已有子类时沿树路由”“过载叶子整组重分桶”的回归测试。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/video_category_service.py services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+  - 在仓库内临时目录手动调用 `test_phase2b_video_category_service.py` 的 3 个回归用例，均通过。
+- 预防：
+  - Phase2B 的多级分类只能通过“沿活动子树路由”或“过载叶子整组下沉”两条路径演进，禁止再次回到“当前任务单独提深”的自由策略。
+  - 以后只要调整叶子阈值或分类树演进逻辑，必须同时覆盖“直归 / 路由 / 整组重分桶”三类回归场景。
+- 文件：
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/system.md`
+  - `services/python_grpc/src/content_pipeline/prompts/deepseek/category_classifier/user.md`
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-12 Web 视频播放数秒后卡顿
+- 日期：
+  - 2026-03-12
+- 现象：
+  - `index.html` 中部分视频播放几秒后缓冲耗尽，停在当前画面无法继续播放。
+- 根因：
+  - 任务派发链路在 CPU/内存高位时会触发资源守卫暂停，导致视频资产生成与读取出现间歇性阻塞。
+  - 视频标签统一使用 `preload=metadata`，缓冲窗口过小，轻微 IO 抖动就会触发停滞。
+- 修复：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/scheduler/LoadBasedScheduler.java`
+    - 关闭基于负载的资源守卫调度，默认不再暂停任务派发。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/AdaptiveResourceOrchestrator.java`
+    - 禁用基于 CPU/内存的动态并发调整。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 视频预加载从 `metadata` 调整为 `auto`，提升客户端缓冲。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 资源守卫仅允许通过 `task.resource-guard.enabled` 显式开启，并在负载评估后灰度恢复。
+  - 将视频播放卡顿作为回归项，必要时记录 `stalled/waiting` 事件做告警。
+- 文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/scheduler/LoadBasedScheduler.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/AdaptiveResourceOrchestrator.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-11 Web 任务列表与分类分组误按最近打开排序
+- 日期：
+  - 2026-03-11
+- 现象：
+  - `index.html` 中任务列表会优先展示最近打开过的任务，而不是最早创建的任务。
+  - 已归档分类分组的顺序也会跟着最近打开/最新任务漂移，无法稳定体现创建先后。
+- 根因：
+  - 前端任务合并排序使用了 `lastOpenedAt` 与 `createdAt` 的较大值，等价于“最近触达优先”。
+  - WebSocket 实时任务更新会把新任务直接插入数组头部，绕过列表的稳定创建顺序。
+  - 后端 `/api/mobile/tasks` 聚合视图同样优先使用 `lastOpenedAt` 倒序返回，前后端排序语义不一致。
+- 修复：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 将任务排序统一改为按 `createdAt` 升序，缺失时仅回退到 `completedAt`，不再使用 `lastOpenedAt`。
+    - 实时任务更新改为复用同一创建顺序比较器，避免推送事件把新任务顶到列表最前。
+    - 分类分组继续复用任务数组索引，因此会自动随任务创建顺序保持“越早越靠前”。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 聚合任务视图改为按创建时间升序输出，避免首次加载与前端合并后的顺序不一致。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 任务列表排序必须只依赖明确的展示语义字段，不能把“最近打开时间”混入“创建顺序”。
+  - 任何实时插入链路都必须复用主排序比较器，禁止单独用 `unshift`/头插破坏稳定顺序。
+- 文件：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `docs/architecture/error-fixes.md`
+
 ## 2026-03-09 App 默认后端地址固定，切换外网入口后无法自恢复
 - 现象：
   - Android App 仍然依赖构建期常量 `BuildConfig.MOBILE_API_BASE_URL`，入口域名切换后必须重新发版才能恢复请求。
@@ -9381,3 +9537,216 @@
 - 预防：
   - 所有依赖中文图像绘制的能力都应同时具备“显式开关 + UTF-8 运行环境 + 可覆盖字体路径 + 自动字体探测”四层保障，避免再次把可用性押注在单一硬编码路径上。
   - 以后若容器内再次出现中文 banner 异常，先检查 `TOP_REASON_BANNER_FONT_PATH`、`fc-cache` 与 `LANG/LC_ALL`，再排查业务逻辑。
+
+## 2026-03-11 Android 1.0.15 无法直接延续 1.0.14 自动更新链
+- 日期：2026-03-11
+- 现象：
+  - 本机将 App 升到 `1.0.15` 后，`assembleRelease` 一度只产出 `app-release-unsigned.apk`，无法直接发布到现有自动更新目录。
+  - 已发布的 `1.0.14` APK 使用旧证书，当前机器又拿不到同一把私钥，因此即使强行发布新的 APK，旧安装包也无法覆盖安装。
+- 根因：
+  - 原有 Android 发布私钥未在当前机器保留或未被当前构建环境加载。
+  - Android 平台要求“覆盖安装必须同签名”，这是安装器硬约束，不是业务层可绕开的限制。
+- 修复：
+  - 在 `C:\Users\HongXU\.videoToMarkdown\android-signing\video-to-markdown-release.jks` 新建长期 release keystore。
+  - 在 `C:\Users\HongXU\.gradle\gradle.properties` 补齐 Gradle 私有签名参数，让现有 `app/build.gradle.kts` 直接复用。
+  - 用新签名重新构建并发布 `1.0.15` 到 `var/app-updates/android/`，将新链路起点固定为 `versionCode=15`。
+- 预防：
+  - Android 发布私钥必须至少做两份离线备份，并记录 keystore 路径、alias、证书指纹与恢复责任人。
+  - 每次换机或清理环境后，先执行一次 `assembleRelease + apksigner verify`，确认仍能产出“已签名 release 包”，再推进版本发布。
+  - 后续若再发生签名链切换，必须在发布说明中明确提示“旧安装用户需卸载重装一次”，避免误判为普通热更新失败。
+
+## 2026-03-11 自动分类被误当成已归档合集
+- 日期：2026-03-11
+- 现象：
+  - 新提交任务虽然只是完成了自动分类，但在 Web 和 App 任务列表中会直接进入合集/分组区，看起来像已经被归档。
+  - App 端在增量刷新后还会残留旧 `collectionPath`，导致某些任务即使后端已清空合集路径，界面仍继续显示在合集里。
+- 根因：
+  - 后端此前把自动分类结果和手动合集覆盖混合成 `effectiveBindings`，`/manual-task-collections` 返回的也是混合后的结果。
+  - 前端又把 `collectionPath` 是否为空直接等价成“是否已入组/已归档”，没有单独的 `archived` 语义。
+  - Android `mergeTaskSnapshot()` 在增量合并时对空 `collectionPath` 使用了“沿用旧值”的策略，放大了状态残留问题。
+- 修复：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CategoryClassificationResultsRepository.java`
+    - 将自动分类、手动覆盖、归档状态拆分读取，新增 `archivedTaskPaths`，仅对显式归档任务输出归档绑定。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+    - 任务列表新增 `categoryPath`、`archived`、`archivedAt`，并在未归档时主动清空 `collectionId/collectionTitle/collectionPath`，避免前端误入合集树。
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+    - 停止把自动分类重新灌入 `collectionBindings`，保留已有人工覆盖和归档状态。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 只把 `archived=true` 的任务水合进本地合集树，并新增按分类归档/取消归档动作。
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+    - App 适配 `categoryPath/archived/archivedAt`，并修复增量合并时空 `collectionPath` 不能正确清空的问题。
+- 验证：
+  - `cmd /c mvn -f services\\java-orchestrator\\pom.xml -DskipTests compile -q`
+  - `cmd /c .\\gradlew.bat :app:compileDebugKotlin -q`
+  - `python -m py_compile services\\python_grpc\\src\\content_pipeline\\phase2b\\video_category_service.py`
+  - `node --check`（逐段校验 `index.html` script）
+- 预防：
+  - 以后只要任务列表出现“建议分类”和“已归档位置”两个概念，必须分别建模，禁止继续用单一 `collectionPath` 混表述。
+  - 增量同步合并逻辑不能对“语义性的空值”做盲目保留；像 `collectionPath`、`archivedAt` 这类状态字段，空值本身就是有效更新。
+
+## 2026-03-11 开发态本地启动 java-orchestrator 被 test-compile 阻塞
+- 日期：2026-03-11
+- 现象：
+  - 按新的轻量开发链路切到“Python 开发态容器 + Java 本地进程”后，`scripts/dev/start_java_orchestrator_local.ps1` 执行 `spring-boot:run` 时没有真正拉起 `8080`。
+  - 日志显示 Maven 在进入 Spring Boot 之前先执行了 `test-compile`，被仓库中当前未收口的测试代码编译错误拦住，导致开发态无法启动。
+- 根因：
+  - 脚本直接执行 `mvn spring-boot:run`，而 Maven 默认会串行触发到测试编译阶段。
+  - 这条开发启动链路的目标是“本地联调”，但它错误继承了“测试也必须可编译”的前置条件。
+- 修复：
+  - `scripts/dev/start_java_orchestrator_local.ps1`
+    - 将启动命令改为 `mvn -f services/java-orchestrator/pom.xml -Dmaven.test.skip=true spring-boot:run`，显式跳过测试编译。
+  - `README.md`
+    - 开发态命令统一改为 `powershell -NoProfile -ExecutionPolicy Bypass -File ...`，避免本机 PowerShell profile/conda 注入额外噪音，便于稳定复用脚本。
+- 验证：
+  - 重新执行 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/start_java_orchestrator_local.ps1`
+  - 观察 `var/logs/java-orchestrator-dev.log`，确认 Spring Boot 不再被 `test-compile` 阶段拦截。
+- 预防：
+  - 以后所有“开发态本地启动”脚本都应默认以“最短联调路径”为目标，避免把无关测试、发布打包步骤或全量校验硬塞进日常热迭代链路。
+  - 完整测试/编译验证仍保留在提测和发布前执行，不能与开发态快速启动混用。
+
+## 2026-03-11 调度层误判 OVERLOADED 导致任务长期不派发
+- 日期：2026-03-11
+- 现象：
+  - 两个视频任务在 `Task submitted` 后约等待 `9 分 40 秒` 才真正进入 `Dispatch task`。
+  - 同期日志持续输出 `System overloaded, pause dispatch for 5s`，但 CPU 近似空闲，且后续恢复后可用内存回到 `8GB+`。
+- 根因：
+  - `LoadBasedScheduler` 原先把“系统内存占用比例过高”直接等同于 `OVERLOADED`，而 `TaskProcessingWorker.dispatchLoop` 又把 `OVERLOADED` 直接解释为“必须停止派发”。
+  - 在容器/共享宿主机环境里，`SysMem%` 抖动比 `CPU/JVM Heap/实际可用内存` 更容易失真，导致调度层出现“假性过载”。
+- 修复：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/scheduler/LoadBasedScheduler.java`
+    - 将 `OVERLOADED` 收敛为“硬过载”条件：`CPU 高`、`JVM Heap 高`、或 `availableMemoryMB` 低于保护阈值。
+    - 将“仅系统内存占用比例偏高”的场景降级为 `BUSY`，保留并发保守性，但不再触发停派发。
+    - 新增 `shouldPauseDispatch()`，把“状态展示”和“是否必须暂停派发”分离。
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+    - `dispatchLoop` 改为仅在 `loadScheduler.shouldPauseDispatch()` 为真时暂停派发。
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/scheduler/LoadBasedSchedulerTest.java`
+    - 增加“高系统内存占用但仍有 577MB 可用内存时，不应暂停派发”与“真实低可用内存时仍需暂停派发”两个回归用例。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=LoadBasedSchedulerTest,TaskProcessingWorkerIoConcurrencyTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 预防：
+  - 后续所有“系统过载 -> 停派发”的调度决策，必须区分“硬保护阈值”和“软退让阈值”，禁止再把单一宿主机指标直接升格为硬熔断。
+  - 容器环境下涉及内存的调度判定，优先使用“实际可用内存余量”而不是单纯的使用率百分比。
+
+## 2026-03-12 concrete/process 媒体回填后未走 preserve_img，且最终 Markdown 没有稳定回写 main_content
+- 日期：2026-03-12
+- 现象：
+  - `concrete` 和 `process` 在图片、视频片段占位符回填完成后，文本虽然已经带上真实媒体 embed，但链路会直接把这份确定性文本继续向下传，不会再调用 DeepSeek `structured_system_preserve_img.md` 做最终 Markdown 整理。
+  - 即使后续局部链路生成了更新文本，下游装配仍可能重新读取旧 `full_text` 或旧分段 `main_content`，导致最终落盘 Markdown 与 `main_content` 不一致，用户看到的仍可能是旧正文。
+- 根因：
+  - `MarkdownEnhancer.enhance()` 对 `concrete/process` 的非教程分支此前被硬编码为“禁用 structured LLM，仅走确定性规则链路”，回填完成后没有第二阶段的 preserve_img 结构化增强。
+  - 结果同步链不完整：`result.json` 与 phase2a 语义单元顶层 `main_content` 没有在最终 Markdown 产生后统一回写。
+  - phase2b 装配仍优先消费旧文本字段，造成“上游已修正文，下游又退回旧值”的覆盖回退。
+- 修复：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 为 `concrete/process` 新增“媒体回填后再走 preserve_img prompt”的结构化增强步骤，并在 LLM 返回后再次执行占位符清理与缺失 embed 兜底，保证最终正文里的媒体引用完整。
+    - 把最终 Markdown 同步写回 `result.json` 的 `body_text`、`main_content`，并刷新 phase2a 相关语义单元文件的顶层 `main_content`。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+    - 调整消费优先级，优先读取已回写的顶层 `main_content`，避免被旧 `full_text` 或旧 concrete 分段正文回滚。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 增加 `process` / `concrete` 回归用例，覆盖“prompt 输入已完成媒体回填”和“最终 Markdown 已同步回写 main_content”。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 在固定目录构造 `process` 与 `concrete` 样例调用 `MarkdownEnhancer.enhance(...)`，确认：
+    - prompt 入参包含真实媒体 embed。
+    - `result.json.main_content` 与 `semantic_units_phase2a.json.main_content` 已更新为 DeepSeek 返回值。
+- 预防：
+  - 后续凡是“先做确定性素材替换，再做 LLM 文案整理”的链路，都必须明确阶段边界，并在阶段切换点定义唯一真值字段，禁止让下游再从旧字段回推正文。
+- 任何最终落盘 Markdown 的生成逻辑，只要涉及 `main_content`、`body_text`、`full_text` 三套并存字段，都必须补齐同步策略和消费优先级校验，否则同类回退问题会反复出现。
+
+## 2026-03-12 aria2c 缺失导致下载直接失败
+- 日期：
+  - 2026-03-12
+- 现象：
+  - 配置了 `external_downloader=aria2c` 时，如果实际环境未安装 aria2c，下载直接失败，未自动回退到 yt-dlp 内置下载器。
+- 根因：
+  - 下载链路只根据配置强行启用外部下载器，没有在运行前检测二进制可用性。
+- 修复：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 新增外部下载器路径解析，缺失时自动降级为 yt-dlp 内置下载器。
+- 验证：
+  - 未执行（建议在无 aria2c 的环境启动一次下载做验证）
+- 预防：
+  - 外部下载器必须在运行期进行可用性探测，避免配置与环境不一致造成硬失败。
+- 文件：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-12 aria2c 触发 SSL/代理错误时未自动回退
+- 日期：
+  - 2026-03-12
+- 现象：
+  - aria2c 下载遇到 SSL/TLS 握手或代理错误时，下载直接失败，未自动回退到 yt-dlp 内置下载器。
+- 根因：
+  - 外部下载器失败后缺少“仅本次降级”的兜底逻辑，错误直接抛出。
+- 修复：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 识别 aria2c 的 SSL/代理/超时类错误并自动回退到 yt-dlp 内置下载器重试一次。
+- 验证：
+  - 未执行（建议在代理或证书异常环境触发一次 aria2c 下载，确认自动回退生效）
+- 预防：
+  - 对外部下载器失败增加可回退的网络类错误识别，避免单点下载器故障阻断主链路。
+- 文件：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-12 aria2c 未继承下载代理导致直连
+- 日期：
+  - 2026-03-12
+- 现象：
+  - 代理已配置但 aria2c 仍然直连，导致 YouTube 等站点下载失败或走错出口。
+- 根因：
+  - 外部下载器参数仅在少数场景追加代理参数，未对所有有代理配置的任务生效。
+- 修复：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+    - 对 aria2c 统一追加 `--all-proxy`，确保代理配置传递到外部下载器。
+  - `services/python_grpc/src/server/download_service.py`
+    - 增加 YouTube 专用代理的日志输出，便于排查是否命中代理配置。
+- 验证：
+  - 未执行（建议触发一次 YouTube 下载并检查 aria2c 日志是否包含 `--all-proxy`）
+- 预防：
+  - 代理配置需要在主下载器与外部下载器之间保持一致，日志必须覆盖最终生效的代理值。
+- 文件：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `services/python_grpc/src/server/download_service.py`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-13 书籍区间选择被错误压缩成单 leaf/单页
+- 现象：
+  - 用户在书籍探测面板勾选从 `x.x.x` 到 `y.y.y` 的连续章节范围后，任务最终只提取一个 leaf 或一页。
+- 根因：
+  - 前端没有把勾选结果稳定收敛成连续区间 selector。
+  - 后端在 PDF 章节提取时没有始终优先使用 probe 返回的 leaf `startPage/endPage`。
+- 修复：
+  - 前端统一提交连续区间 selector，如 `x.x.x-y.y.y`。
+  - Java 侧直接把连续 leaf 区间映射成连续页范围 section。
+  - Python 侧先裁剪子 PDF，再均分为 4 段并行转录后合并。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -m py_compile services/python_grpc/src/server/book_pdf_extractor.py services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q` 当前环境缺少 `fitz`
+- 预防：
+  - `x.x.x -> y.y.y` 语义必须先映射成连续页范围，再进入 OCR。
+
+## 2026-03-13 PDF 目录叶子 selector 错误回贴到正文 section
+- 现象：
+  - 用户在书籍探测面板勾选 `c1` 下多个章节后，最终任务日志只提取单个 leaf，例如 `c1s1t2`。
+- 根因：
+  - `BookMarkdownService.buildPdfTocLeafSections(...)` 在生成 `leafSections` 时，把 TOC 的 `x.y.z` 又按页码回贴到正文 section。
+  - 当 `1.1.3` 与 `1.2.3` 这类叶子落在同一页或 section 页范围重叠时，后者会被错压成前者所在的 selector，例如把 `1.2.3` 写成 `c1s1t3`。
+- 修复：
+  - 调整 `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`：
+    - 叶子 selector 优先信任 TOC 解析出的 `chapterNo/sectionNo/leafNo`。
+    - 只有 TOC 本身缺失坐标时，才退回到按页码匹配正文 section。
+  - 新增回归测试 `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/BookMarkdownServiceLeafSectionMappingTest.java`。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q` 通过。
+  - 手工 probe `var/Distributed_Systems_4.pdf` 后，`leaf[06]` 已从错误的 `c1s1t3` 修正为 `c1s2t3`。
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=BookMarkdownServiceLeafSectionMappingTest test -q` 未完成验证，因为仓库里存在其他测试类对 `TaskQueueManager` 旧构造器的编译错误，与本次修复无关。
+- 预防：
+  - `leafSections` 的 selector 必须代表 TOC 结构路径，不能再被正文 section 解析结果覆盖。
+  - 以后若 probe 阶段出现“多选被压成单 leaf”，先检查 `probe.leafSections` 是否存在重复 `sectionSelector`。

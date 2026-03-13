@@ -31,7 +31,7 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
         injectField(controller, "taskQueueManager", queueManager);
         injectField(controller, "storageTaskCacheService", storageCache);
 
-        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false);
+        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false, "full", null);
 
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());
@@ -70,7 +70,7 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
         cachedTask.markdownAvailable = false;
         storageCache.put(cachedTask);
 
-        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false);
+        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false, "full", null);
 
         assertEquals(200, response.getStatusCode().value());
         assertNotNull(response.getBody());

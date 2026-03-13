@@ -23,10 +23,12 @@ video:
       download_cookies_file: ""
     login_cookie:
       download_proxy: "http://127.0.0.1:7897"
-      download_cookies_from_browser: "edge:Default"
+      download_cookies_from_browser: "firefox"
       download_cookies_file: ""
   # 视频下载代理 (可选，如: "http://127.0.0.1:7890")
   download_proxy: ""
+  # YouTube 专用代理（仅对 YouTube 生效）
+  youtube_download_proxy: "http://127.0.0.1:7897"
   # 外部下载器（提速推荐）：aria2c
   # 为空时走 yt-dlp 内置下载器
   external_downloader: "aria2c"
@@ -43,10 +45,22 @@ video:
   # - "chrome"
   # - "edge:Default"
   # - "firefox:default-release"
-  download_cookies_from_browser: ""
+  download_cookies_from_browser: "firefox"
   # 或者传入手工导出的 Netscape Cookie 文件路径
   # 可填相对路径（相对当前启动目录）或绝对路径
   download_cookies_file: ""
+  # YouTube 下载切换为简易下载器（Download-Simply-Videos-From-YouTube）
+  youtube_simple_downloader_script: ""
+  # YouTube POT Provider（bgutil-ytdlp-pot-provider）
+  # 使用脚本模式时指向 server 目录（包含 build/generate_once.js）
+  youtube_pot_script_home: ""
+  # 如使用 HTTP server，可配置 base_url，例如 http://127.0.0.1:4416
+  youtube_pot_http_base_url: ""
+  # JS 运行时（建议 node，确保与脚本模式一致）
+  youtube_js_runtimes:
+    - "node"
+  # 允许拉取远程 EJS 组件（需要时用于解密新版本播放器脚本）
+  youtube_remote_components: []
   # 下载阶段优先选择 H.264（avc1）可解码轨道，减少后续 OpenCV 兼容问题
   # true: 优先 H.264，失败再回退到默认 best 链路
   # false: 保持历史行为（best -> bestvideo+bestaudio/best）
@@ -321,7 +335,7 @@ pipeline:
   # 多视频并行处理 (V10 - 生产者-消费者模型)
   parallel_videos: true             # 启用多视频并行处理
   download_workers: 5               # 下载并发数
-  transcription_concurrency: 1      # GPU 建议 1；CPU 可按机器资源增大
+  transcription_concurrency: 2      # CPU 容器默认提升到 2，减少下载后排队等待
   postprocess_workers: 8            # 后处理并发数 (精修+分析+合成)
   transcription_queue_size: 3       # 待转录队列容量
 

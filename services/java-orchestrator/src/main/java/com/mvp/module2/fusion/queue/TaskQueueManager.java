@@ -36,6 +36,8 @@ public class TaskQueueManager {
     private final AtomicLong taskIdGenerator = new AtomicLong(0);
     private final Semaphore processingSlots;
     private final int maxConcurrentTasks;
+    private final int dedupeWindowMinutes;
+    private final long dedupeWindowMillis;
     private final ExecutorService executorService;
 
     public enum Priority {
@@ -100,20 +102,31 @@ public class TaskQueueManager {
         }
     }
 
+    public static class TaskSubmissionResult {
+        public TaskEntry task;
+        public boolean deduped;
+    }
+
     public TaskQueueManager() {
-        this(1);
+        this(1, 30);
     }
 
     @Autowired
-    public TaskQueueManager(@Value("${task.queue.max-concurrent:1}") int configuredMaxConcurrentTasks) {
+    public TaskQueueManager(
+            @Value("${task.queue.max-concurrent:1}") int configuredMaxConcurrentTasks,
+            @Value("${task.queue.dedupe-window-minutes:30}") int configuredDedupeWindowMinutes
+    ) {
         this.maxConcurrentTasks = Math.max(1, configuredMaxConcurrentTasks);
+        this.dedupeWindowMinutes = Math.max(0, configuredDedupeWindowMinutes);
+        this.dedupeWindowMillis = TimeUnit.MINUTES.toMillis(this.dedupeWindowMinutes);
         this.processingSlots = new Semaphore(this.maxConcurrentTasks);
         this.taskQueue = new PriorityBlockingQueue<>();
         this.executorService = Executors.newFixedThreadPool(this.maxConcurrentTasks);
         logger.info(
-                "TaskQueueManager initialized with {} concurrent slots (configured={})",
+                "TaskQueueManager initialized with {} concurrent slots (configured={}), dedupeWindowMinutes={}",
                 this.maxConcurrentTasks,
-                configuredMaxConcurrentTasks
+                configuredMaxConcurrentTasks,
+                this.dedupeWindowMinutes
         );
     }
 
@@ -128,27 +141,7 @@ public class TaskQueueManager {
             Priority priority,
             String preferredTitle
     ) {
-        String taskId = generateTaskId();
-
-        TaskEntry entry = new TaskEntry();
-        entry.taskId = taskId;
-        entry.userId = userId;
-        entry.videoUrl = videoUrl;
-        entry.title = normalizeOptionalText(preferredTitle);
-        entry.outputDir = outputDir;
-        entry.priority = priority;
-        entry.status = TaskStatus.QUEUED;
-        entry.createdAt = Instant.now();
-        entry.progress = 0.0;
-        entry.statusMessage = "排队中";
-        entry.resourcesReleased = false;
-
-        allTasks.put(taskId, entry);
-        taskQueue.offer(entry);
-        userTaskCounts.computeIfAbsent(userId, key -> new AtomicInteger(0)).incrementAndGet();
-
-        logger.info("Task submitted: {} by user {} (priority={})", taskId, userId, priority);
-        return entry;
+        return submitTask(userId, videoUrl, outputDir, priority, preferredTitle, null);
     }
 
     public synchronized TaskEntry submitTask(
@@ -159,9 +152,29 @@ public class TaskQueueManager {
             String preferredTitle,
             BookProcessingOptions bookOptions
     ) {
-        TaskEntry entry = submitTask(userId, videoUrl, outputDir, priority, preferredTitle);
-        entry.bookOptions = normalizeBookOptions(bookOptions);
-        return entry;
+        return createTaskEntry(userId, videoUrl, outputDir, priority, preferredTitle, bookOptions);
+    }
+
+    public synchronized TaskSubmissionResult submitTaskWithDedupe(
+            String userId,
+            String videoUrl,
+            String outputDir,
+            Priority priority,
+            String preferredTitle,
+            BookProcessingOptions bookOptions
+    ) {
+        TaskSubmissionResult result = new TaskSubmissionResult();
+        BookProcessingOptions normalizedOptions = normalizeBookOptions(bookOptions);
+        TaskEntry duplicate = findRecentDuplicateTask(userId, videoUrl, normalizedOptions, Instant.now());
+        if (duplicate != null) {
+            result.task = duplicate;
+            result.deduped = true;
+            logger.info("Task deduped: existing={} user={} videoUrl={}", duplicate.taskId, userId, videoUrl);
+            return result;
+        }
+        result.task = createTaskEntry(userId, videoUrl, outputDir, priority, preferredTitle, bookOptions);
+        result.deduped = false;
+        return result;
     }
 
     public TaskEntry pollNextTask(long timeout, TimeUnit unit) throws InterruptedException {
@@ -310,6 +323,10 @@ public class TaskQueueManager {
         return allTasks.get(taskId);
     }
 
+    public int getDedupeWindowMinutes() {
+        return dedupeWindowMinutes;
+    }
+
     public synchronized List<TaskEntry> getUserTasks(String userId) {
         List<TaskEntry> tasks = new ArrayList<>();
         for (TaskEntry task : allTasks.values()) {
@@ -401,6 +418,110 @@ public class TaskQueueManager {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private TaskEntry createTaskEntry(
+            String userId,
+            String videoUrl,
+            String outputDir,
+            Priority priority,
+            String preferredTitle,
+            BookProcessingOptions bookOptions
+    ) {
+        String taskId = generateTaskId();
+
+        TaskEntry entry = new TaskEntry();
+        entry.taskId = taskId;
+        entry.userId = userId;
+        entry.videoUrl = videoUrl;
+        entry.title = normalizeOptionalText(preferredTitle);
+        entry.outputDir = outputDir;
+        entry.priority = priority;
+        entry.status = TaskStatus.QUEUED;
+        entry.createdAt = Instant.now();
+        entry.progress = 0.0;
+        entry.statusMessage = "排队中";
+        entry.resourcesReleased = false;
+        entry.bookOptions = normalizeBookOptions(bookOptions);
+
+        allTasks.put(taskId, entry);
+        taskQueue.offer(entry);
+        userTaskCounts.computeIfAbsent(userId, key -> new AtomicInteger(0)).incrementAndGet();
+
+        logger.info("Task submitted: {} by user {} (priority={})", taskId, userId, priority);
+        return entry;
+    }
+
+    private TaskEntry findRecentDuplicateTask(
+            String userId,
+            String videoUrl,
+            BookProcessingOptions bookOptions,
+            Instant now
+    ) {
+        if (dedupeWindowMillis <= 0) {
+            return null;
+        }
+        if (userId == null || videoUrl == null) {
+            return null;
+        }
+        Instant cutoff = now.minusMillis(dedupeWindowMillis);
+        TaskEntry best = null;
+        for (TaskEntry task : allTasks.values()) {
+            if (task == null) {
+                continue;
+            }
+            if (!userId.equals(task.userId)) {
+                continue;
+            }
+            if (!videoUrl.equals(task.videoUrl)) {
+                continue;
+            }
+            if (task.createdAt == null || task.createdAt.isBefore(cutoff)) {
+                continue;
+            }
+            if (task.status == TaskStatus.CANCELLED || task.status == TaskStatus.FAILED) {
+                continue;
+            }
+            if (!isBookOptionsEquivalent(task.bookOptions, bookOptions)) {
+                continue;
+            }
+            if (best == null || task.createdAt.isAfter(best.createdAt)) {
+                best = task;
+            }
+        }
+        return best;
+    }
+
+    private boolean isBookOptionsEquivalent(BookProcessingOptions left, BookProcessingOptions right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        if (!valuesEqual(left.chapterSelector, right.chapterSelector)) {
+            return false;
+        }
+        if (!valuesEqual(left.sectionSelector, right.sectionSelector)) {
+            return false;
+        }
+        if (!valuesEqual(left.splitByChapter, right.splitByChapter)) {
+            return false;
+        }
+        if (!valuesEqual(left.splitBySection, right.splitBySection)) {
+            return false;
+        }
+        return valuesEqual(left.pageOffset, right.pageOffset);
+    }
+
+    private boolean valuesEqual(Object left, Object right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        return left.equals(right);
     }
 
     private BookProcessingOptions normalizeBookOptions(BookProcessingOptions rawOptions) {

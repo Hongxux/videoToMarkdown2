@@ -444,9 +444,9 @@ vl_material_generation:
   vl_analysis:
     # auto: 使用保守 CPU 感知默认值，避免统一 process 主链后把 unit 数直接打满
     # int:  手动指定并发度
-    parallel_workers: 4
+    parallel_workers: 16
     # 并发硬上限，防止 unit 数很大时瞬时请求过载
-    parallel_hard_cap: 4
+    parallel_hard_cap: 16
     # 单元级流式流水线：切片->压缩上传->离线VL->结果消费，按 unit 无等待推进
     stream_unit_pipeline_enabled: true
     # 单元切片独立进程池并发度（建议保守；统一 process 主链后优先保证稳定性）

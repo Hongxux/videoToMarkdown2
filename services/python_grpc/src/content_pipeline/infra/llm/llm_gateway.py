@@ -16,11 +16,13 @@ import json
 import logging
 import math
 import os
+import random
 import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Deque, Dict, Optional, Tuple, TypeVar
 import threading
+import httpx
 
 from services.python_grpc.src.content_pipeline.infra.runtime import cache_metrics
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
@@ -96,7 +98,7 @@ def _env_float(name: str, default: float) -> float:
         return float(default)
 
 
-_LLM_HEDGE_ENABLED = _env_bool("MODULE2_LLM_HEDGE_ENABLED", True)
+_LLM_HEDGE_ENABLED = _env_bool("MODULE2_LLM_HEDGE_ENABLED", False)
 _LLM_HEDGE_DELAY_MS = max(0, _env_int("MODULE2_LLM_HEDGE_DELAY_MS", 25000))
 
 _DEEPSEEK_HEDGE_ENABLED = _env_bool("MODULE2_DEEPSEEK_HEDGE_ENABLED", _LLM_HEDGE_ENABLED)
@@ -160,6 +162,8 @@ _DEEPSEEK_QWEN_FALLBACK_API_KEY = str(
 _DEEPSEEK_PROVIDER_MAX_RETRIES = 4
 _DEEPSEEK_PROVIDER_INITIAL_BACKOFF_SEC = 2.0
 _DEEPSEEK_PROVIDER_MAX_BACKOFF_SEC = 16.0
+_POOL_RETRY_ATTEMPTS = 5
+_POOL_RETRY_JITTER_RATIO = 0.3
 _DEEPSEEK_FAST_FALLBACK_LOCK = threading.Lock()
 _DEEPSEEK_FAST_FALLBACK_OPEN = False
 
@@ -580,6 +584,43 @@ def _reset_deepseek_fast_fallback() -> bool:
         return bool(was_open)
 
 
+def _iter_exception_chain(exc: BaseException, max_depth: int = 6) -> list[BaseException]:
+    """遍历异常链，补足被包装的连接池异常。"""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while current is not None and depth < max(1, int(max_depth)):
+        current_id = id(current)
+        if current_id in seen:
+            break
+        seen.add(current_id)
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return chain
+
+
+def _is_connection_pool_exhausted_error(exc: BaseException) -> bool:
+    """识别连接池资源不足导致的异常。"""
+    for current in _iter_exception_chain(exc):
+        if isinstance(current, httpx.PoolTimeout):
+            return True
+        text = str(current).lower()
+        if "pool timeout" in text or "connection pool" in text or "no available connections" in text:
+            return True
+    return False
+
+
+def _compute_pool_backoff_seconds(retry_index: int) -> float:
+    base_seconds = _DEEPSEEK_PROVIDER_INITIAL_BACKOFF_SEC * (2 ** max(0, int(retry_index)))
+    base_seconds = min(_DEEPSEEK_PROVIDER_MAX_BACKOFF_SEC, float(base_seconds))
+    jitter = base_seconds * float(_POOL_RETRY_JITTER_RATIO)
+    if jitter > 0:
+        base_seconds += random.uniform(0.0, jitter)
+    return max(0.0, float(base_seconds))
+
+
 def _compute_provider_retry_backoff_seconds(retry_index: int) -> float:
     bounded_retry_index = max(0, int(retry_index))
     wait_seconds = _DEEPSEEK_PROVIDER_INITIAL_BACKOFF_SEC * (2 ** bounded_retry_index)
@@ -595,15 +636,32 @@ async def _run_provider_with_retry(
 ) -> _HedgeResultT:
     total_attempts = max(1, int(max_retries) + 1)
     last_exc: Optional[Exception] = None
-    for attempt_idx in range(total_attempts):
+    provider_retry_index = 0
+    pool_retry_index = 0
+    while True:
         try:
             return await attempt_factory()
         except Exception as exc:
             last_exc = exc
-            if attempt_idx >= total_attempts - 1:
+            if _is_connection_pool_exhausted_error(exc) and pool_retry_index < int(_POOL_RETRY_ATTEMPTS):
+                wait_seconds = _compute_pool_backoff_seconds(pool_retry_index)
+                pool_retry_index += 1
+                logger.warning(
+                    "[LLM-pool] %s pool exhausted, retry %s/%s scheduled. provider=%s, wait=%.1fs, error=%s",
+                    request_name,
+                    pool_retry_index,
+                    _POOL_RETRY_ATTEMPTS,
+                    provider_label,
+                    wait_seconds,
+                    exc,
+                )
+                await asyncio.sleep(wait_seconds)
+                continue
+            if provider_retry_index >= total_attempts - 1:
                 raise
-            retry_no = attempt_idx + 1
-            wait_seconds = _compute_provider_retry_backoff_seconds(attempt_idx)
+            retry_no = provider_retry_index + 1
+            wait_seconds = _compute_provider_retry_backoff_seconds(provider_retry_index)
+            provider_retry_index += 1
             logger.warning(
                 "[LLM-retry] %s failed, retry %s/%s scheduled. provider=%s, wait=%.1fs, error=%s",
                 request_name,

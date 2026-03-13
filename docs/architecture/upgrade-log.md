@@ -1,5 +1,112 @@
 ﻿# 架构升级记录
 
+## 2026-03-12 YouTube 任务信息补全与专用代理
+- 日期：2026-03-12
+- 背景：
+  - YouTube 链接解析后常出现 `platform/title/content_type=unknown`，任务列表难以判断真实内容。
+  - 下载前缺少稳定的标题与类型会放大排查成本。
+- 第一性原理与复用杠杆：
+  - 第一性原理：任务元信息应在下载前尽量确定，否则下游只能围绕 unknown 推断。
+  - 复用杠杆：复用 `VideoProcessor.probe_video_info` 的 yt-dlp `extract_info(download=False)` 能力。
+- 决策：
+  - 决策1：对 YouTube URL 先做 `extract_info(download=False)`，补齐 `title` 与 `content_type`（video/playlist）。
+  - 决策2：新增 `video.youtube_download_proxy`，只对 YouTube 生效的下载代理入口。
+- 调用链变化：
+  - 调整前：`resolve_share_link -> canonical-unknown`
+  - 调整后：`resolve_share_link -> (YouTube) probe_video_info -> title/content_type`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-12 YouTube 下载默认使用 Firefox Cookie + Node 运行时
+- 日期：2026-03-12
+- 背景：
+  - 手工命令 `yt-dlp --cookies-from-browser firefox --js-runtimes node` 在风控场景更稳定。
+  - 线上链路未统一这些参数，导致部分任务反复触发验证或失败。
+- 第一性原理与复用杠杆：
+  - 第一性原理：YouTube 登录态与 JS 运行时是稳定下载的前置条件。
+  - 复用杠杆：配置化 `download_cookies_from_browser` 与 `youtube_js_runtimes`，不改代码即可切换。
+- 决策：
+  - 决策1：默认 `download_cookies_from_browser=firefox` 作为 cookie 来源。
+  - 决策2：YouTube 增加 `youtube_js_runtimes=[node]`，确保 POT/JS 相关能力可用。
+- 调用链变化：
+  - 调整前：`VideoProcessor.download (YouTube) -> yt-dlp (cookiefile/未配置 js_runtimes)`
+  - 调整后：`VideoProcessor.download (YouTube) -> yt-dlp (cookies-from-browser=firefox, js_runtimes=node)`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-12 YouTube 简易下载器复用 player_client 与 http_headers
+- 日期：2026-03-12
+- 背景：
+  - Download-Simply-Videos-From-YouTube 内置的 `player_client` 与 `http_headers` 更贴近当前可用的请求形态。
+- 第一性原理与复用杠杆：
+  - 第一性原理：稳定性来自正确的请求参数组合，而不是额外的下载脚本。
+  - 复用杠杆：从 `download.py` 读取 `YOUTUBE_PLAYER_CLIENTS` 与 `YOUTUBE_HTTP_HEADERS`，直接复用到 `VideoProcessor`。
+- 决策：
+  - 决策1：在 `VideoProcessor` 中动态加载脚本模块，读取 `player_client` 与 headers。
+  - 决策2：将这些参数注入 `yt-dlp extract_info/download`，避免重复维护两套配置。
+- 调用链变化：
+  - 调整前：`VideoProcessor.download (YouTube) -> yt-dlp (默认 player_client)`
+  - 调整后：`VideoProcessor.download (YouTube) -> yt-dlp (extract_info + player_client/http_headers)`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-12 YouTube 简易下载器开关与调用链切换
+- 日期：2026-03-12
+- 背景：
+  - 部分 YouTube 任务在标准 yt-dlp 路径下仍会出现被风控或标题解析失败的情况。
+  - 需要一个可配置的“简易下载器”兜底路径。
+- 第一性原理与复用杠杆：
+  - 第一性原理：把下载策略做成可切换开关，比硬编码单一路径更稳。
+  - 复用杠杆：复用 `Download-Simply-Videos-From-YouTube/download.py` 的配置入口。
+- 决策：
+  - 决策1：新增 `video.youtube_simple_downloader_script`，指向 `Download-Simply-Videos-From-YouTube/download.py`。
+  - 决策2：当该配置存在时，`VideoProcessor.download` 对 YouTube 切到简易下载路径，否则保持 yt-dlp 默认路径。
+- 调用链变化：
+  - 调整前：`VideoProcessor.download (YouTube) -> yt-dlp`
+  - 调整后：`VideoProcessor.download (YouTube) -> 简易下载路径（基于脚本配置的 yt-dlp）`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-12 YouTube 接入 BGUtil POT Provider
+- 日期：2026-03-12
+- 背景：
+  - YouTube 频繁提示 “Sign in to confirm you're not a bot”，需要 PO Token/POT Provider 支持。
+  - 现有 `VideoProcessor` 缺少 POT Provider 与 JS 运行时的统一注入点。
+- 第一性原理与复用杠杆：
+  - 第一性原理：POT Provider 必须与 yt-dlp extractor_args/js_runtimes 联动，才能稳定运行。
+  - 复用杠杆：配置化 `youtube_pot_script_home`、`youtube_pot_http_base_url`、`youtube_js_runtimes`、`youtube_remote_components`。
+- 决策：
+  - 决策1：在 `VideoProcessor` 里统一注入 `youtubepot-bgutil*` extractor_args。
+  - 决策2：在 `grpc_service_impl._load_download_video_options` 透传 POT 配置，确保调用链一致。
+- 调用链变化：
+  - 调整前：`grpc_service_impl._load_download_video_options -> VideoProcessor.download/probe -> yt-dlp`
+  - 调整后：`grpc_service_impl._load_download_video_options -> VideoProcessor._with_youtube_overrides -> yt-dlp (youtubepot + js_runtimes + remote_components)`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-12 关闭资源守卫限流并提升视频缓冲
+- 日期：2026-03-12
+- 背景：
+  - 任务派发在 CPU/内存高位时会触发资源守卫暂停，导致处理链路出现短时阻塞。
+  - 前端视频统一使用 `preload=metadata`，缓冲不足时容易播放数秒后停滞。
+- 第一性原理与复用杠杆：
+  - 第一性原理：播放链路需要稳定数据流，过度的资源守卫会放大瞬时抖动。
+  - 复用杠杆：保留现有调度器与信号量结构，仅关闭基于负载的动态限制。
+- 架构决策：
+  - 决策1：新增 `task.resource-guard.enabled` 开关，默认关闭资源守卫与动态并发调节。
+  - 决策2：视频预加载从 `metadata` 提升为 `auto`，扩大客户端缓冲窗口。
+- 调用链变化：
+  - 调整前：`TaskProcessingWorker -> LoadBasedScheduler.shouldPauseDispatch -> pause dispatch`
+  - 调整后：`TaskProcessingWorker -> LoadBasedScheduler.shouldPauseDispatch (固定返回 false)`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 手动播放任务视频，确认不再出现数秒后卡顿。
+
 ## 2026-03-11 Phase2B 末尾接入视频分类与全局分类汇总
 - 日期：2026-03-11
 - 背景：
@@ -4231,25 +4338,6 @@
 - Reuse note:
   - The "LLM placeholders + local asset binding" pattern is reusable across markdown assembly modules.
 
-## 2026-02-07 RichText ?????????????????
-- ???2026-02-07
-- ????????abstract/concrete ????????? `materials.screenshot_items`????????????????????? markdown ???/???????
-- ???????/??/????
-  - `services/python_grpc/src/content_pipeline/rich_text_pipeline.py`
-    - ???????`_slugify_text`?`_build_unit_asset_prefix`?`_build_action_brief`?`_build_request_base_name`?`_resolve_asset_output_path`?
-    - ?????????????? `assets/{unit_id}/...` ?????????? unit ??? action ???
-    - ?????? `_apply_external_materials` ?????????ID + ?????? + unit_id/title ???????????? `assets/{unit_id}/` ??????
-    - `clip/screenshot` ?? ID ???unit?? + action???????????????????
-  - `services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py`
-    - ?????????ID?????/???????????? unit ????
-- ????????
-  - ??????????????????????????????
-  - markdown ????????????????????????
-- ????????
-  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py`
-  - `python -m pytest -q services/python_grpc/src/content_pipeline/tests/test_rich_text_pipeline_asset_naming.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py services/python_grpc/src/content_pipeline/tests/test_vl_pre_prune.py`
-  - ???17 passed?
-
 ## 2026-02-08 process（非VL分步）链路补齐：截图校验 + 占位替换 + 尾部视频
 - 日期：2026-02-08
 - 触发背景与问题：`process` 语义单元在非 `tutorial_stepwise` 场景下，未统一走“结构化图片占位 -> 本地替换”的链路；截图校验仅覆盖 `abstract/concrete`，导致 process 输出在图文一致性上有缺口。
@@ -4815,54 +4903,6 @@
     - `legacy-video-package-removed.__file__ = D:\videoToMarkdownTest2\legacy-video-package-removed\__init__.py`
     - `legacy-video-package-removed.__path__ = ['D:\\videoToMarkdownTest2\\legacy-video-package-removed']`
     - `parallel_transcription.__file__ = D:\videoToMarkdownTest2\legacy-video-package-removed\knowledge_engine\core\parallel_transcription.py`
-
-## 2026-02-09 content_pipeline ??????????????
-- ???2026-02-09
-- ????????
-  - ?????????`rich_text_pipeline.py` ? `cv_knowledge_validator.py` ?????????????????????????????
-- ?????
-  - ??1????????????????????????????????
-  - ??2?? CV ?????????????????????????????????
-- ??????
-  - ?? `services/python_grpc/src/content_pipeline/phase2b/assembly/material_flow.py`
-    - ???`generate_materials`?`collect_material_requests`?`apply_external_materials`
-  - ?? `services/python_grpc/src/content_pipeline/phase2a/vision/cv_state_analysis.py`
-    - ???`detect_visual_states`?`merge_state_intervals`
-  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
-    - ??????????????????
-  - `services/python_grpc/src/content_pipeline/phase2a/vision/cv_knowledge_validator.py`
-    - ????????????????????
-- ??????
-  - ????????????????????????????
-- ?????
-  - ?????`python -m py_compile` ????????????
-  - ?????
-    - `pytest -q services/python_grpc/src/content_pipeline/tests/test_prompt_loader.py services/python_grpc/src/content_pipeline/tests/test_knowledge_classifier_config_path.py services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py`
-    - ???11 passed?
-
-## 2026-02-09 content_pipeline ???????VL ???????
-- ???2026-02-09
-- ????????
-  - `phase2a/materials/vl_material_generator.py` ?????????????????????
-- ?????
-  - ??1?? VL ?????????????????? `flow_ops` ???
-  - ??2?`VLMaterialGenerator` ?????????????????????
-- ??????
-  - ?? `services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py`
-    - ???
-      - `split_video_by_semantic_units`
-      - `find_clip_for_unit`
-      - `optimize_screenshots_batch_mode`
-      - `optimize_screenshots_streaming_pipeline`
-  - `services/python_grpc/src/content_pipeline/phase2a/materials/vl_material_generator.py`
-    - `_split_video_by_semantic_units`?`_find_clip_for_unit`?`_optimize_screenshots_batch_mode`?`_optimize_screenshots_streaming_pipeline` ???????
-- ??????
-  - ????????????????
-- ?????
-  - ???????/???? `py_compile` ???
-  - ?????
-    - `test_prompt_loader.py`?`test_knowledge_classifier_config_path.py`?`test_vl_tutorial_flow.py` ? 11 passed?
-    - `test_vl_material_prefetch.py`?`test_vl_pre_prune.py` ? 11 passed?
 
 ## 2026-02-09 content_pipeline 视频片段模块职责拆分（phase2a/materials）
 - 日期：2026-02-09
@@ -11467,3 +11507,235 @@ body` and task metadata is still present.
 - 经验：
   - 列表轻量化的第一优先级不是压缩算法，而是把“列表投影”和“详情投影”分层，并停止重复全量推送历史数据。
   - 只做任务时间戳增量是不够的；任何会影响列表展示的外部事实源，例如分类合集 JSON，也必须进入同步版本号模型。
+
+## 2026-03-11 Android 1.0.15 重建发布签名链并发布到自动更新目录
+- 日期：2026-03-11
+- 背景：
+  - 线上自动更新清单此前停留在 `1.0.14`，而本机重新构建 `1.0.15` 时只能产出 `app-release-unsigned.apk`，说明旧的发布私钥已经不在当前机器可复用范围内。
+  - Android 覆盖安装要求“新旧 APK 必须使用同一签名”，因此在旧私钥丢失的前提下，不可能让 `1.0.14` 及更早安装包无缝升级到新的 `1.0.15`。
+- 可复用杠杆：
+  - `app/build.gradle.kts` 已经支持从 Gradle properties / 环境变量读取 `androidReleaseKeystorePath/androidReleaseKeystorePassword/androidReleaseKeyAlias/androidReleaseKeyPassword`，无需修改构建脚本。
+  - 后端已有 `var/app-updates/android/latest.json`、`releases/*.json`、`publish-history.json` 这套更新清单协议，且 App 端已接入 `/api/mobile/app/update/check` 与 `/api/mobile/app/update/apk`。
+- 决策：
+  - 决策 1：在当前机器重建一条新的长期 Android 发布签名链。
+    - 原因：旧签名私钥不可恢复时，唯一可持续的做法是建立新 keystore，并保证后续所有新版本复用这同一签名。
+  - 决策 2：keystore 放在用户目录，签名参数写入 `C:\Users\HongXU\.gradle\gradle.properties`，不把口令入库。
+    - 原因：仓库已经忽略 `*.jks/*.keystore/local.properties` 等敏感文件；继续沿用 Gradle 私有配置可以兼顾可复现打包与密钥隔离。
+  - 决策 3：将 `1.0.15` 作为新签名链起点写入自动更新目录，并把 `minSupportedVersionCode` 提升到 `15`。
+    - 原因：从 `1.0.15` 开始的新安装用户可以继续沿用自动更新；`1.0.14` 及更早用户需要卸载旧版后手动安装一次，之后再恢复自动更新能力。
+- 作用范围：
+  - 本机私有 keystore：`C:\Users\HongXU\.videoToMarkdown\android-signing\video-to-markdown-release.jks`
+  - 本机私有 Gradle 配置：`C:\Users\HongXU\.gradle\gradle.properties`
+  - 发布产物：`var/app-updates/android/releases/apk/videoToMarkdown-15-1.0.15.apk`
+  - 更新清单：`var/app-updates/android/releases/15.json`
+  - 当前线上 latest：`var/app-updates/android/latest.json`
+- 发布结果：
+  - 版本：`versionCode=15`，`versionName=1.0.15`
+  - 新签名指纹（SHA-256）：`677356550026e088aa20f0fa176e10a6b33693377c5536e3b512113a25ae9bbe`
+  - 包体积：`14531156` bytes
+  - APK 摘要：`90901b7b4e24179473ec7dd60132da72ac1fa77acf80db26823349795132b086`
+- 测试方式：
+  - 先构建 release 包，再用 `apksigner` 验证签名身份，最后用 `aapt dump badging` 复核版本号。
+  - 发布后直接核对 `latest.json`、`15.json` 与 `publish-history.json`，确保自动更新服务读取链路不需要额外代码改动。
+- 验证：
+  - `cmd /c .\gradlew.bat :app:assembleRelease -q`
+  - `D:\Android\Sdk\build-tools\36.1.0\apksigner.bat verify --print-certs app/build/outputs/apk/release/app-release.apk`
+  - `D:\Android\Sdk\build-tools\36.1.0\aapt.exe dump badging app/build/outputs/apk/release/app-release.apk`
+- 经验：
+  - Android 自动更新的本质前提不是“服务端有新 APK”，而是“新 APK 必须继承旧签名身份”；没有旧私钥时，要尽快显式承认断更边界，而不是继续发布不可覆盖安装的伪升级包。
+  - 只要构建脚本预留了标准签名参数入口，重建发布链时通常不需要改代码；真正要做的是把 keystore 与私有 Gradle 配置放进稳定、可备份、且不入库的位置。
+
+## 2026-03-11 手动合集与自动分类收敛为统一归档模型
+- 日期：2026-03-11
+- 背景：
+  - 之前任务列表把 `category_classification_results.json` 中的自动分类结果直接映射成合集路径，导致“已分类”被误解释成“已归档”。
+  - Web 和 App 又各自维护一套“手动合集”语义，自动分类和手动调整之间缺少统一边界，出现未归档任务被提前进入合集树、App 端合集解析残留旧值等问题。
+- 可复用杠杆：
+  - `CategoryClassificationResultsRepository` 已经是 `var/storage/category_classification_results.json` 的统一读写入口。
+  - `/api/mobile/tasks`、`/api/mobile/tasks/changes`、`/api/mobile/manual-task-collections` 已经具备分类/合集同步链路。
+  - Web `index.html` 与 Android App 现有的合集树、批量选择、拖拽和路径重命名能力都可以直接复用为“归档后手动调整”能力。
+- 决策：
+  - 决策 1：自动分类路径作为唯一合集骨架，手动调整只作为覆盖层存在，不再维持独立的“手动合集框架”。
+    - 原因：统一骨架后，三端都只需要理解一套路径树结构，避免自动分类与手动合集相互覆盖。
+  - 决策 2：归档状态独立存放到 `archivedTaskPaths`，不再由自动分类结果隐式推出。
+    - 原因：任务“已分类”和“已归档”是两个不同语义；只有显式归档的任务才应该进入合集树。
+  - 决策 3：任务列表统一返回 `categoryPath + archived + archivedAt + collectionPath`。
+    - 原因：`categoryPath` 表示自动分类底座，`collectionPath` 仅在 `archived=true` 时表示最终归档路径，这样前端可以清晰地区分“建议分类”和“已归档位置”。
+- 作用范围：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CategoryClassificationResultsRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileTaskApi.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+- 实现结果：
+  - `category_classification_results.json` 新增 `archivedTaskPaths`，并停止把自动分类结果反灌成默认手动合集。
+  - Web 任务列表切分为“未归档/已归档”，右键菜单支持按分类批量归档与取消归档。
+  - Android 任务列表适配 `categoryPath/archived/archivedAt`，并新增左滑 `Archive/Unarchive` 操作。
+- 测试方式：
+  - Java 后端编译验证任务列表 DTO 和仓储改动。
+  - Kotlin 编译验证 App 端字段适配、左滑菜单和列表分区改动。
+  - Node `--check` 对 `index.html` 中的所有内联脚本做语法检查。
+  - Python `py_compile` 验证 Phase2B 分类汇总写回逻辑。
+- 验证：
+  - `cmd /c mvn -f services\\java-orchestrator\\pom.xml -DskipTests compile -q`
+  - `cmd /c .\\gradlew.bat :app:compileDebugKotlin -q`
+  - `python -m py_compile services\\python_grpc\\src\\content_pipeline\\phase2b\\video_category_service.py`
+  - `node --check`（逐段校验 `index.html` 的 5 个内联 script）
+- 经验：
+  - 只要前端还把“有分类路径”当成“已入合集”，自动分类就一定会污染归档语义；归档状态必须单独建模。
+  - 统一事实源的关键不是把所有字段都塞进一个 JSON，而是先分清“自动建议”“人工覆盖”“显式状态”三类信息，再让三端都只消费这三个层次。
+
+## 2026-03-11 开发态容器同步链路轻量化
+- 日期：2026-03-11
+- 背景：
+  - 当前根目录 [docker-compose.yml](/D:/videoToMarkdownTest2/docker-compose.yml) 属于发布态编排，代码通过 Dockerfile `COPY` 进入镜像，运行时只挂载 `config/` 与 `var/`。
+  - 这意味着日常开发时每改一次 Java/Python/Web 代码，都倾向于触发整套 `docker compose up -d --build`，反馈周期过长。
+- 可复用杠杆：
+  - 发布态 compose、两个 Dockerfile 和 [docker_release.ps1](/D:/videoToMarkdownTest2/scripts/release/docker_release.ps1) 已经稳定，不需要推倒重来。
+  - Java Orchestrator 本身支持本地 `spring-boot:run`，Python gRPC 服务的源码目录也可以直接 bind mount 到容器中。
+- 决策：
+  - 决策 1：保留现有 `docker-compose.yml` 作为发布态，不在原文件里混入开发态特化逻辑。
+    - 原因：发布路径要求可复现和稳定，开发路径要求快反馈，两者目标不同，应该物理分层。
+  - 决策 2：新增 [docker-compose.dev.yml](/D:/videoToMarkdownTest2/docker-compose.dev.yml) 作为开发覆盖层，仅给 `python-grpc` 增加源码挂载。
+    - 原因：Python 服务容器内运行最有价值，但不需要每次 rebuild；源码挂载后只需重启单服务。
+  - 决策 3：Java 改成本地 `spring-boot:run` 开发，并通过脚本自动读取根目录 `.env`。
+    - 原因：Java 当前发布镜像是运行时 JRE + fat jar，不适合直接在容器里做源码热开发；本地运行更轻。
+- 作用范围：
+  - [docker-compose.dev.yml](/D:/videoToMarkdownTest2/docker-compose.dev.yml)
+  - [scripts/dev/docker_dev.ps1](/D:/videoToMarkdownTest2/scripts/dev/docker_dev.ps1)
+  - [scripts/dev/start_java_orchestrator_local.ps1](/D:/videoToMarkdownTest2/scripts/dev/start_java_orchestrator_local.ps1)
+  - [README.md](/D:/videoToMarkdownTest2/README.md)
+- 开发态链路：
+  - Python：`powershell -ExecutionPolicy Bypass -File scripts/dev/docker_dev.ps1 -Action python-up`
+  - Java：`powershell -ExecutionPolicy Bypass -File scripts/dev/start_java_orchestrator_local.ps1`
+  - 改 Python 源码后：`powershell -ExecutionPolicy Bypass -File scripts/dev/docker_dev.ps1 -Action python-restart`
+  - 改 Python 基础依赖/Dockerfile 后：`powershell -ExecutionPolicy Bypass -File scripts/dev/docker_dev.ps1 -Action python-build`
+- 性能对比：
+  - 测试方式：按“改一处 Java Controller 或 `index.html` 后重新可访问服务”的开发回路比较。
+  - 旧方式：倾向执行整套 `docker compose up -d --build`，包含 Python 镜像、Java 镜像、容器重建，链路通常以分钟计。
+  - 新方式：
+    - Java/Web 改动只需重启本地 `spring-boot:run`
+    - Python 改动只需 `restart python-grpc`
+  - 结论：开发反馈路径从“整套镜像重建”收缩为“单服务重启或本地进程重启”，瓶颈从镜像构建转移为代码本身启动时间。
+- 验证：
+  - `docker compose -f docker-compose.yml -f docker-compose.dev.yml config`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 补充收敛：
+  - 新增 `scripts/dev/start_java_orchestrator_local_detached.ps1` 与 `scripts/dev/stop_java_orchestrator_local.ps1`，把后台启动、日志文件和 PID 文件固定下来，避免继续依赖脆弱的 `cmd /c start` 拼接。
+- 经验：
+  - 开发态和发布态 compose 不应该混写在一个文件里，否则最终只会同时牺牲发布稳定性和开发效率。
+  - 反馈周期最长的往往不是业务逻辑，而是错误的运行载体选择；像 Java fat jar 镜像就适合发布，不适合作为源码开发主入口。
+
+## 2026-03-12 视频分类改为过载叶子整组下沉重分桶
+- 日期：2026-03-12
+- 背景：
+  - 叶子类目任务增长后，原有“只把当前任务单独提深”的策略会造成同一父类下混合存在旧叶子和新子类，分类树失真。
+  - 用户的理想规则是：先按当前树的叶子分类；只有当叶子超阈值时，才把该叶子下全部任务统一下沉一层重新分类。
+- 本次调整：
+  - `services/python_grpc/src/content_pipeline/phase2b/video_category_service.py`
+    - 新任务先按当前分类树路由到“活动叶子”；若某个父类已完成过下沉，会继续沿现有子类树向下分类。
+    - 当叶子任务数超过阈值时，不再只细分当前任务，而是收集该叶子下所有任务，统一在原路径下增加一层重新分类。
+    - 整组下沉分类采用原子写回：整组成功才整体替换，避免半新半旧的混合状态。
+    - 补齐 `category_levels`、`category_depth`、`category_target_level` 等元信息到 `video_meta.json` 与任务分类结果。
+  - `services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+    - 增加“阈值内直归”“已有子类时沿树路由”“过载叶子整组重分桶”的回归覆盖。
+- 运行参数：
+  - `MODULE2_CATEGORY_CLASSIFIER_BASE_TARGET_LEVEL`：分类树起始层级，默认 `2`。
+  - `MODULE2_CATEGORY_CLASSIFIER_MAX_TARGET_LEVEL`：允许继续下沉的最大层级，默认 `4`。
+  - `MODULE2_CATEGORY_CLASSIFIER_LEAF_TASK_LIMIT`：叶子目录任务阈值，默认 `10`。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2b/video_category_service.py services/python_grpc/src/content_pipeline/tests/test_phase2b_video_category_service.py`
+  - 在仓库内临时目录手动调用 `test_phase2b_video_category_service.py` 的 3 个回归用例，确认“直归 / 路由 / 整组重分桶”全部通过。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 2026-03-11 视频任务吞吐调优：收紧硬过载判定 + 转写并发 2 + 路由截图切回 process_streaming
+- 日期：2026-03-11
+- 背景：
+  - 本轮容器日志显示吞吐被三段同时拖慢：
+    - 调度层在任务提交后持续报 `System overloaded, pause dispatch for 5s`，两个任务在队列中各等待约 `9 分 40 秒` 才被派发。
+    - 第二个任务下载完成后，又因为转写外层闸门为 `1`，额外等待约 `58 秒` 才进入 `TranscribeVideo`。
+    - 重 VL 任务在 `AnalyzeWithVL` 阶段出现多次 `30s ~ 86s` 的 hedge，说明外部 VL 调用尾延迟很重。
+- 可复用杠杆：
+  - Java 侧已有分阶段 semaphore：`download / transcribe / phase2`。
+  - Python 侧已具备 `process_streaming` 路由截图流水线，只是运行时被 `module2_config.local.yaml` 覆盖回 `legacy_batch`。
+  - 任务指标已落盘到 `task_metrics_latest.json`，可直接作为后续调参复测基线。
+- 本次调整：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/scheduler/LoadBasedScheduler.java`
+    - 将“硬过载”限定为 `CPU/JVM Heap/可用内存余量`，避免仅因系统内存百分比偏高就停派发。
+  - `services/java-orchestrator/src/main/resources/application.properties`
+    - `task.pipeline.transcribe-concurrency: 1 -> 2`
+  - `config/video_config.yaml`
+  - `config/video_config.local.yaml`
+    - `pipeline.transcription_concurrency: 1 -> 2`
+  - `config/module2_config.local.yaml`
+    - `vl_material_generation.routing.screenshot_pipeline_mode: legacy_batch -> process_streaming`
+- 性能基线：
+  - 测试方式：
+    - 直接复盘 2026-03-11 容器中最近两条任务日志与对应 `task_metrics_latest.json`。
+    - 样本任务：
+      - `VT_1773214921204_1`
+      - `VT_1773214923534_2`
+  - 测试数据（变更前基线）：
+    - 队列等待：
+      - `VT_1773214921204_1`：`07:42:01` 提交，`07:51:42` 派发，约 `581s`
+      - `VT_1773214923534_2`：`07:42:03` 提交，`07:51:42` 派发，约 `579s`
+    - 转写等待：
+      - `VT_1773214923534_2`：`07:52:26` 下载完成，`07:53:25` 才进入转写，约 `58s`
+    - 阶段耗时：
+      - `VT_1773214921204_1`：`analysis_vl=744296ms`，`total_pipeline=1332287ms`
+      - `VT_1773214923534_2`：`analysis_vl=182860ms`，`total_pipeline=661429ms`
+  - 结论：
+    - 本次改动先消除“假性停派发”和“下载后排队等转写”两个确定性空等，再把路由截图恢复到已具备流式能力的模式。
+    - 变更后真实吞吐增益需要按同一批双任务/三任务样本复测；当前提交先固化基线与调参方向。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=LoadBasedSchedulerTest,TaskProcessingWorkerIoConcurrencyTest test -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- 经验：
+  - 吞吐优化优先级应遵循“先消灭空等，再扩大窄闸门，最后才增加局部 worker 数”；否则很容易把问题从排队变成更深的排队。
+  - 配置诊断必须以 `*.local.yaml` 的实际生效值为准，不能只看主配置文件。
+
+## 2026-03-12 concrete/process 在媒体回填后接入 preserve_img 结构化增强
+- 日期：2026-03-12
+- 背景：
+  - 现有 `MarkdownEnhancer` 对 `concrete/process` 的非教程分支，只做图片和视频片段占位符的确定性回填，然后直接把结果继续向下游传递。
+  - 用户的新目标不是“只把占位符替换掉”，而是要在回填完成后，继续调用 DeepSeek 的 `structured_system_preserve_img.md` 提示词，对这份已带真实媒体 embed 的正文做最终结构化整理，并把返回值作为最终 Markdown。
+  - 这条能力在现有架构里并不需要新造轮子：`MarkdownEnhancer` 已有提示词加载、LLM 调用回退、trace 落盘、phase2b 组装入口和媒体占位符替换能力，杠杆已经齐全。
+- 本次调整：
+  - `services/python_grpc/src/content_pipeline/markdown_enhancer.py`
+    - 将 `concrete/process` 的非教程分支从“仅走确定性回填”改为“两阶段”：
+      - 第一阶段：沿用既有规则链，把 `[KEYFRAME_*]`、`[CLIP_*]` 等占位符替换成真实媒体 embed。
+      - 第二阶段：把回填后的正文作为 `body_text` 输入到 DeepSeek `structured_system_preserve_img.md` / `structured_user_preserve_img.md`，获取最终结构化 Markdown。
+    - 新增结果同步逻辑：把最终 Markdown 回写到 `result.json` 的 `body_text` 和 `main_content`，并同步刷新 `semantic_units_phase2a.json` / `intermediates/semantic_units_phase2a.json` / 最新 RPC 语义单元文件中的顶层 `main_content`。
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py`
+  - `services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py`
+    - phase2b 装配链优先读取语义单元顶层 `main_content`，避免后续链路又退回旧 `full_text` 或旧 `_vl_concrete_segments[].main_content`，把刚生成的最终 Markdown 覆盖掉。
+  - `services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+    - 补齐 `process` 和 `concrete` 两条回归，验证“prompt 接收到的是已回填的真实 embed，而不是占位符”，以及“返回结果已同步写回 `result.json/main_content` 与 `semantic_units_phase2a.json/main_content`”。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/content_pipeline/markdown_enhancer.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_pipeline.py services/python_grpc/src/content_pipeline/phase2b/assembly/rich_text_document.py services/python_grpc/src/content_pipeline/tests/test_markdown_enhancer_rich_text.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 在固定工作目录下构造 `process` / `concrete` 最小样例，手动调用 `MarkdownEnhancer.enhance(...)`，确认：
+    - DeepSeek prompt 输入已包含真实图片与视频 embed。
+    - prompt 输入中不再残留 `[KEYFRAME_*]`、`[CLIP_*]` 占位符。
+    - 返回结果已同步写回 `result.json.body_text`、`result.json.main_content`，以及 `semantic_units_phase2a.json.main_content`。
+- 经验：
+  - 媒体回填和最终文案整理必须拆成两个职责清晰的阶段：前者负责“把素材锚点变成真实 embed”，后者负责“在不破坏 embed 的前提下重组正文”；否则很容易出现一边增强、一边把媒体引用丢回占位符或旧文本的结构债。
+  - 只更新 `result.json` 不足以保证最终文本稳定落盘；像 `phase2b` 这种后续装配链若仍优先消费旧字段，就会把已增强文本再次覆盖回去，所以必须同步修正消费顺序。
+
+## 2026-03-12 YouTube 禁用 aria2c，强制使用 yt-dlp 内置下载器
+- 日期：
+  - 2026-03-12
+- 背景：
+  - YouTube 下载在代理/SSL 场景下更稳定地依赖 yt-dlp 内置下载器，避免 aria2c 失败导致整链路中断。
+- 变更：
+  - YouTube 下载时不再启用外部下载器，强制使用 yt-dlp 内置下载器。
+- 影响：
+  - YouTube 下载不会再透传 aria2c 参数，速度可能略有下降，但稳定性优先。
+- 验证：
+  - 未执行（建议触发一次 YouTube 下载，检查日志提示“禁用外部下载器”）
+- 文件：
+  - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
+  - `docs/architecture/upgrade-log.md`
+

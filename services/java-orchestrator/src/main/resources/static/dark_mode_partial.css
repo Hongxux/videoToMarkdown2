@@ -44,6 +44,13 @@
             .task-skeleton-chip {
                 background: #334155;
             }
+            .task-skeleton-card.is-failed {
+                background: linear-gradient(180deg, #2b0b0e 0%, #1f172a 100%);
+                border-color: #3f1d1d;
+            }
+            .task-skeleton-card.is-failed .task-skeleton-message {
+                color: #fca5a5;
+            }
             
             /* 空状态暗黑适配 */
             .empty-state {

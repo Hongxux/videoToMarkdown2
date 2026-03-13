@@ -169,7 +169,7 @@ public class TaskProcessingWorker {
         logger.info("Task dispatcher loop started");
         while (running) {
             try {
-                if (loadScheduler.getSystemState() == LoadBasedScheduler.SystemState.OVERLOADED) {
+                if (loadScheduler != null && loadScheduler.shouldPauseDispatch()) {
                     logger.warn("System overloaded, pause dispatch for 5s");
                     Thread.sleep(5000);
                     continue;

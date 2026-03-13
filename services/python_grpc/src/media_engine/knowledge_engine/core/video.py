@@ -11,7 +11,9 @@
 - 各函数/类返回的结构化结果或副作用。"""
 
 import os
+import importlib.util
 import random
+import shlex
 import shutil
 import sys
 import subprocess
@@ -60,6 +62,12 @@ class VideoProcessor(BaseProcessor):
         short_video_max_duration_sec: Optional[float] = None,
         external_downloader: Optional[str] = None,
         external_downloader_args: Optional[list[str]] = None,
+        youtube_download_proxy: Optional[str] = None,
+        youtube_simple_downloader_script: Optional[str] = None,
+        youtube_pot_script_home: Optional[str] = None,
+        youtube_pot_http_base_url: Optional[str] = None,
+        youtube_js_runtimes: Optional[list[str]] = None,
+        youtube_remote_components: Optional[list[str]] = None,
     ):
         """
         执行逻辑：
@@ -87,11 +95,27 @@ class VideoProcessor(BaseProcessor):
         self.external_downloader_args = [
             str(arg).strip() for arg in (external_downloader_args or []) if str(arg).strip()
         ]
+        raw_youtube_proxy = str(youtube_download_proxy or "").strip()
+        self.youtube_download_proxy = raw_youtube_proxy or None
+        raw_simple_script = str(youtube_simple_downloader_script or "").strip()
+        self.youtube_simple_downloader_script = (
+            os.path.abspath(os.path.expanduser(raw_simple_script)) if raw_simple_script else None
+        )
+        raw_pot_script_home = str(youtube_pot_script_home or "").strip()
+        self.youtube_pot_script_home = (
+            os.path.abspath(os.path.expanduser(raw_pot_script_home)) if raw_pot_script_home else None
+        )
+        raw_pot_http_base_url = str(youtube_pot_http_base_url or "").strip()
+        self.youtube_pot_http_base_url = raw_pot_http_base_url or None
+        self.youtube_js_runtimes = self._normalize_js_runtimes(youtube_js_runtimes)
+        self.youtube_remote_components = self._normalize_string_list(youtube_remote_components)
         self._cookie_export_attempted = False
         self._cookie_export_error: Optional[str] = None
         self._last_explicit_probe_error: Optional[str] = None
         self._last_m3u8_probe_error: Optional[str] = None
         self._last_video_title: str = ""
+        self._youtube_simple_downloader_module = None
+        self._external_downloader_fallback_attempted = False
 
     def _resolve_ffmpeg_path(self) -> Optional[str]:
         possible_paths = [
@@ -102,6 +126,18 @@ class VideoProcessor(BaseProcessor):
             if one_path and os.path.isfile(one_path):
                 return one_path
         resolved = shutil.which('ffmpeg')
+        return resolved if resolved and os.path.isfile(resolved) else None
+
+    def _resolve_external_downloader(self) -> Optional[str]:
+        """解析外部下载器路径，缺失时返回 None。"""
+        if not self.external_downloader:
+            return None
+        configured = str(self.external_downloader).strip()
+        if not configured:
+            return None
+        if os.path.isfile(configured):
+            return configured
+        resolved = shutil.which(configured)
         return resolved if resolved and os.path.isfile(resolved) else None
 
     @property
@@ -240,6 +276,269 @@ class VideoProcessor(BaseProcessor):
         return merged
 
     @staticmethod
+    def _normalize_string_list(value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            try:
+                parts = shlex.split(text, posix=False)
+            except ValueError:
+                parts = text.split()
+        elif isinstance(value, (list, tuple, set)):
+            parts = list(value)
+        else:
+            return []
+        normalized: list[str] = []
+        for item in parts:
+            text = str(item).strip()
+            if text and text not in normalized:
+                normalized.append(text)
+        return normalized
+
+    @staticmethod
+    def _normalize_js_runtimes(value: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            normalized: Dict[str, Dict[str, Any]] = {}
+            for key, raw in value.items():
+                runtime = str(key).strip().lower()
+                if not runtime:
+                    continue
+                if isinstance(raw, dict):
+                    path_value = raw.get("path")
+                else:
+                    path_value = raw
+                path_text = str(path_value).strip() if path_value is not None else ""
+                normalized[runtime] = {"path": path_text} if path_text else {}
+            return normalized or None
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                parts = shlex.split(text, posix=False)
+            except ValueError:
+                parts = text.split()
+        elif isinstance(value, (list, tuple, set)):
+            parts = list(value)
+        else:
+            return None
+
+        normalized: Dict[str, Dict[str, Any]] = {}
+        for item in parts:
+            text = str(item).strip()
+            if not text:
+                continue
+            runtime, path = (text.split(":", 1) + [None])[:2]
+            runtime = runtime.strip().lower()
+            if not runtime:
+                continue
+            path_text = str(path).strip() if path is not None else ""
+            normalized[runtime] = {"path": path_text} if path_text else {}
+        return normalized or None
+
+    def _with_youtube_runtime_options(self, opts: Dict[str, Any]) -> Dict[str, Any]:
+        if not (
+            self.youtube_pot_script_home
+            or self.youtube_pot_http_base_url
+            or self.youtube_js_runtimes
+            or self.youtube_remote_components
+        ):
+            return opts
+
+        merged = dict(opts)
+        extractor_args = merged.get("extractor_args")
+        if not isinstance(extractor_args, dict):
+            extractor_args = {}
+        else:
+            extractor_args = dict(extractor_args)
+
+        if self.youtube_pot_script_home:
+            script_args_raw = extractor_args.get("youtubepot-bgutilscript")
+            script_args = dict(script_args_raw) if isinstance(script_args_raw, dict) else {}
+            script_args["server_home"] = self.youtube_pot_script_home
+            extractor_args["youtubepot-bgutilscript"] = script_args
+
+        if self.youtube_pot_http_base_url:
+            http_args_raw = extractor_args.get("youtubepot-bgutilhttp")
+            http_args = dict(http_args_raw) if isinstance(http_args_raw, dict) else {}
+            http_args["base_url"] = self.youtube_pot_http_base_url
+            extractor_args["youtubepot-bgutilhttp"] = http_args
+
+        if extractor_args:
+            merged["extractor_args"] = extractor_args
+
+        if self.youtube_js_runtimes:
+            merged_js = merged.get("js_runtimes")
+            if not isinstance(merged_js, dict):
+                merged_js = {}
+            else:
+                merged_js = dict(merged_js)
+            for runtime, cfg in self.youtube_js_runtimes.items():
+                merged_js[runtime] = dict(cfg) if isinstance(cfg, dict) else {}
+            merged["js_runtimes"] = merged_js
+
+        if self.youtube_remote_components:
+            existing = merged.get("remote_components")
+            merged_components: list[str] = []
+            if isinstance(existing, (list, tuple, set)):
+                for item in existing:
+                    text = str(item).strip()
+                    if text and text not in merged_components:
+                        merged_components.append(text)
+            for item in self.youtube_remote_components:
+                text = str(item).strip()
+                if text and text not in merged_components:
+                    merged_components.append(text)
+            if merged_components:
+                merged["remote_components"] = merged_components
+
+        return merged
+
+    def _with_youtube_overrides(self, opts: Dict[str, Any]) -> Dict[str, Any]:
+        merged = self._with_youtube_player_client_chain(opts)
+        return self._with_youtube_runtime_options(merged)
+
+    def _load_youtube_simple_downloader_module(self):
+        if self._youtube_simple_downloader_module is not None:
+            return self._youtube_simple_downloader_module
+        script_path = self.youtube_simple_downloader_script
+        if not script_path:
+            return None
+        if not os.path.isfile(script_path):
+            raise FileNotFoundError(f"YouTube 简易下载器脚本不存在: {script_path}")
+        module_name = f"simple_youtube_downloader_{abs(hash(script_path))}"
+        spec = importlib.util.spec_from_file_location(module_name, script_path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"YouTube 简易下载器脚本加载失败: {script_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self._youtube_simple_downloader_module = module
+        return module
+
+    @staticmethod
+    def _collect_media_files(root_dir: str) -> list[Path]:
+        valid_exts = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4a', '.mp3'}
+        candidates: list[Path] = []
+        root_path = Path(root_dir)
+        if not root_path.exists():
+            return candidates
+        for item in root_path.rglob("*"):
+            if item.is_file() and item.suffix.lower() in valid_exts:
+                candidates.append(item)
+        return candidates
+
+    def _get_youtube_simple_profile(self) -> Dict[str, Any]:
+        default_clients = ["android", "ios", "web"]
+        default_headers = {
+            "User-Agent": "com.google.android.youtube/17.36.4 (Linux; U; Android 12; GB) gzip",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-us,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+            "Sec-Fetch-Mode": "navigate",
+        }
+        default_format = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
+        default_retries = 3
+        default_player_skip = ["webpage", "configs"]
+
+        module = self._load_youtube_simple_downloader_module()
+        if module is None:
+            return {
+                "format": default_format,
+                "clients": default_clients,
+                "headers": default_headers,
+                "retries": default_retries,
+                "player_skip": default_player_skip,
+            }
+
+        raw_clients = getattr(module, "YOUTUBE_PLAYER_CLIENTS", None)
+        if isinstance(raw_clients, (list, tuple)):
+            clients = [str(item).strip() for item in raw_clients if str(item).strip()]
+        else:
+            clients = default_clients
+
+        raw_headers = getattr(module, "YOUTUBE_HTTP_HEADERS", None)
+        if isinstance(raw_headers, dict):
+            headers = {str(k): str(v) for k, v in raw_headers.items() if str(k)}
+        else:
+            headers = default_headers
+
+        raw_retries = getattr(module, "MAX_RETRIES", None)
+        try:
+            retries = int(raw_retries) if raw_retries is not None else default_retries
+        except Exception:
+            retries = default_retries
+
+        return {
+            "format": default_format,
+            "clients": clients or default_clients,
+            "headers": headers or default_headers,
+            "retries": max(1, retries),
+            "player_skip": default_player_skip,
+        }
+
+    def _download_youtube_with_simple_ydl(self, url: str, output_dir: str, filename: str) -> str:
+        if not self.youtube_simple_downloader_script:
+            raise RuntimeError("YouTube 简易下载器未配置，已停用 yt-dlp YouTube 下载")
+
+        profile = self._get_youtube_simple_profile()
+        os.makedirs(output_dir, exist_ok=True)
+        output_template = os.path.join(output_dir, f"{filename}.%(ext)s")
+
+        self.emit_progress("download", 0.1, "YouTube 下载切换到简易下载器")
+        ydl_opts: Dict[str, Any] = {
+            "format": profile["format"],
+            "outtmpl": output_template,
+            "merge_output_format": "mp4",
+            "noplaylist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "progress_hooks": [self._progress_hook],
+            "retries": profile["retries"],
+            "fragment_retries": profile["retries"],
+            "nocheckcertificate": self.disable_ssl_verify,
+            "http_headers": profile["headers"],
+            "extractor_args": {
+                "youtube": {
+                    "player_client": profile["clients"],
+                    "player_skip": profile["player_skip"],
+                }
+            },
+        }
+        ydl_opts.update(self._build_auth_options(url))
+        ydl_opts = self._with_youtube_runtime_options(ydl_opts)
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+            self._capture_title_from_info_dict(info)
+        except Exception as exc:
+            self.emit_progress("download", 0.0, f"下载失败: {str(exc)}")
+            raise RuntimeError(self._build_download_error_message(exc)) from exc
+
+        valid_exts = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
+        for file in os.listdir(output_dir):
+            f_path = Path(output_dir) / file
+            if file.startswith(filename) and f_path.suffix.lower() in valid_exts:
+                abs_path = str(f_path.absolute())
+                self.emit_progress("download", 1.0, f"YouTube 下载完成: {file}", data={"path": abs_path})
+                return abs_path
+
+        media_files = self._collect_media_files(output_dir)
+        if media_files:
+            media_files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+            abs_path = str(media_files[0].absolute())
+            self.emit_progress("download", 1.0, f"YouTube 下载完成: {media_files[0].name}", data={"path": abs_path})
+            return abs_path
+
+        raise FileNotFoundError(f"未在 {output_dir} 找到下载产物")
+
+    @staticmethod
     def _parse_cookies_from_browser(raw_value: Optional[str]) -> Optional[Tuple[Any, ...]]:
         """解析 cookies-from-browser 字符串为 yt-dlp 需要的 tuple。"""
         if not raw_value:
@@ -253,11 +552,17 @@ class VideoProcessor(BaseProcessor):
             normalized.pop()
         return tuple(normalized) if normalized else None
 
-    def _build_auth_options(self) -> Dict[str, Any]:
+    def _get_effective_proxy(self, url: Optional[str]) -> Optional[str]:
+        if url and self._is_youtube_url(url) and self.youtube_download_proxy:
+            return self.youtube_download_proxy
+        return self.proxy
+
+    def _build_auth_options(self, url: Optional[str] = None) -> Dict[str, Any]:
         """构建 yt-dlp 认证参数（代理 + Cookie 文件优先 + 浏览器 Cookie 兜底）。"""
         opts: Dict[str, Any] = {}
-        if self.proxy:
-            opts["proxy"] = self.proxy
+        effective_proxy = self._get_effective_proxy(url)
+        if effective_proxy:
+            opts["proxy"] = effective_proxy
 
         self._maybe_export_cookie_file_from_browser()
         browser_opt = self._parse_cookies_from_browser(self.cookies_from_browser)
@@ -489,6 +794,25 @@ class VideoProcessor(BaseProcessor):
             or "chunkedencodingerror" in lower_raw
         )
 
+    @staticmethod
+    def _is_external_downloader_fallback_error(err: Exception) -> bool:
+        """判断是否为外部下载器可回退的网络类失败（含 SSL/TLS）。"""
+        lower_raw = str(err).lower()
+        keywords = (
+            "ssl",
+            "tls",
+            "handshake",
+            "certificate",
+            "download aborted",
+            "errorcode",
+            "proxy",
+            "timed out",
+            "timeout",
+            "could not resolve",
+            "failed to resolve",
+        )
+        return any(keyword in lower_raw for keyword in keywords)
+
     def _is_retryable_probe_error(self, err: Exception) -> bool:
         """判断元信息探测失败是否可重试（仅网络层与代理层错误）。"""
         return (
@@ -659,7 +983,7 @@ class VideoProcessor(BaseProcessor):
 
         if self._is_youtube_url(url):
             try:
-                yt_probe_opts = self._with_youtube_player_client_chain(probe_opts)
+                yt_probe_opts = self._with_youtube_overrides(probe_opts)
                 with yt_dlp.YoutubeDL(yt_probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 format_ids = self._pick_ranked_muxed_format_ids(
@@ -727,7 +1051,7 @@ class VideoProcessor(BaseProcessor):
 
         if self._is_youtube_url(url):
             try:
-                yt_probe_opts = self._with_youtube_player_client_chain(probe_opts)
+                yt_probe_opts = self._with_youtube_overrides(probe_opts)
                 with yt_dlp.YoutubeDL(yt_probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                 m3u8_info = self._pick_best_m3u8_url(info if isinstance(info, dict) else {})
@@ -741,7 +1065,13 @@ class VideoProcessor(BaseProcessor):
         self._last_m3u8_probe_error = " | ".join(errors) if errors else None
         return None
 
-    def _download_m3u8_with_ffmpeg(self, ffmpeg_path: str, m3u8_url: str, output_file: str) -> None:
+    def _download_m3u8_with_ffmpeg(
+        self,
+        ffmpeg_path: str,
+        m3u8_url: str,
+        output_file: str,
+        proxy: Optional[str],
+    ) -> None:
         """用 ffmpeg 直接拉取 m3u8，减少 yt-dlp 在下载阶段触发风控的概率。"""
         ffmpeg_cmd = [
             ffmpeg_path,
@@ -750,8 +1080,8 @@ class VideoProcessor(BaseProcessor):
             "error",
             "-stats",
         ]
-        if self.proxy:
-            ffmpeg_cmd.extend(["-http_proxy", self.proxy])
+        if proxy:
+            ffmpeg_cmd.extend(["-http_proxy", proxy])
         ffmpeg_cmd.extend(
             [
                 "-i",
@@ -783,6 +1113,9 @@ class VideoProcessor(BaseProcessor):
         - filename: 函数入参（类型：str）。
         输出参数：
         - 字符串结果。"""
+        if self._is_youtube_url(url) and self.youtube_simple_downloader_script:
+            return self._download_youtube_with_simple_ydl(url, output_dir, filename)
+
         os.makedirs(output_dir, exist_ok=True)
         self._last_video_title = ""
         # yt-dlp 的 template 不包含扩展名，它会自动添加
@@ -814,22 +1147,60 @@ class VideoProcessor(BaseProcessor):
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
         }
         
-        auth_opts = self._build_auth_options()
+        auth_opts = self._build_auth_options(url)
         ydl_opts.update(auth_opts)
-        if self.external_downloader:
-            ydl_opts["external_downloader"] = self.external_downloader
-            self.emit_progress("download", 0.145, f"使用外部下载器: {self.external_downloader}")
-            if self.external_downloader_args:
-                downloader_key = Path(self.external_downloader).stem.lower()
-                args_copy = list(self.external_downloader_args)
+        effective_proxy = None
+        if isinstance(auth_opts, dict):
+            effective_proxy = auth_opts.get("proxy")
+        if not effective_proxy:
+            effective_proxy = self._get_effective_proxy(url)
+        resolved_external_downloader = None
+        external_downloader_key = ""
+        allow_external_downloader = bool(self.external_downloader) and not self._is_youtube_url(url)
+        if self.external_downloader and not allow_external_downloader:
+            self.emit_progress(
+                "download",
+                0.145,
+                f"YouTube 下载禁用外部下载器，改用 yt-dlp 内置下载器: {self.external_downloader}",
+            )
+        if allow_external_downloader:
+            resolved_external_downloader = self._resolve_external_downloader()
+            if not resolved_external_downloader:
+                self.emit_progress(
+                    "download",
+                    0.145,
+                    f"外部下载器不可用，改用 yt-dlp 内置下载器: {self.external_downloader}",
+                )
+            else:
+                external_downloader_key = Path(resolved_external_downloader).stem.lower()
+                ydl_opts["external_downloader"] = resolved_external_downloader
+                self.emit_progress("download", 0.145, f"使用外部下载器: {resolved_external_downloader}")
+        if resolved_external_downloader:
+            downloader_key = external_downloader_key or Path(resolved_external_downloader).stem.lower()
+            args_copy = list(self.external_downloader_args)
+            if effective_proxy and downloader_key.startswith("aria2c"):
+                if not any(str(arg).startswith("--all-proxy") for arg in args_copy):
+                    args_copy.append(f"--all-proxy={effective_proxy}")
+                if (self.disable_ssl_verify or self._is_youtube_url(url)) and not any(
+                    str(arg).startswith("--check-certificate") for arg in args_copy
+                ):
+                    args_copy.append("--check-certificate=false")
+            if args_copy:
                 ydl_opts["external_downloader_args"] = {
                     downloader_key: args_copy,
                     "default": args_copy,
                 }
                 self.emit_progress("download", 0.146, f"外部下载器参数: {' '.join(args_copy)}")
         if self._is_youtube_url(url):
-            ydl_opts = self._with_youtube_player_client_chain(ydl_opts)
+            ydl_opts = self._with_youtube_overrides(ydl_opts)
             self.emit_progress("download", 0.14, "YouTube 下载启用 player_client 回退链: web_safari/tv_downgraded/web")
+            if (
+                self.youtube_pot_script_home
+                or self.youtube_pot_http_base_url
+                or self.youtube_js_runtimes
+                or self.youtube_remote_components
+            ):
+                self.emit_progress("download", 0.141, "YouTube 下载已启用 POT Provider 与 JS 运行时配置")
 
         format_candidates = base_format_candidates
         explicit_probe_prefer_h264 = self.prefer_h264
@@ -849,8 +1220,8 @@ class VideoProcessor(BaseProcessor):
         elif 'cookiesfrombrowser' in auth_opts:
             browser_name = auth_opts['cookiesfrombrowser'][0]
             self.emit_progress("download", 0.12, f"使用浏览器 Cookie: {browser_name}")
-        if self.proxy:
-            self.emit_progress("download", 0.13, f"使用下载代理: {self.proxy}")
+        if effective_proxy:
+            self.emit_progress("download", 0.13, f"使用下载代理: {effective_proxy}")
         else:
             self.emit_progress("download", 0.13, "未配置下载代理（与手工命令上下文可能不一致）")
         
@@ -954,6 +1325,7 @@ class VideoProcessor(BaseProcessor):
                             ffmpeg_path=ffmpeg_path,
                             m3u8_url=m3u8_url,
                             output_file=ffmpeg_output,
+                            proxy=effective_proxy,
                         )
                         last_error = None
                     except Exception as ffmpeg_err:
@@ -996,6 +1368,29 @@ class VideoProcessor(BaseProcessor):
             raise FileNotFoundError(f"未在 {output_dir} 找到以 {filename} 开头的有效视频文件")
             
         except Exception as e:
+            if (
+                resolved_external_downloader
+                and external_downloader_key.startswith("aria2c")
+                and not self._external_downloader_fallback_attempted
+                and self._is_external_downloader_fallback_error(e)
+            ):
+                self.emit_progress(
+                    "download",
+                    0.21,
+                    "外部下载器下载失败（可能为 SSL/代理问题），改用 yt-dlp 内置下载器重试一次",
+                )
+                origin_external_downloader = self.external_downloader
+                origin_external_args = self.external_downloader_args
+                origin_fallback_flag = self._external_downloader_fallback_attempted
+                try:
+                    self._external_downloader_fallback_attempted = True
+                    self.external_downloader = None
+                    self.external_downloader_args = []
+                    return self.download(url, output_dir, filename)
+                finally:
+                    self.external_downloader = origin_external_downloader
+                    self.external_downloader_args = origin_external_args
+                    self._external_downloader_fallback_attempted = origin_fallback_flag
             if (
                 self._is_browser_cookie_access_error(e)
                 and ("cookiefile" in auth_opts or "cookiesfrombrowser" in auth_opts)
@@ -1086,7 +1481,7 @@ class VideoProcessor(BaseProcessor):
             "skip_download": True,
             "extract_flat": False,
         }
-        auth_opts = self._build_auth_options()
+        auth_opts = self._build_auth_options(url)
 
         def _build_probe_options(*, use_proxy: bool, socket_timeout_sec: int) -> Dict[str, Any]:
             probe_opts = dict(base_probe_opts)
@@ -1107,6 +1502,8 @@ class VideoProcessor(BaseProcessor):
         attempted_labels: list[str] = []
         for attempt_index, (label, use_proxy, socket_timeout_sec) in enumerate(attempt_plan, start=1):
             probe_opts = _build_probe_options(use_proxy=use_proxy, socket_timeout_sec=socket_timeout_sec)
+            if self._is_youtube_url(url):
+                probe_opts = self._with_youtube_overrides(probe_opts)
             try:
                 with yt_dlp.YoutubeDL(probe_opts) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -1156,7 +1553,9 @@ class VideoProcessor(BaseProcessor):
                 'socket_timeout': 30,
                 'retries': 5,
             }
-            ydl_opts.update(self._build_auth_options())
+            ydl_opts.update(self._build_auth_options(url))
+            if self._is_youtube_url(url):
+                ydl_opts = self._with_youtube_overrides(ydl_opts)
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -1189,7 +1588,9 @@ class VideoProcessor(BaseProcessor):
                 'socket_timeout': 30,
                 'retries': 5,
             }
-            ydl_opts.update(self._build_auth_options())
+            ydl_opts.update(self._build_auth_options(url))
+            if self._is_youtube_url(url):
+                ydl_opts = self._with_youtube_overrides(ydl_opts)
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
@@ -1311,4 +1712,3 @@ class VideoProcessor(BaseProcessor):
         
         self.emit_progress("download", 1.0, f"完成！成功下载 {len(downloaded_videos)} 集")
         return downloaded_videos
-

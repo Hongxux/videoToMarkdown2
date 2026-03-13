@@ -100,6 +100,23 @@ def _load_openai_retry_exceptions() -> Tuple[type, ...]:
         return tuple()
 
 
+def _iter_exception_chain(exc: BaseException, max_depth: int = 6) -> list[BaseException]:
+    """遍历异常链，避免漏掉被包装的网络异常。"""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    depth = 0
+    while current is not None and depth < max(1, int(max_depth)):
+        current_id = id(current)
+        if current_id in seen:
+            break
+        seen.add(current_id)
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+        depth += 1
+    return chain
+
+
 def _is_retryable_llm_exception(exc: BaseException) -> bool:
     """
     做什么：判断异常是否属于“可通过重试恢复”的网络抖动类错误。
@@ -107,11 +124,12 @@ def _is_retryable_llm_exception(exc: BaseException) -> bool:
     若仅匹配 httpx 异常，会漏掉实际线上最常见的 Connection error。
     权衡：只把连接/超时类异常纳入重试，避免误重试业务逻辑或配额类错误。
     """
-    if isinstance(exc, (httpx.NetworkError, httpx.TimeoutException)):
-        return True
     openai_retry_exceptions = _load_openai_retry_exceptions()
-    if openai_retry_exceptions and isinstance(exc, openai_retry_exceptions):
-        return True
+    for current in _iter_exception_chain(exc):
+        if isinstance(current, (httpx.NetworkError, httpx.TimeoutException)):
+            return True
+        if openai_retry_exceptions and isinstance(current, openai_retry_exceptions):
+            return True
     return False
 
 
@@ -640,6 +658,27 @@ class AdaptiveConnectionPoolManager:
         - 函数计算/封装后的结果对象。"""
         return self._client
 
+    async def close(self) -> None:
+        """
+        执行逻辑：
+        1) 准备必要上下文与参数。
+        2) 关闭现有连接池并重置内部状态。
+        实现方式：加锁 + aclose + 重置。
+        核心价值：避免并发下出现资源泄漏。
+        """
+        client_to_close: Optional[httpx.AsyncClient] = None
+        async with self._lock:
+            if self._client is None:
+                return
+            client_to_close = self._client
+            self._client = None
+            self._last_pool_size = 0
+        try:
+            await client_to_close.aclose()
+            logger.info("Connection pool closed via manager")
+        except Exception as exc:
+            logger.warning("Connection pool close failed: %s", exc)
+
 
 # 全局连接池管理器
 _global_pool_manager: Optional[AdaptiveConnectionPoolManager] = None
@@ -662,6 +701,16 @@ def get_pool_manager() -> AdaptiveConnectionPoolManager:
     if _global_pool_manager is None:
         _global_pool_manager = AdaptiveConnectionPoolManager()
     return _global_pool_manager
+
+
+async def shutdown_pool_manager() -> None:
+    """统一关闭全局 LLM HTTP 连接池。"""
+    global _global_pool_manager
+    manager = _global_pool_manager
+    _global_pool_manager = None
+    if manager is None:
+        return
+    await manager.close()
 
 
 # 全局自适应并发控制器
@@ -788,6 +837,7 @@ class LLMClient:
         
         # 🚀 延迟初始化 OpenAI 客户端
         self._openai_client: Optional[Any] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
         self._pool_manager = get_pool_manager()
         self.concurrency_limiter = get_concurrency_limiter()
     
@@ -806,18 +856,38 @@ class LLMClient:
         - 无。
         输出参数：
         - 函数计算/封装后的结果对象。"""
-        if self._openai_client is None:
-            from openai import AsyncOpenAI
-            # 获取或创建当前循环下的 http_client
-            http_client = await self._pool_manager.get_client(self.concurrency_limiter.effective_limit)
+        from openai import AsyncOpenAI
+        # 获取或创建当前循环下的 http_client
+        http_client = await self._pool_manager.get_client(self.concurrency_limiter.effective_limit)
+        need_reset = (
+            self._openai_client is None
+            or self._http_client is None
+            or self._http_client is not http_client
+            or self._http_client.is_closed
+        )
+        if need_reset:
             self._openai_client = AsyncOpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=self.timeout,
                 http_client=http_client
             )
-            logger.debug("AsyncOpenAI client initialized lazily in active loop")
+            self._http_client = http_client
+            logger.debug("AsyncOpenAI client initialized or rebound in active loop")
         return self._openai_client
+
+    async def _reset_pool_on_error(self, error: BaseException) -> None:
+        """
+        作用：当网络类异常出现时重置连接池，释放资源以便后续复用。
+        """
+        if not _is_retryable_llm_exception(error):
+            return
+        try:
+            await self._pool_manager.close()
+        except Exception as exc:
+            logger.warning("LLM 连接池重置失败: %s", exc)
+        self._openai_client = None
+        self._http_client = None
     
     async def _refresh_client_if_needed(self):
         """
@@ -1130,6 +1200,7 @@ class LLMClient:
                     or "Too Many Requests" in error_msg
                 )
                 await self.concurrency_limiter.record_failure(is_rate_limit=is_rate_limit)
+                await self._reset_pool_on_error(e)
 
                 # 💥 V8.1: 增强对 402 (余额不足) 的识别
                 if "402" in error_msg or "Insufficient Balance" in error_msg:
@@ -1279,6 +1350,7 @@ class LLMClient:
                         "DeepSeek API 提取失败: 账户余额不足 (Error 402)。建议充值或更换 API Key。"
                     ) from e
 
+                await self._reset_pool_on_error(e)
                 logger.error(f"LLM API call failed: {e}")
                 raise
 

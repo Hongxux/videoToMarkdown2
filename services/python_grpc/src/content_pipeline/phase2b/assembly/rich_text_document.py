@@ -625,6 +625,7 @@ def create_section_from_semantic_unit(
     输出参数：
     - RichTextSection 对象（包含字段：unit_id, title, body_text, knowledge_type, start_sec, end_sec, materials, layout_hint）。"""
     vl_concrete_segments = list(getattr(unit, "_vl_concrete_segments", []) or [])
+    preferred_main_content = str(getattr(unit, "main_content", "") or "").strip()
     concrete_main_content_blocks: List[str] = []
     for segment in vl_concrete_segments:
         if not isinstance(segment, dict):
@@ -632,8 +633,10 @@ def create_section_from_semantic_unit(
         main_content = str(segment.get("main_content", "") or "").strip()
         if main_content:
             concrete_main_content_blocks.append(main_content)
-    # concrete 优先使用 Phase2A 的 main_content 直通正文，避免后续链路退化到旧 full_text。
-    preferred_body_text = "\n\n".join(concrete_main_content_blocks).strip()
+    # 优先使用回填后的 main_content；若不存在，再回退到 concrete 分段 main_content。
+    preferred_body_text = preferred_main_content
+    if not preferred_body_text:
+        preferred_body_text = "\n\n".join(concrete_main_content_blocks).strip()
     if not preferred_body_text:
         preferred_body_text = str(getattr(unit, "full_text", "") or "")
 

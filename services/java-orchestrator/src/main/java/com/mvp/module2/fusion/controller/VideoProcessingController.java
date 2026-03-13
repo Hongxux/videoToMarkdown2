@@ -112,7 +112,7 @@ public class VideoProcessingController {
         logger.info("Received task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
 
         // 提交任务
-        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+        TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
             normalizedUserId,
             normalizedVideoInput,
             normalizeOutputDir(request.outputDir),
@@ -120,13 +120,16 @@ public class VideoProcessingController {
             null,
             bookOptions
         );
-        
+        TaskQueueManager.TaskEntry task = submitResult.task;
+
         return ResponseEntity.ok(Map.of(
             "success", true,
             "taskId", task.taskId,
             "status", task.status.name(),
             "normalizedVideoUrl", normalizedVideoInput,
-            "message", "任务已提交，正在排队中"
+            "deduped", submitResult.deduped,
+            "dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes(),
+            "message", submitResult.deduped ? "任务已复用" : "任务已提交，正在排队中"
         ));
     }
 
@@ -195,7 +198,7 @@ public class VideoProcessingController {
                     splitBySection,
                     pageOffset
             );
-            TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+            TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
                     normalizedUserId,
                     reusedPath.toString(),
                     normalizeOutputDir(outputDir),
@@ -203,6 +206,7 @@ public class VideoProcessingController {
                     null,
                     bookOptions
             );
+            TaskQueueManager.TaskEntry task = submitResult.task;
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("success", true);
             payload.put("reused", true);
@@ -211,7 +215,9 @@ public class VideoProcessingController {
             payload.put("normalizedVideoUrl", reusedPath.toString());
             payload.put("uploadedFileName", safeFileName);
             appendFingerprintPayload(payload, fingerprintOpt);
-            payload.put("message", "file reused; task submitted and queued");
+            payload.put("deduped", submitResult.deduped);
+            payload.put("dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes());
+            payload.put("message", submitResult.deduped ? "任务已复用" : "file reused; task submitted and queued");
             return ResponseEntity.ok(payload);
         }
 
@@ -243,7 +249,7 @@ public class VideoProcessingController {
                 splitBySection,
                 pageOffset
             );
-            TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+            TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
                 normalizedUserId,
                 savedVideoPath.toString(),
                 normalizeOutputDir(outputDir),
@@ -251,6 +257,7 @@ public class VideoProcessingController {
                 null,
                 bookOptions
             );
+            TaskQueueManager.TaskEntry task = submitResult.task;
 
             return ResponseEntity.ok(Map.of(
                 "success", true,
@@ -258,7 +265,9 @@ public class VideoProcessingController {
                 "status", task.status.name(),
                 "normalizedVideoUrl", savedVideoPath.toString(),
                 "uploadedFileName", safeFileName,
-                "message", "视频已上传，任务已提交，正在排队中"
+                "deduped", submitResult.deduped,
+                "dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes(),
+                "message", submitResult.deduped ? "任务已复用" : "视频已上传，任务已提交，正在排队中"
             ));
         } catch (IOException e) {
             logger.error("Failed to save uploaded video", e);

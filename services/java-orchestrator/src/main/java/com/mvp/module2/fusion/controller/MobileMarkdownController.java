@@ -239,15 +239,18 @@ public class MobileMarkdownController {
             return ResponseEntity.ok(Map.of("bindings", List.of()));
         }
         Map<String, String> allBindings = categoryClassificationResultsRepository.listAllBindings();
+        Map<String, String> archivedTaskPaths = categoryClassificationResultsRepository.listArchivedTaskPaths();
         List<Map<String, Object>> items = new ArrayList<>(allBindings.size());
         allBindings.forEach((taskPath, collectionPath) -> {
             if (taskPath == null || taskPath.isBlank() || collectionPath == null || collectionPath.isBlank()) {
                 return;
             }
-            items.add(Map.of(
-                    "taskPath", taskPath,
-                    "collectionPath", collectionPath
-            ));
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("taskPath", taskPath);
+            item.put("collectionPath", collectionPath);
+            item.put("archived", true);
+            item.put("archivedAt", archivedTaskPaths.getOrDefault(taskPath, ""));
+            items.add(item);
         });
         return ResponseEntity.ok(Map.of("bindings", items));
     }
@@ -318,7 +321,7 @@ public class MobileMarkdownController {
         );
         String lockedTitle = resolveSubmissionTaskTitle(request.videoUrl, normalizedVideoInput);
         logger.info("Mobile task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
-        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+        TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
                 normalizedUserId,
                 normalizedVideoInput,
                 normalizeOutputDir(request.outputDir),
@@ -326,6 +329,7 @@ public class MobileMarkdownController {
                 lockedTitle,
                 bookOptions
         );
+        TaskQueueManager.TaskEntry task = submitResult.task;
         linkCollectionEpisodeIfNecessary(request.collectionId, request.episodeNo, task.taskId);
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -336,7 +340,9 @@ public class MobileMarkdownController {
         payload.put("normalizedVideoUrl", normalizedVideoInput);
         payload.put("collectionId", request.collectionId != null ? request.collectionId.trim() : "");
         payload.put("episodeNo", request.episodeNo);
-        payload.put("message", "task submitted and queued");
+        payload.put("deduped", submitResult.deduped);
+        payload.put("dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes());
+        payload.put("message", submitResult.deduped ? "task deduped and reused" : "task submitted and queued");
         return ResponseEntity.ok(payload);
     }
 
@@ -2397,14 +2403,17 @@ public class MobileMarkdownController {
             finalViewList.add(fromCachedTask(cached));
         }
         finalViewList = deduplicateTaskViews(finalViewList);
-        finalViewList.sort(Comparator.comparingLong(this::bestTimestamp).reversed());
+        finalViewList.sort(Comparator.comparingLong(this::taskCreatedSortTimestamp)
+                .thenComparing(task -> trimToNullSafe(task.title) != null ? trimToNullSafe(task.title) : "")
+                .thenComparing(task -> trimToNullSafe(task.taskId) != null ? trimToNullSafe(task.taskId) : ""));
 
         Map<String, CollectionRepository.EpisodeTaskBinding> bindingByTaskId = findCollectionBindingByTaskId(finalViewList);
-        Map<String, String> classifiedCollectionPathByTaskPath = findClassifiedCollectionPathByTaskPath(finalViewList);
+        Map<String, CategoryClassificationResultsRepository.CategoryAssignment> categoryAssignmentsByTaskPath =
+                findCategoryAssignmentsByTaskPath(finalViewList);
         for (TaskView task : finalViewList) {
             task.taskPath = resolveTaskPath(task);
             attachCollectionBinding(task, bindingByTaskId.get(task.taskId));
-            attachManualCollectionPath(task, classifiedCollectionPathByTaskPath.get(task.taskPath));
+            attachCategoryAssignment(task, categoryAssignmentsByTaskPath.get(task.taskPath));
         }
         return finalViewList;
     }
@@ -2513,7 +2522,10 @@ public class MobileMarkdownController {
         item.put("collectionId", task.collectionId != null ? task.collectionId : "");
         item.put("collectionTitle", task.collectionTitle != null ? task.collectionTitle : "");
         item.put("collectionPath", task.collectionPath != null ? task.collectionPath : "");
+        item.put("categoryPath", task.categoryPath != null ? task.categoryPath : "");
         item.put("taskPath", task.taskPath != null ? task.taskPath : "");
+        item.put("archived", task.archived);
+        item.put("archivedAt", task.archivedAt != null ? instantToText(task.archivedAt) : "");
         item.put("manualCollection", task.manualCollection);
         if (!compactView) {
             item.put("completedAt", instantToText(task.completedAt));
@@ -2559,7 +2571,9 @@ public class MobileMarkdownController {
         task.totalEpisodes = binding.totalEpisodes;
     }
 
-    private Map<String, String> findClassifiedCollectionPathByTaskPath(List<TaskView> tasks) {
+    private Map<String, CategoryClassificationResultsRepository.CategoryAssignment> findCategoryAssignmentsByTaskPath(
+            List<TaskView> tasks
+    ) {
         if (categoryClassificationResultsRepository == null || tasks == null || tasks.isEmpty()) {
             return Map.of();
         }
@@ -2574,29 +2588,51 @@ public class MobileMarkdownController {
         if (taskPaths.isEmpty()) {
             return Map.of();
         }
-        return categoryClassificationResultsRepository.findCollectionPathByTaskPaths(taskPaths);
+        return categoryClassificationResultsRepository.findCategoryAssignmentsByTaskPaths(taskPaths);
     }
 
-    private void attachManualCollectionPath(TaskView task, String rawCollectionPath) {
+    private void attachCategoryAssignment(
+            TaskView task,
+            CategoryClassificationResultsRepository.CategoryAssignment assignment
+    ) {
         if (task == null) {
             return;
         }
-        String manualPath = TaskManualCollectionRepository.normalizeCollectionPath(rawCollectionPath);
-        if (!manualPath.isEmpty()) {
-            task.collectionPath = manualPath;
-            task.manualCollection = true;
-            String terminal = lastPathSegment(manualPath);
-            task.collectionId = "manual-path::" + manualPath;
-            task.collectionTitle = terminal.isEmpty() ? manualPath : terminal;
+        String categoryPath = assignment != null
+                ? TaskManualCollectionRepository.normalizeCollectionPath(assignment.categoryPath())
+                : "";
+        task.categoryPath = categoryPath;
+        task.archived = assignment != null && assignment.archived();
+        task.manualCollection = assignment != null && assignment.manualBinding();
+        task.archivedAt = parseInstantQuietly(assignment != null ? assignment.archivedAt() : "");
+
+        if (!task.archived || categoryPath.isEmpty()) {
+            task.collectionPath = "";
+            task.collectionId = "";
+            task.collectionTitle = "";
             task.episodeNo = null;
             task.episodeTitle = null;
             task.totalEpisodes = null;
             return;
         }
-        task.manualCollection = false;
-        if ((task.collectionPath == null || task.collectionPath.isBlank())
-                && task.collectionTitle != null && !task.collectionTitle.isBlank()) {
-            task.collectionPath = TaskManualCollectionRepository.normalizeCollectionPath(task.collectionTitle);
+        task.collectionPath = categoryPath;
+        String terminal = lastPathSegment(categoryPath);
+        task.collectionId = "manual-path::" + categoryPath;
+        task.collectionTitle = terminal.isEmpty() ? categoryPath : terminal;
+        task.episodeNo = null;
+        task.episodeTitle = null;
+        task.totalEpisodes = null;
+    }
+
+    private Instant parseInstantQuietly(String rawInstant) {
+        String normalized = trimToNullSafe(rawInstant);
+        if (normalized == null) {
+            return null;
+        }
+        try {
+            return Instant.parse(normalized);
+        } catch (Exception ignored) {
+            return null;
         }
     }
 
@@ -4096,18 +4132,7 @@ public class MobileMarkdownController {
         if (task == null) {
             return keys;
         }
-        addTaskIdentityKey(keys, "taskId", trimToNullSafe(task.taskId));
-        if (task.taskId != null && task.taskId.startsWith(STORAGE_TASK_PREFIX)) {
-            addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.taskId.substring(STORAGE_TASK_PREFIX.length())));
-        }
-        addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.storageKey));
-        addStorageIdentityKey(keys, task.taskRootDir);
-        addStorageIdentityKey(keys, task.baseDir);
-        addStorageIdentityKey(keys, task.markdownPath);
-        addStorageIdentityKey(keys, resolveAbsolutePathSafe(task.resultPath));
-        if (task.runtimeTask != null) {
-            addStorageIdentityKey(keys, resolveAbsolutePathSafe(task.runtimeTask.outputDir));
-        }
+        addTaskIdentityKey(keys, "videoUrl", trimToNullSafe(task.videoUrl));
         return keys;
     }
 
@@ -4421,14 +4446,24 @@ public class MobileMarkdownController {
         }
     }
 
+    private long taskCreatedSortTimestamp(TaskView task) {
+        if (task != null && task.createdAt != null) {
+            return task.createdAt.toEpochMilli();
+        }
+        if (task != null && task.completedAt != null) {
+            return task.completedAt.toEpochMilli();
+        }
+        return Long.MAX_VALUE;
+    }
+
     private long bestTimestamp(TaskView task) {
         if (task != null && task.lastOpenedAt != null) {
             return task.lastOpenedAt.toEpochMilli();
         }
-        if (task.createdAt != null) {
+        if (task != null && task.createdAt != null) {
             return task.createdAt.toEpochMilli();
         }
-        if (task.completedAt != null) {
+        if (task != null && task.completedAt != null) {
             return task.completedAt.toEpochMilli();
         }
         return 0L;
@@ -5046,7 +5081,7 @@ public class MobileMarkdownController {
                 splitBySection,
                 pageOffset
         );
-        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
+        TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
                 normalizedUserId,
                 savedVideoPath.toString(),
                 normalizeOutputDir(outputDir),
@@ -5054,6 +5089,7 @@ public class MobileMarkdownController {
                 null,
                 bookOptions
         );
+        TaskQueueManager.TaskEntry task = submitResult.task;
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
         payload.put("reused", reusedUpload);
@@ -5061,9 +5097,13 @@ public class MobileMarkdownController {
         payload.put("status", task.status.name());
         payload.put("normalizedVideoUrl", savedVideoPath.toString());
         payload.put("uploadedFileName", safeFileName);
-        payload.put("message", reusedUpload
+        payload.put("deduped", submitResult.deduped);
+        payload.put("dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes());
+        payload.put("message", submitResult.deduped
+                ? "task deduped and reused"
+                : (reusedUpload
                 ? "file reused; task submitted and queued"
-                : "video uploaded; task submitted and queued");
+                : "video uploaded; task submitted and queued"));
         appendFingerprintPayload(payload, fingerprintOpt);
         return ResponseEntity.ok(payload);
     }
@@ -5449,7 +5489,10 @@ public class MobileMarkdownController {
         private String episodeTitle;
         private String collectionTitle;
         private String collectionPath;
+        private String categoryPath;
         private String taskPath;
+        private boolean archived;
+        private Instant archivedAt;
         private boolean manualCollection;
         private Integer totalEpisodes;
     }

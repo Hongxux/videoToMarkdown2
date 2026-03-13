@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.beans.factory.annotation.Value;
 
 import java.lang.management.ManagementFactory;
 import com.sun.management.OperatingSystemMXBean;
@@ -24,6 +25,9 @@ public class AdaptiveResourceOrchestrator {
     private final OperatingSystemMXBean osBean;
     private final Semaphore computePool;
     private final Semaphore ioPool;
+
+    @Value("${task.resource-guard.enabled:false}")
+    private boolean resourceGuardEnabled;
     
     // 记录实际持有的许可数，用于动态调整
     private int actualPermits;
@@ -69,6 +73,9 @@ public class AdaptiveResourceOrchestrator {
      * 策略: AIMD (和性增长，乘性减少)
      */
     public void adjustConcurrency() {
+        if (!resourceGuardEnabled) {
+            return;
+        }
         double cpuLoad = osBean.getCpuLoad(); // 0.0 ~ 1.0
         long freeMemMb = osBean.getFreeMemorySize() / (1024 * 1024);
         

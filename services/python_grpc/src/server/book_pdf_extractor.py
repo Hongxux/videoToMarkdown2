@@ -354,12 +354,29 @@ def _build_mineru_page_tasks(
     if start_page > end_page:
         return []
 
-    page_batch_size = max(1, _read_int_env("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", 1))
     total_pages = end_page - start_page + 1
-    if (not parallel_enabled) or page_batch_size >= total_pages:
+    if (not parallel_enabled) or total_pages <= 1:
         return [(start_page, end_page, sliced_pdf_path)]
 
+    configured_batch_size = str(os.environ.get("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", "") or "").strip()
+    if configured_batch_size:
+        page_batch_size = max(1, _read_int_env("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", 1))
+        if page_batch_size >= total_pages:
+            return [(start_page, end_page, sliced_pdf_path)]
+        page_ranges = []
+        cursor = start_page
+        while cursor <= end_page:
+            segment_end = min(end_page, cursor + page_batch_size - 1)
+            page_ranges.append((cursor, segment_end))
+            cursor = segment_end + 1
+    else:
+        target_chunk_count = max(1, _read_int_env("BOOK_PDF_MINERU_TARGET_CHUNKS", 4))
+        page_ranges = _build_even_page_ranges(start_page, end_page, target_chunk_count)
+        if len(page_ranges) <= 1:
+            return [(start_page, end_page, sliced_pdf_path)]
+
     # 按页段切片，确保每个 MinerU 子进程只处理独立 PDF，避免共享 IO 状态导致互相干扰。
+    # 默认走“等分 4 段”策略，让连续区间先裁剪、再分块并行、最后顺序合并。
     task_root = output_dir / "intermediates" / "book_mineru_page_slices"
     task_root.mkdir(parents=True, exist_ok=True)
     task_dir = _ensure_unique_dir(
@@ -367,20 +384,17 @@ def _build_mineru_page_tasks(
     )
 
     tasks: List[Tuple[int, int, Path]] = []
-    cursor = start_page
-    while cursor <= end_page:
-        segment_end = min(end_page, cursor + page_batch_size - 1)
-        local_start = cursor - start_page + 1
+    for segment_start, segment_end in page_ranges:
+        local_start = segment_start - start_page + 1
         local_end = segment_end - start_page + 1
-        segment_path = task_dir / f"slice-p{cursor:04d}-{segment_end:04d}.pdf"
+        segment_path = task_dir / f"slice-p{segment_start:04d}-{segment_end:04d}.pdf"
         _slice_pdf(
             pdf_file=sliced_pdf_path,
             sliced_pdf_path=segment_path,
             start_page=local_start,
             end_page=local_end,
         )
-        tasks.append((cursor, segment_end, segment_path))
-        cursor = segment_end + 1
+        tasks.append((segment_start, segment_end, segment_path))
     return tasks
 
 
@@ -393,6 +407,10 @@ def _decide_mineru_parallel_workers(task_count: int) -> int:
     configured_workers = _read_int_env("BOOK_PDF_MINERU_WORKERS", 0)
     if configured_workers > 0:
         return max(worker_min, min(task_count, hard_cap, configured_workers))
+
+    default_workers = max(worker_min, min(hard_cap, _read_int_env("BOOK_PDF_MINERU_DEFAULT_WORKERS", 4)))
+    if task_count <= default_workers:
+        return min(task_count, default_workers)
 
     cpu_cores = max(1, int(os.cpu_count() or 1))
     cpu_divisor = max(1, _read_int_env("BOOK_PDF_MINERU_WORKER_CPU_DIVISOR", 2))
@@ -409,6 +427,25 @@ def _decide_mineru_parallel_workers(task_count: int) -> int:
         ram_budget = max(worker_min, estimated)
 
     return max(worker_min, min(task_count, hard_cap, cpu_budget, ram_budget))
+
+
+def _build_even_page_ranges(start_page: int, end_page: int, chunk_count: int) -> List[Tuple[int, int]]:
+    total_pages = max(0, int(end_page) - int(start_page) + 1)
+    if total_pages <= 0:
+        return []
+
+    normalized_chunk_count = max(1, min(total_pages, int(chunk_count or 1)))
+    base_chunk_size = total_pages // normalized_chunk_count
+    remainder = total_pages % normalized_chunk_count
+
+    ranges: List[Tuple[int, int]] = []
+    cursor = int(start_page)
+    for chunk_index in range(normalized_chunk_count):
+        current_chunk_size = base_chunk_size + (1 if chunk_index < remainder else 0)
+        segment_end = cursor + current_chunk_size - 1
+        ranges.append((cursor, segment_end))
+        cursor = segment_end + 1
+    return ranges
 
 
 def _extract_mineru_page_task(

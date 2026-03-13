@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import hashlib
 import os
 import threading
@@ -12,6 +13,8 @@ from typing import Any, Dict, Optional, Tuple
 
 from services.python_grpc.src.config_paths import load_yaml_dict, resolve_video_config_path
 from services.python_grpc.src.common.utils.deepseek_model_router import resolve_deepseek_model
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,6 +105,18 @@ def load_config(config_path: str = "config.yaml") -> Dict[str, Any]:
 
 _DEEPSEEK_CLIENT_CACHE: Dict[str, "LLMClient"] = {}
 _DEEPSEEK_CLIENT_CACHE_LOCK = threading.Lock()
+
+
+async def shutdown_deepseek_client_cache() -> None:
+    """统一关闭转写链路 DeepSeek 客户端缓存。"""
+    with _DEEPSEEK_CLIENT_CACHE_LOCK:
+        clients = list(_DEEPSEEK_CLIENT_CACHE.values())
+        _DEEPSEEK_CLIENT_CACHE.clear()
+    for client in clients:
+        try:
+            await client.close()
+        except Exception as exc:
+            logger.warning("DeepSeek 客户端关闭失败: %s", exc)
 
 
 def _build_deepseek_client_cache_key(

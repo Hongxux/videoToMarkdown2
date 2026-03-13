@@ -116,6 +116,7 @@ def _resolve_step_max_inflight(step_env_prefix: str, default: int = 10) -> int:
     1) TRANSCRIPT_{STEP}_MAX_INFLIGHT
     2) TRANSCRIPT_NODE_MAX_INFLIGHT
     3) TRANSCRIPT_LLM_MAX_CONCURRENCY
+    4) <= 0 表示不限制并发
     """
     value = _read_int_env(
         f"TRANSCRIPT_{step_env_prefix}_MAX_INFLIGHT",
@@ -124,7 +125,10 @@ def _resolve_step_max_inflight(step_env_prefix: str, default: int = 10) -> int:
             _read_int_env("TRANSCRIPT_LLM_MAX_CONCURRENCY", default),
         ),
     )
-    return max(1, int(value))
+    value = int(value)
+    if value <= 0:
+        return 0
+    return value
 
 
 async def _run_bounded_producer_consumer(
@@ -137,7 +141,10 @@ async def _run_bounded_producer_consumer(
     if not items:
         return []
 
-    worker_count = max(1, min(int(max_inflight), len(items)))
+    if max_inflight <= 0:
+        worker_count = len(items)
+    else:
+        worker_count = max(1, min(int(max_inflight), len(items)))
     queue: "asyncio.Queue[Optional[tuple[int, _ItemT]]]" = asyncio.Queue()
     results: List[Optional[_ResultT]] = [None] * len(items)
     first_error: Optional[Exception] = None

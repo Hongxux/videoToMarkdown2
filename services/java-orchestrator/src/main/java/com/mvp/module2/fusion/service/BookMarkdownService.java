@@ -231,6 +231,28 @@ public class BookMarkdownService {
         String key;
     }
 
+    private static class OrderedLeafRef {
+        String selector;
+        String title;
+        String outlineIndex;
+        int startPage = -1;
+        int endPage = -1;
+    }
+
+    private static class ContinuousLeafSelection {
+        String startSelector;
+        String endSelector;
+        String startTitle;
+        String endTitle;
+        String startOutlineIndex;
+        String endOutlineIndex;
+        String trimStartAnchorTitle;
+        String trimEndBeforeTitle;
+        int startPage = -1;
+        int endPage = -1;
+        int leafCount = 0;
+    }
+
     public BookProcessingResult processBook(
             String taskId,
             String sourcePath,
@@ -794,17 +816,25 @@ public class BookMarkdownService {
                 }
             }
             String tocSectionKey = chapterIndex + ":" + sectionIndex;
-            String matchedSectionKey = resolveSectionKeyByPage(sectionRangeByKey, startPage);
             int selectorChapterIndex = chapterIndex;
             int selectorSectionIndex = sectionIndex;
-            if (matchedSectionKey != null) {
-                String[] matchedParts = matchedSectionKey.split(":");
-                if (matchedParts.length == 2) {
-                    Integer parsedChapter = parsePositiveIntOrNull(matchedParts[0]);
-                    Integer parsedSection = parsePositiveIntOrNull(matchedParts[1]);
-                    if (parsedChapter != null && parsedSection != null) {
-                        selectorChapterIndex = parsedChapter;
-                        selectorSectionIndex = parsedSection;
+            boolean hasExplicitTocCoordinates = entry.chapterNo != null
+                    && entry.chapterNo > 0
+                    && entry.sectionNo != null
+                    && entry.sectionNo > 0;
+            // 叶子 selector 应该优先代表目录里的 x.y.z，而不是回贴到正文解析出的 section。
+            // 否则像 1.2.3 与 1.1.3 落在同页时，会被错误压成同一个 c1s1t3。
+            if (!hasExplicitTocCoordinates) {
+                String matchedSectionKey = resolveSectionKeyByPage(sectionRangeByKey, startPage);
+                if (matchedSectionKey != null) {
+                    String[] matchedParts = matchedSectionKey.split(":");
+                    if (matchedParts.length == 2) {
+                        Integer parsedChapter = parsePositiveIntOrNull(matchedParts[0]);
+                        Integer parsedSection = parsePositiveIntOrNull(matchedParts[1]);
+                        if (parsedChapter != null && parsedSection != null) {
+                            selectorChapterIndex = parsedChapter;
+                            selectorSectionIndex = parsedSection;
+                        }
                     }
                 }
             }
@@ -1676,6 +1706,14 @@ public class BookMarkdownService {
         BookData safe = data != null ? data : new BookData();
         List<Chapter> source = safe.chapters != null ? safe.chapters : Collections.emptyList();
 
+        if (options != null) {
+            ContinuousLeafSelection continuousLeafSelection =
+                    resolveContinuousLeafSelection(options.sectionSelector, safe.leafSections);
+            if (continuousLeafSelection != null) {
+                return buildContinuousLeafRangeBookData(safe, continuousLeafSelection);
+            }
+        }
+
         List<Chapter> chapterFiltered = source;
         if (options != null) {
             chapterFiltered = filterChapters(chapterFiltered, options.chapterSelector);
@@ -1774,9 +1812,8 @@ public class BookMarkdownService {
             String sectionSelector,
             List<Map<String, Object>> leafSections
     ) {
-        List<Chapter> selected = filterSections(chapters, sectionSelector);
-        if (selected.isEmpty() || leafSections == null || leafSections.isEmpty()) {
-            return selected;
+        if (leafSections == null || leafSections.isEmpty()) {
+            return filterSections(chapters, sectionSelector);
         }
         Map<String, Map<String, Object>> leafBySelector = new LinkedHashMap<>();
         Map<String, String> leafTitleBySelector = new LinkedHashMap<>();
@@ -1803,7 +1840,8 @@ public class BookMarkdownService {
                 }
             }
         }
-        if (leafBySelector.isEmpty()) {
+        List<Chapter> selected = filterSectionsBySelector(chapters, sectionSelector, leafBySelector);
+        if (selected.isEmpty() || leafBySelector.isEmpty()) {
             return selected;
         }
         List<String> selectedLeafSelectors = parseOrderedLeafSelectors(sectionSelector);
@@ -1854,6 +1892,14 @@ public class BookMarkdownService {
     }
 
     private List<Chapter> filterSections(List<Chapter> chapters, String sectionSelector) {
+        return filterSectionsBySelector(chapters, sectionSelector, Collections.emptyMap());
+    }
+
+    private List<Chapter> filterSectionsBySelector(
+            List<Chapter> chapters,
+            String sectionSelector,
+            Map<String, Map<String, Object>> leafBySelector
+    ) {
         List<Chapter> source = chapters != null ? chapters : Collections.emptyList();
         String selector = normalize(sectionSelector);
         if (source.isEmpty() || selector.isBlank()) {
@@ -1982,7 +2028,7 @@ public class BookMarkdownService {
                 chapter.sections.add(ref.section);
                 continue;
             }
-            chapter.sections.addAll(splitSectionByLeafIndexes(ref.section, leafIndexes, ref.chapter.startPage));
+            chapter.sections.addAll(splitSectionByLeafIndexes(ref.section, leafIndexes, ref.chapter.startPage, leafBySelector));
         }
         return new ArrayList<>(selectedByChapter.values());
     }
@@ -2111,6 +2157,241 @@ public class BookMarkdownService {
         ordered.add(selector);
     }
 
+    private ContinuousLeafSelection resolveContinuousLeafSelection(
+            String sectionSelector,
+            List<Map<String, Object>> leafSections
+    ) {
+        String selector = normalize(sectionSelector);
+        if (selector.isBlank() || leafSections == null || leafSections.isEmpty()) {
+            return null;
+        }
+
+        List<OrderedLeafRef> orderedLeafs = buildOrderedLeafRefs(leafSections);
+        if (orderedLeafs.isEmpty()) {
+            return null;
+        }
+        Map<String, Integer> orderBySelector = new LinkedHashMap<>();
+        for (int index = 0; index < orderedLeafs.size(); index++) {
+            OrderedLeafRef leaf = orderedLeafs.get(index);
+            if (leaf == null || leaf.selector == null || leaf.selector.isBlank()) {
+                continue;
+            }
+            orderBySelector.putIfAbsent(leaf.selector, index);
+        }
+        if (orderBySelector.isEmpty()) {
+            return null;
+        }
+
+        int minIndex = Integer.MAX_VALUE;
+        int maxIndex = Integer.MIN_VALUE;
+        boolean matchedLeafToken = false;
+        for (String rawToken : selector.split(SELECTOR_TOKEN_SPLIT_REGEX)) {
+            String token = normalize(rawToken);
+            if (token.isBlank()) {
+                continue;
+            }
+            String canonicalLeaf = canonicalizeLeafSelector(token);
+            if (!canonicalLeaf.isBlank()) {
+                Integer order = orderBySelector.get(canonicalLeaf);
+                if (order != null) {
+                    minIndex = Math.min(minIndex, order);
+                    maxIndex = Math.max(maxIndex, order);
+                    matchedLeafToken = true;
+                }
+                continue;
+            }
+
+            Matcher keyRangeMatcher = CHAPTER_SECTION_LEAF_KEY_RANGE_PATTERN.matcher(token);
+            if (keyRangeMatcher.matches()) {
+                String startLeafSelector = buildLeafSelectorToken(
+                        Integer.parseInt(keyRangeMatcher.group(1)),
+                        Integer.parseInt(keyRangeMatcher.group(2)),
+                        Integer.parseInt(keyRangeMatcher.group(3))
+                );
+                String endLeafSelector = buildLeafSelectorToken(
+                        Integer.parseInt(keyRangeMatcher.group(4)),
+                        Integer.parseInt(keyRangeMatcher.group(5)),
+                        Integer.parseInt(keyRangeMatcher.group(6))
+                );
+                Integer startOrder = orderBySelector.get(startLeafSelector);
+                Integer endOrder = orderBySelector.get(endLeafSelector);
+                if (startOrder != null) {
+                    minIndex = Math.min(minIndex, startOrder);
+                    maxIndex = Math.max(maxIndex, startOrder);
+                    matchedLeafToken = true;
+                }
+                if (endOrder != null) {
+                    minIndex = Math.min(minIndex, endOrder);
+                    maxIndex = Math.max(maxIndex, endOrder);
+                    matchedLeafToken = true;
+                }
+                continue;
+            }
+
+            Matcher dotRangeMatcher = CHAPTER_SECTION_LEAF_DOT_RANGE_PATTERN.matcher(token);
+            if (dotRangeMatcher.matches()) {
+                String startLeafSelector = buildLeafSelectorToken(
+                        Integer.parseInt(dotRangeMatcher.group(1)),
+                        Integer.parseInt(dotRangeMatcher.group(2)),
+                        Integer.parseInt(dotRangeMatcher.group(3))
+                );
+                String endLeafSelector = buildLeafSelectorToken(
+                        Integer.parseInt(dotRangeMatcher.group(4)),
+                        Integer.parseInt(dotRangeMatcher.group(5)),
+                        Integer.parseInt(dotRangeMatcher.group(6))
+                );
+                Integer startOrder = orderBySelector.get(startLeafSelector);
+                Integer endOrder = orderBySelector.get(endLeafSelector);
+                if (startOrder != null) {
+                    minIndex = Math.min(minIndex, startOrder);
+                    maxIndex = Math.max(maxIndex, startOrder);
+                    matchedLeafToken = true;
+                }
+                if (endOrder != null) {
+                    minIndex = Math.min(minIndex, endOrder);
+                    maxIndex = Math.max(maxIndex, endOrder);
+                    matchedLeafToken = true;
+                }
+            }
+        }
+        if (!matchedLeafToken || minIndex == Integer.MAX_VALUE || maxIndex == Integer.MIN_VALUE) {
+            return null;
+        }
+
+        OrderedLeafRef startLeaf = orderedLeafs.get(Math.max(0, minIndex));
+        OrderedLeafRef endLeaf = orderedLeafs.get(Math.max(0, maxIndex));
+        if (startLeaf == null || endLeaf == null || startLeaf.startPage <= 0) {
+            return null;
+        }
+
+        ContinuousLeafSelection selection = new ContinuousLeafSelection();
+        selection.startSelector = firstNonBlank(startLeaf.selector, "");
+        selection.endSelector = firstNonBlank(endLeaf.selector, selection.startSelector);
+        selection.startTitle = firstNonBlank(startLeaf.title, "");
+        selection.endTitle = firstNonBlank(endLeaf.title, selection.startTitle);
+        selection.startOutlineIndex = firstNonBlank(startLeaf.outlineIndex, selection.startSelector);
+        selection.endOutlineIndex = firstNonBlank(endLeaf.outlineIndex, selection.endSelector);
+        selection.startPage = startLeaf.startPage;
+        selection.endPage = endLeaf.endPage >= startLeaf.startPage ? endLeaf.endPage : startLeaf.startPage;
+        selection.leafCount = Math.max(1, maxIndex - minIndex + 1);
+        selection.trimStartAnchorTitle = selection.startTitle;
+        if (maxIndex + 1 < orderedLeafs.size()) {
+            OrderedLeafRef nextLeaf = orderedLeafs.get(maxIndex + 1);
+            selection.trimEndBeforeTitle = nextLeaf != null ? firstNonBlank(nextLeaf.title, "") : "";
+        }
+        return selection;
+    }
+
+    private List<OrderedLeafRef> buildOrderedLeafRefs(List<Map<String, Object>> leafSections) {
+        List<Map<String, Object>> sortedLeafSections = new ArrayList<>();
+        for (Map<String, Object> leaf : leafSections) {
+            if (leaf != null) {
+                sortedLeafSections.add(leaf);
+            }
+        }
+        sortedLeafSections.sort(
+                Comparator.comparingInt((Map<String, Object> leaf) -> readObjectInt(leaf.get("flatIndex"), Integer.MAX_VALUE))
+                        .thenComparingInt(leaf -> readObjectInt(leaf.get("startPage"), Integer.MAX_VALUE))
+                        .thenComparing(leaf -> normalize(String.valueOf(leaf.get("sectionSelector"))))
+        );
+
+        List<OrderedLeafRef> orderedLeafs = new ArrayList<>();
+        for (Map<String, Object> leaf : sortedLeafSections) {
+            OrderedLeafRef orderedLeaf = toOrderedLeafRef(leaf);
+            if (orderedLeaf != null) {
+                orderedLeafs.add(orderedLeaf);
+            }
+        }
+        return orderedLeafs;
+    }
+
+    private OrderedLeafRef toOrderedLeafRef(Map<String, Object> leaf) {
+        if (leaf == null || leaf.isEmpty()) {
+            return null;
+        }
+        String rawSelector = normalize(String.valueOf(leaf.get("sectionSelector")));
+        String selector = canonicalizeLeafSelector(rawSelector);
+        if (selector.isBlank()) {
+            int chapterIndex = readObjectInt(leaf.get("chapterIndex"), -1);
+            int sectionIndex = readObjectInt(leaf.get("sectionIndex"), -1);
+            int subSectionIndex = readObjectInt(leaf.get("subSectionIndex"), -1);
+            if (chapterIndex > 0 && sectionIndex > 0 && subSectionIndex > 0) {
+                selector = buildLeafSelectorToken(chapterIndex, sectionIndex, subSectionIndex);
+            }
+        }
+        if (selector.isBlank()) {
+            return null;
+        }
+        OrderedLeafRef orderedLeaf = new OrderedLeafRef();
+        orderedLeaf.selector = selector;
+        orderedLeaf.title = normalize(String.valueOf(leaf.get("title")));
+        orderedLeaf.outlineIndex = normalize(String.valueOf(leaf.get("outlineIndex")));
+        orderedLeaf.startPage = readObjectInt(leaf.get("startPage"), -1);
+        orderedLeaf.endPage = readObjectInt(leaf.get("endPage"), orderedLeaf.startPage);
+        if (orderedLeaf.endPage < orderedLeaf.startPage) {
+            orderedLeaf.endPage = orderedLeaf.startPage;
+        }
+        return orderedLeaf;
+    }
+
+    private BookData buildContinuousLeafRangeBookData(BookData source, ContinuousLeafSelection selection) {
+        if (source == null || selection == null || selection.startPage <= 0) {
+            return source != null ? source : new BookData();
+        }
+        BookData selected = new BookData();
+        selected.title = source.title;
+        selected.pageMapStrategy = source.pageMapStrategy;
+        selected.detectedPageOffset = source.detectedPageOffset;
+        selected.appliedPageOffset = source.appliedPageOffset;
+        selected.leafSections = new ArrayList<>();
+
+        String rangeSelector = buildContinuousLeafRangeSelector(selection);
+        String rangeTitle = buildContinuousLeafRangeTitle(selection);
+        Chapter chapter = new Chapter(rangeTitle);
+        chapter.selector = rangeSelector;
+        chapter.startPage = selection.startPage;
+        chapter.endPage = selection.endPage;
+
+        Section section = new Section(rangeTitle);
+        section.selector = rangeSelector;
+        section.startPage = selection.startPage;
+        section.endPage = selection.endPage;
+        section.trimStartAnchorTitle = firstNonBlank(selection.trimStartAnchorTitle, "");
+        section.trimEndBeforeTitle = firstNonBlank(selection.trimEndBeforeTitle, "");
+        chapter.sections.add(section);
+
+        selected.chapters = new ArrayList<>();
+        selected.chapters.add(chapter);
+        return selected;
+    }
+
+    private String buildContinuousLeafRangeSelector(ContinuousLeafSelection selection) {
+        if (selection == null) {
+            return "";
+        }
+        String startSelector = firstNonBlank(selection.startSelector, "");
+        String endSelector = firstNonBlank(selection.endSelector, startSelector);
+        if (startSelector.isBlank()) {
+            return "";
+        }
+        return startSelector.equals(endSelector) ? startSelector : startSelector + "-" + endSelector;
+    }
+
+    private String buildContinuousLeafRangeTitle(ContinuousLeafSelection selection) {
+        if (selection == null) {
+            return "章节区间";
+        }
+        String startLabel = firstNonBlank(selection.startOutlineIndex, selection.startSelector);
+        String endLabel = firstNonBlank(selection.endOutlineIndex, selection.endSelector);
+        if (startLabel.isBlank() && endLabel.isBlank()) {
+            return "章节区间";
+        }
+        if (startLabel.equals(endLabel)) {
+            return "章节 " + startLabel;
+        }
+        return "章节区间 " + startLabel + "-" + endLabel;
+    }
+
     private String resolveLeafTitle(
             String selector,
             Map<String, String> leafTitleBySelector,
@@ -2147,7 +2428,12 @@ public class BookMarkdownService {
         return resolveLeafTitle(nextSelector, leafTitleBySelector, leafBySelector);
     }
 
-    private List<Section> splitSectionByLeafIndexes(Section sourceSection, Set<Integer> leafIndexes, int chapterStartPage) {
+    private List<Section> splitSectionByLeafIndexes(
+            Section sourceSection,
+            Set<Integer> leafIndexes,
+            int chapterStartPage,
+            Map<String, Map<String, Object>> leafBySelector
+    ) {
         if (sourceSection == null || leafIndexes == null || leafIndexes.isEmpty()) {
             return List.of();
         }
@@ -2156,20 +2442,38 @@ public class BookMarkdownService {
         int baseStart = sourceSection.startPage > 0 ? sourceSection.startPage : Math.max(1, chapterStartPage);
         int baseEnd = sourceSection.endPage > 0 ? Math.max(baseStart, sourceSection.endPage) : baseStart;
         List<Section> narrowed = new ArrayList<>();
+        String baseSelector = firstNonBlank(sourceSection.selector, "c1s1");
         for (Integer leafIndex : sortedLeafs) {
             if (leafIndex == null || leafIndex <= 0) {
                 continue;
             }
-            int pageNo = baseStart + leafIndex - 1;
-            if (pageNo < baseStart || pageNo > baseEnd) {
-                continue;
-            }
             Section copy = cloneSectionForSelector(sourceSection);
-            copy.startPage = pageNo;
-            copy.endPage = pageNo;
-            String baseSelector = firstNonBlank(sourceSection.selector, "c1s1");
-            copy.selector = baseSelector + "t" + leafIndex;
-            copy.title = firstNonBlank(sourceSection.title, "Section") + " - page " + pageNo;
+            String leafSelector = baseSelector + "t" + leafIndex;
+            copy.selector = leafSelector;
+            boolean appliedLeafRange = false;
+            Map<String, Object> leaf = leafBySelector != null ? leafBySelector.get(leafSelector) : null;
+            if (leaf != null) {
+                int leafStartPage = readObjectInt(leaf.get("startPage"), -1);
+                int leafEndPage = readObjectInt(leaf.get("endPage"), leafStartPage);
+                if (leafStartPage > 0) {
+                    copy.startPage = leafStartPage;
+                    copy.endPage = leafEndPage >= leafStartPage ? leafEndPage : leafStartPage;
+                    appliedLeafRange = true;
+                }
+                String leafTitle = normalize(String.valueOf(leaf.get("title")));
+                if (!leafTitle.isBlank()) {
+                    copy.title = leafTitle;
+                }
+            }
+            if (!appliedLeafRange) {
+                int pageNo = baseStart + leafIndex - 1;
+                if (pageNo < baseStart || pageNo > baseEnd) {
+                    continue;
+                }
+                copy.startPage = pageNo;
+                copy.endPage = pageNo;
+                copy.title = firstNonBlank(sourceSection.title, "Section") + " - page " + pageNo;
+            }
             narrowed.add(copy);
         }
         if (narrowed.isEmpty()) {
@@ -2208,6 +2512,14 @@ public class BookMarkdownService {
         PDFTextStripper pageStripper = new PDFTextStripper();
         pageStripper.setSortByPosition(true);
         int totalPages = pdf.getNumberOfPages();
+        int totalSelectedSections = 0;
+        for (Chapter chapter : data.chapters) {
+            if (chapter == null || chapter.sections == null) {
+                continue;
+            }
+            totalSelectedSections += chapter.sections.size();
+        }
+        int sectionCursor = 0;
 
         for (Chapter chapter : data.chapters) {
             if (chapter == null || chapter.sections == null) {
@@ -2217,12 +2529,22 @@ public class BookMarkdownService {
                 if (section == null) {
                     continue;
                 }
+                sectionCursor += 1;
                 int startPage = section.startPage > 0 ? section.startPage : chapter.startPage;
                 int endPage = section.endPage > 0 ? section.endPage : chapter.endPage;
                 startPage = clampPage(startPage > 0 ? startPage : 1, totalPages);
                 endPage = clampPage(endPage >= startPage ? endPage : startPage, totalPages);
                 section.startPage = startPage;
                 section.endPage = endPage;
+                logger.info(
+                        "[{}] Book PDF section extract start {}/{}, section={}, pages={}~{}",
+                        firstNonBlank(taskId, "book_pdf_extract"),
+                        sectionCursor,
+                        Math.max(1, totalSelectedSections),
+                        firstNonBlank(firstNonBlank(section.selector, section.title), "section"),
+                        startPage,
+                        endPage
+                );
                 section.paragraphs = new ArrayList<>();
                 section.images = new ArrayList<>();
                 section.tables = new ArrayList<>();

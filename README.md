@@ -178,6 +178,60 @@ powershell -ExecutionPolicy Bypass -File scripts/release/docker_release.ps1 -Act
 powershell -ExecutionPolicy Bypass -File scripts/release/docker_release.ps1 -Action down
 ```
 
+## 开发态快速迭代
+
+如果你正在开发，不建议每次改代码都执行整套 `docker compose up -d --build`。当前仓库已经补了一条更轻的开发链路：
+
+- Python 继续跑在容器里，但通过 [docker-compose.dev.yml](/D:/videoToMarkdownTest2/docker-compose.dev.yml) 直接挂载 `apps/`、`services/`、`contracts/`、`tools/` 源码。
+- Java 不再每次打进镜像，直接本地 `spring-boot:run`，连接容器里的 `python-grpc`。
+- 这样日常改 Web / Java / Python 时，不需要每次全量重建两个镜像。
+
+推荐开发步骤：
+
+1. 启动 Python 开发容器：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/docker_dev.ps1 -Action python-up
+```
+
+2. 本地启动 Java Orchestrator：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/start_java_orchestrator_local.ps1
+```
+
+如果希望后台启动并把 PID / 日志固定到 `var/`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/start_java_orchestrator_local_detached.ps1
+```
+
+3. 改 Python 代码后，只重启 `python-grpc`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/docker_dev.ps1 -Action python-restart
+```
+
+4. 如果改了 Python 依赖或 Docker 基础层，再单独重建 `python-grpc`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/docker_dev.ps1 -Action python-build
+```
+
+5. 如果只是改了 Java / `index.html` / Spring Controller，通常直接重启本地 `spring-boot:run` 即可，不需要碰 Docker。开发脚本已经显式跳过测试编译，避免被当前仓库中未收口的测试代码阻塞日常联调。
+
+6. 停掉后台 Java 进程：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev/stop_java_orchestrator_local.ps1
+```
+
+这套链路的边界也要明确：
+
+- 改 `requirements*.txt`、系统依赖、Dockerfile 时，仍然需要重建对应镜像。
+- 改 gRPC proto 后，先重新生成代码，再继续开发。
+- 最终提测或发布前，仍建议回到发布态执行一次完整 `docker compose up -d --build` 验证。
+
 ### 首次构建经验（2026-03-09 已验证）
 
 - `python-grpc` 镜像现在会在构建期预装 `ffmpeg` 和 `Whisper base`，默认只预装 `base`，不额外预装 `medium/large`。

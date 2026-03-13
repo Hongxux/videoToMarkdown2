@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -29,6 +30,9 @@ public class LoadBasedScheduler {
 
     @Autowired
     private AdaptiveResourceOrchestrator adaptiveOrchestrator;
+
+    @Value("${task.resource-guard.enabled:false}")
+    private boolean resourceGuardEnabled;
 
     private final AtomicInteger currentMaxConcurrent = new AtomicInteger(4);
     private final OperatingSystemMXBean osMXBean;
@@ -53,11 +57,20 @@ public class LoadBasedScheduler {
 
     @PostConstruct
     public void init() {
+        if (!resourceGuardEnabled) {
+            currentMaxConcurrent.set(MAX_CONCURRENT_TASKS);
+            systemState = SystemState.NORMAL;
+            logger.info("LoadBasedScheduler disabled by config: task.resource-guard.enabled=false");
+            return;
+        }
         scheduler.scheduleAtFixedRate(this::updateSystemMetrics, 0, 5, TimeUnit.SECONDS);
         logger.info("LoadBasedScheduler initialized");
     }
 
     private void updateSystemMetrics() {
+        if (!resourceGuardEnabled) {
+            return;
+        }
         try {
             currentCpuLoad = estimateCpuLoad();
 
@@ -136,12 +149,9 @@ public class LoadBasedScheduler {
     private void updateSystemState() {
         SystemState previousState = systemState;
 
-        if (currentCpuLoad > CPU_HIGH_THRESHOLD
-            || currentMemoryUsage > MEMORY_HIGH_THRESHOLD
-            || currentJvmHeapUsage > JVM_HEAP_HIGH_THRESHOLD
-            || availableMemoryMB < MIN_AVAILABLE_MEMORY_MB) {
+        if (isHardOverloaded()) {
             systemState = SystemState.OVERLOADED;
-        } else if (currentCpuLoad > CPU_LOW_THRESHOLD) {
+        } else if (currentCpuLoad > CPU_LOW_THRESHOLD || currentMemoryUsage > MEMORY_HIGH_THRESHOLD) {
             systemState = SystemState.BUSY;
         } else {
             systemState = SystemState.NORMAL;
@@ -160,7 +170,17 @@ public class LoadBasedScheduler {
         }
     }
 
+    // 调度层只对“硬过载”做停派发，避免共享宿主机的瞬时内存占用把队列长期误锁死。
+    private boolean isHardOverloaded() {
+        return currentCpuLoad > CPU_HIGH_THRESHOLD
+                || currentJvmHeapUsage > JVM_HEAP_HIGH_THRESHOLD
+                || availableMemoryMB < MIN_AVAILABLE_MEMORY_MB;
+    }
+
     private void adjustConcurrency() {
+        if (!resourceGuardEnabled) {
+            return;
+        }
         int current = currentMaxConcurrent.get();
         int newValue = current;
 
@@ -188,7 +208,17 @@ public class LoadBasedScheduler {
     }
 
     public boolean allowNewTask() {
+        if (!resourceGuardEnabled) {
+            return true;
+        }
         return systemState != SystemState.OVERLOADED;
+    }
+
+    public boolean shouldPauseDispatch() {
+        if (!resourceGuardEnabled) {
+            return false;
+        }
+        return isHardOverloaded();
     }
 
     public int getRecommendedConcurrency() {
