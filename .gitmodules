@@ -1,0 +1,4 @@
+[submodule "BettaFish"]
+	path = BettaFish
+	url = https://github.com/666ghj/BettaFish.git
+	ignore = dirty

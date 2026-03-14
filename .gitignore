@@ -114,6 +114,7 @@ videoToMarkdown/models/
 dist/
 build/
 .gradle/
+.gradle-user/
 .gradle-user-home/
 .kotlin/
 local.properties
@@ -129,6 +130,7 @@ services/java-orchestrator/build.log
 services/java-orchestrator/compile_error.txt
 services/java-orchestrator/compile_failure.log
 services/java-orchestrator/output/**/intermediates/task_metrics_latest.json
+services/java-orchestrator/var/telemetry/**
 
 # =========================
 # 第三方与生成代码
