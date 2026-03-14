@@ -1,13 +1,7 @@
 package com.hongxu.videoToMarkdownTest2
 
-import android.net.Uri
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
+import android.content.Context
 import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicBoolean
 
 data class TaskRealtimeUpdate(
     val taskId: String,
@@ -26,36 +20,44 @@ data class TaskMetaSyncEvent(
 )
 
 class TaskRealtimeClient(
+    context: Context,
     private val wsEndpoint: String,
     private val userId: String,
     private val onTaskUpdate: (TaskRealtimeUpdate) -> Unit,
     private val onMetaSync: (TaskMetaSyncEvent) -> Unit = {}
 ) {
-    private val okHttpClient = OkHttpClient.Builder().build()
-    private val connected = AtomicBoolean(false)
     private val subscribedTaskIds = linkedSetOf<String>()
-    private var webSocket: WebSocket? = null
+    private val reliableClient = ReliableTaskWebSocketClient(
+        context = context.applicationContext,
+        wsEndpoint = wsEndpoint,
+        userId = userId,
+        clientLabel = "TaskRealtimeClient",
+        streamKeyProvider = {
+            ReliableTaskWebSocketClient.buildStableStreamKey(
+                "android",
+                "task",
+                "realtime",
+                userId
+            )
+        },
+        buildReplayActions = {
+            synchronized(subscribedTaskIds) {
+                subscribedTaskIds.map { taskId ->
+                    JSONObject()
+                        .put("action", "subscribe")
+                        .put("taskId", taskId)
+                }
+            }
+        },
+        onJsonMessage = ::handlePayload
+    )
 
-    @Synchronized
     fun connect() {
-        if (webSocket != null) {
-            return
-        }
-        val normalizedUserId = userId.trim()
-        if (normalizedUserId.isEmpty()) {
-            return
-        }
-        val request = Request.Builder()
-            .url("$wsEndpoint?userId=${Uri.encode(normalizedUserId)}")
-            .build()
-        webSocket = okHttpClient.newWebSocket(request, createListener())
+        reliableClient.connect()
     }
 
-    @Synchronized
     fun disconnect() {
-        connected.set(false)
-        webSocket?.close(1000, "app background")
-        webSocket = null
+        reliableClient.disconnect("app background")
     }
 
     @Synchronized
@@ -64,15 +66,17 @@ class TaskRealtimeClient(
         if (normalizedTaskId.isEmpty()) {
             return
         }
-        synchronized(subscribedTaskIds) {
-            if (!subscribedTaskIds.add(normalizedTaskId)) {
-                return
-            }
+        val added = synchronized(subscribedTaskIds) {
+            subscribedTaskIds.add(normalizedTaskId)
         }
-        webSocket?.send(JSONObject().apply {
-            put("action", "subscribe")
-            put("taskId", normalizedTaskId)
-        }.toString())
+        if (!added) {
+            return
+        }
+        reliableClient.sendAction(
+            JSONObject()
+                .put("action", "subscribe")
+                .put("taskId", normalizedTaskId)
+        )
     }
 
     @Synchronized
@@ -84,70 +88,44 @@ class TaskRealtimeClient(
         synchronized(subscribedTaskIds) {
             subscribedTaskIds.remove(normalizedTaskId)
         }
-        webSocket?.send(JSONObject().apply {
-            put("action", "unsubscribe")
-            put("taskId", normalizedTaskId)
-        }.toString())
+        reliableClient.sendAction(
+            JSONObject()
+                .put("action", "unsubscribe")
+                .put("taskId", normalizedTaskId)
+        )
     }
 
-    private fun createListener(): WebSocketListener {
-        return object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                connected.set(true)
-                synchronized(subscribedTaskIds) {
-                    subscribedTaskIds.forEach { taskId ->
-                        webSocket.send(JSONObject().apply {
-                            put("action", "subscribe")
-                            put("taskId", taskId)
-                        }.toString())
-                    }
+    private fun handlePayload(payload: JSONObject) {
+        when (payload.optString("type").trim()) {
+            "taskUpdate" -> {
+                val taskId = payload.optString("taskId").trim()
+                if (taskId.isEmpty()) {
+                    return
                 }
+                onTaskUpdate(
+                    TaskRealtimeUpdate(
+                        taskId = taskId,
+                        status = payload.optString("status").trim(),
+                        message = payload.optString("message").trim(),
+                        progress = payload.optDouble("progress", 0.0),
+                        resultPath = payload.optString("resultPath").trim(),
+                        errorMessage = payload.optString("errorMessage").trim()
+                    )
+                )
             }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                val payload = runCatching { JSONObject(text) }.getOrNull() ?: return
-                when (payload.optString("type").trim()) {
-                    "taskUpdate" -> {
-                        val taskId = payload.optString("taskId").trim()
-                        if (taskId.isEmpty()) {
-                            return
-                        }
-                        onTaskUpdate(
-                            TaskRealtimeUpdate(
-                                taskId = taskId,
-                                status = payload.optString("status").trim(),
-                                message = payload.optString("message").trim(),
-                                progress = payload.optDouble("progress", 0.0),
-                                resultPath = payload.optString("resultPath").trim(),
-                                errorMessage = payload.optString("errorMessage").trim()
-                            )
-                        )
-                    }
-                    "taskMetaSync" -> {
-                        val taskId = payload.optString("taskId").trim()
-                        if (taskId.isEmpty()) {
-                            return
-                        }
-                        onMetaSync(
-                            TaskMetaSyncEvent(
-                                taskId = taskId,
-                                pathKey = payload.optString("pathKey").trim(),
-                                changeKind = payload.optString("changeKind").trim(),
-                                anchorId = payload.optString("anchorId").trim()
-                            )
-                        )
-                    }
+            "taskMetaSync" -> {
+                val taskId = payload.optString("taskId").trim()
+                if (taskId.isEmpty()) {
+                    return
                 }
-            }
-
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                connected.set(false)
-                this@TaskRealtimeClient.webSocket = null
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                connected.set(false)
-                this@TaskRealtimeClient.webSocket = null
+                onMetaSync(
+                    TaskMetaSyncEvent(
+                        taskId = taskId,
+                        pathKey = payload.optString("pathKey").trim(),
+                        changeKind = payload.optString("changeKind").trim(),
+                        anchorId = payload.optString("anchorId").trim()
+                    )
+                )
             }
         }
     }

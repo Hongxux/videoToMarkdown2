@@ -77,6 +77,7 @@ public class WatchdogSignalCodec {
         return switch (normalized) {
             case "download" -> "Download";
             case "transcribe" -> "Transcribe";
+            case "book_pdf_extract" -> "Book PDF";
             case "stage1" -> "Stage1";
             case "phase2a" -> "Phase2A";
             case "analysis_extraction" -> "Analysis";

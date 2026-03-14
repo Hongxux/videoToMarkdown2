@@ -153,6 +153,81 @@ def test_classify_phase2b_output_writes_task_and_summary_artifacts(tmp_path, mon
     assert video_meta["category_depth"] == 2
 
 
+def test_classify_phase2b_output_accepts_direct_multi_level_category_path(tmp_path, monkeypatch):
+    task_dir = _seed_task(
+        tmp_path,
+        task_id="task-direct-leaf",
+        title="Java concurrency deep dive",
+        group_name="Java concurrency",
+        body_text="This lesson focuses on Java concurrency, thread pools, locks, and memory visibility.",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+
+    responses = [
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/java/concurrency",
+                    "is_new": True,
+                    "reasoning": "The content directly belongs to a Java concurrency leaf category.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/java/concurrency",
+                    "is_new": True,
+                    "reasoning": "The content directly belongs to a Java concurrency leaf category.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+    ]
+
+    async def _fake_deepseek_complete_text(**kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2b.video_category_service.llm_gateway.deepseek_complete_text",
+        _fake_deepseek_complete_text,
+    )
+
+    result = asyncio.run(
+        classify_phase2b_output(
+            output_dir=str(task_dir),
+            title="Java concurrency deep dive",
+            result_json_path=str(task_dir / "result.json"),
+        )
+    )
+
+    assert result is not None
+    assert result["category_path"] == "engineering/java/concurrency"
+    assert result["target_level"] == 3
+    assert result["leaf_task_count"] == 1
+
+    library_path = tmp_path / "var" / "storage" / "storage" / "category_paths.txt"
+    assert library_path.read_text(encoding="utf-8").strip() == "engineering/java/concurrency"
+
+    summary_path = tmp_path / "var" / "storage" / "category_classification_results.json"
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary_payload["category_counts"] == {"engineering/java/concurrency": 1}
+
+    task_payload = json.loads((task_dir / "category_classification.json").read_text(encoding="utf-8"))
+    assert task_payload["category_path"] == "engineering/java/concurrency"
+    assert task_payload["target_level"] == 3
+
+    video_meta = json.loads((task_dir / "video_meta.json").read_text(encoding="utf-8"))
+    assert video_meta["category_path"] == "engineering/java/concurrency"
+    assert video_meta["category_depth"] == 3
+    assert video_meta["category_leaf"] == "concurrency"
+
+
 def test_classify_phase2b_output_routes_into_existing_child_category(tmp_path, monkeypatch):
     _seed_task(
         tmp_path,
@@ -373,4 +448,124 @@ def test_classify_phase2b_output_rebalances_whole_overloaded_leaf(tmp_path, monk
     assert summary_payload["category_counts"] == {
         "engineering/java/jvm": 1,
         "engineering/java/spring-boot": 1,
+    }
+
+
+def test_classify_phase2b_output_rebalance_keeps_failed_task_and_continues_others(tmp_path, monkeypatch):
+    _seed_task(
+        tmp_path,
+        task_id="task-old",
+        title="TCP basics",
+        group_name="TCP protocol",
+        body_text="Existing task explains TCP handshake and retransmission.",
+        category_path="engineering/network-protocol",
+    )
+    task_dir = _seed_task(
+        tmp_path,
+        task_id="task-new",
+        title="HTTP caching intro",
+        group_name="HTTP caching",
+        body_text="New task explains HTTP cache control, ETag, and conditional requests.",
+    )
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("MODULE2_CATEGORY_CLASSIFIER_LEAF_TASK_LIMIT", "1")
+    monkeypatch.setenv("MODULE2_CATEGORY_CLASSIFIER_MAX_TARGET_LEVEL", "3")
+
+    responses = [
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/network-protocol",
+                    "is_new": False,
+                    "reasoning": "The topic belongs to network protocols.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/network-protocol",
+                    "is_new": False,
+                    "reasoning": "The topic belongs to network protocols.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/java/spring",
+                    "is_new": True,
+                    "reasoning": "invalid branch for this parent",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/network-protocol/http",
+                    "is_new": True,
+                    "reasoning": "The new task specifically focuses on HTTP caching.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+        (
+            json.dumps(
+                {
+                    "category_path": "engineering/network-protocol/http",
+                    "is_new": True,
+                    "reasoning": "The new task specifically focuses on HTTP caching.",
+                },
+                ensure_ascii=False,
+            ),
+            {},
+            None,
+        ),
+    ]
+
+    async def _fake_deepseek_complete_text(**kwargs):
+        return responses.pop(0)
+
+    monkeypatch.setattr(
+        "services.python_grpc.src.content_pipeline.phase2b.video_category_service.llm_gateway.deepseek_complete_text",
+        _fake_deepseek_complete_text,
+    )
+
+    result = asyncio.run(
+        classify_phase2b_output(
+            output_dir=str(task_dir),
+            title="HTTP caching intro",
+            result_json_path=str(task_dir / "result.json"),
+        )
+    )
+
+    assert result is not None
+    assert result["category_path"] == "engineering/network-protocol/http"
+
+    old_payload = json.loads(
+        (tmp_path / "var" / "storage" / "storage" / "task-old" / "category_classification.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert old_payload["category_path"] == "engineering/network-protocol"
+
+    new_payload = json.loads((task_dir / "category_classification.json").read_text(encoding="utf-8"))
+    assert new_payload["category_path"] == "engineering/network-protocol/http"
+
+    summary_path = tmp_path / "var" / "storage" / "category_classification_results.json"
+    summary_payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary_payload["category_counts"] == {
+        "engineering/network-protocol": 1,
+        "engineering/network-protocol/http": 1,
     }

@@ -265,6 +265,9 @@ public class StorageTaskCacheService {
         newTask.createdAt = metadata.generatedAt != null ? metadata.generatedAt : Instant.ofEpochMilli(dirModified);
         newTask.completedAt = metadata.generatedAt;
         newTask.dirLastModified = dirModified;
+        newTask.bookTitle = metadata.bookTitle;
+        newTask.bookLeafTitle = metadata.bookLeafTitle;
+        newTask.bookLeafOutlineIndex = metadata.bookLeafOutlineIndex;
         
         if (metadata.hasSuccessFlag) {
             newTask.status = metadata.success ? "COMPLETED" : "FAILED";
@@ -361,6 +364,19 @@ public class StorageTaskCacheService {
                 );
                 if (root.has("video_path")) metadata.videoPath = trimToNull(root.get("video_path").asText());
                 if (root.has("result_markdown_path")) metadata.resultMarkdownPath = trimToNull(root.get("result_markdown_path").asText());
+                JsonNode flowFlags = root.path("flow_flags");
+                metadata.bookTitle = firstNonBlank(
+                        jsonText(flowFlags, "book_title"),
+                        jsonText(root, "book_title")
+                );
+                metadata.bookLeafTitle = firstNonBlank(
+                        jsonText(flowFlags, "book_leaf_title"),
+                        jsonText(root, "book_leaf_title")
+                );
+                metadata.bookLeafOutlineIndex = firstNonBlank(
+                        jsonText(flowFlags, "book_leaf_outline_index"),
+                        jsonText(root, "book_leaf_outline_index")
+                );
             } catch (Exception e) {
                 // ignore
             }
@@ -409,6 +425,10 @@ public class StorageTaskCacheService {
     }
 
     private String deriveStorageTitle(Path taskDir, StorageMetadata meta) {
+        String leafTitle = trimToNull(meta.bookLeafTitle);
+        if (leafTitle != null) {
+            return leafTitle;
+        }
         String metricsTitle = trimToNull(meta.videoTitle);
         if (metricsTitle != null) {
             return metricsTitle;
@@ -468,6 +488,9 @@ public class StorageTaskCacheService {
         public String taskId;
         public String title;
         public String videoUrl;
+        public String bookTitle;
+        public String bookLeafTitle;
+        public String bookLeafOutlineIndex;
         public String status;
         public String statusMessage;
         public Instant createdAt;
@@ -516,6 +539,9 @@ public class StorageTaskCacheService {
         String videoTitle;
         String videoPath;
         String resultMarkdownPath;
+        String bookTitle;
+        String bookLeafTitle;
+        String bookLeafOutlineIndex;
     }
     
     private static class ResolvedMarkdown {

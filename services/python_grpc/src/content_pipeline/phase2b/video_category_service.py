@@ -181,13 +181,14 @@ def _normalize_category_result(
     categories: List[str],
     *,
     target_level: int,
+    max_target_level: int,
     required_prefix: str = "",
 ) -> Dict[str, Any]:
     category_path = _normalize_category_path(payload.get("category_path") or "")
     reasoning = str(payload.get("reasoning") or "").strip()
     path_parts = _split_category_path(category_path)
     depth = len(path_parts)
-    if not category_path or depth != target_level:
+    if not category_path or depth < target_level or depth > max_target_level:
         raise ValueError(f"非法分类路径: {category_path!r}")
     normalized_prefix = _normalize_category_path(required_prefix)
     if normalized_prefix:
@@ -501,6 +502,7 @@ async def _verify_classification(
     system_prompt: str,
     candidate: Dict[str, Any],
     target_level: int,
+    max_target_level: int,
     required_prefix: str,
     api_key: str,
     base_url: str,
@@ -518,7 +520,7 @@ async def _verify_classification(
 1. `category_path` 与标题、第一段核心正文、大纲组名的核心主题不一致；
 2. `reasoning` 引用了输入中不存在的证据词、示例内容或串台信息；
 3. `is_new` 与当前分类路径库是否包含该 `category_path` 不一致；
-4. `category_path` 不是唯一、互斥，且层级深度不等于 `target_level={target_level}` 的分类路径。{prefix_constraint_text}
+4. `category_path` 不是唯一、互斥，且层级深度小于 `target_level={target_level}` 或大于 `max_target_level={max_target_level}`。{prefix_constraint_text}
 
 你必须自己重新核对，不要盲从候选结果。
 请只输出修正后的合法 JSON。
@@ -553,6 +555,7 @@ async def _verify_classification(
         _extract_json_object(content),
         categories,
         target_level=target_level,
+        max_target_level=max_target_level,
         required_prefix=required_prefix,
     )
     normalized["verified_raw_response"] = content
@@ -568,6 +571,7 @@ async def _classify_for_target_level(
     base_url: str,
     model: str,
     target_level: int,
+    max_target_level: int,
     required_prefix: str,
 ) -> Dict[str, Any]:
     prompt_categories = _filter_categories_for_target_level(
@@ -575,6 +579,7 @@ async def _classify_for_target_level(
         target_level=target_level,
         required_prefix=required_prefix,
     )
+    normalized_prefix = _normalize_category_path(required_prefix)
     user_prompt = render_prompt(
         PromptKeys.DEEPSEEK_CATEGORY_CLASSIFIER_USER,
         context={
@@ -583,6 +588,8 @@ async def _classify_for_target_level(
             "group_names": "\n".join(f"- {name}" for name in task_input.group_names),
             "categories": "\n".join(prompt_categories),
             "target_level": target_level,
+            "max_target_level": max_target_level,
+            "required_prefix": normalized_prefix,
         },
     )
     content, metadata, _ = await llm_gateway.deepseek_complete_text(
@@ -600,6 +607,7 @@ async def _classify_for_target_level(
         _extract_json_object(content),
         categories,
         target_level=target_level,
+        max_target_level=max_target_level,
         required_prefix=required_prefix,
     )
     verified = await _verify_classification(
@@ -609,6 +617,7 @@ async def _classify_for_target_level(
         system_prompt=system_prompt,
         candidate=candidate,
         target_level=target_level,
+        max_target_level=max_target_level,
         required_prefix=required_prefix,
         api_key=api_key,
         base_url=base_url,
@@ -654,6 +663,7 @@ async def _route_task_to_active_leaf(
         base_url=base_url,
         model=model,
         target_level=base_target_level,
+        max_target_level=max_target_level,
         required_prefix="",
     )
     while _category_depth(classification["category_path"]) < max_target_level:
@@ -671,6 +681,7 @@ async def _route_task_to_active_leaf(
             base_url=base_url,
             model=model,
             target_level=_category_depth(classification["category_path"]) + 1,
+            max_target_level=max_target_level,
             required_prefix=classification["category_path"],
         )
     return classification
@@ -686,20 +697,40 @@ async def _reclassify_overloaded_category(
     model: str,
     parent_category: str,
     target_level: int,
+    max_target_level: int,
 ) -> Dict[str, Dict[str, Any]]:
     mutable_categories = list(categories)
     results: Dict[str, Dict[str, Any]] = {}
     for task_input in task_inputs:
-        classification = await _classify_for_target_level(
-            task_input=task_input,
-            categories=mutable_categories,
-            system_prompt=system_prompt,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            target_level=target_level,
-            required_prefix=parent_category,
-        )
+        try:
+            classification = await _classify_for_target_level(
+                task_input=task_input,
+                categories=mutable_categories,
+                system_prompt=system_prompt,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+                target_level=target_level,
+                max_target_level=max_target_level,
+                required_prefix=parent_category,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Phase2B-Category] keep overloaded leaf for task=%s parent=%s err=%s",
+                task_input.task_dir.name,
+                parent_category,
+                exc,
+            )
+            classification = {
+                "category_path": _normalize_category_path(parent_category),
+                "is_new": False,
+                "reasoning": f"rebalance fallback: {exc}",
+                "target_level": _category_depth(parent_category),
+                "generated_at": _utc_now_iso(),
+                "usage": {},
+                "raw_response": "",
+                "verified_raw_response": "",
+            }
         results[_task_path_for_task_dir(task_input.task_dir)] = classification
         mutable_categories = _normalize_lines([*mutable_categories, classification["category_path"]])
     return results
@@ -821,6 +852,7 @@ async def classify_phase2b_output(
                     model=model,
                     parent_category=overloaded_category,
                     target_level=next_target_level,
+                    max_target_level=max_target_level,
                 )
             except Exception as exc:
                 logger.warning(

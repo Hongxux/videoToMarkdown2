@@ -3,9 +3,12 @@ package com.mvp.module2.fusion.worker;
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
+import com.mvp.module2.fusion.queue.TaskQueueManager.TaskTransitionResult;
 import com.mvp.module2.fusion.scheduler.LoadBasedScheduler;
 import com.mvp.module2.fusion.service.PersonaAwareReadingService;
 import com.mvp.module2.fusion.service.PersonaInsightCardService;
+import com.mvp.module2.fusion.service.TaskDeduplicationService;
+import com.mvp.module2.fusion.service.TaskProbeService;
 import com.mvp.module2.fusion.service.VideoProcessingOrchestrator;
 import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import com.mvp.module2.fusion.worker.watchdog.TaskWatchdog;
@@ -26,7 +29,9 @@ import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -59,6 +64,12 @@ public class TaskProcessingWorker {
 
     @Autowired(required = false)
     private PersonaInsightCardService personaInsightCardService;
+
+    @Autowired
+    private TaskDeduplicationService taskDeduplicationService;
+
+    @Autowired
+    private TaskProbeService taskProbeService;
 
     @Autowired
     private TaskWatchdogFactory taskWatchdogFactory;
@@ -192,14 +203,45 @@ public class TaskProcessingWorker {
 
     private void processTask(TaskEntry task) {
         logger.info("Processing task: {}", task.taskId);
+        TaskDeduplicationService.NormalizedTaskInput normalizedTaskInput = null;
+        boolean activeKeyClaimed = false;
         try {
             if (taskQueueManager.isTaskCancelled(task.taskId)) {
                 finalizeCancelled(task, "任务已取消");
                 return;
             }
 
+            normalizedTaskInput = taskDeduplicationService.normalizeTaskInput(task);
+            taskQueueManager.updateNormalizedVideoInput(
+                    task.taskId,
+                    normalizedTaskInput.normalizedVideoUrl,
+                    normalizedTaskInput.normalizedVideoKey
+            );
+            String activeOwnerTaskId = taskDeduplicationService.registerOrGetActiveOwner(
+                    normalizedTaskInput.normalizedVideoKey,
+                    task.taskId
+            );
+            activeKeyClaimed = task.taskId.equals(activeOwnerTaskId);
+            if (!activeKeyClaimed) {
+                handleDedupedTask(task, normalizedTaskInput, activeOwnerTaskId, "active task duplicate");
+                return;
+            }
+            String persistedDuplicateTaskId = taskDeduplicationService.findReusablePersistedTask(
+                    normalizedTaskInput.normalizedVideoKey,
+                    task.taskId
+            ).map(record -> record.taskId).orElse("");
+            if (!persistedDuplicateTaskId.isBlank()) {
+                handleDedupedTask(task, normalizedTaskInput, persistedDuplicateTaskId, "persisted task duplicate");
+                return;
+            }
+
             String outputDir = task.outputDir != null ? task.outputDir : "./output/" + task.taskId;
             TaskWatchdog watchdog = taskWatchdogFactory.create(task.taskId);
+            webSocketHandler.broadcastTaskUpdate(task);
+
+            if (!prepareProbeStage(task)) {
+                return;
+            }
 
             orchestrator.setProgressCallback(task.taskId, (taskId, progress, message) -> {
                 if (!task.taskId.equals(taskId)) {
@@ -211,8 +253,10 @@ public class TaskProcessingWorker {
                 TaskWatchdog.Signal signal = watchdogSignalCodec.parse(message);
                 watchdog.recordProgress(progress, message, signal);
                 String outwardMessage = watchdogSignalCodec.sanitizeForUser(message, signal);
-                taskQueueManager.updateProgress(taskId, progress, outwardMessage);
-                webSocketHandler.broadcastTaskUpdate(taskId, "PROCESSING", progress, outwardMessage, null);
+                boolean progressApplied = taskQueueManager.updateProgress(taskId, progress, outwardMessage);
+                if (progressApplied) {
+                    webSocketHandler.broadcastTaskUpdate(taskId, "PROCESSING", progress, outwardMessage, null);
+                }
             });
 
             VideoProcessingOrchestrator.ProcessingResult result = runWithWatchdog(task, outputDir, watchdog);
@@ -229,7 +273,20 @@ public class TaskProcessingWorker {
             }
 
             taskQueueManager.updateCleanupSourcePath(task.taskId, result.cleanupSourcePath);
-            taskQueueManager.completeTask(task.taskId, result.markdownPath);
+            TaskTransitionResult completion = taskQueueManager.completeTask(task.taskId, result.markdownPath);
+            if (!completion.isApplied()) {
+                if (completion.currentStatus == TaskQueueManager.TaskStatus.CANCELLED) {
+                    finalizeCancelled(task, "任务已取消");
+                    return;
+                }
+                logger.info(
+                        "Skip completion side effects because COMPLETE transition was not applied: taskId={} outcome={} reason={}",
+                        task.taskId,
+                        completion.outcome,
+                        completion.reason
+                );
+                return;
+            }
             webSocketHandler.broadcastTaskUpdate(task.taskId, "COMPLETED", 1.0, "处理完成", result.markdownPath);
             triggerPersonaArtifactsAfterCompletion(task, result);
             cleanupUploadedSourceAfterCompletion(task);
@@ -242,11 +299,185 @@ public class TaskProcessingWorker {
             logger.error("Task failed: {}", task.taskId, error);
             String rawError = extractThrowableMessage(error);
             String userMessage = UserFacingErrorMapper.toUserMessage(rawError);
-            taskQueueManager.failTask(task.taskId, rawError);
-            webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, userMessage, null);
+            TaskTransitionResult failure = taskQueueManager.failTask(task.taskId, rawError);
+            if (failure.isApplied()) {
+                webSocketHandler.broadcastTaskUpdate(task.taskId, "FAILED", task.progress, userMessage, null);
+            } else if (failure.currentStatus == TaskQueueManager.TaskStatus.CANCELLED) {
+                finalizeCancelled(task, "任务已取消");
+            } else {
+                logger.info(
+                        "Skip failure broadcast because FAIL transition was not applied: taskId={} outcome={} reason={}",
+                        task.taskId,
+                        failure.outcome,
+                        failure.reason
+                );
+            }
         } finally {
+            if (activeKeyClaimed && normalizedTaskInput != null) {
+                taskDeduplicationService.releaseActiveOwner(
+                        normalizedTaskInput.normalizedVideoKey,
+                        task.taskId
+                );
+            }
             orchestrator.clearProgressCallback(task.taskId);
         }
+    }
+
+    private boolean prepareProbeStage(TaskEntry task) {
+        if (shouldProbeInBackground(task)) {
+            return detachProbeFromCriticalPath(task);
+        }
+        TaskProbeService.ProbeOutcome probeOutcome = taskProbeService.probeTask(task);
+        return applyForegroundProbeOutcome(task, probeOutcome);
+    }
+
+    private boolean shouldProbeInBackground(TaskEntry task) {
+        if (task == null || !isHttpUrl(task.videoUrl)) {
+            return false;
+        }
+        VideoProcessingOrchestrator.BookProcessingOptions bookOptions = buildBookProcessingOptions(task);
+        return !orchestrator.shouldRunBookPipeline(task.videoUrl, bookOptions);
+    }
+
+    private boolean detachProbeFromCriticalPath(TaskEntry task) {
+        TaskTransitionResult probeDetached = taskQueueManager.markProbeFinished(
+                task.taskId,
+                "探测转后台执行，开始下载",
+                0.02,
+                Map.of(),
+                null
+        );
+        if (!probeDetached.isApplied() && probeDetached.currentStatus == TaskQueueManager.TaskStatus.CANCELLED) {
+            finalizeCancelled(task, "任务已取消，处理已停止");
+            return false;
+        }
+        if (probeDetached.isRejected()) {
+            throw new IllegalStateException(
+                    "Failed to detach probe from critical path: taskId="
+                            + task.taskId
+                            + ", outcome="
+                            + probeDetached.outcome
+                            + ", reason="
+                            + probeDetached.reason
+            );
+        }
+        TaskEntry processingTask = taskQueueManager.getTask(task.taskId);
+        if (processingTask != null) {
+            webSocketHandler.broadcastTaskUpdate(processingTask);
+        }
+        // 这里把探测降级为旁路元数据补全，避免远端视频的探测阻塞下载起跑。
+        CompletableFuture
+                .supplyAsync(() -> taskProbeService.probeTask(task))
+                .thenAccept(probeOutcome -> applyBackgroundProbeOutcome(task, probeOutcome))
+                .exceptionally(error -> {
+                    logger.warn(
+                            "Background probe crashed, keep pipeline running: taskId={} videoUrl={} err={}",
+                            task.taskId,
+                            task.videoUrl,
+                            extractThrowableMessage(error)
+                    );
+                    return null;
+                });
+        return true;
+    }
+
+    private boolean applyForegroundProbeOutcome(TaskEntry task, TaskProbeService.ProbeOutcome probeOutcome) {
+        if (probeOutcome == null || !probeOutcome.success) {
+            throw new RuntimeException(firstNonBlank(probeOutcome != null ? probeOutcome.errorMessage : null, "Task probe failed"));
+        }
+        mergeProbeOutcomeIntoTask(task, probeOutcome);
+        TaskTransitionResult probeFinished = taskQueueManager.markProbeFinished(
+                task.taskId,
+                firstNonBlank(probeOutcome.statusMessage, "探测完成，开始处理"),
+                0.08,
+                probeOutcome.payload,
+                probeOutcome.preferredTitle
+        );
+        if (!probeFinished.isApplied() && probeFinished.currentStatus == TaskQueueManager.TaskStatus.CANCELLED) {
+            finalizeCancelled(task, "任务已取消，处理已停止");
+            return false;
+        }
+        if (probeFinished.isRejected()) {
+            throw new IllegalStateException(
+                    "Probe transition rejected: taskId="
+                            + task.taskId
+                            + ", outcome="
+                            + probeFinished.outcome
+                            + ", reason="
+                            + probeFinished.reason
+            );
+        }
+        TaskEntry probeSyncedTask = taskQueueManager.getTask(task.taskId);
+        if (probeSyncedTask != null) {
+            webSocketHandler.broadcastTaskUpdate(probeSyncedTask);
+        }
+        return true;
+    }
+
+    private void applyBackgroundProbeOutcome(TaskEntry task, TaskProbeService.ProbeOutcome probeOutcome) {
+        if (probeOutcome == null || !probeOutcome.success) {
+            logger.warn(
+                    "Background probe failed, keep pipeline running: taskId={} videoUrl={} err={}",
+                    task != null ? task.taskId : "",
+                    task != null ? task.videoUrl : "",
+                    firstNonBlank(probeOutcome != null ? probeOutcome.errorMessage : null, "probe returned unsuccessful result")
+            );
+            return;
+        }
+        TaskEntry currentTask = taskQueueManager.getTask(task.taskId);
+        if (currentTask == null || currentTask.status == TaskQueueManager.TaskStatus.CANCELLED) {
+            return;
+        }
+        boolean probeChanged = mergeProbeOutcomeIntoTask(task, probeOutcome);
+        if (!probeChanged) {
+            return;
+        }
+        TaskEntry refreshedTask = taskQueueManager.getTask(task.taskId);
+        if (refreshedTask != null) {
+            webSocketHandler.broadcastTaskUpdate(refreshedTask);
+        }
+    }
+
+    private boolean mergeProbeOutcomeIntoTask(TaskEntry task, TaskProbeService.ProbeOutcome probeOutcome) {
+        if (task == null || probeOutcome == null) {
+            return false;
+        }
+        boolean titleUpdated = false;
+        if (probeOutcome.preferredTitle != null && !probeOutcome.preferredTitle.isBlank()) {
+            titleUpdated = taskQueueManager.updateTaskTitle(task.taskId, probeOutcome.preferredTitle);
+        }
+        boolean payloadUpdated = false;
+        if (probeOutcome.payload != null && !probeOutcome.payload.isEmpty()) {
+            payloadUpdated = taskQueueManager.updateProbePayload(task.taskId, probeOutcome.payload);
+            webSocketHandler.broadcastTaskProbeResult(task.taskId, task.userId, probeOutcome.payload);
+        }
+        return titleUpdated || payloadUpdated;
+    }
+
+    private void handleDedupedTask(
+            TaskEntry task,
+            TaskDeduplicationService.NormalizedTaskInput normalizedTaskInput,
+            String duplicateOfTaskId,
+            String reason
+    ) {
+        TaskEntry dedupedTask = taskQueueManager.markTaskDeduped(
+                task.taskId,
+                normalizedTaskInput != null ? normalizedTaskInput.normalizedVideoUrl : task.videoUrl,
+                normalizedTaskInput != null ? normalizedTaskInput.normalizedVideoKey : "",
+                duplicateOfTaskId,
+                "任务已去重"
+        );
+        if (dedupedTask == null) {
+            return;
+        }
+        webSocketHandler.broadcastTaskDeduped(
+                dedupedTask.taskId,
+                dedupedTask.userId,
+                duplicateOfTaskId,
+                normalizedTaskInput != null ? normalizedTaskInput.normalizedVideoKey : "",
+                reason
+        );
+        taskQueueManager.removeTask(dedupedTask.taskId);
     }
 
     private void triggerPersonaArtifactsAfterCompletion(
@@ -411,9 +642,44 @@ public class TaskProcessingWorker {
         }
         VideoProcessingOrchestrator.IOPhaseResult ioResult =
                 executeVideoDownloadPhaseWithPermit(task.taskId, task.videoUrl, outputDir);
+        syncRecoveredTitleAfterDownload(task, ioResult);
         ioResult = executeVideoTranscribePhaseWithPermit(task.taskId, ioResult);
         ioResult = orchestrator.processVideoStage1Phase(task.taskId, ioResult);
         return executeVideoPhase2WithPermit(task.taskId, ioResult);
+    }
+
+    private void syncRecoveredTitleAfterDownload(
+            TaskEntry task,
+            VideoProcessingOrchestrator.IOPhaseResult ioResult
+    ) {
+        if (task == null || ioResult == null || ioResult.downloadResult == null) {
+            return;
+        }
+        syncRecoveredTaskTitle(task, ioResult.downloadResult.videoTitle);
+    }
+
+    private void syncRecoveredTaskTitle(TaskEntry task, String recoveredTitle) {
+        if (task == null || taskQueueManager == null) {
+            return;
+        }
+        String normalizedTitle = firstNonBlank(recoveredTitle, "").trim();
+        if (normalizedTitle.isBlank()) {
+            return;
+        }
+        TaskEntry currentTask = taskQueueManager.getTask(task.taskId);
+        if (currentTask == null) {
+            return;
+        }
+        if (normalizedTitle.equals(firstNonBlank(currentTask.title, ""))) {
+            return;
+        }
+        if (!taskQueueManager.updateTaskTitle(task.taskId, normalizedTitle)) {
+            return;
+        }
+        TaskEntry refreshedTask = taskQueueManager.getTask(task.taskId);
+        if (refreshedTask != null && webSocketHandler != null) {
+            webSocketHandler.broadcastTaskUpdate(refreshedTask);
+        }
     }
 
     private VideoProcessingOrchestrator.IOPhaseResult executeVideoDownloadPhaseWithPermit(
@@ -559,19 +825,36 @@ public class TaskProcessingWorker {
         options.splitByChapter = task.bookOptions.splitByChapter;
         options.splitBySection = task.bookOptions.splitBySection;
         options.pageOffset = task.bookOptions.pageOffset;
+        options.bookTitle = task.bookOptions.bookTitle;
+        options.leafTitle = task.bookOptions.leafTitle;
+        options.leafOutlineIndex = task.bookOptions.leafOutlineIndex;
+        options.storageKey = task.bookOptions.storageKey;
         if ((options.chapterSelector == null || options.chapterSelector.isBlank())
                 && (options.sectionSelector == null || options.sectionSelector.isBlank())
                 && options.splitByChapter == null
                 && options.splitBySection == null
-                && options.pageOffset == null) {
+                && options.pageOffset == null
+                && (options.bookTitle == null || options.bookTitle.isBlank())
+                && (options.leafTitle == null || options.leafTitle.isBlank())
+                && (options.leafOutlineIndex == null || options.leafOutlineIndex.isBlank())
+                && (options.storageKey == null || options.storageKey.isBlank())) {
             return null;
         }
         return options;
     }
 
     private void finalizeCancelled(TaskEntry task, String message) {
-        taskQueueManager.finalizeCancelledTask(task.taskId);
-        webSocketHandler.broadcastTaskUpdate(task.taskId, "CANCELLED", task.progress, message, null);
+        TaskTransitionResult result = taskQueueManager.finalizeCancelledTask(task.taskId, message);
+        if (result.isApplied()) {
+            webSocketHandler.broadcastTaskUpdate(task.taskId, "CANCELLED", task.progress, message, null);
+            return;
+        }
+        logger.info(
+                "Skip cancelled broadcast because FINALIZE_CANCELLATION transition was not applied: taskId={} outcome={} reason={}",
+                task.taskId,
+                result.outcome,
+                result.reason
+        );
     }
 
     private void cleanupUploadedSourceAfterCompletion(TaskEntry task) {

@@ -1284,8 +1284,41 @@ fun SemanticTopographyReader(
                 overlayViewportSize = size
             }
     ) {
-        // 将 SemanticNode 按 Markdown 语义块拆分为 SemanticBlock
         val blocks = remember(nodes) { buildSingleMarkdownReaderBlock(nodes) }
+        val legacyBlockProjections = remember(nodes, blocks) {
+            buildLegacyBlockProjections(
+                nodes = nodes,
+                blocks = blocks
+            )
+        }
+        val tokenAnnotationMigrationFingerprint by remember {
+            derivedStateOf { tokenAnnotationsState.entries.hashCode() }
+        }
+        val anchorMigrationFingerprint by remember {
+            derivedStateOf { anchorsState.entries.hashCode() }
+        }
+        LaunchedEffect(
+            taskId,
+            legacyBlockProjections,
+            tokenAnnotationMigrationFingerprint,
+            anchorMigrationFingerprint
+        ) {
+            if (legacyBlockProjections.isEmpty()) {
+                return@LaunchedEffect
+            }
+            var migrated = false
+            migrated = migrateLegacyTokenMetadataKeys(
+                state = tokenAnnotationsState,
+                projectionsByLegacyBlockId = legacyBlockProjections
+            ) || migrated
+            migrated = migrateLegacyAnchorMetadataKeys(
+                state = anchorsState,
+                projectionsByLegacyBlockId = legacyBlockProjections
+            ) || migrated
+            if (migrated) {
+                scheduleMetaSync(reason = "reader_block_metadata_migrated")
+            }
+        }
         val blockInteractionEnabled = false
 
         LazyColumn(
@@ -7663,39 +7696,185 @@ private fun buildSingleMarkdownReaderBlock(nodes: List<SemanticNode>): List<Sema
     if (nodes.isEmpty()) {
         return emptyList()
     }
-    val mergedMarkdown = nodes
-        .mapNotNull { node ->
-            val source = (node.originalMarkdown ?: node.text)
-                .replace("\r\n", "\n")
-            source.takeIf { it.any { ch -> !ch.isWhitespace() } }
+    return nodes.mapNotNull { node ->
+        val normalizedId = node.id.trim().ifBlank { return@mapNotNull null }
+        val markdown = (node.originalMarkdown ?: node.text)
+            .replace("\r\n", "\n")
+            .trim()
+        if (markdown.isBlank()) {
+            return@mapNotNull null
         }
-        .joinToString("\n\n")
-    if (mergedMarkdown.isBlank()) {
-        return emptyList()
-    }
-    val mergedInsightTerms = nodes
-        .flatMap { node -> node.resolvedInsightTerms() }
-        .map { token -> token.trim() }
-        .filter { token -> token.isNotBlank() }
-        .distinct()
-    val mergedReasoning = nodes
-        .firstNotNullOfOrNull { node -> node.reasoning?.takeIf { it.isNotBlank() } }
-    return listOf(
         SemanticBlock(
-            blockId = "md_root",
-            parentNodeId = "md_root",
+            blockId = normalizedId,
+            parentNodeId = normalizedId,
             blockIndex = 0,
             blockCount = 1,
-            markdown = mergedMarkdown,
-            plainText = stripMarkdownToPlainText(mergedMarkdown),
+            markdown = markdown,
+            plainText = stripMarkdownToPlainText(markdown),
             indentLevel = 0,
-            type = "paragraph",
-            relevanceScore = 1f,
-            reasoning = mergedReasoning,
-            insightTerms = mergedInsightTerms,
-            insightsTags = emptyList()
+            type = node.type,
+            relevanceScore = node.relevanceScore,
+            reasoning = node.reasoning,
+            insightTerms = node.insightTerms,
+            insightsTags = node.insightsTags
         )
-    )
+    }
+}
+
+private data class LegacyBlockProjection(
+    val blockId: String,
+    val startInLegacyText: Int,
+    val endInLegacyText: Int
+)
+
+private fun buildLegacyBlockProjections(
+    nodes: List<SemanticNode>,
+    blocks: List<SemanticBlock>
+): Map<String, List<LegacyBlockProjection>> {
+    if (nodes.isEmpty() || blocks.isEmpty()) {
+        return emptyMap()
+    }
+    val blocksByParent = blocks.groupBy { it.parentNodeId }
+    return buildMap {
+        nodes.forEach { node ->
+            val childBlocks = blocksByParent[node.id]
+                .orEmpty()
+                .sortedBy { it.blockIndex }
+            if (childBlocks.size <= 1) {
+                return@forEach
+            }
+            val sourceMarkdown = (node.originalMarkdown ?: node.text)
+                .replace("\r\n", "\n")
+            if (sourceMarkdown.isBlank()) {
+                return@forEach
+            }
+            val legacyReaderText = compactReaderParagraphContent(
+                raw = stripMarkdownToPlainText(sourceMarkdown),
+                nodeType = node.type
+            )
+            if (legacyReaderText.isBlank()) {
+                return@forEach
+            }
+            var cursor = 0
+            val projections = mutableListOf<LegacyBlockProjection>()
+            for (block in childBlocks) {
+                val blockReaderText = compactReaderParagraphContent(
+                    raw = block.plainText,
+                    nodeType = block.type
+                )
+                if (blockReaderText.isBlank()) {
+                    continue
+                }
+                val hit = legacyReaderText.indexOf(blockReaderText, startIndex = cursor)
+                if (hit < 0) {
+                    projections.clear()
+                    break
+                }
+                projections += LegacyBlockProjection(
+                    blockId = block.blockId,
+                    startInLegacyText = hit,
+                    endInLegacyText = hit + blockReaderText.length
+                )
+                cursor = hit + blockReaderText.length
+            }
+            if (projections.isNotEmpty()) {
+                put(node.id, projections)
+            }
+        }
+    }
+}
+
+private fun migrateLegacyTokenMetadataKeys(
+    state: MutableMap<String, String>,
+    projectionsByLegacyBlockId: Map<String, List<LegacyBlockProjection>>
+): Boolean {
+    if (state.isEmpty() || projectionsByLegacyBlockId.isEmpty()) {
+        return false
+    }
+    val snapshot = state.toMap()
+    val removals = linkedSetOf<String>()
+    val additions = linkedMapOf<String, String>()
+    snapshot.forEach { (metaKey, value) ->
+        val parsed = parseTokenMetaKey(metaKey) ?: return@forEach
+        val target = projectionsByLegacyBlockId[parsed.blockId]
+            ?.firstOrNull { projection ->
+                parsed.start >= projection.startInLegacyText &&
+                    parsed.end <= projection.endInLegacyText
+            } ?: return@forEach
+        val migratedKey = buildTokenMetaKey(
+            blockId = target.blockId,
+            start = parsed.start - target.startInLegacyText,
+            end = parsed.end - target.startInLegacyText
+        )
+        if (migratedKey == metaKey) {
+            return@forEach
+        }
+        removals += metaKey
+        additions.putIfAbsent(migratedKey, value)
+    }
+    if (removals.isEmpty()) {
+        return false
+    }
+    for (metaKey in removals) {
+        state.remove(metaKey)
+    }
+    additions.forEach { (metaKey, value) ->
+        if (!state.containsKey(metaKey)) {
+            state[metaKey] = value
+        }
+    }
+    return true
+}
+
+private fun migrateLegacyAnchorMetadataKeys(
+    state: MutableMap<String, MobileAnchorData>,
+    projectionsByLegacyBlockId: Map<String, List<LegacyBlockProjection>>
+): Boolean {
+    if (state.isEmpty() || projectionsByLegacyBlockId.isEmpty()) {
+        return false
+    }
+    val snapshot = state.toMap()
+    val removals = linkedSetOf<String>()
+    val additions = linkedMapOf<String, MobileAnchorData>()
+    snapshot.forEach { (metaKey, value) ->
+        val parsed = parseTokenMetaKey(metaKey) ?: return@forEach
+        val target = projectionsByLegacyBlockId[parsed.blockId]
+            ?.firstOrNull { projection ->
+                parsed.start >= projection.startInLegacyText &&
+                    parsed.end <= projection.endInLegacyText
+            } ?: return@forEach
+        val localStart = parsed.start - target.startInLegacyText
+        val localEnd = parsed.end - target.startInLegacyText
+        val migratedKey = buildTokenMetaKey(
+            blockId = target.blockId,
+            start = localStart,
+            end = localEnd
+        )
+        if (migratedKey == metaKey) {
+            return@forEach
+        }
+        removals += metaKey
+        additions.putIfAbsent(
+            migratedKey,
+            value.copy(
+                blockId = target.blockId,
+                startIndex = localStart,
+                endIndex = localEnd
+            )
+        )
+    }
+    if (removals.isEmpty()) {
+        return false
+    }
+    for (metaKey in removals) {
+        state.remove(metaKey)
+    }
+    additions.forEach { (metaKey, value) ->
+        if (!state.containsKey(metaKey)) {
+            state[metaKey] = value
+        }
+    }
+    return true
 }
 
 private data class TokenMetaKey(

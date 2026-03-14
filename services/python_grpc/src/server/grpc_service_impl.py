@@ -1958,6 +1958,24 @@ class GlobalResourceManager:
                 }
             return self._video_tools[video_path]["selector"]
 
+    def cleanup_video_tools(self):
+        """
+        执行逻辑：
+        1) 清理全部缓存的 screenshot selector / extractor。
+        2) 主动释放其中 extractor 持有的 SHM 与视频句柄，避免长期驻留。
+        """
+        self._init_video_tools_cache()
+        with self._video_tools_lock:
+            entries = list(self._video_tools.values())
+            self._video_tools.clear()
+        for entry in entries:
+            extractor = entry.get("extractor") if isinstance(entry, dict) else None
+            if extractor is not None and hasattr(extractor, "cleanup"):
+                try:
+                    extractor.cleanup()
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup screenshot extractor: {e}")
+
     def get_cv_validator(self, video_path: str):
         """
         执行逻辑：
@@ -2749,6 +2767,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         except Exception:
             predicted_output_dir = str(request.output_dir or "").strip()
         download_watchdog = None
+        soft_heartbeat_stop = threading.Event()
+        soft_heartbeat_thread: Optional[threading.Thread] = None
         if predicted_output_dir:
             try:
                 download_watchdog = TaskWatchdogSignalWriter(
@@ -2769,6 +2789,49 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
 
         logger.info(f"[{task_id}] DownloadVideo: {raw_video_input}")
 
+        def _emit_download_hard_heartbeat_loop() -> None:
+            """在 aria2c/yt-dlp 下载期间周期性发送 hard 心跳，防止 Java Watchdog idle 判断触发下载重启。
+            说明：Java watchdog 的 idle 窗口（默认 180s）只计 hard 信号间隔；soft 信号不重置 idle 计数器。
+            因此必须发 hard 信号，间隔需小于 idle-window-min-seconds（默认 180s）。
+            """
+            interval_sec = max(
+                15.0,
+                float(_to_int(os.getenv("DOWNLOAD_HARD_HEARTBEAT_SEC", 30), 30)),
+            )
+            watch_root = predicted_output_dir or ""
+            last_bytes = 0
+            seq_counter = 2  # flow_start 已占 seq=2
+            while not soft_heartbeat_stop.wait(interval_sec):
+                if download_watchdog is None:
+                    continue
+                seq_counter += 1
+                # 扫描目录获取已下载字节数（作为进展证明附在 checkpoint 里）
+                total_bytes = last_bytes
+                if watch_root:
+                    try:
+                        total = 0
+                        for _root, _dirs, _files in os.walk(watch_root):
+                            for _f in _files:
+                                try:
+                                    total += os.path.getsize(os.path.join(_root, _f))
+                                except OSError:
+                                    pass
+                        total_bytes = total
+                        last_bytes = total
+                    except Exception:
+                        pass
+                checkpoint_label = f"download_in_progress|bytes={total_bytes}"
+                try:
+                    download_watchdog.emit(
+                        status="running",
+                        checkpoint=checkpoint_label,
+                        completed=1,
+                        pending=2,
+                        signal_type="hard",
+                    )
+                except Exception as heartbeat_error:
+                    logger.warning(f"[{task_id}] Download hard heartbeat emit failed: {heartbeat_error}")
+
         try:
             self._increment_tasks()
             if download_watchdog is not None:
@@ -2779,6 +2842,12 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                     pending=2,
                     signal_type="hard",
                 )
+                soft_heartbeat_thread = threading.Thread(
+                    target=_emit_download_hard_heartbeat_loop,
+                    name=f"download-heartbeat-{task_id}",
+                    daemon=True,
+                )
+                soft_heartbeat_thread.start()
             flow_result = await run_download_flow(
                 task_id=task_id,
                 raw_video_input=raw_video_input,
@@ -2794,6 +2863,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 write_video_meta_file=_write_video_meta_file,
                 logger=logger,
             )
+            soft_heartbeat_stop.set()
+
             if download_watchdog is not None:
                 if flow_result.success:
                     download_watchdog.emit(
@@ -2828,6 +2899,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 content_type=flow_result.content_type,
             )
         except Exception as e:
+            soft_heartbeat_stop.set()
             logger.error(f"[{task_id}] DownloadVideo failed: {e}")
             if download_watchdog is not None:
                 try:
@@ -2855,7 +2927,9 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
                 content_type="unknown",
             )
         finally:
+            soft_heartbeat_stop.set()
             self._decrement_tasks()
+
 
     async def GetVideoInfo(self, request, context):
         """
@@ -5362,7 +5436,8 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
         try:
             self._increment_tasks()
             timeout_seconds = max(60, _to_int(os.getenv("BOOK_PDF_EXTRACT_TIMEOUT_SEC", "300"), 300))
-            result = extract_book_pdf_markdown(
+            result = await asyncio.to_thread(
+                extract_book_pdf_markdown,
                 task_id=task_id,
                 pdf_path=str(getattr(request, "pdf_path", "") or ""),
                 output_dir=str(getattr(request, "output_dir", "") or ""),
@@ -8472,6 +8547,7 @@ class _VideoProcessingServicerCore(video_processing_pb2_grpc.VideoProcessingServ
             # 清理所有缓存的验证器
             self.resources.cleanup_cv_validators()
             self.resources.cleanup_visual_extractors()
+            self.resources.cleanup_video_tools()
             
             # 强制 GC
             import gc

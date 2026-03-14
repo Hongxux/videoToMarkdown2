@@ -135,6 +135,9 @@ def _emit_prefetch_monitor(
     sampled_frames: int,
     inflight: int,
     inflight_cap: int,
+    shm_frames: Optional[int] = None,
+    shm_mb: Optional[float] = None,
+    shm_budget_mb: Optional[float] = None,
 ) -> None:
     if not bool(governor.get("monitor_enabled", False)):
         return
@@ -143,7 +146,7 @@ def _emit_prefetch_monitor(
     rss_mb = snapshot.get("rss_mb")
     cpu_percent = snapshot.get("cpu_percent")
     logger.info(
-        "[PrefetchMonitor] mode=%s chunk=%s/%s profile=%s reqs=%s span=%.2fs sampled_frames=%s inflight=%s/%s rss_mb=%s cpu=%s",
+        "[PrefetchMonitor] mode=%s chunk=%s/%s profile=%s reqs=%s span=%.2fs sampled_frames=%s inflight=%s/%s rss_mb=%s cpu=%s shm_frames=%s shm_mb=%s shm_budget_mb=%s",
         mode,
         chunk_index,
         total_chunks,
@@ -155,6 +158,9 @@ def _emit_prefetch_monitor(
         inflight_cap,
         f"{rss_mb:.1f}" if isinstance(rss_mb, (int, float)) else "na",
         f"{cpu_percent:.1f}" if isinstance(cpu_percent, (int, float)) else "na",
+        str(int(shm_frames)) if isinstance(shm_frames, int) else "na",
+        f"{shm_mb:.2f}" if isinstance(shm_mb, (int, float)) else "na",
+        f"{shm_budget_mb:.2f}" if isinstance(shm_budget_mb, (int, float)) else "na",
     )
 
     rss_warn_mb = float(governor.get("rss_warn_mb", 0.0) or 0.0)
@@ -586,6 +592,7 @@ async def optimize_screenshots_batch_mode(
                     chunk_sample_rate,
                     chunk_target_height,
                 )
+                registry_snapshot = getattr(registry, "snapshot", lambda: {})() if registry is not None else {}
 
                 _emit_prefetch_monitor(
                     governor=governor,
@@ -598,6 +605,9 @@ async def optimize_screenshots_batch_mode(
                     sampled_frames=len(ts_to_shm_ref),
                     inflight=0,
                     inflight_cap=max_inflight,
+                    shm_frames=int(registry_snapshot.get("frame_count", 0) or 0),
+                    shm_mb=float(registry_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                    shm_budget_mb=float(registry_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
                 )
 
                 try:
@@ -659,6 +669,15 @@ async def optimize_screenshots_batch_mode(
                     # cleanup chunk SHM：确保异常情况下也不会泄漏
                     if registry is not None:
                         try:
+                            cleanup_snapshot = getattr(registry, "snapshot", lambda: {})()
+                            logger.info(
+                                "[SHM ChunkCleanup] mode=batch chunk=%s/%s frames=%s shm_mb=%.2f budget_mb=%.2f",
+                                chunk_id + 1,
+                                len(chunks),
+                                int(cleanup_snapshot.get("frame_count", 0) or 0),
+                                float(cleanup_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                                float(cleanup_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
+                            )
                             registry.cleanup()
                         except Exception as e:
                             logger.debug(f"[Batch Mode] Chunk registry cleanup failed: {e}")
@@ -806,6 +825,15 @@ async def optimize_screenshots_streaming_pipeline(
                     if ctx.get("closed") and ctx.get("pending", 0) <= 0:
                         active_chunks.popleft()
                         try:
+                            cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
+                            logger.info(
+                                "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=completed frames=%s shm_mb=%.2f budget_mb=%.2f",
+                                int(ctx.get("chunk_id", 0)) + 1,
+                                len(chunks),
+                                int(cleanup_snapshot.get("frame_count", 0) or 0),
+                                float(cleanup_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                                float(cleanup_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
+                            )
                             ctx["registry"].cleanup()
                         except Exception as e:
                             logger.debug(f"[Streaming Pipeline] Chunk registry cleanup failed: {e}")
@@ -851,6 +879,15 @@ async def optimize_screenshots_streaming_pipeline(
                     if not pending:
                         ctx = active_chunks.popleft()
                         try:
+                            cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
+                            logger.info(
+                                "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=overlap_evict frames=%s shm_mb=%.2f budget_mb=%.2f",
+                                int(ctx.get("chunk_id", 0)) + 1,
+                                len(chunks),
+                                int(cleanup_snapshot.get("frame_count", 0) or 0),
+                                float(cleanup_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                                float(cleanup_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
+                            )
                             ctx["registry"].cleanup()
                         except Exception:
                             pass
@@ -861,15 +898,46 @@ async def optimize_screenshots_streaming_pipeline(
                 chunk_profile = str(chunk.get("prefetch_profile", "default") or "default")
                 chunk_sample_rate = max(1, int(chunk.get("prefetch_sample_rate", sample_rate) or sample_rate))
                 chunk_target_height = max(0, int(chunk.get("prefetch_target_height", target_height) or target_height))
-                registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
-                    generator._prefetch_union_frames_to_registry_sync,
-                    extractor,
-                    SharedFrameRegistry,
-                    chunk["union_start"],
-                    chunk["union_end"],
-                    chunk_sample_rate,
-                    chunk_target_height,
-                )
+                try:
+                    registry, ts_to_shm_ref, prefetch_ms, register_ms = await asyncio.to_thread(
+                        generator._prefetch_union_frames_to_registry_sync,
+                        extractor,
+                        SharedFrameRegistry,
+                        chunk["union_start"],
+                        chunk["union_end"],
+                        chunk_sample_rate,
+                        chunk_target_height,
+                    )
+                except Exception as error:
+                    if bool(getattr(generator, "screenshot_iframe_fallback_on_oom", False)) and bool(
+                        getattr(generator, "_is_memory_pressure_error", lambda _error: False)(error)
+                    ):
+                        logger.warning(
+                            "[Streaming Pipeline] Chunk %s/%s prefetch hit memory pressure, fallback to iframe-only mode: %s",
+                            chunk_id + 1,
+                            len(chunks),
+                            error,
+                        )
+                        iframe_fallback = getattr(generator, "_optimize_screenshots_by_iframe_only", None)
+                        if callable(iframe_fallback):
+                            remapped_requests = await iframe_fallback(
+                                video_path=video_path,
+                                screenshot_requests=[window.get("req", {}) for window in chunk.get("windows", [])],
+                                reason="streaming_prefetch_memory_pressure",
+                            )
+                            for window, updated_request in zip(chunk.get("windows", []), remapped_requests):
+                                if not isinstance(window, dict):
+                                    continue
+                                original_request = window.get("req")
+                                if isinstance(original_request, dict) and isinstance(updated_request, dict):
+                                    original_request.clear()
+                                    original_request.update(updated_request)
+                                    window["req"] = original_request
+                                else:
+                                    window["req"] = updated_request
+                        continue
+                    raise
+                registry_snapshot = getattr(registry, "snapshot", lambda: {})() if registry is not None else {}
 
                 _emit_prefetch_monitor(
                     governor=governor,
@@ -882,6 +950,9 @@ async def optimize_screenshots_streaming_pipeline(
                     sampled_frames=len(ts_to_shm_ref),
                     inflight=len(pending),
                     inflight_cap=max_inflight,
+                    shm_frames=int(registry_snapshot.get("frame_count", 0) or 0),
+                    shm_mb=float(registry_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                    shm_budget_mb=float(registry_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
                 )
 
                 if not ts_to_shm_ref:
@@ -965,6 +1036,15 @@ async def optimize_screenshots_streaming_pipeline(
             while active_chunks:
                 ctx = active_chunks.popleft()
                 try:
+                    cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
+                    logger.info(
+                        "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=final_drain frames=%s shm_mb=%.2f budget_mb=%.2f",
+                        int(ctx.get("chunk_id", 0)) + 1,
+                        len(chunks),
+                        int(cleanup_snapshot.get("frame_count", 0) or 0),
+                        float(cleanup_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                        float(cleanup_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
+                    )
                     ctx["registry"].cleanup()
                 except Exception:
                     pass
@@ -982,6 +1062,15 @@ async def optimize_screenshots_streaming_pipeline(
                     while active_chunks:
                         ctx = active_chunks.popleft()
                         try:
+                            cleanup_snapshot = getattr(ctx.get("registry"), "snapshot", lambda: {})()
+                            logger.info(
+                                "[SHM ChunkCleanup] mode=streaming chunk=%s/%s reason=finally_cleanup frames=%s shm_mb=%.2f budget_mb=%.2f",
+                                int(ctx.get("chunk_id", 0)) + 1,
+                                len(chunks) if "chunks" in locals() else 0,
+                                int(cleanup_snapshot.get("frame_count", 0) or 0),
+                                float(cleanup_snapshot.get("current_bytes", 0) or 0) / (1024.0 * 1024.0),
+                                float(cleanup_snapshot.get("max_bytes", 0) or 0) / (1024.0 * 1024.0),
+                            )
                             ctx["registry"].cleanup()
                         except Exception:
                             pass
@@ -1008,4 +1097,15 @@ async def optimize_screenshots_streaming_pipeline(
         import traceback
         logger.error(traceback.format_exc())
         traceback.print_exc()
+        if bool(getattr(generator, "screenshot_iframe_fallback_on_oom", False)) and bool(
+            getattr(generator, "_is_memory_pressure_error", lambda _error: False)(e)
+        ):
+            iframe_fallback = getattr(generator, "_optimize_screenshots_by_iframe_only", None)
+            if callable(iframe_fallback):
+                logger.warning("[CV STREAMING] memory pressure fallback to iframe-only mode for all requests")
+                return await iframe_fallback(
+                    video_path=video_path,
+                    screenshot_requests=screenshot_requests,
+                    reason="streaming_pipeline_memory_pressure",
+                )
         return await generator._optimize_screenshot_timestamps(video_path, screenshot_requests)

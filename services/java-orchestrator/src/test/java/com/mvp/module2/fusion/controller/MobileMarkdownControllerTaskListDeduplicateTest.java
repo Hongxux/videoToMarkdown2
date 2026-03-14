@@ -86,6 +86,61 @@ class MobileMarkdownControllerTaskListDeduplicateTest {
         assertEquals("runtime", item.get("source"));
     }
 
+
+    @Test
+    void listTasksShouldKeepDifferentBookLeafTasksFromSameBook() throws Exception {
+        MobileMarkdownController controller = new MobileMarkdownController();
+        TaskQueueManager queueManager = new TaskQueueManager();
+        StubStorageTaskCacheService storageCache = new StubStorageTaskCacheService();
+        injectField(controller, "taskQueueManager", queueManager);
+        injectField(controller, "storageTaskCacheService", storageCache);
+
+        String videoUrl = "D:/books/distributed-systems.pdf";
+        Path storageRoot = resolveControllerStorageRoot();
+
+        TaskQueueManager.BookProcessingOptions leafOne = new TaskQueueManager.BookProcessingOptions();
+        leafOne.sectionSelector = "c1s1t1";
+        leafOne.bookTitle = "Distributed Systems";
+        leafOne.leafTitle = "Introduction";
+        leafOne.leafOutlineIndex = "1.1.1";
+        leafOne.storageKey = md5Hex("Introduction_1.1.1_Distributed Systems");
+
+        TaskQueueManager.BookProcessingOptions leafTwo = new TaskQueueManager.BookProcessingOptions();
+        leafTwo.sectionSelector = "c1s2t1";
+        leafTwo.bookTitle = "Distributed Systems";
+        leafTwo.leafTitle = "System Models";
+        leafTwo.leafOutlineIndex = "1.2.1";
+        leafTwo.storageKey = md5Hex("System Models_1.2.1_Distributed Systems");
+
+        TaskQueueManager.TaskEntry firstTask = queueManager.submitTask(
+                "u_book_leaf",
+                videoUrl,
+                storageRoot.resolve(leafOne.storageKey).toString(),
+                TaskQueueManager.Priority.NORMAL,
+                leafOne.leafTitle,
+                leafOne
+        );
+        TaskQueueManager.TaskEntry secondTask = queueManager.submitTask(
+                "u_book_leaf",
+                videoUrl,
+                storageRoot.resolve(leafTwo.storageKey).toString(),
+                TaskQueueManager.Priority.NORMAL,
+                leafTwo.leafTitle,
+                leafTwo
+        );
+
+        ResponseEntity<Map<String, Object>> response = controller.listTasks(0, 0, false, "full", null);
+
+        assertEquals(200, response.getStatusCode().value());
+        assertNotNull(response.getBody());
+        Object tasksObject = response.getBody().get("tasks");
+        assertTrue(tasksObject instanceof List<?>);
+        List<?> tasks = (List<?>) tasksObject;
+        assertEquals(2, tasks.size());
+        assertTrue(tasks.stream().anyMatch(item -> item instanceof Map<?, ?> map && firstTask.taskId.equals(map.get("taskId"))));
+        assertTrue(tasks.stream().anyMatch(item -> item instanceof Map<?, ?> map && secondTask.taskId.equals(map.get("taskId"))));
+    }
+
     private static String md5Hex(String value) throws Exception {
         MessageDigest md = MessageDigest.getInstance("MD5");
         byte[] digest = md.digest(String.valueOf(value).getBytes(StandardCharsets.UTF_8));

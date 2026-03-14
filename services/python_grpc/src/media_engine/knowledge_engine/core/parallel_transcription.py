@@ -39,6 +39,60 @@ def _notify_progress(progress_callback, event):
         print(f"[并行转录] 进度回调失败: {callback_error}", flush=True)
 
 
+_RESOURCE_EXHAUSTION_MARKERS = (
+    "mkl_malloc",
+    "failed to allocate memory",
+    "cannot allocate memory",
+    "out of memory",
+    "insufficient memory",
+    "std::bad_alloc",
+    "bad allocation",
+    "memoryerror",
+    "resource exhausted",
+)
+
+
+def _is_resource_exhaustion_error(error):
+    if error is None:
+        return False
+    if isinstance(error, MemoryError):
+        return True
+    message = str(error).strip().lower()
+    if not message:
+        return False
+    return any(marker in message for marker in _RESOURCE_EXHAUSTION_MARKERS)
+
+
+def _build_failed_segment_result(segment_id, error):
+    return {
+        "segment_id": segment_id,
+        "error": str(error),
+        "success": False,
+    }
+
+
+def _next_lower_worker_count(current_workers, pending_tasks_args):
+    pending_count = len(pending_tasks_args) if pending_tasks_args is not None else 0
+    if current_workers <= 1 or pending_count <= 0:
+        return 1
+    return max(1, min(pending_count, current_workers - 1))
+
+
+def _execute_parallel_batch(tasks_args, max_workers):
+    batch_results = []
+    with _build_process_pool_executor(max_workers=max_workers) as executor:
+        futures = {executor.submit(transcribe_segment, args): args for args in tasks_args}
+        for future in as_completed(futures):
+            task_args = futures[future]
+            segment = task_args[1]
+            try:
+                result = future.result()
+            except Exception as exc:
+                result = _build_failed_segment_result(segment["id"], exc)
+            batch_results.append((task_args, result))
+    return batch_results
+
+
 def _extract_full_audio(video_path, full_audio_path):
     """一次性提取整段音频，避免后续分段重复解码视频。"""
     cmd = [
@@ -592,21 +646,17 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
     ]
 
     failed_tasks_args = []
+    pending_tasks_args = list(tasks_args)
+    current_workers = max(1, effective_workers)
     try:
-        with _build_process_pool_executor(max_workers=effective_workers) as executor:
-            futures = {executor.submit(transcribe_segment, args): args for args in tasks_args}
-            for future in as_completed(futures):
-                task_args = futures[future]
-                segment = task_args[1]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    result = {
-                        'segment_id': segment['id'],
-                        'error': str(exc),
-                        'success': False
-                    }
-
+        while pending_tasks_args:
+            batch_failed_tasks_args = []
+            retryable_resource_tasks_args = []
+            batch_results = _execute_parallel_batch(
+                tasks_args=pending_tasks_args,
+                max_workers=current_workers,
+            )
+            for task_args, result in batch_results:
                 if result['success']:
                     all_subtitles.extend(result['subtitles'])
                     completed += 1
@@ -626,8 +676,37 @@ def transcribe_parallel(video_path, model_size="small", device="cpu",
                     print(f"[并行转录] ✓ 段 {result['segment_id']+1}/{len(segments)} 完成 "
                           f"({completed}/{len(segments)})")
                 else:
-                    failed_tasks_args.append(task_args)
+                    batch_failed_tasks_args.append(task_args)
+                    if _is_resource_exhaustion_error(result.get("error")) and current_workers > 1:
+                        retryable_resource_tasks_args.append(task_args)
                     print(f"[并行转录] ✗ 段 {result['segment_id']+1} 失败: {result['error']}")
+
+            if not batch_failed_tasks_args:
+                pending_tasks_args = []
+                continue
+
+            failed_tasks_args.extend(
+                task_args for task_args in batch_failed_tasks_args
+                if task_args not in retryable_resource_tasks_args
+            )
+
+            if retryable_resource_tasks_args:
+                next_workers = _next_lower_worker_count(
+                    current_workers=current_workers,
+                    pending_tasks_args=retryable_resource_tasks_args,
+                )
+                if next_workers < current_workers:
+                    print(
+                        f"[并行转录] 检测到资源不足信号，失败段数={len(retryable_resource_tasks_args)}，"
+                        f"自动降级并发 {current_workers} -> {next_workers} 后重试",
+                        flush=True,
+                    )
+                    pending_tasks_args = retryable_resource_tasks_args
+                    current_workers = next_workers
+                    continue
+
+            failed_tasks_args.extend(retryable_resource_tasks_args)
+            pending_tasks_args = []
 
         if failed_tasks_args:
             print(f"[并行转录] 进入串行补偿: {len(failed_tasks_args)} 段")
@@ -695,5 +774,3 @@ def format_subtitles(subtitles):
         start_time = format_hhmmss(sub['start'])
         lines.append(f"[{start_time}] {sub['text']}")
     return "\n".join(lines)
-
-

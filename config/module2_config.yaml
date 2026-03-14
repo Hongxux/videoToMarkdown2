@@ -560,12 +560,17 @@ vl_material_generation:
     concrete_prefetch_chunk_max_requests: 64
     concrete_prefetch_sample_rate: 3
     concrete_prefetch_target_height: 240
+    # true = 只做 I 帧时间戳映射，不再进入 OpenCV/SHM 截图优化链，优先规避内存峰值
+    iframe_only_mode: true
+    # streaming 若命中内存压力，也降级到 I 帧模式而不是回退到更重的 OpenCV 旧链路
+    iframe_fallback_on_memory_pressure: true
+    iframe_probe_max_concurrency: 4
     
     # 🚀 流式处理流水线配置 (参考 upgrade-log.md)
     streaming_pipeline: true              # 启用流式处理 (默认true) 边预读边提交,IO/Compute重叠
     streaming_overlap_buffers: 1          # 主进程预取链默认单缓冲，优先稳定性
     streaming_overlap_buffers_hard_cap: 1 # 主进程预取链硬上限，防止多 chunk 并存放大内存峰值
-    task_max_concurrency: 2               # task 粒度总闸门：最多允许 2 个任务同时进入截图优化
+    task_max_concurrency: 3               # task 粒度总闸门：最多允许 3 个任务同时进入截图优化
     max_workers: 1                        # 当前样本压测最优: 1
     max_inflight_multiplier: 2            # max_inflight = workers * multiplier (背压阈值)
     max_inflight_hard_cap: 1              # 主进程向进程池投递的硬上限，避免 pending 无限堆积

@@ -134,6 +134,9 @@ public class MobileMarkdownController {
     private CategoryClassificationResultsRepository categoryClassificationResultsRepository;
 
     @Autowired(required = false)
+    private com.mvp.module2.fusion.service.StorageTaskCategoryService storageTaskCategoryService;
+
+    @Autowired(required = false)
     private FileReuseService fileReuseService;
 
     @Autowired
@@ -146,6 +149,9 @@ public class MobileMarkdownController {
 
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
+
+    @Value("${task.storage.root:}")
+    private String configuredStorageRoot;
 
     @Value("${mobile.video-info.timeout-seconds:30}")
     private int mobileVideoInfoTimeoutSeconds;
@@ -296,8 +302,8 @@ public class MobileMarkdownController {
             ));
         }
 
-        String normalizedVideoInput = normalizeVideoInput(request.videoUrl);
-        if (normalizedVideoInput.isBlank()) {
+        String rawVideoInput = request.videoUrl != null ? request.videoUrl.trim() : "";
+        if (rawVideoInput.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of(
                     "success", false,
                     "message", "videoUrl cannot be empty"
@@ -317,19 +323,22 @@ public class MobileMarkdownController {
                 request.sectionSelector,
                 request.splitByChapter,
                 request.splitBySection,
-                request.pageOffset
+                request.pageOffset,
+                request.bookTitle,
+                request.leafTitle,
+                request.leafOutlineIndex
         );
-        String lockedTitle = resolveSubmissionTaskTitle(request.videoUrl, normalizedVideoInput);
-        logger.info("Mobile task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
-        TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
+        String lockedTitle = resolveSubmissionTaskTitle(request.videoUrl, rawVideoInput, request.leafTitle);
+        String resolvedOutputDir = resolveSubmissionOutputDir(request.outputDir, bookOptions);
+        logger.info("Mobile task submission accepted: raw={} user={}", request.videoUrl, normalizedUserId);
+        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
                 normalizedUserId,
-                normalizedVideoInput,
-                normalizeOutputDir(request.outputDir),
+                rawVideoInput,
+                resolvedOutputDir,
                 priority,
                 lockedTitle,
                 bookOptions
         );
-        TaskQueueManager.TaskEntry task = submitResult.task;
         linkCollectionEpisodeIfNecessary(request.collectionId, request.episodeNo, task.taskId);
 
         Map<String, Object> payload = new LinkedHashMap<>();
@@ -337,12 +346,12 @@ public class MobileMarkdownController {
         payload.put("taskId", task.taskId);
         payload.put("title", task.title != null ? task.title : "");
         payload.put("status", task.status.name());
-        payload.put("normalizedVideoUrl", normalizedVideoInput);
+        payload.put("normalizedVideoUrl", rawVideoInput);
+        payload.put("storageKey", bookOptions != null && bookOptions.storageKey != null ? bookOptions.storageKey : "");
         payload.put("collectionId", request.collectionId != null ? request.collectionId.trim() : "");
         payload.put("episodeNo", request.episodeNo);
-        payload.put("deduped", submitResult.deduped);
-        payload.put("dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes());
-        payload.put("message", submitResult.deduped ? "task deduped and reused" : "task submitted and queued");
+        payload.put("deduped", false);
+        payload.put("message", "task accepted");
         return ResponseEntity.ok(payload);
     }
 
@@ -2388,6 +2397,9 @@ public class MobileMarkdownController {
 
     private List<TaskView> collectTaskViews(int page, int pageSize) {
         int normalizedPage = Math.max(0, page);
+        if (normalizedPage == 0 && storageTaskCategoryService != null) {
+            storageTaskCategoryService.triggerBackfillAsync();
+        }
         List<TaskEntry> runtimeTasks = taskQueueManager.getAllTasks();
         com.mvp.module2.fusion.service.StorageTaskCacheService.PagedResult storageResult =
                 storageTaskCacheService.getTasks(normalizedPage, pageSize);
@@ -2517,6 +2529,9 @@ public class MobileMarkdownController {
         item.put("markdownAvailable", task.markdownAvailable);
         item.put("source", task.storageTask ? "storage" : "runtime");
         item.put("storageKey", task.storageKey != null ? task.storageKey : "");
+        item.put("bookTitle", task.bookTitle != null ? task.bookTitle : "");
+        item.put("bookLeafTitle", task.bookLeafTitle != null ? task.bookLeafTitle : "");
+        item.put("bookLeafOutlineIndex", task.bookLeafOutlineIndex != null ? task.bookLeafOutlineIndex : "");
         item.put("progress", task.progress);
         item.put("statusMessage", task.statusMessage != null ? task.statusMessage : "");
         item.put("collectionId", task.collectionId != null ? task.collectionId : "");
@@ -2884,6 +2899,7 @@ public class MobileMarkdownController {
         view.progress = task.progress;
         view.statusMessage = task.statusMessage;
         view.runtimeTask = task;
+        applyRuntimeBookLeafIdentity(view, task);
 
         try {
             ResolvedMarkdown resolved = resolveMarkdown(task);
@@ -2937,9 +2953,21 @@ public class MobileMarkdownController {
         view.baseDir = cached.baseDir;
         view.taskRootDir = cached.taskRootDir;
         view.progress = cached.progress;
+        view.bookTitle = trimToNullSafe(cached.bookTitle);
+        view.bookLeafTitle = trimToNullSafe(cached.bookLeafTitle);
+        view.bookLeafOutlineIndex = trimToNullSafe(cached.bookLeafOutlineIndex);
         
         applyTaskTitleFromMeta(view);
         return view;
+    }
+
+    private void applyRuntimeBookLeafIdentity(TaskView view, TaskEntry task) {
+        if (view == null || task == null || task.bookOptions == null) {
+            return;
+        }
+        view.bookTitle = trimToNullSafe(task.bookOptions.bookTitle);
+        view.bookLeafTitle = trimToNullSafe(task.bookOptions.leafTitle);
+        view.bookLeafOutlineIndex = trimToNullSafe(task.bookOptions.leafOutlineIndex);
     }
 
     private ResolvedMarkdown resolveMarkdown(TaskView task) throws IOException {
@@ -4132,8 +4160,44 @@ public class MobileMarkdownController {
         if (task == null) {
             return keys;
         }
+        if (isBookLeafTaskView(task)) {
+            addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.storageKey));
+            addTaskIdentityKey(keys, "bookLeaf", buildBookLeafIdentity(task));
+            return keys;
+        }
+        addTaskIdentityKey(keys, "storageKey", trimToNullSafe(task.storageKey));
         addTaskIdentityKey(keys, "videoUrl", trimToNullSafe(task.videoUrl));
         return keys;
+    }
+
+    private boolean isBookLeafTaskView(TaskView task) {
+        if (task == null) {
+            return false;
+        }
+        return trimToNullSafe(task.bookLeafOutlineIndex) != null
+                || trimToNullSafe(task.bookLeafTitle) != null
+                || trimToNullSafe(task.bookTitle) != null;
+    }
+
+    private String buildBookLeafIdentity(TaskView task) {
+        if (task == null) {
+            return null;
+        }
+        String storageKey = trimToNullSafe(task.storageKey);
+        if (storageKey != null) {
+            return storageKey;
+        }
+        String outlineIndex = trimToNullSafe(task.bookLeafOutlineIndex);
+        String leafTitle = trimToNullSafe(task.bookLeafTitle);
+        String bookTitle = trimToNullSafe(task.bookTitle);
+        if (outlineIndex == null && leafTitle == null && bookTitle == null) {
+            return null;
+        }
+        return String.join("::",
+                bookTitle != null ? bookTitle : "",
+                outlineIndex != null ? outlineIndex : "",
+                leafTitle != null ? leafTitle : "",
+                trimToNullSafe(task.videoUrl) != null ? trimToNullSafe(task.videoUrl) : "");
     }
 
     private void addTaskIdentityKey(Set<String> keys, String type, String rawValue) {
@@ -4405,10 +4469,10 @@ public class MobileMarkdownController {
     }
 
     private TaskView choosePreferredTaskView(TaskView existing, TaskView candidate) {
-        boolean existingRuntimeProcessing = existing.runtimeTask != null && isRunningStatus(existing.status);
-        boolean candidateRuntimeProcessing = candidate.runtimeTask != null && isRunningStatus(candidate.status);
-        if (existingRuntimeProcessing != candidateRuntimeProcessing) {
-            return existingRuntimeProcessing ? existing : candidate;
+        int existingPriority = resolveTaskDedupPriority(existing);
+        int candidatePriority = resolveTaskDedupPriority(candidate);
+        if (existingPriority != candidatePriority) {
+            return existingPriority > candidatePriority ? existing : candidate;
         }
         if (existing.markdownAvailable != candidate.markdownAvailable) {
             return existing.markdownAvailable ? existing : candidate;
@@ -4427,6 +4491,63 @@ public class MobileMarkdownController {
         return existing;
     }
 
+    private int resolveTaskDedupPriority(TaskView task) {
+        if (task == null) {
+            return 0;
+        }
+        boolean runtimeTask = task.runtimeTask != null;
+        if (runtimeTask && isProcessingStatus(task.status)) {
+            return 5;
+        }
+        if (runtimeTask && isQueuedStatus(task.status)) {
+            return 4;
+        }
+        if (task.markdownAvailable || isCompletedStatus(task.status)) {
+            return 3;
+        }
+        if (isFailedStatus(task.status)) {
+            return 2;
+        }
+        if (isCancelledStatus(task.status)) {
+            return 1;
+        }
+        return runtimeTask ? 1 : 0;
+    }
+
+    private boolean isProcessingStatus(String rawStatus) {
+        String status = normalizeStatusUpper(rawStatus);
+        return "PROBING".equals(status)
+                || "PROCESSING".equals(status)
+                || "RUNNING".equals(status)
+                || "IN_PROGRESS".equals(status);
+    }
+
+    private boolean isQueuedStatus(String rawStatus) {
+        String status = normalizeStatusUpper(rawStatus);
+        return "QUEUED".equals(status)
+                || "PENDING".equals(status)
+                || "SUBMITTED".equals(status);
+    }
+
+    private boolean isCompletedStatus(String rawStatus) {
+        return "COMPLETED".equals(normalizeStatusUpper(rawStatus));
+    }
+
+    private boolean isFailedStatus(String rawStatus) {
+        return "FAILED".equals(normalizeStatusUpper(rawStatus));
+    }
+
+    private boolean isCancelledStatus(String rawStatus) {
+        return "CANCELLED".equals(normalizeStatusUpper(rawStatus));
+    }
+
+    private String normalizeStatusUpper(String rawStatus) {
+        if (rawStatus == null || rawStatus.isBlank()) {
+            return "";
+        }
+        return rawStatus.trim().toUpperCase(Locale.ROOT);
+    }
+
     private boolean isRunningStatus(String rawStatus) {
         if (rawStatus == null || rawStatus.isBlank()) {
             return false;
@@ -4434,6 +4555,7 @@ public class MobileMarkdownController {
         String status = rawStatus.trim().toUpperCase(Locale.ROOT);
         return "QUEUED".equals(status)
                 || "PENDING".equals(status)
+                || "PROBING".equals(status)
                 || "PROCESSING".equals(status)
                 || "RUNNING".equals(status);
     }
@@ -4470,6 +4592,9 @@ public class MobileMarkdownController {
     }
 
     private Path resolveStorageRoot() {
+        if (StringUtils.hasText(configuredStorageRoot)) {
+            return Paths.get(configuredStorageRoot.trim()).toAbsolutePath().normalize();
+        }
         Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
         for (int i = 0; i < 8; i++) {
             Path candidate = current.resolve("var").resolve("storage").resolve("storage");
@@ -4935,81 +5060,12 @@ public class MobileMarkdownController {
         return TaskDisplayNameResolver.resolveTaskDisplayTitle(videoUrl, fallbackTaskId);
     }
 
-    private String resolveSubmissionTaskTitle(String rawVideoInput, String normalizedVideoInput) {
-        String fromVideoInfo = resolveTitleFromVideoInfo(rawVideoInput, normalizedVideoInput);
-        if (fromVideoInfo != null) {
-            return fromVideoInfo;
+    private String resolveSubmissionTaskTitle(String rawVideoInput, String normalizedVideoInput, String leafTitle) {
+        String normalizedLeafTitle = trimToNullSafe(leafTitle);
+        if (normalizedLeafTitle != null) {
+            return normalizedLeafTitle;
         }
         return deriveTaskTitle(normalizedVideoInput, normalizedVideoInput);
-    }
-
-    private String resolveTitleFromVideoInfo(String rawVideoInput, String normalizedVideoInput) {
-        if (pythonGrpcClient == null) {
-            return null;
-        }
-        String probeInput = chooseVideoInfoProbeInput(rawVideoInput, normalizedVideoInput);
-        if (probeInput == null || probeInput.isBlank()) {
-            return null;
-        }
-        if (!shouldProbeTitleViaVideoInfo(probeInput)) {
-            return null;
-        }
-        int timeoutSec = Math.max(15, mobileVideoInfoTimeoutSeconds);
-        String probeTaskId = "MVI_" + UUID.randomUUID();
-        try {
-            PythonGrpcClient.VideoInfoResult result = pythonGrpcClient.getVideoInfo(
-                    probeTaskId,
-                    probeInput,
-                    timeoutSec
-            );
-            if (result == null || !result.success) {
-                return null;
-            }
-            String videoTitle = trimToNullSafe(result.videoTitle);
-            if (videoTitle != null) {
-                return videoTitle;
-            }
-            return trimToNullSafe(result.canonicalId);
-        } catch (Exception ex) {
-            logger.debug("mobile submit resolve title via video-info failed: input={} err={}", probeInput, ex.getMessage());
-            return null;
-        }
-    }
-
-    private String chooseVideoInfoProbeInput(String rawInput, String normalizedInput) {
-        String raw = trimToNullSafe(rawInput);
-        String normalized = trimToNullSafe(normalizedInput);
-        if (raw != null) {
-            String lowerRaw = raw.toLowerCase(Locale.ROOT);
-            if (lowerRaw.contains("http://") || lowerRaw.contains("https://")) {
-                return raw;
-            }
-        }
-        if (normalized != null) {
-            return normalized;
-        }
-        return raw;
-    }
-
-    private boolean shouldProbeTitleViaVideoInfo(String probeInput) {
-        String normalizedProbeInput = trimToNullSafe(probeInput);
-        if (normalizedProbeInput == null) {
-            return false;
-        }
-        String inferredContentType = normalizeContentTypeToken(
-                inferContentTypeFromTextCandidate(normalizedProbeInput)
-        );
-        if ("video".equals(inferredContentType)) {
-            return true;
-        }
-        if ("pdf".equals(inferredContentType)
-                || "epub".equals(inferredContentType)
-                || "document".equals(inferredContentType)
-                || "book".equals(inferredContentType)) {
-            return false;
-        }
-        String lower = normalizedProbeInput.toLowerCase(Locale.ROOT);
-        return lower.contains("http://") || lower.contains("https://");
     }
 
     private String instantToText(Instant instant) {
@@ -5044,6 +5100,13 @@ public class MobileMarkdownController {
         }
         String trimmed = rawOutputDir.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private String resolveSubmissionOutputDir(String rawOutputDir, TaskQueueManager.BookProcessingOptions bookOptions) {
+        if (bookOptions != null && bookOptions.storageKey != null) {
+            return resolveStorageRoot().resolve(bookOptions.storageKey).toString();
+        }
+        return normalizeOutputDir(rawOutputDir);
     }
 
     private ResponseEntity<Map<String, Object>> buildUploadSubmissionResponse(
@@ -5081,7 +5144,7 @@ public class MobileMarkdownController {
                 splitBySection,
                 pageOffset
         );
-        TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
+        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
                 normalizedUserId,
                 savedVideoPath.toString(),
                 normalizeOutputDir(outputDir),
@@ -5089,7 +5152,6 @@ public class MobileMarkdownController {
                 null,
                 bookOptions
         );
-        TaskQueueManager.TaskEntry task = submitResult.task;
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("success", true);
         payload.put("reused", reusedUpload);
@@ -5097,13 +5159,10 @@ public class MobileMarkdownController {
         payload.put("status", task.status.name());
         payload.put("normalizedVideoUrl", savedVideoPath.toString());
         payload.put("uploadedFileName", safeFileName);
-        payload.put("deduped", submitResult.deduped);
-        payload.put("dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes());
-        payload.put("message", submitResult.deduped
-                ? "task deduped and reused"
-                : (reusedUpload
+        payload.put("deduped", false);
+        payload.put("message", reusedUpload
                 ? "file reused; task submitted and queued"
-                : "video uploaded; task submitted and queued"));
+                : "video uploaded; task submitted and queued");
         appendFingerprintPayload(payload, fingerprintOpt);
         return ResponseEntity.ok(payload);
     }
@@ -5177,11 +5236,39 @@ public class MobileMarkdownController {
             Boolean splitBySection,
             Integer pageOffset
     ) {
+        return buildBookProcessingOptions(
+                chapterSelector,
+                sectionSelector,
+                splitByChapter,
+                splitBySection,
+                pageOffset,
+                null,
+                null,
+                null
+        );
+    }
+
+    private TaskQueueManager.BookProcessingOptions buildBookProcessingOptions(
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset,
+            String bookTitle,
+            String leafTitle,
+            String leafOutlineIndex
+    ) {
         String normalizedChapterSelector = trimToNullSafe(chapterSelector);
         String normalizedSectionSelector = trimToNullSafe(sectionSelector);
+        String normalizedBookTitle = trimToNullSafe(bookTitle);
+        String normalizedLeafTitle = trimToNullSafe(leafTitle);
+        String normalizedLeafOutlineIndex = trimToNullSafe(leafOutlineIndex);
         if (normalizedChapterSelector == null && normalizedSectionSelector == null
                 && splitByChapter == null && splitBySection == null
-                && pageOffset == null) {
+                && pageOffset == null
+                && normalizedBookTitle == null
+                && normalizedLeafTitle == null
+                && normalizedLeafOutlineIndex == null) {
             return null;
         }
         TaskQueueManager.BookProcessingOptions options = new TaskQueueManager.BookProcessingOptions();
@@ -5190,7 +5277,18 @@ public class MobileMarkdownController {
         options.splitByChapter = splitByChapter;
         options.splitBySection = splitBySection;
         options.pageOffset = pageOffset;
+        options.bookTitle = normalizedBookTitle;
+        options.leafTitle = normalizedLeafTitle;
+        options.leafOutlineIndex = normalizedLeafOutlineIndex;
+        options.storageKey = buildBookLeafStorageKey(normalizedBookTitle, normalizedLeafOutlineIndex, normalizedLeafTitle);
         return options;
+    }
+
+    private String buildBookLeafStorageKey(String bookTitle, String leafOutlineIndex, String leafTitle) {
+        if (bookTitle == null || leafOutlineIndex == null || leafTitle == null) {
+            return null;
+        }
+        return md5HexSafe(leafTitle + "_" + leafOutlineIndex + "_" + bookTitle);
     }
 
     private String sanitizeUploadFileName(String rawFileName) {
@@ -5404,6 +5502,9 @@ public class MobileMarkdownController {
         public Boolean splitByChapter;
         public Boolean splitBySection;
         public Integer pageOffset;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
     }
 
     public static class ChunkUploadCompleteRequest {
@@ -5495,5 +5596,8 @@ public class MobileMarkdownController {
         private Instant archivedAt;
         private boolean manualCollection;
         private Integer totalEpisodes;
+        private String bookTitle;
+        private String bookLeafTitle;
+        private String bookLeafOutlineIndex;
     }
 }

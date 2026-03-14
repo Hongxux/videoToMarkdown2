@@ -1,9 +1,13 @@
 package com.mvp.module2.fusion.queue;
 
 import com.mvp.module2.fusion.common.UserFacingErrorMapper;
+import com.mvp.module2.fusion.service.TaskStateRepository;
+import com.mvp.module2.fusion.service.TaskStateRepository.PersistedTaskRecord;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -11,8 +15,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.PriorityBlockingQueue;
@@ -36,9 +43,11 @@ public class TaskQueueManager {
     private final AtomicLong taskIdGenerator = new AtomicLong(0);
     private final Semaphore processingSlots;
     private final int maxConcurrentTasks;
-    private final int dedupeWindowMinutes;
-    private final long dedupeWindowMillis;
     private final ExecutorService executorService;
+    private volatile boolean persistedTasksRestored;
+
+    @Autowired(required = false)
+    private TaskStateRepository taskStateRepository;
 
     public enum Priority {
         LOW(0),
@@ -59,10 +68,80 @@ public class TaskQueueManager {
 
     public enum TaskStatus {
         QUEUED,
+        PROBING,
         PROCESSING,
         COMPLETED,
         FAILED,
+        DEDUPED,
         CANCELLED
+    }
+
+    public enum TaskEvent {
+        START_PROBING,
+        FINISH_PROBING,
+        COMPLETE,
+        FAIL,
+        CANCEL,
+        FINALIZE_CANCELLATION
+    }
+
+    public enum TaskTransitionOutcome {
+        APPLIED,
+        NO_OP,
+        REJECTED
+    }
+
+    public static class TaskTransitionResult {
+        public final String taskId;
+        public final TaskEvent event;
+        public final TaskTransitionOutcome outcome;
+        public final TaskStatus previousStatus;
+        public final TaskStatus currentStatus;
+        public final String reason;
+
+        private TaskTransitionResult(
+                String taskId,
+                TaskEvent event,
+                TaskTransitionOutcome outcome,
+                TaskStatus previousStatus,
+                TaskStatus currentStatus,
+                String reason
+        ) {
+            this.taskId = taskId;
+            this.event = event;
+            this.outcome = outcome;
+            this.previousStatus = previousStatus;
+            this.currentStatus = currentStatus;
+            this.reason = reason;
+        }
+
+        public boolean isApplied() {
+            return outcome == TaskTransitionOutcome.APPLIED;
+        }
+
+        public boolean isNoOp() {
+            return outcome == TaskTransitionOutcome.NO_OP;
+        }
+
+        public boolean isRejected() {
+            return outcome == TaskTransitionOutcome.REJECTED;
+        }
+
+        public boolean isAccepted() {
+            return outcome == TaskTransitionOutcome.APPLIED || outcome == TaskTransitionOutcome.NO_OP;
+        }
+    }
+
+    private static class TransitionDecision {
+        private final TaskTransitionOutcome outcome;
+        private final TaskStatus nextStatus;
+        private final String reason;
+
+        private TransitionDecision(TaskTransitionOutcome outcome, TaskStatus nextStatus, String reason) {
+            this.outcome = outcome;
+            this.nextStatus = nextStatus;
+            this.reason = reason;
+        }
     }
 
     public static class BookProcessingOptions {
@@ -71,12 +150,17 @@ public class TaskQueueManager {
         public Boolean splitByChapter;
         public Boolean splitBySection;
         public Integer pageOffset;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
+        public String storageKey;
     }
 
     public static class TaskEntry implements Comparable<TaskEntry> {
         public String taskId;
         public String userId;
         public String videoUrl;
+        public String normalizedVideoKey;
         public String title;
         public String outputDir;
         public BookProcessingOptions bookOptions;
@@ -90,7 +174,10 @@ public class TaskQueueManager {
         public String resultPath;
         public String cleanupSourcePath;
         public String errorMessage;
+        public String duplicateOfTaskId;
+        public Map<String, Object> probePayload;
         public boolean resourcesReleased;
+        public boolean processingSlotAcquired;
 
         @Override
         public int compareTo(TaskEntry other) {
@@ -102,32 +189,70 @@ public class TaskQueueManager {
         }
     }
 
-    public static class TaskSubmissionResult {
-        public TaskEntry task;
-        public boolean deduped;
-    }
-
     public TaskQueueManager() {
-        this(1, 30);
+        this.maxConcurrentTasks = 1;
+        this.processingSlots = new Semaphore(this.maxConcurrentTasks);
+        this.taskQueue = new PriorityBlockingQueue<>();
+        this.executorService = Executors.newFixedThreadPool(this.maxConcurrentTasks);
     }
 
     @Autowired
     public TaskQueueManager(
-            @Value("${task.queue.max-concurrent:1}") int configuredMaxConcurrentTasks,
-            @Value("${task.queue.dedupe-window-minutes:30}") int configuredDedupeWindowMinutes
+            @Value("${task.queue.max-concurrent:1}") int configuredMaxConcurrentTasks
     ) {
         this.maxConcurrentTasks = Math.max(1, configuredMaxConcurrentTasks);
-        this.dedupeWindowMinutes = Math.max(0, configuredDedupeWindowMinutes);
-        this.dedupeWindowMillis = TimeUnit.MINUTES.toMillis(this.dedupeWindowMinutes);
         this.processingSlots = new Semaphore(this.maxConcurrentTasks);
         this.taskQueue = new PriorityBlockingQueue<>();
         this.executorService = Executors.newFixedThreadPool(this.maxConcurrentTasks);
         logger.info(
-                "TaskQueueManager initialized with {} concurrent slots (configured={}), dedupeWindowMinutes={}",
+                "TaskQueueManager initialized with {} concurrent slots (configured={})",
                 this.maxConcurrentTasks,
-                configuredMaxConcurrentTasks,
-                this.dedupeWindowMinutes
+                configuredMaxConcurrentTasks
         );
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public synchronized void restorePersistedTasks() {
+        if (persistedTasksRestored) {
+            return;
+        }
+        if (taskStateRepository == null) {
+            return;
+        }
+        List<PersistedTaskRecord> records = taskStateRepository.listAllTasks();
+        if (records.isEmpty()) {
+            return;
+        }
+        int restoredActiveCount = 0;
+        int restoredTerminalCount = 0;
+        for (PersistedTaskRecord record : records) {
+            TaskEntry restored = toTaskEntry(record);
+            if (restored == null || restored.taskId == null || restored.taskId.isBlank()) {
+                continue;
+            }
+            if (isActiveStatus(restored.status)) {
+                if (allTasks.containsKey(restored.taskId)) {
+                    continue;
+                }
+                if (restored.status == TaskStatus.PROBING || restored.status == TaskStatus.PROCESSING) {
+                    restored.status = TaskStatus.QUEUED;
+                    restored.startedAt = null;
+                    restored.statusMessage = "服务重启后恢复排队，等待重新执行";
+                }
+                restored.resourcesReleased = false;
+                restored.processingSlotAcquired = false;
+                taskQueue.offer(restored);
+                userTaskCounts.computeIfAbsent(restored.userId, key -> new AtomicInteger(0)).incrementAndGet();
+                allTasks.put(restored.taskId, restored);
+                restoredActiveCount += 1;
+            } else {
+                restoredTerminalCount += 1;
+            }
+        }
+        if (restoredActiveCount > 0 || restoredTerminalCount > 0) {
+            logger.info("Restored persisted tasks: active={} terminal={}", restoredActiveCount, restoredTerminalCount);
+        }
+        persistedTasksRestored = true;
     }
 
     public synchronized TaskEntry submitTask(String userId, String videoUrl, String outputDir, Priority priority) {
@@ -155,28 +280,6 @@ public class TaskQueueManager {
         return createTaskEntry(userId, videoUrl, outputDir, priority, preferredTitle, bookOptions);
     }
 
-    public synchronized TaskSubmissionResult submitTaskWithDedupe(
-            String userId,
-            String videoUrl,
-            String outputDir,
-            Priority priority,
-            String preferredTitle,
-            BookProcessingOptions bookOptions
-    ) {
-        TaskSubmissionResult result = new TaskSubmissionResult();
-        BookProcessingOptions normalizedOptions = normalizeBookOptions(bookOptions);
-        TaskEntry duplicate = findRecentDuplicateTask(userId, videoUrl, normalizedOptions, Instant.now());
-        if (duplicate != null) {
-            result.task = duplicate;
-            result.deduped = true;
-            logger.info("Task deduped: existing={} user={} videoUrl={}", duplicate.taskId, userId, videoUrl);
-            return result;
-        }
-        result.task = createTaskEntry(userId, videoUrl, outputDir, priority, preferredTitle, bookOptions);
-        result.deduped = false;
-        return result;
-    }
-
     public TaskEntry pollNextTask(long timeout, TimeUnit unit) throws InterruptedException {
         if (!processingSlots.tryAcquire(timeout, unit)) {
             return null;
@@ -186,57 +289,127 @@ public class TaskQueueManager {
             processingSlots.release();
             return null;
         }
+        task.processingSlotAcquired = true;
         if (task.status == TaskStatus.CANCELLED) {
             releaseTaskResources(task);
             return null;
         }
-        task.status = TaskStatus.PROCESSING;
-        task.startedAt = Instant.now();
-        task.statusMessage = "处理中";
-        return task;
-    }
-
-    public synchronized void completeTask(String taskId, String resultPath) {
-        TaskEntry task = allTasks.get(taskId);
-        if (task == null) {
-            return;
+        TaskTransitionResult transition = startProbeTask(task);
+        if (transition.isApplied()) {
+            return task;
         }
         if (task.status == TaskStatus.CANCELLED) {
-            logger.info("Skip completion because task already cancelled: {}", taskId);
             releaseTaskResources(task);
-            return;
+        } else {
+            releaseProcessingPermit(task);
+            logger.warn(
+                    "Skip polled task because START_PROBING transition was not applied: taskId={} status={} outcome={} reason={}",
+                    task.taskId,
+                    task.status,
+                    transition.outcome,
+                    transition.reason
+            );
         }
-        task.status = TaskStatus.COMPLETED;
+        return null;
+    }
+
+    public synchronized TaskTransitionResult markProbeFinished(
+            String taskId,
+            String statusMessage,
+            double progress,
+            Map<String, Object> probePayload,
+            String preferredTitle
+    ) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return rejectedTransition(taskId, TaskEvent.FINISH_PROBING, null, null, "task not found");
+        }
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.FINISH_PROBING);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            if (task.status == TaskStatus.CANCELLED) {
+                releaseTaskResources(task);
+                return noOpTransition(task.taskId, TaskEvent.FINISH_PROBING, task.status, "cancelled task absorbs probe completion");
+            }
+            return rejectedTransition(task.taskId, TaskEvent.FINISH_PROBING, task.status, task.status, decision.reason);
+        }
+        if (decision.outcome == TaskTransitionOutcome.NO_OP) {
+            return noOpTransition(task.taskId, TaskEvent.FINISH_PROBING, task.status, decision.reason);
+        }
+        TaskStatus previousStatus = task.status;
+        task.status = decision.nextStatus;
+        task.progress = Math.max(task.progress, progress);
+        task.statusMessage = normalizeOptionalText(statusMessage) != null
+                ? normalizeOptionalText(statusMessage)
+                : "探测完成，开始处理";
+        mergeProbePayload(task, probePayload);
+        if (preferredTitle != null && !preferredTitle.isBlank()) {
+            task.title = preferredTitle.trim();
+        }
+        persistTaskState(task);
+        return appliedTransition(task.taskId, TaskEvent.FINISH_PROBING, previousStatus, task.status, "probe finished");
+    }
+
+    public synchronized TaskTransitionResult completeTask(String taskId, String resultPath) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return rejectedTransition(taskId, TaskEvent.COMPLETE, null, null, "task not found");
+        }
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.COMPLETE);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            if (task.status == TaskStatus.CANCELLED) {
+                logger.info("Skip completion because task already cancelled: {}", taskId);
+                releaseTaskResources(task);
+                return noOpTransition(task.taskId, TaskEvent.COMPLETE, task.status, "cancelled task absorbs completion");
+            }
+            return rejectedTransition(task.taskId, TaskEvent.COMPLETE, task.status, task.status, decision.reason);
+        }
+        if (decision.outcome == TaskTransitionOutcome.NO_OP) {
+            return noOpTransition(task.taskId, TaskEvent.COMPLETE, task.status, decision.reason);
+        }
+        TaskStatus previousStatus = task.status;
+        task.status = decision.nextStatus;
         task.completedAt = Instant.now();
         task.progress = 1.0;
         task.statusMessage = "处理完成";
         task.resultPath = resultPath;
         releaseTaskResources(task);
+        persistTaskState(task);
 
         long elapsedMs = task.startedAt != null
                 ? task.completedAt.toEpochMilli() - task.startedAt.toEpochMilli()
                 : -1L;
         logger.info("Task completed: {} ({}ms)", taskId, elapsedMs);
+        return appliedTransition(task.taskId, TaskEvent.COMPLETE, previousStatus, task.status, "task completed");
     }
 
-    public synchronized void failTask(String taskId, String errorMessage) {
+    public synchronized TaskTransitionResult failTask(String taskId, String errorMessage) {
         TaskEntry task = allTasks.get(taskId);
         if (task == null) {
-            return;
-        }
-        if (task.status == TaskStatus.CANCELLED) {
-            logger.info("Skip failure because task already cancelled: {}", taskId);
-            releaseTaskResources(task);
-            return;
+            return rejectedTransition(taskId, TaskEvent.FAIL, null, null, "task not found");
         }
         String userMessage = UserFacingErrorMapper.toUserMessage(errorMessage);
-        task.status = TaskStatus.FAILED;
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.FAIL);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            if (task.status == TaskStatus.CANCELLED) {
+                logger.info("Skip failure because task already cancelled: {}", taskId);
+                releaseTaskResources(task);
+                return noOpTransition(task.taskId, TaskEvent.FAIL, task.status, "cancelled task absorbs failure");
+            }
+            return rejectedTransition(task.taskId, TaskEvent.FAIL, task.status, task.status, decision.reason);
+        }
+        if (decision.outcome == TaskTransitionOutcome.NO_OP) {
+            return noOpTransition(task.taskId, TaskEvent.FAIL, task.status, decision.reason);
+        }
+        TaskStatus previousStatus = task.status;
+        task.status = decision.nextStatus;
         task.completedAt = Instant.now();
         task.statusMessage = userMessage;
         task.errorMessage = userMessage;
         releaseTaskResources(task);
+        persistTaskState(task);
 
         logger.error("Task failed: {} - rawError={}, userMessage={}", taskId, errorMessage, userMessage);
+        return appliedTransition(task.taskId, TaskEvent.FAIL, previousStatus, task.status, "task failed");
     }
 
     /**
@@ -245,28 +418,38 @@ public class TaskQueueManager {
      * 处理中任务标记为 CANCELLED，由 worker 在安全点收敛并 finalize。
      */
     public synchronized boolean cancelTask(String taskId) {
+        TaskTransitionResult result = cancelTaskTransition(taskId);
+        return result.isAccepted() && result.currentStatus == TaskStatus.CANCELLED;
+    }
+
+    public synchronized TaskTransitionResult cancelTaskTransition(String taskId) {
         TaskEntry task = allTasks.get(taskId);
         if (task == null) {
-            return false;
+            return rejectedTransition(taskId, TaskEvent.CANCEL, null, null, "task not found");
         }
-        if (task.status != TaskStatus.QUEUED && task.status != TaskStatus.PROCESSING) {
-            return false;
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.CANCEL);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            return rejectedTransition(task.taskId, TaskEvent.CANCEL, task.status, task.status, decision.reason);
+        }
+        if (decision.outcome == TaskTransitionOutcome.NO_OP) {
+            return noOpTransition(task.taskId, TaskEvent.CANCEL, task.status, decision.reason);
         }
         TaskStatus previousStatus = task.status;
         if (previousStatus == TaskStatus.QUEUED) {
             taskQueue.remove(task);
         }
-        task.status = TaskStatus.CANCELLED;
+        task.status = decision.nextStatus;
         task.completedAt = Instant.now();
-        task.statusMessage = "任务已取消，后续步骤已暂停";
+        task.statusMessage = "任务已取消，后续处理已停止";
         task.errorMessage = null;
 
         if (previousStatus == TaskStatus.QUEUED) {
             releaseTaskResources(task);
         }
+        persistTaskState(task);
 
         logger.info("Task cancelled: {}", taskId);
-        return true;
+        return appliedTransition(task.taskId, TaskEvent.CANCEL, previousStatus, task.status, "task cancelled");
     }
 
     public synchronized boolean removeTask(String taskId) {
@@ -274,7 +457,9 @@ public class TaskQueueManager {
         if (task == null) {
             return false;
         }
-        if (task.status == TaskStatus.QUEUED || task.status == TaskStatus.PROCESSING) {
+        if (task.status == TaskStatus.QUEUED
+                || task.status == TaskStatus.PROBING
+                || task.status == TaskStatus.PROCESSING) {
             return false;
         }
         taskQueue.remove(task);
@@ -284,17 +469,40 @@ public class TaskQueueManager {
         return true;
     }
 
-    public synchronized void finalizeCancelledTask(String taskId) {
+    public synchronized TaskTransitionResult finalizeCancelledTask(String taskId) {
+        return finalizeCancelledTask(taskId, "任务已取消，处理已停止");
+    }
+
+    public synchronized TaskTransitionResult finalizeCancelledTask(String taskId, String finalMessage) {
         TaskEntry task = allTasks.get(taskId);
-        if (task == null || task.status != TaskStatus.CANCELLED) {
-            return;
+        if (task == null) {
+            return rejectedTransition(taskId, TaskEvent.FINALIZE_CANCELLATION, null, null, "task not found");
         }
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.FINALIZE_CANCELLATION);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            return rejectedTransition(task.taskId, TaskEvent.FINALIZE_CANCELLATION, task.status, task.status, decision.reason);
+        }
+        boolean changed = false;
         if (task.completedAt == null) {
             task.completedAt = Instant.now();
+            changed = true;
         }
-        task.statusMessage = "任务已取消，处理已停止";
-        releaseTaskResources(task);
+        String normalizedMessage = normalizeOptionalText(finalMessage);
+        String nextMessage = normalizedMessage != null ? normalizedMessage : "任务已取消，处理已停止";
+        if (!Objects.equals(task.statusMessage, nextMessage)) {
+            task.statusMessage = nextMessage;
+            changed = true;
+        }
+        if (!task.resourcesReleased) {
+            releaseTaskResources(task);
+            changed = true;
+        }
+        if (!changed) {
+            return noOpTransition(task.taskId, TaskEvent.FINALIZE_CANCELLATION, task.status, "cancellation already finalized");
+        }
+        persistTaskState(task);
         logger.info("Task cancellation finalized: {}", taskId);
+        return appliedTransition(task.taskId, TaskEvent.FINALIZE_CANCELLATION, task.status, task.status, "cancellation finalized");
     }
 
     public synchronized boolean isTaskCancelled(String taskId) {
@@ -302,13 +510,55 @@ public class TaskQueueManager {
         return task != null && task.status == TaskStatus.CANCELLED;
     }
 
-    public synchronized void updateProgress(String taskId, double progress, String message) {
+    public synchronized boolean updateProgress(String taskId, double progress, String message) {
         TaskEntry task = allTasks.get(taskId);
-        if (task == null || task.status == TaskStatus.CANCELLED) {
-            return;
+        if (task == null) {
+            return false;
+        }
+        if (task.status != TaskStatus.QUEUED
+                && task.status != TaskStatus.PROBING
+                && task.status != TaskStatus.PROCESSING) {
+            return false;
         }
         task.progress = progress;
         task.statusMessage = message;
+        persistTaskState(task);
+        return true;
+    }
+
+    public synchronized boolean updateTaskTitle(String taskId, String preferredTitle) {
+        TaskEntry task = allTasks.get(taskId);
+        String normalizedTitle = normalizeOptionalText(preferredTitle);
+        if (task == null || normalizedTitle == null) {
+            return false;
+        }
+        if (Objects.equals(task.title, normalizedTitle)) {
+            return true;
+        }
+        task.title = normalizedTitle;
+        persistTaskState(task);
+        return true;
+    }
+
+    public synchronized boolean updateNormalizedVideoInput(String taskId, String normalizedVideoUrl, String normalizedVideoKey) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return false;
+        }
+        task.videoUrl = normalizeOptionalText(normalizedVideoUrl);
+        task.normalizedVideoKey = normalizeOptionalText(normalizedVideoKey);
+        persistTaskState(task);
+        return true;
+    }
+
+    public synchronized boolean updateProbePayload(String taskId, Map<String, Object> probePayload) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return false;
+        }
+        mergeProbePayload(task, probePayload);
+        persistTaskState(task);
+        return true;
     }
 
     public synchronized void updateCleanupSourcePath(String taskId, String cleanupSourcePath) {
@@ -317,14 +567,38 @@ public class TaskQueueManager {
             return;
         }
         task.cleanupSourcePath = normalizeOptionalText(cleanupSourcePath);
+        persistTaskState(task);
+    }
+
+    public synchronized TaskEntry markTaskDeduped(
+            String taskId,
+            String normalizedVideoUrl,
+            String normalizedVideoKey,
+            String duplicateOfTaskId,
+            String message
+    ) {
+        TaskEntry task = allTasks.get(taskId);
+        if (task == null) {
+            return null;
+        }
+        task.videoUrl = normalizeOptionalText(normalizedVideoUrl);
+        task.normalizedVideoKey = normalizeOptionalText(normalizedVideoKey);
+        task.duplicateOfTaskId = normalizeOptionalText(duplicateOfTaskId);
+        task.status = TaskStatus.DEDUPED;
+        task.completedAt = Instant.now();
+        task.statusMessage = normalizeOptionalText(message) != null ? normalizeOptionalText(message) : "任务已去重";
+        task.errorMessage = null;
+        releaseTaskResources(task);
+        persistTaskState(task);
+        return task;
     }
 
     public synchronized TaskEntry getTask(String taskId) {
-        return allTasks.get(taskId);
-    }
-
-    public int getDedupeWindowMinutes() {
-        return dedupeWindowMinutes;
+        TaskEntry task = allTasks.get(taskId);
+        if (task != null || taskStateRepository == null) {
+            return task;
+        }
+        return taskStateRepository.findTask(taskId).map(this::toTaskEntry).orElse(null);
     }
 
     public synchronized List<TaskEntry> getUserTasks(String userId) {
@@ -388,6 +662,113 @@ public class TaskQueueManager {
         }
     }
 
+    private TaskTransitionResult startProbeTask(TaskEntry task) {
+        if (task == null) {
+            return rejectedTransition("", TaskEvent.START_PROBING, null, null, "task not found");
+        }
+        TransitionDecision decision = decideTransition(task.status, TaskEvent.START_PROBING);
+        if (decision.outcome == TaskTransitionOutcome.REJECTED) {
+            return rejectedTransition(task.taskId, TaskEvent.START_PROBING, task.status, task.status, decision.reason);
+        }
+        if (decision.outcome == TaskTransitionOutcome.NO_OP) {
+            return noOpTransition(task.taskId, TaskEvent.START_PROBING, task.status, decision.reason);
+        }
+        TaskStatus previousStatus = task.status;
+        task.status = decision.nextStatus;
+        if (task.startedAt == null) {
+            task.startedAt = Instant.now();
+        }
+        task.statusMessage = "正在探测任务输入";
+        persistTaskState(task);
+        return appliedTransition(task.taskId, TaskEvent.START_PROBING, previousStatus, task.status, "task started probing");
+    }
+
+    private TransitionDecision decideTransition(TaskStatus currentStatus, TaskEvent event) {
+        if (event == TaskEvent.START_PROBING) {
+            if (currentStatus == TaskStatus.QUEUED) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.PROBING, "queued -> probing");
+            }
+            if (currentStatus == TaskStatus.PROBING) {
+                return new TransitionDecision(TaskTransitionOutcome.NO_OP, TaskStatus.PROBING, "task already probing");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only queued task can start probing");
+        }
+        if (event == TaskEvent.FINISH_PROBING) {
+            if (currentStatus == TaskStatus.PROBING) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.PROCESSING, "probing -> processing");
+            }
+            if (currentStatus == TaskStatus.PROCESSING) {
+                return new TransitionDecision(TaskTransitionOutcome.NO_OP, TaskStatus.PROCESSING, "task already processing");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only probing task can finish probing");
+        }
+        if (event == TaskEvent.COMPLETE) {
+            if (currentStatus == TaskStatus.PROCESSING) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.COMPLETED, "processing -> completed");
+            }
+            if (currentStatus == TaskStatus.COMPLETED) {
+                return new TransitionDecision(TaskTransitionOutcome.NO_OP, TaskStatus.COMPLETED, "task already completed");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only processing task can complete");
+        }
+        if (event == TaskEvent.FAIL) {
+            if (currentStatus == TaskStatus.PROBING || currentStatus == TaskStatus.PROCESSING) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.FAILED, "active task -> failed");
+            }
+            if (currentStatus == TaskStatus.FAILED) {
+                return new TransitionDecision(TaskTransitionOutcome.NO_OP, TaskStatus.FAILED, "task already failed");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only probing or processing task can fail");
+        }
+        if (event == TaskEvent.CANCEL) {
+            if (currentStatus == TaskStatus.QUEUED
+                    || currentStatus == TaskStatus.PROBING
+                    || currentStatus == TaskStatus.PROCESSING) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.CANCELLED, "active task -> cancelled");
+            }
+            if (currentStatus == TaskStatus.CANCELLED) {
+                return new TransitionDecision(TaskTransitionOutcome.NO_OP, TaskStatus.CANCELLED, "task already cancelled");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only queued, probing or processing task can cancel");
+        }
+        if (event == TaskEvent.FINALIZE_CANCELLATION) {
+            if (currentStatus == TaskStatus.CANCELLED) {
+                return new TransitionDecision(TaskTransitionOutcome.APPLIED, TaskStatus.CANCELLED, "finalize cancellation");
+            }
+            return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "only cancelled task can finalize cancellation");
+        }
+        return new TransitionDecision(TaskTransitionOutcome.REJECTED, currentStatus, "unsupported task transition event");
+    }
+
+    private TaskTransitionResult appliedTransition(
+            String taskId,
+            TaskEvent event,
+            TaskStatus previousStatus,
+            TaskStatus currentStatus,
+            String reason
+    ) {
+        return new TaskTransitionResult(taskId, event, TaskTransitionOutcome.APPLIED, previousStatus, currentStatus, reason);
+    }
+
+    private TaskTransitionResult noOpTransition(
+            String taskId,
+            TaskEvent event,
+            TaskStatus currentStatus,
+            String reason
+    ) {
+        return new TaskTransitionResult(taskId, event, TaskTransitionOutcome.NO_OP, currentStatus, currentStatus, reason);
+    }
+
+    private TaskTransitionResult rejectedTransition(
+            String taskId,
+            TaskEvent event,
+            TaskStatus previousStatus,
+            TaskStatus currentStatus,
+            String reason
+    ) {
+        return new TaskTransitionResult(taskId, event, TaskTransitionOutcome.REJECTED, previousStatus, currentStatus, reason);
+    }
+
     private String generateTaskId() {
         return String.format("VT_%d_%d", System.currentTimeMillis(), taskIdGenerator.incrementAndGet());
     }
@@ -403,12 +784,20 @@ public class TaskQueueManager {
         }
     }
 
+    private void releaseProcessingPermit(TaskEntry task) {
+        if (task == null || !task.processingSlotAcquired) {
+            return;
+        }
+        task.processingSlotAcquired = false;
+        processingSlots.release();
+    }
+
     private void releaseTaskResources(TaskEntry task) {
         if (task == null || task.resourcesReleased) {
             return;
         }
         task.resourcesReleased = true;
-        processingSlots.release();
+        releaseProcessingPermit(task);
         decrementUserTaskCount(task.userId);
     }
 
@@ -434,6 +823,7 @@ public class TaskQueueManager {
         entry.taskId = taskId;
         entry.userId = userId;
         entry.videoUrl = videoUrl;
+        entry.normalizedVideoKey = null;
         entry.title = normalizeOptionalText(preferredTitle);
         entry.outputDir = outputDir;
         entry.priority = priority;
@@ -442,86 +832,18 @@ public class TaskQueueManager {
         entry.progress = 0.0;
         entry.statusMessage = "排队中";
         entry.resourcesReleased = false;
+        entry.processingSlotAcquired = false;
         entry.bookOptions = normalizeBookOptions(bookOptions);
+        entry.duplicateOfTaskId = null;
+        entry.probePayload = null;
 
+        persistAcceptedTaskState(entry);
         allTasks.put(taskId, entry);
         taskQueue.offer(entry);
         userTaskCounts.computeIfAbsent(userId, key -> new AtomicInteger(0)).incrementAndGet();
 
         logger.info("Task submitted: {} by user {} (priority={})", taskId, userId, priority);
         return entry;
-    }
-
-    private TaskEntry findRecentDuplicateTask(
-            String userId,
-            String videoUrl,
-            BookProcessingOptions bookOptions,
-            Instant now
-    ) {
-        if (dedupeWindowMillis <= 0) {
-            return null;
-        }
-        if (userId == null || videoUrl == null) {
-            return null;
-        }
-        Instant cutoff = now.minusMillis(dedupeWindowMillis);
-        TaskEntry best = null;
-        for (TaskEntry task : allTasks.values()) {
-            if (task == null) {
-                continue;
-            }
-            if (!userId.equals(task.userId)) {
-                continue;
-            }
-            if (!videoUrl.equals(task.videoUrl)) {
-                continue;
-            }
-            if (task.createdAt == null || task.createdAt.isBefore(cutoff)) {
-                continue;
-            }
-            if (task.status == TaskStatus.CANCELLED || task.status == TaskStatus.FAILED) {
-                continue;
-            }
-            if (!isBookOptionsEquivalent(task.bookOptions, bookOptions)) {
-                continue;
-            }
-            if (best == null || task.createdAt.isAfter(best.createdAt)) {
-                best = task;
-            }
-        }
-        return best;
-    }
-
-    private boolean isBookOptionsEquivalent(BookProcessingOptions left, BookProcessingOptions right) {
-        if (left == right) {
-            return true;
-        }
-        if (left == null || right == null) {
-            return false;
-        }
-        if (!valuesEqual(left.chapterSelector, right.chapterSelector)) {
-            return false;
-        }
-        if (!valuesEqual(left.sectionSelector, right.sectionSelector)) {
-            return false;
-        }
-        if (!valuesEqual(left.splitByChapter, right.splitByChapter)) {
-            return false;
-        }
-        if (!valuesEqual(left.splitBySection, right.splitBySection)) {
-            return false;
-        }
-        return valuesEqual(left.pageOffset, right.pageOffset);
-    }
-
-    private boolean valuesEqual(Object left, Object right) {
-        if (left == right) {
-            return true;
-        }
-        if (left == null || right == null) {
-            return false;
-        }
-        return left.equals(right);
     }
 
     private BookProcessingOptions normalizeBookOptions(BookProcessingOptions rawOptions) {
@@ -534,13 +856,127 @@ public class TaskQueueManager {
         normalized.splitByChapter = rawOptions.splitByChapter;
         normalized.splitBySection = rawOptions.splitBySection;
         normalized.pageOffset = rawOptions.pageOffset;
+        normalized.bookTitle = normalizeOptionalText(rawOptions.bookTitle);
+        normalized.leafTitle = normalizeOptionalText(rawOptions.leafTitle);
+        normalized.leafOutlineIndex = normalizeOptionalText(rawOptions.leafOutlineIndex);
+        normalized.storageKey = normalizeOptionalText(rawOptions.storageKey);
         if (normalized.chapterSelector == null
                 && normalized.sectionSelector == null
                 && normalized.splitByChapter == null
                 && normalized.splitBySection == null
-                && normalized.pageOffset == null) {
+                && normalized.pageOffset == null
+                && normalized.bookTitle == null
+                && normalized.leafTitle == null
+                && normalized.leafOutlineIndex == null
+                && normalized.storageKey == null) {
             return null;
         }
         return normalized;
+    }
+
+    private void mergeProbePayload(TaskEntry task, Map<String, Object> probePayload) {
+        if (task == null || probePayload == null || probePayload.isEmpty()) {
+            return;
+        }
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (task.probePayload != null && !task.probePayload.isEmpty()) {
+            merged.putAll(task.probePayload);
+        }
+        merged.putAll(probePayload);
+        task.probePayload = merged;
+    }
+
+    private boolean isActiveStatus(TaskStatus status) {
+        return status == TaskStatus.QUEUED
+                || status == TaskStatus.PROBING
+                || status == TaskStatus.PROCESSING;
+    }
+
+    private Priority parsePriority(String rawPriority) {
+        String normalized = rawPriority != null ? rawPriority.trim().toUpperCase(Locale.ROOT) : "";
+        if (normalized.isEmpty()) {
+            return Priority.NORMAL;
+        }
+        try {
+            return Priority.valueOf(normalized);
+        } catch (Exception error) {
+            return Priority.NORMAL;
+        }
+    }
+
+    private TaskStatus parseTaskStatus(String rawStatus) {
+        String normalized = rawStatus != null ? rawStatus.trim().toUpperCase(Locale.ROOT) : "";
+        if (normalized.isEmpty()) {
+            return TaskStatus.QUEUED;
+        }
+        try {
+            return TaskStatus.valueOf(normalized);
+        } catch (Exception error) {
+            return TaskStatus.QUEUED;
+        }
+    }
+
+    private TaskEntry toTaskEntry(PersistedTaskRecord record) {
+        if (record == null) {
+            return null;
+        }
+        TaskEntry task = new TaskEntry();
+        task.taskId = normalizeOptionalText(record.taskId);
+        task.userId = normalizeOptionalText(record.userId);
+        task.videoUrl = normalizeOptionalText(record.videoUrl);
+        task.normalizedVideoKey = normalizeOptionalText(record.normalizedVideoKey);
+        task.title = normalizeOptionalText(record.title);
+        task.outputDir = normalizeOptionalText(record.outputDir);
+        task.priority = parsePriority(record.priority);
+        task.status = parseTaskStatus(record.status);
+        task.createdAt = record.createdAt != null ? record.createdAt : Instant.now();
+        task.startedAt = record.startedAt;
+        task.completedAt = record.completedAt;
+        task.progress = record.progress;
+        task.statusMessage = normalizeOptionalText(record.statusMessage);
+        task.resultPath = normalizeOptionalText(record.resultPath);
+        task.cleanupSourcePath = normalizeOptionalText(record.cleanupSourcePath);
+        task.errorMessage = normalizeOptionalText(record.errorMessage);
+        task.duplicateOfTaskId = normalizeOptionalText(record.duplicateOfTaskId);
+        task.bookOptions = normalizeBookOptions(record.bookOptions);
+        task.probePayload = record.probePayload != null && !record.probePayload.isEmpty()
+                ? new LinkedHashMap<>(record.probePayload)
+                : null;
+        task.resourcesReleased = !isActiveStatus(task.status);
+        task.processingSlotAcquired = false;
+        return task;
+    }
+
+    private void persistTaskState(TaskEntry task) {
+        if (task == null || taskStateRepository == null) {
+            return;
+        }
+        try {
+            taskStateRepository.upsertTask(task);
+        } catch (Exception error) {
+            logger.error("Persist task state failed: taskId={} err={}", task.taskId, error.getMessage(), error);
+        }
+    }
+
+    private void persistAcceptedTaskState(TaskEntry task) {
+        if (task == null) {
+            return;
+        }
+        if (taskStateRepository == null) {
+            throw new IllegalStateException("task state repository unavailable");
+        }
+        try {
+            taskStateRepository.upsertTask(task);
+        } catch (Exception error) {
+            logger.error(
+                "Persist accepted task failed before enqueue: taskId={} userId={} videoUrl={} err={}",
+                    task.taskId,
+                    task.userId,
+                    task.videoUrl,
+                    error.getMessage(),
+                    error
+            );
+            throw new IllegalStateException("persist accepted task failed", error);
+        }
     }
 }

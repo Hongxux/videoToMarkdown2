@@ -42,7 +42,7 @@ public class TaskWatchdogFactory {
     @Value("${video.task.watchdog.restart-backoff-seconds:60,180,420}")
     private String watchdogRestartBackoffSeconds;
 
-    @Value("${video.task.watchdog.heartbeat-strong-stages:stage1,phase2a,analysis_extraction,phase2b}")
+    @Value("${video.task.watchdog.heartbeat-strong-stages:stage1,phase2a,analysis_extraction,phase2b,book_pdf_extract}")
     private String watchdogHeartbeatStrongStages;
 
     public TaskWatchdog create(String taskId) {

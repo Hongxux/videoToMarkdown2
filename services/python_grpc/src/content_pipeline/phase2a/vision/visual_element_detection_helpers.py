@@ -866,33 +866,15 @@ class VisualElementDetector:
         return False
     @staticmethod
     def analyze_frame(frame: np.ndarray) -> Dict[str, any]:
-        """
-        执行逻辑：
-        1) 准备必要上下文与参数。
-        2) 执行核心处理并返回结果。
-        实现方式：通过OpenCV 图像处理、NumPy 数值计算实现。
-        核心价值：封装逻辑单元，提升复用与可维护性。
-        决策逻辑：
-        - 条件：isinstance(frame, dict) and 'shm_name' in frame
-        - 条件：isinstance(frame, (bytes, np.ndarray)) and (not isinstance(frame, np.ndarray))
-        - 条件：frame is None
-        依据来源（证据链）：
-        - 输入参数：frame。
-        输入参数：
-        - frame: 函数入参（类型：np.ndarray）。
-        输出参数：
-        - 结构化结果字典（包含关键字段信息）。"""
+        """在 worker 进程中分析单帧视觉元素，支持 SHM 输入。"""
         import cv2
         import os
         import time
-        
-        # 🚀 Phase 5.1 Performance: Defensive GC for large frames
-        gc.collect() 
-        
+
+        gc.collect()
+
         start_time = time.time()
         pid = os.getpid()
-        
-        # 🚀 Phase 5.0 Performance: Handle Shared Memory
         shm = None
         if isinstance(frame, dict) and "shm_name" in frame:
             from multiprocessing import shared_memory
@@ -902,82 +884,55 @@ class VisualElementDetector:
             except Exception as e:
                 return {"error": f"SHM access failed: {e}", "process_id": pid}
 
-        # 兼容性处理：如果输入是 bytes (JPEG buffer)，在这里解码
-        if isinstance(frame, (bytes, np.ndarray)) and not isinstance(frame, np.ndarray):
-            frame = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
-        
-        if frame is None:
-            if shm: shm.close()
-            return {"error": "Invalid frame data", "process_id": pid}
+        try:
+            if isinstance(frame, (bytes, np.ndarray)) and not isinstance(frame, np.ndarray):
+                frame = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        
-        # 1. 检测矩形 (框)
-        rectangles = VisualElementDetector.detect_rectangles(edges)
-        
-        # 2. 检测圆形 (节点)
-        circles = VisualElementDetector.detect_circles(gray)
-        
-        # 3. 检测直线 (链接)
-        lines = VisualElementDetector.detect_lines(edges)
-        
-        # 4. 检测箭头 (关系)
-        arrows = VisualElementDetector.detect_arrows(edges, lines, gray)
-        
-        # 5. 检测流程图连接符
-        connectors = VisualElementDetector.detect_connectors(edges, lines)
-        
-        # 6. 检测菱形 (决策)
-        diamonds = VisualElementDetector.detect_diamonds(edges)
-        
-        # 7. 检测云形状 (平台)
-        clouds = VisualElementDetector.detect_clouds(edges)
-        
-        # 8. 检测数学公式特征 (Note: lines need to be passed)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        math_features = VisualElementDetector.detect_math_formula(edges, lines, rectangles)
-        
-        # 补充矩阵与根号检测
-        matrix_count = VisualElementDetector.detect_matrix_brackets(edges, contours)
-        math_features["matrix_bracket_count"] = matrix_count
-        math_features["is_formula_likely"] = math_features["is_formula_likely"] or (matrix_count > 0)
-        
-        # 9. 检测表格 (V4)
-        has_table = VisualElementDetector.detect_tables(edges)
-        
-        total_elements = rectangles + circles + arrows["total"] + diamonds + clouds
-        
-        # 判断架构元素特征
-        has_architecture = (rectangles >= 3 or circles >= 2 or arrows["total"] >= 3 or diamonds >= 1)
-        
-        # 🚀 V4 Global Static Structure Fact
-        has_static_structure = has_architecture or has_table or math_features["is_formula_likely"]
-        
-        elapsed = (time.time() - start_time) * 1000
-        
-        if shm:
-            shm.close()
-            
-        return {
-            "rectangles": rectangles,
-            "circles": circles,
-            "arrows": arrows,
-            "lines": len(lines),
-            "connectors": connectors,
-            "diamonds": diamonds,
-            "clouds": clouds,
-            "total": total_elements,
-            "has_architecture_elements": has_architecture,
-            "has_table": has_table,
-            "has_static_visual_structure": has_static_structure,
-            "has_math_formula": math_features["is_formula_likely"],
-            "math_details": math_features,
-            "edge_density": np.sum(edges > 0) / edges.size,
-            "rectangle_count": rectangles, # 兼容旧接口
-            "process_id": pid,
-            "latency_ms": elapsed
-        }
+            if frame is None:
+                return {"error": "Invalid frame data", "process_id": pid}
+
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+            rectangles = VisualElementDetector.detect_rectangles(edges)
+            circles = VisualElementDetector.detect_circles(gray)
+            lines = VisualElementDetector.detect_lines(edges)
+            arrows = VisualElementDetector.detect_arrows(edges, lines, gray)
+            connectors = VisualElementDetector.detect_connectors(edges, lines)
+            diamonds = VisualElementDetector.detect_diamonds(edges)
+            clouds = VisualElementDetector.detect_clouds(edges)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            math_features = VisualElementDetector.detect_math_formula(edges, lines, rectangles)
+            matrix_count = VisualElementDetector.detect_matrix_brackets(edges, contours)
+            math_features["matrix_bracket_count"] = matrix_count
+            math_features["is_formula_likely"] = math_features["is_formula_likely"] or (matrix_count > 0)
+            has_table = VisualElementDetector.detect_tables(edges)
+            total_elements = rectangles + circles + arrows["total"] + diamonds + clouds
+            has_architecture = (rectangles >= 3 or circles >= 2 or arrows["total"] >= 3 or diamonds >= 1)
+            has_static_structure = has_architecture or has_table or math_features["is_formula_likely"]
+            elapsed = (time.time() - start_time) * 1000
+
+            return {
+                "rectangles": rectangles,
+                "circles": circles,
+                "arrows": arrows,
+                "lines": len(lines),
+                "connectors": connectors,
+                "diamonds": diamonds,
+                "clouds": clouds,
+                "total": total_elements,
+                "has_architecture_elements": has_architecture,
+                "has_table": has_table,
+                "has_static_visual_structure": has_static_structure,
+                "has_math_formula": math_features["is_formula_likely"],
+                "math_details": math_features,
+                "edge_density": np.sum(edges > 0) / edges.size,
+                "rectangle_count": rectangles,
+                "process_id": pid,
+                "latency_ms": elapsed,
+            }
+        finally:
+            if shm:
+                shm.close()
 
     def detect_structure_roi(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """

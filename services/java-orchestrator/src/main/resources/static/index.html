@@ -801,6 +801,13 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .task-collection-chip.task-category-chip {
+            max-width: none;
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+            word-break: break-all;
+        }
         .task-list-context-menu {
             position: fixed;
             z-index: 1400;
@@ -2017,8 +2024,8 @@
             display: none;
         }
         .book-probe-card {
-            width: min(860px, 100%);
-            max-height: min(88vh, 940px);
+            width: min(1360px, calc(100vw - 32px));
+            max-height: min(94vh, 1100px);
             display: grid;
             grid-template-rows: auto auto 1fr auto;
             gap: 12px;
@@ -2074,17 +2081,17 @@
             background: #ffffff;
             overflow: auto;
             min-height: 240px;
-            max-height: calc(min(88vh, 940px) - 260px);
+            max-height: calc(min(94vh, 1100px) - 260px);
             padding: 8px;
             display: grid;
             gap: 6px;
         }
         .book-probe-content {
-            --book-probe-preview-width: 640px;
+            --book-probe-preview-width: 860px;
             display: grid;
-            grid-template-columns: minmax(0, 1fr) 12px minmax(260px, var(--book-probe-preview-width));
+            grid-template-columns: minmax(300px, 1fr) 12px minmax(420px, var(--book-probe-preview-width));
             gap: 0;
-            min-height: 260px;
+            min-height: 320px;
             align-items: stretch;
         }
         .book-probe-content.is-resizing {
@@ -2097,7 +2104,7 @@
             display: grid;
             grid-template-rows: auto 1fr;
             min-height: 240px;
-            max-height: calc(min(88vh, 940px) - 260px);
+            max-height: calc(min(94vh, 1100px) - 260px);
             overflow: hidden;
             min-width: 0;
         }
@@ -2144,7 +2151,7 @@
             line-height: 1.45;
         }
         .book-probe-preview-body {
-            padding: 10px 12px;
+            padding: 10px 12px 8px;
             display: grid;
             align-content: start;
             gap: 10px;
@@ -2163,13 +2170,6 @@
             flex-wrap: wrap;
             margin-left: auto;
         }
-        .book-probe-preview-zoom-label {
-            min-width: 58px;
-            font-size: 11px;
-            color: #334155;
-            text-align: center;
-            line-height: 1.45;
-        }
         .book-probe-preview-page-meta {
             flex: 1;
             min-width: 0;
@@ -2184,7 +2184,7 @@
         }
         .book-probe-preview-pdf-wrap {
             position: relative;
-            min-height: 320px;
+            min-height: 460px;
             border-radius: 10px;
             border: 1px solid rgba(148, 163, 184, 0.35);
             background: rgba(248, 250, 252, 0.82);
@@ -2192,7 +2192,7 @@
         }
         .book-probe-preview-pdf-frame {
             width: 100%;
-            min-height: 320px;
+            min-height: 460px;
             height: 100%;
             border: 0;
             background: #ffffff;
@@ -2304,6 +2304,7 @@
             border: 1px solid rgba(148, 163, 184, 0.24);
             border-radius: 9px;
             background: #f8fafc;
+            cursor: pointer;
         }
         .book-probe-tree-row:hover {
             border-color: rgba(37, 99, 235, 0.38);
@@ -2403,7 +2404,7 @@
             }
             .book-probe-preview {
                 max-height: none;
-                min-height: 160px;
+                min-height: 260px;
             }
         }
         /* --- Obsidian-style Mount Panel Additions --- */
@@ -2994,10 +2995,6 @@
                         <div class="book-probe-preview-page-meta" id="bookProbePreviewPageMeta">Page 1</div>
                         <button class="btn" id="bookProbePreviewNextBtn" type="button">Next</button>
                         <div class="book-probe-preview-toolbar-actions">
-                            <button class="btn" id="bookProbePreviewZoomOutBtn" type="button">-</button>
-                            <button class="btn" id="bookProbePreviewZoomResetBtn" type="button">Fit</button>
-                            <div class="book-probe-preview-zoom-label" id="bookProbePreviewZoomLabel">Fit</div>
-                            <button class="btn" id="bookProbePreviewZoomInBtn" type="button">+</button>
                             <button class="btn" id="bookProbePreviewFullscreenBtn" type="button">Full</button>
                         </div>
                     </div>
@@ -3591,6 +3588,7 @@
     const API_BASE = resolveApiBaseUrl();
     const TASK_API_BASE = API_BASE;
     const MOBILE_USER_ID = getOrCreateMobileUserId();
+    window.__mobileUserId = MOBILE_USER_ID;
     const MARKDOWN_SMART_SELECTION_ENABLED = false;
     const READING_POSITION_STORE_KEY = 'mobile.reader.position.v1';
     const READING_POSITION_MAX_ENTRIES = 160;
@@ -3666,8 +3664,10 @@
     const READER_TYPOGRAPHY = window.mobileReaderTypography || null;
     const CONTENT_INVITATION = window.mobileContentInvitation || null;
     const TASK_NOTIFICATION_TAG_PREFIX = 'mobile-task-status:';
-    const TASK_UPDATES_WS_RECONNECT_BASE_MS = 1200;
-    const TASK_UPDATES_WS_RECONNECT_MAX_MS = 15000;
+    const TASK_UPDATES_WS_RECONNECT_BASE_MS = 1000;
+    const TASK_UPDATES_WS_RECONNECT_MAX_MS = 30000;
+    const TASK_UPDATES_WS_HEARTBEAT_INTERVAL_MS = 10000;
+    const TASK_UPDATES_WS_HEARTBEAT_TIMEOUT_MS = 12000;
     const TASK_NOTIFICATION_SW_READY_TIMEOUT_MS = 1600;
     const TASK_NOTIFICATION_PREFERENCE_KEY = 'mobile.task.notification.enabled.v1';
     const TASK_NOTIFICATION_GUIDE_SEEN_KEY = 'mobile.task.notification.guide.seen.v1';
@@ -3724,6 +3724,31 @@
     });
     const TOKEN_SELECTION_POPOVER_DELAY_MS = 180;
     const TOKEN_SELECTION_SUPPRESS_AFTER_DOUBLE_CLICK_MS = 420;
+
+    function getTaskUpdatesSocketOffsetStorageKey() {
+        return `mobile.task.ws.offset.v2::task-updates::${MOBILE_USER_ID}`;
+    }
+
+    function readTaskUpdatesSocketOffset() {
+        try {
+            const raw = Number(localStorage.getItem(getTaskUpdatesSocketOffsetStorageKey()) || '0');
+            return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 0;
+        } catch (_error) {
+            return 0;
+        }
+    }
+
+    function writeTaskUpdatesSocketOffset(messageId) {
+        const normalized = Math.max(0, Math.floor(Number(messageId) || 0));
+        try {
+            localStorage.setItem(getTaskUpdatesSocketOffsetStorageKey(), String(normalized));
+        } catch (_error) {
+            // ignore storage failure
+        }
+    }
+
+    const TASK_UPDATES_WS_INITIAL_MESSAGE_ID = readTaskUpdatesSocketOffset();
+
     const state = {
         tasks: [],
         pendingSubmitTasks: [],
@@ -3828,6 +3853,11 @@
         taskUpdatesSocketReconnectAttempt: 0,
         taskUpdatesSocketManualClose: false,
         taskUpdatesSubscribedTaskId: '',
+        taskUpdatesHeartbeatTimerId: 0,
+        taskUpdatesHeartbeatTimeoutTimerId: 0,
+        taskUpdatesLastPingAt: 0,
+        taskUpdatesLastPongAt: 0,
+        taskUpdatesLastProcessedMessageId: TASK_UPDATES_WS_INITIAL_MESSAGE_ID,
         taskListSelectionMode: false,
         taskListSelectedIds: new Set(),
         taskListSelectionPivotId: '',
@@ -5987,13 +6017,48 @@
         return leftTitle.localeCompare(rightTitle, 'zh-Hans-CN');
     }
 
-    // 任务去重仅关注视频来源，同一链接只保留一个任务记录。
+    function resolveTaskBookLeafIdentity(task) {
+        const storageKey = String(task && task.storageKey || '').trim();
+        if (storageKey) {
+            return storageKey;
+        }
+        const bookTitle = String(task && task.bookTitle || '').trim();
+        const outlineIndex = String(task && task.bookLeafOutlineIndex || '').trim();
+        const leafTitle = String(task && task.bookLeafTitle || '').trim();
+        if (!bookTitle && !outlineIndex && !leafTitle) {
+            return '';
+        }
+        const normalizedVideo = normalizeTaskVideoInput(task && task.videoUrl);
+        return [bookTitle, outlineIndex, leafTitle, normalizedVideo].filter(Boolean).join('::');
+    }
+
+    function resolveTaskBookLeafChipText(task) {
+        const bookTitle = String(task && task.bookTitle || '').trim();
+        const outlineIndex = String(task && task.bookLeafOutlineIndex || '').trim();
+        if (!bookTitle && !outlineIndex) {
+            return '';
+        }
+        if (bookTitle && outlineIndex) {
+            return `${bookTitle} · ${outlineIndex}`;
+        }
+        return bookTitle || outlineIndex;
+    }
+
+    // 任务去重默认按来源聚合，但书籍 leaf 任务需要按 leaf 身份保留。
     function resolveTaskVideoUrlKey(task, options = {}) {
+        const bookLeafIdentity = resolveTaskBookLeafIdentity(task);
+        const separateArchived = !!(options && options.separateArchived === true);
+        if (bookLeafIdentity) {
+            if (!separateArchived) {
+                return `bookLeaf::${bookLeafIdentity}`;
+            }
+            const bucket = isTaskArchived(task) ? 'archived' : 'active';
+            return `${bucket}::bookLeaf::${bookLeafIdentity}`;
+        }
         const normalized = normalizeTaskVideoInput(task && task.videoUrl);
         if (!normalized) {
             return '';
         }
-        const separateArchived = !!(options && options.separateArchived === true);
         if (!separateArchived) {
             return normalized;
         }
@@ -6017,26 +6082,46 @@
         return 0;
     }
 
+    function isRuntimeTaskRecord(task) {
+        const source = normalizeTaskLifecycleStatus(task && task.source);
+        if (source) {
+            return source !== 'storage';
+        }
+        const taskId = normalizeTaskId(task && task.taskId);
+        return !taskId.startsWith('storage:');
+    }
+
     function resolveTaskVideoDedupeStatusRank(task) {
-        const visual = getTaskStatusVisual(task && task.status);
-        if (visual === 'completed') return 4;
-        if (visual === 'processing') return 3;
-        if (visual === 'queued') return 2;
-        if (visual === 'failed') return 1;
-        if (visual === 'cancelled') return 0;
+        const normalized = normalizeTaskLifecycleStatus(task && task.status);
+        const runtime = isRuntimeTaskRecord(task);
+        if (runtime && (normalized === 'processing' || normalized === 'running' || normalized === 'in_progress')) return 5;
+        if (runtime && (normalized === 'queued' || normalized === 'pending' || normalized === 'submitted')) return 4;
+        if ((task && task.markdownAvailable) || normalized === 'completed') return 3;
+        if (normalized === 'failed') return 2;
+        if (normalized === 'cancelled') return 1;
         return 0;
     }
 
     function pickPreferredTaskForVideoDedup(left, right) {
+        const leftRank = resolveTaskVideoDedupeStatusRank(left);
+        const rightRank = resolveTaskVideoDedupeStatusRank(right);
+        if (leftRank !== rightRank) {
+            return rightRank > leftRank ? right : left;
+        }
+        const leftMarkdown = !!(left && left.markdownAvailable);
+        const rightMarkdown = !!(right && right.markdownAvailable);
+        if (leftMarkdown !== rightMarkdown) {
+            return rightMarkdown ? right : left;
+        }
         const leftTs = resolveTaskVideoDedupeTimestamp(left);
         const rightTs = resolveTaskVideoDedupeTimestamp(right);
         if (leftTs !== rightTs) {
             return rightTs > leftTs ? right : left;
         }
-        const leftRank = resolveTaskVideoDedupeStatusRank(left);
-        const rightRank = resolveTaskVideoDedupeStatusRank(right);
-        if (leftRank !== rightRank) {
-            return rightRank > leftRank ? right : left;
+        const leftRuntime = isRuntimeTaskRecord(left);
+        const rightRuntime = isRuntimeTaskRecord(right);
+        if (leftRuntime !== rightRuntime) {
+            return rightRuntime ? right : left;
         }
         const leftId = normalizeTaskId(left && left.taskId);
         const rightId = normalizeTaskId(right && right.taskId);
@@ -6150,7 +6235,7 @@
     function getTaskStatusVisual(status) {
         const normalized = normalizeTaskLifecycleStatus(status);
         if (normalized === 'completed') return 'completed';
-        if (normalized === 'processing') return 'processing';
+        if (normalized === 'processing' || normalized === 'probing') return 'processing';
         if (normalized === 'failed') return 'failed';
         if (normalized === 'cancelled') return 'cancelled';
         return 'queued';
@@ -6186,6 +6271,21 @@
             return null;
         }
         return (state.tasks || []).find((task) => normalizeTaskTitleText(task && task.storageKey) === normalizedStorageKey) || null;
+    }
+
+    function taskMatchesIdentity(task, taskIdRaw, storageKeyRaw) {
+        if (!task || typeof task !== 'object') {
+            return false;
+        }
+        const normalizedTaskId = normalizeTaskId(taskIdRaw);
+        if (normalizedTaskId && normalizeTaskId(task && task.taskId) === normalizedTaskId) {
+            return true;
+        }
+        const normalizedStorageKey = normalizeTaskTitleText(storageKeyRaw);
+        if (!normalizedStorageKey) {
+            return false;
+        }
+        return normalizeTaskTitleText(task && task.storageKey) === normalizedStorageKey;
     }
 
     function normalizeTaskId(taskId) {
@@ -7857,6 +7957,10 @@
         const videoDisplay = escapeHtml(extractVideoInputDisplay(task && task.videoUrl));
         const metaBase = videoDisplay || compactId;
         const metaQuiet = compactTime ? `${metaBase} · ${compactTime}` : metaBase;
+        const bookLeafChipText = resolveTaskBookLeafChipText(task);
+        const bookLeafChip = bookLeafChipText
+            ? `<span class="task-collection-chip" title="${escapeHtml(bookLeafChipText)}">${escapeHtml(bookLeafChipText)}</span>`
+            : '';
         const collectionTitleRaw = String(task && (task.collectionTitle || task.collectionId || '') || '').trim();
         const collectionChip = collectionTitleRaw
             ? `<span class="task-collection-chip" title="${escapeHtml(collectionTitleRaw)}">${escapeHtml(collectionTitleRaw)}</span>`
@@ -7881,6 +7985,7 @@
                 </div>
                 <div class="task-foot-row">
                     <span class="task-source-chip source-${sourceKind}" aria-hidden="true">${sourceIcon}</span>
+                    ${bookLeafChip}
                     ${collectionChip}
                     <span class="task-progress-hint">${escapeHtml(statusHint)}</span>
                 </div>
@@ -8282,19 +8387,128 @@
         markTaskNotificationGuideSeen();
     }
 
+    function syncTaskUpdatesSocketOffset(messageId) {
+        const normalized = Math.max(0, Math.floor(Number(messageId) || 0));
+        if (!normalized || normalized <= (Number(state.taskUpdatesLastProcessedMessageId) || 0)) {
+            return;
+        }
+        state.taskUpdatesLastProcessedMessageId = normalized;
+        writeTaskUpdatesSocketOffset(normalized);
+    }
+
+    function clearTaskUpdatesSocketHeartbeat() {
+        if (state.taskUpdatesHeartbeatTimerId) {
+            clearInterval(state.taskUpdatesHeartbeatTimerId);
+            state.taskUpdatesHeartbeatTimerId = 0;
+        }
+        if (state.taskUpdatesHeartbeatTimeoutTimerId) {
+            clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
+            state.taskUpdatesHeartbeatTimeoutTimerId = 0;
+        }
+    }
+
+    function acknowledgeTaskUpdatesSocketMessage(messageId) {
+        const normalized = Math.max(0, Math.floor(Number(messageId) || 0));
+        if (!normalized) {
+            return;
+        }
+        syncTaskUpdatesSocketOffset(normalized);
+        const ws = state.taskUpdatesSocket;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        try {
+            ws.send(JSON.stringify({ action: 'ack', messageId: normalized }));
+        } catch (error) {
+            console.warn('ack task status websocket message failed', error);
+        }
+    }
+
+    function forceTaskUpdatesSocketReconnect(reason) {
+        const ws = state.taskUpdatesSocket;
+        state.taskUpdatesSocketManualClose = false;
+        clearTaskUpdatesSocketHeartbeat();
+        state.taskUpdatesSocket = null;
+        state.taskUpdatesSocketConnectPromise = null;
+        if (ws) {
+            try {
+                ws.close(4008, reason || 'heartbeat timeout');
+            } catch (_error) {
+                // ignore close error
+            }
+        }
+        scheduleTaskUpdatesSocketReconnect();
+    }
+
+    function armTaskUpdatesSocketPongTimeout() {
+        if (state.taskUpdatesHeartbeatTimeoutTimerId) {
+            clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
+        }
+        state.taskUpdatesHeartbeatTimeoutTimerId = window.setTimeout(() => {
+            state.taskUpdatesHeartbeatTimeoutTimerId = 0;
+            if (!state.taskUpdatesSocket || state.taskUpdatesSocket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            forceTaskUpdatesSocketReconnect('heartbeat timeout');
+        }, TASK_UPDATES_WS_HEARTBEAT_TIMEOUT_MS);
+    }
+
+    function sendTaskUpdatesSocketPing() {
+        const ws = state.taskUpdatesSocket;
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            return;
+        }
+        state.taskUpdatesLastPingAt = Date.now();
+        try {
+            ws.send(JSON.stringify({
+                action: 'ping',
+                clientTime: state.taskUpdatesLastPingAt,
+                lastReceivedMessageId: Math.max(0, Number(state.taskUpdatesLastProcessedMessageId) || 0),
+            }));
+            armTaskUpdatesSocketPongTimeout();
+        } catch (error) {
+            console.warn('task status websocket ping failed', error);
+            forceTaskUpdatesSocketReconnect('ping send failed');
+        }
+    }
+
+    function startTaskUpdatesSocketHeartbeat() {
+        clearTaskUpdatesSocketHeartbeat();
+        state.taskUpdatesLastPongAt = Date.now();
+        state.taskUpdatesHeartbeatTimerId = window.setInterval(() => {
+            sendTaskUpdatesSocketPing();
+        }, TASK_UPDATES_WS_HEARTBEAT_INTERVAL_MS);
+        sendTaskUpdatesSocketPing();
+    }
+
+    function handleTaskUpdatesSocketPong(payload) {
+        state.taskUpdatesLastPongAt = Date.now();
+        if (state.taskUpdatesHeartbeatTimeoutTimerId) {
+            clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
+            state.taskUpdatesHeartbeatTimeoutTimerId = 0;
+        }
+        const ackedMessageId = Math.max(0, Math.floor(Number(payload && payload.lastAckedMessageId) || 0));
+        if (ackedMessageId) {
+            syncTaskUpdatesSocketOffset(ackedMessageId);
+        }
+    }
+
     function resolveTaskUpdatesWebSocketUrl() {
         const injected = String(window.__mobileTaskWebSocketUrl || '').trim();
         const fallback = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/tasks`;
         const raw = injected || fallback;
+        const lastReceivedMessageId = Math.max(0, Number(state.taskUpdatesLastProcessedMessageId) || 0);
         try {
             const resolved = new URL(raw, window.location.href);
             if (!resolved.searchParams.get('userId')) {
                 resolved.searchParams.set('userId', MOBILE_USER_ID);
             }
+            resolved.searchParams.set('streamKey', 'web-task-updates');
+            resolved.searchParams.set('lastReceivedMessageId', String(lastReceivedMessageId));
             return resolved.toString();
         } catch (_error) {
             const joiner = raw.includes('?') ? '&' : '?';
-            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}`;
+            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}&streamKey=web-task-updates&lastReceivedMessageId=${encodeURIComponent(String(lastReceivedMessageId))}`;
         }
     }
 
@@ -8545,18 +8759,23 @@
         if (!taskId) {
             return null;
         }
+        const storageKey = normalizeTaskTitleText(payload && payload.storageKey);
         const previousTasks = Array.isArray(state.tasks)
             ? state.tasks.map((task) => ({ ...task }))
             : [];
-        const taskIndex = previousTasks.findIndex((task) => normalizeTaskId(task && task.taskId) === taskId);
+        const taskIndex = previousTasks.findIndex((task) => taskMatchesIdentity(task, taskId, storageKey));
         const previousTask = taskIndex >= 0 ? previousTasks[taskIndex] : null;
         const nextTask = {
             ...(previousTask || {
                 taskId,
-                title: taskId,
-                createdAt: new Date().toISOString(),
+                title: String(payload && payload.title || taskId),
+                createdAt: String(payload && payload.createdAt || '').trim() || new Date().toISOString(),
+                source: String(payload && payload.source || 'runtime'),
+                storageKey: storageKey || '',
+                videoUrl: String(payload && payload.videoUrl || ''),
             }),
         };
+        nextTask.taskId = taskId;
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'status')) {
             nextTask.status = String(payload.status || '');
         }
@@ -8571,6 +8790,30 @@
         }
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'errorMessage')) {
             nextTask.errorMessage = String(payload.errorMessage || '');
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'title')) {
+            nextTask.title = String(payload.title || '').trim() || nextTask.title || taskId;
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'videoUrl')) {
+            nextTask.videoUrl = String(payload.videoUrl || '');
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'storageKey')) {
+            nextTask.storageKey = storageKey;
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'createdAt')) {
+            const createdAt = String(payload.createdAt || '').trim();
+            if (createdAt) {
+                nextTask.createdAt = createdAt;
+            }
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'source')) {
+            nextTask.source = String(payload.source || '').trim() || nextTask.source || 'runtime';
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'collectionId')) {
+            nextTask.collectionId = String(payload.collectionId || '');
+        }
+        if (payload && Object.prototype.hasOwnProperty.call(payload, 'markdownAvailable')) {
+            nextTask.markdownAvailable = !!payload.markdownAvailable;
         }
         if (payload && payload.resultPath) {
             nextTask.resultPath = String(payload.resultPath);
@@ -8589,19 +8832,88 @@
         }
         const deduped = dedupeTasksByVideoUrl(nextTasks, { separateArchived: false });
         state.tasks = deduped.sort(compareTaskCreatedOrder);
+        const affectsCurrentTask = taskMatchesIdentity(nextTask, state.currentTaskId, state.currentTaskStorageKey);
         const shouldRenderLiveUpdate = !document.hidden
-            && (state.currentView === 'tasks' || state.currentTaskId === taskId);
+            && (state.currentView === 'tasks' || affectsCurrentTask);
         if (shouldRenderLiveUpdate) {
             applyTaskListMotionDiff(previousTasks, state.tasks || []);
             renderTaskList();
         }
-        if (state.currentTaskId === taskId && getTaskStatusVisual(nextTask.status) === 'completed') {
+        if (affectsCurrentTask && getTaskStatusVisual(nextTask.status) === 'completed') {
             setContentNeedsReload(true);
+        }
+        if (affectsCurrentTask) {
+            syncCurrentTaskRealtimeStateAfterTaskReload().catch((error) => {
+                console.warn('sync current task after live update failed', error);
+            });
         }
         return {
             previousTask,
             nextTask,
         };
+    }
+
+    function mergeTaskProbeResultIntoState(payload) {
+        const taskId = normalizeTaskId(payload && payload.taskId);
+        const probe = payload && payload.probe && typeof payload.probe === 'object' ? payload.probe : null;
+        if (!taskId || !probe) {
+            return null;
+        }
+        const previousTasks = Array.isArray(state.tasks) ? state.tasks.map((task) => ({ ...task })) : [];
+        const taskIndex = previousTasks.findIndex((task) => normalizeTaskId(task && task.taskId) === taskId);
+        const previousTask = taskIndex >= 0 ? previousTasks[taskIndex] : null;
+        const nextTask = {
+            ...(previousTask || {
+                taskId,
+                title: String(taskId || ''),
+                createdAt: new Date().toISOString(),
+                source: 'runtime',
+            }),
+        };
+        nextTask.taskId = taskId;
+        nextTask.probe = probe;
+        const probeTitle = String(probe.title || '').trim();
+        if (probeTitle) {
+            nextTask.title = probeTitle;
+        }
+        const probeResolvedUrl = String(probe.resolvedUrl || '').trim();
+        if (probeResolvedUrl) {
+            nextTask.videoUrl = probeResolvedUrl;
+        }
+        const nextTasks = previousTasks.slice();
+        if (taskIndex >= 0) {
+            nextTasks.splice(taskIndex, 1, nextTask);
+        } else {
+            nextTasks.push(nextTask);
+        }
+        state.tasks = dedupeTasksByVideoUrl(nextTasks, { separateArchived: false }).sort(compareTaskCreatedOrder);
+        if (!document.hidden && state.currentView === 'tasks') {
+            renderTaskList();
+        }
+        return {
+            previousTask,
+            nextTask,
+        };
+    }
+
+    function removeTaskByRealtimeIdentity(taskIdRaw) {
+        const taskId = normalizeTaskId(taskIdRaw);
+        if (!taskId) {
+            return false;
+        }
+        const previousTasks = Array.isArray(state.tasks) ? state.tasks : [];
+        const nextTasks = previousTasks.filter((task) => normalizeTaskId(task && task.taskId) !== taskId);
+        if (nextTasks.length === previousTasks.length) {
+            return false;
+        }
+        state.tasks = nextTasks;
+        if (Array.isArray(state.pendingSubmitTasks)) {
+            state.pendingSubmitTasks = state.pendingSubmitTasks.filter((pending) => normalizeTaskId(pending && pending.taskId) !== taskId);
+        }
+        if (!document.hidden && state.currentView === 'tasks') {
+            renderTaskList();
+        }
+        return true;
     }
 
     async function refreshRealtimeMetaForCurrentTask(payload) {
@@ -8635,6 +8947,15 @@
 
     function handleTaskUpdatesSocketMessage(payload) {
         const type = String(payload && payload.type || '').trim();
+        if (type === 'pong') {
+            handleTaskUpdatesSocketPong(payload);
+            return;
+        }
+        const messageId = Math.max(0, Math.floor(Number(payload && payload.messageId) || 0));
+        if (messageId && messageId <= (Number(state.taskUpdatesLastProcessedMessageId) || 0)) {
+            acknowledgeTaskUpdatesSocketMessage(messageId);
+            return;
+        }
         if (type === 'taskUpdate') {
             const merged = mergeLiveTaskUpdateIntoState(payload);
             if (!merged || !merged.nextTask) {
@@ -8647,12 +8968,28 @@
             ).catch((error) => {
                 console.warn('show terminal task notification failed', error);
             });
-            return;
-        }
-        if (type === 'taskMetaSync') {
+        } else if (type === 'taskProbeResult') {
+            mergeTaskProbeResultIntoState(payload);
+        } else if (type === 'taskDeduped') {
+            const removed = removeTaskByRealtimeIdentity(payload && payload.taskId);
+            if (removed) {
+                const duplicateOfTaskId = normalizeTaskId(payload && payload.duplicateOfTaskId);
+                setTaskSummary(
+                    duplicateOfTaskId
+                        ? `任务已去重，复用已有任务 ${duplicateOfTaskId}`
+                        : '任务已去重，已从列表移除',
+                    'success'
+                );
+            }
+        } else if (type === 'taskMetaSync') {
             refreshRealtimeMetaForCurrentTask(payload).catch((error) => {
                 console.warn('refresh realtime meta failed', error);
             });
+        } else if (type) {
+            console.warn('task status websocket ignored message', type, payload);
+        }
+        if (messageId) {
+            acknowledgeTaskUpdatesSocketMessage(messageId);
         }
     }
 
@@ -8680,6 +9017,7 @@
             clearTimeout(state.taskUpdatesSocketReconnectTimerId);
             state.taskUpdatesSocketReconnectTimerId = 0;
         }
+        clearTaskUpdatesSocketHeartbeat();
         const ws = state.taskUpdatesSocket;
         state.taskUpdatesSocket = null;
         state.taskUpdatesSocketConnectPromise = null;
@@ -8699,6 +9037,9 @@
         }
         const current = state.taskUpdatesSocket;
         if (current && current.readyState === WebSocket.OPEN) {
+            if (!state.taskUpdatesHeartbeatTimerId) {
+                startTaskUpdatesSocketHeartbeat();
+            }
             return Promise.resolve(true);
         }
         if (state.taskUpdatesSocketConnectPromise) {
@@ -8738,6 +9079,7 @@
             ws.addEventListener('open', () => {
                 clearTimeout(openTimer);
                 state.taskUpdatesSocketReconnectAttempt = 0;
+                startTaskUpdatesSocketHeartbeat();
                 syncTaskUpdatesSocketTaskSubscription(state.currentTaskId, '');
                 finish(true);
             }, { once: true });
@@ -8755,11 +9097,13 @@
             });
             ws.addEventListener('error', () => {
                 clearTimeout(openTimer);
+                clearTaskUpdatesSocketHeartbeat();
                 finish(false);
                 scheduleTaskUpdatesSocketReconnect();
             }, { once: true });
             ws.addEventListener('close', () => {
                 clearTimeout(openTimer);
+                clearTaskUpdatesSocketHeartbeat();
                 if (state.taskUpdatesSocket === ws) {
                     state.taskUpdatesSocket = null;
                 }
@@ -9558,14 +9902,13 @@
         return source;
     }
 
-    function buildBookProbePdfPageUrl(baseUrl, pageNo, zoomValue = 'page-fit') {
+    function buildBookProbePdfPageUrl(baseUrl, pageNo) {
         const normalizedPage = Math.max(1, normalizeBookProbeInt(pageNo, 1));
         const clean = String(baseUrl || '').trim().replace(/#.*$/, '');
         if (!clean) {
             return '';
         }
-        const normalizedZoom = String(zoomValue || 'page-fit').trim() || 'page-fit';
-        return `${clean}#page=${normalizedPage}&zoom=${normalizedZoom}`;
+        return `${clean}#page=${normalizedPage}&zoom=page-width`;
     }
 
     async function openBookProbeSheet(probePayload, options = {}) {
@@ -9585,10 +9928,6 @@
         const previewPrevBtn = document.getElementById('bookProbePreviewPrevBtn');
         const previewNextBtn = document.getElementById('bookProbePreviewNextBtn');
         const previewPageMeta = document.getElementById('bookProbePreviewPageMeta');
-        const previewZoomOutBtn = document.getElementById('bookProbePreviewZoomOutBtn');
-        const previewZoomResetBtn = document.getElementById('bookProbePreviewZoomResetBtn');
-        const previewZoomLabel = document.getElementById('bookProbePreviewZoomLabel');
-        const previewZoomInBtn = document.getElementById('bookProbePreviewZoomInBtn');
         const previewFullscreenBtn = document.getElementById('bookProbePreviewFullscreenBtn');
         const useCurrentPageBtn = document.getElementById('bookProbeUseCurrentPageBtn');
         const previewPdfWrap = document.getElementById('bookProbePdfWrap');
@@ -9628,29 +9967,25 @@
                     return leftOrder - rightOrder;
                 })
         );
-        const buildSelectedRangePayload = () => {
+        const buildSelectedLeafTaskPayloads = () => {
             const orderedItems = getSelectedItemsInRangeOrder();
             if (!orderedItems.length) {
-                return null;
+                return [];
             }
-            const firstItem = orderedItems[0];
-            const lastItem = orderedItems[orderedItems.length - 1];
-            const startToken = String(firstItem.outlineIndex || firstItem.sectionSelector || '').trim();
-            const endToken = String(lastItem.outlineIndex || lastItem.sectionSelector || '').trim();
-            const rangeText = startToken && endToken && startToken !== endToken
-                ? `${startToken} -> ${endToken}`
-                : (startToken || endToken || '');
-            const sectionSelector = startToken && endToken
-                ? (startToken === endToken ? startToken : `${startToken}-${endToken}`)
-                : String(firstItem.sectionSelector || '').trim();
-            if (!sectionSelector) {
-                return null;
-            }
-            return {
-                sectionSelector,
-                rangeText: rangeText || sectionSelector,
-                selectedCount: orderedItems.length,
-            };
+            const bySelector = new Map();
+            orderedItems.forEach((item) => {
+                const selector = String(item && item.sectionSelector || '').trim();
+                if (!selector || bySelector.has(selector)) {
+                    return;
+                }
+                bySelector.set(selector, {
+                    sectionSelector: selector,
+                    leafTitle: String(item && item.title || '').trim() || selector,
+                    leafOutlineIndex: String(item && item.outlineIndex || '').trim(),
+                    bookTitle: title || '',
+                });
+            });
+            return Array.from(bySelector.values());
         };
 
         const detectedStartPage = Number(probePayload && probePayload.detectedStartPage);
@@ -9674,10 +10009,8 @@
         const previewPdfEnabled = !!previewPdfSource && isPdfLikeSource(previewPdfSource, probePayload, options);
         let previewPdfPage = Math.max(1, defaultStartPage);
         let lastFocusedEpisodeKeyForPreview = '';
-        const previewHeightStorageKey = 'book_probe_pdf_preview_height_v3';
-        const previewWidthStorageKey = 'book_probe_pdf_preview_width_v2';
-        const previewZoomStorageKey = 'book_probe_pdf_preview_zoom_v1';
-        const previewZoomLevels = ['page-fit', 'page-width', '125', '150', '200'];
+        const previewHeightStorageKey = 'book_probe_pdf_preview_height_v4';
+        const previewWidthStorageKey = 'book_probe_pdf_preview_width_v3';
         const readStoredPreviewSize = (storageKey) => {
             try {
                 return localStorage.getItem(storageKey) || '';
@@ -9688,13 +10021,13 @@
         const clampNumber = (value, min, max) => Math.max(min, Math.min(max, value));
         const parsePreviewHeight = (candidate) => {
             const value = Number(candidate);
-            const defaultHeight = clampNumber(Math.floor(window.innerHeight * 0.74), 420, 1040);
+            const defaultHeight = clampNumber(Math.floor(window.innerHeight * 0.84), 520, 1220);
             if (!Number.isFinite(value)) return defaultHeight;
-            return clampNumber(Math.floor(value), 320, 1200);
+            return clampNumber(Math.floor(value), 380, 1320);
         };
         const resolvePreviewWidthBounds = () => {
-            const minWidth = 260;
-            const fallbackMax = 780;
+            const minWidth = 420;
+            const fallbackMax = 980;
             if (!content) {
                 return { minWidth, maxWidth: fallbackMax };
             }
@@ -9703,7 +10036,7 @@
                 return { minWidth, maxWidth: fallbackMax };
             }
             const handleWidth = 12;
-            const minListWidth = 280;
+            const minListWidth = 260;
             const computedMax = contentWidth - handleWidth - minListWidth;
             const maxWidth = Math.max(minWidth, computedMax);
             return { minWidth, maxWidth };
@@ -9716,24 +10049,11 @@
             }
             return clampNumber(Math.floor(value), bounds.minWidth, bounds.maxWidth);
         };
-        const parsePreviewZoomIndex = (candidate) => {
-            const normalized = String(candidate || '').trim();
-            const index = previewZoomLevels.indexOf(normalized);
-            return index >= 0 ? index : 0;
-        };
-        const formatPreviewZoomLabel = (zoomValue) => {
-            if (zoomValue === 'page-fit') return 'Fit';
-            if (zoomValue === 'page-width') return 'Width';
-            return `${zoomValue}%`;
-        };
         let previewFrameHeight = parsePreviewHeight(
             readStoredPreviewSize(previewHeightStorageKey)
         );
         let previewPanelWidth = parsePreviewWidth(
             readStoredPreviewSize(previewWidthStorageKey)
-        );
-        let previewZoomIndex = parsePreviewZoomIndex(
-            readStoredPreviewSize(previewZoomStorageKey)
         );
         const applyPreviewFrameHeight = (heightCandidate, persist = true) => {
             previewFrameHeight = parsePreviewHeight(heightCandidate);
@@ -9764,30 +10084,6 @@
                 }
             }
         };
-        const getPreviewZoomValue = () => previewZoomLevels[previewZoomIndex] || 'page-fit';
-        const syncPreviewZoomUi = () => {
-            if (previewZoomLabel) {
-                previewZoomLabel.textContent = formatPreviewZoomLabel(getPreviewZoomValue());
-            }
-            if (previewZoomOutBtn) {
-                previewZoomOutBtn.disabled = previewZoomIndex <= 0;
-            }
-            if (previewZoomInBtn) {
-                previewZoomInBtn.disabled = previewZoomIndex >= previewZoomLevels.length - 1;
-            }
-        };
-        const applyPreviewZoom = (zoomIndexCandidate, persist = true) => {
-            previewZoomIndex = clampNumber(Math.floor(zoomIndexCandidate), 0, previewZoomLevels.length - 1);
-            syncPreviewZoomUi();
-            if (persist) {
-                try {
-                    localStorage.setItem(previewZoomStorageKey, getPreviewZoomValue());
-                } catch (_error) {
-                    // ignore storage failures
-                }
-            }
-            syncPreviewPdfFrame();
-        };
         const isPreviewFullscreen = () => !!(
             previewPdfWrap
             && document.fullscreenElement
@@ -9800,7 +10096,6 @@
         };
         applyPreviewPanelWidth(previewPanelWidth, false);
         applyPreviewFrameHeight(previewFrameHeight, false);
-        syncPreviewZoomUi();
         syncPreviewFullscreenUi();
 
         const syncPreviewPdfFrame = () => {
@@ -9829,7 +10124,7 @@
                 previewPdfEmpty.textContent = 'PDF preview is available for .pdf files only.';
                 return;
             }
-            const frameSrc = buildBookProbePdfPageUrl(previewPdfSource, safePage, getPreviewZoomValue());
+            const frameSrc = buildBookProbePdfPageUrl(previewPdfSource, safePage);
             if (!frameSrc) {
                 previewPdfFrame.removeAttribute('src');
                 previewPdfFrame.dataset.currentSrc = '';
@@ -9855,7 +10150,7 @@
             return displayPageShift;
         };
 
-        const renderPreview = () => {
+        const renderPreview = (forceJump = false) => {
             if (!previewMeta || !previewTitle) return;
             const focusedItem = episodeByKey.get(focusedEpisodeKey) || episodes[0] || null;
             const currentShift = getCurrentDisplayShift();
@@ -9866,7 +10161,7 @@
                 return;
             }
             const focusedRange = getProbeEpisodeRange(focusedItem, currentShift);
-            if (focusedItem.key !== lastFocusedEpisodeKeyForPreview && focusedRange.startPage > 0) {
+            if ((forceJump || focusedItem.key !== lastFocusedEpisodeKeyForPreview) && focusedRange.startPage > 0) {
                 previewPdfPage = focusedRange.startPage;
             }
             lastFocusedEpisodeKeyForPreview = focusedItem.key;
@@ -9875,7 +10170,7 @@
             previewMeta.textContent = `${formatProbeRangeText(focusedRange)} | 选择器 ${focusedItem.sectionSelector}`;
         };
 
-        const renderProbeTree = () => {
+        const renderProbeTree = (forcePreviewJump = false) => {
             list.innerHTML = `<div class="book-probe-tree-root">${
                 renderBookProbeTreeNodesV2(treeNodes, {
                     level: 1,
@@ -9891,19 +10186,23 @@
                     checkboxNode.indeterminate = true;
                 }
             });
-            renderPreview();
+            renderPreview(forcePreviewJump);
         };
 
         const countSelection = () => selectedEpisodeKeys.size;
         const updateSelectionInfo = () => {
-            const rangePayload = buildSelectedRangePayload();
-            if (!rangePayload) {
+            const leafTasks = buildSelectedLeafTaskPayloads();
+            if (!leafTasks.length) {
                 selectionInfo.textContent = '未选择章节';
                 return;
             }
-            selectionInfo.textContent = rangePayload.selectedCount > 1
-                ? `已选择 ${rangePayload.selectedCount} 个章节，将按区间 ${rangePayload.rangeText} 提取`
-                : `已选择 ${rangePayload.rangeText}`;
+            if (leafTasks.length === 1) {
+                const item = leafTasks[0];
+                const outlineText = item.leafOutlineIndex ? `${item.leafOutlineIndex} · ` : '';
+                selectionInfo.textContent = `已选择 ${outlineText}${item.leafTitle}`;
+                return;
+            }
+            selectionInfo.textContent = `已选择 ${leafTasks.length} 个 leaf，将拆成 ${leafTasks.length} 个任务`;
         };
         renderProbeTree();
         updateSelectionInfo();
@@ -9970,12 +10269,8 @@
                 if (!leaf) return;
                 const episodeKey = String(leaf.getAttribute('data-probe-key') || '').trim();
                 if (!episodeKey) return;
-                if (focusedEpisodeKey !== episodeKey) {
-                    focusedEpisodeKey = episodeKey;
-                    renderProbeTree();
-                } else {
-                    renderPreview();
-                }
+                focusedEpisodeKey = episodeKey;
+                renderProbeTree(true);
                 return;
             };
             const onTreeRowFocusClick = (event) => {
@@ -9994,12 +10289,8 @@
                 if (inputNode) return;
                 const focusEpisodeKey = String(treeRow.getAttribute('data-tree-focus-key') || '').trim();
                 if (!focusEpisodeKey) return;
-                if (focusedEpisodeKey !== focusEpisodeKey) {
-                    focusedEpisodeKey = focusEpisodeKey;
-                    renderProbeTree();
-                } else {
-                    renderPreview();
-                }
+                focusedEpisodeKey = focusEpisodeKey;
+                renderProbeTree(true);
             };
             const onPageOffsetInput = () => renderProbeTree();
             const onPreviewPrevClick = () => {
@@ -10018,9 +10309,6 @@
                 pageOffsetInput.value = String(Math.max(0, safePage - 1));
                 renderProbeTree();
             };
-            const onPreviewZoomOutClick = () => applyPreviewZoom(previewZoomIndex - 1, true);
-            const onPreviewZoomResetClick = () => applyPreviewZoom(0, true);
-            const onPreviewZoomInClick = () => applyPreviewZoom(previewZoomIndex + 1, true);
             const onPreviewFullscreenClick = async () => {
                 if (!previewPdfWrap) return;
                 try {
@@ -10147,9 +10435,6 @@
                 if (clearBtn) clearBtn.onclick = null;
                 if (previewPrevBtn) previewPrevBtn.onclick = null;
                 if (previewNextBtn) previewNextBtn.onclick = null;
-                if (previewZoomOutBtn) previewZoomOutBtn.onclick = null;
-                if (previewZoomResetBtn) previewZoomResetBtn.onclick = null;
-                if (previewZoomInBtn) previewZoomInBtn.onclick = null;
                 if (previewFullscreenBtn) previewFullscreenBtn.onclick = null;
                 if (useCurrentPageBtn) useCurrentPageBtn.onclick = null;
                 if (previewPdfFrame) {
@@ -10165,9 +10450,6 @@
             pageOffsetInput.addEventListener('input', onPageOffsetInput);
             if (previewPrevBtn) previewPrevBtn.onclick = onPreviewPrevClick;
             if (previewNextBtn) previewNextBtn.onclick = onPreviewNextClick;
-            if (previewZoomOutBtn) previewZoomOutBtn.onclick = onPreviewZoomOutClick;
-            if (previewZoomResetBtn) previewZoomResetBtn.onclick = onPreviewZoomResetClick;
-            if (previewZoomInBtn) previewZoomInBtn.onclick = onPreviewZoomInClick;
             if (previewFullscreenBtn) previewFullscreenBtn.onclick = onPreviewFullscreenClick;
             if (useCurrentPageBtn) useCurrentPageBtn.onclick = onUseCurrentPageClick;
             window.addEventListener('resize', onWindowResize);
@@ -10208,16 +10490,16 @@
                     selectionInfo.textContent = '请至少选择一个章节';
                     return;
                 }
-                const rangePayload = buildSelectedRangePayload();
-                if (!rangePayload || !rangePayload.sectionSelector) {
-                    selectionInfo.textContent = '未能生成连续章节区间';
+                const leafTasks = buildSelectedLeafTaskPayloads();
+                if (!leafTasks.length) {
+                    selectionInfo.textContent = '未能生成 leaf 任务';
                     return;
                 }
                 const pageOffset = Number(pageOffsetInput.value);
                 closeSheet({
-                    sectionSelector: rangePayload.sectionSelector,
+                    leafTasks,
                     pageOffset: Number.isFinite(pageOffset) && pageOffset >= 0 ? Math.floor(pageOffset) : 0,
-                    selectedCount: rangePayload.selectedCount,
+                    selectedCount: leafTasks.length,
                 });
             };
             sheet.hidden = false;
@@ -10254,20 +10536,58 @@
             cancelledError.cancelled = true;
             throw cancelledError;
         }
-        const response = await fetch(`${TASK_API_BASE}/tasks/submit`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                userId: MOBILE_USER_ID,
-                videoUrl: normalizedVideoUrl,
-                outputDir: './output',
-                sectionSelector: selection.sectionSelector,
-                splitByChapter: false,
-                splitBySection: false,
-                pageOffset: selection.pageOffset,
-            }),
-        });
-        return parseSubmitResponse(response);
+        const leafTasks = Array.isArray(selection.leafTasks) ? selection.leafTasks : [];
+        if (!leafTasks.length) {
+            throw new Error('章节提交缺少 leaf 任务');
+        }
+        const successes = [];
+        const failures = [];
+        for (const leafTask of leafTasks) {
+            try {
+                const response = await fetch(`${TASK_API_BASE}/tasks/submit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        userId: MOBILE_USER_ID,
+                        videoUrl: normalizedVideoUrl,
+                        sectionSelector: String(leafTask && leafTask.sectionSelector || '').trim(),
+                        splitByChapter: false,
+                        splitBySection: false,
+                        pageOffset: selection.pageOffset,
+                        bookTitle: String(leafTask && leafTask.bookTitle || '').trim(),
+                        leafTitle: String(leafTask && leafTask.leafTitle || '').trim(),
+                        leafOutlineIndex: String(leafTask && leafTask.leafOutlineIndex || '').trim(),
+                    }),
+                });
+                successes.push(await parseSubmitResponse(response));
+            } catch (error) {
+                failures.push({ leafTask, error });
+            }
+        }
+        if (!successes.length) {
+            throw (failures[0] && failures[0].error) || new Error('leaf 任务提交失败');
+        }
+        const taskIds = successes
+            .map((item) => normalizeTaskId(item && item.taskId))
+            .filter(Boolean);
+        const submittedCount = successes.length;
+        const failedCount = failures.length;
+        let message = '';
+        if (failedCount > 0) {
+            message = `已提交 ${submittedCount} 个 leaf，另有 ${failedCount} 个提交失败`;
+        } else if (submittedCount > 1) {
+            message = `已提交 ${submittedCount} 个 leaf 任务`;
+        } else {
+            message = '已提交 leaf 任务';
+        }
+        return {
+            success: true,
+            taskId: taskIds[0] || '',
+            taskIds,
+            submittedCount,
+            failedCount,
+            message,
+        };
     }
 
     async function submitUrlTask(normalizedVideoUrl) {
@@ -10602,9 +10922,19 @@
             } else {
                 submitResult = await submitUrlTask(normalizedVideoUrl);
             }
-            const submitResultTaskId = normalizeTaskId(submitResult && submitResult.taskId);
-            const submitResultDeduped = !!(submitResult && submitResult.deduped);
-            const dedupeWindowMinutes = Math.max(1, Number(submitResult && submitResult.dedupeWindowMinutes) || 30);
+            const submitResultTaskIds = Array.isArray(submitResult && submitResult.taskIds)
+                ? submitResult.taskIds.map((taskId) => normalizeTaskId(taskId)).filter(Boolean)
+                : [];
+            const submitResultTaskId = normalizeTaskId(submitResult && submitResult.taskId)
+                || (submitResultTaskIds[0] || '');
+            if (submitResultTaskId && !submitResultTaskIds.includes(submitResultTaskId)) {
+                submitResultTaskIds.unshift(submitResultTaskId);
+            }
+            const submitResultSubmittedCount = Math.max(
+                submitResultTaskIds.length,
+                Number(submitResult && submitResult.submittedCount) || 0
+            );
+            const submitResultMessage = String(submitResult && submitResult.message || '').trim();
             if (pendingEntry) {
                 updatePendingSubmitTask(pendingEntry.id, {
                     status: 'queued',
@@ -10616,10 +10946,7 @@
                 renderTaskList();
             }
             void submitResult;
-            setTaskSubmitTip(
-                submitResultDeduped ? `已复用 ${dedupeWindowMinutes} 分钟内的任务` : COMPOSER_COPY.queuedTip,
-                'success'
-            );
+            setTaskSubmitTip(submitResultMessage || COMPOSER_COPY.queuedTip, 'success');
             triggerComposerLaunchFx('success');
 
             if (urlInput) {
@@ -10630,17 +10957,32 @@
             }
             closeTaskComposer();
 
-            await reloadTaskList({ showLoading: false });
             let submitAssignedCollectionTitle = '';
             let submitAssignedTaskCount = 0;
-            let revealTaskId = submitResultTaskId;
+            let revealTaskId = submitResultTaskIds[0] || submitResultTaskId;
+            const optimisticStatus = String(submitResult && submitResult.status || 'QUEUED').trim() || 'QUEUED';
+            const optimisticTitle = String(submitResult && submitResult.title || '').trim();
+            const optimisticVideoUrl = String(
+                submitResult && submitResult.normalizedVideoUrl
+                    || normalizedVideoUrl
+                    || ''
+            ).trim();
+            submitResultTaskIds.forEach((taskId) => {
+                mergeLiveTaskUpdateIntoState({
+                    taskId,
+                    status: optimisticStatus,
+                    progress: 0,
+                    message: submitResultMessage || COMPOSER_COPY.queuedTip,
+                    title: optimisticTitle || taskId,
+                    videoUrl: optimisticVideoUrl,
+                    source: 'runtime',
+                    createdAt: new Date().toISOString(),
+                    collectionId: submitTargetCollectionId || '',
+                });
+            });
             if (submitTargetCollectionId) {
-                const candidateTaskIds = (Array.isArray(state.tasks) ? state.tasks : [])
-                    .map((task) => normalizeTaskId(task && task.taskId))
+                const candidateTaskIds = submitResultTaskIds
                     .filter((taskId) => !!taskId && !taskIdsBeforeSubmit.has(taskId));
-                if (submitResultTaskId && !candidateTaskIds.includes(submitResultTaskId)) {
-                    candidateTaskIds.push(submitResultTaskId);
-                }
                 if (candidateTaskIds.length > 0) {
                     submitAssignedCollectionTitle = resolveTaskCollectionTitleById(submitTargetCollectionId) || TASK_COLLECTION_DEFAULT_TITLE;
                     const assignedTaskIds = assignTaskIdsToCollection(
@@ -10666,10 +11008,17 @@
                 setTaskSummary(`已将 ${submitAssignedTaskCount} 个新任务归入合集「${submitAssignedCollectionTitle || TASK_COLLECTION_DEFAULT_TITLE}」`, 'success');
             } else if (revealTaskId) {
                 setTaskSummary(
-                    submitResultDeduped ? `已复用 ${dedupeWindowMinutes} 分钟内的任务` : '已提交新任务',
+                    submitResultMessage || (
+                        submitResultSubmittedCount > 1
+                            ? `已提交 ${submitResultSubmittedCount} 个 leaf 任务`
+                            : '已提交新任务'
+                    ),
                     'success'
                 );
             }
+            reloadTaskList({ showLoading: false }).catch((error) => {
+                console.warn('reload task list after submit failed', error);
+            });
             return true;
         } catch (error) {
             if (error && error.cancelled) {
@@ -12312,11 +12661,15 @@
         const suggestedCategoryPath = !isArchived ? resolveTaskCategoryPath(task) : '';
         const suggestedCategorySegments = splitCollectionPathSegments(suggestedCategoryPath);
         const showCollectionChip = !options.hideCollectionChip;
+        const bookLeafChipText = resolveTaskBookLeafChipText(task);
+        const bookLeafChip = bookLeafChipText
+            ? `<span class="task-collection-chip" title="${escapeHtml(bookLeafChipText)}">${escapeHtml(bookLeafChipText)}</span>`
+            : '';
         const collectionChip = showCollectionChip && collectionTitleRaw
             ? `<span class="task-collection-chip" title="${escapeHtml(collectionTitleRaw)}">${escapeHtml(collectionTitleRaw)}</span>`
             : '';
         const categoryChip = showCollectionChip && !collectionChip && suggestedCategorySegments.length
-            ? `<span class="task-collection-chip" title="${escapeHtml(suggestedCategoryPath)}">待归档·${escapeHtml(suggestedCategorySegments[suggestedCategorySegments.length - 1])}</span>`
+            ? `<span class="task-collection-chip task-category-chip" title="${escapeHtml(suggestedCategoryPath)}">待归档·${escapeHtml(suggestedCategoryPath)}</span>`
             : '';
 
         const classes = resolveTaskItemMotionClasses(taskIdRaw, statusVisual, options);
@@ -12348,6 +12701,7 @@
                 </div>
                 <div class="task-foot-row">
                     <span class="task-source-chip source-${sourceKind}" aria-hidden="true">${sourceIcon}</span>
+                    ${bookLeafChip}
                     ${collectionChip}
                     ${categoryChip}
                     <span class="task-progress-hint">${escapeHtml(statusHint)}</span>

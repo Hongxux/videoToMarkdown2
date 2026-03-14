@@ -2,6 +2,7 @@ package com.mvp.module2.fusion.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,6 +19,7 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -102,6 +104,64 @@ public class CategoryClassificationResultsRepository {
 
     public Map<String, String> listArchivedTaskPaths() {
         return loadSnapshot().archivedTaskPaths;
+    }
+
+    public int upsertAutomaticResults(Collection<AutomaticCategoryResult> rawResults) {
+        if (rawResults == null || rawResults.isEmpty()) {
+            return 0;
+        }
+        ObjectNode root = readOrCreateRoot();
+        Map<String, ObjectNode> mergedResults = readAutomaticResultNodes(root.path("results"));
+        int changed = 0;
+        for (AutomaticCategoryResult rawResult : rawResults) {
+            ObjectNode normalizedNode = normalizeAutomaticResultNode(rawResult);
+            if (normalizedNode == null) {
+                continue;
+            }
+            String taskPath = TaskManualCollectionRepository.normalizeTaskPath(
+                    normalizedNode.path("task_path").asText("")
+            );
+            if (taskPath.isEmpty()) {
+                continue;
+            }
+            ObjectNode previous = mergedResults.put(taskPath, normalizedNode);
+            if (previous == null || !previous.equals(normalizedNode)) {
+                changed += 1;
+            }
+        }
+        if (changed <= 0) {
+            return 0;
+        }
+
+        ArrayNode resultArray = objectMapper.createArrayNode();
+        ObjectNode categoryCountsNode = objectMapper.createObjectNode();
+        List<String> orderedTaskPaths = new ArrayList<>(mergedResults.keySet());
+        orderedTaskPaths.sort(String::compareTo);
+        Map<String, Integer> categoryCounts = new LinkedHashMap<>();
+        for (String taskPath : orderedTaskPaths) {
+            ObjectNode node = mergedResults.get(taskPath);
+            if (node == null) {
+                continue;
+            }
+            resultArray.add(node);
+            String categoryPath = TaskManualCollectionRepository.normalizeCollectionPath(node.path("category_path").asText(""));
+            if (categoryPath.isEmpty()) {
+                continue;
+            }
+            categoryCounts.put(categoryPath, categoryCounts.getOrDefault(categoryPath, 0) + 1);
+        }
+        List<String> orderedCategoryPaths = new ArrayList<>(categoryCounts.keySet());
+        orderedCategoryPaths.sort(String::compareTo);
+        for (String categoryPath : orderedCategoryPaths) {
+            categoryCountsNode.put(categoryPath, categoryCounts.getOrDefault(categoryPath, 0));
+        }
+
+        root.set("results", resultArray);
+        root.put("total_videos", resultArray.size());
+        root.set("category_counts", categoryCountsNode);
+        root.put("updated_at", Instant.now().toString());
+        writeRoot(root);
+        return changed;
     }
 
     public int replaceAllBindings(Map<String, String> rawBindings) {
@@ -222,6 +282,42 @@ public class CategoryClassificationResultsRepository {
         return bindings;
     }
 
+    private Map<String, ObjectNode> readAutomaticResultNodes(JsonNode resultsNode) {
+        Map<String, ObjectNode> results = new LinkedHashMap<>();
+        if (!resultsNode.isArray()) {
+            return results;
+        }
+        for (JsonNode item : resultsNode) {
+            if (!(item instanceof ObjectNode objectNode)) {
+                continue;
+            }
+            String taskPath = TaskManualCollectionRepository.normalizeTaskPath(
+                    firstNonBlank(
+                            objectNode.path("task_path").asText(""),
+                            objectNode.path("taskPath").asText(""),
+                            buildStorageTaskPath(objectNode.path("video_id").asText(""))
+                    )
+            );
+            String categoryPath = TaskManualCollectionRepository.normalizeCollectionPath(
+                    objectNode.path("category_path").asText("")
+            );
+            if (taskPath.isEmpty() || categoryPath.isEmpty()) {
+                continue;
+            }
+            ObjectNode copied = objectNode.deepCopy();
+            copied.put("task_path", taskPath);
+            copied.put("category_path", categoryPath);
+            if (!copied.hasNonNull("video_id")) {
+                copied.put("video_id", lastTaskPathSegment(taskPath));
+            }
+            if (!copied.hasNonNull("taskPath")) {
+                copied.put("taskPath", taskPath);
+            }
+            results.put(taskPath, copied);
+        }
+        return results;
+    }
+
     private Map<String, String> readArchivedTaskPaths(JsonNode archivedNode) {
         Map<String, String> archivedTaskPaths = new LinkedHashMap<>();
         if (!(archivedNode instanceof ObjectNode objectNode)) {
@@ -260,6 +356,38 @@ public class CategoryClassificationResultsRepository {
             normalized.put(taskPath, collectionPath);
         }
         return normalized;
+    }
+
+    private ObjectNode normalizeAutomaticResultNode(AutomaticCategoryResult rawResult) {
+        if (rawResult == null) {
+            return null;
+        }
+        String taskPath = TaskManualCollectionRepository.normalizeTaskPath(rawResult.taskPath());
+        String categoryPath = TaskManualCollectionRepository.normalizeCollectionPath(rawResult.categoryPath());
+        if (taskPath.isEmpty() || categoryPath.isEmpty()) {
+            return null;
+        }
+        String taskId = firstNonBlank(
+                TaskManualCollectionRepository.normalizeTaskPath(rawResult.taskId()),
+                lastTaskPathSegment(taskPath)
+        );
+        int targetLevel = Math.max(1, pathDepth(categoryPath));
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("video_id", taskId);
+        node.put("task_path", taskPath);
+        node.put("taskPath", taskPath);
+        node.put("video_title", firstNonBlank(rawResult.title(), ""));
+        node.put("category_path", categoryPath);
+        node.put("target_level", targetLevel);
+        node.put("is_new", rawResult.isNew());
+        node.put("reasoning", firstNonBlank(rawResult.reasoning(), ""));
+        node.put("generated_at", firstNonBlank(rawResult.generatedAt(), Instant.now().toString()));
+        if (!firstNonBlank(rawResult.contentType(), "").isBlank()) {
+            node.put("content_type", rawResult.contentType().trim().toLowerCase(Locale.ROOT));
+        }
+        ObjectNode usageNode = objectMapper.createObjectNode();
+        node.set("usage", usageNode);
+        return node;
     }
 
     private ObjectNode readOrCreateRoot() {
@@ -336,6 +464,23 @@ public class CategoryClassificationResultsRepository {
         return "storage/" + normalizedVideoId;
     }
 
+    private String lastTaskPathSegment(String taskPath) {
+        String normalized = TaskManualCollectionRepository.normalizeTaskPath(taskPath);
+        if (normalized.isEmpty()) {
+            return "";
+        }
+        int slash = normalized.lastIndexOf('/');
+        return slash >= 0 ? normalized.substring(slash + 1) : normalized;
+    }
+
+    private int pathDepth(String categoryPath) {
+        String normalized = TaskManualCollectionRepository.normalizeCollectionPath(categoryPath);
+        if (normalized.isEmpty()) {
+            return 0;
+        }
+        return normalized.split("/").length;
+    }
+
     private String firstNonBlank(String... candidates) {
         if (candidates == null) {
             return "";
@@ -353,6 +498,18 @@ public class CategoryClassificationResultsRepository {
             boolean archived,
             String archivedAt,
             boolean manualBinding
+    ) {
+    }
+
+    public record AutomaticCategoryResult(
+            String taskId,
+            String taskPath,
+            String title,
+            String categoryPath,
+            boolean isNew,
+            String reasoning,
+            String generatedAt,
+            String contentType
     ) {
     }
 

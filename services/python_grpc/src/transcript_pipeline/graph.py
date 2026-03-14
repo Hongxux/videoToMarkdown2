@@ -20,6 +20,10 @@ from .monitoring.metrics import MetricsCollector
 from .monitoring.tracer import PipelineTracer
 from .nodes import step1_node, step2_node, step3_node, step3_5_node, step4_node, step5_6_node
 from .state import PipelineState, create_initial_state
+from .streaming_executor import (
+    StreamingStage1Graph,
+    should_use_streaming_stage1_executor,
+)
 
 _LANGGRAPH_END_SYMBOL = None
 _LANGGRAPH_STATE_GRAPH_CLASS = None
@@ -518,13 +522,30 @@ async def run_pipeline(
     else:
         main_logger.info("Checkpoints disabled")
 
-    graph = create_pipeline_graph(
-        checkpointer=checkpointer,
-        sqlite_checkpointer=sqlite_checkpointer,
-        output_config=output_config,
+    use_streaming_executor, streaming_reason = should_use_streaming_stage1_executor(
         max_step=max_step,
-        progress_callback=progress_callback,
+        resume=resume,
+        resume_state=resume_state,
+        resume_from_step=resume_from_step,
+        enable_checkpoints=enable_checkpoints,
     )
+    if use_streaming_executor:
+        main_logger.info("Stage1 streaming executor enabled")
+        graph = StreamingStage1Graph(
+            sqlite_checkpointer=sqlite_checkpointer,
+            output_config=output_config,
+            progress_callback=progress_callback,
+            max_step=max_step,
+        )
+    else:
+        main_logger.info("Stage1 streaming executor disabled: %s", streaming_reason)
+        graph = create_pipeline_graph(
+            checkpointer=checkpointer,
+            sqlite_checkpointer=sqlite_checkpointer,
+            output_config=output_config,
+            max_step=max_step,
+            progress_callback=progress_callback,
+        )
 
     return await _execute_pipeline(
         graph,

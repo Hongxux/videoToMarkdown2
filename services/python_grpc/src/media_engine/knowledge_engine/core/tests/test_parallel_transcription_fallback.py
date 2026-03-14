@@ -135,6 +135,65 @@ def test_parallel_failure_then_serial_fallback_success(monkeypatch):
     assert subtitle_text == "A|B"
 
 
+def test_parallel_resource_exhaustion_retries_with_lower_workers(monkeypatch):
+    _patch_common(monkeypatch, {})
+
+    executor_calls = []
+    attempt_futures = [
+        {
+            0: _FutureStub(
+                result_payload={
+                    "segment_id": 0,
+                    "subtitles": [{"start": 0.0, "end": 1.0, "text": "A"}],
+                    "success": True,
+                }
+            ),
+            1: _FutureStub(
+                result_payload={
+                    "segment_id": 1,
+                    "error": "mkl_malloc: failed to allocate memory",
+                    "success": False,
+                }
+            ),
+        },
+        {
+            1: _FutureStub(
+                result_payload={
+                    "segment_id": 1,
+                    "subtitles": [{"start": 10.0, "end": 11.0, "text": "B"}],
+                    "success": True,
+                }
+            ),
+        },
+    ]
+
+    def _build_executor(max_workers):
+        executor_calls.append(max_workers)
+        return _ExecutorStub(attempt_futures[len(executor_calls) - 1])
+
+    monkeypatch.setattr(pt, "_build_process_pool_executor", _build_executor)
+    monkeypatch.setattr(
+        pt,
+        "transcribe_segment",
+        lambda args: pytest.fail("resource retry should complete before serial fallback"),
+    )
+
+    subtitle_text = pt.transcribe_parallel(
+        video_path="demo.mp4",
+        model_size="small",
+        device="cpu",
+        compute_type="int8",
+        language="zh",
+        segment_duration=600,
+        num_workers=2,
+        hf_endpoint=None,
+        config={"whisper": {"parallel": {"enabled": True}}},
+    )
+
+    assert subtitle_text == "A|B"
+    assert executor_calls == [2, 1]
+
+
 def test_parallel_progress_callback_emits_per_completed_segment(monkeypatch):
     futures = {
         0: _FutureStub(

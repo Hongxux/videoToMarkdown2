@@ -554,6 +554,21 @@ class SharedFrameRegistry:
         """返回当前已占用的共享内存字节数。"""
         return self._current_bytes
 
+    @property
+    def frame_count(self) -> int:
+        """返回当前 registry 中仍然存活的 SHM 帧数量。"""
+        return len(self._registry)
+
+    def snapshot(self) -> Dict[str, int]:
+        """导出 registry 当前占用快照，便于监控和清理日志复用。"""
+        with self._lock:
+            return {
+                "frame_count": len(self._registry),
+                "current_bytes": int(self._current_bytes),
+                "max_frames": int(self.max_frames),
+                "max_bytes": int(self.max_bytes),
+            }
+
     def _drop_frame_locked(self, frame_idx: int) -> None:
         """释放指定帧占用的共享内存。"""
         shm_name = self._registry.pop(frame_idx, None)
@@ -731,6 +746,8 @@ class SharedFrameRegistry:
         输出参数?
         - 无（仅产生副作用，日志/写盘/状更新）?"""
         with self._lock:
+            released_frames = len(self._registry)
+            released_bytes = int(self._current_bytes)
             for shm_name, shm in list(self._shms.items()):
                 try:
                     shm.close()
@@ -741,6 +758,12 @@ class SharedFrameRegistry:
             self._shms.clear()
             self._frame_specs.clear()
             self._current_bytes = 0
+        if released_frames > 0 or released_bytes > 0:
+            logger.info(
+                "[SHM Registry] cleanup released_frames=%s released_mb=%.2f",
+                released_frames,
+                released_bytes / (1024.0 * 1024.0),
+            )
 
     def get_shm_ref(self, frame_idx: int) -> Optional[Dict[str, Any]]:
         """
@@ -811,7 +834,12 @@ class VisualFeatureExtractor:
     2) 步2：协调类内方法完成业务理?
     3) 步3：输出理结果并提供用能力?"""
     
-    def __init__(self, video_path: str):
+    def __init__(
+        self,
+        video_path: str,
+        *,
+        shared_frame_registry: Optional[SharedFrameRegistry] = None,
+    ):
         """
         执逻辑?
         1) 解析配置或依赖，准运?
@@ -865,8 +893,13 @@ class VisualFeatureExtractor:
         # 🚀 Phase 4.3: Added visual detector for math/structure awareness
         self.visual_detector = VisualElementDetector()
         
-        # 🚀 Phase 5.0 Performance: Shared Memory Registry
-        self.shm_registry = get_shared_frame_registry()
+        # SharedMemory 注册表默认随 extractor 生命周期释放；只有显式传入时才共享。
+        if shared_frame_registry is None:
+            self.shm_registry = SharedFrameRegistry()
+            self._owns_shm_registry = True
+        else:
+            self.shm_registry = shared_frame_registry
+            self._owns_shm_registry = False
         
         # 🚀 V5: Load CLIP Model (Safe Singleton)
         self.clip_model = _get_clip_model()
@@ -894,6 +927,36 @@ class VisualFeatureExtractor:
             self.video_path,
         )
 
+    def cleanup(self):
+        """释放 extractor 持有的 OpenCV 与 SHM 资源。"""
+        cap = getattr(self, "cap", None)
+        try:
+            if cap is not None and cap.isOpened():
+                cap.release()
+        except Exception:
+            pass
+        finally:
+            self.cap = None
+
+        frame_cache = getattr(self, "_frame_cache", None)
+        if isinstance(frame_cache, dict):
+            frame_cache.clear()
+        analysis_cache = getattr(self, "_analysis_cache", None)
+        if isinstance(analysis_cache, dict):
+            analysis_cache.clear()
+        clip_caches = getattr(self, "_clip_caches", None)
+        if isinstance(clip_caches, dict):
+            clip_caches.clear()
+
+        registry = getattr(self, "shm_registry", None)
+        if bool(getattr(self, "_owns_shm_registry", False)) and registry is not None:
+            try:
+                registry.cleanup()
+            except Exception:
+                pass
+        self.shm_registry = None
+        self._owns_shm_registry = False
+
     def __del__(self):
         """
         执逻辑?
@@ -909,8 +972,10 @@ class VisualFeatureExtractor:
         - 无?
         输出参数?
         - 无（仅产生副作用，日志/写盘/状更新）?"""
-        if hasattr(self, 'cap') and self.cap is not None and self.cap.isOpened():
-            self.cap.release()
+        try:
+            self.cleanup()
+        except Exception:
+            pass
 
     async def extract_frames_async(self, start_sec: float, end_sec: float, sample_rate: int = 1) -> Tuple[List[np.ndarray], List[float]]:
         # 这里主昸了接口异，内部目前仍用同步解?(OpenCV 限制)

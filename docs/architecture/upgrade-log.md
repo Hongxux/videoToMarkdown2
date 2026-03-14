@@ -1,5 +1,149 @@
 ﻿# 架构升级记录
 
+## 2026-03-14 Web submit accept path switches to strict minimal durability, worker-side normalization and dedupe
+- Date: 2026-03-14
+- Background:
+  - `POST /api/mobile/tasks/submit` 与 `POST /api/tasks` 已经去掉了提交线程里的同步探测与同步去重，但提交后到 worker 首次写库前仍存在“仅在内存队列中存活”的窗口。
+  - 该窗口一旦遇到 Java 进程退出，会导致“接口已返回 taskId，但任务尚未 durable accept”的丢单风险。
+- First principles:
+  - “接口返回成功”必须等价于“任务已被 durable accept”，否则 `taskId` 只是临时句柄，不是可靠受理凭证。
+  - 受理路径应只做最小必要同步工作；输入归一化、全量去重、探测都属于消费者职责，不应重新回流到前台线程。
+- Reusable leverage:
+  - 复用既有 `task_runtime_state` 与 `TaskStateRepository.upsertTask(...)`，不引入第二套提交日志或外部消息中间件。
+  - 复用既有启动恢复逻辑，让“先落库、后入内存队列”的任务在进程重启后自动回到 `QUEUED` 投影。
+- Decisions:
+  - Decision 1: `TaskQueueManager.createTaskEntry(...)` 改为“先将 `taskId + userId + raw videoUrl + QUEUED` 持久化，再放入运行时内存队列”。
+  - Decision 2: 首次受理持久化失败不再静默降级为 memory-only submit，而是直接拒绝提交，保证 `200 OK` 的业务语义等于“已可恢复”。
+  - Decision 3: URL/BV/短链归一化、活跃任务去重、历史任务去重继续全部保留在 worker 消费阶段执行，不回到 controller submit path。
+- Call-chain change:
+  - Before: `submit -> create task in memory -> return taskId -> worker normalize/dedupe/probe -> first SQLite upsert`
+  - After: `submit -> SQLite minimal accept snapshot(QUEUED, rawUrl) -> enqueue runtime projection -> return taskId -> worker normalize/dedupe/probe -> upsert same row`
+- Performance comparison:
+  - 测试方式：静态拆分提交同步链路的必经操作，并结合本地编译后的实现确认 submit path 不再调用 `VideoInputNormalizer`、gRPC `GetVideoInfo`、历史去重查询。
+  - 测试数据：
+    - 改造前提交期同步职责：`create task in memory`，durability 依赖 worker 首次写库，进程崩溃窗口内可丢单。
+    - 改造后提交期同步职责：`1 次 SQLite upsert + 1 次内存入队`，同步链路仍为常数级，不包含归一化、去重、probe、历史任务扫描。
+    - 行为收益：`200 OK` 从“已入内存队列”提升为“已 durable accept”，同时保持 worker-side normalization/dedupe 的低阻塞提交语义。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`
+
+## 2026-03-14 Web task submission switches to persisted state machine with async probe stage
+- Date: 2026-03-14
+- Background:
+  - `index.html` 侧任务提交通道已经可以快速返回 `taskId`，但任务状态机只存在于 Java 进程内存，服务重启后运行态不可恢复，`probe` 也没有作为显式阶段进入统一状态机。
+  - 新需求要求 URL 提交后先落 SQLite 与队列，后端消费者先做探测并通过 WebSocket 推送探测结果，再继续后续处理链路。
+- First principles:
+  - “已受理”与“已处理”必须分离；提交接口只负责受理与持久化，不应承担长耗时探测。
+  - 任务控制平面的单一事实源必须是可恢复的状态机，而不是内存 map。
+- Reusable leverage:
+  - 复用既有 `TaskQueueManager` 队列与去重逻辑，不新增第二套消息队列框架。
+  - 复用既有 `/ws/tasks` 与 `TaskWebSocketHandler`，只新增 `taskProbeResult` 消息类型，不新建第二条推送通道。
+  - 复用既有 `PythonGrpcClient.getVideoInfo(...)` 与 `Phase2bArticleLinkService` 探测能力，不重写探测协议。
+- Decisions:
+  - Decision 1: 新增 SQLite `task_runtime_state` 表，持久化任务状态机快照（状态、进度、标题、结果路径、book options、probe payload）。
+  - Decision 2: 任务状态机从 `QUEUED -> PROCESSING` 扩展为 `QUEUED -> PROBING -> PROCESSING -> COMPLETED/FAILED/CANCELLED`。
+  - Decision 3: `TaskProcessingWorker` 在正式处理前执行统一 probe 首阶段；探测成功后回写任务标题/探测 payload，再推进到 `PROCESSING`。
+  - Decision 4: 服务启动时把 SQLite 中的活跃任务恢复为运行时投影；中断在 `PROBING/PROCESSING` 的任务统一回退到 `QUEUED` 重排。
+- Call-chain change:
+  - 调整前：`index.html submit -> /api/mobile/tasks/submit -> TaskQueueManager(memory only) -> worker 直接进入处理链路 -> WebSocket 仅推 taskUpdate`
+  - 调整后：`index.html submit -> /api/mobile/tasks/submit -> TaskQueueManager(memory + SQLite) -> worker PROBING -> WebSocket(taskUpdate + taskProbeResult) -> PROCESSING -> COMPLETED/FAILED/CANCELLED`
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/config/DatabaseInitializer.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskStateRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/TaskProbeService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+
+## 2026-03-14 Android task list category tree and auto-update installer promotion
+- Date: 2026-03-14
+- Background:
+  - The task list already had a recursive tree UI for archived manual collection paths, but auto-classified `categoryPath` values still rendered as a flat card subtitle.
+  - The update flow already had background download, checksum verification, and installer intents, but the ready state still depended on a manual button click.
+- Reusable leverage:
+  - Reused the existing `TaskCollectionSectionUi` recursive tree structure instead of creating a second category list widget.
+  - Reused the existing `ReadyInstallState` persistence and installer launch path instead of adding a new update protocol.
+- Decisions:
+  - Decision 1: unarchived tasks with `categoryPath` now render through the same hierarchical section model used by archived collections.
+  - Decision 2: tasks without `categoryPath` remain visible under an explicit `Uncategorized` section instead of being hidden by the tree conversion.
+  - Decision 3: a ready APK now auto-prompts installation once, while keeping the manual install button as a retry path.
+- Call-chain change:
+  - Before: `task cards -> flat unarchived list + category subtitle only`
+  - After: `task cards -> category tree sections + uncategorized fallback + archived tree sections`
+  - Before: `download complete -> ReadyToInstall -> wait for user tap`
+  - After: `download complete -> ReadyToInstall state -> one-time installer launch -> manual retry only if needed`
+- Verification:
+  - `./gradlew.bat --no-daemon :app:compileDebugKotlin -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Files:
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppUpdateStateStore.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MobileAppAutoUpdateManager.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+
+## 2026-03-14 Android 1.0.16 release packaging and publish
+- Date: 2026-03-14
+- Background:
+  - Reader rendering was changed to semantic blocks, and the fix needed to reach devices through the existing in-app update channel instead of staying in source only.
+  - The current update manifest was still pinned at `versionCode=15 / versionName=1.0.15`, so publishing without a version bump would not trigger an upgrade for already-installed clients.
+- Reusable leverage:
+  - Reuse the existing Android release signing configuration from local Gradle user properties.
+  - Reuse the existing update publication path under `var/app-updates/android/` and the existing PowerShell release scripts.
+- Decisions:
+  - Decision 1: bump Android app version to `versionCode=16` and `versionName=1.0.16`.
+  - Decision 2: build a signed release APK and publish it through the existing Android update admin path.
+- Verification:
+  - `./gradlew.bat :app:assembleRelease -q`
+  - `D:\Android\Sdk\build-tools\36.1.0\apksigner.bat verify --print-certs app/build/outputs/apk/release/app-release.apk`
+  - `D:\Android\Sdk\build-tools\36.1.0\aapt.exe dump badging app/build/outputs/apk/release/app-release.apk`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Files:
+  - `app/build.gradle.kts`
+  - `var/app-updates/android/latest.json`
+  - `var/app-updates/android/releases/16.json`
+  - `var/app-updates/android/releases/apk/videoToMarkdown-16-1.0.16.apk`
+
+## 2026-03-14 Android reader body rendering switched to semantic blocks with legacy metadata migration
+- Date: 2026-03-14
+- Background:
+  - Some articles showed image placeholders early while body text lagged behind, creating the perception that content never loaded.
+  - Investigation confirmed `POST /api/telemetry/ingest` is async telemetry traffic; the real hotspot was the Android reader collapsing the full markdown into one `TextView` render job.
+- First principles and reusable leverage:
+  - First principle: first-frame cost is dominated by render granularity. Long-form markdown should not be parsed, laid out, and decorated as one monolithic `TextView` update.
+  - Leverage 1: reuse `splitSemanticNodesIntoBlocks(...)` instead of inventing a second markdown chunking rule.
+  - Leverage 2: reuse `parseSemanticNodesFromPayload(...)` so the app can preserve semantic nodes already returned by the payload.
+  - Leverage 3: reuse `buildTokenMetaKey(...)`, `scheduleMetaSync(...)`, and the existing meta persistence path to migrate old reading metadata instead of creating a second anchor protocol.
+- Decisions:
+  - Decision 1: `buildReaderNodesFromPayload(...)` now prefers payload semantic nodes and only falls back to a merged single node when needed.
+  - Decision 2: reader body rendering now flows through `splitSemanticNodesIntoBlocks(...) -> LazyColumn` instead of a fixed `md_root -> one TextView` path.
+  - Decision 3: legacy `md_root::start::end` token/anchor keys are projected into new block ids on first read and synced back through the existing meta update path.
+- Call-chain change:
+  - Before: `GET /tasks/{taskId}/markdown -> buildSingleNodeForReader(md_root) -> buildSingleMarkdownReaderBlock(single block) -> one TextView -> markwon.setMarkdown(full article)`
+  - After: `GET /tasks/{taskId}/markdown -> buildReaderNodesFromPayload(parsed nodes first) -> splitSemanticNodesIntoBlocks -> LazyColumn multi-block render -> visible blocks render first`
+- Performance comparison data (mechanism-level; no on-device profiling added in this patch):
+  - Initial Markwon full-render jobs: before `1` per article; after `= semantic block count`, and only visible blocks participate in first-screen rendering.
+  - Legacy metadata migration overhead: before `0`; after `1` in-memory projection plus `1` meta sync only when old `md_root` keys are detected, then back to `0` extra migration cost on later reads.
+  - Test sample: existing `SemanticBlockSplitterTest` covers heading / blockquote / list / code-fence markdown structures and validates stable multi-block splitting instead of a single monolithic block.
+- Test method:
+  - `./gradlew.bat :app:compileDebugKotlin -q`
+  - `./gradlew.bat :app:testDebugUnitTest --tests com.hongxu.videoToMarkdownTest2.SemanticBlockSplitterTest -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Test data:
+  - Code-level sample data comes from `app/src/test/java/com/hongxu/videoToMarkdownTest2/SemanticBlockSplitterTest.kt` and includes heading, blockquote, list, and code-fence combinations.
+  - This patch verifies compile stability, splitter stability, and legacy-key migration compileability first; device-side first-frame profiling remains a follow-up observation task.
+- Files:
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/MainActivity.kt`
+  - `app/src/main/java/com/hongxu/videoToMarkdownTest2/SemanticTopographyReader.kt`
+
 ## 2026-03-12 YouTube 任务信息补全与专用代理
 - 日期：2026-03-12
 - 背景：
@@ -11739,3 +11883,447 @@ body` and task metadata is still present.
   - `services/python_grpc/src/media_engine/knowledge_engine/core/video.py`
   - `docs/architecture/upgrade-log.md`
 
+
+## 2026-03-13 书籍提取切换为 leaf 级任务与页队列调度
+- 时间：
+  - 2026-03-13
+- 背景：
+  - 同一本书会被多次按不同 `x.x.x` leaf 重复提取，原来以整本书或连续区间作为存储粒度，会让不同 leaf 任务共用存储目录、Markdown 文件名和任务卡片，结果互相覆盖。
+  - PDF 提取默认按区间均分 4 份，不适合大量离散 leaf；更合理的模型是“每个 leaf 一个任务”，再让 MinerU 进程池从最小 1 页的任务队列中领取工作。
+- 方案：
+  - 前端探测面板改为按 leaf 提交：每个勾选 leaf 都单独调用 `/tasks/submit`，提交 `sectionSelector + 书名 + leaf 名称 + x.x.x`。
+  - Java 提交链路生成 `storageKey = MD5(leaf名称_x.x.x_书名)`，并把输出目录固定到 `var/storage/storage/<storageKey>`。
+  - `BookMarkdownService` 改为写 leaf 级产物：
+    - Markdown 文件名使用 leaf 名称。
+    - `book_semantic_units.json` 写入 `leaf_title`、`leaf_outline_index`、`leaf_selector`、`storage_key` 以及来源书名。
+  - 任务缓存与前端列表透出 `bookTitle`、`bookLeafTitle`、`bookLeafOutlineIndex`，用小标签展示“书名 · x.x.x”。
+  - Python `book_pdf_extractor.py` 默认改为 1 页一个任务、4 个 worker 从页任务队列领取，不再做均分切段；若设置 `BOOK_PDF_MINERU_PAGE_BATCH_SIZE`，则仍按显式批大小执行。
+- 性能与效果：
+  - 多个 leaf 一次提交时，任务队列可以并行处理多个 leaf，避免整书级 `storageKey` 造成的去重误判。
+  - 单个 leaf 的 MinerU 调度改为页队列抢占后，短页任务不会被均分策略拖慢，进程利用率更稳定。
+  - 本次没有补充新的端到端耗时基准；后续应使用同一本书、相同页数、相同 4 worker 配置，对比“均分切段”和“1 页任务队列”的总耗时与尾延迟。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -m py_compile services/python_grpc/src/server/book_pdf_extractor.py services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=MobileMarkdownControllerTaskListDeduplicateTest test -q` 未能完整执行，因为仓库里已有其他测试类仍依赖旧的 `TaskQueueManager(int)` 构造器，与本次改动无关。
+- 文件：
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/queue/TaskQueueManager.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/TaskProcessingWorker.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookEnhancedPipelineService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCacheService.java`
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+ 
+ 
+## 2026-03-13 PDF TOC 标题映射切换为 TOC 优先
+- 日期：2026-03-13
+- 背景：
+  - PDF 存在 `Preface` 等前置页时，outline 的章节编号会相对 TOC 产生偏移，导致 probe 返回的 leaf section 标题错位。
+  - UI 侧会把错位后的 section 标题渲染到 `1.1.x / 1.2.x` 这类 leaf 上，用户看到的标题与正文不一致。
+- 第一性原理与复用杠杆：
+  - 第一性原理：有 TOC 时，章节/小节标题应以 TOC 为单一真源，而不是与 outline 混用。
+  - 复用杠杆：继续复用现有 `buildPdfTocLeafSections(...)`、`fillProbeResult(...)` 与 book probe payload，只调整标题来源与字段透传。
+- 改动：
+  - `BookMarkdownService.buildPdfTocLeafSections(...)` 改为优先使用 TOC 的 `chapterTitle/sectionTitle`。
+  - `fillProbeResult(...)` 与 `buildBookSectionTreePayload(...)` 补齐 section title。
+  - `VideoProcessingController.buildBookProbeEpisodes(...)` 与 `buildBookSectionTree(...)` 改为优先消费 `sectionTitle`。
+- 结果：
+  - `1.1.x / 1.2.x` 不再被 `Preface` 偏移后的 outline 标题污染。
+  - `From networked systems...`、`Design goals` 等 TOC section title 能稳定落到正确 leaf。
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 使用 `var/Distributed_Systems_4.pdf` 手动调用 `/api/video-info`
+- 影响文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
+  - `services/java-orchestrator/src/test/java/com/mvp/module2/fusion/service/BookMarkdownServiceLeafSectionMappingTest.java`
+
+
+## 2026-03-13 PDF 目录结构从 outline 回切到 TOC 派生
+- 日期：2026-03-13
+- 背景：
+  - `buildPdfBookStructure(...)` 继续偏向 outline 结构时，会把 PDF 前置页偏移、深层 `x.x.x` 路径和正文 section 树混在一起。
+  - 结果是 leaf 结构和 `outlineIndex` 同时漂移，前端看到的章节树会出现混层与跳号。
+- 第一性原理与复用杠杆：
+  - 第一性原理：章节树与页码映射必须由同一份结构导出，否则 section 选择器和页码会同时失真。
+  - 复用杠杆：保留 `buildPdfBookStructureFromToc(...)` 与现有 page map 统计口径，只调整选择优先级。
+- 改动：
+  - `BookMarkdownService.buildPdfBookStructure(...)` 在 TOC 存在时优先走 `buildPdfBookStructureFromToc(...)`。
+  - `pageMapStrategy` 固定到 `toc`。
+  - `outlineIndex` 规范化为 `chapterIndex.sectionIndex` 级别，不再伪装成深层 leaf 路径。
+- 结果：
+  - `pageMapStrategy=toc`
+  - `mismatch_count=0`
+  - `mixed_sections=[]`
+- 验证：
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - 使用 `var/Distributed_Systems_4.pdf` 手动调用 `/api/video-info`
+- 影响文件：
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+
+
+## 2026-03-13 PDF 提取改为异步 dispatch 与 round-robin 页队列
+- 日期：2026-03-13
+- 背景：
+  - `ExtractBookPdf` 表面上是 gRPC aio handler，但阻塞式提取仍然挂在 handler 上，放大了 PDF 长任务对 gRPC 服务线程的占用。
+  - 多个 MinerU 提取任务并发时，worker 分配不均，个别任务会长期独占页队列。
+- 第一性原理与复用杠杆：
+  - 第一性原理：aio handler 只能负责编排，阻塞提取必须下沉到线程或进程池；页级调度必须保证多任务公平。
+  - 复用杠杆：复用现有 `extract_book_pdf_markdown(...)`、共享 MinerU worker 池与 Java deadline 配置。
+- 改动：
+  - `grpc_service_impl.py` 的 `ExtractBookPdf` 改为 `await asyncio.to_thread(...)`。
+  - `book_pdf_extractor.py` 调整共享 worker 默认值与 round-robin 页任务调度。
+  - Java 侧同步收紧 PDF gRPC deadline 计算，避免无界等待。
+- 结果：
+  - gRPC handler 不再被阻塞提取直接卡住。
+  - 多任务并发时，页队列分发更公平，单任务更难独占 MinerU worker。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/server/book_pdf_extractor.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`
+- 影响文件：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/grpc_service_impl.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+
+
+## 2026-03-13 Book PDF 提取阶段接入 hard heartbeat
+- 日期：2026-03-13
+- 背景：
+  - book leaf 在 Python 侧执行长时间 PDF 提取时，Java watchdog 缺少稳定强心跳，容易把正常任务误判为卡死。
+  - 任务排障时也缺少页级/检查点级 heartbeat 证据，难以判断是“仍在跑”还是“已停住”。
+- 第一性原理与复用杠杆：
+  - 第一性原理：长耗时提取阶段必须提供独立于普通进度条的 hard heartbeat。
+  - 复用杠杆：复用 `TaskWatchdogSignalWriter`、`TaskProgressWatchdogBridge` 与现有 watchdog 配置项。
+- 改动：
+  - `book_pdf_extractor.py` 的 `_BookPdfExtractProgressReporter` 新增 hard heartbeat 信号与 `completed/pending/checkpoint` 进度快照。
+  - `VideoProcessingOrchestrator` 为 `book_pdf_extract` 阶段接入 monitor。
+  - `TaskWatchdogFactory` 与 `application.properties` 将 `book_pdf_extract` 纳入强心跳阶段。
+- 结果：
+  - Java 侧能在 PDF 提取阶段持续收到 hard heartbeat。
+  - 日志可稳定反映 `book_pdf_pages_queued -> page_x_done -> completed` 的推进过程。
+- 验证：
+  - `python -m py_compile services/python_grpc/src/server/book_pdf_extractor.py services/python_grpc/src/server/grpc_service_impl.py services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `pytest services/python_grpc/src/server/tests/test_book_pdf_extractor.py -q`
+- 影响文件：
+  - `services/python_grpc/src/server/book_pdf_extractor.py`
+  - `services/python_grpc/src/server/tests/test_book_pdf_extractor.py`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/watchdog/TaskProgressWatchdogBridge.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/TaskWatchdogFactory.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/worker/watchdog/WatchdogSignalCodec.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+
+
+## 2026-03-14 Stage1 step2-step6 去 step barrier + VL task 粒度并发校正
+- 背景
+  - Stage1 原实现同时存在两层 barrier：LangGraph 将 `step2 -> step3 -> step3.5 -> step4 -> step5.6` 串成严格 step 级边界；各 step 内部又通过 `_run_bounded_producer_consumer(...)` 等待整步 batch/window 全量完成后才返回。
+  - 这会把 step2 尾批、step3 尾窗、step3.5 尾窗的长尾串行放大，下游即使已经拿到足量输入，也要等上游整步收口。
+  - 另一处并发理解偏差在 VL：真正控制“同时有多少个任务进入截图优化”的不是 `vl_analysis.parallel_workers`，而是 `screenshot_optimization.task_max_concurrency` 这条 task 粒度总闸门。
+- 改动
+  - 新增 `services/python_grpc/src/transcript_pipeline/streaming_executor.py`，保留 `step1_validate`，将 `step2-step6` 改为单执行器内的流式推进：
+  - `step2` 每产出一个 batch，就立刻尝试触发 `step3` 窗口。
+  - `step3` 每产出可翻译句，就立刻触发 `step3.5`。
+  - `step3.5` 每产出按顺序可提交的句子，就立刻累积到 step4 passthrough 缓冲。
+  - `step4` 继续复用既有 `STEP2_STEP4_MERGED_STATE_FLAG` 兼容路径；若任一 step2 batch 失败，则回退到原 `step4_node -> step5_6_node` 链路，避免错误地把局部 fallback 结果提前喂给下游。
+  - `services/python_grpc/src/transcript_pipeline/graph.py` 仅在“全量 Stage1、无 resume、无 memory checkpoint、step3/step56 overlap 均为 0”的场景切到 `StreamingStage1Graph`，其余场景继续走原 LangGraph，保证断点恢复与特殊窗口模式不被破坏。
+  - `config/module2_config.yaml` 将 `vl_material_generation.screenshot_optimization.task_max_concurrency` 从 `2` 调整为 `3`，明确把 VL 并发改在 task 粒度总闸门，而不是 unit/worker 粒度的 `parallel_workers`。
+- 调用链变化
+  - 旧链路：`run_pipeline -> create_pipeline_graph -> step2 -> step3 -> step3.5 -> step4 -> step5.6`
+  - 新链路：`run_pipeline -> StreamingStage1Graph -> run_stage1_streaming_executor -> OrderedTaskRunner(step2/step3/step3.5/step5.6)`
+  - 兼容边界：
+  - `resume/resume_state/resume_from_step/enable_checkpoints/overlap!=0` 仍走旧链路。
+  - `step2_step4_merged_done=false` 时仍回退到原 `step4_node` 与 `step5_6_node`，不强推流式 passthrough。
+- 性能对比数据
+  - 测试方式：使用合成 20 条字幕数据，`TRANSCRIPT_STEP2_BATCH_SIZE=10`，第一批 step2 人工延迟约 `20ms`，第二批人工延迟约 `200ms`，记录 step3 第一次启动时刻与第二批 step2 完成时刻。
+  - 测试数据：第一批 step2 完成 `36.6ms`，step3 首次启动 `37.5ms`；若沿用旧 barrier，step3 最早只能在第二批 step2 完成后启动，即 `206.7ms`。
+  - 性能收益：在该合成场景里，step3 首次启动相比旧 barrier 提前 `169.2ms`，约减少 `81.9%` 的尾部等待时间。
+- 验证
+  - `pytest services/python_grpc/src/transcript_pipeline/tests/test_streaming_executor.py -q`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py -q`
+  - `python -m py_compile services/python_grpc/src/transcript_pipeline/tests/test_streaming_executor.py services/python_grpc/src/transcript_pipeline/streaming_executor.py services/python_grpc/src/transcript_pipeline/graph.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- 影响文件
+  - `services/python_grpc/src/transcript_pipeline/graph.py`
+  - `services/python_grpc/src/transcript_pipeline/streaming_executor.py`
+  - `services/python_grpc/src/transcript_pipeline/tests/test_streaming_executor.py`
+  - `config/module2_config.yaml`
+
+
+## 2026-03-14 书籍任务分类接入统一分类事实源
+- 背景
+  - 历史 task list 的分类展示完全依赖 `var/storage/category_classification_results.json`，视频任务会在 Python `Phase2B-Category` 末尾写入，但书籍任务不经过这条链路，导致书籍任务长期缺分类。
+  - 同时，历史 storage 里还存在一批 summary 缺失但 task 目录内已有 `category_classification.json` 或 `video_meta.category_path` 的任务，没有统一补录入口。
+  - 书籍 leaf 任务如果直接按 leaf 标题分类，容易脱离整本书上下文，出现 leaf 分类与书籍主分类断裂。
+- 改动
+  - 新增 `StorageTaskCategoryService`：
+    - 统一扫描 `var/storage/storage/*`，补齐历史缺分类任务；
+    - 书籍任务完成后由 `VideoProcessingOrchestrator.processBook(...)` 在写完 `task_metrics_latest.json` 后 best-effort 触发分类；
+    - `MobileMarkdownController.collectTaskViews(...)` 在首页任务列表读取时异步触发一次 backfill，缩短历史缺分类修复延迟。
+  - 扩展 `CategoryClassificationResultsRepository`，新增 Java 侧自动分类结果写入口，继续复用 `category_classification_results.json` 作为单一事实源，并保持 `collectionBindings/archivedTaskPaths` 不被覆盖。
+  - `BookMarkdownService` 新增书籍分类证据提取能力：从书籍源文件抽取书名、前几页、Preface/前言、TOC 标题，供主分类使用；leaf 分类只在书籍主分类前缀下继续细分。
+  - 新增 `prompts/storage-category/*.txt`，将视频分类、书籍主分类、书籍 leaf 分类与 system prompt 全部外置到资源文件，避免 prompt 硬编码进 Java 服务。
+- 调用链变化
+  - 新书籍任务：
+    - `VideoProcessingOrchestrator.processBook(...)`
+    - `writeTaskMetricsReport(...)`
+    - `StorageTaskCategoryService.classifyBookTaskIfNeeded(...)`
+    - `CategoryClassificationResultsRepository.upsertAutomaticResults(...)`
+  - 历史缺分类任务：
+    - `MobileMarkdownController.collectTaskViews(page=0)`
+    - `StorageTaskCategoryService.triggerBackfillAsync()`
+    - `scheduleBackfillMissingClassifications()`
+    - `CategoryClassificationResultsRepository.upsertAutomaticResults(...)`
+- 决策与取舍
+  - 没有新增 gRPC 协议，而是把“书籍分类 + 历史补分类”放在 Java 侧完成：
+    - 收益：避免改 proto、双端生成代码和 Python gRPC 服务签名，落地更快；
+    - 代价：视频主链与历史回填链在实现语言上分叉，但写回事实源保持一致，风险可控。
+  - 合集任务采用“合集标题先定主分类、多个小级同目录继承”的策略：
+    - 若任务已绑定 `collectionId`，优先按 `collection.title` 判定合集主分类；
+    - 同合集下若任一小级已有分类，其它小级直接继承，不再重复调用模型；
+    - 若整个合集都未分类，则按合集标题判一次，并把当前可定位到的小级任务统一写成同一 `categoryPath`。
+  - 书籍 leaf 采用“两段式”分类：
+    - 先判定整本书主分类；
+    - 再在该主分类前缀下细分 leaf；
+    - 这样可以保证 leaf extends 书籍分类，而不是反过来让 leaf 标题定义整本书主题。
+- 验证
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+- 影响文件
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/StorageTaskCategoryService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/CategoryClassificationResultsRepository.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/BookMarkdownService.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/service/VideoProcessingOrchestrator.java`
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/MobileMarkdownController.java`
+  - `services/java-orchestrator/src/main/resources/application.properties`
+  - `services/java-orchestrator/src/main/resources/prompts/storage-category/system-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/storage-category/video-user-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/storage-category/book-root-user-zh.txt`
+  - `services/java-orchestrator/src/main/resources/prompts/storage-category/book-leaf-user-zh.txt`
+
+## 16. 2026-03-14 Screenshot Optimization 内存压力降级到 I 帧链路
+- 背景
+  - Phase2A 的 screenshot streaming 链路原本是 `OpenCV 顺序读帧 -> SharedFrameRegistry -> worker 质量评分`。
+  - 当视频分辨率较高或 NumPy/OpenCV 瞬时内存紧张时，`cap.read()` 与 worker 内部 `float32` 中间数组都可能触发 OOM。
+  - 原实现一旦失败，会退回 `_optimize_screenshot_timestamps(...)` 这条更重的旧 OpenCV 链路，降级方向错误。
+- 本次升级
+  - 把 screenshot optimization 正式扩展为两条可切换链路：
+    - `cv_streaming/cv_batch`：保留原有 OpenCV + SHM 路径；
+    - `iframe_only`：使用 `ffprobe` 在请求窗口内定位 I 帧，仅回写时间戳，不在 Python 侧持有帧数组。
+  - `VLMaterialGenerator` 新增配置：
+    - `screenshot_optimization.iframe_only_mode`
+    - `screenshot_optimization.iframe_fallback_on_memory_pressure`
+    - `screenshot_optimization.iframe_probe_max_concurrency`
+  - 当前默认值切到 `iframe_only_mode=true`，让线上环境直接只走 I 帧映射，优先保稳定性。
+- 调用链变化
+  - 正常 I 帧模式：
+    - `VLMaterialGenerator._optimize_screenshots_parallel(...)`
+    - `VLMaterialGenerator._optimize_screenshots_by_iframe_only(...)`
+    - `vl_ffmpeg_utils._probe_iframe_timestamps(...)`
+  - streaming 内存压力降级：
+    - `flow_ops.optimize_screenshots_streaming_pipeline(...)`
+    - `generator._is_memory_pressure_error(...)`
+    - `generator._optimize_screenshots_by_iframe_only(...)`
+  - 预取异常清理：
+    - `VLMaterialGenerator._prefetch_union_frames_to_registry_sync(...)`
+    - `registry.cleanup()`
+- 设计取舍
+  - 没有简单继续缩小 `prefetch_target_height/max_frames` 作为唯一修复：
+    - 收益：避免只是把 OOM 触发点向后拖延；
+    - 代价：I 帧模式在某些视频上截图精度可能不如全帧 CV 评分，但当前目标是先消除整链失败与 SHM 残留。
+  - chunk 级 OOM 只降级当前 chunk，而不是整批任务直接失败：
+    - 收益：局部异常不会放大成全局失败；
+    - 代价：同一批请求里可能同时存在 CV 结果与 I 帧结果，但对下游契约没有破坏。
+- 验证
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py::test_prefetch_registry_cleans_up_when_read_raises services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py::test_streaming_pipeline_falls_back_to_iframe_only_on_prefetch_memory_pressure services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_optimize_screenshots_parallel_uses_iframe_only_mode_when_forced services/python_grpc/src/content_pipeline/tests/test_vl_tutorial_flow.py::test_apply_screenshot_optimization_with_bypass_only_skips_explicit_requests -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 17. 2026-03-14 SHM 生命周期从“主链可控”扩展到“旁路与缓存也可控”
+- 背景
+  - 前一轮修复已经把 screenshot streaming 主链的 chunk 级 SHM 生命周期收紧，但旁路视觉分析与 extractor 缓存仍有遗漏。
+  - 具体遗漏点有两类：
+    - 直接消费 SHM 帧引用的旁路函数缺少 `finally` 关句柄；
+    - `VisualFeatureExtractor` 与 gRPC `video_tools` 缓存缺少成组释放入口。
+- 本次升级
+  - `VisualElementDetector.analyze_frame(...)` 改为在异常路径也 `shm.close()`。
+  - `VisualFeatureExtractor` 引入明确的 SHM 所有权模型：
+    - 默认创建本地 `SharedFrameRegistry`；
+    - 仅在显式传入 `shared_frame_registry` 时共享；
+    - 新增 `cleanup()`，统一释放本地 registry、OpenCV capture 与内部缓存。
+  - `grpc_service_impl.py` 新增 `cleanup_video_tools()`，在服务级收尾时连同 screenshot selector 缓存一起释放 extractor 资源。
+- 调用链变化
+  - 旁路 SHM 分析：
+    - `VisualElementDetector.analyze_frame(...)`
+    - `finally -> shm.close()`
+  - extractor 生命周期：
+    - `VisualFeatureExtractor.__init__(..., shared_frame_registry=None)`
+    - `VisualFeatureExtractor.cleanup()`
+    - `VisualFeatureExtractor.__del__()`
+  - gRPC 服务收尾：
+    - `self.resources.cleanup_visual_extractors()`
+    - `self.resources.cleanup_video_tools()`
+- 设计取舍
+  - 没有继续把所有 extractor 强行挂回全局 registry：
+    - 收益：把大部分 SHM 生命周期收回到对象本地，释放更及时；
+    - 代价：跨 extractor 的 SHM 复用减少，但当前优先级是稳定释放，而不是最大化复用。
+- 验证
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/content_pipeline/phase2a/vision/visual_element_detection_helpers.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_visual_shm_lifecycle.py services/python_grpc/src/content_pipeline/tests/test_shared_frame_registry_budget.py services/python_grpc/src/content_pipeline/tests/test_worker_shm_release.py -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 18. 2026-03-14 SHM 运行态观测补齐
+- 背景
+  - 前两轮修复已经把 SHM 生命周期本身收紧，但运行时还缺少足够的观测口径，难以从日志直接判断：
+    - 某个 chunk 预取后实际占了多少 SHM；
+    - cleanup 前还有多少帧/多少字节未释放；
+    - worker 侧当前线程附着了多少 SHM 句柄。
+- 本次升级
+  - `SharedFrameRegistry` 新增快照能力：
+    - `frame_count`
+    - `snapshot()`
+  - `flow_ops.py` 的 prefetch monitor 增补 SHM 指标：
+    - `shm_frames`
+    - `shm_mb`
+    - `shm_budget_mb`
+  - `flow_ops.py` 在 batch / streaming 的 chunk cleanup 前新增 `[SHM ChunkCleanup]` 日志，明确记录 cleanup 原因与释放前状态。
+  - `worker.py` 在 `cv_validation / screenshot_selection / coarse_fine_screenshot` 的 finally 里记录：
+    - `used`
+    - `attached_before`
+    - `attached_after`
+  - `release_attached_shm_refs(...)` 增加统一 release 汇总日志，便于判断 worker 句柄是否按预期归零。
+- 设计取舍
+  - 没有在 `register_frame()` 这种高频热点上打 `INFO`，避免日志洪泛。
+  - 当前只保留 chunk 级与 task 级日志：
+    - 好处是足够排障；
+    - 代价是无法细到“每一帧”的生命周期，但那种粒度更适合临时 debug，不适合默认开启。
+- 验证
+  - `python -m py_compile services/python_grpc/src/content_pipeline/phase2a/materials/flow_ops.py services/python_grpc/src/content_pipeline/phase2a/vision/visual_feature_extractor.py services/python_grpc/src/vision_validation/worker.py services/python_grpc/src/server/grpc_service_impl.py`
+  - `pytest services/python_grpc/src/content_pipeline/tests/test_visual_shm_lifecycle.py services/python_grpc/src/content_pipeline/tests/test_vl_material_prefetch.py services/python_grpc/src/content_pipeline/tests/test_worker_shm_release.py -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 19. 2026-03-14 远端视频探测后台化，解除下载起跑阻塞
+- 背景
+  - 远端视频任务原先采用 `PROBING -> PROCESSING` 串行启动：只有 `GetVideoInfo` 完成，Java worker 才会进入下载。
+  - 用户在 YouTube 样本 `https://www.youtube.com/watch?v=X_DdIXrmWOo` 上观察到明显空转，说明探测耗时正在直接吞掉下载启动时间。
+- 本次升级
+  - `TaskProcessingWorker` 新增“远端视频 probe 后台化”分支：
+    - 先用 `markProbeFinished(...)` 把任务推进到 `PROCESSING`；
+    - 再以 `CompletableFuture` 在后台执行 `taskProbeService.probeTask(task)`；
+    - probe 成功后只补写 `title/probePayload`，并复用现有任务更新广播。
+  - 同步 probe 仍保留给书籍/PDF/文章链接等非视频下载任务，确保 book/article pipeline 的前置判断不被破坏。
+  - 新增 `TaskProcessingWorkerProbeConcurrencyTest`，锁住“probe 尚未完成时下载已经启动”的关键行为。
+- 设计取舍
+  - 没有删除 `GetVideoInfo`：合集结构、分集列表、封面等 UI 元数据仍然需要 probe 提供，当前只是把它从关键路径挪到旁路。
+  - 没有重写主状态机：继续复用现有 `PROBING/PROCESSING` 转换，只在远端视频任务上提前完成状态推进，降低改动面和回归风险。
+- 性能对比
+  - 测试方式
+    - 真实样本日志：观察用户提供的 YouTube 任务日志中 `GetVideoInfo` 与 `DownloadVideo` 的时间差。
+    - 定向回归测试：在 `TaskProcessingWorkerProbeConcurrencyTest` 中人为阻塞 probe，验证 `processVideoDownloadPhase(...)` 是否先于 probe 释放启动。
+  - 测试数据
+    - 变更前：`GetVideoInfo` `2026-03-14 15:38:27.059` -> `DownloadVideo` `2026-03-14 15:39:17.311`，下载启动前额外等待约 `50.252s`。
+    - 变更后：定向回归测试中，在 probe latch 未释放前就已经观测到下载阶段启动，说明下载关键路径不再承担 probe 等待时间，额外等待从“完整 probe 耗时”降到 `0s` 级关键路径开销。
+- 验证
+  - `mvn -f services/java-orchestrator/pom.xml -Dtest=TaskProcessingWorkerProbeConcurrencyTest -DargLine="-Djdk.attach.allowAttachSelf=true -XX:+StartAttachListener" test -q`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+
+## 20. 2026-03-14 并行转录资源不足自动降并发重试
+- 背景
+  - 现有并行转录已经具备静态资源规划，会根据任务段数、CPU 预算和内存预算计算 `effective_workers`。
+  - 但 CPU 模式下的 `faster_whisper` 峰值内存受模型、beam search、MKL 工作区和系统瞬时可提交内存共同影响，静态预算无法完全覆盖运行时波动。
+- 本次升级
+  - `parallel_transcription.py` 新增资源不足信号识别：
+    - `mkl_malloc`
+    - `failed to allocate memory`
+    - `out of memory`
+    - `MemoryError`
+    - `std::bad_alloc`
+  - 并行执行从“一次性提交全部任务，然后直接串行补偿失败段”升级为“批次执行 -> 识别资源失败 -> 自动降低 worker 数重试失败段 -> 最后再串行补偿”。
+  - 新增 `_execute_parallel_batch(...)`、`_is_resource_exhaustion_error(...)`、`_next_lower_worker_count(...)`，把运行时资源反馈显式接回调度层。
+  - 新增 `test_parallel_resource_exhaustion_retries_with_lower_workers`，锁住 `2 -> 1 worker` 的降级重试行为。
+- 设计取舍
+  - 没有直接重算整套 `build_parallel_plan(...)`，而是仅对“本轮失败且可判定为资源不足”的剩余段降并发重试，避免重复处理已经成功的段。
+  - 没有删除串行补偿；它仍然是最终兜底，负责处理降到 `1 worker` 后仍失败的段或非资源型失败。
+  - 当前降级策略采用逐级收缩 worker 数，而不是一次性跳到 `1 worker`，优先保留尽可能多的吞吐。
+- 验证
+  - `pytest services/python_grpc/src/media_engine/knowledge_engine/core/tests/test_parallel_transcription_fallback.py -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+
+## 21. 2026-03-14 `/ws/tasks` 统一可靠传输层升级
+- 背景
+  - 现有任务状态链路同时承载网页端 `index.html`、Android 主界面、合集详情页与前台提交服务的实时状态更新。
+  - 旧实现只有网页端具备基础重连；服务端没有可靠消息序列、客户端没有统一 ACK/补发与应用层心跳，断网抖动后容易出现“连接已半死但状态面板还以为在线”与“终态消息错过后只能等下次全量刷新”的问题。
+- 本次升级
+  - 服务端 `TaskWebSocketHandler` 新增可靠消息信封：
+    - 对重要下行消息统一附加 `messageId`、`requiresAck`、`sentAt`。
+    - 新增 `ack` 动作，按连接维护累计 ACK 水位与待确认消息集合。
+    - 以 `userId` 维度维护有界可靠消息缓冲，连接重建时客户端可通过 `lastReceivedMessageId` 请求补发。
+  - 服务端新增应用层心跳配套能力：
+    - 支持客户端 `ping`，回 `pong`，并把客户端上报的 `lastReceivedMessageId` 一并视为累计确认。
+    - 通过定时清理关闭长时间未上报心跳的半开连接，避免僵尸 session 长期残留在订阅表。
+  - 网页端任务状态连接升级为可靠客户端：
+    - WebSocket 建连统一携带 `userId`、`streamKey`、`lastReceivedMessageId`。
+    - 处理完可靠消息后立即回 ACK，并把最新 offset 持久化到本地存储，供刷新/重连后补发。
+    - 新增应用层心跳与 pong 超时检测；一旦进入半死状态，主动 `close()` 并按 `1s/2s/4s/8s...` 指数退避重连。
+    - 继续保留 `/tasks/changes` 的 REST 增量对账作为真相源兜底，形成“WebSocket 低延迟通知 + REST 周期校准”的双层同步模型。
+  - Android 端同步引入统一可靠客户端：
+    - `TaskRealtimeClient`、`CollectionRealtimeClient`、`TaskSubmissionForegroundService` 统一接入 ACK、offset 恢复、应用层心跳与指数退避重连。
+    - 不再让前台提交服务在一次短暂断链后直接失败，而是先尝试恢复同一任务订阅。
+- 设计取舍
+  - 没有切换到 SSE：当前链路仍需要 `subscribe/unsubscribe/cancel/subscribeCollection` 等控制面动作，保留 WebSocket 能避免再拆一套反向控制接口。
+  - 消息缓冲按 `userId` 收敛，而不是按单个 session 单独建离线箱，目的是在断线重连时能直接沿用现有 `userId` 身份补发，不额外引入 session 恢复票据。
+  - 缓冲采用“有界消息窗口 + 客户端 offset 恢复”，不依赖 ACK 立即删除消息；这样可以兼容同一 `userId` 下多个并发连接的不同恢复进度。
+  - 网页端继续保留 REST 增量刷新，而不是把“真相同步”完全交给 WebSocket，避免缓冲窗口被淘汰时前端失去自愈能力。
+- 性能与稳定性收益
+  - 连接恢复从“等浏览器/TCP 最终感知断线后再人工刷新”收敛为“客户端心跳超时即主动重连”。
+  - 任务终态、标题补写、元数据同步等关键消息从“尽力而为”升级为“ACK + offset 恢复”的可补发语义，弱网下丢消息概率显著下降。
+  - 重连采用指数退避而不是紧循环重试，降低服务端在批量弱网设备同时抖动时的雪崩风险。
+- 验证
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - Android Kotlin 编译尝试：
+    - `.\\gradlew.bat :app:compileDebugKotlin -q`
+    - `.\\gradlew.bat :app:compileDebugKotlin --no-daemon -Dkotlin.compiler.execution.strategy=in-process -q`
+    - 当前受宿主机内存/Gradle daemon 启动限制阻塞，未拿到最终 Kotlin 编译结果；已通过代码路径审阅确认统一客户端已接入 ACK、心跳、offset 与指数退避逻辑。
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`（待本次文档补写后执行）
+
+## 22. 2026-03-14 任务状态 WebSocket 收敛为快照模型
+- 背景
+  - 在进一步梳理任务状态同步语义后确认：普通任务状态只要求“尽快拿到最新真相”，不要求逐条重放历史状态变迁。
+  - 当前系统已经具备两层真相源：
+    - 运行时状态通过 `TaskStateRepository/task_runtime_state` 持久化。
+    - 任务列表与合集列表通过 `/tasks`、`/tasks/changes` 的 REST 聚合视图做对账。
+  - 因此为普通任务状态保留 ACK/offset/补发队列，会增加复杂度，但不能带来等价收益。
+- 本次升级
+  - 服务端 `TaskWebSocketHandler` 对普通任务状态改回“直接推送当前快照”：
+    - `taskUpdate`
+    - `taskMetaSync`
+    - `taskProbeResult`
+    - `taskDeduped`
+    - `cancelResult`
+  - 服务端保留应用层 `ping -> pong` 与半开连接清理，但不再为任务状态维护离线补发队列，也不再在建连时按 `lastReceivedMessageId` 重放任务消息。
+  - 网页端任务状态连接保留：
+    - 心跳
+    - 半开检测
+    - 指数退避重连
+    - 重连成功后立即执行一次任务列表增量对账
+  - 网页端不再依赖任务状态消息的 `messageId/ACK/offset` 恢复；最新状态由“当前任务订阅快照 + REST 对账”共同保证。
+  - Android 端保持统一客户端封装不变，但由于服务端不再为任务状态附加 `messageId`，任务状态流会自然退化为“快照消费 + 心跳重连”。
+- 设计取舍
+  - 普通任务状态采用快照模型，是因为其用户价值来自“当前状态是否正确”，而不是“中间每一步是否可回放”。
+  - `subscribe(taskId)` 本身已经具备“回当前快照”能力，因此当前任务详情在重连后不需要额外补发历史状态。
+  - 任务列表天然更适合 REST 对账：列表合并、排序、去重、分类绑定这些语义，本来就不是单条 WebSocket 消息能单独保证的。
+  - 这次没有继续把 `phase2b` 文本流并入快照模型；它仍然是另一类问题，因为 chunk 流的用户语义与普通任务状态不同。
+- 验证
+  - `powershell.exe -Command "mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q"`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`

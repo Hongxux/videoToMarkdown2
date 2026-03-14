@@ -52,6 +52,7 @@ class CollectionFeatureRepository(
     private val api = CollectionApiFactory.create(apiBaseUrl)
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val realtimeClient = CollectionRealtimeClient(
+        context = context.applicationContext,
         wsEndpoint = CollectionApiFactory.toWebSocketUrl(apiBaseUrl),
         userId = mobileUserId,
         onTaskUpdate = { taskId, status, statusMessage ->

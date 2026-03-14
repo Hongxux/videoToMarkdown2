@@ -22,16 +22,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
 import kotlin.math.roundToInt
 
 class TaskSubmissionForegroundService : Service() {
@@ -411,90 +405,78 @@ class TaskSubmissionForegroundService : Service() {
             throw IllegalStateException("mobile user id is empty")
         }
 
-        val wsEndpoint = CollectionApiFactory.toWebSocketUrl(MobileApiEndpointStore.resolveApiBaseUrl(applicationContext))
-        val request = Request.Builder()
-            .url("$wsEndpoint?userId=${Uri.encode(normalizedUserId)}")
-            .build()
+        val wsEndpoint = CollectionApiFactory.toWebSocketUrl(
+            MobileApiEndpointStore.resolveApiBaseUrl(applicationContext)
+        )
         val deferred = CompletableDeferred<TaskRealtimeState>()
-        val client = OkHttpClient.Builder()
-            .connectTimeout(10L, TimeUnit.SECONDS)
-            .readTimeout(0L, TimeUnit.MILLISECONDS)
-            .build()
-
-        val listener = object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                val subscribe = JSONObject()
-                    .put("action", "subscribe")
-                    .put("taskId", normalizedTaskId)
-                webSocket.send(subscribe.toString())
-            }
-
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                val payload = runCatching { JSONObject(text) }.getOrNull() ?: return
-                if (payload.optString("type").trim() != "taskUpdate") {
-                    return
-                }
-                if (payload.optString("taskId").trim() != normalizedTaskId) {
-                    return
-                }
-                val status = payload.optString("status").trim()
-                val statusMessage = payload.optString("message").trim()
-                val progress = payload.optDouble("progress", 0.0)
-
-                val phaseText = resolvePhaseText(
-                    status = status,
-                    statusMessage = statusMessage,
-                    progress = progress
+        val realtimeClient = ReliableTaskWebSocketClient(
+            context = applicationContext,
+            wsEndpoint = wsEndpoint,
+            userId = normalizedUserId,
+            clientLabel = "TaskSubmitRealtime",
+            streamKeyProvider = {
+                ReliableTaskWebSocketClient.buildStableStreamKey(
+                    "android",
+                    "foreground",
+                    "task",
+                    normalizedUserId,
+                    normalizedTaskId
                 )
-                val progressPercent = normalizeProgressPercent(progress)
-                TaskSubmissionRegistry.upsert(
-                    ActiveSubmissionHint(
-                        workId = submissionId,
-                        taskId = normalizedTaskId,
+            },
+            buildReplayActions = {
+                listOf(
+                    JSONObject()
+                        .put("action", "subscribe")
+                        .put("taskId", normalizedTaskId)
+                )
+            },
+            onJsonMessage = { payload ->
+                if (payload.optString("type").trim() == "taskUpdate"
+                    && payload.optString("taskId").trim() == normalizedTaskId
+                ) {
+                    val status = payload.optString("status").trim()
+                    val statusMessage = payload.optString("message").trim()
+                    val progress = payload.optDouble("progress", 0.0)
+
+                    val phaseText = resolvePhaseText(
+                        status = status,
+                        statusMessage = statusMessage,
+                        progress = progress
+                    )
+                    val progressPercent = normalizeProgressPercent(progress)
+                    TaskSubmissionRegistry.upsert(
+                        ActiveSubmissionHint(
+                            workId = submissionId,
+                            taskId = normalizedTaskId,
+                            title = title,
+                            phaseText = phaseText,
+                            progressPercent = progressPercent,
+                            running = !isTerminalStatus(status),
+                            failed = false,
+                            failedMessage = ""
+                        )
+                    )
+                    notifyProgress(
+                        notificationId = notificationId,
                         title = title,
                         phaseText = phaseText,
                         progressPercent = progressPercent,
-                        running = !isTerminalStatus(status),
-                        failed = false,
-                        failedMessage = ""
+                        taskId = normalizedTaskId
                     )
-                )
-                notifyProgress(
-                    notificationId = notificationId,
-                    title = title,
-                    phaseText = phaseText,
-                    progressPercent = progressPercent,
-                    taskId = normalizedTaskId
-                )
-                if (!deferred.isCompleted && isTerminalStatus(status)) {
-                    deferred.complete(
-                        TaskRealtimeState(
-                            status = status,
-                            statusMessage = statusMessage,
-                            progress = progress
+                    if (!deferred.isCompleted && isTerminalStatus(status)) {
+                        deferred.complete(
+                            TaskRealtimeState(
+                                status = status,
+                                statusMessage = statusMessage,
+                                progress = progress
+                            )
                         )
-                    )
+                    }
                 }
             }
+        )
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                if (!deferred.isCompleted) {
-                    deferred.completeExceptionally(
-                        IllegalStateException(t.message ?: "task websocket failure", t)
-                    )
-                }
-            }
-
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                if (!deferred.isCompleted) {
-                    deferred.completeExceptionally(
-                        IllegalStateException("task websocket closed before terminal status")
-                    )
-                }
-            }
-        }
-
-        val socket = client.newWebSocket(request, listener)
+        realtimeClient.connect()
         try {
             return withTimeout(TASK_REALTIME_AWAIT_TIMEOUT_MS) {
                 deferred.await()
@@ -502,18 +484,9 @@ class TaskSubmissionForegroundService : Service() {
         } catch (timeout: TimeoutCancellationException) {
             throw IllegalStateException("wait task terminal status timeout")
         } finally {
-            runCatching {
-                val unsubscribe = JSONObject()
-                    .put("action", "unsubscribe")
-                    .put("taskId", normalizedTaskId)
-                socket.send(unsubscribe.toString())
-            }
-            socket.close(1000, "task terminal received")
-            client.dispatcher.executorService.shutdown()
-            client.connectionPool.evictAll()
+            realtimeClient.shutdown()
         }
     }
-
     private fun cancelSubmission(submissionId: String) {
         val taskId = submissionTaskIds[submissionId]
         if (!taskId.isNullOrBlank()) {

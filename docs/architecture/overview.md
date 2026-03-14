@@ -1,209 +1,251 @@
 ﻿# 系统架构概览
 
-更新日期：2026-02-18  
+更新日期：2026-03-14  
 范围：`D:/videoToMarkdownTest2`
 
-## 1. 系统目标与边界
-- 目标：将视频内容转换为结构化知识文档（Markdown/JSON），并沉淀可复用素材（截图/视频片段）。
-- 输入：`videoUrl`、本地视频路径或浏览器直传视频文件、任务优先级、输出目录、可选标题。
-- 输出：知识文档、素材目录（`screenshots/`、`clips/`）以及阶段性中间产物（`semantic_units`、`step2/step6` 等）。
+## 1. 系统定位
+- 目标：把远端视频、本地视频、书籍文件和文章链接转换为可阅读、可编辑、可归档的 Markdown/JSON 知识产物，并沉淀截图、视频片段、分类、卡片与阅读遥测。
+- 核心输入：
+  - 远端链接或分享文本：视频 URL、BV、短链、文章链接。
+  - 本地输入：浏览器上传文件、本地视频路径、本地书籍文件（`pdf`、`epub`、`txt`、`md`）。
+  - 可选控制信息：任务优先级、输出目录、书籍章节/小节范围、合集信息、移动端上下文。
+- 核心输出：
+  - 任务状态与进度。
+  - 结构化文档：`enhanced_output.md`、`result.json`、`video_meta.json`。
+  - 素材与中间产物：`assets/`、`intermediates/`、语义单元、任务指标。
+  - 辅助资产：分类汇总、概念卡片、阅读遥测、Android 更新清单。
 - 职责边界：
-  - Java 编排层负责任务生命周期、跨阶段调度、进度回传、素材工程化执行。
-  - Python 推理层负责转写、语义处理、视觉校验、富文本组装与模型调用。
+  - Java 编排层负责控制平面：受理、持久化状态机、去重、探测、跨阶段编排、实时推送、移动端接口、卡片/分类/更新/遥测聚合。
+  - Python gRPC 层负责计算平面：下载、转录、Stage1、Phase2A/2B、视觉链路、提示词加载、模型调用与进程级资源管理。
+  - Web PWA 与 Android App 共享同一组 `/api/mobile` 与 `/ws/tasks` 能力。
+  - 企业微信机器人是可选外部入口，不属于默认 Docker 启动必需组件。
 
-## 2. 目录与数据落盘约束
-- 运行产物统一落盘：`var/storage/{url_hash}/...`。
-- 历史兼容读取：允许读取旧路径 `storage/{url_hash}`，但新任务不再写入旧路径。
-- 关键约束：同一任务全链路必须复用同一个 `url_hash`，避免跨目录碎片化与状态漂移。
-
-## 3. 高层架构
+## 2. 高层拓扑
 ```mermaid
 flowchart LR
-    Client -->|REST /api| JavaOrchestrator
-    Client -->|WebSocket /ws/tasks| JavaOrchestrator
-    WeComUser -->|企业微信内部应用消息| WeComCallback
-    WeComCallback -->|HTTP /api/tasks + /api/tasks/{id}| JavaOrchestrator
-    WeComCallback -->|企业微信发送接口| WeComUser
-    JavaOrchestrator -->|gRPC| PythonGrpcService
-    JavaOrchestrator -->|JavaCV/FFmpeg| AssetExtractor
-    PythonGrpcService -->|Whisper/LLM/Vision| ExternalProviders
-    PythonGrpcService -->|Stage1/Phase2| Storage[(var/storage/{url_hash})]
+    Web["Web PWA\nstatic/index.html"]
+    Android["Android App\napp/"]
+    WeCom["WeCom Bot\napps/wecom-bot"]
+    Java["Java Orchestrator\nservices/java-orchestrator"]
+    Py["Python gRPC\nservices/python_grpc"]
+    DB["SQLite\nvar/state/collections.db"]
+    Storage["任务产物\nvar/storage/storage/{storage_key}"]
+    Cards["概念卡片\nvar/cards"]
+    Telemetry["阅读遥测\nvar/telemetry"]
+    Updates["Android 更新\nvar/app-updates/android"]
+    Providers["Whisper / yt-dlp / DeepSeek / DashScope / Vision / OCR / FFmpeg"]
+
+    Web -->|REST /api/mobile\nWebSocket /ws/tasks| Java
+    Android -->|REST /api/mobile\nWebSocket /ws/tasks| Java
+    WeCom -->|REST /api/tasks| Java
+    Java -->|gRPC| Py
+    Java --> DB
+    Java --> Storage
+    Java --> Cards
+    Java --> Telemetry
+    Java --> Updates
+    Py --> Storage
+    Py --> Providers
 ```
 
-## 4. 核心组件
-- API/编排层（Java）
-  - 路径：`services/java-orchestrator/`
-  - 控制器：`services/java-orchestrator/src/main/java/com/mvp/module2/fusion/controller/VideoProcessingController.java`
-  - 核心编排：`service/VideoProcessingOrchestrator`
-  - 调度与资源治理：`queue/TaskQueueManager`、`worker/TaskProcessingWorker`、`service/AdaptiveResourceOrchestrator`、`service/DynamicTimeoutCalculator`、`scheduler/LoadBasedScheduler`
-  - 可靠性：`resilience/`（熔断、重试）
-  - 通信：`grpc/PythonGrpcClient`、`websocket/TaskWebSocketHandler`
-  - 素材工程化：`service/JavaCVFFmpegService`
-- 移动端 Markdown 展示与任务提交：`controller/MobileMarkdownController` + `static/index.html`
-  - 统一静态入口：`static/index.html` 直接承载主页面；历史入口 `/mobile-markdown.html` 由 `WebConfig` 服务端重定向到 `/index.html`
-    - 聚合运行中任务与 `var/storage/storage` 历史任务（历史任务以 `storage:{目录名}` 作为外部任务ID）
-    - 提供任务列表与 Markdown 正文读取/写回（支持段落级编辑后的整文保存）
-    - 提供任务目录内图片/视频等资源文件预览
-    - 提供移动端任务提交（URL/BV 直提 + 本地视频文件上传，调用 `/api/mobile/tasks/submit` 与 `/api/mobile/tasks/upload`）
-  - 前端运行时模块（无构建链，按脚本顺序加载）：
-    - `static/lib/mobile-view-navigation.js`：视图导航状态机与边缘返回手势。
-    - `static/lib/mobile-markdown-gestures.js`：段落手势交互与滑动动作编排。
-    - `static/lib/mobile-performance-utils.js`：双帧调度、JSON Worker 解析池、滚动动效绑定器。
-    - `static/lib/mobile-highlight-engine.js`：概念高亮引擎（术语索引、视口增量调度、主线程分帧执行）。
-    - `static/lib/mobile-highlight-worker.js`：概念高亮匹配 Worker（超大词库场景的可选下沉通道）。
-- 移动端 Android 更新能力：`controller/MobileAppUpdateController` + `service/AndroidAppUpdateService` + `service/AndroidAppUpdateAdminService`
-  - 版本检查：`GET /api/mobile/app/update/check`，输入 `versionCode/versionName`，返回 `hasUpdate/forceUpdate/downloadUrl` 等字段。
-  - APK 下载：`GET /api/mobile/app/update/apk`，按 manifest 解析本地 APK 并流式返回，支持 DownloadManager 直连下载。
-  - 发布清单：默认读取 `var/app-updates/android/latest.json`，后端通过配置项统一管理下载基址与端点路径。
-  - 发布后台：`POST /api/mobile/app/update/admin/upload` 支持上传 APK 并自动生成版本清单，`POST /api/mobile/app/update/admin/publish` 一键切换 latest，`POST /api/mobile/app/update/admin/rollback` 一键回滚。
-  - 鉴权模型：管理端接口统一校验 `X-Update-Admin-Token`（或 `Authorization: Bearer`），token 由后端配置项注入。
-- 企业微信消息入口（Python）
-  - 启动入口：`apps/wecom-bot/main.py`
-  - 服务实现：`services/python_grpc/src/apps/bot/wecom_bot.py`
-  - 职责：
-    - 处理 `GET/POST /wechat/callback` 的签名校验与 AES 解密
-    - 将 URL 指令映射为任务并串行执行（单工作线程）
-    - 失败自动重试 2 次（总尝试 3 次）
-    - 将任务状态回传到发起人的企业微信个人聊天
-- 推理/处理层（Python）
-  - gRPC 启动入口：`apps/grpc-server/main.py`
-  - 服务与依赖预检：`services/python_grpc/src/server/`
-  - 转写与知识引擎：`services/python_grpc/src/media_engine/knowledge_engine/`
-  - Stage1 文本处理：`services/python_grpc/src/transcript_pipeline/`
-  - Phase2A/2B 语义与富文本：`services/python_grpc/src/content_pipeline/`
-  - CV 批处理执行：`services/python_grpc/src/vision_validation/worker.py`
-- 合约与生成代码
-  - Proto 真源：`contracts/proto/video_processing.proto`
-  - Python 生成代码：`contracts/gen/python/`
+## 3. 核心组件分层
+### 3.1 Java 编排层
+- 路径：`services/java-orchestrator/`
+- 主要职责：
+  - `controller/VideoProcessingController`：通用任务提交、上传、查询、取消、健康检查。
+  - `controller/MobileMarkdownController`：移动端任务列表、增量变更、Markdown 读写、资源读取、锚点挂载/同步、导出、上传分片、任务遥测。
+  - `controller/MobileCardController`：概念卡片、候选标题、AI 建议、Phase2B 结构化阅读辅助。
+  - `controller/MobileAppUpdateController`：Android 版本检查、APK 下载、发布与回滚。
+  - `controller/TelemetryIngestController`：移动端阅读遥测分流到冷数据与逻辑池。
+  - `queue/TaskQueueManager`：优先级队列、任务状态机、受理持久化、重启恢复。
+  - `worker/TaskProcessingWorker`：消费任务、归一化、去重、探测、并发信号量、watchdog 管理。
+  - `service/VideoProcessingOrchestrator`：跨阶段编排与 Java 侧素材工程化执行。
+  - `service/StorageTaskCacheService`：扫描并缓存 `var/storage/storage` 历史任务。
+  - `service/StorageTaskCategoryService`：书籍和历史任务分类补录，写回统一分类事实源。
+  - `service/CategoryClassificationResultsRepository`：统一读写 `var/storage/category_classification_results.json`。
+  - `websocket/TaskWebSocketHandler`：任务、合集、Phase2B 三类实时通道。
+- 前端托管：
+  - `src/main/resources/static/index.html` 是唯一静态主入口。
+  - `WebConfig` 将历史入口 `/mobile-markdown.html` 永久重定向到 `/index.html`。
 
-## 5. 主链路调用（当前实现）
-1. 客户端通过 `POST /api/tasks`（URL/BV/本地路径）或 `POST /api/tasks/upload`（浏览器直传视频）提交任务，Java 创建任务并入队；URL 提交入口支持“Bilibili BV号 -> 标准 URL”归一化。
-2. Java 调用 Python gRPC：`DownloadVideo`、`TranscribeVideo`、`ProcessStage1`。
-3. Java 调用 `AnalyzeSemanticUnits` 与 `GenerateMaterialRequests`，产出语义单元与素材请求。
-4. 视觉链路按需调用 `ValidateCVBatch`、`ClassifyKnowledgeBatch`、`AnalyzeWithVL`。
-5. Java 侧执行截图/切片等素材抽取，再调用 `AssembleRichText` 生成最终 Markdown/JSON。
-6. 任务状态通过 REST 可查询，并通过 WebSocket 持续推送进度。
-7. 企业微信消息链路中，`wecom_bot` 复用 Java REST 接口提交任务并轮询状态，按 `QUEUED/RUNNING/RETRYING/SUCCEEDED/FAILED_FINAL` 回传个人聊天。
-8. 静态页面入口统一为 `/` -> `index.html`（主页面本体）；历史路径 `/mobile-markdown.html` 由服务端重定向兼容到 `index.html`。页面通过 `/api/mobile/tasks` 罗列任务（含内存任务与磁盘历史任务），按任务维度读取 markdown 与资源文件进行渲染。
-9. 阅读视图支持 Obsidian 式概念卡片：前端在渲染后调用 `/api/mobile/cards/titles` 拉取全量标题，再通过 `/api/mobile/cards/titles/candidates` 按上下文获取 Top-K 高亮候选；长按/点击术语后通过 `/api/mobile/cards/concept/{title}`（兼容 `/api/mobile/cards/{title}`）读写概念卡片，并可通过 `/api/mobile/cards/ai-advice` 获取顾问式建议。新增 `/api/mobile/cards/thought` 用于将 `> [!TEAR]` 思考块按锚点直接插入原文，概念与思考两条保存路径统一返回 `targetType/targetPath/locator/revision`，用于前端保存后定位反馈。卡片文件采用 YAML Frontmatter（`title/created/tags/type`）+ 纯正文，避免 UI 反向链接信息污染数据层；反向链接由软件在运行时动态计算展示，或仅在导出阶段按需写入。
-10. Android 端可通过 `/api/mobile/app/update/check` 获取最新版本策略与下载地址，并通过 `/api/mobile/app/update/apk` 拉取 APK；后端版本决策由发布清单驱动，便于 CI 发布流程自动切换最新版本。
-11. 管理端可通过 `/api/mobile/app/update/admin/upload` 上传 APK 并生成版本发布清单，随后一键调用 `/publish` 切换 `latest.json`，或调用 `/rollback` 回滚到历史版本，发布历史落盘在 `var/app-updates/android/publish-history.json`。
+### 3.2 Python gRPC 计算层
+- 路径：`services/python_grpc/src/`
+- 主要职责：
+  - `server/`：gRPC 启动、依赖预检、协议实现、运行时环境修补。
+  - `server/grpc_service_impl.py`：`VideoProcessingService` 主实现，暴露下载、转录、Stage1、Phase2A、VL、组装等 RPC。
+  - `media_engine/knowledge_engine/`：下载与转录底座。
+  - `transcript_pipeline/`：Stage1 文本预处理与中间结果产出。
+  - `content_pipeline/phase2a/`：语义分割、素材请求规划、VL 材料生成、截图路由、知识分类前置能力。
+  - `content_pipeline/phase2b/`：富文本组装与视频分类收尾。
+  - `content_pipeline/infra/`：提示词注册与加载、LLM 网关、运行时资源管理、缓存指标。
+  - `vision_validation/` 与 `worker/`：CV 批处理 worker、共享内存与多进程运行时。
 
-## 6. 接口清单（2026-02-18）
-- REST（Java）
-  - `/api/tasks`
-  - `/api/tasks/upload`
-  - `/api/tasks/{taskId}`
-  - `/api/tasks/user/{userId}`
-  - `/api/stats`
-  - `/api/health`
-  - `/api/admin/reset-circuit-breaker`
-  - `/api/mobile/tasks`
-  - `/api/mobile/tasks/submit`
-  - `/api/mobile/tasks/upload`
-  - `/api/mobile/tasks/{taskId}/markdown`
-  - `/api/mobile/tasks/{taskId}/markdown`（PUT：保存编辑后的 Markdown 内容）
-  - `/api/mobile/tasks/{taskId}/markdown/by-path`
-  - `/api/mobile/tasks/{taskId}/asset?path=...`
-  - `/api/mobile/app/update/check`
-  - `/api/mobile/app/update/apk`
-  - `/api/mobile/app/update/admin/upload`
-  - `/api/mobile/app/update/admin/publish`
-  - `/api/mobile/app/update/admin/rollback`
-  - `/api/mobile/cards/titles`
-  - `/api/mobile/cards/titles/candidates`（POST：按上下文返回 Top-K 概念候选词）
-  - `/api/mobile/cards/{title}`（兼容读写入口）
-  - `/api/mobile/cards/concept/{title}`（读写概念卡片 Markdown）
-  - `/api/mobile/cards/thought`（POST：按锚点把 `> [!TEAR]` 插入原文）
-  - `/api/mobile/cards/ai-advice`
-- WebSocket（Java）
-  - `/ws/tasks`
-- HTTP Callback（Python）
-  - `GET /wechat/callback`（企业微信 URL 校验）
-  - `POST /wechat/callback`（企业微信消息回调）
-- gRPC（Java <-> Python）
-  - `DownloadVideo`
-  - `TranscribeVideo`
-  - `ProcessStage1`
-  - `AnalyzeSemanticUnits`
-  - `GenerateMaterialRequests`
-  - `ValidateCVBatch`
-  - `ClassifyKnowledgeBatch`
-  - `AnalyzeWithVL`
-  - `AssembleRichText`
-  - `ReleaseCVResources`
-  - `HealthCheck`
+### 3.3 客户端与边缘入口
+- `app/`：Android 客户端，包含语义块阅读器、合集 UI、可靠 WebSocket 客户端、前台提交服务、自动更新管理。
+- `apps/grpc-server/main.py`：Python gRPC 标准启动入口。
+- `apps/wecom-bot/main.py` + `services/python_grpc/src/apps/bot/wecom_bot.py`：企业微信回调机器人，负责消息入口、任务投递与状态回传。
+- `contracts/proto/video_processing.proto`：Java/Python 之间的单一协议真源。
 
-## 7. 当前架构收敛点（截至 2026-02-14）
-- Prompt 管理收敛：`MarkdownEnhancer` 等模块统一通过 `prompt_loader + prompt_registry` 获取模板，避免硬编码提示词与运行时脱节。
-- Phase2B 素材过滤语义固定：使用 `should_include` 作为图片进入 Markdown 结构化流程的准入标记；被 Vision 拒绝的图片不再进入最终文档。
-- 回填策略受限：`RichTextPipeline` 仅在“请求缺失”场景下从 `vl_analysis_cache.json` 回填素材请求，并过滤实际 VL 调用产物，避免缓存污染。
-- 动作单元一致性：`GenerateMaterialRequests` 落盘时同步 `action_units` 与 `action_segments`，避免“字段分叉”导致的语义误判。
-- 预处理能力前置校验：`apps/grpc-server/main.py --check-deps` 会检查 PP-Structure、PaddleX、人物预过滤后端与关键版本组合，降低运行期静默降级风险。
-- Whisper 模型启动优化：已支持“首轮校验成功后重启复用”，减少重复完整性校验造成的冷启动耗时。
+## 4. 运行态数据与事实源
+### 4.1 控制平面
+- SQLite：`var/state/collections.db`
+- 主要表：
+  - `task_runtime_state`：任务状态机快照，包含 `task_id`、`status`、`progress`、`probe_payload_json`、`book_options_json`、结果路径等。
+  - `video_collections`、`collection_episodes`：合集与分集绑定。
+  - `task_manual_collection_bindings`：人工归档合集绑定。
+  - `file_metadata`、`file_probe_cache`：上传复用与探测缓存。
 
-## 8. 迁移状态
-- 历史兼容壳目录已下线，运行主链仅保留新分层目录。
-- 历史文档归档：`services/python_grpc/src/docs/legacy/`、`docs/archive/`。
-- 历史依赖清单归档：`requirements/legacy/`。
+### 4.2 内容平面
+- 任务主存储目录：`var/storage/storage/{storage_key}/`
+- `storage_key` 生成方式：
+  - 普通视频/本地文件：优先使用归一化输入的 MD5。
+  - 书籍 leaf：可使用显式 `storageKey`，确保同一本书的叶子节点可稳定复用目录。
+- 典型内容：
+  - `enhanced_output.md`
+  - `result.json`
+  - `video_meta.json`
+  - `assets/`
+  - `intermediates/task_metrics_latest.json`
 
-## 9. 维护约束
-- 协议变更必须先更新 `contracts/proto/video_processing.proto` 并重新生成代码。
-- 架构演进必须同步更新：
+### 4.3 统一汇总资产
+- 分类事实源：`var/storage/category_classification_results.json`
+  - 视频主链由 Python `phase2b/video_category_service.py` 在 Phase2B 末尾写入。
+  - 书籍任务与历史缺分类任务由 Java `StorageTaskCategoryService` 补录到同一文件。
+- 概念卡片：`var/cards`
+- 阅读遥测：`var/telemetry/*.ndjson`
+- Android 更新：`var/app-updates/android/`
+- 上传缓冲：`var/uploads/`
+
+## 5. 任务控制平面
+### 5.1 状态机
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> PROBING
+    PROBING --> PROCESSING
+    PROCESSING --> COMPLETED
+    PROCESSING --> FAILED
+    QUEUED --> DEDUPED
+    PROBING --> DEDUPED
+    QUEUED --> CANCELLED
+    PROBING --> CANCELLED
+    PROCESSING --> CANCELLED
+```
+
+### 5.2 控制原则
+- 提交成功等价于“已 durable accept”：
+  - `TaskQueueManager.submitTask(...)` 在返回前先把最小任务快照写入 `task_runtime_state`，再进入内存队列。
+- 归一化、去重、探测全部放在 worker 侧：
+  - 提交线程不再执行同步探测，也不承担历史去重。
+  - `TaskProcessingWorker` 在消费阶段统一执行输入归一化、活跃任务去重、历史任务复用判定与探测。
+  - 对远端视频，probe 可以从下载关键路径摘出，先进入处理链路，再后台补写标题与探测 payload。
+- 服务重启可恢复：
+  - `TaskQueueManager.restorePersistedTasks()` 会把 SQLite 中的活跃任务恢复成运行时投影。
+  - `PROBING/PROCESSING` 中断任务回退为 `QUEUED` 重新排队。
+
+### 5.3 实时通道
+- WebSocket 入口：`/ws/tasks`
+- 当前协议不是简单广播，而是可靠消息层：
+  - 服务端消息附带 `messageId`。
+  - 客户端支持 `ack`、`ping/pong`、`lastReceivedMessageId`。
+  - 服务端按 `userId` 维护有界 inbox，支持断线补发。
+- 支持的订阅维度：
+  - 单任务进度。
+  - 合集进度。
+  - Phase2B 专用频道。
+
+## 6. 主处理链路
+### 6.1 视频任务主链
+1. 客户端通过 `POST /api/tasks`、`POST /api/tasks/upload`、`POST /api/mobile/tasks/submit` 或移动端上传接口提交任务。
+2. Java 持久化最小状态后入队，`TaskProcessingWorker` 取出任务并完成归一化、去重与探测。
+3. `VideoProcessingOrchestrator` 进入跨阶段编排：
+   - `DownloadVideo` 或将本地文件纳入 storage 目录。
+   - `TranscribeVideo`
+   - `ProcessStage1`
+   - `AnalyzeSemanticUnits`
+4. Phase2A 后进入两条分析路径之一：
+   - 首选 VL 路径：`AnalyzeWithVL`
+   - 回退传统路径：`ValidateCVBatch` + `ClassifyKnowledgeBatch` + `GenerateMaterialRequests`
+5. Java 侧 `JavaCVFFmpegService` 负责截图、切片等工程化素材抽取。
+6. Python `AssembleRichText` 组装最终 Markdown/JSON，并在 Phase2B 尾部完成视频分类写回。
+7. Java 侧补充任务指标、缓存、清理、实时推送与终态持久化。
+
+### 6.2 书籍与文章链路
+1. `TaskProbeService` 对书籍文件和文章链接走专门探测分支，不再套用视频探测逻辑。
+2. 文章链接先由 `Phase2bArticleLinkService` 抽取正文与图片，落为本地 Markdown 源，再进入书籍增强编排。
+3. `BookMarkdownService` 负责基础抽取，产出书籍 Markdown 与元数据。
+4. 若开启增强：
+   - `BookEnhancedPipelineService` 先保护图片/表格/代码/公式占位。
+   - 对英文段落做条件翻译。
+   - 合成 Phase2A 输入并调用 `AnalyzeSemanticUnits` 与 `AssembleRichText`。
+   - 最后回填占位符，生成增强版书籍 Markdown。
+5. 若增强失败，自动回退到基础书籍结果，不阻断任务成功。
+6. 书籍与历史任务分类由 Java 侧补齐，并继续写入统一分类事实源。
+
+## 7. 客户端与阅读面能力
+### 7.1 Web PWA
+- 主页面由 `index.html` 直接托管，无单独前端构建链。
+- 核心能力：
+  - 任务列表与增量对账：`/api/mobile/tasks`、`/api/mobile/tasks/changes`
+  - 提交与上传：普通提交、秒传检查、分片上传、上传探测
+  - Markdown/资源：读取、整文保存、资源流式访问、导出
+  - 锚点能力：挂载、同步、删除、挂载态查询
+  - 实时能力：可靠 WebSocket + REST 变更对账双保险
+
+### 7.2 概念卡片与阅读增强
+- `/api/mobile/cards/**` 提供：
+  - 标题索引与候选词筛选
+  - 卡片读写
+  - AI 建议
+  - 思考块写回
+  - Phase2B 结构化阅读辅助
+- 卡片存储与 UI 解耦：
+  - 数据层保存 Markdown/YAML frontmatter。
+  - 反向链接与高亮候选在运行时计算，不污染底层文件。
+
+### 7.3 Android 客户端
+- 路径：`app/src/main/java/com/hongxu/videoToMarkdownTest2/`
+- 关键能力：
+  - `ReliableTaskWebSocketClient`、`TaskRealtimeClient`、`CollectionRealtimeClient`：复用服务端可靠 WebSocket 语义。
+  - `SemanticTopographyReader`：语义块阅读器，而不是整篇单块渲染。
+  - `TaskSubmissionForegroundService`：前台任务提交与订阅。
+  - `MobileAppAutoUpdateManager`：消费 `/api/mobile/app/update/**` 更新链路。
+
+## 8. 部署与外部依赖
+- 默认发布拓扑：`docker-compose.yml` 启动两个核心服务：
+  - `python-grpc`：暴露 `50051`
+  - `java-orchestrator`：暴露 `8080`
+- 两个容器共享：
+  - `./config`：配置真源
+  - `./var`：运行态数据真源
+- Python 侧外部依赖包括：
+  - Whisper / faster-whisper
+  - yt-dlp 与站点探测
+  - DeepSeek / DashScope / Vision API
+  - OCR / PP-Structure / OpenCV / FFmpeg
+- `apps/grpc-server/main.py --check-deps` 是运行前依赖预检入口，用于提前发现环境缺失，而不是等运行期静默降级。
+
+## 9. 当前架构收敛点
+- 控制平面与内容平面已分离：
+  - 控制状态看 SQLite。
+  - 内容产物看 `var/storage/storage/{storage_key}`。
+- 分类事实源已统一：
+  - 任务列表只消费 `var/storage/category_classification_results.json`，不再拆分多份分类真相。
+- 总览与日志分工已固定：
+  - `overview.md` 只描述当前稳定架构。
+  - 具体演进与性能数据进入 `upgrade-log.md`。
+- 运行中断恢复已内建到状态机，而不是依赖人工补救。
+
+## 10. 维护约束
+- 协议改动先改 `contracts/proto/video_processing.proto`，再生成两端代码。
+- 架构边界调整后必须同步更新：
   - `docs/architecture/overview.md`
   - `docs/architecture/repository-map.md`
   - `docs/architecture/upgrade-log.md`
-- 运行期排障优先使用：
+- 重大故障修复沉淀到：
   - `docs/architecture/error-fixes.md`
-  - `docs/runbooks/README_preprocess_dependency_fix.md`
-
-## 10. 2026-02-17 语义分割与 Phase2B 分组模型补充
-- Unit/Group 双层模型：
-  - Unit：只由知识类型 `k` 与时间连续性决定，要求 `k` 纯度，不允许跨类型混合。
-  - Group：由核心论点（Core Argument）决定，作为 Phase2B 结构化输出与后续分析的基本聚合单元。
-- Phase2A 输出约束：
-  - 语义分割提示词与解析器统一采用 `knowledge_groups -> units[]` 输出模板。
-  - Group 层字段：`group_name`、`reason`；Unit 层字段：`pids`、`k`、`m`、`title`。
-  - 保留对旧格式 `semantic_units + group_name` 的兼容解析，用于历史缓存平滑迁移。
-- VL 分析策略：
-  - 在 `VLMaterialGenerator.generate()` 入口前置过滤 `k=0 (abstract)` 单元，仅保留 process/concrete 进入视觉链路。
-  - 目标：减少无效视觉分析干扰与 token 消耗。
-- Phase2B 输出模型：
-  - 最终 JSON 统一为 `knowledge_groups[]`，每个 group 内包含 `group_name/reason/units[]`。
-  - Markdown 固定两级：`## group_name`（一级）+ `### unit.title`（二级）。
-  - 移除“按 LLM 再划分层级”的主路径依赖，避免重复分层与结构漂移。
-
-## 11. 2026-02-17 Grouped 落盘与复用读取补充
-- `semantic_units_phase2a.json` 统一采用 `knowledge_groups[]`，group 承载 `group_name/reason`，unit 不再重复组信息。
-- 服务侧复用链路支持 grouped/legacy 双读；当回写 `material_requests/instructional_steps/_vl_route_override` 时，保持输入文件原始结构不变。
-- 该策略确保 Phase2B、VL、RPC 内存透传链路在结构上保持一致，避免“写回后结构退化”。
-
-## 12. 2026-02-17 Grouped 结构兜底一致性补充
-- 语义分割 fallback 提示词与主提示词保持同一协议：`knowledge_groups -> units[]`，避免 prompt 文件不可用时协议回退。
-- RPC 物化路径（`semantic_units_from_rpc_*.json`）统一落盘 grouped 结构，确保“展示形态”与主链路一致。
-- 回写兜底分支在索引缺失时也重建 grouped，不再退化为扁平 `semantic_units`。
-
-## 13. 2026-02-18 DeepSeek Hedge 上下文化估算补充
-- Phase2A 语义分段链路在 DeepSeek JSON 调用前统一注入 `hedge_context`：
-  - `video_duration_sec`：由 `sentence_timestamps.end_sec` 最大值推导；
-  - `step6_text_chars`：由 Step6 段落文本总长度计算；
-  - `batch_text_chars`：由当前批次（或边界合并判定双单元）文本长度计算。
-- `llm_gateway` 动态 hedge 延迟决策升级为“长度 + 上下文”联合估算：
-  - 上下文齐全时优先按业务语义负载换算有效 token；
-  - 上下文缺失时回退 prompt token 估算；
-  - 仍保留配置级开关实现快速回滚。
-
-## 14. 2026-02-26 书籍增强链路（范围选择后）
-- 书籍输入（`pdf/txt/md/epub`）在章节/小节范围确定后，进入增强链路：
-  - `BookMarkdownService.processBook(...)` 先产出基础 `book.md + book_semantic_units.json`；
-  - `BookEnhancedPipelineService.enhanceBook(...)` 执行：
-    - Markdown 结构保护（图片/表格/代码/公式占位）；
-    - 英文段落条件翻译（保留 `[[SYS_MEDIA_*]]` 与 `[[SYS_INLINE_*]]` 占位符）；
-    - 生成合成 `step2/step6/sentence_timestamps` 并调用 `AnalyzeSemanticUnits`；
-    - 调用 `AssembleRichText` 后回填占位符，产出 `book_enhanced.md`。
-- 编排与降级策略：
-  - `VideoProcessingOrchestrator.processBook(...)` 在基础抽取成功后尝试增强；
-  - 若增强失败，自动回退到基础书籍输出，不影响任务成功与队列吞吐。
-- 观测口径：
-  - 继续复用统一任务队列与任务指标上报；
-  - 新增 `book_enhanced_*` 的 stage/flag 维度区分书籍增强链路。
+- 运行期排障优先观察：
+  - `task_runtime_state`
+  - `var/storage/storage/{storage_key}/intermediates/task_metrics_latest.json`
+  - `var/storage/category_classification_results.json`
+  - `var/telemetry/*.ndjson`

@@ -1,8 +1,10 @@
 package com.mvp.module2.fusion.worker;
 
+import com.mvp.module2.fusion.grpc.PythonGrpcClient.DownloadResult;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.queue.TaskQueueManager.TaskEntry;
 import com.mvp.module2.fusion.service.VideoProcessingOrchestrator;
+import com.mvp.module2.fusion.websocket.TaskWebSocketHandler;
 import com.mvp.module2.fusion.worker.watchdog.TaskWatchdog;
 import org.junit.jupiter.api.Test;
 
@@ -23,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -31,6 +34,74 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class TaskProcessingWorkerIoConcurrencyTest {
+
+    @Test
+    void executeTaskPipelineShouldSyncRecoveredDownloadTitleToFrontend() throws Exception {
+        TaskProcessingWorker worker = new TaskProcessingWorker();
+        VideoProcessingOrchestrator orchestrator = mock(VideoProcessingOrchestrator.class);
+        TaskWebSocketHandler webSocketHandler = mock(TaskWebSocketHandler.class);
+        TaskQueueManager queueManager = new TaskQueueManager(1);
+
+        try {
+            setField(worker, "orchestrator", orchestrator);
+            setField(worker, "webSocketHandler", webSocketHandler);
+            setField(worker, "taskQueueManager", queueManager);
+            setField(worker, "downloadSemaphore", new Semaphore(1));
+            setField(worker, "transcribeSemaphore", new Semaphore(1));
+            setField(worker, "phase2Semaphore", new Semaphore(1));
+
+            when(orchestrator.shouldRunBookPipeline(anyString(), isNull())).thenReturn(false);
+            when(orchestrator.processVideoDownloadPhase(anyString(), anyString(), anyString())).thenAnswer(invocation -> {
+                VideoProcessingOrchestrator.IOPhaseResult ioResult = new VideoProcessingOrchestrator.IOPhaseResult();
+                ioResult.taskId = invocation.getArgument(0, String.class);
+                ioResult.videoPath = "mock.mp4";
+                ioResult.outputDir = invocation.getArgument(2, String.class);
+                ioResult.videoDuration = 60d;
+                DownloadResult downloadResult = new DownloadResult();
+                downloadResult.videoTitle = "恢复出的标题";
+                ioResult.downloadResult = downloadResult;
+                return ioResult;
+            });
+            when(orchestrator.processVideoTranscribePhase(anyString(), any(VideoProcessingOrchestrator.IOPhaseResult.class)))
+                    .thenAnswer(invocation -> {
+                        VideoProcessingOrchestrator.IOPhaseResult ioResult =
+                                invocation.getArgument(1, VideoProcessingOrchestrator.IOPhaseResult.class);
+                        ioResult.subtitlePath = "mock.srt";
+                        return ioResult;
+                    });
+            when(orchestrator.processVideoStage1Phase(anyString(), any(VideoProcessingOrchestrator.IOPhaseResult.class)))
+                    .thenAnswer(invocation -> invocation.getArgument(1, VideoProcessingOrchestrator.IOPhaseResult.class));
+            when(orchestrator.processVideoLLMPhase(anyString(), any(VideoProcessingOrchestrator.IOPhaseResult.class)))
+                    .thenAnswer(invocation -> {
+                        VideoProcessingOrchestrator.ProcessingResult success = new VideoProcessingOrchestrator.ProcessingResult();
+                        success.success = true;
+                        return success;
+                    });
+
+            TaskEntry task = queueManager.submitTask(
+                    "user-title",
+                    "https://example.com/runtime-title",
+                    "./output/task-runtime-title",
+                    TaskQueueManager.Priority.NORMAL
+            );
+
+            VideoProcessingOrchestrator.ProcessingResult result = invokeExecuteTaskPipeline(
+                    worker,
+                    task,
+                    "./output/task-runtime-title"
+            );
+
+            assertTrue(result.success);
+            assertEquals("恢复出的标题", queueManager.getTask(task.taskId).title);
+            verify(webSocketHandler).broadcastTaskUpdate(argThat(updatedTask ->
+                    updatedTask != null
+                            && task.taskId.equals(updatedTask.taskId)
+                            && "恢复出的标题".equals(updatedTask.title)
+            ));
+        } finally {
+            queueManager.shutdown();
+        }
+    }
 
     @Test
     void runWithWatchdogShouldAllowParallelDownloadAndSerializeTranscribe() throws Exception {
@@ -331,6 +402,31 @@ class TaskProcessingWorkerIoConcurrencyTest {
         method.setAccessible(true);
         try {
             return (VideoProcessingOrchestrator.ProcessingResult) method.invoke(worker, task, outputDir, watchdog);
+        } catch (InvocationTargetException invocationError) {
+            Throwable cause = invocationError.getCause();
+            if (cause instanceof RuntimeException runtimeError) {
+                throw runtimeError;
+            }
+            if (cause instanceof Exception checkedError) {
+                throw checkedError;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
+    private VideoProcessingOrchestrator.ProcessingResult invokeExecuteTaskPipeline(
+            TaskProcessingWorker worker,
+            TaskEntry task,
+            String outputDir
+    ) throws Exception {
+        Method method = TaskProcessingWorker.class.getDeclaredMethod(
+                "executeTaskPipeline",
+                TaskEntry.class,
+                String.class
+        );
+        method.setAccessible(true);
+        try {
+            return (VideoProcessingOrchestrator.ProcessingResult) method.invoke(worker, task, outputDir);
         } catch (InvocationTargetException invocationError) {
             Throwable cause = invocationError.getCause();
             if (cause instanceof RuntimeException runtimeError) {

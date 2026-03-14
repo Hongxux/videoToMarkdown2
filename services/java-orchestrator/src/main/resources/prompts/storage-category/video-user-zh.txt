@@ -1,0 +1,25 @@
+你是一个严格遵守 MECE 原则的内容分类专家。
+请根据以下视频证据，返回唯一 JSON：
+{
+  "category_path": "层级1/层级2[/更细层级]",
+  "is_new": true,
+  "reasoning": "只能引用输入里真实存在的证据"
+}
+
+约束：
+1. 只按知识主题分类，不混入难度、形式、年份、作者或场景。
+2. 输出路径深度必须 >= {target_level} 且 <= {max_target_level}。
+3. 如果已有分类能覆盖，就复用已有分类。
+4. `reasoning` 只能引用标题、第一段正文和分组名，不得编造。
+
+视频标题：
+{video_title}
+
+第一段核心正文：
+{first_unit_text}
+
+大纲分组名：
+{group_names}
+
+当前分类路径库：
+{categories}

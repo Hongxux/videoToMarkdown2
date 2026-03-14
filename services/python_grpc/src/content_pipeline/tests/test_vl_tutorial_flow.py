@@ -4204,6 +4204,45 @@ def test_apply_screenshot_optimization_with_bypass_only_skips_explicit_requests(
     assert "_optimized_by_cv" not in merged[3]
 
 
+def test_optimize_screenshots_parallel_uses_iframe_only_mode_when_forced(monkeypatch):
+    from services.python_grpc.src.content_pipeline.phase2a.materials import vl_material_generator as generator_module
+
+    config = _build_generator_config()
+    config["screenshot_optimization"]["iframe_only_mode"] = True
+    generator = VLMaterialGenerator(config)
+
+    async def _fake_probe_iframe_timestamps(**kwargs):
+        assert kwargs["video_path"] == "dummy.mp4"
+        assert abs(float(kwargs["target_timestamp_sec"]) - 10.0) < 1e-6
+        return [9.8, 10.2]
+
+    async def _fail_if_task_gate(**kwargs):
+        raise AssertionError("task gate path should be bypassed in iframe-only mode")
+
+    monkeypatch.setattr(generator_module, "_probe_iframe_timestamps", _fake_probe_iframe_timestamps)
+    monkeypatch.setattr(generator, "_run_screenshot_optimization_with_task_gate", _fail_if_task_gate)
+
+    results = asyncio.run(
+        generator._optimize_screenshots_parallel(
+            "dummy.mp4",
+            [
+                {
+                    "screenshot_id": "SU010/SU010_ss_vl_01_01",
+                    "timestamp_sec": 10.0,
+                    "_window_start_sec": 10.0,
+                    "_window_end_sec": 10.4,
+                }
+            ],
+        )
+    )
+
+    assert len(results) == 1
+    assert abs(float(results[0]["timestamp_sec"]) - 10.2) < 1e-6
+    assert results[0]["_skip_cv_optimization"] is True
+    assert results[0]["_iframe_only_selected"] is True
+    assert results[0]["_iframe_only_reason"] == "forced_by_config"
+
+
 def test_annotate_screenshot_requests_with_unit_context_does_not_force_skip():
     generator = VLMaterialGenerator(_build_generator_config())
     requests = [

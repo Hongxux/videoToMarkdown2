@@ -81,8 +81,8 @@ android {
         applicationId = "com.hongxu.videoToMarkdownTest2"
         minSdk = 24
         targetSdk = 35
-        versionCode = 15
-        versionName = "1.0.15"
+        versionCode = 17
+        versionName = "1.0.17"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "MOBILE_API_BASE_URL", "\"$mobileApiBaseUrlEscaped\"")
@@ -180,4 +180,5 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }
+
 

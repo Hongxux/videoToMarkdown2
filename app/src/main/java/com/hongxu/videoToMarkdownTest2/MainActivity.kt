@@ -182,8 +182,9 @@ private data class TaskCollectionSectionUi(
 )
 
 private data class TaskCollectionBuckets(
-    val ungroupedTasks: List<MobileTaskListItem>,
-    val groupedSections: List<TaskCollectionSectionUi>
+    val uncategorizedTasks: List<MobileTaskListItem>,
+    val categorizedSections: List<TaskCollectionSectionUi>,
+    val archivedSections: List<TaskCollectionSectionUi>
 )
 
 private data class TaskDragSession(
@@ -1643,6 +1644,7 @@ private fun MobileTaskApp(
 
     val taskRealtimeClient = remember(apiBaseUrl, mobileUserId) {
         TaskRealtimeClient(
+            context = context.applicationContext,
             wsEndpoint = CollectionApiFactory.toWebSocketUrl(apiBaseUrl),
             userId = mobileUserId,
             onTaskUpdate = { update ->
@@ -2232,56 +2234,70 @@ private fun MobileTaskApp(
         }
     }
     val taskCollectionBuckets = remember(visibleTaskCards) {
-        val directTasksByPath = LinkedHashMap<String, MutableList<MobileTaskListItem>>()
-        val allCollectionPaths = linkedSetOf<String>()
-        val childPathsByParent = LinkedHashMap<String, MutableList<String>>()
-        val ungrouped = mutableListOf<MobileTaskListItem>()
-        visibleTaskCards.forEach { task ->
-            if (!task.archived) {
-                ungrouped += task
-                return@forEach
-            }
-            val normalizedCollectionPath = normalizeManualCollectionPathInput(task.collectionPath)
-            if (normalizedCollectionPath.isEmpty()) {
-                ungrouped += task
-            } else {
-                val segments = normalizedCollectionPath.split('/').filter { segment -> segment.isNotBlank() }
-                var currentPath = ""
-                segments.forEach { segment ->
-                    currentPath = if (currentPath.isBlank()) segment else "$currentPath/$segment"
-                    allCollectionPaths += currentPath
+        fun buildSections(
+            tasks: List<MobileTaskListItem>,
+            pathSelector: (MobileTaskListItem) -> String
+        ): Pair<List<MobileTaskListItem>, List<TaskCollectionSectionUi>> {
+            val directTasksByPath = LinkedHashMap<String, MutableList<MobileTaskListItem>>()
+            val allPaths = linkedSetOf<String>()
+            val childPathsByParent = LinkedHashMap<String, MutableList<String>>()
+            val ungrouped = mutableListOf<MobileTaskListItem>()
+            tasks.forEach { task ->
+                val normalizedPath = normalizeManualCollectionPathInput(pathSelector(task))
+                if (normalizedPath.isEmpty()) {
+                    ungrouped += task
+                } else {
+                    val segments = normalizedPath.split('/').filter { segment -> segment.isNotBlank() }
+                    var currentPath = ""
+                    segments.forEach { segment ->
+                        currentPath = if (currentPath.isBlank()) segment else "$currentPath/$segment"
+                        allPaths += currentPath
+                    }
+                    directTasksByPath.getOrPut(normalizedPath) { mutableListOf() }.add(task)
                 }
-                directTasksByPath.getOrPut(normalizedCollectionPath) { mutableListOf() }.add(task)
             }
-        }
-        val sortedPaths = allCollectionPaths.sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
-        sortedPaths.forEach { pathKey ->
-            val prefix = if (pathKey.contains('/')) pathKey.substringBeforeLast('/') else ""
-            if (prefix.isNotBlank()) {
-                childPathsByParent.getOrPut(prefix) { mutableListOf() }.add(pathKey)
+            val sortedPaths = allPaths.sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
+            sortedPaths.forEach { pathKey ->
+                val prefix = if (pathKey.contains('/')) pathKey.substringBeforeLast('/') else ""
+                if (prefix.isNotBlank()) {
+                    childPathsByParent.getOrPut(prefix) { mutableListOf() }.add(pathKey)
+                }
             }
+            fun buildSection(pathKey: String): TaskCollectionSectionUi {
+                val segments = pathKey.split('/').filter { segment -> segment.isNotBlank() }
+                val childPaths = childPathsByParent[pathKey].orEmpty()
+                    .distinct()
+                    .sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
+                val childSections = childPaths.map(::buildSection)
+                return TaskCollectionSectionUi(
+                    collectionPath = pathKey,
+                    title = segments.lastOrNull().orEmpty().ifBlank { pathKey },
+                    depth = (segments.size - 1).coerceAtLeast(0),
+                    tasks = directTasksByPath[pathKey].orEmpty().toList(),
+                    childGroupCount = childSections.size,
+                    children = childSections
+                )
+            }
+            val rootSections = sortedPaths
+                .filter { path -> !path.contains('/') }
+                .map(::buildSection)
+            return ungrouped.toList() to rootSections
         }
-        fun buildSection(collectionPath: String): TaskCollectionSectionUi {
-            val segments = collectionPath.split('/').filter { segment -> segment.isNotBlank() }
-            val childPaths = childPathsByParent[collectionPath].orEmpty()
-                .distinct()
-                .sortedWith(compareBy<String>({ it.count { ch -> ch == '/' } }, { it }))
-            val childSections = childPaths.map(::buildSection)
-            return TaskCollectionSectionUi(
-                collectionPath = collectionPath,
-                title = segments.lastOrNull().orEmpty().ifBlank { collectionPath },
-                depth = (segments.size - 1).coerceAtLeast(0),
-                tasks = directTasksByPath[collectionPath].orEmpty().toList(),
-                childGroupCount = childSections.size,
-                children = childSections
-            )
-        }
-        val rootSections = sortedPaths
-            .filter { path -> !path.contains('/') }
-            .map(::buildSection)
+
+        val activeTasks = visibleTaskCards.filterNot { task -> task.archived }
+        val archivedTasks = visibleTaskCards.filter { task -> task.archived }
+        val (uncategorizedTasks, categorizedSections) = buildSections(
+            tasks = activeTasks,
+            pathSelector = { task -> task.categoryPath }
+        )
+        val (looseArchivedTasks, archivedSections) = buildSections(
+            tasks = archivedTasks,
+            pathSelector = { task -> task.collectionPath }
+        )
         TaskCollectionBuckets(
-            ungroupedTasks = ungrouped,
-            groupedSections = rootSections
+            uncategorizedTasks = uncategorizedTasks + looseArchivedTasks,
+            categorizedSections = categorizedSections,
+            archivedSections = archivedSections
         )
     }
     val selectedTaskCount = selectedTaskIds.values.count { it }
@@ -2407,18 +2423,26 @@ private fun MobileTaskApp(
         )
     }
 
-    fun LazyListScope.renderArchiveSection(section: TaskCollectionSectionUi) {
-        item(key = "group-header-${section.collectionPath}") {
-            val isCollapsed = collapsedTaskCollections[section.collectionPath] == true
-            val isDropTarget = dragHoverCollectionPath == section.collectionPath
+    fun LazyListScope.renderGroupedSection(
+        section: TaskCollectionSectionUi,
+        sectionKeyPrefix: String,
+        childLabel: String,
+        enableDropTarget: Boolean
+    ) {
+        val collapseKey = "$sectionKeyPrefix:${section.collectionPath}"
+        item(key = "$sectionKeyPrefix-group-header-${section.collectionPath}") {
+            val isCollapsed = collapsedTaskCollections[collapseKey] == true
+            val isDropTarget = enableDropTarget && dragHoverCollectionPath == section.collectionPath
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
                     .onGloballyPositioned { coordinates ->
-                        collectionHeaderBounds[section.collectionPath] = coordinates.boundsInWindow()
+                        if (enableDropTarget) {
+                            collectionHeaderBounds[section.collectionPath] = coordinates.boundsInWindow()
+                        }
                     }
                     .clickable(enabled = !actionLoading) {
-                        collapsedTaskCollections[section.collectionPath] = !isCollapsed
+                        collapsedTaskCollections[collapseKey] = !isCollapsed
                     },
                 colors = CardDefaults.cardColors(
                     containerColor = if (isDropTarget) {
@@ -2445,7 +2469,7 @@ private fun MobileTaskApp(
                         color = Color(0xFF101828)
                     )
                     Text(
-                        text = "${section.collectionPath} · ${section.tasks.size} tasks · ${section.childGroupCount} child groups",
+                        text = "${section.collectionPath} ? ${section.tasks.size} tasks ? ${section.childGroupCount} $childLabel",
                         color = Color(0xFF667085),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -2458,10 +2482,10 @@ private fun MobileTaskApp(
                 }
             }
         }
-        if (collapsedTaskCollections[section.collectionPath] == true) {
+        if (collapsedTaskCollections[collapseKey] == true) {
             return
         }
-        items(section.tasks, key = { task -> "${section.collectionPath}-${task.taskId}" }) { task ->
+        items(section.tasks, key = { task -> "$sectionKeyPrefix-${section.collectionPath}-${task.taskId}" }) { task ->
             TaskListCard(
                 task = task,
                 isDropTarget = dragHoverTaskId == task.taskId,
@@ -2470,7 +2494,7 @@ private fun MobileTaskApp(
             )
         }
         section.children.forEach { childSection ->
-            renderArchiveSection(childSection)
+            renderGroupedSection(childSection, sectionKeyPrefix, childLabel, enableDropTarget)
         }
     }
 
@@ -3663,17 +3687,36 @@ private fun MobileTaskApp(
                     ungroupDropBounds = null
                 }
 
-                if (taskCollectionBuckets.ungroupedTasks.isNotEmpty()) {
-                    item(key = "unarchived-section-header") {
+                if (taskCollectionBuckets.categorizedSections.isNotEmpty()) {
+                    item(key = "categorized-section-header") {
                         Text(
-                            text = "Unarchived",
+                            text = "Categories",
                             color = Color(0xFF344054),
                             fontWeight = FontWeight.SemiBold,
                             modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
                         )
                     }
                 }
-                items(taskCollectionBuckets.ungroupedTasks, key = { it.taskId }) { task ->
+                taskCollectionBuckets.categorizedSections.forEach { section ->
+                    renderGroupedSection(
+                        section = section,
+                        sectionKeyPrefix = "category",
+                        childLabel = "child categories",
+                        enableDropTarget = false
+                    )
+                }
+
+                if (taskCollectionBuckets.uncategorizedTasks.isNotEmpty()) {
+                    item(key = "uncategorized-section-header") {
+                        Text(
+                            text = "Uncategorized",
+                            color = Color(0xFF344054),
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(top = 8.dp, bottom = 2.dp)
+                        )
+                    }
+                }
+                items(taskCollectionBuckets.uncategorizedTasks, key = { it.taskId }) { task ->
                     TaskListCard(
                         task = task,
                         isDropTarget = dragHoverTaskId == task.taskId,
@@ -3682,7 +3725,7 @@ private fun MobileTaskApp(
                     )
                 }
 
-                if (taskCollectionBuckets.groupedSections.isNotEmpty()) {
+                if (taskCollectionBuckets.archivedSections.isNotEmpty()) {
                     item(key = "archived-section-header") {
                         Text(
                             text = "Archived",
@@ -3692,8 +3735,13 @@ private fun MobileTaskApp(
                         )
                     }
                 }
-                taskCollectionBuckets.groupedSections.forEach { section ->
-                    renderArchiveSection(section)
+                taskCollectionBuckets.archivedSections.forEach { section ->
+                    renderGroupedSection(
+                        section = section,
+                        sectionKeyPrefix = "archive",
+                        childLabel = "child groups",
+                        enableDropTarget = true
+                    )
                 }
 
                     }
@@ -4949,7 +4997,7 @@ private fun SwipeRenameTaskListItem(
                     )
                 } else if (task.categoryPath.isNotBlank()) {
                     Text(
-                        text = "Suggested: ${task.categoryPath.trim()}",
+                        text = "Category: ${task.categoryPath.trim()}",
                         color = Color(0xFF475467),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -5187,7 +5235,7 @@ private fun buildReaderSessionFromPayload(
         parseSemanticNodesFromPayload(payload.rawPayload)
     }.getOrDefault(emptyList())
 
-    val nodes = buildSingleNodeForReader(
+    val nodes = buildReaderNodesFromPayload(
         markdown = payload.markdown,
         parsedNodes = parsedNodes
     ) ?: return null
@@ -5202,10 +5250,27 @@ private fun buildReaderSessionFromPayload(
     )
 }
 
-private fun buildSingleNodeForReader(
+private fun buildReaderNodesFromPayload(
     markdown: String,
     parsedNodes: List<SemanticNode>
 ): List<SemanticNode>? {
+    val sanitizedParsedNodes = parsedNodes
+        .mapNotNull { node ->
+            val body = (node.originalMarkdown ?: node.text)
+                .replace("\r\n", "\n")
+            if (body.any { ch -> !ch.isWhitespace() }) {
+                node.copy(
+                    text = body,
+                    originalMarkdown = node.originalMarkdown?.replace("\r\n", "\n") ?: body
+                )
+            } else {
+                null
+            }
+        }
+    if (sanitizedParsedNodes.isNotEmpty()) {
+        return sanitizedParsedNodes
+    }
+
     val normalizedMarkdown = markdown
         .replace("\r\n", "\n")
     val normalizedMarkdownHasContent = normalizedMarkdown.any { ch -> !ch.isWhitespace() }

@@ -125,6 +125,7 @@ def init_cv_worker():
             cv2.ocl.setUseOpenCL(False)
         except Exception:
             pass
+
         if _is_truthy_env("CV_DISABLE_OPENCV_OPT", "0"):
             try:
                 cv2.setUseOptimized(False)
@@ -177,6 +178,11 @@ def _get_attached_shm_store() -> Dict[str, shared_memory.SharedMemory]:
         store = {}
         _thread_local.attached_shms = store
     return store
+
+
+def _count_attached_shm_refs() -> int:
+    """返回当前线程已附着的 SHM 句柄数量，便于任务级监控。"""
+    return len(_get_attached_shm_store())
 
 
 def _get_thread_local_screenshot_selector(selector_key: str):
@@ -239,6 +245,8 @@ def release_attached_shm_refs(shm_names: Optional[List[str]] = None) -> None:
     else:
         target_names = [name for name in shm_names if name]
 
+    before_count = len(attached_shms)
+
     for shm_name in target_names:
         shm = attached_shms.pop(shm_name, None)
         if shm is None:
@@ -249,6 +257,13 @@ def release_attached_shm_refs(shm_names: Optional[List[str]] = None) -> None:
         except Exception:
             pass
 
+    if target_names:
+        logger.info(
+            "[SHM Worker] release requested=%s attached_before=%s attached_after=%s",
+            len(target_names),
+            before_count,
+            len(attached_shms),
+        )
 
 def _normalize_roi(
     roi: Optional[Tuple[int, int, int, int]],
@@ -981,8 +996,16 @@ def run_cv_validation_task(video_path: str, unit_data: dict, shm_frames: dict = 
             if validator is not None and hasattr(validator, "_frame_cache") and injected_frame_indices:
                 for frame_idx in injected_frame_indices:
                     validator._frame_cache.pop(frame_idx, None)
+            attached_before_release = _count_attached_shm_refs()
             if used_shm_names:
                 release_attached_shm_refs(list(used_shm_names))
+                logger.info(
+                    "[SHM Worker] task=cv_validation unit=%s used=%s attached_before=%s attached_after=%s",
+                    unit_data.get("unit_id", ""),
+                    len(used_shm_names),
+                    attached_before_release,
+                    _count_attached_shm_refs(),
+                )
             gc.collect()
         except Exception:
             pass
@@ -1238,8 +1261,17 @@ def run_screenshot_selection_task(
                 del frames
             if "timestamps" in locals():
                 del timestamps
+            attached_before_release = _count_attached_shm_refs()
             if "used_shm_names" in locals() and used_shm_names:
                 release_attached_shm_refs(list(used_shm_names))
+                logger.info(
+                    "[SHM Worker] task=screenshot_selection unit=%s island=%s used=%s attached_before=%s attached_after=%s",
+                    unit_id,
+                    island_index,
+                    len(used_shm_names),
+                    attached_before_release,
+                    _count_attached_shm_refs(),
+                )
             gc.collect()
         except Exception:
             pass
@@ -1634,8 +1666,16 @@ def run_coarse_fine_screenshot_task(
                 del fine_frames
             if "fine_timestamps" in locals():
                 del fine_timestamps
+            attached_before_release = _count_attached_shm_refs()
             if "used_shm_names" in locals() and used_shm_names:
                 release_attached_shm_refs(list(used_shm_names))
+                logger.info(
+                    "[SHM Worker] task=coarse_fine_screenshot unit=%s used=%s attached_before=%s attached_after=%s",
+                    unit_id,
+                    len(used_shm_names),
+                    attached_before_release,
+                    _count_attached_shm_refs(),
+                )
             gc.collect()
         except Exception:
             pass

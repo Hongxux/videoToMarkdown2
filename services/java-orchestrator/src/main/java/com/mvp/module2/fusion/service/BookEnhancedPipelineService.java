@@ -330,7 +330,10 @@ public class BookEnhancedPipelineService {
             allTokenMap.putAll(protectionResult.getTokenToOriginalBlock());
             allTokenMap.putAll(translationOutcome.inlineTokenMap);
             String restoredMarkdown = BookMarkdownProtectionUtils.restoreProtectedBlocks(phase2bMarkdown, allTokenMap);
-            Path enhancedMarkdownPath = outputRoot.resolve("book_enhanced.md");
+            String preferredMarkdownFileName = StringUtils.hasText(baseResult.preferredMarkdownFileName)
+                    ? baseResult.preferredMarkdownFileName.trim()
+                    : "book_enhanced.md";
+            Path enhancedMarkdownPath = outputRoot.resolve(preferredMarkdownFileName);
             Files.writeString(enhancedMarkdownPath, restoredMarkdown, StandardCharsets.UTF_8);
             result.stageTimingsMs.put("restore_protected_blocks", System.currentTimeMillis() - restoreStart);
 

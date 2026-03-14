@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
- * Python gRPC 客户端
+ * Python gRPC 瀹㈡埛绔?
  * 
  * 负责与 Python Worker 通信，调用：
  * 1. DownloadVideo
@@ -43,6 +43,59 @@ import java.util.stream.Collectors;
 public class PythonGrpcClient {
     
     private static final Logger logger = LoggerFactory.getLogger(PythonGrpcClient.class);
+    private static final String GRPC_PROTO_PACKAGE = "com.mvp.videoprocessing.grpc";
+    // 做什么：集中声明 Java 侧直接依赖的 protobuf 消息类型。
+    // 为什么：启动自检、磁盘校验、单测共享同一份清单，避免以后只补 response 忘补 request。
+    private static final List<String> REQUIRED_GRPC_PROTO_MESSAGE_TYPES = List.of(
+        "ActionUnitForClassification",
+        "ActionUnitForMaterialGeneration",
+        "AnalyzeRequest",
+        "AnalyzeResponse",
+        "AssembleRequest",
+        "AssembleResponse",
+        "CVValidationRequest",
+        "CVValidationResponse",
+        "ClipRequest",
+        "ClipSegment",
+        "DownloadRequest",
+        "DownloadResponse",
+        "EpisodeInfo",
+        "ExtractBookPdfRequest",
+        "ExtractBookPdfResponse",
+        "GenerateMaterialRequestsRequest",
+        "GenerateMaterialRequestsResponse",
+        "HealthCheckRequest",
+        "HealthCheckResponse",
+        "KnowledgeClassificationRequest",
+        "KnowledgeClassificationResponse",
+        "KnowledgeClassificationResult",
+        "ReleaseResourcesRequest",
+        "ReleaseResourcesResponse",
+        "ScreenshotRequest",
+        "SemanticUnitForCV",
+        "SemanticUnitForClassification",
+        "SemanticUnitForMaterialGeneration",
+        "SemanticUnitsInline",
+        "SemanticUnitsRef",
+        "StableIsland",
+        "Stage1Request",
+        "Stage1Response",
+        "SubtitleForClassification",
+        "TranscriptSegment",
+        "TranscribeRequest",
+        "TranscribeResponse",
+        "VLAnalysisRequest",
+        "VLAnalysisResponse",
+        "VideoInfoRequest",
+        "VideoInfoResponse",
+        "WatchdogSignalEvent",
+        "WatchdogSignalStreamRequest"
+    );
+    private static final List<String> REQUIRED_GRPC_PROTO_SYNTHETIC_TYPES = List.of(
+        "CVValidationRequest$1",
+        "ScreenshotRequest$1",
+        "TranscribeRequest$1"
+    );
     
     @Value("${grpc.python.host:127.0.0.1}")
     private String pythonHost;
@@ -83,12 +136,10 @@ public class PythonGrpcClient {
         logger.info("Initializing Python gRPC client: {}:{} (configuredHost={})", resolvedHost, pythonPort, pythonHost);
 
         ManagedChannelBuilder<?> builder = ManagedChannelBuilder.forAddress(resolvedHost, pythonPort)
-            .usePlaintext()  // 开发环境使用明文
+            .usePlaintext()  // 寮€鍙戠幆澧冧娇鐢ㄦ槑鏂?
             .maxInboundMessageSize(100 * 1024 * 1024);  // 100MB
         if (grpcKeepaliveEnabled) {
-            // 做什么：按配置启用 gRPC keepalive。
-            // 为什么：部分网络拓扑（跨网段/NAT）可能需要保活，但默认关闭以避免触发服务端 too_many_pings。
-            // 权衡：开启后若频率过高会被服务端限流，因此默认值设置为保守档位（600s）。
+            // 按配置启用 gRPC keepalive。默认保持保守档位，避免服务端触发 too_many_pings。
             builder = builder
                 .keepAliveTime(grpcKeepaliveTimeSeconds, TimeUnit.SECONDS)
                 .keepAliveTimeout(grpcKeepaliveTimeoutSeconds, TimeUnit.SECONDS)
@@ -140,25 +191,15 @@ public class PythonGrpcClient {
     }
 
     private void runGrpcProtoSelfCheck(boolean verifyDiskLocations) throws Exception {
-        DownloadResponse.parser();
-        VideoInfoResponse.parser();
-        TranscribeResponse.parser();
-        Stage1Response.parser();
-        AnalyzeResponse.parser();
-        AssembleResponse.parser();
-        ExtractBookPdfResponse.parser();
-        CVValidationRequest.parser();
-        CVValidationResponse.parser();
-        GenerateMaterialRequestsResponse.parser();
-        VLAnalysisResponse.parser();
-        com.mvp.videoprocessing.grpc.ScreenshotRequest.parser();
-        ReleaseResourcesResponse.parser();
-        HealthCheckResponse.parser();
-        WatchdogSignalEvent.parser();
-
         ClassLoader loader = PythonGrpcClient.class.getClassLoader();
-        Class.forName("com.mvp.videoprocessing.grpc.ScreenshotRequest$1", true, loader);
-        Class.forName("com.mvp.videoprocessing.grpc.CVValidationRequest$1", true, loader);
+        Class.forName(GRPC_PROTO_PACKAGE + ".VideoProcessingServiceGrpc", true, loader);
+        for (String simpleName : REQUIRED_GRPC_PROTO_MESSAGE_TYPES) {
+            Class<?> messageType = Class.forName(GRPC_PROTO_PACKAGE + "." + simpleName, true, loader);
+            messageType.getMethod("parser").invoke(null);
+        }
+        for (String syntheticType : REQUIRED_GRPC_PROTO_SYNTHETIC_TYPES) {
+            Class.forName(GRPC_PROTO_PACKAGE + "." + syntheticType, true, loader);
+        }
 
         if (!verifyDiskLocations) {
             return;
@@ -305,12 +346,7 @@ public class PythonGrpcClient {
             .resolve("mvp")
             .resolve("videoprocessing")
             .resolve("grpc");
-        List<String> requiredMessageFiles = List.of(
-            "ScreenshotRequest.java",
-            "CVValidationRequest.java",
-            "VLAnalysisResponse.java"
-        );
-        List<String> missingMessageFiles = requiredMessageFiles.stream()
+        List<String> missingMessageFiles = requiredGrpcProtoGeneratedMessageFiles().stream()
             .filter(name -> !Files.exists(messageGeneratedDir.resolve(name)))
             .collect(Collectors.toList());
         if (!missingMessageFiles.isEmpty()) {
@@ -369,20 +405,34 @@ public class PythonGrpcClient {
             .resolve("mvp")
             .resolve("videoprocessing")
             .resolve("grpc");
-        List<String> requiredClasses = List.of(
-            "ScreenshotRequest.class",
-            "ScreenshotRequest$1.class",
-            "CVValidationRequest.class",
-            "CVValidationRequest$1.class",
-            "VLAnalysisResponse.class",
-            "VideoProcessingServiceGrpc.class"
-        );
-        List<String> missing = requiredClasses.stream()
+        List<String> missing = requiredGrpcProtoCompiledClassFiles().stream()
             .filter(name -> !Files.exists(classesDir.resolve(name)))
             .collect(Collectors.toList());
         if (!missing.isEmpty()) {
             throw new IllegalStateException("Missing compiled protobuf classes under " + classesDir + ": " + missing);
         }
+    }
+
+    static List<String> requiredGrpcProtoMessageSimpleNamesForSelfCheck() {
+        return REQUIRED_GRPC_PROTO_MESSAGE_TYPES;
+    }
+
+    static List<String> requiredGrpcProtoGeneratedMessageFiles() {
+        return REQUIRED_GRPC_PROTO_MESSAGE_TYPES.stream()
+            .map(simpleName -> simpleName + ".java")
+            .collect(Collectors.toList());
+    }
+
+    static List<String> requiredGrpcProtoCompiledClassFiles() {
+        List<String> requiredClasses = new ArrayList<>();
+        for (String simpleName : REQUIRED_GRPC_PROTO_MESSAGE_TYPES) {
+            requiredClasses.add(simpleName + ".class");
+        }
+        for (String syntheticType : REQUIRED_GRPC_PROTO_SYNTHETIC_TYPES) {
+            requiredClasses.add(syntheticType + ".class");
+        }
+        requiredClasses.add("VideoProcessingServiceGrpc.class");
+        return requiredClasses;
     }
 
     private String quoteForShell(String text) {
@@ -413,7 +463,7 @@ public class PythonGrpcClient {
         }
     }
     
-    // ========== 步骤1: 下载视频 ==========
+    // ========== Step 1: Download Video ==========
     
     public static class DownloadResult {
         public boolean success;
@@ -545,7 +595,7 @@ public class PythonGrpcClient {
         }
     }
     
-    // ========== 步骤2: Whisper转录 ==========
+    // ========== Step 2: Transcribe with Whisper ==========
     
     public static class TranscribeResult {
         public boolean success;
@@ -591,7 +641,7 @@ public class PythonGrpcClient {
         );
     }
     
-    // ========== 步骤3: Stage1处理 ==========
+    // ========== Step 3: Stage1 Processing ==========
     
     public static class Stage1Result {
         public boolean success;
@@ -753,7 +803,7 @@ public class PythonGrpcClient {
         }
     }
     
-    // ========== 步骤4: Phase2A 语义分析 ==========
+    // ========== Step 4: Phase2A Semantic Analysis ==========
     
     public static class ScreenshotRequest {
         public String screenshotId;
@@ -914,7 +964,7 @@ public class PythonGrpcClient {
         );
     }
     
-    // ========== 步骤6: Phase2B 富文本组装 ==========
+    // ========== Step 6: Phase2B Rich Text Assembly ==========
     
     public static class AssembleResult {
         public boolean success;
@@ -1034,7 +1084,7 @@ public class PythonGrpcClient {
         }
     }
     
-    // ========== 健康检查 ==========
+    // ========== 鍋ュ悍妫€鏌?==========
     
     public static class ExtractBookPdfResult {
         public boolean success;
@@ -1122,7 +1172,7 @@ public class PythonGrpcClient {
         }
     }
     
-    // ========== 🚀 V3: CV验证批量并行处理 ==========
+    // ========== V3: Batch CV Validation ==========
     
     public static class StableIslandResult {
         public double startSec;
@@ -1161,23 +1211,14 @@ public class PythonGrpcClient {
     }
     
     /**
-     * 🚀 批量CV验证 (异步)
-     * 
-     * @param taskId 任务ID
-     * @param videoPath 视频路径
-     * @param units 语义单元列表
-     * @param timeoutSec 超时秒数
-     * @return CompletableFuture<CVBatchResult>
-     */
-    /**
-     * 🚀 批量CV验证 (流式返回)
-     * 
-     * @param taskId 任务ID
-     * @param videoPath 视频路径
-     * @param units 语义单元列表
-     * @param timeoutSec 超时秒数
-     * @param resultConsumer 结果回调 (每完成一个 Unit 回调一次)
-     * @return CompletableFuture<Boolean> 任务是否启动成功
+     * Batch CV validation with streaming callbacks.
+     *
+     * @param taskId task id
+     * @param videoPath video path
+     * @param units semantic unit inputs
+     * @param timeoutSec timeout in seconds
+     * @param resultConsumer callback invoked after each unit finishes
+     * @return whether the streaming task started successfully
      */
     public boolean validateCVBatchStreamingBlocking(
             String taskId, String videoPath, List<SemanticUnitInput> units, int timeoutSec,
@@ -1272,7 +1313,7 @@ public class PythonGrpcClient {
         );
     }
 
-    // ========== 🚀 V3: Phase2A - Step 2: Knowledge Classification ==========
+    // ========== 馃殌 V3: Phase2A - Step 2: Knowledge Classification ==========
     
     public static class ClassificationInput {
         public String unitId;
@@ -1367,7 +1408,7 @@ public class PythonGrpcClient {
         );
     }
 
-    // ========== 🚀 V3: Phase2A - Step 3: Material Request Generation ==========
+    // ========== 馃殌 V3: Phase2A - Step 3: Material Request Generation ==========
 
     public static class MaterialGenerationInput {
         public String unitId;
@@ -1376,7 +1417,7 @@ public class PythonGrpcClient {
         public double endSec;
         public String fullText;
         public List<ActionSegmentResult> actionUnits = new ArrayList<>();
-        public List<StableIslandResult> stableIslands = new ArrayList<>(); // 🚀 CV结果中的稳定岛
+        public List<StableIslandResult> stableIslands = new ArrayList<>(); // Stable islands extracted from CV results.
     }
     
     public static class ScreenshotRequestDTO {
@@ -1470,7 +1511,7 @@ public class PythonGrpcClient {
 
                     if (missingCnt > 0 || cvLikeCnt > 0 || defaultLikeCnt > 0) {
                         logger.warn(
-                            "[{}] 上游 knowledge_type 缺失/疑似 CV actionType: unit={}, actions={}, missing={}, cv_like={}, default_like={}, unit_kt={}, example=({})",
+                            "[{}] 涓婃父 knowledge_type 缂哄け/鐤戜技 CV actionType: unit={}, actions={}, missing={}, cv_like={}, default_like={}, unit_kt={}, example=({})",
                             taskId, unit.unitId, unit.actionUnits.size(), missingCnt, cvLikeCnt, defaultLikeCnt, unitKt, example
                         );
                     }
@@ -1539,7 +1580,7 @@ public class PythonGrpcClient {
     }
 
 
-    // ========== 🔥 V7: VL-Based Analysis ==========
+    // ========== 馃敟 V7: VL-Based Analysis ==========
     
     public static class VLAnalysisResult {
         public boolean success;
@@ -1555,15 +1596,15 @@ public class PythonGrpcClient {
     }
     
     /**
-     * 🔥 V7: VL-Based Analysis - 使用 Qwen3-VL-Plus 直接分析视频
-     * 
-     * 完全跳过 CV/LLM 流程，直接使用视觉语言模型分析视频片段。
-     * 
-     * @param taskId 任务ID
-     * @param videoPath 视频路径
-     * @param analyzeResult AnalyzeSemanticUnits 的返回结果（含 ref/inline）
-     * @param outputDir 输出目录
-     * @param timeoutSec 超时秒数
+     * V7: VL-based analysis using a multimodal model directly on the video.
+     *
+     * This path bypasses the legacy CV/LLM chain and consumes AnalyzeSemanticUnits output directly.
+     *
+     * @param taskId task id
+     * @param videoPath video path
+     * @param analyzeResult AnalyzeSemanticUnits result
+     * @param outputDir output directory
+     * @param timeoutSec timeout in seconds
      * @return CompletableFuture<VLAnalysisResult>
      */
     public VLAnalysisResult analyzeWithVL(
@@ -1684,7 +1725,7 @@ public class PythonGrpcClient {
         );
     }
 
-    // ========== 🚀 V6: 资源释放 ==========
+    // ========== 馃殌 V6: 璧勬簮閲婃斁 ==========
     
     public static class ReleaseResourcesResult {
         public boolean success;

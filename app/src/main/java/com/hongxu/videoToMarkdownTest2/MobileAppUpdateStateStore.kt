@@ -115,6 +115,23 @@ internal class MobileAppUpdateStateStore(
             .putString(KEY_READY_SHA256, state.sha256)
             .putString(KEY_READY_FILE_NAME, state.fileName)
             .putBoolean(KEY_READY_FORCE_UPDATE, state.forceUpdate)
+            .putInt(KEY_READY_INSTALL_PROMPTED_VERSION_CODE, 0)
+            .apply()
+    }
+
+    fun wasReadyInstallPrompted(versionCode: Int): Boolean {
+        if (versionCode <= 0) {
+            return false
+        }
+        return preferences.getInt(KEY_READY_INSTALL_PROMPTED_VERSION_CODE, 0) == versionCode
+    }
+
+    fun markReadyInstallPrompted(versionCode: Int) {
+        if (versionCode <= 0) {
+            return
+        }
+        preferences.edit()
+            .putInt(KEY_READY_INSTALL_PROMPTED_VERSION_CODE, versionCode)
             .apply()
     }
 
@@ -125,6 +142,7 @@ internal class MobileAppUpdateStateStore(
             .remove(KEY_READY_SHA256)
             .remove(KEY_READY_FILE_NAME)
             .remove(KEY_READY_FORCE_UPDATE)
+            .remove(KEY_READY_INSTALL_PROMPTED_VERSION_CODE)
             .apply()
     }
 
@@ -170,5 +188,6 @@ internal class MobileAppUpdateStateStore(
         internal const val KEY_READY_SHA256 = "ready_sha256"
         internal const val KEY_READY_FILE_NAME = "ready_file_name"
         internal const val KEY_READY_FORCE_UPDATE = "ready_force_update"
+        internal const val KEY_READY_INSTALL_PROMPTED_VERSION_CODE = "ready_install_prompted_version_code"
     }
 }

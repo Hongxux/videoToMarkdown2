@@ -96,7 +96,10 @@ class MobileAppAutoUpdateManager(
 
                     val ready = stateStore.readReadyInstallState()
                     if (ready != null && ready.versionCode > currentVersion.versionCode) {
-                        val readyAction = resolveReadyInstallAction(ready)
+                        val readyAction = resolveReadyInstallAction(
+                            state = ready,
+                            autoPromptInstaller = true
+                        )
                         if (readyAction !is AutoUpdateAction.NoOp) {
                             return@withContext readyAction
                         }
@@ -112,7 +115,10 @@ class MobileAppAutoUpdateManager(
 
                     val existingReady = stateStore.readReadyInstallState()
                     if (existingReady != null && existingReady.versionCode == checkPayload.latestVersionCode) {
-                        val readyAction = resolveReadyInstallAction(existingReady)
+                        val readyAction = resolveReadyInstallAction(
+                                state = existingReady,
+                                autoPromptInstaller = true
+                            )
                         if (readyAction !is AutoUpdateAction.NoOp) {
                             return@withContext readyAction
                         }
@@ -150,7 +156,11 @@ class MobileAppAutoUpdateManager(
                     val currentVersion = stateStore.readCurrentVersion()
                     stateStore.pruneStateByCurrentVersion(currentVersion.versionCode)
                     val ready = stateStore.readReadyInstallState() ?: return@withContext AutoUpdateAction.NoOp
-                    launchInstallerIfReady(ready)
+                    val installAction = launchInstallerIfReady(ready)
+                    if (installAction is AutoUpdateAction.InstallPrompted) {
+                        stateStore.markReadyInstallPrompted(ready.versionCode)
+                    }
+                    installAction
                 }
             } catch (error: Exception) {
                 AutoUpdateAction.Failed(
@@ -185,7 +195,10 @@ class MobileAppAutoUpdateManager(
                     forceUpdate = state.forceUpdate
                 )
                 stateStore.writeReadyInstallState(readyState)
-                return resolveReadyInstallAction(readyState)
+                return resolveReadyInstallAction(
+                    state = readyState,
+                    autoPromptInstaller = true
+                )
             }
             stateStore.clearPendingDownloadState()
             return AutoUpdateAction.NoOp
@@ -260,7 +273,10 @@ class MobileAppAutoUpdateManager(
             forceUpdate = state.forceUpdate
         )
         stateStore.writeReadyInstallState(readyState)
-        return resolveReadyInstallAction(readyState)
+        return resolveReadyInstallAction(
+            state = readyState,
+            autoPromptInstaller = true
+        )
     }
 
     private fun resolveWorkProgress(workInfo: WorkInfo, fallbackProgress: Int?): Int? {
@@ -373,7 +389,10 @@ class MobileAppAutoUpdateManager(
         )
     }
 
-    private fun resolveReadyInstallAction(state: ReadyInstallState): AutoUpdateAction {
+    private suspend fun resolveReadyInstallAction(
+        state: ReadyInstallState,
+        autoPromptInstaller: Boolean
+    ): AutoUpdateAction {
         val apkFile = resolveManagedUpdateApkFile(appContext, state.fileName)
         if (apkFile == null || !apkFile.exists()) {
             stateStore.clearReadyInstallState()
@@ -388,6 +407,15 @@ class MobileAppAutoUpdateManager(
                 versionCode = state.versionCode,
                 versionName = state.versionName
             )
+        }
+        if (autoPromptInstaller && !stateStore.wasReadyInstallPrompted(state.versionCode)) {
+            val installAction = launchInstallerIfReady(state)
+            if (installAction is AutoUpdateAction.InstallPrompted) {
+                stateStore.markReadyInstallPrompted(state.versionCode)
+            }
+            if (installAction !is AutoUpdateAction.ReadyToInstall && installAction !is AutoUpdateAction.NoOp) {
+                return installAction
+            }
         }
         return AutoUpdateAction.ReadyToInstall(
             versionCode = state.versionCode,

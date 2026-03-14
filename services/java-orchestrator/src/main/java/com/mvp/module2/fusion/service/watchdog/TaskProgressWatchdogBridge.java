@@ -319,6 +319,7 @@ public class TaskProgressWatchdogBridge {
         return switch (normalized) {
             case "download" -> new StageRange(0.03d, 0.14d);
             case "transcribe" -> new StageRange(0.14d, 0.25d);
+            case "book_pdf_extract" -> new StageRange(0.20d, 0.60d);
             case "stage1" -> new StageRange(0.25d, 0.35d);
             case "phase2a" -> new StageRange(0.35d, 0.45d);
             case "analysis_extraction" -> new StageRange(0.40d, 0.80d);

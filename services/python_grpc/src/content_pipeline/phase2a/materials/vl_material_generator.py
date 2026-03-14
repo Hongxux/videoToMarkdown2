@@ -53,6 +53,7 @@ from services.python_grpc.src.content_pipeline.infra.runtime.vl_ffmpeg_utils imp
     export_keyframe_with_ffmpeg,
     export_keyframes_with_ffmpeg_batch,
     concat_segments_with_ffmpeg,
+    _probe_iframe_timestamps,
 )
 from services.python_grpc.src.content_pipeline.phase2a.materials.models import VLGenerationResult
 from services.python_grpc.src.content_pipeline.phase2a.materials.errors import (
@@ -391,6 +392,23 @@ class VLMaterialGenerator:
             )
         except (TypeError, ValueError):
             self.best_frame_vision_max_tokens = 64
+        raw_iframe_only_mode = self.screenshot_config.get("iframe_only_mode", False)
+        if isinstance(raw_iframe_only_mode, str):
+            self.screenshot_iframe_only_mode = raw_iframe_only_mode.strip().lower()
+        elif raw_iframe_only_mode:
+            self.screenshot_iframe_only_mode = "always"
+        else:
+            self.screenshot_iframe_only_mode = "off"
+        self.screenshot_iframe_fallback_on_oom = bool(
+            self.screenshot_config.get("iframe_fallback_on_memory_pressure", True)
+        )
+        try:
+            self.screenshot_iframe_probe_max_concurrency = max(
+                1,
+                int(self.screenshot_config.get("iframe_probe_max_concurrency", 4)),
+            )
+        except (TypeError, ValueError):
+            self.screenshot_iframe_probe_max_concurrency = 4
         self._best_frame_selection_prompt = _load_package_prompt_default(
             _DEFAULT_BEST_FRAME_SELECTION_REL_PATH,
             fallback=self._get_default_best_frame_selection_prompt(),
@@ -7079,6 +7097,14 @@ class VLMaterialGenerator:
             return []
         
         # 检查是否启用流式处鐞?(默认启用)
+        if self._should_force_iframe_only_screenshot_optimization():
+            logger.info("Using iframe-only screenshot optimization mode")
+            return await self._optimize_screenshots_by_iframe_only(
+                video_path=video_path,
+                screenshot_requests=screenshot_requests,
+                reason="forced_by_config",
+            )
+
         use_streaming = self.screenshot_config.get("streaming_pipeline", True)
         
         if use_streaming:
@@ -7460,6 +7486,131 @@ class VLMaterialGenerator:
         threshold_ms = safe_float(raw_value, 200.0)
         return max(0.0, min(5000.0, float(threshold_ms)))
 
+    def _resolve_screenshot_iframe_bounds(
+        self,
+        request: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[float, float, float]:
+        """解析截图 I 帧搜索窗口，优先复用请求级 window。"""
+        default_before, default_after = self._resolve_screenshot_time_window()
+        requested_ts = safe_float((request or {}).get("timestamp_sec", 0.0), 0.0)
+
+        search_start = None
+        search_end = None
+        if isinstance(request, dict):
+            raw_window_start = request.get("_window_start_sec")
+            raw_window_end = request.get("_window_end_sec")
+            try:
+                if raw_window_start is not None:
+                    search_start = max(0.0, float(raw_window_start))
+            except (TypeError, ValueError):
+                search_start = None
+            try:
+                if raw_window_end is not None:
+                    search_end = max(0.0, float(raw_window_end))
+            except (TypeError, ValueError):
+                search_end = None
+
+        config_before = safe_float(
+            self.screenshot_config.get("iframe_search_before_seconds", default_before),
+            default_before,
+        )
+        config_after = safe_float(
+            self.screenshot_config.get("iframe_search_after_seconds", default_after),
+            default_after,
+        )
+        before = max(0.0, requested_ts - search_start) if search_start is not None else max(0.0, config_before)
+        after = max(0.0, search_end - requested_ts) if search_end is not None else max(0.0, config_after)
+        window = max(before, after)
+        return before, after, window
+
+    def _should_force_iframe_only_screenshot_optimization(self) -> bool:
+        """解析是否强制整条截图优化链只做 I 帧映射。"""
+        return self.screenshot_iframe_only_mode in {"1", "true", "yes", "y", "on", "always", "force", "iframe"}
+
+    def _is_memory_pressure_error(self, error: Any) -> bool:
+        """识别 OpenCV/NumPy 典型内存不足异常，便于降级到 I 帧模式。"""
+        if isinstance(error, MemoryError):
+            return True
+        message = f"{type(error).__name__}: {error}".lower()
+        markers = (
+            "outofmemoryerror",
+            "insufficient memory",
+            "unable to allocate",
+            "failed to allocate",
+            "cannot allocate memory",
+            "std::bad_alloc",
+        )
+        return any(marker in message for marker in markers)
+
+    async def _optimize_screenshots_by_iframe_only(
+        self,
+        *,
+        video_path: str,
+        screenshot_requests: List[Dict[str, Any]],
+        reason: str,
+    ) -> List[Dict[str, Any]]:
+        """将截图时间戳映射到搜索窗口内最近 I 帧，避免走 OpenCV/SHM 链路。"""
+        if not screenshot_requests:
+            return []
+
+        semaphore = asyncio.Semaphore(max(1, int(self.screenshot_iframe_probe_max_concurrency)))
+
+        async def _remap_single(request: Dict[str, Any]) -> Dict[str, Any]:
+            updated = dict(request or {})
+            requested_ts = safe_float(updated.get("timestamp_sec", 0.0), 0.0)
+            before_sec, after_sec, window_sec = self._resolve_screenshot_iframe_bounds(updated)
+
+            async with semaphore:
+                iframe_candidates = await _probe_iframe_timestamps(
+                    video_path=video_path,
+                    target_timestamp_sec=requested_ts,
+                    search_window_sec=window_sec,
+                    search_before_sec=before_sec,
+                    search_after_sec=after_sec,
+                )
+            min_ts = max(0.0, requested_ts - before_sec)
+            max_ts = max(min_ts, requested_ts + after_sec)
+            iframe_candidates = [
+                float(candidate_ts)
+                for candidate_ts in list(iframe_candidates or [])
+                if min_ts - 1e-6 <= float(candidate_ts) <= max_ts + 1e-6
+            ]
+
+            selected_ts = requested_ts
+            matched_iframe = False
+            if iframe_candidates:
+                selected_ts = min(
+                    iframe_candidates,
+                    key=lambda ts: (abs(float(ts) - requested_ts), abs(float(ts) - requested_ts)),
+                )
+                matched_iframe = True
+
+            updated["timestamp_sec"] = float(selected_ts)
+            updated["_skip_cv_optimization"] = True
+            updated["_iframe_only_selected"] = bool(matched_iframe)
+            updated["_iframe_only_reason"] = str(reason or "manual")
+            updated["_cv_quality_score"] = float(updated.get("_cv_quality_score", updated.get("score", 0.0)) or 0.0)
+            updated["_cv_candidate_screenshots"] = [
+                {
+                    "timestamp_sec": float(selected_ts),
+                    "score": float(updated["_cv_quality_score"]),
+                    "selection_source": "iframe_only" if matched_iframe else "requested_timestamp_fallback",
+                }
+            ]
+            return updated
+
+        remapped_requests = await asyncio.gather(*[_remap_single(req) for req in screenshot_requests])
+        selected_count = sum(1 for item in remapped_requests if item.get("_iframe_only_selected"))
+        logger.info(
+            "[VL] screenshot iframe-only remap: reason=%s, total=%s, matched_iframe=%s, requested_fallback=%s, video=%s",
+            reason,
+            len(remapped_requests),
+            selected_count,
+            max(0, len(remapped_requests) - selected_count),
+            video_path,
+        )
+        return remapped_requests
+
     def _resolve_concrete_forward_search_profile(self) -> Dict[str, Any]:
         """解析 concrete 截图的轻量 forward-search 配置。"""
         _, default_after = self._resolve_screenshot_time_window()
@@ -7637,47 +7788,53 @@ class VLMaterialGenerator:
                 max_frames=max(10, sampled_frame_count + 10),
                 max_bytes=registry_byte_budget,
             )
+            try:
+                # Seek once, then sequential scan
+                cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+                current_idx = start_frame
+                next_target_idx = start_frame
 
-            # Seek once, then sequential scan
-            cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            current_idx = start_frame
-            next_target_idx = start_frame
+                ts_to_shm_ref: Dict[float, Any] = {}
+                register_ms = 0.0
 
-            ts_to_shm_ref: Dict[float, Any] = {}
-            register_ms = 0.0
+                while current_idx <= end_frame:
+                    ret, frame = cap.read()
+                    if not ret or frame is None:
+                        break
 
-            while current_idx <= end_frame:
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    break
+                    should_sample = (current_idx == next_target_idx) or (current_idx == end_frame)
+                    if should_sample:
+                        # Downsample to proxy height for memory safety + speed
+                        h, w = frame.shape[:2]
+                        if h > 0 and w > 0 and target_height > 0:
+                            target_w = int((w / h) * target_height)
+                            target_w = (target_w // 2) * 2
+                            if target_w <= 0:
+                                target_w = 2
+                            frame = cv2.resize(frame, (target_w, target_height))
 
-                should_sample = (current_idx == next_target_idx) or (current_idx == end_frame)
-                if should_sample:
-                    # Downsample to proxy height for memory safety + speed
-                    h, w = frame.shape[:2]
-                    if h > 0 and w > 0 and target_height > 0:
-                        target_w = int((w / h) * target_height)
-                        target_w = (target_w // 2) * 2
-                        if target_w <= 0:
-                            target_w = 2
-                        frame = cv2.resize(frame, (target_w, target_height))
+                        ts = float(current_idx / fps) if fps > 0 else float(union_start)
+                        t_reg0 = time.perf_counter()
+                        registry.register_frame(current_idx, frame)
+                        shm_ref = registry.get_shm_ref(current_idx)
+                        register_ms += (time.perf_counter() - t_reg0) * 1000.0
+                        if shm_ref:
+                            ts_to_shm_ref[ts] = shm_ref
 
-                    ts = float(current_idx / fps) if fps > 0 else float(union_start)
-                    t_reg0 = time.perf_counter()
-                    registry.register_frame(current_idx, frame)
-                    shm_ref = registry.get_shm_ref(current_idx)
-                    register_ms += (time.perf_counter() - t_reg0) * 1000.0
-                    if shm_ref:
-                        ts_to_shm_ref[ts] = shm_ref
+                        if current_idx >= next_target_idx:
+                            next_target_idx = next_target_idx + step
 
-                    if current_idx >= next_target_idx:
-                        next_target_idx = next_target_idx + step
+                    current_idx += 1
 
-                current_idx += 1
-
-            prefetch_total_ms = (time.perf_counter() - t0) * 1000.0
-            prefetch_ms = max(0.0, prefetch_total_ms - register_ms)
-            return registry, ts_to_shm_ref, prefetch_ms, register_ms
+                prefetch_total_ms = (time.perf_counter() - t0) * 1000.0
+                prefetch_ms = max(0.0, prefetch_total_ms - register_ms)
+                return registry, ts_to_shm_ref, prefetch_ms, register_ms
+            except Exception:
+                try:
+                    registry.cleanup()
+                except Exception:
+                    pass
+                raise
         finally:
             cap.release()
 

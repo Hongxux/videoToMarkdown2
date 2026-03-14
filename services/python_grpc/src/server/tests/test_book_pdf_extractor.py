@@ -1,4 +1,6 @@
 from pathlib import Path
+from collections import deque
+from concurrent.futures import Future
 import json
 import sys
 
@@ -6,12 +8,18 @@ import fitz
 
 import services.python_grpc.src.server.book_pdf_extractor as extractor_mod
 from services.python_grpc.src.server.book_pdf_extractor import (
+    _BookPdfExtractProgressReporter,
     _build_mineru_page_tasks,
     _build_mineru_runtime_env,
     _decide_mineru_parallel_workers,
+    _dispatch_book_pdf_mineru_jobs_locked,
     _discover_mineru_cli,
+    _mineru_local_models_ready,
+    _MineruPageTaskPayload,
+    _MineruSharedJob,
     _maybe_refine_markdown_with_llm,
     _refill_mineru_code_blocks_with_vector_text,
+    _resolve_mineru_shared_pool_workers,
     _split_markdown_into_llm_chunks,
     extract_book_pdf_markdown,
 )
@@ -59,6 +67,40 @@ def _build_multi_page_pdf(pdf_path: Path, page_count: int) -> None:
         doc.save(pdf_path)
     finally:
         doc.close()
+
+
+def _reset_shared_pool_state() -> None:
+    extractor_mod._BOOK_PDF_MINERU_PENDING_JOBS.clear()
+    extractor_mod._BOOK_PDF_MINERU_ACTIVE_FUTURES.clear()
+    extractor_mod._BOOK_PDF_MINERU_COMPLETED_FUTURES.clear()
+    extractor_mod._BOOK_PDF_MINERU_DISPATCHER = None
+    extractor_mod._BOOK_PDF_MINERU_STOP = False
+
+
+class _FakeMineruExecutor:
+    def __init__(self) -> None:
+        self.submissions = []
+
+    def submit(self, fn, *args):
+        future = Future()
+        self.submissions.append(args)
+        future.set_result(
+            extractor_mod._MineruSliceExtractResult(
+                success=True,
+                start_page=int(args[9]),
+                end_page=int(args[10]),
+                markdown=f"page-{int(args[9])}",
+            )
+        )
+        return future
+
+
+class _RecordingWatchdogWriter:
+    def __init__(self) -> None:
+        self.events = []
+
+    def emit(self, **kwargs):
+        self.events.append(dict(kwargs))
 
 
 def test_extract_book_pdf_markdown_uses_page_slice_and_fallback(tmp_path: Path) -> None:
@@ -109,13 +151,12 @@ def test_extract_book_pdf_markdown_rejects_invalid_page_range(tmp_path: Path) ->
     assert "out of range" in (result.error_msg or "").lower()
 
 
-def test_build_mineru_page_tasks_splits_continuous_range_into_four_even_chunks(tmp_path: Path, monkeypatch) -> None:
+def test_build_mineru_page_tasks_defaults_to_single_page_queue(tmp_path: Path, monkeypatch) -> None:
     pdf_path = tmp_path / "ten-pages.pdf"
     _build_multi_page_pdf(pdf_path, page_count=10)
 
     output_dir = tmp_path / "out-range"
     monkeypatch.delenv("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", raising=False)
-    monkeypatch.setenv("BOOK_PDF_MINERU_TARGET_CHUNKS", "4")
 
     tasks = _build_mineru_page_tasks(
         sliced_pdf_path=pdf_path,
@@ -127,10 +168,16 @@ def test_build_mineru_page_tasks_splits_continuous_range_into_four_even_chunks(t
     )
 
     assert [(start, end) for start, end, _path in tasks] == [
-        (1, 3),
-        (4, 6),
-        (7, 8),
-        (9, 10),
+        (1, 1),
+        (2, 2),
+        (3, 3),
+        (4, 4),
+        (5, 5),
+        (6, 6),
+        (7, 7),
+        (8, 8),
+        (9, 9),
+        (10, 10),
     ]
     assert all(path.is_file() for _start, _end, path in tasks)
 
@@ -143,6 +190,96 @@ def test_decide_mineru_parallel_workers_prefers_four_default_workers(monkeypatch
     monkeypatch.setattr(extractor_mod, "_read_available_memory_gb", lambda: 1.0)
 
     assert _decide_mineru_parallel_workers(4) == 4
+
+
+def test_resolve_mineru_shared_pool_workers_defaults_to_four(monkeypatch) -> None:
+    monkeypatch.delenv("BOOK_PDF_MINERU_WORKERS", raising=False)
+    monkeypatch.setenv("BOOK_PDF_MINERU_DEFAULT_WORKERS", "4")
+    monkeypatch.setenv("BOOK_PDF_MINERU_WORKER_MAX", "8")
+
+    assert _resolve_mineru_shared_pool_workers() == 4
+
+
+def test_dispatch_book_pdf_mineru_jobs_round_robin_across_jobs(monkeypatch) -> None:
+    _reset_shared_pool_state()
+    fake_executor = _FakeMineruExecutor()
+    monkeypatch.setattr(extractor_mod, "_get_book_pdf_mineru_pool", lambda worker_count: fake_executor)
+    monkeypatch.setattr(extractor_mod, "_resolve_mineru_shared_pool_workers", lambda: 4)
+
+    def build_job(task_id: str, pages: list[int]) -> _MineruSharedJob:
+        payloads = deque(
+            _MineruPageTaskPayload(
+                task_id=task_id,
+                mineru_bin="mineru",
+                use_mineru_cli=True,
+                mineru_env={},
+                sliced_pdf_path=f"/tmp/{task_id}-{page_no}.pdf",
+                output_dir="/tmp/out",
+                output_root="/tmp/out",
+                image_dir="/tmp/out/assets",
+                section_id=task_id,
+                start_page=page_no,
+                end_page=page_no,
+                timeout_seconds=120,
+            )
+            for page_no in pages
+        )
+        return _MineruSharedJob(
+            job_id=task_id,
+            task_id=task_id,
+            section_id=task_id,
+            total_tasks=len(pages),
+            pending_payloads=payloads,
+        )
+
+    jobs = [
+        build_job("job-a", [1, 2, 3]),
+        build_job("job-b", [10, 11]),
+        build_job("job-c", [20]),
+    ]
+    for job in jobs:
+        extractor_mod._BOOK_PDF_MINERU_PENDING_JOBS.append(job)
+        job.queued = True
+
+    _dispatch_book_pdf_mineru_jobs_locked()
+
+    submitted_pages = [int(args[9]) for args in fake_executor.submissions]
+    assert submitted_pages == [1, 10, 20, 2]
+    assert jobs[0].queued is True
+    assert jobs[1].queued is True
+    assert jobs[2].queued is False
+    _reset_shared_pool_state()
+
+
+def test_book_pdf_progress_reporter_emits_hard_progress_once_per_page() -> None:
+    writer = _RecordingWatchdogWriter()
+    reporter = _BookPdfExtractProgressReporter(
+        task_id="task-1",
+        section_id="c1s1t1",
+        start_page=3,
+        end_page=4,
+        total_pages=2,
+        writer=writer,
+    )
+
+    reporter.emit_queue_ready("mineru")
+    reporter.record_completed_pages(3, 3, "mineru")
+    reporter.record_completed_pages(3, 3, "pymupdf")
+    reporter.record_completed_pages(4, 4, "pymupdf")
+    reporter.emit_completed("pymupdf")
+
+    checkpoints = [event["checkpoint"] for event in writer.events]
+    assert checkpoints == [
+        "book_pdf_pages_queued",
+        "page_0003_done",
+        "page_0004_done",
+        "book_pdf_extract_completed",
+    ]
+    assert writer.events[1]["completed"] == 1
+    assert writer.events[1]["pending"] == 1
+    assert writer.events[2]["completed"] == 2
+    assert writer.events[2]["pending"] == 0
+    assert all(event["signal_type"] == "hard" for event in writer.events)
 
 
 def test_discover_mineru_cli_finds_script_near_python(monkeypatch, tmp_path: Path) -> None:
@@ -167,6 +304,41 @@ def test_build_mineru_runtime_env_writes_config(tmp_path: Path) -> None:
     config_path = Path(env["MINERU_TOOLS_CONFIG_JSON"])
     assert config_path.is_file()
     assert (tmp_path / "intermediates" / "book_mineru_runtime" / "models").is_dir()
+
+
+def test_mineru_local_models_ready_accepts_legacy_string_models_dir(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "mineru.json"
+    models_dir = tmp_path / "models"
+    sentinel = models_dir / "Layout" / "YOLO" / "doclayout_yolo_docstructbench_imgsz1280_2501.pt"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("", encoding="utf-8")
+    config_path.write_text(json.dumps({"models-dir": str(models_dir)}), encoding="utf-8")
+
+    monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", str(config_path))
+
+    assert _mineru_local_models_ready() is True
+
+
+def test_mineru_local_models_ready_accepts_pipeline_snapshot_root(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "mineru.json"
+    snapshot_root = tmp_path / "snapshot"
+    sentinel = (
+        snapshot_root
+        / "models"
+        / "Layout"
+        / "YOLO"
+        / "doclayout_yolo_docstructbench_imgsz1280_2501.pt"
+    )
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text("", encoding="utf-8")
+    config_path.write_text(
+        json.dumps({"models-dir": {"pipeline": str(snapshot_root), "vlm": ""}}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("MINERU_TOOLS_CONFIG_JSON", str(config_path))
+
+    assert _mineru_local_models_ready() is True
 
 
 def test_maybe_refine_markdown_with_llm_keeps_image_marker(monkeypatch) -> None:

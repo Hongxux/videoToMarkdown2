@@ -108,6 +108,43 @@ public class DatabaseInitializer {
                             UNIQUE(file_md5, file_ext)
                         )
                         """);
+                statement.execute("""
+                        CREATE TABLE IF NOT EXISTS task_runtime_state (
+                            task_id TEXT PRIMARY KEY,
+                            user_id TEXT NOT NULL,
+                            video_url TEXT NOT NULL,
+                            normalized_video_key TEXT,
+                            title TEXT,
+                            output_dir TEXT,
+                            priority TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            progress REAL NOT NULL DEFAULT 0,
+                            status_message TEXT,
+                            result_path TEXT,
+                            cleanup_source_path TEXT,
+                            error_message TEXT,
+                            duplicate_of_task_id TEXT,
+                            book_options_json TEXT,
+                            probe_payload_json TEXT,
+                            created_at TEXT NOT NULL,
+                            started_at TEXT,
+                            completed_at TEXT,
+                            updated_at TEXT NOT NULL
+                        )
+                        """);
+                try {
+                    statement.execute("ALTER TABLE task_runtime_state ADD COLUMN normalized_video_key TEXT");
+                } catch (Exception ignored) {
+                    // 幂等迁移：旧库已存在该列时直接跳过。
+                }
+                try {
+                    statement.execute("ALTER TABLE task_runtime_state ADD COLUMN duplicate_of_task_id TEXT");
+                } catch (Exception ignored) {
+                    // 幂等迁移：旧库已存在该列时直接跳过。
+                }
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_status ON task_runtime_state(status)");
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_user_id ON task_runtime_state(user_id)");
+                statement.execute("CREATE INDEX IF NOT EXISTS idx_task_runtime_state_video_key ON task_runtime_state(normalized_video_key)");
                 logger.info("collection schema initialized");
             }
         };

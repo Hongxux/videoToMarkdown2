@@ -2,23 +2,27 @@
 
 from __future__ import annotations
 
+import atexit
 import logging
 import json
 import os
+import threading
 import re
 import shutil
 import subprocess
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import deque
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import requests
 
 from services.python_grpc.src.common.utils.process_pool import create_spawn_process_pool
+from services.python_grpc.src.server.watchdog_signal_writer import TaskWatchdogSignalWriter
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +31,10 @@ _INLINE_FORMULA_PATTERN = re.compile(r"(?<!\$)\$[^$\n]+\$(?!\$)")
 _MD_FENCE_PATTERN = re.compile(r"^```(?:markdown|md)?\s*([\s\S]*?)\s*```$", flags=re.IGNORECASE)
 _TABLE_LINE_PATTERN = re.compile(r"^\|.+\|$")
 _MINERU_MODEL_BOOTSTRAP_LAST_TS = 0.0
+_MINERU_PIPELINE_MODEL_SENTINEL = Path("Layout") / "YOLO" / "doclayout_yolo_docstructbench_imgsz1280_2501.pt"
 
 _BOOK_MARKDOWN_FILTER_SYSTEM_PROMPT = "你是一个专业的学术文档和代码校对专家。"
+_BOOK_PDF_WATCHDOG_STAGE = "book_pdf_extract"
 _BOOK_MARKDOWN_FILTER_USER_PROMPT_TEMPLATE = """以下是通过 OCR 从 PDF 提取的 Markdown 文本，其中可能包含损坏的数学公式（LaTeX 语法错误）或丢失了缩进的代码块。
 请在【完全不改变原文语义、不删减内容】的前提下，修复以下问题：
 1. 修复不闭合或语法错误的 LaTeX 公式（如 $\\frac{{a}}{{b}} 错写成 $\\frac{{a b}}）。
@@ -72,6 +78,186 @@ class _MineruSliceExtractResult:
     error_msg: str = ""
 
 
+@dataclass
+class _BookPdfExtractProgressReporter:
+    task_id: str
+    section_id: str
+    start_page: int
+    end_page: int
+    total_pages: int
+    writer: Optional[TaskWatchdogSignalWriter] = None
+    _completed_pages: Set[int] = field(default_factory=set)
+    _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def emit_queue_ready(self, extractor: str) -> None:
+        self._emit_running(
+            checkpoint="book_pdf_pages_queued",
+            extractor=extractor,
+            extra={
+                "section_id": self.section_id,
+                "page_start": self.start_page,
+                "page_end": self.end_page,
+            },
+        )
+
+    def emit_fallback(self, reason: str) -> None:
+        self._emit_running(
+            checkpoint="fallback_to_pymupdf",
+            extractor="pymupdf",
+            extra={
+                "section_id": self.section_id,
+                "reason": str(reason or "").strip()[:200],
+            },
+        )
+
+    def record_completed_pages(self, start_page: int, end_page: int, extractor: str) -> None:
+        normalized_start = max(1, int(start_page or 1))
+        normalized_end = max(normalized_start, int(end_page or normalized_start))
+        with self._lock:
+            changed = False
+            for page_no in range(normalized_start, normalized_end + 1):
+                if page_no in self._completed_pages:
+                    continue
+                self._completed_pages.add(page_no)
+                changed = True
+            if not changed:
+                return
+            completed = len(self._completed_pages)
+        checkpoint = (
+            f"page_{normalized_start:04d}_done"
+            if normalized_start == normalized_end
+            else f"pages_{normalized_start:04d}_{normalized_end:04d}_done"
+        )
+        self._emit_running(
+            checkpoint=checkpoint,
+            extractor=extractor,
+            completed=completed,
+            extra={
+                "section_id": self.section_id,
+                "page_start": normalized_start,
+                "page_end": normalized_end,
+            },
+        )
+
+    def emit_completed(self, extractor: str) -> None:
+        completed = self._completed_count()
+        self._emit(
+            status="completed",
+            checkpoint="book_pdf_extract_completed",
+            completed=max(completed, self.total_pages),
+            extractor=extractor,
+            extra={
+                "section_id": self.section_id,
+                "page_start": self.start_page,
+                "page_end": self.end_page,
+            },
+        )
+
+    def emit_failed(self, checkpoint: str, error_msg: str, extractor: str) -> None:
+        self._emit(
+            status="failed",
+            checkpoint=checkpoint,
+            completed=self._completed_count(),
+            extractor=extractor,
+            extra={
+                "section_id": self.section_id,
+                "error": str(error_msg or "").strip()[:300],
+            },
+        )
+
+    def _completed_count(self) -> int:
+        with self._lock:
+            return len(self._completed_pages)
+
+    def _emit_running(
+        self,
+        *,
+        checkpoint: str,
+        extractor: str,
+        completed: Optional[int] = None,
+        extra: Optional[Dict[str, object]] = None,
+    ) -> None:
+        self._emit(
+            status="running",
+            checkpoint=checkpoint,
+            completed=self._completed_count() if completed is None else completed,
+            extractor=extractor,
+            extra=extra,
+        )
+
+    def _emit(
+        self,
+        *,
+        status: str,
+        checkpoint: str,
+        completed: int,
+        extractor: str,
+        extra: Optional[Dict[str, object]] = None,
+    ) -> None:
+        if self.writer is None:
+            return
+        safe_completed = max(0, min(int(completed), self.total_pages))
+        safe_pending = max(0, self.total_pages - safe_completed)
+        payload: Dict[str, object] = {
+            "extractor": str(extractor or "").strip() or "unknown",
+        }
+        if isinstance(extra, dict):
+            payload.update(extra)
+        self.writer.emit(
+            status=status,
+            checkpoint=checkpoint,
+            completed=safe_completed,
+            pending=safe_pending,
+            signal_type="hard",
+            extra=payload,
+        )
+
+
+@dataclass
+class _MineruPageTaskPayload:
+    task_id: str
+    mineru_bin: str
+    use_mineru_cli: bool
+    mineru_env: dict
+    sliced_pdf_path: str
+    output_dir: str
+    output_root: str
+    image_dir: str
+    section_id: str
+    start_page: int
+    end_page: int
+    timeout_seconds: int
+
+
+@dataclass
+class _MineruSharedJob:
+    job_id: str
+    task_id: str
+    section_id: str
+    total_tasks: int
+    pending_payloads: Deque[_MineruPageTaskPayload]
+    total_pages: int = 0
+    progress_reporter: Optional[_BookPdfExtractProgressReporter] = None
+    done_event: threading.Event = field(default_factory=threading.Event)
+    results: List[_MineruSliceExtractResult] = field(default_factory=list)
+    error_msg: str = ""
+    inflight_count: int = 0
+    queued: bool = False
+    submitted_count: int = 0
+    completed_count: int = 0
+
+
+_BOOK_PDF_MINERU_POOL_LOCK = threading.Lock()
+_BOOK_PDF_MINERU_POOL: Optional[ProcessPoolExecutor] = None
+_BOOK_PDF_MINERU_POOL_WORKERS = 0
+_BOOK_PDF_MINERU_SCHEDULER_COND = threading.Condition()
+_BOOK_PDF_MINERU_PENDING_JOBS: Deque[_MineruSharedJob] = deque()
+_BOOK_PDF_MINERU_ACTIVE_FUTURES: Dict[Future, Tuple[_MineruSharedJob, _MineruPageTaskPayload]] = {}
+_BOOK_PDF_MINERU_COMPLETED_FUTURES: Deque[Future] = deque()
+_BOOK_PDF_MINERU_DISPATCHER: Optional[threading.Thread] = None
+_BOOK_PDF_MINERU_STOP = False
+
+
 def extract_book_pdf_markdown(
     task_id: str,
     pdf_path: str,
@@ -102,6 +288,23 @@ def extract_book_pdf_markdown(
     page_start, page_end, page_error = _normalize_page_range(pdf_file, start_page, end_page)
     if page_error:
         return ExtractBookPdfResult(success=False, error_msg=page_error)
+    total_pages = max(1, page_end - page_start + 1)
+    safe_section_id = str(section_id or "").strip() or "section"
+    progress_reporter = _BookPdfExtractProgressReporter(
+        task_id=str(task_id or "").strip() or "book_pdf_extract",
+        section_id=safe_section_id,
+        start_page=page_start,
+        end_page=page_end,
+        total_pages=total_pages,
+        writer=TaskWatchdogSignalWriter(
+            task_id=str(task_id or "").strip() or "book_pdf_extract",
+            output_dir=str(output_dir_path),
+            stage=_BOOK_PDF_WATCHDOG_STAGE,
+            total_steps=total_pages,
+        ),
+    )
+    preferred_extractor = "mineru" if prefer_mineru else "pymupdf"
+    progress_reporter.emit_queue_ready(preferred_extractor)
 
     slice_root = output_dir_path / "intermediates" / "book_pdf_slices"
     slice_root.mkdir(parents=True, exist_ok=True)
@@ -120,6 +323,7 @@ def extract_book_pdf_markdown(
             page_end,
             error,
         )
+        progress_reporter.emit_failed("slice_pdf_failed", str(error), preferred_extractor)
         return ExtractBookPdfResult(success=False, error_msg=f"slice pdf failed: {error}")
 
     if prefer_mineru:
@@ -133,25 +337,42 @@ def extract_book_pdf_markdown(
             start_page=page_start,
             end_page=page_end,
             timeout_seconds=timeout_seconds,
+            progress_reporter=progress_reporter,
         )
         if mineru_result.success:
+            progress_reporter.emit_completed("mineru")
             return mineru_result
         logger.info(
             "[%s] mineru extraction unavailable, fallback to pymupdf, reason=%s",
             task_id,
             mineru_result.error_msg,
         )
+        progress_reporter.emit_fallback(mineru_result.error_msg)
 
-    return _extract_with_pymupdf(
-        task_id=task_id,
-        sliced_pdf_path=sliced_pdf_path,
-        output_dir=output_dir_path,
-        output_root=output_root_path,
-        image_dir=image_dir_path,
-        section_id=section_id,
-        start_page=page_start,
-        end_page=page_end,
-    )
+    try:
+        pymupdf_result = _extract_with_pymupdf(
+            task_id=task_id,
+            sliced_pdf_path=sliced_pdf_path,
+            output_dir=output_dir_path,
+            output_root=output_root_path,
+            image_dir=image_dir_path,
+            section_id=section_id,
+            start_page=page_start,
+            end_page=page_end,
+            progress_reporter=progress_reporter,
+        )
+    except Exception as error:
+        progress_reporter.emit_failed("pymupdf_extract_failed", str(error), "pymupdf")
+        raise
+    if pymupdf_result.success:
+        progress_reporter.emit_completed("pymupdf")
+    else:
+        progress_reporter.emit_failed(
+            "pymupdf_extract_failed",
+            pymupdf_result.error_msg,
+            "pymupdf",
+        )
+    return pymupdf_result
 
 
 def _normalize_page_range(pdf_file: Path, start_page: int, end_page: int) -> Tuple[int, int, str]:
@@ -195,6 +416,7 @@ def _extract_with_mineru(
     start_page: int,
     end_page: int,
     timeout_seconds: int,
+    progress_reporter: Optional[_BookPdfExtractProgressReporter] = None,
 ) -> ExtractBookPdfResult:
     mineru_bin = _discover_mineru_cli()
     if not mineru_bin:
@@ -220,22 +442,21 @@ def _extract_with_mineru(
     if not page_tasks:
         return ExtractBookPdfResult(success=False, error_msg="mineru page task list is empty")
 
-    worker_count = _decide_mineru_parallel_workers(len(page_tasks)) if parallel_enabled else 1
-    if len(page_tasks) <= 1:
-        worker_count = 1
+    worker_count = _resolve_mineru_shared_pool_workers() if parallel_enabled else 1
 
     logger.info(
-        "[%s] mineru extraction dispatch, pages=%s-%s, tasks=%s, workers=%s, parallel=%s",
+        "[%s] mineru extraction dispatch, pages=%s-%s, tasks=%s, workers=%s, parallel=%s, mode=%s",
         task_id,
         start_page,
         end_page,
         len(page_tasks),
         worker_count,
         parallel_enabled,
+        "shared-page-pool" if parallel_enabled else "serial",
     )
 
     slice_results: List[_MineruSliceExtractResult] = []
-    if worker_count <= 1:
+    if not parallel_enabled:
         for page_start, page_end, task_pdf_path in page_tasks:
             result = _extract_mineru_page_task(
                 task_id=task_id,
@@ -257,44 +478,31 @@ def _extract_with_mineru(
                     error_msg=f"mineru task failed pages={page_start}-{page_end}: {result.error_msg}",
                 )
             slice_results.append(result)
+            if progress_reporter is not None:
+                progress_reporter.record_completed_pages(
+                    start_page=result.start_page,
+                    end_page=result.end_page,
+                    extractor="mineru",
+                )
     else:
         try:
-            with create_spawn_process_pool(max_workers=worker_count) as executor:
-                future_map = {
-                    executor.submit(
-                        _extract_mineru_page_task,
-                        task_id,
-                        mineru_bin,
-                        use_mineru_cli,
-                        mineru_env,
-                        str(task_pdf_path),
-                        str(output_dir),
-                        str(output_root),
-                        str(image_dir),
-                        section_id,
-                        page_start,
-                        page_end,
-                        timeout_seconds,
-                    ): (page_start, page_end)
-                    for page_start, page_end, task_pdf_path in page_tasks
-                }
-                for future in as_completed(future_map):
-                    page_start, page_end = future_map[future]
-                    try:
-                        result = future.result()
-                    except Exception as error:
-                        return ExtractBookPdfResult(
-                            success=False,
-                            error_msg=f"mineru process failed pages={page_start}-{page_end}: {error}",
-                        )
-                    if not result.success:
-                        return ExtractBookPdfResult(
-                            success=False,
-                            error_msg=f"mineru task failed pages={page_start}-{page_end}: {result.error_msg}",
-                        )
-                    slice_results.append(result)
+            slice_results, shared_error = _run_mineru_page_tasks_with_shared_pool(
+                task_id=task_id,
+                mineru_bin=mineru_bin,
+                use_mineru_cli=use_mineru_cli,
+                mineru_env=mineru_env,
+                output_dir=output_dir,
+                output_root=output_root,
+                image_dir=image_dir,
+                section_id=section_id,
+                timeout_seconds=timeout_seconds,
+                page_tasks=page_tasks,
+                progress_reporter=progress_reporter,
+            )
         except Exception as error:
             return ExtractBookPdfResult(success=False, error_msg=f"mineru process pool failed: {error}")
+        if shared_error:
+            return ExtractBookPdfResult(success=False, error_msg=shared_error)
 
     slice_results = sorted(slice_results, key=lambda item: (item.start_page, item.end_page))
     merged_markdown_parts = [str(item.markdown or "") for item in slice_results if str(item.markdown or "").strip()]
@@ -343,6 +551,296 @@ def _extract_with_mineru(
     )
 
 
+def _resolve_mineru_shared_pool_workers() -> int:
+    hard_cap = max(1, _read_int_env("BOOK_PDF_MINERU_WORKER_MAX", 8))
+    configured_workers = _read_int_env("BOOK_PDF_MINERU_WORKERS", 0)
+    if configured_workers > 0:
+        return max(1, min(hard_cap, configured_workers))
+    default_workers = _read_int_env("BOOK_PDF_MINERU_DEFAULT_WORKERS", 4)
+    return max(1, min(hard_cap, default_workers))
+
+
+def _shutdown_book_pdf_mineru_pool() -> None:
+    global _BOOK_PDF_MINERU_POOL
+    global _BOOK_PDF_MINERU_POOL_WORKERS
+    global _BOOK_PDF_MINERU_DISPATCHER
+    global _BOOK_PDF_MINERU_STOP
+
+    with _BOOK_PDF_MINERU_SCHEDULER_COND:
+        _BOOK_PDF_MINERU_STOP = True
+        _BOOK_PDF_MINERU_SCHEDULER_COND.notify_all()
+    dispatcher = _BOOK_PDF_MINERU_DISPATCHER
+    if dispatcher is not None and dispatcher.is_alive():
+        dispatcher.join(timeout=2.0)
+    _BOOK_PDF_MINERU_DISPATCHER = None
+    with _BOOK_PDF_MINERU_SCHEDULER_COND:
+        _BOOK_PDF_MINERU_PENDING_JOBS.clear()
+        _BOOK_PDF_MINERU_ACTIVE_FUTURES.clear()
+        _BOOK_PDF_MINERU_COMPLETED_FUTURES.clear()
+    with _BOOK_PDF_MINERU_POOL_LOCK:
+        if _BOOK_PDF_MINERU_POOL is not None:
+            try:
+                _BOOK_PDF_MINERU_POOL.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            _BOOK_PDF_MINERU_POOL = None
+            _BOOK_PDF_MINERU_POOL_WORKERS = 0
+
+
+atexit.register(_shutdown_book_pdf_mineru_pool)
+
+
+def _get_book_pdf_mineru_pool(worker_count: int) -> ProcessPoolExecutor:
+    global _BOOK_PDF_MINERU_POOL
+    global _BOOK_PDF_MINERU_POOL_WORKERS
+
+    safe_workers = max(1, int(worker_count))
+    with _BOOK_PDF_MINERU_POOL_LOCK:
+        if (
+            _BOOK_PDF_MINERU_POOL is None
+            or _BOOK_PDF_MINERU_POOL_WORKERS != safe_workers
+        ):
+            if _BOOK_PDF_MINERU_POOL is not None:
+                try:
+                    _BOOK_PDF_MINERU_POOL.shutdown(wait=False, cancel_futures=True)
+                except Exception:
+                    pass
+            _BOOK_PDF_MINERU_POOL = create_spawn_process_pool(max_workers=safe_workers)
+            _BOOK_PDF_MINERU_POOL_WORKERS = safe_workers
+    return _BOOK_PDF_MINERU_POOL
+
+
+def _ensure_book_pdf_mineru_dispatcher() -> None:
+    global _BOOK_PDF_MINERU_DISPATCHER
+    global _BOOK_PDF_MINERU_STOP
+
+    with _BOOK_PDF_MINERU_SCHEDULER_COND:
+        if _BOOK_PDF_MINERU_DISPATCHER is not None and _BOOK_PDF_MINERU_DISPATCHER.is_alive():
+            return
+        _BOOK_PDF_MINERU_STOP = False
+        _BOOK_PDF_MINERU_DISPATCHER = threading.Thread(
+            target=_book_pdf_mineru_dispatch_loop,
+            name="book-pdf-mineru-dispatcher",
+            daemon=True,
+        )
+        _BOOK_PDF_MINERU_DISPATCHER.start()
+
+
+def _book_pdf_mineru_future_done(future: Future) -> None:
+    with _BOOK_PDF_MINERU_SCHEDULER_COND:
+        _BOOK_PDF_MINERU_COMPLETED_FUTURES.append(future)
+        _BOOK_PDF_MINERU_SCHEDULER_COND.notify_all()
+
+
+def _fail_book_pdf_mineru_jobs_locked(error_msg: str) -> None:
+    normalized_error = str(error_msg or "").strip() or "mineru shared dispatcher failed"
+    seen_job_ids = set()
+    jobs: List[_MineruSharedJob] = []
+    for job in list(_BOOK_PDF_MINERU_PENDING_JOBS):
+        if job.job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job.job_id)
+        jobs.append(job)
+    for job, _payload in list(_BOOK_PDF_MINERU_ACTIVE_FUTURES.values()):
+        if job.job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job.job_id)
+        jobs.append(job)
+    for job in jobs:
+        if not job.error_msg:
+            job.error_msg = normalized_error
+        job.pending_payloads.clear()
+        job.queued = False
+        if job.inflight_count <= 0 and not job.done_event.is_set():
+            job.done_event.set()
+    _BOOK_PDF_MINERU_PENDING_JOBS.clear()
+
+
+def _dispatch_book_pdf_mineru_jobs_locked() -> None:
+    if not _BOOK_PDF_MINERU_PENDING_JOBS:
+        return
+    worker_count = _resolve_mineru_shared_pool_workers()
+    try:
+        pool = _get_book_pdf_mineru_pool(worker_count)
+    except Exception as error:
+        _fail_book_pdf_mineru_jobs_locked(f"mineru shared pool init failed: {error}")
+        return
+    available_slots = max(0, worker_count - len(_BOOK_PDF_MINERU_ACTIVE_FUTURES))
+    while available_slots > 0 and _BOOK_PDF_MINERU_PENDING_JOBS:
+        job = _BOOK_PDF_MINERU_PENDING_JOBS.popleft()
+        job.queued = False
+        if job.done_event.is_set() or job.error_msg or not job.pending_payloads:
+            if not job.pending_payloads and job.inflight_count <= 0 and not job.done_event.is_set():
+                job.done_event.set()
+            continue
+        payload = job.pending_payloads.popleft()
+        try:
+            future = pool.submit(
+                _extract_mineru_page_task,
+                payload.task_id,
+                payload.mineru_bin,
+                payload.use_mineru_cli,
+                payload.mineru_env,
+                payload.sliced_pdf_path,
+                payload.output_dir,
+                payload.output_root,
+                payload.image_dir,
+                payload.section_id,
+                payload.start_page,
+                payload.end_page,
+                payload.timeout_seconds,
+            )
+        except Exception as error:
+            job.error_msg = f"mineru process submit failed pages={payload.start_page}-{payload.end_page}: {error}"
+            job.pending_payloads.clear()
+            if job.inflight_count <= 0:
+                job.done_event.set()
+            continue
+        job.inflight_count += 1
+        job.submitted_count += 1
+        _BOOK_PDF_MINERU_ACTIVE_FUTURES[future] = (job, payload)
+        future.add_done_callback(_book_pdf_mineru_future_done)
+        if job.pending_payloads and not job.queued:
+            _BOOK_PDF_MINERU_PENDING_JOBS.append(job)
+            job.queued = True
+        available_slots -= 1
+
+
+def _drain_book_pdf_mineru_completed_locked() -> None:
+    while _BOOK_PDF_MINERU_COMPLETED_FUTURES:
+        future = _BOOK_PDF_MINERU_COMPLETED_FUTURES.popleft()
+        meta = _BOOK_PDF_MINERU_ACTIVE_FUTURES.pop(future, None)
+        if meta is None:
+            continue
+        job, payload = meta
+        job.inflight_count = max(0, job.inflight_count - 1)
+        try:
+            result = future.result()
+        except Exception as error:
+            if not job.error_msg:
+                job.error_msg = f"mineru process failed pages={payload.start_page}-{payload.end_page}: {error}"
+        else:
+            if not result.success:
+                if not job.error_msg:
+                    job.error_msg = (
+                        f"mineru task failed pages={payload.start_page}-{payload.end_page}: "
+                        f"{result.error_msg}"
+                    )
+            else:
+                job.results.append(result)
+                job.completed_count += 1
+                if job.progress_reporter is not None:
+                    job.progress_reporter.record_completed_pages(
+                        start_page=result.start_page,
+                        end_page=result.end_page,
+                        extractor="mineru",
+                    )
+        if job.error_msg:
+            job.pending_payloads.clear()
+        if not job.pending_payloads and job.inflight_count <= 0 and not job.done_event.is_set():
+            job.done_event.set()
+
+
+def _book_pdf_mineru_dispatch_loop() -> None:
+    while True:
+        try:
+            with _BOOK_PDF_MINERU_SCHEDULER_COND:
+                _drain_book_pdf_mineru_completed_locked()
+                _dispatch_book_pdf_mineru_jobs_locked()
+                should_stop = (
+                    _BOOK_PDF_MINERU_STOP
+                    and not _BOOK_PDF_MINERU_PENDING_JOBS
+                    and not _BOOK_PDF_MINERU_ACTIVE_FUTURES
+                    and not _BOOK_PDF_MINERU_COMPLETED_FUTURES
+                )
+                if should_stop:
+                    return
+                _BOOK_PDF_MINERU_SCHEDULER_COND.wait(timeout=0.5)
+        except Exception as error:
+            logger.exception("book pdf mineru dispatcher loop failed: %s", error)
+            with _BOOK_PDF_MINERU_SCHEDULER_COND:
+                _fail_book_pdf_mineru_jobs_locked(f"mineru shared dispatcher failed: {error}")
+                _BOOK_PDF_MINERU_SCHEDULER_COND.wait(timeout=0.5)
+
+
+def _run_mineru_page_tasks_with_shared_pool(
+    task_id: str,
+    mineru_bin: str,
+    use_mineru_cli: bool,
+    mineru_env: dict,
+    output_dir: Path,
+    output_root: Path,
+    image_dir: Path,
+    section_id: str,
+    timeout_seconds: int,
+    page_tasks: List[Tuple[int, int, Path]],
+    progress_reporter: Optional[_BookPdfExtractProgressReporter] = None,
+) -> Tuple[List[_MineruSliceExtractResult], str]:
+    if not page_tasks:
+        return [], "mineru page task list is empty"
+
+    _ensure_book_pdf_mineru_dispatcher()
+    safe_section_id = str(section_id or "").strip() or "section"
+    # 使用无 maxlen 的 deque 作为进程内无界消息队列，按页保存待提取 PDF 任务。
+    payloads = deque(
+        _MineruPageTaskPayload(
+            task_id=task_id,
+            mineru_bin=mineru_bin,
+            use_mineru_cli=use_mineru_cli,
+            mineru_env=mineru_env,
+            sliced_pdf_path=str(task_pdf_path),
+            output_dir=str(output_dir),
+            output_root=str(output_root),
+            image_dir=str(image_dir),
+            section_id=safe_section_id,
+            start_page=page_start,
+            end_page=page_end,
+            timeout_seconds=timeout_seconds,
+        )
+        for page_start, page_end, task_pdf_path in page_tasks
+    )
+    job = _MineruSharedJob(
+        job_id=uuid.uuid4().hex,
+        task_id=task_id,
+        section_id=safe_section_id,
+        total_tasks=len(page_tasks),
+        pending_payloads=payloads,
+        total_pages=sum(max(1, page_end - page_start + 1) for page_start, page_end, _task_pdf_path in page_tasks),
+        progress_reporter=progress_reporter,
+    )
+    logger.info(
+        "[%s] mineru shared pool queued, section=%s, pages=%s-%s, pageTasks=%s",
+        task_id,
+        safe_section_id,
+        page_tasks[0][0],
+        page_tasks[-1][1],
+        len(page_tasks),
+    )
+    with _BOOK_PDF_MINERU_SCHEDULER_COND:
+        _BOOK_PDF_MINERU_PENDING_JOBS.append(job)
+        job.queued = True
+        _BOOK_PDF_MINERU_SCHEDULER_COND.notify_all()
+    job.done_event.wait()
+    if job.error_msg:
+        logger.warning(
+            "[%s] mineru shared pool failed, section=%s, completed=%s/%s, err=%s",
+            task_id,
+            safe_section_id,
+            job.completed_count,
+            job.total_tasks,
+            job.error_msg,
+        )
+        return [], job.error_msg
+    logger.info(
+        "[%s] mineru shared pool finished, section=%s, completed=%s/%s",
+        task_id,
+        safe_section_id,
+        job.completed_count,
+        job.total_tasks,
+    )
+    return sorted(job.results, key=lambda item: (item.start_page, item.end_page)), ""
+
+
 def _build_mineru_page_tasks(
     sliced_pdf_path: Path,
     output_dir: Path,
@@ -363,20 +861,20 @@ def _build_mineru_page_tasks(
         page_batch_size = max(1, _read_int_env("BOOK_PDF_MINERU_PAGE_BATCH_SIZE", 1))
         if page_batch_size >= total_pages:
             return [(start_page, end_page, sliced_pdf_path)]
-        page_ranges = []
-        cursor = start_page
-        while cursor <= end_page:
-            segment_end = min(end_page, cursor + page_batch_size - 1)
-            page_ranges.append((cursor, segment_end))
-            cursor = segment_end + 1
     else:
-        target_chunk_count = max(1, _read_int_env("BOOK_PDF_MINERU_TARGET_CHUNKS", 4))
-        page_ranges = _build_even_page_ranges(start_page, end_page, target_chunk_count)
-        if len(page_ranges) <= 1:
-            return [(start_page, end_page, sliced_pdf_path)]
+        page_batch_size = 1
+
+    page_ranges = []
+    cursor = start_page
+    while cursor <= end_page:
+        segment_end = min(end_page, cursor + page_batch_size - 1)
+        page_ranges.append((cursor, segment_end))
+        cursor = segment_end + 1
+    if len(page_ranges) <= 1:
+        return [(start_page, end_page, sliced_pdf_path)]
 
     # 按页段切片，确保每个 MinerU 子进程只处理独立 PDF，避免共享 IO 状态导致互相干扰。
-    # 默认走“等分 4 段”策略，让连续区间先裁剪、再分块并行、最后顺序合并。
+    # 默认按单页任务切片，让进程池从页任务队列中领取工作，避免“等分后某一段拖慢全局”。
     task_root = output_dir / "intermediates" / "book_mineru_page_slices"
     task_root.mkdir(parents=True, exist_ok=True)
     task_dir = _ensure_unique_dir(
@@ -427,26 +925,6 @@ def _decide_mineru_parallel_workers(task_count: int) -> int:
         ram_budget = max(worker_min, estimated)
 
     return max(worker_min, min(task_count, hard_cap, cpu_budget, ram_budget))
-
-
-def _build_even_page_ranges(start_page: int, end_page: int, chunk_count: int) -> List[Tuple[int, int]]:
-    total_pages = max(0, int(end_page) - int(start_page) + 1)
-    if total_pages <= 0:
-        return []
-
-    normalized_chunk_count = max(1, min(total_pages, int(chunk_count or 1)))
-    base_chunk_size = total_pages // normalized_chunk_count
-    remainder = total_pages % normalized_chunk_count
-
-    ranges: List[Tuple[int, int]] = []
-    cursor = int(start_page)
-    for chunk_index in range(normalized_chunk_count):
-        current_chunk_size = base_chunk_size + (1 if chunk_index < remainder else 0)
-        segment_end = cursor + current_chunk_size - 1
-        ranges.append((cursor, segment_end))
-        cursor = segment_end + 1
-    return ranges
-
 
 def _extract_mineru_page_task(
     task_id: str,
@@ -758,18 +1236,55 @@ def _ensure_mineru_pipeline_models(task_id: str) -> None:
 
 
 def _mineru_local_models_ready() -> bool:
-    config_path = Path.home() / "mineru.json"
-    if not config_path.is_file():
+    config_path = _resolve_mineru_tools_config_path()
+    if not config_path:
         return False
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception:
         return False
-    models_dir = str((config or {}).get("models-dir") or "").strip()
-    if not models_dir:
-        return False
-    model_file = Path(models_dir) / "Layout" / "YOLO" / "doclayout_yolo_docstructbench_imgsz1280_2501.pt"
-    return model_file.is_file()
+    for models_root in _iter_mineru_pipeline_model_roots(config):
+        model_file = models_root / _MINERU_PIPELINE_MODEL_SENTINEL
+        if model_file.is_file():
+            return True
+    return False
+
+
+def _resolve_mineru_tools_config_path() -> Optional[Path]:
+    configured_path = str(os.getenv("MINERU_TOOLS_CONFIG_JSON", "") or "").strip()
+    candidates: List[Path] = []
+    if configured_path:
+        candidates.append(Path(configured_path))
+    candidates.append(Path.home() / "mineru.json")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _iter_mineru_pipeline_model_roots(config: dict) -> List[Path]:
+    models_dir = (config or {}).get("models-dir")
+    raw_paths: List[str] = []
+    if isinstance(models_dir, str):
+        normalized = models_dir.strip()
+        if normalized:
+            raw_paths.append(normalized)
+    elif isinstance(models_dir, dict):
+        pipeline_dir = str(models_dir.get("pipeline") or "").strip()
+        if pipeline_dir:
+            raw_paths.append(pipeline_dir)
+
+    candidates: List[Path] = []
+    seen = set()
+    for raw_path in raw_paths:
+        root = Path(raw_path)
+        for candidate in (root, root / "models"):
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+    return candidates
 
 
 def _maybe_refine_markdown_with_llm(task_id: str, markdown: str) -> str:
@@ -1590,6 +2105,7 @@ def _extract_with_pymupdf(
     section_id: str,
     start_page: int,
     end_page: int,
+    progress_reporter: Optional[_BookPdfExtractProgressReporter] = None,
 ) -> ExtractBookPdfResult:
     import fitz
 
@@ -1599,6 +2115,7 @@ def _extract_with_pymupdf(
 
     with fitz.open(sliced_pdf_path) as document:
         for local_page_idx in range(document.page_count):
+            absolute_page_no = start_page + local_page_idx
             page = document[local_page_idx]
             blocks = page.get_text("dict").get("blocks", [])
             blocks = sorted(
@@ -1632,6 +2149,12 @@ def _extract_with_pymupdf(
                     image_paths.append(rel_path)
                     markdown_lines.append(f"![image-{image_counter}]({rel_path})")
                     markdown_lines.append("")
+            if progress_reporter is not None:
+                progress_reporter.record_completed_pages(
+                    start_page=absolute_page_no,
+                    end_page=absolute_page_no,
+                    extractor="pymupdf",
+                )
 
     markdown = "\n".join(markdown_lines).strip()
     markdown = _maybe_refine_markdown_with_llm(task_id=task_id, markdown=markdown)

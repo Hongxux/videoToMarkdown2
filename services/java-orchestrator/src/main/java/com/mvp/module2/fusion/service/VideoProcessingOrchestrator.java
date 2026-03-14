@@ -134,6 +134,9 @@ public class VideoProcessingOrchestrator {
     @Autowired(required = false)
     private Phase2bArticleLinkService phase2bArticleLinkService;
 
+    @Autowired(required = false)
+    private StorageTaskCategoryService storageTaskCategoryService;
+
     private VideoMetaService videoMetaService = new VideoMetaService();
     
     // 运行时任务上下文缓存。
@@ -264,6 +267,10 @@ public class VideoProcessingOrchestrator {
         public Boolean splitByChapter;
         public Boolean splitBySection;
         public Integer pageOffset;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
+        public String storageKey;
     }
 
     /**
@@ -577,6 +584,11 @@ public class VideoProcessingOrchestrator {
                     stageTimingsMs,
                     flowFlags
             );
+            if (result.success
+                    && storageTaskCategoryService != null
+                    && StringUtils.hasText(metricsOutputDir)) {
+                storageTaskCategoryService.classifyBookTaskIfNeeded(metricsOutputDir);
+            }
         }
         return result;
     }
@@ -1084,7 +1096,7 @@ public class VideoProcessingOrchestrator {
                 if (!isHttpUrl(sourceUrl)) {
                     sourcePath = normalizeLocalVideoPath(sourceUrl);
                     assertLocalVideoExists(sourceUrl, sourcePath);
-                    outputDir = resolveOutputDirForLocalVideo(sourcePath);
+                    outputDir = resolveBookTaskOutputDir(outputDir, sourcePath, bookOptions);
                     new File(outputDir).mkdirs();
                     sourcePath = ensureLocalVideoInStorage(sourcePath, outputDir);
                 }
@@ -1126,8 +1138,14 @@ public class VideoProcessingOrchestrator {
                         downloadResult = dl;
                         sourcePath = dl.videoPath;
                         cleanupSourcePath = dl.videoPath;
-                        outputDir = new File(sourcePath).getParentFile().getAbsolutePath();
-                        new File(outputDir).mkdirs();
+                        if (hasExplicitBookLeafOutputDir(outputDir, bookOptions)) {
+                            outputDir = Paths.get(outputDir).toAbsolutePath().normalize().toString();
+                            new File(outputDir).mkdirs();
+                            sourcePath = ensureLocalVideoInStorage(sourcePath, outputDir);
+                        } else {
+                            outputDir = new File(sourcePath).getParentFile().getAbsolutePath();
+                            new File(outputDir).mkdirs();
+                        }
                         metricsVideoPath = sourcePath;
                         metricsOutputDir = outputDir;
                     }
@@ -1140,14 +1158,34 @@ public class VideoProcessingOrchestrator {
                 throw new IllegalArgumentException("Book format not supported for source: " + sourcePath);
             }
 
+            TaskProgressWatchdogBridge.SignalEmitter bookSignalEmitter =
+                (progress, message) -> updateProgress(taskId, progress, message);
             updateProgress(taskId, 0.20, "Extracting book content...");
             long bookFlowStart = System.currentTimeMillis();
-            BookMarkdownService.BookProcessingResult bookResult = bookMarkdownService.processBook(
-                    taskId,
-                    sourcePath,
-                    outputDir,
-                    toBookServiceOptions(bookOptions)
-            );
+            boolean pdfBookSource = firstNonBlank(sourcePath, "").toLowerCase(Locale.ROOT).endsWith(".pdf");
+            BookMarkdownService.BookProcessingResult bookResult;
+            if (pdfBookSource) {
+                taskProgressWatchdogBridge.resetTask(taskId);
+                TaskProgressWatchdogBridge.MonitorHandle bookExtractMonitor =
+                    taskProgressWatchdogBridge.startMonitor(taskId, outputDir, "book_pdf_extract", bookSignalEmitter);
+                try {
+                    bookResult = bookMarkdownService.processBook(
+                            taskId,
+                            sourcePath,
+                            outputDir,
+                            toBookServiceOptions(bookOptions)
+                    );
+                } finally {
+                    taskProgressWatchdogBridge.stopMonitor(taskId, bookExtractMonitor, bookSignalEmitter);
+                }
+            } else {
+                bookResult = bookMarkdownService.processBook(
+                        taskId,
+                        sourcePath,
+                        outputDir,
+                        toBookServiceOptions(bookOptions)
+                );
+            }
             stageTimingsMs.put("book_extract_markdown", System.currentTimeMillis() - bookFlowStart);
             if (!bookResult.success) {
                 throw new RuntimeException(
@@ -1218,6 +1256,12 @@ public class VideoProcessingOrchestrator {
                     bookResult.bookSectionTree != null ? bookResult.bookSectionTree : List.of()
             );
             if (!StringUtils.hasText(metricsVideoTitle)) {
+                metricsVideoTitle = firstNonBlank(
+                        bookResult.leafTitle,
+                        bookOptions != null ? bookOptions.leafTitle : null
+                );
+            }
+            if (!StringUtils.hasText(metricsVideoTitle)) {
                 metricsVideoTitle = stripExtensionSafe(new File(sourcePath).getName());
             }
 
@@ -1232,6 +1276,24 @@ public class VideoProcessingOrchestrator {
             flowFlags.put("book_enhanced_applied", enhancedApplied);
             flowFlags.put("book_split_by_chapter", bookOptions == null || bookOptions.splitByChapter == null || bookOptions.splitByChapter);
             flowFlags.put("book_split_by_section", bookOptions != null && Boolean.TRUE.equals(bookOptions.splitBySection));
+            if (bookOptions != null && bookOptions.bookTitle != null && !bookOptions.bookTitle.isBlank()) {
+                flowFlags.put("book_title", bookOptions.bookTitle.trim());
+            } else if (bookResult.bookTitle != null && !bookResult.bookTitle.isBlank()) {
+                flowFlags.put("book_title", bookResult.bookTitle.trim());
+            }
+            if (bookOptions != null && bookOptions.leafTitle != null && !bookOptions.leafTitle.isBlank()) {
+                flowFlags.put("book_leaf_title", bookOptions.leafTitle.trim());
+            } else if (bookResult.leafTitle != null && !bookResult.leafTitle.isBlank()) {
+                flowFlags.put("book_leaf_title", bookResult.leafTitle.trim());
+            }
+            if (bookOptions != null && bookOptions.leafOutlineIndex != null && !bookOptions.leafOutlineIndex.isBlank()) {
+                flowFlags.put("book_leaf_outline_index", bookOptions.leafOutlineIndex.trim());
+            } else if (bookResult.leafOutlineIndex != null && !bookResult.leafOutlineIndex.isBlank()) {
+                flowFlags.put("book_leaf_outline_index", bookResult.leafOutlineIndex.trim());
+            }
+            if (bookOptions != null && bookOptions.storageKey != null && !bookOptions.storageKey.isBlank()) {
+                flowFlags.put("book_leaf_storage_key", bookOptions.storageKey.trim());
+            }
             if (bookOptions != null && bookOptions.chapterSelector != null && !bookOptions.chapterSelector.isBlank()) {
                 flowFlags.put("book_chapter_selector", bookOptions.chapterSelector.trim());
             }
@@ -1278,11 +1340,19 @@ public class VideoProcessingOrchestrator {
         options.splitByChapter = raw.splitByChapter;
         options.splitBySection = raw.splitBySection;
         options.pageOffset = raw.pageOffset;
+        options.bookTitle = raw.bookTitle;
+        options.leafTitle = raw.leafTitle;
+        options.leafOutlineIndex = raw.leafOutlineIndex;
+        options.storageKey = raw.storageKey;
         if ((options.chapterSelector == null || options.chapterSelector.isBlank())
                 && (options.sectionSelector == null || options.sectionSelector.isBlank())
                 && options.splitByChapter == null
                 && options.splitBySection == null
-                && options.pageOffset == null) {
+                && options.pageOffset == null
+                && (options.bookTitle == null || options.bookTitle.isBlank())
+                && (options.leafTitle == null || options.leafTitle.isBlank())
+                && (options.leafOutlineIndex == null || options.leafOutlineIndex.isBlank())
+                && (options.storageKey == null || options.storageKey.isBlank())) {
             return null;
         }
         return options;
@@ -1298,7 +1368,11 @@ public class VideoProcessingOrchestrator {
                 || (options.sectionSelector != null && !options.sectionSelector.isBlank())
                 || options.splitByChapter != null
                 || options.splitBySection != null
-                || options.pageOffset != null)) {
+                || options.pageOffset != null
+                || (options.bookTitle != null && !options.bookTitle.isBlank())
+                || (options.leafTitle != null && !options.leafTitle.isBlank())
+                || (options.leafOutlineIndex != null && !options.leafOutlineIndex.isBlank())
+                || (options.storageKey != null && !options.storageKey.isBlank()))) {
             return true;
         }
         if (source == null || source.isBlank()) {
@@ -2026,6 +2100,21 @@ public class VideoProcessingOrchestrator {
         String normalized = normalizePathForHash(videoPath);
         String hash = md5Hex(normalized);
         return storageRoot.resolve(hash).toString();
+    }
+
+    private String resolveBookTaskOutputDir(String requestedOutputDir, String sourcePath, BookProcessingOptions bookOptions) {
+        if (hasExplicitBookLeafOutputDir(requestedOutputDir, bookOptions)) {
+            return Paths.get(requestedOutputDir).toAbsolutePath().normalize().toString();
+        }
+        return resolveOutputDirForLocalVideo(sourcePath);
+    }
+
+    private boolean hasExplicitBookLeafOutputDir(String requestedOutputDir, BookProcessingOptions bookOptions) {
+        return StringUtils.hasText(requestedOutputDir)
+                && bookOptions != null
+                && StringUtils.hasText(bookOptions.storageKey)
+                && StringUtils.hasText(bookOptions.leafTitle)
+                && StringUtils.hasText(bookOptions.leafOutlineIndex);
     }
 
     private String ensureLocalVideoInStorage(String videoPath, String outputDir) {

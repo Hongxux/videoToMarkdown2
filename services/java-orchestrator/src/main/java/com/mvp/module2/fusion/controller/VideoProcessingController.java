@@ -21,9 +21,11 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.LinkedHashMap;
 import java.util.ArrayList;
@@ -61,6 +63,9 @@ public class VideoProcessingController {
     @Value("${task.upload.dir:var/uploads}")
     private String uploadDir;
 
+    @Value("${task.storage.root:}")
+    private String configuredStorageRoot;
+
     @Value("${grpc.python.timeout-seconds:300}")
     private int grpcTimeoutSeconds;
     
@@ -93,8 +98,8 @@ public class VideoProcessingController {
      */
     @PostMapping("/tasks")
     public ResponseEntity<Map<String, Object>> submitTask(@RequestBody TaskSubmitRequest request) {
-        String normalizedVideoInput = normalizeVideoInput(request.videoUrl);
-        if (normalizedVideoInput.isBlank()) {
+        String rawVideoInput = request.videoUrl != null ? request.videoUrl.trim() : "";
+        if (rawVideoInput.isBlank()) {
             return ResponseEntity.badRequest().body(Map.of(
                 "success", false,
                 "message", "videoUrl 不能为空"
@@ -107,30 +112,35 @@ public class VideoProcessingController {
             request.sectionSelector,
             request.splitByChapter,
             request.splitBySection,
-            request.pageOffset
+            request.pageOffset,
+            request.bookTitle,
+            request.leafTitle,
+            request.leafOutlineIndex
         );
-        logger.info("Received task submission: raw={} normalized={} user={}", request.videoUrl, normalizedVideoInput, normalizedUserId);
+        String preferredTitle = resolvePreferredTaskTitle(request);
+        String resolvedOutputDir = resolveSubmissionOutputDir(request.outputDir, bookOptions);
+        logger.info("Received task submission accepted: raw={} user={}", request.videoUrl, normalizedUserId);
 
         // 提交任务
-        TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
+        TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
             normalizedUserId,
-            normalizedVideoInput,
-            normalizeOutputDir(request.outputDir),
+            rawVideoInput,
+            resolvedOutputDir,
             priority,
-            null,
+            preferredTitle,
             bookOptions
         );
-        TaskQueueManager.TaskEntry task = submitResult.task;
 
-        return ResponseEntity.ok(Map.of(
-            "success", true,
-            "taskId", task.taskId,
-            "status", task.status.name(),
-            "normalizedVideoUrl", normalizedVideoInput,
-            "deduped", submitResult.deduped,
-            "dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes(),
-            "message", submitResult.deduped ? "任务已复用" : "任务已提交，正在排队中"
-        ));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("success", true);
+        payload.put("taskId", task.taskId);
+        payload.put("title", task.title != null ? task.title : "");
+        payload.put("status", task.status.name());
+        payload.put("normalizedVideoUrl", rawVideoInput);
+        payload.put("storageKey", bookOptions != null && bookOptions.storageKey != null ? bookOptions.storageKey : "");
+        payload.put("deduped", false);
+        payload.put("message", "task accepted");
+        return ResponseEntity.ok(payload);
     }
 
     /**
@@ -198,7 +208,7 @@ public class VideoProcessingController {
                     splitBySection,
                     pageOffset
             );
-            TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
+            TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
                     normalizedUserId,
                     reusedPath.toString(),
                     normalizeOutputDir(outputDir),
@@ -206,7 +216,6 @@ public class VideoProcessingController {
                     null,
                     bookOptions
             );
-            TaskQueueManager.TaskEntry task = submitResult.task;
             Map<String, Object> payload = new LinkedHashMap<>();
             payload.put("success", true);
             payload.put("reused", true);
@@ -215,9 +224,8 @@ public class VideoProcessingController {
             payload.put("normalizedVideoUrl", reusedPath.toString());
             payload.put("uploadedFileName", safeFileName);
             appendFingerprintPayload(payload, fingerprintOpt);
-            payload.put("deduped", submitResult.deduped);
-            payload.put("dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes());
-            payload.put("message", submitResult.deduped ? "任务已复用" : "file reused; task submitted and queued");
+            payload.put("deduped", false);
+            payload.put("message", "file reused; task submitted and queued");
             return ResponseEntity.ok(payload);
         }
 
@@ -249,7 +257,7 @@ public class VideoProcessingController {
                 splitBySection,
                 pageOffset
             );
-            TaskQueueManager.TaskSubmissionResult submitResult = taskQueueManager.submitTaskWithDedupe(
+            TaskQueueManager.TaskEntry task = taskQueueManager.submitTask(
                 normalizedUserId,
                 savedVideoPath.toString(),
                 normalizeOutputDir(outputDir),
@@ -257,7 +265,6 @@ public class VideoProcessingController {
                 null,
                 bookOptions
             );
-            TaskQueueManager.TaskEntry task = submitResult.task;
 
             return ResponseEntity.ok(Map.of(
                 "success", true,
@@ -265,9 +272,8 @@ public class VideoProcessingController {
                 "status", task.status.name(),
                 "normalizedVideoUrl", savedVideoPath.toString(),
                 "uploadedFileName", safeFileName,
-                "deduped", submitResult.deduped,
-                "dedupeWindowMinutes", taskQueueManager.getDedupeWindowMinutes(),
-                "message", submitResult.deduped ? "任务已复用" : "视频已上传，任务已提交，正在排队中"
+                "deduped", false,
+                "message", "视频已上传，任务已提交，正在排队中"
             ));
         } catch (IOException e) {
             logger.error("Failed to save uploaded video", e);
@@ -440,6 +446,9 @@ public class VideoProcessingController {
         public Boolean splitByChapter;
         public Boolean splitBySection;
         public Integer pageOffset;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
     }
 
     public static class VideoInfoRequest {
@@ -1080,6 +1089,7 @@ public class VideoProcessingController {
                 item.put("flatIndex", leafFlatIndex);
                 item.put("title", leafTitle);
                 item.put("chapterTitle", chapterTitle);
+                item.put("sectionTitle", asText(leaf.get("sectionTitle")));
                 item.put("chapterIndex", chapterIndex);
                 item.put("sectionIndex", sectionIndex);
                 item.put("subSectionIndex", subSectionIndex);
@@ -1167,7 +1177,10 @@ public class VideoProcessingController {
             int subSectionIndex = asInt(episode.get("subSectionIndex"), 0);
             int episodeNo = asInt(episode.get("index"), -1);
             String chapterTitle = firstNonBlank(asText(episode.get("chapterTitle")), "第 " + Math.max(1, chapterIndex) + " 章");
-            String sectionTitle = firstNonBlank(asText(episode.get("title")), "未命名章节");
+            String sectionTitle = firstNonBlank(
+                    asText(episode.get("sectionTitle")),
+                    firstNonBlank(asText(episode.get("title")), "未命名章节")
+            );
             String chapterKey = chapterIndex > 0 ? ("c" + chapterIndex) : ("c_fallback_" + episodeNo);
             String sectionKey = chapterKey + "_s" + Math.max(1, sectionIndex);
 
@@ -1293,13 +1306,41 @@ public class VideoProcessingController {
             Boolean splitBySection,
             Integer pageOffset
     ) {
+        return buildBookProcessingOptions(
+                chapterSelector,
+                sectionSelector,
+                splitByChapter,
+                splitBySection,
+                pageOffset,
+                null,
+                null,
+                null
+        );
+    }
+
+    private TaskQueueManager.BookProcessingOptions buildBookProcessingOptions(
+            String chapterSelector,
+            String sectionSelector,
+            Boolean splitByChapter,
+            Boolean splitBySection,
+            Integer pageOffset,
+            String bookTitle,
+            String leafTitle,
+            String leafOutlineIndex
+    ) {
         String normalizedChapterSelector = normalizeOptionalText(chapterSelector);
         String normalizedSectionSelector = normalizeOptionalText(sectionSelector);
+        String normalizedBookTitle = normalizeOptionalText(bookTitle);
+        String normalizedLeafTitle = normalizeOptionalText(leafTitle);
+        String normalizedLeafOutlineIndex = normalizeOptionalText(leafOutlineIndex);
         if (normalizedChapterSelector == null
                 && normalizedSectionSelector == null
                 && splitByChapter == null
                 && splitBySection == null
-                && pageOffset == null) {
+                && pageOffset == null
+                && normalizedBookTitle == null
+                && normalizedLeafTitle == null
+                && normalizedLeafOutlineIndex == null) {
             return null;
         }
         TaskQueueManager.BookProcessingOptions options = new TaskQueueManager.BookProcessingOptions();
@@ -1308,7 +1349,72 @@ public class VideoProcessingController {
         options.splitByChapter = splitByChapter;
         options.splitBySection = splitBySection;
         options.pageOffset = pageOffset;
+        options.bookTitle = normalizedBookTitle;
+        options.leafTitle = normalizedLeafTitle;
+        options.leafOutlineIndex = normalizedLeafOutlineIndex;
+        options.storageKey = buildBookLeafStorageKey(normalizedBookTitle, normalizedLeafOutlineIndex, normalizedLeafTitle);
         return options;
+    }
+
+    private String resolvePreferredTaskTitle(TaskSubmitRequest request) {
+        if (request == null) {
+            return null;
+        }
+        String normalizedLeafTitle = normalizeOptionalText(request.leafTitle);
+        if (normalizedLeafTitle != null) {
+            return normalizedLeafTitle;
+        }
+        return null;
+    }
+
+    private String resolveSubmissionOutputDir(String rawOutputDir, TaskQueueManager.BookProcessingOptions bookOptions) {
+        if (bookOptions != null && bookOptions.storageKey != null) {
+            return resolveStorageRoot().resolve(bookOptions.storageKey).toString();
+        }
+        return normalizeOutputDir(rawOutputDir);
+    }
+
+    private String buildBookLeafStorageKey(String bookTitle, String leafOutlineIndex, String leafTitle) {
+        String normalizedBookTitle = normalizeOptionalText(bookTitle);
+        String normalizedLeafOutlineIndex = normalizeOptionalText(leafOutlineIndex);
+        String normalizedLeafTitle = normalizeOptionalText(leafTitle);
+        if (normalizedBookTitle == null || normalizedLeafOutlineIndex == null || normalizedLeafTitle == null) {
+            return null;
+        }
+        return md5Hex(normalizedLeafTitle + "_" + normalizedLeafOutlineIndex + "_" + normalizedBookTitle);
+    }
+
+    private String md5Hex(String value) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(String.valueOf(value).getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            for (byte one : digest) {
+                sb.append(String.format(Locale.ROOT, "%02x", one));
+            }
+            return sb.toString();
+        } catch (Exception error) {
+            throw new IllegalStateException("Failed to build book leaf storage key", error);
+        }
+    }
+
+    private Path resolveStorageRoot() {
+        if (StringUtils.hasText(configuredStorageRoot)) {
+            return Paths.get(configuredStorageRoot.trim()).toAbsolutePath().normalize();
+        }
+        Path current = Paths.get(System.getProperty("user.dir")).toAbsolutePath().normalize();
+        for (int i = 0; i < 8; i++) {
+            Path candidate = current.resolve("var").resolve("storage").resolve("storage");
+            if (Files.isDirectory(candidate)) {
+                return candidate.toAbsolutePath().normalize();
+            }
+            Path parent = current.getParent();
+            if (parent == null) {
+                break;
+            }
+            current = parent;
+        }
+        return Paths.get("var", "storage", "storage").toAbsolutePath().normalize();
     }
 
     private String normalizeOptionalText(String value) {

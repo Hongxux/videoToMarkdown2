@@ -6,6 +6,8 @@ VLMaterialGenerator 棰勮绛栫暐鍗曞厓娴嬭瘯
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from typing import Any, Dict, List
 
@@ -240,5 +242,132 @@ def test_screenshot_task_gate_serializes_tasks_when_limit_is_one(monkeypatch):
 
         release_event.set()
         await asyncio.gather(task_a, task_b)
+
+    asyncio.run(_main())
+
+
+def test_prefetch_registry_cleans_up_when_read_raises(monkeypatch):
+    from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
+
+    generator = VLMaterialGenerator({"enabled": True, "screenshot_optimization": {}})
+
+    class _FakeCapture:
+        released = False
+
+        def isOpened(self):
+            return True
+
+        def get(self, _prop):
+            return 30.0
+
+        def set(self, _prop, _value):
+            return True
+
+        def read(self):
+            raise MemoryError("Unable to allocate frame buffer")
+
+        def release(self):
+            self.released = True
+
+    fake_cap = _FakeCapture()
+    monkeypatch.setattr(
+        generator,
+        "_open_video_capture_with_subset_policy",
+        lambda _video_path: (fake_cap, "dummy.mp4", None),
+    )
+
+    class _FakeRegistry:
+        last_instance = None
+
+        def __init__(self, max_frames=None, max_bytes=None):
+            _ = max_frames
+            _ = max_bytes
+            self.cleaned = False
+            type(self).last_instance = self
+
+        @staticmethod
+        def resolve_default_max_bytes():
+            return 1024 * 1024
+
+        def cleanup(self):
+            self.cleaned = True
+
+    extractor = SimpleNamespace(video_path="dummy.mp4", fps=30.0, frame_count=30)
+
+    try:
+        generator._prefetch_union_frames_to_registry_sync(
+            extractor,
+            _FakeRegistry,
+            0.0,
+            1.0,
+            1,
+            120,
+        )
+        assert False, "expected MemoryError"
+    except MemoryError:
+        pass
+
+    assert _FakeRegistry.last_instance is not None
+    assert _FakeRegistry.last_instance.cleaned is True
+    assert fake_cap.released is True
+
+
+def test_streaming_pipeline_falls_back_to_iframe_only_on_prefetch_memory_pressure(monkeypatch):
+    from services.python_grpc.src.content_pipeline.phase2a.materials import flow_ops
+    from services.python_grpc.src.content_pipeline.phase2a.materials.vl_material_generator import VLMaterialGenerator
+
+    async def _main() -> None:
+        generator = VLMaterialGenerator(
+            {
+                "enabled": True,
+                "screenshot_optimization": {
+                    "enabled": True,
+                    "streaming_pipeline": True,
+                    "best_frame_vision_select_enabled": False,
+                },
+            }
+        )
+
+        monkeypatch.setattr(
+            generator,
+            "_get_cached_visual_extractor",
+            lambda _video_path: SimpleNamespace(fps=30.0),
+        )
+        monkeypatch.setattr(
+            generator,
+            "_prefetch_union_frames_to_registry_sync",
+            lambda *args, **kwargs: (_ for _ in ()).throw(MemoryError("Unable to allocate 6.33 MiB")),
+        )
+
+        async def _fake_iframe_only(**kwargs):
+            remapped = []
+            for request in kwargs["screenshot_requests"]:
+                updated = dict(request)
+                updated["timestamp_sec"] = float(updated.get("timestamp_sec", 0.0)) + 0.5
+                updated["_iframe_only_reason"] = kwargs["reason"]
+                remapped.append(updated)
+            return remapped
+
+        monkeypatch.setattr(generator, "_optimize_screenshots_by_iframe_only", _fake_iframe_only)
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        monkeypatch.setattr(
+            flow_ops,
+            "_resolve_cv_route_executor",
+            lambda *args, **kwargs: (executor, True, "thread"),
+        )
+
+        try:
+            results = await flow_ops.optimize_screenshots_streaming_pipeline(
+                generator,
+                "dummy.mp4",
+                [{"unit_id": "u1", "timestamp_sec": 5.0}],
+            )
+        finally:
+            executor.shutdown(wait=True)
+
+        assert len(results) == 1
+        assert abs(float(results[0]["timestamp_sec"]) - 5.5) < 1e-6
+        assert results[0]["_iframe_only_reason"] == "streaming_prefetch_memory_pressure"
 
     asyncio.run(_main())

@@ -36,6 +36,7 @@ import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.text.Normalizer;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -48,6 +49,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
@@ -94,12 +96,19 @@ public class BookMarkdownService {
     @Value("${book.pdf.extractor.grpc-timeout-seconds:300}")
     private int bookPdfExtractorTimeoutSec = 300;
 
+    @Value("${book.pdf.extractor.grpc-timeout-per-page-seconds:25}")
+    private int bookPdfExtractorTimeoutPerPageSec = 25;
+
     public static class BookProcessingOptions {
         public String chapterSelector;
         public String sectionSelector;
         public Boolean splitByChapter;
         public Boolean splitBySection;
         public Integer pageOffset;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
+        public String storageKey;
     }
 
     public static class BookProbeResult {
@@ -124,11 +133,26 @@ public class BookMarkdownService {
         public String markdownPath;
         public String metadataPath;
         public String contentType;
+        public String preferredMarkdownFileName;
+        public String bookTitle;
+        public String leafTitle;
+        public String leafOutlineIndex;
+        public String leafSelector;
+        public String storageKey;
         public List<Map<String, Object>> bookSectionTree = new ArrayList<>();
         public int chapterCount;
         public int sectionCount;
         public int unitCount;
         public String errorMessage;
+    }
+
+    public static class BookCategoryEvidence {
+        public String sourcePath;
+        public String contentType;
+        public String bookTitle;
+        public String frontMatterText;
+        public String prefaceText;
+        public List<String> tocTitles = new ArrayList<>();
     }
 
     private static class Section {
@@ -253,6 +277,15 @@ public class BookMarkdownService {
         int leafCount = 0;
     }
 
+    private static class LeafTaskDescriptor {
+        String bookTitle;
+        String leafTitle;
+        String outlineIndex;
+        String sectionSelector;
+        String storageKey;
+        String markdownFileName;
+    }
+
     public BookProcessingResult processBook(
             String taskId,
             String sourcePath,
@@ -282,8 +315,11 @@ public class BookMarkdownService {
 
             boolean splitByChapter = options == null || options.splitByChapter == null || options.splitByChapter;
             boolean splitBySection = options != null && Boolean.TRUE.equals(options.splitBySection);
-            Path markdownPath = writeMarkdownOutputs(data, outputRoot, splitByChapter, splitBySection);
-            Path metadataPath = writeAbstractMetadata(taskId, source, outputRoot, data);
+            LeafTaskDescriptor leafTask = resolveLeafTaskDescriptor(data, source, options);
+            Path markdownPath = writeMarkdownOutputs(data, outputRoot, splitByChapter, splitBySection, leafTask);
+            Path selectedPdfPath = writeSelectedPdfOutput(source, outputRoot, data, markdownPath);
+            Path metadataPath = writeAbstractMetadata(taskId, source, outputRoot, data, leafTask);
+            cleanupOriginalTaskPdf(source, outputRoot, selectedPdfPath);
 
             int sectionCount = 0;
             for (Chapter chapter : data.chapters) {
@@ -294,6 +330,17 @@ public class BookMarkdownService {
             result.markdownPath = markdownPath.toString();
             result.metadataPath = metadataPath.toString();
             result.contentType = "book";
+            result.preferredMarkdownFileName = markdownPath.getFileName() != null
+                    ? markdownPath.getFileName().toString()
+                    : null;
+            result.bookTitle = firstNonBlank(
+                    data.title,
+                    firstNonBlank(leafTask != null ? leafTask.bookTitle : null, stripExt(source.getFileName().toString()))
+            );
+            result.leafTitle = leafTask != null ? leafTask.leafTitle : null;
+            result.leafOutlineIndex = leafTask != null ? leafTask.outlineIndex : null;
+            result.leafSelector = leafTask != null ? leafTask.sectionSelector : null;
+            result.storageKey = leafTask != null ? leafTask.storageKey : null;
             result.bookSectionTree = buildBookSectionTreePayload(data);
             result.chapterCount = data.chapters.size();
             result.sectionCount = sectionCount;
@@ -345,6 +392,47 @@ public class BookMarkdownService {
         }
     }
 
+    public BookCategoryEvidence buildCategoryEvidence(
+            String sourcePath,
+            String fallbackTitle,
+            List<Map<String, Object>> bookSectionTree
+    ) {
+        BookCategoryEvidence evidence = new BookCategoryEvidence();
+        evidence.sourcePath = firstNonBlank(sourcePath, "");
+        evidence.bookTitle = firstNonBlank(fallbackTitle, "");
+        evidence.frontMatterText = "";
+        evidence.prefaceText = "";
+        evidence.contentType = "book";
+        List<String> fallbackTocTitles = collectTocTitlesFromTree(bookSectionTree);
+        evidence.tocTitles = new ArrayList<>(fallbackTocTitles);
+
+        try {
+            Path source = resolveBookSourcePath(sourcePath);
+            if (!Files.isRegularFile(source)) {
+                evidence.bookTitle = firstNonBlank(evidence.bookTitle, stripExt(Path.of(sourcePath).getFileName().toString()));
+                return evidence;
+            }
+            String ext = lowerExt(source.getFileName().toString());
+            evidence.contentType = switch (ext) {
+                case ".pdf" -> "book_pdf";
+                case ".epub" -> "book_epub";
+                case ".md" -> "book_markdown";
+                case ".txt" -> "book_text";
+                default -> "book";
+            };
+            evidence.bookTitle = firstNonBlank(evidence.bookTitle, stripExt(source.getFileName().toString()));
+            if (".pdf".equals(ext)) {
+                fillPdfCategoryEvidence(source, evidence, fallbackTocTitles);
+                return evidence;
+            }
+            fillTextLikeCategoryEvidence(source, evidence, fallbackTocTitles);
+            return evidence;
+        } catch (Exception error) {
+            logger.warn("Build book category evidence failed, sourcePath={}, err={}", sourcePath, error.getMessage());
+            return evidence;
+        }
+    }
+
     private BookData extractBook(
             String taskId,
             Path source,
@@ -367,6 +455,74 @@ public class BookMarkdownService {
             return data;
         }
         throw new IllegalArgumentException("Unsupported book format: " + ext);
+    }
+
+    private void fillPdfCategoryEvidence(
+            Path source,
+            BookCategoryEvidence evidence,
+            List<String> fallbackTocTitles
+    ) throws Exception {
+        try (PDDocument pdf = PDDocument.load(source.toFile())) {
+            if (pdf.getDocumentInformation() != null) {
+                evidence.bookTitle = firstNonBlank(
+                        normalize(pdf.getDocumentInformation().getTitle()),
+                        evidence.bookTitle
+                );
+            }
+            int totalPages = pdf.getNumberOfPages();
+            PDFTextStripper pageStripper = new PDFTextStripper();
+            pageStripper.setSortByPosition(true);
+            evidence.frontMatterText = trimEvidenceText(
+                    extractPdfPageRangeText(pdf, pageStripper, 1, Math.min(totalPages, 6)),
+                    5000
+            );
+            evidence.prefaceText = trimEvidenceText(
+                    extractPdfPrefaceText(pdf, pageStripper, totalPages),
+                    3000
+            );
+            List<PdfTocEntry> tocEntries = parsePdfTocEntries(pdf, totalPages);
+            List<String> tocTitles = new ArrayList<>();
+            for (PdfTocEntry tocEntry : tocEntries) {
+                if (tocEntry == null) {
+                    continue;
+                }
+                String title = firstNonBlank(tocEntry.displayTitle, tocEntry.title);
+                if (title.isBlank()) {
+                    continue;
+                }
+                tocTitles.add(title);
+                if (tocTitles.size() >= 40) {
+                    break;
+                }
+            }
+            evidence.tocTitles = !tocTitles.isEmpty() ? normalizeDistinctTitles(tocTitles) : new ArrayList<>(fallbackTocTitles);
+        }
+    }
+
+    private void fillTextLikeCategoryEvidence(
+            Path source,
+            BookCategoryEvidence evidence,
+            List<String> fallbackTocTitles
+    ) throws Exception {
+        String ext = lowerExt(source.getFileName().toString());
+        String content = readText(source);
+        evidence.frontMatterText = trimEvidenceText(content, 5000);
+        evidence.prefaceText = trimEvidenceText(extractPrefaceFromText(content), 3000);
+        if (".epub".equals(ext)) {
+            BookData data = parseEpubStructure(source);
+            evidence.bookTitle = firstNonBlank(data.title, evidence.bookTitle);
+            evidence.tocTitles = !fallbackTocTitles.isEmpty()
+                    ? new ArrayList<>(fallbackTocTitles)
+                    : collectTocTitlesFromBookData(data);
+            return;
+        }
+        if (".md".equals(ext) || ".txt".equals(ext)) {
+            BookData data = parseStructuredLines(content.split("\\R"), evidence.bookTitle);
+            evidence.bookTitle = firstNonBlank(data.title, evidence.bookTitle);
+            evidence.tocTitles = !fallbackTocTitles.isEmpty()
+                    ? new ArrayList<>(fallbackTocTitles)
+                    : collectTocTitlesFromBookData(data);
+        }
     }
 
     private BookData parsePlainText(Path source) throws Exception {
@@ -491,6 +647,18 @@ public class BookMarkdownService {
             logger.warn("Parse PDF TOC failed, fallback to outline/text strategy, title={}, err={}", fallbackTitle, tocError.getMessage());
         }
 
+        BookData tocData = buildPdfBookStructureFromToc(
+                pdf,
+                fallbackTitle,
+                totalPages,
+                manualPageOffset,
+                frontTocEntries,
+                detectedOffsetFromToc
+        );
+        if (hasPageAnchoredStructure(tocData)) {
+            return tocData;
+        }
+
         BookData outlineData = buildPdfBookStructureFromOutline(pdf, fallbackTitle, totalPages);
         if (hasPageAnchoredStructure(outlineData)) {
             outlineData.pageMapStrategy = "outline";
@@ -507,18 +675,6 @@ public class BookMarkdownService {
             List<PdfTocEntry> normalizedTocEntries = normalizePdfTocEntries(frontTocEntries, totalPages, appliedOffset);
             outlineData.leafSections = buildPdfTocLeafSections(normalizedTocEntries, totalPages, outlineData);
             return outlineData;
-        }
-
-        BookData tocData = buildPdfBookStructureFromToc(
-                pdf,
-                fallbackTitle,
-                totalPages,
-                manualPageOffset,
-                frontTocEntries,
-                detectedOffsetFromToc
-        );
-        if (hasPageAnchoredStructure(tocData)) {
-            return tocData;
         }
 
         PDFTextStripper textStripper = new PDFTextStripper();
@@ -852,12 +1008,12 @@ public class BookMarkdownService {
             }
 
             String chapterTitle = firstNonBlank(
-                    outlineChapterTitleByIndex.get(selectorChapterIndex),
-                    firstNonBlank(chapterTitleByIndex.get(chapterIndex), "Chapter " + chapterIndex)
+                    chapterTitleByIndex.get(chapterIndex),
+                    firstNonBlank(outlineChapterTitleByIndex.get(selectorChapterIndex), "Chapter " + chapterIndex)
             );
             String sectionTitle = firstNonBlank(
-                    outlineSectionTitleByKey.get(selectorSectionKey),
-                    firstNonBlank(sectionTitleByKey.get(tocSectionKey), "Section " + sectionIndex)
+                    sectionTitleByKey.get(tocSectionKey),
+                    firstNonBlank(outlineSectionTitleByKey.get(selectorSectionKey), "Section " + sectionIndex)
             );
             String leafTitle = firstNonBlank(entry.displayTitle, firstNonBlank(entry.title, sectionTitle));
             String outlineIndex = chapterIndex + "." + sectionIndex + "." + subSectionIndex;
@@ -1507,6 +1663,8 @@ public class BookMarkdownService {
         result.detectedPageOffset = data != null ? data.detectedPageOffset : null;
         result.pageMapStrategy = data != null ? firstNonBlank(data.pageMapStrategy, "") : "";
         result.leafSections = data != null && data.leafSections != null ? new ArrayList<>(data.leafSections) : new ArrayList<>();
+        Map<Integer, String> leafChapterTitleByIndex = buildLeafChapterTitleLookup(result.leafSections);
+        Map<String, String> leafSectionTitleByKey = buildLeafSectionTitleLookup(result.leafSections);
         int sectionGlobalIndex = 0;
         if (data == null || data.chapters == null) {
             result.chapterCount = 0;
@@ -1519,10 +1677,15 @@ public class BookMarkdownService {
             if (chapter == null) {
                 continue;
             }
+            int chapterHumanIndex = chapterIndex + 1;
+            String chapterTitle = firstNonBlank(
+                    leafChapterTitleByIndex.get(chapterHumanIndex),
+                    firstNonBlank(chapter.title, "Chapter " + chapterHumanIndex)
+            );
             Map<String, Object> chapterPayload = new LinkedHashMap<>();
-            chapterPayload.put("chapterIndex", chapterIndex + 1);
-            chapterPayload.put("chapterSelector", firstNonBlank(chapter.selector, "c" + (chapterIndex + 1)));
-            chapterPayload.put("title", firstNonBlank(chapter.title, "Chapter " + (chapterIndex + 1)));
+            chapterPayload.put("chapterIndex", chapterHumanIndex);
+            chapterPayload.put("chapterSelector", firstNonBlank(chapter.selector, "c" + chapterHumanIndex));
+            chapterPayload.put("title", chapterTitle);
             chapterPayload.put("startPage", chapter.startPage);
             chapterPayload.put("endPage", chapter.endPage);
             List<Map<String, Object>> sectionPayload = new ArrayList<>();
@@ -1538,14 +1701,19 @@ public class BookMarkdownService {
                     continue;
                 }
                 sectionGlobalIndex += 1;
+                int sectionHumanIndex = sectionIndex + 1;
+                String sectionTitle = firstNonBlank(
+                        leafSectionTitleByKey.get(chapterHumanIndex + ":" + sectionHumanIndex),
+                        firstNonBlank(section.title, "Section " + sectionHumanIndex)
+                );
                 Map<String, Object> item = new LinkedHashMap<>();
                 item.put("flatIndex", sectionGlobalIndex);
-                item.put("chapterIndex", chapterIndex + 1);
-                item.put("sectionIndex", sectionIndex + 1);
-                item.put("chapterSelector", firstNonBlank(chapter.selector, "c" + (chapterIndex + 1)));
-                item.put("sectionSelector", firstNonBlank(section.selector, "c" + (chapterIndex + 1) + "s" + (sectionIndex + 1)));
-                item.put("chapterTitle", firstNonBlank(chapter.title, ""));
-                item.put("title", firstNonBlank(section.title, "Section " + (sectionIndex + 1)));
+                item.put("chapterIndex", chapterHumanIndex);
+                item.put("sectionIndex", sectionHumanIndex);
+                item.put("chapterSelector", firstNonBlank(chapter.selector, "c" + chapterHumanIndex));
+                item.put("sectionSelector", firstNonBlank(section.selector, "c" + chapterHumanIndex + "s" + sectionHumanIndex));
+                item.put("chapterTitle", chapterTitle);
+                item.put("title", sectionTitle);
                 item.put("startPage", section.startPage);
                 item.put("endPage", section.endPage);
                 sectionPayload.add(item);
@@ -1561,6 +1729,8 @@ public class BookMarkdownService {
             return tree;
         }
 
+        Map<Integer, String> leafChapterTitleByIndex = buildLeafChapterTitleLookup(data.leafSections);
+        Map<String, String> leafSectionTitleByKey = buildLeafSectionTitleLookup(data.leafSections);
         Map<String, List<Map<String, Object>>> leafBySectionKey = new LinkedHashMap<>();
         if (data.leafSections != null) {
             for (Map<String, Object> leaf : data.leafSections) {
@@ -1590,7 +1760,10 @@ public class BookMarkdownService {
                 continue;
             }
             int chapterIndex = chapterPos + 1;
-            String chapterTitle = firstNonBlank(chapter.title, "Chapter " + chapterIndex);
+            String chapterTitle = firstNonBlank(
+                    leafChapterTitleByIndex.get(chapterIndex),
+                    firstNonBlank(chapter.title, "Chapter " + chapterIndex)
+            );
 
             Map<String, Object> chapterNode = new LinkedHashMap<>();
             chapterNode.put("nodeType", "chapter");
@@ -1607,8 +1780,11 @@ public class BookMarkdownService {
                     continue;
                 }
                 int sectionIndex = sectionPos + 1;
-                String sectionTitle = firstNonBlank(section.title, "Section " + sectionIndex);
                 String sectionKey = chapterIndex + ":" + sectionIndex;
+                String sectionTitle = firstNonBlank(
+                        leafSectionTitleByKey.get(sectionKey),
+                        firstNonBlank(section.title, "Section " + sectionIndex)
+                );
 
                 Map<String, Object> sectionNode = new LinkedHashMap<>();
                 sectionNode.put("nodeType", "section");
@@ -1681,6 +1857,45 @@ public class BookMarkdownService {
         return tree;
     }
 
+    private Map<Integer, String> buildLeafChapterTitleLookup(List<Map<String, Object>> leafSections) {
+        Map<Integer, String> lookup = new LinkedHashMap<>();
+        if (leafSections == null || leafSections.isEmpty()) {
+            return lookup;
+        }
+        for (Map<String, Object> leaf : leafSections) {
+            if (leaf == null) {
+                continue;
+            }
+            int chapterIndex = intValue(leaf.get("chapterIndex"), -1);
+            String chapterTitle = firstNonBlank(stringValue(leaf.get("chapterTitle")), "");
+            if (chapterIndex <= 0 || chapterTitle.isBlank() || lookup.containsKey(chapterIndex)) {
+                continue;
+            }
+            lookup.put(chapterIndex, chapterTitle);
+        }
+        return lookup;
+    }
+
+    private Map<String, String> buildLeafSectionTitleLookup(List<Map<String, Object>> leafSections) {
+        Map<String, String> lookup = new LinkedHashMap<>();
+        if (leafSections == null || leafSections.isEmpty()) {
+            return lookup;
+        }
+        for (Map<String, Object> leaf : leafSections) {
+            if (leaf == null) {
+                continue;
+            }
+            int chapterIndex = intValue(leaf.get("chapterIndex"), -1);
+            int sectionIndex = intValue(leaf.get("sectionIndex"), -1);
+            String sectionTitle = firstNonBlank(stringValue(leaf.get("sectionTitle")), "");
+            if (chapterIndex <= 0 || sectionIndex <= 0 || sectionTitle.isBlank()) {
+                continue;
+            }
+            lookup.putIfAbsent(chapterIndex + ":" + sectionIndex, sectionTitle);
+        }
+        return lookup;
+    }
+
     private int intValue(Object rawValue, int fallback) {
         if (rawValue == null) {
             return fallback;
@@ -1709,7 +1924,7 @@ public class BookMarkdownService {
         if (options != null) {
             ContinuousLeafSelection continuousLeafSelection =
                     resolveContinuousLeafSelection(options.sectionSelector, safe.leafSections);
-            if (continuousLeafSelection != null) {
+            if (continuousLeafSelection != null && continuousLeafSelection.leafCount > 1) {
                 return buildContinuousLeafRangeBookData(safe, continuousLeafSelection);
             }
         }
@@ -2633,7 +2848,10 @@ public class BookMarkdownService {
             String safeTaskId = firstNonBlank(taskId, "book_pdf_extract");
             String sectionId = firstNonBlank(section.selector, "p" + startPage + "_" + endPage);
             boolean preferMineru = "mineru".equals(strategy) || preferMineruExtractor;
-            int timeoutSec = Math.max(30, bookPdfExtractorTimeoutSec);
+            int pageCount = Math.max(1, endPage - startPage + 1);
+            long timeoutByPagesLong = (long) pageCount * (long) Math.max(1, bookPdfExtractorTimeoutPerPageSec);
+            int timeoutByPages = (int) Math.max(30L, Math.min(Integer.MAX_VALUE, timeoutByPagesLong));
+            int timeoutSec = Math.max(Math.max(30, bookPdfExtractorTimeoutSec), timeoutByPages);
             PythonGrpcClient.ExtractBookPdfResult grpcResult = grpcClient.extractBookPdf(
                     safeTaskId,
                     source != null ? source.toString() : "",
@@ -2890,6 +3108,171 @@ public class BookMarkdownService {
         return pageStripper.getText(pdf);
     }
 
+    private String extractPdfPageRangeText(
+            PDDocument pdf,
+            PDFTextStripper pageStripper,
+            int startPage,
+            int endPage
+    ) throws Exception {
+        if (pdf == null || pageStripper == null || startPage <= 0 || endPage < startPage) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        int totalPages = pdf.getNumberOfPages();
+        for (int pageNo = startPage; pageNo <= endPage && pageNo <= totalPages; pageNo++) {
+            String pageText = normalize(extractPdfPageText(pdf, pageStripper, pageNo));
+            if (pageText.isBlank()) {
+                continue;
+            }
+            if (builder.length() > 0) {
+                builder.append("\n\n");
+            }
+            builder.append("[Page ").append(pageNo).append("]\n").append(pageText);
+        }
+        return builder.toString();
+    }
+
+    private String extractPdfPrefaceText(PDDocument pdf, PDFTextStripper pageStripper, int totalPages) throws Exception {
+        if (pdf == null || pageStripper == null || totalPages <= 0) {
+            return "";
+        }
+        Pattern prefaceHeadingPattern = Pattern.compile(
+                "(?i)\\b(preface|foreword|introduction|prologue)\\b|前言|序言|序|导言|引言"
+        );
+        int maxScanPages = Math.min(totalPages, 12);
+        for (int pageNo = 1; pageNo <= maxScanPages; pageNo++) {
+            String pageText = normalize(extractPdfPageText(pdf, pageStripper, pageNo));
+            if (pageText.isBlank()) {
+                continue;
+            }
+            if (!prefaceHeadingPattern.matcher(pageText).find()) {
+                continue;
+            }
+            return extractPdfPageRangeText(pdf, pageStripper, pageNo, Math.min(totalPages, pageNo + 2));
+        }
+        return "";
+    }
+
+    private String extractPrefaceFromText(String content) {
+        String normalized = normalize(content);
+        if (normalized.isBlank()) {
+            return "";
+        }
+        Pattern prefacePattern = Pattern.compile(
+                "(?is)(preface|foreword|introduction|前言|序言|导言|引言)\\s*[\\r\\n]+(.{0,3000})"
+        );
+        Matcher matcher = prefacePattern.matcher(normalized);
+        if (matcher.find()) {
+            return firstNonBlank(matcher.group(0), "");
+        }
+        return "";
+    }
+
+    private List<String> collectTocTitlesFromBookData(BookData data) {
+        List<String> titles = new ArrayList<>();
+        if (data == null || data.chapters == null) {
+            return titles;
+        }
+        for (Chapter chapter : data.chapters) {
+            if (chapter == null) {
+                continue;
+            }
+            String chapterTitle = normalize(chapter.title);
+            if (!chapterTitle.isBlank()) {
+                titles.add(chapterTitle);
+            }
+            if (chapter.sections == null) {
+                continue;
+            }
+            for (Section section : chapter.sections) {
+                if (section == null) {
+                    continue;
+                }
+                String sectionTitle = normalize(section.title);
+                if (!sectionTitle.isBlank()) {
+                    titles.add(sectionTitle);
+                }
+                if (titles.size() >= 40) {
+                    return normalizeDistinctTitles(titles);
+                }
+            }
+        }
+        return normalizeDistinctTitles(titles);
+    }
+
+    private List<String> collectTocTitlesFromTree(List<Map<String, Object>> bookSectionTree) {
+        List<String> titles = new ArrayList<>();
+        collectTocTitlesFromTreeNodes(bookSectionTree, titles);
+        return normalizeDistinctTitles(titles);
+    }
+
+    private void collectTocTitlesFromTreeNodes(List<Map<String, Object>> nodes, List<String> titles) {
+        if (nodes == null || nodes.isEmpty() || titles == null || titles.size() >= 40) {
+            return;
+        }
+        for (Map<String, Object> node : nodes) {
+            if (node == null) {
+                continue;
+            }
+            String title = normalize(stringValue(node.get("title")));
+            if (!title.isBlank()) {
+                titles.add(title);
+                if (titles.size() >= 40) {
+                    return;
+                }
+            }
+            Object children = node.get("children");
+            if (!(children instanceof List<?> childList)) {
+                continue;
+            }
+            List<Map<String, Object>> safeChildren = new ArrayList<>();
+            for (Object child : childList) {
+                if (!(child instanceof Map<?, ?> childMap)) {
+                    continue;
+                }
+                @SuppressWarnings("unchecked")
+                Map<String, Object> normalizedChild = (Map<String, Object>) childMap;
+                safeChildren.add(normalizedChild);
+            }
+            collectTocTitlesFromTreeNodes(safeChildren, titles);
+            if (titles.size() >= 40) {
+                return;
+            }
+        }
+    }
+
+    private List<String> normalizeDistinctTitles(List<String> rawTitles) {
+        List<String> normalizedTitles = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        if (rawTitles == null) {
+            return normalizedTitles;
+        }
+        for (String rawTitle : rawTitles) {
+            String title = normalize(rawTitle);
+            if (title.isBlank()) {
+                continue;
+            }
+            String dedupeKey = title.toLowerCase(Locale.ROOT);
+            if (!seen.add(dedupeKey)) {
+                continue;
+            }
+            normalizedTitles.add(title);
+            if (normalizedTitles.size() >= 40) {
+                break;
+            }
+        }
+        return normalizedTitles;
+    }
+
+    private String trimEvidenceText(String rawText, int limit) {
+        String normalized = normalize(rawText);
+        if (normalized.isBlank()) {
+            return "";
+        }
+        int safeLimit = Math.max(256, limit);
+        return normalized.length() <= safeLimit ? normalized : normalized.substring(0, safeLimit);
+    }
+
     private List<String> parsePdfPageParagraphs(String[] lines) {
         List<String> paragraphs = new ArrayList<>();
         if (lines == null || lines.length == 0) {
@@ -3056,12 +3439,251 @@ public class BookMarkdownService {
         return placements;
     }
 
+    private LeafTaskDescriptor resolveLeafTaskDescriptor(BookData data, Path source, BookProcessingOptions options) {
+        int sectionCount = countSections(data);
+        if (sectionCount <= 0) {
+            return null;
+        }
+        String requestedSelector = normalize(options != null ? options.sectionSelector : null);
+        List<String> selectedLeafSelectors = parseOrderedLeafSelectors(requestedSelector);
+        boolean singleLeafSelection = selectedLeafSelectors.size() == 1;
+        if (!singleLeafSelection && sectionCount != 1) {
+            return null;
+        }
+
+        Section onlySection = findFirstSection(data);
+        String sectionSelector = firstNonBlank(
+                singleLeafSelection ? selectedLeafSelectors.get(0) : null,
+                onlySection != null ? normalize(onlySection.selector) : null
+        );
+        String leafTitle = firstNonBlank(
+                normalize(options != null ? options.leafTitle : null),
+                firstNonBlank(
+                        findLeafField(data.leafSections, sectionSelector, "title"),
+                        firstNonBlank(onlySection != null ? normalize(onlySection.title) : null, "leaf")
+                )
+        );
+        String outlineIndex = firstNonBlank(
+                normalize(options != null ? options.leafOutlineIndex : null),
+                findLeafField(data.leafSections, sectionSelector, "outlineIndex")
+        );
+
+        LeafTaskDescriptor descriptor = new LeafTaskDescriptor();
+        descriptor.bookTitle = firstNonBlank(
+                normalize(options != null ? options.bookTitle : null),
+                firstNonBlank(data != null ? data.title : null, stripExt(source.getFileName().toString()))
+        );
+        descriptor.leafTitle = leafTitle;
+        descriptor.outlineIndex = outlineIndex;
+        descriptor.sectionSelector = sectionSelector;
+        descriptor.storageKey = normalize(options != null ? options.storageKey : null);
+        descriptor.markdownFileName = sanitizeLeafMarkdownFileName(leafTitle);
+        return descriptor;
+    }
+
+    private int countSections(BookData data) {
+        if (data == null || data.chapters == null) {
+            return 0;
+        }
+        int count = 0;
+        for (Chapter chapter : data.chapters) {
+            if (chapter == null || chapter.sections == null) {
+                continue;
+            }
+            count += chapter.sections.size();
+        }
+        return count;
+    }
+
+    private Section findFirstSection(BookData data) {
+        if (data == null || data.chapters == null) {
+            return null;
+        }
+        for (Chapter chapter : data.chapters) {
+            if (chapter == null || chapter.sections == null || chapter.sections.isEmpty()) {
+                continue;
+            }
+            return chapter.sections.get(0);
+        }
+        return null;
+    }
+
+    private String findLeafField(List<Map<String, Object>> leafSections, String sectionSelector, String fieldName) {
+        if (leafSections == null || leafSections.isEmpty()) {
+            return "";
+        }
+        String normalizedSelector = canonicalizeLeafSelector(normalize(sectionSelector));
+        for (Map<String, Object> leaf : leafSections) {
+            if (leaf == null) {
+                continue;
+            }
+            String leafSelector = canonicalizeLeafSelector(normalize(String.valueOf(leaf.get("sectionSelector"))));
+            if (normalizedSelector.isBlank() || !normalizedSelector.equals(leafSelector)) {
+                continue;
+            }
+            return normalize(String.valueOf(leaf.get(fieldName)));
+        }
+        return "";
+    }
+
+    private String sanitizeLeafMarkdownFileName(String leafTitle) {
+        String rawTitle = firstNonBlank(leafTitle, "leaf");
+        StringBuilder safe = new StringBuilder();
+        for (int index = 0; index < rawTitle.length(); index++) {
+            char current = rawTitle.charAt(index);
+            if (current == '<' || current == '>' || current == ':' || current == '"' || current == '/'
+                    || current == '\\' || current == '|' || current == '?' || current == '*') {
+                safe.append('_');
+                continue;
+            }
+            if (Character.isISOControl(current)) {
+                continue;
+            }
+            safe.append(current);
+        }
+        String normalized = safe.toString().trim();
+        normalized = normalized.replaceAll("[.\\s]+$", "");
+        if (normalized.isBlank()) {
+            normalized = "leaf";
+        }
+        return normalized + ".md";
+    }
+
+    private Path writeSelectedPdfOutput(
+            Path source,
+            Path outputRoot,
+            BookData data,
+            Path markdownPath
+    ) throws Exception {
+        if (source == null || outputRoot == null || data == null || markdownPath == null) {
+            return null;
+        }
+        if (!".pdf".equals(lowerExt(source.getFileName().toString()))) {
+            return null;
+        }
+
+        TreeSet<Integer> selectedPages = collectSelectedPdfPages(data);
+        if (selectedPages.isEmpty()) {
+            return null;
+        }
+
+        String markdownFileName = markdownPath.getFileName() != null
+                ? markdownPath.getFileName().toString()
+                : "book.md";
+        String pdfFileName = stripExt(markdownFileName) + "_pages.pdf";
+        Path selectedPdfPath = outputRoot.resolve(pdfFileName).toAbsolutePath().normalize();
+        Path normalizedOutputRoot = outputRoot.toAbsolutePath().normalize();
+        if (!selectedPdfPath.startsWith(normalizedOutputRoot)) {
+            throw new IllegalArgumentException("selected pdf path escapes output root: " + selectedPdfPath);
+        }
+        Files.createDirectories(normalizedOutputRoot);
+
+        // 只保留最终 Markdown 真正覆盖到的页，避免任务目录继续滞留整本原始 PDF。
+        Path tempPdfPath = Files.createTempFile(normalizedOutputRoot, stripExt(pdfFileName) + "_", ".pdf");
+        boolean written = false;
+        try (PDDocument sourcePdf = PDDocument.load(source.toFile()); PDDocument selectedPdf = new PDDocument()) {
+            int totalPages = sourcePdf.getNumberOfPages();
+            for (Integer pageNo : selectedPages) {
+                if (pageNo == null || pageNo < 1 || pageNo > totalPages) {
+                    continue;
+                }
+                selectedPdf.importPage(sourcePdf.getPage(pageNo - 1));
+            }
+            if (selectedPdf.getNumberOfPages() <= 0) {
+                return null;
+            }
+            selectedPdf.save(tempPdfPath.toFile());
+            written = true;
+        } finally {
+            if (!written) {
+                Files.deleteIfExists(tempPdfPath);
+            }
+        }
+        Files.move(tempPdfPath, selectedPdfPath, StandardCopyOption.REPLACE_EXISTING);
+        logger.info(
+                "Book selected-page pdf saved: source={} target={} pages={}",
+                source,
+                selectedPdfPath,
+                selectedPages.size()
+        );
+        return selectedPdfPath;
+    }
+
+    private TreeSet<Integer> collectSelectedPdfPages(BookData data) {
+        TreeSet<Integer> pages = new TreeSet<>();
+        if (data == null || data.chapters == null) {
+            return pages;
+        }
+        for (Chapter chapter : data.chapters) {
+            if (chapter == null) {
+                continue;
+            }
+            if (chapter.sections == null || chapter.sections.isEmpty()) {
+                appendPageRange(pages, chapter.startPage, chapter.endPage);
+                continue;
+            }
+            for (Section section : chapter.sections) {
+                if (section == null) {
+                    continue;
+                }
+                int startPage = section.startPage > 0 ? section.startPage : chapter.startPage;
+                int endPage = section.endPage >= startPage ? section.endPage : startPage;
+                appendPageRange(pages, startPage, endPage);
+            }
+        }
+        return pages;
+    }
+
+    private void appendPageRange(Set<Integer> pages, int startPage, int endPage) {
+        if (pages == null || startPage <= 0) {
+            return;
+        }
+        int normalizedEnd = endPage >= startPage ? endPage : startPage;
+        for (int pageNo = startPage; pageNo <= normalizedEnd; pageNo++) {
+            pages.add(pageNo);
+        }
+    }
+
+    private void cleanupOriginalTaskPdf(Path source, Path outputRoot, Path selectedPdfPath) {
+        if (source == null || outputRoot == null) {
+            return;
+        }
+        if (!".pdf".equals(lowerExt(source.getFileName().toString()))) {
+            return;
+        }
+        Path normalizedSource = source.toAbsolutePath().normalize();
+        Path normalizedOutputRoot = outputRoot.toAbsolutePath().normalize();
+        if (!normalizedSource.startsWith(normalizedOutputRoot)) {
+            return;
+        }
+        if (selectedPdfPath != null && normalizedSource.equals(selectedPdfPath.toAbsolutePath().normalize())) {
+            return;
+        }
+        try {
+            // 只清理任务目录内部的原始 PDF，外部源文件由原有来源路径自行负责。
+            if (Files.deleteIfExists(normalizedSource)) {
+                logger.info("Book original pdf removed from task directory: {}", normalizedSource);
+            }
+        } catch (Exception error) {
+            logger.warn(
+                    "Delete original task pdf failed: source={} outputRoot={} err={}",
+                    normalizedSource,
+                    normalizedOutputRoot,
+                    error.getMessage()
+            );
+        }
+    }
+
     private Path writeMarkdownOutputs(
             BookData data,
             Path outputRoot,
             boolean splitByChapter,
-            boolean splitBySection
+            boolean splitBySection,
+            LeafTaskDescriptor leafTask
     ) throws Exception {
+        if (leafTask != null) {
+            return writeLeafMarkdownOutput(data, outputRoot, leafTask);
+        }
         Path mainMarkdownPath = outputRoot.resolve("book.md");
         StringBuilder main = new StringBuilder();
         main.append("# ").append(firstNonBlank(data.title, "Book")).append("\n\n");
@@ -3131,6 +3753,33 @@ public class BookMarkdownService {
 
         Files.writeString(mainMarkdownPath, main.toString(), StandardCharsets.UTF_8);
         return mainMarkdownPath;
+    }
+
+    private Path writeLeafMarkdownOutput(BookData data, Path outputRoot, LeafTaskDescriptor leafTask) throws Exception {
+        Path markdownPath = outputRoot.resolve(firstNonBlank(leafTask.markdownFileName, "leaf.md"));
+        StringBuilder builder = new StringBuilder();
+        builder.append("# ").append(firstNonBlank(leafTask.leafTitle, "Leaf")).append("\n\n");
+        builder.append("- Book: ").append(firstNonBlank(leafTask.bookTitle, firstNonBlank(data.title, "Book"))).append("\n");
+        if (!normalize(leafTask.outlineIndex).isBlank()) {
+            builder.append("- Outline: ").append(leafTask.outlineIndex).append("\n");
+        }
+        if (!normalize(leafTask.sectionSelector).isBlank()) {
+            builder.append("- Selector: ").append(leafTask.sectionSelector).append("\n");
+        }
+        builder.append("\n");
+        for (Chapter chapter : data.chapters) {
+            if (chapter == null || chapter.sections == null) {
+                continue;
+            }
+            for (Section section : chapter.sections) {
+                if (section == null) {
+                    continue;
+                }
+                appendSectionBody(builder, section, markdownPath, outputRoot);
+            }
+        }
+        Files.writeString(markdownPath, builder.toString(), StandardCharsets.UTF_8);
+        return markdownPath;
     }
 
     private void appendBookOverview(StringBuilder builder, BookData data) {
@@ -3382,14 +4031,24 @@ public class BookMarkdownService {
         return line.toString();
     }
 
-    private Path writeAbstractMetadata(String taskId, Path source, Path outputRoot, BookData data) throws Exception {
+    private Path writeAbstractMetadata(
+            String taskId,
+            Path source,
+            Path outputRoot,
+            BookData data,
+            LeafTaskDescriptor leafTask
+    ) throws Exception {
         List<Map<String, Object>> units = new ArrayList<>();
         for (int chapterIndex = 0; chapterIndex < data.chapters.size(); chapterIndex++) {
             Chapter chapter = data.chapters.get(chapterIndex);
             for (int sectionIndex = 0; sectionIndex < chapter.sections.size(); sectionIndex++) {
                 Section section = chapter.sections.get(sectionIndex);
                 Map<String, Object> unit = new LinkedHashMap<>();
-                unit.put("unit_id", String.format(Locale.ROOT, "book_unit_%03d_%03d", chapterIndex + 1, sectionIndex + 1));
+                String unitId = String.format(Locale.ROOT, "book_unit_%03d_%03d", chapterIndex + 1, sectionIndex + 1);
+                if (leafTask != null && !normalize(leafTask.outlineIndex).isBlank()) {
+                    unitId = "book_leaf_" + leafTask.outlineIndex.replace('.', '_');
+                }
+                unit.put("unit_id", unitId);
                 unit.put("unit_type", "abstract");
                 unit.put("chapter_index", chapterIndex + 1);
                 unit.put("chapter_title", firstNonBlank(chapter.title, ""));
@@ -3397,6 +4056,15 @@ public class BookMarkdownService {
                 unit.put("section_index", sectionIndex + 1);
                 unit.put("section_title", firstNonBlank(section.title, ""));
                 unit.put("section_selector", firstNonBlank(section.selector, ""));
+                unit.put("source_book_title", firstNonBlank(
+                        leafTask != null ? leafTask.bookTitle : null,
+                        firstNonBlank(data.title, stripExt(source.getFileName().toString()))
+                ));
+                unit.put("leaf_title", firstNonBlank(
+                        leafTask != null ? leafTask.leafTitle : null,
+                        section.title
+                ));
+                unit.put("leaf_outline_index", firstNonBlank(leafTask != null ? leafTask.outlineIndex : null, ""));
                 unit.put("start_page", section.startPage);
                 unit.put("end_page", section.endPage);
                 String metadataText = String.join("\n\n", section.paragraphs);
@@ -3412,11 +4080,15 @@ public class BookMarkdownService {
         }
 
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("version", "book-abstract-v1");
+        payload.put("version", "book-abstract-v2");
         payload.put("generated_at", Instant.now().toString());
         payload.put("task_id", firstNonBlank(taskId, ""));
         payload.put("source_path", source.toString());
         payload.put("book_title", firstNonBlank(data.title, stripExt(source.getFileName().toString())));
+        payload.put("leaf_title", firstNonBlank(leafTask != null ? leafTask.leafTitle : null, ""));
+        payload.put("leaf_outline_index", firstNonBlank(leafTask != null ? leafTask.outlineIndex : null, ""));
+        payload.put("leaf_selector", firstNonBlank(leafTask != null ? leafTask.sectionSelector : null, ""));
+        payload.put("storage_key", firstNonBlank(leafTask != null ? leafTask.storageKey : null, ""));
         payload.put("page_map_strategy", firstNonBlank(data.pageMapStrategy, ""));
         payload.put("detected_page_offset", data.detectedPageOffset);
         payload.put("applied_page_offset", data.appliedPageOffset);

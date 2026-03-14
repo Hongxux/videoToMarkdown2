@@ -61,6 +61,57 @@ class BookMarkdownServiceLeafSectionMappingTest {
         );
     }
 
+    @Test
+    void buildPdfTocLeafSectionsPrefersTocTitlesWhenOutlineFrontMatterShiftsChapterTitles() throws Exception {
+        BookMarkdownService service = new BookMarkdownService();
+        Object bookData = newBookData();
+
+        Object chapter = newChapter("Preface", "c1", 15, 80);
+        Object body = newSection("Body", "c1s1", 15, 23);
+        Object designGoals = newSection("Design goals", "c1s2", 24, 45);
+        ReflectionTestUtils.setField(chapter, "sections", new ArrayList<>(List.of(body, designGoals)));
+        ReflectionTestUtils.setField(bookData, "chapters", new ArrayList<>(List.of(chapter)));
+
+        List<Object> tocEntries = new ArrayList<>();
+        tocEntries.add(newTocEntry("1 Introduction", "Introduction", 1, 15, 1, "1", 1, null, null));
+        tocEntries.add(newTocEntry(
+                "1.1 From networked systems to distributed systems",
+                "From networked systems to distributed systems",
+                2,
+                15,
+                1,
+                "1.1",
+                1,
+                1,
+                null
+        ));
+        tocEntries.add(newTocEntry("1.2 Design goals", "Design goals", 2, 24, 1, "1.2", 1, 2, null));
+        tocEntries.add(newTocEntry("1.1.1 Layered architectures", "Layered architectures", 3, 15, 1, "1.1.1", 1, 1, 1));
+        tocEntries.add(newTocEntry("1.2.1 Resource sharing", "Resource sharing", 3, 24, 1, "1.2.1", 1, 2, 1));
+
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> leafSections = (List<Map<String, Object>>) ReflectionTestUtils.invokeMethod(
+                service,
+                "buildPdfTocLeafSections",
+                tocEntries,
+                90,
+                bookData
+        );
+
+        Assertions.assertNotNull(leafSections);
+        Assertions.assertEquals(2, leafSections.size());
+
+        Map<String, Object> firstLeaf = leafSections.get(0);
+        Map<String, Object> secondLeaf = leafSections.get(1);
+        Assertions.assertEquals("Introduction", firstLeaf.get("chapterTitle"));
+        Assertions.assertEquals("From networked systems to distributed systems", firstLeaf.get("sectionTitle"));
+        Assertions.assertEquals("c1s1t1", firstLeaf.get("sectionSelector"));
+        Assertions.assertEquals("Introduction", secondLeaf.get("chapterTitle"));
+        Assertions.assertEquals("Design goals", secondLeaf.get("sectionTitle"));
+        Assertions.assertEquals("c1s2t1", secondLeaf.get("sectionSelector"));
+    }
+
+
     private Object newBookData() throws Exception {
         Class<?> clazz = Class.forName("com.mvp.module2.fusion.service.BookMarkdownService$BookData");
         Constructor<?> constructor = clazz.getDeclaredConstructor();

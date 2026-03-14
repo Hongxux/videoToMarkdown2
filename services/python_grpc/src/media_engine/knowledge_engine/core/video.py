@@ -813,6 +813,59 @@ class VideoProcessor(BaseProcessor):
         )
         return any(keyword in lower_raw for keyword in keywords)
 
+    @staticmethod
+    def _is_transient_network_error(err: Exception) -> bool:
+        """判断是否为临时网络错误（超时/SSL-EOF/IncompleteRead），这类错误 aria2c 自身通常已在处理。"""
+        lower_raw = str(err).lower()
+        transient_keywords = (
+            "read timed out",
+            "timed out",
+            "timeout",
+            "incompleteread",
+            "error reading response",
+            "chunkedencodingerror",
+            "unexpected_eof_while_reading",
+            "ssl: unexpected_eof",
+            "eof occurred in violation of protocol",
+            "connection reset",
+            "connection aborted",
+            "remotedisconnected",
+            "broken pipe",
+        )
+        return any(kw in lower_raw for kw in transient_keywords)
+
+    @staticmethod
+    def _find_completed_video_file(output_dir: str, filename: str) -> Optional[str]:
+        """在 output_dir 中查找已完成的视频文件（排除 .aria2/.part 等临时后缀）。"""
+        valid_exts = {'.mp4', '.mkv', '.webm', '.mov', '.avi'}
+        incomplete_exts = {'.aria2', '.part', '.ytdl', '.tmp'}
+        best: Optional[Tuple[int, str]] = None  # (size, path)
+        root = Path(output_dir)
+        if not root.exists():
+            return None
+        for item in root.iterdir():
+            if not item.is_file():
+                continue
+            # 排除明确的临时文件
+            if item.suffix.lower() in incomplete_exts:
+                continue
+            if item.name.endswith('.aria2') or item.name.endswith('.part'):
+                continue
+            if item.suffix.lower() not in valid_exts:
+                continue
+            if not item.name.startswith(filename):
+                continue
+            # 同时确认没有对应的 .aria2 控制文件（说明 aria2c 已完成该文件）
+            aria2_control = Path(str(item) + '.aria2')
+            if aria2_control.exists():
+                continue
+            size = item.stat().st_size
+            if size < 1024:  # 忽略小于 1 KB 的文件（不完整）
+                continue
+            if best is None or size > best[0]:
+                best = (size, str(item.absolute()))
+        return best[1] if best else None
+
     def _is_retryable_probe_error(self, err: Exception) -> bool:
         """判断元信息探测失败是否可重试（仅网络层与代理层错误）。"""
         return (
@@ -1178,13 +1231,21 @@ class VideoProcessor(BaseProcessor):
         if resolved_external_downloader:
             downloader_key = external_downloader_key or Path(resolved_external_downloader).stem.lower()
             args_copy = list(self.external_downloader_args)
-            if effective_proxy and downloader_key.startswith("aria2c"):
-                if not any(str(arg).startswith("--all-proxy") for arg in args_copy):
-                    args_copy.append(f"--all-proxy={effective_proxy}")
+            if downloader_key.startswith("aria2c"):
+                if effective_proxy:
+                    if not any(str(arg).startswith("--all-proxy") for arg in args_copy):
+                        args_copy.append(f"--all-proxy={effective_proxy}")
                 if (self.disable_ssl_verify or self._is_youtube_url(url)) and not any(
                     str(arg).startswith("--check-certificate") for arg in args_copy
                 ):
                     args_copy.append("--check-certificate=false")
+                # 自动注入 aria2c 断线重连参数（用户未显式配置时生效）
+                if not any(str(arg).startswith("--retry-wait") for arg in args_copy):
+                    args_copy.append("--retry-wait=3")
+                if not any(str(arg).startswith("--connect-timeout") for arg in args_copy):
+                    args_copy.append("--connect-timeout=60")
+                if not any(str(arg).startswith("--max-tries") for arg in args_copy):
+                    args_copy.append("--max-tries=15")
             if args_copy:
                 ydl_opts["external_downloader_args"] = {
                     downloader_key: args_copy,
@@ -1368,11 +1429,32 @@ class VideoProcessor(BaseProcessor):
             raise FileNotFoundError(f"未在 {output_dir} 找到以 {filename} 开头的有效视频文件")
             
         except Exception as e:
+            # ── aria2c 文件救活：aria2c 已在内部完成下载，但 yt-dlp 因元数据请求失败而抛出异常 ──
+            # 场景：aria2c 分片下载全部完成，yt-dlp 主线程在后续的元数据刷新/网页请求时遇到
+            # 临时网络错误（超时、SSL-EOF、IncompleteRead），误认为整体下载失败。
+            # 修复：先扫描 output_dir，若已有完整落盘文件（无 .aria2 控制文件），则视为成功。
+            if (
+                resolved_external_downloader
+                and external_downloader_key.startswith("aria2c")
+                and self._is_transient_network_error(e)
+                and not self._is_format_unavailable_error(e)
+            ):
+                completed_path = self._find_completed_video_file(output_dir, filename)
+                if completed_path:
+                    self.emit_progress(
+                        "download",
+                        1.0,
+                        f"aria2c 已完成下载，跳过 yt-dlp 元数据错误（{type(e).__name__}）: {completed_path}",
+                        data={"path": completed_path},
+                    )
+                    return completed_path
+            # ── 正常 fallback：仅对非临时错误（SSL握手/代理配置类）才切换到 yt-dlp 内置下载器 ──
             if (
                 resolved_external_downloader
                 and external_downloader_key.startswith("aria2c")
                 and not self._external_downloader_fallback_attempted
                 and self._is_external_downloader_fallback_error(e)
+                and not self._is_transient_network_error(e)
             ):
                 self.emit_progress(
                     "download",
