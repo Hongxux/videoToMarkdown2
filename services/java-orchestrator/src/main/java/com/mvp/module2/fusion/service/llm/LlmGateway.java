@@ -89,9 +89,6 @@ public final class LlmGateway {
                         ? client.stream(provider, request, deltaRelay.consumer())
                         : client.complete(provider, request);
                 String content = String.valueOf(response.content == null ? "" : response.content).trim();
-                if (!StringUtils.hasText(content)) {
-                    throw new IllegalStateException(provider.resolveDisplayName() + " returned empty");
-                }
                 return GatewayAttemptResult.success(provider, response, content, attemptIndex + 1, partialStreamObserved, deltaRelay);
             } catch (Exception ex) {
                 boolean retryable = retryPolicy.shouldRetry(ex);
@@ -242,7 +239,7 @@ public final class LlmGateway {
         }
 
         private boolean isSuccess() {
-            return error == null && StringUtils.hasText(content);
+            return error == null;
         }
 
         private LlmGatewayResult toGatewayResult(boolean degraded) {

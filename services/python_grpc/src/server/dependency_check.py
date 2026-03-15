@@ -12,6 +12,7 @@ from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Callable
 
+from services.python_grpc.src.config_paths import load_yaml_dict, resolve_video_config_path
 from .runtime_env import log_boot_step, safe_print
 
 _PREPROCESS_VERSION_SPECS: tuple[tuple[str, tuple[str, ...], str], ...] = (
@@ -83,6 +84,46 @@ def _check_person_prefilter_backend() -> tuple[bool, str]:
         return False, f"mediapipe selfie_segmentation init failed: {exc}"
 
 
+def _load_preflight_config() -> dict:
+    config_path = resolve_video_config_path(anchor_file=__file__)
+    if config_path is None:
+        return {}
+    return load_yaml_dict(config_path)
+
+
+def _read_nested_bool(config: dict, path: tuple[str, ...], default: bool = False) -> bool:
+    node = config
+    for key in path:
+        if not isinstance(node, dict):
+            return default
+        node = node.get(key)
+    if isinstance(node, bool):
+        return node
+    return default
+
+
+def _resolve_optional_feature_flags(config: dict | None = None) -> dict[str, bool]:
+    effective_config = config if isinstance(config, dict) else _load_preflight_config()
+    ppstructure_enabled = _read_nested_bool(
+        effective_config,
+        ("visual", "structure_preprocess", "enabled"),
+        False,
+    ) or _read_nested_bool(
+        effective_config,
+        ("content_pipeline", "phase2b", "concrete_ai_vision", "enabled"),
+        False,
+    )
+    return {
+        "ppstructure_preprocess": ppstructure_enabled,
+        "paddlex_layout_fallback": ppstructure_enabled,
+        "person_subject_prefilter": _read_nested_bool(
+            effective_config,
+            ("vision_ai", "person_subject_filter", "enabled"),
+            True,
+        ),
+    }
+
+
 def _get_distribution_version(distribution_name: str) -> str | None:
     try:
         return importlib_metadata.version(distribution_name)
@@ -100,9 +141,11 @@ def _normalize_version_core(version: str) -> str:
     return match.group(0) if match else token
 
 
-def _check_preprocess_dependency_versions() -> tuple[bool, str]:
+def _check_preprocess_dependency_versions(required_dependencies: set[str] | None = None) -> tuple[bool, str]:
     mismatches: list[str] = []
     for logical_name, candidates, expected_version in _PREPROCESS_VERSION_SPECS:
+        if required_dependencies and logical_name not in required_dependencies:
+            continue
         installed_from: str | None = None
         installed_version: str | None = None
         for distribution_name in candidates:
@@ -164,6 +207,7 @@ def _check_pydantic_core_schema_compatibility() -> tuple[bool, str]:
 def run_dependency_check(debug_imports: bool = False) -> int:
     """Run startup dependency preflight; return 0 for pass and 2 for failure."""
     _prepare_preflight_paths()
+    optional_feature_flags = _resolve_optional_feature_flags()
 
     modules_to_check = [
         ("psutil",),
@@ -180,11 +224,25 @@ def run_dependency_check(debug_imports: bool = False) -> int:
 
     feature_checks: list[tuple[str, Callable[[], tuple[bool, str]]]] = [
         ("pydantic_core_schema_compatibility", _check_pydantic_core_schema_compatibility),
-        ("preprocess_dependency_versions", _check_preprocess_dependency_versions),
-        ("ppstructure_preprocess", _check_ppstructure_importable),
-        ("paddlex_layout_fallback", _check_paddlex_importable),
-        ("person_subject_prefilter", _check_person_prefilter_backend),
     ]
+    required_preprocess_dependencies: set[str] = set()
+    if optional_feature_flags["ppstructure_preprocess"] or optional_feature_flags["paddlex_layout_fallback"]:
+        required_preprocess_dependencies.update({"paddleocr", "paddlepaddle", "paddlex"})
+    if optional_feature_flags["person_subject_prefilter"]:
+        required_preprocess_dependencies.add("mediapipe")
+    if required_preprocess_dependencies:
+        feature_checks.append(
+            (
+                "preprocess_dependency_versions",
+                lambda deps=set(required_preprocess_dependencies): _check_preprocess_dependency_versions(deps),
+            )
+        )
+    if optional_feature_flags["ppstructure_preprocess"]:
+        feature_checks.append(("ppstructure_preprocess", _check_ppstructure_importable))
+    if optional_feature_flags["paddlex_layout_fallback"]:
+        feature_checks.append(("paddlex_layout_fallback", _check_paddlex_importable))
+    if optional_feature_flags["person_subject_prefilter"]:
+        feature_checks.append(("person_subject_prefilter", _check_person_prefilter_backend))
 
     missing_modules: set[str] = set()
     import_errors: list[tuple[str, str]] = []

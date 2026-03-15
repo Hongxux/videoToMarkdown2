@@ -1,5 +1,36 @@
 ﻿# 错误修正记录
 
+## 2026-03-15 浏览器 `/ws/tasks` 半开连接无法快速发现且终态通知会在断线窗口内丢失
+- Date:
+  - 2026-03-15
+- Symptom:
+  - 浏览器标签页在代理链路半开或网络短抖时，页面上的任务连接可能长时间不报错，但也不再收到新的终态更新。
+  - 如果 `COMPLETED/FAILED` 恰好发生在浏览器断线窗口内，重连后只能依赖下一次全量刷新，终态通知与用户感知都有明显延迟。
+- Root cause:
+  - `/ws/tasks` 在收敛为快照模型后，普通任务状态不再维护通用离线消息队列，但浏览器侧也没有补一条“仅针对终态事件”的可回放语义。
+  - 浏览器仍主要依赖应用层 `ping -> pong` 和重连定时器，没有启用 WebSocket 原生 `Ping/Pong` 传输层探活，半开链路检测不够快。
+- Fix:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+    - 为 `clientType=browser` 的 `web-task-updates` 连接启用原生 `PingMessage/PongMessage` 传输层心跳。
+    - 新增 `taskTerminalEventService` 接入；`COMPLETED/FAILED` 会入队成 `taskTerminalEvent`，并按 `lastAckedTerminalEventId` 回放未确认事件。
+    - 新增 `ack` 动作处理浏览器对终态事件的确认删除。
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - 浏览器建连时带上 `clientType=browser` 与 `lastAckedTerminalEventId`。
+    - 终态事件消费后继续复用现有前端通知与任务状态合并逻辑。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Prevention:
+  - 普通运行态快照和终态事件流必须分开治理，不能因为取消通用可靠层就把终态补发能力一起删掉。
+  - 浏览器侧长连接如果需要更快识别半开状态，应优先启用传输层 `Ping/Pong`，而不是只依赖业务心跳。
+  - 任何新增的 terminal replay 机制都必须带显式 ack 水位，避免“每次重连重复弹终态通知”。
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`
+
 ## 2026-03-15 run_server.ps1 自动拉起 Redis 时命中 PowerShell `$Host` 只读变量
 - Date:
   - 2026-03-15

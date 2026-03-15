@@ -174,10 +174,10 @@ stateDiagram-v2
 
 ### 5.3 实时通道
 - WebSocket 入口：`/ws/tasks`
-- 当前协议不是简单广播，而是可靠消息层：
-  - 服务端消息附带 `messageId`。
-  - 客户端支持 `ack`、`ping/pong`、`lastReceivedMessageId`。
-  - 服务端按 `userId` 维护有界 inbox，支持断线补发。
+- 当前协议按语义拆分为两层：
+  - 普通任务状态更新走“快照推送 + REST `/api/mobile/tasks/changes` 对账”模型，不再为每条状态消息维护离线补发队列。
+  - 浏览器 `web-task-updates` 流额外启用传输层心跳：服务端定时发送 WebSocket `PingMessage`，浏览器回 `PongMessage`，用于更快识别半开连接。
+  - 终态事件单独走 `TaskTerminalEventService`：`COMPLETED/FAILED` 事件按 `userId` 入队，浏览器建连时携带 `lastAckedTerminalEventId`，收到 `taskTerminalEvent` 后通过 `ack` 确认并支持断线补发。
 - 支持的订阅维度：
   - 单任务进度。
   - 合集进度。
@@ -219,7 +219,7 @@ stateDiagram-v2
   - 提交与上传：普通提交、秒传检查、分片上传、上传探测
   - Markdown/资源：读取、整文保存、资源流式访问、导出
   - 锚点能力：挂载、同步、删除、挂载态查询
-  - 实时能力：可靠 WebSocket + REST 变更对账双保险
+  - 实时能力：WebSocket 快照更新、浏览器传输层心跳、终态事件补发、REST 变更对账
 
 ### 7.2 概念卡片与阅读增强
 - `/api/mobile/cards/**` 提供：
@@ -235,7 +235,7 @@ stateDiagram-v2
 ### 7.3 Android 客户端
 - 路径：`app/src/main/java/com/hongxu/videoToMarkdownTest2/`
 - 关键能力：
-  - `ReliableTaskWebSocketClient`、`TaskRealtimeClient`、`CollectionRealtimeClient`：复用服务端可靠 WebSocket 语义。
+  - `ReliableTaskWebSocketClient`、`TaskRealtimeClient`、`CollectionRealtimeClient`：统一封装心跳、重连、订阅恢复与任务实时状态消费。
   - `SemanticTopographyReader`：语义块阅读器，而不是整篇单块渲染。
   - `TaskSubmissionForegroundService`：前台任务提交与订阅。
   - `MobileAppAutoUpdateManager`：消费 `/api/mobile/app/update/**` 更新链路。

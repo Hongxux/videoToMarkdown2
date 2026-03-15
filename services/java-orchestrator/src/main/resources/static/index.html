@@ -3625,7 +3625,8 @@
     });
     const EDGE_BACK_COMMIT_SETTLE_DURATION_MS = 250;
     const VIEW_HISTORY_MAX = 24;
-    const TASK_LIST_AUTO_REFRESH_MS = 25000;
+    const TASK_LIST_AUTO_REFRESH_HEALTHY_MS = 180000;
+    const TASK_LIST_AUTO_REFRESH_RECOVERY_MS = 25000;
     const TASK_LIST_LOADING_HINT_DELAY_MS = 1000;
     const PAPER_SCROLL_RELAX_DELAY_MS = 96;
     // 任务微交互参数表：统一管理“入场/开始处理/完成/退出”时长与清理节奏。
@@ -3851,6 +3852,7 @@
         taskUpdatesSocketConnectPromise: null,
         taskUpdatesSocketReconnectTimerId: 0,
         taskUpdatesSocketReconnectAttempt: 0,
+        taskUpdatesSocketRecoveryPending: false,
         taskUpdatesSocketManualClose: false,
         taskUpdatesSubscribedTaskId: '',
         taskUpdatesHeartbeatTimerId: 0,
@@ -7404,10 +7406,42 @@
         return (
             normalized === 'queued'
             || normalized === 'processing'
+            || normalized === 'probing'
             || normalized === 'pending'
             || normalized === 'running'
             || normalized === 'submitted'
             || normalized === 'in_progress'
+        );
+    }
+
+    function hasActivePendingSubmitTasks() {
+        const list = Array.isArray(state.pendingSubmitTasks) ? state.pendingSubmitTasks : [];
+        return list.some((entry) => {
+            if (!entry || typeof entry !== 'object') {
+                return false;
+            }
+            if (entry.inFlight) {
+                return true;
+            }
+            const status = String(entry.status || '').trim().toLowerCase();
+            return status === 'submitting' || status === 'queued';
+        });
+    }
+
+    function hasAutoRefreshableTasks() {
+        const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+        if (tasks.some((task) => isTaskInProgress(task))) {
+            return true;
+        }
+        return hasActivePendingSubmitTasks();
+    }
+
+    function isTaskUpdatesSocketHealthy() {
+        const ws = state.taskUpdatesSocket;
+        return !!(
+            ws
+            && ws.readyState === WebSocket.OPEN
+            && !state.taskUpdatesSocketRecoveryPending
         );
     }
 
@@ -8037,7 +8071,7 @@
         }
         const currentView = String(viewName || state.currentView || '').trim();
         if (currentView === 'tasks') {
-            return true;
+            return hasAutoRefreshableTasks();
         }
         if (currentView !== 'content' && currentView !== 'outline') {
             return false;
@@ -8047,12 +8081,12 @@
     }
 
     function createTaskListRefreshPolicy(options = {}) {
-        const baseIntervalMs = Number(options.baseIntervalMs) > 0
-            ? Number(options.baseIntervalMs)
-            : TASK_LIST_AUTO_REFRESH_MS;
-        const maxBackoffMs = Number(options.maxBackoffMs) > baseIntervalMs
-            ? Number(options.maxBackoffMs)
-            : (baseIntervalMs * 8);
+        const healthyIntervalMs = Number(options.healthyIntervalMs) > 0
+            ? Number(options.healthyIntervalMs)
+            : TASK_LIST_AUTO_REFRESH_HEALTHY_MS;
+        const recoveryIntervalMs = Number(options.recoveryIntervalMs) > 0
+            ? Number(options.recoveryIntervalMs)
+            : TASK_LIST_AUTO_REFRESH_RECOVERY_MS;
         const viewEnterMinGapMs = Number(options.viewEnterMinGapMs) > 0
             ? Number(options.viewEnterMinGapMs)
             : 1200;
@@ -8062,7 +8096,6 @@
 
         let timerId = 0;
         let stopped = false;
-        let consecutiveFailures = 0;
         let lastAttemptAt = 0;
 
         function clearTimer() {
@@ -8076,23 +8109,26 @@
         }
 
         function computeNextDelayMs() {
-            const factor = Math.pow(2, Math.min(consecutiveFailures, 4));
-            return Math.min(maxBackoffMs, Math.round(baseIntervalMs * factor));
+            return isTaskUpdatesSocketHealthy()
+                ? healthyIntervalMs
+                : recoveryIntervalMs;
         }
 
         function scheduleNext() {
             if (stopped) return;
             clearTimer();
+            if (!isAutoRefreshEligible()) {
+                return;
+            }
             const delay = computeNextDelayMs();
             timerId = setTimeout(async () => {
                 timerId = 0;
                 if (!isAutoRefreshEligible()) {
-                    scheduleNext();
                     return;
                 }
                 await refresh('auto', {
                     showLoading: false,
-                    minGapMs: Math.round(baseIntervalMs * 0.25),
+                    minGapMs: Math.round(Math.min(healthyIntervalMs, recoveryIntervalMs) * 0.25),
                 });
             }, delay);
         }
@@ -8117,10 +8153,8 @@
             lastAttemptAt = now;
             try {
                 await refreshTaskListIncrementally({ showLoading, loadingText, render: true });
-                consecutiveFailures = 0;
                 return true;
             } catch (error) {
-                consecutiveFailures = Math.min(consecutiveFailures + 1, 6);
                 if (throwOnError) {
                     throw error;
                 }
@@ -8178,8 +8212,8 @@
     }
 
     const taskListRefreshPolicy = createTaskListRefreshPolicy({
-        baseIntervalMs: TASK_LIST_AUTO_REFRESH_MS,
-        maxBackoffMs: TASK_LIST_AUTO_REFRESH_MS * 8,
+        healthyIntervalMs: TASK_LIST_AUTO_REFRESH_HEALTHY_MS,
+        recoveryIntervalMs: TASK_LIST_AUTO_REFRESH_RECOVERY_MS,
     });
 
 
@@ -8427,6 +8461,7 @@
     function forceTaskUpdatesSocketReconnect(reason) {
         const ws = state.taskUpdatesSocket;
         state.taskUpdatesSocketManualClose = false;
+        state.taskUpdatesSocketRecoveryPending = true;
         clearTaskUpdatesSocketHeartbeat();
         state.taskUpdatesSocket = null;
         state.taskUpdatesSocketConnectPromise = null;
@@ -8443,41 +8478,17 @@
     function armTaskUpdatesSocketPongTimeout() {
         if (state.taskUpdatesHeartbeatTimeoutTimerId) {
             clearTimeout(state.taskUpdatesHeartbeatTimeoutTimerId);
-        }
-        state.taskUpdatesHeartbeatTimeoutTimerId = window.setTimeout(() => {
             state.taskUpdatesHeartbeatTimeoutTimerId = 0;
-            if (!state.taskUpdatesSocket || state.taskUpdatesSocket.readyState !== WebSocket.OPEN) {
-                return;
-            }
-            forceTaskUpdatesSocketReconnect('heartbeat timeout');
-        }, TASK_UPDATES_WS_HEARTBEAT_TIMEOUT_MS);
+        }
     }
 
     function sendTaskUpdatesSocketPing() {
-        const ws = state.taskUpdatesSocket;
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-            return;
-        }
         state.taskUpdatesLastPingAt = Date.now();
-        try {
-            ws.send(JSON.stringify({
-                action: 'ping',
-                clientTime: state.taskUpdatesLastPingAt,
-            }));
-            armTaskUpdatesSocketPongTimeout();
-        } catch (error) {
-            console.warn('task status websocket ping failed', error);
-            forceTaskUpdatesSocketReconnect('ping send failed');
-        }
     }
 
     function startTaskUpdatesSocketHeartbeat() {
         clearTaskUpdatesSocketHeartbeat();
         state.taskUpdatesLastPongAt = Date.now();
-        state.taskUpdatesHeartbeatTimerId = window.setInterval(() => {
-            sendTaskUpdatesSocketPing();
-        }, TASK_UPDATES_WS_HEARTBEAT_INTERVAL_MS);
-        sendTaskUpdatesSocketPing();
     }
 
     function handleTaskUpdatesSocketPong(payload) {
@@ -8493,16 +8504,19 @@
         const injected = String(window.__mobileTaskWebSocketUrl || '').trim();
         const fallback = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/tasks`;
         const raw = injected || fallback;
+        const lastAckedTerminalEventId = Math.max(0, Number(state.taskUpdatesLastProcessedMessageId) || 0);
         try {
             const resolved = new URL(raw, window.location.href);
             if (!resolved.searchParams.get('userId')) {
                 resolved.searchParams.set('userId', MOBILE_USER_ID);
             }
+            resolved.searchParams.set('clientType', 'browser');
             resolved.searchParams.set('streamKey', 'web-task-updates');
+            resolved.searchParams.set('lastAckedTerminalEventId', String(lastAckedTerminalEventId));
             return resolved.toString();
         } catch (_error) {
             const joiner = raw.includes('?') ? '&' : '?';
-            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}&streamKey=web-task-updates`;
+            return `${raw}${joiner}userId=${encodeURIComponent(MOBILE_USER_ID)}&clientType=browser&streamKey=web-task-updates&lastAckedTerminalEventId=${encodeURIComponent(String(lastAckedTerminalEventId))}`;
         }
     }
 
@@ -8946,17 +8960,29 @@
             return;
         }
         if (type === 'taskUpdate') {
+            mergeLiveTaskUpdateIntoState(payload);
+            return;
+        }
+        if (type === 'taskTerminalEvent') {
             const merged = mergeLiveTaskUpdateIntoState(payload);
-            if (!merged || !merged.nextTask) {
-                return;
-            }
+            const terminalMessageId = Math.max(
+                0,
+                Number(payload && payload.eventId) || 0,
+                Number(payload && payload.messageId) || 0
+            );
+            const nextTask = merged && merged.nextTask
+                ? merged.nextTask
+                : findTaskById(payload && payload.taskId);
             maybeShowTaskTerminalNotification(
-                merged.nextTask,
+                nextTask,
                 payload,
-                merged.previousTask && merged.previousTask.status
+                merged && merged.previousTask ? merged.previousTask.status : ''
             ).catch((error) => {
                 console.warn('show terminal task notification failed', error);
+            }).finally(() => {
+                acknowledgeTaskUpdatesSocketMessage(terminalMessageId);
             });
+            return;
         } else if (type === 'taskProbeResult') {
             mergeTaskProbeResultIntoState(payload);
         } else if (type === 'taskDeduped') {
@@ -8983,6 +9009,7 @@
         if (state.taskUpdatesSocketManualClose || state.taskUpdatesSocketReconnectTimerId) {
             return;
         }
+        state.taskUpdatesSocketRecoveryPending = true;
         const attempt = Math.max(0, Math.min(6, Number(state.taskUpdatesSocketReconnectAttempt) || 0));
         const delayMs = Math.min(
             TASK_UPDATES_WS_RECONNECT_MAX_MS,
@@ -8999,6 +9026,9 @@
 
     function closeTaskUpdatesWebSocket(options = {}) {
         state.taskUpdatesSocketManualClose = options.manual !== false;
+        if (state.taskUpdatesSocketManualClose) {
+            state.taskUpdatesSocketRecoveryPending = false;
+        }
         if (state.taskUpdatesSocketReconnectTimerId) {
             clearTimeout(state.taskUpdatesSocketReconnectTimerId);
             state.taskUpdatesSocketReconnectTimerId = 0;
@@ -9031,6 +9061,7 @@
         if (state.taskUpdatesSocketConnectPromise) {
             return state.taskUpdatesSocketConnectPromise;
         }
+        const recoveryConnect = !!state.taskUpdatesSocketRecoveryPending;
         state.taskUpdatesSocketManualClose = false;
         state.taskUpdatesSocketConnectPromise = new Promise((resolve) => {
             const wsUrl = resolveTaskUpdatesWebSocketUrl();
@@ -9065,14 +9096,17 @@
             ws.addEventListener('open', () => {
                 clearTimeout(openTimer);
                 state.taskUpdatesSocketReconnectAttempt = 0;
+                state.taskUpdatesSocketRecoveryPending = false;
                 startTaskUpdatesSocketHeartbeat();
                 syncTaskUpdatesSocketTaskSubscription(state.currentTaskId, '');
-                refreshTaskListIncrementally({
-                    showLoading: false,
-                    render: true,
-                }).catch((error) => {
-                    console.warn('refresh task snapshot after websocket reconnect failed', error);
-                });
+                if (recoveryConnect) {
+                    refreshTaskListIncrementally({
+                        showLoading: false,
+                        render: true,
+                    }).catch((error) => {
+                        console.warn('refresh task snapshot after websocket reconnect failed', error);
+                    });
+                }
                 finish(true);
             }, { once: true });
             ws.addEventListener('message', (event) => {

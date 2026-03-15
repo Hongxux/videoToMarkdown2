@@ -3,6 +3,7 @@ package com.mvp.module2.fusion.websocket;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mvp.module2.fusion.queue.TaskQueueManager;
 import com.mvp.module2.fusion.service.CollectionRepository;
+import com.mvp.module2.fusion.service.TaskTerminalEventService;
 import com.mvp.module2.fusion.service.TaskStatusPresentationService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,12 +11,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.PingMessage;
+import org.springframework.web.socket.PongMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
 import java.net.URLDecoder;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,6 +32,9 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(TaskWebSocketHandler.class);
     private static final long CLIENT_HEARTBEAT_TIMEOUT_MS = 35_000L;
+    private static final long BROWSER_TRANSPORT_HEARTBEAT_INTERVAL_MS = 15_000L;
+    private static final long BROWSER_TRANSPORT_HEARTBEAT_TIMEOUT_MS = 45_000L;
+    private static final String WEB_TASK_UPDATES_STREAM_KEY = "web-task-updates";
 
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>> userSessions =
             new ConcurrentHashMap<>();
@@ -49,14 +56,22 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
     @Autowired(required = false)
     private TaskStatusPresentationService taskStatusPresentationService = new TaskStatusPresentationService();
 
+    @Autowired
+    private TaskTerminalEventService taskTerminalEventService;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
         String userId = getUserIdFromSession(session);
         String streamKey = getTextQueryParam(session, "streamKey");
+        String clientType = getTextQueryParam(session, "clientType");
+        long lastAckedTerminalEventId = parsePositiveLong(getTextQueryParam(session, "lastAckedTerminalEventId"));
         userSessions.computeIfAbsent(userId, key -> new ConcurrentHashMap<>()).put(session.getId(), session);
-        sessionStates.put(session.getId(), new SessionRuntimeState(session, userId, streamKey));
+        sessionStates.put(session.getId(), new SessionRuntimeState(session, userId, streamKey, clientType));
+        if (!streamKey.isBlank() && WEB_TASK_UPDATES_STREAM_KEY.equals(streamKey)) {
+            replayPendingTerminalEvents(session, userId, lastAckedTerminalEventId);
+        }
         logger.info("WebSocket connected: user={}, session={}", userId, session.getId());
     }
 
@@ -111,11 +126,22 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
                 case "ping":
                     handlePing(session, payload);
                     break;
+                case "ack":
+                    handleAck(session, payload);
+                    break;
                 default:
                     logger.warn("Unknown action: {}", action);
             }
         } catch (Exception error) {
             logger.error("Error handling message", error);
+        }
+    }
+
+    @Override
+    protected void handlePongMessage(WebSocketSession session, PongMessage message) {
+        SessionRuntimeState runtimeState = sessionStates.get(session.getId());
+        if (runtimeState != null) {
+            runtimeState.markTransportPong(System.currentTimeMillis());
         }
     }
 
@@ -394,6 +420,33 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         );
     }
 
+    public void broadcastTaskTerminalEvent(TaskQueueManager.TaskEntry task) {
+        if (task == null || task.status == null) {
+            return;
+        }
+        if (task.status != TaskQueueManager.TaskStatus.COMPLETED
+                && task.status != TaskQueueManager.TaskStatus.FAILED) {
+            return;
+        }
+        String collectionId = resolveCollectionId(task.taskId);
+        Map<String, Object> payload = buildTaskUpdatePayload(
+                task.taskId,
+                task.status.name(),
+                task.progress,
+                task.statusMessage,
+                task.resultPath,
+                task.errorMessage,
+                collectionId,
+                task
+        );
+        payload.put("terminalStatus", task.status.name());
+        Map<String, Object> queuedPayload = taskTerminalEventService.enqueue(task, payload);
+        if (queuedPayload == null || queuedPayload.isEmpty()) {
+            return;
+        }
+        sendPayloadToSessions(collectSessions(userSessions.get(task.userId)), queuedPayload);
+    }
+
     private void sendTaskUpdate(WebSocketSession session, TaskQueueManager.TaskEntry task, String collectionId) {
         sendPayloadToSessions(
                 List.of(session),
@@ -538,6 +591,29 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         sendRawMessage(session, pong);
     }
 
+    private void handleAck(WebSocketSession session, Map<String, Object> payload) {
+        String userId = getUserIdFromSession(session);
+        long messageId = readLong(payload.get("messageId"));
+        if (messageId <= 0L) {
+            return;
+        }
+        taskTerminalEventService.acknowledge(userId, messageId);
+    }
+
+    private void replayPendingTerminalEvents(WebSocketSession session, String userId, long lastAckedTerminalEventId) {
+        if (session == null || !session.isOpen()) {
+            return;
+        }
+        List<Map<String, Object>> payloads = taskTerminalEventService.replayPendingEvents(userId, lastAckedTerminalEventId);
+        if (payloads.isEmpty()) {
+            return;
+        }
+        sendPayloadToSessions(List.of(session), payloads.get(0));
+        for (int i = 1; i < payloads.size(); i++) {
+            sendPayloadToSessions(List.of(session), payloads.get(i));
+        }
+    }
+
     private void sendPayloadToSessions(
             Iterable<WebSocketSession> candidateSessions,
             Map<String, Object> payload
@@ -615,10 +691,62 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
+    private long parsePositiveLong(String rawValue) {
+        try {
+            long parsed = Long.parseLong(normalizeText(rawValue));
+            return Math.max(0L, parsed);
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    @Scheduled(fixedDelay = BROWSER_TRANSPORT_HEARTBEAT_INTERVAL_MS)
+    public void sendBrowserTransportPings() {
+        long now = System.currentTimeMillis();
+        for (SessionRuntimeState runtimeState : new ArrayList<>(sessionStates.values())) {
+            if (!runtimeState.transportHeartbeatEnabled || !runtimeState.session.isOpen()) {
+                continue;
+            }
+            if (now - runtimeState.lastTransportPingAt < BROWSER_TRANSPORT_HEARTBEAT_INTERVAL_MS) {
+                continue;
+            }
+            try {
+                runtimeState.session.sendMessage(new PingMessage(ByteBuffer.wrap(new byte[0])));
+                runtimeState.markTransportPing(now);
+            } catch (IOException error) {
+                logger.warn(
+                        "Browser transport ping failed: user={}, session={}",
+                        runtimeState.userId,
+                        runtimeState.session.getId(),
+                        error
+                );
+                closeSessionSilently(runtimeState.session, new CloseStatus(4009, "transport ping failed"));
+            }
+        }
+    }
+
     @Scheduled(fixedDelay = 5000L)
     public void reapHalfOpenSessions() {
         long now = System.currentTimeMillis();
         for (SessionRuntimeState runtimeState : new ArrayList<>(sessionStates.values())) {
+            if (runtimeState.transportHeartbeatEnabled) {
+                long transportBaseline = Math.max(
+                        runtimeState.connectedAt,
+                        Math.max(runtimeState.lastTransportPongAt, runtimeState.lastClientMessageAt)
+                );
+                if (now - transportBaseline <= BROWSER_TRANSPORT_HEARTBEAT_TIMEOUT_MS) {
+                    continue;
+                }
+                logger.info(
+                        "Closing websocket after browser transport heartbeat timeout: user={}, stream={}, session={}, lastPongAt={}",
+                        runtimeState.userId,
+                        runtimeState.streamKey,
+                        runtimeState.session.getId(),
+                        runtimeState.lastTransportPongAt
+                );
+                closeSessionSilently(runtimeState.session, new CloseStatus(4008, "transport heartbeat timeout"));
+                continue;
+            }
             if (!runtimeState.heartbeatEnabled) {
                 continue;
             }
@@ -666,19 +794,26 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         private final String userId;
         private final String streamKey;
         private final boolean heartbeatEnabled;
+        private final boolean transportHeartbeatEnabled;
         private final long connectedAt;
         private volatile long lastClientMessageAt;
         private volatile long lastClientPingAt;
+        private volatile long lastTransportPingAt;
+        private volatile long lastTransportPongAt;
 
-        private SessionRuntimeState(WebSocketSession session, String userId, String streamKey) {
+        private SessionRuntimeState(WebSocketSession session, String userId, String streamKey, String clientType) {
             long now = System.currentTimeMillis();
             this.session = session;
             this.userId = userId;
             this.streamKey = streamKey;
-            this.heartbeatEnabled = !streamKey.isBlank();
+            String normalizedClientType = clientType != null ? clientType.trim().toLowerCase() : "";
+            this.transportHeartbeatEnabled = "browser".equals(normalizedClientType);
+            this.heartbeatEnabled = !this.transportHeartbeatEnabled && !streamKey.isBlank();
             this.connectedAt = now;
             this.lastClientMessageAt = now;
             this.lastClientPingAt = now;
+            this.lastTransportPingAt = 0L;
+            this.lastTransportPongAt = now;
         }
 
         private void markClientActivity(long now) {
@@ -688,6 +823,14 @@ public class TaskWebSocketHandler extends TextWebSocketHandler {
         private void markPing(long now) {
             this.lastClientMessageAt = now;
             this.lastClientPingAt = now;
+        }
+
+        private void markTransportPing(long now) {
+            this.lastTransportPingAt = now;
+        }
+
+        private void markTransportPong(long now) {
+            this.lastTransportPongAt = now;
         }
     }
 }

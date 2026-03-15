@@ -32,7 +32,7 @@ if (-not $SkipRedis -and -not (Test-Path $RedisComposeFilePath)) {
     throw "Redis compose file not found: $RedisComposeFilePath"
 }
 
-# 固定禁用 user-site，避免用户目录包污染运行时依赖解析。
+# 固定禁用 user-site，避免本地启动时用户目录包污染运行时依赖解析。
 $env:PYTHONNOUSERSITE = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
@@ -176,6 +176,7 @@ if ($CheckDeps) {
     if ($LASTEXITCODE -ne 0) {
         throw "Dependency preflight failed with exit code $LASTEXITCODE"
     }
+    return
 }
 
 & $PythonExe -X utf8 .\apps\grpc-server\main.py @ServerArgs

@@ -1,5 +1,41 @@
 ﻿# 架构升级记录
 
+## 2026-03-15 Browser `/ws/tasks` adds transport heartbeat and terminal-event replay
+- Date: 2026-03-15
+- Background:
+  - `/ws/tasks` 已经在 2026-03-14 收敛为“普通状态走快照 + REST 对账”，但浏览器侧仍有两个缺口：
+    - 只靠应用层 `ping -> pong`，对“TCP 还没断、浏览器标签页与代理链路已经半死”的检测不够快；
+    - 终态通知如果刚好发生在浏览器断线窗口内，重连后只能依赖下一次全量刷新，无法保证 `COMPLETED/FAILED` 事件补发。
+- First principles:
+  - 普通运行态进度适合快照模型，但终态事件仍然是“错过一次就会直接影响用户感知”的小型事件流，需要单独补发语义。
+  - 浏览器客户端最可靠的半开探测不应只依赖业务消息，而应使用 WebSocket 原生 `Ping/Pong` 作为传输层心跳。
+- Reusable leverage:
+  - 复用既有 `TaskTerminalEventRepository` / `TaskTerminalEventService` 作为终态事件暂存层，不重新引入通用消息队列。
+  - 复用现有 `web-task-updates` streamKey 与前端任务状态连接，不新增第二条浏览器专用 WebSocket 路径。
+  - 复用 `TaskStatusPresentationService` 继续统一终态 payload 的 `blocked/statusCategory/recovery*` 投影。
+- Decisions:
+  - Decision 1: 浏览器连接建连时显式携带 `clientType=browser`，服务端仅对浏览器连接启用原生 `PingMessage/PongMessage` 传输层心跳。
+  - Decision 2: 终态事件与普通 `taskUpdate` 分流；`COMPLETED/FAILED` 通过 `TaskTerminalEventService.enqueue(...)` 入队，并在浏览器连接时按 `lastAckedTerminalEventId` 回放未确认事件。
+  - Decision 3: 浏览器收到 `taskTerminalEvent` 后通过 `ack` 回写确认，服务端按 `userId + eventId` 删除已确认终态事件。
+- Call-chain change:
+  - Before: `task completes/fails -> broadcast current task snapshot -> browser disconnected window may miss terminal event -> reconnect relies on REST refresh only`
+  - After: `task completes/fails -> enqueue terminal event -> broadcast realtime payload -> browser reconnect with lastAckedTerminalEventId -> replay pending terminal events -> ack -> repository cleanup`
+- Reliability comparison:
+  - 测试方式：对比“浏览器在终态前后短时断线”场景中，终态是否还能通过 WebSocket 恢复，而不是只能等待下一次全量刷新。
+  - 测试数据：
+    - 改造前：终态消息错过后只能靠 `refreshTaskListIncrementally(...)` 或人工刷新补齐。
+    - 改造后：浏览器建连携带 `lastAckedTerminalEventId`，服务端会回放尚未确认的 `taskTerminalEvent`；普通运行态仍维持快照模型。
+    - 行为收益：终态消息从“尽力送达”提升为“可补发的小型事件流”，同时不把所有运行态消息重新拉回复杂可靠层。
+- Verification:
+  - `mvn -f services/java-orchestrator/pom.xml -DskipTests compile -q`
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Files:
+  - `services/java-orchestrator/src/main/java/com/mvp/module2/fusion/websocket/TaskWebSocketHandler.java`
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+  - `docs/architecture/overview.md`
+  - `docs/architecture/upgrade-log.md`
+  - `docs/architecture/error-fixes.md`
+
 ## 2026-03-15 run_server.ps1 auto-starts Docker Redis and wires Python runtime recovery mirror
 - Date: 2026-03-15
 - Background:
@@ -12609,3 +12645,35 @@ body` and task metadata is still present.
 - Performance notes:
   - No dedicated latency benchmark was run for the extraction itself.
   - The structural gain is reduced duplication and lower future change cost, not immediate throughput improvement.
+
+## 2026-03-15: Mobile task REST reconciliation now follows websocket health and active-task state
+- Background:
+  - The mobile task list previously polled `/api/mobile/tasks/changes` every `25s` whenever the task list view was visible.
+  - After the websocket recovery path was strengthened, fixed high-frequency polling became unnecessary when the realtime socket was healthy, but a slow REST checksum path was still useful as a fallback.
+- Reusable leverage:
+  - Reuse the existing `taskListRefreshPolicy` scheduler in `services/java-orchestrator/src/main/resources/static/index.html` instead of adding another polling controller.
+  - Reuse the existing websocket recovery state `taskUpdatesSocketRecoveryPending` as the health signal, so the REST cadence stays aligned with the realtime channel.
+  - Reuse existing task lifecycle parsing and pending-submit state instead of introducing a second notion of "active work".
+- Changes:
+  - `services/java-orchestrator/src/main/resources/static/index.html`
+    - Replace the fixed `25s` task REST reconciliation interval with a two-tier cadence:
+      - websocket healthy: `180s`
+      - websocket disconnected or recovery pending: `25s`
+    - Stop automatic REST reconciliation entirely when all current tasks are terminal and there are no active pending-submit placeholders.
+    - Treat `probing` as an active in-flight task for reconciliation purposes.
+- Call-chain change:
+  - Old: `visible task view -> always schedule REST reconciliation every 25s`
+  - New: `visible task view -> if active tasks exist, schedule REST reconciliation using websocket-health-based cadence; otherwise stop scheduling`
+- Decisions:
+  - Decision 1: keep a low-frequency REST reconciliation path even when websocket is healthy.
+    - Reason: websocket remains the primary realtime channel, but REST still provides slow self-healing against silent drift.
+  - Decision 2: stop polling once all tasks are terminal.
+    - Reason: terminal tasks no longer change autonomously, so continued reconciliation would spend requests without improving correctness.
+- Verification:
+  - `python -X utf8 tools/architecture/check_docs_encoding.py`
+- Performance notes:
+  - No synthetic benchmark was run.
+  - Expected behavior change:
+    - healthy websocket session: from `~2.4` REST reconciliations/minute to `~0.33`/minute
+    - recovery/disconnected websocket session: unchanged at `~2.4`/minute
+    - fully terminal task set: `0` automatic reconciliations/minute

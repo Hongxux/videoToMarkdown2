@@ -287,7 +287,13 @@ public class TaskProcessingWorker {
                 );
                 return;
             }
-            webSocketHandler.broadcastTaskUpdate(task.taskId, "COMPLETED", 1.0, "处理完成", result.markdownPath);
+            TaskEntry completedTask = taskQueueManager.getTask(task.taskId);
+            if (completedTask != null) {
+                webSocketHandler.broadcastTaskUpdate(completedTask);
+                webSocketHandler.broadcastTaskTerminalEvent(completedTask);
+            } else {
+                webSocketHandler.broadcastTaskUpdate(task.taskId, "COMPLETED", 1.0, "处理完成", result.markdownPath);
+            }
             triggerPersonaArtifactsAfterCompletion(task, result);
             cleanupUploadedSourceAfterCompletion(task);
             cleanupDownloadedSourceAfterCompletion(task, result);
@@ -304,6 +310,7 @@ public class TaskProcessingWorker {
                 TaskEntry refreshedTask = taskQueueManager.getTask(task.taskId);
                 if (refreshedTask != null) {
                     webSocketHandler.broadcastTaskUpdate(refreshedTask);
+                    webSocketHandler.broadcastTaskTerminalEvent(refreshedTask);
                 } else {
                     String status = failure.currentStatus != null ? failure.currentStatus.name() : "FAILED";
                     webSocketHandler.broadcastTaskUpdate(task.taskId, status, task.progress, userMessage, null);

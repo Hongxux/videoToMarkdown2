@@ -340,24 +340,31 @@ public class DeepSeekAdvisorService {
         }
         String safeContext = String.valueOf(context == null ? "" : context).trim();
         String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
-
-        if (!advisorEnabled) {
-            throw new IllegalStateException("deepseek.advisor.enabled=false");
-        }
-        if (!StringUtils.hasText(apiKey)) {
-            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
-        }
-
-        String content;
+        ensureAdvisorPrimaryConfigured();
+        LlmGatewayResult gatewayResult;
         try {
-            content = callDeepSeek(safeTerm, safeContext, safeContextExample, contextDependent);
+            gatewayResult = resolveLlmGateway().execute(
+                    new LlmPromptRequest(
+                            buildSystemPrompt(),
+                            buildUserPrompt(safeTerm, safeContext, safeContextExample, contextDependent),
+                            0.35,
+                            320,
+                            false
+                    ),
+                    buildAdvisorFallbackStrategy(),
+                    buildAdvisorRetryPolicy(),
+                    false,
+                    null
+            );
         } catch (Exception ex) {
-            throw new IllegalStateException("DeepSeek advisor call failed: " + ex.getMessage(), ex);
+            Throwable cause = resolveAdvisorFailureCause(ex);
+            throw new IllegalStateException("DeepSeek advisor call failed: " + resolveAdvisorFailureMessage(ex), cause);
         }
+        String content = String.valueOf(gatewayResult.content == null ? "" : gatewayResult.content).trim();
         if (!StringUtils.hasText(content)) {
-            return AdviceResult.empty("deepseek-empty");
+            return AdviceResult.empty(resolveProviderSource(gatewayResult, "empty"));
         }
-        return AdviceResult.deepseek(content.trim());
+        return new AdviceResult(content, resolveProviderKey(gatewayResult));
     }
 
     public StructuredAdviceResult requestStructuredAdvice(String term, String context, String contextExample, boolean contextDependent) {
@@ -368,14 +375,8 @@ public class DeepSeekAdvisorService {
         String safeContext = String.valueOf(context == null ? "" : context).trim();
         String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
 
-        if (!advisorEnabled) {
-            throw new IllegalStateException("deepseek.advisor.enabled=false");
-        }
-        if (!StringUtils.hasText(apiKey)) {
-            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
-        }
-
-        DeepSeekCallResult callResult;
+        ensureAdvisorPrimaryConfigured();
+        LlmGatewayResult callResult;
         String structuredSystemPrompt = buildStructuredSystemPrompt();
         String structuredUserPrompt = buildStructuredUserPrompt(safeTerm, safeContext, safeContextExample, contextDependent);
         try {
@@ -385,43 +386,46 @@ public class DeepSeekAdvisorService {
                     Math.max(256, structuredMaxTokens)
             );
         } catch (Exception ex) {
-            throw new IllegalStateException("DeepSeek structured advisor call failed: " + ex.getMessage(), ex);
+            Throwable cause = resolveAdvisorFailureCause(ex);
+            throw new IllegalStateException("DeepSeek structured advisor call failed: " + resolveAdvisorFailureMessage(ex), cause);
         }
+        String providerKey = resolveProviderKey(callResult);
         String raw = String.valueOf(callResult.content == null ? "" : callResult.content).trim();
-        if (isFinishReasonLength(callResult.finishReason)) {
+        if (isFinishReasonLength(callResult.response.finishReason)) {
             return StructuredAdviceResult.empty(
-                    "deepseek-truncated",
+                    providerKey + "-truncated",
                     raw,
-                    callResult.requestPayloadJson,
-                    callResult.responseBodyJson
+                    callResult.response.requestPayloadJson,
+                    callResult.response.responseBodyJson
             );
         }
         if (!StringUtils.hasText(raw)) {
             return StructuredAdviceResult.empty(
-                    "deepseek-empty",
+                    providerKey + "-empty",
                     "",
-                    callResult.requestPayloadJson,
-                    callResult.responseBodyJson
+                    callResult.response.requestPayloadJson,
+                    callResult.response.responseBodyJson
             );
         }
 
         StructuredAdviceResult parsed = parseStructuredAdvice(raw);
         if (parsed.hasContent()) {
-            return StructuredAdviceResult.deepseek(
+            return new StructuredAdviceResult(
                     parsed.background,
                     parsed.contextualExplanations,
                     parsed.depth,
                     parsed.breadth,
+                    providerKey,
                     raw,
-                    callResult.requestPayloadJson,
-                    callResult.responseBodyJson
+                    callResult.response.requestPayloadJson,
+                    callResult.response.responseBodyJson
             );
         }
         return StructuredAdviceResult.empty(
-                "deepseek-parse-empty",
+                providerKey + "-parse-empty",
                 raw,
-                callResult.requestPayloadJson,
-                callResult.responseBodyJson
+                callResult.response.requestPayloadJson,
+                callResult.response.responseBodyJson
         );
     }
 
@@ -643,16 +647,11 @@ public class DeepSeekAdvisorService {
             StructuredAdviceResult single = requestStructuredAdvice(term, context, contextExample, contextDependent);
             return Map.of(term, single);
         }
-        if (!advisorEnabled) {
-            throw new IllegalStateException("deepseek.advisor.enabled=false");
-        }
-        if (!StringUtils.hasText(apiKey)) {
-            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
-        }
+        ensureAdvisorPrimaryConfigured();
         String safeContext = String.valueOf(context == null ? "" : context).trim();
         String safeContextExample = String.valueOf(contextExample == null ? "" : contextExample).trim();
 
-        DeepSeekCallResult callResult;
+        LlmGatewayResult callResult;
         String structuredSystemPrompt = buildStructuredBatchSystemPrompt();
         String structuredUserPrompt = buildStructuredBatchUserPrompt(
                 safeTerms,
@@ -668,39 +667,41 @@ public class DeepSeekAdvisorService {
                     true
             );
         } catch (Exception ex) {
-            throw new IllegalStateException("DeepSeek structured batch advisor call failed: " + ex.getMessage(), ex);
+            Throwable cause = resolveAdvisorFailureCause(ex);
+            throw new IllegalStateException("DeepSeek structured batch advisor call failed: " + resolveAdvisorFailureMessage(ex), cause);
         }
+        String providerKey = resolveProviderKey(callResult);
         String raw = String.valueOf(callResult.content == null ? "" : callResult.content).trim();
-        if (isFinishReasonLength(callResult.finishReason)) {
+        if (isFinishReasonLength(callResult.response.finishReason)) {
             return buildBatchFallbackResults(
                     safeTerms,
-                    "deepseek-batch-truncated",
+                    providerKey + "-batch-truncated",
                     raw,
-                    callResult.requestPayloadJson,
-                    callResult.responseBodyJson
+                    callResult.response.requestPayloadJson,
+                    callResult.response.responseBodyJson
             );
         }
         if (!StringUtils.hasText(raw)) {
             return buildBatchFallbackResults(
                     safeTerms,
-                    "deepseek-batch-empty",
+                    providerKey + "-batch-empty",
                     "",
-                    callResult.requestPayloadJson,
-                    callResult.responseBodyJson
+                    callResult.response.requestPayloadJson,
+                    callResult.response.responseBodyJson
             );
         }
         Map<String, StructuredAdviceResult> parsed = parseStructuredAdviceBatch(
                 raw,
-                callResult.requestPayloadJson,
-                callResult.responseBodyJson
+                callResult.response.requestPayloadJson,
+                callResult.response.responseBodyJson
         );
         if (parsed.isEmpty()) {
             return buildBatchFallbackResults(
                     safeTerms,
-                    "deepseek-batch-parse-empty",
+                    providerKey + "-batch-parse-empty",
                     raw,
-                    callResult.requestPayloadJson,
-                    callResult.responseBodyJson
+                    callResult.response.requestPayloadJson,
+                    callResult.response.responseBodyJson
             );
         }
         LinkedHashMap<String, StructuredAdviceResult> resolved = new LinkedHashMap<>();
@@ -709,10 +710,10 @@ public class DeepSeekAdvisorService {
             StructuredAdviceResult result = parsed.get(key);
             if (result == null || !result.hasContent()) {
                 result = StructuredAdviceResult.empty(
-                        "deepseek-batch-miss",
+                        providerKey + "-batch-miss",
                         raw,
-                        callResult.requestPayloadJson,
-                        callResult.responseBodyJson
+                        callResult.response.requestPayloadJson,
+                        callResult.response.responseBodyJson
                 );
             }
             resolved.put(term, result);
@@ -720,7 +721,7 @@ public class DeepSeekAdvisorService {
         return resolved;
     }
 
-    private DeepSeekCallResult callStructuredWithRetry(
+    private LlmGatewayResult callStructuredWithRetry(
             String systemPrompt,
             String userPrompt,
             int initialMaxTokens
@@ -728,7 +729,7 @@ public class DeepSeekAdvisorService {
         return callStructuredWithRetry(systemPrompt, userPrompt, initialMaxTokens, false);
     }
 
-    private DeepSeekCallResult callStructuredWithRetry(
+    private LlmGatewayResult callStructuredWithRetry(
             String systemPrompt,
             String userPrompt,
             int initialMaxTokens,
@@ -736,19 +737,17 @@ public class DeepSeekAdvisorService {
     ) throws Exception {
         int attempt = 0;
         int currentMaxTokens = Math.max(256, initialMaxTokens);
-        DeepSeekCallResult lastResult = new DeepSeekCallResult("", "", "", "");
+        LlmGatewayResult lastResult = null;
         while (attempt < STRUCTURED_RETRY_MAX_ATTEMPTS) {
             attempt += 1;
-            try {
-                lastResult = callDeepSeekWithPromptsDetailed(systemPrompt, userPrompt, 0.2, currentMaxTokens, forceJsonObject);
-            } catch (Exception ex) {
-                if (!isRetryableNetworkException(ex) || attempt >= STRUCTURED_RETRY_MAX_ATTEMPTS) {
-                    throw ex;
-                }
-                sleepBeforeRetry(attempt, ex);
-                continue;
-            }
-            if (!isFinishReasonLength(lastResult.finishReason)) {
+            lastResult = resolveLlmGateway().execute(
+                    new LlmPromptRequest(systemPrompt, userPrompt, 0.2, currentMaxTokens, forceJsonObject),
+                    buildAdvisorFallbackStrategy(),
+                    buildAdvisorRetryPolicy(),
+                    false,
+                    null
+            );
+            if (!isFinishReasonLength(lastResult.response.finishReason)) {
                 return lastResult;
             }
             int next = Math.min(16000, Math.max(currentMaxTokens * 2, currentMaxTokens + 1024));
@@ -757,84 +756,11 @@ public class DeepSeekAdvisorService {
             }
             currentMaxTokens = next;
         }
-        return lastResult;
-    }
-
-    private boolean isRetryableNetworkException(Throwable ex) {
-        Throwable cursor = ex;
-        while (cursor != null) {
-            if (cursor instanceof HttpTimeoutException || cursor instanceof ConnectException) {
-                return true;
-            }
-            cursor = cursor.getCause();
-        }
-        return false;
-    }
-
-    private void sleepBeforeRetry(int attempt, Exception ex) {
-        int safeAttempt = Math.max(1, attempt);
-        int shift = Math.min(20, safeAttempt - 1);
-        long multiplier = 1L << shift;
-        long delayMs = NETWORK_RETRY_INITIAL_BACKOFF_MS * multiplier;
-        if (delayMs < 0 || delayMs > NETWORK_RETRY_MAX_BACKOFF_MS) {
-            delayMs = NETWORK_RETRY_MAX_BACKOFF_MS;
-        }
-        if (delayMs <= 0) {
-            return;
-        }
-        logger.warn(
-                "DeepSeek advisor transient network error, retrying: attempt={} delayMs={} err={}",
-                safeAttempt,
-                delayMs,
-                ex.getMessage()
-        );
-        try {
-            Thread.sleep(delayMs);
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw new IllegalStateException("deepseek advisor retry interrupted", interrupted);
-        }
+        return lastResult != null ? lastResult : new LlmGatewayResult("", buildPrimaryLlmProvider(), new LlmResponse("", "", "", ""), false, false, 0);
     }
 
     private boolean isFinishReasonLength(String finishReason) {
         return "length".equalsIgnoreCase(String.valueOf(finishReason == null ? "" : finishReason).trim());
-    }
-
-    private String callDeepSeek(String term, String context, String contextExample, boolean contextDependent) throws Exception {
-        return callDeepSeekWithPrompts(
-                buildSystemPrompt(),
-                buildUserPrompt(term, context, contextExample, contextDependent),
-                0.35,
-                320
-        );
-    }
-
-    private String callDeepSeekWithPrompts(
-            String systemPrompt,
-            String userPrompt,
-            double temperature,
-            int maxTokens
-    ) throws Exception {
-        return callDeepSeekWithPromptsDetailed(systemPrompt, userPrompt, temperature, maxTokens, false).content;
-    }
-
-    private DeepSeekCallResult callDeepSeekWithPromptsDetailed(
-            String systemPrompt,
-            String userPrompt,
-            double temperature,
-            int maxTokens,
-            boolean forceJsonObject
-    ) throws Exception {
-        LlmResponse response = resolveLlmClient().complete(
-                buildPrimaryLlmProvider(),
-                new LlmPromptRequest(systemPrompt, userPrompt, temperature, maxTokens, forceJsonObject)
-        );
-        return new DeepSeekCallResult(
-                response.content,
-                response.requestPayloadJson,
-                response.responseBodyJson,
-                response.finishReason
-        );
     }
 
     private HttpClient resolveHttpClient() {
@@ -898,6 +824,79 @@ public class DeepSeekAdvisorService {
                 phase2bProviderJitterRatio,
                 this::isRetryablePhase2bException
         );
+    }
+
+    private LlmRetryPolicy buildAdvisorRetryPolicy() {
+        return new LlmRetryPolicy(
+                Math.max(0, STRUCTURED_RETRY_MAX_ATTEMPTS - 1),
+                NETWORK_RETRY_INITIAL_BACKOFF_MS,
+                NETWORK_RETRY_MAX_BACKOFF_MS,
+                0d,
+                this::isRetryableNetworkException
+        );
+    }
+
+    private LlmFallbackStrategy buildAdvisorFallbackStrategy() {
+        return new LlmFallbackStrategy(buildPrimaryLlmProvider(), null);
+    }
+
+    private void ensureAdvisorPrimaryConfigured() {
+        if (!advisorEnabled) {
+            throw new IllegalStateException("deepseek.advisor.enabled=false");
+        }
+        if (!StringUtils.hasText(apiKey)) {
+            throw new IllegalStateException("DEEPSEEK_API_KEY is empty");
+        }
+    }
+
+    private boolean isRetryableNetworkException(Throwable ex) {
+        Throwable cursor = ex;
+        while (cursor != null) {
+            if (cursor instanceof HttpTimeoutException || cursor instanceof ConnectException) {
+                return true;
+            }
+            cursor = cursor.getCause();
+        }
+        return false;
+    }
+
+    private String resolveAdvisorFailureMessage(Throwable ex) {
+        String lastNonBlankMessage = "";
+        Throwable cursor = ex;
+        while (cursor != null) {
+            String message = String.valueOf(cursor.getMessage() == null ? "" : cursor.getMessage()).trim();
+            if (StringUtils.hasText(message)) {
+                lastNonBlankMessage = message;
+            }
+            cursor = cursor.getCause();
+        }
+        return lastNonBlankMessage;
+    }
+
+    private Throwable resolveAdvisorFailureCause(Throwable ex) {
+        Throwable last = ex;
+        Throwable cursor = ex;
+        while (cursor != null) {
+            last = cursor;
+            cursor = cursor.getCause();
+        }
+        return last;
+    }
+
+    private String resolveProviderKey(LlmGatewayResult gatewayResult) {
+        if (gatewayResult == null || gatewayResult.provider == null) {
+            return "deepseek";
+        }
+        return gatewayResult.provider.resolveProviderKey();
+    }
+
+    private String resolveProviderSource(LlmGatewayResult gatewayResult, String suffix) {
+        String providerKey = resolveProviderKey(gatewayResult);
+        String normalizedSuffix = String.valueOf(suffix == null ? "" : suffix).trim();
+        if (!StringUtils.hasText(normalizedSuffix)) {
+            return providerKey;
+        }
+        return providerKey + "-" + normalizedSuffix;
     }
 
     /**
@@ -2090,17 +2089,4 @@ public class DeepSeekAdvisorService {
         }
     }
 
-    private static class DeepSeekCallResult {
-        private final String content;
-        private final String requestPayloadJson;
-        private final String responseBodyJson;
-        private final String finishReason;
-
-        private DeepSeekCallResult(String content, String requestPayloadJson, String responseBodyJson, String finishReason) {
-            this.content = String.valueOf(content == null ? "" : content).trim();
-            this.requestPayloadJson = String.valueOf(requestPayloadJson == null ? "" : requestPayloadJson).trim();
-            this.responseBodyJson = String.valueOf(responseBodyJson == null ? "" : responseBodyJson).trim();
-            this.finishReason = String.valueOf(finishReason == null ? "" : finishReason).trim();
-        }
-    }
 }
